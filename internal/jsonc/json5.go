@@ -13,6 +13,7 @@ package jsonc
 import (
 	"bytes"
 	"math/big"
+	"strconv"
 	"unicode"
 	"unicode/utf8"
 )
@@ -46,7 +47,14 @@ func JSON5ToJSON(data []byte) []byte {
 			out, next = appendJSON5String(out, data, i)
 			i = next
 		case b == '/' && i+1 < len(data) && (data[i+1] == '/' || data[i+1] == '*'):
-			i = skipJSON5Comment(data, i)
+			next, closed := skipJSON5Comment(data, i)
+			if !closed {
+				// An unterminated block comment is not JSON5. Keep the rest
+				// as it is so the strict parse fails instead of reading the
+				// text before it as the whole document.
+				return append(out, data[i:]...)
+			}
+			i = next
 			out = append(out, ' ')
 		case b == '+' || b == '-' || b == '.' || b >= '0' && b <= '9':
 			var next int
@@ -58,47 +66,75 @@ func JSON5ToJSON(data []byte) []byte {
 		case b == '\v' || b == '\f':
 			out = append(out, ' ')
 			i++
-		case b < utf8.RuneSelf && !isJSON5IdentStart(b):
+		case b < utf8.RuneSelf && b != '\\' && !isJSON5IdentStart(b):
 			out = append(out, b)
 			i++
 		default:
-			r, size := utf8.DecodeRune(data[i:])
-			switch {
-			case isJSON5Space(r):
-				out = append(out, ' ')
-				i += size
-			case isJSON5IdentRune(r, true):
-				j := i + size
-				for j < len(data) {
-					r, size := utf8.DecodeRune(data[j:])
-					if !isJSON5IdentRune(r, false) {
-						break
-					}
-					j += size
-				}
-				out = appendJSON5Word(out, data, i, j)
-				i = j
-			default:
-				out = append(out, data[i:i+size]...)
-				i += size
+			if end := scanJSON5Identifier(data, i); end > i {
+				out = appendJSON5Word(out, data, i, end)
+				i = end
+				continue
 			}
+			r, size := utf8.DecodeRune(data[i:])
+			if isJSON5Space(r) {
+				out = append(out, ' ')
+			} else {
+				out = append(out, data[i:i+size]...)
+			}
+			i += size
 		}
 	}
 	return stripJSONCTrailingCommas(out)
 }
 
 // skipJSON5Comment returns the index after the comment that starts at
-// data[start]. A line comment ends before its line terminator.
-func skipJSON5Comment(data []byte, start int) int {
+// data[start] and whether the comment is well formed. A line comment ends
+// before any JSON5 line terminator (LF, CR, U+2028, U+2029); a block comment
+// without its closing "*/" is not well formed.
+func skipJSON5Comment(data []byte, start int) (int, bool) {
 	i := start + 2
 	if data[start+1] == '*' {
-		for i+1 < len(data) && (data[i] != '*' || data[i+1] != '/') {
+		for i+1 < len(data) {
+			if data[i] == '*' && data[i+1] == '/' {
+				return i + 2, true
+			}
 			i++
 		}
-		return min(i+2, len(data))
+		return len(data), false
 	}
-	for i < len(data) && data[i] != '\n' && data[i] != '\r' {
+	for i < len(data) && data[i] != '\n' && data[i] != '\r' && !isJSON5LineSeparator(data[i:]) {
 		i++
+	}
+	return i, true
+}
+
+// isJSON5LineSeparator reports whether data starts with U+2028 or U+2029.
+func isJSON5LineSeparator(data []byte) bool {
+	return len(data) >= 3 && data[0] == 0xe2 && data[1] == 0x80 && (data[2] == 0xa8 || data[2] == 0xa9)
+}
+
+// scanJSON5Identifier returns the end of the ECMAScript IdentifierName that
+// starts at data[start], or start when none does. A Unicode escape (backslash,
+// u, four hex digits) is part of an identifier when it names an identifier
+// character.
+func scanJSON5Identifier(data []byte, start int) int {
+	i := start
+	for i < len(data) {
+		var r rune
+		size := 0
+		if data[i] == '\\' {
+			if i+6 > len(data) || data[i+1] != 'u' || !isJSON5Hex(data[i+2]) || !isJSON5Hex(data[i+3]) || !isJSON5Hex(data[i+4]) || !isJSON5Hex(data[i+5]) {
+				break
+			}
+			v, _ := strconv.ParseUint(string(data[i+2:i+6]), 16, 32)
+			r, size = rune(v), 6
+		} else {
+			r, size = utf8.DecodeRune(data[i:])
+		}
+		if !isJSON5IdentRune(r, i == start) {
+			break
+		}
+		i += size
 	}
 	return i
 }
@@ -109,7 +145,11 @@ func appendJSON5Word(out, data []byte, start, end int) []byte {
 	k := end
 	for k < len(data) {
 		if data[k] == '/' && k+1 < len(data) && (data[k+1] == '/' || data[k+1] == '*') {
-			k = skipJSON5Comment(data, k)
+			next, closed := skipJSON5Comment(data, k)
+			if !closed {
+				break
+			}
+			k = next
 			continue
 		}
 		if data[k] == ' ' || data[k] == '\t' || data[k] == '\n' || data[k] == '\r' || data[k] == '\v' || data[k] == '\f' {

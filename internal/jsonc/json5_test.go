@@ -92,3 +92,46 @@ func TestJSON5ToJSONLeavesInvalidInputInvalid(t *testing.T) {
 		}
 	}
 }
+
+func TestJSON5ToJSONEndsLineCommentsAtEveryLineTerminator(t *testing.T) {
+	for name, in := range map[string]string{
+		"LF": "{a: 1, // c\nb: 2}", "CR": "{a: 1, // c\rb: 2}", "U+2028": "{a: 1, // c\u2028b: 2}", "U+2029": "{a: 1, // c\u2029b: 2}",
+		"after a bare key": "{a // c\u2028: 1, b: 2}",
+	} {
+		var got map[string]any
+		if err := json.Unmarshal(JSON5ToJSON([]byte(in)), &got); err != nil {
+			t.Errorf("%s: not strict JSON after the rewrite: %v", name, err)
+			continue
+		}
+		if got["b"] != 2.0 && name != "after a bare key" {
+			t.Errorf("%s: b lost: %#v", name, got)
+		}
+		if name == "after a bare key" && (got["a"] != 1.0 || got["b"] != 2.0) {
+			t.Errorf("%s: got %#v", name, got)
+		}
+	}
+}
+
+func TestJSON5ToJSONReadsUnicodeEscapesInBareKeys(t *testing.T) {
+	var got map[string]any
+	in := "{g\\u0061teway: 1, \\u0062: {\\u0063\\u0064: 2}, e\\u00e9: 3, a\\u0030: 4, \\u0024x: 5, true: 6, 'q': 'g\\u0061'}"
+	if err := json.Unmarshal(JSON5ToJSON([]byte(in)), &got); err != nil {
+		t.Fatalf("not strict JSON after the rewrite: %v\n%s", err, JSON5ToJSON([]byte(in)))
+	}
+	want := map[string]any{"gateway": 1.0, "b": map[string]any{"cd": 2.0}, "e\u00e9": 3.0, "a0": 4.0, "$x": 5.0, "true": 6.0, "q": "ga"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestJSON5ToJSONLeavesMalformedCommentsAndEscapesInvalid(t *testing.T) {
+	for _, in := range []string{
+		`{a: 1}/*`, `{a: 1} /* open`, `/*`, `{a: /* open 1}`, `{a /* open : 1}`,
+		`{g\u006teway: 1}`, `{g\u0020a: 1}`, `{\u0031a: 1}`, `{a: tr\u0075e}`, `{a: 1}\u0061`, `{\u00: 1}`, `{a\: 1}`,
+	} {
+		var got any
+		if err := json.Unmarshal(JSON5ToJSON([]byte(in)), &got); err == nil {
+			t.Errorf("%q parsed as %#v", in, got)
+		}
+	}
+}
