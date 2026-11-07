@@ -418,6 +418,11 @@ func dispatchTrustedAction(
 			gitHookFacts = &placed
 		}
 	}
+	if twins := unknownKeyWriteTwinRequests(request, facts); len(twins) != 0 {
+		defer func() {
+			findings = dispatchUnknownKeyWriteTwins(parent, findings, twins)
+		}()
+	}
 	if twin, ok := overLimitWriteBoundedTwinRequest(request, facts); ok {
 		defer func() {
 			findings = withOverLimitTwinFindings(findings, dispatchTrustedAction(parent, twin))
