@@ -3105,6 +3105,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
 	enterpriseHookStandalonePlatformPrepare(os.Stderr)
+	openCodePorts, openCodePortsErr := enterpriseHookStandaloneOpenCodePorts(ctx, manifest)
+	if openCodePortsErr != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: %v\n", openCodePortsErr)
+	}
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
@@ -3235,9 +3239,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 				WindowsDeferredFirstEnrollment:     enterpriseHookDeferredFirstEnrollment(target, previousProtection),
 				// Standalone Amp and OpenCode only; empty on Secure Client.
-				ForeignHookGuardBinary:  standaloneForeignHookGuardBinary(target.Connector),
-				ManagedHookBinary:       standaloneManagedHookBinary(),
-				MachinePolicyContractID: enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
+				ForeignHookGuardBinary:      standaloneForeignHookGuardBinary(target.Connector),
+				ManagedHookBinary:           standaloneManagedHookBinary(),
+				MachinePolicyContractID:     enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
+				OpenCodeServicePort:         openCodePorts[strings.ToUpper(resolved.sid)],
+				OpenCodeServicePortRequired: runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && strings.EqualFold(target.Connector, "opencode"),
 			}
 			// Repair the user's objects as root before anything validates them.
 			err = repairEnterpriseHookUserTargetPlatform(target, opts)
@@ -3466,6 +3472,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if stateErr == nil && restoreErr != nil {
 		stateErr = fmt.Errorf("record the restored targets: %w", restoreErr)
 	}
+	stateErr = errors.Join(stateErr, openCodePortsErr)
 	enterpriseHookStandalonePlatformFinish(ctx, os.Stderr, rows, time.Now())
 	run.Rows = rows
 	run.Failures = failures
