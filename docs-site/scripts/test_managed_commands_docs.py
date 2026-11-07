@@ -75,20 +75,35 @@ def command_patterns(table: dict) -> re.Pattern[str]:
     return re.compile("|".join(parts))
 
 
-def units(block: str) -> list[str]:
-    """Split a block into table rows (one unit each) and the prose lines around them."""
+def units(text: str) -> list[str]:
+    """Split a page into table rows, fenced code lines (one unit each) and paragraphs.
+
+    A line of a fenced code block is its own unit: the lines of an example are separate
+    commands and comments, not one sentence, and a blank line inside a fence does not
+    end it.
+    """
     found: list[str] = []
     prose: list[str] = []
-    for line in block.split("\n"):
-        if line.lstrip().startswith("|"):
-            if prose:
-                found.append("\n".join(prose))
-                prose = []
+
+    def flush() -> None:
+        if prose:
+            found.append("\n".join(prose))
+            prose.clear()
+
+    fenced = False
+    for line in text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            flush()
+            fenced = not fenced
+        elif fenced or stripped.startswith("|"):
+            flush()
             found.append(line)
+        elif not stripped:
+            flush()
         else:
             prose.append(line)
-    if prose:
-        found.append("\n".join(prose))
+    flush()
     return found
 
 
@@ -104,17 +119,16 @@ def pages_with_unlinked_claims(docs: Path, table: dict) -> list[str]:
     for path in sorted(docs.rglob("*.mdx")):
         if path == page:
             continue
-        for block in re.split(r"\n\s*\n", path.read_text(encoding="utf-8")):
-            for unit in units(block):
-                if LINK in unit:
-                    continue
-                for sentence in SENTENCE_BREAK.split(unit):
-                    if sentence.lstrip().startswith("#"):
-                        continue  # a heading names a topic and says nothing about it
-                    text = POLICY_LABEL.sub("", sentence)
-                    if MANAGED.search(text) and commands.search(text):
-                        found.append("%s: %s" % (path.relative_to(docs), " ".join(sentence.split())[:120]))
-                        break
+        for unit in units(path.read_text(encoding="utf-8")):
+            if LINK in unit:
+                continue
+            for sentence in SENTENCE_BREAK.split(unit):
+                if sentence.lstrip().startswith("#"):
+                    continue  # a heading names a topic and says nothing about it
+                text = POLICY_LABEL.sub("", sentence)
+                if MANAGED.search(text) and commands.search(text):
+                    found.append("%s: %s" % (path.relative_to(docs), " ".join(sentence.split())[:120]))
+                    break
     return found
 
 
@@ -201,6 +215,8 @@ class AvailabilityClaimGateTests(unittest.TestCase):
             # A table row needs the link in the row; a link in another row does not cover it.
             "| Managed Linux | `defenseclaw policy show` works. |\n| Managed Windows | [Command availability](%s) |\n" % LINK,
             "| Managed Linux | `defenseclaw policy show` works. |\n\n[table](%s)\n" % LINK,
+            # A prose sentence in a fence still needs the link when one line says it all.
+            "```text\nOn managed Linux, `defenseclaw policy show` works.\n```\n",
         ):
             with self.subTest(text=text):
                 self.assertEqual(len(self.check(text)), 1)
@@ -227,6 +243,9 @@ class AvailabilityClaimGateTests(unittest.TestCase):
             # The generated environment-variable table labels each row with a policy value.
             "| `EXAMPLE_VAR`<br/>Managed host: `allow` | Set by `defenseclaw setup`. |\n",
             "## Managed Linux and `defenseclaw status`\n",
+            # The lines of a fenced example are separate commands and comments, blank lines included.
+            "```bash\ndefenseclaw guardrail profile explain --connector claudecode\n# standalone enterprise, as root:\nsudo enterprise linux profile-explain\n```\n",
+            "```bash\ndefenseclaw status\n\n# managed Linux host, as root:\n```\n",
         ):
             with self.subTest(text=text):
                 self.assertEqual(self.check(text), [])
