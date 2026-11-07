@@ -454,6 +454,137 @@ def test_kiro_new_install_that_cannot_be_read_is_not_invented() -> None:
     assert dict(check.unchecked) == {"kiro": "the version probe timed out"}
 
 
+# ---- review 3 M1: Kiro forms follow the current launch order -----------------
+
+_K_OLD = "/opt/kiro-old/bin/kiro-cli"
+_K_NEW = "/opt/kiro-new/bin/kiro-cli"
+
+
+def _kiro_check(old_version: str, candidates: tuple[str, ...], answers: dict[str, tuple[str, str]]):
+    discovery = _kiro_discovery([_kiro_cli_form(old_version, _K_OLD)])
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", _by_path(answers)),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", return_value=candidates),
+    ):
+        return doctor_health.recheck_installed_versions(discovery, ["kiro"], "")
+
+
+def _kiro_gate_and_row(old_version: str, candidates: tuple[str, ...], answers: dict[str, tuple[str, str]]):
+    discovery = _kiro_discovery([_kiro_cli_form(old_version, _K_OLD)])
+    r = _DoctorResult()
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", _by_path(answers)),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", return_value=candidates),
+        mock.patch.object(cmd_doctor, "_doctor_active_connectors", return_value=["kiro"]),
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=discovery),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cfg = SimpleNamespace(data_dir="")
+        gate = cmd_doctor._plan_connector_compatibility_gate(cfg)
+        cmd_doctor._check_component_connector_compatibility(cfg, ["kiro"], r)
+    return gate, next(c for c in r.checks if c["label"] == "Connector compatibility: kiro")
+
+
+def test_kiro_newly_preferred_install_is_selected_before_the_recorded_one() -> None:
+    old, new = KIRO_CLI_HOOK_FLOOR, _above(KIRO_CLI_HOOK_FLOOR)
+    check = _kiro_check(
+        old, (_K_NEW, _K_OLD), {_K_NEW: (f"kiro-cli {new}", ""), _K_OLD: (f"kiro-cli {old}", "")}
+    )
+    signal = check.discovery.agents["kiro"]
+    assert [f["path"] for f in signal.kiro_forms] == [_K_NEW, _K_OLD]
+    assert (signal.binary_path, signal.version) == (_K_NEW, f"kiro-cli {new}")
+
+
+def test_kiro_replaced_install_with_a_supported_one_has_no_stale_failure() -> None:
+    # The old below-floor CLI is gone; the supported replacement is all there is.
+    old, new = _below(KIRO_CLI_HOOK_FLOOR), _above(KIRO_CLI_HOOK_FLOOR)
+    gate, row = _kiro_gate_and_row(
+        old, (_K_NEW,), {_K_NEW: (f"kiro-cli {new}", ""), _K_OLD: ("", "no such file")}
+    )
+    assert row["status"] == "pass"
+    assert f"installed={new}" in row["detail"]
+    assert "auxiliary" not in row["detail"] and old not in row["detail"]
+    assert gate.state != "manual"
+
+
+def test_kiro_replaced_protected_install_with_a_below_floor_one_is_not_a_pass() -> None:
+    # The old protected CLI is gone; the one launched now is below its hook floor.
+    old, new = _above(KIRO_CLI_HOOK_FLOOR), _below(KIRO_CLI_HOOK_FLOOR)
+    gate, row = _kiro_gate_and_row(
+        old, (_K_NEW,), {_K_NEW: (f"kiro-cli {new}", ""), _K_OLD: ("", "no such file")}
+    )
+    assert row["status"] != "pass"
+    assert f"installed={old}" not in row["detail"]
+    assert gate.state == "manual"
+
+
+def test_kiro_retired_install_that_still_answers_is_judged_after_the_current_ones() -> None:
+    old, new = _below(KIRO_CLI_HOOK_FLOOR), _above(KIRO_CLI_HOOK_FLOOR)
+    check = _kiro_check(
+        old, (_K_NEW,), {_K_NEW: (f"kiro-cli {new}", ""), _K_OLD: (f"kiro-cli {old}", "")}
+    )
+    assert [f["path"] for f in check.discovery.agents["kiro"].kiro_forms] == [_K_NEW, _K_OLD]
+
+
+def test_kiro_retired_install_that_does_not_answer_is_dropped() -> None:
+    new = _above(KIRO_CLI_HOOK_FLOOR)
+    check = _kiro_check(
+        _below(KIRO_CLI_HOOK_FLOOR), (_K_NEW,), {_K_NEW: (f"kiro-cli {new}", ""), _K_OLD: ("", "gone")}
+    )
+    assert [f["path"] for f in check.discovery.agents["kiro"].kiro_forms] == [_K_NEW]
+    assert check.unchecked == {}
+
+
+def test_kiro_everything_recorded_gone_and_nothing_current_stays_recorded_not_installed() -> None:
+    check = _kiro_check(KIRO_CLI_HOOK_FLOOR, (), {_K_OLD: ("", "gone")})
+    assert "kiro" in check.unchecked
+    assert check.changed == {}
+
+
+# ---- review 3 M2: the candidate list and the answer are one per run ----------
+
+
+def test_a_candidate_that_appears_mid_run_does_not_split_the_gate_from_the_row() -> None:
+    answers = {_NEW: ("codex-cli 0.100.0", ""), _OLD: ("codex-cli 0.160.0", "")}
+    listings = iter([(_OLD,), (_NEW, _OLD)])
+    r = _DoctorResult()
+    probe = _by_path(answers)
+    doctor_health.begin_installed_version_run()
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", probe),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", side_effect=lambda *_a: next(listings)),
+        mock.patch.object(cmd_doctor, "_doctor_active_connectors", return_value=["codex"]),
+        mock.patch("defenseclaw.doctor_health.read_cached_discovery", return_value=_discovery(binary=_OLD)),
+        mock.patch.object(cmd_doctor, "_doctor_component_evidence", return_value=()),
+        mock.patch.object(cmd_doctor, "_connector_enabled", return_value=True),
+        mock.patch.object(cmd_doctor, "_unverified_executable_note", return_value=("", "")),
+    ):
+        cfg = SimpleNamespace(data_dir="")
+        gate = cmd_doctor._plan_connector_compatibility_gate(cfg)
+        cmd_doctor._check_component_connector_compatibility(cfg, ["codex"], r)
+    row = next(c for c in r.checks if c["label"] == "Connector compatibility: codex")
+    assert gate.state == "noop" and row["status"] == "pass"
+    assert "installed=0.160.0" in row["detail"]
+    assert [c.args[1] for c in probe.call_args_list] == [_OLD]
+
+
+def test_outside_a_run_the_candidate_list_expires_with_the_answers() -> None:
+    answers = {_NEW: ("codex-cli 0.167.0", ""), _OLD: ("codex-cli 0.160.0", "")}
+    listings = iter([(_OLD,), (_NEW, _OLD)])
+    clock = _slow_clock()
+    with (
+        mock.patch.object(agent_discovery, "_version_for_agent_binary", _by_path(answers)),
+        mock.patch.object(agent_discovery, "_binary_candidates_for_agent", side_effect=lambda *_a: next(listings)),
+        mock.patch.object(doctor_health.time, "monotonic", clock),
+    ):
+        first = doctor_health.recheck_installed_versions(_discovery(binary=_OLD), ["codex"], "")
+        second = doctor_health.recheck_installed_versions(_discovery(binary=_OLD), ["codex"], "")
+    assert first.discovery.agents["codex"].binary_path == _OLD
+    assert second.discovery.agents["codex"].binary_path == _NEW
+
+
 # ---- M2: one answer for a whole run, however long ----------------------------
 
 
