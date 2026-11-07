@@ -316,7 +316,14 @@ def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
         # outcome is established only for a plain command, words and nothing
         # the shell reads; anything else is a launch of its own and its result
         # is the test result.
-        if not _SHELL_PLAIN_COMMAND.fullmatch(args):
+        # The shell is the one the launch names (executable) or /bin/sh; a plain
+        # string says nothing about what another shell does with it, so only the
+        # system shell is modelled.
+        shell = kwargs.get("executable")
+        if not _SHELL_PLAIN_COMMAND.fullmatch(args) or (
+            shell is not None
+            and not (os.name != "nt" and os.path.isabs(shell) and _is_system_program(shell, _SYSTEM_SHELL))
+        ):
             return _NO_COMMAND, kwargs.get("env") or os.environ, os.curdir
         words = args.split()
     elif isinstance(args, str):
@@ -436,43 +443,28 @@ def _wrapper_start(path: str) -> str:
     return _WRAPPER_RUNS[identity]
 
 
-# The first bytes of the executable images the gate models as env: ELF, Mach-O
-# (thin and universal, both byte orders) and PE.
-_NATIVE_IMAGE_MAGIC = (
-    b"\x7fELF",
-    b"\xfe\xed\xfa\xce",
-    b"\xfe\xed\xfa\xcf",
-    b"\xce\xfa\xed\xfe",
-    b"\xcf\xfa\xed\xfe",
-    b"\xca\xfe\xba\xbe",
-    b"\xbe\xba\xfe\xca",
-    b"MZ",
-)
+# The files the gate models: the system env and the system shell. A program is
+# one of them by being the same file (same device and inode, through any link or
+# hard link), not by its name, its owner, the look of its image or what it
+# answers to a probe: a link named env that leads to another program (nice, for
+# one) is that program, and it is the test result.
+_SYSTEM_ENV = ("/usr/bin/env", "/bin/env")
+_SYSTEM_SHELL = ("/bin/sh",)
 
 
-def _is_platform_env(path: str) -> bool:
-    # Whether the file is the platform env, whose options the gate reads and
-    # checks against the real one: a compiled program that belongs to the
-    # system, owned by root in a directory chain only root can change. Any
-    # other program named env, a script or a binary a test or a user put on the
-    # PATH, is a program of its own: what it does with the environment, the
-    # options or the command word is its own, the gate cannot predict it
-    # (passing a probe says nothing about the next launch), and whatever it
-    # does is the test result.
-    try:
-        with open(path, "rb") as image:
-            head = image.read(4)
-        folder = os.path.dirname(os.path.realpath(path))
-        owned = os.stat(path).st_uid == 0
-        while owned:
-            status = os.stat(folder)
-            owned = status.st_uid == 0 and not status.st_mode & 0o022
-            if folder == os.path.dirname(folder):
-                break
-            folder = os.path.dirname(folder)
-    except OSError:
-        return False
-    return owned and head.startswith(_NATIVE_IMAGE_MAGIC)
+def _is_system_program(path, system_paths) -> bool:  # type: ignore[no-untyped-def]
+    # Whether `path` is one of `system_paths`, the same file. Any other program,
+    # a script or a binary a test or a user put on the PATH, is a program of its
+    # own: what it does with the environment, the options or the command word
+    # is its own, the gate cannot predict it, and whatever it does is the test
+    # result.
+    for system in system_paths:
+        try:
+            if os.path.samefile(path, system):
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _can_start(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
@@ -494,7 +486,7 @@ def _can_start(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
         if os.path.isfile(path) and os.access(path, os.X_OK):
             result = _wrapper_start(path)
             if result != _WRAPPER_NOT_EXECUTED:
-                return result == _WRAPPER_RAN and _is_platform_env(path)
+                return result == _WRAPPER_RAN and _is_system_program(path, _SYSTEM_ENV)
     return False
 
 
@@ -5946,11 +5938,12 @@ def test_a_program_named_env_that_is_not_the_system_env_is_never_judged(
 ) -> None:
     # A compiled program named env passes any probe the gate can run (same
     # image, same marker) and still refuses the real launch on its environment,
-    # its command word or an option. A compiled image is therefore not enough:
-    # only the system env, root's own in a directory only root can change, is
-    # modelled. A copy of the real env in a folder this user owns, and a
-    # compiled wrapper that refuses, are programs of their own: the launch
-    # result is the test result.
+    # its command word or an option, and a link named env can lead to another
+    # system program (nice) that is compiled, root-owned and in a root-only
+    # folder. Image, owner and folder are therefore not enough: only the system
+    # env itself, the same file, is modelled. A copy of the real env, a
+    # compiled wrapper that refuses and a link that leads elsewhere are programs
+    # of their own: the launch result is the test result.
     if os.name == "nt":
         pytest.skip("the lookup checked here is POSIX exec")
     env = shutil.which("env")
@@ -5965,6 +5958,15 @@ def test_a_program_named_env_that_is_not_the_system_env_is_never_judged(
     copy.mkdir()
     shutil.copy2(env, copy / "env")
     searches = {"copy": f"{copy}:{good}"}
+    nice = shutil.which("nice")
+    if nice and _env_is_gnu_coreutils(nice):
+        elsewhere = tmp_path / "link-to-nice"
+        elsewhere.mkdir()
+        (elsewhere / "env").symlink_to(nice)
+        searches["link-to-nice"] = f"{elsewhere}:{good}"
+    same = tmp_path / "link-to-env"
+    same.mkdir()
+    (same / "env").symlink_to(env)
     compiler = shutil.which("cc") or shutil.which("gcc")
     if compiler:
         folder = tmp_path / "refusing"
@@ -5985,6 +5987,8 @@ def test_a_program_named_env_that_is_not_the_system_env_is_never_judged(
             searches["refusing"] = f"{folder}:{good}"
     # (launch, kwargs, what the real launch does)
     launches = [(["env", "pwsh"], {"env": {"PATH": searches["copy"]}}, "exit 127")]
+    if "link-to-nice" in searches:
+        launches.append((["env", "-i", "pwsh"], {"env": {"PATH": searches["link-to-nice"]}}, "exit 125"))
     if "refusing" in searches:
         refusing = searches["refusing"]
         launches += [
@@ -6003,18 +6007,22 @@ def test_a_program_named_env_that_is_not_the_system_env_is_never_judged(
         except pytest.skip.Exception:  # a skip here would hide the failure this test is for
             pytest.fail(f"a launch through a program named env was skipped as a missing PowerShell: {launch} {kwargs}")
         assert gated == expected, (launch, kwargs)
-    # The system env is the control: modelled, and its missing PowerShell skips.
-    with pytest.raises(pytest.skip.Exception):
-        subprocess.run(["env", "pwsh"], env={"PATH": good}, check=False)
+    # The system env is the control, by its own path and through a link that
+    # leads to it: modelled, and its missing PowerShell skips.
+    for folder in (good, str(same)):
+        with pytest.raises(pytest.skip.Exception):
+            subprocess.run(["env", "pwsh"], env={"PATH": folder}, check=False)
 
 
 def test_a_shell_string_is_judged_by_its_whole_outcome_not_its_first_words(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A shell runs the whole string. `env pwsh || exit 42` ends with the exit
     # 42 and `env pwsh || true` with the true, whatever the first words did,
     # so a missing PowerShell in front of them is not the outcome. Only a
-    # plain command (words, nothing the shell reads) is the missing program.
+    # plain command (words, nothing the shell reads) is the missing program,
+    # and only when the shell is the system shell: a plain string does not say
+    # what another shell (executable=) does with it.
     if os.name == "nt":
         pytest.skip("the shell checked here is POSIX sh")
     if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
@@ -6042,10 +6050,32 @@ def test_a_shell_string_is_judged_by_its_whole_outcome_not_its_first_words(
         except pytest.skip.Exception:  # a skip here would hide the result this test is for
             pytest.fail(f"a compound shell command was skipped as a missing PowerShell: {command}")
         assert gated == expected, command
-    # The plain commands are the control: a missing PowerShell, skipped as before.
+    # The same plain command under another shell is that shell's result.
+    refusing = tmp_path / "shell"
+    refusing.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
+    refusing.chmod(0o755)
+    other = [(str(refusing), "exit 42")]
+    true = shutil.which("true")
+    if true:
+        other.append((true, "exit 0"))
+    for shell, expected in other:
+        kwargs = {"shell": True, "executable": shell}
+        with _gate_off("running the real launch"):
+            assert _launch_outcome("env pwsh", kwargs) == expected, shell
+        assert not _launches_a_missing_powershell("env pwsh", kwargs), shell
+        try:
+            gated = _launch_outcome("env pwsh", kwargs)
+        except pytest.skip.Exception:  # a skip here would hide the result of the shell this test is for
+            pytest.fail(f"a plain command under another shell was skipped as a missing PowerShell: {shell}")
+        assert gated == expected, shell
+    # The plain commands are the control: a missing PowerShell, skipped as before,
+    # also when the system shell is named.
     for command in ("env pwsh", "pwsh -NoProfile -Command exit", "None -NoProfile -Command exit"):
         with pytest.raises(pytest.skip.Exception):
             subprocess.run(command, shell=True, check=False)
+    if os.path.exists("/bin/sh"):
+        with pytest.raises(pytest.skip.Exception):
+            subprocess.run("env pwsh", shell=True, executable="/bin/sh", check=False)
 
 
 def test_env_actions_that_run_no_powershell_still_run_where_it_is_not_installed(
