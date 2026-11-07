@@ -76,6 +76,18 @@ func lateOrdinaryPayload(t *testing.T, project string, command any) string {
 // verified-gateway-without-status control of the psna-rb review).
 func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 	project := lateOrdinaryProject(t)
+	// A folder whose link is not in the project (round 4: a cd must move the
+	// folder every later word is looked up in).
+	sub := filepath.Join(project, "sub")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(filepath.Dir(project), ".ssh", "authorized_keys"), filepath.Join(sub, "childlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "plain.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	shortAnswerBudget(t, 400*time.Millisecond)
 	addr := hungGateway(t)
 	client, err := NewPerUserGatewayHTTPClient(2*time.Second, addr)
@@ -121,6 +133,23 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"sed write flag to the link, open tier", `sed -n "s/a/b/w keylink" plain.txt`, "open", true},
 			{"argv with a link that has a space, open tier", []string{"cat", "key link"}, "open", true},
 			{"quoted link that has a space, open tier", `cat "key link"`, "open", true},
+			// Round 4: a cd moves the folder, a direct link stays closed as
+			// text, and ordinary scripts and patterns stay open.
+			{"cd then a plain file, open tier", "cd sub && cat plain.txt", "open", false},
+			{"cd then a link of that folder, open tier", "cd sub && cat childlink", "open", true},
+			{"cd then a redirect to a link of that folder, open tier", "cd sub && echo x > childlink", "open", true},
+			{"cd then a link after a semicolon, open tier", "cd sub; cat childlink", "open", true},
+			{"echo of a direct link, open tier", "echo keylink", "open", true},
+			{"echo of a quoted link with a space, open tier", "echo 'key link'", "open", true},
+			{"printf of a direct link, open tier", "printf %s keylink", "open", true},
+			{"sed two prints, open tier", `sed -n '1p;2p' plain.txt`, "open", false},
+			{"sed two substitutions, open tier", `sed -e 's/a/b/;s/c/d/' plain.txt`, "open", false},
+			{"sed print and write to the link, open tier", `sed -n '1p;w keylink' plain.txt`, "open", true},
+			{"grep pattern option, open tier", "grep -e openclaw plain.txt", "open", false},
+			{"grep first operand pattern, open tier", "grep openclaw plain.txt", "open", false},
+			{"grep pattern file link, open tier", "grep -f keylink plain.txt", "open", true},
+			{"ls ignore pattern, open tier", "ls -Iopenclaw plain.txt", "open", false},
+			{"ls ignore pattern then a link, open tier", "ls -Iopenclaw keylink", "open", true},
 		} {
 			t.Run(connector+"/"+tc.name, func(t *testing.T) {
 				result, _ := runAgainstGateway(t, connector, addr, func(opts *Options) {
