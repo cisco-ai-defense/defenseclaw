@@ -51,7 +51,10 @@ func TestWindowsHookRuntimeWatchListIsTheAllowListOnly(t *testing.T) {
 		"copilot/.defenseclaw-managed-runtime-selector.lock",
 		"kiro/.defenseclaw-enrollment.lock",
 		".defenseclaw-enrollment.lock",
-		// Temp files and relax records of the writers.
+		// Temp files (the writer's real name is .defenseclaw-policy-*.tmp; the old .tmp- forms stay excluded too) and relax records of the writers.
+		".defenseclaw-policy-123.tmp",
+		"copilot/.defenseclaw-policy-456.tmp",
+		"copilot/.defenseclaw-policy-789.tmp.bak",
 		"copilot/.tmp-enrollment-1",
 		"copilot/enrollment.json.tmp-9",
 		"copilot/.defenseclaw-setup-relax-S-1-5-21-1.json",
@@ -73,7 +76,7 @@ func TestWindowsHookRuntimeWatchListIsTheAllowListOnly(t *testing.T) {
 	}
 	for _, path := range got {
 		base := strings.ToLower(filepath.Base(path))
-		if strings.HasSuffix(base, ".lock") || strings.Contains(base, ".tmp-") || strings.HasPrefix(base, ".tmp-") {
+		if strings.HasSuffix(base, ".lock") || strings.HasSuffix(base, ".tmp") || strings.Contains(base, ".tmp-") || strings.HasPrefix(base, ".tmp-") {
 			t.Fatalf("%s is a lock or temp file", path)
 		}
 	}
@@ -113,7 +116,7 @@ func TestWindowsHookRuntimeFilesAreReadOnTheHookPath(t *testing.T) {
 				t.Fatalf("%s is listed twice", entry.Name)
 			}
 			seen[strings.ToLower(entry.Name)] = true
-			if strings.HasSuffix(entry.Name, ".lock") || strings.Contains(entry.Name, ".tmp-") || strings.Contains(entry.Name, "*") || strings.Contains(entry.Name, "relax") {
+			if strings.HasSuffix(entry.Name, ".lock") || strings.HasSuffix(entry.Name, ".tmp") || strings.Contains(entry.Name, ".tmp-") || strings.Contains(entry.Name, "*") || strings.Contains(entry.Name, "relax") {
 				t.Fatalf("%s is a lock, temp or relax file, which the hook never reads", entry.Name)
 			}
 			if len(entry.Path) == 0 {

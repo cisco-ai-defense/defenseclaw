@@ -22,9 +22,10 @@ import (
 // folder is watched, and in particular not the lock files the Setup program
 // and the command line take with no sharing for a whole transaction
 // (.defenseclaw-enrollment.lock, .defenseclaw-managed-runtime-selector.lock),
-// not their .tmp-* files, and not the relax records: DefenseClaw's own
-// writers hold those, the hook never opens them, and ending such a hold would
-// break the writer's lock or write a tamper row for DefenseClaw's own run.
+// not the .defenseclaw-policy-*.tmp files their writers create beside the
+// files, and not the relax records: DefenseClaw's own writers hold those, the
+// hook never opens them, and ending such a hold would break the
+// writer's lock or write a tamper row for DefenseClaw's own run.
 // A name is added here only with the chain of code that makes a hook start
 // read it (windowsHookRuntimeFiles, checked by a test against the source).
 

@@ -1885,7 +1885,7 @@ func TestWindowsHolderTheLockFilesDefenseClawHoldsAreNeverActedOn(t *testing.T) 
 		filepath.Join(dir, "copilot", ".defenseclaw-managed-runtime-selector.lock"),
 		filepath.Join(dir, "hermes", ".defenseclaw-enrollment.lock"),
 		filepath.Join(dir, "hermes", ".defenseclaw-managed-runtime-selector.lock"),
-		filepath.Join(dir, "copilot", ".tmp-enrollment-1"),
+		filepath.Join(dir, "copilot", ".defenseclaw-policy-1234.tmp"),
 	}
 	policy := filepath.Join(dir, "machine-policy.json")
 	for _, path := range append([]string{policy}, locks...) {

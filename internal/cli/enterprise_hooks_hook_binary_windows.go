@@ -225,7 +225,7 @@ func reportWindowsImageSwapLinkRefusal(stderr io.Writer, target string) {
 
 // windowsImageBackupRestrictFailure is set when a swap could not close the
 // backup name to users; windowsImageBackupRestrictLogged keeps one line per
-// error until a later restriction succeeds (review L9).
+// error until a later restriction succeeds.
 var (
 	windowsImageBackupRestrictFailure struct{ backup, err string }
 	windowsImageBackupRestrictLogged  string
@@ -397,8 +397,7 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 			// The same verdict comes from a handle that shares no reading
 			// (a program can open the hook that way), and the swap cannot
 			// end that hold. So the swaps of one path are bounded: a
-			// backoff between them and a cap on the backups still pending
-			// (S5).
+			// backoff between them and a cap on the backups still pending.
 			if allowed, why := windowsHeldSwapAllowed(); !allowed {
 				windowsHeldSwaps.notice = why
 				return "", nil
@@ -582,7 +581,7 @@ func windowsHeldSwapAllowed() (bool, string) {
 	now := windowsHeldSwapNow()
 	// The streak ends, and with it the logged flag, ten minutes after the
 	// last held verdict, whether or not that streak ever swapped: a cap or a
-	// backoff can stop the very first verdict (review L8).
+	// backoff can stop the very first verdict.
 	if !state.last.IsZero() && now.Sub(state.last) > windowsHeldSwapStreakEnd {
 		*state = windowsHeldSwapState{}
 	}

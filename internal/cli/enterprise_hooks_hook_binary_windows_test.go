@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // GAP-0935, GAP-0680: the guardian keeps a copy of the recorded hook binary
@@ -1176,7 +1177,7 @@ func TestCopyWindowsManagedFileClaimsNoRestoreWhenTheOlderReplacementIsRefused(t
 	}
 }
 
-// GAP-0656 review L5: the old program under its backup name takes an
+// GAP-0656: the old program under its backup name takes an
 // administrators-only access list, so a user cannot start it from there.
 func TestSwapWindowsProgramImageClosesTheBackupToUsers(t *testing.T) {
 	requireAdministratorTestToken(t, "the backup keeps the old object's owner")
@@ -1256,5 +1257,58 @@ func TestSwapWindowsProgramImageLogsAFailedBackupAccessListOnce(t *testing.T) {
 	reportWindowsImageBackupRestrictFailure(&log)
 	if got := strings.Count(log.String(), "could not close the backup"); got != 2 {
 		t.Fatalf("after a closed backup, %d notices: %q", got, log.String())
+	}
+}
+
+// GAP-0755: in each guardian check the hook binary is checked, and restored
+// when it is damaged, before the runtime files are looked at, so a user who
+// holds many runtime files cannot delay the binary. The real check runs on a
+// layout in a temporary folder; the binary lookup and the runtime folder
+// lookup are recorders. Moving the runtime pass above the binary check fails
+// this test.
+func TestKeepWindowsStandaloneHookBinaryChecksTheBinaryBeforeTheRuntimeFiles(t *testing.T) {
+	root := t.TempDir()
+	roots := winpath.EnterpriseRoots{
+		Profile:      managed.ProfileStandalone,
+		InstallRoot:  filepath.Join(root, "install"),
+		StateRoot:    filepath.Join(root, "state"),
+		MetadataPath: filepath.Join(root, "state", "metadata.json"),
+	}
+	target := filepath.Join(roots.InstallRoot, "bin", "defenseclaw-hook.exe")
+	if err := os.MkdirAll(roots.StateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(roots.MetadataPath, []byte(`{"hashes":{"hook":"0123456789abcdef"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	savedRoots, savedManifest, savedStandalone := windowsManagedLayout.roots, enterpriseHookManifest, windowsHolderStandalone
+	savedLstat, savedDir := windowsHookBinaryLstat, windowsHookRuntimeDir
+	t.Cleanup(func() {
+		windowsManagedLayout.roots, enterpriseHookManifest, windowsHolderStandalone = savedRoots, savedManifest, savedStandalone
+		windowsHookBinaryLstat, windowsHookRuntimeDir = savedLstat, savedDir
+		resetWindowsHolderOutputForTest()
+	})
+	windowsManagedLayout.roots = func(string) (winpath.EnterpriseRoots, error) { return roots, nil }
+	enterpriseHookManifest = filepath.Join(roots.StateRoot, "targets.yaml")
+	windowsHolderStandalone = func() bool { return true }
+	var order []string
+	windowsHookBinaryLstat = func(path string) (os.FileInfo, error) {
+		if path == target {
+			order = append(order, "binary")
+			return nil, os.ErrPermission
+		}
+		return os.Lstat(path)
+	}
+	windowsHookRuntimeDir = func() (string, error) {
+		order = append(order, "runtime")
+		return "", fmt.Errorf("no runtime folder in this test")
+	}
+	var log strings.Builder
+	keepWindowsStandaloneHookBinaryLocked(&log, false)
+	if len(order) < 2 || order[0] != "binary" || order[len(order)-1] != "runtime" {
+		t.Fatalf("order of the guardian check: %v, want the binary first and the runtime files after it", order)
+	}
+	if !strings.Contains(log.String(), "inspect the hook binary") {
+		t.Fatalf("the binary check did not report its own result: %q", log.String())
 	}
 }

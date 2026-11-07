@@ -110,10 +110,10 @@ func swapWindowsProgramImage(temporary, destination string) (string, error) {
 	}
 	// The backup name is the old program under a second name for as long as
 	// a process runs it. Nothing refers to the name, and a user must not be
-	// able to start the old image from it (review L5), so it takes an
+	// able to start the old image from it, so it takes an
 	// administrators-only access list. A process already running the image,
 	// and one that opened it a moment before the rename, are unaffected. A
-	// failure does not undo the swap; the guardian logs it once (review L9).
+	// failure does not undo the swap; the guardian logs it once.
 	if err := windowsImageBackupRestrict(backup); err != nil {
 		windowsImageBackupRestrictFailure.backup, windowsImageBackupRestrictFailure.err = backup, err.Error()
 	} else {
