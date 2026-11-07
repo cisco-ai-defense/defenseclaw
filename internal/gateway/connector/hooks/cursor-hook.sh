@@ -462,7 +462,9 @@ fail_response() {
 {{end}}  defenseclaw_allow_failed_stop_event cursor cursor-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_delivery_failure cursor cursor-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: cursor hook error, blocking cursor tool (sandbox hooks fail closed): $1" >&2
-  emit_cursor_deny "DefenseClaw hook failed closed"
+  # $2, when given, is the readable cause the gateway stated (a 429 names the
+  # limit that refused the call): the agent sees it, JSON-escaped.
+  emit_cursor_deny "$(defenseclaw_json_escape "${2:-DefenseClaw hook failed closed}")"
   exit 2
 }
 {{else}}if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
@@ -534,7 +536,7 @@ fail_response() {
     emit_cursor_allow
     exit 0
   fi
-  emit_cursor_deny "{{if .Sandbox}}$(defenseclaw_json_escape "${2:-DefenseClaw hook failed closed}"){{else}}DefenseClaw hook failed closed{{end}}"
+  emit_cursor_deny "DefenseClaw hook failed closed"
 {{if not .SecureClient}}  if cursor_event_unread; then exit 2; fi
 {{end}}  exit 0
 }
