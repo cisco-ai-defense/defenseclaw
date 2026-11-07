@@ -190,7 +190,7 @@ const MaxPayloadBytes = 1 << 20
 // reports a redirect target that is not a static word (a parameter other
 // than HOME, a substitution or a glob), which is not listed.
 func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynamic bool) {
-	operands, _, ok, dynamic = shellWriteOperands(command, cwd, home, "")
+	operands, _, ok, dynamic = shellWriteOperands(command, cwd, home, KnownUser{})
 	return operands, ok, dynamic
 }
 
@@ -198,7 +198,7 @@ func ShellWriteOperands(command, cwd, home string) (operands []string, ok, dynam
 // dynamic targets that the known values of the action name (knownValueWord
 // with user, ActionKnownUser): <parent>/$USER/f. Only the hook client map
 // lists them, with the state name they reach (stateOperand).
-func shellWriteOperands(command, cwd, home, user string) (operands, known []string, ok, dynamic bool) {
+func shellWriteOperands(command, cwd, home string, user KnownUser) (operands, known []string, ok, dynamic bool) {
 	file, parsed := parseShell(command)
 	if !parsed {
 		return nil, nil, false, false
@@ -208,7 +208,7 @@ func shellWriteOperands(command, cwd, home, user string) (operands, known []stri
 }
 
 // shellFileWriteOperands is shellWriteOperands on a parsed command.
-func shellFileWriteOperands(file *syntax.File, cwd, home, user string) (operands, known []string, dynamic bool) {
+func shellFileWriteOperands(file *syntax.File, cwd, home string, user KnownUser) (operands, known []string, dynamic bool) {
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	// A definition runs nothing. A body is read once, where it is defined,
 	// when the command may call it (GAP-1430). Expanding each call instead
@@ -233,7 +233,7 @@ func shellFileWriteOperands(file *syntax.File, cwd, home, user string) (operands
 			name, static := staticShellWord(redirect.Word, env, home != "")
 			if !static {
 				dynamic = dynamic || shellWordHasSlash(redirect.Word)
-				if user != "" {
+				if user.Name != "" {
 					if name, static = knownValueWord(redirect.Word, home, user); static && name != "" && name != "-" &&
 						strings.Trim(name, "0123456789") != "" {
 						known = append(known, OperandPath(name, cwd))
@@ -252,7 +252,7 @@ func shellFileWriteOperands(file *syntax.File, cwd, home, user string) (operands
 		name, static := staticShellWord(redirect.Word, env, home != "")
 		if !static {
 			dynamic = true
-			if user != "" {
+			if user.Name != "" {
 				if name, static = knownValueWord(redirect.Word, home, user); static && name != "" {
 					known = append(known, OperandPath(name, cwd))
 				}
@@ -266,6 +266,27 @@ func shellFileWriteOperands(file *syntax.File, cwd, home, user string) (operands
 		return true
 	})
 	return operands, known, dynamic
+}
+
+// knownStateOperands lists the redirect targets that a known USER or
+// LOGNAME names, and the in-place editor operands, of each top-level
+// statement of command: a name the statement or one before it binds is not
+// the login the home spells (PlacedStatement.User).
+func knownStateOperands(command, cwd, home string) []stateOperand {
+	if !strings.Contains(command, "USER") && !strings.Contains(command, "LOGNAME") {
+		return inPlaceStateOperands(command, cwd, home, KnownUser{})
+	}
+	var operands []stateOperand
+	for _, statement := range PlacedOrWhole(command, cwd, home) {
+		if statement.User.Name != "" && strings.Contains(statement.Command, ">") {
+			_, known, _, _ := shellWriteOperands(statement.Command, statement.Dir, home, statement.User)
+			for _, name := range known {
+				operands = append(operands, stateOperand{path: name})
+			}
+		}
+		operands = append(operands, inPlaceStateOperands(statement.Command, statement.Dir, home, statement.User)...)
+	}
+	return operands
 }
 
 // stateOperand is a write operand the hook client map lists only with the
@@ -298,7 +319,7 @@ func childStateOperands(command, cwd, home string) []stateOperand {
 // inPlaceStateOperands lists the operands of the sed -i and perl -i calls
 // of command read in cwd with the known values of the action (user): an
 // entry, or a followed name for sed --follow-symlinks.
-func inPlaceStateOperands(command, cwd, home, user string) []stateOperand {
+func inPlaceStateOperands(command, cwd, home string, user KnownUser) []stateOperand {
 	if !strings.Contains(command, "sed") && !strings.Contains(command, "perl") {
 		return nil
 	}
@@ -543,38 +564,46 @@ func StaticWord(word *syntax.Word, home string) (string, bool) {
 	return staticShellWord(word, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")), home != "")
 }
 
+// KnownUser is the login USER and LOGNAME name in a statement: Name,
+// until the byte offset Until of the statement text (0: all of it), after
+// which a binding inside the statement hides it. The zero value is no
+// known login.
+type KnownUser struct {
+	Name  string
+	Until int
+}
+
 // knownValueWord expands one shell word with every value known for the
-// active home: HOME, and USER and LOGNAME as user, the value the action
-// keeps for them (ActionKnownUser; empty when it may bind them). A reader
-// of the targets of a write to DefenseClaw state uses it, so a known value
-// names the file its literal spelling names (rel-1-0-6:GAP-0681).
-func knownValueWord(word *syntax.Word, home, user string) (string, bool) {
-	if user == "" {
-		return StaticWord(word, home)
-	}
+// active home: HOME, and USER and LOGNAME as the login the word is read
+// with (KnownUser; empty when the action may bind them). A reader of the
+// targets of a write to DefenseClaw state uses it, so a known value names
+// the file its literal spelling names (rel-1-0-6:GAP-0681).
+func knownValueWord(word *syntax.Word, home string, user KnownUser) (string, bool) {
 	if word == nil {
 		return "", false
 	}
+	if user.Name == "" || user.Until > 0 && int(word.Pos().Offset()) >= user.Until {
+		return StaticWord(word, home)
+	}
 	home = strings.TrimRight(home, "/")
-	return staticShellWord(word, expand.ListEnviron("HOME="+home, "USER="+user, "LOGNAME="+user), home != "")
+	return staticShellWord(word, expand.ListEnviron("HOME="+home, "USER="+user.Name, "LOGNAME="+user.Name), home != "")
 }
 
-// ActionKnownUser is the value USER and LOGNAME keep through the shell
-// action: the last element of a POSIX home, as actionfacts reads
-// <parent>/$USER (userHomeRewriteWord) and the target mention scan reads
-// both names. It is empty when the action does not name them, or may bind
-// one of them (knownNamesBound): the per-command readings
-// (actionfacts.SimpleCommands) then carry each value where the shell sets
-// it, so USER=x; sed -i d <parent>/$USER/f edits the file of x
-// (rel-1-0-6:GAP-0630 review 2). A reader of one statement or child of the
-// action passes the whole action.
+// ActionKnownUser is the value USER and LOGNAME keep through a shell
+// action that binds neither: the last element of a POSIX home, as
+// actionfacts reads <parent>/$USER (userHomeRewriteWord) and the target
+// mention scan reads both names. It is empty when the action does not name
+// them, or may bind one of them (knownNamesBound). A reader of a list reads
+// each statement with the value it has there (TopLevelStatements), so
+// sed -i d <parent>/$USER/f; USER=x edits the file of the active user and
+// USER=x; sed -i d <parent>/$USER/f the file of x (rel-1-0-6:GAP-0630
+// review 2, review 5).
 func ActionKnownUser(action, home string) string {
 	if !strings.Contains(action, "USER") && !strings.Contains(action, "LOGNAME") {
 		return ""
 	}
-	home = strings.TrimRight(home, "/")
-	user := path.Base(home)
-	if !strings.HasPrefix(home, "/") || user == "/" || user == "." || user == "" {
+	user := homeUser(home)
+	if user == "" {
 		return ""
 	}
 	if file, parsed := parseShell(action); !parsed || knownNamesBound(file, home, 0) {
@@ -583,21 +612,51 @@ func ActionKnownUser(action, home string) string {
 	return user
 }
 
-// knownNamesBound reports a binding of USER or LOGNAME in file: an
-// assignment (prefix, plain or declared), a for or select name, an env
-// NAME=value word, or one in the static body of a shell -c call. A
-// dynamic binding (read, eval) leaves the inherited value: its reading
-// stays the protective one.
-func knownNamesBound(file *syntax.File, home string, depth int) bool {
+// homeUser is the last element of a POSIX home, the login USER and LOGNAME
+// name; empty for any other home.
+func homeUser(home string) string {
+	home = strings.TrimRight(home, "/")
+	user := path.Base(home)
+	if !strings.HasPrefix(home, "/") || user == "/" || user == "." || user == "" {
+		return ""
+	}
+	return user
+}
+
+// knownNamesBound reports a binding of USER or LOGNAME in node
+// (firstUserBinding).
+func knownNamesBound(node syntax.Node, home string, depth int) bool {
+	_, bound := firstUserBinding(node, home, depth)
+	return bound
+}
+
+// firstUserBinding returns the byte offset where the first binding of
+// USER or LOGNAME in node ends: an assignment (prefix, plain or declared),
+// a for or select name, an env NAME=value word, one in the static body of
+// a shell -c call, or a call that binds a name where the value cannot be
+// followed (read, mapfile, printf -v, an eval of code that binds it, a
+// sourced file). The value a name has after such a binding is not the
+// login the home spells.
+func firstUserBinding(node syntax.Node, home string, depth int) (int, bool) {
 	known := func(name string) bool { return name == "USER" || name == "LOGNAME" }
-	bound := false
-	syntax.Walk(file, func(node syntax.Node) bool {
+	first := -1
+	note := func(at syntax.Node) {
+		if end := int(at.End().Offset()); first < 0 || end < first {
+			first = end
+		}
+	}
+	syntax.Walk(node, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.Assign:
-			bound = bound || node.Name != nil && known(node.Name.Value)
+			if node.Name != nil && known(node.Name.Value) {
+				note(node)
+			}
 		case *syntax.WordIter:
-			bound = bound || node.Name != nil && known(node.Name.Value)
+			if node.Name != nil && known(node.Name.Value) {
+				note(node)
+			}
 		case *syntax.CallExpr:
+			bound := len(actionfacts.CallBindsUserNames(node)) != 0
 			for _, arg := range node.Args {
 				if word, static := StaticWord(arg, home); static {
 					if name, _, cut := strings.Cut(word, "="); cut && known(name) {
@@ -609,10 +668,13 @@ func knownNamesBound(file *syntax.File, home string, depth int) bool {
 				inner, parsed := parseShell(body)
 				bound = !parsed || depth >= 4 || knownNamesBound(inner, home, depth+1)
 			}
+			if bound {
+				note(node)
+			}
 		}
-		return !bound
+		return true
 	})
-	return bound
+	return first, first >= 0
 }
 
 func homeParam(param *syntax.ParamExp, haveHome bool) bool {
@@ -1408,17 +1470,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// A command over the analysis limits has no path facts, but
 				// the gateway still checks each literal redirect operand.
 				var parsed bool
-				knownUser := ActionKnownUser(command, home)
 				if concreteOperands.ready && !strings.Contains(command, ">") {
 					parsed = concreteOperands.shellParsed
 				} else {
-					var known []string
-					operands, known, parsed, _ = shellWriteOperands(command, cwd, home, knownUser)
-					for _, name := range known {
-						stateOperands = append(stateOperands, stateOperand{path: name})
-					}
+					operands, _, parsed, _ = shellWriteOperands(command, cwd, home, KnownUser{})
 				}
-				stateOperands = append(stateOperands, inPlaceStateOperands(command, cwd, home, knownUser)...)
+				stateOperands = append(stateOperands, knownStateOperands(command, cwd, home)...)
 				if concreteOperands.ready {
 					literalOperands = concreteOperands.literal
 				} else {
@@ -1518,7 +1575,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 						}
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {
 							stateOperands = append(stateOperands, childStateOperands(simple.Text, simple.CWD, home)...)
-							stateOperands = append(stateOperands, inPlaceStateOperands(simple.Text, simple.CWD, home, "")...)
+							stateOperands = append(stateOperands, inPlaceStateOperands(simple.Text, simple.CWD, home, KnownUser{})...)
 						}
 					}
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
@@ -3953,6 +4010,19 @@ func pushdBypassesCDPath(target string) bool {
 type PlacedStatement struct {
 	Command string
 	Dir     string
+	// User is the value USER and LOGNAME have where the statement reads
+	// them: the login the home spells until a statement binds one of them,
+	// and empty after it (ActionKnownUser reads one statement).
+	User KnownUser
+}
+
+// PlacedOrWhole is TopLevelStatements, or the whole command as one
+// statement in cwd when its directories cannot be placed.
+func PlacedOrWhole(command, cwd, home string) []PlacedStatement {
+	if statements, placed := TopLevelStatements(command, cwd, home); placed && len(statements) != 0 {
+		return statements
+	}
+	return []PlacedStatement{{Command: command, Dir: cwd, User: KnownUser{Name: ActionKnownUser(command, home)}}}
 }
 
 // TopLevelStatements splits a ; / && / || list into its statements other
@@ -3970,12 +4040,30 @@ func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
 		return nil, false
 	}
 	out := make([]PlacedStatement, 0, len(statements))
+	user := ""
+	if strings.Contains(command, "USER") || strings.Contains(command, "LOGNAME") {
+		user = homeUser(home)
+	}
 	for i, stmt := range statements {
 		start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
 		if start < 0 || end > len(command) || start >= end {
 			return nil, false
 		}
-		out = append(out, PlacedStatement{Command: command[start:end], Dir: dirs[i]})
+		// The shell expands the words and redirects of a simple command
+		// before it runs, so a binding in it (USER=x, read USER) changes
+		// the statements after it; the words of a compound command are read
+		// with the value they have where they come, before the first
+		// binding in it.
+		reads := KnownUser{Name: user}
+		if user != "" {
+			if bindEnd, bound := firstUserBinding(stmt, home, 0); bound {
+				if _, simple := stmt.Cmd.(*syntax.CallExpr); !simple {
+					reads.Until = max(bindEnd-start, 1)
+				}
+				user = ""
+			}
+		}
+		out = append(out, PlacedStatement{Command: command[start:end], Dir: dirs[i], User: reads})
 	}
 	return out, true
 }
