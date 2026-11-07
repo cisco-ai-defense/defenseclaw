@@ -274,6 +274,11 @@ type enterpriseHookWorkerRequest struct {
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// Progress asks the apply worker to write a line when it begins and when
+	// it ends the repair of a protected target (enterpriseHookWorkerProgress),
+	// so a worker the parent kills before its answer still tells what it put
+	// back (GAP-0754). The parent sets it for a caller that marked its context.
+	Progress bool `json:"progress,omitempty"`
 	// CleanupFence tells a foreign_cleanup worker that the guardian passed
 	// the cleanup fence pipes (enterprise_hooks_worker_fence_unix.go). The
 	// guardian sets it from cleanupFence.
@@ -385,7 +390,9 @@ type enterpriseHookPurgeDetail struct {
 }
 
 type enterpriseHookWorkerResponse struct {
-	Version  int                                `json:"version"`
+	Version int `json:"version"`
+	// Progress marks a line written before the answer, not the answer.
+	Progress *enterpriseHookWorkerProgress      `json:"progress,omitempty"`
 	Targets  []enterpriseHookWorkerTargetResult `json:"targets,omitempty"`
 	Versions map[string]string                  `json:"versions,omitempty"`
 	Reasons  map[string]string                  `json:"reasons,omitempty"`
@@ -548,6 +555,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		var vscode *enterpriseHookWorkerCopilotVSCodeReport
 		if request.CopilotVSCode != nil {
 			vscode = runEnterpriseHookWorkerCopilotVSCode(request)
+		}
+		if request.Progress {
+			ctx = withEnterpriseHookWorkerProgress(ctx, stdout)
 		}
 		response := runEnterpriseHookWorkerApply(ctx, request)
 		response.CopilotVSCode = vscode
@@ -730,6 +740,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		return target.Mode == enterpriseHookWorkerModeRestoreOwnInstall
 	})
 	removeRetiredConnectorsForAccount(ctx, request)
+	progress := enterpriseHookWorkerProgressOf(ctx)
 	for _, target := range request.Targets {
 		opts := target.Options.installOptions(registry)
 		outcome := enterpriseHookWorkerTargetResult{Index: target.Index}
@@ -747,6 +758,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		var result enterprisehooks.InstallResult
 		var err error
 		recheck := false
+		repairing := false
 		switch target.Mode {
 		case enterpriseHookWorkerModeInstall:
 			result, err = enterpriseHookWorkerInstaller(ctx, opts)
@@ -761,6 +773,8 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			recheck = err == nil && recheckWindow > 0
 			if err != nil {
 				policyOnly := request.Standalone && enterprisehooks.PreviousHookRuntimeIntactForConfigurationChange(ctx, opts, target.PriorCredentials)
+				progress.begin()
+				repairing = true
 				result, err = enterpriseHookWorkerInstaller(ctx, opts)
 				outcome.Repaired = err == nil && !policyOnly
 			}
@@ -908,6 +922,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 		}
 		results = append(results, outcome)
+		if repairing {
+			progress.end(outcome)
+		}
 		if recheck {
 			rechecks = append(rechecks, enterpriseHookWorkerRecheck{result: len(results) - 1, opts: opts})
 			recheckedAt = append(recheckedAt, time.Now())
@@ -920,6 +937,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		},
 		func(index int, _ error) {
 			outcome := &results[rechecks[index].result]
+			progress.begin()
 			result, err := enterpriseHookWorkerInstaller(ctx, rechecks[index].opts)
 			if err != nil {
 				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
@@ -928,11 +946,13 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 				if !outcome.Pending {
 					outcome.Error = err.Error()
 				}
+				progress.end(*outcome)
 				return
 			}
 			outcome.Repaired = true
 			outcome.Result = &result
 			outcome.AgentConfig = result.AgentConfig
+			progress.end(*outcome)
 		})
 	return enterpriseHookWorkerResponse{Targets: results}
 }
@@ -1517,30 +1537,41 @@ func defaultEnterpriseHookWorkerExecutable() (string, error) {
 // enterpriseHookWorkerInterruptDrain is how long a worker that is running when
 // its caller is interrupted may take to answer before it is killed, for a
 // caller that asked for it (withEnterpriseHookWorkerInterruptDrain). The
-// guardian watch loop interrupts a pass for every new file event. A worker
-// killed there loses the answer that says it put a hook file or config entry
-// back, and the restore is then counted, audited and recorded nowhere
-// (GAP-0754). A worker answers within its recheck window, well under this.
+// guardian watch loop interrupts a pass for every new file event, and a pass
+// that waited for a worker busy with another account would not react to the
+// event. A worker in the middle of a repair is not killed at this bound but
+// when the repair ends (or at the worker timeout), and a worker killed at the
+// bound keeps the targets it repaired before (enterpriseHookWorkerProgress).
+// Without both, the restore is counted, audited and recorded nowhere
+// (GAP-0754).
 var enterpriseHookWorkerInterruptDrain = 5 * time.Second
 
 type enterpriseHookWorkerInterruptDrainKey struct{}
 
 // withEnterpriseHookWorkerInterruptDrain marks ctx so that
-// runEnterpriseHookWorker lets a running worker finish, up to
-// enterpriseHookWorkerInterruptDrain, when ctx is canceled, and accepts its
-// answer. A worker not yet started when ctx is canceled is not started.
-// Without the mark a canceled ctx kills the worker at once, as before.
+// runEnterpriseHookWorker, when ctx is canceled, lets a running worker finish
+// up to enterpriseHookWorkerInterruptDrain (a worker in the middle of a repair
+// until that repair ends), accepts its answer, and keeps what it repaired if
+// it has to kill it. A worker not yet started when ctx is canceled is not
+// started. Without the mark a canceled ctx kills the worker at once, as
+// before.
 func withEnterpriseHookWorkerInterruptDrain(ctx context.Context) context.Context {
 	return context.WithValue(ctx, enterpriseHookWorkerInterruptDrainKey{}, true)
+}
+
+func enterpriseHookWorkerInterruptDrains(ctx context.Context) bool {
+	drains, _ := ctx.Value(enterpriseHookWorkerInterruptDrainKey{}).(bool)
+	return drains
 }
 
 // enterpriseHookWorkerContext derives the context of one worker process from
 // the context of its caller: bounded by timeout and, for a caller that marked
 // its context, by the interrupt drain instead of by the cancellation of the
 // caller. stopDrain releases the drain watcher. A marked context that is
-// already canceled yields its error.
-func enterpriseHookWorkerContext(parent context.Context, timeout time.Duration) (ctx context.Context, cancel context.CancelFunc, stopDrain func() bool, err error) {
-	if drains, _ := parent.Value(enterpriseHookWorkerInterruptDrainKey{}).(bool); !drains {
+// already canceled yields its error. output is what the worker has written so
+// far; the drain reads it to tell a repair under way.
+func enterpriseHookWorkerContext(parent context.Context, timeout time.Duration, output *workerOutputBuffer) (ctx context.Context, cancel context.CancelFunc, stopDrain func() bool, err error) {
+	if !enterpriseHookWorkerInterruptDrains(parent) {
 		ctx, cancel = context.WithTimeout(parent, timeout)
 		return ctx, cancel, func() bool { return true }, nil
 	}
@@ -1553,20 +1584,36 @@ func enterpriseHookWorkerContext(parent context.Context, timeout time.Duration) 
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-			cancel()
 		case <-ctx.Done():
+			return
+		}
+		for {
+			if out := parseEnterpriseHookWorkerOutput(output.snapshot()); out.repairing == 0 || out.answered {
+				cancel()
+				return
+			}
+			poll := time.NewTimer(enterpriseHookWorkerRepairPoll)
+			select {
+			case <-poll.C:
+			case <-ctx.Done():
+				poll.Stop()
+				return
+			}
 		}
 	})
 	return ctx, cancel, stopDrain, nil
 }
 
 type workerOutputBuffer struct {
+	mu       sync.Mutex
 	buf      bytes.Buffer
 	limit    int
 	exceeded bool
 }
 
 func (b *workerOutputBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if b.buf.Len()+len(p) > b.limit {
 		b.exceeded = true
 		if remaining := b.limit - b.buf.Len(); remaining > 0 {
@@ -1590,10 +1637,14 @@ func runEnterpriseHookWorker(
 	if os.Geteuid() != 0 && (os.Geteuid() != account.UID || os.Getegid() != account.GID) {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("a non-root guardian can only run a worker for itself (uid %d)", os.Geteuid())
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	request.Version = enterpriseHookWorkerProtocolVersion
 	request.UID, request.GID = account.UID, account.GID
 	request.User, request.Home = account.User, account.Home
 	request.CleanupFence = request.cleanupFence != nil
+	request.Progress = enterpriseHookWorkerInterruptDrains(ctx) && request.Operation == enterpriseHookWorkerOpApply
 	if enterpriseHookWorkerReadsLaunchd() {
 		request.LaunchdHermesHome = enterpriseHookWorkerLaunchdHermesHome(account)
 	}
@@ -1605,10 +1656,8 @@ func runEnterpriseHookWorker(
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ctx, cancel, stopDrain, err := enterpriseHookWorkerContext(ctx, workerTimeout(request))
+	stdout := &workerOutputBuffer{limit: enterpriseHookWorkerResponseLimit}
+	ctx, cancel, stopDrain, err := enterpriseHookWorkerContext(ctx, workerTimeout(request), stdout)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
@@ -1618,7 +1667,6 @@ func runEnterpriseHookWorker(
 	cmd.Dir = "/"
 	cmd.Env = enterpriseHookWorkerEnvironment(account)
 	cmd.Stdin = bytes.NewReader(payload)
-	stdout := &workerOutputBuffer{limit: enterpriseHookWorkerResponseLimit}
 	stderr := &workerOutputBuffer{limit: enterpriseHookWorkerStderrLimit}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -1645,25 +1693,34 @@ func runEnterpriseHookWorker(
 	}
 	abandoned, runErr := runEnterpriseHookWorkerProcess(ctx, cmd, account.UID)
 	stopFence()
+	// A worker that ends without its answer still tells what it put back
+	// when the parent asked for progress (GAP-0754): the targets it repaired
+	// come back with the error, and the caller accounts them.
+	withoutAnswer := func(err error) (enterpriseHookWorkerResponse, error) {
+		if !request.Progress {
+			return enterpriseHookWorkerResponse{}, err
+		}
+		return enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion,
+			Targets: parseEnterpriseHookWorkerOutput(stdout.snapshot()).repaired}, err
+	}
 	if abandoned {
-		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err())
+		return withoutAnswer(fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err()))
 	}
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
-		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
+		return withoutAnswer(fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err()))
 	}
 	if stdout.exceeded {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d returned an oversized response", account.UID)
 	}
-	var response enterpriseHookWorkerResponse
-	decoder := json.NewDecoder(bytes.NewReader(stdout.buf.Bytes()))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&response); err != nil {
+	output := parseEnterpriseHookWorkerOutput(stdout.snapshot())
+	if !output.answered {
 		if runErr != nil {
-			return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr)
+			return withoutAnswer(fmt.Errorf("worker for uid %d failed: %w", account.UID, runErr))
 		}
-		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d returned invalid JSON: %w", account.UID, err)
+		return withoutAnswer(fmt.Errorf("worker for uid %d returned invalid JSON: %w", account.UID, output.err))
 	}
+	response := output.response
 	if response.Version != enterpriseHookWorkerProtocolVersion {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d speaks protocol %d", account.UID, response.Version)
 	}
