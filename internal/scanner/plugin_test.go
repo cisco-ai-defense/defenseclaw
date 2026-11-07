@@ -203,14 +203,37 @@ func resolvePluginCLI() (binary string, strict bool) {
 
 // errPluginCLIAbsent marks a CLI whose file, or whose interpreter (the shebang
 // target of a console script), is not there: cmd.Start failed because a path
-// does not exist. Only this outcome means "not installed". A start failure for
-// any other reason (access denied, a resource limit) means the CLI is present
-// and broken. Once the process started, its exit status is the answer of the
+// does not exist, or a bare name matches no regular file on PATH. Only this
+// outcome means "not installed". A start failure for any other reason (access
+// denied, a resource limit), or a regular file of that name on PATH that
+// exec.LookPath passed over because it cannot be executed, means the CLI is
+// present and broken. Once the process started, its exit status is the answer of the
 // CLI itself, whatever the number: a shell launcher or a script can print its
 // output and exit 126 or 127 for its own reasons, so a status cannot show that
 // the file was missing. A CLI that ran and then failed or hung is a real defect
 // and is never reported through this error.
 var errPluginCLIAbsent = errors.New("plugin CLI is not installed")
+
+// pathHoldsANonExecutable reports whether a bare command name matches a
+// regular file in a PATH directory. exec.LookPath returns ErrNotFound both for
+// a name with no such file and for a file without the execute permission, so
+// only after a lookup failure does a file by that name mean "present and
+// broken" rather than "not installed". Windows resolves a bare name through
+// PATHEXT, where a file without an executable extension is not a candidate.
+func pathHoldsANonExecutable(name string) bool {
+	if runtime.GOOS == "windows" || strings.ContainsRune(name, '/') {
+		return false
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			continue
+		}
+		if info, err := os.Stat(filepath.Join(dir, name)); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
 
 // pluginCLIStarts runs the CLI with --help (no scan). It returns an error
 // wrapping errPluginCLIAbsent when a path it needs does not exist, a plain
@@ -224,6 +247,10 @@ func pluginCLIStarts(binary string, timeout time.Duration) error {
 	cmd.Stdout = &output
 	cmd.Stderr = &output
 	if err := cmd.Start(); err != nil {
+		if errors.Is(err, exec.ErrNotFound) && pathHoldsANonExecutable(binary) {
+			// LookPath reports a file it cannot execute as not found.
+			return fmt.Errorf("plugin CLI %s is on PATH but cannot be executed: %w", binary, err)
+		}
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, exec.ErrNotFound) {
 			return fmt.Errorf("%w: %v", errPluginCLIAbsent, err)
 		}
@@ -347,6 +374,98 @@ func TestPluginCLIStartsRejectsAStaleInstallAndAcceptsAWorkingOne(t *testing.T) 
 	}
 }
 
+// TestGatePluginCLIChoosesTheBareNameThroughPATH covers the lookup a PATH
+// install goes through: the bare name is resolved by exec.LookPath, which
+// reports a present file without the execute permission as not found.
+func TestGatePluginCLIChoosesTheBareNameThroughPATH(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell shims are a Unix install shape")
+	}
+	write := func(dir, name, body string, mode os.FileMode) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const name = "defenseclaw-path-choice"
+	for _, tc := range []struct {
+		name     string
+		setup    func(dir string)
+		wantSkip bool
+		wantErr  bool
+	}{
+		{"nothing on PATH skips", func(string) {}, true, true},
+		{"a file of another name skips", func(dir string) { write(dir, "other", "#!/bin/sh\nexit 0\n", 0o755) }, true, true},
+		{"a directory of that name skips", func(dir string) {
+			if err := os.Mkdir(filepath.Join(dir, name), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, true, true},
+		{"a regular file without the execute bit fails", func(dir string) { write(dir, name, "#!/bin/sh\nexit 0\n", 0o644) }, false, true},
+		{"a symlink to a file without the execute bit fails", func(dir string) {
+			write(dir, "target", "#!/bin/sh\nexit 0\n", 0o644)
+			if err := os.Symlink(filepath.Join(dir, "target"), filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}, false, true},
+		{"a dangling symlink skips", func(dir string) {
+			if err := os.Symlink(filepath.Join(dir, "gone"), filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}, true, true},
+		{"an executable file runs", func(dir string) { write(dir, name, "#!/bin/sh\nexit 0\n", 0o755) }, false, false},
+		{"an executable file later on PATH wins over an earlier non-executable one", func(dir string) {
+			first := filepath.Join(dir, "first")
+			if err := os.Mkdir(first, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			write(first, name, "#!/bin/sh\nexit 0\n", 0o644)
+			write(dir, name, "#!/bin/sh\nexit 0\n", 0o755)
+			t.Setenv("PATH", first+string(os.PathListSeparator)+dir)
+		}, false, false},
+		{"a file that starts and exits nonzero fails", func(dir string) { write(dir, name, "#!/bin/sh\nexit 23\n", 0o755) }, false, true},
+	} {
+		dir := t.TempDir()
+		t.Setenv("PATH", dir)
+		tc.setup(dir)
+		skip, err := gatePluginCLI(name, false, time.Minute)
+		if skip != tc.wantSkip || (err != nil) != tc.wantErr {
+			t.Errorf("%s: skip=%v err=%v, want skip=%v err=%v", tc.name, skip, err, tc.wantSkip, tc.wantErr)
+		}
+	}
+}
+
+// TestPluginScannerIntegrationDecidesAPathInstallByWhetherItIsPresent runs the
+// integration test itself with only a bare "defenseclaw" to find, as on a
+// developer's box with no repo .venv and no explicit DEFENSECLAW_BIN.
+func TestPluginScannerIntegrationDecidesAPathInstallByWhetherItIsPresent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell shims are a Unix install shape")
+	}
+	if binary, strict := resolvePluginCLI(); strict {
+		t.Skipf("the integration test would use %s, not PATH", binary)
+	}
+	run := func(setup func(dir string)) (string, error) {
+		dir := t.TempDir()
+		setup(dir)
+		cmd := exec.Command(os.Args[0], "-test.run=^TestPluginScanner_Integration$", "-test.v")
+		cmd.Env = []string{"PATH=" + dir, "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+		output, err := cmd.CombinedOutput()
+		return string(output), err
+	}
+	output, err := run(func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "defenseclaw"), []byte("#!/bin/sh\nexit 0\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if err == nil || strings.Contains(output, "--- SKIP") || !strings.Contains(output, "--- FAIL") {
+		t.Fatalf("a defenseclaw on PATH without the execute bit must fail the integration test, err=%v:\n%s", err, output)
+	}
+	output, err = run(func(string) {})
+	if err != nil || !strings.Contains(output, "--- SKIP") || strings.Contains(output, "--- FAIL") {
+		t.Fatalf("no defenseclaw on PATH must skip the integration test, err=%v:\n%s", err, output)
+	}
+}
 func TestResolvePluginCLIKeepsExplicitChoicesStrict(t *testing.T) {
 	t.Setenv("DEFENSECLAW_BIN", "/explicit/defenseclaw")
 	if binary, strict := resolvePluginCLI(); binary != "/explicit/defenseclaw" || !strict {
