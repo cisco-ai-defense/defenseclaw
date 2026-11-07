@@ -210,6 +210,54 @@ func TestUnsafePrivateDACLCarriersNameEveryFolderThatGrantsTheEntry(t *testing.T
 	}
 }
 
+// Review 4 of GAP-0731: a folder that holds the refused entry and also inherits
+// it needs its parent read to find the entry above. When that read fails, or the
+// walk ends without reaching a folder that grants it, the carriers are not
+// listed at all: the one printed command would remove the explicit entry and
+// leave the inherited one.
+func TestWalkDaclCarriersWithholdsAPartialListOnAnIncompleteWalk(t *testing.T) {
+	root := t.TempDir()
+	child := filepath.Join(root, "a", "plugins")
+	parent := filepath.Dir(child)
+	why := &daclRefusal{sid: mustWorldSID(t)}
+	type answer struct{ explicit, inherited bool }
+	lookupOf := func(answers map[string]answer) func(string, *daclRefusal, byte) (bool, bool) {
+		return func(path string, _ *daclRefusal, _ byte) (bool, bool) {
+			found := answers[path]
+			return found.explicit, found.inherited
+		}
+	}
+	cases := []struct {
+		name    string
+		answers map[string]answer
+		want    []string
+	}{
+		{"the child alone holds it", map[string]answer{child: {true, false}}, []string{child}},
+		{"the parent grants what the child inherits", map[string]answer{child: {false, true}, parent: {true, false}}, []string{parent}},
+		{"both folders grant it, the top one inherits nothing", map[string]answer{child: {true, true}, parent: {true, false}}, []string{parent, child}},
+		{"the parent cannot be read", map[string]answer{child: {true, true}}, nil},
+		{"the parent does not show the inherited entry", map[string]answer{child: {false, true}}, nil},
+	}
+	for _, test := range cases {
+		if got := walkDaclCarriers(child, why, lookupOf(test.answers)); !slices.Equal(got, test.want) {
+			t.Fatalf("%s: carriers=%q, want %q", test.name, got, test.want)
+		}
+	}
+	// A chain that inherits all the way up to the volume root has no folder that grants it.
+	always := func(string, *daclRefusal, byte) (bool, bool) { return true, true }
+	if got := walkDaclCarriers(child, why, always); got != nil {
+		t.Fatalf("a walk that ended at the volume root listed %q", got)
+	}
+	// The depth bound is an incomplete walk too.
+	deep := root
+	for range daclCarrierDepth + 6 {
+		deep = filepath.Join(deep, "d")
+	}
+	if got := walkDaclCarriers(deep, why, always); got != nil {
+		t.Fatalf("a walk cut off at the depth bound listed %q", got)
+	}
+}
+
 // Two foreign accounts on the folder are two refused entries: the refusal names
 // both, each with the folder that holds it, so the printed repair clears the
 // refusal in one pass (review 3 of GAP-0731).

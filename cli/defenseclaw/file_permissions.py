@@ -184,7 +184,9 @@ def _plugin_darwin_acl_refused(path: str) -> bool:
     entry. Asking the stricter rule everywhere would warn about, and make setup
     refuse, a folder the gateway accepts.
     """
-    mode_field, acl_text = _darwin_acl_output(path)
+    mode_field, acl_text = _darwin_acl_output(
+        path, timeout=_PLUGIN_ACL_INSPECTION_TIMEOUT, attempts=_PLUGIN_ACL_INSPECTION_ATTEMPTS
+    )
     if not mode_field:
         return True
     if not acl_text:
@@ -1171,16 +1173,19 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
 
 #: The gateway inspection bound (hookAPIACLInspectionTimeout) and its retry: a
 #: slow ls under a process scanner is inspected once more, and a second timeout
-#: is the verdict. The CLI must reach the same outcome the gateway does.
-_DARWIN_ACL_INSPECTION_TIMEOUT = 5.0
+#: is the verdict. Only the plugin-folder check (_plugin_darwin_acl_refused) asks
+#: for this; every other caller keeps the single 2-second inspection, so a
+#: timeout there stays a refusal on the first try.
+_PLUGIN_ACL_INSPECTION_TIMEOUT = 5.0
+_PLUGIN_ACL_INSPECTION_ATTEMPTS = 2
 
 
-def _darwin_acl_output(path: str | os.PathLike[str]) -> tuple[str, str]:
+def _darwin_acl_output(path: str | os.PathLike[str], *, timeout: float = 2.0, attempts: int = 1) -> tuple[str, str]:
     """Return ``(mode, ACL text)`` from a fixed-path Darwin inspection."""
     if sys.platform != "darwin":
         return "", ""
     result = None
-    for _attempt in range(2):
+    for _attempt in range(attempts):
         try:
             result = subprocess.run(
                 ["/bin/ls", "-lde", os.path.abspath(os.fspath(path))],
@@ -1189,7 +1194,7 @@ def _darwin_acl_output(path: str | os.PathLike[str]) -> tuple[str, str]:
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 env=trusted_system_subprocess_env(),
-                timeout=_DARWIN_ACL_INSPECTION_TIMEOUT,
+                timeout=timeout,
                 check=False,
             )
             break

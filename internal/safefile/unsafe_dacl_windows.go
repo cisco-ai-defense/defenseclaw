@@ -138,13 +138,33 @@ func trusteeName(sid *windows.SID) string {
 // hold a harmless read entry of that account. A parent that holds the entry
 // itself and also inherits it from higher up is a carrier and the walk goes on,
 // because removing the entry there leaves the one granted above. It returns
-// nil when the parents do not show where an inherited entry comes from.
+// nil unless the walk reaches the end of every inherited chain: a parent that
+// cannot be read, one that no longer shows the entry its child inherits, the
+// top of the volume and the depth bound are all an incomplete walk, and a
+// partial list would print a repair that leaves the refusal in place.
 func daclEntryCarriers(path string, why *daclRefusal) []string {
+	return walkDaclCarriers(path, why, daclRefusedEntryOf)
+}
+
+// daclCarrierDepth bounds the walk up the parents.
+const daclCarrierDepth = 64
+
+// walkDaclCarriers is daclEntryCarriers over a lookup that reports, for one
+// folder, whether it holds the refused entry as its own and whether it inherits it.
+func walkDaclCarriers(
+	path string,
+	why *daclRefusal,
+	lookup func(path string, why *daclRefusal, passes byte) (explicit, inherited bool),
+) []string {
 	var carriers []string
 	current := path
 	var passes byte
-	for depth := 0; depth < 64; depth++ {
-		explicit, inherited := daclRefusedEntryOf(current, why, passes)
+	for depth := 0; depth < daclCarrierDepth; depth++ {
+		explicit, inherited := lookup(current, why, passes)
+		if depth > 0 && !explicit && !inherited {
+			// The child inherits an entry this folder does not show.
+			return nil
+		}
 		if explicit {
 			carriers = append([]string{current}, carriers...)
 		}
@@ -153,7 +173,7 @@ func daclEntryCarriers(path string, why *daclRefusal) []string {
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return carriers
+			return nil
 		}
 		passes = byte(windows.OBJECT_INHERIT_ACE)
 		if info, err := os.Stat(current); err != nil || info.IsDir() {
@@ -161,7 +181,7 @@ func daclEntryCarriers(path string, why *daclRefusal) []string {
 		}
 		current = parent
 	}
-	return carriers
+	return nil
 }
 
 // daclRefusedEntryOf reports whether path's DACL holds the entry why refused,
