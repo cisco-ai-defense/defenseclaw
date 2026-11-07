@@ -81,8 +81,10 @@ def test_a_dangling_link_is_its_own_reason(profile) -> None:
     kind = _dangling(link, profile.elsewhere)
     problem = link_guard.dangling_link_problem(str(link / "DefenseClaw"))
     assert problem is not None
-    assert f"{link} is a {kind} whose target is missing" in problem
-    assert f'cmd /c rmdir "{link}"' in problem.step and "nothing is behind it" in problem.step
+    assert f"{link} is a {kind} whose target cannot be found" in problem
+    assert f'cmd /c rmdir "{link}"' in problem.step
+    assert "nothing is behind it" not in problem.step and "nothing is behind it" not in problem
+    assert "not connected" in problem.step and "connect it" in problem.step
     assert "Apps & Features" not in problem.step
 
 
@@ -102,14 +104,18 @@ def test_a_dangling_link_at_the_setup_folder_or_above_it_is_named(profile, where
     link = profile.local.joinpath(*where.split("/"))
     link.parent.mkdir(exist_ok=True)
     kind = _dangling(link, profile.elsewhere)
-    with patch.object(
-        legacy_setup_install, "_read_state", side_effect=AssertionError("nothing is read through a link")
+    with (
+        patch.object(legacy_setup_install, "_setup_registered", return_value=True),
+        patch.object(
+            legacy_setup_install, "_read_state", side_effect=AssertionError("nothing is read through a link")
+        ),
     ):
         found = legacy_setup_install.find("win32")
     assert found is not None
     assert found.root == os.path.join(profile.local, "Programs", "DefenseClaw")
+    # A link above the Setup folder is named here because Setup left its entries; at the folder it always is.
     _named(found.problem, found.problem_step, link, kind)
-    assert "whose target is missing" in found.problem
+    assert "whose target cannot be found" in found.problem
     done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: False)
     assert done == [] and [p.step for p in problems] == [found.problem_step]
 
@@ -133,7 +139,7 @@ def test_the_uninstall_prints_the_dangling_link_step(profile) -> None:
     )
     code, output = _uninstall(found, result)
     assert code == 1
-    assert f"- {link} is a {kind} whose target is missing, so nothing is behind it." in output
+    assert f"- {link} is a {kind} whose target cannot be found (a deleted folder, or a drive or share" in output
     assert f'`cmd /c rmdir "{link}"`' in output
 
 
@@ -504,7 +510,7 @@ def test_real_dangling_junction_at_the_setup_folder_is_named(profile) -> None:
     found = legacy_setup_install.find("win32")
     assert found is not None
     _named(found.problem, found.problem_step, link, "junction")
-    assert "whose target is missing" in found.problem
+    assert "whose target cannot be found" in found.problem
     # The printed step removes only the link.
     subprocess.run(["cmd.exe", "/d", "/c", "rmdir", str(link)], check=True, capture_output=True)
     assert not os.path.lexists(link) and legacy_setup_install.find("win32") is None
@@ -534,3 +540,231 @@ def test_the_uninstall_command_is_unchanged_without_a_link(profile) -> None:
     ):
         outcome = CliRunner().invoke(cmd_uninstall.uninstall_cmd, ["--dry-run"])
     assert "left by DefenseClaw Setup" in outcome.output and "stays:" not in outcome.output
+
+
+# --- S1: a dangling link high in the chain of a profile that never had Setup 0.8.x -----------------------------------
+
+
+def test_a_dangling_link_above_the_setup_folder_is_not_named_without_setup_evidence(profile) -> None:
+    link = profile.local / "Programs"
+    _dangling(link, profile.elsewhere)
+    with patch.object(legacy_setup_install, "_setup_registered", return_value=False):
+        assert legacy_setup_install.find("win32") is None
+
+
+def test_a_dangling_link_above_the_setup_folder_is_named_when_setup_left_its_entries(profile) -> None:
+    link = profile.local / "Programs"
+    kind = _dangling(link, profile.elsewhere)
+    with patch.object(legacy_setup_install, "_setup_registered", return_value=True):
+        found = legacy_setup_install.find("win32")
+    assert found is not None and f"{link} is a {kind} whose target cannot be found" in found.problem
+    # Setup hook launcher state is evidence too.
+    state = profile.local / "DefenseClaw" / "HookRuntime" / "hook-runtime-state.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("{}", encoding="utf-8")
+    with patch.object(legacy_setup_install, "_setup_registered", return_value=False):
+        found = legacy_setup_install.find("win32")
+    assert found is not None and "whose target cannot be found" in found.problem
+
+
+def test_a_dangling_link_at_the_setup_folder_is_named_without_other_evidence(profile) -> None:
+    (profile.local / "Programs").mkdir()
+    link = profile.local / "Programs" / "DefenseClaw"
+    kind = _dangling(link, profile.elsewhere)
+    with patch.object(legacy_setup_install, "_setup_registered", return_value=False):
+        found = legacy_setup_install.find("win32")
+    assert found is not None and f"{link} is a {kind} whose target cannot be found" in found.problem
+
+
+def test_the_dangling_text_does_not_say_nothing_is_behind_the_link(profile) -> None:
+    link = profile.local / "Programs"
+    _dangling(link, profile.elsewhere)
+    problem = link_guard.dangling_link_problem(str(link / "DefenseClaw"))
+    assert problem is not None
+    assert "nothing is behind" not in problem and "nothing is behind" not in problem.step
+    assert "a drive or share that is not connected" in problem.step
+    # Only the link at the path itself, when asked.
+    assert link_guard.dangling_link_problem(str(link / "DefenseClaw"), above=False) is None
+
+
+def test_setup_registered_reads_the_uninstall_entry_and_the_sign_in_start(profile) -> None:
+    root = str(profile.local / "Programs" / "DefenseClaw")
+    cache = str(profile.local / "DefenseClaw" / "InstallerCache")
+    class Key:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    def run_entries(_key, index):
+        values = [("other", "C:\\Other\\app.exe"), ("DefenseClaw", f"\"{root}{os.sep}defenseclaw.exe\" start")]
+        if index >= len(values):
+            raise OSError("no more")
+        return (*values[index], 1)
+
+    registry = SimpleNamespace(
+        HKEY_CURRENT_USER=1,
+        KEY_QUERY_VALUE=1,
+        OpenKey=lambda *_args, **_kw: Key(),
+        QueryValueEx=lambda *_args: (root, 1),
+        EnumValue=run_entries,
+        ExpandEnvironmentStrings=lambda value: value,
+    )
+    with patch.dict(sys.modules, {"winreg": registry}):
+        assert legacy_setup_install._setup_registered(root, cache) is True
+        registry.QueryValueEx = lambda *_args: (str(profile.elsewhere), 1)
+        assert legacy_setup_install._setup_registered(root, cache) is True  # the Run value
+        registry.EnumValue = lambda _key, _index: (_ for _ in ()).throw(OSError("none"))
+        assert legacy_setup_install._setup_registered(root, cache) is False
+
+
+def test_another_kind_of_reparse_point_is_not_sent_to_rmdir(profile) -> None:
+    link = profile.local / "Programs"
+    link.mkdir()
+    with patch.object(link_guard, "links_on_path", return_value=[(str(link), "link")]):
+        problem = link_guard.link_problem(str(link / "DefenseClaw"))
+    assert problem is not None and "rmdir" not in problem.step
+    assert "Ask an administrator to check" in problem.step
+    assert f"{link} is a link" in problem
+    _dangling(profile.local / "gone", profile.elsewhere)
+    with patch.object(link_guard, "links_on_path", return_value=[(str(profile.local / "gone"), "link")]):
+        dangling = link_guard.dangling_link_problem(str(profile.local / "gone"))
+    assert dangling is not None and "rmdir" not in dangling.step and "Ask an administrator" in dangling.step
+
+
+# --- S2: uv editable cache entries -------------------------------------------------------------------------------
+
+
+def _uv_cache(base: Path) -> Path:
+    cache = base / "cache"
+    entry = cache / "archive-v0" / "abc123"
+    (entry / "defenseclaw-1.0.0.dist-info").mkdir(parents=True)
+    (entry / "defenseclaw.pth").write_text("src", encoding="utf-8")
+    return cache
+
+
+def _uv_plan(profile, cache: Path):
+    bin_dir = profile.home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    uv = bin_dir / "uv.exe"
+    uv.write_text("uv", encoding="utf-8")
+    uv.chmod(0o755)
+    return cmd_uninstall.UninstallPlan(platform_name="win32", install_root=str(bin_dir), uv_cache_entries=str(cache))
+
+
+def test_uv_editable_entries_behind_a_linked_archive_folder_stay(profile, capsys) -> None:
+    real = _uv_cache(profile.elsewhere)
+    cache = profile.local / "uv-cache"
+    cache.mkdir()
+    link = cache / "archive-v0"
+    kind = _link(link, real / "archive-v0")
+    before = _digest(real)
+    plan = _uv_plan(profile, cache)
+    with patch.object(cmd_uninstall.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+        cmd_uninstall._clean_uv_cache_entries(plan)
+    out = " ".join(capsys.readouterr().out.split())
+    assert f"{link} is a {kind}" in out and "removed DefenseClaw" not in out
+    assert _digest(real) == before
+
+
+def test_uv_editable_entries_that_are_links_are_not_candidates(profile) -> None:
+    real = _uv_cache(profile.elsewhere)
+    cache = profile.local / "uv-cache"
+    (cache / "archive-v0").mkdir(parents=True)
+    _link(cache / "archive-v0" / "abc123", real / "archive-v0" / "abc123")
+    assert cmd_uninstall._uv_editable_leftovers(str(cache)) == []
+
+
+def test_uv_editable_entries_without_a_link_are_removed_as_before(profile, capsys) -> None:
+    cache = _uv_cache(profile.local / "uvbase")
+    plan = _uv_plan(profile, cache)
+    with patch.object(cmd_uninstall.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+        cmd_uninstall._clean_uv_cache_entries(plan)
+    assert not (cache / "archive-v0" / "abc123").exists()
+    assert "removed DefenseClaw" in capsys.readouterr().out
+
+
+# --- S3: a relative path is still looked at ----------------------------------------------------------------------
+
+
+def test_a_relative_openclaw_path_is_checked_as_the_absolute_path_it_names(profile, monkeypatch) -> None:
+    lnk = profile.base / "lnk"
+    kind = _link(lnk, profile.elsewhere)
+    monkeypatch.chdir(profile.base)
+    with pytest.raises(click.ClickException) as refused:
+        cmd_uninstall._validate_windows_ancestor_chain(os.path.join("lnk", "openclaw.json"), "OpenClaw config")
+    assert f"{lnk} is a {kind}" in refused.value.message
+    cmd_uninstall._validate_windows_ancestor_chain(os.path.join("elsewhere", "openclaw.json"), "OpenClaw config")
+    plan = cmd_uninstall.UninstallPlan(
+        platform_name="win32", revert_openclaw=True, openclaw_config_file=os.path.join("lnk", "openclaw.json")
+    )
+    with pytest.raises(click.ClickException) as plan_refused:
+        cmd_uninstall._validate_plan(plan)
+    assert f"{lnk} is a {kind}" in plan_refused.value.message
+
+
+# --- S4: the launchers are looked at again before each unlink -----------------------------------------------------
+
+
+def test_a_link_made_between_two_launchers_stops_the_rest(profile) -> None:
+    bin_dir = profile.home / ".local" / "bin"
+    bin_dir.mkdir(parents=True)
+    first, second = bin_dir / "defenseclaw.cmd", bin_dir / "defenseclaw-scanner.cmd"
+    for launcher in (first, second):
+        launcher.write_text("shim", encoding="utf-8")
+    plan = cmd_uninstall.UninstallPlan(
+        platform_name="win32",
+        install_root=str(bin_dir),
+        binary_targets=(str(first), str(second)),
+        data_bound_launchers=(str(first), str(second)),
+    )
+    calls: list[str] = []
+    moved = profile.home / ".local" / "bin.real"
+
+    def swap(path: str, _data: str, _platform: str) -> bool:
+        calls.append(path)
+        if len(calls) == 2:  # the install folder becomes a link before the second launcher is looked at
+            bin_dir.rename(moved)
+            _link(bin_dir, moved)
+        return True
+
+    with patch.object(cmd_uninstall, "_is_data_bound_launcher", side_effect=swap):
+        with pytest.raises(OSError) as stopped:
+            cmd_uninstall._remove_data_bound_launchers(plan)
+    assert "is a " in str(stopped.value) and "does not read or remove a folder through a link" in str(stopped.value)
+    assert not (moved / "defenseclaw.cmd").exists() and (moved / "defenseclaw-scanner.cmd").exists()
+
+
+# --- hardening: the real path must be the path written ---------------------------------------------------------------
+
+
+def test_a_path_that_resolves_elsewhere_is_refused_with_the_link_step(profile) -> None:
+    folder = profile.local / "uv"
+    folder.mkdir()
+    with patch.object(link_guard, "_windows", return_value=True), patch.object(link_guard, "_long_name", lambda p: p):
+        with (
+            patch.object(link_guard.os.path, "realpath", side_effect=lambda p: str(p).upper()),
+            patch.object(link_guard.os.path, "normcase", str.lower),
+        ):
+            assert link_guard.link_problem(str(folder)) is None  # case alone does not count
+        with patch.object(link_guard.os.path, "realpath", return_value=str(profile.elsewhere / "uv")):
+            problem = link_guard.link_problem(str(folder))
+            above = link_guard.link_problem(str(folder), include_self=False)
+        # The folder itself may be a link that goes as a link: only the folder above is compared then.
+        with patch.object(link_guard.os.path, "realpath", return_value=str(profile.local)):
+            assert link_guard.link_problem(str(folder), include_self=False) is None
+    assert problem is not None and "resolves to" in problem and "Ask an administrator to check" in problem.step
+    assert above is not None
+    # Off Windows the look is not made.
+    with patch.object(link_guard.os.path, "realpath", return_value="/nowhere"):
+        assert link_guard.link_problem(str(folder)) is None
+
+
+def test_the_data_folder_removal_refuses_a_path_that_resolves_elsewhere(profile) -> None:
+    data = _data_folder(profile.home)
+    with patch.object(link_guard, "_windows", return_value=True), patch.object(link_guard, "_long_name", lambda p: p):
+        with patch.object(link_guard.os.path, "realpath", return_value=str(profile.elsewhere / ".defenseclaw")):
+            with pytest.raises(click.ClickException) as refused:
+                cmd_uninstall._remove_data_dir(str(data), platform_name="win32")
+    assert "resolves to" in refused.value.message and (data / "audit.db").exists()

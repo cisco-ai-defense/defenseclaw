@@ -1715,7 +1715,7 @@ def _uv_editable_leftovers(cache: str) -> list[str]:
         infos = glob.glob(os.path.join(glob.escape(archive), "*.dist-info"))
         if infos and all(os.path.basename(info).startswith("defenseclaw-") for info in infos):
             entries.append(archive)
-    return [entry for entry in entries if os.path.isdir(entry) and not os.path.islink(entry)]
+    return [entry for entry in entries if os.path.isdir(entry) and not _is_reparse_path(entry)]
 
 
 def _clean_uv_cache_entries(plan: UninstallPlan) -> None:
@@ -1748,12 +1748,22 @@ def _clean_uv_cache_entries(plan: UninstallPlan) -> None:
     if result.returncode != 0:
         ux.warn(f"kept DefenseClaw's entries in uv's cache {cache} (uv exited {result.returncode}); run `{command}`")
         return
-    # uv's clean does not reach editable builds; they go here (GAP-1873).
+    # uv's clean does not reach editable builds; they go here (GAP-1873). On Windows an entry with a link
+    # at it or above it (an archive-v* or editable folder that is a junction) stays: nothing goes through a link.
+    behind_link: set[str] = set()
     for entry in _uv_editable_leftovers(cache):
-        shutil.rmtree(entry, ignore_errors=True)
-    left = _uv_editable_leftovers(cache)
+        linked = link_guard.link_problem(entry) if plan.platform_name == "win32" else None
+        if linked:
+            _warn_kept_behind_link(entry, linked)
+            behind_link.add(entry)
+            continue
+        with contextlib.suppress(OSError):
+            _remove_tree_no_follow(entry)
+    left = [entry for entry in _uv_editable_leftovers(cache) if entry not in behind_link]
     if left:
         ux.warn(f"kept {len(left)} DefenseClaw entr{'y' if len(left) == 1 else 'ies'} in uv's cache: {', '.join(left)}")
+        return
+    if behind_link:
         return
     ux.ok(f"removed DefenseClaw's entries from uv's cache {cache}")
 
@@ -2962,6 +2972,13 @@ def _remove_data_bound_launchers(plan: UninstallPlan) -> None:
     for path in plan.data_bound_launchers:
         if path not in owned or not _is_data_bound_launcher(path, plan.data_dir, plan.platform_name):
             continue
+        if plan.platform_name == "win32":
+            # Again just before each unlink: a link made since the first look stops the rest.
+            try:
+                _validate_windows_ancestor_chain(plan.install_root, "binary install root")
+            except click.ClickException as exc:
+                failures.append(f"{path}: {exc.message}")
+                break
         try:
             os.unlink(path)
             ux.ok(f"removed {path}")
@@ -3308,9 +3325,9 @@ def _validate_owned_root(path: str, label: str, *, reject_reparse: bool = True) 
 
 def _validate_windows_ancestor_chain(path: str, label: str) -> None:
     """Refuse a Windows *path* with a link at it or at any folder above it, naming the link and the safe step."""
-    if not os.path.isabs(path):
-        return  # refused as non-absolute where the path is validated
-    problem = link_guard.link_problem(path)
+    # A relative path (the OpenClaw config and home come from the user config) is looked at as the
+    # absolute path it names, as before.
+    problem = link_guard.link_problem(os.path.abspath(path))
     if problem:
         raise click.ClickException(f"refusing {label}: {problem}\n  {problem.step}")
 

@@ -91,9 +91,11 @@ def find(platform_name: str) -> LegacySetupInstall | None:
     cache = os.path.join(local, "DefenseClaw", "InstallerCache")
     hook_state = os.path.join(local, "DefenseClaw", "HookRuntime", "hook-runtime-state.json")
     if not os.path.lexists(state_path):
-        # A link whose target is missing hides the state, so there is nothing to find through it: say so
-        # instead of nothing, with the step that removes only the link.
-        dangling = dangling_link_problem(root)
+        # A link whose target cannot be found hides the state, so there is nothing to find through it: say so
+        # instead of nothing, with the step that removes only the link. A link at the Setup folder is always
+        # named; one further up only when Setup 0.8.x left its entries (registry, hook launcher state), so a
+        # stray link on a profile that never had Setup is not a reason to exit 1.
+        dangling = dangling_link_problem(root, above=_setup_registered(root, cache) or os.path.lexists(hook_state))
         if dangling:
             return LegacySetupInstall(
                 root, "", "", cache, hook_state, problem=str(dangling), problem_step=dangling.step
@@ -444,6 +446,41 @@ def _turn_hook_launcher_off(hook_state: str, root: str) -> bool:
         return False
     os.unlink(hook_state)
     return True
+
+
+def _setup_registered(root: str, cache: str) -> bool:
+    """Whether DefenseClaw Setup 0.8.x left its entries for *root* in this account registry (read only).
+
+    Its Apps & Features entry names the program folder, and its sign-in start runs a program in the
+    program folder or the cache.
+    """
+    try:
+        import winreg
+    except ImportError:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _UNINSTALL_KEY) as key:
+            location, _kind = winreg.QueryValueEx(key, "InstallLocation")
+        if isinstance(location, str) and _same_path(location, root):
+            return True
+    except OSError:
+        pass
+    prefixes = tuple(os.path.normcase(os.path.join(os.path.abspath(path), "")) for path in (root, cache))
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY, 0, winreg.KEY_QUERY_VALUE)
+    except OSError:
+        return False
+    with key:
+        index = 0
+        while True:
+            try:
+                _name, value, _kind = winreg.EnumValue(key, index)
+            except OSError:
+                return False
+            index += 1
+            command = os.path.normcase(winreg.ExpandEnvironmentStrings(value)) if isinstance(value, str) else ""
+            if _starts_in(command, prefixes):
+                return True
 
 
 def _remove_run_values(root: str, cache: str) -> list[str]:
