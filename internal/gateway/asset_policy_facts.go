@@ -324,7 +324,7 @@ func (a *APIServer) skillFolderAccessDecision(
 		// A skill admission blocked and disabled (one whose quarantine
 		// failed stays in its folder) is refused when a tool reaches into
 		// its folder, as a denied one is (GAP-1101).
-		if decision, disabled := a.runtimeAssetDisableDecision("skill", ref.Name, connector, "skill_folder", []string{ref.Dir}); disabled {
+		if decision, disabled := a.runtimeAssetDisableDecision(ctx, cfg, "skill", ref.Name, connector, "skill_folder", []string{ref.Dir}); disabled {
 			a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
 				TargetType: "skill", SkillName: ref.Name, ToolName: toolName,
 				SourcePath: ref.Dir, Surface: "skill_folder", Matched: true,
