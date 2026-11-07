@@ -14,6 +14,7 @@ import json
 import os
 import re
 import stat
+import sys
 import tarfile
 import tempfile
 import urllib.error
@@ -438,14 +439,39 @@ _PROTECTED_SOURCE_NAMES = _PRIVATE_INSTALL_COMPONENTS | frozenset({
 _SOURCE_SCHEME = re.compile(r"(?:^|@)(?:git\+)?(?:file|link|portal):(?://)?", re.IGNORECASE)
 
 
-def _names_protected_source(value: object, data_dir: str = "") -> bool:
+def _name_folding() -> str:
+    """How this platform compares file names: windows, case or exact.
+
+    Windows drops trailing dots and spaces and ignores case, macOS volumes
+    ignore case, and elsewhere ``.SSH`` and ``.ssh.`` are ordinary names of
+    their own, so a source that uses them is an ordinary source.
+    """
+
+    return {"win32": "windows", "darwin": "case"}.get(sys.platform, "exact")
+
+
+def _source_name(name: str) -> str:
+    folding = _name_folding()
+    if folding == "windows":
+        return name.rstrip(". ").casefold()
+    return name.casefold() if folding == "case" else name
+
+
+def _names_protected_state(path: str) -> bool:
+    return any(_source_name(name) in _PROTECTED_SOURCE_NAMES for name in _location_names(path))
+
+
+def _names_protected_source(value: object, data_dir: str = "", bases: tuple[str, ...] = ()) -> bool:
     """Whether any string in ``value`` names a protected file or link.
 
     ``value`` is install metadata or a dependency spec. Every name of a path
     in it is judged (a relative spelling that climbs to a protected folder
     names it as much as an absolute one), the credential file patterns of the
-    scanner apply, and an absolute location is judged again after resolution
-    and against the state folders. A registry request names none of these.
+    scanner apply, and a location is judged again after resolution and against
+    the state folders. A relative location is resolved from each of ``bases``
+    (the package folder and the folders that hold a lock), because a link on
+    the way can lead it to a protected folder. A registry request names none
+    of these.
     """
 
     pending = [value]
@@ -455,12 +481,12 @@ def _names_protected_source(value: object, data_dir: str = "") -> bool:
             pending.extend(v for k, v in item.items() if k != "where")
         elif isinstance(item, list):
             pending.extend(item)
-        elif isinstance(item, str) and _text_names_protected_source(item, data_dir):
+        elif isinstance(item, str) and _text_names_protected_source(item, data_dir, bases):
             return True
     return False
 
 
-def _text_names_protected_source(text: str, data_dir: str) -> bool:
+def _text_names_protected_source(text: str, data_dir: str, bases: tuple[str, ...]) -> bool:
     from defenseclaw.config import default_data_path
     from defenseclaw.scanner.plugin_scanner.rules import CREDENTIAL_PATH_PATTERNS
 
@@ -468,25 +494,34 @@ def _text_names_protected_source(text: str, data_dir: str) -> bool:
     flat = decoded.replace("\\", "/")
     if any(entry.pattern.search(flat) for entry in CREDENTIAL_PATH_PATTERNS):
         return True
-    if any(
-        part.rstrip(". ").casefold() in _PROTECTED_SOURCE_NAMES
-        for part in re.split(r"[/:@\s]+", flat)
-    ):
+    if any(_source_name(part) in _PROTECTED_SOURCE_NAMES for part in re.split(r"[/:@\s]+", flat)):
         return True
     marker = _SOURCE_SCHEME.search(decoded)
     candidate = decoded[marker.end():] if marker else decoded
     if re.match(r"/[A-Za-z]:", candidate):
         candidate = candidate[1:]
     candidate = os.path.expanduser(candidate)
-    if not os.path.isabs(candidate):
-        return False
-    resolved = os.path.realpath(candidate)
     roots = {os.path.realpath(str(default_data_path()))}
     if data_dir:
         roots.add(os.path.realpath(data_dir))
-    return _names_private_state(resolved) or any(
-        _path_within(root, location) for root in roots for location in (candidate, resolved)
-    )
+
+    def protected(location: str) -> bool:
+        return _names_protected_state(location) or any(
+            _path_within(root, location) for root in roots
+        )
+
+    if os.path.isabs(candidate):
+        return protected(os.path.realpath(candidate)) or protected(candidate)
+    if not (marker or "/" in flat or flat.startswith(".")):
+        return False
+    # A relative source is a protected one when a link on its way leads there
+    # from a place the install resolves it. A base that is itself under
+    # protected state does not make every relative spelling protected.
+    for base in bases:
+        resolved = os.path.realpath(os.path.join(base, candidate))
+        if protected(resolved) and not protected(os.path.realpath(base)):
+            return True
+    return False
 
 
 def _registry_archive(address: object, name: str, version: str | None = None) -> bool:
@@ -582,22 +617,30 @@ def _lock_records(lock: dict, name: str, key: str | None) -> list[dict]:
     ]
 
 
-def _root_specs(lock: dict, name: str, key: str | None) -> list[object]:
-    """The specs that the root of the project gives this package.
+def _owner_specs(lock: dict, name: str, key: str | None) -> list[object]:
+    """The specs that the package owning this install gives it.
 
-    The root is the lock entry with an empty path. Its dependencies resolve to
-    ``node_modules/<name>`` of the folder of the lock, so they describe this
-    install only when it is that copy; the copy is a copy whether or not the
-    lock lists it.
+    A copy at ``node_modules/<name>`` is the one the root of the project asks
+    for (the lock entry with an empty path); a copy at
+    ``node_modules/a/node_modules/<name>`` is the one ``a`` asks for. The spec
+    describes this install only when it is that copy, and the copy is a copy
+    whether or not the lock lists it. A lock of npm 6 gives the same spec in
+    ``requires``.
     """
 
-    packages = lock.get("packages")
-    root = packages.get("") if isinstance(packages, dict) else None
-    if key is None or _fold(key) != _fold(f"{_DEPENDENCY_DIR}/{name}") or not isinstance(root, dict):
+    suffix = f"{_DEPENDENCY_DIR}/{name}"
+    if key is None or not (_fold(key) == _fold(suffix) or _fold(key).endswith("/" + _fold(suffix))):
         return []
+    owner = _fold(key[:len(key) - len(suffix)].rstrip("/"))
+    tables = [
+        table for table in (lock.get("packages"), _flat_v1(lock.get("dependencies")))
+        if isinstance(table, dict)
+    ]
     return [
-        specs[name] for field in _DEPENDENCY_FIELDS
-        if isinstance(specs := root.get(field), dict) and name in specs
+        specs[name] for table in tables for path, entry in table.items()
+        if isinstance(path, str) and isinstance(entry, dict) and _fold(path) == owner
+        for field in (*_DEPENDENCY_FIELDS, "requires")
+        if isinstance(specs := entry.get(field), dict) and isinstance(specs.get(name), str)
     ]
 
 
@@ -608,11 +651,15 @@ def _install_records(
     a protected source or its entry names a source other than the registry. A
     record that cannot be read raises."""
 
-    if any(_names_protected_source(manifest.get(field), data_dir) for field in _METADATA_FIELDS):
+    folders = _lock_folders(plugin_dir)
+    bases = tuple(folders)
+    if any(
+        _names_protected_source(manifest.get(field), data_dir, bases) for field in _METADATA_FIELDS
+    ):
         return None
     records: list[dict] = []
     root = os.path.abspath(plugin_dir)
-    for position, folder in enumerate(_lock_folders(plugin_dir)):
+    for position, folder in enumerate(folders):
         key = None if position == 0 else os.path.relpath(root, folder).replace(os.sep, "/")
         for relative in _LOCK_FILES:
             path = os.path.join(folder, *relative.split("/"))
@@ -633,7 +680,10 @@ def _install_records(
                 return None
             if not isinstance(lock, dict):
                 continue
-            if any(_names_protected_source(spec, data_dir) for spec in _root_specs(lock, name, key)):
+            if any(
+                _names_protected_source(spec, data_dir, bases)
+                for spec in _owner_specs(lock, name, key)
+            ):
                 return None
             for entry in _lock_records(lock, name, key):
                 version = entry.get("version")
@@ -641,7 +691,7 @@ def _install_records(
                     version is not None
                     and not (isinstance(version, str) and _RECORDED_VERSION.fullmatch(version))
                 ) or ("resolved" in entry and not _registry_archive(entry["resolved"], name)) or (
-                    _names_protected_source(entry.get("from"), data_dir)
+                    _names_protected_source(entry.get("from"), data_dir, bases)
                 ):
                     return None
                 records.append(entry)
