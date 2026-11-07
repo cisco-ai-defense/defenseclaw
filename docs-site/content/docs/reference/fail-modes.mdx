@@ -245,7 +245,7 @@ defenseclaw guardrail fail-mode   # effective value per connector
 defenseclaw doctor --passive      # no synthetic telemetry, LLM or inspection probes
 ```
 
-These commands are for a per-user install. On a managed standalone Linux or macOS computer `defenseclaw` offers users only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version` (anything else exits 2), and `defenseclaw-gateway` is not on their `PATH`. On native Windows the managed `defenseclaw.exe` is the administrator's command (run it by its full path: Setup puts nothing on `PATH`), which refuses `guardrail` commands (exit `3`) and has no `version` command. The administrator reads each connector's `effective_hook_fail_mode` from `status --json` or `verify --json`:
+These commands are for a per-user install. On a managed standalone Linux or macOS computer `defenseclaw-gateway` is not on the user's `PATH`. On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`; every other command exits `2` with the managed message. On native Windows the managed `defenseclaw.exe` is the administrator's command (run it by its full path: Setup puts nothing on `PATH`), which refuses `guardrail` commands (exit `3`) and has no `version` command. The administrator reads each connector's `effective_hook_fail_mode` from `status --json` or `verify --json`:
 
 ```bash title="Linux"
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json

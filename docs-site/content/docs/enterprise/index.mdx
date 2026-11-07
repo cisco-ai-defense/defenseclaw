@@ -119,7 +119,7 @@ the only policy. Only the lifecycle (and a migration it runs) writes the config.
 Under the Secure Client profile none of this applies. The model is in
 [Configuration: one source of truth](/docs/reference/source-of-truth).
 
-On Linux and macOS the enterprise package installs `defenseclaw` as a launcher that runs only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`. `defenseclaw status` shows the person their own Claude Code and Cowork protection state (never another account's). Every other command prints this and exits `2`:
+On Linux and macOS the enterprise package installs `defenseclaw` as a launcher. On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`; every other command exits `2` with the managed message. `defenseclaw status` shows the person the protection state of their own Claude Code and Cowork sessions, and of nobody else's account. Every other command prints this and exits `2`:
 
 ```text
 This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy. For administrator views, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status`, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify`, or `sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.

@@ -1170,7 +1170,7 @@ installed, `config get`, `config show`, `config validate` and `status` still
 work.
 
 A standard user on a Linux or macOS computer with the standalone enterprise
-package does not get the Python CLI. The `defenseclaw` command there offers only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version` (`status` shows your own protection state). Every other command, readers
+package does not get the Python CLI. On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`; every other command exits `2` with the managed message. Every other command, readers
 included (`doctor`, `config get`, `skill list`), prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy." followed, on Linux and macOS, by the administrator views of that computer (the installed gateway's `enterprise linux status` or `enterprise macos status`, `verify` and `audit export --since 2h`)
 and exits `2`, not `3`. `defenseclaw-gateway` is not on that user's `PATH`.
 The administrator runs it by its packaged path, as root

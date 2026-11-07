@@ -570,8 +570,7 @@ defenseclaw doctor
 defenseclaw keys list
 ```
 
-On managed Linux and macOS, the user's `defenseclaw` launcher offers only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`;
-it refuses `doctor` and `keys list`. An administrator runs the packaged binary as root:
+On managed Linux and macOS, the packaged `defenseclaw` runs `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`; every other command exits `2` with the managed message. The launcher refuses `doctor` and `keys list`. An administrator runs the packaged binary as root:
 
 ```bash
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json

@@ -1343,10 +1343,25 @@ function offeredList(table: LauncherCommands): string {
   return joinAnd(table.offered.map((name) => (name === 'sandbox' ? '`sandbox` commands' : `\`${name}\``)));
 }
 
+// The one sentence a page may use to say what the managed launcher runs. It
+// is built from the table and names its operating systems. No other sentence
+// may state, limit or deny the launcher's command set, in any wording, so a
+// page cannot drift from the table, deny a command it offers, or carry the
+// Linux and macOS launcher to Windows, which has none.
+function launcherSentence(table: LauncherCommands): string {
+  return `On managed Linux and macOS, the packaged \`defenseclaw\` runs ${offeredList(table)}; every other command exits \`2\` with the managed message.`;
+}
+
+// The names a sentence can use for one command of the table, with or without
+// backticks, alone or in a list ("sandbox commands, help and version"). The
+// sandbox tree counts as one command: a sentence about one of its subcommands
+// (`defenseclaw sandbox setup`) is about that subcommand.
 function namesLauncherCommand(sentence: string, name: string): boolean {
-  if (name === 'sandbox') return /`sandbox`|sandbox commands|defenseclaw sandbox\b/.test(sentence);
+  if (name === 'sandbox') return /`sandbox`(?! user)|\bsandbox (?:commands|tree)\b|\bdefenseclaw sandbox(?![\w -])|`defenseclaw sandbox`/.test(sentence);
+  if (name === 'help') return /`help`|\bhelp(?:,| and| or) (?:and |or )?(?:`?--)?version\b|\bversion(?:,| and| or) (?:and |or )?help\b/.test(sentence);
+  if (name === '--version') return /`--version`|\bhelp(?:,| and| or) (?:and |or )?(?:`?--)?version\b|\bversion(?:,| and| or) (?:and |or )?help\b/.test(sentence);
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`\`${escaped}\`|defenseclaw ${escaped}(?![\\w-])`).test(sentence);
+  return new RegExp(`\`${escaped}\`|\\bdefenseclaw ${escaped}(?![\\w-])`).test(sentence);
 }
 
 // The refusal itself quotes the offered commands; it is checked on its own.
@@ -1354,27 +1369,47 @@ function withoutRefusalQuote(text: string): string {
   return text.replace(/"?This computer is managed[^"]*"/g, '').replace(/`?\\?"?This computer is managed; use[^.]*\.\S*/g, '');
 }
 
-// The sentences of a page that restrict what the managed `defenseclaw` runs:
-// they say "only", "refused", "exits 2" or "not available", speak of the
-// launcher or the `defenseclaw` command on a managed computer, and name a
-// command of the table (or say the commands of a page do not run there).
-function launcherRestrictions(raw: string, table: LauncherCommands): string[] {
-  const restricts = /\b(?:only|exits?\b[^.]{0,20}\b2|refus\w*|not (?:offer\w*|available|run\w*)|unavailable|cannot run|are not|is not)\b/i;
-  const managed = /launcher|managed|standard user|enterprise (?:package|install)/i;
-  const subject = /`defenseclaw`|\blauncher\b|\bpackaged `?defenseclaw|\bthe user's `?defenseclaw/i;
-  const blanket = /\bcommands (?:on|in) this page\b/i;
+const managedContext = /\bmanaged\b|\bstandard user|\bstandalone\b|\benterprise\b|launcher/i;
+// The `defenseclaw` command, not the product name, defenseclaw-gateway,
+// defenseclaw.exe or the ~/.defenseclaw folder.
+const defenseclawCommand = /(?<![\w./~-])defenseclaw(?![\w-]|\.\w)/;
+// The launcher the enterprise package installs, not a Windows hook launcher,
+// an npm `.cmd` launcher or an administrator-owned launcher script.
+const packagedLauncher = /\b(?:packaged|installed|managed|standard user's|user's|enterprise|unix) launcher\b|\bthe launcher\b/i;
+// Words that state, limit or deny: any of them next to a command of the
+// table in a managed context makes the sentence a claim about the launcher.
+const limitingWords = /\b(?:not|no|nor|neither|(?<!read-)only|just|solely|merely|limit\w*|restrict\w*|confin\w*|refus\w*|reject\w*|den(?:y|ies|ied)|block\w*|unavailable|cannot|without|except\w*|but|other than|instead|fail\w*|lacks?|missing|disabled?|removed?|hidden)\b|n't|\bexits? (?:with )?(?:status |code )?`?2\b/i;
+const blanketClaim = /\bcommands (?:on|in) this page\b/i;
+const noLauncher = /\b(?:no|not a|without a|has no|have no) (?:`?defenseclaw`? )?launcher\b|\blauncher (?:is|does) not\b|\bno `?defenseclaw`? command\b/i;
+
+// The sentences of a page that claim anything about what the managed
+// `defenseclaw` runs and are not the generated sentence: a sentence that
+// speaks of the launcher or the `defenseclaw` command on a managed computer
+// and lists two or more commands of the table, or names one and states,
+// limits or denies it ("does not run", "is limited to", "exits 2"); a sentence
+// that says the commands of a page do not run, when the page lacks the
+// generated sentence; and a sentence that gives the Linux and macOS launcher
+// to Windows. Every one is a failure: the page must carry the generated
+// sentence instead of its own.
+function launcherClaims(raw: string, table: LauncherCommands): string[] {
+  const generated = launcherSentence(table);
+  const tableStart = raw.indexOf(launcherTableStart);
+  const tableEnd = raw.indexOf(launcherTableEnd);
+  const withoutTable = tableStart >= 0 && tableEnd > tableStart ? raw.slice(0, tableStart) + raw.slice(tableEnd + launcherTableEnd.length) : raw;
   const found: string[] = [];
-  for (const block of raw.split(/\n\s*\n|\n\s*(?:[-*]|\d+\.)\s|\|/)) {
+  for (const block of withoutTable.split(/\n\s*\n|\n\s*(?:[-*]|\d+\.)\s|\|/)) {
     const flat = block.split(/\s+/).join(' ');
-    // The paragraph says it is about a managed computer even when its
-    // sentence only quotes the refusal elsewhere.
-    if (!managed.test(flat)) continue;
-    for (const sentence of withoutRefusalQuote(flat).split(/(?<=[.!?;])\s+(?=[A-Z`*(])/)) {
-      if (!restricts.test(sentence)) continue;
-      // A sentence that only names refused commands (config set exits 3) is
-      // true by construction: the Go fixture test lists what is refused.
-      const offered = table.offered.some((name) => namesLauncherCommand(sentence, name));
-      if ((subject.test(sentence) && offered) || blanket.test(sentence)) found.push(sentence);
+    for (const sentence of withoutRefusalQuote(flat.split(generated).join('')).split(/(?<=[.!?;])\s+(?=[A-Z`*(])/)) {
+      if (!managedContext.test(sentence)) continue;
+      if (blanketClaim.test(sentence) && !flat.includes(generated)) {
+        found.push(sentence);
+        continue;
+      }
+      const launcher = packagedLauncher.test(sentence);
+      if (!launcher && !defenseclawCommand.test(sentence)) continue;
+      const named = table.offered.filter((name) => namesLauncherCommand(sentence, name));
+      const crossPlatform = launcher && named.length >= 1 && /\bWindows\b/.test(sentence) && !noLauncher.test(sentence);
+      if (named.length >= 2 || (named.length >= 1 && limitingWords.test(sentence)) || crossPlatform) found.push(sentence);
     }
   }
   return found;
@@ -1398,30 +1433,37 @@ function launcherTable(table: LauncherCommands): string {
 }
 
 describe('what a managed user can and cannot run (GAP-0635)', () => {
-  it('every page that restricts the managed defenseclaw carries the launcher\'s own offered list', () => {
+  it('every statement of what the managed defenseclaw runs is the sentence generated from the launcher\'s table', () => {
     const table = launcherCommands();
-    const list = offeredList(table);
-    let checked = 0;
-    const without: string[] = [];
+    const generated = launcherSentence(table);
+    let pages = 0;
+    const claims: string[] = [];
     for (const file of docPages()) {
-      for (const sentence of launcherRestrictions(readFileSync(file, 'utf8'), table)) {
-        checked += 1;
-        if (!sentence.includes(list)) without.push(`${relative(docs, file)}: ${sentence.slice(0, 160)}`);
-      }
+      const raw = readFileSync(file, 'utf8');
+      if (raw.split(/\s+/).join(' ').includes(generated)) pages += 1;
+      for (const sentence of launcherClaims(raw, table)) claims.push(`${relative(docs, file)}: ${sentence.slice(0, 200)}`);
     }
-    assert.deepEqual(without, [], `these sentences restrict what the managed defenseclaw runs without the launcher's offered list (${list})`);
-    assert.ok(checked >= 15, `expected at least 15 restricting sentences, found ${checked}`);
+    assert.deepEqual(claims, [], `these sentences state, limit or deny what the managed defenseclaw runs in their own words; use the generated sentence (${generated}) and no other: ${claims.length}`);
+    assert.ok(pages >= 15, `expected the generated sentence on at least 15 pages, found ${pages}`);
   });
 
-  it('the detector sees a restriction in other words, and a list that leaves out a command', () => {
+  it('the detector sees a claim in any wording, a denied command, and the launcher given to Windows', () => {
     const table = launcherCommands();
-    const list = offeredList(table);
-    const short = 'On managed Linux and macOS the user\'s `defenseclaw` runs only `sandbox` commands, `help` and `--version`.';
-    assert.equal(launcherRestrictions(short, table).length, 1);
-    assert.ok(!short.includes(list));
-    assert.equal(launcherRestrictions(`On managed Linux the packaged \`defenseclaw\` accepts ${list}.`, table).length, 0, 'no restriction word: not a claim');
-    assert.equal(launcherRestrictions(`On managed Linux the launcher refuses everything but ${list}.`, table).filter((sentence) => !sentence.includes(list)).length, 0);
-    assert.equal(launcherRestrictions('The per-user commands on this page do not run on a managed computer.', table).length, 1);
+    const generated = launcherSentence(table);
+    const claims = (text: string) => launcherClaims(text, table).length;
+    assert.equal(claims(`On managed Linux and macOS ${generated}`), 0, 'the generated sentence is the one allowed claim');
+    assert.equal(claims('On managed Linux and macOS the standard user\'s `defenseclaw` runs `sandbox` commands, `help` and `--version`.'), 1, 'a list that leaves out commands');
+    assert.equal(claims('On managed Linux and macOS the packaged launcher is limited to sandbox commands, help and version.'), 1, 'a restriction without the usual words');
+    assert.equal(claims('On managed Linux and macOS `defenseclaw status` does not run.'), 1, 'a command the launcher offers, denied');
+    assert.equal(claims('On a managed computer `defenseclaw guardrail profile explain` is not something a standard user can use.'), 1, 'guardrail profile explain denied');
+    assert.equal(claims('On a managed computer the user\'s `defenseclaw` confines itself to `sandbox` commands.'), 1, 'a single command and a limiting word');
+    assert.equal(claims('The per-user setup commands on this page do not run on a managed computer.'), 1, 'a blanket denial without the generated sentence');
+    assert.equal(claims(`The per-user setup commands on this page do not run on a managed computer. ${generated}`), 0, 'a blanket denial next to the generated sentence');
+    assert.equal(claims('On managed Windows the launcher runs only `sandbox` commands, `status`, `guardrail profile explain`, `help` and `--version`.'), 1, 'the Linux and macOS launcher given to Windows');
+    assert.equal(claims('On a managed Windows computer the standard user\'s `defenseclaw` runs `sandbox` commands and `status`.'), 1, 'Windows named with a short list');
+    assert.equal(claims('On a managed Windows computer the launcher is not installed, so use the administrator\'s `defenseclaw.exe`.'), 0, 'Windows has no launcher: a true statement');
+    assert.equal(claims('On a managed computer, run `defenseclaw sandbox status` to see your sandboxes.'), 0, 'ordinary guidance that names one offered command');
+    assert.equal(claims('On a managed computer an administrator runs `defenseclaw-gateway scan skill FOLDER`, and the per-user `defenseclaw skill` commands are not used.'), 0, 'a refused command named alone');
   });
 
   it('no page says a command the launcher offers is refused', () => {
@@ -1755,7 +1797,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-2368", page: "get-started/windows/paths-troubleshooting.mdx", has: ["The watchdog is on by default (`gateway.watchdog.enabled` is `true`)", "set `gateway.watchdog.enabled` to `false` to turn it off"], lacks: ["The watchdog runs only when `gateway.watchdog.enabled` is set"] },
   { gap: "GAP-2363", page: "guardrail/multi-connector.mdx", has: ["Setup first asks the new agent's enforcement mode, prints what it will change, and then", "ask `Proceed? [Y/n]`; Enter applies it, and `--yes` skips the question in scripts."] },
   { gap: "GAP-2354", page: "reference/fail-modes.mdx", has: ["On a per-user install with the `default` or `permissive` rule pack, a call DefenseClaw would allow still runs.", "On a per-user install with the `strict` rule pack, on a managed install and inside an OpenShell sandbox, the call is blocked"], lacks: ["(disk full, database busy), the call is denied."] },
-  { gap: "GAP-2356", page: "guardrail/user-and-group-policies.mdx", section: "Before you start", has: ["Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml` and no `defenseclaw guardrail` commands except `defenseclaw guardrail profile explain` on Linux and macOS, which shows a standard user their own profile", "`& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' config validate FILE` and `& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows profile-explain --user CORP\\alice`"] },
+  { gap: "GAP-2356", page: "guardrail/user-and-group-policies.mdx", section: "Before you start", has: ["Steps 1 to 3 are for a per-user install. A managed host (Linux, macOS or Windows) has no per-user `config.yaml`. On Linux and macOS a standard user runs `defenseclaw guardrail profile explain` to see their own profile", "`& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' config validate FILE` and `& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw.exe' enterprise windows profile-explain --user CORP\\alice`"] },
   { gap: "GAP-2357", page: "guardrail/user-and-group-policies.mdx", section: "Steps", has: ["With no `--user`, `guardrail profile explain` explains the account that runs the command. The managed `enterprise linux|macos|windows profile-explain` commands need `--user` when an administrator runs them; on Linux and macOS a standard user leaves it out and gets their own profile only."], lacks: ["3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command."] },
   { gap: "GAP-2332", page: "scanning/index.mdx", has: ["The defaults quarantine CRITICAL and HIGH skills, warn on MEDIUM and queue it for review, and allow LOW and INFO.", "`defenseclaw config get admission.skill` shows the actions in force"], lacks: ["A skill whose worst finding is MEDIUM, LOW or INFO is installed with the `warning` verdict"] },
   { gap: "GAP-2353", page: "guardrail/unified-llm-key.mdx", has: ["While the guardrail is on, the `DEFENSECLAW_LLM_KEY` row still reads `OPTIONAL`", "A local judge's `JUDGE_API_KEY` row reads `NOT_USED`."], lacks: ["correctly classifies them as `NOT_USED` even when the feature is on"] },
