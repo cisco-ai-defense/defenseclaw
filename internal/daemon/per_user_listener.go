@@ -57,12 +57,13 @@ func rootGatewayRemedyFor(goos, dataDir string) string {
 // windowsRootGatewayRemedy names the elevated stop and the account start of
 // the gateway at executable. Both commands are rendered by
 // managed.WindowsCommandLine, the one place a PowerShell command line is
-// built (TestManagedWindowsCommandsComeFromTheRenderer): a bare command in a
-// sentence for an administrator prompt does not run as typed, and a path with
-// a space or an apostrophe would break it.
+// built (TestManagedWindowsCommandsComeFromTheRenderer). The call-operator
+// form runs only in PowerShell, so the text names PowerShell for both steps
+// (a Command Prompt cannot run it); a bare command would not run as typed and a
+// path with a space or an apostrophe would break it.
 func windowsRootGatewayRemedy(executable string) string {
-	return "Stop it from an administrator prompt (" + managed.WindowsCommandLine(executable, "stop") +
-		"), then start it as yourself (" + managed.WindowsCommandLine(executable, "start") + ")"
+	return "Stop it from an elevated PowerShell prompt (" + managed.WindowsCommandLine(executable, "stop") +
+		"), then start it as yourself from a normal PowerShell prompt (" + managed.WindowsCommandLine(executable, "start") + ")"
 }
 
 // rootGatewayWindowsExecutable is the gateway of this account: the running

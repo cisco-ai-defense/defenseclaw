@@ -948,8 +948,8 @@ class TestStatusJson(unittest.TestCase):
         for shown in (reason, as_text.output):
             self.assertIn(ROOT_GATEWAY_REASON, shown)
             if sys.platform.startswith("win"):
-                # GAP-0747: the Windows remedy is an administrator prompt, never sudo.
-                self.assertIn("administrator prompt", shown)
+                # GAP-0747: the Windows remedy is an elevated PowerShell prompt, never sudo.
+                self.assertIn("elevated PowerShell prompt", shown)
                 self.assertNotIn("sudo", shown)
             else:
                 self.assertIn("sudo env DEFENSECLAW_HOME=", shown)

@@ -879,10 +879,13 @@ def test_root_gateway_remedy_is_written_for_the_running_os(monkeypatch, tmp_path
     if platform_name == "win32":
         # GAP-0747: rendered like managed.WindowsCommandLine, never a bare command.
         assert remedy == (
-            "Stop it from an administrator prompt (& 'defenseclaw-gateway.exe' stop), "
-            "then start it as yourself (& 'defenseclaw-gateway.exe' start)"
+            "Stop it from an elevated PowerShell prompt (& 'defenseclaw-gateway.exe' stop), "
+            "then start it as yourself from a normal PowerShell prompt (& 'defenseclaw-gateway.exe' start)"
         )
         assert "(defenseclaw-gateway " not in remedy
+        # The call operator runs only in PowerShell (not cmd.exe): both steps name it.
+        assert "from an elevated PowerShell prompt (" in remedy and "from a normal PowerShell prompt (" in remedy
+        assert "administrator prompt" not in remedy
 
 
 def test_windows_root_gateway_remedy_quotes_the_resolved_gateway_path(monkeypatch, tmp_path) -> None:
