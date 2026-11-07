@@ -205,6 +205,9 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 type sequenceStatement struct {
 	text, scope string
 	sourceStart int
+	// binds holds the USER and LOGNAME names that a for or select loop
+	// around the statement binds: the statement runs after the binding.
+	binds []string
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -258,6 +261,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		defer func() { scope = parent }()
 		return walk()
 	}
+	var loopBinds []string
 	// keep adds the text of node, or of a command and its redirects.
 	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
 		from, to := node.Pos(), node.End()
@@ -276,7 +280,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		for index := len(redirects) - 1; index >= 0; index-- {
 			statement += " " + redirects[index]
 		}
-		statements = append(statements, sequenceStatement{text: statement, scope: scope, sourceStart: int(from.Offset())})
+		statements = append(statements, sequenceStatement{text: statement, scope: scope,
+			sourceStart: int(from.Offset()), binds: slices.Clone(loopBinds)})
 		return true
 	}
 	subshells := 0
@@ -404,6 +409,12 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				}
 			default:
 				return true, false
+			}
+			if iteration, ok := typed.Loop.(*syntax.WordIter); ok && iteration.Name != nil &&
+				slices.Contains(simpleUserNames, iteration.Name.Value) {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), iteration.Name.Value)
+				defer func() { loopBinds = outer }()
 			}
 			return true, childScope('c', func() bool { return flattenAll(typed.Do) })
 		case *syntax.CaseClause:
