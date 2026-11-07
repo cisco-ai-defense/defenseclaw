@@ -32,7 +32,7 @@ import yaml
 
 from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
 from defenseclaw.scanner.plugin_scanner.analyzer_factory import build_analyzers
-from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts
+from defenseclaw.scanner.plugin_scanner.analyzers import has_install_scripts, scan_source_files
 from defenseclaw.scanner.plugin_scanner.helpers import (
     PathLinkStatus,
     audit_skipped_dirs_for_native,
@@ -67,6 +67,19 @@ _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _names_protected_content(target: str, profile: str) -> bool:
+    """Whether the package source names a credential file or an agent identity file.
+
+    An identity that rests on an install record alone (the registry could not
+    be asked) does not outweigh the rules for protected files: such a tree gets
+    the ordinary scan, in every profile.
+    """
+
+    found: list[Finding] = []
+    scan_source_files(target, found, set(), profile)
+    return any(f.rule_id.startswith("CRED-") or f.rule_id == "COG-TAMPER" for f in found)
 
 
 def scan_plugin(
@@ -125,6 +138,10 @@ def scan_plugin(
         official = inspect_official_provider_tree(
             target, data_dir=options.data_dir if options else "",
         )
+        if official is not None and official.unverified and _names_protected_content(
+            target, profile,
+        ):
+            official = None
         if official is not None:
             findings = audit_skipped_dirs_for_native(target)
             if official.possible_peer:

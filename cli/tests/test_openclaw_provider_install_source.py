@@ -135,6 +135,18 @@ def test_manifest_install_metadata_that_names_another_source_gives_no_identity(
         "requested-git": {"_requested": {"type": "git"}},
         "requested-directory": {"_requested": {"type": "directory"}},
         "requested-not-a-record": {"_requested": "git"},
+        "requested-version-with-file-raw": {"_requested": {
+            "type": "version", "raw": "file:/home/user/.ssh/provider.tgz",
+        }},
+        "requested-version-with-file-fetch": {"_requested": {
+            "type": "version", "fetchSpec": "file:/home/user/.ssh/provider.tgz",
+        }},
+        "requested-range-with-path-save": {"_requested": {
+            "type": "range", "saveSpec": "../provider", "registry": True,
+        }},
+        "requested-tag-with-address": {"_requested": {
+            "type": "tag", "rawSpec": "https://example.invalid/provider.tgz",
+        }},
     }
     for name, fields in cases.items():
         root = tmp_path / "case" / name
@@ -183,6 +195,113 @@ def test_install_records_that_name_the_registry_keep_the_identity(tmp_path, monk
         _requested={"type": "version"},
     ))
     assert vendor_identity.inspect_official_provider_tree(str(root / PACKAGE_KEY)) is not None
+
+    # The whole npm 6 record of an ordinary registry install.
+    root = tmp_path / "case" / "manifest-metadata-full"
+    shutil.copytree(project, root, symlinks=True)
+    _edit_manifest(root / PACKAGE_KEY, lambda m: m.update(
+        _resolved=_archive_address(VERSION), _from=PROVIDER + "@" + VERSION,
+        _requested={
+            "type": "version", "registry": True, "where": "/home/user/project",
+            "raw": PROVIDER + "@" + VERSION, "name": PROVIDER,
+            "escapedName": "@openclaw%2famazon-bedrock-provider",
+            "rawSpec": VERSION, "saveSpec": None, "fetchSpec": VERSION,
+        },
+    ))
+    assert vendor_identity.inspect_official_provider_tree(str(root / PACKAGE_KEY)) is not None
+
+
+REGISTRY_RECORD = {"version": VERSION, "resolved": _archive_address(VERSION), "integrity": INTEGRITY}
+
+
+def _root_lock(project, root_entry, **others) -> None:
+    _write(project / "package-lock.json", json.dumps({
+        "lockfileVersion": 3,
+        "packages": {"": root_entry, PACKAGE_KEY: REGISTRY_RECORD, **others},
+    }))
+
+
+@requires_symlink_privilege
+def test_dependency_spec_that_asks_for_another_source_gives_no_identity(
+    tmp_path, monkeypatch,
+) -> None:
+    """The root of the project can ask for a file while the entry claims the registry."""
+
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    cases = {
+        "file": "file:/home/user/.ssh/provider.tgz",
+        "link": "link:../provider",
+        "path": "../provider",
+        "address": "https://example.invalid/provider.tgz",
+        "git": "git+ssh://example.invalid/provider.git",
+        "workspace": "workspace:*",
+        "alias-of-another-package": "npm:other@1.0.0",
+    }
+    for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        for label, spec in cases.items():
+            root = tmp_path / "case" / field / label
+            shutil.copytree(project, root, symlinks=True)
+            _root_lock(root, {field: {PROVIDER: spec}})
+            target = root / PACKAGE_KEY
+            assert vendor_identity.inspect_official_provider_tree(str(target)) is None, f"{field} {label}"
+            for profile in ("default", "permissive", "strict"):
+                assert "SRC-EXEC" in _high(target, profile), f"{field} {label} {profile}"
+
+
+@requires_symlink_privilege
+def test_dependency_spec_that_asks_the_registry_keeps_the_identity(tmp_path, monkeypatch) -> None:
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    for label, spec in {
+        "range": "^2026.10.0", "exact": VERSION, "tag": "latest", "any": "*", "empty": "",
+        "same-package-alias": f"npm:{PROVIDER}@{VERSION}",
+    }.items():
+        root = tmp_path / "case" / label
+        shutil.copytree(project, root, symlinks=True)
+        _root_lock(root, {"dependencies": {PROVIDER: spec}})
+        target = root / PACKAGE_KEY
+        assert vendor_identity.inspect_official_provider_tree(str(target)) is not None, label
+        for profile in ("default", "permissive"):
+            assert _high(target, profile) == set(), f"{label} {profile}"
+
+
+@requires_symlink_privilege
+def test_another_copy_of_the_package_elsewhere_in_the_project_is_another_install(
+    tmp_path, monkeypatch,
+) -> None:
+    """A sibling that carries its own local copy does not change the top-level install."""
+
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    nested = "node_modules/sibling/node_modules/" + PROVIDER
+    _write(project / "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"dependencies": {PROVIDER: VERSION, "sibling": "1.0.0"}},
+        PACKAGE_KEY: REGISTRY_RECORD,
+        "node_modules/sibling": {
+            "version": "1.0.0", "dependencies": {PROVIDER: "file:../local-provider.tgz"},
+        },
+        nested: {"version": VERSION, "resolved": "file:../local-provider.tgz"},
+    }}))
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is not None
+    for profile in ("default", "permissive"):
+        assert _high(installed, profile) == set(), profile
+    assert "SRC-EXEC" in _high(installed, "strict")
+
+    # The same record is decisive for the copy it describes.
+    moved = project / nested
+    moved.parent.mkdir(parents=True)
+    shutil.copytree(installed, moved, symlinks=True)
+    assert vendor_identity.inspect_official_provider_tree(str(moved)) is None
+    for profile in ("default", "permissive", "strict"):
+        assert "SRC-EXEC" in _high(moved, profile), profile
+
+    # A v1 lock is read by the same path: the nested copy is the sibling's.
+    _write(project / "package-lock.json", json.dumps({"lockfileVersion": 1, "dependencies": {
+        PROVIDER: {"version": VERSION, "resolved": _archive_address(VERSION)},
+        "sibling": {"version": "1.0.0", "dependencies": {
+            PROVIDER: {"version": VERSION, "resolved": "file:../local-provider.tgz"},
+        }},
+    }}))
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is not None
+    assert vendor_identity.inspect_official_provider_tree(str(moved)) is None
 
 
 @requires_symlink_privilege
@@ -294,6 +413,43 @@ def test_registry_outage_admits_a_recorded_release_with_a_warning(
     # Strict does not rely on the record: the ordinary scan applies.
     assert "SRC-EXEC" in _high(target, "strict")
     assert "VENDOR-REGISTRY-UNVERIFIED" not in _rules(target, "strict")
+
+
+PROTECTED_READS = {
+    "named-directly": "require('node:fs').readFileSync('/home/user/.codex/auth.json');",
+    "through-a-known-value": (
+        "const protectedFile = '/home/user/.codex/auth.json'; "
+        "require('node:fs').readFileSync(protectedFile);"
+    ),
+}
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("read", sorted(PROTECTED_READS))
+@pytest.mark.parametrize("record", ["recorded", "any-well-formed-integrity"])
+def test_registry_outage_does_not_admit_edited_code_that_names_a_protected_file(
+    tmp_path, monkeypatch, read, record,
+) -> None:
+    """The record is a claim of the install; protected-file rules outrank it in every profile."""
+
+    version = "2026.99.4"
+    entry = REGISTRY_ENTRY if record == "recorded" else {
+        **REGISTRY_ENTRY,
+        "integrity": "sha512-" + base64.b64encode(hashlib.sha512(b"other").digest()).decode(),
+    }
+    _, target = _unpinned_npm_install(tmp_path, version, entry)
+    monkeypatch.setattr(vendor_identity, "_registry_get", _registry_outage(OSError("offline")))
+
+    # Unmodified, the same tree is admitted with the warning.
+    assert vendor_identity.inspect_official_provider_tree(str(target)).unverified
+    assert _high(target, "default") == set()
+    assert "VENDOR-REGISTRY-UNVERIFIED" in _rules(target, "default")
+
+    with open(target / "dist" / "index.js", "a", encoding="utf-8") as stream:
+        stream.write("\n" + PROTECTED_READS[read] + "\n")
+    for profile in ("default", "permissive", "strict"):
+        assert "CRED-CODEX-AUTH" in _high(target, profile), profile
+        assert "VENDOR-REGISTRY-UNVERIFIED" not in _rules(target, profile), profile
 
 
 @requires_symlink_privilege
