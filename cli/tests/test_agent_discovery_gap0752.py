@@ -76,6 +76,9 @@ def _signal(name: str, *, binary: str = "", version: str = "", error: str = "") 
 def _seed(tmp_path: Path, codex: ad.AgentSignal, *, age: timedelta = timedelta(hours=1), config: str = _CONFIG) -> None:
     (tmp_path / "config.yaml").write_text(config, encoding="utf-8")
     agents = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+    if codex.version and not codex.identity and Path(codex.binary_path).is_file():
+        # A cache written by this release names the file the version came from.
+        codex.identity = ad._executable_identity(codex.binary_path)
     agents["codex"] = codex
     scanned = ad._format_rfc3339(ad._now_utc() - age)
     assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=agents, cache_hit=False), data_dir=tmp_path)
@@ -118,6 +121,7 @@ def test_an_updated_executable_is_probed_again(monkeypatch, tmp_path):
     # The scan is an hour old; the executable was replaced after it.
     _launch_order(monkeypatch, binary)
     _seed(tmp_path, _signal("codex", binary=str(binary), version="codex-cli 0.160.0"))
+    binary.write_text("#!/bin/sh\necho updated\n")
     calls: list[str] = []
     monkeypatch.setattr(ad, "_scan_agent", _scan_returning("codex-cli 0.167.0", calls))
 
@@ -1251,7 +1255,7 @@ def test_a_peer_cached_before_identities_existed_loses_its_version_when_its_exec
     assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
 
 
-def test_a_peer_cached_before_identities_existed_keeps_its_version_when_its_executable_did_not_change(tmp_path):
+def test_a_peer_cached_before_identities_existed_keeps_no_version_even_when_its_executable_did_not_change(tmp_path):
     (tmp_path / "bin").mkdir()
     binary = tmp_path / "bin" / "cursor"
     binary.write_text("3.19.13", encoding="utf-8")
@@ -1266,7 +1270,7 @@ def test_a_peer_cached_before_identities_existed_keeps_its_version_when_its_exec
 
     assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
 
-    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
 
 
 def test_a_peer_whose_replaced_executable_kept_changing_loses_its_cached_version(tmp_path):
@@ -1690,27 +1694,28 @@ def _legacy_scan(binary: Path, version: str, *, read_ago: float = 0.0) -> ad.Age
     return scan
 
 
-def test_a_legacy_windows_entry_is_judged_changed_by_an_in_place_rewrite_and_not_kept(monkeypatch, tmp_path):
+@pytest.mark.parametrize("rewritten", (False, True))
+def test_a_legacy_entry_is_never_trusted_whether_or_not_its_file_was_written_to(tmp_path, rewritten):
     (tmp_path / "bin").mkdir()
     binary = tmp_path / "bin" / "cursor"
     binary.write_text("3.19.13", encoding="utf-8")
     original = binary.stat()
     os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns - 60_000_000_000))
-    _on_windows(monkeypatch, original, binary)
     time.sleep(0.02)
     assert ad._write_cache(_legacy_scan(binary, "3.19.13"), data_dir=tmp_path)
+    if rewritten:
+        time.sleep(0.02)
+        binary.write_text("2.3.999", encoding="utf-8")
+        os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns - 60_000_000_000))
     payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
-    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload, tmp_path) is False
+    assert not payload["agents"]["cursor"].get("identity")
+
+    assert ad._entry_executable_changed(payload["agents"]["cursor"]) is True
     older = _identified_scan(binary, "3.19.13")
     older.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=30))
-    time.sleep(0.02)
-    binary.write_text("2.3.999", encoding="utf-8")
-    os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns - 60_000_000_000))
-
-    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload, tmp_path) is True
     assert ad._write_cache(older, data_dir=tmp_path)
 
-    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].identity == ad._executable_identity(str(binary))
 
 
 def _link_cache(tmp_path: Path):
@@ -1732,29 +1737,20 @@ def _peer_scan_that_timed_out_on(link: Path) -> ad.AgentDiscovery:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="needs symbolic links")
-def test_a_legacy_entry_whose_launch_link_moved_to_an_older_install_is_not_kept(tmp_path):
+@pytest.mark.parametrize("moved", (True, False))
+def test_a_legacy_entry_is_not_kept_whether_or_not_its_launch_link_moved(tmp_path, moved):
     _old, new, link = _link_cache(tmp_path)
-    time.sleep(0.02)
-    moved = link.parent / "moved"
-    moved.symlink_to(new)
-    os.replace(moved, link)
+    if moved:
+        time.sleep(0.02)
+        staged = link.parent / "moved"
+        staged.symlink_to(new)
+        os.replace(staged, link)
     payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
-    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload, tmp_path) is True
+    assert ad._entry_executable_changed(payload["agents"]["cursor"]) is True
 
     assert ad._publish_agent_signal(_peer_scan_that_timed_out_on(link), "codex", data_dir=tmp_path)
 
     assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
-
-
-@pytest.mark.skipif(os.name == "nt", reason="needs symbolic links")
-def test_a_legacy_entry_whose_launch_link_did_not_move_is_kept(tmp_path):
-    _old, _new, link = _link_cache(tmp_path)
-    payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
-    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload, tmp_path) is False
-
-    assert ad._publish_agent_signal(_peer_scan_that_timed_out_on(link), "codex", data_dir=tmp_path)
-
-    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
 
 
 def _removed_then_older_scan(tmp_path: Path, writer: str) -> Path:
@@ -1804,12 +1800,14 @@ def _slow_cursor_agents(binary: Path) -> dict[str, ad.AgentSignal]:
     return agents
 
 
-def test_a_slow_probe_of_an_executable_rewritten_in_place_keeps_no_version_from_a_cache_before_identities(tmp_path):
+@pytest.mark.parametrize("rewritten", (False, True))
+def test_a_slow_probe_keeps_no_version_from_a_cache_before_identities(tmp_path, rewritten):
     binary = _legacy_cursor_cache(tmp_path)
     kept = binary.stat()
-    time.sleep(0.02)
-    binary.write_text("2.3.999", encoding="utf-8")
-    os.utime(binary, ns=(kept.st_atime_ns, kept.st_mtime_ns))
+    if rewritten:
+        time.sleep(0.02)
+        binary.write_text("2.3.999", encoding="utf-8")
+        os.utime(binary, ns=(kept.st_atime_ns, kept.st_mtime_ns))
     agents = _slow_cursor_agents(binary)
 
     ad._keep_versions_of_slow_unchanged_agents(agents, data_dir=tmp_path)
@@ -1818,33 +1816,70 @@ def test_a_slow_probe_of_an_executable_rewritten_in_place_keeps_no_version_from_
     assert agents["cursor"].error == ad.VERSION_PROBE_TIMED_OUT
 
 
-def test_a_slow_probe_of_an_executable_not_written_to_keeps_the_version_from_a_cache_before_identities(tmp_path):
-    binary = _legacy_cursor_cache(tmp_path)
-    agents = _slow_cursor_agents(binary)
-
-    ad._keep_versions_of_slow_unchanged_agents(agents, data_dir=tmp_path)
-
-    assert agents["cursor"].version == "3.19.13"
-
-
-@pytest.mark.parametrize("swapped", (True, False))
-def test_a_replaced_parent_folder_drops_a_version_from_a_cache_before_identities_only_when_it_was_replaced(
-    tmp_path, swapped
-):
+def _swap_parent_folder(tmp_path: Path, *, restore_times: bool) -> Path:
+    """A cache from before identities for Cursor in ``bin``; ``bin`` is then
+    swapped for a ready-made folder holding another version. With
+    *restore_times* every folder time is set back to what it was, as the
+    creation-time semantics of ``st_ctime`` on Windows leave it."""
     launch, ready = tmp_path / "bin", tmp_path / "ready"
     launch.mkdir()
     ready.mkdir()
     (launch / "cursor").write_text("3.19.13", encoding="utf-8")
     (ready / "cursor").write_text("2.3.999", encoding="utf-8")
+    old = (launch.stat().st_atime_ns, launch.stat().st_mtime_ns - 120_000_000_000)
+    for folder in (launch, ready, tmp_path):
+        os.utime(folder, ns=old)
     time.sleep(0.02)
     assert ad._write_cache(_legacy_scan(launch / "cursor", "3.19.13"), data_dir=tmp_path)
-    if swapped:
-        time.sleep(0.02)
-        os.rename(launch, tmp_path / "retired")
-        os.rename(ready, launch)
+    time.sleep(0.02)
+    os.rename(launch, tmp_path / "retired")
+    os.rename(ready, launch)
+    if restore_times:
+        for folder in (launch, tmp_path):
+            os.utime(folder, ns=old)
+    return launch / "cursor"
+
+
+@pytest.mark.parametrize("restore_times", (False, True))
+def test_a_replaced_parent_folder_keeps_no_version_from_a_cache_before_identities(tmp_path, restore_times):
+    swapped = _swap_parent_folder(tmp_path, restore_times=restore_times)
     payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
-    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload, tmp_path) is swapped
+    assert ad._entry_executable_changed(payload["agents"]["cursor"]) is True
 
-    assert ad._publish_agent_signal(_peer_scan_that_timed_out_on(launch / "cursor"), "codex", data_dir=tmp_path)
+    assert ad._publish_agent_signal(_peer_scan_that_timed_out_on(swapped), "codex", data_dir=tmp_path)
+    agents = _slow_cursor_agents(swapped)
+    ad._keep_versions_of_slow_unchanged_agents(agents, data_dir=tmp_path)
 
-    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ("" if swapped else "3.19.13")
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+    assert agents["cursor"].version == ""
+
+
+@pytest.mark.parametrize("swap", (False, True))
+def test_a_cache_before_identities_is_read_again_and_rewritten_with_the_identity(monkeypatch, tmp_path, swap):
+    data = tmp_path / "data"
+    data.mkdir()
+    if swap:
+        binary = _swap_parent_folder(tmp_path, restore_times=True)
+        payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
+        ad._cache_path(data_dir=data).write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        (tmp_path / "bin").mkdir()
+        binary = tmp_path / "bin" / "cursor"
+        binary.write_text("3.19.13", encoding="utf-8")
+        assert ad._write_cache(_legacy_scan(binary, "3.19.13"), data_dir=data)
+    probed: list[str] = []
+
+    def probe(_name, path, *_a, **_k):
+        probed.append(path)
+        return Path(path).read_text(encoding="utf-8"), ""
+
+    _one_cursor(monkeypatch, binary, probe)
+
+    disc = ad.discover_agents(data_dir=data)
+
+    expected = "2.3.999" if swap else "3.19.13"
+    assert probed and disc.cache_hit is False
+    assert disc.agents["cursor"].version == expected
+    cached = ad._read_cache(data_dir=data).agents["cursor"]
+    assert cached.version == expected
+    assert cached.identity == ad._executable_identity(str(binary))

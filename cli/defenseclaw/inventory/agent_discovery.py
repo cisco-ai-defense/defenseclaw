@@ -1349,9 +1349,7 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
             continue
         if not os.path.isabs(signal.binary_path) or not _resolves_unchanged_since(signal.binary_path, since, data_dir):
             return True
-        if _executable_replaced_since_read(
-            signal.binary_path, signal.identity, _parse_rfc3339(signal.observed_at) or scanned, data_dir
-        ):
+        if _executable_replaced_since_read(signal.binary_path, signal.identity):
             return True
         recorded = {"skipped_binaries": list(signal.skipped_binaries)}
         if _unchanged_candidates_ahead(name, signal.binary_path, recorded, since, data_dir) is None:
@@ -1419,10 +1417,10 @@ def _keep_versions_of_slow_unchanged_agents(
             payload = json.load(fh)
     except Exception:
         return
-    # Versions 3 (0.8.10) and 6 (1.0.0-1.0.3) carry the same binary/version
-    # evidence. A fresh scan still owns the result; these schemas supply only
-    # unchanged-binary evidence when that scan could not obtain a version.
-    if not isinstance(payload, dict) or payload.get("version") not in {3, 6, CACHE_SCHEMA_VERSION}:
+    # Only an entry that names the executable it was read from can be kept
+    # (a cache from a release before executable identities has none, and is
+    # read again instead). A fresh scan still owns the result.
+    if not isinstance(payload, dict) or payload.get("version") != CACHE_SCHEMA_VERSION:
         return
     previous_scan = _parse_rfc3339(str(payload.get("scanned_at") or ""))
     previous_agents = payload.get("agents")
@@ -1460,17 +1458,11 @@ def _keep_versions_of_slow_unchanged_agents(
                 signal.installed = True
             continue
         # The same judgement every other reader of a cached version makes: the
-        # file must still be the one that answered, by its identity, or (an
-        # entry from before identities, as a 1.0.8 upgrade leaves) by the times
-        # of the file and of every link and folder on its way against the time
-        # it was read. A probe that timed out on a replaced file keeps nothing.
+        # file must still be the one that answered, by its identity. An entry
+        # that records none (written before identities) keeps nothing, and a
+        # probe that timed out on a replaced file keeps nothing.
         recorded_identity = _recorded_identity(previous)
-        if _executable_replaced_since_read(
-            previous_binary,
-            recorded_identity,
-            _entry_observed_at(previous, payload) or previous_scan,
-            data_dir,
-        ):
+        if _executable_replaced_since_read(previous_binary, recorded_identity):
             continue
         signal.binary_path = previous_binary
         signal.version = version
@@ -1478,16 +1470,9 @@ def _keep_versions_of_slow_unchanged_agents(
         # The kept version was read when the last scan read it, not now.
         signal.observed_at = str(previous.get("observed_at") or payload.get("scanned_at") or "")
         if signal.name == "kiro":
-            if payload["version"] in {3, 6}:
-                if _kiro_binary_surface(previous_binary, version) == "cli":
-                    signal.kiro_cli_version = version
-                else:
-                    signal.kiro_ide_version = version
-            else:
-                signal.kiro_cli_version = str(previous.get("kiro_cli_version") or "")
-                signal.kiro_ide_version = str(previous.get("kiro_ide_version") or "")
-            # The forms of the scan whose version is kept; an earlier schema
-            # has none, so assess_kiro reads the versions above.
+            signal.kiro_cli_version = str(previous.get("kiro_cli_version") or "")
+            signal.kiro_ide_version = str(previous.get("kiro_ide_version") or "")
+            # The forms of the scan whose version is kept.
             signal.kiro_forms = _kiro_forms_from_cache(previous.get("kiro_forms"))
         signal.error = ""
         signal.installed = True
@@ -1530,7 +1515,7 @@ def _peers_with_unchanged_binaries(
             continue
         if require_trusted_binary_paths and not _is_trusted_binary_path(binary, data_dir=data_dir):
             continue
-        if _resolves_unchanged_since(binary, previous_scan.timestamp(), data_dir):
+        if not _executable_replaced_since_read(binary, _recorded_identity(previous)):
             unchanged.add(name)
     return frozenset(unchanged)
 
@@ -3608,58 +3593,37 @@ def _entry_for_cache(signal: AgentSignal, observed_at: str) -> dict[str, Any]:
     return {**asdict(_current_signal(signal)), _ENTRY_OBSERVED_AT: observed_at}
 
 
-def _executable_replaced_since_read(
-    path: str,
-    recorded: list[Any],
-    read_at: datetime | None,
-    data_dir: str | os.PathLike[str] | None = None,
-) -> bool:
-    """Whether the version read at *read_at* from the executable at *path* is
-    no longer the version of the file there.
+def _executable_replaced_since_read(path: str, recorded: list[Any]) -> bool:
+    """Whether the version read from the executable at *path* is no longer the
+    version of the file there.
 
-    A file that cannot be read now is changed: it was removed, and whatever is
-    installed there next is another file (a version kept for it would be the
-    removed one). A reading with a recorded identity is compared with the file
-    now (:func:`_executable_identity`); one written before identities existed
-    is judged by the times of the file against the read time (the change time
-    in the unit of the modification time), and by every link and folder on the
-    way (:func:`_resolves_unchanged_since`): a link switched to another
-    installed file, or a folder replaced by a ready-made one, leaves the file
-    with old times and rebinds the path. A folder that changed for another
-    reason only costs one new probe.
+    The version belongs to the file that answered, named by the identity taken
+    before it was probed (:func:`_executable_identity`), and is trusted only
+    while the file now is that one. A file that cannot be read now is changed:
+    it was removed, and whatever is installed there next is another file. A
+    reading that records no identity (a cache written before identities
+    existed) is changed too: nothing says which file it was read from, so it
+    is read again and rewritten with its identity, not judged by file times.
     """
     current = _executable_identity(path) if path else []
-    if not current:
-        return True
-    if recorded:
-        return recorded != current
-    if read_at is None:
-        return False
-    return max(current[2], current[5]) >= int(read_at.timestamp() * 1_000_000_000) or not _resolves_unchanged_since(
-        path, read_at.timestamp(), data_dir
-    )
+    return not current or not recorded or recorded != current
 
 
-def _entry_executable_changed(
-    entry: Any, payload: dict[str, Any], data_dir: str | os.PathLike[str] | None = None
-) -> bool:
+def _entry_executable_changed(entry: Any) -> bool:
     """Whether the version a cached *entry* records belongs to an executable
     that is no longer the one at its path (:func:`_executable_replaced_since_read`).
 
     Judged from the entry alone, so a peer scan that could not read the
     executable (a timeout, or one that kept changing so that nothing was
     selected) is still told apart from a slow answer of an unchanged one. An
-    entry written before identities existed is judged against the time it was
-    read (the scan time when it says none).
+    entry that records no identity is always changed.
     """
     if not isinstance(entry, dict) or not str(entry.get("version") or ""):
         return False
     path = str(entry.get("binary_path") or "")
     if not path:
         return False
-    return _executable_replaced_since_read(
-        path, _recorded_identity(entry), _entry_observed_at(entry, payload), data_dir
-    )
+    return _executable_replaced_since_read(path, _recorded_identity(entry))
 
 
 def _entry_selected_elsewhere(entry: Any, fresh: AgentSignal) -> bool:
@@ -3671,7 +3635,7 @@ def _entry_selected_elsewhere(entry: Any, fresh: AgentSignal) -> bool:
     if not isinstance(entry, dict) or not str(entry.get("version") or ""):
         return False
     recorded = _recorded_identity(entry)
-    cached_path = str(recorded[0]) if recorded else _resolved_path(str(entry.get("binary_path") or ""))
+    cached_path = str(recorded[0]) if recorded else ""
     selected_path = fresh.binary_path if fresh.installed else ""
     selected = str(fresh.identity[0]) if fresh.identity else _resolved_path(selected_path)
     return bool(cached_path and selected and os.path.normcase(cached_path) != os.path.normcase(selected))
@@ -3694,12 +3658,7 @@ def _signal_observed_at(signal: AgentSignal, disc: AgentDiscovery) -> datetime |
     return _parse_rfc3339(signal.observed_at) or _parse_rfc3339(disc.scanned_at)
 
 
-def _cached_entry_is_newer(
-    entry: Any,
-    payload: dict[str, Any],
-    read_at: datetime | None,
-    data_dir: str | os.PathLike[str] | None = None,
-) -> bool:
+def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], read_at: datetime | None) -> bool:
     """Whether a cached entry holds a reading (a version, or a probe that
     could not read one) taken after *read_at*, the time the scan being written
     took its own. Such an entry is newer evidence and stays, whichever scan
@@ -3709,7 +3668,7 @@ def _cached_entry_is_newer(
     version belongs to an executable replaced since is no evidence at all
     (:func:`_entry_executable_changed`): it is judged here, when it would be
     kept, so a late writer cannot restore it."""
-    if read_at is None or not _entry_was_read(entry) or _entry_executable_changed(entry, payload, data_dir):
+    if read_at is None or not _entry_was_read(entry) or _entry_executable_changed(entry):
         return False
     observed = _entry_observed_at(entry, payload)
     return observed is not None and observed > read_at
@@ -3756,7 +3715,7 @@ def _write_cache(
             if existing is not None:
                 for name, entry in existing["agents"].items():
                     if name in agents and _cached_entry_is_newer(
-                        entry, existing, _signal_observed_at(disc.agents[name], disc), target_dir
+                        entry, existing, _signal_observed_at(disc.agents[name], disc)
                     ):
                         observed = _format_rfc3339(_entry_observed_at(entry, existing))
                         agents[name] = {**entry, _ENTRY_OBSERVED_AT: observed}
@@ -3816,12 +3775,12 @@ def _publish_agent_signal(
                     if (
                         peer != name
                         and not _scan_read_version(fresh)
-                        and not _entry_executable_changed(cached_peer, payload, data_dir)
+                        and not _entry_executable_changed(cached_peer)
                         and not _entry_selected_elsewhere(cached_peer, fresh)
                     ):
                         continue
                     read_at = _signal_observed_at(fresh, disc)
-                    if _cached_entry_is_newer(cached_peer, payload, read_at, data_dir):
+                    if _cached_entry_is_newer(cached_peer, payload, read_at):
                         continue
                     payload["agents"][peer] = _entry_for_cache(fresh, fresh.observed_at or disc.scanned_at)
                 body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
