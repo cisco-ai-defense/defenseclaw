@@ -352,4 +352,16 @@ def test_windows_remaining_package_control_stays_covered() -> None:
     packages = sorted(set(timings["packages"]) - excluded)
     shards = partition_packages(packages, 6, timings, root=root)
     control = prefix + "internal/hookpaths"
-    assert sum(package == control for shard in shards for package, _ in shard) == 1
+    # GAP-0749: the hookpaths program sweep (every form through Resolve on
+    # native Windows, eight tests) and its archive table take about 20 minutes
+    # on a hosted runner, more than one shard step. The package runs in parts:
+    # every one of its tests is in exactly one part, no part is a whole
+    # package, and no part is estimated past half the 14 minute go test timeout.
+    parts = [regex for shard in shards for package, regex in shard if package == control]
+    assert len(parts) >= 2 and all(parts), parts
+    tests = sorted({name for _, names in discover_test_files(root / "internal/hookpaths") for name in names})
+    assert check_exact_cover([regex_names(regex) for regex in parts], tests) == []
+    seconds = timings["tests"]["internal/hookpaths"]
+    for regex in parts:
+        estimated = sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+        assert estimated <= 0.5 * 14 * 60, (regex, estimated)
