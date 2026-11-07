@@ -235,6 +235,21 @@ func platformAccountUIDGone(ctx context.Context, name string, uid int) bool {
 		func() bool { return OpenDirectoryOffline(ctx) })
 }
 
+// platformAccountsAtHome asks Open Directory in fresh dscl processes, across
+// the search policy, which accounts have home as their home folder.
+func platformAccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	return dsclHomeAccounts(
+		func() (commandResult, error) {
+			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-search", "/Users", "NFSHomeDirectory", home})
+		},
+		func(name string) (commandResult, error) {
+			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
+		})
+}
+
 // platformLoginShell reads the UserShell of the account through the Open
 // Directory search node, so a local, mobile or directory account answers.
 // Any user may read it.

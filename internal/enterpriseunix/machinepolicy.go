@@ -136,6 +136,9 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 	eligible := record.Accounts
 	accounts := eligible
 	enrollment := cfg.Enterprise.Enrollment
+	// enrolled says whether the manifest enrolls an account; every account is
+	// enrolled where enrollment does not read the manifest.
+	enrolled := func(enterprisehooks.UnixEligibleAccount) bool { return true }
 	if strings.EqualFold(strings.TrimSpace(enrollment.Mode), config.EnterpriseEnrollmentManifest) ||
 		strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) {
 		manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath))
@@ -148,6 +151,9 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 				(target.Enabled == nil || *target.Enabled) {
 				targets = append(targets, target)
 			}
+		}
+		enrolled = func(account enterprisehooks.UnixEligibleAccount) bool {
+			return len(enterprisehooks.ManifestEnrolledAccounts([]enterprisehooks.UnixEligibleAccount{account}, enterprisehooks.Manifest{Targets: targets})) == 1
 		}
 		allowed := enterprisehooks.ManifestEnrolledAccounts(accounts, enterprisehooks.Manifest{Targets: targets})
 		inManifest := make(map[int]bool, len(allowed))
@@ -210,19 +216,40 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 	// guardian retires the account in the pass that verify would otherwise
 	// call it an account outside enrollment (GAP-0777). It contributes
 	// nothing even where a live account shares its home, so the deleted
-	// account cannot put the live one's home out of scope; and where no
-	// recorded account is live but a fresh read finds a live account at the
-	// home (the record has not caught up with a replacement), the home stays
-	// as the record scopes it.
+	// account cannot put the home of the live one out of scope. Where no
+	// recorded account is live but a fresh read of the whole search policy
+	// finds accounts at the home (the record has not caught up with a
+	// replacement, local or from a directory), the home is scoped by the
+	// name and uid of those accounts, never by the deleted account: enrollment
+	// may leave out the one and not the other. A read that does not answer
+	// keeps the recorded scope, since a home that may be in use is never
+	// dropped.
 	var scoped, outOfScope []string
+	add := func(home string, out bool) {
+		if out {
+			outOfScope = append(outOfScope, env.P(home))
+		} else {
+			scoped = append(scoped, env.P(home))
+		}
+	}
+	replaced := map[string]bool{}
 	for _, entry := range entries {
-		if entry.gone && !goneHomes.heldByLiveAccount(entry.home) {
+		if !entry.gone {
+			add(entry.home, entry.outOfScope)
 			continue
 		}
-		if entry.outOfScope {
-			outOfScope = append(outOfScope, env.P(entry.home))
-		} else {
-			scoped = append(scoped, env.P(entry.home))
+		if goneHomes.live[entry.home] || replaced[entry.home] {
+			continue
+		}
+		holders, err := goneHomes.accountsAt(entry.home)
+		if err != nil {
+			add(entry.home, entry.outOfScope)
+			continue
+		}
+		replaced[entry.home] = true
+		for _, holder := range holders {
+			add(entry.home, leftOut[holder.Name] || leftOut[strconv.Itoa(holder.UID)] ||
+				!enrolled(enterprisehooks.UnixEligibleAccount{User: holder.Name, UID: holder.UID, Home: entry.home}))
 		}
 	}
 	// Status and verify read no settings below a home that does not answer
@@ -303,11 +330,17 @@ type scopeEntry struct {
 type confirmedGoneHomes struct {
 	asked map[string]bool
 	live  map[string]bool
-	held  map[string]bool
+	held  map[string]homeAccounts
+}
+
+// homeAccounts is the answer of one fresh read of the accounts at a home.
+type homeAccounts struct {
+	accounts []unixidentity.HomeAccount
+	err      error
 }
 
 func newConfirmedGoneHomes() *confirmedGoneHomes {
-	return &confirmedGoneHomes{asked: map[string]bool{}, live: map[string]bool{}, held: map[string]bool{}}
+	return &confirmedGoneHomes{asked: map[string]bool{}, live: map[string]bool{}, held: map[string]homeAccounts{}}
 }
 
 // note records one account recorded at home and returns whether it is
@@ -329,19 +362,15 @@ func (g *confirmedGoneHomes) note(user string, uid int, home string) bool {
 	return gone
 }
 
-// heldByLiveAccount is true for a home that a gone account's entry must keep
-// speaking for: no account recorded at it is live, and a fresh read of the
-// directory finds a live account there. Asked once per home.
-func (g *confirmedGoneHomes) heldByLiveAccount(home string) bool {
-	if g.live[home] {
-		return false
-	}
-	held, asked := g.held[home]
+// accountsAt are the live accounts a fresh read of the search policy finds
+// at home, asked once per home.
+func (g *confirmedGoneHomes) accountsAt(home string) ([]unixidentity.HomeAccount, error) {
+	answer, asked := g.held[home]
 	if !asked {
-		held = guardianHomeHeldByLiveAccount(home)
-		g.held[home] = held
+		answer.accounts, answer.err = guardianAccountsAtHome(home)
+		g.held[home] = answer
 	}
-	return held
+	return answer.accounts, answer.err
 }
 
 // guardianAccountConfirmedGone is unixidentity.AccountUIDGone for a recorded
@@ -357,22 +386,13 @@ var guardianAccountConfirmedGone = func(user string, uid int) bool {
 	return unixidentity.AccountRecordGone(ctx, user)
 }
 
-// guardianHomeHeldByLiveAccount is true when a fresh read of the local
-// directory finds an account whose home is home, and when that read does not
-// answer: a home that may be in use is never dropped. Tests replace it.
-var guardianHomeHeldByLiveAccount = func(home string) bool {
+// guardianAccountsAtHome is unixidentity.AccountsAtHome: the accounts of the
+// whole search policy (local and bound directory nodes) with home as their
+// home folder; a directory that does not answer is an error. Tests replace it.
+var guardianAccountsAtHome = func(home string) ([]unixidentity.HomeAccount, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	records, err := unixidentity.LocalAccountRecords(ctx)
-	if err != nil {
-		return true
-	}
-	for _, record := range records {
-		if filepath.Clean(record.Home) == filepath.Clean(home) {
-			return true
-		}
-	}
-	return false
+	return unixidentity.AccountsAtHome(ctx, home)
 }
 
 func (m *policyManager) Intended(cfg *config.Config) ([]string, error) {

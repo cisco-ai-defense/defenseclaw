@@ -5,6 +5,7 @@ package enterpriseunix
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,13 +16,14 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 func stubAccountsGone(t *testing.T, gone ...string) {
 	t.Helper()
-	previous, previousHeld := guardianAccountConfirmedGone, guardianHomeHeldByLiveAccount
-	t.Cleanup(func() { guardianAccountConfirmedGone, guardianHomeHeldByLiveAccount = previous, previousHeld })
-	guardianHomeHeldByLiveAccount = func(string) bool { return false }
+	previous, previousHeld := guardianAccountConfirmedGone, guardianAccountsAtHome
+	t.Cleanup(func() { guardianAccountConfirmedGone, guardianAccountsAtHome = previous, previousHeld })
+	guardianAccountsAtHome = func(string) ([]unixidentity.HomeAccount, error) { return nil, nil }
 	guardianAccountConfirmedGone = func(user string, _ int) bool {
 		for _, name := range gone {
 			if user == name {
@@ -171,7 +173,8 @@ func TestCopilotAccountScopeDeletedExcludedAccountLeavesALiveSharedHomeInScope(t
 
 // The eligible record can lag a replacement: the recorded uid is gone while
 // a live account holds the same home. A home a fresh read finds in use is not
-// dropped; one it finds free is.
+// dropped, and a read that does not answer does not drop it either; one the
+// read finds free is.
 func TestCopilotAccountScopeKeepsAReusedHomeBeforeTheRecordRefreshes(t *testing.T) {
 	h := newTestHost(t, "darwin")
 	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
@@ -187,16 +190,81 @@ func TestCopilotAccountScopeKeepsAReusedHomeBeforeTheRecordRefreshes(t *testing.
 		return scoped, out
 	}
 	stubAccountsGone(t, "alice", "bob")
-	held := map[string]bool{}
-	guardianHomeHeldByLiveAccount = func(home string) bool { return held[home] }
+	var failure error
+	guardianAccountsAtHome = func(string) ([]unixidentity.HomeAccount, error) { return nil, failure }
 
 	if scoped, out := homes(); len(scoped) != 0 || len(out) != 0 {
 		t.Fatalf("homes no live account holds: scoped=%v out=%v", scoped, out)
 	}
-	held["/home/alice"], held["/home/bob"] = true, true
+	failure = errors.New("directory does not answer")
 	scoped, out := homes()
 	if !reflect.DeepEqual(scoped, []string{h.env.P("/home/alice")}) || !reflect.DeepEqual(out, []string{h.env.P("/home/bob")}) {
-		t.Fatalf("homes a live account holds keep their recorded scope: scoped=%v out=%v", scoped, out)
+		t.Fatalf("a directory that does not answer keeps the recorded scope: scoped=%v out=%v", scoped, out)
+	}
+}
+
+// A home is scoped by the account that holds it now, not by the deleted one
+// the record still names (GAP-0777 review 3): the replacement is judged by
+// its own uid and name, whether enrollment excludes it, and whether the
+// manifest enrolls it. The replacement may be a local or a directory account;
+// the fresh read covers both.
+func TestCopilotAccountScopeJudgesAReusedHomeByTheAccountThatHoldsItNow(t *testing.T) {
+	const shared = "/home/shared"
+	const target = "  - user: alice\n    uid: %UID%\n    user_home: /home/shared\n    connector: copilot\n"
+	cases := []struct {
+		name         string
+		exclude      []string
+		manifest     string
+		replacement  []unixidentity.HomeAccount
+		wantScoped   bool
+		wantOutScope bool
+	}{
+		{"new account excluded by uid, old one enrolled", []string{"502"}, "", []unixidentity.HomeAccount{{Name: "alice", UID: 502}}, false, true},
+		{"old account excluded by uid, new one enrolled", []string{"501"}, "", []unixidentity.HomeAccount{{Name: "alice", UID: 502}}, true, false},
+		{"old account excluded by name, new one under another name enrolled", []string{"alice"}, "", []unixidentity.HomeAccount{{Name: "alicia", UID: 502}}, true, false},
+		{"new account excluded by name", []string{"alicia"}, "", []unixidentity.HomeAccount{{Name: "alicia", UID: 502}}, false, true},
+		{"nobody excluded", nil, "", []unixidentity.HomeAccount{{Name: "alice", UID: 502}}, true, false},
+		{"manifest enrolls the old uid only", nil, strings.Replace(target, "%UID%", "501", 1), []unixidentity.HomeAccount{{Name: "alicia", UID: 502}}, false, true},
+		{"manifest enrolls the new uid", nil, strings.Replace(target, "%UID%", "502", 1), []unixidentity.HomeAccount{{Name: "alice", UID: 502}}, true, false},
+		{"two accounts hold the home, one excluded", []string{"503"}, "", []unixidentity.HomeAccount{{Name: "alice", UID: 502}, {Name: "carol", UID: 503}}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(t, "darwin")
+			writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+				`{"version":1,"accounts":[{"user":"alice","uid":501,"home":"`+shared+`"}]}`)
+			cfg := &config.Config{}
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+			cfg.Enterprise.Enrollment.ExcludeUsers = tc.exclude
+			if tc.manifest != "" {
+				writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+tc.manifest)
+				cfg.Enterprise.Enrollment.Mode = config.EnterpriseEnrollmentManifest
+			}
+			stubAccountsGone(t, "alice")
+			reads := 0
+			guardianAccountsAtHome = func(home string) ([]unixidentity.HomeAccount, error) {
+				reads++
+				if home != shared {
+					t.Fatalf("read the accounts of %s", home)
+				}
+				return tc.replacement, nil
+			}
+			scoped, out, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scoped, out = slices.Compact(scoped), slices.Compact(out)
+			p := h.env.P(shared)
+			if got := slices.Contains(scoped, p); got != tc.wantScoped {
+				t.Errorf("scoped=%v, want home scoped: %v", scoped, tc.wantScoped)
+			}
+			if got := slices.Contains(out, p); got != tc.wantOutScope {
+				t.Errorf("out=%v, want home out of scope: %v", out, tc.wantOutScope)
+			}
+			if reads != 1 {
+				t.Errorf("the home was read %d times, want once", reads)
+			}
+		})
 	}
 }
 
