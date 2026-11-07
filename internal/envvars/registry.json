@@ -5983,6 +5983,66 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_LAUNCHER_START_BASE",
+      "category": "test_fixture",
+      "purpose": "1 makes the Windows launcher-cannot-start test also run the hook command forms that releases before 1.0.9 wrote and log their rows, for native evidence; those rows are not asserted.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/launcher_cannot_start_windows_test.go",
+          "description": "The launcher-cannot-start test runs and logs the pre-1.0.9 command forms when this is 1"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LAUNCHER_START_CHILD",
+      "category": "test_fixture",
+      "purpose": "1 makes the Windows test binary act as the stand-in hook launcher or Codex and Devin guard in the launcher-cannot-start test. The test sets it only for its own child processes.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/launcher_cannot_start_windows_test.go",
+          "description": "init() turns the test binary into the stand-in launcher or guard for its child processes"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LAUNCHER_START_EXIT",
+      "category": "test_fixture",
+      "purpose": "The exit status the stand-in hook launcher returns in the Windows launcher-cannot-start test. The test sets it only for its own child processes.",
+      "default": "unset",
+      "accepted_values": [
+        "integer exit status",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/launcher_cannot_start_windows_test.go",
+          "description": "The stand-in launcher exits with this status"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
       "name": "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
       "category": "security_opt_out",
       "purpose": "Make the plugin-side tool-inspect hook fail-open (allow tool) when the gateway is unreachable. Default is fail-closed (block).",
