@@ -43,13 +43,14 @@ const review5Skill = "# skill\nA reference skill.\n"
 func TestHookAssetFactsCopilotRootsAndSpellingsCarryText(t *testing.T) {
 	home := t.TempDir()
 	review5Home(t, home)
-	review5Write(t, filepath.Join(home, ".copilot", "skills", "direct", "SKILL.md"), review5Skill)
 	review5Write(t, filepath.Join(home, ".agents", "skills", "agents-root", "SKILL.md"), review5Skill)
 	custom := filepath.Join(t.TempDir(), "skills")
 	review5Write(t, filepath.Join(custom, "custom-root", "SKILL.md"), review5Skill)
 	t.Setenv("COPILOT_SKILLS_DIRS", custom)
 	copilotHome := filepath.Join(t.TempDir(), "copilot-home")
 	review5Write(t, filepath.Join(copilotHome, "skills", "relocated", "SKILL.md"), review5Skill)
+	// COPILOT_HOME replaces ~/.copilot, so the skill the agent loads is under it.
+	review5Write(t, filepath.Join(copilotHome, "skills", "direct", "SKILL.md"), review5Skill)
 	t.Setenv("COPILOT_HOME", copilotHome)
 	event := func(args map[string]string) []byte {
 		raw, err := json.Marshal(map[string]any{"toolName": "skill", "toolArgs": args})

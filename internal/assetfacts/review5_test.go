@@ -30,8 +30,8 @@ func TestMCPPinsSurviveTheBoundsAndAnotherPass(t *testing.T) {
 	}
 	facts, _ = Decode(Encode(Facts{MCP: &MCPServer{Name: "notes", Command: `C:\tools\node.exe`, Args: args, Relocated: true, Digest: digest}}))
 	pins := facts.MCP.Pins
-	if pins == nil || pins.ArgCount != 40 || len(pins.Args) != maxArgs || pins.Args[1] != PinSum(args[1]) {
-		t.Fatalf("40 arguments claim = %+v, want 32 argument pins and the count", pins)
+	if pins == nil || pins.ArgCount != 40 || len(pins.Args) != 40 || pins.Args[1] != PinArgSum(args[1]) {
+		t.Fatalf("40 arguments claim = %+v, want 40 argument pins and the count", pins)
 	}
 	bare, _ := Decode(Encode(Facts{MCP: &MCPServer{Name: "notes", ProjectScope: true, Digest: digest}}))
 	if bare.MCP == nil || bare.MCP.Pins != nil {
@@ -74,6 +74,10 @@ func TestContentIsNeverDroppedForNotFitting(t *testing.T) {
 func TestCopilotSkillRootsAndSkillNameSpellings(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "home")
 	cwd := filepath.Join(t.TempDir(), "work")
+	// The working folder is the repository root, so a relative root is below it only.
+	if err := os.MkdirAll(filepath.Join(cwd, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	custom := filepath.Join(t.TempDir(), "skills")
 	t.Setenv("COPILOT_SKILLS_DIRS", custom+", ~/shared , rel/skills,"+custom)
 	t.Setenv("COPILOT_HOME", filepath.Join(t.TempDir(), "copilot-home"))

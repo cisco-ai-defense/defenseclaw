@@ -1,0 +1,42 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package assetfacts
+
+import (
+	"fmt"
+	"testing"
+)
+
+// A claim that does not fit pins every argument up to maxPinArgs, not only the
+// first maxArgs, and keeps them through another pass of the codec; the header
+// still fits.
+func TestMCPPinsCoverArgumentsPastTheFactBound(t *testing.T) {
+	digest := "ab"
+	for len(digest) < 64 {
+		digest += "ab"
+	}
+	args := make([]string, maxPinArgs+100)
+	for i := range args {
+		args[i] = fmt.Sprintf("--argument-%d", i)
+	}
+	for _, count := range []int{maxArgs + 8, maxPinArgs, len(args)} {
+		value := Encode(Facts{MCP: &MCPServer{Name: "notes", Command: "node", Args: args[:count], ProjectScope: true, Digest: digest}})
+		facts, ok := Decode(value)
+		if !ok || facts.MCP == nil || facts.MCP.Pins == nil {
+			t.Fatalf("%d arguments: facts = %+v, want the pins", count, facts.MCP)
+		}
+		again, _ := Decode(Encode(facts))
+		for _, pins := range []*MCPPins{facts.MCP.Pins, again.MCP.Pins} {
+			want := min(count, maxPinArgs)
+			if pins == nil || pins.ArgCount != count || len(pins.Args) != want {
+				t.Fatalf("%d arguments: pins = %+v, want %d digests and the count", count, pins, want)
+			}
+			for _, i := range []int{0, maxArgs - 1, maxArgs, want - 1} {
+				if pins.Args[i] != PinArgSum(args[i]) {
+					t.Errorf("%d arguments: pin %d = %q, want the digest of %q", count, i, pins.Args[i], args[i])
+				}
+			}
+		}
+	}
+}
