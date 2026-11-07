@@ -194,7 +194,8 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 	resolvedSource, sourceErr := filepath.EvalSymlinks(source)
 	resolvedRoot, rootErr := filepath.EvalSymlinks(root)
 	if projectSkillRootKey(source) == projectSkillRootKey(root) ||
-		sourceErr == nil && rootErr == nil && projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedRoot) {
+		sourceErr == nil && rootErr == nil && projectSkillRootKey(resolvedSource) == projectSkillRootKey(resolvedRoot) &&
+			projectSkillSourceSelects(home, resolvedRoot, resolvedSource) {
 		return append(projectSkillSelectedFolders(root, name), root)
 	}
 	if child := projectSkillChild(root, source); child != "" {
@@ -241,6 +242,12 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 func projectSkillSourceSelects(home, folder, source string) bool {
 	if projectSkillRootKey(folder) != projectSkillRootKey(source) && !projectSkillPathWithin(folder, source) {
 		return false
+	}
+	// A project link to a skill folder reaches its manifest as a child named
+	// SKILL.md. That child is no folder: the folder holding it is the
+	// candidate, so its owner is weighed like any other.
+	if info, err := os.Stat(folder); err == nil && !info.IsDir() {
+		folder = filepath.Dir(folder)
 	}
 	for dir := source; ; dir = filepath.Dir(dir) {
 		if info, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && info.Mode().IsRegular() {
