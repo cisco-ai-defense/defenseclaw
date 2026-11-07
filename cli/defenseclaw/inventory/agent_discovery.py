@@ -102,6 +102,7 @@ VERSION_PROBE_TIMED_OUT = "version probe timed out"
 #: The error of an agent whose CLI the current command did not run because it
 #: only sets up other connectors (GAP-0901).
 VERSION_NOT_PROBED = "version not probed: not being set up"
+VERSION_EXECUTABLE_CHANGED = "version probe: the executable changed while it was being read"
 PACKAGE_MANAGER_CONFIG_TIMEOUT_SECONDS = 5.0
 _ANTIGRAVITY_BINARY_MAX_BYTES = 256 << 20
 _KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
@@ -849,6 +850,11 @@ class AgentSignal:
     #: Two scans that overlap are ordered by this, not by when each started;
     #: "" means the scan time stands for it (GAP-0752).
     observed_at: str = ""
+    #: Which executable ``version`` was read from (:func:`_executable_identity`,
+    #: taken before the probe and checked after it); [] when it is not known.
+    #: The cache keeps a version only while the file at ``binary_path`` is still
+    #: that executable (GAP-0752).
+    identity: list[Any] = field(default_factory=list)
 
 
 #: The most Kiro forms one signal records.
@@ -1451,8 +1457,12 @@ def _keep_versions_of_slow_unchanged_agents(
             continue
         if changed_at >= previous_scan.timestamp():
             continue
+        recorded_identity = _recorded_identity(previous)
+        if recorded_identity and _executable_identity(previous_binary) != recorded_identity:
+            continue
         signal.binary_path = previous_binary
         signal.version = version
+        signal.identity = recorded_identity
         # The kept version was read when the last scan read it, not now.
         signal.observed_at = str(previous.get("observed_at") or payload.get("scanned_at") or "")
         if signal.name == "kiro":
@@ -1588,6 +1598,30 @@ def _data_dir_holders(data_dir: str | os.PathLike[str] | None) -> frozenset[str]
         holders.add(os.path.normcase(form))
         holders.update(os.path.normcase(str(parent)) for parent in Path(form).parents)
     return frozenset(holders)
+
+
+def _executable_identity(path: str) -> list[Any]:
+    """Which file *path* is right now: where it resolves, its size, its
+    modification time and its file id; [] when it is not a regular file.
+
+    Two readings that name the same file have the same identity, and a file
+    replaced (even by one of the same size and time), or a link moved to
+    another file, does not. Only the executable itself is named: nothing a
+    probe creates is part of it.
+    """
+    try:
+        real = os.path.realpath(path)
+        info = os.stat(real)
+    except (OSError, ValueError):
+        return []
+    if not stat.S_ISREG(info.st_mode):
+        return []
+    return [real, info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev]
+
+
+def _recorded_identity(raw: dict[str, Any]) -> list[Any]:
+    recorded = raw.get("identity")
+    return list(recorded) if isinstance(recorded, list) and len(recorded) == 5 else []
 
 
 def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
@@ -1844,17 +1878,30 @@ def _scan_agent(
     # bookkeeping after the probes can wait on another process), so this is
     # the time the cache orders competing writes by.
     read_at: dict[str, datetime] = {}
+    # Which executable each answer came from, taken before the probe and kept
+    # only when the file at the path is the same one after it.
+    read_from: dict[str, list[Any]] = {}
 
     def read_version(candidate: str) -> tuple[str, str]:
-        answer = _version_for_agent_binary(
-            name,
-            candidate,
-            spec.version_args,
-            require_trusted_binary_paths=require_trusted_binary_paths,
-            data_dir=data_dir,
-        )
-        read_at[candidate] = _now_utc()
-        return answer
+        # A version belongs to the executable that answered. One replaced (or
+        # re-linked) while the probe ran may have answered for the file that
+        # is gone, so that answer is dropped and the path asked again; one that
+        # keeps changing is unread, never recorded at either version.
+        for _attempt in range(2):
+            identity = _executable_identity(candidate)
+            answer = _version_for_agent_binary(
+                name,
+                candidate,
+                spec.version_args,
+                require_trusted_binary_paths=require_trusted_binary_paths,
+                data_dir=data_dir,
+            )
+            read_at[candidate] = _now_utc()
+            if _executable_identity(candidate) == identity:
+                read_from[candidate] = identity
+                return answer
+        read_from[candidate] = []
+        return "", VERSION_EXECUTABLE_CHANGED
 
     def kiro_found(surface: str, candidate: str, version_for_surface: str) -> None:
         # Per surface the first install at or above its floor wins over an
@@ -1981,6 +2028,7 @@ def _scan_agent(
         kiro_forms=kiro_forms[:_KIRO_FORMS_MAX],
         source=_agent_source(name, binary_path) if installed or timed_out else "",
         observed_at=_format_rfc3339(read_at.get(binary_path) or _now_utc()),
+        identity=list(read_from.get(binary_path, ())),
     )
 
 
@@ -3373,6 +3421,7 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 kiro_forms=_kiro_forms_from_cache(raw.get("kiro_forms")),
                 source=str(raw.get("source") or "") if raw.get("source") in _SOURCES else "",
                 observed_at=str(raw.get("observed_at") or ""),
+                identity=_recorded_identity(raw),
             )
     except Exception:
         return None
@@ -3417,6 +3466,47 @@ def _entry_was_read(entry: Any) -> bool:
         and bool(entry.get("installed"))
         and str(entry.get("error") or "") != VERSION_NOT_PROBED
     )
+
+
+def _entry_for_cache(signal: AgentSignal, observed_at: str) -> dict[str, Any]:
+    """The cache entry for *signal*: the version it holds only while the
+    executable at its path is still the one that answered.
+
+    Between the probe and this write the file can be replaced, or its link
+    moved. A version read from the one that went away is not the version of the
+    one that is there now, and neither is the absence of one, so the entry
+    becomes installed and not probed: the next reader probes it again instead
+    of trusting (or refusing on) the old answer. A signal that carries no
+    identity (an older cache file, a hand-built signal) is written as it is.
+    """
+    entry = {**asdict(signal), _ENTRY_OBSERVED_AT: observed_at}
+    if (
+        signal.identity
+        and signal.installed
+        and signal.binary_path
+        and _executable_identity(signal.binary_path) != signal.identity
+    ):
+        entry.update(
+            version="",
+            kiro_cli_version="",
+            kiro_ide_version="",
+            kiro_forms=[],
+            skipped_binaries=[],
+            identity=[],
+            error=VERSION_NOT_PROBED,
+        )
+    return entry
+
+
+def _entry_replaced_executable(entry: Any, signal: AgentSignal) -> bool:
+    """Whether *signal* installed-but-unread names another executable than the
+    cached *entry* was read from. Only then is an unread result a newer fact
+    than a version already cached: a slow answer from the same executable is
+    not."""
+    if not signal.installed or not signal.identity or not isinstance(entry, dict):
+        return False
+    recorded = _recorded_identity(entry)
+    return bool(recorded) and recorded != signal.identity
 
 
 def _entry_observed_at(entry: dict[str, Any], payload: dict[str, Any]) -> datetime | None:
@@ -3473,7 +3563,7 @@ def _write_cache(
     path = _cache_path(data_dir=target_dir)
     try:
         agents = {
-            name: {**asdict(signal), _ENTRY_OBSERVED_AT: signal.observed_at or disc.scanned_at}
+            name: _entry_for_cache(signal, signal.observed_at or disc.scanned_at)
             for name, signal in disc.agents.items()
         }
         with _cache_update(path):
@@ -3537,13 +3627,17 @@ def _publish_agent_signal(
                 if scanned is None or _now_utc() - scanned > timedelta(seconds=CACHE_TTL_SECONDS):
                     return False
                 for peer, fresh in disc.agents.items():
-                    if peer != name and not _scan_read_version(fresh):
+                    cached_peer = payload["agents"].get(peer)
+                    if (
+                        peer != name
+                        and not _scan_read_version(fresh)
+                        and not _entry_replaced_executable(cached_peer, fresh)
+                    ):
                         continue
                     read_at = _signal_observed_at(fresh, disc)
-                    if _cached_entry_is_newer(payload["agents"].get(peer), payload, read_at):
+                    if _cached_entry_is_newer(cached_peer, payload, read_at):
                         continue
-                    observed = fresh.observed_at or disc.scanned_at
-                    payload["agents"][peer] = {**asdict(fresh), _ENTRY_OBSERVED_AT: observed}
+                    payload["agents"][peer] = _entry_for_cache(fresh, fresh.observed_at or disc.scanned_at)
                 body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
                 atomic_write_private_bytes(path, body.encode("utf-8"))
                 return True
