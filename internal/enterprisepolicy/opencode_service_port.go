@@ -105,6 +105,10 @@ type OpenCodeServicePortResult struct {
 	Changed bool
 	// CreatedDirs are the folders below home the write created.
 	CreatedDirs []string
+	// Sealed are the folders on the path to service.json that the account's
+	// group could write and this call made sticky, so that nobody but the
+	// owner of an entry in them can rename it (Unix; none on Windows).
+	Sealed []string
 }
 
 // SetOpenCodeServicePort makes the account's service.json name port, as the
@@ -128,7 +132,9 @@ func SetOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult, e
 	path := OpenCodeServiceConfigPath(home)
 	// A port that already matches is not accepted through a path another
 	// account could replace, any more than a write is.
-	if err := checkOpenCodeServiceConfigFolders(home, path); err != nil {
+	sealed, err := checkOpenCodeServiceConfigFolders(home, path)
+	result.Sealed = sealed
+	if err != nil {
 		return result, fmt.Errorf("opencode service port: %s: %w", path, err)
 	}
 	current, exists, regular, err := readUserFile(path, openCodeServiceConfigLimit)
