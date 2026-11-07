@@ -118,6 +118,11 @@ type plistNode struct {
 	Children []plistNode `xml:",any"`
 }
 
+// onlyElements reports whether the node holds nothing but white space between
+// its child elements. Text beside the elements of a container is not part of
+// a property list, so the answer is not one complete list.
+func (n plistNode) onlyElements() bool { return strings.TrimSpace(n.Text) == "" }
+
 const (
 	dsclHomeKeyUID  = "dsAttrTypeStandard:UniqueID"
 	dsclHomeKeyHome = "dsAttrTypeStandard:NFSHomeDirectory"
@@ -128,7 +133,8 @@ const (
 // <array> of <dict> records, each with the UniqueID, NFSHomeDirectory and
 // RecordName fields as non-empty arrays of strings (UniqueID exactly one). A
 // document that does not end where it should, an element that is not where
-// the format puts it and a record missing a field are errors.
+// the format puts it, text beside the elements of a container and a record
+// missing a field are errors.
 func parseDSCLHomeRecords(output []byte) ([]dsclHomeRecord, error) {
 	unclear := errors.New("unixidentity: unclear account record answer")
 	decoder := xml.NewDecoder(strings.NewReader(string(output)))
@@ -154,7 +160,7 @@ func parseDSCLHomeRecords(output []byte) ([]dsclHomeRecord, error) {
 			return nil, unclear
 		}
 	}
-	if len(root.Children) != 1 || root.Children[0].XMLName.Local != "array" {
+	if !root.onlyElements() || len(root.Children) != 1 || root.Children[0].XMLName.Local != "array" || !root.Children[0].onlyElements() {
 		return nil, unclear
 	}
 	var records []dsclHomeRecord
@@ -170,13 +176,13 @@ func parseDSCLHomeRecords(output []byte) ([]dsclHomeRecord, error) {
 
 // dsclHomeRecordOf reads one <dict> record.
 func dsclHomeRecordOf(dict plistNode) (dsclHomeRecord, bool) {
-	if dict.XMLName.Local != "dict" || len(dict.Children)%2 != 0 {
+	if dict.XMLName.Local != "dict" || !dict.onlyElements() || len(dict.Children)%2 != 0 {
 		return dsclHomeRecord{}, false
 	}
 	fields := map[string][]string{}
 	for i := 0; i < len(dict.Children); i += 2 {
 		key, value := dict.Children[i], dict.Children[i+1]
-		if key.XMLName.Local != "key" || value.XMLName.Local != "array" {
+		if key.XMLName.Local != "key" || len(key.Children) != 0 || value.XMLName.Local != "array" || !value.onlyElements() {
 			return dsclHomeRecord{}, false
 		}
 		name := strings.TrimSpace(key.Text)
