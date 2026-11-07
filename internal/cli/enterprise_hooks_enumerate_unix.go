@@ -399,9 +399,10 @@ func runEnterpriseHooksEnumerateCycle(
 	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected, configGeneration, configSHA256); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
 	}
-	// The gateway cannot read that root-only record; it answers a user's own
-	// status from this copy of the same completed scan (rel-1-0-6 GAP-0789).
-	if err := enterpriseHooksEnumerateGatewayAgents(current.DataDir, cycle.Unprotected, configGeneration, configSHA256); err != nil {
+	// The gateway cannot read that root-only record; it answers a user own
+	// status from a copy of the record as it stands, whether or not this
+	// cycle could replace it (rel-1-0-6 GAP-0789).
+	if err := enterpriseHooksEnumerateGatewayAgents(current.DataDir, enterprisehooks.UnprotectedAgentsPath(manifestPath)); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents for the gateway: %v\n", err)
 	}
 	if !manifestMode {
@@ -707,11 +708,10 @@ func writeEnterpriseHookRefusedSurfaces(dataDir string, refused []enterprisehook
 }
 
 // publishEnterpriseHookUnixGatewayUnprotectedAgents makes sure the guardian
-// state directory is the ledger's and publishes the cycle's scan for the
-// gateway.
-func publishEnterpriseHookUnixGatewayUnprotectedAgents(dataDir string, agents []enterprisehooks.UnprotectedAgent, configGeneration uint64, configSHA256 string) error {
+// state directory is the ledger one and mirrors the record for the gateway.
+func publishEnterpriseHookUnixGatewayUnprotectedAgents(dataDir, rootRecordPath string) error {
 	if err := ensureEnterpriseHookStandaloneAuthDir(managed.HookGuardianAuthorizationDir(dataDir)); err != nil {
 		return err
 	}
-	return publishEnterpriseHookGatewayUnprotectedAgents(dataDir, agents, configGeneration, configSHA256)
+	return mirrorEnterpriseHookGatewayUnprotectedAgents(dataDir, rootRecordPath)
 }

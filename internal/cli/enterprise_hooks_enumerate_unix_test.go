@@ -230,9 +230,9 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 		enterpriseHooksEnumerateManifestWriter, enterpriseHooksEnumerateEligibleWriter, enterpriseHooksEnumerateUnprotectedWriter = origManifestWriter, origEligibleWriter, origUnprotectedWriter
 		enterpriseHooksEnumerateGatewayAgents = origGatewayAgents
 	})
-	var gatewayCopy []enterprisehooks.UnprotectedAgent
-	enterpriseHooksEnumerateGatewayAgents = func(_ string, agents []enterprisehooks.UnprotectedAgent, _ uint64, _ string) error {
-		gatewayCopy = append([]enterprisehooks.UnprotectedAgent(nil), agents...)
+	var gatewayMirrored string
+	enterpriseHooksEnumerateGatewayAgents = func(_, rootRecordPath string) error {
+		gatewayMirrored = rootRecordPath
 		return nil
 	}
 	current := standaloneTestConfig(f.dataDir)
@@ -266,7 +266,7 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 	opts := enterpriseHooksEnumerateOptions{manifest: f.manifest, descriptor: filepath.Join(f.root, "absent.json")}
 	cycle := func() {
 		t.Helper()
-		requests, recordPath, recorded, gatewayCopy = nil, "", nil, nil
+		requests, recordPath, recorded, gatewayMirrored = nil, "", nil, ""
 		state := &enterprisehooks.UnixEnumeratorState{Version: 1}
 		if _, err := runEnterpriseHooksEnumerateCycle(context.Background(), io.Discard, f.manifest, opts, state); err != nil {
 			t.Fatal(err)
@@ -277,9 +277,9 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 		if len(recorded) != 1 || recorded[0].User != "alice" || recorded[0].Connector != "opencode" {
 			t.Fatalf("record = %+v, want alice's opencode", recorded)
 		}
-		// The gateway answers a user's own status from its copy of the same scan.
-		if len(gatewayCopy) != len(recorded) || gatewayCopy[0].User != recorded[0].User || gatewayCopy[0].Connector != recorded[0].Connector {
-			t.Fatalf("gateway copy = %+v, want the published record %+v", gatewayCopy, recorded)
+		// The gateway copy is made from the record the cycle just wrote.
+		if gatewayMirrored != recordPath {
+			t.Fatalf("gateway copy made from %q, want the published record %q", gatewayMirrored, recordPath)
 		}
 	}
 
