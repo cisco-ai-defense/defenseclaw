@@ -887,7 +887,6 @@ var hermesDeclaredEntrypointForms = map[string]struct{ file, body, alsoFile, als
 	"yaml-bin-bool-key":         {file: "plugin.yaml", body: "name: p\nbin:\n  true: DIR/run.js\n"},
 	"yaml-bin-null-key":         {file: "plugin.yaml", body: "name: p\nbin:\n  null: DIR/run.js\n"},
 	"yaml-bin-quoted-key":       {file: "plugin.yaml", body: "name: p\nbin:\n  \"7\": DIR/run.js\n"},
-	"yaml-bin-complex-key":      {file: "plugin.yaml", body: "name: p\nbin:\n  ? [a, b]\n  : DIR/run.js\n"},
 	"yaml-bin-merge":            {file: "plugin.yaml", body: "name: p\nshared: &s\n  tool: DIR/run.js\nbin:\n  <<: *s\n"},
 	"yaml-duplicate-keys":       {file: "plugin.yaml", body: "name: p\nname: q\nmain: lib/a.js\nmain: DIR/run.js\n"},
 	"yaml-alias":                {file: "plugin.yaml", body: "name: p\nsrc: &s DIR/run.js\nmain: *s\n"},
@@ -899,6 +898,14 @@ var hermesDeclaredEntrypointForms = map[string]struct{ file, body, alsoFile, als
 	"yaml-merge-list-first":     {file: "plugin.yaml", body: "name: p\n<<: [{main: DIR/run.js}, {main: lib/a.js}]\n"},
 	"yaml-merge-key-last":       {file: "plugin.yaml", body: "name: p\n<<: {main: lib/a.js}\n<<: {main: DIR/run.js}\n"},
 	"yaml-merge-nested":         {file: "plugin.yaml", body: "i: &i\n  main: lib/a.js\nm: &m\n  <<: *i\n  main: DIR/run.js\n<<: *m\n"},
+	"yaml-typed-int-key-wins":   {file: "plugin.yaml", body: "name: p\nbin:\n  1: lib/run.js\n  !!int 1: DIR/run.js\n"},
+	"yaml-typed-bool-key-wins":  {file: "plugin.yaml", body: "name: p\nbin:\n  true: lib/run.js\n  !!bool true: DIR/run.js\n"},
+	"yaml-typed-float-key-wins": {file: "plugin.yaml", body: "name: p\nbin:\n  1.0: lib/run.js\n  !!float 1.0: DIR/run.js\n"},
+	"yaml-typed-null-key-wins":  {file: "plugin.yaml", body: "name: p\nbin:\n  null: lib/run.js\n  !!null null: DIR/run.js\n"},
+	"yaml-sexagesimal-key-wins": {file: "plugin.yaml", body: "name: p\nbin:\n  1:00: lib/run.js\n  60: DIR/run.js\n"},
+	"yaml-infinity-key-wins":    {file: "plugin.yaml", body: "name: p\nbin:\n  .inf: lib/run.js\n  +.Inf: DIR/run.js\n"},
+	"yaml-date-key-wins":        {file: "plugin.yaml", body: "name: p\nbin:\n  2001-01-01: lib/run.js\n  !!timestamp 2001-1-1: DIR/run.js\n"},
+	"json-infinity":             {file: "package.json", body: `{"name":"p","version":-Infinity,"main":"DIR/run.js"}`},
 	"json-nan":                  {file: "package.json", body: `{"name":"p","version":NaN,"main":"DIR/run.js"}`},
 	"shadowed": {file: "plugin.yaml", body: "name: p\nentrypoint: DIR/run.js\n",
 		alsoFile: "package.json", alsoBody: `{"name":"p","main":"lib/other.js"}`},
@@ -985,7 +992,7 @@ func TestHermesUndeclaredBytecodeCacheStaysUnhashedWithManifest(t *testing.T) {
 // A manifest this package cannot read or parse may still be read by the
 // scanner, so every cache file is then treated as declared.
 func TestHermesUnparsedManifestHashesBytecodeCache(t *testing.T) {
-	for name, body := range map[string]string{"package.json": `{"main": `, "plugin.yaml": "name: [unclosed\n"} {
+	for name, body := range map[string]string{"package.json": "{\"main\": \"\xff\"}", "plugin.yaml": "name: [unclosed\n"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
 			writePluginFile(t, filepath.Join(dir, name), body)
@@ -1087,6 +1094,14 @@ func TestHermesDeclaredEntrypointIsBoundByVendorDigest(t *testing.T) {
 // file is not a change (GAP-0645 review 14).
 var hermesShadowedEntrypointForms = map[string]string{
 	"duplicate-main":        "name: p\nmain: DIR/provider.cpython-312.pyc\nmain: lib/run.js\n",
+	"typed-int-key":         "name: p\nbin:\n  1: DIR/provider.cpython-312.pyc\n  !!int 1: lib/run.js\n",
+	"typed-bool-key":        "name: p\nbin:\n  true: DIR/provider.cpython-312.pyc\n  !!bool true: lib/run.js\n",
+	"typed-float-key":       "name: p\nbin:\n  1.0: DIR/provider.cpython-312.pyc\n  !!float 1.0: lib/run.js\n",
+	"typed-null-key":        "name: p\nbin:\n  null: DIR/provider.cpython-312.pyc\n  !!null null: lib/run.js\n",
+	"sexagesimal-key":       "name: p\nbin:\n  1:00: DIR/provider.cpython-312.pyc\n  60: lib/run.js\n",
+	"infinity-key":          "name: p\nbin:\n  .inf: DIR/provider.cpython-312.pyc\n  +.Inf: lib/run.js\n",
+	"date-key":              "name: p\nbin:\n  2001-01-01: DIR/provider.cpython-312.pyc\n  !!timestamp 2001-1-1: lib/run.js\n",
+	"string-key":            "name: p\nbin:\n  p: DIR/provider.cpython-312.pyc\n  !!str p: lib/run.js\n",
 	"duplicate-bin-key":     "name: p\nbin:\n  p: DIR/provider.cpython-312.pyc\n  p: lib/run.js\n",
 	"same-number-bin-key":   "name: p\nbin:\n  1: DIR/provider.cpython-312.pyc\n  true: lib/run.js\n",
 	"merge-overridden-main": "name: p\n<<: {main: DIR/provider.cpython-312.pyc}\nmain: lib/run.js\n",
@@ -1117,6 +1132,15 @@ func TestHermesManifestProseDeclaresNothing(t *testing.T) {
 		"yaml-bin-other-file":  {"plugin.yaml", "name: p\nbin:\n  7: lib/other.js\n  true: lib/more.js\n"},
 		"yaml-bin-merge-prose": {"plugin.yaml", "name: p\nshared: &s\n  note: DIR/provider.cpython-312.pyc\nprovides:\n  <<: *s\n"},
 		"json-nan":             {"package.json", `{"name":"p","version":NaN}`},
+		"json-trailing-comma":  {"package.json", `{"name":"p","main":"DIR/provider.cpython-312.pyc",}`},
+		"json-single-quotes":   {"package.json", "{'name':'p','main':'DIR/provider.cpython-312.pyc'}"},
+		"json-yaml-object":     {"package.json", "name: p\nmain: DIR/provider.cpython-312.pyc\n"},
+		"json-truncated":       {"plugin.json", `{"name":"p","main":"DIR/provider.cpython-312.pyc"`},
+		"json-comment":         {"manifest.json", `{"name":"p","main":"DIR/provider.cpython-312.pyc"} // x`},
+		"yaml-unhashable-key":  {"plugin.yaml", "name: p\nbin:\n  ? [a, b]\n  : DIR/provider.cpython-312.pyc\n"},
+		"yaml-second-document": {"plugin.yaml", "main: DIR/provider.cpython-312.pyc\n---\nname: p\n"},
+		"yaml-unknown-tag":     {"plugin.yaml", "name: p\nmain: DIR/provider.cpython-312.pyc\nx: !custom y\n"},
+		"yaml-bad-merge":       {"plugin.yaml", "name: p\nmain: DIR/provider.cpython-312.pyc\n<<: 5\n"},
 		"yaml-nested-main":     {"plugin.yaml", "name: p\nprovides:\n  main: DIR/provider.cpython-312.pyc\n"},
 	}
 	for name, body := range hermesShadowedEntrypointForms {

@@ -19,7 +19,6 @@ package watcher
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,9 +30,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
-	"gopkg.in/yaml.v3"
 )
 
 // Hermes ships plugins in its checkout (hermes-agent/plugins). A shipped
@@ -298,144 +297,28 @@ var hermesManifestEntrypointKeys = []string{"main", "bin", "entrypoint", "entry"
 // so aliases and merge keys that fan out cannot make a manifest expensive.
 const hermesManifestMaxNodes = 100000
 
-// hermesJSONEntrypoints lists the entrypoint strings of one parsed JSON
-// manifest, as the plugin scanner reads them.
-func hermesJSONEntrypoints(doc any) []string {
-	top, ok := doc.(map[string]any)
-	if !ok {
-		return nil
-	}
-	var out []string
-	for _, key := range hermesManifestEntrypointKeys {
-		switch value := top[key].(type) {
-		case string:
-			out = append(out, value)
-		case map[string]any:
-			if key == "bin" {
-				for _, v := range value {
-					if text, isString := v.(string); isString {
-						out = append(out, text)
-					}
-				}
-			}
-		}
-	}
-	return out
-}
-
-// hermesYAMLEntrypoints lists the entrypoint strings of one YAML manifest.
-// The plugin scanner loads YAML with PyYAML, which builds one dict from the
-// mapping: a later pair replaces an earlier pair with an equal key, a merge
-// key (<<) contributes the pairs of the mapping it names beneath the
-// mapping's own pairs, a later merge key beneath an earlier one and the first
-// mapping of a merge list beneath the rest, and a key may be a number, a
-// Boolean or null. The manifest is therefore walked as a node tree and the
-// effective mapping is built the same way (a Go map decode rejects duplicate
-// keys and drops keys that are not strings), so a value the scanner never
-// sees, because a later key or an explicit pair replaced it, declares nothing.
-// A scalar is taken as written whatever type YAML gives it, so the result is a
-// superset of what the scanner reads. ok is false when the text is not YAML
-// or the walk is over budget.
-func hermesYAMLEntrypoints(data []byte) (out []string, ok bool) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal(data, &doc); err != nil {
+// hermesManifestEntrypoints lists the entrypoint strings of the manifest rel
+// with contents data, as the plugin scanner reads them: a .yaml or .yml
+// manifest as PyYAML loads it (hermes_vendor_yaml.go), any other manifest as
+// json.loads reads it (hermes_vendor_json.go), and no entrypoint from a
+// manifest the scanner refuses. The text is never tried as the other format,
+// since the scanner does not. ok is false when this package cannot decide what
+// the scanner reads.
+func hermesManifestEntrypoints(rel string, data []byte) ([]string, bool) {
+	if !utf8.Valid(data) {
 		return nil, false
 	}
-	budget := hermesManifestMaxNodes
-	var resolve func(n *yaml.Node) *yaml.Node
-	resolve = func(n *yaml.Node) *yaml.Node {
-		for n != nil && (n.Kind == yaml.AliasNode || n.Kind == yaml.DocumentNode) {
-			if budget--; budget < 0 {
-				return nil
-			}
-			if n.Kind == yaml.AliasNode {
-				n = n.Alias
-			} else if len(n.Content) > 0 {
-				n = n.Content[0]
-			} else {
-				return nil
-			}
-		}
-		return n
-	}
-	type pair struct{ key, value *yaml.Node }
-	// pairs lists the pairs of a mapping in the order PyYAML applies them:
-	// the pairs of its merge keys first, then its own.
-	var pairs func(n *yaml.Node) []pair
-	pairs = func(n *yaml.Node) []pair {
-		if n = resolve(n); n == nil || n.Kind != yaml.MappingNode {
-			return nil
-		}
-		var merged, own []pair
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			if budget--; budget < 0 {
-				return nil
-			}
-			key, value := resolve(n.Content[i]), n.Content[i+1]
-			if key != nil && key.Kind == yaml.ScalarNode && key.ShortTag() == "!!merge" {
-				if list := resolve(value); list != nil && list.Kind == yaml.SequenceNode {
-					for j := len(list.Content) - 1; j >= 0; j-- {
-						merged = append(merged, pairs(list.Content[j])...)
-					}
-				} else {
-					merged = append(merged, pairs(list)...)
-				}
-				continue
-			}
-			own = append(own, pair{key, value})
-		}
-		return append(merged, own...)
-	}
-	// effective is the dict PyYAML builds from a mapping: the last value for
-	// each key, keyed by key identity, in order of first appearance.
-	effective := func(n *yaml.Node) (keys []string, byKey map[string]pair) {
-		byKey = map[string]pair{}
-		for _, p := range pairs(n) {
-			id := hermesYAMLKeyIdentity(p.key)
-			if _, seen := byKey[id]; !seen {
-				keys = append(keys, id)
-			}
-			byKey[id] = p
-		}
-		return keys, byKey
-	}
-	scalar := func(n *yaml.Node) {
-		if n = resolve(n); n != nil && n.Kind == yaml.ScalarNode {
-			out = append(out, n.Value)
-		}
-	}
-	keys, top := effective(&doc)
-	for _, id := range keys {
-		name, isString := strings.CutPrefix(id, "str:")
-		if !isString || !slices.Contains(hermesManifestEntrypointKeys, name) {
-			continue
-		}
-		value := top[id].value
-		scalar(value)
-		if name == "bin" {
-			binKeys, bin := effective(value)
-			for _, binID := range binKeys {
-				scalar(bin[binID].value)
-			}
-		}
-	}
-	return out, budget >= 0
-}
-
-// hermesManifestEntrypoints lists the entrypoint strings of the manifest rel
-// with contents data, as the plugin scanner reads them. A YAML manifest is
-// read by hermesYAMLEntrypoints. A JSON manifest is decoded as JSON; text
-// that is not JSON Go accepts (NaN and Infinity, which Python reads) is read
-// as YAML, which is a superset of JSON. ok is false when neither reads it.
-func hermesManifestEntrypoints(rel string, data []byte) ([]string, bool) {
 	if strings.HasSuffix(rel, ".yaml") || strings.HasSuffix(rel, ".yml") {
 		return hermesYAMLEntrypoints(data)
 	}
-	var doc any
-	if err := json.Unmarshal(data, &doc); err == nil {
-		return hermesJSONEntrypoints(doc), true
+	top, err := hermesPyJSON(data)
+	switch {
+	case errors.Is(err, errPyLoad):
+		return nil, true
+	case err != nil:
+		return nil, false
 	}
-	return hermesYAMLEntrypoints(data)
+	return pyManifestEntrypoints(top), true
 }
 
 // hermesDeclaredFiles returns the files in root that a plugin manifest names
