@@ -11,13 +11,18 @@ import (
 )
 
 // lateReachEntries bounds the entries the late-call scan looks at when it
-// decides whether a file is one of the protected ones by identity. A bound
-// that is hit is not an answer: the file is then not ordinary.
+// decides whether a file is one of the protected ones by identity. The scan
+// identifies a protected file positively: a file is protected only when its
+// identity is found among the protected ones. A bound that is hit, an
+// unreadable folder and a link to a folder are not found, so the file they
+// might have held is not proven protected (the call is then ordinary in the
+// open tier, with the late-gateway warning; the strict tier never reaches the
+// scan).
 var lateReachEntries = 20000
 
 // lateHomeEntries bounds the entries of the home the scan lists to find the
-// protected folders in it.
-const lateHomeEntries = 20000
+// protected folders in it; the entries past it are not listed.
+var lateHomeEntries = 20000
 
 // lateReach is the protected-reach state of one call's scan, built only when
 // a path needs it: the protected authorized-keys files, the folders in the
@@ -28,10 +33,8 @@ type lateReach struct {
 	haveKeys  bool
 	roots     []os.FileInfo
 	rootPaths []string
-	rootsOK   bool
 	haveRoots bool
 	ids       map[string]bool
-	idsOK     bool
 	haveIDs   bool
 }
 
@@ -85,9 +88,10 @@ func (s *lateScan) follow(path string) (string, bool) {
 // which the scan reached through a link or which has a second hard link, is
 // one of the protected ones or may be: an authorized-keys file by identity, a
 // protected folder or anything below it, and, for a regular file with a
-// second hard link, any file below such a folder. What cannot be told (an
-// unreadable home, a state tree over the bound) is protected, because the
-// scan only ever moves a call from closed to the outage-mode outcome.
+// second hard link, any file below such a folder. Only a proven identity is
+// protected: what the scan could not list or index (an unreadable folder, a
+// tree over the bound) is not proven, and a not-proven ordinary alias must not
+// be denied for the budget the scan ran out of.
 func (s *lateScan) reachesProtected(real string, info os.FileInfo) bool {
 	if !s.reach.haveKeys {
 		s.reach.keys, s.reach.haveKeys = newProtectedFiles(s.home), true
@@ -99,9 +103,6 @@ func (s *lateScan) reachesProtected(real string, info os.FileInfo) bool {
 	}
 	if !s.reach.haveRoots {
 		s.listRoots()
-	}
-	if !s.reach.rootsOK {
-		return true
 	}
 	for dir := real; ; dir = filepath.Dir(dir) {
 		dirInfo, err := pathLstat(dir)
@@ -123,12 +124,13 @@ func (s *lateScan) reachesProtected(real string, info os.FileInfo) bool {
 	return false
 }
 
-// listRoots finds the folders of the home that carry a protected name.
+// listRoots finds the folders of the home that carry a protected name, among
+// the first lateHomeEntries entries it can read.
 func (s *lateScan) listRoots() {
 	s.reach.haveRoots = true
-	entries, err := os.ReadDir(s.home)
-	if err != nil || len(entries) > lateHomeEntries {
-		return
+	entries, _ := os.ReadDir(s.home)
+	if len(entries) > lateHomeEntries {
+		entries = entries[:lateHomeEntries]
 	}
 	for _, entry := range entries {
 		if !lateNamesProtected(entry.Name()) {
@@ -140,27 +142,29 @@ func (s *lateScan) listRoots() {
 		}
 		info, err := pathLstat(real)
 		if err != nil {
-			return
+			continue
 		}
 		s.reach.roots = append(s.reach.roots, info)
 		s.reach.rootPaths = append(s.reach.rootPaths, real)
 	}
-	s.reach.rootsOK = true
 }
 
 // hardLinkedToProtected reports whether a regular file with a second hard
-// link is the same file as any entry below a protected folder (or what a link
-// there leads to).
+// link is the same file as an entry the index found below a protected folder
+// (or what a link there leads to). A file the index did not reach is not
+// proven protected.
 func (s *lateScan) hardLinkedToProtected(real string, info os.FileInfo) bool {
 	if !s.reach.haveIDs {
 		s.indexRoots()
 	}
 	identity := fileIdentityForPath(real, info)
-	return !s.reach.idsOK || identity == "" || s.reach.ids[identity]
+	return identity != "" && s.reach.ids[identity]
 }
 
-// indexRoots records the identity of every entry below the protected folders,
-// and of what each link there leads to, within lateReachEntries entries.
+// indexRoots records the identity of the entries below the protected folders,
+// and of what each link there leads to, within lateReachEntries entries. A
+// folder it cannot read and a link to a folder it does not enter are left
+// out.
 func (s *lateScan) indexRoots() {
 	s.reach.haveIDs = true
 	s.reach.ids = map[string]bool{}
@@ -171,7 +175,7 @@ func (s *lateScan) indexRoots() {
 		}
 	}
 	for _, root := range s.reach.rootPaths {
-		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 			if visited++; visited > lateReachEntries {
 				return fs.SkipAll
 			}
@@ -188,9 +192,5 @@ func (s *lateScan) indexRoots() {
 			}
 			return nil
 		})
-		if err != nil {
-			return
-		}
 	}
-	s.reach.idsOK = visited <= lateReachEntries
 }
