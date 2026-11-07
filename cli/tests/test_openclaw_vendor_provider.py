@@ -607,8 +607,14 @@ def test_r109_g610_windows_junction_peers_match_link_peers(tmp_path, monkeypatch
         ("private-alias", private_peer.parent.parent),
         ("state-alias", data_dir),
         ("named-private-alias", tmp_path / ".ssh" / ".." / "ordinary"),
+        ("stored-private-alias", tmp_path / ".ssh" / "hop"),
     ):
         aliases[label] = tmp_path / label
+        if label == "stored-private-alias":
+            # The stored target names the private directory on every system
+            # (no parent name for Windows to resolve), then hops to an
+            # ordinary tree: the alias is protected wherever it is created.
+            target.symlink_to(ordinary.parent.parent, target_is_directory=True)
         aliases[label].symlink_to(target, target_is_directory=True)
     # Windows resolves a parent name when it creates a link, so the stored
     # target of the alias that goes through a private name never names it there;
@@ -618,6 +624,7 @@ def test_r109_g610_windows_junction_peers_match_link_peers(tmp_path, monkeypatch
     # test_r109_g724_stored_parent_name_after_private_name_is_judged.
     stored = os.readlink(aliases["named-private-alias"])
     assert (".." not in PureWindowsPath(stored).parts) is (os.name == "nt")
+    assert ".ssh" in PureWindowsPath(os.readlink(aliases["stored-private-alias"])).parts
 
     # (label, peer target, peer entry is a junction, admitted with a possible peer)
     cases = (
@@ -631,6 +638,9 @@ def test_r109_g610_windows_junction_peers_match_link_peers(tmp_path, monkeypatch
         ("link-through-state-junction", aliases["state-alias"] / "node_modules/openclaw", False, False),
         ("link-through-named-private-junction", aliases["named-private-alias"] / "node_modules/openclaw",
          False, os.name == "nt"),
+        # Blocked on every system and in every profile, Windows included.
+        ("link-through-stored-private-junction", aliases["stored-private-alias"] / "node_modules/openclaw",
+         False, False),
         ("extra-junction", ordinary, True, False),
     )
     trees = {}
