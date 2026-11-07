@@ -6,13 +6,20 @@ A skip marker is evaluated when the module is imported, so a bare
 even when the module is skipped there.
 
 This test does not read the source and guess. It collects the real test
-modules in a child interpreter where ``import os`` and ``import sys`` inside a
-test module (conftest files included) give a Windows view: the POSIX-only
-``os`` attributes are absent, ``os.name`` is ``"nt"`` and ``sys.platform`` is
-``"win32"``. Library code keeps the real modules. A collection error that says
-``os`` lacks one of those attributes is a module that would fail to collect on
-the Windows Python shard, whatever form the call takes (decorator, default,
-``if``, assignment, class body, ``from os import``).
+modules in a child interpreter where the real ``os`` and ``sys`` modules answer
+as Windows does to code that lives in the tests tree: the POSIX-only ``os``
+attributes are absent, ``os.name`` is ``"nt"`` and ``sys.platform`` is
+``"win32"``. The view sits on the module objects themselves (their attribute
+lookup checks which file asks), so every route to the attribute is covered:
+``os.x``, ``from os import x``, ``importlib.import_module("os").x``,
+``__import__("os").x``, ``getattr(os, "x")``. Library code keeps the real
+answers. A collection error that says ``os`` lacks one of those attributes is a
+module that would fail to collect on the Windows Python shard, whatever form the
+call takes (decorator, default, ``if``, assignment, class body, import).
+
+The absent set is the Unix-only part of the ``os`` documentation. When a test
+needs another name, add it to ``_UNIX_ONLY_NAMES`` or ``_UNIX_ONLY_PREFIXES``
+in the child below.
 """
 
 from __future__ import annotations
@@ -31,52 +38,74 @@ _TESTS = Path(__file__).resolve().parent
 # What the child runs. Collection errors that are not about a missing os
 # attribute (other optional imports, for example) are not this test business.
 _CHILD = r"""
-import builtins, json, os, sys, types
+import json, os, sys, types
 import pytest
+
+_getframe = sys._getframe
+_real_os = os
+_real_sys = sys
+
 
 def norm(path):
     return os.path.normcase(os.path.realpath(path))
 
 
 ROOT = norm(os.environ["WINDOWS_VIEW_ROOT"])
-ABSENT = {
-    "geteuid", "getuid", "getgid", "getegid", "getgroups", "getpgid", "getpgrp", "getsid",
-    "setsid", "setuid", "setgid", "seteuid", "setegid", "fork", "forkpty", "killpg",
-    "chown", "lchown", "fchown", "chroot", "mkfifo", "mknod", "nice", "uname", "statvfs",
-    "getloadavg", "sched_getaffinity", "O_NOFOLLOW", "O_DIRECTORY",
+
+_UNIX_ONLY_NAMES = {
+    "geteuid", "getuid", "getgid", "getegid", "getgroups", "getgrouplist", "getresuid", "getresgid",
+    "getpgid", "getpgrp", "getsid", "getpriority", "getlogin_r", "getloadavg",
+    "setsid", "setuid", "setgid", "seteuid", "setegid", "setreuid", "setregid", "setresuid",
+    "setresgid", "setgroups", "initgroups", "setpgid", "setpgrp", "setpriority", "setns", "unshare",
+    "fork", "forkpty", "killpg", "wait", "wait3", "wait4", "waitid", "waitstatus_to_exitcode_unix",
+    "chown", "lchown", "fchown", "lchmod", "chflags", "lchflags", "chroot", "fchdir", "sync",
+    "fdatasync", "mkfifo", "mknod", "major", "minor", "makedev", "nice", "uname", "statvfs",
+    "fstatvfs", "sysconf", "confstr", "pathconf", "fpathconf", "ctermid", "ttyname", "openpty",
+    "login_tty", "tcgetpgrp", "tcsetpgrp", "plock", "lockf", "pread", "pwrite", "preadv", "pwritev",
+    "readv", "writev", "sendfile", "pipe2", "posix_fadvise", "posix_fallocate", "posix_spawnp",
+    "memfd_create", "eventfd", "eventfd_read", "eventfd_write", "pidfd_open", "copy_file_range",
+    "splice", "getxattr", "setxattr", "listxattr", "removexattr", "sched_getaffinity",
+    "sched_setaffinity", "O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK", "O_NDELAY", "O_NOCTTY",
+    "O_SYNC", "O_DSYNC", "O_RSYNC", "O_CLOEXEC", "O_ASYNC", "O_DIRECT", "O_NOATIME", "O_PATH",
+    "O_TMPFILE", "O_LARGEFILE",
 }
+_UNIX_ONLY_PREFIXES = (
+    "sched_", "SCHED_", "EX_", "RTLD_", "POSIX_FADV_", "POSIX_SPAWN_", "PRIO_", "XATTR_",
+    "F_LOCK", "F_TLOCK", "F_ULOCK", "F_TEST", "CLD_", "P_PID", "P_PGID", "P_ALL", "P_PIDFD",
+)
 
 
-class WindowsOs(types.ModuleType):
-    def __init__(self):
-        super().__init__("os")
+def is_unix_only(name):
+    if name in _UNIX_ONLY_NAMES or name.startswith(_UNIX_ONLY_PREFIXES):
+        return True
+    # The wait-status helpers and flags (WIFEXITED, WNOHANG, ...) are upper-case W names.
+    return name.startswith("W") and name.isupper()
 
-    def __getattr__(self, name):
-        if name in ABSENT:
+
+_asked = {}
+
+
+def asked_from_tests(frame):
+    filename = frame.f_globals.get("__file__") or "-"
+    if filename not in _asked:
+        _asked[filename] = norm(filename).startswith(ROOT)
+    return _asked[filename]
+
+
+class WindowsViewOs(types.ModuleType):
+    def __getattribute__(self, name):
+        if (name == "name" or is_unix_only(name)) and asked_from_tests(_getframe(1)):
+            if name == "name":
+                return "nt"
             raise AttributeError("module 'os' has no attribute '" + name + "'")
-        if name == "name":
-            return "nt"
-        return getattr(os, name)
+        return types.ModuleType.__getattribute__(self, name)
 
 
-class WindowsSys(types.ModuleType):
-    def __init__(self):
-        super().__init__("sys")
-
-    def __getattr__(self, name):
-        return "win32" if name == "platform" else getattr(sys, name)
-
-
-views = {"os": WindowsOs(), "sys": WindowsSys()}
-real_import = builtins.__import__
-
-
-def windows_import(name, globals=None, locals=None, fromlist=(), level=0):
-    top = name.partition(".")[0]
-    if level == 0 and top in views and norm((globals or {}).get("__file__") or "-").startswith(ROOT):
-        if not fromlist or name == top:
-            return views[top]
-    return real_import(name, globals, locals, fromlist, level)
+class WindowsViewSys(types.ModuleType):
+    def __getattribute__(self, name):
+        if name == "platform" and asked_from_tests(_getframe(1)):
+            return "win32"
+        return types.ModuleType.__getattribute__(self, name)
 
 
 class Plugin:
@@ -88,12 +117,14 @@ class Plugin:
             self.errors.append([str(report.nodeid), str(report.longrepr)])
 
 
-builtins.__import__ = windows_import
+_real_os.__class__ = WindowsViewOs
+_real_sys.__class__ = WindowsViewSys
 plugin = Plugin()
 try:
     pytest.main(sys.argv[2:], plugins=[plugin])
 finally:
-    builtins.__import__ = real_import
+    _real_os.__class__ = types.ModuleType
+    _real_sys.__class__ = types.ModuleType
 sys.stdout.write("\n@@RESULT@@" + json.dumps(plugin.errors))
 """
 
@@ -135,6 +166,15 @@ _UNSAFE = {
     "assignment": "import os\nIS_ROOT = os.getuid() == 0\ndef test_a(): pass\n",
     "class_body": "import os\nclass TestA:\n    ROOT = os.getgid()\n    def test_a(self): pass\n",
     "other_attribute": "import os\nNAME = os.uname().sysname\ndef test_a(): pass\n",
+    "importlib_import_module": "import importlib\nUID = importlib.import_module(\"os\").geteuid()\ndef test_a(): pass\n",
+    "dunder_import": "UID = __import__(\"os\").geteuid()\ndef test_a(): pass\n",
+    "resuid_triple": "import os\nUIDS = os.getresuid()\ndef test_a(): pass\n",
+    "from_import_function": "from os import getresgid\ndef test_a(): pass\n",
+    "from_import_geteuid": "import os\nfrom os import geteuid\ndef test_a(): pass\n",
+    "getattr_literal": "import os\nUID = getattr(os, \"getresuid\")()\ndef test_a(): pass\n",
+    "unix_only_flag": "import os\nFLAGS = os.O_NOFOLLOW\ndef test_a(): pass\n",
+    "wait_status_helper": "import os\nOK = os.WIFEXITED(0)\ndef test_a(): pass\n",
+    "or_chain_resuid": "import os, pytest\n@pytest.mark.skipif(hasattr(os, \"fork\") or os.getresuid()[0] == 0, reason=\"x\")\ndef test_a(): pass\n",
 }
 
 _SAFE = {
@@ -145,6 +185,11 @@ _SAFE = {
     "platform_conditional": "import os, sys\nIS_ROOT = False if sys.platform == \"win32\" else os.geteuid() == 0\ndef test_a(): pass\n",
     "platform_if": "import os\nif os.name != \"nt\":\n    UID = os.geteuid()\ndef test_a(): pass\n",
     "runtime_only": "import os\ndef test_a():\n    assert os.geteuid() >= 0\n",
+    "importlib_guarded": "import importlib\nm = importlib.import_module(\"os\")\nUID = m.getresuid() if hasattr(m, \"getresuid\") else None\ndef test_a(): pass\n",
+    "try_except_attribute_error": "import os\ntry:\n    UIDS = os.getresuid()\nexcept AttributeError:\n    UIDS = ()\ndef test_a(): pass\n",
+    "try_except_import_error": "try:\n    from os import getresgid\nexcept ImportError:\n    getresgid = None\ndef test_a(): pass\n",
+    "getattr_default": "import os\nUID = getattr(os, \"getresuid\", lambda: ())()\ndef test_a(): pass\n",
+    "platform_gate_on_flag": "import os, sys\nFLAGS = 0 if sys.platform == \"win32\" else os.O_NOFOLLOW\ndef test_a(): pass\n",
 }
 
 
