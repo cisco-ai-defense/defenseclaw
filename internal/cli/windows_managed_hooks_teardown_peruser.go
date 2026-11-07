@@ -275,6 +275,10 @@ var windowsManagedClaudeCurrentUserSID = func() (string, error) {
 // removeWindowsManagedHooksStandalonePerUserRegistrations); Secure Client
 // writes none. Per-user runtime files stay, like every other connector.
 
+// windowsEnterpriseKeptLinkReason is the reason of a machine_state_remaining
+// entry for a link a purge kept. The psm1 purge steps write the same text.
+const windowsEnterpriseKeptLinkReason = "kept: a link sits here; DefenseClaw does not follow, change or remove it"
+
 // windowsManagedHooksKeptLinkedFolders names, as machine_state_remaining
 // entries (path: kept: reason), each vendor folder a teardown kept because a
 // link sits there: the ones the Cursor, Claude Code, selector and per-user
@@ -282,9 +286,12 @@ var windowsManagedClaudeCurrentUserSID = func() (string, error) {
 // paths (Copilot, OpenCode, Devin), which an earlier step of the uninstall
 // may have kept. It only reads. Replaceable in tests.
 var windowsManagedHooksKeptLinkedFolders = func() []string {
-	const reason = "kept: a link sits here; DefenseClaw does not follow, change or remove it"
+	const reason = windowsEnterpriseKeptLinkReason
 	var out []string
 	for _, folder := range enterprisehooks.WindowsManagedPolicyFoldersKept() {
+		out = append(out, folder+": "+reason)
+	}
+	for _, folder := range connector.WindowsCodexMachineFoldersKept() {
 		out = append(out, folder+": "+reason)
 	}
 	if layout, programFiles, programData, err := standaloneEnterprisePolicyLayout(); err == nil {

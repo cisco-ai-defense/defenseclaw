@@ -1499,3 +1499,59 @@ func TestWindowsManagedHooksOwnerRightsRestoreRefusesOutsideStandalone(t *testin
 		t.Fatalf("restore outside standalone: report=%+v err=%v", report, err)
 	}
 }
+
+// A link at the Codex machine-policy folder is kept and not read through
+// (GAP-0773). The teardown registry read then reports it in Kept and nothing
+// else; prepare keeps the expected policy bit, and the installed-state check
+// has no Codex enrollment to compare, whether Codex is configured with no
+// account, or has an enrolled account the manifest lists.
+func TestWindowsManagedHooksTeardownKeepsALinkAtTheCodexFolder(t *testing.T) {
+	previous := windowsManagedHooksTeardownCodexRegistryReader
+	t.Cleanup(func() { windowsManagedHooksTeardownCodexRegistryReader = previous })
+	const hook = `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	const link = `C:\ProgramData\OpenAI\Codex`
+	alice := connector.WindowsCodexManagedRuntimeTarget{
+		SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+	}
+	windowsManagedHooksTeardownCodexRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+		return connector.WindowsCodexManagedRuntimeRegistry{Kept: link}, nil
+	}
+	for name, targets := range map[string][]connector.WindowsCodexManagedRuntimeTarget{
+		"configured, no account": nil,
+		"enrolled account":       {alice},
+	} {
+		t.Run(name, func(t *testing.T) {
+			claude, active, codex, cursor := windowsManagedHooksTeardownExpectedEnrollment(
+				windowsManagedHooksActivated, true, nil, targets, nil,
+			)
+			identity := windowsManagedHooksTeardownJournal{
+				HookBinary:        hook,
+				ClaudeTargetSIDs:  claude,
+				CodexPolicyActive: active,
+				CodexTargets:      codex,
+				CursorTargets:     cursor,
+			}
+			if !identity.CodexPolicyActive {
+				t.Fatal("fixture: Codex must expect an active guard")
+			}
+			prepared := identity
+			if err := captureWindowsManagedHooksTeardownCodexPolicy(&prepared); err != nil {
+				t.Fatalf("prepare failed on a kept link: %v", err)
+			}
+			if prepared.CodexPolicyActive != identity.CodexPolicyActive || len(prepared.CodexTargets) != len(identity.CodexTargets) {
+				t.Fatalf("prepare changed the expected Codex enrollment over a link: %+v", prepared)
+			}
+			kept := connector.WindowsCodexManagedRuntimeRegistry{Kept: link}
+			if err := validateWindowsManagedHooksTeardownEnrollment(identity, nil, false, kept, nil, false); err != nil {
+				t.Fatalf("the installed-state check failed on a kept link: %v", err)
+			}
+			// Without the link the same registry is a mismatch: the
+			// exemption is the kept link, nothing else.
+			if err := validateWindowsManagedHooksTeardownEnrollment(
+				identity, nil, false, connector.WindowsCodexManagedRuntimeRegistry{}, nil, false,
+			); err == nil {
+				t.Fatal("an empty registry without a link matched an active Codex guard")
+			}
+		})
+	}
+}

@@ -91,7 +91,11 @@ type WindowsCodexManagedRuntimeTarget struct {
 }
 
 type WindowsCodexManagedRuntimeRegistry struct {
-	Active             bool
+	Active bool
+	// Kept is set only by the teardown read: the link (or non-folder) at the
+	// Codex machine-policy folder, which is not read through. The registry is
+	// then empty and says nothing about what is behind the link (GAP-0773).
+	Kept               string
 	GatewayAddr        string
 	GatewayServiceName string
 	Targets            []WindowsCodexManagedRuntimeTarget

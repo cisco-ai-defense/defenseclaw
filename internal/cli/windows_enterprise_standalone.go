@@ -2027,11 +2027,25 @@ func windowsEnterprisePurgeRerunFindsAccounts(report *windowsEnterpriseInstaller
 // uninstall also reports intentional machine file retention, including a
 // Cursor tombstone for a pending Cursor registration. Two cleanup steps can
 // report the same path (GAP-0571).
+//
+// A link a purge kept is named once, and only as kept: a file the purge did not
+// look for behind it, or a folder below it, is not listed as one it could not
+// remove, and a link below another kept link is not named again (GAP-0773).
 func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	var failed, kept []string
 	seen := map[string]bool{}
-	for _, entry := range windowsEnterpriseReportStrings(report.MachineStateRemaining) {
+	entries := windowsEnterpriseReportStrings(report.MachineStateRemaining)
+	var links []string
+	for _, entry := range entries {
+		if path, reason, _ := strings.Cut(entry, ": "); strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason) {
+			links = append(links, path)
+		}
+	}
+	for _, entry := range entries {
 		path, reason, _ := strings.Cut(entry, ": ")
+		if windowsEnterprisePathBehindKeptLink(path, links, strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason)) {
+			continue
+		}
 		key := strings.ToLower(path)
 		if seen[key] {
 			continue
@@ -2056,6 +2070,20 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 			len(kept), windowsEnterpriseBoundedLabels(kept),
 		))
 	}
+}
+
+// windowsEnterprisePathBehindKeptLink reports whether path is below one of the
+// kept links, or is one of them while the entry is not the link's own kept
+// entry (a failure written for the link path itself).
+func windowsEnterprisePathBehindKeptLink(path string, links []string, isKeptLinkEntry bool) bool {
+	folded := strings.TrimRight(strings.ToLower(path), `\`)
+	for _, link := range links {
+		prefix := strings.TrimRight(strings.ToLower(link), `\`)
+		if strings.HasPrefix(folded, prefix+`\`) || (folded == prefix && !isKeptLinkEntry) {
+			return true
+		}
+	}
+	return false
 }
 
 // addWindowsEnterpriseRecoveryGatewayWarnings records which gateway a

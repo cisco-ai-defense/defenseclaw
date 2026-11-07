@@ -18147,7 +18147,7 @@ function Remove-DefenseClawOwnRuntimeSelector {
                 $named = & $NamesOwnHook $state
             }
             catch {
-                "${state}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+                Get-DefenseClawMachineStateFailureEntry -Path $state -Message $_.Exception.Message
                 return
             }
             if ($false -eq $named) {
@@ -18164,7 +18164,7 @@ function Remove-DefenseClawOwnRuntimeSelector {
                 Remove-DefenseClawManagedHooksSerializationLock -Path $path -Label 'runtime selector state'
             }
             catch {
-                "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+                Get-DefenseClawMachineStateFailureEntry -Path $path -Message $_.Exception.Message
             }
         }
     }
@@ -18219,6 +18219,22 @@ function Get-DefenseClawRuntimeSelectorOtherHooks {
 # this deployment scope only when it names the scope's exact hook
 # executable; the floor and the locks go with the policy. Standalone only.
 # Writes "path: reason" for each file it keeps.
+# The "path: reason" entry for a file a purge step could not read or remove.
+# A failure that is a link on the path (Assert-DefenseClawNoReparsePath) is
+# not a file the purge could not remove: the link is kept and named at the
+# link, once, the same way every other kept link is, and the files behind it
+# are not listed as failures (GAP-0758, GAP-0773).
+function Get-DefenseClawMachineStateFailureEntry {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Message
+    )
+    if ($Message -match '^reparse points are not allowed in managed path: (?<link>.+)$') {
+        return ($Matches['link'] + ': kept: a link sits here; DefenseClaw does not follow, change or remove it')
+    }
+    return "${Path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $Message -MaxLength 512)
+}
+
 function Remove-DefenseClawStandaloneOrphanedHookMachineState {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -18251,7 +18267,7 @@ function Remove-DefenseClawStandaloneOrphanedHookMachineState {
             $named = & $namesThisHook $path
         }
         catch {
-            "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+            Get-DefenseClawMachineStateFailureEntry -Path $path -Message $_.Exception.Message
             $claudeOwned = $false
             continue
         }
@@ -18284,7 +18300,7 @@ function Remove-DefenseClawStandaloneOrphanedHookMachineState {
             Remove-DefenseClawManagedHooksSerializationLock -Path $path -Label 'orphaned DefenseClaw hook machine state'
         }
         catch {
-            "${path}: " + (ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message -MaxLength 512)
+            Get-DefenseClawMachineStateFailureEntry -Path $path -Message $_.Exception.Message
         }
     }
 }

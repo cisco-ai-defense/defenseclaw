@@ -572,6 +572,22 @@ func RemoveWindowsCodexMachineRequirements(
 		report.Error = err.Error()
 		return report, err
 	}
+	// A link at the Codex machine-policy folder is kept and named (GAP-0773):
+	// nothing behind it is read, opened, locked, written or deleted, and the
+	// removal does not fail on it. Standalone only.
+	kept, err := WindowsCodexMachineFolderKept()
+	if err != nil {
+		report.Error = err.Error()
+		return report, err
+	}
+	if kept != "" {
+		report.OK = true
+		report.Disposition = "link_kept"
+		report.SafeToRemoveBinary = true
+		report.ManagedStateRemovedOrAbsent = true
+		report.Details = append(report.Details, "kept: a link sits at "+kept+"; DefenseClaw does not follow, change or remove it")
+		return report, nil
+	}
 	// The locked path below requires the Codex machine-policy directory, which
 	// exists only once a target has been enrolled. No artifact means nothing to
 	// remove, which is the same result that path reports for this state. The

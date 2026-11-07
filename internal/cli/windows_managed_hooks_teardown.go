@@ -1268,8 +1268,9 @@ func runWindowsManagedHooksTeardown(
 }
 
 // windowsManagedHooksTeardownCodexRegistryReader reads the protected Codex
-// registry for a prepare; tests replace it.
-var windowsManagedHooksTeardownCodexRegistryReader = connector.ResolveWindowsCodexManagedRuntimeRegistry
+// registry for a prepare; tests replace it. A link at the Codex folder is not
+// read through (GAP-0773): the result is empty and names the link in Kept.
+var windowsManagedHooksTeardownCodexRegistryReader = connector.ResolveWindowsCodexManagedRuntimeRegistryForTeardown
 
 // captureWindowsManagedHooksTeardownCodexPolicy journals the Codex policy bit
 // a zero-target prepare finds. Configuration expects a configured connector's
@@ -1285,6 +1286,11 @@ func captureWindowsManagedHooksTeardownCodexPolicy(identity *windowsManagedHooks
 	registry, err := windowsManagedHooksTeardownCodexRegistryReader(identity.HookBinary)
 	if err != nil {
 		return err
+	}
+	if registry.Kept != "" {
+		// A link at the Codex folder: nothing behind it is read, so the
+		// journal keeps the expected bit and the removal keeps the link.
+		return nil
 	}
 	if len(registry.Targets) != 0 {
 		return errors.New("codex machine enrollment does not match the protected manifest")
@@ -1788,6 +1794,15 @@ func restoreWindowsCodexManagedHooks(
 	policyActive bool,
 	targets []connector.WindowsCodexManagedRuntimeTarget,
 ) error {
+	// The removal kept a link at the Codex folder and changed nothing behind
+	// it, so there is nothing to restore (GAP-0773).
+	kept, err := connector.WindowsCodexMachineFolderKept()
+	if err != nil {
+		return err
+	}
+	if kept != "" {
+		return nil
+	}
 	opts.CodexTargetEnabled = policyActive
 	if !policyActive {
 		if len(targets) != 0 {
@@ -2218,15 +2233,23 @@ func verifyWindowsManagedHooksTeardownClean(
 	}
 	disabled := opts
 	disabled.CodexTargetEnabled = false
-	report, err := connector.VerifyWindowsCodexMachineRequirements(disabled)
+	kept, err := connector.WindowsCodexMachineFolderKept()
 	if err != nil {
-		return report.SurvivingOwnedPathReferences, err
+		return 0, err
 	}
-	if !report.OK || !report.SafeToRemoveBinary ||
-		report.SurvivingOwnedPathReferences != 0 {
-		return report.SurvivingOwnedPathReferences, errors.New(
-			"Codex machine requirements are not clean after managed-hook teardown",
-		)
+	if kept == "" {
+		// Behind a kept link nothing is read, so there is nothing to verify
+		// (GAP-0773).
+		report, err := connector.VerifyWindowsCodexMachineRequirements(disabled)
+		if err != nil {
+			return report.SurvivingOwnedPathReferences, err
+		}
+		if !report.OK || !report.SafeToRemoveBinary ||
+			report.SurvivingOwnedPathReferences != 0 {
+			return report.SurvivingOwnedPathReferences, errors.New(
+				"Codex machine requirements are not clean after managed-hook teardown",
+			)
+		}
 	}
 	if err := verifyWindowsManagedHooksStandalonePerUserClean(); err != nil {
 		return 0, err
@@ -2263,7 +2286,7 @@ func verifyWindowsManagedHooksTeardownInstalled(
 	if err != nil {
 		return err
 	}
-	registry, err := connector.ResolveWindowsCodexManagedRuntimeRegistry(opts.HookBinary)
+	registry, err := connector.ResolveWindowsCodexManagedRuntimeRegistryForTeardown(opts.HookBinary)
 	if err != nil {
 		return err
 	}
@@ -2340,6 +2363,14 @@ func validateWindowsManagedHooksTeardownEnrollment(
 	if (len(identity.ClaudeTargetSIDs) != 0 && !claudeActive) ||
 		!equalWindowsEnterpriseStringSet(currentClaude, identity.ClaudeTargetSIDs) {
 		return errors.New("Claude machine enrollment does not match the authenticated activation state")
+	}
+	if currentCodex.Kept != "" {
+		// A link at the Codex folder is kept and not read through (GAP-0773),
+		// so there is no Codex enrollment to compare.
+		currentCodex = connector.WindowsCodexManagedRuntimeRegistry{
+			Active:  identity.CodexPolicyActive,
+			Targets: identity.CodexTargets,
+		}
 	}
 	if currentCodex.Active != identity.CodexPolicyActive ||
 		len(currentCodex.Targets) != len(identity.CodexTargets) {
