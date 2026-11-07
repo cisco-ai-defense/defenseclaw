@@ -1112,6 +1112,10 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 	ports := map[int]int{}
 	var unknown []enterprisehooks.UnixOpenCodeServicePortUnknown
 	var mu sync.Mutex
+	// A read that outlives its deadline keeps running after this function
+	// returns, so it is handed copies of everything it needs and never reads
+	// a package variable the caller (or a test) may reassign afterwards.
+	readTimeout, runWorker := enterpriseHookOpenCodeReadTimeout, enterpriseHookWorkerRunner
 	note := func(account enterprisehooks.UnixEligibleAccount, reason string) {
 		path := enterprisepolicy.OpenCodeServiceConfigPath(account.Home)
 		mu.Lock()
@@ -1132,24 +1136,25 @@ var enterpriseHookReadOpenCodePortsAsUsers = func(ctx context.Context, stderr io
 			defer wg.Done()
 			// The slot is released when the read answers or its deadline
 			// passes, whichever is first: a hung read does not hold it.
-			readCtx, cancel := context.WithTimeout(ctx, enterpriseHookOpenCodeReadTimeout)
+			readCtx, cancel := context.WithTimeout(ctx, readTimeout)
 			type answer struct {
 				response enterpriseHookWorkerResponse
 				err      error
 			}
 			answered := make(chan answer, 1)
+			workerAccount := enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: account.Home}
 			go func() {
 				defer cancel()
 				request := enterpriseHookWorkerRequest{Operation: enterpriseHookWorkerOpOpenCodePortRead, Standalone: true,
-					TimeoutSeconds: int(enterpriseHookOpenCodeReadTimeout / time.Second)}
-				response, err := enterpriseHookWorkerRunner(readCtx, enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.User, Home: account.Home}, request)
+					TimeoutSeconds: int(readTimeout / time.Second)}
+				response, err := runWorker(readCtx, workerAccount, request)
 				answered <- answer{response, err}
 			}()
 			var got answer
 			select {
 			case got = <-answered:
 			case <-readCtx.Done():
-				got = answer{err: fmt.Errorf("the read did not answer within %s", enterpriseHookOpenCodeReadTimeout)}
+				got = answer{err: fmt.Errorf("the read did not answer within %s", readTimeout)}
 			}
 			<-slots
 			report := got.response.OpenCodeServicePort
