@@ -3952,7 +3952,7 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 				return true
 			}
 		}
-		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, knownValueUser(request, text, home)) {
+		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, hookpaths.ActionKnownUser(text, home)) {
 			targets := links.AliasTargets(operand, true)
 			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
 				// The linked entry's parent can go on through an existing
@@ -3975,17 +3975,6 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 		}
 	}
 	return false
-}
-
-// knownValueUser is the value USER and LOGNAME keep through the shell call
-// (hookpaths.ActionKnownUser). A simple-command child is read with the
-// bindings of the whole call it was cut from: USER=x bash -c BODY binds
-// USER for the body (rel-1-0-6:GAP-0630 review 2).
-func knownValueUser(request trustedActionRequest, text, home string) string {
-	if request.simpleCommandPass && request.parentPatch != nil && request.parentPatch.Command != "" {
-		text = request.parentPatch.Command
-	}
-	return hookpaths.ActionKnownUser(text, home)
 }
 
 // provenFollowedInPlaceStateWrite reports sed -i --follow-symlinks (gsed
@@ -4016,7 +4005,7 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
 	}
 	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
-	user := knownValueUser(request, text, home)
+	user := hookpaths.ActionKnownUser(text, home)
 	for _, statement := range statements {
 		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home, user)
 		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, user)
