@@ -39,7 +39,7 @@ func PrepareServiceRuntimeDir(deploymentMode, path, label string) error {
 	}
 	// Only the leaf is created; a missing ancestor means the installer-provisioned
 	// tree is incomplete and must surface.
-	if err := os.Mkdir(path, 0o700); err != nil && !os.IsExist(err) {
+	if err := mkdirServiceRuntimeDir(path); err != nil && !os.IsExist(err) {
 		return err
 	}
 	return ValidateTrustedServiceRuntimeDir(path, label, serviceAccount)

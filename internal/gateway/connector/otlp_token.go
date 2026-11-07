@@ -195,7 +195,7 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+	if err := ensureHookAPITokenDir(filepath.Dir(tokenPath)); err != nil {
 		return "", fmt.Errorf("create OTLP path-token dir: %w", err)
 	}
 	if err := validateOTLPPathTokenDirectory(tokenPath); err != nil {
@@ -316,7 +316,7 @@ func RemoveOTLPPathToken(dataDir string, scope OTLPPathTokenScope) error {
 	if err := validateOTLPPathTokenLocation(dataDir, path); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := ensureHookAPITokenDir(filepath.Dir(path)); err != nil {
 		return err
 	}
 	return withOTLPPathTokenLock(path, func() error {

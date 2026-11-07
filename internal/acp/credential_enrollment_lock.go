@@ -18,3 +18,15 @@ func enterpriseCredentialEnrollmentLockPath(dataDir string) (string, error) {
 	}
 	return filepath.Join(filepath.Dir(path), ".enterprise-enrollment.lock"), nil
 }
+
+// EnterpriseLockFilePaths lists the lock files the ACP enrollment code creates
+// lazily under dataDir, so the Guardian and Setup repair cover each of them.
+func EnterpriseLockFilePaths(dataDir string) []string {
+	var paths []string
+	for _, build := range []func(string) (string, error){enterpriseCredentialLockPath, enterpriseCredentialEnrollmentLockPath} {
+		if path, err := build(dataDir); err == nil {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}

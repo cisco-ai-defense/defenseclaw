@@ -890,3 +890,23 @@ func validateHookAPITokenLocationWith(
 	}
 	return nil
 }
+
+// ensureHookAPITokenDir makes sure the hooks directory exists, creating a
+// missing one through mkdirHookAPITokenDir like the hook token does, so the
+// OTLP token paths never create it first with an ordinary mkdir. A missing
+// data directory above it is made first; an existing directory is left for
+// the caller trust check.
+func ensureHookAPITokenDir(hooksDir string) error {
+	if _, err := os.Lstat(hooksDir); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(hooksDir), 0o700); err != nil {
+		return err
+	}
+	if err := mkdirHookAPITokenDir(hooksDir); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	return nil
+}
