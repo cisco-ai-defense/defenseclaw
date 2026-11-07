@@ -693,6 +693,20 @@ func windowsEnterpriseStandaloneNextStepText(
 	}
 }
 
+// windowsEnterpriseHeldRollbackNextStep is the next step of a rollback or
+// recovery that a program holding a Codex file open stopped (GAP-0803): the
+// error already says to close that program and run Setup again, and that the
+// same command then finishes the rollback, so the standard recovery steps
+// ("it fails the same way", the forced uninstall) are not added. Only the
+// pending transaction and the stopped services are named. Without a pending
+// transaction (the gate before the run) it adds nothing, as before.
+func windowsEnterpriseHeldRollbackNextStep(pending bool, services []enterprisestatus.Service) string {
+	if !pending {
+		return ""
+	}
+	return windowsEnterprisePendingLead(services)
+}
+
 // windowsEnterpriseRunningAsLocalSystem reports a lifecycle running as
 // LocalSystem; set on Windows, replaceable in tests.
 var windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
