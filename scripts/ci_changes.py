@@ -349,8 +349,10 @@ def _outputs(
             "windows_go": managed or on("go", "windows"),
             "windows_python": managed or on("python", "windows"),
             # The Windows connector contract and install lifecycle on an
-            # install.ps1 install of this tree (windows-native.yml).
-            "windows_contract": on("go", "python", "ts", "windows", "connector"),
+            # install.ps1 install of this tree (windows-native.yml). A managed
+            # path includes the workflow file itself, so editing the jobs
+            # runs them.
+            "windows_contract": managed or on("go", "python", "ts", "windows", "connector"),
             "pwsh": managed or on("go", "python", "ts", "windows", "pwsh"),
             "code": on("go", "python", "tui", "ts", "rego", "windows", "packaging"),
             "repro": repro,

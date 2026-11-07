@@ -118,7 +118,7 @@ def ran(outputs: dict) -> set[str]:
 
 
 # What a managed path adds on top of its own rule.
-MANAGED_LANES = {"managed", "enterprise", "windows_go", "windows_python", "pwsh"}
+MANAGED_LANES = {"managed", "enterprise", "windows_go", "windows_python", "windows_contract", "pwsh"}
 
 
 @pytest.mark.parametrize("path", [
@@ -248,6 +248,13 @@ ALL_GROUPS = ran(ci_changes.everything("test")) - {"go_pinned"}
             "",
             [],
             id="managed-go-runs-the-windows-enterprise-smokes",
+        ),
+        pytest.param(
+            [".github/workflows/windows-native.yml"],
+            {"workflows"} | MANAGED_LANES,
+            "",
+            [],
+            id="editing-the-windows-native-workflow-runs-its-contract-jobs",
         ),
         pytest.param(["Makefile"], ALL_GROUPS, "", [], id="shared-makefile-runs-everything"),
         pytest.param(["somewhere/new.file"], ALL_GROUPS, "", [], id="unknown-path-runs-everything"),
