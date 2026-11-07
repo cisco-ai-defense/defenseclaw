@@ -59,6 +59,16 @@ import (
 // (rel-1-0-6:GAP-0482 review 2). The readers take no context, so a call is
 // the goroutine that runs it, from HookCall to its end; a read outside a
 // hook call waits for each share at most networkShareAnswerWait.
+//
+// The call budget never drops a script silently. A share read that the
+// budget cut short (the share might have answered within its own wait) and
+// that was to read the body of a script (an explicit source, make or awk -f:
+// pathOpenRoot) is recorded on the call (ShareBodyUnread); the gateway then
+// judges the call as past its evaluation limit, as it judges a command it
+// cannot read to the end. Whatever the number of shares the call asked
+// before, a body the budget kept unread is never taken as a body that wrote
+// nothing (rel-1-0-6:GAP-0482 review 7). A share that is merely slower than
+// its own wait is the owner-accepted bound and is not recorded.
 
 // errNetworkShareUnanswered is the error of a read below a network share
 // that has not answered. It is not fs.ErrNotExist: the path may exist.
@@ -116,6 +126,9 @@ type hookCall struct {
 	// (networkShareCallShares answer waits and tail at its start); tail is
 	// the part of it that the shares after the full waits share.
 	waitLeft, tail time.Duration
+	// bodyUnread is set when the budget cut short a read of a script body
+	// (ShareBodyUnread).
+	bodyUnread bool
 }
 
 // shareWait is how long the call may wait for the next share: a full answer
@@ -181,9 +194,17 @@ func goroutineID() uint64 {
 // networkPathUnanswered reports a path below a network share that has not
 // answered in time. A local path is never reported and costs no probe.
 func networkPathUnanswered(path string) bool {
+	unanswered, _ := networkPathRead(path)
+	return unanswered
+}
+
+// networkPathRead is networkPathUnanswered that also reports whether the
+// call budget, not the own wait of the share, ended the wait for a share
+// that did not answer: it might have answered had the call had more budget.
+func networkPathRead(path string) (unanswered, budgetCut bool) {
 	root := networkShareRootOf(path)
 	if root == "" {
-		return false
+		return false, false
 	}
 	// One probe per share, whichever slashes the path spells it with.
 	key := strings.ToLower(filepath.ToSlash(root))
@@ -198,10 +219,10 @@ func networkPathUnanswered(path string) bool {
 			switch {
 			case dead && now.Sub(finished) < networkShareQuietFor:
 				networkShares.mu.Unlock()
-				return true
+				return true, false
 			case !dead && now.Sub(finished) < networkShareAnsweredFor:
 				networkShares.mu.Unlock()
-				return false
+				return false, false
 			}
 			probe = nil
 		default:
@@ -215,7 +236,7 @@ func networkPathUnanswered(path string) bool {
 			// As many shares as the limit are being asked and none has
 			// answered: hold no further thread on one more.
 			networkShares.mu.Unlock()
-			return true
+			return true, false
 		}
 		probe = &networkShareProbe{started: now, done: make(chan struct{})}
 		networkShares.probes[key] = probe
@@ -233,14 +254,16 @@ func networkPathUnanswered(path string) bool {
 	wait := networkShareAnswerWait - now.Sub(probe.started)
 	call := currentHookCall()
 	if call != nil {
-		wait = min(wait, call.shareWait())
+		if left := call.shareWait(); left < wait {
+			wait, budgetCut = left, true
+		}
 	}
 	if wait <= 0 {
 		select {
 		case <-probe.done:
-			return probe.took > networkShareDeadAfter
+			return probe.took > networkShareDeadAfter, false
 		default:
-			return true
+			return true, budgetCut
 		}
 	}
 	timer := time.NewTimer(wait)
@@ -250,10 +273,38 @@ func networkPathUnanswered(path string) bool {
 	}
 	select {
 	case <-probe.done:
-		return probe.took > networkShareDeadAfter
+		return probe.took > networkShareDeadAfter, false
 	case <-timer.C:
-		return true
+		return true, budgetCut
 	}
+}
+
+// OverrideNetworkSharesForTest replaces which paths are network shares
+// (rootOf names the share of a path, "" for none) and how a share is asked,
+// and forgets the shares asked so far, for tests of the gateway on a host
+// with no share. The restore puts all back.
+func OverrideNetworkSharesForTest(rootOf func(path string) string, ask func(root string)) (restore func()) {
+	oldRoot, oldProbe := networkShareRootOf, probeNetworkShare
+	networkShares.mu.Lock()
+	oldProbes := networkShares.probes
+	networkShares.probes = nil
+	networkShares.mu.Unlock()
+	networkShareRootOf, probeNetworkShare = rootOf, ask
+	return func() {
+		networkShareRootOf, probeNetworkShare = oldRoot, oldProbe
+		networkShares.mu.Lock()
+		networkShares.probes = oldProbes
+		networkShares.mu.Unlock()
+	}
+}
+
+// ShareBodyUnread reports that the hook call on the calling goroutine
+// could not read the body of a script on a network share because its share
+// budget was spent. The body might have written a protected file; the
+// caller judges the call as it judges one it cannot evaluate.
+func ShareBodyUnread() bool {
+	call := currentHookCall()
+	return call != nil && call.bodyUnread
 }
 
 // evictNetworkShareProbesLocked drops the finished probes and reports
@@ -310,7 +361,10 @@ func pathOpen(name string) (*os.File, error) {
 // pathOpenRoot is os.OpenRoot with the root read as pathOpen reads it.
 // A read through the root stays below the root, so on the same share.
 func pathOpenRoot(name string) (*os.Root, error) {
-	if networkPathUnanswered(name) {
+	if unanswered, budgetCut := networkPathRead(name); unanswered {
+		if call := currentHookCall(); call != nil && budgetCut {
+			call.bodyUnread = true
+		}
 		return nil, networkShareError("openroot", name)
 	}
 	return os.OpenRoot(name)
