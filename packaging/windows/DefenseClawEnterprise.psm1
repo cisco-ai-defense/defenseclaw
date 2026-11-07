@@ -14733,11 +14733,11 @@ function Test-DefenseClawTransientDeploymentMetadataError {
             return $true
         }
         if ($exception -is [ComponentModel.Win32Exception] -and
-            [int]$exception.NativeErrorCode -in @(2, 3, 32)) {
+            [int]$exception.NativeErrorCode -in @(2, 3, 32, 33)) {
             return $true
         }
         if ($exception -is [IO.IOException] -and
-            ([int]$exception.HResult -band 0xffff) -in @(2, 3, 32)) {
+            ([int]$exception.HResult -band 0xffff) -in @(2, 3, 32, 33)) {
             return $true
         }
     }
