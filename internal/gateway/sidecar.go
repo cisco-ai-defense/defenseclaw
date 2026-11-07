@@ -6734,6 +6734,20 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					}
 					continue
 				}
+				if connectorRefusedAtCustody(err) {
+					// Another account can write where the guard of this connector
+					// lives. Setup changed nothing, so its earlier registration
+					// stays, only this connector is not started (its hooks follow
+					// the outage mode and still block a protected call), and every
+					// other connector keeps enforcing. The refusal names the one
+					// fix; a restart retries it (GAP-0798).
+					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s not started, another account can write where its guard lives (other connectors unaffected): %v\n", registration.conn.Name(), err)
+					transaction.noteNotStarted(registration.conn.Name(), err)
+					if strings.TrimSpace(previousLock.Connector) != "" {
+						transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
+					}
+					continue
+				}
 				// A refresh is an upgrade of an existing guard. Teardown restores
 				// the pre-install, possibly hookless settings, not that guard.
 				// Restore its prior posture with the rest of this transaction and

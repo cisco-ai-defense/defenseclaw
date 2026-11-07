@@ -71,3 +71,19 @@ type RepairedRefusal interface {
 }
 
 func (e *pluginCustodyError) Unwrap() []error { return []error{e.cause, ErrPluginFolderCustody} }
+
+// PluginFolderRefusedBeforeChange reports whether err is the custody refusal
+// itself, reached through single wrappers only. Setup raises it before it
+// writes the plugin, the backup receipt or the lock, so the connector keeps
+// the registration it had. A refusal joined with another failure (a
+// rollback that met the same folder) is not the refusal alone: the other
+// failure may have left a change behind, and errors.Is would still match
+// (GAP-0798).
+func PluginFolderRefusedBeforeChange(err error) bool {
+	for ; err != nil; err = errors.Unwrap(err) {
+		if _, ok := err.(*pluginCustodyError); ok {
+			return true
+		}
+	}
+	return false
+}
