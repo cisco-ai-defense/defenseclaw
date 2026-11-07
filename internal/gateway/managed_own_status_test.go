@@ -22,6 +22,7 @@ import (
 // is the kernel-verified caller's: another account's last Cowork event, the
 // administrator's profiles and paths are never in it.
 func TestOwnStatusAnswersOnlyTheCaller(t *testing.T) {
+	completeOwnStatusScan(t, nil)
 	previous := ownStatusCoworkEvents
 	t.Cleanup(func() { ownStatusCoworkEvents = previous })
 	mine := time.Date(2026, 11, 4, 9, 0, 0, 0, time.UTC)
@@ -91,6 +92,7 @@ func TestOwnStatusAnswersOnlyTheCaller(t *testing.T) {
 }
 
 func TestManagedOwnStatusReportsConfiguredConnectorProof(t *testing.T) {
+	completeOwnStatusScan(t, nil)
 	previousGuardian := ownStatusGuardianAuthorization
 	ownStatusGuardianAuthorization = func(string) (*managedGuardianAuthorization, string) { return nil, "unavailable" }
 	t.Cleanup(func() { ownStatusGuardianAuthorization = previousGuardian })
@@ -186,6 +188,7 @@ func TestManagedOwnStatusReportsConfiguredConnectorProof(t *testing.T) {
 }
 
 func TestManagedOwnStatusIncludesStandaloneConnectorSources(t *testing.T) {
+	completeOwnStatusScan(t, nil)
 	previousGuardian := ownStatusGuardianAuthorization
 	ownStatusGuardianAuthorization = func(string) (*managedGuardianAuthorization, string) { return nil, "unavailable" }
 	t.Cleanup(func() { ownStatusGuardianAuthorization = previousGuardian })
@@ -239,6 +242,7 @@ func TestManagedOwnStatusIncludesStandaloneConnectorSources(t *testing.T) {
 // own state and last Cowork event only. A SID that is not a user account's
 // gets no answer.
 func TestOwnStatusForWindowsAccountAnswersOnlyThatAccount(t *testing.T) {
+	completeOwnStatusScan(t, nil)
 	previousEvents, previousName := ownStatusCoworkEvents, ownStatusWindowsAccountName
 	t.Cleanup(func() { ownStatusCoworkEvents, ownStatusWindowsAccountName = previousEvents, previousName })
 	const alice, bob = "S-1-5-21-1004336348-1177238915-682003330-1001", "S-1-5-21-1004336348-1177238915-682003330-1002"
@@ -296,6 +300,7 @@ func TestOwnStatusForWindowsAccountAnswersOnlyThatAccount(t *testing.T) {
 // as the Unix answer while retaining its existing Claude Code and Cowork
 // status. A connector without per-user proof stays unconfirmed.
 func TestOwnStatusForWindowsAccountListsConfiguredConnectors(t *testing.T) {
+	completeOwnStatusScan(t, nil)
 	previousName := ownStatusWindowsAccountName
 	ownStatusWindowsAccountName = func(string) string { return `WIN11\alice` }
 	t.Cleanup(func() { ownStatusWindowsAccountName = previousName })

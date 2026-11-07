@@ -231,7 +231,7 @@ func TestEnumerateCyclePublishesTheUnprotectedAgentsRecord(t *testing.T) {
 		enterpriseHooksEnumerateGatewayAgents = origGatewayAgents
 	})
 	var gatewayCopy []enterprisehooks.UnprotectedAgent
-	enterpriseHooksEnumerateGatewayAgents = func(_ string, agents []enterprisehooks.UnprotectedAgent) error {
+	enterpriseHooksEnumerateGatewayAgents = func(_ string, agents []enterprisehooks.UnprotectedAgent, _ uint64, _ string) error {
 		gatewayCopy = append([]enterprisehooks.UnprotectedAgent(nil), agents...)
 		return nil
 	}
