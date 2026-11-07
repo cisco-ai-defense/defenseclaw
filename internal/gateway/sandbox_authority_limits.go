@@ -38,7 +38,7 @@ import (
 // post on the hook route: sandbox-receipt, the same rate and burst, counts
 // those (hookCallerAdmissionKey), so a receipt never spends the evaluation
 // rate. There is no four-binding limit: one account can use its budget
-// across more bindings, each with its own 32-request in-flight limit. The
+// across more bindings, each with its own in-flight limit (sandboxauth.DefaultMaxInFlight). The
 // shared hook and receipt admission therefore holds the most calls the
 // account bucket can admit during each managed request's actual lifetime,
 // including its initial burst (GAP-0490). The 60 s policy/current poll is
