@@ -586,12 +586,16 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 	if subject != nil && subject.tokenGroupsCause != "" {
 		why = append(why, subject.tokenGroupsCause)
 	}
+	command := set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown"))
+	// The hint follows the command as printed: a command without the
+	// placeholder (the OSS profile list of an account without a verified ID,
+	// a built-in connector) has nothing to substitute.
 	hint := ""
-	if set.profileCommandConnector(connectorName) && profileCommandConnectorArgument(connectorName) == profileConnectorPlaceholder {
+	if strings.Contains(command, " --connector "+profileConnectorPlaceholder) {
 		hint = identityRefusalConnectorHint
 	}
 	return issueIdentityRefusal(identityRefusalPrefix + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + identityRefusalTail + hint)
+		"; run `" + command + "`" + set.profileExplainPrompt() + identityRefusalTail + hint)
 }
 
 // explainOnRequestPaths is explain's decision for connectorName's requests:
