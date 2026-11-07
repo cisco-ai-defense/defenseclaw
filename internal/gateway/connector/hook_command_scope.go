@@ -556,6 +556,18 @@ func hookHomeParam(param *syntax.ParamExp) bool {
 	return ok && name == "HOME"
 }
 
+// hookHasParam reports whether word holds a parameter expansion, quoted or not.
+func hookHasParam(word *syntax.Word) bool {
+	found := false
+	syntax.Walk(word, func(n syntax.Node) bool {
+		if _, ok := n.(*syntax.ParamExp); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
 // hookPlainParam returns the name of a plain $NAME or ${NAME}.
 func hookPlainParam(param *syntax.ParamExp) (string, bool) {
 	if param.Param == nil || param.Exp != nil || param.Index != nil || param.Slice != nil || param.Repl != nil ||

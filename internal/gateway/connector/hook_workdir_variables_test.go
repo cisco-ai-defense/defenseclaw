@@ -229,3 +229,37 @@ func TestHookInterpreterFlagsBeforeScript(t *testing.T) {
 		})
 	}
 }
+
+// A word that holds a variable the command set to a literal directory opens the
+// file of that name there: a link to a managed hook stays protected, and an
+// ordinary link stays the user's.
+func TestHookWordHoldingKnownVariableIsTheFileItOpens(t *testing.T) {
+	forms := map[string]string{
+		"program word":    `D=DIR; "$D/linked-file"`,
+		"script operand":  `D=DIR; bash "$D/linked-file"`,
+		"braces":          `D=DIR; bash "${D}/linked-file"`,
+		"unquoted":        `D=DIR; bash $D/linked-file`,
+		"relative after":  `D=DIR; cd "$D" && bash "./linked-file"`,
+		"redirect source": `D=DIR; bash < "$D/linked-file"`,
+	}
+	for name, form := range forms {
+		t.Run(name+"/managed", func(t *testing.T) {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
+				managed, _ := hookLinkDirs(t, home, hooks)
+				command := strings.ReplaceAll(form, "DIR", shellWord(managed))
+				gap0625RunsInBash(t, command)
+				return command
+			})
+			gap0625ExpectProtected(t, verifyErr, commands, userHook)
+		})
+		t.Run(name+"/ordinary", func(t *testing.T) {
+			commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
+				_, ordinary := hookLinkDirs(t, home, hooks)
+				command := strings.ReplaceAll(form, "DIR", shellWord(ordinary))
+				gap0625RunsInBash(t, command)
+				return command
+			})
+			gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+		})
+	}
+}
