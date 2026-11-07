@@ -19,6 +19,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import sys
 import tempfile
 import time
@@ -900,8 +901,8 @@ class DoctorGuardrailTests(unittest.TestCase):
             patch.object(cmd_doctor, "_http_probe", return_value=refused),
             patch.object(
                 cmd_doctor,
-                "sudo_runtime_leftover_relpaths",
-                return_value=["hook_contract_lock.json", "active_connector.json"],
+                "root_owned_start_blockers",
+                return_value=(["hook_contract_lock.json", "active_connector.json"], []),
             ),
         ):
             result = _DoctorResult()
@@ -914,6 +915,33 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertTrue(row["remediation"].rstrip().endswith("defenseclaw-gateway start"))
         self.assertNotIn("doctor --fix", row["detail"] + row["remediation"])
 
+    def test_stopped_gateway_chain_takes_away_group_and_other_access_before_the_start(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        loose = "/tmp/defenseclaw/active connector.json"
+        with patch.object(
+            cmd_doctor,
+            "root_owned_start_blockers",
+            return_value=(["active connector.json"], [loose]),
+        ):
+            detail, remediation = cmd_doctor._stopped_gateway_start_advice(cfg)
+        self.assertIn("active connector.json", detail)
+        self.assertTrue(
+            remediation.endswith(" && chmod go-rwx " + shlex.quote(loose) + " && defenseclaw-gateway start"),
+            remediation,
+        )
+
+    def test_stopped_gateway_blocker_asks_about_the_configured_discovery(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        for enabled in (False, True):
+            cfg.ai_discovery.enabled = enabled
+            with patch.object(cmd_doctor, "root_owned_start_blockers", return_value=([], [])) as blockers:
+                cmd_doctor._root_leftover_start_blocker(cfg)
+            self.assertEqual(blockers.call_args.kwargs["ai_discovery_enabled"], enabled)
+
     def test_sidecar_check_still_advises_a_start_without_root_owned_files(self):
         from defenseclaw.commands import cmd_doctor
 
@@ -921,7 +949,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         refused = (0, "<urlopen error [Errno 111] Connection refused>")
         with (
             patch.object(cmd_doctor, "_http_probe", return_value=refused),
-            patch.object(cmd_doctor, "sudo_runtime_leftover_relpaths", return_value=[]),
+            patch.object(cmd_doctor, "root_owned_start_blockers", return_value=([], [])),
         ):
             result = _DoctorResult()
             _check_sidecar(cfg, result)

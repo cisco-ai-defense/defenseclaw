@@ -545,42 +545,119 @@ SUDO_RUNTIME_LEFTOVER_NAMES: tuple[str, ...] = (
 )
 
 
-def sudo_runtime_leftover_relpaths(data_dir: str | os.PathLike[str]) -> list[str]:
-    """Return relative paths of private root-owned leftovers under *data_dir*."""
+# The data directory itself, named in the start blockers below when root owns
+# it and this account cannot use it (a moved store left root-owned 0700).
+STORE_DIR_ENTRY = "./"
 
-    if os.name == "nt" or not hasattr(os, "geteuid"):
+
+def _root_owned_runtime_files(
+    data_dir: str | os.PathLike[str],
+    names: tuple[str, ...],
+    *,
+    private_only: bool,
+) -> list[tuple[str, bool]]:
+    """``(relative path, group/other bits set)`` of root-owned files under *data_dir*.
+
+    ``lstat`` needs no read access. With *private_only* a file that grants
+    group or others anything is left out (the Sudo leftovers row of Doctor); without
+    it the file is named and flagged, because the gateway refuses such a file
+    too and a change of owner alone does not repair it.
+    """
+
+    if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0:
         return []
     root = os.fspath(data_dir)
-    leftovers: list[str] = []
-    for name in SUDO_RUNTIME_LEFTOVER_NAMES:
-        if root_owned_private_regular_file(os.path.join(root, name)):
-            leftovers.append(name)
+    found: list[tuple[str, bool]] = []
+
+    def add(rel: str) -> None:
+        try:
+            info = os.lstat(os.path.join(root, rel))
+        except OSError:
+            return
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0:
+            return
+        loose = bool(stat.S_IMODE(info.st_mode) & 0o077)
+        if loose and private_only:
+            return
+        found.append((rel, loose))
+
+    for name in names:
+        add(name)
 
     hooks_dir = os.path.join(root, "hooks")
     try:
         info = os.lstat(hooks_dir)
     except OSError:
-        return leftovers
+        return found
     if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-        return leftovers
-    current_uid = os.geteuid()
-    if (
-        current_uid != 0
-        and info.st_uid == 0
-        and not (stat.S_IMODE(info.st_mode) & 0o022)
-    ):
-        leftovers.append("hooks/")
+        return found
+    if info.st_uid == 0 and not (stat.S_IMODE(info.st_mode) & 0o022):
+        found.append(("hooks/", False))
     try:
-        names = os.listdir(hooks_dir)
+        hook_names = os.listdir(hooks_dir)
     except OSError:
-        return leftovers
-    for name in sorted(names):
-        if not (name.startswith(".hook-") and name.endswith(".token")):
-            continue
-        rel = f"hooks/{name}"
-        if root_owned_private_regular_file(os.path.join(hooks_dir, name)):
-            leftovers.append(rel)
-    return leftovers
+        return found
+    for name in sorted(hook_names):
+        if name.startswith(".hook-") and name.endswith(".token"):
+            add(f"hooks/{name}")
+    return found
+
+
+def sudo_runtime_leftover_relpaths(data_dir: str | os.PathLike[str]) -> list[str]:
+    """Return relative paths of private root-owned leftovers under *data_dir*."""
+
+    return [rel for rel, _ in _root_owned_runtime_files(data_dir, SUDO_RUNTIME_LEFTOVER_NAMES, private_only=True)]
+
+
+# The PID records the gateway start and restart validate before anything else.
+GATEWAY_PID_RECORD_NAMES: tuple[str, ...] = ("gateway.pid", "watchdog.pid")
+
+
+def root_owned_start_blockers(
+    data_dir: str | os.PathLike[str],
+    *,
+    ai_discovery_enabled: bool,
+    pid_dir: str | os.PathLike[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Root-owned state that stops the gateway start of this account (GAP-0788).
+
+    Returns ``(blockers, loose)``: the paths to name, and the ones of those
+    whose group/other bits the gateway also refuses, which the repair must
+    take away after the owner is returned. Unlike the Sudo leftovers row this
+    names a root-owned file of any mode, the data directory itself when root
+    owns it and this account cannot write there (its files are then invisible,
+    as in a root-owned 0700 moved store), and the PID records in *pid_dir*
+    when that is another folder. The AI discovery state is named only when
+    discovery is enabled: the gateway reads it then and not otherwise.
+    """
+
+    if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0:
+        return [], []
+    names = tuple(n for n in SUDO_RUNTIME_LEFTOVER_NAMES if ai_discovery_enabled or n != "ai_discovery_state.json")
+    blockers: list[str] = []
+    loose: list[str] = []
+    try:
+        info = os.lstat(data_dir)
+    except OSError:
+        info = None
+    if (
+        info is not None
+        and stat.S_ISDIR(info.st_mode)
+        and info.st_uid == 0
+        and not os.access(data_dir, os.W_OK | os.X_OK)
+    ):
+        blockers.append(STORE_DIR_ENTRY)
+    for rel, is_loose in _root_owned_runtime_files(data_dir, names, private_only=False):
+        blockers.append(rel)
+        if is_loose:
+            loose.append(os.path.join(os.fspath(data_dir), rel))
+    if pid_dir is not None and os.path.abspath(os.fspath(pid_dir)) != os.path.abspath(os.fspath(data_dir)):
+        for rel, is_loose in _root_owned_runtime_files(pid_dir, GATEWAY_PID_RECORD_NAMES, private_only=False):
+            path = os.path.join(os.fspath(pid_dir), rel)
+            blockers.append(path)
+            if is_loose:
+                loose.append(path)
+    return blockers, loose
 
 
 # The one Windows owner trust set, besides the account itself, for folders and

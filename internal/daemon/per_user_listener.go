@@ -97,12 +97,27 @@ func rootGatewayWindowsExecutable() string {
 // names the install home only and the note says so, so the sequence is never
 // presented as complete. The note is empty otherwise.
 func rootGatewayRecoverySteps(dataDir string) (command, note string) {
+	return rootGatewayRecoveryStepsLoosening(dataDir, nil)
+}
+
+// rootGatewayRecoveryStepsLoosening is rootGatewayRecoverySteps with a chmod
+// between the return and the start for the root-owned files that also grant
+// group or others access (GAP-0788): the gateway refuses such a file after the
+// owner is returned.
+func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command, note string) {
 	dirs, configFile, storeErr := rootGatewayRecoveryDirs(dataDir)
 	for i, dir := range dirs {
 		dirs[i] = shellQuote(dir)
 	}
-	command = rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ") +
-		" && defenseclaw-gateway start"
+	command = rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ")
+	if len(loosen) > 0 {
+		quoted := make([]string, len(loosen))
+		for i, path := range loosen {
+			quoted[i] = shellQuote(path)
+		}
+		command += " && chmod go-rwx " + strings.Join(quoted, " ")
+	}
+	command += " && defenseclaw-gateway start"
 	if storeErr != nil {
 		note = "The configuration " + configFile + " could not be read here, so a data_dir it sets is " +
 			"not in the chown command below: return that folder to your account too. "

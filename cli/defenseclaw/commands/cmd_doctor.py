@@ -138,6 +138,7 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_valid,
     read_regular_file_no_follow,
     root_owned_private_regular_file,
+    root_owned_start_blockers,
     sudo_runtime_leftover_relpaths,
     trusted_system_subprocess_env,
 )
@@ -1918,13 +1919,16 @@ def _root_gateway_windows_executable() -> str:
     return "defenseclaw-gateway.exe"
 
 
-def _root_gateway_recovery_command(cfg) -> str:
+def _root_gateway_recovery_command(cfg, loosen: tuple[str, ...] = ()) -> str:
     """Stop the root gateway, return the home and the store, start as this account."""
-    return _root_gateway_stop_command(cfg) + " && " + _root_gateway_return_and_start_command(cfg)
+    return _root_gateway_stop_command(cfg) + " && " + _root_gateway_return_and_start_command(cfg, loosen)
 
 
-def _root_gateway_return_and_start_command(cfg) -> str:
-    """Give the install home and the moved store back to this account, then start."""
+def _root_gateway_return_and_start_command(cfg, loosen: tuple[str, ...] = ()) -> str:
+    """Give the install home and the moved store back to this account, then start.
+
+    ``loosen`` files lose their group and other access between the two.
+    """
     home = _root_gateway_install_home(cfg)
     store = _root_gateway_moved_store()[0]
     homes = [home]
@@ -1933,6 +1937,7 @@ def _root_gateway_return_and_start_command(cfg) -> str:
     return (
         'sudo chown -R "$(id -un)" '
         + " ".join(shlex.quote(item) for item in homes)
+        + (" && chmod go-rwx " + " ".join(shlex.quote(item) for item in loosen) if loosen else "")
         + " && defenseclaw-gateway start"
     )
 
@@ -2071,7 +2076,7 @@ def _root_leftovers_account_can_repair(cfg) -> bool:
     return not asset_lists.is_secure_client(cfg)
 
 
-def _root_leftovers_remedy(cfg) -> str:
+def _root_leftovers_remedy(cfg, loosen: tuple[str, ...] = ()) -> str:
     """The one repair for root-owned files a sudo-started gateway left behind.
 
     The gateway refuses to run as root over an account's files, so asking for
@@ -2079,34 +2084,44 @@ def _root_leftovers_remedy(cfg) -> str:
     stop, return, start sequence as ``_root_gateway_remedy``, in that order:
     a root gateway that is still alive keeps writing, and the stop of one that
     is already stopped succeeds, so the sequence reads the same either way.
+    ``loosen`` names root-owned files that also grant group or others access,
+    which the gateway refuses after the owner is returned: the chain takes
+    that access away before the start.
     """
     note = _root_gateway_recovery_note(cfg)
     return (
         (note + "Then stop" if note else "stop")
         + " the gateway if it runs as root, give its files back to this account and start it as yourself: "
-        + _root_gateway_recovery_command(cfg)
+        + _root_gateway_recovery_command(cfg, loosen)
     )
 
 
 def _root_leftover_start_blocker(cfg) -> tuple[list[str], str]:
-    """Root-owned runtime files that stop this account's gateway from starting (GAP-0788).
+    """Root-owned state that stops the gateway of this account from starting (GAP-0788).
 
     Returns ``(names, remedy)``, or ``([], "")`` when nothing blocks the start.
-    It reads the same store, with the same helper, as the Sudo leftovers row
-    and gives the same remedy chain, so the Sidecar API row and ``doctor --fix``
-    never send the user to a start the gateway refuses over files only root
-    can change. A managed install and a Secure Client host keep their own
-    guidance, as the Sudo leftovers row does.
+    It reads the same store as the Sudo leftovers row and gives the same remedy
+    chain, so the Sidecar API row and ``doctor --fix`` never send the user to a
+    start the gateway refuses over files only root can change. Beyond that row
+    it names a root-owned file of any mode (the chain then also takes the group
+    and other access away), a root-owned store this account cannot use, a
+    root-owned PID record in the install home, and AI discovery state only when
+    discovery is enabled. A managed install and a Secure Client host keep their
+    own guidance, as the Sudo leftovers row does.
     """
     if os.name == "nt" or _gateway_store_unknown(cfg) or not _root_leftovers_account_can_repair(cfg):
         return [], ""
     data_dir = _gateway_store_dir(cfg)
     if not data_dir:
         return [], ""
-    names = sudo_runtime_leftover_relpaths(data_dir)
+    names, loose = root_owned_start_blockers(
+        data_dir,
+        ai_discovery_enabled=bool(getattr(getattr(cfg, "ai_discovery", None), "enabled", False)),
+        pid_dir=_root_gateway_install_home(cfg),
+    )
     if not names:
         return [], ""
-    return names, _root_leftovers_remedy(cfg)
+    return names, _root_leftovers_remedy(cfg, tuple(loose))
 
 
 def _stopped_gateway_start_advice(cfg) -> tuple[str, str]:

@@ -2052,8 +2052,8 @@ def test_fix_gateway_service_does_not_start_over_root_owned_files(tmp_path, plan
         process,
         listener,
         patch(
-            "defenseclaw.commands.cmd_doctor.sudo_runtime_leftover_relpaths",
-            return_value=["active_connector.json"],
+            "defenseclaw.commands.cmd_doctor.root_owned_start_blockers",
+            return_value=(["active_connector.json"], []),
         ),
         patch("defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle") as repair,
         patch("defenseclaw.commands.cmd_doctor.click.confirm") as confirm,

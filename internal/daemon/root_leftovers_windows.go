@@ -7,6 +7,9 @@ package daemon
 
 import "io/fs"
 
-// fileOwnerUID has no meaning on Windows, where RootOwnedRuntimeLeftovers
+// fileOwnerUID has no meaning on Windows, where RootOwnedStartBlockers
 // returns before it is asked.
 func fileOwnerUID(fs.FileInfo) (uint32, bool) { return 0, false }
+
+// accountCanUseDir has no meaning on Windows, for the same reason.
+func accountCanUseDir(string) bool { return true }
