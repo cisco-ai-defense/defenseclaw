@@ -631,48 +631,23 @@ EMPTY_RULE_PACK_FILES_DIGEST = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e46
 def custom_pack_dir(cfg: Any, entry: Any) -> str:
     """The folder a ``guardrail.custom_packs`` entry names, "" when its path is blank.
 
-    An absolute path as written, a relative one against the (absolute)
-    directory of the config file, never the working directory (Go
-    ``customPackPathIn``). ``~`` is not expanded: the gateway does not.
+    An absolute path as written, a relative one against the absolute directory
+    of the config file recorded when the config was loaded (``config.load``),
+    never the working directory read now (Go ``customPackPathIn``). A config
+    built in code records none and takes the directory of its config path,
+    made absolute at this call. ``~`` is not expanded: the gateway does not.
     """
     raw = str(getattr(entry, "path", "") or "").strip()
     if not raw:
         return ""
     if os.path.isabs(raw):
         return os.path.normpath(raw)
-    from defenseclaw.config import config_path_for_data_dir
+    base = str(getattr(_guardrail(cfg), "_custom_pack_base", "") or "")
+    if not base:
+        from defenseclaw.config import config_path_for_data_dir
 
-    base = os.path.dirname(str(config_path_for_data_dir(str(getattr(cfg, "data_dir", "") or ""))))
+        base = os.path.dirname(os.path.abspath(str(config_path_for_data_dir(str(getattr(cfg, "data_dir", "") or "")))))
     return os.path.abspath(os.path.join(base, raw))
-
-
-# The Go rule loader verdicts on pack folders, kept for the life of the
-# process and keyed by what the folder holds, so a status or doctor run asks
-# the gateway binary once per pack state, not once per reader.
-_LOADER_VERDICTS: dict[tuple[Any, ...], tuple[str, str]] = {}
-_MAX_LOADER_VERDICTS = 64
-_MAX_FINGERPRINT_FILES = 4096
-
-
-def _pack_fingerprint(path: str) -> tuple[tuple[str, int, int], ...] | None:
-    """(relative path, size, mtime) of every file under *path*; None when it cannot be listed or is too large."""
-    out: list[tuple[str, int, int]] = []
-
-    def _raise(exc: OSError) -> None:
-        raise exc
-
-    try:
-        for root, dirs, files in os.walk(path, onerror=_raise):
-            dirs.sort()
-            for entry in sorted(files):
-                full = os.path.join(root, entry)
-                info = os.stat(full)
-                out.append((os.path.relpath(full, path), info.st_size, info.st_mtime_ns))
-                if len(out) > _MAX_FINGERPRINT_FILES:
-                    return None
-    except OSError:
-        return None
-    return tuple(out)
 
 
 def _loader_verdict(path: str) -> tuple[str, str] | None:
@@ -683,29 +658,20 @@ def _loader_verdict(path: str) -> tuple[str, str] | None:
     for a folder it refuses, ``None`` when the verdict is unavailable (no
     trusted gateway binary, or a helper that does not answer). Python never
     judges pack content itself: ``defenseclaw-gateway rulepack validate`` runs
-    the loader the gateway enforces with (``rulepack_validation``).
+    the loader the gateway enforces with (``rulepack_validation``). The verdict
+    is asked on every read and never kept: any file or folder change, whatever
+    its size or time, reaches the next reader.
     """
     from defenseclaw import rulepack_validation
 
-    validate = rulepack_validation.validate_rule_pack
-    fingerprint = _pack_fingerprint(path)
-    key = (validate, path, fingerprint)
-    if fingerprint is not None and key in _LOADER_VERDICTS:
-        return _LOADER_VERDICTS[key]
     try:
-        result = validate(path)
+        result = rulepack_validation.validate_rule_pack(path)
     except Exception:  # noqa: BLE001 - an unavailable helper is "unverified", never "usable".
         return None
     if result.valid:
-        verdict = ("", str((result.summary or {}).get("files_digest", "") or "").lower())
-    else:
-        issue = result.error
-        verdict = (f"{issue.code} at {issue.path}: {issue.reason}" if issue else "not a valid rule pack", "")
-    if fingerprint is not None:
-        if len(_LOADER_VERDICTS) >= _MAX_LOADER_VERDICTS:
-            _LOADER_VERDICTS.clear()
-        _LOADER_VERDICTS[key] = verdict
-    return verdict
+        return "", str((result.summary or {}).get("files_digest", "") or "").lower()
+    issue = result.error
+    return (f"{issue.code} at {issue.path}: {issue.reason}" if issue else "not a valid rule pack"), ""
 
 
 def custom_pack_check(cfg: Any, name: str) -> tuple[str, bool]:

@@ -11,6 +11,7 @@ fallback pack, the hook's outage mode follows the strict tier (closed), and
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 from defenseclaw import config as dcconfig
@@ -56,10 +57,15 @@ class _Loader:
         return rulepack_validation.RulePackValidationResult(1, "validation_error", False, error=issue)
 
 
+# The reader conftest replaces for every test (an installed gateway must not decide them).
+_REAL_LOADER_VERDICT = policy_catalog._loader_verdict
+
+
 @pytest.fixture
 def loader(monkeypatch):
     fake = _Loader()
     monkeypatch.setattr(rulepack_validation, "validate_rule_pack", fake)
+    monkeypatch.setattr(policy_catalog, "_loader_verdict", _REAL_LOADER_VERDICT)
     return fake
 
 
@@ -103,17 +109,75 @@ def test_pin_comparison_is_case_insensitive_and_needs_the_prefix(tmp_path, loade
     assert policy_catalog.custom_pack_problem(bare, "operator")
 
 
-def test_loader_verdict_is_asked_once_per_pack_state(tmp_path, loader):
+def test_loader_verdict_is_never_kept_between_reads(tmp_path, loader):
+    """Every read asks the loader: no cache can hold a usable verdict for a pack that changed."""
     path = _pack(tmp_path)
     cfg = _cfg(tmp_path, "operator", CustomRulePack(path=path, digest=PIN))
     for _ in range(3):
         assert policy_catalog.custom_pack_problem(cfg, "operator") == ""
-        assert cfg.guardrail.hook_policy_tier("codex") == "default"
-    assert loader.calls == 1
-    with open(os.path.join(path, "suppressions.yaml"), "a", encoding="utf-8") as fh:
-        fh.write("# edited\n")
+    assert loader.calls == 3
+
+
+def test_a_directory_entry_added_to_a_valid_pack_reaches_the_next_reader(tmp_path, loader):
+    """The Go loader refuses a directory link in a pack; a verdict taken before it must not survive."""
+    path = _pack(tmp_path)
+    cfg = _cfg(tmp_path, "operator", CustomRulePack(path=path, digest=PIN))
     assert policy_catalog.custom_pack_problem(cfg, "operator") == ""
-    assert loader.calls == 2
+    assert cfg.guardrail.hook_policy_tier("codex") == "default"
+    os.symlink(str(tmp_path), os.path.join(path, "linked"))
+    loader.answers[os.path.basename(path)] = "file_type: a directory link"
+    reloaded = _cfg(tmp_path, "operator", CustomRulePack(path=path, digest=PIN))
+    for view in (cfg, reloaded):
+        assert policy_catalog.custom_pack_problem(view, "operator")
+        assert view.guardrail.hook_policy_tier("codex") == "strict"
+        assert view.guardrail.effective_hook_outage_fail_mode("codex") == "closed"
+
+
+def test_an_edit_that_keeps_size_and_mtime_reaches_the_next_reader(tmp_path, loader):
+    path = _pack(tmp_path)
+    cfg = _cfg(tmp_path, "operator", CustomRulePack(path=path, digest=PIN))
+    assert policy_catalog.custom_pack_problem(cfg, "operator") == ""
+    target = os.path.join(path, "suppressions.yaml")
+    before = os.stat(target)
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write("version: 2\n")
+    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert os.stat(target).st_size == before.st_size
+    loader.answers[os.path.basename(path)] = "the pack content changed"
+    assert policy_catalog.custom_pack_problem(cfg, "operator")
+
+
+def test_loaded_relative_config_path_survives_chdir_and_copies(tmp_path, monkeypatch, loader):
+    """A relative DEFENSECLAW_CONFIG: the pack folder is fixed when the config is loaded, for the config and its copies."""
+    import copy
+
+    home = tmp_path / "work"
+    (home / "cfg" / "pack").mkdir(parents=True)
+    (home / "cfg" / "pack" / "suppressions.yaml").write_text("version: 1\n", encoding="utf-8")
+    (home / "cfg" / "config.yaml").write_text(
+        "guardrail:\n  rule_pack: operator\n  custom_packs:\n    operator:\n"
+        f"      path: pack\n      digest: {PIN}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "other" / "cfg").mkdir(parents=True)
+    monkeypatch.chdir(home)
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", os.path.join("cfg", "config.yaml"))
+    cfg = dcconfig.load(data_dir=str(tmp_path / "data"))
+    want = str(home / "cfg" / "pack")
+    copies = (cfg, copy.copy(cfg), copy.deepcopy(cfg), copy.copy(cfg.guardrail), copy.deepcopy(cfg.guardrail))
+    for view in copies:
+        guardrail = getattr(view, "guardrail", view)
+        owner = SimpleNamespace(guardrail=guardrail, data_dir="")
+        assert policy_catalog.custom_pack_dir(owner, guardrail.custom_packs["operator"]) == want
+    monkeypatch.chdir(tmp_path / "other")
+    for view in copies:
+        guardrail = getattr(view, "guardrail", view)
+        owner = SimpleNamespace(guardrail=guardrail, data_dir="")
+        assert policy_catalog.custom_pack_dir(owner, guardrail.custom_packs["operator"]) == want
+        assert policy_catalog.custom_pack_problem(owner, "operator") == ""
+        assert guardrail.effective_rule_pack_dir("codex") == want
+        assert guardrail.hook_policy_tier("codex") == "default"
+        assert guardrail.effective_hook_outage_fail_mode("codex") == "open"
 
 
 def test_relative_config_directory_is_absolute(tmp_path, monkeypatch):
