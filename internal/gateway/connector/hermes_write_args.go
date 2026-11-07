@@ -50,6 +50,10 @@ type HermesWriteView struct {
 	PossibleOverflow bool
 	// Path is the target as the call names it ("" for the unverified view).
 	Path string
+	// SelfProtectionOnly marks the view of a string under a key that names
+	// no place: only the findings that protect DefenseClaw's own state
+	// count (actionfacts.UnknownKeyTwin).
+	SelfProtectionOnly bool
 
 	fields  map[string]any
 	pathKey string
@@ -160,7 +164,7 @@ func withHermesHiddenTargets(tool string, views []HermesWriteView, args json.Raw
 		if slices.Contains(reviewed, key) {
 			continue
 		}
-		targets, overflow := actionfacts.PathShapedArgumentValues(fields[key])
+		targets, overflow := actionfacts.PathShapedArgumentValues(key, fields[key])
 		possible = possible || overflow
 		for _, target := range targets {
 			count++
@@ -168,9 +172,9 @@ func withHermesHiddenTargets(tool string, views []HermesWriteView, args json.Raw
 				possible = true
 				continue
 			}
-			if retargeted, ok := views[0].Retarget(target); ok {
-				views = append(views, HermesWriteView{Tool: views[0].Tool, Args: retargeted, Path: target,
-					fields: views[0].fields, pathKey: views[0].pathKey})
+			if retargeted, ok := views[0].Retarget(target.Value); ok {
+				views = append(views, HermesWriteView{Tool: views[0].Tool, Args: retargeted, Path: target.Value,
+					SelfProtectionOnly: !target.Destination, fields: views[0].fields, pathKey: views[0].pathKey})
 			}
 		}
 	}

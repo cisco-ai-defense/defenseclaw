@@ -91,7 +91,10 @@ func fileToolHiddenTargetVariants(target string) map[string]func(map[string]any)
 			a["options"] = map[string]any{"dest": map[string]any{"to": target}}
 			return a
 		},
-		"hidden-array": func(a map[string]any) map[string]any { a["extra"] = []any{"x", target}; return a },
+		// "extra" names no place: its strings are text to every protected
+		// class but DefenseClaw's own state (GAP-0729, owner ruling).
+		"hidden-array":       func(a map[string]any) map[string]any { a["extra"] = []any{"x", target}; return a },
+		"hidden-array-files": func(a map[string]any) map[string]any { a["files"] = []any{"x", target}; return a },
 	}
 }
 
@@ -227,6 +230,9 @@ func TestFileToolExtraArgumentKeysKeepTheirPathFindings(t *testing.T) {
 							if cell.profile == "default" && call.connector != "copilot" && got != "allow" {
 								t.Errorf("%s %s %s-%d %s: ordinary file got %q: %.400s", name, call.connector, call.tool, i, variantName, got, body)
 							}
+							continue
+						}
+						if variantName == "hidden-array" && label != "state" {
 							continue
 						}
 						if fileToolUnknownKeyRank[got] < fileToolUnknownKeyRank[reviewed] {
