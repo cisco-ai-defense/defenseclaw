@@ -202,11 +202,28 @@ func networkPathUnanswered(path string) bool {
 	return unanswered
 }
 
+// linkUnanswered is networkPathUnanswered for a read that opens no link at
+// the end of the path (lstat, readlink, a directory walk).
+func linkUnanswered(path string) bool {
+	unanswered, _ := networkPathReadAs(path, false)
+	return unanswered
+}
+
 // networkPathRead is networkPathUnanswered that also reports whether the
 // call budget, not the own wait of the share, ended the wait for a share
 // that did not answer: it might have answered had the call had more budget.
 func networkPathRead(path string) (unanswered, budgetCut bool) {
+	return networkPathReadAs(path, true)
+}
+
+// networkPathReadAs is networkPathRead for a path that is on a share, or
+// that a link on its way (and, with followLast, the last component) leads
+// into one: the share the read opens is the one asked.
+func networkPathReadAs(path string, followLast bool) (unanswered, budgetCut bool) {
 	root := networkShareRootOf(path)
+	if root == "" {
+		root = linkedNetworkShare(path, followLast)
+	}
 	if root == "" {
 		return false, false
 	}
@@ -288,14 +305,14 @@ func networkPathRead(path string) (unanswered, budgetCut bool) {
 // and forgets the shares asked so far, for tests of the gateway on a host
 // with no share. The restore puts all back.
 func OverrideNetworkSharesForTest(rootOf func(path string) string, ask func(root string)) (restore func()) {
-	oldRoot, oldProbe := networkShareRootOf, probeNetworkShare
+	oldRoot, oldProbe, oldWalk := networkShareRootOf, probeNetworkShare, networkShareLinkWalk
 	networkShares.mu.Lock()
 	oldProbes := networkShares.probes
 	networkShares.probes = nil
 	networkShares.mu.Unlock()
-	networkShareRootOf, probeNetworkShare = rootOf, ask
+	networkShareRootOf, probeNetworkShare, networkShareLinkWalk = rootOf, ask, true
 	return func() {
-		networkShareRootOf, probeNetworkShare = oldRoot, oldProbe
+		networkShareRootOf, probeNetworkShare, networkShareLinkWalk = oldRoot, oldProbe, oldWalk
 		networkShares.mu.Lock()
 		networkShares.probes = oldProbes
 		networkShares.mu.Unlock()
@@ -350,7 +367,7 @@ func pathStatPinned(name string) (os.FileInfo, error) {
 }
 
 func pathLstat(name string) (os.FileInfo, error) {
-	if networkPathUnanswered(name) {
+	if linkUnanswered(name) {
 		return nil, networkShareError("lstat", name)
 	}
 	return os.Lstat(name)
@@ -383,7 +400,7 @@ func pathReadDir(name string) ([]os.DirEntry, error) {
 }
 
 func pathReadlink(name string) (string, error) {
-	if networkPathUnanswered(name) {
+	if linkUnanswered(name) {
 		return "", networkShareError("readlink", name)
 	}
 	return os.Readlink(name)
@@ -400,7 +417,7 @@ func pathEvalSymlinks(name string) (string, error) {
 // it: a root below a share that has not answered is passed to fn with the
 // share's error, as WalkDir passes a root it cannot read.
 func pathWalkDir(root string, fn fs.WalkDirFunc) error {
-	if networkPathUnanswered(root) {
+	if linkUnanswered(root) {
 		err := fn(root, nil, networkShareError("lstat", root))
 		if err == filepath.SkipDir || err == filepath.SkipAll {
 			return nil
