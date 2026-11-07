@@ -1230,13 +1230,30 @@ def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
     if not isinstance(roster, dict):
         return
     configured = {normalize_connector(name) for name in roster if isinstance(name, str)}
-    if len(configured) < 2:
-        return
     enabled = {
         normalize_connector(name)
         for name, entry in roster.items()
         if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
     }
+    # The installed connector (guardrail.connector, else an explicit claw.mode)
+    # is part of the process too: a first entry for another connector beside a
+    # single OpenClaw or ZeptoClaw install is the same mix as a two-entry map
+    # (GAP-0588). An entry of its own that is disabled keeps it out.
+    claw = document.get("claw") if isinstance(document, dict) else None
+    named = guardrail.get("connector") if isinstance(guardrail, dict) else None
+    if not (isinstance(named, str) and named.strip()) and isinstance(claw, dict):
+        named = claw.get("mode")
+    if isinstance(named, str) and named.strip() and not config_module._is_retired_connector_name(named):
+        installed = normalize_connector(named)
+        own = next(
+            (e for n, e in roster.items() if isinstance(n, str) and normalize_connector(n) == installed),
+            None,
+        )
+        configured.add(installed)
+        if not (isinstance(own, dict) and own.get("enabled") is False):
+            enabled.add(installed)
+    if len(configured) < 2:
+        return
     proxies = sorted(enabled & {"openclaw", "zeptoclaw"})
     if proxies:
         proxy = proxies[0]
