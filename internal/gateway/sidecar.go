@@ -8545,11 +8545,41 @@ func (t *multiConnectorSetupTransaction) noteNotStarted(name string, err error) 
 	if t.notStartedReasons == nil {
 		t.notStartedReasons = map[string]string{}
 	}
-	reason := err.Error()
-	if len(reason) > notStartedReasonMaxBytes {
-		reason = strings.ToValidUTF8(reason[:notStartedReasonMaxBytes], "") + " [truncated; the gateway log has the rest]"
+	t.notStartedReasons[strings.ToLower(strings.TrimSpace(name))] = boundNotStartedReason(err.Error())
+}
+
+// notStartedRepairMaxBytes bounds the repair that ends a recorded reason.
+const notStartedRepairMaxBytes = 8192
+
+// boundNotStartedReason bounds the cause of a recorded reason at
+// notStartedReasonMaxBytes and keeps its repair (the "; fix: " or "; by hand: "
+// tail a custody refusal ends with, GAP-0731) whole: a cut command would read
+// as a repair that is not one. A repair past notStartedRepairMaxBytes is left
+// out and said so, so no reader is shown a partial command.
+func boundNotStartedReason(reason string) string {
+	if len(reason) <= notStartedReasonMaxBytes {
+		return reason
 	}
-	t.notStartedReasons[strings.ToLower(strings.TrimSpace(name))] = reason
+	cause, repair := reason, ""
+	for _, marker := range []string{"; fix: ", "; by hand: "} {
+		if at := strings.LastIndex(reason, marker); at >= 0 {
+			cause, repair = reason[:at], reason[at:]
+			break
+		}
+	}
+	cut := cause
+	if len(cut) > notStartedReasonMaxBytes {
+		cut = strings.ToValidUTF8(cut[:notStartedReasonMaxBytes], "")
+	}
+	switch {
+	case repair == "":
+		return cut + " [truncated; the gateway log has the rest]"
+	case len(repair) > notStartedRepairMaxBytes:
+		return fmt.Sprintf("%s; repair omitted: it is %d bytes, too long for this field; the gateway log has it whole", cut, len(repair))
+	case len(cut) < len(cause):
+		return cut + " [cause truncated; the gateway log has it whole]" + repair
+	}
+	return cause + repair
 }
 
 // notStartedReasonsFor returns the recorded reasons of the connectors in

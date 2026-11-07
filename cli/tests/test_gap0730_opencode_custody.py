@@ -411,3 +411,30 @@ def test_other_acl_callers_keep_one_two_second_inspection(monkeypatch) -> None:
     # Benign twin: a prompt clean listing is still accepted.
     _ls(monkeypatch, [_CleanListing()])
     assert file_permissions.darwin_acl_write_error("/x") is None
+
+
+# Review 7: a repair argument is shown byte for byte; only the prose is collapsed.
+@pytest.mark.parametrize(
+    "folder, trustee",
+    [
+        (r"C:\Users\lane\.config\Open  Code", r"HOST\other"),
+        (r"C:\Users\lane\.config\opencode", r"HOST\Other  User"),
+        (r"C:\Users\lane\.config\a   b  c", r"HOST\x  y"),
+    ],
+)
+def test_a_repair_argument_with_repeated_spaces_is_shown_as_recorded(folder: str, trustee: str) -> None:
+    fix = f"icacls '{folder}' /remove:g '{trustee}'"
+    bounded = cmd_doctor._bounded_recorded_reason(f"validate plugin   directory custody: DACL\nunsafe; fix: {fix}")
+    assert bounded == f"validate plugin directory custody: DACL unsafe; fix: {fix}"
+
+
+def test_an_omitted_repair_notice_and_a_manual_tail_are_kept_whole() -> None:
+    omitted = "; repair omitted: it is 9000 bytes, too long for this field; the gateway log has it whole"
+    bounded = cmd_doctor._bounded_recorded_reason("validate plugin directory custody: " + "x" * 520 + omitted)
+    assert bounded.endswith(omitted) and "…" in bounded
+    by_hand = "; by hand: replace the link 'C:\\a  b' with a real folder"
+    assert cmd_doctor._bounded_recorded_reason("link refused" + by_hand) == "link refused" + by_hand
+
+
+def test_a_reason_with_no_repair_still_collapses_whitespace() -> None:
+    assert cmd_doctor._bounded_recorded_reason("a  b\n c") == "a b c"
