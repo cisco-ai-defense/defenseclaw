@@ -20,6 +20,7 @@ record is missing (the scan ran before setup) or older than its executable."""
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -332,3 +333,168 @@ def test_publishing_one_agent_keeps_a_peer_the_scan_found_but_did_not_version(tm
     )
 
     assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+def _cursor_cache(data: Path, version: str, *, seconds_old: int) -> str:
+    peers = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+    peers["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version=version)
+    scanned = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=seconds_old))
+    assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=data)
+    return scanned
+
+
+def _scan(*, seconds_old: int, cursor: str, codex: str = "codex-cli 0.160.0") -> ad.AgentDiscovery:
+    agents = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+    agents["codex"] = _signal("codex", binary="/opt/codex/bin/codex", version=codex)
+    agents["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version=cursor)
+    scanned = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=seconds_old))
+    return ad.AgentDiscovery(scanned_at=scanned, agents=agents, cache_hit=False)
+
+
+def test_publishing_an_older_scan_keeps_a_peer_a_newer_scan_cached(tmp_path):
+    # Setup A scanned three seconds ago; discovery B wrote the cache one second
+    # ago. A ends last and must not put its older reading back, whichever way
+    # the version moved: one direction would admit a changed agent, the other
+    # would block a good one.
+    for newer, older in (("3.19.13", "cursor 2.3.99"), ("cursor 2.3.99", "3.19.13")):
+        data = tmp_path / older.replace(" ", "-")
+        data.mkdir()
+        _cursor_cache(data, newer, seconds_old=1)
+
+        assert ad._publish_agent_signal(_scan(seconds_old=3, cursor=older), "codex", data_dir=data)
+
+        cache = ad._read_cache(data_dir=data)
+        assert cache.agents["cursor"].version == newer
+        assert cache.agents["codex"].version == "codex-cli 0.160.0"
+
+
+def test_a_peer_published_by_a_newer_scan_is_not_replaced_by_an_older_publish(tmp_path):
+    # The file time stays at the first scan, so the order of each entry is its own.
+    _cursor_cache(tmp_path, "3.19.0", seconds_old=300)
+    assert ad._publish_agent_signal(_scan(seconds_old=1, cursor="3.19.13"), "codex", data_dir=tmp_path)
+
+    assert ad._publish_agent_signal(_scan(seconds_old=3, cursor="cursor 2.3.99"), "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+def test_a_complete_older_scan_keeps_what_a_newer_scan_read(tmp_path):
+    _cursor_cache(tmp_path, "3.19.0", seconds_old=300)
+    assert ad._publish_agent_signal(_scan(seconds_old=1, cursor="3.19.13"), "codex", data_dir=tmp_path)
+
+    assert ad._write_cache(_scan(seconds_old=3, cursor="cursor 2.3.99", codex="codex-cli 0.150.0"), data_dir=tmp_path)
+
+    cache = ad._read_cache(data_dir=tmp_path)
+    assert cache.agents["cursor"].version == "3.19.13"
+    assert cache.agents["codex"].version == "codex-cli 0.160.0"
+
+
+def test_a_complete_newer_scan_replaces_the_cache(tmp_path):
+    _cursor_cache(tmp_path, "3.19.0", seconds_old=300)
+
+    assert ad._write_cache(_scan(seconds_old=0, cursor="3.19.13", codex="codex-cli 0.167.0"), data_dir=tmp_path)
+
+    cache = ad._read_cache(data_dir=tmp_path)
+    assert cache.agents["cursor"].version == "3.19.13"
+    assert cache.agents["codex"].version == "codex-cli 0.167.0"
+
+
+def test_scans_ending_in_any_order_leave_the_newest_reading(tmp_path):
+    _cursor_cache(tmp_path, "3.19.0", seconds_old=300)
+    ages = (9, 2, 7, 4, 1, 8, 3, 6)
+    barrier = threading.Barrier(len(ages))
+
+    def publish(age: int) -> None:
+        scan = _scan(seconds_old=age, cursor=f"cursor-{age}")
+        barrier.wait()
+        assert ad._publish_agent_signal(scan, "codex", data_dir=tmp_path)
+
+    threads = [threading.Thread(target=publish, args=(age,)) for age in ages]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "cursor-1"
+
+
+def test_a_busy_cache_lock_means_no_unserialized_write(monkeypatch, tmp_path):
+    from defenseclaw.file_lock import locked_file_update
+
+    _cursor_cache(tmp_path, "3.19.0", seconds_old=300)
+    monkeypatch.setattr(ad, "_CACHE_LOCK_SECONDS", 0.2)
+
+    with locked_file_update(str(tmp_path / ad.CACHE_FILENAME)):
+        assert ad._publish_agent_signal(_scan(seconds_old=0, cursor="3.19.13"), "codex", data_dir=tmp_path) is False
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.0"
+
+
+def _skipped_candidate_in_folder_cache(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Cache whose selected codex sits behind a skipped (failed) candidate that
+    is two folders below a folder an installer can replace as a whole."""
+    active, spare, picked, data = (tmp_path / name for name in ("active", "spare", "picked", "data"))
+    candidate = active / "nested" / "bin" / "codex"
+    ready = spare / "nested" / "bin" / "codex"
+    selected = picked / "codex"
+    for path in (candidate, ready, selected):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/bin/sh\n")
+    data.mkdir()
+    time.sleep(1.2)
+    codex = _signal("codex", binary=str(selected), version="codex-cli 0.160.0")
+    codex.skipped_binaries = (str(candidate),)
+    _seed(data, codex, age=timedelta(0))
+    time.sleep(1.2)
+    return candidate, active, spare, data
+
+
+def test_a_skipped_candidate_behind_a_replaced_higher_folder_is_probed_again(monkeypatch, tmp_path):
+    # The file and the folder holding it keep their old times when the folder
+    # above them is swapped for a ready-made one.
+    candidate, active, spare, data = _skipped_candidate_in_folder_cache(tmp_path)
+    _launch_order(monkeypatch, candidate, tmp_path / "picked" / "codex")
+    os.rename(active, tmp_path / "parked")
+    os.rename(spare, active)
+    calls: list[str] = []
+    monkeypatch.setattr(ad, "_scan_agent", _scan_returning("codex-cli 0.167.0", calls))
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert disc.cache_hit is False
+    assert disc.agents["codex"].version == "codex-cli 0.167.0"
+    assert "codex" in calls
+
+
+def test_a_skipped_candidate_behind_an_untouched_higher_folder_keeps_the_cached_version(monkeypatch, tmp_path):
+    # A folder above the data folder changes whenever anything is saved in it
+    # and is not part of the install: saving a file there is not a change.
+    candidate, _active, _spare, data = _skipped_candidate_in_folder_cache(tmp_path)
+    _launch_order(monkeypatch, candidate, tmp_path / "picked" / "codex")
+    (tmp_path / "unrelated.txt").write_text("saved\n")
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_k: (_ for _ in ()).throw(AssertionError(name)))
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert disc.cache_hit is True
+    assert disc.agents["codex"].version == "codex-cli 0.160.0"
+
+
+def test_an_installed_executable_behind_a_replaced_higher_folder_is_probed_again(monkeypatch, tmp_path):
+    # The same rule for the selected executable, not only a skipped one.
+    candidate, active, spare, data = _skipped_candidate_in_folder_cache(tmp_path)
+    selected = active / "nested" / "bin" / "codex"
+    codex = _signal("codex", binary=str(selected), version="codex-cli 0.160.0")
+    time.sleep(1.2)
+    _seed(data, codex, age=timedelta(0))
+    time.sleep(1.2)
+    _launch_order(monkeypatch, selected)
+    os.rename(active, tmp_path / "parked")
+    os.rename(spare, active)
+    calls: list[str] = []
+    monkeypatch.setattr(ad, "_scan_agent", _scan_returning("codex-cli 0.167.0", calls))
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert disc.cache_hit is False
+    assert disc.agents["codex"].version == "codex-cli 0.167.0"

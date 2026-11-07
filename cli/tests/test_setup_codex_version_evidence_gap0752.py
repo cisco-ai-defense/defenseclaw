@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest import mock
 
 import pytest
@@ -104,7 +105,8 @@ def test_windows_setup_keeps_a_peer_version_the_fresh_scan_missed(tmp_path) -> N
 
 
 def test_windows_setup_replaces_a_peer_version_the_fresh_scan_read(tmp_path) -> None:
-    scanned = ad._format_rfc3339(ad._now_utc())
+    # The cache is older than the setup scan, which read the peer again.
+    scanned = ad._format_rfc3339(ad._now_utc() - timedelta(minutes=5))
     for previous, fresh_version in (("3.19.13", "cursor 2.3.99"), ("cursor 2.3.99", "3.19.13")):
         data = tmp_path / fresh_version.replace(" ", "-")
         data.mkdir()
@@ -117,6 +119,7 @@ def test_windows_setup_replaces_a_peer_version_the_fresh_scan_read(tmp_path) -> 
         )
         assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=agents, cache_hit=False), data_dir=data)
         disc = _disc()
+        disc.scanned_at = ad._format_rfc3339(ad._now_utc())
         disc.agents["cursor"] = ad.AgentSignal(
             name="cursor",
             installed=True,
@@ -136,3 +139,38 @@ def test_windows_setup_replaces_a_peer_version_the_fresh_scan_read(tmp_path) -> 
 
         assert ok is True
         assert ad._read_cache(data_dir=data).agents["cursor"].version == fresh_version
+
+
+def test_windows_setup_keeps_a_peer_version_a_newer_scan_cached(tmp_path) -> None:
+    # Setup scanned three seconds ago; discovery cached the peer one second ago.
+    # Setup ends last and must not put its older reading back, either way.
+    for newer, older in (("3.19.13", "cursor 2.3.99"), ("cursor 2.3.99", "3.19.13")):
+        data = tmp_path / older.replace(" ", "-")
+        data.mkdir()
+        agents = {
+            name: ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+            for name in ad.DISCOVERABLE_CONNECTORS
+        }
+        agents["cursor"] = ad.AgentSignal(
+            name="cursor", installed=True, config_path="", binary_path="/opt/cursor/bin/cursor", version=newer, error=""
+        )
+        cached_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=1))
+        assert ad._write_cache(ad.AgentDiscovery(scanned_at=cached_at, agents=agents, cache_hit=False), data_dir=data)
+        disc = _disc()
+        disc.scanned_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=3))
+        disc.agents["cursor"] = ad.AgentSignal(
+            name="cursor", installed=True, config_path="", binary_path="/opt/cursor/bin/cursor", version=older, error=""
+        )
+
+        with (
+            mock.patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+            mock.patch.object(cmd_setup.agent_discovery, "discover_with_probes", return_value=disc),
+        ):
+            ok = cmd_setup._check_connector_version_supported_for_setup(
+                "codex", mode="action", emit=False, data_dir=str(data), _allow_prompt=False
+            )
+
+        cache = ad._read_cache(data_dir=data)
+        assert ok is True
+        assert cache.agents["cursor"].version == newer
+        assert cache.agents["codex"].version == "codex-cli 0.160.0"
