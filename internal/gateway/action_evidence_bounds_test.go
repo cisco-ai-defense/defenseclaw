@@ -111,6 +111,8 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 	switch {
 	case strings.HasPrefix(body, `{"action":"block"`):
 		return "block"
+	case strings.HasPrefix(body, `{"action":"alert"`):
+		return "alert"
 	case strings.HasPrefix(body, `{"action":"allow"`):
 		return "allow"
 	}
