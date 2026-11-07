@@ -82,6 +82,12 @@ BENIGN = {
     "name-from-construction": "const RE = RegExp(\"x\");\nRE.test(text);\nRE.exec(text);\n",
     "optional-call": "const RE = /x/;\nRE?.exec(text);\n",
     "literal-in-expression": "return (a, /x/g).exec(text) ?? (/y/).exec(text);\n",
+    "unrelated-string-reading-exec": "const message = \"exec\";\n/x/.exec(text);\n",
+    "unrelated-key-and-quoted-key-named-exec": "const names = { exec: 1, \"exec\": 2 };\n/x/.exec(text);\n",
+    "instanceof-regexp": "if (value instanceof RegExp) { value.test(text); }\n/x/.exec(text);\n",
+    "own-prototype-methods": (
+        "function Parser() {}\nParser.prototype.parse = function (t) { return /x/.exec(t); };\n"
+    ),
 }
 
 
@@ -137,6 +143,26 @@ HOSTILE = {
     "call-result-of-a-construction": "make(RegExp(`a`)).exec(command);\n",
     "parenthesized-module": "(require(`node:child_process`)).exec(command);\n",
     "parenthesized-name": "const cp = require(`node:child_process`);\n(cp).exec(command);\n",
+    "regexp-shadowed-by-a-parameter-and-called": (
+        "function run(RegExp) { return RegExp(`a`).exec(command); }\n"
+        "run(() => require(`node:child_process`));\n"
+    ),
+    "prototype-merged-by-a-computed-key": (
+        "const cp = require(`node:child_process`);\nconst key = [`ex`, `ec`].join(``);\n"
+        "Object.assign(RegExp.prototype, { [key]: cp.exec });\n/a/.exec(command);\n"
+    ),
+    "prototype-reached-through-the-constructor": (
+        "const cp = require(`node:child_process`);\nconst key = [`ex`, `ec`].join(``);\n"
+        "Object.assign(/b/.constructor.prototype, { [key]: cp.exec });\n/a/.exec(command);\n"
+    ),
+    "prototype-kept-in-a-name": (
+        "const cp = require(`node:child_process`);\nconst proto = Object.getPrototypeOf(/b/);\n"
+        "proto.exec = cp.exec;\n/a/.exec(command);\n"
+    ),
+    "regexp-kept-in-an-object": (
+        "const cp = require(`node:child_process`);\nconst holder = { kind: RegExp };\n"
+        "Object.assign(holder.kind.prototype, { exec: cp.exec });\n/a/.exec(command);\n"
+    ),
 }
 
 
@@ -152,6 +178,41 @@ def test_r109_g610_a_regexp_name_is_judged_per_file(tmp_path, profile) -> None:
     _plugin(tmp_path / "provider", PROVIDER_SOURCE)
     (tmp_path / "provider" / "other.js").write_text("BEDROCK_REGION_RE.exec(command);\n", encoding="utf-8")
     assert "SRC-EXEC" in _high(tmp_path / "provider", profile)
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_another_file_can_change_what_a_pattern_reaches(tmp_path, profile) -> None:
+    """One file that changes the built-in object voids the proof in every file."""
+
+    root = tmp_path / "provider"
+    _plugin(root, PROVIDER_SOURCE + "/a/.exec(command);\n")
+    assert _high(root, profile) == set()
+    (root / "mutator.js").write_text(
+        "RegExp.prototype.exec = require(`node:child_process`).exec;\n", encoding="utf-8",
+    )
+    assert "SRC-EXEC" in _high(root, profile)
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_typescript_uses_of_the_regexp_type_are_not_findings(tmp_path, profile) -> None:
+    root = tmp_path / "provider"
+    root.mkdir()
+    (root / "package.json").write_text(json.dumps({
+        "name": "ordinary-plugin", "version": "1.0.0", "main": "index.ts",
+    }), encoding="utf-8")
+    (root / "index.ts").write_text(
+        "const BODY: RegExp = /a(b)/;\n"
+        "export function pick(rules: RegExp[], map: Map<string, RegExp>, text: string) {\n"
+        "  return BODY.exec(text)?.[1] ?? /c/.exec(text);\n}\n",
+        encoding="utf-8",
+    )
+    assert _high(root, profile) == set()
+    (root / "index.ts").write_text(
+        "const cp = require(`node:child_process`);\nconst holder = { kind: RegExp };\n"
+        "Object.assign(holder.kind.prototype, { exec: cp.exec });\n/a/.exec(command);\n",
+        encoding="utf-8",
+    )
+    assert "SRC-EXEC" in _high(root, profile)
 
 
 def _peer(tmp_path, destination) -> Path:
@@ -215,6 +276,39 @@ def test_r109_g610_a_local_source_in_protected_state_is_blocked(tmp_path, profil
     manifest["dependencies"] = {"helper": "file:../sibling"}
     (root / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
     assert "DEP-LOCAL-FILE" not in _high(root, profile)
+
+
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_a_local_source_in_the_configured_state_folder_is_blocked(tmp_path, profile) -> None:
+    state = tmp_path / "state"
+    (state / "private").mkdir(parents=True)
+    root = tmp_path / "provider"
+    _plugin(root, PROVIDER_SOURCE)
+    manifest = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    manifest["dependencies"] = {"helper": "file:../state/private"}
+    (root / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
+    findings = scan_plugin(str(root), PluginScanOptions(policy=profile, data_dir=str(state))).findings
+    assert "DEP-LOCAL-FILE" in {f.rule_id for f in findings if f.severity == "HIGH"}
+    findings = scan_plugin(str(root), PluginScanOptions(policy=profile)).findings
+    assert "DEP-LOCAL-FILE" not in {f.rule_id for f in findings if f.severity == "HIGH"}
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("profile", PROFILES)
+def test_r109_g610_a_dependency_folder_that_is_itself_a_link_is_judged_inside(tmp_path, profile) -> None:
+    """An ordinary link to a dependency folder is fine; a protected link inside it is not."""
+
+    protected = tmp_path / "home" / ".ssh" / "secret"
+    protected.mkdir(parents=True)
+    shared = tmp_path / "shared-dependencies"
+    (shared / "dep").mkdir(parents=True)
+    root = tmp_path / "provider"
+    _plugin(root, PROVIDER_SOURCE)
+    (root / "node_modules").symlink_to(shared, target_is_directory=True)
+    assert _high(root, profile) == set()
+    (shared / "dep").rmdir()
+    (shared / "dep").symlink_to(protected, target_is_directory=True)
+    assert "STRUCT-SYMLINK-ESCAPE" in _high(root, profile)
 
 
 @requires_symlink_privilege
