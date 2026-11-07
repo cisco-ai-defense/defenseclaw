@@ -38,21 +38,21 @@ func overlayRegistryForTest(t *testing.T, overlayJSON string) *configs.Providers
 // the overlay-bound provider from the registry the request carries, whatever
 // those hold.
 func TestResolveProvider_InstanceOverlay_IgnoresProcessWideState(t *testing.T) {
-	previousRegistry, _, _ := providerRegistrySnapshot()
+	// Everything this test publishes is put back as it was found, including the
+	// overlay-applied marker, so it leaves no state for a later test (GAP-0741).
+	previousRegistry, _, previousApplied := providerRegistryResponseSnapshot()
 	previousGeneration := liveGeneration.Load()
 	t.Cleanup(func() {
 		liveGeneration.Store(previousGeneration)
-		configs.SetIgnoreCustomProvidersPathEnv(false)
-		if previousRegistry != nil {
-			setProviderRegistry(previousRegistry)
-		}
+		setProviderRegistryWithOverlay(previousRegistry, previousApplied)
 	})
 	// What a leaked managed sidecar or a concurrent reload leaves behind: a
-	// published generation without the overlay, the environment path ignored
-	// and a registry that does not know the host.
+	// published generation without the overlay and a registry that does not
+	// know the host. The managed ignore-environment flag is not set here: it
+	// only steers environment reloads, which a pinned request never makes, and
+	// the flag has no reader that could give it back as found.
 	liveGeneration.Store(&Generation{Config: &config.Config{}})
-	configs.SetIgnoreCustomProvidersPathEnv(true)
-	setProviderRegistry(&configs.ProvidersConfig{Providers: []configs.Provider{{Name: "unrelated", Domains: []string{"unrelated.example"}}}})
+	setProviderRegistryWithOverlay(&configs.ProvidersConfig{Providers: []configs.Provider{{Name: "unrelated", Domains: []string{"unrelated.example"}}}}, true)
 
 	registry := overlayRegistryForTest(t, `{
 		"providers": [{
