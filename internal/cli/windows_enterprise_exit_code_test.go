@@ -87,6 +87,7 @@ func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
 		"lifecycle_busy":                  enterprisestatus.WindowsExitBusy,
 		"hook_calls_running":              enterprisestatus.WindowsExitBusy,
 		"hook_in_use":                     enterprisestatus.WindowsExitBusy,
+		"codex_state_held":                enterprisestatus.WindowsExitBusy,
 		"bundle_apply_failed":             enterprisestatus.WindowsExitBusy,
 		"invalid_arguments":               enterprisestatus.WindowsExitInvalidArgs,
 		"bundle_config_validation_failed": enterprisestatus.WindowsExitFailure,
