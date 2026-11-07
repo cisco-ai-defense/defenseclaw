@@ -1531,21 +1531,21 @@ def test_a_same_size_rewrite_with_the_modification_time_restored_changes_the_ide
     assert ad._executable_identity(str(binary)) != before
 
 
-def _folder_changed_at(monkeypatch, tmp_path: Path, changed_ns: dict[str, int]) -> tuple[Path, float]:
+def _folder_changed_at(monkeypatch, tmp_path: Path, changed_ns: dict[str, int | None]) -> tuple[Path, float]:
     """A Windows host whose folder times are the creation time in ``st_ctime`` and the
-    change time given per path. Returns the executable and a scan time after every
-    file time ``st_*`` reports."""
+    change time given per path (None: Windows gives none for that path). Returns the
+    executable and a scan time after every file time ``st_*`` reports."""
     folder = tmp_path / "bin"
     folder.mkdir()
     binary = folder / "codex"
     binary.write_text("codex", encoding="utf-8")
     since = time.time() + 10
     monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
-    monkeypatch.setattr(
-        ad,
-        "_windows_change_time",
-        lambda path: _filetime(changed_ns.get(path, int((since - 600) * 1e9))),
-    )
+    def change_time(path: str) -> int | None:
+        changed = changed_ns.get(path, int((since - 600) * 1e9))
+        return None if changed is None else _filetime(changed)
+
+    monkeypatch.setattr(ad, "_windows_change_time", change_time)
     return binary, since
 
 
@@ -1588,10 +1588,42 @@ def test_a_windows_in_place_rewrite_after_the_scan_is_not_cached_at_the_old_vers
     assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
 
 
-def test_the_identity_falls_back_to_the_stat_change_time_when_windows_gives_none(monkeypatch, tmp_path):
+def test_a_folder_whose_windows_change_time_cannot_be_read_is_not_proven_unchanged(monkeypatch, tmp_path):
+    folder = str(tmp_path / "bin")
+    binary, since = _folder_changed_at(monkeypatch, tmp_path, {folder: None})
+
+    assert not ad._resolves_unchanged_since(str(binary), since, tmp_path / "data")
+
+
+def test_an_executable_whose_windows_change_time_cannot_be_read_is_not_proven_unchanged(monkeypatch, tmp_path):
+    binary, since = _folder_changed_at(monkeypatch, tmp_path, {})
+    unreadable = {str(binary): None}
+    monkeypatch.setattr(
+        ad,
+        "_windows_change_time",
+        lambda path: None if path in unreadable else _filetime(int((since - 600) * 1e9)),
+    )
+
+    assert not ad._resolves_unchanged_since(str(binary), since, tmp_path / "data")
+
+
+def test_a_cached_version_is_dropped_when_windows_cannot_give_the_change_time_of_the_executable(monkeypatch, tmp_path):
     binary = tmp_path / "cursor"
     binary.write_text("3.19.13", encoding="utf-8")
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    _on_windows(monkeypatch, binary.stat(), binary)
+    recorded = ad._executable_identity(str(binary))
+    assert recorded
+    assert not ad._executable_replaced_since_read(str(binary), recorded)
+    monkeypatch.setattr(ad, "_windows_change_time", lambda path: None)
+
+    assert ad._executable_identity(str(binary)) == []
+    assert ad._executable_replaced_since_read(str(binary), recorded)
+
+
+def test_the_identity_of_an_executable_is_the_stat_change_time_off_windows(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
     monkeypatch.setattr(ad, "_windows_change_time", lambda path: None)
 
     assert ad._executable_identity(str(binary))[5] == binary.stat().st_ctime_ns

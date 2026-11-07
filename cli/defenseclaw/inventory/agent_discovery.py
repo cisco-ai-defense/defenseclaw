@@ -1588,7 +1588,8 @@ def _resolves_unchanged_since(
             info = os.lstat(checked)
         except OSError:
             return False
-        if max(info.st_mtime, _changed_at(checked, info)) >= since:
+        changed = _changed_at(checked, info)
+        if changed is None or max(info.st_mtime, changed) >= since:
             return False
     try:
         return stat.S_ISREG(os.lstat(resolved).st_mode)
@@ -1596,16 +1597,19 @@ def _resolves_unchanged_since(
         return False
 
 
-def _changed_at(path: str, info: os.stat_result) -> float:
+def _changed_at(path: str, info: os.stat_result) -> float | None:
     """When the file or folder at *path* last changed, in Unix seconds: ``st_ctime``
     where that is the change time. On Windows it is the creation time, which a
     rename leaves alone, so a folder swapped for a ready-made one would look
     untouched; the NTFS change time (:func:`_windows_change_time`) moves with the
-    rename. A link is made new when it is retargeted, so its creation time says."""
+    rename. When Windows gives none, nothing proves the path unchanged and None
+    is returned (the creation time is no stand-in). A link is made new when it is
+    retargeted, so its creation time says."""
     if _is_windows_host() and not stat.S_ISLNK(info.st_mode):
         ticks = _windows_change_time(path)
-        if ticks is not None:
-            return max(info.st_ctime, (ticks - _WINDOWS_TICKS_AT_UNIX_EPOCH) / 10_000_000)
+        if ticks is None:
+            return None
+        return max(info.st_ctime, (ticks - _WINDOWS_TICKS_AT_UNIX_EPOCH) / 10_000_000)
     return info.st_ctime
 
 
@@ -1622,7 +1626,8 @@ def _data_dir_holders(data_dir: str | os.PathLike[str] | None) -> frozenset[str]
 def _executable_identity(path: str) -> list[Any]:
     """Which file *path* is right now: where it resolves, its size, its
     modification time, its file id and its change time; [] when it is not a
-    regular file.
+    regular file, or when the host is Windows and gives no change time (nothing
+    then tells one write of the file from the next, so no reading is an identity).
 
     Two readings that name the same file have the same identity, and a file
     replaced (even by one of the same size and time), or a link moved to
@@ -1640,7 +1645,10 @@ def _executable_identity(path: str) -> list[Any]:
         return []
     if not stat.S_ISREG(info.st_mode):
         return []
-    return [real, info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev, _change_time_ns(real, info)]
+    changed = _change_time_ns(real, info)
+    if changed is None:
+        return []
+    return [real, info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev, changed]
 
 
 class _WindowsFileBasicInfo(ctypes.Structure):
@@ -1714,15 +1722,17 @@ def _windows_change_time(path: str) -> int | None:
 _WINDOWS_TICKS_AT_UNIX_EPOCH = 116_444_736_000_000_000
 
 
-def _change_time_ns(real: str, info: os.stat_result) -> int:
+def _change_time_ns(real: str, info: os.stat_result) -> int | None:
     """When the file at *real* was last written to, in Unix nanoseconds (the
     unit of the modification time and of a read time): the Windows change time
     there (``st_ctime`` is the creation time on Windows, which an in-place write
-    leaves alone), ``st_ctime_ns`` elsewhere."""
+    leaves alone), ``st_ctime_ns`` elsewhere. None when Windows gives none: the
+    creation time would let a same-size rewrite pass as the same file."""
     if _is_windows_host():
         ticks = _windows_change_time(real)
-        if ticks is not None:
-            return (ticks - _WINDOWS_TICKS_AT_UNIX_EPOCH) * 100
+        if ticks is None:
+            return None
+        return (ticks - _WINDOWS_TICKS_AT_UNIX_EPOCH) * 100
     return info.st_ctime_ns
 
 
