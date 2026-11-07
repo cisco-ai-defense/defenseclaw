@@ -28,8 +28,9 @@ import (
 // claude-code-hook.sh command, on Windows (one-line install) the cmd.exe
 // launcher guard and, on PreToolUse, defenseclaw-hook-guard.exe
 // launcher-guard. The Windows file holds the two captured entries
-// (SessionStart, PreToolUse); its other events carry the SessionStart form,
-// as claudeCodeHandlerInvocation renders them.
+// (SessionStart, PreToolUse); its other events carry the SessionStart form.
+// Current Setup uses a paired guard form, while status names the released
+// uploaded plugin as stale until it is rebuilt.
 //
 // If a change makes this fail, keep the old form running, or teach
 // cowork_status (cli/defenseclaw/cowork.py) to report the uploaded plugin as
@@ -166,22 +167,42 @@ func TestCoworkReleasedPluginHandlersStillRun(t *testing.T) {
 		const home = `C:\Users\dcw std1`
 		launcher := home + `\.local\bin\defenseclaw-hook.exe`
 		guard := home + `\.local\bin\defenseclaw-hook-guard.exe`
+		approved := home + `\.local\bin\defenseclaw-hook-guard.approved`
 		savedGuard := claudeCodePreToolGuardExecutable
 		claudeCodePreToolGuardExecutable = func(string) string { return guard }
 		t.Cleanup(func() { claudeCodePreToolGuardExecutable = savedGuard })
+		savedPair := claudeChainFor
+		claudeChainFor = func(string) (string, string) { return guard, approved }
+		t.Cleanup(func() { claudeChainFor = savedPair })
 		released := coworkReleasedPlugin(t, "1.0.8", "cowork-plugin-hooks-windows.json", home)
 
 		// The released argv is the per-user Windows Setup form from 1.0.8.
 		command, args := claudeCodeWindowsHookInvocation(SetupOpts{}, launcher)
+		if err := claudeCodeChainAdmission(SetupOpts{}, command, args, "windows"); err != nil {
+			t.Fatalf("current paired guard was refused: %v", err)
+		}
+		hookArgs := []string{"hook", "--connector", "claudecode"}
 		for event, entries := range released {
 			handler := entries[0].Hooks[0]
 			if entries[0].Matcher != groups[event].matcher || handler["timeout"] != float64(groups[event].timeout) {
 				t.Fatalf("%s: matcher %q timeout %v, want the Claude Code group %+v", event, entries[0].Matcher, handler["timeout"], groups[event])
 			}
-			wantCommand, wantArgs := claudeCodeHandlerInvocation(event, command, args)
+			wantCommand, wantArgs := claudeCodeWindowsCommandProcessor(), claudeCodeLauncherGuardArgs(launcher, hookArgs)
+			if event == "PreToolUse" {
+				wantCommand, wantArgs = guard, claudeCodePreToolGuardArgs(launcher, hookArgs)
+			}
 			gotArgs, ok := claudeCodeNativeExecArguments(handler)
 			if !ok || handler["command"] != wantCommand || !reflect.DeepEqual(gotArgs, wantArgs) {
-				t.Fatalf("%s: released %q %q, current Setup writes %q %q", event, handler["command"], gotArgs, wantCommand, wantArgs)
+				t.Fatalf("%s: released form = %q %q, want %q %q", event, handler["command"], gotArgs, wantCommand, wantArgs)
+			}
+			currentCommand, currentArgs := claudeCodeHandlerInvocation(event, command, args, true)
+			if currentCommand == wantCommand && reflect.DeepEqual(currentArgs, wantArgs) {
+				t.Fatalf("%s: current Setup still writes the released form", event)
+			}
+			if _, _, ok := claudeCodeLauncherGuardParts(map[string]interface{}{
+				"command": currentCommand, "args": currentArgs,
+			}); !ok {
+				t.Fatalf("%s: current paired guard form is not recognized", event)
 			}
 			// Teardown, doctor and uninstall recognise it as DefenseClaw's own.
 			gotLauncher, hookArgs, ok := ClaudeCodeLauncherGuardTarget(handler)
