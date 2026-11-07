@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,7 +26,7 @@ func TestGAP0694ForegroundGatewayHelper(t *testing.T) {
 	}
 }
 
-// startGAP0694Gateway starts a gateway stand-in from a link named
+// startGAP0694Gateway starts a gateway stand-in from the copy named
 // defenseclaw-gateway.exe, with the launch environment env.
 func startGAP0694Gateway(t *testing.T, path string, env []string) int {
 	t.Helper()
@@ -41,17 +42,53 @@ func startGAP0694Gateway(t *testing.T, path string, env []string) int {
 	return child.Process.Pid
 }
 
-func gatewayLinkForGAP0694(t *testing.T) string {
+// gatewayCopyForGAP0694 is a copy of this test binary named
+// defenseclaw-gateway.exe, in a temp dir of its own. It is a copy and not a
+// hard link: a link names the file this very test process runs from, and a
+// name of a running image cannot be deleted on Windows, so the temp dir
+// cleanup failed with Access is denied. The stand-in is stopped by the
+// cleanup startGAP0694Gateway registers later, which runs first; the copy is
+// then removed here, retrying while the kernel still holds the image of a
+// process that has just exited.
+func gatewayCopyForGAP0694(t *testing.T) string {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "defenseclaw-gateway.exe")
-	if err := os.Link(self, path); err != nil {
+	copyExecutableForGAP0694(t, self, path)
+	t.Cleanup(func() {
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			err := os.Remove(path)
+			if err == nil || os.IsNotExist(err) || time.Now().After(deadline) {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	})
+	return path
+}
+
+func copyExecutableForGAP0694(t *testing.T, from, to string) {
+	t.Helper()
+	source, err := os.Open(from)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return path
+	defer source.Close()
+	target, err := os.OpenFile(to, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		target.Close()
+		t.Fatal(err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func withoutEnv(env []string, names ...string) []string {
@@ -71,7 +108,7 @@ func withoutEnv(env []string, names ...string) []string {
 }
 
 // TestGAP0694WindowsForegroundGatewayUsesOwnerImageAndHome starts a gateway
-// stand-in from a link named defenseclaw-gateway.exe, with no gateway.pid:
+// stand-in from a copy named defenseclaw-gateway.exe, with no gateway.pid:
 // status must call it this account's gateway for the home in its own launch
 // environment, and not for a different home, image or launch value. A
 // runtime record in another home, copied or newly written, naming the live
@@ -79,7 +116,7 @@ func withoutEnv(env []string, names ...string) []string {
 func TestGAP0694WindowsForegroundGatewayUsesOwnerImageAndHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)
-	path := gatewayLinkForGAP0694(t)
+	path := gatewayCopyForGAP0694(t)
 	pid := startGAP0694Gateway(t, path, os.Environ())
 
 	oldHolder, oldState, oldExecutable := gatewayPortHolder, gatewayManagedState, gatewayExecutable
@@ -159,7 +196,7 @@ func TestGAP0694WindowsForegroundGatewayOnDefaultHome(t *testing.T) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := gatewayLinkForGAP0694(t)
+	path := gatewayCopyForGAP0694(t)
 	pid := startGAP0694Gateway(t, path, append(withoutEnv(os.Environ(), "DEFENSECLAW_HOME", "USERPROFILE"), "USERPROFILE="+profile))
 	if !sameHomeGatewayProcessPlatform(pid, home, path) {
 		t.Fatal("a gateway on the default home was not recognised")
