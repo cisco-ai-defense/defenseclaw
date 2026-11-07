@@ -2286,7 +2286,10 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
 	w.admissionNotes.Delete(evt.Path)
-	defer func() { w.settleAdmissionIssue(evt, res) }()
+	defer func() {
+		w.settleAdmissionIssue(evt, res)
+		w.releaseHeldOnAdmission(evt, res)
+	}()
 	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
 		return AdmissionResult{
 			Event:   evt,
@@ -2355,10 +2358,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 		w.logAssetPolicyWouldBlock(ctx, evt, targetType, assetConnector, assetDecision)
 	}
-	// No connector rule denies it (any more): a hold an earlier denial left
-	// on the owner or on a consumer goes.
-	w.releasePolicyHolds(evt)
-
 	if res, done := w.legacyAllowPathMismatch(ctx, cfg, evt, targetType); done {
 		return res
 	}
@@ -3344,26 +3343,95 @@ func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType st
 	}
 }
 
-// policyDenialMark ends the journal reason of a block and runtime disable
-// that journalPolicyDenied wrote, so releasePolicyHolds lifts those and only
-// those once no connector rule denies the asset.
-const policyDenialMark = " [asset policy]"
+// policyDenialMarkPrefix opens the tag that ends the journal reason of a hold
+// journalPolicyDenied wrote. The tag lists the fields of the row the hold
+// set, so releasePolicyHolds lifts those and only those once no connector rule
+// denies the asset; an install block or runtime disable that was on the row
+// for another reason is not in the list and stays.
+const policyDenialMarkPrefix = " [asset policy: "
+
+// policyDenialSep follows, in the reason of a row the hold shares with an
+// earlier runtime disable, the reason of that earlier block; releasing the
+// hold puts it back.
+const policyDenialSep = " | asset policy hold: "
 
 // retainedPolicyReason leads the reason of a hold on an operator-restored
 // copy that stays in its folder although a connector rule denies it.
 const retainedPolicyReason = "a restored copy stays in its folder while an asset policy rule denies it"
 
+func policyDenialMark(fields []string) string {
+	return policyDenialMarkPrefix + strings.Join(fields, ",") + "]"
+}
+
+// policyHeldFields are the fields a journal reason records as set by a policy
+// hold, or nil when the reason carries no tag.
+func policyHeldFields(reason string) []string {
+	i := strings.LastIndex(reason, policyDenialMarkPrefix)
+	if i < 0 || !strings.HasSuffix(reason, "]") {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(reason[i+len(policyDenialMarkPrefix):], "]"), ",")
+}
+
+// policyPriorReason is the reason of the block a hold shares its row with
+// (policyDenialSep), or "".
+func policyPriorReason(reason string) string {
+	if i := strings.Index(reason, policyDenialSep); i >= 0 {
+		return reason[:i]
+	}
+	return ""
+}
+
+func actionFieldValue(entry *audit.ActionEntry, field string) string {
+	if entry == nil {
+		return ""
+	}
+	switch field {
+	case "install":
+		return entry.Actions.Install
+	case "runtime":
+		return entry.Actions.Runtime
+	case "file":
+		return entry.Actions.File
+	}
+	return ""
+}
+
+// policyRuntimeScope is the journal row that carries a connector's runtime
+// disable from a policy hold: the connector's own row. OpenClaw's install
+// journal is the global row (journalScope), which every other connector's
+// runtime check falls back to, so a runtime disable written there would block
+// an unrelated connector's skill of the same name.
+func policyRuntimeScope(connector string) string {
+	return strings.ToLower(strings.TrimSpace(connector))
+}
+
+// policyHoldScopes are the journal rows a policy hold of evt may sit in: the
+// install row and the runtime row of the owner and of every consumer.
+func (w *InstallWatcher) policyHoldScopes(evt InstallEvent) []string {
+	var scopes []string
+	for _, connector := range w.rootConsumersOf(evt, w.eventConnector(evt)) {
+		for _, scope := range []string{w.journalScope(connector), policyRuntimeScope(connector)} {
+			if !slices.Contains(scopes, scope) {
+				scopes = append(scopes, scope)
+			}
+		}
+	}
+	return scopes
+}
+
 // journalPolicyDenied records, after enforceBlockWith (err is its result) on
 // an asset an asset_policy rule denied, that the asset is still in its
 // folder: because the quarantine failed (err), or because the files of an
 // operator restore are kept while the install block stands. The owner and
-// the connector whose rule denied it both get the install block and the
-// runtime disable. Without the runtime disable a denial by the default
-// (default_action deny) rule, which the hook evaluates only when
-// runtime_detection is on, left the surviving skill callable.
-// releasePolicyHolds lifts them when the denial goes; an operator enable
-// clears them too. A removed link, or an asset that is gone, leaves nothing
-// to run and no runtime disable.
+// the connector whose rule denied it both get the install block and, on their
+// own row, the runtime disable. Without the runtime disable a denial by the
+// default (default_action deny) rule, which the hook evaluates only when
+// runtime_detection is on, left the surviving skill callable. A runtime
+// disable already on a row for another reason is left as it is and not
+// claimed. releasePolicyHolds lifts what the hold set when the denial goes; an
+// operator enable clears it too. A removed link, or an asset that is gone,
+// leaves nothing to run and no runtime disable.
 func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string, err error, decidedBy string) {
 	if w.store == nil || w.secureClientActive() {
 		return
@@ -3380,16 +3448,79 @@ func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string
 	default:
 		return
 	}
-	reason += policyDenialMark
-	scopes := []string{w.journalScope(w.eventConnector(evt))}
-	if scope := w.journalScope(decidedBy); !slices.Contains(scopes, scope) {
-		scopes = append(scopes, scope)
+	type holdRow struct {
+		scope  string
+		fields []string
 	}
-	for _, scope := range scopes {
-		_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "install", "block", reason)
-		_ = w.store.SetActionFieldForConnector(targetType, evt.Name, scope, "runtime", "disable", reason)
-		_ = w.store.SetSourcePathForConnector(targetType, evt.Name, scope, evt.Path)
+	var rows []holdRow
+	add := func(scope, field string) {
+		for i := range rows {
+			if rows[i].scope == scope {
+				rows[i].fields = append(rows[i].fields, field)
+				return
+			}
+		}
+		rows = append(rows, holdRow{scope, []string{field}})
 	}
+	connectors := []string{w.eventConnector(evt)}
+	if decidedBy != "" && !strings.EqualFold(decidedBy, connectors[0]) {
+		connectors = append(connectors, decidedBy)
+	}
+	var installScopes []string
+	for _, connector := range connectors {
+		if scope := w.journalScope(connector); !slices.Contains(installScopes, scope) {
+			installScopes = append(installScopes, scope)
+			add(scope, "install")
+		}
+	}
+	for _, connector := range connectors {
+		if scope := policyRuntimeScope(connector); scope != "" {
+			add(scope, "runtime")
+		}
+	}
+	name := evt.Name
+	for _, row := range rows {
+		prev, _ := w.store.GetActionForConnector(targetType, name, row.scope)
+		owned := policyHeldFields(reasonOf(prev))
+		var claim []string
+		independent := false
+		for _, field := range row.fields {
+			if field == "runtime" && actionFieldValue(prev, "runtime") != "" && !slices.Contains(owned, "runtime") {
+				independent = true
+				continue
+			}
+			claim = append(claim, field)
+		}
+		for _, field := range owned {
+			if !slices.Contains(claim, field) && actionFieldValue(prev, field) != "" {
+				claim = append(claim, field)
+			}
+		}
+		if len(claim) == 0 {
+			continue
+		}
+		rowReason := reason + policyDenialMark(claim)
+		if prior := policyPriorReason(reasonOf(prev)); prior != "" {
+			rowReason = prior + policyDenialSep + rowReason
+		} else if independent && owned == nil && reasonOf(prev) != "" {
+			rowReason = prev.Reason + policyDenialSep + rowReason
+		}
+		for _, field := range claim {
+			value := "block"
+			if field == "runtime" {
+				value = "disable"
+			}
+			_ = w.store.SetActionFieldForConnector(targetType, name, row.scope, field, value, rowReason)
+		}
+		_ = w.store.SetSourcePathForConnector(targetType, name, row.scope, evt.Path)
+	}
+}
+
+func reasonOf(entry *audit.ActionEntry) string {
+	if entry == nil {
+		return ""
+	}
+	return entry.Reason
 }
 
 func assetStillThere(path string) bool {
@@ -3397,48 +3528,67 @@ func assetStillThere(path string) bool {
 	return err == nil
 }
 
-// policyHeldScopes are the journal scopes of the owner and of every consumer
-// of the root holding evt whose row is a hold journalPolicyDenied wrote for
+// policyHeldScopes are the journal rows of the owner and of every consumer of
+// the root holding evt that hold something a journalPolicyDenied wrote for
 // this path.
 func (w *InstallWatcher) policyHeldScopes(evt InstallEvent) []string {
 	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
 		return nil
 	}
 	var scopes []string
-	for _, connector := range w.rootConsumersOf(evt, w.eventConnector(evt)) {
-		scope := w.journalScope(connector)
-		if slices.Contains(scopes, scope) {
-			continue
-		}
+	for _, scope := range w.policyHoldScopes(evt) {
 		entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
-		if err != nil || entry == nil || !strings.HasSuffix(entry.Reason, policyDenialMark) ||
-			(entry.Actions.Runtime == "" && entry.Actions.Install == "") ||
+		if err != nil || entry == nil ||
 			(entry.SourcePath != "" && !sameWatcherPath(entry.SourcePath, evt.Path)) {
 			continue
 		}
-		scopes = append(scopes, scope)
+		for _, field := range policyHeldFields(entry.Reason) {
+			if actionFieldValue(entry, field) != "" {
+				scopes = append(scopes, scope)
+				break
+			}
+		}
 	}
 	return scopes
 }
 
-// releasePolicyHolds lifts, from the owner and from every consumer, the
-// install block and runtime disable that a policy denial left on an asset
-// that stayed in its folder, once no connector rule denies it: an allow rule
-// for it (a global one or one scoped to the denying connector) or a policy
-// that no longer denies. Without it an allow rule cleared only the owner row
-// and the allowed skill stayed blocked for the denying connector.
+// releasePolicyHolds lifts, from the owner and from every consumer, what a
+// policy denial set on an asset that stayed in its folder, once no connector
+// rule denies it: an allow rule for it (a global one or one scoped to the
+// denying connector) or a policy that no longer denies. Without it an allow
+// rule cleared only the owner row and the allowed skill stayed blocked for
+// the denying connector. A block or disable that was on a row before the
+// hold stays.
 func (w *InstallWatcher) releasePolicyHolds(evt InstallEvent) {
 	for _, scope := range w.policyHeldScopes(evt) {
+		entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
+		if err != nil || entry == nil {
+			continue
+		}
 		var cleared []string
-		for _, field := range []string{"install", "runtime"} {
+		for _, field := range policyHeldFields(entry.Reason) {
+			if actionFieldValue(entry, field) == "" {
+				continue
+			}
 			if err := w.store.ClearActionFieldForConnector(string(evt.Type), evt.Name, scope, field); err == nil {
 				cleared = append(cleared, field)
 			}
 		}
-		if len(cleared) > 0 {
-			_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
-				fmt.Sprintf("type=%s released: no asset policy rule denies it; cleared %s connector=%s", evt.Type, strings.Join(cleared, " "), scope))
+		if len(cleared) == 0 {
+			continue
 		}
+		if rest, _ := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope); rest != nil {
+			if prior := policyPriorReason(entry.Reason); prior != "" {
+				for _, field := range []string{"runtime", "install", "file"} {
+					if value := actionFieldValue(rest, field); value != "" {
+						_ = w.store.SetActionFieldForConnector(string(evt.Type), evt.Name, scope, field, value, prior)
+						break
+					}
+				}
+			}
+		}
+		_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+			fmt.Sprintf("type=%s released: no asset policy rule denies it; cleared %s connector=%s", evt.Type, strings.Join(cleared, " "), scope))
 	}
 }
 
@@ -3699,15 +3849,37 @@ func (w *InstallWatcher) allowRuleReleases(ctx context.Context, evt InstallEvent
 	return out != nil && out.Verdict == "allowed" && w.allowedAuditReason(out.Reason) == "allow-listed"
 }
 
+// policyDenies reports whether a connector rule that loads evt's root denies
+// it under the live config.
+func (w *InstallWatcher) policyDenies(evt InstallEvent) bool {
+	decision, _ := w.rootAssetPolicy(w.liveConfig(), evt, w.eventConnector(evt))
+	return decision.Enabled && decision.RawAction == "block" && decision.Action == "block"
+}
+
 // policyHoldReleases reports a skill or plugin whose owner or consumer row
 // still holds it after an asset-policy denial although no connector rule
 // denies it now, so the rescan admits it again and lifts the hold.
 func (w *InstallWatcher) policyHoldReleases(evt InstallEvent) bool {
-	if len(w.policyHeldScopes(evt)) == 0 {
-		return false
+	return len(w.policyHeldScopes(evt)) > 0 && !w.policyDenies(evt)
+}
+
+// releaseHeldOnAdmission lifts a policy hold once admission has reached a
+// verdict that lets the asset run: a scan that has not finished, one that was
+// interrupted, and a block all keep it, since until then nothing but the hold
+// stops a skill that stayed in its folder (the hook evaluates the default
+// skill rules only with runtime_detection on).
+func (w *InstallWatcher) releaseHeldOnAdmission(evt InstallEvent, res AdmissionResult) {
+	if res.Interrupted {
+		return
 	}
-	decision, _ := w.rootAssetPolicy(w.liveConfig(), evt, w.eventConnector(evt))
-	return !(decision.Enabled && decision.RawAction == "block" && decision.Action == "block")
+	switch res.Verdict {
+	case VerdictAllowed, VerdictClean, VerdictWarning:
+	default:
+		return
+	}
+	if len(w.policyHeldScopes(evt)) > 0 && !w.policyDenies(evt) {
+		w.releasePolicyHolds(evt)
+	}
 }
 
 // quarantinedCopyIsBack reports a skill or plugin at a path that holds an
