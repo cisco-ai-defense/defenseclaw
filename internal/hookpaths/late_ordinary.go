@@ -35,13 +35,16 @@ import (
 //     user's home itself; an ordinary word such as claw or defense is not
 //     a name, because a protected file is a place and a place is told by
 //     its folder, its link or its state-folder name, not by one word;
-//   - a path word, or a folder in front of it, is a link that leads to
-//     anything above (a missing target, a protected name, the root, the
-//     home or a parent of it, a file with a second hard link), or the file
-//     is a regular file with a second hard link: a link candidate. A link
-//     whose whole target is ordinary is as ordinary as its target, because
-//     a program that reads or writes through it touches only that target.
-//     A program may
+//   - a path word, or a folder in front of it, is a link whose way to its
+//     end is not ordinary (a missing target, a protected name in any link
+//     text or place on the way, the root, the home or a parent of it), or
+//     the place it ends at is a protected one by identity (an authorized-keys
+//     file wherever it was moved to, a protected folder or anything below
+//     it); or the file is a regular file with a second hard link that is the
+//     same file as one in a protected folder (late_ordinary_reach.go). A
+//     link or a hard link whose whole way and identity are ordinary is as
+//     ordinary as its target, because a program that reads or writes through
+//     it touches only that target. A program may
 //     read a path out of any word (-ofile, of=file, --out=file, a:file), so
 //     every part of a word that can start a value is looked at, not only
 //     the word;
@@ -160,6 +163,7 @@ type lateScan struct {
 	orSeen bool     // a "||" since the last ";": a later "&&" may run without the cd before it
 	home   string
 	seen   map[string]lateEntry
+	reach  lateReach // what is protected, found when a link or a hard link needs it
 }
 
 // lateEntry is what the scan found at one path: whether the entry is
@@ -276,10 +280,12 @@ func (s *lateScan) placeOrdinary(path string) bool {
 	return !lateNamesProtected(path) && s.placeReachable(path)
 }
 
-// entry looks at one path once. A missing entry is ordinary and ends a walk;
-// a regular file with a second hard link is not; a link is as ordinary as
-// the place it finally leads to (a missing target, a protected name, the
-// root or the home are not, and the target is looked at as an entry too).
+// entry looks at one path once. A missing entry is ordinary and ends a walk.
+// A link is followed hop by hop (follow) and a link, or a regular file with a
+// second hard link, is as ordinary as the place it reaches: not a missing
+// target, a protected name on any hop, the root or the home, and not the
+// identity of a protected file or folder (reachesProtected). An ordinary
+// file with a second hard link stays ordinary.
 func (s *lateScan) entry(path string) lateEntry {
 	if known, seen := s.seen[path]; seen {
 		return known
@@ -298,15 +304,18 @@ func (s *lateScan) lookup(path string) lateEntry {
 	if info.Mode()&os.ModeIrregular != 0 {
 		return found
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		if found.real, err = filepath.EvalSymlinks(path); err != nil || !s.placeOrdinary(found.real) {
+	linked := info.Mode()&os.ModeSymlink != 0
+	if linked {
+		var ok bool
+		if found.real, ok = s.follow(path); !ok {
 			return found
 		}
 		if info, err = pathLstat(found.real); err != nil {
 			return found
 		}
 	}
-	found.ok = !info.Mode().IsRegular() || linkCount(found.real, info) <= 1
+	hardLinked := info.Mode().IsRegular() && linkCount(found.real, info) > 1
+	found.ok = !(linked || hardLinked) || !s.reachesProtected(found.real, info)
 	return found
 }
 
@@ -843,9 +852,12 @@ func (s *lateScan) patternWord(program string, st *latePattern, text string) (ha
 		case lateOptionText:
 			return st.optionValue(s, lateOptionText, value, hasValue)
 		case lateOptionFile:
-			if name == "file" {
+			// --file reads the patterns from its value, the next word when it
+			// is not attached: a path, whatever it looks like (--regexp).
+			if strings.HasPrefix("file", name) {
 				st.done = true
-			} else if !hasValue {
+			}
+			if !hasValue {
 				st.expect = lateOptionFile
 			}
 		}
@@ -861,6 +873,9 @@ func (s *lateScan) patternWord(program string, st *latePattern, text string) (ha
 				return st.optionValue(s, lateOptionText, text[i+1:], i+1 < len(text))
 			case strings.IndexByte(opts.file, letter) >= 0:
 				st.done = true
+				if i+1 == len(text) {
+					st.expect = lateOptionFile
+				}
 				return false, false
 			case strings.IndexByte(known.flags, letter) < 0:
 				return false, false
