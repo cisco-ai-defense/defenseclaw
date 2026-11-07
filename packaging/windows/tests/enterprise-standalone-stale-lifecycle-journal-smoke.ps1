@@ -267,7 +267,7 @@ try {
             # This deployment's helper prepares the hook removal against the
             # tombstone (teardown-managed-hooks capabilities); the older-helper
             # paths are covered by enterprise-standalone-uninstall-hook-commit-smoke.ps1.
-            function script:Test-DefenseClawManagedHooksCommittedTeardownSupported { param($Layout, $GatewayServiceName) return $true }
+            function script:Test-DefenseClawManagedHooksCommittedTeardownSupported { param($Layout, $GatewayServiceName, [string]$Capability = 'committed_standalone_prepare') return $true }
             $realRemoveRolledBackJournal = ${function:Remove-DefenseClawRolledBackTeardownJournal}
             function script:Remove-DefenseClawRolledBackTeardownJournal { param($Layout, [switch]$Stale) throw 'uninstall reached teardown after stale journal retirement' }
             foreach ($refusal in @($gcRefusal, $selectorRefusal, $identityRefusal, $unknownRefusal, $untrustedFolder)) {

@@ -325,7 +325,7 @@ function Set-DefenseClawInstallTreeRetirementAcls { param([hashtable]$Layout, [s
 # (teardown-managed-hooks capabilities); the older-helper paths are covered
 # by enterprise-standalone-uninstall-hook-commit-smoke.ps1.
 function Test-DefenseClawManagedHooksCommittedTeardownSupported {
-    param([hashtable]$Layout, [string]$GatewayServiceName)
+    param([hashtable]$Layout, [string]$GatewayServiceName, [string]$Capability = 'committed_standalone_prepare')
     return $true
 }
 function Invoke-DefenseClawManagedHooksTeardownCommand {

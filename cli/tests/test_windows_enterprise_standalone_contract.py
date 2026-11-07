@@ -1425,7 +1425,7 @@ function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDir
 function Remove-DefenseClawStaleReplacementBackups {}
 function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($Path); return $true }
 # A volume that refuses the one-step swap (GAP-0240) keeps File.Replace.
-function Invoke-DefenseClawLaunchableFileSwap { return $false }
+function Invoke-DefenseClawLaunchableFileSwap { param($Temporary, $Destination, $Backup, [switch]$KeepReplacementAccess) return $false }
 function ConvertTo-DefenseClawBoundedDiagnostic { param($Value, $MaxLength) return $Value }
 $script:attempts = 0
 function Invoke-TestMappedImageReplace {
@@ -1619,7 +1619,7 @@ function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($P
 function ConvertTo-DefenseClawBoundedDiagnostic { param($Value, $MaxLength) return $Value }
 $script:swaps = 0
 function Invoke-DefenseClawLaunchableFileSwap {
-    param($Temporary, $Destination, $Backup)
+    param($Temporary, $Destination, $Backup, [switch]$KeepReplacementAccess)
     $script:swaps++
     if (-not $Backup.StartsWith("$Destination.backup.")) { throw "unexpected backup name $Backup" }
     [IO.File]::Copy($Destination, $Backup)

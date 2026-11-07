@@ -60,7 +60,7 @@ try {
             $realProbe = ${function:Test-DefenseClawManagedHooksCommittedTeardownSupported}
             $realTeardownCommand = ${function:Invoke-DefenseClawManagedHooksTeardownCommand}
             function script:Test-DefenseClawManagedHooksCommittedTeardownSupported {
-                param($Layout, $GatewayServiceName)
+                param($Layout, $GatewayServiceName, [string]$Capability = 'committed_standalone_prepare')
                 $script:HookCommitEvents.Add('capabilities')
                 return $script:HookCommitCapable
             }
