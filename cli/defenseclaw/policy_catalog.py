@@ -631,9 +631,9 @@ EMPTY_RULE_PACK_FILES_DIGEST = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e46
 def custom_pack_dir(cfg: Any, entry: Any) -> str:
     """The folder a ``guardrail.custom_packs`` entry names, "" when its path is blank.
 
-    An absolute path as written, a relative one against the directory of the
-    config file, never the working directory (Go ``customPackPathIn``). ``~`` is
-    not expanded: the gateway does not.
+    An absolute path as written, a relative one against the (absolute)
+    directory of the config file, never the working directory (Go
+    ``customPackPathIn``). ``~`` is not expanded: the gateway does not.
     """
     raw = str(getattr(entry, "path", "") or "").strip()
     if not raw:
@@ -643,39 +643,123 @@ def custom_pack_dir(cfg: Any, entry: Any) -> str:
     from defenseclaw.config import config_path_for_data_dir
 
     base = os.path.dirname(str(config_path_for_data_dir(str(getattr(cfg, "data_dir", "") or ""))))
-    return os.path.normpath(os.path.join(base, raw))
+    return os.path.abspath(os.path.join(base, raw))
 
 
-def custom_pack_problem(cfg: Any, name: str) -> str:
-    """The config error of ``guardrail.custom_packs.<name>``, "" when usable or not an entry.
+# The Go rule loader verdicts on pack folders, kept for the life of the
+# process and keyed by what the folder holds, so a status or doctor run asks
+# the gateway binary once per pack state, not once per reader.
+_LOADER_VERDICTS: dict[tuple[Any, ...], tuple[str, str]] = {}
+_MAX_LOADER_VERDICTS = 64
+_MAX_FINGERPRINT_FILES = 4096
 
-    Mirrors the structural part of Go ``Config.CustomRulePackError``: a path that
-    is empty after trimming, an empty-file-set pin, a path that is not a
-    readable folder. The content checks (the pack loads, its files hash to the
-    pin, a pin is present) are the Go loader's; ``defenseclaw doctor`` reads them from it
-    (``_emit_rule_pack_row``). Secure Client keeps its loader's own refusals.
+
+def _pack_fingerprint(path: str) -> tuple[tuple[str, int, int], ...] | None:
+    """(relative path, size, mtime) of every file under *path*; None when it cannot be listed or is too large."""
+    out: list[tuple[str, int, int]] = []
+
+    def _raise(exc: OSError) -> None:
+        raise exc
+
+    try:
+        for root, dirs, files in os.walk(path, onerror=_raise):
+            dirs.sort()
+            for entry in sorted(files):
+                full = os.path.join(root, entry)
+                info = os.stat(full)
+                out.append((os.path.relpath(full, path), info.st_size, info.st_mtime_ns))
+                if len(out) > _MAX_FINGERPRINT_FILES:
+                    return None
+    except OSError:
+        return None
+    return tuple(out)
+
+
+def _loader_verdict(path: str) -> tuple[str, str] | None:
+    """The Go rule loader verdict on pack folder *path*.
+
+    ``("", files_digest)`` for a pack it loads (``files_digest`` is the bare
+    hex ``guardrail.custom_packs`` pins as ``sha256:<hex>``), ``(reason, "")``
+    for a folder it refuses, ``None`` when the verdict is unavailable (no
+    trusted gateway binary, or a helper that does not answer). Python never
+    judges pack content itself: ``defenseclaw-gateway rulepack validate`` runs
+    the loader the gateway enforces with (``rulepack_validation``).
+    """
+    from defenseclaw import rulepack_validation
+
+    validate = rulepack_validation.validate_rule_pack
+    fingerprint = _pack_fingerprint(path)
+    key = (validate, path, fingerprint)
+    if fingerprint is not None and key in _LOADER_VERDICTS:
+        return _LOADER_VERDICTS[key]
+    try:
+        result = validate(path)
+    except Exception:  # noqa: BLE001 - an unavailable helper is "unverified", never "usable".
+        return None
+    if result.valid:
+        verdict = ("", str((result.summary or {}).get("files_digest", "") or "").lower())
+    else:
+        issue = result.error
+        verdict = (f"{issue.code} at {issue.path}: {issue.reason}" if issue else "not a valid rule pack", "")
+    if fingerprint is not None:
+        if len(_LOADER_VERDICTS) >= _MAX_LOADER_VERDICTS:
+            _LOADER_VERDICTS.clear()
+        _LOADER_VERDICTS[key] = verdict
+    return verdict
+
+
+def custom_pack_check(cfg: Any, name: str) -> tuple[str, bool]:
+    """``(problem, verified)`` for ``guardrail.custom_packs.<name>``.
+
+    *problem* is the config error of the entry, "" when usable or not an
+    entry: Go ``Config.CustomRulePackError``. It is the structural check (a
+    path that is empty after trimming, an empty-file-set pin, a path that is
+    not a readable folder) and then the Go rule loader verdict: the folder
+    must load as a pack whose files hash to the pin (a missing pin matches
+    nothing). *verified* is False when the entry looks usable but the loader
+    verdict is unavailable; a caller that grants a posture from the pack must
+    treat that as strict, as the standalone hook does where the loader is not
+    linked (``HookPolicyTierForConnector``). Secure Client keeps its loader
+    own refusals: ("", True).
     """
     guardrail = _guardrail(cfg)
     entry = (getattr(guardrail, "custom_packs", None) or {}).get(name)
     if entry is None:
-        return ""
+        return "", True
     secure_client = getattr(guardrail, "secure_client_hook_fail_modes", None)
     if callable(secure_client) and secure_client():
-        return ""
+        return "", True
     key = f"guardrail.custom_packs.{name}"
     path = custom_pack_dir(cfg, entry)
     pin = str(getattr(entry, "digest", "") or "").strip()
     if not path:
-        return f"{key}.path is empty"
+        return f"{key}.path is empty", True
     if pin.lower() == EMPTY_RULE_PACK_FILES_DIGEST:
-        return f"{key}.digest pins an empty file set"
+        return f"{key}.digest pins an empty file set", True
     if not os.path.isdir(path):
-        return f"{key}.path {path!r} is not a folder"
+        return f"{key}.path {path!r} is not a folder", True
     try:
         os.listdir(path)
     except OSError as exc:
-        return f"{key}.path cannot be read: {exc.strerror or exc}"
-    return ""
+        return f"{key}.path cannot be read: {exc.strerror or exc}", True
+    verdict = _loader_verdict(path)
+    if verdict is None:
+        return "", False
+    reason, files_digest = verdict
+    if reason:
+        return f"{key}.path {path!r} is not a valid rule pack: {reason}", True
+    if pin.lower() != f"sha256:{files_digest}":
+        return (
+            f"the files in {path!r} hash to sha256:{files_digest}, which does not match {key}.digest; "
+            "review the pack, then pin that digest",
+            True,
+        )
+    return "", True
+
+
+def custom_pack_problem(cfg: Any, name: str) -> str:
+    """The config error of ``guardrail.custom_packs.<name>`` (:func:`custom_pack_check`)."""
+    return custom_pack_check(cfg, name)[0]
 
 
 def builtin_rule_pack_fallback(name: str) -> str:

@@ -14,7 +14,7 @@ import os
 
 import pytest
 from defenseclaw import config as dcconfig
-from defenseclaw import policy_catalog
+from defenseclaw import policy_catalog, rulepack_validation
 from defenseclaw.commands.cmd_doctor import _DoctorResult, _emit_custom_pack_config_error
 from defenseclaw.config import Config, CustomRulePack
 
@@ -34,6 +34,94 @@ def _pack(tmp_path, name: str = "pack") -> str:
     path.mkdir(exist_ok=True)
     (path / "suppressions.yaml").write_text("version: 1\n", encoding="utf-8")
     return str(path)
+
+
+class _Loader:
+    """A stand-in for the Go rule loader helper: it answers by the pack folder."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.answers: dict[str, object] = {}
+
+    def __call__(self, path, *, gateway_binary=None):
+        self.calls += 1
+        answer = self.answers.get(os.path.basename(path), PIN.removeprefix("sha256:"))
+        if answer is None:
+            raise rulepack_validation.RulePackValidationBridgeError("helper unavailable", code="gateway_unavailable")
+        if isinstance(answer, str) and len(answer) == 64:
+            summary = {field: 0 for field in rulepack_validation._SUMMARY_COUNT_FIELDS}
+            summary.update(digest=answer, files_digest=answer)
+            return rulepack_validation.RulePackValidationResult(1, "validation", True, summary=summary)
+        issue = rulepack_validation.RulePackValidationIssue(path=".", code="pack_empty", reason=str(answer))
+        return rulepack_validation.RulePackValidationResult(1, "validation_error", False, error=issue)
+
+
+@pytest.fixture
+def loader(monkeypatch):
+    fake = _Loader()
+    monkeypatch.setattr(rulepack_validation, "validate_rule_pack", fake)
+    return fake
+
+
+def _expect_config_error(cfg, name: str, fallback: str) -> None:
+    assert policy_catalog.custom_pack_problem(cfg, name)
+    assert os.path.basename(cfg.guardrail.effective_rule_pack_dir("codex")) == fallback
+    assert cfg.guardrail.hook_policy_tier("codex") == "strict"
+    assert cfg.guardrail.effective_hook_outage_fail_mode("codex") == "closed"
+    result = _DoctorResult()
+    _emit_custom_pack_config_error(cfg.guardrail, cfg, "codex", result)
+    (row,) = result.checks
+    assert row["status"] == "fail" and f"built-in {fallback} pack" in row["detail"]
+
+
+@pytest.mark.parametrize("name", ["strict", "default", "operator"])
+@pytest.mark.parametrize("variant", ["wrong pin", "missing pin", "empty folder"])
+def test_content_and_pin_come_from_the_go_loader_verdict(tmp_path, loader, name, variant):
+    """Python takes the Go loader verdict: a pack that does not load, or whose files do not hash to the pin, is a config error."""
+    folder = _pack(tmp_path, "copy")
+    pin = {"wrong pin": "sha256:" + "b" * 64, "missing pin": "", "empty folder": PIN}[variant]
+    if variant == "empty folder":
+        loader.answers["copy"] = "the folder holds no pack files"
+    cfg = _cfg(tmp_path, name, CustomRulePack(path=folder, digest=pin))
+    _expect_config_error(cfg, name, name if name in policy_catalog.RULE_PACK_PRESETS else "default")
+
+
+@pytest.mark.parametrize("name", ["strict", "operator"])
+def test_pack_the_loader_cannot_vouch_for_grants_no_open_outage(tmp_path, loader, name):
+    """No loader verdict (no trusted gateway binary) is not a usable pack: strict, as the standalone hook without the loader."""
+    loader.answers["pack"] = None
+    cfg = _cfg(tmp_path, name, CustomRulePack(path=_pack(tmp_path), digest=PIN))
+    assert policy_catalog.custom_pack_problem(cfg, name) == ""
+    assert cfg.guardrail.hook_policy_tier("codex") == "strict"
+    assert cfg.guardrail.effective_hook_outage_fail_mode("codex") == "closed"
+
+
+def test_pin_comparison_is_case_insensitive_and_needs_the_prefix(tmp_path, loader):
+    cfg = _cfg(tmp_path, "operator", CustomRulePack(path=_pack(tmp_path), digest=PIN.upper().replace("SHA256", "sha256")))
+    assert policy_catalog.custom_pack_problem(cfg, "operator") == ""
+    bare = _cfg(tmp_path, "operator", CustomRulePack(path=_pack(tmp_path), digest=PIN.removeprefix("sha256:")))
+    assert policy_catalog.custom_pack_problem(bare, "operator")
+
+
+def test_loader_verdict_is_asked_once_per_pack_state(tmp_path, loader):
+    path = _pack(tmp_path)
+    cfg = _cfg(tmp_path, "operator", CustomRulePack(path=path, digest=PIN))
+    for _ in range(3):
+        assert policy_catalog.custom_pack_problem(cfg, "operator") == ""
+        assert cfg.guardrail.hook_policy_tier("codex") == "default"
+    assert loader.calls == 1
+    with open(os.path.join(path, "suppressions.yaml"), "a", encoding="utf-8") as fh:
+        fh.write("# edited\n")
+    assert policy_catalog.custom_pack_problem(cfg, "operator") == ""
+    assert loader.calls == 2
+
+
+def test_relative_config_directory_is_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(dcconfig, "config_path_for_data_dir", lambda _data_dir=None: os.path.join("cfg", "config.yaml"))
+    got = policy_catalog.custom_pack_dir(Config(), CustomRulePack(path="pack", digest=PIN))
+    os.chdir(os.path.dirname(tmp_path))
+    assert got == str(tmp_path / "cfg" / "pack")
 
 
 @pytest.mark.parametrize("name", ["strict", "default", "operator"])
@@ -62,7 +150,7 @@ def test_broken_entry_is_a_config_error_with_builtin_fallback(tmp_path, name, va
     assert "fail closed" in row["detail"]
 
 
-def test_usable_entry_keeps_its_folder_and_posture(tmp_path):
+def test_usable_entry_keeps_its_folder_and_posture(tmp_path, loader):
     path = _pack(tmp_path)
     cfg = _cfg(tmp_path, "operator", CustomRulePack(path=path, digest=PIN))
     assert policy_catalog.custom_pack_problem(cfg, "operator") == ""
@@ -74,7 +162,7 @@ def test_usable_entry_keeps_its_folder_and_posture(tmp_path):
     assert result.checks == []
 
 
-def test_relative_path_is_relative_to_the_config_directory(tmp_path, monkeypatch):
+def test_relative_path_is_relative_to_the_config_directory(tmp_path, monkeypatch, loader):
     config_dir = tmp_path / "home"
     config_dir.mkdir()
     pack = _pack(config_dir)

@@ -240,18 +240,24 @@ def seed_cached_plugin(
     return str(root)
 
 
+# The files digest the tests stand-in rule loaders report (tests/test_cmd_guardrail_packs.py _valid).
+SELECTED_PACK_PIN = "sha256:" + "a" * 64
+
+
 def select_pack(cfg: Config, block, path: str) -> None:
     """Make a guardrail scope (``cfg.guardrail`` or one connector entry) select the pack at *path*.
 
     A built-in preset name is selected by name; any other folder is registered under its
-    folder name in ``guardrail.custom_packs`` (config_version 9 has no directory key).
+    folder name in ``guardrail.custom_packs`` (config_version 9 has no directory key),
+    pinned to ``SELECTED_PACK_PIN``: an unpinned entry is a config error, which falls back to
+    the built-in pack, so a test that registers one pins it to what its stand-in loader reports.
     """
     from defenseclaw.config import CustomRulePack
     from defenseclaw.policy_catalog import RULE_PACK_PRESETS
 
     name = os.path.basename(path.rstrip("/\\")) if path else ""
     if name and name not in RULE_PACK_PRESETS:
-        cfg.guardrail.custom_packs[name] = CustomRulePack(path=path)
+        cfg.guardrail.custom_packs[name] = CustomRulePack(path=path, digest=SELECTED_PACK_PIN)
     block.rule_pack = name
 
 

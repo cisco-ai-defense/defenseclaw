@@ -188,3 +188,58 @@ func TestGAP0632RelativeCustomPackUsesConfigDirectory(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0632: a relative config path is legal, and the folder a relative
+// custom_packs path names is fixed when the configuration is loaded: a later
+// change of working directory leaves the selected pack, and the writer check
+// that vouched for it, on the same folder. The ordinary twin is the absolute
+// config path of the test above.
+func TestGAP0632RelativeConfigPathSurvivesChdir(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "cfg"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(root)
+	pin := copyShippedPack(t, "strict", filepath.Join("cfg", "pack"))
+	policyDir := filepath.Dir(guardrailPoliciesRoot(t))
+	raw := fmt.Sprintf("config_version: 9\ndata_dir: %q\npolicy_dir: %q\nguardrail:\n  enabled: true\n  mode: action\n  rule_pack: operator\n  custom_packs:\n    operator:\n      path: pack\n      digest: %q\n", root, policyDir, pin)
+	if err := os.WriteFile(filepath.Join("cfg", "config.yaml"), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	built := &config.Config{ConfigFilePath: filepath.Join("cfg", "config.yaml"), PolicyDir: policyDir}
+	built.Guardrail.RulePack = "operator"
+	built.Guardrail.CustomPacks = map[string]config.CustomRulePack{"operator": {Path: "pack", Digest: pin}}
+	built.CheckCustomRulePacks()
+	loaded, err := config.LoadFromFile(filepath.Join("cfg", "config.yaml"))
+	if err != nil {
+		t.Fatalf("valid relative config file rejected at load: %v", err)
+	}
+	copied, err := loaded.DeepCopy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for who, cfg := range map[string]*config.Config{"built": built, "loaded": loaded, "copy": copied} {
+		if err := cfg.CustomRulePackError("operator"); err != nil {
+			t.Fatalf("%s: %v", who, err)
+		}
+		if err := CheckRulePacks(cfg); err != nil {
+			t.Fatalf("%s: valid config-relative pack refused by the writer check: %v", who, err)
+		}
+	}
+	t.Chdir(t.TempDir())
+	want := filepath.Join(root, "cfg", "pack")
+	for who, cfg := range map[string]*config.Config{"built": built, "loaded": loaded, "copy": copied} {
+		got := cfg.ResolveRulePackDir(config.RulePackRef{Name: "operator"})
+		if resolved, err := filepath.EvalSymlinks(got); err != nil {
+			t.Errorf("%s: selected %q: %v", who, got, err)
+		} else if wantResolved, _ := filepath.EvalSymlinks(want); resolved != wantResolved {
+			t.Errorf("%s: selected %q after chdir, want %q", who, got, want)
+		}
+		if _, err := guardrail.LoadRulePack(got); err != nil {
+			t.Errorf("%s: config-relative pack changed with the working directory: %v", who, err)
+		}
+		if err := CheckRulePacks(cfg); err != nil {
+			t.Errorf("%s: writer check changed with the working directory: %v", who, err)
+		}
+	}
+}
