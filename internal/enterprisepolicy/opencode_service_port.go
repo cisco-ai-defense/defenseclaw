@@ -7,6 +7,8 @@ package enterprisepolicy
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -53,15 +55,27 @@ func ReadOpenCodeServicePortAsUser(home string) (int, error) {
 		return 0, fmt.Errorf("opencode service port: home %q is not absolute", home)
 	}
 	path := OpenCodeServiceConfigPath(filepath.Clean(home))
-	data, exists, regular, err := readUserFile(path, openCodeServiceConfigLimit)
+	// This read runs under the account identity. Follow a final file link so
+	// its existing port participates in the one-time import; the privileged
+	// writer below still refuses a final link.
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
 	if err != nil {
 		return 0, fmt.Errorf("read %s: %w", path, err)
 	}
-	if !exists {
-		return 0, nil
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return 0, fmt.Errorf("%s is not a regular file: %v", path, err)
 	}
-	if !regular {
-		return 0, fmt.Errorf("%s is not a regular file", path)
+	data, err := io.ReadAll(io.LimitReader(file, openCodeServiceConfigLimit+1))
+	if err != nil {
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	if len(data) > openCodeServiceConfigLimit {
+		return 0, fmt.Errorf("%s exceeds the service file limit", path)
 	}
 	var doc map[string]json.RawMessage
 	if len(strings.TrimSpace(string(data))) == 0 {
@@ -141,7 +155,7 @@ func SetOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult, e
 		return result, err
 	}
 	missing := missingDirsBelow(home, path)
-	if err := writePrivateUserFile(path, append(data, '\n')); err != nil {
+	if err := writeOpenCodeServiceConfig(home, path, append(data, '\n')); err != nil {
 		return result, fmt.Errorf("opencode service port: write %s: %w", path, err)
 	}
 	result.Port, result.Changed, result.CreatedDirs = port, true, missing
@@ -194,13 +208,14 @@ type OpenCodePortPlan struct {
 //
 // A record that pairs two uids with one port (written by an earlier build)
 // keeps the lower uid on it and rebinds the other, reported as a conflict.
-//
-// importWindow is true only in the pass that creates or rebuilds the record
-// (REVIEW-gx053-11): only then are imports used; every other pass gives an
-// unrecorded uid a fresh port, whatever its file names. contestedMarks are
-// the ports the record marks contested: never imported, never handed out,
-// until an administrator clears the mark.
+// importWindow is true only in the pass that creates or rebuilds the record.
+// Contested ports stay marked until an administrator clears them. A per-user
+// claim reserves a free port from other accounts while its owner may retry it.
 func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool, importWindow bool, contestedMarks map[int]bool) OpenCodePortPlan {
+	return planOpenCodeServicePorts(eligible, imports, recorded, allowNew, unknown, importWindow, contestedMarks, nil)
+}
+
+func planOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, allowNew bool, unknown map[int]bool, importWindow bool, contestedMarks map[int]bool, reserved map[int]int) OpenCodePortPlan {
 	plan := OpenCodePortPlan{Ports: map[int]int{}, Record: map[int]int{}}
 	holder := map[int]int{}
 	recordedUIDs := make([]int, 0, len(recorded))
@@ -239,7 +254,9 @@ func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 		start := OpenCodeAccountPort(uint64(uid))
 		for step := 0; step < OpenCodeAccountPortSpan; step++ {
 			port := OpenCodeAccountPortBase + (start-OpenCodeAccountPortBase+step)%OpenCodeAccountPortSpan
-			if _, taken := holder[port]; !taken && !contested[port] {
+			_, taken := holder[port]
+			owner, claimed := reserved[port]
+			if !taken && !contested[port] && (!claimed || owner == uid) {
 				holder[port] = uid
 				return port
 			}
@@ -302,6 +319,13 @@ func PlanOpenCodeServicePorts(eligible []int, imports, recorded map[int]int, all
 			continue
 		}
 		uid := claimants[0]
+		if owner, claimed := reserved[port]; claimed && owner != uid {
+			if owner > 0 {
+				plan.Conflicts = append(plan.Conflicts, OpenCodePortConflict{UID: uid, Holder: owner, Port: port})
+			}
+			needFresh = append(needFresh, uid)
+			continue
+		}
 		holder[port] = uid
 		plan.Ports[uid], plan.Record[uid] = port, port
 	}
