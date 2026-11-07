@@ -144,6 +144,28 @@ func mergeEnterpriseHookGuardianRestorePending(pathKey string, restored []enterp
 	}
 }
 
+// holdEnterpriseHookGuardianRestores keeps the restores of a pass that was
+// interrupted after its workers put targets back. The pass does not record,
+// and the next pass that does writes them with its own (GAP-0754).
+func holdEnterpriseHookGuardianRestores(dataDir string, restored []enterpriseHookGuardianRestore) {
+	dataDir = strings.TrimSpace(dataDir)
+	if !enterpriseHookGuardianRestoresEnabled() || dataDir == "" {
+		return
+	}
+	normalized := make([]enterpriseHookGuardianRestore, 0, len(restored))
+	for _, entry := range restored {
+		entry.SID = strings.ToUpper(strings.TrimSpace(entry.SID))
+		entry.Connector = strings.ToLower(strings.TrimSpace(entry.Connector))
+		if enterpriseHookGuardianRestoreEntryKey(entry) != "" {
+			normalized = append(normalized, entry)
+		}
+	}
+	pathKey := enterpriseHookGuardianRestorePendingKey(filepath.Join(dataDir, hookGuardianRestoresFile))
+	enterpriseHookGuardianRestorePending.Lock()
+	defer enterpriseHookGuardianRestorePending.Unlock()
+	mergeEnterpriseHookGuardianRestorePending(pathKey, normalized)
+}
+
 func enterpriseHookGuardianRestoreEntriesEqual(a, b enterpriseHookGuardianRestore) bool {
 	if a.SID != b.SID || a.User != b.User || a.Connector != b.Connector || a.RestoredAt != b.RestoredAt {
 		return false
