@@ -1,6 +1,8 @@
 package connector
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -133,5 +135,103 @@ func TestGAP0625ApostropheNamedScriptArgument(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// gap0625RelativeToWorkDir returns name as a path relative to the working
+// directory, the way a hook command written beside it names the file.
+func gap0625RelativeToWorkDir(t *testing.T, name string) string {
+	t.Helper()
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return relative
+}
+
+// A relative link is one shell word that opens a managed script from the
+// working directory. Quoting and the command prefixes do not change the file
+// the shell opens, so the entry stays protected. The twin names an ordinary
+// file the same way and is the user's.
+func TestGAP0625RelativeLinkToManagedScriptStaysProtected(t *testing.T) {
+	for _, prefix := range []string{"", "env ", "command ", "bash ", "sh ", "source ", ". "} {
+		t.Run(strings.TrimSpace(prefix), func(t *testing.T) {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
+				owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+				link := gap0625Link(t, owned, filepath.Join(home, "outside", "linked'file"))
+				command := prefix + shellWord(gap0625RelativeToWorkDir(t, link)) + " --event pre_tool_call"
+				gap0625RunsInBash(t, command)
+				return command
+			})
+			gap0625ExpectProtected(t, verifyErr, commands, userHook)
+		})
+		t.Run("ordinary "+strings.TrimSpace(prefix), func(t *testing.T) {
+			commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
+				other := gap0625WriteExecutable(t, filepath.Join(home, "elsewhere", "other-file"))
+				link := gap0625Link(t, other, filepath.Join(home, "outside", "linked'file"))
+				command := prefix + shellWord(gap0625RelativeToWorkDir(t, link)) + " --event pre_tool_call"
+				gap0625RunsInBash(t, command)
+				return command
+			})
+			gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+		})
+	}
+}
+
+// An existing relative program is one word whatever characters its name
+// holds: a separator and the spelling of a managed path inside the file name
+// do not make the shell run the managed script.
+func TestGAP0625RelativeProgramWithManagedPathInNameStaysOrdinary(t *testing.T) {
+	for _, prefix := range []string{"", "env ", "command "} {
+		t.Run(strings.TrimSpace(prefix), func(t *testing.T) {
+			commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
+				owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+				program := gap0625WriteExecutable(t, filepath.Join(home, "ordinary; /"+strings.TrimPrefix(owned, "/")))
+				command := prefix + shellWord(gap0625RelativeToWorkDir(t, program)) + " --event pre_tool_call"
+				gap0625RunsInBash(t, command)
+				return command
+			})
+			gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+		})
+	}
+}
+
+// A link a variable holds is a managed script the command runs later. The
+// quoted apostrophe in the link name must survive the ownership check, for a
+// leading assignment, an env assignment and an exported variable. The twin
+// holds an ordinary link and stays the user's.
+func TestGAP0625AssignedLinkToManagedScriptStaysProtected(t *testing.T) {
+	forms := map[string]string{
+		"assignment":     "HOOK=%s bash -c 'bash \"$HOOK\"'",
+		"env assignment": "env HOOK=%s bash -c 'bash \"$HOOK\"'",
+		"export":         "export HOOK=%s; bash -c 'bash \"$HOOK\"'",
+		"loop item":      "for h in %s; do bash \"$h\"; done",
+		"redirect":       "bash < %s",
+	}
+	for name, form := range forms {
+		t.Run(name, func(t *testing.T) {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
+				owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+				link := gap0625Link(t, owned, filepath.Join(home, "outside", "linked'file"))
+				command := fmt.Sprintf(form, shellWord(link))
+				gap0625RunsInBash(t, command)
+				return command
+			})
+			gap0625ExpectProtected(t, verifyErr, commands, userHook)
+		})
+		t.Run("ordinary "+name, func(t *testing.T) {
+			commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
+				other := gap0625WriteExecutable(t, filepath.Join(home, "elsewhere", "other-file"))
+				link := gap0625Link(t, other, filepath.Join(home, "outside", "linked'file"))
+				command := fmt.Sprintf(form, shellWord(link))
+				gap0625RunsInBash(t, command)
+				return command
+			})
+			gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+		})
 	}
 }
