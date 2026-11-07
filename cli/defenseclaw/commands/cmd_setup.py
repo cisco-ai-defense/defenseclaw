@@ -6372,7 +6372,15 @@ def _check_connector_version_supported_for_setup(
                 ux.err(problem)
             _refuse_in_every_mode(_refusal_scope, problem)
             return False
-        if _discovery is None and platform_support.host_os() != "windows":
+        if _discovery is None and platform_support.host_os() == "windows":
+            # Windows never takes Codex authority from this cache (the gateway
+            # reads the protected setup selection), so a write that fails
+            # changes no admission. The version setup just accepted is still
+            # published where doctor and `agent discover` read it, or both
+            # report it as not observed until `agent discover --refresh`
+            # (GAP-0752).
+            agent_discovery._write_cache(disc, data_dir=data_dir)
+        elif _discovery is None:
             if not agent_discovery._write_cache(disc, data_dir=data_dir):
                 if emit:
                     ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
