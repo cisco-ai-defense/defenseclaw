@@ -47,14 +47,18 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 	previousReadTimeout := enterpriseHookOpenCodeReadTimeout
 	openCodeOnCommit, openCodeAfterRewrite = nil, nil
 	openCodeCrashed.Store(false)
+	openCodeFaultMu.Lock()
 	openCodeUserCannotRead, openCodeReadFails, openCodeReadHangs = map[int]bool{}, map[int]bool{}, map[int]chan struct{}{}
+	openCodeFaultMu.Unlock()
 	t.Cleanup(func() {
 		enterpriseHookOpenCodeReadTimeout = previousReadTimeout
 		openCodeOnCommit, openCodeAfterRewrite = nil, nil
 		openCodeCrashed.Store(false)
+		openCodeFaultMu.Lock()
 		for _, release := range openCodeReadHangs {
 			close(release)
 		}
+		openCodeFaultMu.Unlock()
 		enterpriseHookManifest, enterpriseHookStandaloneMachinePolicySet = previousManifest, previousMachinePolicy
 		enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner = previousLoad, previousCheck, previousRunner
 		enterpriseHookLoadOpenCodePorts, enterpriseHookWriteOpenCodePorts = previousLoadPorts, previousWritePorts
@@ -162,16 +166,23 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		request.Home = account.Home
 		response := enterpriseHookWorkerResponse{}
 		if request.Operation == enterpriseHookWorkerOpOpenCodePortRead {
-			if release, hangs := openCodeReadHangs[account.UID]; hangs {
+			// A read the pass abandons keeps running after the test moves on:
+			// it takes its fault settings once, under the lock, and touches no
+			// shared state after it wakes.
+			openCodeFaultMu.Lock()
+			release, hangs := openCodeReadHangs[account.UID]
+			readFails, cannotRead := openCodeReadFails[account.UID], openCodeUserCannotRead[account.UID]
+			openCodeFaultMu.Unlock()
+			if hangs {
 				<-release // a hung home: the read never answers
 				return response, context.DeadlineExceeded
 			}
-			if openCodeReadFails[account.UID] {
+			if readFails {
 				return response, errors.New("worker for uid " + fmt.Sprint(account.UID) + " exited 1")
 			}
 			// The as-the-user read: links resolve; a file the user cannot
 			// read either is an error.
-			if openCodeUserCannotRead[account.UID] {
+			if cannotRead {
 				response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Error: "permission denied"}
 				return response, nil
 			}
@@ -224,6 +235,9 @@ var (
 	openCodeAfterRewrite func(uid int)
 	openCodeCrashed      atomic.Bool
 	openCodeRewriteMu    sync.Mutex
+	// openCodeFaultMu guards the three fault maps below against a read
+	// worker the pass abandoned at its deadline.
+	openCodeFaultMu sync.Mutex
 	// openCodeUserCannotRead are the uids whose service.json the account
 	// itself cannot read; openCodeReadFails the uids whose read worker fails;
 	// openCodeReadHangs the uids whose read never answers (until released).
