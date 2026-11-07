@@ -513,7 +513,7 @@ func TestGAP0048Review4(t *testing.T) {
 					default:
 						want = "-"
 					}
-					status := "ok"
+					var status string
 					switch {
 					case managed && r.want == "namedall" && action == "block":
 						status = "ok"
