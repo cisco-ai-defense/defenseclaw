@@ -7,8 +7,10 @@ package watcher
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -133,12 +135,42 @@ func (w *InstallWatcher) noteMCPAdmissionOutcome(evt InstallEvent, snap *TargetS
 // outcome (pending) and the next cycle admits the definition it has now. A
 // listing that cannot be read decides nothing either.
 func (w *InstallWatcher) mcpDefinitionIsSnapshot(evt InstallEvent, snap *TargetSnapshot) bool {
+	hash, err := w.mcpDefinitionHashOf(evt)
+	return err == nil && hash == snap.ContentHash
+}
+
+// mcpDefinitionHashOf is the hash of the definition the server has now.
+func (w *InstallWatcher) mcpDefinitionHashOf(evt InstallEvent) (string, error) {
 	entry, err := w.lookupMCPServer(evt)
 	if err != nil {
+		return "", err
+	}
+	return mcpDefinitionHash(*entry)
+}
+
+// mcpDefinitionMoved reports an MCP admission whose server no longer has the
+// definition it was started for (evt.definitionHash), or is no longer listed
+// or readable. The scanner reads a server by name, so a definition rewritten
+// after the snapshot would get its verdict applied under the old definition:
+// an ordinary server disabled for another definition high finding, or a
+// protective block released by another definition clean scan. Such an
+// admission decides nothing: the earlier protection stays until the
+// definition the server has admits for itself. An event bound to no
+// definition, and Secure Client, are never moved.
+func (w *InstallWatcher) mcpDefinitionMoved(evt InstallEvent) bool {
+	if evt.Type != InstallMCP || evt.definitionHash == "" || w.secureClientActive() {
 		return false
 	}
-	hash, err := mcpDefinitionHash(*entry)
-	return err == nil && hash == snap.ContentHash
+	hash, err := w.mcpDefinitionHashOf(evt)
+	return err != nil || hash != evt.definitionHash
+}
+
+// mcpMovedAdmission is the result of an admission that mcpDefinitionMoved
+// stopped: nothing decided, nothing enforced, no baseline.
+func (w *InstallWatcher) mcpMovedAdmission(evt InstallEvent) AdmissionResult {
+	fmt.Fprintf(os.Stderr, "[watch] mcp %s: its definition changed during admission; nothing was decided, the next cycle admits the definition it has\n", evt.Name)
+	return AdmissionResult{Event: evt, Verdict: VerdictScanError, Interrupted: true,
+		Reason: "definition changed during admission; the next cycle admits it"}
 }
 
 // mcpOutcome returns the outcome this process completed for the definition
