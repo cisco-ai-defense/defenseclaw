@@ -296,13 +296,12 @@ const hermesManifestMaxEntrypoints = 10000
 // dir, as the scanner does, with links followed and with the name taken both
 // as written and with its dot segments folded, so the set is a superset of
 // what the scanner opens. every is true when every file counts as declared: a
-// manifest exists that cannot be read, or the scanner cannot answer under a
-// strict or managed policy. When the scanner cannot answer under a policy
-// that fails open (a per-user default or permissive tier), the candidates are
-// the entrypoints a parsed tree of the manifests declares
-// (hermesManifestCandidates), resolved the same way, so a file that a manifest
-// declares, however it spells the name, stays bound, and an ordinary generated
-// cache file is not rejected for an outage of the reader.
+// manifest exists that cannot be read, or the scanner has no answer for these
+// manifest bytes under a strict or managed policy. When it has none under a policy that fails open
+// (a per-user default or permissive tier), nothing is declared, so an ordinary
+// generated cache file is not rejected for an outage of the reader; the policy
+// has warned and audited it. An earlier answer of the scanner for the same
+// manifest bytes is applied exactly (hermesManifestPolicy).
 func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (declared []fs.FileInfo, every bool) {
 	manifests := map[string][]byte{}
 	for _, name := range hermesManifestFiles {
@@ -334,12 +333,9 @@ func hermesDeclaredFiles(root *os.Root, dir string, load hermesManifestLoader) (
 	}
 	entrypoints, err := load(manifests)
 	if errors.Is(err, errHermesManifestFailOpen) {
-		var decided bool
-		if entrypoints, decided = hermesManifestCandidates(manifests); !decided {
-			// Too large or too deep to read: what it declares is unknown.
-			return nil, true
-		}
-		err = nil
+		// No answer, now or earlier, for these manifest bytes: what they
+		// declare is unknown, and the policy lets ordinary writes continue.
+		return nil, false
 	}
 	if err != nil || len(entrypoints) > hermesManifestMaxEntrypoints {
 		return nil, true
