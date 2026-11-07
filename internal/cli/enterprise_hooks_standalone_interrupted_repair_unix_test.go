@@ -27,9 +27,11 @@ type gap0754RoundTripper func(*http.Request) (*http.Response, error)
 func (f gap0754RoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 // GAP-0754: a pass the watch loop interrupts after its worker put a target
-// back still reports the repair: the repairs record, the audit report to the
-// gateway and, once a later pass records, the restore entry. A pass that is
-// interrupted with nothing repaired reports nothing.
+// back still accounts the repair like a pass that ran to its end: the repairs
+// record, the audit report to the gateway, the pass repair count the watch
+// loop logs, the agent config notice of the worker and the durable restore
+// entry. The notice of a target the pass did not answer survives. A pass that
+// is interrupted with nothing repaired reports nothing.
 func TestStandaloneInterruptedPassStillReportsTheRepairItMade(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -45,6 +47,9 @@ func TestStandaloneInterruptedPassStillReportsTheRepairItMade(t *testing.T) {
 			f.writeLedger(t, protectedRow("alice", alice, "hermes"))
 			key := enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{User: "alice", Connector: "hermes"})
 			f.writeBindings(t, map[string]enterpriseHookUnixBinding{key: {UID: uid, Home: alice, LockUpdatedAt: "L", EntryUpdatedAt: "E"}})
+
+			// A notice of another target, written by an earlier pass.
+			writeEnterpriseHookGuardianNotices(io.Discard, f.dataDir, []enterpriseHookGuardianNotice{{User: "bob", Connector: "codex", AgentConfig: "restored_last_good"}})
 
 			var mu sync.Mutex
 			var reports []string
@@ -67,13 +72,20 @@ func TestStandaloneInterruptedPassStillReportsTheRepairItMade(t *testing.T) {
 				response, err := previousRunner(ctx, account, request)
 				for i := range response.Targets {
 					response.Targets[i].Repaired = tc.repair
+					if tc.repair {
+						response.Targets[i].AgentConfig = "settings_lost"
+					}
 				}
 				cancel() // the watch loop interrupts the pass as its worker answers
 				return response, err
 			}
 
-			if _, err := runEnterpriseHookReconcileOnce(interrupt); !errors.Is(err, context.Canceled) {
+			run, err := runEnterpriseHookReconcileOnce(interrupt)
+			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("interrupted pass error = %v, want context canceled", err)
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.repair]; run.Repairs != want || len(run.RepairedTargets) != want {
+				t.Fatalf("interrupted pass repairs = %d (%v), want %d: the watch loop logs repairs>0 from it (GAP-0754)", run.Repairs, run.RepairedTargets, want)
 			}
 			mu.Lock()
 			got := append([]string(nil), reports...)
@@ -103,8 +115,19 @@ func TestStandaloneInterruptedPassStillReportsTheRepairItMade(t *testing.T) {
 				t.Fatalf("repairs record = %q, %v", data, err)
 			}
 
-			// The next pass finds the target in order, repairs nothing, and
-			// records the restore the interrupted pass held.
+			notices := map[string]string{}
+			for _, notice := range readEnterpriseHookGuardianNotices(f.dataDir) {
+				notices[notice.User+"/"+notice.Connector] = notice.AgentConfig
+			}
+			if len(notices) != 2 || notices["alice/hermes"] != "settings_lost" || notices["bob/codex"] != "restored_last_good" {
+				t.Fatalf("notices after the interrupted pass = %v, want the worker notice of alice/hermes next to the earlier bob/codex one", notices)
+			}
+			// The restore is on disk now, not when a later pass records.
+			if restores := guardianRestoresForTest(t, f.dataDir); len(restores) != 1 {
+				t.Fatalf("restores right after the interrupted pass = %v, want the hermes restore of uid %d", restores, uid)
+			}
+
+			// The next pass finds the target in order and repairs nothing.
 			enterpriseHookWorkerRunner = previousRunner
 			if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil {
 				t.Fatal(err)

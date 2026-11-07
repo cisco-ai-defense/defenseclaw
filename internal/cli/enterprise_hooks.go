@@ -3692,6 +3692,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		run, err := enterpriseHookWatchReconcileOnce(reconcileCtx)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
+				if run.Repairs > 0 {
+					// The pass was interrupted after its workers put targets
+					// back: the next pass finds them in order, so this line is
+					// the only reconcile log of those repairs (GAP-0754).
+					writeEnterpriseHookReconcileLog(cmd.ErrOrStderr(), reason, "interrupted", run, len(watched), true, "")
+				}
 				return false, err
 			}
 			if legacyWatch {
