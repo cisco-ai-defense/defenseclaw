@@ -1100,7 +1100,8 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	// What is configured decides what is an orphan: with a config.yaml that
 	// does not load, or an unreadable connector state, nothing is removed on a
 	// guess. A rolled-back install that was never initialized has no
-	// config.yaml at all; with the saved newer install backup folder
+	// config.yaml at all (a link, even a dangling one, is a config that does not
+	// load, not an absent config); with the saved newer install backup folder
 	// supplied, that is a rollback, and the connector state (if any) names what
 	// stays configured. Every other connector is an orphan whose DefenseClaw
 	// entries go, with the operator own bytes kept.
@@ -1109,7 +1110,7 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 		for _, name := range cfg.ActiveConnectors() {
 			configured[strings.ToLower(strings.TrimSpace(name))] = true
 		}
-	} else if _, statErr := os.Stat(filepath.Join(dataDir, config.DefaultConfigName)); connectorRollbackBackupsDir == "" || !errors.Is(statErr, os.ErrNotExist) {
+	} else if _, statErr := os.Lstat(filepath.Join(dataDir, config.DefaultConfigName)); connectorRollbackBackupsDir == "" || !errors.Is(statErr, os.ErrNotExist) {
 		return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed")
 	}
 	active, _, err := connector.ReadActiveConnectorState(dataDir)
