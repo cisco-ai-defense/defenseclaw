@@ -90,7 +90,7 @@ func TestGAP0034DistinctSnapshotKeysPreserveCompletedFailure(t *testing.T) {
 }
 
 func TestGAP0034UpgradePreIdentityRowsRescanOnce(t *testing.T) {
-	cfg, store, logger, _ := setupTestEnv(t)
+	cfg, store, _, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
 	cfg.Scanners.MCPScanner.UnverifiedServer = "warn"
 	home := filepath.Join(t.TempDir(), "account")
@@ -130,7 +130,7 @@ func TestGAP0034UpgradePreIdentityRowsRescanOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	logger = audit.NewLogger(store)
+	logger := audit.NewLogger(store)
 	logger.SetRuntimeV8Emitter(&watcherTestRuntime{})
 	if MCPAccountJournalServes(oldPath, MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: failed.Home}) ||
 		MCPAccountJournalServes(oldPath, MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: ordinary.Home, CWD: project}) {
