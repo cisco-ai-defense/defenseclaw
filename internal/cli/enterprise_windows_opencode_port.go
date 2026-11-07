@@ -124,12 +124,11 @@ func windowsOpenCodePortRecordPath() (string, error) {
 	return enterprisehooks.WindowsOpenCodeServicePortsPath(layout.ManifestPath), nil
 }
 
+// windowsOpenCodePortClearCommand is the command an administrator types in
+// PowerShell to clear one contested OpenCode port mark: the installed gateway
+// by its full path, rendered like every managed Windows command.
 func windowsOpenCodePortClearCommand(port int) string {
-	layout, err := managed.StandaloneWindowsLayout()
-	if err != nil {
-		return fmt.Sprintf("defenseclaw-gateway enterprise windows opencode-port-clear %d --yes", port)
-	}
-	return managed.WindowsCommandLine(filepath.Join(layout.BinDir, "defenseclaw-gateway.exe"), "enterprise", "windows", "opencode-port-clear", strconv.Itoa(port), "--yes")
+	return managedWindowsGatewayCommandLine("enterprise", "windows", "opencode-port-clear", strconv.Itoa(port), "--yes")
 }
 
 func newWindowsOpenCodePortClearCommand() *cobra.Command {
