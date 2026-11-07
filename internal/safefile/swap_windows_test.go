@@ -47,6 +47,43 @@ func requireSwapDirForTest(t *testing.T, dir string, want map[string]string) {
 	}
 }
 
+func TestReplaceFileInDirectoryUsesSourceDirectory(t *testing.T) {
+	dir := t.TempDir()
+	stagePath := filepath.Join(dir, "stage.tmp")
+	if err := os.WriteFile(stagePath, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "target.json"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "neighbor.json"), []byte("stable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	name, err := windows.UTF16PtrFromString(stagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.DELETE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := os.NewFile(uintptr(handle), stagePath)
+	defer stage.Close()
+	if err := ReplaceFileInDirectory(parent, stage, "target.json"); err != nil {
+		t.Fatal(err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{
+		"target.json": "new", "neighbor.json": "stable",
+	})
+}
+
 // A compare-and-swap replaces only the file it expects, and leaves no
 // replaced copy behind.
 func TestCompareAndSwapFileReplacesOnlyTheExpectedFile(t *testing.T) {
