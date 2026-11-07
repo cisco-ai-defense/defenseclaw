@@ -890,6 +890,45 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("the gateway is not running", result.checks[0]["detail"])
         self.assertIn("defenseclaw-gateway start", result.checks[0]["detail"])
 
+    def test_sidecar_check_names_root_owned_files_and_chain_for_a_stopped_gateway(self):
+        """GAP-0788: a start cannot work over root-owned files, so the row prints the chain."""
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        refused = (0, "<urlopen error [Errno 111] Connection refused>")
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=refused),
+            patch.object(
+                cmd_doctor,
+                "sudo_runtime_leftover_relpaths",
+                return_value=["hook_contract_lock.json", "active_connector.json"],
+            ),
+        ):
+            result = _DoctorResult()
+            _check_sidecar(cfg, result)
+        row = result.checks[0]
+        self.assertEqual(row["status"], "fail")
+        self.assertIn("the gateway is not running", row["detail"])
+        self.assertIn("hook_contract_lock.json, active_connector.json", row["detail"])
+        self.assertIn('sudo chown -R "$(id -un)" ', row["remediation"])
+        self.assertTrue(row["remediation"].rstrip().endswith("defenseclaw-gateway start"))
+        self.assertNotIn("doctor --fix", row["detail"] + row["remediation"])
+
+    def test_sidecar_check_still_advises_a_start_without_root_owned_files(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._sidecar_alignment_cfg()
+        refused = (0, "<urlopen error [Errno 111] Connection refused>")
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=refused),
+            patch.object(cmd_doctor, "sudo_runtime_leftover_relpaths", return_value=[]),
+        ):
+            result = _DoctorResult()
+            _check_sidecar(cfg, result)
+        row = result.checks[0]
+        self.assertIn("start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'", row["detail"])
+        self.assertNotIn("chown", row["detail"] + row["remediation"])
+
     def test_sidecar_check_names_foreign_holder_without_its_health_rows(self):
         from defenseclaw.commands import cmd_doctor
 
