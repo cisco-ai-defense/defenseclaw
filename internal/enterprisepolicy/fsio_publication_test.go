@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 func TestReadPolicyFileRetriesRepeatedPublication(t *testing.T) {
@@ -44,6 +46,36 @@ func TestReadPolicyFileReadsStablePublishedFile(t *testing.T) {
 	data, exists, err := readPolicyFileWith(Options{GOOS: "windows"}, path, func(Options, string) error { return nil })
 	if err != nil || !exists || string(data) != "published" {
 		t.Fatalf("data=%q exists=%v err=%v", data, exists, err)
+	}
+}
+
+func TestReadPolicyFileDoesNotTreatPostCheckDisappearanceAsAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	if err := os.WriteFile(path, []byte("published"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	removed := false
+	restore := pathidentity.SetPinnedStatHookForTest(func(checked string) {
+		if checked != path || removed {
+			return
+		}
+		removed = true
+		if err := os.Remove(path); err != nil {
+			t.Errorf("remove checked policy: %v", err)
+		}
+	})
+	t.Cleanup(restore)
+	_, exists, err := readPolicyFileWith(Options{GOOS: "windows", SkipTrustChecks: true}, path, nil)
+	if !removed || exists || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("removed=%v exists=%v err=%v; want a read error after a checked policy disappears", removed, exists, err)
+	}
+}
+
+func TestReadPolicyFileTreatsNeverSeenNameAsAbsent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.json")
+	data, exists, err := readPolicyFileWith(Options{GOOS: "windows", SkipTrustChecks: true}, path, nil)
+	if err != nil || exists || data != nil {
+		t.Fatalf("data=%q exists=%v err=%v; want clean absence", data, exists, err)
 	}
 }
 
