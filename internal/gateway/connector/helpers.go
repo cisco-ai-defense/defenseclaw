@@ -554,9 +554,10 @@ func (s *hookPathScan) scanCommand(file *syntax.File, command, home string, star
 			// argument ("bash <link>"), a value a variable holds for a later
 			// command ("HOOK=<link> bash -c 'bash $HOOK'", "export HOOK=<link>",
 			// "env HOOK=<link> ..."), a redirect target or a loop item.
-			at := dirsAt(word)
+			at := stateAt(word)
 			value := hookAssignmentValue(word)
-			if s.wordNamesManaged(word, home, at) || value != nil && s.wordNamesManaged(value, home, at) {
+			if s.wordNamesManaged(word, home, at.dirs) || value != nil && s.wordNamesManaged(value, home, at.dirs) ||
+				s.variableWordNamesManaged(word, home, at) {
 				named = true
 				return false
 			}
@@ -647,6 +648,21 @@ func (s *hookPathScan) wordNamesManaged(word *syntax.Word, home string, dirs []s
 	}
 	named, _ := s.wordFile(literal, dirs)
 	return named
+}
+
+// variableWordNamesManaged reports whether a word that holds a variable the
+// command has set to literal values ("D=<dir>; bash $D/f") names a managed hook
+// file or directory for any of those values, read in state st.
+func (s *hookPathScan) variableWordNamesManaged(word *syntax.Word, home string, st hookState) bool {
+	if len(st.vars) == 0 || !hookHasParam(word) {
+		return false
+	}
+	for _, variant := range hookWordVariants(word, st.vars) {
+		if s.wordNamesManaged(variant, home, st.dirs) {
+			return true
+		}
+	}
+	return false
 }
 
 // workDirs returns the working directory a relative word is resolved from when
