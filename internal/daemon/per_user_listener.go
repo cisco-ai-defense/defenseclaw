@@ -110,12 +110,8 @@ func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command
 		dirs[i] = shellQuote(dir)
 	}
 	command = rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ")
-	if len(loosen) > 0 {
-		quoted := make([]string, len(loosen))
-		for i, path := range loosen {
-			quoted[i] = shellQuote(path)
-		}
-		command += " && chmod go-rwx " + strings.Join(quoted, " ")
+	if step := rootGatewayLoosenStep(loosen); step != "" {
+		command += " && " + step
 	}
 	command += " && defenseclaw-gateway start"
 	if storeErr != nil {
@@ -123,6 +119,35 @@ func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command
 			"not in the chown command below: return that folder to your account too. "
 	}
 	return command, note
+}
+
+// rootGatewayLoosenStep takes group and other access away from the root-owned
+// files the owner return leaves loose. A path that ends in a separator is a
+// folder whose files could not be seen: a find over it takes the access away
+// from the runtime files it holds, so a hidden store is repaired too.
+func rootGatewayLoosenStep(loosen []string) string {
+	var files, folders []string
+	for _, path := range loosen {
+		if strings.HasSuffix(path, string(filepath.Separator)) {
+			folders = append(folders, shellQuote(path))
+		} else {
+			files = append(files, shellQuote(path))
+		}
+	}
+	var steps []string
+	if len(files) > 0 {
+		steps = append(steps, "chmod go-rwx "+strings.Join(files, " "))
+	}
+	if len(folders) > 0 {
+		var tests []string
+		for _, name := range rootRuntimeLeftoverNames {
+			tests = append(tests, "-name "+name)
+		}
+		tests = append(tests, "-path '*/hooks/.hook-*.token'")
+		steps = append(steps, "find "+strings.Join(folders, " ")+" -maxdepth 2 -type f \\( "+
+			strings.Join(tests, " -o ")+" \\) -exec chmod go-rwx {} +")
+	}
+	return strings.Join(steps, " && ")
 }
 
 // rootGatewayRecoveryDirs are the directories a root-run gateway for the
