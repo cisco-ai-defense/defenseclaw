@@ -188,3 +188,51 @@ def test_a_saved_global_closed_is_still_shown_as_inherited_by_the_scoped_proxy_v
     assert "closed (proxy-backed, no hooks:" in scoped
     assert "inherited from global default (closed)" in scoped
     assert "Runtime drift" not in scoped
+
+
+def _strict_two_connector_config(tmp_path: Path, *, saved: str = "", connector_saved: str = ""):
+    cfg = _two_connector_config(tmp_path, saved=saved)
+    cfg.guardrail.rule_pack = "strict"
+    if connector_saved:
+        cfg.guardrail.connectors["openclaw"].hook_fail_mode = connector_saved
+    return cfg
+
+
+def _both_views(cfg) -> tuple[str, str]:
+    unscoped = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=_app(cfg))
+    scoped = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--connector", "openclaw"], obj=_app(cfg))
+    assert unscoped.exit_code == 0, unscoped.output
+    assert scoped.exit_code == 0, scoped.output
+    return _words(unscoped.output), _words(scoped.output)
+
+
+@pytest.mark.parametrize(("saved", "connector_saved", "where"), [("open", "", "global"), ("", "open", "per-connector")])
+def test_a_saved_open_under_the_strict_policy_is_explained_as_the_strict_policy_closing_openclaw(
+    tmp_path: Path, saved: str, connector_saved: str, where: str
+) -> None:
+    unscoped, scoped = _both_views(_strict_two_connector_config(tmp_path, saved=saved, connector_saved=connector_saved))
+    for out in (unscoped, scoped):
+        assert "closed (proxy-backed, no hooks:" in out
+        assert f"closed by the strict policy: the saved {where} open mode does not apply to OpenClaw" in out
+        assert "inherited from global default (open)" not in out
+        assert "an explicit saved mode wins." not in out
+        assert _CONTINUES not in out
+
+
+def test_a_saved_closed_openclaw_is_explained_as_the_saved_mode_in_both_views(tmp_path: Path) -> None:
+    cfg = _two_connector_config(tmp_path)
+    cfg.guardrail.connectors["openclaw"].hook_fail_mode = "closed"
+    unscoped, scoped = _both_views(cfg)
+    assert "the saved per-connector mode (closed); the policy tier does not change it" in unscoped
+    assert "the saved per-connector mode (closed); the policy tier does not change it" in scoped
+
+
+def test_secure_client_openclaw_names_secure_client_as_the_source_of_its_outage_mode(tmp_path: Path) -> None:
+    cfg = _strict_two_connector_config(tmp_path)
+    object.__setattr__(cfg.guardrail, "_secure_client", True)
+    unscoped, scoped = _both_views(cfg)
+    for out in (unscoped, scoped):
+        assert "open (proxy-backed, no hooks:" in out
+        assert "from the policy tier (strict tier)" not in out
+        assert "closed by the strict policy" not in out
+    assert "set by Secure Client (open unless the administrator chose otherwise)" in scoped
