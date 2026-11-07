@@ -2625,12 +2625,14 @@ class TestCheckHookHealth(unittest.TestCase):
         # recorded why it skipped the connector.
         from defenseclaw.commands.cmd_doctor import _check_connector_skipped_at_start
 
-        reason = 'opencode setup failed: fix: icacls "C:\\u\\.config\\opencode" /remove:g "H\\other"'
+        reason = "opencode setup failed"
+        fix = 'icacls "C:\\u\\.config\\opencode" /remove:g "H\\other"'
         health = {
             "guardrail": {
                 "details": {
                     "connectors_not_started": ["opencode"],
                     "connectors_not_started_reasons": {"opencode": reason},
+                    "connectors_not_started_repairs": {"opencode": {"fix": fix}},
                 }
             }
         }
@@ -2641,6 +2643,7 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertNotIn("gateway.log has the reason", r.checks[-1]["detail"])
         # Benign twin: no recorded reason keeps the old pointer.
         del health["guardrail"]["details"]["connectors_not_started_reasons"]
+        del health["guardrail"]["details"]["connectors_not_started_repairs"]
         r = _DoctorResult()
         _check_connector_skipped_at_start("opencode", health, r)
         self.assertIn("gateway.log has the reason", r.checks[-1]["detail"])

@@ -1527,6 +1527,38 @@ def _connectors_not_started_reasons(health: dict | None) -> dict[str, str]:
     }
 
 
+def _connectors_not_started_repairs(health: dict | None) -> dict[str, str]:
+    """The repair each skipped connector's refusal carries, ready to show after its reason (GAP-0731).
+
+    The gateway sends the fix command and the by-hand steps as fields of their
+    own, apart from the reason, so no folder or account name in the reason can
+    move the boundary between them. They hold paths and accounts inside quotes,
+    where a run of spaces is part of the argument, so they are shown exactly as
+    recorded. A repair too long for the health field was left out by the
+    gateway, which says so here and points to the gateway log.
+    """
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    repairs = details.get("connectors_not_started_repairs") if isinstance(details, dict) else None
+    if not isinstance(repairs, dict):
+        return {}
+    shown: dict[str, str] = {}
+    for name, repair in repairs.items():
+        if not isinstance(name, str) or not name.strip() or not isinstance(repair, dict):
+            continue
+        fix, by_hand, omitted = repair.get("fix"), repair.get("by_hand"), repair.get("omitted_bytes")
+        text = ""
+        if isinstance(fix, str) and fix:
+            text += f"; fix: {fix}"
+        if isinstance(by_hand, str) and by_hand:
+            text += f"; then by hand: {by_hand}" if text else f"; by hand: {by_hand}"
+        if isinstance(omitted, int) and not isinstance(omitted, bool) and omitted > 0:
+            text += f"; repair omitted: it is {omitted} bytes, too long for this field; the gateway log has it whole"
+        if text:
+            shown[name.strip().lower()] = text
+    return shown
+
+
 def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
     """Whether the connector's agent is not installed (GAP-0513).
 

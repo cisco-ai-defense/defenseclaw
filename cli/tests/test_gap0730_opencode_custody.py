@@ -165,13 +165,26 @@ def test_no_acl_and_an_nfs4_acl(monkeypatch) -> None:
     assert file_permissions.plugin_acl_refused("/x") is True
 
 
-# Review 1 and 2: a long recorded reason keeps the repair, whole or said to be left out.
+# Review 1, 2, 9: a long recorded reason keeps its repair whole, or says it was left out.
+def _health(connector: str, reason: str, repair: dict | None) -> dict:
+    details: dict = {"connectors_not_started": [connector], "connectors_not_started_reasons": {connector: reason}}
+    if repair is not None:
+        details["connectors_not_started_repairs"] = {connector: repair}
+    return {"guardrail": {"details": details}}
+
+
+def _doctor_row(connector: str, health: dict) -> dict:
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_connector_skipped_at_start(connector, health, result)
+    return result.checks[-1]
+
+
 def test_a_long_recorded_reason_keeps_its_repair_whole() -> None:
     fix = 'icacls "C:\\Users\\lane\\.config\\opencode" /remove:g "HOST\\other"'
-    reason = "validate plugin directory custody: " + "x" * 520 + f" (HOST\\other has write access there); fix: {fix}"
-    bounded = cmd_doctor._bounded_recorded_reason(reason)
-    assert bounded.endswith(f"; fix: {fix}")
-    assert len(bounded) < len(reason)
+    reason = "validate plugin directory custody: " + "x" * 520 + " (HOST\\other has write access there)"
+    detail = _doctor_row("opencode", _health("opencode", reason, {"fix": fix}))["detail"]
+    assert detail.endswith(f"; fix: {fix}")
+    assert len(detail) < len(reason) + len(fix)
     assert cmd_doctor._bounded_recorded_reason("short   reason\nhere") == "short reason here"
     long_without_fix = cmd_doctor._bounded_recorded_reason("y " * 400)
     assert len(long_without_fix) <= 401 and long_without_fix.endswith("…")
@@ -179,26 +192,25 @@ def test_a_long_recorded_reason_keeps_its_repair_whole() -> None:
 
 def test_a_long_manual_only_repair_is_kept_whole() -> None:
     steps = "replace the link " + "/Users/lane/very/long/path/" * 20 + "with a real folder, then run the upgrade"
-    reason = "validate plugin directory custody: " + "x" * 520 + f"; by hand: {steps}"
-    bounded = cmd_doctor._bounded_recorded_reason(reason)
-    assert bounded.endswith(f"; by hand: {steps}")
-    assert len(bounded) < len(reason)
-    short = "validate plugin directory custody: link; by hand: replace it"
-    assert cmd_doctor._bounded_recorded_reason(short) == short
+    reason = "validate plugin directory custody: " + "x" * 520
+    detail = _doctor_row("opencode", _health("opencode", reason, {"by_hand": steps}))["detail"]
+    assert detail.endswith(f"; by hand: {steps}")
+    short = _doctor_row("opencode", _health("opencode", "link", {"by_hand": "replace it"}))["detail"]
+    assert short.endswith("link; by hand: replace it")
 
 
 def test_a_repair_of_a_dozen_deep_folders_is_not_cut() -> None:
     steps = [f'icacls "C:\\Users\\lane\\{"deep-folder-" * 6}{n}" /remove:g "HOST\\other"' for n in range(12)]
     fix = "; ".join(steps)
     assert len(fix) > 1200
-    bounded = cmd_doctor._bounded_recorded_reason(f"validate plugin directory custody: refused; fix: {fix}")
-    assert bounded.endswith(f"; fix: {fix}")
+    detail = _doctor_row("opencode", _health("opencode", "refused", {"fix": fix}))["detail"]
+    assert detail.endswith(f"refused; fix: {fix}")
 
 
+# The gateway leaves a repair past its limit out and says so; the row repeats that and points to the log.
 def test_a_repair_past_the_limit_is_left_out_and_said_so() -> None:
-    fix = "icacls " + "p" * 9000
-    bounded = cmd_doctor._bounded_recorded_reason(f"refused; fix: {fix}")
-    assert fix[:50] not in bounded and "too long for this row" in bounded and "gateway.log" in bounded
+    detail = _doctor_row("opencode", _health("opencode", "refused", {"omitted_bytes": 9000}))["detail"]
+    assert detail.endswith("refused; repair omitted: it is 9000 bytes, too long for this field; the gateway log has it whole")
 
 
 # Review 2: the macOS rule is the gateway's, not a stricter one.
@@ -413,7 +425,7 @@ def test_other_acl_callers_keep_one_two_second_inspection(monkeypatch) -> None:
     assert file_permissions.darwin_acl_write_error("/x") is None
 
 
-# Review 7: a repair argument is shown byte for byte; only the prose is collapsed.
+# Review 7, 9: the repair arrives as fields apart from the reason and is shown byte for byte; only the prose is collapsed.
 @pytest.mark.parametrize(
     "folder, trustee",
     [
@@ -424,17 +436,46 @@ def test_other_acl_callers_keep_one_two_second_inspection(monkeypatch) -> None:
 )
 def test_a_repair_argument_with_repeated_spaces_is_shown_as_recorded(folder: str, trustee: str) -> None:
     fix = f"icacls '{folder}' /remove:g '{trustee}'"
-    bounded = cmd_doctor._bounded_recorded_reason(f"validate plugin   directory custody: DACL\nunsafe; fix: {fix}")
-    assert bounded == f"validate plugin directory custody: DACL unsafe; fix: {fix}"
+    row = _doctor_row("opencode", _health("opencode", "validate plugin   directory custody: DACL\nunsafe", {"fix": fix}))
+    assert row["detail"].endswith(f"validate plugin directory custody: DACL unsafe; fix: {fix}")
 
 
-def test_an_omitted_repair_notice_and_a_manual_tail_are_kept_whole() -> None:
-    omitted = "; repair omitted: it is 9000 bytes, too long for this field; the gateway log has it whole"
-    bounded = cmd_doctor._bounded_recorded_reason("validate plugin directory custody: " + "x" * 520 + omitted)
-    assert bounded.endswith(omitted) and "…" in bounded
-    by_hand = "; by hand: replace the link 'C:\\a  b' with a real folder"
-    assert cmd_doctor._bounded_recorded_reason("link refused" + by_hand) == "link refused" + by_hand
+@pytest.mark.parametrize("name", ["Open; fix: Code  Dir", "Open; by hand: Code  Dir", "x; repair omitted: y"])
+def test_a_folder_or_link_named_like_a_repair_marker_cannot_move_the_boundary(name: str) -> None:
+    path = f"/home/lane/{name}"
+    fix, by_hand = f"chmod go-w '{path}'", f"replace the link '{path}' with a real folder"
+    cause = f"validate plugin directory custody: {path} is writable by another account"
+    prose = " ".join(cause.split())  # the cause is prose; only the repair is kept byte for byte
+    folder = _doctor_row("opencode", _health("opencode", cause, {"fix": fix}))
+    assert folder["detail"].endswith(f"{prose}; fix: {fix}")
+    link = _doctor_row("opencode", _health("opencode", cause, {"by_hand": by_hand}))
+    assert link["detail"].endswith(f"{prose}; by hand: {by_hand}")
+    both = _doctor_row("opencode", _health("opencode", cause, {"fix": fix, "by_hand": by_hand}))
+    assert both["detail"].endswith(f"{prose}; fix: {fix}; then by hand: {by_hand}")
 
 
-def test_a_reason_with_no_repair_still_collapses_whitespace() -> None:
+def test_an_omitted_repair_is_said_and_a_long_cause_is_bounded() -> None:
+    row = _doctor_row("opencode", _health("opencode", "validate plugin directory custody: " + "x" * 520, {"omitted_bytes": 9000}))
+    assert row["detail"].endswith("; repair omitted: it is 9000 bytes, too long for this field; the gateway log has it whole")
+    assert "…" in row["detail"]
+
+
+def test_a_reason_with_no_repair_still_collapses_whitespace_and_a_stray_marker_stays_prose() -> None:
     assert cmd_doctor._bounded_recorded_reason("a  b\n c") == "a b c"
+    row = _doctor_row("opencode", _health("opencode", "settings busy; fix: not a repair", None))
+    assert row["detail"].endswith("settings busy; fix: not a repair")
+    # Malformed repair fields are ignored, not shown.
+    row = _doctor_row("opencode", _health("opencode", "refused", {"fix": 7, "by_hand": None, "omitted_bytes": True}))
+    assert row["detail"].endswith("refused")
+
+
+def test_setup_names_the_repair_beside_the_reason() -> None:
+    from defenseclaw.commands.cmd_status import _connectors_not_started_repairs
+
+    path = "/home/lane/Open; fix: Code  Dir"
+    health = _health("opencode", f"refused {path}", {"fix": f"chmod go-w '{path}'"})
+    repair = _connectors_not_started_repairs(health)["opencode"]
+    detail = cmd_setup._connector_not_started_detail("opencode", f"refused {path}", repair)
+    assert detail.endswith(f"refused {' '.join(path.split())}; fix: chmod go-w '{path}'")
+    # Benign twin: a reason with no repair is unchanged.
+    assert cmd_setup._connector_not_started_detail("opencode", "refused").endswith("refused")

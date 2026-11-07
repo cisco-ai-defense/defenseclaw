@@ -5762,6 +5762,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		if reasons := setupTransaction.notStartedReasonsFor(notStarted); len(reasons) > 0 {
 			guardrailDetails[GuardrailNotStartedReasons] = reasons
 		}
+		if repairs := setupTransaction.notStartedRepairsFor(notStarted); len(repairs) > 0 {
+			guardrailDetails[GuardrailNotStartedRepairs] = repairs
+		}
 		s.health.SetGuardrail(StateRunning, "", guardrailDetails)
 	}
 	publishHealth()
@@ -6321,6 +6324,9 @@ type multiConnectorSetupTransaction struct {
 	// so setup and status name it instead of only a roster mismatch
 	// (GAP-0620).
 	notStartedReasons map[string]string
+	// notStartedRepairs maps each connector in notStartedReasons whose refusal
+	// carries a repair to that repair, kept apart from the reason (GAP-0731).
+	notStartedRepairs map[string]NotStartedRepair
 	// keptRegistrations lists the agentSettingsRefused connectors that still
 	// hold their earlier registration. They stay in the saved active set, so a
 	// later per-connector disable removes them through the non-fatal
@@ -6551,6 +6557,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction.releaseRefused = false
 		transaction.agentSettingsRefused = nil
 		transaction.notStartedReasons = nil
+		transaction.notStartedRepairs = nil
 		transaction.keptRegistrations = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
@@ -8535,8 +8542,27 @@ const GuardrailAgentSettingsRefused = "connectors_refused_by_agent_settings"
 // (GAP-0620).
 const GuardrailNotStartedReasons = "connectors_not_started_reasons"
 
+// GuardrailNotStartedRepairs is the guardrail health detail that maps a
+// connector in GuardrailNotStartedReasons to the repair its refusal carries,
+// as fields apart from the reason: the reason is prose, and a repair holds
+// paths and accounts a reader must be able to copy exactly (GAP-0731).
+const GuardrailNotStartedRepairs = "connectors_not_started_repairs"
+
+// NotStartedRepair is the repair of a refusal: the shell command that repairs
+// what a command can repair and the steps only a person can take. A field
+// longer than notStartedRepairMaxBytes is left out, never cut, and OmittedBytes
+// says how many bytes were left out.
+type NotStartedRepair struct {
+	Fix          string `json:"fix,omitempty"`
+	ByHand       string `json:"by_hand,omitempty"`
+	OmittedBytes int    `json:"omitted_bytes,omitempty"`
+}
+
 // notStartedReasonMaxBytes bounds one reason in guardrail health.
 const notStartedReasonMaxBytes = 1024
+
+// notStartedRepairMaxBytes bounds each field of a repair in guardrail health.
+const notStartedRepairMaxBytes = 8192
 
 func (t *multiConnectorSetupTransaction) noteNotStarted(name string, err error) {
 	if err == nil {
@@ -8545,41 +8571,52 @@ func (t *multiConnectorSetupTransaction) noteNotStarted(name string, err error) 
 	if t.notStartedReasons == nil {
 		t.notStartedReasons = map[string]string{}
 	}
-	t.notStartedReasons[strings.ToLower(strings.TrimSpace(name))] = boundNotStartedReason(err.Error())
+	key := strings.ToLower(strings.TrimSpace(name))
+	reason, repair := splitNotStartedRefusal(err)
+	t.notStartedReasons[key] = boundNotStartedReason(reason)
+	delete(t.notStartedRepairs, key)
+	if repair != (NotStartedRepair{}) {
+		if t.notStartedRepairs == nil {
+			t.notStartedRepairs = map[string]NotStartedRepair{}
+		}
+		t.notStartedRepairs[key] = repair
+	}
 }
 
-// notStartedRepairMaxBytes bounds the repair that ends a recorded reason.
-const notStartedRepairMaxBytes = 8192
+// splitNotStartedRefusal returns the text of err with the repair of a
+// refusal that carries one (connector.RepairedRefusal) taken out of it, and
+// that repair. The repair comes from the error's own fields, never from its
+// text, so no name in the text can move the boundary between the two.
+func splitNotStartedRefusal(err error) (string, NotStartedRepair) {
+	var refusal connector.RepairedRefusal
+	if !errors.As(err, &refusal) {
+		return err.Error(), NotStartedRepair{}
+	}
+	text, whole := err.Error(), refusal.Error()
+	if at := strings.LastIndex(text, whole); at >= 0 {
+		text = text[:at] + refusal.CauseText() + text[at+len(whole):]
+	}
+	fix, byHand := refusal.Repair()
+	var repair NotStartedRepair
+	for _, field := range []struct {
+		value string
+		to    *string
+	}{{fix, &repair.Fix}, {byHand, &repair.ByHand}} {
+		if len(field.value) > notStartedRepairMaxBytes {
+			repair.OmittedBytes += len(field.value)
+			continue
+		}
+		*field.to = field.value
+	}
+	return text, repair
+}
 
-// boundNotStartedReason bounds the cause of a recorded reason at
-// notStartedReasonMaxBytes and keeps its repair (the "; fix: " or "; by hand: "
-// tail a custody refusal ends with, GAP-0731) whole: a cut command would read
-// as a repair that is not one. A repair past notStartedRepairMaxBytes is left
-// out and said so, so no reader is shown a partial command.
+// boundNotStartedReason bounds a reason at notStartedReasonMaxBytes.
 func boundNotStartedReason(reason string) string {
 	if len(reason) <= notStartedReasonMaxBytes {
 		return reason
 	}
-	cause, repair := reason, ""
-	for _, marker := range []string{"; fix: ", "; by hand: "} {
-		if at := strings.LastIndex(reason, marker); at >= 0 {
-			cause, repair = reason[:at], reason[at:]
-			break
-		}
-	}
-	cut := cause
-	if len(cut) > notStartedReasonMaxBytes {
-		cut = strings.ToValidUTF8(cut[:notStartedReasonMaxBytes], "")
-	}
-	switch {
-	case repair == "":
-		return cut + " [truncated; the gateway log has the rest]"
-	case len(repair) > notStartedRepairMaxBytes:
-		return fmt.Sprintf("%s; repair omitted: it is %d bytes, too long for this field; the gateway log has it whole", cut, len(repair))
-	case len(cut) < len(cause):
-		return cut + " [cause truncated; the gateway log has it whole]" + repair
-	}
-	return cause + repair
+	return strings.ToValidUTF8(reason[:notStartedReasonMaxBytes], "") + " [truncated; the gateway log has the rest]"
 }
 
 // notStartedReasonsFor returns the recorded reasons of the connectors in
@@ -8593,6 +8630,19 @@ func (t *multiConnectorSetupTransaction) notStartedReasonsFor(notStarted []strin
 		}
 	}
 	return reasons
+}
+
+// notStartedRepairsFor returns the recorded repairs of the connectors in
+// notStarted.
+func (t *multiConnectorSetupTransaction) notStartedRepairsFor(notStarted []string) map[string]NotStartedRepair {
+	repairs := map[string]NotStartedRepair{}
+	for _, name := range notStarted {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if repair, ok := t.notStartedRepairs[key]; ok {
+			repairs[key] = repair
+		}
+	}
+	return repairs
 }
 
 // GuardrailHookContractAdmissionRefused is the guardrail health detail that

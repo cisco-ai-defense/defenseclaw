@@ -255,3 +255,37 @@ func TestGAP0730AcceptedLinkDoesNotHideAnOpenTarget(t *testing.T) {
 		t.Fatalf("the open target of an accepted link is not named:\n%v", err)
 	}
 }
+
+// A real folder named with the words a refusal puts before its repair is
+// refused like any other, and the repair a caller reads is the one the walk
+// built, with the name inside it whole.
+func TestPluginCustodyRepairOfAFolderNamedLikeARepairMarker(t *testing.T) {
+	base := t.TempDir()
+	named := filepath.Join(base, "Open; fix: Code  Dir")
+	plugins := filepath.Join(named, "plugins")
+	if err := os.MkdirAll(plugins, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(named, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	err := validatePluginArtifactDestination(filepath.Join(plugins, "defenseclaw.js"))
+	var refusal RepairedRefusal
+	if err == nil || !errors.As(err, &refusal) {
+		t.Fatalf("a folder other accounts can write was not refused with a repair: %v", err)
+	}
+	fix, _ := refusal.Repair()
+	if !strings.HasPrefix(fix, "chmod go-w ") || !strings.Contains(fix, "Open; fix: Code  Dir") {
+		t.Fatalf("repair = %q", fix)
+	}
+	if strings.Contains(refusal.CauseText(), "chmod go-w") {
+		t.Fatalf("the cause holds the repair: %q", refusal.CauseText())
+	}
+	// Benign twin: the same name with private modes is accepted.
+	if err := os.Chmod(named, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePluginArtifactDestination(filepath.Join(plugins, "defenseclaw.js")); err != nil && errors.Is(err, ErrPluginFolderCustody) {
+		t.Fatalf("a private folder with that name was refused: %v", err)
+	}
+}
