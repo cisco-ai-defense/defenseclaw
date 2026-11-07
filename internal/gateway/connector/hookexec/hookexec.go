@@ -347,6 +347,11 @@ type Options struct {
 	// failure takes the administrator's open; every other failure is closed
 	// (managedNonOutageMode, bounded review P1).
 	managedOutageOpen bool
+	// lateOrdinary, when set, scans the call for a path a protected file
+	// could be reached through (lateOrdinaryCheck). A per-user call that a
+	// verified gateway took and did not answer by the deadline follows the
+	// outage mode when it is ordinary (GAP-0518); it stays closed otherwise.
+	lateOrdinary func() bool
 	// perUserOutage is set on a per-user hook for a failure that is a gateway
 	// outage (withPerUserOutage): this account's gateway refused or dropped
 	// the connection, gave no connection within the restart budget, or could
@@ -990,6 +995,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// take time after Run, leaving a healthy gateway only a fraction of the
 	// configured answer budget. The early watchdog still caps the whole call.
 	opts.requestFacts = &hookRequestFacts{}
+	opts.lateOrdinary = lateOrdinaryCheck(opts, payload)
 	if opts.ManagedEnterprise && !opts.SecureClient {
 		opts.requestFacts.set(make(http.Header), opts, payload)
 	}

@@ -42,6 +42,12 @@ func TestShellHookRestartWindowNoAnswerFollowsTheOutageMode(t *testing.T) {
 		// new one is not ready): the restart outage, with no refusal first.
 		{"no answer during a restart, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=10"}, true, "restarting or not running", ""},
 		{"no answer during a restart, strict tier", "closed", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=10"}, false, "restarting or not running", ""},
+		// hook-post 12: the verified gateway took a call that names nothing
+		// protected and was late (a burst, a long operand list, GAP-0518): the
+		// outage mode decides, and the text names a running gateway that did
+		// not answer, not a restart.
+		{"late ordinary call, open tier", "open", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=12"}, true, "the gateway is running but did not answer", ""},
+		{"late ordinary call, strict tier", "closed", []string{"DC_COLD_FAILS=1000", "DC_COLD_FIRST_RC=12"}, false, "the gateway is running but did not answer", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := append([]string{"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_OUTAGE_MODE=" + tc.outageMode}, tc.env...)
