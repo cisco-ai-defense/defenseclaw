@@ -42,6 +42,10 @@ type hotConfigHost struct {
 	digestCalls int
 	adoptAfter  int
 	refreshes   int
+	// GAP-0779: the config bytes each approved-source refresh was asked to
+	// record, and the error it returns.
+	approved   []string
+	approveErr error
 	// The targets record of a refreshing apply (GAP-0847): how often it was
 	// taken and put back, what fails, and the targets it says are dropped.
 	targetRecords    int
@@ -140,7 +144,9 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
 	closeHooksSeam, hooksHeldSeam, releaseHooksSeam := windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks
 	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
+	approveSeam := windowsEnterpriseHotConfigApproveSource
 	t.Cleanup(func() {
+		windowsEnterpriseHotConfigApproveSource = approveSeam
 		windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover = restartSeam, recoverSeam
 		windowsEnterpriseHotConfigFailClosed = failClosedSeam
 		windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks = closeHooksSeam, hooksHeldSeam, releaseHooksSeam
@@ -164,6 +170,14 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		return managed.StandaloneLayout{ConfigPath: host.configPath, ConfigDir: filepath.Dir(host.configPath), DataDir: dir, ServiceUser: `NT SERVICE\DefenseClawGateway`}, nil
 	}
 	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return func() {}, nil }
+	windowsEnterpriseHotConfigApproveSource = func(managed.StandaloneLayout) error {
+		installed, err := os.ReadFile(host.configPath)
+		if err != nil {
+			return err
+		}
+		host.approved = append(host.approved, string(installed))
+		return host.approveErr
+	}
 	windowsEnterpriseHotConfigRefreshTargets = func(context.Context, managed.StandaloneLayout) error {
 		host.refreshes++
 		return nil
@@ -459,6 +473,43 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	if string(got) != previous || string(generation) == recorded || len(host.writes) != 2 ||
 		len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" {
 		t.Fatalf("gateway never adopted: config %q, generation %q, writes %q, installer runs %q", got, generation, host.writes, stub.calls)
+	}
+}
+
+// GAP-0779: a config-only ensure that stays in the running gateway makes the
+// config it applied the approved config source, so a later Repair never puts
+// back the config of an earlier ensure; an ensure that cannot record it puts
+// the previous config back and leaves the change to the upgrade transaction.
+func TestWindowsEnterpriseEnsureApprovesTheConfigItApplied(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const next = "config_version: 9\nguardrail:\n  mode: action\n"
+
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	if len(host.approved) != 1 || host.approved[0] != next {
+		t.Fatalf("approved config sources %q, want exactly the applied config", host.approved)
+	}
+
+	// A change the gateway never adopts is undone before anything is approved.
+	host, opts = newHotConfigHost(t, previous, next)
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	if len(host.approved) != 0 {
+		t.Fatalf("a config the gateway never adopted was approved: %q", host.approved)
+	}
+
+	// An approved source that cannot be recorded undoes the apply: the
+	// previous config is back and the upgrade transaction runs.
+	host, opts = newHotConfigHost(t, previous, next)
+	host.adopted = true
+	host.approveErr = errors.New("deployment record is locked")
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	got, _ := os.ReadFile(host.configPath)
+	if string(got) != previous || len(host.writes) != 2 || stub.calls[len(stub.calls)-1][1] != "Upgrade" {
+		t.Fatalf("unrecordable approved source: config %q, writes %q, installer runs %q", got, host.writes, stub.calls)
 	}
 }
 
