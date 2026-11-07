@@ -420,7 +420,11 @@ type hookPathRun struct {
 // blankOrdinaryPrograms). The text is never run.
 func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) bool {
 	scan := &hookPathScan{files: files, dirs: dirs, fold: fold, exists: map[string]bool{}}
-	text := hookCommandPathText(scan.blankOrdinaryPrograms(command, home), home, fold)
+	blanked, named := scan.blankOrdinaryPrograms(command, home)
+	if named {
+		return true
+	}
+	text := hookCommandPathText(blanked, home, fold)
 	startOK, wordSlash, skipTo := true, false, 0
 	for i, r := range text {
 		if startOK && i >= skipTo && hookPathStart(text, i, fold) {
@@ -451,7 +455,11 @@ func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) 
 // literal (hookLiteralWord), naming an existing absolute path that is not managed,
 // replaced by "_", and each other ANSI-C quoted program word replaced by its
 // decoded text in single quotes, so an escaped spelling of a managed path is
-// scanned as the path. A shell runs that word as the program whatever its
+// scanned as the path. It also reports whether a program word is itself a path
+// that names a managed hook file or lies in a managed hook directory, directly
+// or through a link, by the exact name the shell uses: the scan below reads
+// text with its quotes and escapes dropped, which loses an apostrophe in a file
+// or link name. A shell runs that word as the program whatever its
 // characters are, so the managed path inside
 // "/home/u/a /home/u/.defenseclaw/hooks/b" is not a word of its own. The words
 // come from the shared shell lexer (shellparse), not from the first byte of the
@@ -463,16 +471,17 @@ func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) 
 // runs the substitution before it picks the program. A word that is not
 // the program is an argument and the program may run its text as a shell line
 // ("sh -c ..."), so it stays. Text the lexer does not read stays whole.
-func (s *hookPathScan) blankOrdinaryPrograms(command, home string) string {
+func (s *hookPathScan) blankOrdinaryPrograms(command, home string) (string, bool) {
 	file, ok := shellparse.Parse(command)
 	if !ok {
-		return command
+		return command, false
 	}
 	var out strings.Builder
+	named := false
 	copied := 0
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
-		if !isCall {
+		if !isCall || named {
 			return true
 		}
 		word := hookProgramWord(call.Args)
@@ -491,12 +500,17 @@ func (s *hookPathScan) blankOrdinaryPrograms(command, home string) string {
 			literal = hookCommandPathText(literal, home, true)
 		}
 		replacement := ""
-		if strings.ContainsFunc(literal, hookShellSeparator) && hookPathStart(literal, 0, s.fold) {
-			if named, exists := s.span(literal); !named && exists {
+		if hookPathStart(literal, 0, s.fold) {
+			isManaged, exists := s.span(literal)
+			if isManaged {
+				named = true
+				return false
+			}
+			if exists && strings.ContainsFunc(literal, hookShellSeparator) {
 				replacement = "_"
 			}
 		}
-		if replacement == "" && hookAnsiCWord(word) && !strings.Contains(literal, "'") {
+		if replacement == "" && hookAnsiCWord(word) {
 			// The scan reads text, not escapes: give it the decoded name.
 			replacement = "'" + literal + "'"
 		}
@@ -507,11 +521,11 @@ func (s *hookPathScan) blankOrdinaryPrograms(command, home string) string {
 		}
 		return true
 	})
-	if copied == 0 {
-		return command
+	if named || copied == 0 {
+		return command, named
 	}
 	out.WriteString(command[copied:])
-	return out.String()
+	return out.String(), false
 }
 
 // hookAnsiCWord reports whether word has an ANSI-C quoted part.
@@ -531,12 +545,13 @@ func hookAnsiCWord(word *syntax.Word) bool {
 // backslash or a newline; outside quotes a backslash before any character;
 // inside $'...' the ANSI-C escapes, see hookAnsiCText). A word is not literal
 // when the shell resolves something in it before it picks the program: an
-// expansion or command substitution (backticks too), an ANSI-C escape it cannot
-// decode, an unquoted glob character, a tilde that starts the word, or a brace
-// expression that expands (a comma or a sequence between braces). A tilde in
-// the middle of a word and a brace pair without a comma or sequence stay plain
-// characters. With windows set a backslash is a path separator, not an escape,
-// and ANSI-C quoting does not exist.
+// expansion or command substitution (backticks too), an ANSI-C escape that
+// makes a control character or a NUL, an unquoted glob character, a tilde that
+// starts the word, or a brace expression that expands (a comma or a valid
+// sequence between braces). A tilde in the middle of a word, a brace pair
+// without a comma or valid sequence ("{ab..cd}") and an unknown ANSI-C escape
+// ("\q") stay plain characters. With windows set a backslash is a path
+// separator, not an escape, and ANSI-C quoting does not exist.
 func hookLiteralWord(word *syntax.Word, windows bool) (string, bool) {
 	var text, unquoted strings.Builder
 	for i, part := range word.Parts {
@@ -581,8 +596,8 @@ func hookLiteralWord(word *syntax.Word, windows bool) (string, bool) {
 
 // hookBraceExpands reports whether bare, the unquoted text of a word with each
 // quoted part reduced to one plain character, holds a brace pair the shell
-// expands: a comma or ".." (a sequence) between a "{" and its "}". A pair
-// without either is plain text, and so is a "{" with no "}".
+// expands: a comma, or a sequence (hookBraceSequence), between a "{" and its
+// "}". A pair without either is plain text, and so is a "{" with no "}".
 func hookBraceExpands(bare string) bool {
 	for open := 0; open < len(bare); open++ {
 		if bare[open] != '{' {
@@ -598,7 +613,7 @@ func hookBraceExpands(bare string) bool {
 			}
 			if depth == 0 {
 				inner := bare[open+1 : end]
-				if strings.Contains(inner, ",") || strings.Contains(inner, "..") {
+				if strings.Contains(inner, ",") || hookBraceSequence(inner) {
 					return true
 				}
 				break
@@ -608,10 +623,37 @@ func hookBraceExpands(bare string) bool {
 	return false
 }
 
+// hookBraceSequence reports whether inner, the text between a brace pair, is a
+// sequence expression the shell expands: START..END or START..END..INCR with
+// whole numbers, or with one character at each end (Bash takes letters only; any
+// single character is read as a sequence here, the protected direction). Text
+// such as "ab..cd" is not a sequence, and the shell leaves it as it is.
+func hookBraceSequence(inner string) bool {
+	parts := strings.Split(inner, "..")
+	if len(parts) < 2 || len(parts) > 3 {
+		return false
+	}
+	whole := func(text string) bool {
+		digits := strings.TrimLeft(text, "+-")
+		if len(text)-len(digits) > 1 || digits == "" {
+			return false
+		}
+		return strings.TrimLeft(digits, "0123456789") == ""
+	}
+	if len(parts) == 3 && !whole(parts[2]) {
+		return false
+	}
+	return whole(parts[0]) && whole(parts[1]) ||
+		utf8.RuneCountInString(parts[0]) == 1 && utf8.RuneCountInString(parts[1]) == 1
+}
+
 // hookAnsiCText decodes the body of an ANSI-C quoted word ($'...') as Bash
 // does: \a \b \e \E \f \n \r \t \v \\ \' \" \?, \nnn (octal), \xHH, \uHHHH and
-// \UHHHHHHHH. It returns false for an escape it does not decode (\c and
-// unknown ones) and for text with a NUL, where the shell cuts the word short.
+// \UHHHHHHHH. Like Bash it keeps the backslash of an escape it does not know
+// ("\q" stays two characters, as do "\x" and "\u" with no digit after them) and
+// takes an octal escape modulo 256. It returns false for \c (a control
+// character), a code point that is not valid text, and text with a NUL, where
+// the shell cuts the word short.
 func hookAnsiCText(raw string) (string, bool) {
 	if !strings.Contains(raw, "\\") {
 		return raw, !strings.Contains(raw, "\x00")
@@ -643,15 +685,21 @@ func hookAnsiCText(raw string) (string, bool) {
 			base, digits = 16, 4
 		case c == 'U':
 			base, digits = 16, 8
-		default:
+		case c == 'c':
 			return "", false
+		default:
+			out.WriteByte('\\')
+			out.WriteByte(c)
+			continue
 		}
 		end := start
 		for end < len(raw) && end-start < digits && hookDigit(raw[end], base) {
 			end++
 		}
 		if end == start {
-			return "", false
+			out.WriteByte('\\')
+			out.WriteByte(c)
+			continue
 		}
 		value, err := strconv.ParseUint(raw[start:end], base, 32)
 		if err != nil {
@@ -663,9 +711,6 @@ func hookAnsiCText(raw string) (string, bool) {
 			}
 			out.WriteRune(rune(value))
 		} else {
-			if value > 0xff {
-				return "", false
-			}
 			out.WriteByte(byte(value))
 		}
 		i = end - 1
