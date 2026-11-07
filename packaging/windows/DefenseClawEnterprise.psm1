@@ -32400,8 +32400,9 @@ function Get-DefenseClawGuardianRowMachineFolderLink {
     return ''
 }
 
-# The folders a machine vendor folder lives under. A smoke points it at scratch paths.
-$script:DefenseClawVendorFolderRoots = @($env:ProgramData, $env:ProgramFiles)
+# The folders a machine vendor folder lives under: the trusted machine roots
+# (never the process environment). A smoke points it at scratch paths.
+$script:DefenseClawVendorFolderRoots = @($script:ProgramData, $script:ProgramFiles)
 
 function Get-DefenseClawStandaloneManifestAdoption {
     <#

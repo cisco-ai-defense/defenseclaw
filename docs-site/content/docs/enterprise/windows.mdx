@@ -989,7 +989,7 @@ a junction to another folder, the uninstall does not follow it, change it or rem
 and does not stop for it. Nothing behind the link is read, opened, locked, written or deleted, even a file
 that looks like DefenseClaw's own, such as a Codex `requirements.toml` or a writer lock. The link and what it points to stay as they are,
 the link is named once in a `machine_state_kept` warning (and in `created_folders_kept` when DefenseClaw
-had recorded the folder), never as a file the uninstall could not remove, and the rest of the uninstall completes. The
+had recorded the folder), never as a file the uninstall could not remove, and the rest of the uninstall completes. This holds when an account is enrolled for that agent too: the uninstall cannot read the enrollment behind the link, so it leaves that agent out of the checks that compare the enrolled accounts with the machine state, and out of the check that waits for the guardian to reconcile without failure (the guardian does not write through a link). A mismatch that no kept link explains still stops the uninstall. The
 machine policy folders DefenseClaw writes itself for GitHub Copilot, OpenCode and Devin under
 `C:\ProgramData` are the one difference: a link a standard user made there is removed, the link only, and
 nothing is created in its place (what it points to is untouched), while a link an administrator made stays and
