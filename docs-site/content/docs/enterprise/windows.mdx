@@ -246,6 +246,9 @@ does nothing. Exit codes: `0` success or nothing to do, `1603` failed (rolled ba
 `1618` another run holds the lock (retry), `1639` invalid arguments (retrying does
 not help). All properties are in [Setup actions and properties](#setup-actions-and-properties).
 
+Third-party readers of managed files must open with `FILE_SHARE_DELETE` or retry
+a transient open failure during replacement.
+
 An agent reads its hooks when it starts. A session opened before the install runs
 without DefenseClaw until it restarts; the result names each one with
 `agent_sessions_restart_required`.

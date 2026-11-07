@@ -156,7 +156,7 @@ func copyExistingWindowsDACL(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	stage, err := windows.CreateFile(to, windows.WRITE_DAC,
+	stage, err := windows.CreateFile(to, windows.READ_CONTROL|windows.WRITE_DAC,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
