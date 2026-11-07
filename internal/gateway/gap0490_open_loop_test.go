@@ -40,24 +40,24 @@ func TestGAP0490OpenLoopSandboxStream(t *testing.T) {
 	runGAP0490OpenLoop(t, 1, 22, 10*time.Second)
 }
 
-// The two- and four-sandbox streams need the audit disk and CPU of a quiet
-// host (the gateway makes about two dozen audit writes per call on the store
-// one writer connection), so they run on request: set
-// DC_GAP0490_OPEN_LOOP=1. They are the managed host verification of the row.
-func requireOpenLoopHost(t *testing.T) {
-	t.Helper()
-	if os.Getenv("DC_GAP0490_OPEN_LOOP") == "" {
-		t.Skip("set DC_GAP0490_OPEN_LOOP=1 on a quiet host to run the multi-sandbox open-loop streams")
-	}
-}
-
+// The two-sandbox stream (44 calls a second for one account) runs in every
+// test run: before the managed call writes shared one write baton and one
+// correlation turn per session the gateway answered it only some of the time
+// (rel-1-0-6 GAP-0490, round 6).
 func TestGAP0490OpenLoopTwoSandboxes(t *testing.T) {
-	requireOpenLoopHost(t)
 	runGAP0490OpenLoop(t, 2, 22, 10*time.Second)
 }
 
+// The four-sandbox stream (96 calls a second, under the 100/s of the account)
+// needs the CPU and disk of a quiet host: each call makes about two dozen
+// audit writes, and on the shared build box (load above 60, nice 15) the
+// gateway answers about two thirds of it inside the window. It runs on
+// request, DC_GAP0490_OPEN_LOOP=1, and is the managed host verification of
+// the row.
 func TestGAP0490OpenLoopFourSandboxes(t *testing.T) {
-	requireOpenLoopHost(t)
+	if os.Getenv("DC_GAP0490_OPEN_LOOP") == "" {
+		t.Skip("set DC_GAP0490_OPEN_LOOP=1 on a quiet host to run the four-sandbox open-loop stream")
+	}
 	runGAP0490OpenLoop(t, 4, 24, 10*time.Second)
 }
 

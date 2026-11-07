@@ -948,12 +948,22 @@ func (repo *CorrelationRepository) BeginOccurrence(
 	if err != nil {
 		return nil, empty, err
 	}
-	tx, err := repo.store.db.BeginTx(ctx, nil)
+	// The occurrence reads before it writes. Another writer of this process
+	// that commits in between makes the upgrade fail at once with
+	// SQLITE_BUSY_SNAPSHOT and the hook starts its correlation over, so this
+	// transaction takes the write baton first (writeBaton).
+	turn, err := repo.store.writeBaton.acquire(ctx)
 	if err != nil {
 		release()
 		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
 	}
-	correlationTx := &CorrelationTx{repo: repo, tx: tx, release: release}
+	tx, err := repo.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		turn()
+		release()
+		return nil, empty, fmt.Errorf("audit: begin correlation occurrence: %w", err)
+	}
+	correlationTx := &CorrelationTx{repo: repo, tx: tx, release: func() { turn(); release() }}
 	fail := func(cause error) (*CorrelationTx, CorrelationOccurrenceResult, error) {
 		_ = correlationTx.Rollback()
 		return nil, empty, cause
