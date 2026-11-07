@@ -7,7 +7,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
+	"weak"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -55,6 +58,12 @@ func HookOutageFailMode(managedInstall bool, managedMode, tier string) string {
 // Every other hook failure (EffectiveHookFailModeForConnector) stays closed on
 // a per-user install.
 func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) string {
+	return c.EffectiveHookOutageFailModeForConnectorAtTier(connector, c.HookPolicyTierForConnector(connector))
+}
+
+// EffectiveHookOutageFailModeForConnectorAtTier uses a tier captured by the
+// caller's policy generation instead of rereading a mutable pack manifest.
+func (c *Config) EffectiveHookOutageFailModeForConnectorAtTier(connector, tier string) string {
 	if c == nil {
 		return "closed"
 	}
@@ -62,8 +71,13 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	if managedInstall {
 		return HookOutageFailMode(true, c.EffectiveHookFailModeForConnector(connector), "")
 	}
-	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), c.HookPolicyTierForConnector(connector))
+	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), tier)
 }
+
+// A configuration's first tier resolution is retained while that snapshot
+// is in use. Reload creates a new Config, including for an in-place pack edit.
+// Weak keys let old snapshots leave with their generations.
+var hookPolicyTierSnapshots sync.Map // weak.Pointer[Config] -> *sync.Map
 
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule
 // pack, as the gateway reads its posture (internal/gateway packPosture): the
@@ -78,13 +92,29 @@ func (c *Config) HookPolicyTierForConnector(connector string) string {
 	if dir == "" {
 		dir = strings.TrimSpace(ref.Dir)
 	}
-	if posture := packManifestPosture(dir); posture != "" {
-		return posture
+	key := weak.Make(c)
+	value, loaded := hookPolicyTierSnapshots.Load(key)
+	if !loaded {
+		value, loaded = hookPolicyTierSnapshots.LoadOrStore(key, new(sync.Map))
+		if !loaded {
+			runtime.AddCleanup(c, func(key weak.Pointer[Config]) { hookPolicyTierSnapshots.Delete(key) }, key)
+		}
 	}
-	if ref.Name != "" && IsBuiltinRulePack(ref.Name) {
-		return ref.Name
+	tiers := value.(*sync.Map)
+	tierKey := connector + "\x00" + ref.Name + "\x00" + dir
+	if tier, ok := tiers.Load(tierKey); ok {
+		return tier.(string)
 	}
-	return packFolderPosture(dir)
+	posture := ""
+	if manifestPosture := packManifestPosture(dir); manifestPosture != "" {
+		posture = manifestPosture
+	} else if ref.Name != "" && IsBuiltinRulePack(ref.Name) {
+		posture = ref.Name
+	} else {
+		posture = packFolderPosture(dir)
+	}
+	actual, _ := tiers.LoadOrStore(tierKey, posture)
+	return actual.(string)
 }
 
 // packManifestPosture is the posture defenseclaw-pack.json in dir names, ""
