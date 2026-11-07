@@ -110,7 +110,7 @@ func TestG622bPatchTargetsAreJudgedByIdentityAgainstEveryStateFile(t *testing.T)
 				} {
 					target := filepath.Join(project, fmt.Sprintf("swap-%d-%d.txt", i, j))
 					mustWrite(t, target, "# base\n")
-					watch := NewPatchTargetWatch(g622bPatchEvidence(t, connector, project, target))
+					watch := watchOfEvidence(g622bPatchEvidence(t, connector, project, target))
 					if watch == nil || watch.Changed() {
 						t.Fatalf("%s: ordinary target read as changed before the swap (watch present: %t)", swap.name, watch != nil)
 					}
@@ -155,7 +155,7 @@ func TestG622bOrdinaryHardLinkedPatchTargetsStayAllowed(t *testing.T) {
 			if !ok || targets[two] != two || targets[PatchCompleteKey] != "1" {
 				t.Fatalf("hard link between project files: evidence %v (ok %v), want itself and complete", targets, ok)
 			}
-			watch := NewPatchTargetWatch(evidence)
+			watch := watchOfEvidence(evidence)
 			if watch.Changed() {
 				t.Error("hard link between project files read as changed")
 			}

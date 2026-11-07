@@ -72,6 +72,11 @@ type reachedInstructions struct {
 // gateway that cannot read the user's files learns the identity of a
 // directory the session created when the session reaches it through a link.
 func reachedEvidence(directories []string) string {
+	return (*scanReads)(nil).reachedEvidence(directories)
+}
+
+// reachedEvidence is reachedEvidence reading each path through r.
+func (r *scanReads) reachedEvidence(directories []string) string {
 	sighting := reachedInstructions{Directories: make(map[string]string)}
 	var read []string
 	add := func(directory string) {
@@ -82,7 +87,7 @@ func reachedEvidence(directories []string) string {
 		if _, seen := sighting.Directories[directory]; seen || len(read) == MaxReachedDirectories {
 			return
 		}
-		sighting.Directories[directory] = DirectoryIdentity(directory)
+		sighting.Directories[directory] = r.directoryIdentity(directory)
 		read = append(read, directory)
 		if info, err := pathLstat(directory); err == nil && info.IsDir() &&
 			info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
@@ -100,7 +105,7 @@ func reachedEvidence(directories []string) string {
 			add(real)
 		}
 	}
-	sighting.Files = InstructionFilesIn(read)
+	sighting.Files = r.instructionFilesIn(read)
 	if len(read) == 0 || sighting.Files == nil {
 		return ""
 	}
@@ -212,14 +217,19 @@ func StartupDirectories(cwd, home string) []string {
 // files in directories. A missing file has no entry; nil means more files
 // than a snapshot holds.
 func InstructionFilesIn(directories []string) map[string]string {
+	return (*scanReads)(nil).instructionFilesIn(directories)
+}
+
+// instructionFilesIn is InstructionFilesIn reading each path through r.
+func (r *scanReads) instructionFilesIn(directories []string) map[string]string {
 	files := make(map[string]string)
 	for _, directory := range directories {
-		if !filepath.IsAbs(directory) {
+		if !filepath.IsAbs(directory) || r.absent(directory) {
 			continue
 		}
 		for _, name := range InstructionFileNames {
 			candidate := filepath.Join(directory, name)
-			if identity := FileIdentity(candidate); identity != "" {
+			if identity := r.fileIdentity(candidate); identity != "" {
 				files[candidate] = identity
 				if len(files) > maxStartupInstructionFiles {
 					return nil
@@ -354,6 +364,9 @@ type InstructionFiles struct {
 	loaded    []string
 	files     []instructionFile
 	built     bool
+	// reads is the memo the call's other instruction scans share; nil reads
+	// every path.
+	reads *scanReads
 }
 
 type instructionFile struct {
@@ -379,7 +392,7 @@ func (f *InstructionFiles) identify() {
 			return
 		}
 		seen[path] = true
-		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
+		if info, err := f.reads.stat(path); err == nil && info.Mode().IsRegular() {
 			f.files = append(f.files, instructionFile{path: path, info: info})
 		}
 	}
@@ -389,6 +402,9 @@ func (f *InstructionFiles) identify() {
 		}
 	}
 	for _, directory := range instructionDirectories(f.cwd, f.home) {
+		if f.reads.absent(directory) {
+			continue
+		}
 		for _, name := range InstructionFileNames {
 			add(filepath.Join(directory, name))
 		}

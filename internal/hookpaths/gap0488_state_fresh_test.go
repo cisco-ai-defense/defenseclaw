@@ -50,7 +50,7 @@ func TestG622b8StateAddedInsideIndexTTLIsStillProtected(t *testing.T) {
 				t.Fatal(err)
 			}
 			evidence := g622bPatchEvidence(t, connector, project, target)
-			watch := NewPatchTargetWatch(evidence)
+			watch := watchOfEvidence(evidence)
 			if watch == nil || watch.Changed() {
 				t.Fatal("ordinary patch target changed before swap")
 			}
@@ -142,7 +142,7 @@ func TestG622b8BoundedStateWalkNeverAttestsAnOrdinaryTarget(t *testing.T) {
 			}
 			activeStateExactBudget = old
 			resetActiveStateViews()
-			watch := NewPatchTargetWatch(g622bPatchEvidence(t, connector, project, ordinary))
+			watch := watchOfEvidence(g622bPatchEvidence(t, connector, project, ordinary))
 			if watch == nil || watch.Changed() {
 				t.Fatal("ordinary patch target changed before the time bound was lowered")
 			}
