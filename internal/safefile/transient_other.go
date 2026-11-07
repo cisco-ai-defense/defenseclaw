@@ -5,7 +5,15 @@
 
 package safefile
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
+
+var transientRetryDelays = []time.Duration{
+	time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond,
+	8 * time.Millisecond, 16 * time.Millisecond, 19 * time.Millisecond,
+}
 
 // A non-Windows rename does not drop the name, but validation can still
 // observe the old and new file identities in one read attempt.
