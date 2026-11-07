@@ -63,19 +63,28 @@ func TestGAP0034UnresolvedProtectedPluginBlocksOnRefreshOutage(t *testing.T) {
 	}
 }
 
-func TestGAP0034CompletedFailureBlocksOnRefreshOutage(t *testing.T) {
-	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = "claudecode"
-	api := &APIServer{scannerCfg: cfg}
-	api.SetMCPRefreshBeforeCall(func(context.Context, string) error { return errors.New("refresh unavailable") })
-	api.SetMCPAdmissionStatus(func(_, server, _, _ string) watcher.MCPAdmissionStatus {
-		return watcher.MCPAdmissionStatus{Name: server, Failed: true}
-	})
-	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
-		HookEventName: "PreToolUse", ToolName: "mcp__notes__lookup", ToolInput: map[string]interface{}{},
-	})
-	if resp.Action != "block" || !strings.Contains(resp.Reason, "failed admission scan") {
-		t.Fatalf("completed failure during outage: %+v", resp)
+// A completed scan failure survives a refresh outage with the tier's own
+// decision: blocked in the strict tier, allowed with a warning in the default
+// tier (the cell that moved with the GAP-0775 ruling).
+func TestGAP0034CompletedFailureFollowsTierOnRefreshOutage(t *testing.T) {
+	for _, tc := range []struct{ pack, action string }{{"strict", "block"}, {"default", "allow"}} {
+		t.Run(tc.pack, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Guardrail.RulePack = tc.pack
+			api := &APIServer{scannerCfg: cfg}
+			api.SetMCPRefreshBeforeCall(func(context.Context, string) error { return errors.New("refresh unavailable") })
+			api.SetMCPAdmissionStatus(func(_, server, _, _ string) watcher.MCPAdmissionStatus {
+				return watcher.MCPAdmissionStatus{Name: server, Failed: true}
+			})
+			resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+				HookEventName: "PreToolUse", ToolName: "mcp__notes__lookup", ToolInput: map[string]interface{}{},
+			})
+			if resp.Action != tc.action || resp.RawAction != "block" ||
+				!strings.Contains(resp.SourceReason, "reason_code=mcp-admission-failed") {
+				t.Fatalf("completed failure during outage: %+v", resp)
+			}
+		})
 	}
 }

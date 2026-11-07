@@ -428,7 +428,7 @@ var agentAssetPolicyKinds = map[string]string{"mcp": "MCP server", "skill": "ski
 // agentAssetPolicyKeys are the fields assetPolicyResponseReason emits.
 var agentAssetPolicyKeys = []string{
 	"reason_code", "source", "asset_type", "asset_name", "connector",
-	"registry_status", "registry_configured", "surface", "retry_after_s",
+	"registry_status", "registry_configured", "surface", "retry_after_s", "scan_issue",
 }
 
 // agentAssetPolicyValuePattern is the shape of a value an asset-policy reason
@@ -519,6 +519,9 @@ func agentAssetPolicySubject(reason string) string {
 	case "mcp-admission-unavailable":
 		return kind + " " + name + " admission is unavailable; try the call again in " + agentMCPAdmissionRetryText(values)
 	case "mcp-admission-failed":
+		if values["asset_type"] == "mcp" {
+			return mcpAdmissionFailedText(name, values["scan_issue"])
+		}
 		return kind + " " + name + " has a failed admission scan"
 	case "not-in-approved-registry":
 		return kind + " " + name + " is not in the approved registry"
@@ -621,6 +624,8 @@ func agentMCPAdmissionAllowedSentence(reason string) string {
 		return "DefenseClaw is still scanning MCP server " + values["asset_name"] + ". This call is allowed while admission is pending."
 	case "mcp-admission-unavailable":
 		return "DefenseClaw could not read admission for MCP server " + values["asset_name"] + ". This call is allowed with a warning."
+	case "mcp-admission-failed":
+		return mcpAdmissionAllowedWarning(values["asset_name"], values["scan_issue"])
 	}
 	return ""
 }

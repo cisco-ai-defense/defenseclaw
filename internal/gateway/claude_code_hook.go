@@ -723,7 +723,8 @@ func claudeCodeAdditionalContext(rawAction, severity, reason string, wouldBlock 
 		return ""
 	}
 	if strings.HasPrefix(reason, "DefenseClaw is still scanning MCP server ") ||
-		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") {
+		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") ||
+		strings.HasPrefix(reason, mcpAdmissionAllowedLead) {
 		return reason
 	}
 	lead := "DefenseClaw observed"

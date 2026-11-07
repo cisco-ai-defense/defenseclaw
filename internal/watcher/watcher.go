@@ -263,6 +263,12 @@ type InstallWatcher struct {
 	// A slower older list read must not replace a newer completed listing.
 	mcpAdmissionReadSeq  atomic.Uint64
 	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
+	// mcpFailedOutcomes keeps, per server key, the definition hash whose
+	// admission this process completed as a scan failure, from the moment the
+	// verdict is decided. The hook reads it with the stored baseline, so a
+	// completed verdict is visible before (or without) the baseline write and
+	// is never read as pending (GAP-0775). Guarded by mcpAdmissionMu.
+	mcpFailedOutcomes map[string]string
 	// admitNewMCP runs install admission for an MCP server that appears
 	// after the first rescan cycle (set with SetMCPServerSource): a managed
 	// computer has no `mcp set`, so a user adding a server to their agent is
@@ -682,6 +688,7 @@ func (w *InstallWatcher) admitAddedMCPServer(ctx context.Context, evt InstallEve
 	}
 	fmt.Fprintf(os.Stderr, "[watch] mcp %s was added; running install admission\n", evt.Name)
 	res := w.runAdmission(ctx, evt)
+	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if !res.Interrupted {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, w.cachedFingerprint(evt, nil)))
@@ -893,7 +900,8 @@ func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
 			known = append(known, mcpKnownDefinition{
 				server: config.MCPServerEntry{Name: server.Name, Connector: server.Connector,
 					Home: server.Home, Project: server.Project, Bundled: server.Bundled},
-				hash: hash,
+				hash:  hash,
+				issue: mcpScanIssue(server),
 			})
 		}
 		w.mcpAdmissionMu.Lock()
@@ -3184,17 +3192,24 @@ func (w *InstallWatcher) mcpNameSharedByAnotherServer(evt InstallEvent) bool {
 // keepsUnverifiedMCPServer reports an MCP server whose scan ended without a
 // verdict and that scanners.mcp_scanner.unverified_server warn keeps, as mcp
 // set adds it (GAP-1195): the scan did not finish (a timeout, a launcher or
-// scanner that exited, an unreachable server) and reported no finding, the
-// scanner did not refuse the server's definition, and the live policy
-// neither refuses unverified servers (explicit block) nor blocks this server. Secure Client keeps its
-// fail-closed admission.
+// scanner that exited, an unreachable server) or the scanner refused the
+// definition in a tier that fails open (GAP-0775), no finding was reported,
+// and the live policy neither refuses unverified servers (explicit block) nor
+// blocks this server. Secure Client keeps its fail-closed admission.
 func (w *InstallWatcher) keepsUnverifiedMCPServer(evt InstallEvent, targetType, connector string, result *scanner.ScanResult, err error) bool {
-	if evt.Type != InstallMCP || w.secureClientActive() || scanner.MCPScanRefused(err) ||
-		(result != nil && len(result.Findings) > 0) {
+	if evt.Type != InstallMCP || w.secureClientActive() || (result != nil && len(result.Findings) > 0) {
 		return false
 	}
 	cfg := w.admissionPolicySnapshot().Config
 	if cfg == nil || cfg.MCPUnverifiedServerBlocks() {
+		return false
+	}
+	// A definition the scanner refuses (a launcher or address it never
+	// starts or dials) is a server DefenseClaw cannot scan, not a malicious
+	// one: the OSS default and permissive tiers keep it with a warning, and
+	// the strict tier and every managed profile still refuse it (fail
+	// closed). A completed scan that finds something never reaches here.
+	if scanner.MCPScanRefused(err) && cfg.MCPAdmissionFailsClosed(connector) {
 		return false
 	}
 	decision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
@@ -3243,12 +3258,28 @@ func (w *InstallWatcher) logFailedMCPScan(ctx context.Context, evt InstallEvent,
 // unverifiedMCPReason leads the reason of an MCP server kept unverified.
 const unverifiedMCPReason = "scan did not finish, kept unverified (scanners.mcp_scanner.unverified_server: warn): "
 
+// unscannableMCPReason leads the reason of an MCP server the scanner refuses
+// (a launcher or address it never starts or dials) that a fail-open tier
+// keeps with a warning. Strict and managed profiles block it instead.
+const unscannableMCPReason = "cannot be scanned, kept with a warning (fail-closed only in the strict tier and managed profiles): "
+
+// keptUnscannedMCPReason reports the reason of an MCP server kept after a
+// scan that did not finish or that the scanner refused.
+func keptUnscannedMCPReason(reason string) bool {
+	return strings.HasPrefix(reason, unverifiedMCPReason) || strings.HasPrefix(reason, unscannableMCPReason)
+}
+
 // keepUnverifiedMCPServer keeps an MCP server whose scan did not finish: a
 // MEDIUM audit row says so, a block an earlier failed scan left is released,
 // and its marked baseline makes the rescan retry admission until a scan decides.
 func (w *InstallWatcher) keepUnverifiedMCPServer(ctx context.Context, evt InstallEvent, targetType, scannerName string, err error) AdmissionResult {
 	reason := unverifiedMCPReason + err.Error()
-	w.releaseScanFailureBlock(evt, targetType, "kept unverified (scanners.mcp_scanner.unverified_server: warn)")
+	cause := "kept unverified (scanners.mcp_scanner.unverified_server: warn)"
+	if scanner.MCPScanRefused(err) {
+		reason = unscannableMCPReason + err.Error()
+		cause = "kept with a warning: the server cannot be scanned and this profile fails open"
+	}
+	w.releaseScanFailureBlock(evt, targetType, cause)
 	_ = w.logger.LogEventCtx(ctx, audit.Event{
 		Action:   string(audit.ActionInstallAllowed),
 		Target:   evt.Path,
