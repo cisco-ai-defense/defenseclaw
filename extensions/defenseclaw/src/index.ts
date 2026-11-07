@@ -406,8 +406,18 @@ export default function (api: DefenseClawPluginHost) {
   // routes through the guardrail when Bedrock is the primary model.
   interceptor.start();
 
+  // Stops the interceptor and the health monitor. OpenClaw calls the service
+  // `stop` when it replaces or removes the plugin; it ignores what start()
+  // returns, so without it every reload left the previous copy patching the
+  // transport and polling the gateway (GAP-0745).
+  const stopService = (): void => {
+    interceptor.stop();
+    healthMonitor.stop();
+  };
+
   api.registerService({
     id: "llm-interceptor",
+    stop: stopService,
     start: async () => {
       interceptor.start();
       const layers = interceptor.describeLayers();
@@ -429,12 +439,8 @@ export default function (api: DefenseClawPluginHost) {
           `[defenseclaw] interception self-test failed to complete: ${String(error)}`,
         );
       });
-      return {
-        stop: () => {
-          interceptor.stop();
-          healthMonitor.stop();
-        },
-      };
+      // Older OpenClaw releases take the stop handle from the return value.
+      return { stop: stopService };
     },
   });
 
