@@ -58,6 +58,12 @@ func rv2Action(got string) string {
 
 func TestRV2GX048Variants(t *testing.T) {
 	h := newGAP0048Home(t)
+	if err := os.MkdirAll(filepath.Join(h.project, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.project, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	h.links(t)
 	home, proj, ext := h.home, h.project, h.ext
 	user := h.userSettings
