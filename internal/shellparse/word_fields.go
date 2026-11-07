@@ -5,6 +5,7 @@ package shellparse
 
 import (
 	"errors"
+	"strings"
 
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
@@ -34,7 +35,7 @@ func Fields(cfg *expand.Config, word *syntax.Word) ([]string, error) {
 // alternatives, a {x..y} range its elements, and the groups of one word
 // multiply. A word with no brace group is never too large.
 func BraceFieldsTooLarge(word *syntax.Word) bool {
-	if word == nil {
+	if word == nil || !wordHasBraceText(word) {
 		return false
 	}
 	split := *word // SplitBraces replaces the Parts slice, never the parts
@@ -52,6 +53,17 @@ func BraceFieldsTooLarge(word *syntax.Word) bool {
 		}
 	}
 	return fields*float64(size) > MaxBraceBytes
+}
+
+// wordHasBraceText reports a literal part with a brace, the only place a
+// brace group can start: the common word has none and is not split.
+func wordHasBraceText(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		if lit, ok := part.(*syntax.Lit); ok && strings.Contains(lit.Value, "{") {
+			return true
+		}
+	}
+	return false
 }
 
 // braceFields is the number of fields the brace groups of parts make: the
