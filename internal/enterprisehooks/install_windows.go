@@ -3022,26 +3022,41 @@ func windowsPathOwnerNoFollow(path string) (*windows.SID, error) {
 }
 
 func rejectWindowsReparseChain(path string) error {
-	current, err := filepath.Abs(path)
+	link, err := windowsReparseChainProbe(path)
 	if err != nil {
 		return err
+	}
+	if link != "" {
+		return fmt.Errorf("enterprise hooks: reparse point in path: %s", link)
+	}
+	return nil
+}
+
+// findWindowsReparsePointInChain walks path and each parent without following
+// anything and returns the first element that is a reparse point (a storage-only
+// tag excepted), or "" when the chain has none. rejectWindowsReparseChain refuses
+// on it; a teardown keeps and names it instead (GAP-0758).
+func findWindowsReparsePointInChain(path string) (string, error) {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
 	}
 	for {
 		ptr, err := winpath.UTF16Ptr(current)
 		if err != nil {
-			return err
+			return "", err
 		}
 		attributes, err := windows.GetFileAttributes(ptr)
 		if err == nil && attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 &&
 			!windowsPathHasHarmlessReparseTag(current) {
-			return fmt.Errorf("enterprise hooks: reparse point in path: %s", current)
+			return current, nil
 		}
 		if err != nil && err != windows.ERROR_FILE_NOT_FOUND && err != windows.ERROR_PATH_NOT_FOUND {
-			return err
+			return "", err
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return nil
+			return "", nil
 		}
 		current = parent
 	}

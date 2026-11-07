@@ -147,6 +147,12 @@ func RemoveWindowsStandaloneDeletedAccountSelectorTargets() error {
 			errs = append(errs, err)
 			continue
 		}
+		if kept, err := windowsManagedPolicyLinkKept(filepath.Dir(path)); err != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: inspect %s: %w", filepath.Dir(path), err))
+			continue
+		} else if kept {
+			continue
+		}
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 			continue
 		} else if err != nil {
@@ -156,7 +162,7 @@ func RemoveWindowsStandaloneDeletedAccountSelectorTargets() error {
 		if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 			return err
 		}
-		err = withWindowsManagedRuntimeSelectorTransaction(name, func() error {
+		err = withWindowsManagedRuntimeSelectorTeardownTransaction(name, func() error {
 			selector, _, exists, err := readWindowsManagedRuntimeSelector(name, true)
 			if err != nil || !exists {
 				return err
@@ -202,6 +208,12 @@ func RemoveWindowsStandaloneMachinePolicySelectorLocks() error {
 			continue
 		} else if !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, fmt.Errorf("enterprise hooks: inspect %s: %w", selector, err))
+			continue
+		}
+		if kept, err := windowsManagedPolicyLinkKept(filepath.Dir(selector)); err != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: inspect %s: %w", filepath.Dir(selector), err))
+			continue
+		} else if kept {
 			continue
 		}
 		lock := filepath.Join(filepath.Dir(selector), windowsManagedRuntimeSelectorLockFile)

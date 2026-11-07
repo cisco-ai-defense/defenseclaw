@@ -207,6 +207,12 @@ func windowsPerUserManagedRuntimeDirPresent(connectorName string) (bool, error) 
 	if err != nil {
 		return false, err
 	}
+	// A link kept at the folder is not followed: nothing to revoke behind it,
+	// and the revocation must not be refused by the write-side preparation
+	// (GAP-0758).
+	if kept, err := windowsManagedPolicyLinkKept(directory); err != nil || kept {
+		return false, err
+	}
 	if _, err := os.Lstat(directory); errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	} else if err != nil {

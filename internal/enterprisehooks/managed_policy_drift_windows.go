@@ -45,6 +45,9 @@ func RestoreWindowsClaudeManagedPolicyDrift() (bool, error) {
 			return false, err
 		}
 	}
+	if plain, err := windowsClaudeManagedPolicyDirPlain(); err != nil || !plain {
+		return false, err
+	}
 	restored := false
 	err := windowsClaudeManagedPolicyTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
@@ -183,6 +186,9 @@ func ApplyWindowsClaudeManagedHooksOnlyLock() (bool, error) {
 		if requireWindowsClaudeTeardownAdministrator() != nil {
 			return false, err
 		}
+	}
+	if plain, err := windowsClaudeManagedPolicyDirPlain(); err != nil || !plain {
+		return false, err
 	}
 	want := windowsClaudeManagedHooksOnlyEnforced()
 	written := false
