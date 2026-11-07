@@ -90,7 +90,7 @@ function Test-DefenseClawFileReadBlocked {
     param([string]$Path)
     $script:looks++
     $script:events.Add('look:' + [string]$script:looks)
-    return ($Case -eq 'held-stays' -or ($Case -eq 'held-closes' -and $script:looks -le 2))
+    return ($Case -eq 'held-stays' -or $Case -eq 'held-unnamed' -or ($Case -eq 'held-closes' -and $script:looks -le 2))
 }
 function Get-DefenseClawStateFileHolders {
     param([hashtable]$Layout, [string[]]$Paths, $Excluded)
@@ -106,7 +106,7 @@ catch { $threw = $_.Exception.Message }
 [pscustomobject]@{
     threw = $threw
     events = @($script:events)
-    state = $(if (Test-Path -LiteralPath $state) { Get-Content -LiteralPath $state -Raw } else { '<absent>' })
+    state = $(if (Test-Path -LiteralPath $state) { [IO.File]::ReadAllText($state) } else { '<absent>' })
 } | ConvertTo-Json -Compress
 """
 
