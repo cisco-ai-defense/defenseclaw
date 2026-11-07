@@ -368,7 +368,7 @@ func gap0523RetryFixture(t *testing.T) (*standaloneFixture, map[string]bool, *sy
 				result.Error = "repair pending"
 			} else {
 				result.OK = true
-				result.Repaired = true
+				result.Repaired, result.RestoredElements = true, entryElement
 				result.Result = &enterprisehooks.InstallResult{Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome}
 			}
 			response.Targets = append(response.Targets, result)
@@ -531,7 +531,7 @@ func testGAP0523ThirteenAccountWatchRepairsDuringSlowPass(t *testing.T, interval
 			if failing[account.User] {
 				result.Error = "repair pending"
 			} else {
-				result.OK, result.Repaired = true, true
+				result.OK, result.Repaired, result.RestoredElements = true, true, entryElement
 				result.Result = &enterprisehooks.InstallResult{Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome}
 				if account.User == "account12" {
 					if err := os.WriteFile(token, []byte(issued), 0o600); err != nil {

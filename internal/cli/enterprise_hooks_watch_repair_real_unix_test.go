@@ -200,7 +200,7 @@ func startGAP0754RealGuardian(t *testing.T, rel, initial, repair string) (string
 		}
 		for _, target := range request.Targets {
 			response.Targets = append(response.Targets, enterpriseHookWorkerTargetResult{
-				Index: target.Index, OK: true, Repaired: repaired,
+				Index: target.Index, OK: true, Repaired: repaired, RestoredElements: restoredElementsIf(repaired),
 				Result: &enterprisehooks.InstallResult{Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome},
 			})
 		}

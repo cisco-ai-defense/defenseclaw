@@ -111,6 +111,11 @@ const (
 	// enrollment changed (enterprisehooks.RestoreOwnInstall, rel-1-0-6
 	// GAP-0178). It runs only when every removal of the job succeeded.
 	enterpriseHookWorkerModeRestoreOwnInstall = "restore_own_install"
+	// enterpriseHookWorkerModeProbeElements reads, as the user, which of the
+	// protected elements of a target named in its Broken list now match what
+	// DefenseClaw renders. The parent asks for it when it ended a worker in
+	// the middle of a repair and needs the result of that repair (GAP-0754).
+	enterpriseHookWorkerModeProbeElements = "probe_elements"
 )
 
 // enterpriseHookWorkerWritingModes are the target modes that write into the
@@ -222,6 +227,9 @@ type enterpriseHookWorkerTarget struct {
 	Mode                string                      `json:"mode"`
 	PreviouslyProtected bool                        `json:"previously_protected,omitempty"`
 	Options             enterpriseHookWorkerOptions `json:"options"`
+	// Broken, on a probe_elements target, names the protected elements that
+	// did not match before the repair whose result is asked for.
+	Broken []string `json:"broken,omitempty"`
 	// PriorCredentials are the target's credentials from the other key of
 	// the credential rotation the guardian holds
 	// (enterpriseHookPriorUserTokens). They only classify a reinstall as
@@ -345,7 +353,13 @@ type enterpriseHookWorkerTargetResult struct {
 	Index    int  `json:"index"`
 	OK       bool `json:"ok"`
 	Repaired bool `json:"repaired,omitempty"`
-	Removed  bool `json:"removed,omitempty"`
+	// RestoredElements names the protected elements (enterprisehooks.HookElement*)
+	// that did not match what DefenseClaw renders when the repair began and
+	// match it now. It is the only evidence of a restore, whatever the
+	// target health: a repair that only wrote other files, or the agent
+	// settings in a shared config, restored nothing (GAP-0754).
+	RestoredElements []string `json:"restored_elements,omitempty"`
+	Removed          bool     `json:"removed,omitempty"`
 	// Restored: the unblock put the account's own Claude Code hook script
 	// back from the copy the enrollment kept (rel-1-0-6 GAP-0178).
 	Restored bool `json:"restored,omitempty"`
@@ -709,6 +723,7 @@ func lowerRlimit(resource int, limit uint64) {
 var (
 	enterpriseHookWorkerInstaller = enterprisehooks.Install
 	enterpriseHookWorkerVerifier  = enterprisehooks.Verify
+	enterpriseHookWorkerProber    = enterprisehooks.ProbeHookElements
 	enterpriseHookWorkerRemover   = enterprisehooks.RemoveUserHooks
 	enterpriseHookWorkerPurger    = enterprisehooks.PurgeUserState
 	// enterpriseHookWorkerStopPerUser stops the account's per-user gateway
@@ -773,10 +788,9 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			recheck = err == nil && recheckWindow > 0
 			if err != nil {
 				policyOnly := request.Standalone && enterprisehooks.PreviousHookRuntimeIntactForConfigurationChange(ctx, opts, target.PriorCredentials)
-				progress.begin(target, !policyOnly)
 				repairing = true
-				result, err = reinstallEnterpriseHookTarget(ctx, opts)
-				outcome.Repaired = err == nil && !policyOnly
+				result, outcome.RestoredElements, err = repairEnterpriseHookTarget(ctx, progress, target, opts, !policyOnly)
+				outcome.Repaired = (err == nil && !policyOnly) || len(outcome.RestoredElements) > 0
 			}
 		case enterpriseHookWorkerModeRemove:
 			previousHome := strings.TrimSpace(target.Options.PreviousHome)
@@ -886,6 +900,13 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
 				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, KeptEntries: summary.KeptEntries, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
 			}
+		case enterpriseHookWorkerModeProbeElements:
+			var after enterprisehooks.HookElements
+			if after, err = enterpriseHookWorkerProber(ctx, opts); err == nil {
+				outcome.RestoredElements = restoredHookElements(target.Broken, after)
+				outcome.Repaired = len(outcome.RestoredElements) > 0
+			}
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModeRestoreOwnInstall:
 			if purgeBlocked != "" {
 				err = errors.New("kept the managed changes to its own per-user install: " + purgeBlocked)
@@ -937,10 +958,11 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		},
 		func(index int, _ error) {
 			outcome := &results[rechecks[index].result]
-			progress.begin(rechecks[index].target, true)
-			result, err := reinstallEnterpriseHookTarget(ctx, rechecks[index].opts)
+			result, restored, err := repairEnterpriseHookTarget(ctx, progress, rechecks[index].target, rechecks[index].opts, true)
+			outcome.RestoredElements = restored
 			if err != nil {
 				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
+				outcome.Repaired = len(restored) > 0
 				outcome.Pending = enterprisehooks.PendingTargetError(err) &&
 					enterprisehooks.CheckUnixTargetHome(request.Home, request.UID).State == enterprisehooks.HomePending
 				if !outcome.Pending {
@@ -1709,21 +1731,20 @@ func runEnterpriseHookWorker(
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
-	restoreFiles := snapshotEnterpriseHookWorkerRestoreFiles(request)
 	abandoned, runErr := runEnterpriseHookWorkerProcess(ctx, cmd, account.UID)
 	stopFence()
 	// A worker that ends without its answer still tells what it put back
 	// when the parent asked for progress (GAP-0754): the targets it repaired
 	// come back with the error, and the caller accounts them. A target whose
-	// repair began and did not end is failed, with the restore its files
-	// show (withRestores), never healthy.
+	// repair began and did not end is failed, never healthy, and is a restore
+	// only for the protected elements it put back (restoresOfEndedWorker).
 	withoutAnswer := func(err error) (enterpriseHookWorkerResponse, error) {
 		if !request.Progress {
 			return enterpriseHookWorkerResponse{}, err
 		}
 		output := parseEnterpriseHookWorkerOutput(stdout.snapshot())
 		return enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion,
-			Targets: restoreFiles.withRestores(output.repaired, output.restoring, err)}, err
+			Targets: restoresOfEndedWorker(account, request, output, err)}, err
 	}
 	if abandoned {
 		return withoutAnswer(fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err()))
@@ -1746,9 +1767,6 @@ func runEnterpriseHookWorker(
 	if response.Version != enterpriseHookWorkerProtocolVersion {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d speaks protocol %d", account.UID, response.Version)
 	}
-	// A target whose install failed after it wrote part of its files is
-	// still failed, and the files it put back are a restore (GAP-0754).
-	response.Targets = restoreFiles.withRestores(response.Targets, output.restoring, nil)
 	if response.Error != "" {
 		return response, fmt.Errorf("worker for uid %d: %s", account.UID, response.Error)
 	}

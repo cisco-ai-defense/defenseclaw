@@ -72,6 +72,7 @@ func TestStandaloneInterruptedPassStillReportsTheRepairItMade(t *testing.T) {
 				response, err := previousRunner(ctx, account, request)
 				for i := range response.Targets {
 					response.Targets[i].Repaired = tc.repair
+					response.Targets[i].RestoredElements = restoredElementsIf(tc.repair)
 					if tc.repair {
 						response.Targets[i].AgentConfig = "settings_lost"
 					}

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
@@ -43,20 +44,23 @@ func requireRestoredAndKept(t *testing.T, response enterpriseHookWorkerResponse,
 		t.Fatalf("the worker did not restore %s: %v", script, err)
 	}
 	if len(response.Targets) != 1 || response.Targets[0].Index != 1 || !response.Targets[0].OK ||
-		!response.Targets[0].Repaired || response.Targets[0].Result == nil || response.Targets[0].Result.Connector != "hermes" {
+		!response.Targets[0].Repaired || response.Targets[0].Result == nil || response.Targets[0].Result.Connector != "hermes" ||
+		!slices.Equal(response.Targets[0].RestoredElements, runtimeElement) {
 		t.Fatalf("kept targets = %+v, want the hermes restore", response.Targets)
 	}
 }
 
-// requireRestoredButFailed: the files show the worker put the script back, and
-// the target is still failed, because the worker never said it is healthy.
+// requireRestoredButFailed: the hook runtime files match again, which is the
+// restore, and the target is still failed, because the worker never said it
+// is healthy.
 func requireRestoredButFailed(t *testing.T, response enterpriseHookWorkerResponse, script string) {
 	t.Helper()
 	if _, err := os.Stat(script); err != nil {
 		t.Fatalf("the worker did not restore %s: %v", script, err)
 	}
 	if len(response.Targets) != 1 || response.Targets[0].Index != 1 || response.Targets[0].OK ||
-		!response.Targets[0].Repaired || response.Targets[0].Result != nil || response.Targets[0].Error == "" {
+		!response.Targets[0].Repaired || response.Targets[0].Result != nil || response.Targets[0].Error == "" ||
+		!slices.Equal(response.Targets[0].RestoredElements, runtimeElement) {
 		t.Fatalf("kept targets = %+v, want the hermes restore on a failed target", response.Targets)
 	}
 }
@@ -168,8 +172,9 @@ func TestDispatchedHookWorkerOutcomeKeepsHealthSeparateFromRestore(t *testing.T)
 			if _, err := os.Stat(script); (err == nil) != tc.wantScript {
 				t.Fatalf("script present = %v, want %v", err == nil, tc.wantScript)
 			}
-			if got.ok || got.pending || got.err == "" || got.repaired != tc.wantRepaired {
-				t.Fatalf("outcome = %+v, want a failed target, repaired = %v", got, tc.wantRepaired)
+			if got.ok || got.pending || got.err == "" || got.repaired != tc.wantRepaired ||
+				!slices.Equal(got.restored, map[bool][]string{true: runtimeElement, false: nil}[tc.wantRepaired]) {
+				t.Fatalf("outcome = %+v, want a failed target, repaired = %v, the runtime restored only then", got, tc.wantRepaired)
 			}
 		})
 	}
