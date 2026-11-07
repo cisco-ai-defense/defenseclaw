@@ -21,309 +21,214 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
-	"strings"
 	"testing"
 )
 
-// posixShells are the host shells a Windows machine does not have.
-var posixShells = map[string]bool{"/bin/sh": true, "/bin/bash": true}
+// The POSIX shells a test may start come from the accessors below and from
+// nowhere else. A Windows host has no /bin/sh: a test that starts one
+// without a way to skip fails to start the process, and the cases that read
+// the failure as a refusal go red. This file is the only place in the package
+// that spells a shell path, so a test cannot start a shell without going
+// through a check that skips (binSh, binBash) or reports the absence
+// (maybeBinSh, maybeBinBash).
 
-// shellUse is a place a function starts a POSIX shell: directly through
-// os/exec or by handing the shell path to a helper of this package.
-type shellUse struct {
-	pos   token.Pos
-	shell string
+// shellIfPresent returns the shell at the path, or "" when the host has none.
+func shellIfPresent(shell string) string {
+	if fi, err := os.Stat(shell); err != nil || fi.IsDir() {
+		return ""
+	}
+	return shell
 }
 
-// shellsOf reports the POSIX shells an expression can hold: a string
-// literal, a name bound to one (package level, a local assignment or a range
-// over a list of them) or a list that contains one.
-func shellsOf(e ast.Expr, env map[string]map[string]bool) map[string]bool {
-	out := map[string]bool{}
+// maybeBinSh and maybeBinBash return the host shell, or "" for a test that
+// runs a lighter check without one.
+func maybeBinSh() string   { return shellIfPresent("/bin/sh") }
+func maybeBinBash() string { return shellIfPresent("/bin/bash") }
+
+// needShell skips the test when the shell is empty (absent) and returns it.
+func needShell(t testing.TB, shell string) string {
+	t.Helper()
+	if shell == "" {
+		t.Skip("a POSIX shell is required")
+	}
+	return shell
+}
+
+// binSh and binBash skip the test when the host has no such shell. They are
+// for the tests that run an image-build shell fragment; the fragments run in
+// the Linux sandbox image, never on the host.
+func binSh(t testing.TB) string   { t.Helper(); return needShell(t, maybeBinSh()) }
+func binBash(t testing.TB) string { t.Helper(); return needShell(t, maybeBinBash()) }
+
+func TestShellAccessorsSkipWhenTheShellIsMissing(t *testing.T) {
+	if got := shellIfPresent(filepath.Join(t.TempDir(), "no-such-shell")); got != "" {
+		t.Errorf("a missing shell came back as %q", got)
+	}
+	if got := shellIfPresent(t.TempDir()); got != "" {
+		t.Errorf("a directory came back as the shell %q", got)
+	}
+	here := filepath.Join(t.TempDir(), "sh")
+	if err := os.WriteFile(here, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := shellIfPresent(here); got != here {
+		t.Errorf("a present shell came back as %q, want %q", got, here)
+	}
+	if got := needShell(t, here); got != here {
+		t.Errorf("needShell returned %q, want %q", got, here)
+	}
+	skipped := false
+	t.Run("without a shell", func(t *testing.T) {
+		defer func() { skipped = t.Skipped() }()
+		needShell(t, "")
+		t.Error("the test ran on after needShell on an empty shell")
+	})
+	if !skipped {
+		t.Error("a missing shell did not skip the test")
+	}
+}
+
+// shellPaths are the shell programs by absolute path; shellNames are the
+// bare names that a PATH lookup resolves to one.
+var shellPaths = map[string]bool{}
+var shellNames = map[string]bool{"sh": true, "bash": true, "dash": true, "zsh": true, "ksh": true}
+
+func init() {
+	for name := range shellNames {
+		shellPaths["/bin/"+name] = true
+		shellPaths["/usr/bin/"+name] = true
+	}
+}
+
+// constString folds an expression to the string it always holds: a string
+// literal, a constant of the package, a sum of them or a path.Join /
+// filepath.Join of them.
+func constString(e ast.Expr, consts map[string]ast.Expr, depth int) (string, bool) {
+	if depth > 8 {
+		return "", false
+	}
 	switch e := e.(type) {
 	case *ast.BasicLit:
-		if s, err := strconv.Unquote(e.Value); err == nil && e.Kind == token.STRING && posixShells[s] {
-			out[s] = true
+		if e.Kind != token.STRING {
+			return "", false
 		}
-	case *ast.Ident:
-		for s := range env[e.Name] {
-			out[s] = true
-		}
+		s, err := strconv.Unquote(e.Value)
+		return s, err == nil
 	case *ast.ParenExpr:
-		return shellsOf(e.X, env)
-	case *ast.CompositeLit:
-		for _, elt := range e.Elts {
-			for s := range shellsOf(elt, env) {
-				out[s] = true
-			}
+		return constString(e.X, consts, depth+1)
+	case *ast.Ident:
+		if v, ok := consts[e.Name]; ok {
+			return constString(v, consts, depth+1)
 		}
-	}
-	return out
-}
-
-// bindShells records every name the node binds to a shell path.
-func bindShells(root ast.Node, env map[string]map[string]bool) {
-	bind := func(name ast.Expr, value ast.Expr) {
-		id, ok := name.(*ast.Ident)
+	case *ast.BinaryExpr:
+		if e.Op != token.ADD {
+			return "", false
+		}
+		l, lok := constString(e.X, consts, depth+1)
+		r, rok := constString(e.Y, consts, depth+1)
+		return l + r, lok && rok
+	case *ast.CallExpr:
+		sel, ok := e.Fun.(*ast.SelectorExpr)
 		if !ok {
-			return
+			return "", false
 		}
-		for s := range shellsOf(value, env) {
-			if env[id.Name] == nil {
-				env[id.Name] = map[string]bool{}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || sel.Sel.Name != "Join" || (pkg.Name != "path" && pkg.Name != "filepath") {
+			return "", false
+		}
+		parts := make([]string, len(e.Args))
+		for i, arg := range e.Args {
+			s, ok := constString(arg, consts, depth+1)
+			if !ok {
+				return "", false
 			}
-			env[id.Name][s] = true
+			parts[i] = s
 		}
+		return path.Join(parts...), true
 	}
-	ast.Inspect(root, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.AssignStmt:
-			if len(n.Lhs) == len(n.Rhs) {
-				for i := range n.Lhs {
-					bind(n.Lhs[i], n.Rhs[i])
-				}
-			}
-		case *ast.ValueSpec:
-			if len(n.Names) == len(n.Values) {
-				for i := range n.Names {
-					bind(n.Names[i], n.Values[i])
-				}
-			}
-		case *ast.RangeStmt:
-			if n.Value != nil {
-				bind(n.Value, n.X)
-			}
-		}
-		return true
-	})
+	return "", false
 }
 
-// shellsFromCall reports the shells named by the arguments of a call.
-func shellsFromCall(call *ast.CallExpr, env map[string]map[string]bool) map[string]bool {
-	out := map[string]bool{}
-	for _, arg := range call.Args {
-		for s := range shellsOf(arg, env) {
-			out[s] = true
-		}
-	}
-	return out
-}
-
-// pkgCall splits a call of the form pkg.Name(...).
-func pkgCall(call *ast.CallExpr) (pkg, name string) {
-	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		if id, ok := sel.X.(*ast.Ident); ok {
-			return id.Name, sel.Sel.Name
-		}
-	}
-	return "", ""
-}
-
-// skipCall reports whether the block calls t.Skip, t.SkipNow or t.Skipf.
-func skipCall(block *ast.BlockStmt) bool {
-	found := false
-	ast.Inspect(block, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && strings.HasPrefix(sel.Sel.Name, "Skip") {
-				found = true
-			}
-		}
-		return !found
-	})
-	return found
-}
-
-// leaves reports whether the block ends the test or helper early: a skip or
-// a return.
-func leaves(block *ast.BlockStmt) bool {
-	found := skipCall(block)
-	ast.Inspect(block, func(n ast.Node) bool {
-		if _, ok := n.(*ast.ReturnStmt); ok {
-			found = true
-		}
-		return !found
-	})
-	return found
-}
-
-// shellScan is what one function does about POSIX shells, in source order.
-type shellScan struct {
-	uses   []shellUse      // places it starts a shell
-	guards []shellUse      // checks that a shell exists, from the position they take effect
-	skips  map[string]bool // shells whose absence skips the calling test
-}
-
-// scanShells reads one function. A check is requirePOSIXShell or any helper
-// that skips the test when a shell is missing, an os.Stat or os.Lstat of the
-// shell inside an if, or an if on runtime.GOOS that leaves; the shells of a
-// helper's skip are those it checks itself or through its own helpers.
-// unguarded holds the shells a helper starts before checking, which count as
-// a use at each call.
-func scanShells(fn *ast.FuncDecl, pkgEnv map[string]map[string]bool, funcs map[string]*ast.FuncDecl,
-	skipHelpers, unguarded map[string]map[string]bool) shellScan {
-	env := map[string]map[string]bool{}
-	for k, v := range pkgEnv {
-		env[k] = v
-	}
-	bindShells(fn.Body, env)
-	scan := shellScan{skips: map[string]bool{}}
-	guard := func(pos token.Pos, shell string, skip bool) {
-		scan.guards = append(scan.guards, shellUse{pos, shell})
-		if skip {
-			scan.skips[shell] = true
-		}
-	}
-	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		switch n := n.(type) {
-		case *ast.IfStmt:
-			for _, part := range []ast.Node{n.Init, n.Cond} {
-				if part == nil {
-					continue
-				}
-				ast.Inspect(part, func(m ast.Node) bool {
-					switch m := m.(type) {
-					case *ast.CallExpr:
-						if pkg, name := pkgCall(m); pkg == "os" && (name == "Stat" || name == "Lstat") {
-							for s := range shellsFromCall(m, env) {
-								guard(m.Pos(), s, skipCall(n.Body))
-							}
-						}
-					case *ast.SelectorExpr:
-						if id, ok := m.X.(*ast.Ident); ok && id.Name == "runtime" && m.Sel.Name == "GOOS" && leaves(n.Body) {
-							guard(n.Pos(), "*", skipCall(n.Body))
-						}
-					}
-					return true
-				})
-			}
-		case *ast.CallExpr:
-			pkg, name := pkgCall(n)
-			id, _ := n.Fun.(*ast.Ident)
-			switch {
-			case pkg == "exec" && strings.HasPrefix(name, "Command"):
-				for s := range shellsFromCall(n, env) {
-					scan.uses = append(scan.uses, shellUse{n.Pos(), s})
-				}
-			case id != nil && funcs[id.Name] != nil:
-				for s := range skipHelpers[id.Name] {
-					guard(n.Pos(), s, true)
-				}
-				for s := range shellsFromCall(n, env) {
-					scan.uses = append(scan.uses, shellUse{n.Pos(), s})
-				}
-				for s := range unguarded[id.Name] {
-					scan.uses = append(scan.uses, shellUse{n.Pos(), s})
-				}
-			}
-		}
-		return true
-	})
-	return scan
-}
-
-// unguardedShells reports, per function of the package, the shells it can
-// start before any check that the shell exists. The use is a direct os/exec
-// call or a call to a helper that starts a shell without its own check; the
-// check must come earlier in the source and cover that shell.
-func unguardedShells(files map[string]string) (map[string]map[string]bool, error) {
+// shellNamings reports every place the files name a POSIX shell outside the
+// accessors: any expression that is always a shell path (a literal, a
+// constant, a sum or a join of them, wherever it flows: a variable, a list,
+// an argument, the parameter of a helper), and a bare shell name handed to
+// exec.Command, exec.CommandContext or exec.LookPath.
+func shellNamings(files map[string]string) ([]string, error) {
 	names := make([]string, 0, len(files))
 	for name := range files {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	fset := token.NewFileSet()
-	pkgEnv := map[string]map[string]bool{}
-	funcs := map[string]*ast.FuncDecl{}
+	parsed := map[string]*ast.File{}
+	consts := map[string]ast.Expr{}
 	for _, name := range names {
 		file, err := parser.ParseFile(fset, name, files[name], 0)
 		if err != nil {
 			return nil, err
 		}
-		for _, decl := range file.Decls {
-			switch d := decl.(type) {
-			case *ast.GenDecl:
-				bindShells(d, pkgEnv)
-			case *ast.FuncDecl:
-				if d.Body != nil && d.Recv == nil {
-					funcs[d.Name.Name] = d
-				}
-			}
-		}
-	}
-	skipHelpers := map[string]map[string]bool{}
-	for changed, round := true, 0; changed && round <= len(funcs); round++ {
-		changed = false
-		for fname, fn := range funcs {
-			for s := range scanShells(fn, pkgEnv, funcs, skipHelpers, nil).skips {
-				if skipHelpers[fname] == nil {
-					skipHelpers[fname] = map[string]bool{}
-				}
-				if !skipHelpers[fname][s] {
-					skipHelpers[fname][s] = true
-					changed = true
-				}
-			}
-		}
-	}
-	unguarded := map[string]map[string]bool{}
-	for changed, round := true, 0; changed && round <= len(funcs); round++ {
-		changed = false
-		for fname, fn := range funcs {
-			scan := scanShells(fn, pkgEnv, funcs, skipHelpers, unguarded)
-			for _, use := range scan.uses {
-				covered := false
-				for _, g := range scan.guards {
-					covered = covered || (g.pos < use.pos && (g.shell == "*" || g.shell == use.shell))
-				}
-				if !covered && !unguarded[fname][use.shell] {
-					if unguarded[fname] == nil {
-						unguarded[fname] = map[string]bool{}
+		parsed[name] = file
+		ast.Inspect(file, func(n ast.Node) bool {
+			if d, ok := n.(*ast.GenDecl); ok && d.Tok == token.CONST {
+				for _, spec := range d.Specs {
+					if v, ok := spec.(*ast.ValueSpec); ok && len(v.Names) == len(v.Values) {
+						for i := range v.Names {
+							consts[v.Names[i].Name] = v.Values[i]
+						}
 					}
-					unguarded[fname][use.shell] = true
-					changed = true
 				}
 			}
-		}
+			return true
+		})
 	}
-	return unguarded, nil
+	var found []string
+	report := func(n ast.Node, what string) {
+		p := fset.Position(n.Pos())
+		found = append(found, p.Filename+":"+strconv.Itoa(p.Line)+": "+what)
+	}
+	for _, name := range names {
+		ast.Inspect(parsed[name], func(n ast.Node) bool {
+			e, ok := n.(ast.Expr)
+			if !ok {
+				return true
+			}
+			if s, ok := constString(e, consts, 0); ok && shellPaths[s] {
+				report(e, strconv.Quote(s))
+				return false
+			}
+			if call, ok := e.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "exec" {
+						arg := -1
+						switch sel.Sel.Name {
+						case "Command", "LookPath":
+							arg = 0
+						case "CommandContext":
+							arg = 1
+						}
+						if arg >= 0 && arg < len(call.Args) {
+							if s, ok := constString(call.Args[arg], consts, 0); ok && shellNames[s] {
+								report(call, strconv.Quote(s)+" looked up on PATH")
+							}
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	return found, nil
 }
 
-// unguardedShellTests names the tests among the files that start a POSIX
-// shell on a host that may not have one.
-func unguardedShellTests(files map[string]string) ([]string, error) {
-	unguarded, err := unguardedShells(files)
-	if err != nil {
-		return nil, err
-	}
-	var bad []string
-	for fname, shells := range unguarded {
-		if !strings.HasPrefix(fname, "Test") {
-			continue
-		}
-		var list []string
-		for s := range shells {
-			list = append(list, s)
-		}
-		sort.Strings(list)
-		bad = append(bad, fname+" ("+strings.Join(list, ", ")+")")
-	}
-	sort.Strings(bad)
-	return bad, nil
-}
-
-// TestTestsThatRunBinShSkipWithoutAPosixShell keeps the image-build shell
-// checks off hosts that cannot run them. The fragments in this package run in
-// the Linux sandbox image, never on the host; a test that executes one through
-// /bin/sh fails to start the process on Windows, so every case reads as a
-// refusal and the positive cases go red. Every test that compiles on Windows
-// and starts /bin/sh or /bin/bash, directly, through a name that holds the
-// path or through a helper of this package, must first check that the shell
-// exists (requirePOSIXShell, an os.Stat of that shell in an if) or skip on
-// runtime.GOOS.
-func TestTestsThatRunBinShSkipWithoutAPosixShell(t *testing.T) {
+// windowsTestFiles reads the test files of this package that compile for
+// Windows, except this file, which holds the accessors.
+func windowsTestFiles(t *testing.T) map[string]string {
+	t.Helper()
 	ctx := build.Default
 	ctx.GOOS, ctx.GOARCH, ctx.CgoEnabled = "windows", "amd64", false
 	names, err := filepath.Glob("*_test.go")
@@ -336,7 +241,7 @@ func TestTestsThatRunBinShSkipWithoutAPosixShell(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !onWindows {
+		if !onWindows || name == "shell_guard_test.go" {
 			continue
 		}
 		src, err := os.ReadFile(name)
@@ -345,53 +250,88 @@ func TestTestsThatRunBinShSkipWithoutAPosixShell(t *testing.T) {
 		}
 		files[name] = string(src)
 	}
-	bad, err := unguardedShellTests(files)
+	return files
+}
+
+// TestTestsStartPosixShellsOnlyThroughTheAccessors keeps the image-build
+// shell checks off hosts that cannot run them. Every test file that compiles
+// on Windows gets its POSIX shell from binSh, binBash, maybeBinSh or
+// maybeBinBash and never spells the path, whatever the test does with it: the
+// rule does not depend on where a check sits relative to the use, on which
+// side of a branch the skip is, or on what a helper does with the value.
+func TestTestsStartPosixShellsOnlyThroughTheAccessors(t *testing.T) {
+	found, err := shellNamings(windowsTestFiles(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, b := range bad {
-		t.Errorf("%s starts a POSIX shell without checking it exists (requirePOSIXShell, os.Stat of that shell in an if, or a runtime.GOOS skip)", b)
+	for _, f := range found {
+		t.Errorf("%s names a POSIX shell: take it from binSh(t), binBash(t) (skip when the host has none), or maybeBinSh(), maybeBinBash() (empty when it has none)", f)
 	}
 }
 
-// TestShellGuardJudgesNearVariants pins the check itself: the shapes that
-// start a shell without a check that covers it are named, and the shapes
-// with a covering check are not.
+// TestShellGuardJudgesNearVariants pins the check itself: every way to spell
+// a shell outside the accessors is named, wherever the value goes, and the
+// uses of the accessors and the scripts that merely mention a shell are not.
 func TestShellGuardJudgesNearVariants(t *testing.T) {
-	const head = "package harness\nimport (\n\"os\"\n\"os/exec\"\n\"runtime\"\n\"testing\"\n)\nfunc requirePOSIXShell(t *testing.T) { if _, err := os.Stat(\"/bin/sh\"); err != nil { t.Skip() } }\n"
+	const head = `package harness
+import (
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"runtime"
+	"testing"
+)
+`
 	for _, tc := range []struct {
 		name string
 		body string
 		bad  bool
 	}{
-		{"literal", "func TestX(t *testing.T) { exec.Command(\"/bin/sh\", \"-c\", \"true\").Run() }", true},
-		{"local variable", "func TestX(t *testing.T) { shell := \"/bin/sh\"; exec.Command(shell, \"-c\", \"true\").Run() }", true},
-		{"var declaration", "func TestX(t *testing.T) { var shell = \"/bin/bash\"; exec.Command(shell).Run() }", true},
-		{"package constant", "const loginShell = \"/bin/sh\"\nfunc TestX(t *testing.T) { exec.Command(loginShell).Run() }", true},
-		{"ranged list", "func TestX(t *testing.T) { for _, s := range []string{\"/bin/dash\", \"/bin/sh\"} { exec.Command(s).Run() } }", true},
-		{"shell as an argument", "func TestX(t *testing.T) { exec.Command(\"wrapper\", \"/bin/sh\", \"-c\", \"true\").Run() }", true},
-		{"unrelated stat", "func TestX(t *testing.T) { if _, err := os.Stat(\"ordinary\"); err != nil { t.Skip() }\nexec.Command(\"/bin/sh\").Run() }", true},
-		{"stat that is not a branch", "func TestX(t *testing.T) { os.Stat(\"/bin/sh\")\nexec.Command(\"/bin/sh\").Run() }", true},
-		{"stat of the other shell", "func TestX(t *testing.T) { if _, err := os.Stat(\"/bin/sh\"); err != nil { t.Skip() }\nexec.Command(\"/bin/bash\").Run() }", true},
-		{"check after the use", "func TestX(t *testing.T) { exec.Command(\"/bin/sh\").Run()\nrequirePOSIXShell(t) }", true},
-		{"mention of runtime.GOOS without a skip", "func TestX(t *testing.T) { t.Log(runtime.GOOS)\nexec.Command(\"/bin/sh\").Run() }", true},
-		{"helper without a check", "func runIt() { exec.Command(\"/bin/sh\").Run() }\nfunc TestX(t *testing.T) { runIt() }", true},
-		{"helper handed the shell", "func runIn(shell string) { exec.Command(shell).Run() }\nfunc TestX(t *testing.T) { runIn(\"/bin/sh\") }", true},
-		{"helper two levels down", "func inner() { exec.Command(\"/bin/sh\").Run() }\nfunc outer() { inner() }\nfunc TestX(t *testing.T) { outer() }", true},
-		{"required check", "func TestX(t *testing.T) { requirePOSIXShell(t)\nexec.Command(\"/bin/sh\").Run() }", false},
-		{"stat of the shell", "func TestX(t *testing.T) { if _, err := os.Stat(\"/bin/sh\"); err != nil { t.Skip() }\nexec.Command(\"/bin/sh\").Run() }", false},
-		{"stat of the shell by name", "func TestX(t *testing.T) { shell := \"/bin/bash\"\nif _, err := os.Stat(shell); err != nil { t.Skip() }\nexec.Command(shell).Run() }", false},
-		{"stat that wraps the use", "func TestX(t *testing.T) { if _, err := os.Stat(\"/bin/bash\"); err == nil { exec.Command(\"/bin/bash\").Run() } }", false},
-		{"goos skip", "func TestX(t *testing.T) { if runtime.GOOS == \"windows\" { t.Skip() }\nexec.Command(\"/bin/sh\").Run() }", false},
-		{"helper after the check", "func runIt() { exec.Command(\"/bin/sh\").Run() }\nfunc TestX(t *testing.T) { requirePOSIXShell(t)\nrunIt() }", false},
-		{"helper that checks itself", "func runIt() { if _, err := os.Stat(\"/bin/sh\"); err != nil { return }\nexec.Command(\"/bin/sh\").Run() }\nfunc TestX(t *testing.T) { runIt() }", false},
-		{"helper that checks the other shell", "func needBash(t *testing.T) { if _, err := os.Stat(\"/bin/bash\"); err != nil { t.Skip() } }\nfunc TestX(t *testing.T) { needBash(t)\nexec.Command(\"/bin/sh\").Run() }", true},
-		{"helper that only returns", "func check() { if _, err := os.Stat(\"/bin/sh\"); err != nil { return } }\nfunc TestX(t *testing.T) { check()\nexec.Command(\"/bin/sh\").Run() }", true},
-		{"helper that checks the shell", "func needBash(t *testing.T) { if _, err := os.Stat(\"/bin/bash\"); err != nil { t.Skip() } }\nfunc TestX(t *testing.T) { needBash(t)\nexec.Command(\"/bin/bash\").Run() }", false},
-		{"check through two helpers", "func outer(t *testing.T) { requirePOSIXShell(t) }\nfunc TestX(t *testing.T) { outer(t)\nexec.Command(\"/bin/sh\").Run() }", false},
-		{"no shell", "func TestX(t *testing.T) { exec.Command(\"/usr/bin/python3\").Run() }", false},
+		{"literal", `func TestX(t *testing.T) { exec.Command("/bin/sh", "-c", "true").Run() }`, true},
+		{"local variable", `func TestX(t *testing.T) { shell := "/bin/sh"; exec.Command(shell, "-c", "true").Run() }`, true},
+		{"var declaration", `func TestX(t *testing.T) { var shell = "/bin/bash"; exec.Command(shell).Run() }`, true},
+		{"package constant", `const loginShell = "/bin/sh"
+func TestX(t *testing.T) { exec.Command(loginShell).Run() }`, true},
+		{"ranged list", `func TestX(t *testing.T) { for _, s := range []string{"/bin/dash", "/bin/sh"} { exec.Command(s).Run() } }`, true},
+		{"shell as an argument", `func TestX(t *testing.T) { exec.Command("wrapper", "/bin/sh", "-c", "true").Run() }`, true},
+		{"shell handed to a helper as data", `func note(string) {}
+func TestX(t *testing.T) { note("/bin/sh") }`, true},
+		{"stat alone", `func TestX(t *testing.T) { os.Stat("/bin/sh") }`, true},
+		{"concatenation", `func TestX(t *testing.T) { exec.Command("/bin/" + "sh").Run() }`, true},
+		{"constant concatenation", `const dir = "/usr/bin/"
+const name = "bash"
+func TestX(t *testing.T) { exec.Command(dir + name).Run() }`, true},
+		{"parenthesized", `func TestX(t *testing.T) { exec.Command(("/bin/sh")).Run() }`, true},
+		{"path.Join", `func TestX(t *testing.T) { exec.Command(path.Join("/bin", "sh")).Run() }`, true},
+		{"filepath.Join", `func TestX(t *testing.T) { exec.Command(filepath.Join("/usr", "bin", "dash")).Run() }`, true},
+		{"bare name", `func TestX(t *testing.T) { exec.Command("sh", "-c", "true").Run() }`, true},
+		{"bare name with a context", `func TestX(t *testing.T) { exec.CommandContext(nil, "bash").Run() }`, true},
+		{"bare name looked up", `func TestX(t *testing.T) { exec.LookPath("sh") }`, true},
+		{"check in an unreachable branch", `func TestX(t *testing.T) { if false { if _, err := os.Stat("/bin/sh"); err != nil { t.Skip() } }
+exec.Command("/bin/sh").Run() }`, true},
+		{"missing-shell branch that only logs", `func TestX(t *testing.T) { if _, err := os.Stat("/bin/sh"); err != nil { t.Log("no shell") }
+exec.Command("/bin/sh").Run() }`, true},
+		{"skip on the present side", `func TestX(t *testing.T) { if _, err := os.Stat("/bin/sh"); err == nil { t.Skip() }
+exec.Command("/bin/sh").Run() }`, true},
+		{"skip on linux only", `func TestX(t *testing.T) { if runtime.GOOS == "linux" { return }
+exec.Command("/bin/sh").Run() }`, true},
+		{"helper with a conditional check", `func check(t *testing.T, on bool) { if on { if _, err := os.Stat("/bin/sh"); err != nil { t.Skip() } } }
+func TestX(t *testing.T) { check(t, false)
+exec.Command("/bin/sh").Run() }`, true},
+		{"check after the use", `func TestX(t *testing.T) { exec.Command("/bin/sh").Run()
+if _, err := os.Stat("/bin/sh"); err != nil { t.Skip() } }`, true},
+		{"binSh", `func TestX(t *testing.T) { exec.Command(binSh(t), "-c", "true").Run() }`, false},
+		{"binBash as a wrapper argument", `func TestX(t *testing.T) { exec.Command("wrapper", binBash(t), "-c", "true").Run() }`, false},
+		{"soft shell", `func TestX(t *testing.T) { sh := maybeBinSh()
+if sh == "" { return }
+exec.Command(sh, "-n").Run() }`, false},
+		{"shebang text", `func TestX(t *testing.T) { os.WriteFile("f", []byte("#!/bin/sh\necho hi\n"), 0o755) }`, false},
+		{"shell inside script text", `func TestX(t *testing.T) { inner := "x"; _ = "printf hi\nexec /bin/sh " + inner + "\n" }`, false},
+		{"shell word as a script argument", `func TestX(t *testing.T) { exec.Command("wrapper", "sh", "one").Run() }`, false},
+		{"other program", `func TestX(t *testing.T) { exec.Command("/usr/bin/python3").Run() }`, false},
 	} {
-		got, err := unguardedShellTests(map[string]string{"x_test.go": head + tc.body})
+		got, err := shellNamings(map[string]string{"x_test.go": head + tc.body})
 		if err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}

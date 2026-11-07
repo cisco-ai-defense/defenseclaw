@@ -49,7 +49,7 @@ func TestOpenCodeImageUsesOnlyTheV2PackageAndVerifiedNativeBinary(t *testing.T) 
 }
 
 func TestOpenCodePinnedVersionDisplay(t *testing.T) {
-	requirePOSIXShell(t)
+	sh := binSh(t)
 	steps, err := OpenCode.InstallSteps("")
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestOpenCodePinnedVersionDisplay(t *testing.T) {
 		{"extra version text", "opencode v2.1.4-extra", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cmd := exec.Command("/bin/sh", "-c", check)
+			cmd := exec.Command(sh, "-c", check)
 			cmd.Env = append(os.Environ(), "VERSION_REPLY="+tc.output)
 			out, err := cmd.CombinedOutput()
 			if (err == nil) != tc.allow {
