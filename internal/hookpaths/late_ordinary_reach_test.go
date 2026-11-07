@@ -141,8 +141,10 @@ func TestLateOrdinaryCallHardLinks(t *testing.T) {
 	}
 	lateAssertOrdinary(t, f.project, rows)
 
-	// Over the bound the identity of the protected folders is not known: every
-	// hard link is then not ordinary, a plain file still is.
+	// An ordinary alias is never denied for a budget the scan ran out of: over
+	// the bound the protected folders are not fully indexed, so a file is not
+	// proven protected and stays ordinary (the open tier, with the late-gateway
+	// warning; the strict tier never reaches the scan).
 	lateSymlink(t, filepath.Join(f.project, "src", "main.go"), filepath.Join(f.project, "srclinkfile"))
 	old := lateReachEntries
 	lateReachEntries = 2
@@ -151,9 +153,54 @@ func TestLateOrdinaryCallHardLinks(t *testing.T) {
 		name, command string
 		want          bool
 	}{
-		{"hard link of an ordinary file over the bound", "cat hardplain", false},
+		{"hard link of an ordinary file over the bound", "cat hardplain", true},
+		{"write to a hard link of an ordinary file over the bound", "echo x > hardplain", true},
 		{"file with one name over the bound", "cat src/main.go", true},
 		{"ordinary link to it over the bound", "cat srclinkfile", true},
+		{"directly named state path over the bound", "cat ../.defenseclaw/config.yaml", false},
+		{"hard link of the keys over the bound", "cat hardlink", false},
+	})
+}
+
+// TestLateOrdinaryCallHomeAndSubtreeBudget: a home with more entries than the
+// scan lists, and a protected folder it cannot read, leave an ordinary link
+// and an ordinary hard link ordinary; a link to a protected file by name or
+// by identity of the listed part still is not.
+func TestLateOrdinaryCallHomeAndSubtreeBudget(t *testing.T) {
+	f := newLateFixture(t)
+	if err := os.Link(filepath.Join(f.project, "plain.txt"), filepath.Join(f.project, "hardplain")); err != nil {
+		t.Fatal(err)
+	}
+	lateSymlink(t, filepath.Join(f.project, "plain.txt"), filepath.Join(f.project, "plainlink"))
+	locked := filepath.Join(f.home, ".openclaw", "locked")
+	lateWrite(t, filepath.Join(locked, "settings.json"), "{}\n")
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(locked, 0); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	}
+	rows := []struct {
+		name, command string
+		want          bool
+	}{
+		{"hard link of an ordinary file beside an unreadable state folder", "cat hardplain", true},
+		{"ordinary link beside an unreadable state folder", "cat plainlink", true},
+		{"link to the keys beside an unreadable state folder", "cat keylink", false},
+		{"hard link of the keys beside an unreadable state folder", "cat hardlink", false},
+	}
+	lateAssertOrdinary(t, f.project, rows)
+
+	old := lateHomeEntries
+	lateHomeEntries = 0
+	t.Cleanup(func() { lateHomeEntries = old })
+	lateAssertOrdinary(t, f.project, []struct {
+		name, command string
+		want          bool
+	}{
+		{"hard link of an ordinary file in a home over the bound", "cat hardplain", true},
+		{"ordinary link in a home over the bound", "cat plainlink", true},
+		{"link to the keys in a home over the bound", "cat keylink", false},
 	})
 }
 
