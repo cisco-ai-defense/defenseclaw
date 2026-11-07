@@ -60,8 +60,7 @@ def run_powershell(arguments, *, interpreter=None, **kwargs) -> subprocess.Compl
     A host without PowerShell skips the test here instead of failing it with a
     TypeError from launching None. Tests pass the arguments after the
     interpreter; a test that runs once per discovered interpreter passes it as
-    interpreter. test_powershell_launch_hygiene.py keeps every other launch out
-    of the test files.
+    interpreter. Tests start PowerShell only through this function.
     """
     shell = POWERSHELL if interpreter is None else interpreter
     if shell is None:
