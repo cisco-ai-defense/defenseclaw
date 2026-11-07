@@ -39,17 +39,21 @@ def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.Mo
 
 
 def test_fail_mode_open_on_per_user_openclaw_saves_for_future_hooks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # OpenClaw has no hooks, so an explicit choice is saved for later hook
-    # connectors without claiming its proxy will pass an outage call.
+    # OpenClaw has no hooks; an explicit open is saved for later hook connectors, and its
+    # proxied model requests continue with a warning while the gateway is down (GAP-0824).
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"openclaw": ""})
     cfg.guardrail.connectors = {}
     cfg.guardrail.connector = "openclaw"
     cfg.guardrail.hook_fail_mode = "closed"
     result = _fail_mode(cfg, "open")
     assert result.exit_code == 0, result.output
-    assert "proxy-backed connectors still block while the gateway is down" in " ".join(result.output.split())
+    assert "OpenClaw: Its proxied model requests continue with a warning while the gateway is down." in " ".join(
+        result.output.split()
+    )
     assert cfg.guardrail.hook_fail_mode == "open"
 
     bare = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=_app(cfg))
     assert bare.exit_code == 0, bare.output
-    assert "OpenClaw (openclaw): closed (proxy-backed, no hooks" in " ".join(bare.output.split())
+    assert "OpenClaw (openclaw): open (proxy-backed, no hooks: model requests continue" in " ".join(
+        bare.output.split()
+    )

@@ -458,6 +458,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         with (
             patch.object(cmd_init.platform_support, "host_os", return_value="linux"),
             patch.object(cmd_init, "_closed_fail_mode_connectors", return_value=["openclaw"]),
+            patch.object(cmd_init, "_proxy_model_outage_closed", return_value=True),
             patch.object(cmd_init, "_sandboxes_possible", return_value=False),
             patch.object(cmd_init, "_unguarded_acp_summary", return_value=""),
         ):
@@ -470,6 +471,34 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertIn("defenseclaw setup <connector> --replace", text)
         self.assertIn("OpenClaw model calls fail while the DefenseClaw gateway is down", text)
         self.assertIn("Nothing starts the gateway for OpenClaw", text)
+
+    def test_next_for_openclaw_says_the_requests_continue_when_the_outage_mode_is_open(self):
+        # GAP-0824: the default and permissive packs let OpenClaw model requests continue with a warning.
+        from types import SimpleNamespace
+
+        from defenseclaw.commands import cmd_init
+
+        report = SimpleNamespace(
+            status="ok", connector="openclaw", profile="action", setup=[], readiness=[], next_commands=[]
+        )
+        for closed, want in (
+            (False, "OpenClaw model calls continue with a warning while the DefenseClaw gateway is down"),
+            (None, "OpenClaw model calls follow the gateway-outage mode"),
+        ):
+            lines: list[str] = []
+            renderer = SimpleNamespace(
+                title=lambda *a: None, section=lambda *a: None, step=lambda *a: None, echo=lines.append
+            )
+            with (
+                patch.object(cmd_init.platform_support, "host_os", return_value="linux"),
+                patch.object(cmd_init, "_proxy_model_outage_closed", return_value=closed),
+                patch.object(cmd_init, "_sandboxes_possible", return_value=False),
+                patch.object(cmd_init, "_unguarded_acp_summary", return_value=""),
+            ):
+                cmd_init._render_first_run_report(report, renderer)
+            text = "\n".join(lines)
+            self.assertIn(want, text)
+            self.assertNotIn("model calls fail while", text)
 
     def test_header_profile_says_mixed_when_connector_modes_differ(self):
         # GAP-1224: one connector in action and the rest in observe is not "profile=observe".

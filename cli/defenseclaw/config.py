@@ -3064,8 +3064,33 @@ class GuardrailConfig:
         setter's runtime check read for them (GAP-1354, GAP-1730).
         :meth:`effective_hook_fail_mode` already resolves it (a managed mode,
         an explicit saved mode, else the connector's policy tier).
+
+        OpenClaw plugin tool inspection and model requests are in-process:
+        a strict policy stays closed even when an older saved hook setting says
+        open, on a host that is not managed (the Go rule in
+        ``EffectiveHookOutageFailModeForConnector``).
         """
-        return self.effective_hook_fail_mode(connector)
+        mode, source = self.hook_fail_mode_resolution(connector)
+        if (
+            mode == "open"
+            and source.startswith("config:")
+            and connector_paths.normalize(connector) == "openclaw"
+            and not self._managed_outage_install()
+            and self.hook_policy_tier(connector) == "strict"
+        ):
+            return "closed"
+        return mode
+
+    def _managed_outage_install(self) -> bool:
+        """Whether the outage mode is the administrator's, not the policy tier's (Go managed.IsManagedEnterprise)."""
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        if cfg is not None and getattr(cfg, "guardrail", None) is self:
+            if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+                return True
+            if cfg.managed_outside_secure_client():
+                return True
+        return self.secure_client_hook_fail_modes()
 
     def hook_policy_tier(self, connector: str = "") -> str:
         """The connector's policy tier: its rule pack's posture (strict, default or permissive).

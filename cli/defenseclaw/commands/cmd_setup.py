@@ -15795,7 +15795,9 @@ def _guardrail_summary_hook_fail_mode(cfg, connector: str) -> str:
     if not (gc.enabled and gc.effective_enabled(connector)):
         return "disabled (no hooks)"
     if normalize_connector(connector) in PROXY_CONNECTORS:
-        return "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+        from defenseclaw.fail_mode import proxy_model_outage_mode, proxy_outage_summary
+
+        return proxy_outage_summary(proxy_model_outage_mode(cfg, connector))
     mode = gc.effective_hook_outage_fail_mode(connector)
     entry = (gc.connectors or {}).get(connector)
     saved = bool(entry is not None and str(entry.hook_fail_mode or "").strip()) or bool(

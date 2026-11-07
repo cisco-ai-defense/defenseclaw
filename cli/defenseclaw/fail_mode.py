@@ -756,6 +756,55 @@ def rendered_fail_mode(report: dict[str, Any]) -> str | None:
     return None
 
 
+def proxy_model_outage_mode(cfg: Any, connector: str, *, saved: str | None = None) -> str:
+    """What the model requests of a proxy-backed connector do while the gateway is down (GAP-0824).
+
+    OpenClaw follows the outage mode its plugin asks the gateway program for
+    (Go ``Config.EffectiveHookOutageFailModeForConnector``): open on the default
+    and permissive packs, closed on strict, on a managed host and for an explicit
+    closed. ZeptoClaw model requests stay blocked. ``saved`` is a mode about to be
+    saved, judged by the same rules.
+    """
+
+    name = normalize(connector)
+    if name != "openclaw":
+        return "closed"
+    guardrail = cfg.guardrail
+    if saved is None:
+        return normalize_fail_mode(guardrail.effective_hook_outage_fail_mode(name))
+    if guardrail._managed_outage_install() or guardrail.hook_policy_tier(name) == "strict":
+        return "closed"
+    return normalize_fail_mode(saved)
+
+
+def proxy_outage_note(mode: str) -> str:
+    if mode == "open":
+        return "no hooks: model requests continue with a warning while the gateway is down"
+    return "no hooks: blocked while the gateway is down"
+
+
+def proxy_outage_summary(mode: str) -> str:
+    """The one-line outage behaviour of a proxy-backed connector, as every fail-mode view prints it."""
+
+    shown = "open" if mode == "open" else "closed"
+    return shown + " (proxy-backed, " + proxy_outage_note(mode) + ")"
+
+
+def proxy_requests_note(cfg: Any, connector: str, *, saved: str | None = None) -> str:
+    """What a fail-mode value does to the model requests of a proxy-backed connector."""
+
+    if normalize(connector) != "openclaw":
+        return "Its proxied model requests are blocked while the gateway is down, whatever this value says."
+    if proxy_model_outage_mode(cfg, connector, saved=saved) == "open":
+        return "Its proxied model requests continue with a warning while the gateway is down."
+    if saved == "open":
+        return (
+            "Its proxied model requests are blocked while the gateway is down: the strict policy "
+            "(or a managed host) blocks them whatever this value says."
+        )
+    return "Its proxied model requests are blocked while the gateway is down."
+
+
 def connector_fail_mode_report(
     cfg: Any,
     connector: str,
@@ -801,21 +850,21 @@ def connector_fail_mode_report(
     from defenseclaw.platform_support import is_proxy_connector
 
     if is_proxy_connector(name):
-        # The proxy connectors (OpenClaw, ZeptoClaw) have no hooks: while the
-        # gateway is down their model and tool calls are refused whatever
-        # guardrail.hook_fail_mode says, as `guardrail fail-mode` lists them
-        # (GAP-1957).
+        # The proxy connectors (OpenClaw, ZeptoClaw) have no hooks. ZeptoClaw
+        # model requests stay blocked while the gateway is down; OpenClaw
+        # follows the outage mode the gateway resolves (GAP-0824).
+        outage = proxy_model_outage_mode(cfg, name)
         return {
-            "effective": "closed",
+            "effective": outage,
             "provenance": "proxy-backed",
-            "note": "no hooks: blocked while the gateway is down",
+            "note": proxy_outage_note(outage),
             "configured": configured,
-            "desired": "closed",
+            "desired": outage,
             "runtime": None,
             "current": False if unguarded else None,
             "runtime_verified": None,
             "drift": unguarded,
-            "sources": [{"name": "proxy", "mode": "closed"}],
+            "sources": [{"name": "proxy", "mode": outage}],
         }
     if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
         # Outside Secure Client, Copilot CLI, Antigravity and Hermes follow the
