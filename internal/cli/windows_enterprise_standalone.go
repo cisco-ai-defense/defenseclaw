@@ -2725,8 +2725,9 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 				"the account %s has a link or junction at %s (or its hooks folder) that the account does not own, such as one an "+
 					"administrator made, so it is not protected; DefenseClaw never follows that link and leaves this account out so "+
 					"Setup, Upgrade and Repair finish for the other accounts. Remove the link (rmdir on a junction removes only the "+
-					"link) and run Setup /ensure again",
-				label, filepath.Join(account.Home, ".defenseclaw")))
+					"link), then run `%s` from an elevated PowerShell prompt",
+				label, filepath.Join(account.Home, ".defenseclaw"),
+				managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone)))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
 			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(
 				"the account %s created %s itself, so it has no DefenseClaw runtime (for example when an agent it ran before enrollment "+
