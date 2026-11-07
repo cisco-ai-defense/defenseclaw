@@ -1154,16 +1154,17 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	// does not load, or an unreadable connector state, nothing is removed on a
 	// guess. A rolled-back install that was never initialized has no
 	// config.yaml at all (a link, even a dangling one, is a config that does not
-	// load, not an absent config); with the saved newer install backup folder
-	// supplied, that is a rollback, and the connector state (if any) names what
-	// stays configured. Every other connector is an orphan whose DefenseClaw
+	// load, not an absent config); with a usable data folder and the saved newer
+	// install backup folder confirmed (confirmedRollbackWithoutConfig), that is
+	// a rollback, and the connector state (if any) names what stays configured.
+	// Every other connector is an orphan whose DefenseClaw
 	// entries go, with the operator own bytes kept.
 	configured := map[string]bool{}
 	if cfg != nil {
 		for _, name := range cfg.ActiveConnectors() {
 			configured[strings.ToLower(strings.TrimSpace(name))] = true
 		}
-	} else if _, statErr := os.Lstat(filepath.Join(dataDir, config.DefaultConfigName)); connectorRollbackBackupsDir == "" || !errors.Is(statErr, os.ErrNotExist) {
+	} else if !confirmedRollbackWithoutConfig(dataDir, connectorRollbackBackupsDir) {
 		return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed")
 	}
 	active, _, err := connector.ReadActiveConnectorState(dataDir)
@@ -1255,6 +1256,26 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector prune-orphans: some vendor files could not be restored")
 	}
 	return nil
+}
+
+// confirmedRollbackWithoutConfig reports whether the missing config is a
+// confirmed absence on a rollback: the older data folder resolves to a usable
+// directory (a link whose target is unavailable proves nothing about what was
+// inside), config.yaml is confirmed absent there (Lstat, so a link is a
+// present config), and the saved newer install folder is a directory that holds
+// connector backup records. Anything else is a refusal that removes nothing.
+func confirmedRollbackWithoutConfig(dataDir, savedDir string) bool {
+	if savedDir == "" {
+		return false
+	}
+	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, config.DefaultConfigName)); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(savedDir, "connector_backups"))
+	return err == nil && info.IsDir()
 }
 
 // pruneOrphanedConnector tears down name, which is not configured, when its
