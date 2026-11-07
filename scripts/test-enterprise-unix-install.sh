@@ -480,52 +480,80 @@ launcher_refusal_text() {
         "$repo/internal/cli/testdata/launcher_refusal.json" "$platform"
 }
 
-# own_status_roster_check TEXT JSON [CONNECTOR...]: the standard user status
+# own_status_roster_check TEXT JSON CONNECTOR...: the standard user status
 # (TEXT) and status --json (JSON) show the account own protection state: an
 # account row, a Cowork row and one row per ENROLLED connector (cowork-1-0-8
 # GAP-0053, rel-1-0-9 GAP-0635). The roster is the connectors the installed
-# config enrolls, not a fixed one. Every CONNECTOR must be on the roster with a
-# protection state; with none given the roster must not be empty. The text
-# shows exactly the roster rows.
+# config enrolls, not a fixed one, so the caller names exactly that roster.
+# Fails unless the JSON roster has exactly those connectors, each with a
+# protection state that agrees with its protected flag, and the text shows
+# exactly those connectors (by label) with the same state as the JSON.
 own_status_roster_check() {
     local text=$1 answer=$2
     shift 2
+    if [ "$#" = 0 ]; then
+        echo "no expected connector was given"
+        return 1
+    fi
     DC_OWN_TEXT=$text DC_OWN_JSON=$answer "$python" - "$@" <<\PYCHECK
 import json, os, re, sys
 
 text, answer = os.environ["DC_OWN_TEXT"], json.loads(os.environ["DC_OWN_JSON"])
-roster = answer.get("connectors")
+expected = sorted(set(sys.argv[1:]))
 problems = []
-if not isinstance(roster, dict) or not roster:
-    problems.append("the JSON answer has no enrolled connector")
+roster = answer.get("connectors")
+if not isinstance(roster, dict):
     roster = {}
-for name in sys.argv[1:]:
-    row = roster.get(name)
-    if not isinstance(row, dict) or not isinstance(row.get("protected"), bool) or not row.get("state"):
-        problems.append("enrolled connector %s has no protection state in the JSON answer" % name)
+if sorted(roster) != expected:
+    problems.append("the JSON roster is %s, want %s" % (sorted(roster), expected))
+states = {}
+for name, row in roster.items():
+    if not isinstance(row, dict) or not isinstance(row.get("protected"), bool) or not isinstance(row.get("state"), str) or not row["state"]:
+        problems.append("connector %s has no protection state in the JSON answer" % name)
+    elif (row["state"] == "protected") != row["protected"]:
+        problems.append("connector %s has protected=%s but state %r in the JSON answer" % (name, row["protected"], row["state"]))
+    else:
+        states[name] = row["state"]
 lines = text.splitlines()
 first = next((i for i, line in enumerate(lines) if re.match(r"  Account +\S", line)), None)
 last = next((i for i, line in enumerate(lines) if re.match(r"  Cowork +\S", line)), None)
 if first is None or last is None or last < first:
     problems.append("the text has no Account row followed by a Cowork row")
 else:
-    rows = [line for line in lines[first + 1:last] if re.match(r"  \S.* \S", line)]
-    if len(rows) != len(roster):
-        problems.append("the text shows %d connector rows, the JSON roster has %d (%s)" % (len(rows), len(roster), ", ".join(sorted(roster))))
+    # A connector row is two spaces, the label padded to 13 columns, a space
+    # and the state (showOwnStatus); the label is the connector name with
+    # capitals and spaces, so it maps back to the roster key.
+    rows = {}
+    for line in lines[first + 1:last]:
+        if not line.strip():
+            continue
+        label, state = line[2:15].strip(), line[16:].strip()
+        if not line.startswith("  ") or line[15:16] != " " or not label or not state:
+            problems.append("the text has an unreadable connector row %r" % line)
+            continue
+        key = label.lower().replace(" ", "")
+        if key in rows:
+            problems.append("the text shows %s twice" % label)
+        rows[key] = state
+    if sorted(rows) != expected:
+        problems.append("the text shows connectors %s, want %s" % (sorted(rows), expected))
+    for key, state in sorted(rows.items()):
+        if key in states and states[key] != state:
+            problems.append("the text shows %s as %r, the JSON answer says %r" % (key, state, states[key]))
 if problems:
     print("; ".join(problems))
     sys.exit(1)
 PYCHECK
 }
 
-# launcher_offers_only_sandbox [CONNECTOR...]: an unprivileged account that
+# launcher_offers_only_sandbox CONNECTOR...: an unprivileged account that
 # runs the launcher is told the computer is managed, sees only its own
 # protection state in `defenseclaw status` (cowork-1-0-8 GAP-0053), sees the
 # sandbox tree and that status in its help, and is refused every administrator
 # command with the sentence the launcher builds for this platform. CONNECTOR
-# names the connectors the config in force enrolls (admin_connectors once
-# write_admin_config has applied it); before any administrator config the
-# roster is the package default and only its presence is checked.
+# names the connectors the config in force enrolls: package_default_connectors
+# before any administrator config, admin_connectors once write_admin_config has
+# applied it.
 launcher_offers_only_sandbox() {
     local output answer check rc=0 text
     text=$(launcher_refusal_text) || die "cannot read the launcher refusal for $platform from internal/cli/testdata/launcher_refusal.json"
@@ -693,6 +721,11 @@ admin_config_version() {
 # and the roster a standard user must see once it is applied both come from
 # this list (launcher_offers_only_sandbox).
 admin_connectors=(claudecode codex)
+
+# package_default_connectors: the roster of a package install before any
+# administrator config, which is the product default connector. A change of
+# that default turns the status check red here on purpose.
+package_default_connectors=(openclaw)
 
 write_admin_config() {
     local connector_lines="" connector
@@ -919,7 +952,7 @@ else
     fi
     step "the sandbox launcher and the user service definitions are installed"
     sandbox_files_present
-    launcher_offers_only_sandbox
+    launcher_offers_only_sandbox "${package_default_connectors[@]}"
 
     # ---- reconfigure ---------------------------------------------------------------
     step "ensure with an administrator config that enables Claude Code and Codex"
@@ -934,6 +967,8 @@ else
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
+    # The administrator config changes the roster the user sees: the connectors it enrolls.
+    launcher_offers_only_sandbox "${admin_connectors[@]}"
 fi
 
 if [ -e "$install_root/lib/defenseclaw/policy_compiler.py" ]; then
