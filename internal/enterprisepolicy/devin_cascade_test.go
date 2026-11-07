@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // adminCascadeHooks is an administrator hooks file DefenseClaw never owns.
@@ -266,9 +267,9 @@ func TestDevinCascadePathsPinTheDevinHooksFile(t *testing.T) {
 	cases := []struct {
 		goos, devin, legacy string
 	}{
-		{"linux", "/etc/devin/hooks.json", "/etc/windsurf/hooks.json"},
-		{"darwin", "/Library/Application Support/Devin/hooks.json", "/Library/Application Support/Windsurf/hooks.json"},
-		{"windows", `C:\ProgramData\Devin\hooks.json`, `C:\ProgramData\Windsurf\hooks.json`},
+		{"linux", "/etc/devin/hooks.json", "/etc/" + legacyconnector.CascadeMachineFolderUnix + "/hooks.json"},
+		{"darwin", "/Library/Application Support/Devin/hooks.json", "/Library/Application Support/" + legacyconnector.CascadeMachineFolder + "/hooks.json"},
+		{"windows", `C:\ProgramData\Devin\hooks.json`, `C:\ProgramData\` + legacyconnector.CascadeMachineFolder + `\hooks.json`},
 	}
 	for _, c := range cases {
 		opts := Options{GOOS: c.goos, WindowsProgramData: `C:\ProgramData`}
