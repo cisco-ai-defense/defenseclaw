@@ -602,6 +602,7 @@ export default function (api: DefenseClawPluginHost) {
           args: event.params,
           content,
           direction: "outbound",
+          tool_call_id: (event as { toolCallId?: string }).toolCallId,
         },
         ctx,
       );

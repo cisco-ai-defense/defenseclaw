@@ -311,6 +311,25 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       }
     });
 
+    it("sends the tool call id of an outbound message too (GAP-0644)", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        mockDaemonClient.postRaw.mockResolvedValue(rawAnswer(JSON.stringify({
+          action: "allow", raw_action: "allow", severity: "NONE", reason: "", mode: "action",
+        })));
+        await listeners.before_tool_call(
+          { toolName: "message", params: { to: "team@example.test", content: "status update" }, toolCallId: "call_msg1" },
+          { sessionKey: "agent:main:main", runId: "run-1", toolName: "message" },
+        );
+        const sent = mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>;
+        expect(sent.tool_call_id).toBe("call_msg1");
+        expect(sent.tool).toBe("message");
+        expect(sent.direction).toBe("outbound");
+      } finally {
+        log.mockRestore();
+      }
+    });
+
     it("an unanswered approval says where OpenClaw shows approvals (GAP-1958)", async () => {
       mockDaemonClient.postRaw.mockResolvedValue(
         rawAnswer(
