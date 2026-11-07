@@ -4059,8 +4059,9 @@ def _run_audit_store_case(shell: str, tmp_path: Path, call: str, fail: str = "",
         + f"try {{ $r = {call}; Write-Host \"result: $r\" }} catch {{ Write-Host \"thrown: $($_.Exception.Message)\" }}\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -4593,8 +4594,9 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
         + "Write-Host \"end=$(if (Test-Path -LiteralPath $SetupHookState) { 'enabled' } else { 'disabled' })\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -4756,8 +4758,9 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         + "\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -4896,8 +4899,9 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
         "Write-Host \"final hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -5038,8 +5042,9 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
         "Write-Host \"hook: $(Get-Content -Raw -LiteralPath (Join-Path $BinDir 'defenseclaw-hook.exe'))\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -5123,8 +5128,9 @@ def test_a_new_gateway_start_that_throws_restores_the_previous_install(tmp_path:
         "Write-Host \"restored: $script:restored\"\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -7215,8 +7221,9 @@ def test_setup_launcher_delegates_to_this_releases_hook(tmp_path: Path, shell: s
         + "\nforeach ($p in $protected) { Write-Host \"protected $p\" }\n",
         encoding="utf-8",
     )
-    completed = subprocess.run(
-        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+    completed = run_powershell(
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        interpreter=shell,
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
     kept = staging / "hook-runtime-state.json"
