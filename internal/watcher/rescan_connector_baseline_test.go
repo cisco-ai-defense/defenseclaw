@@ -218,9 +218,9 @@ func onlyHermes(t *testing.T, connectors []string) {
 }
 
 // GAP-0645: a Hermes shipped plugin whose bytes match the pinned vendor
-// digest is not scanned or alerted on a fresh account and keeps no baseline;
-// every scanned Hermes plugin is attributed to hermes, and a shipped plugin
-// that differs from its digest is scanned with its real severity.
+// digest is not scanned or alerted on a fresh account and keeps a baseline
+// with no scan; every scanned Hermes plugin is attributed to hermes, and a
+// change to the pristine bytes is admitted, so a HIGH edit is refused.
 func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *testing.T) {
 	f := newHermesPluginFixture(t)
 	vendor := f.plugin(f.bundledRoot, "web/ddgs")
@@ -264,8 +264,9 @@ func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *t
 		t.Fatalf("vendor plugin with a bytecode cache scanned %d times", n)
 	}
 
-	// A change to shipped bytes or an added file is not vendor code: it is
-	// scanned and its finding is active.
+	// A change to shipped bytes or an added file is not vendor code: the
+	// baseline of the pristine bytes makes it a change, so install admission
+	// decides it and refuses it.
 	writePluginFile(t, filepath.Join(vendor, "provider.py"), "VENDOR = False\n")
 	writePluginFile(t, filepath.Join(platform, "extra.py"), "EXTRA = True\n")
 	f.w.runRescanCycle(context.Background())
@@ -273,7 +274,7 @@ func TestRescanAttributesBundledPluginFindingsAndKeepsFirstSightOutOfAlerts(t *t
 		if f.scan.scans(path) != 1 {
 			t.Fatalf("changed shipped plugin %s scans = %d, want 1", path, f.scan.scans(path))
 		}
-		f.activeScan(path)
+		f.refused(path)
 	}
 	changed := f.findingConnectors()
 	onlyHermes(t, changed)
@@ -352,7 +353,7 @@ func TestRescanHermesVendorPluginDecisionUsesBytesRead(t *testing.T) {
 	if f.scan.scans(linked) != before+1 {
 		t.Fatalf("plugin left changed after the read was not scanned next cycle")
 	}
-	f.activeScan(linked)
+	f.refused(linked)
 	onlyHermes(t, f.findingConnectors())
 	for _, path := range []string{shipped, linked, sibling} {
 		row, err := f.store.GetTargetSnapshot("plugin", path)
@@ -490,8 +491,8 @@ func TestHermesVendorPluginHonorsExplicitDeny(t *testing.T) {
 }
 
 // GAP-0645 review 5: a shipped plugin installed while the watcher runs is
-// admitted on the live path without a scan and keeps no baseline; an edited
-// shipped plugin is scanned and refused there, and a later edit is scanned.
+// admitted on the live path without a scan; an edited shipped plugin is
+// scanned and refused there, and a later edit of the admitted one is refused.
 func TestHermesVendorPluginLiveAdmission(t *testing.T) {
 	for _, name := range []string{"security-guidance", "web/ddgs"} {
 		t.Run(name, func(t *testing.T) {
@@ -533,7 +534,7 @@ func TestHermesVendorPluginLiveAdmission(t *testing.T) {
 			if f.scan.scans(path) != 1 {
 				t.Fatalf("edited live shipped plugin scans = %d, want 1", f.scan.scans(path))
 			}
-			f.activeScan(path)
+			f.refused(path)
 		})
 	}
 }
@@ -557,7 +558,7 @@ func TestRescanHermesVendorPluginIsDecidedOnEveryScan(t *testing.T) {
 			if f.scan.scans(path) != 1 {
 				t.Fatalf("edited plugin scans = %d, want 1", f.scan.scans(path))
 			}
-			f.activeScan(path)
+			f.refused(path)
 			writePluginFile(t, source, "VENDOR = True\n")
 			before := len(f.findingConnectors())
 			f.w.runRescanCycle(context.Background())
@@ -572,7 +573,7 @@ func TestRescanHermesVendorPluginIsDecidedOnEveryScan(t *testing.T) {
 	}
 }
 
-// GAP-0645 review 8: after an ordinary edit was scanned, a later change in a
+// GAP-0645 review 8: after an ordinary edit was admitted, a later change in a
 // folder the snapshot leaves out reaches a scan, and is refused when HIGH:
 // no earlier admission skips any folder. A bytecode cache without a native
 // file stays no change.
@@ -597,7 +598,7 @@ func TestHermesShippedPluginChangeAfterEditIsScanned(t *testing.T) {
 			if f.scan.scans(path) != 1 {
 				t.Fatalf("edited plugin scans = %d, want 1", f.scan.scans(path))
 			}
-			f.activeScan(path)
+			f.refused(path)
 
 			writePluginFile(t, filepath.Join(path, "__pycache__", "provider.cpython-312.pyc"), "cache")
 			f.w.runRescanCycle(context.Background())
@@ -694,7 +695,7 @@ func TestHermesVendorPluginNativePayloadInScannerSkippedDir(t *testing.T) {
 				if f.scan.scans(path) != 1 {
 					t.Fatalf("plugin scans = %d, want 1", f.scan.scans(path))
 				}
-				f.activeScan(path)
+				f.refused(path)
 				onlyHermes(t, f.findingConnectors())
 			})
 			t.Run("live", func(t *testing.T) {
@@ -766,5 +767,89 @@ func TestHermesNativeExtensionsMatchScanner(t *testing.T) {
 	slices.Sort(ours)
 	if !slices.Equal(scanned, ours) {
 		t.Fatalf("native extensions = %q, scanner reports %q", ours, scanned)
+	}
+}
+
+// GAP-0645 review 9: the baseline recorded for vendor bytes vouches for
+// nothing but vendor bytes. When the plugin stops matching its digest while
+// the snapshot hash is unchanged (a snapshot taken from other bytes, or a
+// digest that no longer matches), the next cycle admits it and refuses it
+// when HIGH, rather than scanning it as a first sight.
+func TestHermesVendorBaselineVouchesOnlyForVendorBytes(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "kanban")
+	f.pinVendor("kanban", path)
+	f.w.runRescanCycle(context.Background())
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	row, err := f.store.GetTargetSnapshot("plugin", path)
+	if err != nil || row == nil || row.ScanID != "" || strings.Contains(row.ScannerFingerprint, "hermes-vendor") {
+		t.Fatalf("vendor baseline = %#v, %v; want an unmarked baseline with no scan", row, err)
+	}
+	hermesPluginVendorDigests["kanban"] = "0000"
+	f.w.runRescanCycle(context.Background())
+	if n := f.scan.scans(path); n != 1 {
+		t.Fatalf("plugin that stopped matching its digest scans = %d, want 1", n)
+	}
+	f.refused(path)
+	onlyHermes(t, f.findingConnectors())
+}
+
+// GAP-0645 review 9: a file the plugin scanner can read in a folder it skips
+// is hashed however much skipped data precedes it. A 64 MiB file in .git
+// used to spend the whole budget, so a same-size edit of the entrypoint under
+// node_modules left the content hash unchanged and was never rescanned.
+func TestHermesShippedPluginEntrypointEditAfterLargeSkippedFileIsRescanned(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	pack := filepath.Join(path, ".git", "000-pack")
+	writePluginFile(t, pack, "")
+	if err := os.Truncate(pack, hermesPluginMaxTreeBytes); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(path, "node_modules", "main.js")
+	writePluginFile(t, main, "safe()\n")
+	f.w.runRescanCycle(context.Background())
+	if n := f.scan.scans(path); n != 1 {
+		t.Fatalf("first sight scans = %d, want 1", n)
+	}
+	f.w.runRescanCycle(context.Background())
+	if n := f.scan.scans(path); n != 1 {
+		t.Fatalf("unchanged plugin scans = %d, want 1", n)
+	}
+	writePluginFile(t, main, "eval()\n")
+	f.w.runRescanCycle(context.Background())
+	if n := f.scan.scans(path); n != 2 {
+		t.Fatalf("plugin scans after the same-size entrypoint edit = %d, want 2", n)
+	}
+	f.refused(path)
+}
+
+// GAP-0645 review 9: skippedTreeHash reads the files the scanner can read, in
+// order, and not the larger ones; a tree past the read bound has no stable
+// hash, so it is never reported unchanged.
+func TestSkippedTreeHashBounds(t *testing.T) {
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: a\n")
+	pack := filepath.Join(dir, ".git", "000-pack")
+	writePluginFile(t, pack, "")
+	if err := os.Truncate(pack, hermesScannerReadBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	main := filepath.Join(dir, "node_modules", "main.js")
+	writePluginFile(t, main, "safe()\n")
+	before := skippedTreeHash(dir)
+	writePluginFile(t, main, "eval()\n")
+	if after := skippedTreeHash(dir); after == before {
+		t.Fatal("same-size entrypoint edit left the skipped-tree hash unchanged")
+	}
+	if skippedTreeHash(dir) != skippedTreeHash(dir) {
+		t.Fatal("skipped-tree hash of an unchanged tree differs between reads")
+	}
+	limit := hermesSkippedTreeMaxBytes
+	hermesSkippedTreeMaxBytes = 4
+	t.Cleanup(func() { hermesSkippedTreeMaxBytes = limit })
+	if first, second := skippedTreeHash(dir), skippedTreeHash(dir); first == second {
+		t.Fatal("a tree past the read bound has a stable hash")
 	}
 }

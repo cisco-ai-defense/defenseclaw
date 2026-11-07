@@ -28,6 +28,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
@@ -37,23 +38,38 @@ import (
 // DefenseClaw pins for that Hermes release is vendor code the account did not
 // install, so it is reported as informational vendor content and not scanned,
 // as the digest-pinned Hermes bundled skills are not. Nothing about that
-// decision is stored: no baseline carries a mark, and every scan reads the
-// plugin again. A plugin that differs from its digest in any byte, file or
-// link is scanned as any other, under hermes. Change detection for a shipped
-// plugin covers the folders the snapshot leaves out (skippedTreeHash), so a
-// later change anywhere in the tree reaches a scan whatever was admitted
-// before. The manifest only grows: an unchanged plugin whose release digest
-// was dropped would be scanned again.
+// decision is stored as trust: every scan reads the plugin again, and no
+// baseline carries a mark. The baseline written for vendor content is an
+// ordinary snapshot with no stored scan; it records which bytes were seen, and
+// it vouches for nothing but bytes that still match the digest
+// (hermesBaselineOwesAdmission). A plugin that differs from its digest in any
+// byte, file or link is scanned as any other, under hermes, and a shipped
+// plugin that had such a baseline is admitted, so an edit of vendor bytes is
+// refused when HIGH. Change detection for a shipped plugin covers the folders
+// the snapshot leaves out (skippedTreeHash), so a later change anywhere the
+// scanner can read reaches a scan whatever was admitted before. The manifest
+// only grows: an unchanged plugin whose release digest was dropped would be
+// scanned again.
 
 const (
 	hermesPluginMaxEntries   = 4096
 	hermesPluginMaxFileBytes = 8 << 20
 	hermesPluginMaxTreeBytes = 64 << 20
 
+	// hermesScannerReadBytes is the largest file the plugin scanner reads
+	// from a folder it skips (analyzers.py: forced entrypoints, 2 MiB). A
+	// larger file there is known by name and size alone.
+	hermesScannerReadBytes = 2 << 20
+
 	// hermesVendorPluginReason is the admission reason for a shipped plugin
 	// whose bytes match their pinned digest.
 	hermesVendorPluginReason = "hermes shipped plugin matches its pinned vendor digest"
 )
+
+// hermesSkippedTreeMaxBytes bounds the bytes skippedTreeHash reads in one
+// call. Past it the tree has no stable hash, so it is never unchanged and is
+// scanned in every cycle. A variable so a test can lower it.
+var hermesSkippedTreeMaxBytes int64 = 1 << 30
 
 var errHermesPluginUnverified = errors.New("hermes plugin tree cannot be matched to its vendor digest")
 
@@ -107,15 +123,41 @@ func (w *InstallWatcher) hermesVendorPlugin(evt InstallEvent) bool {
 
 // rescanHermesVendorPlugin is the rescan side of hermesVendorPlugin: it
 // reports the plugin as informational vendor content, once per process, and
-// tells the caller to leave it unscanned.
-func (w *InstallWatcher) rescanHermesVendorPlugin(evt InstallEvent) bool {
+// tells the caller to leave it unscanned. It records the snapshot of those
+// bytes as the plugin's baseline, with no scan and no mark, when there is
+// none for the current scanner fingerprint, so that a later change is an
+// admission and not a first sight.
+func (w *InstallWatcher) rescanHermesVendorPlugin(evt InstallEvent, snap *TargetSnapshot, baseline *audit.SnapshotRow, fingerprint string) bool {
 	if !w.hermesVendorPlugin(evt) {
 		return false
 	}
 	if _, seen := w.hermesVendorNoted.LoadOrStore(evt.Path, struct{}{}); !seen {
 		w.logHermesVendorPlugin(evt, string(evt.Type))
 	}
+	if snap != nil && (baseline == nil || baseline.ScannerFingerprint != fingerprint) {
+		scanID := ""
+		if baseline != nil {
+			scanID = baseline.ScanID
+		}
+		w.persistSnapshot(evt, snap, scanID, fingerprint)
+	}
 	return true
+}
+
+// hermesBaselineOwesAdmission reports a shipped plugin whose baseline holds no
+// scan and whose bytes are not vendor content: the baseline was recorded for
+// vendor bytes (or after a failed scan), so changed bytes, and bytes that
+// differ from the digest although the snapshot hash is the same, are admitted
+// and refused when HIGH, not scanned as a first sight. The decision reads the
+// plugin again; nothing stored says it is vendor content.
+func (w *InstallWatcher) hermesBaselineOwesAdmission(evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot) bool {
+	if baseline == nil || baseline.ScanID != "" || snap == nil {
+		return false
+	}
+	if _, shipped := w.hermesShippedPlugin(evt); !shipped {
+		return false
+	}
+	return baseline.ContentHash != snap.ContentHash || !w.hermesVendorPlugin(evt)
 }
 
 // logHermesVendorPlugin records the vendor-content verdict of a shipped plugin.
@@ -223,15 +265,17 @@ func inBytecodeCache(name string) bool {
 // folder the snapshot skips (.git, node_modules, __pycache__, .venv, venv)
 // except a bytecode cache file without a native extension, which Hermes
 // writes at run time and the plugin scanner ignores. The plugin scanner
-// reports a native file in those folders, so a shipped plugin folds this hash
-// into its content hash: a change anywhere in the tree then reaches a scan,
-// whatever was admitted before. Files are hashed up to the tree budget of
-// the vendor digest and described by name and size beyond it. An entry that
-// cannot be read is recorded as unreadable, so it also differs from a clean
-// read.
+// reports a native file in those folders and reads a declared entrypoint
+// there, so a shipped plugin folds this hash into its content hash: a change
+// anywhere in the tree reaches a scan, whatever was admitted before. Every
+// file the scanner can read (up to hermesScannerReadBytes) is hashed, however
+// much skipped data precedes it; a larger file is described by name and size,
+// since the scanner reads none of its bytes. A tree over
+// hermesSkippedTreeMaxBytes has no stable hash. An entry that cannot be read
+// is recorded as unreadable, so it also differs from a clean read.
 func skippedTreeHash(root string) string {
 	var entries []string
-	budget := int64(hermesPluginMaxTreeBytes)
+	read := int64(0)
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil || rel == "." {
@@ -257,9 +301,12 @@ func skippedTreeHash(root string) string {
 				return nil
 			}
 			detail := fmt.Sprintf("%d", info.Size())
-			if info.Size() <= budget {
+			if info.Size() <= hermesScannerReadBytes {
+				if read += info.Size(); read > hermesSkippedTreeMaxBytes {
+					entries = append(entries, fmt.Sprintf("unbounded:%d", time.Now().UnixNano()))
+					return fs.SkipAll
+				}
 				if sum, err := hashFile(path); err == nil {
-					budget -= info.Size()
 					detail += ":" + sum
 				} else {
 					detail += ":unreadable"

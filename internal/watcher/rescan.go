@@ -1036,7 +1036,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s was configured before the upgrade; recording its baseline without install admission\n", evt.Name)
 				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path, "type=mcp reason=configured-before-upgrade")
 			}
-			if w.rescanHermesVendorPlugin(evt) {
+			if w.rescanHermesVendorPlugin(evt, currentSnap, nil, fingerprint) {
 				return rescanSkipped // vendor content, decided on this read (GAP-0645)
 			}
 			// First time we've seen this target: scan once to establish a
@@ -1134,11 +1134,11 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
 	}
 
-	if reason == "content-changed" && !w.secureClientActive() {
+	if (reason == "content-changed" || w.hermesBaselineOwesAdmission(evt, baseline, currentSnap)) && !w.secureClientActive() {
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
 	}
 
-	if w.rescanHermesVendorPlugin(evt) {
+	if w.rescanHermesVendorPlugin(evt, currentSnap, baseline, fingerprint) {
 		return rescanSkipped // vendor content, decided on this read (GAP-0645)
 	}
 
@@ -1528,10 +1528,12 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // watcher admitted with a logged scan. Without it the next gateway start
 // re-admitted the unchanged target as new, and the start after that scanned
 // it again for lack of a baseline scan: three scans and three scan-finding
-// alerts for one install (GAP-2507). A target admission moved away gets no
-// baseline.
+// alerts for one install (GAP-2507). A Hermes shipped plugin admitted as
+// vendor content has no scan; its baseline records the bytes admitted, so an
+// edit before the next rescan is an admission (GAP-0645). A target admission
+// moved away gets no baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
-	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" {
+	if w.movedByAdmission(evt) || snap == nil || res.ScanID == "" && res.Reason != hermesVendorPluginReason {
 		return
 	}
 	if _, err := os.Lstat(evt.Path); err != nil {
