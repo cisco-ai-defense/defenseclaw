@@ -189,15 +189,25 @@ _ENV_BASELINE_SHORT = "i0vuCS"
 _ENV_PROBE_VALUES = {"u": "X", "unset": "X", "a": "x", "argv0": "x", "C": ".", "chdir": ".", "S": "true", "split-string": "true"}
 
 
-def _after_env_options(env_word, words, environ) -> list:  # type: ignore[no-untyped-def]
+def _after_env_options(env_word, words, environ) -> tuple:  # type: ignore[no-untyped-def]
     # The words env(1) goes on to run, given its own name and the words that
     # follow it: its options and NAME=VALUE assignments skipped, and the
     # string of -S / --split-string split into words that are read as more env
     # arguments. Empty when env runs nothing (no command, --help, --version,
     # an option this env lacks or an option without its value, a split string
-    # env refuses).
+    # env refuses, a name -u cannot unset, -0 given with a command). Returned with them is the
+    # environment env runs them in: the one it started with (which is where
+    # ${NAME} in a split string is read), cleared by -i / --ignore-environment
+    # / "-", minus every -u NAME, plus every NAME=VALUE, which is what the
+    # next env in a chain starts with.
     words, i, options = list(words), 0, True
     env_word = str(os.fspath(env_word))
+    cleared, null, unset, assigned = False, False, [], {}
+
+    def child_environment():  # type: ignore[no-untyped-def]
+        kept = {} if cleared else {k: v for k, v in environ.items() if k not in unset}
+        return {**kept, **assigned}
+
     while i < len(words) and isinstance(words[i], str):
         word = words[i]
         i += 1
@@ -207,47 +217,70 @@ def _after_env_options(env_word, words, environ) -> list:  # type: ignore[no-unt
             name, has_value, value = word[2:].partition("=")
             named = [n for n in _ENV_LONG if n == name] or [n for n in _ENV_LONG if n.startswith(name)]
             if len(named) != 1 or named[0] in _ENV_LONG_THAT_RUN_NOTHING:
-                return []
+                return [], environ
             if not _env_has_option(env_word, "--" + named[0], _ENV_PROBE_VALUES.get(named[0], "")):
-                return []
+                return [], environ
             if named[0] in _ENV_LONG_WITH_A_VALUE:
                 if not has_value:
                     if i >= len(words) or not isinstance(words[i], str):
-                        return []
+                        return [], environ
                     value, i = words[i], i + 1
                 if named[0] == "split-string":
                     parts = _env_split_string(value, environ)
                     if parts is None:
-                        return []
+                        return [], environ
                     words[i:i] = parts
+                elif named[0] == "unset":
+                    if not value or "=" in value:
+                        return [], environ
+                    unset.append(value)
+            elif named[0] == "ignore-environment":
+                cleared = True
+            elif named[0] == "null":
+                null = True
+        elif options and word == "-":
+            cleared = True
         elif options and word.startswith("-"):
             letters = word[1:]
             for position, letter in enumerate(letters):
                 if letter not in _ENV_SHORT_FLAGS:
-                    return []
+                    return [], environ
                 if letter not in _ENV_BASELINE_SHORT and not _env_has_option(
                     env_word, "-" + letter, _ENV_PROBE_VALUES.get(letter, "")
                 ):
-                    return []
+                    return [], environ
+                if letter == "i":
+                    cleared = True
+                elif letter == "0":
+                    null = True
                 if letter in _ENV_SHORT_WITH_A_VALUE:
                     value = letters[position + 1 :]
                     if not value:
                         if i >= len(words) or not isinstance(words[i], str):
-                            return []
+                            return [], environ
                         value, i = words[i], i + 1
                     if letter == "S":
                         parts = _env_split_string(value, environ)
                         if parts is None:
-                            return []
+                            return [], environ
                         words[i:i] = parts
+                    elif letter == "u":
+                        # unsetenv refuses an empty name and one holding "=".
+                        if not value or "=" in value:
+                            return [], environ
+                        unset.append(value)
                     break
         elif "=" in word[1:]:
             # env reads options only up to the first NAME=VALUE: a later word
             # that looks like an option is the command it tries to run.
             options = False
+            name, _, value = word.partition("=")
+            assigned[name] = value
         else:
-            return words[i - 1 :]
-    return words[i:]
+            # -0 ends each line of the environment with a NUL, which has no
+            # place in front of a command: env refuses it.
+            return ([], environ) if null else (words[i - 1 :], child_environment())
+    return words[i:], child_environment()
 
 
 def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
@@ -263,12 +296,13 @@ def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
     if kwargs.get("executable") is not None and not kwargs.get("shell"):
         words = [kwargs["executable"], *words[1:]]
     # The environment env starts with is the one the launch passes, however
-    # small: an empty mapping is a real, empty environment.
+    # small: an empty mapping is a real, empty environment. Each env in a chain
+    # hands the next the environment its own options and assignments left.
     environ = kwargs["env"] if kwargs.get("env") is not None else os.environ
     while words:
         if not isinstance(words[0], (str, os.PathLike)) or _base_name(words[0]) not in _ENV_NAMES:
             return words[0]
-        words = _after_env_options(words[0], words[1:], environ)
+        words, environ = _after_env_options(words[0], words[1:], environ)
     return _NO_COMMAND
 
 
@@ -5026,6 +5060,18 @@ _ORDINARY_ENV_LAUNCHES = [
     ["env", "-S", "python3 'p\\wsh'"],
     ["env", "-S", "python3 \\c pwsh"],
     ["env", "-S", "${DC_PROBE_UNSET} python3"],
+    # An outer env that clears, unsets or overrides the variable hands the inner
+    # env an environment in which ${DC_PROBE} is not PowerShell.
+    ["env", "-i", "env", "-S", "${DC_PROBE}"],
+    ["env", "-", "env", "-S", "${DC_PROBE}"],
+    ["env", "--ignore-environment", "env", "-S", "${DC_PROBE}"],
+    ["env", "-u", "DC_PROBE", "env", "-S", "${DC_PROBE}"],
+    ["env", "-uDC_PROBE", "env", "-S", "${DC_PROBE}"],
+    ["env", "--unset=DC_PROBE", "env", "-S", "${DC_PROBE}"],
+    ["env", "DC_PROBE=true", "env", "-S", "${DC_PROBE}"],
+    ["env", "-S", "-i env -S \\${DC_PROBE}"],
+    ["env", "-i", "DC_PROBE=pwsh", "env", "-u", "DC_PROBE", "env", "-S", "${DC_PROBE}"],
+    ["env", "DC_PROBE=pwsh", "env", "-i", "env", "-S", "${DC_PROBE}"],
 ]
 # env refuses these before it launches anything (status 125), so no PowerShell
 # is started; a test that launches one fails on its own terms.
@@ -5039,6 +5085,14 @@ _ENV_LAUNCHES_THAT_RUN_NOTHING = [
     ["env", "--no-such-option", "pwsh"],
     ["env", "-Z", "pwsh"],
     ["env", "-S", "# pwsh"],
+    ["env", "-u", "A=B", "pwsh"],
+    ["env", "-u", "", "pwsh"],
+    ["env", "--unset=A=B", "pwsh"],
+    ["env", "-0", "pwsh"],
+    ["env", "--null", "pwsh"],
+    ["env", "-i0", "pwsh"],
+    ["env", "-0", "A=1", "pwsh"],
+    ["env", "-0", "env", "pwsh"],
 ]
 _MISSING_POWERSHELL_ENV_LAUNCHES = [
     ["env", "pwsh"],
@@ -5063,6 +5117,14 @@ _MISSING_POWERSHELL_ENV_LAUNCHES = [
     ["env", "-S", "'pwsh' -c x"],
     ["env", "-S", '"pwsh" -c x'],
     ["env", "-S", "pwsh\\_-c\\_x"],
+    # The environment an outer env passes on decides what ${DC_PROBE} is.
+    ["env", "DC_PROBE=pwsh", "env", "-S", "${DC_PROBE}"],
+    ["env", "-i", "DC_PROBE=pwsh", "env", "-S", "${DC_PROBE}"],
+    ["env", "-u", "HOME", "env", "-S", "${DC_PROBE}"],
+    ["env", "-S", "DC_PROBE=pwsh env -S ${DC_PROBE}"],
+    ["env", "-S", "-i env -S ${DC_PROBE}"],
+    ["env", "-i", "env", "DC_PROBE=pwsh", "env", "-S", "${DC_PROBE}"],
+    ["env", "DC_PROBE=true", "env", "-u", "DC_PROBE", "DC_PROBE=pwsh", "env", "-S", "${DC_PROBE}"],
 ]
 
 
@@ -5114,6 +5176,20 @@ _OTHER_COMMAND_ENV_LAUNCHES = [
     ["env", "DC_PROBE=true", "-S", "${DC_PROBE}"],
     ["env", "A=1", "-u", "HOME", "pwsh"],
     ["env", "A=1", "--", "pwsh"],
+    ["env", "-i", "env", "-S", "${DC_PROBE}"],
+    ["env", "-", "env", "-S", "${DC_PROBE}"],
+    ["env", "--ignore-environment", "env", "-S", "${DC_PROBE}"],
+    ["env", "-u", "DC_PROBE", "env", "-S", "${DC_PROBE}"],
+    ["env", "-uDC_PROBE", "env", "-S", "${DC_PROBE}"],
+    ["env", "--unset=DC_PROBE", "env", "-S", "${DC_PROBE}"],
+    ["env", "DC_PROBE=true", "env", "-S", "${DC_PROBE}"],
+    ["env", "-S", "-i env -S \\${DC_PROBE}"],
+    ["env", "-S", "-i env -S ${DC_PROBE}"],
+    ["env", "-i", "DC_PROBE=pwsh", "env", "-u", "DC_PROBE", "env", "-S", "${DC_PROBE}"],
+    ["env", "DC_PROBE=pwsh", "env", "-i", "env", "-S", "${DC_PROBE}"],
+    ["env", "-0", "env", "-S", "${DC_PROBE}"],
+    ["env", "-0"],
+    ["env", "-0", "A=1"],
 ]
 _CHILD_ENVIRONMENTS = [
     {},
@@ -5199,11 +5275,25 @@ def test_ordinary_env_launches_that_read_the_environment_or_an_assignment_still_
         ([env, "-S", "${DC_PROBE}"], {"env": {}}),
         ([env, "DC_PROBE=true", "-S", "${DC_PROBE}"], {"env": {"PATH": os.environ.get("PATH", "")}}),
     ]
+    # Nested env: the outer one clears, unsets or overrides the variable the
+    # inner one reads, so the inner one runs `env` itself and exits 0.
+    nested = [
+        ([env, "-i", env, "-S", "${DC_PROBE}"], {}),
+        ([env, "-u", "DC_PROBE", env, "-S", "${DC_PROBE}"], {}),
+        ([env, "DC_PROBE=true", env, "-S", "${DC_PROBE}"], {}),
+        ([env, "-", env, "-S", "${DC_PROBE}"], {}),
+    ]
+    launches += nested
     expected = [subprocess.run(argv, capture_output=True, check=False, **kw).returncode for argv, kw in launches]
+    assert expected[-len(nested) :] == [0] * len(nested)
     monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
     _skip_powershell_calls_when_missing(monkeypatch)
     for (argv, kw), returncode in zip(launches, expected):
         assert subprocess.run(argv, capture_output=True, check=False, **kw).returncode == returncode
+    # The same nesting, with an outer env that hands the inner one PowerShell's
+    # name, is a launch of the missing PowerShell and skips.
+    with pytest.raises(pytest.skip.Exception):
+        subprocess.run([env, "DC_PROBE=pwsh", env, "-S", "${DC_PROBE}"], check=False)
 
 
 def test_env_actions_that_run_no_powershell_still_run_where_it_is_not_installed(
