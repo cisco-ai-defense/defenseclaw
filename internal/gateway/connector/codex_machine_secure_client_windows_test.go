@@ -121,10 +121,10 @@ func TestSecureClientCodexMachinePolicyDoesNotWaitForAHeldRequirements(t *testin
 }
 
 // g582 round 11b (GAP-0764, GAP-0765) are standalone only. A Secure Client
-// transaction writes the state at its fixed name in place every time it is
-// asked to, even with the bytes it already holds (base behavior: no copy, no
-// counter, no writer lock), and a fixed-name state a process holds open fails
-// the plain way, with no named holder and no wait.
+// transaction keeps the state at its fixed name, written in place by the
+// plain file writer (which already leaves a file alone when the bytes are the
+// same) with no copy, no counter and no writer lock, and a fixed-name state a
+// process holds open fails the plain way, with no named holder and no wait.
 func TestSecureClientCodexStateStaysDirectForTheRound11bRules(t *testing.T) {
 	row := windowsCodexRemovalRowsForTest[0]
 	opts := newWindowsCodexMachineGuardFixtureForTest(t, row.requirements)
@@ -147,8 +147,8 @@ func TestSecureClientCodexStateStaysDirectForTheRound11bRules(t *testing.T) {
 		t.Fatalf("Secure Client write of the same bytes: %v", err)
 	}
 	after, err := os.Stat(opts.ManagedStatePath)
-	if err != nil || os.SameFile(before, after) {
-		t.Fatalf("Secure Client did not write the state in place again (err %v): the same-bytes rule must not reach it", err)
+	if err != nil || !os.SameFile(before, after) || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("Secure Client replaced the state for the same bytes (err %v)", err)
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
