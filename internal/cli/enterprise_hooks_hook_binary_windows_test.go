@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -300,12 +301,12 @@ func TestKeepWindowsManagedFileCopyReplacesAHookHeldOpenForWriting(t *testing.T)
 // startWindowsExclusiveHolder runs a child process that opens path with no
 // sharing and keeps it open until release is called. The child ends by itself
 // and prints "alive" if its handle was closed by someone else; it is never
-// killed by the test while the fixture is needed.
-func startWindowsExclusiveHolder(t *testing.T, path string) (release func() string) {
+// killed by the test while the fixture is needed. shell names the PowerShell
+// to run (the 64-bit or the 32-bit one); a missing one skips the test.
+func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func() string, pid int) {
 	t.Helper()
-	shell := filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 	if _, err := os.Stat(shell); err != nil {
-		t.Skipf("Windows PowerShell unavailable: %v", err)
+		t.Skipf("PowerShell unavailable: %v", err)
 	}
 	script := fmt.Sprintf(`$f = [IO.File]::Open('%s', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [void][Console]::In.ReadLine(); [Console]::Out.WriteLine('alive')`, strings.ReplaceAll(path, "'", "''"))
 	cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
@@ -361,17 +362,68 @@ func startWindowsExclusiveHolder(t *testing.T, path string) (release func() stri
 			_ = cmd.Wait()
 		}
 	})
-	return release
+	return release, cmd.Process.Pid
+}
+
+// interactiveFactsSystem is the real handle table and the real processes, with
+// every process taken for a signed-in user's: the test runs in session 0 or as
+// SYSTEM, which the bound (c) rules refuse (they are tested with injected
+// facts, and on the host in a real interactive session). What it proves is
+// the Windows calls: listing, duplicating, identifying, closing.
+type interactiveFactsSystem struct{ windowsHolderSystem }
+
+func (s interactiveFactsSystem) OpenProcess(pid uint32) (windowsHolderProc, error) {
+	proc, err := s.windowsHolderSystem.OpenProcess(pid)
+	if err != nil {
+		return nil, err
+	}
+	return interactiveFactsProc{proc}, nil
+}
+
+type interactiveFactsProc struct{ windowsHolderProc }
+
+func (p interactiveFactsProc) Facts() windowsHolderProcess {
+	facts := p.windowsHolderProc.Facts()
+	facts.Session, facts.SID, facts.Protected, facts.FactsErr = 1, "S-1-5-21-1-2-3-1001", false, nil
+	return facts
+}
+
+func powershellForTest(wow64 bool) string {
+	if wow64 {
+		return filepath.Join(os.Getenv("SystemRoot"), "SysWOW64", "WindowsPowerShell", "v1.0", "powershell.exe")
+	}
+	return filepath.Join(os.Getenv("SystemRoot"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 }
 
 // GAP-0755: a handle that shares nothing, held by another process, refuses
 // the guardian's own digest read and every start. A swap cannot end it, so the
-// guardian closes that handle: the next start works on the same file, nothing
-// was moved, no process was ended, and the hold is logged once.
+// guardian closes that handle, on the second check: the next start works on
+// the same file, nothing was moved, no process was ended, and one HIGH audit
+// row names the holder. A holder that takes the handle again waits out the
+// backoff, and a hold in a later streak writes a new row.
 func TestKeepWindowsManagedFileCopyEndsAnExclusiveHoldOfAnotherProcess(t *testing.T) {
+	endsAnExclusiveHold(t, powershellForTest(false))
+}
+
+// The same with a 32-bit holder (WOW64): the handle values and the calls are
+// the same, and the audit row says so.
+func TestKeepWindowsManagedFileCopyEndsAnExclusiveHoldOfAWow64Process(t *testing.T) {
+	endsAnExclusiveHold(t, powershellForTest(true))
+}
+
+func endsAnExclusiveHold(t *testing.T, shell string) {
 	resetWindowsHeldSwapsForTest(t)
-	windowsHookHoldersClosed, windowsHookHoldersLogged = nil, false
-	t.Cleanup(func() { windowsHookHoldersClosed, windowsHookHoldersLogged = nil, false })
+	advance := fakeWindowsHeldSwapClock(t)
+	var rows []windowsHolderAuditRow
+	savedStandalone, savedSys, savedPost := windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost
+	windowsHolderStandalone = func() bool { return true }
+	windowsHolderSys = interactiveFactsSystem{windowsNativeHolderSystem{}}
+	windowsHolderAuditPost = func(row windowsHolderAuditRow) error { rows = append(rows, row); return nil }
+	windowsHolderGate, windowsHolderLog, windowsHolderAuditQueue = windowsHolderState{}, nil, nil
+	t.Cleanup(func() {
+		windowsHolderStandalone, windowsHolderSys, windowsHolderAuditPost = savedStandalone, savedSys, savedPost
+		windowsHolderGate, windowsHolderLog, windowsHolderAuditQueue = windowsHolderState{}, nil, nil
+	})
 	root := t.TempDir()
 	target := filepath.Join(root, "bin", "defenseclaw-hook.exe")
 	copyPath := filepath.Join(root, "hook-guardian", "payload", "defenseclaw-hook.exe")
@@ -390,24 +442,56 @@ func TestKeepWindowsManagedFileCopyEndsAnExclusiveHoldOfAnotherProcess(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	release := startWindowsExclusiveHolder(t, target)
-	if _, err := exec.Command(target).Output(); err == nil {
+	var log strings.Builder
+	check := func() {
+		t.Helper()
+		if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+			t.Fatalf("check: restored %q, %v", damage, err)
+		}
+		reportWindowsHookHolders(&log)
+	}
+	started := func() bool {
+		out, err := exec.Command(target).Output()
+		return err == nil && len(strings.TrimSpace(string(out))) > 0
+	}
+	release, pid := startWindowsExclusiveHolder(t, shell, target)
+	if started() {
 		t.Fatal("a start succeeded while another process held the hook with no sharing; the fixture does not reproduce the failure")
 	}
 	if _, err := windowsFileSHA256Hex(target); err == nil {
 		t.Fatal("the guardian's digest read succeeded under an exclusive handle; the fixture does not reproduce the failure")
 	}
-	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
-	if err != nil || damage != "" {
-		t.Fatalf("first check: restored %q, %v", damage, err)
+	// Tick 1: the hold is seen, nothing is closed.
+	check()
+	if started() || len(rows) != 0 {
+		t.Fatalf("the first check acted on a hold seen once (rows %d)", len(rows))
 	}
-	var log strings.Builder
-	reportWindowsHookHoldersClosed(&log, target)
-	if !strings.Contains(log.String(), "closed the handle powershell.exe (process id") || strings.Count(log.String(), "[hook-guardian]") != 1 {
+	// Tick 2: the same handle, five seconds on. The pass reads the whole
+	// handle table of the host, with the holder's blocked pipe handle in it.
+	advance(windowsHookBinaryCheckInterval)
+	passStart := time.Now()
+	check()
+	t.Logf("second check (list, probe, close) took %s", time.Since(passStart))
+	if time.Since(passStart) > 15*time.Second {
+		t.Fatalf("the pass took %s", time.Since(passStart))
+	}
+	if !started() {
+		t.Fatal("a start still fails after the second check")
+	}
+	if len(rows) != 1 {
+		t.Fatalf("audit rows %d, want 1", len(rows))
+	}
+	row := rows[0]
+	t.Logf("row: holder %s pid %d session %d sid %s wow64 %v access 0x%08x; scan %d ms, %d handles listed, %d inspected", row.Holder.Image, row.Holder.PID, row.Holder.Session, row.Holder.SID, row.Holder.Wow64, row.Access, row.ScanMS, row.Listed, row.Probed)
+	if row.Holder.PID != uint32(pid) || !row.Closed || !strings.EqualFold(filepath.Base(row.Holder.Image), "powershell.exe") || row.Holder.SID == "" ||
+		row.Access&windowsHolderDataAccess == 0 || row.Hook != target || row.Holder.Wow64 != strings.Contains(shell, "SysWOW64") {
+		t.Fatalf("row %+v", row)
+	}
+	if wow := strings.Contains(shell, "SysWOW64"); wow && !strings.Contains(strings.ToLower(row.Holder.Image), "syswow64") {
+		t.Fatalf("image %q is not the 32-bit PowerShell", row.Holder.Image)
+	}
+	if !strings.Contains(log.String(), "tamper: closed the handle") || strings.Count(log.String(), "[hook-guardian]") != 1 {
 		t.Fatalf("log %q", log.String())
-	}
-	if out, err := exec.Command(target).Output(); err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		t.Fatalf("start after the hold was ended: %q, %v", out, err)
 	}
 	after, err := os.Stat(target)
 	if err != nil || !os.SameFile(before, after) {
@@ -419,20 +503,92 @@ func TestKeepWindowsManagedFileCopyEndsAnExclusiveHoldOfAnotherProcess(t *testin
 	if answer := release(); answer != "alive" {
 		t.Fatalf("the holder process did not survive the close (said %q)", answer)
 	}
-	// A hold that returns is ended again; the second line is not logged
-	// until a check has found the hook free.
-	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
-		t.Fatalf("check on the free hook: restored %q, %v", damage, err)
+	// A check on the free hook, then ten quiet minutes: the next hold is a
+	// new streak with its own row.
+	check()
+	advance(11 * time.Minute)
+	check()
+	second, _ := startWindowsExclusiveHolder(t, shell, target)
+	check()
+	advance(windowsHookBinaryCheckInterval)
+	check()
+	if !started() || len(rows) != 2 {
+		t.Fatalf("second hold: start works %v, rows %d", started(), len(rows))
 	}
-	second := startWindowsExclusiveHolder(t, target)
-	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
-		t.Fatalf("second hold: restored %q, %v", damage, err)
-	}
-	reportWindowsHookHoldersClosed(&log, target)
-	if strings.Count(log.String(), "[hook-guardian]") != 2 {
-		t.Fatalf("a hold after a free check is logged again, got %q", log.String())
-	}
+	// The same process takes the handle again as soon as it loses it: the
+	// close waits out the backoff and writes no new row.
 	_ = second()
+	check()
+	advance(11 * time.Minute) // a new streak
+	check()
+	stop, reopened := startWindowsReacquiringHolder(t, shell, target)
+	check()
+	advance(windowsHookBinaryCheckInterval)
+	check() // close 1
+	if opens := reopened(); opens < 1 {
+		t.Fatalf("the holder did not take the handle again (%d re-opens)", opens)
+	}
+	rowsAfterFirst := len(rows)
+	for _, step := range []string{"+5 s", "+10 s", "+15 s", "+20 s"} {
+		advance(windowsHookBinaryCheckInterval)
+		check()
+		t.Logf("%s after the first close: start works %v, re-opens %d, rows %d", step, started(), reopened(), len(rows))
+		if len(rows) != rowsAfterFirst {
+			t.Fatalf("a close of the same holder in the same streak wrote a row (%d)", len(rows))
+		}
+	}
+	if opens := reopened(); opens < 2 {
+		t.Fatalf("the holder was closed %d time(s) in 20 s of backoff steps; the second close is due by then", opens-1)
+	}
+	stop()
+}
+
+// startWindowsReacquiringHolder opens path with no sharing and opens it again
+// whenever its handle is gone; reopened is how many times that happened.
+func startWindowsReacquiringHolder(t *testing.T, shell, path string) (stop func(), reopened func() int) {
+	t.Helper()
+	// An unbuffered stream, so that every poll is a read on the handle and
+	// fails when the handle is gone.
+	script := fmt.Sprintf(`$p = '%s'; $n = 0; $b = New-Object byte[] 1; $f = New-Object IO.FileStream($p, 'Open', 'Read', 'None', 1); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); for ($i = 0; $i -lt 1200; $i++) { Start-Sleep -Milliseconds 100; try { [void]$f.Seek(0, 0); [void]$f.Read($b, 0, 1) } catch { try { $f = New-Object IO.FileStream($p, 'Open', 'Read', 'None', 1); $n++; [Console]::Out.WriteLine('reopened ' + $n); [Console]::Out.Flush() } catch {} } }`, strings.ReplaceAll(path, "'", "''"))
+	cmd := exec.Command(shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var opens atomic.Int32
+	ready := make(chan struct{})
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			if line := strings.TrimSpace(scanner.Text()); line == "ready" {
+				close(ready)
+			} else if n, err := strconv.Atoi(strings.TrimPrefix(line, "reopened ")); err == nil {
+				opens.Store(int32(n))
+			}
+		}
+	}()
+	select {
+	case <-ready:
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("the holder did not open the file")
+	}
+	stopped := false
+	stop = func() {
+		if !stopped {
+			stopped = true
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}
+	t.Cleanup(stop)
+	return stop, func() int {
+		time.Sleep(1500 * time.Millisecond) // the holder polls every 100 ms
+		return int(opens.Load())
+	}
 }
 
 // GAP-0656 review S1 (GAP-0369): on a volume or behind a filter driver that

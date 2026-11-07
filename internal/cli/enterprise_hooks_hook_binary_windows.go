@@ -172,7 +172,7 @@ func keepWindowsStandaloneHookBinary(stderr io.Writer, onlyWhenDamaged bool) {
 	reportWindowsImageSwapLinkRefusal(stderr, target)
 	reportWindowsImageBackupRestrictFailure(stderr)
 	reportWindowsHeldSwapNotice(stderr, target)
-	reportWindowsHookHoldersClosed(stderr, target)
+	reportWindowsHookHolders(stderr)
 	if err != nil {
 		if message := err.Error(); message != windowsHookBinaryLastErr {
 			windowsHookBinaryLastErr = message
@@ -204,26 +204,6 @@ func reportWindowsImageSwapLinkRefusal(stderr io.Writer, target string) {
 	}
 	windowsImageSwapLinkRefusalLogged = refusal
 	fmt.Fprintf(stderr, "[hook-guardian] notice: restored the hook binary %s without the one-step swap: %s; an agent starting it in that moment can get an error (GAP-0369)\n", target, refusal)
-}
-
-// windowsHookHoldersClosed is set when a check ended a hold on the hook by
-// closing the holders' handles; windowsHookHoldersLogged keeps it to one line
-// until a check finds the hook free (GAP-0755).
-var (
-	windowsHookHoldersClosed []string
-	windowsHookHoldersLogged bool
-)
-
-// reportWindowsHookHoldersClosed logs, once per hold, that the guardian
-// closed another program's handle on the hook.
-func reportWindowsHookHoldersClosed(stderr io.Writer, target string) {
-	closed := windowsHookHoldersClosed
-	windowsHookHoldersClosed = nil
-	if len(closed) == 0 || windowsHookHoldersLogged {
-		return
-	}
-	windowsHookHoldersLogged = true
-	fmt.Fprintf(stderr, "[hook-guardian] tamper: closed the handle %s had on the hook binary %s with no sharing, which refused every start of it; the file was not changed. Logged once until the hook is free\n", strings.Join(closed, ", "), target)
 }
 
 // windowsImageBackupRestrictFailure is set when a swap could not close the
@@ -318,6 +298,14 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 	missing := false
 	windowsHookBinaryDigestRefusal = ""
 	windowsHookBinarySharedDigestOK = false
+	// Any check that does not find the hook held by a handle that allows no
+	// deletion starts the two checks of the next such hold again (GAP-0755).
+	holdSeen := false
+	defer func() {
+		if !holdSeen {
+			windowsHolderGate.free()
+		}
+	}()
 	info, err := windowsHookBinaryLstat(target)
 	classification, err := classifyGuardianTargetLstat(info, err)
 	if err != nil {
@@ -359,22 +347,29 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 		// start-style open does not say which kind of handle it is (a writer,
 		// or a reader that shares no reading), so the verdict is "held
 		// open".
-		if held != "" && windowsHookBinaryDeleteBlocked(target) {
+		if held != "" && windowsHolderCloserEnabled() && windowsHookBinaryDeleteBlocked(target) {
 			// GAP-0755: a handle that shares no deletion (any user may open
 			// the hook that way) cannot be swapped around: the rename that
 			// puts the new file at the name fails for as long as the handle
-			// lives. The guardian closes that handle in its owner instead;
-			// the file stays as it is and starts work at once.
-			closed, closeErr := windowsCloseHookHolders(target)
-			if len(closed) > 0 && !windowsHookBinaryOpenRefused(target) {
-				windowsHookHoldersClosed = closed
+			// lives. On the standalone profile the guardian closes that
+			// handle in its owner instead, inside the bounds listed at
+			// enterprise_hooks_hook_holders_policy_windows.go: it waits for the second check, never
+			// closes a service's, a protected or a session 0 process's
+			// handle, closes one handle at a time and backs off from a
+			// holder that takes it again. The file stays as it is.
+			holdSeen = true
+			closed, holdErr := endWindowsExclusiveHold(target)
+			if holdErr == nil && closed == 0 {
 				return "", nil
 			}
-			reason := fmt.Sprintf("the hook binary %s is %s, and the guardian could not end the hold", target, held)
-			if len(closed) > 0 {
-				reason += " (it closed " + strings.Join(closed, ", ") + ", but a start is still refused)"
-			} else if closeErr != nil {
-				reason += " (" + closeErr.Error() + ")"
+			if holdErr == nil && !windowsHookBinaryOpenRefused(target) {
+				return "", nil
+			}
+			reason := fmt.Sprintf("the hook binary %s is %s, and the guardian did not end the hold", target, held)
+			if holdErr != nil {
+				reason += " (" + holdErr.Error() + ")"
+			} else {
+				reason += fmt.Sprintf(" (it closed %d handle(s), but a start is still refused)", closed)
 			}
 			if err != nil {
 				return "", fmt.Errorf("%s: %w", reason, err)
@@ -394,7 +389,6 @@ func keepWindowsManagedFileCopy(target, copyPath, want string, refresh bool) (st
 			damage = held
 			break
 		}
-		windowsHookHoldersLogged = false
 		windowsHookBinaryDigestRefusal = verdict.refusal
 		if !refresh {
 			return "", nil
@@ -529,15 +523,20 @@ var windowsHookBinaryOpenRefused = func(path string) bool {
 }
 
 // The swaps a held-open verdict causes (GAP-0656 review S5). A handle that
-// holds the hook open and shares deletion (a writer, a scanner) keeps every
-// start off until the guardian swaps; a handle that shares no deletion is
-// closed instead, because no swap can replace the name under it (GAP-0755).
-// A swap cannot end a hold: the holder reopens the new object, and its
-// handle on the old object blocks the backup's deletion. Unbounded, that is
-// a full-size backup every check. So these swaps back off exponentially for
-// the same path, stop when windowsHeldSwapBackupCap backups are still
-// pending, and say so once. That any user may hold a hook image they may
-// start is a known limit; the cap bounds the cost, not the hold.
+// holds the hook open and shares deletion keeps every start off until the
+// guardian swaps (a writer opened with FileShare.ReadWrite | Delete); the
+// swap moves the name to a fresh file. A handle that shares no deletion (an
+// ordinary writer, which the C runtime and Go open without delete sharing, or
+// a reader that shares nothing) cannot be swapped around, because the rename
+// that puts the new file at the name fails for as long as it lives, so on
+// the standalone profile the guardian closes it in its owner, inside the
+// bounds listed at the top of enterprise_hooks_hook_holders_policy_windows.go (GAP-0755). A swap cannot end a
+// hold: the holder reopens the new object, and its handle on the old object
+// blocks the backup's deletion. Unbounded, that is a full-size backup every
+// check. So these swaps back off exponentially for the same path, stop when
+// windowsHeldSwapBackupCap backups are still pending, and say so once. That
+// any user may hold a hook image they may start is a known limit; the cap
+// bounds the cost, not the hold.
 var (
 	windowsHeldSwapBackoffBase = 10 * time.Second
 	windowsHeldSwapBackoffMax  = 5 * time.Minute
