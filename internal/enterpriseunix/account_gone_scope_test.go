@@ -460,3 +460,50 @@ func TestGuardianReconcileTimeoutCoversTheGuardianMinute(t *testing.T) {
 		t.Fatalf("GuardianReportTimeout %s, want 30s", env.GuardianReportTimeout)
 	}
 }
+
+// A recorded live account at a reused home does not stand in for the accounts
+// a fresh read finds there: an excluded account that moved in beside it is
+// outside enrollment, and a holder the record already names, an enrolled
+// newcomer or an unanswering directory change nothing.
+func TestCopilotAccountScopeSearchesTheHomeEvenWhenARecordedAccountIsLive(t *testing.T) {
+	cases := []struct {
+		name      string
+		holders   []unixidentity.HomeAccount
+		failure   error
+		wantOut   bool
+		wantReads int
+	}{
+		{"an excluded account moved in", []unixidentity.HomeAccount{{Name: "carol", UID: 503}, {Name: "bob", UID: 502}}, nil, true, 1},
+		{"only the recorded live account holds it", []unixidentity.HomeAccount{{Name: "carol", UID: 503}}, nil, false, 1},
+		{"an enrolled account moved in", []unixidentity.HomeAccount{{Name: "carol", UID: 503}, {Name: "dave", UID: 504}}, nil, false, 1},
+		{"the directory does not answer", nil, errors.New("timed out"), false, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHost(t, "darwin")
+			writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+				`{"version":1,"accounts":[{"user":"alice","uid":501,"home":"/Users/shared"},{"user":"carol","uid":503,"home":"/Users/shared"}]}`)
+			cfg := &config.Config{}
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+			cfg.Enterprise.Enrollment.ExcludeUsers = []string{"502"}
+			stubAccountsGone(t, "alice")
+			reads := 0
+			guardianAccountsAtHome = func(string) ([]unixidentity.HomeAccount, error) {
+				reads++
+				return tc.holders, tc.failure
+			}
+			scoped, out, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			shared := h.env.P("/Users/shared")
+			wantOut := []string(nil)
+			if tc.wantOut {
+				wantOut = []string{shared}
+			}
+			if !reflect.DeepEqual(slices.Compact(scoped), []string{shared}) || !reflect.DeepEqual(slices.Compact(out), wantOut) || reads != tc.wantReads {
+				t.Fatalf("scoped=%v out=%v reads=%d; want scoped=[%s] out=%v reads=%d", scoped, out, reads, shared, wantOut, tc.wantReads)
+			}
+		})
+	}
+}
