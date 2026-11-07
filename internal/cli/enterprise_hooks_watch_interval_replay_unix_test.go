@@ -129,7 +129,7 @@ func testGAP0689IntervalConcurrentWriteReplaysFsnotify(t *testing.T, name string
 		}
 		for _, target := range request.Targets {
 			response.Targets = append(response.Targets, enterpriseHookWorkerTargetResult{
-				Index: target.Index, OK: true, Repaired: call == 3,
+				Index: target.Index, OK: true, Repaired: call == 3, RestoredElements: restoredElementsIf(call == 3),
 				Result: &enterprisehooks.InstallResult{Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome},
 			})
 		}
