@@ -311,7 +311,7 @@ func contextWithCancelGrace(parent context.Context, grace time.Duration) (contex
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// The request is one hook call: its reads wait for network shares
-		// one answer wait in all, its own (rel-1-0-6:GAP-0482).
+		// networkShareCallWaits answer waits in all, its own (rel-1-0-6:GAP-0482).
 		defer hookpaths.HookCall()()
 		chargeBudget := func(receipt bool) bool {
 			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
