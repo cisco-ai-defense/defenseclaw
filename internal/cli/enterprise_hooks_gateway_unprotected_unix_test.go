@@ -93,7 +93,11 @@ func TestGatewayUnprotectedAgentsCopyIsTheAdministratorRecord(t *testing.T) {
 // The copy follows the record when the cycle could not replace it: the
 // administrator still sees the old V1, so the gateway copy must list it too,
 // not a clean scan of this cycle (review 2 M1).
-func TestGatewayUnprotectedAgentsCopyFollowsARecordThatWasNotReplaced(t *testing.T) {
+// gatewayCycleFixture sets up a real enumerator cycle (config generation 7,
+// opencode enabled, gateway copy publication on) and returns the fixture and
+// the config digest the records are stamped with.
+func gatewayCycleFixture(t *testing.T) (*standaloneFixture, string) {
+	t.Helper()
 	f := newStandaloneFixture(t, standaloneTestResolver{})
 	configPath := filepath.Join(f.root, "config.yaml")
 	raw := []byte("deployment_mode: managed_enterprise\n")
@@ -127,6 +131,17 @@ func TestGatewayUnprotectedAgentsCopyFollowsARecordThatWasNotReplaced(t *testing
 		return nil
 	}
 	enterpriseHooksEnumerateGatewayAgents = publishEnterpriseHookUnixGatewayUnprotectedAgents
+	return f, digest
+}
+
+func runGatewayCycle(f *standaloneFixture) error {
+	_, err := runEnterpriseHooksEnumerateCycle(context.Background(), io.Discard, f.manifest,
+		enterpriseHooksEnumerateOptions{manifest: f.manifest, descriptor: filepath.Join(f.root, "absent.json")}, &enterprisehooks.UnixEnumeratorState{Version: 1})
+	return err
+}
+
+func TestGatewayUnprotectedAgentsCopyFollowsARecordThatWasNotReplaced(t *testing.T) {
+	f, digest := gatewayCycleFixture(t)
 
 	rootPath := enterprisehooks.UnprotectedAgentsPath(f.manifest)
 	oldData, err := enterprisehooks.MarshalUnprotectedAgentsForConfig([]enterprisehooks.UnprotectedAgent{openCodeV1For(1006)}, 7, digest)
@@ -139,8 +154,7 @@ func TestGatewayUnprotectedAgentsCopyFollowsARecordThatWasNotReplaced(t *testing
 	cycle := func(rootWrite func(string, []enterprisehooks.UnprotectedAgent, uint64, string) error) {
 		t.Helper()
 		enterpriseHooksEnumerateUnprotectedWriter = rootWrite
-		if _, err := runEnterpriseHooksEnumerateCycle(context.Background(), io.Discard, f.manifest,
-			enterpriseHooksEnumerateOptions{manifest: f.manifest, descriptor: filepath.Join(f.root, "absent.json")}, &enterprisehooks.UnixEnumeratorState{Version: 1}); err != nil {
+		if err := runGatewayCycle(f); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -252,5 +266,176 @@ func TestGatewayUnprotectedAgentsCopyIsEmptiedWhenTheDirectoryRefusesRemoval(t *
 	}
 	if _, parseErr := enterprisehooks.ParseUnprotectedAgents(data); parseErr == nil {
 		t.Fatalf("the old copy still reads as a completed scan: %q", data)
+	}
+}
+
+// rel-1-0-6 GAP-0789 review 3 M1: the cycle that replaces the administrator
+// record withdraws the gateway copy first, so a cycle that stops between the
+// two writes never leaves a recent clean copy next to a record that lists an
+// uncovered agent.
+func TestEnumerateCycleStoppedBetweenTheRecordAndTheCopyLeavesNoOldCleanCopy(t *testing.T) {
+	f, digest := gatewayCycleFixture(t)
+	root := enterprisehooks.UnprotectedAgentsPath(f.manifest)
+	clean, err := enterprisehooks.MarshalUnprotectedAgentsForConfig(nil, 7, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root, clean, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGatewayCycleWithRecord(t, f, nil); err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(f.authDir, managed.HookGuardianUnprotectedAgentsFile)
+	if data, err := os.ReadFile(copyPath); err != nil || len(mustParseAgents(t, data)) != 0 {
+		t.Fatalf("setup: want a clean gateway copy, got %q, %v", data, err)
+	}
+
+	copied := make(chan struct{})
+	release := make(chan struct{})
+	enterpriseHooksEnumerateUnprotectedWriter = func(path string, _ []enterprisehooks.UnprotectedAgent, generation uint64, stamp string) error {
+		data, err := enterprisehooks.MarshalUnprotectedAgentsForConfig([]enterprisehooks.UnprotectedAgent{openCodeV1For(5001)}, generation, stamp)
+		if err == nil {
+			err = os.WriteFile(path, data, 0o600)
+		}
+		close(copied)
+		<-release
+		return err
+	}
+	done := make(chan error, 1)
+	go func() { done <- runGatewayCycle(f) }()
+	select {
+	case <-copied:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the cycle did not write the record")
+	}
+	// The cycle is stopped here: the record lists the V1, the mirror has not run.
+	rootAgents := mustParseAgents(t, mustReadFile(t, root))
+	copyData, copyErr := os.ReadFile(copyPath)
+	info, statErr := os.Stat(copyPath)
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if len(rootAgents) != 1 {
+		t.Fatalf("record = %+v, want the uncovered V1", rootAgents)
+	}
+	if copyErr == nil {
+		if agents, parseErr := enterprisehooks.ParseUnprotectedAgents(copyData); statErr != nil ||
+			(parseErr == nil && len(agents) == 0 && !enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), time.Now())) {
+			t.Fatalf("the old clean copy is still recent next to a record that lists a V1: %q", copyData)
+		}
+	}
+	// Once the cycle completes the copy is the record.
+	if got := mustParseAgents(t, mustReadFile(t, copyPath)); len(got) != 1 {
+		t.Fatalf("copy after the cycle = %+v, want the V1", got)
+	}
+	if done, err := os.Stat(copyPath); err != nil || enterprisehooks.UnprotectedAgentsRecordStale(done.ModTime(), time.Now()) {
+		t.Fatalf("the completed cycle left the copy old: %v, %v", done, err)
+	}
+}
+
+// When the old copy can be neither aged nor withdrawn (here a link in a
+// directory that refuses removal), the record is not replaced either: the
+// record and the copy stay the same older pair.
+func TestEnumerateCycleDoesNotReplaceTheRecordWhenTheCopyCannotBeRetired(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	f, digest := gatewayCycleFixture(t)
+	root := enterprisehooks.UnprotectedAgentsPath(f.manifest)
+	clean, err := enterprisehooks.MarshalUnprotectedAgentsForConfig(nil, 7, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(root, clean, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runGatewayCycleWithRecord(t, f, nil); err != nil {
+		t.Fatal(err)
+	}
+	copyPath := filepath.Join(f.authDir, managed.HookGuardianUnprotectedAgentsFile)
+	if err := os.Remove(copyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, copyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(f.authDir, 0o550); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(f.authDir, 0o750) })
+	wrote := false
+	enterpriseHooksEnumerateUnprotectedWriter = func(string, []enterprisehooks.UnprotectedAgent, uint64, string) error {
+		wrote = true
+		return nil
+	}
+	if err := runGatewayCycle(f); err != nil {
+		t.Fatal(err)
+	}
+	if wrote {
+		t.Fatal("the record was replaced while the previous gateway copy still stood")
+	}
+}
+
+// runGatewayCycleWithRecord runs a cycle whose record write publishes agents.
+func runGatewayCycleWithRecord(t *testing.T, f *standaloneFixture, agents []enterprisehooks.UnprotectedAgent) error {
+	t.Helper()
+	enterpriseHooksEnumerateUnprotectedWriter = func(path string, _ []enterprisehooks.UnprotectedAgent, generation uint64, stamp string) error {
+		data, err := enterprisehooks.MarshalUnprotectedAgentsForConfig(agents, generation, stamp)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(path, data, 0o600)
+	}
+	return runGatewayCycle(f)
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func mustParseAgents(t *testing.T, data []byte) []enterprisehooks.UnprotectedAgent {
+	t.Helper()
+	agents, err := enterprisehooks.ParseUnprotectedAgents(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return agents
+}
+
+// rel-1-0-6 GAP-0789 review 3 M2: only a record that carries the protection
+// the enumerator gives it is mirrored; a record with wider access is refused
+// and the previous copy is withdrawn. The benign twin is a 0600 record.
+func TestGatewayUnprotectedAgentsCopyRefusesARecordWithoutTheRecordProtection(t *testing.T) {
+	dir, path := gatewayCopyFixture(t)
+	for _, mode := range []os.FileMode{0o666, 0o644, 0o660} {
+		if err := mirrorEnterpriseHookGatewayUnprotectedAgents(dir, rootRecordFixture(t, nil, time.Now())); err != nil {
+			t.Fatalf("a 0600 record was not mirrored: %v", err)
+		}
+		root := rootRecordFixture(t, nil, time.Now())
+		if err := os.Chmod(root, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := mirrorEnterpriseHookGatewayUnprotectedAgents(dir, root); err == nil {
+			t.Fatalf("a %v record was mirrored as a completed clean scan", mode)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%v: the gateway copy stands after the record was refused: %v", mode, err)
+		}
+	}
+	root := rootRecordFixture(t, nil, time.Now())
+	link := root + ".link"
+	if err := os.Link(root, link); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+	if err := mirrorEnterpriseHookGatewayUnprotectedAgents(dir, root); err == nil {
+		t.Fatal("a record with a second hard link was mirrored")
 	}
 }

@@ -202,9 +202,12 @@ func UnprotectedAgentsPath(manifestPath string) string {
 }
 
 // ReadUnprotectedAgentsRecord reads the record at path as status reads it:
-// the bytes of a regular file within UnprotectedAgentsMaxBytes, and the time
-// of the scan it holds (the file modification time the writer refreshes every
-// cycle). The enumerator mirrors these bytes for the gateway.
+// a regular file within UnprotectedAgentsMaxBytes that carries the platform
+// record protection (unprotectedAgentsRecordTrusted), and the time of the
+// scan it holds (the file modification time the writer refreshes every
+// cycle). A record status would refuse is refused here, so nothing derived
+// from it is trusted either. The enumerator mirrors these bytes for the
+// gateway.
 func ReadUnprotectedAgentsRecord(path string) ([]byte, time.Time, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -218,6 +221,16 @@ func ReadUnprotectedAgentsRecord(path string) ([]byte, time.Time, error) {
 		return nil, time.Time{}, err
 	}
 	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if !os.SameFile(info, opened) {
+		return nil, time.Time{}, fmt.Errorf("enterprise hooks: %s changed while it was read", path)
+	}
+	if err := unprotectedAgentsRecordTrusted(path, opened); err != nil {
+		return nil, time.Time{}, err
+	}
 	data, err := io.ReadAll(io.LimitReader(file, UnprotectedAgentsMaxBytes+1))
 	if err != nil {
 		return nil, time.Time{}, err
@@ -225,11 +238,7 @@ func ReadUnprotectedAgentsRecord(path string) ([]byte, time.Time, error) {
 	if len(data) > UnprotectedAgentsMaxBytes {
 		return nil, time.Time{}, fmt.Errorf("enterprise hooks: %s exceeds %d bytes", path, UnprotectedAgentsMaxBytes)
 	}
-	scanned, err := file.Stat()
-	if err != nil {
-		return nil, time.Time{}, err
-	}
-	return data, scanned.ModTime(), nil
+	return data, opened.ModTime(), nil
 }
 
 // UnprotectedUnknownAccount is the user of an entry for an agent whose account
