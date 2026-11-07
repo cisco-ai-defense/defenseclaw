@@ -112,25 +112,85 @@ def _long_name(path: str) -> str:
     return path
 
 
+def _drive_kind(drive: str) -> tuple[str, str]:
+    """What a drive letter such as ``Z:`` is: ("local", ""), ("network", its UNC root) or ("subst", "").
+
+    ``QueryDosDevice`` tells them apart: a subst drive maps to ``\\??\\C:\\...``, a mapped network drive to
+    ``\\Device\\LanmanRedirector\\...`` or ``\\Device\\Mup\\...`` (the UNC root then comes from
+    ``WNetGetConnection``). Anything unknown is "local", so it is compared as written.
+    """
+    if not _windows():
+        return ("local", "")
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(1024)
+        if not ctypes.windll.kernel32.QueryDosDeviceW(drive, buffer, len(buffer)):  # type: ignore[attr-defined]
+            return ("local", "")
+        target = buffer.value.lower()
+        if target.startswith(("\\device\\lanmanredirector", "\\device\\mup", "\\??\\unc\\")):
+            remote = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_ulong(len(remote))
+            if ctypes.windll.mpr.WNetGetConnectionW(drive, remote, ctypes.byref(size)) == 0:  # type: ignore[attr-defined]
+                return ("network", remote.value)
+            return ("network", "")
+        if target.startswith("\\??\\"):
+            return ("subst", "")
+    return ("local", "")
+
+
+def _key(path: str) -> str:
+    return os.path.normcase(path).rstrip("\\/")
+
+
+def _resolution(path: str, *, include_self: bool = True) -> tuple[str, str]:
+    """(real path, what the path goes through) when *path* is not where it is written; ("", "") otherwise.
+
+    Only the longest part that exists is compared: Windows cannot expand the
+    short name of a part that does not exist, while ``realpath`` expands the
+    existing part, so the missing tail (the same on both sides) is left out.
+    A drive mapped to a share is the same place as its UNC root; a subst drive is not.
+    """
+    if not _windows():
+        return ("", "")
+    written = os.path.abspath(path)
+    if not include_self:
+        written = os.path.dirname(written)
+    existing, tail = written, ""
+    while not os.path.lexists(existing):
+        parent, name = os.path.split(existing)
+        if parent == existing or not name:
+            break
+        existing, tail = parent, (os.path.join(name, tail) if tail else name)
+    real = os.path.realpath(existing)
+    whole = os.path.join(real, tail) if tail else real
+    drive = os.path.splitdrive(existing)[0]
+    kind, remote = _drive_kind(drive) if len(drive) == 2 and drive[1] == ":" else ("local", "")
+    if kind == "subst":
+        return (whole, "a substituted drive (subst)")
+    shown = _long_name(existing)
+    accepted = {_key(shown)}
+    if kind == "network":
+        rest = shown[len(drive):]
+        if remote:
+            accepted.add(_key(remote + rest))
+        accepted.add(_key(os.path.realpath(drive + "\\").rstrip("\\/") + rest))
+    if _key(real) in accepted:
+        return ("", "")
+    return (whole, "a link")
+
+
 def resolves_elsewhere(path: str, *, include_self: bool = True) -> str:
     """Where *path* really is, when that is not where it is written (Windows only; empty otherwise).
 
     The last look before a removal: the real path (every link followed) must
-    equal the path written, upper and lower case aside. It catches a link made
+    equal the path written, upper and lower case and short names aside, and a
+    drive mapped to a network share counts as its share. It catches a link made
     since the component-by-component look, and a substituted drive. *include_self*
     False compares the folder above *path*, as *path* itself may be a link that
     goes as a link.
     """
-    if not _windows():
-        return ""
-    written = os.path.abspath(path)
-    if not include_self:
-        written = os.path.dirname(written)
-    written = _long_name(written)
-    real = os.path.realpath(written)
-    if os.path.normcase(real).rstrip("\\/") == os.path.normcase(written).rstrip("\\/"):
-        return ""
-    return real
+    return _resolution(path, include_self=include_self)[0]
 
 
 def _step(link: str, kind: str, *, leave: str) -> str:
@@ -161,11 +221,19 @@ def link_problem(path: str, *, include_self: bool = True, setup: bool = False) -
     """
     links = links_on_path(path, include_self=include_self)
     if not links:
-        real = resolves_elsewhere(path, include_self=include_self)
+        real, what = _resolution(path, include_self=include_self)
         if not real:
             return None
+        if what.endswith("(subst)"):
+            drive = os.path.splitdrive(os.path.abspath(path))[0]
+            return Problem(
+                f"{path} is reached through {what} (it resolves to {real})",
+                f"DefenseClaw does not remove anything through a substituted drive. If {drive} is a stray "
+                f"substitution, remove it with `subst {drive} /d`, or ask an administrator to, then run the "
+                "command again.",
+            )
         return Problem(
-            f"{path} is reached through a link or a substituted drive (it resolves to {real})",
+            f"{path} is reached through {what} (it resolves to {real})",
             f"DefenseClaw does not remove anything through a link. Ask an administrator to check {path}, "
             "then run the command again.",
         )
