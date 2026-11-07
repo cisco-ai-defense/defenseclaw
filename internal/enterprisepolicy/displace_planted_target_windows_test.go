@@ -227,9 +227,6 @@ func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
 	for _, linked := range []string{"Devin", "Windsurf"} {
 		t.Run(linked+" linked", func(t *testing.T) {
 			opts := windowsOpenCodeTestOptions(t)
-			if _, err := (devinCascadeTarget{}).Reconcile(opts); err != nil {
-				t.Fatalf("publish DefenseClaw's Cascade entries: %v", err)
-			}
 			devinPath, err := DevinSystemHooksPath(opts)
 			if err != nil {
 				t.Fatal(err)
@@ -237,6 +234,18 @@ func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
 			windsurfPath, err := devinCascadeLegacyHooksPath(opts)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// DefenseClaw publishes into the legacy file only when it exists
+			// (a pre-rename app reads only it), so an administrator's file is
+			// there first.
+			if err := createProtectedDir(filepath.Dir(windsurfPath)); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(windsurfPath, []byte(`{"version":1,"hooks":{}}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (devinCascadeTarget{}).Reconcile(opts); err != nil {
+				t.Fatalf("publish DefenseClaw's Cascade entries: %v", err)
 			}
 			owned := func(path string) bool {
 				t.Helper()
