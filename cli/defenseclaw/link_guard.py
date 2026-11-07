@@ -93,16 +93,82 @@ def links_on_path(path: str, *, include_self: bool = True) -> list[tuple[str, st
     return found
 
 
+def _windows() -> bool:
+    return os.name == "nt"
+
+
+def _long_name(path: str) -> str:
+    """*path* with its 8.3 short names written out (as given when Windows cannot say)."""
+    if not _windows():
+        return path
+    with contextlib.suppress(Exception):
+        import ctypes
+
+        size = ctypes.windll.kernel32.GetLongPathNameW(path, None, 0)  # type: ignore[attr-defined]
+        if size:
+            buffer = ctypes.create_unicode_buffer(size)
+            if ctypes.windll.kernel32.GetLongPathNameW(path, buffer, size):  # type: ignore[attr-defined]
+                return buffer.value
+    return path
+
+
+def resolves_elsewhere(path: str, *, include_self: bool = True) -> str:
+    """Where *path* really is, when that is not where it is written (Windows only; empty otherwise).
+
+    The last look before a removal: the real path (every link followed) must
+    equal the path written, upper and lower case aside. It catches a link made
+    since the component-by-component look, and a substituted drive. *include_self*
+    False compares the folder above *path*, as *path* itself may be a link that
+    goes as a link.
+    """
+    if not _windows():
+        return ""
+    written = os.path.abspath(path)
+    if not include_self:
+        written = os.path.dirname(written)
+    written = _long_name(written)
+    real = os.path.realpath(written)
+    if os.path.normcase(real).rstrip("\\/") == os.path.normcase(written).rstrip("\\/"):
+        return ""
+    return real
+
+
+def _step(link: str, kind: str, *, leave: str) -> str:
+    """The step for a link of *kind*: remove only the link when it is a plain junction or symlink."""
+    if kind not in ("junction", "symlink"):
+        # Another kind of reparse point (an online-only OneDrive folder, a mount point, a dedup or WSL point)
+        # is not for DefenseClaw to take apart, and rmdir may not remove it.
+        return (
+            f"{link} is a {kind} (a reparse point that is neither a junction nor a symbolic link). DefenseClaw "
+            f"does not remove anything through it. Ask an administrator to check {link}, then run the command again."
+        )
+    return (
+        f"{link} is a {kind}. DefenseClaw does not remove anything through a link. If it is a stray link, "
+        f"remove only the link with `cmd /c rmdir \"{link}\"` (this removes only the link, not what it points "
+        f"to), or ask an administrator to, then run the command again. If it is part of how this profile is "
+        f"set up, leave it: {leave}"
+    )
+
+
 def link_problem(path: str, *, include_self: bool = True, setup: bool = False) -> Problem | None:
     """Why *path* is not reached: a link at or above it, named, with the safe step (None when there is none).
 
     The link nearest the folder is the one to deal with first; one outside it
     is named in the reason and comes up on the next run. *setup* ends the step
-    with the way out for a DefenseClaw Setup 0.8.x install.
+    with the way out for a DefenseClaw Setup 0.8.x install. On Windows a last
+    check that the real path is the path written refuses what the component look
+    cannot name (see resolves_elsewhere).
     """
     links = links_on_path(path, include_self=include_self)
     if not links:
-        return None
+        real = resolves_elsewhere(path, include_self=include_self)
+        if not real:
+            return None
+        return Problem(
+            f"{path} is reached through a link or a substituted drive (it resolves to {real})",
+            f"DefenseClaw does not remove anything through a link. Ask an administrator to check {path}, "
+            "then run the command again.",
+        )
     link, kind = links[-1]
     text = f"{link} is a {kind}, and DefenseClaw does not read or remove a folder through a link"
     if len(links) > 1:
@@ -112,33 +178,37 @@ def link_problem(path: str, *, include_self: bool = True, setup: bool = False) -
         if setup
         else f"ask an administrator to check {link}."
     )
-    step = (
-        f"{link} is a {kind}. DefenseClaw does not remove anything through a link. If it is a stray link, "
-        f'remove only the link with `cmd /c rmdir "{link}"` (this removes only the link, not what it points '
-        f"to), or ask an administrator to, then run the command again. If it is part of how this profile is "
-        f"set up, leave it: {leave}"
-    )
-    return Problem(text, step)
+    return Problem(text, _step(link, kind, leave=leave))
 
 
-def dangling_link_problem(path: str) -> Problem | None:
-    """Why *path* cannot be reached: a link at or above it whose target is missing (None when there is none).
+def dangling_link_problem(path: str, *, above: bool = True) -> Problem | None:
+    """Why *path* cannot be reached: a link at or above it whose target cannot be found (None when there is none).
 
-    Nothing is behind such a link, so removing only the link is safe. A link
-    whose target cannot be read for another reason (access denied, an offline
-    file) is not reported as missing.
+    The target may be a deleted folder, or a drive or share that is not
+    connected, so the text does not say that nothing is behind it. A link whose
+    target cannot be read for another reason (access denied, an offline file) is
+    not reported. *above* False looks at *path* itself only.
     """
+    here = os.path.normcase(os.path.abspath(path))
     for link, kind in links_on_path(path):
+        if not above and os.path.normcase(os.path.abspath(link)) != here:
+            continue
         try:
             os.stat(link)
         except (FileNotFoundError, NotADirectoryError):
-            text = f"{link} is a {kind} whose target is missing"
-            step = (
-                f"{link} is a {kind} whose target is missing, so nothing is behind it. Remove only the link "
-                f'with `cmd /c rmdir "{link}"` (this removes only the link), or ask an administrator to, '
-                "then run the command again."
+            lost = (
+                f"{link} is a {kind} whose target cannot be found "
+                "(a deleted folder, or a drive or share that is not connected)"
             )
-            return Problem(text, step)
+            if kind in ("junction", "symlink"):
+                step = (
+                    f"{lost}. If it is a stray link, remove only the link with `cmd /c rmdir \"{link}\"` "
+                    "(this removes only the link), or ask an administrator to, then run the command again. "
+                    "If the drive or share should be there, connect it and run the command again."
+                )
+            else:
+                step = f"{lost}. Ask an administrator to check {link}, then run the command again."
+            return Problem(f"{link} is a {kind} whose target cannot be found", step)
         except OSError:
             continue
     return None
