@@ -105,16 +105,103 @@ func TestEnsureReportsTheScanPendingWhenTheEnumeratorDoesNotPublish(t *testing.T
 	}
 }
 
-// A change that leaves a current record in place does not wait for one.
+// writeStampedInstallScanRecord writes a completed scan of the installed
+// config, as the enumerator does at the end of a cycle.
+func writeStampedInstallScanRecord(t *testing.T, h *testHost) {
+	t.Helper()
+	data, err := h.marshalCompletedScan(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// GAP-0782: a change of the config (a connector roster pushed by ensure)
+// leaves the record of the previous config generation in place, written by
+// this same build a few minutes ago. The wait tested only the build and the
+// age, returned at once, and the result reported the scan pending ("from a
+// different config generation", coverage_complete=false: the Enterprise
+// Install Lane (pkg) on macOS). The wait and the result now share one test,
+// so the result reports the scan the restarted enumerator publishes.
+func TestEnsureWaitsForTheScanOfTheNewConfigGeneration(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			// The enumerator scanned the config the install wrote.
+			writeStampedInstallScanRecord(t, h)
+			h.env.InstallScanTimeout = 10 * time.Second
+			enumerator := unitOf(goos, "enumerator")
+			published := make(chan error, 1)
+			started := false
+			h.env.Services = &hookedServices{fakeServices: h.services, onStart: func(unit string) {
+				if unit != enumerator || started {
+					return
+				}
+				started = true
+				go func() {
+					time.Sleep(300 * time.Millisecond)
+					data, err := h.marshalCompletedScan(nil)
+					if err == nil {
+						err = os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600)
+					}
+					published <- err
+				}()
+			}}
+			t.Cleanup(func() {
+				if !started {
+					return
+				}
+				if err := <-published; err != nil {
+					t.Error(err)
+				}
+			})
+			r := h.run(Options{Action: ActionEnsure, ConfigFile: writeChangedConfig(t, h, "mode: observe", "mode: action")})
+			requireOK(t, r)
+			if !started {
+				t.Fatal("the change did not restart the enumerator; the test proves nothing")
+			}
+			if hasWarning(r, enterprisehooks.UnprotectedCodeInstallScanIncomplete) {
+				t.Fatalf("ensure reported the scan of the previous config generation as pending after the enumerator published: %+v", r.Warnings)
+			}
+			if !r.CoverageComplete {
+				t.Fatalf("coverage_complete=false after the enumerator published the scan of the new config: %+v", r.Warnings)
+			}
+		})
+	}
+}
+
+// An enumerator that does not publish the scan of the new config in time
+// leaves the truthful warning with its remedy, after the bounded wait.
+func TestEnsureReportsTheScanPendingWhenTheEnumeratorKeepsThePreviousConfigGeneration(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	writeStampedInstallScanRecord(t, h)
+	h.env.InstallScanTimeout = 100 * time.Millisecond
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: writeChangedConfig(t, h, "mode: observe", "mode: action")})
+	requireOK(t, r)
+	messages := messagesOf(r.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+	if r.CoverageComplete || !strings.Contains(messages, "from a different config generation") ||
+		!strings.Contains(messages, "launchctl kickstart") {
+		t.Fatalf("coverage=%v warnings=%q, want the scan-pending row for the previous config generation with its remedy", r.CoverageComplete, messages)
+	}
+}
+
+// A change that leaves a record of the installed config in place does not
+// wait for one: a repair rewrites no config, so the scan stays current.
 func TestEnsureDoesNotWaitForACurrentInstallScan(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
 	writeFreshLedger(t, h)
-	writeInstallScanRecord(t, h, "")
+	writeStampedInstallScanRecord(t, h)
 	h.env.InstallScanTimeout = time.Minute
 	begun := time.Now()
-	requireOK(t, h.run(Options{Action: ActionEnsure, ConfigFile: writeChangedConfig(t, h, "mode: observe", "mode: action")}))
+	requireOK(t, h.run(Options{Action: ActionRepair}))
 	if took := time.Since(begun); took > 20*time.Second {
-		t.Fatalf("ensure waited %s for an install scan that was already current", took)
+		t.Fatalf("repair waited %s for an install scan that was already current", took)
 	}
 }
