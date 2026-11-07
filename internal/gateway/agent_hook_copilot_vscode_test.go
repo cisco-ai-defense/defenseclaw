@@ -226,6 +226,30 @@ func TestGAP0691PerUserCopilotCLIRegistrationJudgesLocalToolCalls(t *testing.T) 
 	}
 }
 
+// sharedLocalProtectedTarget returns a protected file that exists on this OS,
+// outside the project, and the rule that names it once a project link to it is
+// resolved. Where the system /etc/shadow exists under that literal name (Linux)
+// it is the target. macOS has no /etc/shadow, and /etc there is a link to
+// /private/etc, so a link to a name below /etc resolves to a /private/etc
+// spelling the exact system-file rule does not name; the fixture is then a real
+// credential file (a .netrc in a user-home-shaped directory of its own), which
+// the same path rules protect on every OS.
+func sharedLocalProtectedTarget(t *testing.T) (target, rule string) {
+	t.Helper()
+	if physical, err := filepath.EvalSymlinks("/etc/shadow"); err == nil && physical == "/etc/shadow" {
+		return "/etc/shadow", "PATH-ETC-SHADOW"
+	}
+	home := filepath.Join(t.TempDir(), "Users", "fixture")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target = filepath.Join(home, ".netrc")
+	if err := os.WriteFile(target, []byte("machine example.invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return target, "PATH-NETRC"
+}
+
 func TestGAP0691SharedLocalFileTargetsAndEnvelope(t *testing.T) {
 	installSandboxMarkerRules(t)
 	store, logger := testStoreAndLogger(t)
@@ -235,7 +259,8 @@ func TestGAP0691SharedLocalFileTargetsAndEnvelope(t *testing.T) {
 		t.Fatal(err)
 	}
 	linked := filepath.Join(project, "linked.txt")
-	if err := os.Symlink("/etc/shadow", linked); err != nil {
+	protectedTarget, linkedRule := sharedLocalProtectedTarget(t)
+	if err := os.Symlink(protectedTarget, linked); err != nil {
 		t.Fatal(err)
 	}
 	ordinaryLink := filepath.Join(project, "ordinary-link.txt")
@@ -316,8 +341,12 @@ func TestGAP0691SharedLocalFileTargetsAndEnvelope(t *testing.T) {
 					if answer.Action != want {
 						t.Fatalf("action=%s, want %s; rules=%v", answer.Action, want, answer.RuleIDs)
 					}
-					if tc.protected && !tc.cliEvent && tier != "strict" && !slices.Contains(answer.RuleIDs, "PATH-ETC-SHADOW") {
-						t.Fatalf("protected file rule absent: %v", answer.RuleIDs)
+					wantRule := "PATH-ETC-SHADOW"
+					if strings.HasPrefix(tc.name, "linked") {
+						wantRule = linkedRule
+					}
+					if tc.protected && !tc.cliEvent && tier != "strict" && !slices.Contains(answer.RuleIDs, wantRule) {
+						t.Fatalf("protected file rule %s absent: %v", wantRule, answer.RuleIDs)
 					}
 					if tc.cliEvent && !slices.Contains(answer.RuleIDs, hookToolCallUnparsedRuleID) {
 						t.Fatalf("mixed body was not refused: %v", answer.RuleIDs)
