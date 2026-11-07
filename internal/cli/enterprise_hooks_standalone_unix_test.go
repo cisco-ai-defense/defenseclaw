@@ -136,7 +136,16 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			}
 			return enterprisehooks.InstallResult{Connector: opts.ConnectorName, AgentVersion: value}, nil
 		}
-		if mode == "drift" || mode == "fail" || mode == "slow-repair" {
+		if mode == "slow-verify" || (mode == "slow-second" && opts.ConnectorName == "claudecode") {
+			// A check that takes a while, nothing under repair: say so, then
+			// answer late.
+			if err := os.WriteFile(filepath.Join(opts.UserHome, "verify-started"), nil, 0o600); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			time.Sleep(3 * time.Second)
+			return result(opts), nil
+		}
+		if mode == "drift" || mode == "fail" || mode == "slow-repair" || (mode == "slow-second" && opts.ConnectorName == "hermes") {
 			return enterprisehooks.InstallResult{}, errors.New("hook config drifted")
 		}
 		return result(opts), nil
