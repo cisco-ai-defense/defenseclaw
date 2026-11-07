@@ -473,17 +473,58 @@ def test_real_program_folder_owned_by_another_account_is_refused(real_local: Pat
     from defenseclaw.file_permissions import _windows_current_user_sid
 
     root = _install(real_local)
+    system = "S-1-5-18"
+    _set_owner(root, system)
+
+    assert _windows_current_user_sid() != system
+    found = legacy_setup_install.find("win32")
+    assert found is not None
+    assert found.problem.startswith(f"its program folder belongs to another account ({system})")
+    assert "delete the folder yourself" in found.problem
+    done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: True)
+    assert done == [] and problems
+    assert (root / "bin" / "defenseclaw-gateway.exe").is_file()
+
+
+@windows_only
+def test_real_program_folder_owned_by_administrators_is_removed(real_local: Path) -> None:
+    from defenseclaw.file_permissions import _windows_current_user_sid
+
+    root = _install(real_local)
     administrators = "S-1-5-32-544"
-    # Another owner than this account; an elevated token can give it to Administrators.
+    # What an elevated install, Windows Server or a UAC-off account leaves.
     _set_owner(root, administrators)
 
     assert _windows_current_user_sid() != administrators
     found = legacy_setup_install.find("win32")
-    assert found is not None
-    assert found.problem == f"its program folder belongs to another account ({administrators})"
+    assert found is not None and found.problem == ""
     done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: True)
-    assert done == [] and problems
-    assert (root / "bin" / "defenseclaw-gateway.exe").is_file()
+    assert not problems and any(str(root) in line for line in done)
+    assert not root.exists()
+
+
+@pytest.mark.parametrize(
+    ("owner", "refused"),
+    (
+        ("S-1-5-21-1-2-3-1001", False),  # this account
+        ("S-1-5-32-544", False),  # Administrators: an elevated install
+        ("S-1-5-18", True),  # SYSTEM
+        ("S-1-5-21-1-2-3-1002", True),  # another user
+        ("", True),
+    ),
+)
+def test_the_owner_check_accepts_this_account_and_administrators_only(monkeypatch, owner: str, refused: bool) -> None:
+    from defenseclaw import file_permissions
+    from defenseclaw.commands import windows_uninstall_helper
+
+    monkeypatch.setattr(legacy_setup_install, "_is_reparse", lambda _path: False)
+    monkeypatch.setattr(windows_uninstall_helper, "_validate_root", lambda _root, _label: None)
+    monkeypatch.setattr(file_permissions, "_windows_acl_snapshot", lambda _path: (owner, False, []))
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: "S-1-5-21-1-2-3-1001")
+    problem = legacy_setup_install._ownership_problem(r"C:\Users\u\AppData\Local\Programs\DefenseClaw")
+    assert bool(problem) is refused
+    if refused:
+        assert "belongs to another account" in problem and "delete the folder yourself" in problem
 
 
 @windows_only

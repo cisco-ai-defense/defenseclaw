@@ -46,6 +46,9 @@ _VERSION = re.compile(r"0\.(?:0|[1-9][0-9]{0,3})\.(?:0|[1-9][0-9]{0,3})\Z")
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw"
 _STOP_WAIT_MS = 10_000
+# A folder an elevated token creates belongs to this group, not to the user
+# (Windows Server, a "Run as administrator" install, UAC off).
+_ADMINISTRATORS_SID = "S-1-5-32-544"
 
 
 @dataclass(frozen=True)
@@ -206,8 +209,14 @@ def _ownership_problem(root: str) -> str:
         current = _windows_current_user_sid()
     except OSError as exc:
         return f"its owner could not be read ({exc})"
-    if owner != current:
-        return f"its program folder belongs to another account ({owner or 'unknown'})"
+    # The user's own account, or Administrators: an elevated install is owned by
+    # the group. The folder is still the user's own Known Folder path with no
+    # link above it, and removing it takes no authority this account lacks.
+    if owner not in (current, _ADMINISTRATORS_SID):
+        return (
+            f"its program folder belongs to another account ({owner or 'unknown'}); "
+            "sign in as that account to uninstall it, or delete the folder yourself"
+        )
     return ""
 
 
