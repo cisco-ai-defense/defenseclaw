@@ -45,12 +45,6 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     strip_comment,
     strip_hash_comment,
 )
-from defenseclaw.scanner.plugin_scanner.regexp_receiver import (
-    RegexpReceivers,
-    code_view,
-    file_facts,
-    regexp_may_be_changed,
-)
 from defenseclaw.scanner.plugin_scanner.rules import (
     BINARY_EXTENSIONS,
     BUNDLE_DIRS,
@@ -77,7 +71,6 @@ from defenseclaw.scanner.plugin_scanner.rules import (
     WRITE_FUNCTIONS,
 )
 from defenseclaw.scanner.plugin_scanner.types import Finding, PluginManifest
-from defenseclaw.scanner.plugin_scanner.vendor_identity import path_reaches_private_state
 
 # PluginManifest.source holds a schema label; connector manifests live in a
 # dot directory, so map their labels back to the real file (GAP-2214).
@@ -174,8 +167,6 @@ def check_dependencies(
     manifest: PluginManifest,
     findings: list[Finding],
     target: str,
-    protected_sources: bool = True,
-    data_dir: str = "",
 ) -> None:
     if not manifest.dependencies:
         return
@@ -240,17 +231,12 @@ def check_dependencies(
             )
 
         if version.startswith("file:"):
-            # A local source that names or resolves into protected state is
-            # not a development convenience; it is blocked on every profile.
-            protected = protected_sources and path_reaches_private_state(
-                os.path.join(target, version[len("file:"):]), data_dir,
-            )
             findings.append(
                 make_finding(
                     len(findings) + 1,
                     rule_id="DEP-LOCAL-FILE",
-                    severity="HIGH" if protected else "MEDIUM",
-                    confidence=0.9 if protected else 0.7,
+                    severity="MEDIUM",
+                    confidence=0.7,
                     title=f'Dependency "{dep}" uses local file path',
                     evidence=f'"{dep}": "{version}"',
                     description=(
@@ -469,7 +455,6 @@ def scan_source_files(
     source_files_out: list | None = None,
     force_include: list[str] | None = None,
     python_host: bool = False,
-    secure_client_rules: bool = False,
 ) -> tuple[int, int]:
     """Returns (file_count, total_bytes).
 
@@ -564,24 +549,13 @@ def scan_source_files(
 
     total_bytes = 0
 
-    loaded: list[tuple[str, str]] = []
     for file_path in ts_files:
         try:
             with open(file_path, encoding="utf-8", errors="replace") as fh:
-                loaded.append((file_path, fh.read()))
+                content = fh.read()
         except OSError:
             continue
 
-    # A RegExp match is told from a command only when no file of the plugin
-    # can change what a regular expression reaches (see regexp_receiver).
-    views: dict[str, str] = {}
-    scripts = [(path, text) for path, text in loaded if not path.casefold().endswith(".py")]
-    if not secure_client_rules and any("exec" in text for _, text in scripts):
-        views = {path: code_view(text) for path, text in scripts}
-        if regexp_may_be_changed([file_facts(path, view) for path, view in views.items()]):
-            views = {}
-
-    for file_path, content in loaded:
         total_bytes += len(content)
 
         rel_path = (
@@ -624,8 +598,7 @@ def scan_source_files(
             )
 
         _scan_suspicious_patterns(
-            call_lines, rel_path, findings, capabilities, profile, in_test, "py" if is_py else "js", code_lines,
-            receivers=RegexpReceivers(views[file_path]) if file_path in views else None,
+            call_lines, rel_path, findings, capabilities, profile, in_test, "py" if is_py else "js", code_lines
         )
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)
         _check_for_credential_access(code_lines, rel_path, findings, capabilities, in_test)
@@ -653,7 +626,6 @@ def _scan_suspicious_patterns(
     in_test_path: bool,
     language: str = "js",
     evidence_lines: list[str] | None = None,
-    receivers: RegexpReceivers | None = None,
 ) -> None:
     for rule in SOURCE_PATTERN_RULES:
         if profile not in rule.profiles or language not in rule.languages:
@@ -661,12 +633,6 @@ def _scan_suspicious_patterns(
 
         for i, line in enumerate(code_lines):
             if rule.pattern.search(line):
-                if (
-                    rule.pattern_match_is_not_execution
-                    and receivers is not None
-                    and receivers.only_pattern_matches(i)
-                ):
-                    continue
                 if evidence_lines is not None and i < len(evidence_lines):
                     line = evidence_lines[i]
                 if rule.capability:
