@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unsafe"
@@ -423,21 +424,27 @@ func renameReplace(source, destination string, class uint32, flags uint32) error
 	return renameHandle(handle, 0, destination, class, flags)
 }
 
-// ReplaceFileInDirectory publishes a staged file through its held handle and
-// an already-validated parent directory handle. The destination is one leaf
-// in that directory. Unsupported volumes use the classic replacement request.
+// ReplaceFileInDirectory publishes a staged file through its held handle.
+// The caller has bound source to parent and keeps that directory and its
+// ancestors held against rename. SetFileInformationByHandle requires a null
+// RootDirectory with this absolute destination path. Unsupported volumes use
+// the classic replacement request.
 func ReplaceFileInDirectory(parent, source *os.File, targetName string) error {
 	if targetName == "" || targetName == "." || targetName == ".." ||
 		strings.ContainsAny(targetName, `\/:`) {
 		return fmt.Errorf("safefile: invalid destination leaf")
 	}
-	err := renameHandle(windows.Handle(source.Fd()), windows.Handle(parent.Fd()), targetName,
+	if parent == nil || !filepath.IsAbs(parent.Name()) {
+		return fmt.Errorf("safefile: destination directory has no absolute path")
+	}
+	destination := filepath.Join(parent.Name(), targetName)
+	err := renameHandle(windows.Handle(source.Fd()), 0, destination,
 		windows.FileRenameInfoEx, fileRenameReplaceIfExists|fileRenamePOSIXSemantics|fileRenameIgnoreReadOnlyAttribute)
 	if err == nil || !posixRenameUnsupported(err) {
 		return err
 	}
 	warnClassicRenameFallback()
-	return renameHandle(windows.Handle(source.Fd()), windows.Handle(parent.Fd()), targetName,
+	return renameHandle(windows.Handle(source.Fd()), 0, destination,
 		windows.FileRenameInfo, fileRenameReplaceIfExists)
 }
 
