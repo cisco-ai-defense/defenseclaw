@@ -234,7 +234,13 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 			}
 		}
 		resolved, err := filepath.EvalSymlinks(path)
-		if err == nil && projectSkillSourceSelects(home, resolved, resolvedSource) {
+		if err != nil {
+			continue
+		}
+		// A linked manifest is selected by its own spelling or by the
+		// folder that holds it, as for a linked folder.
+		if projectSkillSourceSelects(home, resolved, resolvedSource) ||
+			kind == fs.ModeDir && projectSkillSourceSelects(home, filepath.Dir(resolved), resolvedSource) {
 			return []string{dir}
 		}
 	}
