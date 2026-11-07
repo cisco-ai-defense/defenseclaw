@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"golang.org/x/sys/windows"
 )
 
 // checkOpenCodeServiceConfigFolders runs the folder checks the write runs,
@@ -55,9 +56,14 @@ func writeOpenCodeServiceConfig(home, path string, data []byte) error {
 	return safefile.Write(path, data)
 }
 
-// openCodeImportFileTrusted reports that service.json belongs to the account or
-// the system owners and no other account has write access (the DACL check the
-// write uses).
-func openCodeImportFileTrusted(path string, _ *os.File) bool {
-	return !openCodeServiceFileShared(path)
+// openCodeImportFileTrusted reports that the open service.json belongs to the
+// account or the system owners and no other account has write access. It asks
+// the handle, so a final link the open followed is judged by its target (the
+// writer still refuses a final link) and what is read is what was checked.
+func openCodeImportFileTrusted(_ string, file *os.File) bool {
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	return safefile.ValidatePrivateFileHandleAllowingAdministrators(windows.Handle(file.Fd())) == nil
 }
