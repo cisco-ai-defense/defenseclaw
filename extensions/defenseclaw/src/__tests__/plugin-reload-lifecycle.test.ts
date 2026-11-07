@@ -241,6 +241,41 @@ function startOlderBuildCopy(port: number, nativeFetch: typeof fetch) {
   };
 }
 
+/**
+ * One copy of an older plugin build over the shared state, with the 1.0.8
+ * protocol: start() installs only when the mark is down, and stop() always
+ * writes the mark down (and the port to null), whether or not this copy
+ * installed anything.
+ */
+function olderBuildCopy(port: number) {
+  const globals = globalThis as Record<symbol, unknown>;
+  const state = (globals[STATE_KEY] ??= {
+    llmDomains: ["api.openai.com"],
+    ollamaPorts: [] as string[],
+    installed: false,
+    guardrailPort: null as number | null,
+  }) as { installed: boolean; guardrailPort: number | null };
+  let original: typeof fetch | null = null;
+  return {
+    start: () => {
+      if (state.installed) return;
+      state.installed = true;
+      state.guardrailPort = port;
+      original = globalThis.fetch;
+      globalThis.fetch = (async () => new Response(`older:${port}`)) as typeof fetch;
+    },
+    stop: () => {
+      if (original) {
+        globalThis.fetch = original;
+        original = null;
+      }
+      state.installed = false;
+      state.guardrailPort = null;
+    },
+    holds: () => original !== null,
+  };
+}
+
 describe("module copies that share the transport, with a live copy of an older build", () => {
   const realFetch = globalThis.fetch;
   let seen: string[];
@@ -311,6 +346,91 @@ describe("module copies that share the transport, with a live copy of an older b
 
     expect(globalThis.fetch).toBe(baseFetch);
     expect(fresh.describeLayers().fetch).toBe(false);
+  });
+
+  it("a copy of the older build that never held the transport stops first: the holder keeps it, then hands it over", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    expect(bystander.holds()).toBe(false);
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+
+    bystander.stop();
+    expect(fresh.describeLayers().fetch).toBe(false);
+    expect(await (await globalThis.fetch("https://api.openai.com/v1/chat/completions")).text()).toBe(`older:${PORT}`);
+
+    holder.stop();
+    expect(fresh.describeLayers().fetch).toBe(true);
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
+
+    fresh.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  it("the older build starts again after a hand-over and stops: a later copy gets the transport, no model call goes direct", async () => {
+    const older = olderBuildCopy(PORT);
+    older.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const first = createFetchInterceptor(PORT + 1);
+    first.start();
+    older.stop();
+    expect(first.describeLayers().fetch).toBe(true);
+    first.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+
+    older.start();
+    expect(older.holds()).toBe(true);
+    const later = createFetchInterceptor(PORT + 2);
+    later.start();
+    expect(later.describeLayers().fetch).toBe(false);
+
+    older.stop();
+    expect(later.describeLayers().fetch).toBe(true);
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 2}/v1/chat/completions`]);
+    later.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  it("a second stop of an older copy after the hand-over does not release the new holder", async () => {
+    const older = olderBuildCopy(PORT);
+    older.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const first = createFetchInterceptor(PORT + 1);
+    first.start();
+    older.stop();
+    older.stop();
+    const later = createFetchInterceptor(PORT + 2);
+    later.start();
+    expect(later.describeLayers().fetch).toBe(false);
+
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
+    expect((globalThis as Record<symbol, { guardrailPort: number | null }>)[STATE_KEY].guardrailPort).toBe(PORT + 1);
+
+    first.stop();
+    expect(later.describeLayers().fetch).toBe(true);
+    later.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  it("repeated reloads: every new copy hands to the next, ending at the native transport", async () => {
+    const older = olderBuildCopy(PORT);
+    older.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const copies = [1, 2, 3].map((n) => createFetchInterceptor(PORT + n));
+    for (const copy of copies) copy.start();
+    older.stop();
+    for (const [index, copy] of copies.entries()) {
+      expect(copy.describeLayers().fetch).toBe(true);
+      expect(copies.filter((_, other) => other > index).every((later) => !later.describeLayers().fetch)).toBe(true);
+      copy.stop();
+    }
+    expect(globalThis.fetch).toBe(baseFetch);
   });
 
   it("benign twin: no older copy, the new copy installs at once and guards model calls", async () => {
