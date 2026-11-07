@@ -19,9 +19,12 @@ record is missing (the scan ran before setup) or older than its executable."""
 
 from __future__ import annotations
 
+import atexit
 import ctypes
 import json
 import os
+import shutil
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -32,6 +35,31 @@ import pytest
 from defenseclaw.inventory import agent_discovery as ad
 
 _CONFIG = "guardrail:\n  enabled: true\n  connector: codex\n  connectors:\n    codex:\n      enabled: true\n"
+
+
+#: The cursor executable of the cache-ordering cases is a real file: a cached
+#: version belongs to an executable that is there, so a recorded path that is
+#: not a file keeps nothing.
+_PEERS = Path(tempfile.mkdtemp(prefix="g752-peers-"))
+atexit.register(shutil.rmtree, _PEERS, ignore_errors=True)
+_CURSOR = str(_PEERS / "cursor")
+Path(_CURSOR).write_text("cursor", encoding="utf-8")
+
+
+def _cursor_signal(*, version: str = "", error: str = "") -> ad.AgentSignal:
+    signal = _signal("cursor", binary=_CURSOR, version=version, error=error)
+    signal.identity = ad._executable_identity(_CURSOR)
+    return signal
+
+
+_CODEX = str(_PEERS / "codex")
+Path(_CODEX).write_text("codex", encoding="utf-8")
+
+
+def _codex_signal(*, version: str) -> ad.AgentSignal:
+    signal = _signal("codex", binary=_CODEX, version=version)
+    signal.identity = ad._executable_identity(_CODEX)
+    return signal
 
 
 def _signal(name: str, *, binary: str = "", version: str = "", error: str = "") -> ad.AgentSignal:
@@ -213,13 +241,13 @@ def test_an_executable_that_left_the_launch_order_is_probed(monkeypatch, tmp_pat
 
 def test_publishing_one_agent_keeps_every_peer_entry(tmp_path):
     peers = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-    peers["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version="3.19.13")
+    peers["cursor"] = _cursor_signal(version="3.19.13")
     peers["codex"] = _signal("codex", binary="/opt/codex/bin/codex", error=ad.VERSION_NOT_PROBED)
     scanned = ad._format_rfc3339(ad._now_utc() - timedelta(minutes=5))
     assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=tmp_path)
     # The fresh scan versioned codex but missed cursor.
     fresh = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-    fresh["codex"] = _signal("codex", binary="/opt/codex/bin/codex", version="codex-cli 0.160.0")
+    fresh["codex"] = _codex_signal(version="codex-cli 0.160.0")
 
     assert ad._publish_agent_signal(
         ad.AgentDiscovery(scanned_at=ad._format_rfc3339(ad._now_utc()), agents=fresh, cache_hit=False),
@@ -235,7 +263,7 @@ def test_publishing_one_agent_keeps_every_peer_entry(tmp_path):
 
 def test_publishing_with_no_cache_takes_the_scan(tmp_path):
     fresh = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-    fresh["codex"] = _signal("codex", binary="/opt/codex/bin/codex", version="codex-cli 0.160.0")
+    fresh["codex"] = _codex_signal(version="codex-cli 0.160.0")
 
     assert ad._publish_agent_signal(
         ad.AgentDiscovery(scanned_at=ad._format_rfc3339(ad._now_utc()), agents=fresh, cache_hit=False),
@@ -301,12 +329,12 @@ def test_publishing_one_agent_replaces_a_peer_the_scan_read_at_another_version(t
         data = tmp_path / after.replace(" ", "-")
         data.mkdir()
         peers = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-        peers["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version=before)
+        peers["cursor"] = _cursor_signal(version=before)
         scanned = ad._format_rfc3339(ad._now_utc() - timedelta(minutes=5))
         assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=data)
         fresh = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-        fresh["codex"] = _signal("codex", binary="/opt/codex/bin/codex", version="codex-cli 0.160.0")
-        fresh["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version=after)
+        fresh["codex"] = _codex_signal(version="codex-cli 0.160.0")
+        fresh["cursor"] = _cursor_signal(version=after)
 
         assert ad._publish_agent_signal(
             ad.AgentDiscovery(scanned_at=ad._format_rfc3339(ad._now_utc()), agents=fresh, cache_hit=False),
@@ -322,12 +350,12 @@ def test_publishing_one_agent_replaces_a_peer_the_scan_read_at_another_version(t
 
 def test_publishing_one_agent_keeps_a_peer_the_scan_found_but_did_not_version(tmp_path):
     peers = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-    peers["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version="3.19.13")
+    peers["cursor"] = _cursor_signal(version="3.19.13")
     scanned = ad._format_rfc3339(ad._now_utc() - timedelta(minutes=5))
     assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=tmp_path)
     fresh = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-    fresh["codex"] = _signal("codex", binary="/opt/codex/bin/codex", version="codex-cli 0.160.0")
-    fresh["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", error=ad.VERSION_NOT_PROBED)
+    fresh["codex"] = _codex_signal(version="codex-cli 0.160.0")
+    fresh["cursor"] = _cursor_signal(error=ad.VERSION_NOT_PROBED)
 
     assert ad._publish_agent_signal(
         ad.AgentDiscovery(scanned_at=ad._format_rfc3339(ad._now_utc()), agents=fresh, cache_hit=False),
@@ -340,7 +368,7 @@ def test_publishing_one_agent_keeps_a_peer_the_scan_found_but_did_not_version(tm
 
 def _cursor_cache(data: Path, version: str, *, seconds_old: int) -> str:
     peers = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-    peers["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version=version)
+    peers["cursor"] = _cursor_signal(version=version)
     scanned = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=seconds_old))
     assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=data)
     return scanned
@@ -348,8 +376,8 @@ def _cursor_cache(data: Path, version: str, *, seconds_old: int) -> str:
 
 def _scan(*, seconds_old: int, cursor: str, codex: str = "codex-cli 0.160.0") -> ad.AgentDiscovery:
     agents = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
-    agents["codex"] = _signal("codex", binary="/opt/codex/bin/codex", version=codex)
-    agents["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version=cursor)
+    agents["codex"] = _codex_signal(version=codex)
+    agents["cursor"] = _cursor_signal(version=cursor)
     scanned = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=seconds_old))
     return ad.AgentDiscovery(scanned_at=scanned, agents=agents, cache_hit=False)
 
@@ -800,9 +828,10 @@ def test_the_stamp_is_the_time_the_selected_binary_answered_not_the_end_of_the_s
     assert stamp is not None and answered[0] <= stamp < answered[0] + timedelta(seconds=0.2)
 
 
-def _unread_scan(*, read_ago: float, version: str, error: str, binary: str = "/opt/cursor/bin/cursor") -> ad.AgentDiscovery:
+def _unread_scan(*, read_ago: float, version: str, error: str, binary: str = _CURSOR) -> ad.AgentDiscovery:
     disc = _scan(seconds_old=0, cursor=version)
     disc.agents["cursor"] = _signal("cursor", binary=binary, version=version, error=error)
+    disc.agents["cursor"].identity = ad._executable_identity(binary)
     stamp = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=read_ago))
     disc.scanned_at = stamp
     for signal in disc.agents.values():
@@ -1073,7 +1102,7 @@ def _peer_cache(tmp_path: Path, binary: Path, version: str) -> ad.AgentDiscovery
 def _later_scan_of_the_peer(binary: Path, *, error: str) -> ad.AgentDiscovery:
     scan = _identified_scan(binary, "")
     scan.agents["cursor"].error = error
-    codex = _signal("codex", binary="/opt/codex/bin/codex", version="codex-cli 0.160.0")
+    codex = _codex_signal(version="codex-cli 0.160.0")
     codex.observed_at = scan.agents["cursor"].observed_at
     scan.agents["codex"] = codex
     return scan
@@ -1439,6 +1468,11 @@ def test_a_write_keeps_a_newer_cached_version_of_an_executable_that_did_not_chan
     assert cached.observed_at == newer.agents["cursor"].observed_at
 
 
+def _filetime(unix_ns: int) -> int:
+    """A Unix time in nanoseconds as the 100 ns ticks since 1601 Windows keeps."""
+    return unix_ns // 100 + ad._WINDOWS_TICKS_AT_UNIX_EPOCH
+
+
 def _on_windows(monkeypatch, original: os.stat_result, binary: Path) -> None:
     """Windows semantics for one file: ``st_ctime`` is the creation time (it
     stays what the file was created with), and the NTFS change time moves with
@@ -1455,7 +1489,9 @@ def _on_windows(monkeypatch, original: os.stat_result, binary: Path) -> None:
 
     monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
     monkeypatch.setattr(ad.os, "stat", lambda path, *a, **k: WindowsStat(real_stat(path, *a, **k)))
-    monkeypatch.setattr(ad, "_windows_change_time", lambda path: real_stat(path).st_ctime_ns)
+    monkeypatch.setattr(ad, "_windows_change_time", lambda path: _filetime(real_stat(path).st_ctime_ns))
+    real_lstat = os.lstat
+    monkeypatch.setattr(ad.os, "lstat", lambda path, *a, **k: WindowsStat(real_lstat(path, *a, **k)))
 
 
 def test_a_same_size_rewrite_with_the_modification_time_restored_changes_the_identity_on_windows(monkeypatch, tmp_path):
@@ -1578,3 +1614,169 @@ def test_the_windows_change_time_is_none_when_windows_does_not_give_one(monkeypa
 
     assert ad._windows_change_time("C:\\tools\\cursor.exe") is None
     assert kernel32.closed == ([7] if kernel32.handle == 7 else [])
+
+
+# --- GAP-0752 review 9: a version is judged against the executable by every reader ----
+
+
+def test_the_windows_change_time_is_in_the_unit_of_the_modification_time(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    written = 1_800_000_000_123_456_700
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(ad, "_windows_change_time", lambda path: _filetime(written))
+
+    assert ad._executable_identity(str(binary))[5] == written
+
+
+def _cursor_discovery_setup(monkeypatch, tmp_path: Path, scan_version: str):
+    """A Windows account with Cursor configured, a cached read of the file, and a
+    scan that would answer *scan_version*. Returns (data, binary, original, rescans)."""
+    data, bindir = tmp_path / "data", tmp_path / "bin"
+    data.mkdir()
+    bindir.mkdir()
+    (data / "config.yaml").write_text(
+        "guardrail:\n  enabled: true\n  connector: cursor\n  connectors:\n    cursor:\n      enabled: true\n",
+        encoding="utf-8",
+    )
+    binary = bindir / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    original = binary.stat()
+    _on_windows(monkeypatch, original, binary)
+    rescans: list[str] = []
+
+    def scan(name, **_kwargs):
+        rescans.append(name)
+        if name == "cursor":
+            return _signal(name, binary=str(binary), version=scan_version)
+        return _signal(name)
+
+    monkeypatch.setattr(ad, "_configured_probe_names", lambda *_a, **_k: frozenset({"cursor"}))
+    monkeypatch.setattr(ad, "_unchanged_candidates_ahead", lambda *_a, **_k: ())
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    time.sleep(0.02)
+    assert ad._write_cache(_identified_scan(binary, "3.19.13"), data_dir=data)
+    return data, binary, original, rescans
+
+
+def test_a_windows_cached_discovery_reads_again_an_executable_rewritten_in_place(monkeypatch, tmp_path):
+    data, binary, original, rescans = _cursor_discovery_setup(monkeypatch, tmp_path, "cursor 2.3.99")
+    time.sleep(0.02)
+    binary.write_text("2.3.999", encoding="utf-8")
+    os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert rescans and disc.cache_hit is False
+    assert disc.agents["cursor"].version == "cursor 2.3.99"
+
+
+def test_a_windows_cached_discovery_keeps_the_version_of_an_executable_not_written_to(monkeypatch, tmp_path):
+    data, _binary, _original, rescans = _cursor_discovery_setup(monkeypatch, tmp_path, "cursor 2.3.99")
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert not rescans and disc.cache_hit is True
+    assert disc.agents["cursor"].version == "3.19.13"
+
+
+def _legacy_scan(binary: Path, version: str, *, read_ago: float = 0.0) -> ad.AgentDiscovery:
+    """A scan as a release before executable identities wrote it."""
+    scan = _identified_scan(binary, version)
+    stamp = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=read_ago))
+    scan.scanned_at = scan.agents["cursor"].observed_at = stamp
+    scan.agents["cursor"].identity = []
+    return scan
+
+
+def test_a_legacy_windows_entry_is_judged_changed_by_an_in_place_rewrite_and_not_kept(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    original = binary.stat()
+    os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns - 60_000_000_000))
+    _on_windows(monkeypatch, original, binary)
+    time.sleep(0.02)
+    assert ad._write_cache(_legacy_scan(binary, "3.19.13"), data_dir=tmp_path)
+    payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
+    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload) is False
+    older = _identified_scan(binary, "3.19.13")
+    older.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=30))
+    time.sleep(0.02)
+    binary.write_text("2.3.999", encoding="utf-8")
+    os.utime(binary, ns=(original.st_atime_ns, original.st_mtime_ns - 60_000_000_000))
+
+    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload) is True
+    assert ad._write_cache(older, data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+
+
+def _link_cache(tmp_path: Path):
+    old, new, link = tmp_path / "cursor-old", tmp_path / "cursor-new", tmp_path / "cursor"
+    old.write_text("3.19.13", encoding="utf-8")
+    new.write_text("cursor 2.3.99", encoding="utf-8")
+    link.symlink_to(old)
+    time.sleep(0.02)
+    assert ad._write_cache(_legacy_scan(link, "3.19.13"), data_dir=tmp_path)
+    return old, new, link
+
+
+def _peer_scan_that_timed_out_on(link: Path) -> ad.AgentDiscovery:
+    scan = _identified_scan(link, "")
+    scan.agents["cursor"].error = ad.VERSION_PROBE_TIMED_OUT
+    scan.agents["codex"] = _codex_signal(version="codex-cli 0.160.0")
+    return scan
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symbolic links")
+def test_a_legacy_entry_whose_launch_link_moved_to_an_older_install_is_not_kept(tmp_path):
+    _old, new, link = _link_cache(tmp_path)
+    time.sleep(0.02)
+    moved = tmp_path / "moved"
+    moved.symlink_to(new)
+    os.replace(moved, link)
+    payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
+    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload) is True
+
+    assert ad._publish_agent_signal(_peer_scan_that_timed_out_on(link), "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs symbolic links")
+def test_a_legacy_entry_whose_launch_link_did_not_move_is_kept(tmp_path):
+    _old, _new, link = _link_cache(tmp_path)
+    payload = ad._read_cache_payload(ad._cache_path(data_dir=tmp_path))
+    assert ad._entry_executable_changed(payload["agents"]["cursor"], payload) is False
+
+    assert ad._publish_agent_signal(_peer_scan_that_timed_out_on(link), "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+def _removed_then_older_scan(tmp_path: Path, writer: str) -> Path:
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    older = _identified_scan(binary, "3.19.13")
+    older.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=30))
+    newer = _identified_scan(binary, "3.19.13")
+    newer.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=5))
+    assert ad._write_cache(newer, data_dir=tmp_path)
+    binary.unlink()
+    if writer == "publish":
+        assert ad._publish_agent_signal(older, "cursor", data_dir=tmp_path)
+    else:
+        assert ad._write_cache(older, data_dir=tmp_path)
+    return binary
+
+
+@pytest.mark.parametrize("writer", ("publish", "write"))
+def test_a_removed_executable_does_not_keep_a_newer_cached_version_for_what_is_installed_there_next(tmp_path, writer):
+    binary = _removed_then_older_scan(tmp_path, writer)
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+
+    binary.write_text("cursor 2.3.99", encoding="utf-8")
+
+    cached = ad._read_cache(data_dir=tmp_path).agents["cursor"]
+    assert cached.version == ""
+    assert cached.identity != ad._executable_identity(str(binary))

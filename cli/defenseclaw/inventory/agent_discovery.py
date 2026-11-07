@@ -1349,6 +1349,10 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
             continue
         if not os.path.isabs(signal.binary_path) or not _resolves_unchanged_since(signal.binary_path, since, data_dir):
             return True
+        if _executable_replaced_since_read(
+            signal.binary_path, signal.identity, _parse_rfc3339(signal.observed_at) or scanned
+        ):
+            return True
         recorded = {"skipped_binaries": list(signal.skipped_binaries)}
         if _unchanged_candidates_ahead(name, signal.binary_path, recorded, since, data_dir) is None:
             return True
@@ -1527,9 +1531,17 @@ def _peers_with_unchanged_binaries(
     return frozenset(unchanged)
 
 
-def _resolves_unchanged_since(path: str, since: float, data_dir: str | os.PathLike[str] | None = None) -> bool:
+def _resolves_unchanged_since(
+    path: str,
+    since: float,
+    data_dir: str | os.PathLike[str] | None = None,
+    *,
+    links_only: bool = False,
+) -> bool:
     """Whether *path* resolves to a regular file through links and folders
     none of which, nor the file, changed (mtime or ctime) at or after *since*.
+    With ``links_only`` only the links on the way are judged (a link moved to
+    another file, whatever that file's own times are).
 
     Every link on the way counts, also a link in a parent folder: switching a
     ``current`` link to another version folder, or installing a new version
@@ -1577,6 +1589,8 @@ def _resolves_unchanged_since(path: str, since: float, data_dir: str | os.PathLi
         if os.path.isabs(target):
             resolved = (target_drive or drive) + os.sep
         pending.extend(part for part in reversed(target_rest.split(os.sep)) if part)
+    if links_only:
+        return True
     holders = _data_dir_holders(data_dir)
     always = {resolved, os.path.dirname(resolved)}
     for checked in dict.fromkeys(chain):
@@ -1695,14 +1709,19 @@ def _windows_change_time(path: str) -> int | None:
     return info.change_time if info.change_time > 0 else None
 
 
+#: FILETIME ticks (100 ns since 1601-01-01) at the Unix epoch.
+_WINDOWS_TICKS_AT_UNIX_EPOCH = 116_444_736_000_000_000
+
+
 def _change_time_ns(real: str, info: os.stat_result) -> int:
-    """When the file at *real* was last written to: the Windows change time
+    """When the file at *real* was last written to, in Unix nanoseconds (the
+    unit of the modification time and of a read time): the Windows change time
     there (``st_ctime`` is the creation time on Windows, which an in-place write
     leaves alone), ``st_ctime_ns`` elsewhere."""
     if _is_windows_host():
         ticks = _windows_change_time(real)
         if ticks is not None:
-            return ticks
+            return (ticks - _WINDOWS_TICKS_AT_UNIX_EPOCH) * 100
     return info.st_ctime_ns
 
 
@@ -3591,29 +3610,46 @@ def _entry_for_cache(signal: AgentSignal, observed_at: str) -> dict[str, Any]:
     return {**asdict(_current_signal(signal)), _ENTRY_OBSERVED_AT: observed_at}
 
 
+def _executable_replaced_since_read(path: str, recorded: list[Any], read_at: datetime | None) -> bool:
+    """Whether the version read at *read_at* from the executable at *path* is
+    no longer the version of the file there.
+
+    A file that cannot be read now is changed: it was removed, and whatever is
+    installed there next is another file (a version kept for it would be the
+    removed one). A reading with a recorded identity is compared with the file
+    now (:func:`_executable_identity`); one written before identities existed
+    is judged by the times of the file against the read time (the change time
+    in the unit of the modification time), and by the links on the way, which a
+    switch to another installed file leaves with old file times.
+    """
+    current = _executable_identity(path) if path else []
+    if not current:
+        return True
+    if recorded:
+        return recorded != current
+    if read_at is None:
+        return False
+    return max(current[2], current[5]) >= int(read_at.timestamp() * 1_000_000_000) or not _resolves_unchanged_since(
+        path, read_at.timestamp(), links_only=True
+    )
+
+
 def _entry_executable_changed(entry: Any, payload: dict[str, Any]) -> bool:
     """Whether the version a cached *entry* records belongs to an executable
-    that is no longer the one at its path.
+    that is no longer the one at its path (:func:`_executable_replaced_since_read`).
 
     Judged from the entry alone, so a peer scan that could not read the
     executable (a timeout, or one that kept changing so that nothing was
     selected) is still told apart from a slow answer of an unchanged one. An
-    entry with a recorded identity is compared with the file now; an entry
-    written before identities existed is compared by its change times against
-    the time it was read (the scan time when it says none). A file that cannot be read now is not judged changed
-    (it may be mid-update): the entry stays until a scan reads it.
+    entry written before identities existed is judged against the time it was
+    read (the scan time when it says none).
     """
     if not isinstance(entry, dict) or not str(entry.get("version") or ""):
         return False
     path = str(entry.get("binary_path") or "")
-    current = _executable_identity(path) if path else []
-    if not current:
+    if not path:
         return False
-    recorded = _recorded_identity(entry)
-    if recorded:
-        return recorded != current
-    read_at = _entry_observed_at(entry, payload)
-    return read_at is not None and max(current[2], current[5]) >= int(read_at.timestamp() * 1_000_000_000)
+    return _executable_replaced_since_read(path, _recorded_identity(entry), _entry_observed_at(entry, payload))
 
 
 def _entry_selected_elsewhere(entry: Any, fresh: AgentSignal) -> bool:
