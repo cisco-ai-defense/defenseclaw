@@ -40,10 +40,11 @@ type PolicyHoldScope struct {
 	// or cannot be resolved, a path is a held copy or lies inside one, or no
 	// held copy is left to compare with.
 	Ignored []string
-	// Unknown are the held copies this process could not inspect (present,
-	// but not readable here, for example below a private home folder). They
-	// are not absent: only the names of the paths were compared with them,
-	// so the caller decides by profile whether to run the call.
+	// Unknown are the held copies this process could not inspect, or could
+	// not compare in full (present, but not readable here, for example below
+	// a private home folder, or a folder with too many entries). They are not
+	// absent and not proven to hold the paths: only what could be compared
+	// was, so the caller decides by profile whether to run the call.
 	Unknown []string
 }
 
@@ -68,6 +69,7 @@ func PolicyHoldIgnoredFields(entry *audit.ActionEntry, paths []string) PolicyHol
 		return PolicyHoldScope{}
 	}
 	proven := 0
+	unsure := make([]bool, len(held))
 	for _, path := range paths {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -80,10 +82,14 @@ func PolicyHoldIgnoredFields(entry *audit.ActionEntry, paths []string) PolicyHol
 		if !exact {
 			return PolicyHoldScope{}
 		}
-		names := holdPathNames(path)
+		trail := holdPathTrail(path)
 		for i := range held {
-			if held[i].contains(resolved, names) {
+			inside, complete := held[i].contains(resolved, trail)
+			if inside {
 				return PolicyHoldScope{}
+			}
+			if !complete {
+				unsure[i] = true
 			}
 		}
 		proven++
@@ -92,8 +98,8 @@ func PolicyHoldIgnoredFields(entry *audit.ActionEntry, paths []string) PolicyHol
 		return PolicyHoldScope{}
 	}
 	scope := PolicyHoldScope{Ignored: fields}
-	for _, copy := range held {
-		if copy.info == nil {
+	for i, copy := range held {
+		if copy.info == nil || unsure[i] {
 			scope.Unknown = append(scope.Unknown, copy.recorded)
 		}
 	}
@@ -114,6 +120,10 @@ type heldPolicyCopy struct {
 	recorded string      // the path in the hold tag
 	resolved string      // the path with every link followed as far as it could be
 	info     os.FileInfo // its identity; nil when it cannot be inspected here
+
+	files     []os.FileInfo // identities of the files and links in a held folder
+	filesDone bool          // files was read
+	filesFull bool          // files lists every entry of the folder
 }
 
 // heldPolicyCopies are the copies of a hold tag that are not absent. A copy
@@ -135,79 +145,113 @@ func heldPolicyCopies(copies []string) []heldPolicyCopy {
 	return out
 }
 
-// contains reports whether a path is the held copy or inside it. names are
-// the names the path took on the way to its target and resolved is the target:
-// any name below the copy counts, as does the resolved path below it, the
-// identity of the resolved path or of one of its ancestors, and a file with the
-// identity of a file in a held folder. A comparison that cannot be made counts
-// as inside.
-func (h *heldPolicyCopy) contains(resolved string, names []string) bool {
-	for _, name := range append([]string{resolved}, names...) {
+// contains reports whether a path is the held copy or inside it, and whether
+// the comparison could be made in full. resolved is the target of the path and
+// trail the names and links on the way to it: any name below the copy counts,
+// as does the resolved path below it, the identity of the resolved path or of
+// one of its ancestors, and the identity of a file or link in a held folder
+// (a hard link to it has the same device and inode, whatever the link points
+// to). A folder that cannot be read through, or is too large to compare, does
+// not prove that the path lies inside it: the answer is outside and
+// incomplete, and the caller decides by profile. A lookup that fails on the
+// path itself counts as inside.
+func (h *heldPolicyCopy) contains(resolved string, trail holdTrail) (inside, complete bool) {
+	for _, name := range append([]string{resolved}, trail.names...) {
 		if pathWithinRoot(name, h.resolved) || pathWithinRoot(name, h.recorded) {
-			return true
+			return true, true
 		}
 	}
 	if h.info == nil {
-		return false
+		return false, true
 	}
-	for p, depth := resolved, 0; depth < policyHoldWalkLimit; depth++ {
+	links := trail.links
+	for p, depth := resolved, 0; ; depth++ {
+		if depth >= policyHoldWalkLimit {
+			return true, true
+		}
 		info, err := os.Stat(p)
 		switch {
 		case err == nil:
 			if os.SameFile(info, h.info) {
-				return true
+				return true, true
 			}
-			if depth == 0 && info.Mode().IsRegular() && h.info.IsDir() && h.holdsFile(info) {
-				return true
+			if depth == 0 && info.Mode().IsRegular() {
+				links = append(links[:len(links):len(links)], info)
 			}
 		case !pathAbsent(err):
-			return true
+			return true, true
 		}
 		parent := filepath.Dir(p)
 		if parent == p {
-			return false
+			break
 		}
 		p = parent
 	}
-	return true
+	if !h.info.IsDir() || len(links) == 0 {
+		return false, true
+	}
+	found, full := h.holdsAny(links)
+	return found, full
 }
 
-// holdsFile reports whether info is the identity of a file in the held folder
-// (a hard link to it has the same device and inode). A folder that cannot be
-// read through, or is too large to compare, counts as holding it.
-func (h *heldPolicyCopy) holdsFile(info os.FileInfo) bool {
-	seen := 0
-	found := false
-	err := filepath.WalkDir(h.resolved, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if seen++; seen > policyHoldFileLimit {
-			return errPolicyHoldFileLimit
-		}
-		if d.Type().IsRegular() {
-			if entry, ierr := d.Info(); ierr != nil || os.SameFile(entry, info) {
-				found = true
+// holdsAny reports whether any of infos is the identity of a file or link in
+// the held folder, and whether the whole folder was compared. The folder is
+// read once per call.
+func (h *heldPolicyCopy) holdsAny(infos []os.FileInfo) (found, complete bool) {
+	if !h.filesDone {
+		h.filesDone = true
+		h.filesFull = true
+		seen := 0
+		_ = filepath.WalkDir(h.resolved, func(_ string, d fs.DirEntry, err error) error {
+			if err != nil {
+				h.filesFull = false
+				return nil
+			}
+			if seen++; seen > policyHoldFileLimit {
+				h.filesFull = false
 				return fs.SkipAll
 			}
+			if d.Type().IsRegular() || d.Type()&fs.ModeSymlink != 0 {
+				if entry, ierr := d.Info(); ierr == nil {
+					h.files = append(h.files, entry)
+				} else {
+					h.filesFull = false
+				}
+			}
+			return nil
+		})
+	}
+	for _, entry := range h.files {
+		for _, info := range infos {
+			if os.SameFile(entry, info) {
+				return true, true
+			}
 		}
-		return nil
-	})
-	return found || err != nil
+	}
+	return false, h.filesFull
 }
 
-var errPolicyHoldFileLimit = errors.New("held folder has too many entries to compare")
+// holdTrail is how a path reaches its target: the names it takes, and the
+// identity of every link it passes through.
+type holdTrail struct {
+	names []string
+	links []os.FileInfo
+}
 
-// holdPathNames are the names path takes on the way to its target: each
-// prefix of the path and, for every link on it, each prefix of the target of
-// that link in turn. A link that cannot be read ends the list.
-func holdPathNames(path string) []string {
+// holdPathTrail follows path the way the system does and records the names it
+// takes: each prefix of the path that is still on the way to the target and,
+// for every link on it, the link itself and each prefix of its target in turn.
+// A folder that a parent element steps out of again is not on the way (an
+// alias spelled held/../admitted/x is the admitted file), but a link is named
+// whatever follows it. A link that cannot be read ends the trail.
+func holdPathTrail(path string) holdTrail {
 	path = filepath.Clean(path)
 	volume := filepath.VolumeName(path)
 	cur := volume + string(filepath.Separator)
 	queue := strings.Split(filepath.ToSlash(strings.TrimPrefix(path, cur)), "/")
-	var names []string
-	for links := 0; len(queue) > 0 && len(names) < policyHoldWalkLimit*policyHoldLinkLimit; {
+	var trail holdTrail
+	var chain []string
+	for links := 0; len(queue) > 0 && len(trail.names)+len(chain) < policyHoldWalkLimit*policyHoldLinkLimit; {
 		name := queue[0]
 		queue = queue[1:]
 		switch name {
@@ -215,25 +259,33 @@ func holdPathNames(path string) []string {
 			continue
 		case "..":
 			cur = filepath.Dir(cur)
+			if len(chain) > 0 {
+				chain = chain[:len(chain)-1]
+			}
 			continue
 		}
 		cur = filepath.Join(cur, name)
-		names = append(names, cur)
-		if info, err := os.Lstat(cur); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		info, err := os.Lstat(cur)
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			chain = append(chain, cur)
 			continue
 		}
+		trail.names = append(trail.names, cur)
+		trail.links = append(trail.links, info)
 		target, err := os.Readlink(cur)
 		if links++; err != nil || links > policyHoldLinkLimit {
-			return names
+			break
 		}
 		cur = filepath.Dir(cur)
 		if filepath.IsAbs(target) {
 			cur = filepath.VolumeName(target) + string(filepath.Separator)
 			target = strings.TrimPrefix(target, cur)
+			chain = chain[:0]
 		}
 		queue = append(strings.Split(filepath.ToSlash(target), "/"), queue...)
 	}
-	return names
+	trail.names = append(trail.names, chain...)
+	return trail
 }
 
 // resolveHoldPath is path with every link followed. A path that does not
