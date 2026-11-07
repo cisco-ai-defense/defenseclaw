@@ -69,6 +69,9 @@ func RegistrationWriteReach(command, cwd, home string, names []string) bool {
 	if registrationPatchReach(file, cwd, home, protected) {
 		return true
 	}
+	if registrationCopyReach(file, cwd, home, fileProtected) {
+		return true
+	}
 	if strings.Contains(command, "cd ") || strings.Contains(command, "pushd ") {
 		if statements, ok := TopLevelStatements(command, cwd, home); ok {
 			for _, statement := range statements {
@@ -158,6 +161,97 @@ func RegistrationWriteReach(command, cwd, home string, names []string) bool {
 	return found
 }
 
+// registrationCopyReach resolves a copy into a directory to the actual file
+// name supplied by its source. A directory receiving some other name is not
+// itself a registration write.
+func registrationCopyReach(file *syntax.File, cwd, home string, protected protectedFiles) bool {
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok || found {
+			return !found
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 3 {
+			return true
+		}
+		argv := make([]string, len(call.Args))
+		for i, word := range call.Args {
+			value, fixed := StaticWord(word, home)
+			if !fixed {
+				return true
+			}
+			argv[i] = value
+		}
+		if !IsCopyProgram(argv) {
+			return true
+		}
+		dest := CopyDestination(argv, cwd)
+		if dest == "" {
+			return true
+		}
+		source := argv[len(argv)-2]
+		if CopyDestinationOperand(argv) != argv[len(argv)-1] {
+			source = argv[len(argv)-1]
+		}
+		if source == "" || strings.HasPrefix(source, "-") {
+			return true
+		}
+		if info, err := os.Stat(dest); err != nil || !info.IsDir() {
+			return true
+		}
+		if protectedReachPath(filepath.Join(dest, filepath.Base(source)), protected, "") {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// RegistrationArchivePossibleReach reports an extraction into a directory
+// containing a registration when the archive's entries are not named in the
+// command. This is a possible write; callers choose its profile grade.
+func RegistrationArchivePossibleReach(command, cwd, home string, names []string) string {
+	if !strings.Contains(command, "tar") && !strings.Contains(command, "unzip") {
+		return ""
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return ""
+	}
+	found := ""
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 || found != "" {
+			return found == ""
+		}
+		program, fixed := StaticWord(call.Args[0], home)
+		if !fixed {
+			return true
+		}
+		args := make([]string, 0, len(call.Args)-1)
+		for _, word := range call.Args[1:] {
+			value, fixed := StaticWord(word, home)
+			if !fixed {
+				return true
+			}
+			args = append(args, value)
+		}
+		for _, dest := range ArchiveExtractionDestinations(program, args) {
+			folder := OperandPath(dest, cwd)
+			for _, name := range names {
+				if name != folder && strings.HasPrefix(name, folder+string(filepath.Separator)) {
+					found = folder
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
 // RegistrationWriteCandidate is the shared reader's cheap hot-path gate.
 func RegistrationWriteCandidate(command string) bool {
 	if strings.ContainsAny(command, ">") {
@@ -176,9 +270,13 @@ func RegistrationWriteCandidate(command string) bool {
 func registrationPatchReach(file *syntax.File, cwd, home string, protected protectedFiles) bool {
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
-		call, ok := node.(*syntax.CallExpr)
-		if !ok || len(call.Args) < 2 || found {
+		stmt, ok := node.(*syntax.Stmt)
+		if !ok || found {
 			return !found
+		}
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
 		}
 		program, fixed := StaticWord(call.Args[0], home)
 		if !fixed || programBase(program) != "patch" {
@@ -216,6 +314,14 @@ func registrationPatchReach(file *syntax.File, cwd, home string, protected prote
 		}
 		if patchSource == "" && len(operands) > 1 {
 			patchSource = operands[len(operands)-1]
+		}
+		if patchSource == "" {
+			for _, redirect := range stmt.Redirs {
+				if redirect.Op == syntax.RdrIn && redirect.Word != nil {
+					patchSource, _ = StaticWord(redirect.Word, home)
+					break
+				}
+			}
 		}
 		if patchSource == "" {
 			return true
