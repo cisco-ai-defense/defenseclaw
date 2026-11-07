@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 )
 
 // ManagedUserStateDir reports directories that a managed installation may
@@ -16,7 +18,8 @@ import (
 func ManagedUserStateDir(rel string) bool {
 	rel = filepath.ToSlash(filepath.Clean(rel))
 	switch rel {
-	case "hooks", "logs", "shims", "policies", "native-codeguard", "foreign-hook-sessions", "connector_backups", "foreign-hooks-backup":
+	case "hooks", "logs", "shims", "policies", "native-codeguard", "foreign-hook-sessions", "connector_backups", "foreign-hooks-backup",
+		"acp", "acp/enterprise-credentials", "acp/enterprise-token-index":
 		return true
 	}
 	if kind, ok := strings.CutPrefix(rel, "connector_backups/"); ok && !strings.Contains(kind, "/") {
@@ -33,6 +36,11 @@ func ManagedUserStateFile(rel string) bool {
 	if rel == "." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
 		return false
 	}
+	// A lock is created beside the file it guards (withFileLock,
+	// withOwnedFileLock): it is managed exactly when that file is.
+	if guarded, ok := strings.CutSuffix(rel, ".lock"); ok && ManagedUserStateFile(guarded) {
+		return true
+	}
 	parts := strings.Split(rel, "/")
 	if len(parts) == 1 {
 		switch rel {
@@ -41,10 +49,16 @@ func ManagedUserStateFile(rel string) bool {
 			"agent_discovery.json", "ai_discovery_state.json", "managed_peer_homes.json",
 			"gateway-api.json", "hook_guardian_state.json",
 			"inventory.db", "inventory.db-journal", "inventory.db-shm", "inventory.db-wal",
-			"foreign-hook-env.json", "hermes-home-setup.json", ".hermes-lifecycle.lock",
+			"foreign-hook-env.json", "hermes-home-setup.json",
 			"removed-connectors-logged.json", "kiro-created-dirs.json", ".hook-api-token-publish.lock",
 			"gateway.pid", "gateway.stopped", "notify-bridge.sh":
 			return true
+		}
+		if kind, ok := strings.CutPrefix(rel, "."); ok {
+			// The lifecycle lock of a connector with one (codex, hermes).
+			if kind, ok = strings.CutSuffix(kind, "-lifecycle.lock"); ok && (IsKnownBuiltinConnector(kind) || IsRemovedConnector(kind)) {
+				return true
+			}
 		}
 		if kind, ok := strings.CutPrefix(rel, ".hook-"); ok {
 			if kind, ok = strings.CutSuffix(kind, ".token"); ok && (IsKnownBuiltinConnector(kind) || IsRemovedConnector(kind)) {
@@ -57,6 +71,9 @@ func ManagedUserStateFile(rel string) bool {
 			}
 		}
 		return false
+	}
+	if parts[0] == "acp" {
+		return managedACPFile(parts[1:])
 	}
 	if len(parts) != 2 {
 		return false
@@ -102,6 +119,57 @@ func managedSessionRecordName(name string) bool {
 		return false
 	}
 	for _, ch := range name[2:42] {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// managedACPFile names the files `enterprise acp setup` and the ACP
+// credential store write below <data>/acp; rel is the path below that folder.
+// The path from the data directory decides, so a purge rooted at the ACP
+// folder itself carries the "acp" prefix (PurgeUserStateInRootAt).
+func managedACPFile(rel []string) bool {
+	switch len(rel) {
+	case 1:
+		name := rel[0]
+		switch name {
+		case ".token", ".enterprise-credentials.lock", ".enterprise-enrollment.lock", "owned-entries.json":
+			return true
+		}
+		for _, suffix := range []string{".token", ".enrollment.json", ".contract-lock.json"} {
+			if pair, ok := strings.CutSuffix(name, suffix); ok && managedACPPair(pair) {
+				return true
+			}
+		}
+	case 2:
+		if rel[0] == "enterprise-credentials" || rel[0] == "enterprise-token-index" {
+			return managedACPDigestName(rel[1])
+		}
+	}
+	return false
+}
+
+// managedACPPair reports "<client>-<agent>" for an editor and an agent of the
+// built-in catalog, the pair a token copy and a contract lock are named by.
+func managedACPPair(pair string) bool {
+	for _, client := range acp.BuiltinCatalog().Clients {
+		if agent, ok := strings.CutPrefix(pair, client.ID+"-"); ok && slices.Contains(acp.AgentIDs(), agent) {
+			return true
+		}
+	}
+	return false
+}
+
+// managedACPDigestName is "<64 lowercase hex>.json", the credential record
+// and token index names.
+func managedACPDigestName(name string) bool {
+	digest, ok := strings.CutSuffix(name, ".json")
+	if !ok || len(digest) != 64 {
+		return false
+	}
+	for _, ch := range digest {
 		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
 			return false
 		}

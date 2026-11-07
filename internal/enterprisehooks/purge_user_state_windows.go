@@ -99,6 +99,14 @@ func windowsUserStateRollbackFolders(home string) ([]string, error) {
 // window between the check and the removal, and nothing is removed through
 // a link: the purge refuses and leaves the folder as found.
 func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) error {
+	return purgeWindowsUserStateFolderAt(home, sid, dataDir, "")
+}
+
+// purgeWindowsUserStateFolderAt is purgeWindowsUserStateFolder for a folder
+// that is a managed subfolder (prefix, "acp") of the data directory rather
+// than the data directory: the ownership rules read the path from the data
+// directory.
+func purgeWindowsUserStateFolderAt(home string, sid *windows.SID, dataDir, prefix string) error {
 	rel, err := filepath.Rel(home, dataDir)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) {
 		return fmt.Errorf("enterprise hooks: refusing to purge %s, which is not below the profile %s", dataDir, home)
@@ -149,9 +157,13 @@ func purgeWindowsUserStateFolder(home string, sid *windows.SID, dataDir string) 
 		if err := keptManagedBackupsError(dataDir); err != nil {
 			return err
 		}
-		return connector.PurgeUserStateInRoot(root, func(rel string) error {
+		removeDenied := func(rel string) error {
 			return removeWindowsUserStateDenied(windows.Handle(pin.Fd()), rel)
-		})
+		}
+		if prefix != "" {
+			return connector.PurgeUserStateInRootAt(root, prefix, removeDenied)
+		}
+		return connector.PurgeUserStateInRoot(root, removeDenied)
 	}()
 	root.Close()
 	pin.Close()
@@ -388,7 +400,7 @@ func PurgeWindowsACPUserState(rawHome, rawSID string) error {
 		return err
 	}
 	dataDir := filepath.Join(home, ".defenseclaw")
-	if err := purgeWindowsUserStateFolder(home, sid, filepath.Join(dataDir, "acp")); err != nil {
+	if err := purgeWindowsUserStateFolderAt(home, sid, filepath.Join(dataDir, "acp"), "acp"); err != nil {
 		return err
 	}
 	_ = os.Remove(dataDir)
