@@ -626,7 +626,7 @@ func homeUser(home string) string {
 // knownNamesBound reports a binding of USER or LOGNAME in node
 // (firstUserBinding).
 func knownNamesBound(node syntax.Node, home string, depth int) bool {
-	_, bound := firstUserBinding(node, home, depth)
+	_, bound := firstUserBinding(node, home, depth, false)
 	return bound
 }
 
@@ -636,10 +636,14 @@ func knownNamesBound(node syntax.Node, home string, depth int) bool {
 // a shell -c call, or a call that binds a name where the value cannot be
 // followed (read, mapfile, printf -v, an eval of code that binds it, a
 // sourced file). The value a name has after such a binding is not the
-// login the home spells.
-func firstUserBinding(node syntax.Node, home string, depth int) (int, bool) {
+// login the home spells. With keepLoops, a for or select loop whose list
+// can hold the active login binds the name only at the end of the loop: its
+// words and body are read with the login in the iteration that has it
+// (loopListReadsActive; rel-1-0-6:GAP-0681 review 6).
+func firstUserBinding(node syntax.Node, home string, depth int, keepLoops bool) (int, bool) {
 	known := func(name string) bool { return name == "USER" || name == "LOGNAME" }
 	first := -1
+	keptLoops := map[*syntax.WordIter]bool{}
 	note := func(at syntax.Node) {
 		if end := int(at.End().Offset()); first < 0 || end < first {
 			first = end
@@ -651,8 +655,14 @@ func firstUserBinding(node syntax.Node, home string, depth int) (int, bool) {
 			if node.Name != nil && known(node.Name.Value) {
 				note(node)
 			}
+		case *syntax.ForClause:
+			if iter, ok := node.Loop.(*syntax.WordIter); ok && keepLoops && iter.Name != nil && known(iter.Name.Value) &&
+				loopListReadsActive(iter, home) {
+				keptLoops[iter] = true
+				note(node)
+			}
 		case *syntax.WordIter:
-			if node.Name != nil && known(node.Name.Value) {
+			if node.Name != nil && known(node.Name.Value) && !keptLoops[node] {
 				note(node)
 			}
 		case *syntax.CallExpr:
@@ -675,6 +685,24 @@ func firstUserBinding(node syntax.Node, home string, depth int) (int, bool) {
 		return true
 	})
 	return first, first >= 0
+}
+
+// loopListReadsActive reports a for or select list that can give its name
+// the active login: an empty list (the positional parameters), a word the
+// scan cannot read or that has a pattern, or the login itself, as the name
+// or spelled out. A list of other logins only does not.
+func loopListReadsActive(iter *syntax.WordIter, home string) bool {
+	active := homeUser(home)
+	if active == "" || len(iter.Items) == 0 {
+		return true
+	}
+	for _, word := range iter.Items {
+		value, static := knownValueWord(word, home, KnownUser{Name: active})
+		if !static || value == active || strings.ContainsAny(value, "*?[") {
+			return true
+		}
+	}
+	return false
 }
 
 func homeParam(param *syntax.ParamExp, haveHome bool) bool {
@@ -4053,7 +4081,7 @@ func TopLevelStatements(command, cwd, home string) ([]PlacedStatement, bool) {
 		// binding in it.
 		reads := KnownUser{Name: user}
 		if user != "" {
-			if bindEnd, bound := firstUserBinding(stmt, home, 0); bound {
+			if bindEnd, bound := firstUserBinding(stmt, home, 0, true); bound {
 				if _, simple := stmt.Cmd.(*syntax.CallExpr); !simple {
 					reads.Until = max(bindEnd-start, 1)
 				}
