@@ -146,6 +146,22 @@ func vendorFolderCases() []vendorFolderCase {
 	}
 }
 
+// appendToRecordedFile changes a recorded file the way an administrator's
+// edit does: still administrator-only, no longer the bytes DefenseClaw wrote.
+func appendToRecordedFile(t *testing.T, file string) {
+	t.Helper()
+	handle, err := os.OpenFile(file, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.WriteString("\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func folderSDDL(t *testing.T, path string) string {
 	t.Helper()
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
@@ -296,6 +312,11 @@ func TestStandaloneRecordedVendorFolderAStandardUserCanReplaceFailsClosed(t *tes
 			if err := applySDDL(folder, vendorFolderReplaceableDACL); err != nil {
 				t.Fatal(err)
 			}
+			// The safe transaction puts a weak folder right only when the
+			// recorded file is still as DefenseClaw wrote it; this one is
+			// not, so the folder is refused by name (a clean weak folder is
+			// re-protected: vendor_folder_judge_windows_test.go).
+			appendToRecordedFile(t, file)
 			before := folderSDDL(t, folder)
 			data, err := os.ReadFile(file)
 			if err != nil {
@@ -304,6 +325,9 @@ func TestStandaloneRecordedVendorFolderAStandardUserCanReplaceFailsClosed(t *tes
 
 			state, err := publishVendorCase(t, tc, opts)
 			requireNotTakenOverMessage(t, err, folder, false)
+			if !strings.Contains(err.Error(), "was changed after DefenseClaw wrote it") {
+				t.Fatalf("err = %v; want the changed recorded file named as what blocks the re-protection", err)
+			}
 			if state.Covered {
 				t.Fatalf("publish state = %+v, want not covered", state)
 			}
@@ -382,7 +406,7 @@ func TestStandaloneRecordedVendorFolderUsersMayAddFailsClosedWhenTheVendorLoadsM
 		if !tc.siblings {
 			continue
 		}
-		for _, variant := range []string{"add-only folder", "a user file already added"} {
+		for _, variant := range []string{"add-only folder, recorded file changed", "a user file already added"} {
 			t.Run(tc.name+" ("+variant+")", func(t *testing.T) {
 				pinReclaimStandalone(t, true)
 				opts := tc.options(t)
@@ -392,6 +416,9 @@ func TestStandaloneRecordedVendorFolderUsersMayAddFailsClosedWhenTheVendorLoadsM
 				requireCleanFirstPublish(t, tc, opts)
 				if err := applySDDL(folder, vendorFolderAddOnlyDACL); err != nil {
 					t.Fatal(err)
+				}
+				if variant != "a user file already added" {
+					appendToRecordedFile(t, file)
 				}
 				planted := ""
 				if variant == "a user file already added" {

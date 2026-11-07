@@ -953,3 +953,32 @@ func openGuardAppend(path string) (*os.File, error) {
 func linkedPolicyComponent(Options, string) string { return "" }
 
 func clearOrKeepLinkedPolicyPath(Options, string, *State) (string, string) { return "", "" }
+
+// VendorFolderProblem is the Windows vendor folder that does not protect a
+// recorded file; no folder is judged off Windows.
+type VendorFolderProblem struct {
+	Connector     string
+	Dir           string
+	File          string
+	Message       string
+	Reprotectable bool
+	Blocker       string
+}
+
+// InspectRecordedVendorFolders reports nothing off Windows.
+func InspectRecordedVendorFolders(Options, []string) []VendorFolderProblem { return nil }
+
+// ReprotectRecordedVendorFolders does nothing off Windows.
+func ReprotectRecordedVendorFolders(Options, []string) ([]ReprotectedFolder, []VendorFolderProblem) {
+	return nil, nil
+}
+
+// VendorFolderProblemFor reports nothing off Windows.
+func VendorFolderProblemFor(Options, string) *VendorFolderProblem { return nil }
+
+// IsVendorFolderRefusal is false off Windows.
+func IsVendorFolderRefusal(error) bool { return false }
+
+// reclaimRefusesContentDrift is the Windows standalone rule for vendor
+// folders; no unix vendor folder is taken over or kept, so it is false.
+var reclaimRefusesContentDrift = func() bool { return false }

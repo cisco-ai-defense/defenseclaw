@@ -297,14 +297,18 @@ func windowsStandaloneGuardianOptions() (enterprisepolicy.Options, []string, boo
 // of users the machine policies no longer enroll. Failure is
 // reported, not fatal: rows that depend on the policy (Copilot) fail their
 // own verification, and `enterprise policy verify` reports a missing floor.
-func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
+// The one failure it returns is a vendor folder that does not protect
+// DefenseClaw's recorded policy file (E3 case c): the reconcile names it and
+// is not clean, as Setup's lifecycle and machine-policy verify judge the
+// same folder (GAP-0756, GAP-0760). Secure Client returns nil.
+func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) error {
 	if cfg != nil && cfg.SecureClientIntegration() {
 		enterpriseHookSecureClientPlatformPrepare(stderr)
-		return
+		return nil
 	}
 	opts, connectors, standalone, err := enterpriseHookWindowsGuardianOptions()
 	if !standalone {
-		return
+		return nil
 	}
 	// After this pass's revocations and before any row: a deferred row
 	// whose SID kept a selection would fail its pending proof (GAP-0262).
@@ -313,7 +317,7 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
-		return
+		return nil
 	}
 	// Before the machine policy the hook-side guard enforces is published:
 	// an account this pass enrolls never meets DefenseClaw's own older
@@ -352,10 +356,15 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): the hook-side summary was not updated, so the Claude Code foreign-hook guard stays on until the managed_hooks_only lock is written\n")
 	}
 	windowsStandaloneGoOwnedPolicyMu.Lock()
-	_, err = enterpriseHookWindowsPublishGoOwned(publishOpts, connectors)
+	published, err := enterpriseHookWindowsPublishGoOwned(publishOpts, connectors)
 	windowsStandaloneGoOwnedPolicyMu.Unlock()
+	reportWindowsGuardianVendorFolders(stderr, published, err)
+	var refusal error
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
+		if windowsIsVendorFolderRefusal(err) {
+			refusal = err
+		}
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
@@ -370,6 +379,60 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Cursor enterprise adapter: %v\n", err)
 	} else if refreshed {
 		fmt.Fprintf(stderr, "[hook-guardian] rewrote the Cursor enterprise adapter for this release\n")
+	}
+	return refusal
+}
+
+// windowsIsVendorFolderRefusal is replaceable in tests.
+var windowsIsVendorFolderRefusal = enterprisepolicy.IsVendorFolderRefusal
+
+// enterpriseHookWindowsHookRepairedAudit is replaceable in tests.
+var enterpriseHookWindowsHookRepairedAudit = postWindowsManagedHookRepaired
+
+// enterpriseHookWindowsVendorFolderAlert is replaceable in tests.
+var enterpriseHookWindowsVendorFolderAlert = postWindowsManagedCoverageAlert
+
+// windowsGuardianVendorFolderRefusals remembers the refusal each vendor
+// folder last had, so the audit alert is written when the refusal appears or
+// changes and not at every pass.
+var (
+	windowsGuardianVendorFolderMu       sync.Mutex
+	windowsGuardianVendorFolderRefusals = map[string]string{}
+)
+
+// reportWindowsGuardianVendorFolders reports, once each, what the pass did to
+// the vendor folders DefenseClaw did not create that hold a file it recorded:
+// a folder it re-protected gets one HIGH connector-hook-repaired audit row
+// and one log line; a refusal gets one alert row naming the folder (and not a
+// repaired row), and the log line at every pass (GAP-0756, GAP-0760).
+func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepolicy.Result, publishErr error) {
+	for _, state := range published.States {
+		for _, folder := range state.Reprotected {
+			fmt.Fprintf(stderr, "[hook-guardian] re-protected %s (%s): %s; access list before %s, after %s\n",
+				folder.Dir, folder.Connector, folder.Why, folder.Before, folder.After)
+			if err := enterpriseHookWindowsHookRepairedAudit(folder, "defenseclaw-hook-guardian"); err != nil {
+				fmt.Fprintf(stderr, "[hook-guardian] the audit row for %s could not be written: %v\n", folder.Dir, err)
+			}
+			windowsGuardianVendorFolderMu.Lock()
+			delete(windowsGuardianVendorFolderRefusals, strings.ToLower(folder.Dir))
+			windowsGuardianVendorFolderMu.Unlock()
+		}
+	}
+	if publishErr == nil || !windowsIsVendorFolderRefusal(publishErr) {
+		return
+	}
+	key := "refused"
+	message := publishErr.Error()
+	windowsGuardianVendorFolderMu.Lock()
+	seen := windowsGuardianVendorFolderRefusals[key] == message
+	windowsGuardianVendorFolderRefusals[key] = message
+	windowsGuardianVendorFolderMu.Unlock()
+	if seen {
+		return
+	}
+	if err := enterpriseHookWindowsVendorFolderAlert("managed-vendor-folder", "managed_vendor_folder_not_protected",
+		map[string]any{"coverage_state": "incomplete", "message": message}); err != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] the audit row for the refused vendor folder could not be written: %v\n", err)
 	}
 }
 
