@@ -143,3 +143,27 @@ func TestEverySandboxHookStillAllowsAnAnsweredCall(t *testing.T) {
 		})
 	}
 }
+
+// The Antigravity sandbox deny keeps the sentence that says the request was
+// refused with its status, and adds the limit the gateway named when it named
+// one. A 429 that names no limit (a bare error body or no body) keeps the
+// sentence alone.
+func TestSandboxAntigravityRateRefusalSaysWhyAndNamesTheLimit(t *testing.T) {
+	const said = "DefenseClaw hook request was refused (HTTP 429), so the tool call is blocked."
+	agy := newSandboxHookHarness(t, NewAntigravityConnector(), "1.2.12")
+	token := map[string]string{SandboxTokenEnv: "tok"}
+	for _, tc := range []struct{ name, body, want string }{
+		{"names the limit", `{"error":"rate_limited","message":"this sandbox is over its \"hook\" rate of 25 a second"}`,
+			said[:len(said)-1] + `: this sandbox is over its "hook" rate of 25 a second`},
+		{"bare error body", `{"error":"slow down"}`, said},
+		{"no body", ``, said},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := agy.run(t, SandboxHookDir+"/antigravity-hook.sh", []string{"PreToolUse"}, antigravityPreToolUse, token, []string{"429|" + tc.body})
+			got := lastJSON(run)
+			if run.exitCode != 0 || got["decision"] != "deny" || got["reason"] != tc.want {
+				t.Fatalf("exit %d stdout %q, want a deny with reason %q; stderr=%s", run.exitCode, run.stdout, tc.want, run.stderr)
+			}
+		})
+	}
+}
