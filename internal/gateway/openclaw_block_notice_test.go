@@ -9,9 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func resetOpenClawBlockNotices(t *testing.T) {
@@ -38,6 +41,7 @@ type noticeServe struct {
 	session    string // X-DefenseClaw-Session-Id
 	enc        string // Content-Encoding of the reply
 	deny       bool   // the request does not present the owner credential
+	active     string // connector this gateway serves; openclaw when empty, none when "-"
 	viaPrefix  bool   // run behind connectorPrefixStripper, as the proxy does
 	ctype      string
 	status     int // 200 when zero
@@ -89,6 +93,13 @@ func serveNoticeWith(t *testing.T, o noticeServe) (string, int) {
 		path = "/v1/x"
 	}
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(o.reqBody))
+	switch o.active {
+	case "":
+		req = req.WithContext(withThresholdConnector(req.Context(), "openclaw"))
+	case "-":
+	default:
+		req = req.WithContext(withThresholdConnector(req.Context(), o.active))
+	}
 	if o.session != "" {
 		req.Header.Set(SessionIDHeader, o.session)
 	}
@@ -151,10 +162,10 @@ func streamText(frames []map[string]any, kind string) string {
 func TestGAP0644NoticeLeadsTheReplyInEveryFormat(t *testing.T) {
 	line := noticeTestLine()
 	want := line + "\n\n" + "I could not run that."
-	chatReq := `{"messages":[{"role":"user","content":"go"},{"role":"assistant","tool_calls":[{"id":"call_blk1"}]},{"role":"tool","tool_call_id":"call_blk1","content":"DefenseClaw: blocked"}]}`
-	respReq := `{"input":[{"type":"function_call_output","call_id":"call_blk1","output":"blocked"}]}`
-	antReq := `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_blk1","content":"blocked"}]}]}`
-	bedReq := `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"call_blk1","content":[{"text":"blocked"}]}}]}]}`
+	chatReq := `{"messages":[{"role":"user","content":"go"},{"role":"assistant","tool_calls":[{"id":"call_blk1"}]},{"role":"tool","tool_call_id":"call_blk1","content":"DefenseClaw: blocked (ref REF)"}]}`
+	respReq := `{"input":[{"type":"function_call_output","call_id":"call_blk1","output":"blocked (ref REF)"}]}`
+	antReq := `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_blk1","content":"blocked (ref REF)"}]}]}`
+	bedReq := `{"messages":[{"role":"user","content":[{"toolResult":{"toolUseId":"call_blk1","content":[{"text":"blocked (ref REF)"}]}}]}]}`
 
 	chatJSON := `{"id":"c1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"I could not run that."},"finish_reason":"stop"}]}`
 	chatSSE := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
@@ -220,15 +231,15 @@ func TestGAP0644NoticeLeadsTheReplyInEveryFormat(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
-			// The plugin id of an OpenClaw Responses call carries the item id.
-			rememberOpenClawBlockNotice("", "call_blk1|fc_77", "exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
-			out, code := serveNotice(t, c.req, c.ctype, c.resp, 0)
+			ref := rememberOpenClawBlockNotice("", "exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
+			req := strings.ReplaceAll(c.req, "REF", ref)
+			out, code := serveNotice(t, req, c.ctype, c.resp, 0)
 			if code != 200 {
 				t.Fatalf("status %d", code)
 			}
 			c.check(t, out)
 			// Exactly once: the same history on the next request is untouched.
-			again, _ := serveNotice(t, c.req, c.ctype, c.resp, 0)
+			again, _ := serveNotice(t, req, c.ctype, c.resp, 0)
 			if again != c.resp {
 				t.Fatalf("notice repeated on the next request:\n%s", again)
 			}
@@ -250,7 +261,7 @@ func TestGAP0644AllowedCallsAndOtherRepliesAreUntouched(t *testing.T) {
 				t.Fatalf("allowed call changed the reply: %q", out)
 			}
 			// A block for another call does not leak into this one.
-			rememberOpenClawBlockNotice("", "call_other", "exec", []string{noticeTestRule}, "r")
+			rememberOpenClawBlockNotice("", "exec", []string{noticeTestRule}, "r")
 			if out, _ := serveNotice(t, chatReq, tc.ctype, tc.body, 0); out != tc.body {
 				t.Fatalf("another call notice changed the reply: %q", out)
 			}
@@ -263,11 +274,11 @@ func TestGAP0644AllowedCallsAndOtherRepliesAreUntouched(t *testing.T) {
 
 func TestGAP0644NoticeWaitsForAReplyWithText(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	req := `{"messages":[{"role":"tool","tool_call_id":"call_blk1","content":"blocked"}]}`
+	ref := rememberOpenClawBlockNotice("", "exec", []string{noticeTestRule}, "r")
+	req := noticeChatReq(ref)
 	toolOnlyJSON := `{"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_2"}]}}]}`
 	toolOnlySSE := "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_2\"}]}}]}\n\ndata: [DONE]\n\n"
 	textJSON := `{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`
-	rememberOpenClawBlockNotice("", "call_blk1", "exec", []string{noticeTestRule}, "r")
 
 	if out, _ := serveNotice(t, req, "application/json", toolOnlyJSON, 0); out != toolOnlyJSON {
 		t.Fatalf("tool-only reply changed: %q", out)
@@ -289,8 +300,7 @@ func TestGAP0644NoticeWaitsForAReplyWithText(t *testing.T) {
 
 func TestGAP0644UnrewrittenFormatsKeepTheNoticeForALaterReply(t *testing.T) {
 	resetOpenClawBlockNotices(t)
-	req := `{"messages":[{"role":"tool","tool_call_id":"call_blk1","content":"blocked"}]}`
-	rememberOpenClawBlockNotice("", "call_blk1", "exec", nil, "r")
+	req := noticeChatReq(rememberOpenClawBlockNotice("", "exec", nil, "r"))
 	// A reply format that is not rewritten, and a compressed stream, pass
 	// through byte for byte and do not use up the notice.
 	for _, tc := range []struct{ ctype, enc string }{{"text/plain", ""}, {"text/event-stream", "br"}, {"application/json", "zstd"}} {
@@ -348,31 +358,61 @@ func TestGAP0644LaunderKeepsAModelReplyThatCarriesANotice(t *testing.T) {
 	}
 }
 
-// The inspect endpoint records a notice for an enforced OpenClaw block only.
-func TestGAP0644InspectRecordsOnlyEnforcedBlocks(t *testing.T) {
+// The inspect endpoint issues a notice reference for an enforced OpenClaw
+// block only.
+func TestGAP0644InspectIssuesAReferenceOnlyForEnforcedBlocks(t *testing.T) {
 	resetOpenClawBlockNotices(t)
+	const blocking = `{"tool":"exec","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`
 	api := testAPIServerWithConfig(t, "action")
-	_, benign := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_ok1","args":{"command":"echo hello"}}`)
-	if benign.Action != "allow" || openClawBlockNoticesPending("") {
-		t.Fatalf("benign call: action=%s pending=%v", benign.Action, openClawBlockNoticesPending(""))
+	_, benign := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","args":{"command":"echo hello"}}`)
+	if benign.Action != "allow" || benign.NoticeRef != "" || openClawBlockNoticesPending("") {
+		t.Fatalf("benign call: %+v pending=%v", benign, openClawBlockNoticesPending(""))
 	}
-	_, blocked := postInspectForConnector(t, api, "openclaw", `{"tool":"exec","tool_call_id":"call_blk2|fc_1","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`)
-	if blocked.Action != "block" {
-		t.Fatalf("protected call not blocked: %+v", blocked)
+	_, blocked := postInspectForConnector(t, api, "openclaw", blocking)
+	if blocked.Action != "block" || !regexp.MustCompile(`^dc-[0-9a-f]{16}$`).MatchString(blocked.NoticeRef) {
+		t.Fatalf("protected call: %+v", blocked)
 	}
-	got := takeOpenClawBlockNotices([]byte(`{"messages":[{"role":"tool","tool_call_id":"call_blk2"}]}`), "")
+	// The tool result carries the reference; nothing else of the call is needed.
+	got := takeOpenClawBlockNotices([]byte(noticeChatReq(blocked.NoticeRef)), "")
 	if len(got) != 1 || !strings.Contains(got[0].line, openClawBlockNoticeMark+": exec") || !strings.Contains(got[0].line, "(rule ") {
 		t.Fatalf("notice=%+v", got)
 	}
-	// A block without an id has nothing to match and records nothing.
-	postInspectForConnector(t, api, "openclaw", `{"tool":"exec","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`)
-	if openClawBlockNoticesPending("") {
-		t.Fatal("a block without a tool call id left a notice")
+	// Another connector never gets one.
+	_, other := postInspectForConnector(t, api, "claudecode", blocking)
+	if other.NoticeRef != "" || openClawBlockNoticesPending("") {
+		t.Fatalf("a non-OpenClaw block left a notice: %+v", other)
 	}
-	// Another connector never records one.
-	postInspectForConnector(t, api, "claudecode", `{"tool":"exec","tool_call_id":"call_blk3","args":{"command":"echo k >> ~/.ssh/authorized_keys"}}`)
-	if openClawBlockNoticesPending("") {
-		t.Fatal("a non-OpenClaw block left a notice")
+	// The session the notice is filed under is the one the request header names.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", bytes.NewBufferString(blocking))
+	req.Header.Set(SessionIDHeader, "sess-a")
+	req = req.WithContext(withAuthenticatedInspectConnector(req.Context(), "openclaw"))
+	_, sess := postInspectHTTP(t, api, req)
+	if sess.NoticeRef == "" || !openClawBlockNoticesPending("sess-a") || openClawBlockNoticesPending("") {
+		t.Fatalf("session filing: %+v", sess)
+	}
+}
+
+// Secure Client answers stay as they were: no reference, no notice. (A
+// Secure Client inspect cannot be driven to a block in a unit fixture: its
+// local scan is skipped without a wired AI Defense lane, so the policy is
+// pinned on the config the handler consults.)
+func TestGAP0644SecureClientAnswerHasNoNoticeReference(t *testing.T) {
+	secure := &config.Config{DeploymentMode: "managed_enterprise"}
+	if !secure.SecureClientIntegration() {
+		t.Fatal("fixture is not a Secure Client configuration")
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+		want bool
+	}{
+		{"no config", nil, true},
+		{"default profile", &config.Config{}, true},
+		{"Secure Client", secure, false},
+	} {
+		if got := openClawNoticeAllowed(tc.cfg); got != tc.want {
+			t.Errorf("%s: openClawNoticeAllowed=%v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -402,11 +442,15 @@ func TestGAP0644NoticeThroughThePassthroughHandler(t *testing.T) {
 			}))
 			defer upstream.Close()
 			proxy := newForwardingProxy(t, upstream.URL)
-			front := httptest.NewServer(openClawBlockNoticeMiddleware(http.HandlerFunc(proxy.handlePassthrough), func(*http.Request) bool { return true }))
+			notice := openClawBlockNoticeMiddleware(http.HandlerFunc(proxy.handlePassthrough), func(*http.Request) bool { return true })
+			front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				notice.ServeHTTP(w, r.WithContext(withThresholdConnector(r.Context(), "openclaw")))
+			}))
 			defer front.Close()
 
+			ref := rememberOpenClawBlockNotice("", "exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
 			send := func() string {
-				body := `{"model":"gpt-4.1","stream":` + strconv.FormatBool(stream) + `,"input":[{"type":"function_call_output","call_id":"call_blk1","output":"blocked"}]}`
+				body := `{"model":"gpt-4.1","stream":` + strconv.FormatBool(stream) + `,"input":[{"type":"function_call_output","call_id":"call_blk1","output":"blocked (ref ` + ref + `)"}]}`
 				req, _ := http.NewRequest(http.MethodPost, front.URL+"/v1/responses", strings.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
 				req.Header.Set("X-DC-Target-URL", upstream.URL)
@@ -422,7 +466,6 @@ func TestGAP0644NoticeThroughThePassthroughHandler(t *testing.T) {
 				}
 				return string(b)
 			}
-			rememberOpenClawBlockNotice("", "call_blk1|fc_1", "exec", []string{noticeTestRule}, "matched: ssh authorized_keys write")
 			out := send()
 			if !strings.Contains(out, "Tool call blocked: exec (rule "+noticeTestRule+")") || !strings.Contains(out, `\n\n`) || !strings.Contains(out, "run that.") {
 				t.Fatalf("notice missing from the forwarded reply:\n%s", out)

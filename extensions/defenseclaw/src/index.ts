@@ -89,7 +89,19 @@ type InspectVerdict = {
   reason: string;
   mode: "action" | "observe";
   approval_timeout_ms?: number;
+  // Reference of an enforced block; the block reason carries it so the proxy
+  // can show the block on the model reply that follows (GAP-0644).
+  notice_ref?: string;
 };
+
+// blockNoticeSuffix is the reference the gateway issued for this block, in the
+// shape the proxy looks for in the tool result. Nothing when the gateway
+// issued none.
+const NOTICE_REF = /^dc-[0-9a-f]{16}$/;
+function blockNoticeSuffix(verdict: InspectVerdict): string {
+  const ref = verdict.notice_ref;
+  return typeof ref === "string" && NOTICE_REF.test(ref) ? ` (ref ${ref})` : "";
+}
 
 function hasValidInspectActionContract(verdict: Record<string, unknown>): boolean {
   if (verdict.mode === "observe" && verdict.action !== "allow") return false;
@@ -493,7 +505,6 @@ export default function (api: DefenseClawPluginHost) {
           args: event.params,
           content,
           direction: "outbound",
-          tool_call_id: (event as { toolCallId?: string }).toolCallId,
         },
         ctx,
       );
@@ -504,7 +515,10 @@ export default function (api: DefenseClawPluginHost) {
       logInspectWarning("message", verdict);
 
       if (verdict.action === "block" && verdict.mode === "action") {
-        return { block: true, blockReason: `DefenseClaw: outbound blocked — ${verdict.reason}` };
+        return {
+          block: true,
+          blockReason: `DefenseClaw: outbound blocked — ${verdict.reason}${blockNoticeSuffix(verdict)}`,
+        };
       }
       if (verdict.action === "confirm" && verdict.mode === "action") {
         return buildApprovalRequest("outbound message", verdict);
@@ -516,9 +530,6 @@ export default function (api: DefenseClawPluginHost) {
       {
         tool: event.toolName,
         args: event.params,
-        // The gateway keys a block notice by this id, so the proxy can show
-        // the block on the model reply that follows it (GAP-0644).
-        tool_call_id: (event as { toolCallId?: string }).toolCallId,
       },
       ctx,
     );
@@ -529,7 +540,7 @@ export default function (api: DefenseClawPluginHost) {
     logInspectWarning(event.toolName, verdict);
 
     if (verdict.action === "block" && verdict.mode === "action") {
-      return { block: true, blockReason: `DefenseClaw: ${verdict.reason}` };
+      return { block: true, blockReason: `DefenseClaw: ${verdict.reason}${blockNoticeSuffix(verdict)}` };
     }
     if (verdict.action === "confirm" && verdict.mode === "action") {
       return buildApprovalRequest(event.toolName, verdict);

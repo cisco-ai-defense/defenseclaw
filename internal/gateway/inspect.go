@@ -84,10 +84,6 @@ type ToolInspectRequest struct {
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
-	// ToolCallID is the id the OpenClaw plugin hook names for the call. An
-	// enforced block is keyed by it so the proxy can put the block notice on
-	// the reply that follows (GAP-0644).
-	ToolCallID string `json:"tool_call_id,omitempty"`
 	// BoundedPrefixReview is set by the per-user shell inspect hooks on the
 	// bounded review of a call over their size cap (markOversizeUninspected).
 	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
@@ -162,6 +158,10 @@ type ToolInspectVerdict struct {
 	Mode              string        `json:"mode"`
 	WouldBlock        bool          `json:"would_block,omitempty"`
 	ApprovalTimeoutMS int           `json:"approval_timeout_ms,omitempty"`
+	// NoticeRef is the reference of an enforced OpenClaw block. The plugin puts
+	// it in the block reason, so the model request that carries the tool
+	// result lets the proxy show the block on the reply (GAP-0644).
+	NoticeRef string `json:"notice_ref,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive from the AID lane through the hook-side
 	// merge so the evaluate* callers can stamp it onto the request
@@ -2362,9 +2362,14 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 				AgentIdentityFromContext(r.Context()))
 		}
 		// The proxy shows an enforced block on the reply that follows it,
-		// whichever tool made the call (GAP-0644).
+		// whichever tool made the call (GAP-0644). Secure Client answers
+		// stay as they were.
 		if verdict.Action == "block" && verdict.Mode == "action" {
-			rememberOpenClawBlockNotice(sessionID, req.ToolCallID, req.Tool, evalCtx.RuleIDs, verdict.Reason)
+			if openClawNoticeAllowed(a.decisionConfig(r.Context())) {
+				verdict.NoticeRef = rememberOpenClawBlockNotice(
+					firstNonEmpty(strings.TrimSpace(r.Header.Get(SessionIDHeader)), req.SessionID),
+					req.Tool, evalCtx.RuleIDs, verdict.Reason)
+			}
 		}
 	}
 

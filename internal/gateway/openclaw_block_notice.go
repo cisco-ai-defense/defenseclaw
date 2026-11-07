@@ -6,7 +6,9 @@ package gateway
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -28,16 +31,19 @@ import (
 // level. The one place DefenseClaw owns on that screen is the model reply,
 // which already carries the [DefenseClaw] banner for proxy blocks.
 //
-// The inspect endpoint records each enforced OpenClaw tool block here, keyed by
-// the tool call id the plugin sends and the plugin session. The next
-// authenticated OpenClaw model request in that session that carries the tool
-// result for that call takes the notice, and the proxy puts one line in front
-// of the first text of the reply (stream or not). A notice is taken by one
-// request, so a block is shown once and an allowed call never has one. A reply
-// with no text to lead with, or in a format that is not rewritten, gives the
-// notice back until it expires, so the line lands on the first reply that can
-// carry it. A reply DefenseClaw wrote itself (it starts with the block banner)
-// is never prefixed, so history laundering still recognises it.
+// The inspect endpoint records each enforced OpenClaw tool block here under a
+// random reference and returns the reference to the plugin, which appends it
+// to the block reason the tool result carries. A model request of this
+// OpenClaw route and plugin session whose body carries a pending reference
+// takes the notice, and the proxy puts one line in front of the first text of
+// the reply (stream or not). The reference names one block and nothing else,
+// so no provider rewrite of a call id, no tool name and no older result of the
+// same tool can take another call's notice, and an allowed call has none. A
+// notice is taken by one request, so a block is shown once. A reply with no
+// text to lead with, or in a format that is not rewritten, gives the notice
+// back until it expires, so the line lands on the first reply that can carry
+// it. A reply DefenseClaw wrote itself (it starts with the block banner) is
+// never prefixed, so history laundering still recognises it.
 
 const (
 	openClawBlockNoticeTTL      = 2 * time.Minute
@@ -45,18 +51,15 @@ const (
 	openClawBlockNoticeMark     = "[DefenseClaw] Tool call blocked"
 	openClawBlockNoticeMaxBody  = 32 << 20
 	openClawBlockNoticeMaxFrame = 4 << 20
-	// A provider that keeps only nine alphanumerics of a call id (the strictest
-	// id policy OpenClaw has) sends this much of it back.
-	openClawStrictIDLength = 9
+	// openClawBlockRefPrefix starts the reference a block puts in its tool
+	// result.
+	openClawBlockRefPrefix = "dc-"
 )
 
 type openClawBlockNotice struct {
-	// ids is every form of the call id a provider adapter may send back: the
-	// id itself, with and without characters the provider cannot carry, and the
-	// strict short form. A request id matches only by being one of them, so two
-	// different calls never share a notice.
-	ids     []string
-	tool    string
+	// ref is the random reference the block reason carries back in the tool
+	// result of the blocked call.
+	ref     string
 	session string
 	line    string
 	at      time.Time
@@ -65,54 +68,6 @@ type openClawBlockNotice struct {
 var openClawBlockNotices struct {
 	mu      sync.Mutex
 	entries []openClawBlockNotice
-}
-
-// openClawRequestCallID is the call id a model request names: the OpenClaw
-// Responses ids are "<call id>|<item id>" and the request carries the first
-// part.
-func openClawRequestCallID(id string) string {
-	id = strings.TrimSpace(id)
-	if i := strings.Index(id, "|"); i >= 0 {
-		id = id[:i]
-	}
-	return id
-}
-
-func openClawCallIDForms(id string) []string {
-	id = openClawRequestCallID(id)
-	if id == "" {
-		return nil
-	}
-	var kept, alnum strings.Builder
-	for _, r := range id {
-		switch {
-		case r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r)):
-			kept.WriteRune(r)
-			alnum.WriteRune(r)
-		case r == '_' || r == '-':
-			kept.WriteRune(r)
-		default:
-			kept.WriteByte('_')
-		}
-	}
-	forms := []string{id}
-	add := func(f string) {
-		if f == "" {
-			return
-		}
-		for _, have := range forms {
-			if have == f {
-				return
-			}
-		}
-		forms = append(forms, f)
-	}
-	add(kept.String())
-	add(alnum.String())
-	if a := alnum.String(); len(a) > openClawStrictIDLength {
-		add(a[:openClawStrictIDLength])
-	}
-	return forms
 }
 
 func openClawNoticeText(s string, limit int) string {
@@ -150,22 +105,40 @@ func openClawBlockNoticeLine(tool string, ruleIDs []string, reason string) strin
 	return b.String()
 }
 
+// openClawNoticeAllowed is false for a Secure Client configuration, whose
+// inspect answers stay byte for byte as they were.
+func openClawNoticeAllowed(cfg *config.Config) bool {
+	return cfg == nil || !cfg.SecureClientIntegration()
+}
+
+// newOpenClawBlockRef returns a fresh reference, or "" when no randomness is
+// available (the block then has no notice).
+func newOpenClawBlockRef() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return openClawBlockRefPrefix + hex.EncodeToString(b[:])
+}
+
 // rememberOpenClawBlockNotice records an enforced block of one OpenClaw tool
-// call. A call without an id cannot be matched to its tool result and has none.
-func rememberOpenClawBlockNotice(session, toolCallID, tool string, ruleIDs []string, reason string) {
-	ids := openClawCallIDForms(toolCallID)
-	if len(ids) == 0 {
-		return
+// call and returns the reference the plugin puts in the block reason, which
+// is how the next model request is matched to this block.
+func rememberOpenClawBlockNotice(session, tool string, ruleIDs []string, reason string) string {
+	ref := newOpenClawBlockRef()
+	if ref == "" {
+		return ""
 	}
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
 	now := openClawToolOutcomeNow()
 	openClawBlockNotices.entries = append(pruneOpenClawBlockNotices(openClawBlockNotices.entries, now),
 		openClawBlockNotice{
-			ids: ids, tool: strings.ToLower(strings.TrimSpace(tool)), session: strings.TrimSpace(session),
+			ref: ref, session: strings.TrimSpace(session),
 			line: openClawBlockNoticeLine(tool, ruleIDs, reason), at: now,
 		})
 	capOpenClawBlockNotices()
+	return ref
 }
 
 func capOpenClawBlockNotices() {
@@ -185,10 +158,11 @@ func pruneOpenClawBlockNotices(entries []openClawBlockNotice, now time.Time) []o
 }
 
 // openClawNoticeSessionFits reports whether a notice recorded in one session
-// may show in a request from another: only when both name a session and the
-// names differ is it ruled out.
+// may show in a request from another: only when both name the same session. A
+// request that names no session fits only a notice that names none, so a
+// missing header never reaches into another session.
 func openClawNoticeSessionFits(entry, request string) bool {
-	return entry == "" || request == "" || entry == request
+	return entry == request
 }
 
 // openClawBlockNoticesPending reports whether a live notice may belong to a
@@ -206,87 +180,10 @@ func openClawBlockNoticesPending(session string) bool {
 	return false
 }
 
-// openClawNoticeRefs is what a model request names about its tool results.
-type openClawNoticeRefs struct {
-	// ids are the call ids, in any provider shape: tool_call_id (Chat
-	// Completions), call_id (Responses), tool_use_id (Anthropic), toolUseId
-	// (Bedrock) and the id of a Gemini functionResponse.
-	ids map[string]bool
-	// tools are the tool names of results that carry no call id (a Gemini
-	// functionResponse name, an Ollama tool_name); used only when the request
-	// names no call id at all.
-	tools map[string]bool
-}
-
-func openClawRequestRefs(body []byte) openClawNoticeRefs {
-	refs := openClawNoticeRefs{ids: map[string]bool{}, tools: map[string]bool{}}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.UseNumber()
-	var doc any
-	if dec.Decode(&doc) != nil {
-		return refs
-	}
-	addID := func(v any) {
-		if s, ok := v.(string); ok {
-			if id := openClawRequestCallID(s); id != "" {
-				refs.ids[id] = true
-			}
-		}
-	}
-	addTool := func(v any) {
-		if s, ok := v.(string); ok {
-			if t := strings.ToLower(strings.TrimSpace(s)); t != "" {
-				refs.tools[t] = true
-			}
-		}
-	}
-	var walk func(v any)
-	walk = func(v any) {
-		switch t := v.(type) {
-		case map[string]any:
-			if role, _ := t["role"].(string); role == "tool" {
-				addTool(t["tool_name"])
-			}
-			for k, val := range t {
-				switch k {
-				case "tool_call_id", "call_id", "tool_use_id", "toolUseId":
-					addID(val)
-					continue
-				case "functionResponse", "function_response":
-					// The result body is tool output: only its name and id count.
-					if fr, ok := val.(map[string]any); ok {
-						addTool(fr["name"])
-						addID(fr["id"])
-					}
-					continue
-				}
-				walk(val)
-			}
-		case []any:
-			for _, val := range t {
-				walk(val)
-			}
-		}
-	}
-	walk(doc)
-	return refs
-}
-
-func (r openClawNoticeRefs) matches(e openClawBlockNotice) bool {
-	if len(r.ids) > 0 {
-		for _, f := range e.ids {
-			if r.ids[f] {
-				return true
-			}
-		}
-		return false
-	}
-	return e.tool != "" && r.tools[e.tool]
-}
-
+// takeOpenClawBlockNotices removes and returns the live notices of this
+// session whose reference the request body carries.
 func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice {
-	refs := openClawRequestRefs(body)
-	if len(refs.ids) == 0 && len(refs.tools) == 0 {
+	if !bytes.Contains(body, []byte(openClawBlockRefPrefix)) {
 		return nil
 	}
 	openClawBlockNotices.mu.Lock()
@@ -295,7 +192,7 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	var taken []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(openClawBlockNotices.entries))
 	for _, e := range openClawBlockNotices.entries {
-		if openClawNoticeSessionFits(e.session, session) && refs.matches(e) {
+		if openClawNoticeSessionFits(e.session, session) && bytes.Contains(body, []byte(e.ref)) {
 			taken = append(taken, e)
 		} else {
 			kept = append(kept, e)
@@ -379,12 +276,17 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 
 type proxyConnectorKey struct{}
 
-// openClawNoticeRoute is false for a request that connectorPrefixStripper
-// routed to a connector other than OpenClaw (/c/<name>/...); OpenClaw's own
-// fetch interceptor sends no connector prefix.
+// openClawNoticeRoute is true only for a request that is OpenClaw's: routed
+// with the /c/openclaw/ prefix, or unprefixed (OpenClaw's own fetch
+// interceptor sends no prefix) while the connector this gateway serves is
+// OpenClaw. Traffic of any other connector, prefixed or not, and a request
+// whose serving connector is unknown, never takes a notice.
 func openClawNoticeRoute(r *http.Request) bool {
-	name, _ := r.Context().Value(proxyConnectorKey{}).(string)
-	return name == "" || name == "openclaw"
+	routed, _ := r.Context().Value(proxyConnectorKey{}).(string)
+	if routed != "" {
+		return routed == "openclaw"
+	}
+	return thresholdConnectorFrom(r.Context()) == "openclaw"
 }
 
 const (
