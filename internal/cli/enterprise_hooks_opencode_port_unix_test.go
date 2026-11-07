@@ -1139,6 +1139,44 @@ func assertOpenCodeContestKept(t *testing.T, homes map[int]string, record map[in
 	}
 }
 
+// A linked service file is read in the import pass. Its recorded binding
+// remains reserved when the account-side replacement refuses the link.
+func TestReviewLinkedServiceFileNeverGivesItsPortToNewcomer(t *testing.T) {
+	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001, 1002)
+	target := filepath.Join(homes[1001], "actual-service.json")
+	if err := os.WriteFile(target, []byte(`{"port":25002}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := enterprisepolicy.OpenCodeServiceConfigPath(homes[1001])
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	for pass := 0; pass < 3; pass++ {
+		log := runOpenCodePortPass(t)
+		if (*record)[1001] != 25002 || (*record)[1002] == 25002 || openCodePortIn(t, homes[1002]) == 25002 {
+			t.Fatalf("pass %d lost a recorded port: record=%v log=%s", pass, *record, log)
+		}
+	}
+	setEligible(nil, 1001, 1002, 9002)
+	log := runOpenCodePortPass(t)
+	if (*record)[9002] == 25002 || openCodePortIn(t, homes[9002]) == 25002 {
+		t.Fatalf("later newcomer received a recorded port: record=%v log=%s", *record, log)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(link, []byte(`{"port":25002}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runOpenCodePortPass(t)
+	if (*record)[1001] != 25002 || openCodePortIn(t, homes[1001]) != 25002 {
+		t.Fatalf("ordinary file recovery lost its binding: %v", *record)
+	}
+}
+
 // REVIEW-gx053-12 MF1: the record is committed before any user file is
 // rewritten. A commit that fails rewrites no file, and the next pass is the
 // same import pass over the same files, with the same result.
