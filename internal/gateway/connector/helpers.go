@@ -33,6 +33,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +43,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 var userHomeOverrideSessionMu sync.Mutex
@@ -413,11 +416,11 @@ type hookPathRun struct {
 // the rest of the text, and a complete name is always among them. A span that
 // exists and is not managed is one ordinary path: the starts inside it are not
 // read, so "/home/u/a,/home/u/.defenseclaw/hooks/b" stays the user's file when
-// it exists. The first word of the command, when it is one quoted existing
-// path, is one word (see blankOrdinaryQuoted). The text is never run.
+// it exists. A program word that is one quoted existing path is one word (see
+// blankOrdinaryPrograms). The text is never run.
 func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) bool {
 	scan := &hookPathScan{files: files, dirs: dirs, fold: fold, exists: map[string]bool{}}
-	text := hookCommandPathText(scan.blankOrdinaryQuoted(command, home), home, fold)
+	text := hookCommandPathText(scan.blankOrdinaryPrograms(command, home), home, fold)
 	startOK, wordSlash, skipTo := true, false, 0
 	for i, r := range text {
 		if startOK && i >= skipTo && hookPathStart(text, i, fold) {
@@ -444,36 +447,158 @@ func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) 
 	return false
 }
 
-// blankOrdinaryQuoted returns command with its first word replaced by "_" when
-// that word is quoted and, with a space or another shell separator in it, is
-// one existing absolute path that is not managed. A shell runs that word as
-// the program, so the managed path inside "/home/u/a /home/u/.defenseclaw/hooks/b"
-// is not a word of its own. Only the program word is read this way: a quoted
-// word further on is an argument, and the program may run its text as a shell
-// line ("sh -c ..."), so it stays whether or not the same bytes name a file.
-func (s *hookPathScan) blankOrdinaryQuoted(command, home string) string {
-	trimmed := strings.TrimLeftFunc(command, unicode.IsSpace)
-	if trimmed == "" || (trimmed[0] != '\'' && trimmed[0] != '"') {
+// blankOrdinaryPrograms returns command with each program word that is one
+// quoted literal, naming an existing absolute path that is not managed,
+// replaced by "_". A shell runs that word as the program whatever its
+// characters are, so the managed path inside
+// "/home/u/a /home/u/.defenseclaw/hooks/b" is not a word of its own. The words
+// come from the shared shell lexer (shellparse), not from the first byte of the
+// text: the program is the first word of a command after its assignments and
+// the prefixes env, command, exec, nohup and nice (hookProgramWord), wherever
+// the command stands. A word that holds an expansion or command substitution
+// ($(...), backticks) is not a literal, whatever file the bytes name: the shell
+// runs the substitution before it picks the program. A quoted word that is not
+// the program is an argument and the program may run its text as a shell line
+// ("sh -c ..."), so it stays. Text the lexer does not read stays whole.
+func (s *hookPathScan) blankOrdinaryPrograms(command, home string) string {
+	file, ok := shellparse.Parse(command)
+	if !ok {
 		return command
 	}
-	end := strings.IndexByte(trimmed[1:], trimmed[0])
-	if end < 0 {
+	var out strings.Builder
+	copied := 0
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, isCall := node.(*syntax.CallExpr)
+		if !isCall {
+			return true
+		}
+		word := hookProgramWord(call.Args)
+		if word == nil {
+			return true
+		}
+		from, to := int(word.Pos().Offset()), int(word.End().Offset())
+		if from < copied || from >= to || to > len(command) {
+			return true
+		}
+		literal, ok := hookQuotedLiteral(word, s.fold)
+		if !ok {
+			return true
+		}
+		if s.fold {
+			literal = hookCommandPathText(literal, home, true)
+		}
+		if strings.ContainsFunc(literal, hookShellSeparator) && hookPathStart(literal, 0, s.fold) {
+			if named, exists := s.span(literal); !named && exists {
+				out.WriteString(command[copied:from])
+				out.WriteString("_")
+				copied = to
+			}
+		}
+		return true
+	})
+	if copied == 0 {
 		return command
 	}
-	end += 2
-	for _, r := range trimmed[end:] {
-		if !hookShellSeparator(r) {
-			return command
-		}
-		break
+	out.WriteString(command[copied:])
+	return out.String()
+}
+
+// hookQuotedLiteral returns the text of a word made of one single-quoted or
+// one double-quoted literal. A double-quoted word with an expansion or a
+// command substitution is not a literal, and neither is one with an escape
+// (the escape would have to be run) unless Windows separators are read.
+func hookQuotedLiteral(word *syntax.Word, windows bool) (string, bool) {
+	if len(word.Parts) != 1 {
+		return "", false
 	}
-	word := hookCommandPathText(trimmed[1:end-1], home, s.fold)
-	if strings.ContainsFunc(word, hookShellSeparator) && hookPathStart(word, 0, s.fold) {
-		if named, exists := s.span(word); !named && exists {
-			return "_" + trimmed[end:]
+	switch part := word.Parts[0].(type) {
+	case *syntax.SglQuoted:
+		return part.Value, !part.Dollar
+	case *syntax.DblQuoted:
+		if part.Dollar {
+			return "", false
+		}
+		var text strings.Builder
+		for _, inner := range part.Parts {
+			lit, ok := inner.(*syntax.Lit)
+			if !ok || (!windows && strings.Contains(lit.Value, "\\")) {
+				return "", false
+			}
+			text.WriteString(lit.Value)
+		}
+		return text.String(), true
+	}
+	return "", false
+}
+
+// hookProgramWord returns the word a command runs as its program: the first
+// word after the prefixes env, command, exec, nohup and nice and their usual
+// options. It returns the word at which the prefixes stop, so an option it does
+// not know ("env -S ...") is returned instead of the word after it, and nil for
+// a command without words.
+func hookProgramWord(args []*syntax.Word) *syntax.Word {
+	for len(args) > 0 {
+		var rest []*syntax.Word
+		switch args[0].Lit() {
+		case "command":
+			rest = hookSkipPrefixOptions(args[1:], []string{"-p", "--"}, nil, false)
+		case "exec":
+			rest = hookSkipPrefixOptions(args[1:], []string{"-c", "-l", "--"}, []string{"-a"}, false)
+		case "nohup":
+			rest = args[1:]
+		case "nice":
+			rest = hookSkipPrefixOptions(args[1:], []string{"--"}, []string{"-n"}, false)
+		case "env":
+			rest = hookSkipPrefixOptions(args[1:], []string{"-i", "-", "--ignore-environment", "--"},
+				[]string{"-u", "--unset", "-C", "--chdir"}, true)
+		default:
+			return args[0]
+		}
+		if len(rest) == 0 {
+			return args[0]
+		}
+		args = rest
+	}
+	return nil
+}
+
+// hookSkipPrefixOptions drops the leading flags, options with one argument
+// and, for env, NAME=value words from args.
+func hookSkipPrefixOptions(args []*syntax.Word, flags, withArg []string, assignments bool) []*syntax.Word {
+	for len(args) > 0 {
+		switch name := args[0].Lit(); {
+		case name != "" && slices.Contains(flags, name):
+			args = args[1:]
+		case name != "" && slices.Contains(withArg, name) && len(args) > 1:
+			args = args[2:]
+		case assignments && hookAssignmentWord(args[0]):
+			args = args[1:]
+		default:
+			return args
 		}
 	}
-	return command
+	return args
+}
+
+// hookAssignmentWord reports whether word starts with NAME=.
+func hookAssignmentWord(word *syntax.Word) bool {
+	if len(word.Parts) == 0 {
+		return false
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	if !ok {
+		return false
+	}
+	name, _, found := strings.Cut(lit.Value, "=")
+	if !found || name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r != 95 && !unicode.IsLetter(r) && (i == 0 || !unicode.IsDigit(r)) {
+			return false
+		}
+	}
+	return true
 }
 
 // start tries every span that starts at text[i]. It returns whether a span
@@ -568,9 +693,10 @@ func (s *hookPathScan) missingSpan(run *hookPathRun, word string, dotted bool) b
 	return run.resolvedOK && s.namesJoined(run.resolved, word[run.missEnd-run.start:])
 }
 
-// hookShellSeparator is a character that ends a shell word when unquoted.
+// hookShellSeparator is a character that ends a shell word when unquoted, or
+// that hookCommandPathText turns into one (a backtick).
 func hookShellSeparator(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune(";|&()<>{}[]$", r)
+	return unicode.IsSpace(r) || strings.ContainsRune(";|&()<>{}[]$`", r)
 }
 
 // span reports whether word, cleaned or resolved through its links, names a
@@ -659,12 +785,17 @@ func normalizeHookPath(name string, fold bool) string {
 }
 
 // hookCommandPathText is command with quoting removed, home prefixes expanded
-// and repeated or "." path separators collapsed. It is only matched, never run.
+// and repeated or "." path separators collapsed. A backtick opens and closes a
+// command substitution, so it reads as a space and the command inside is its
+// own word. It is only matched, never run.
 func hookCommandPathText(command, home string, fold bool) string {
 	var text strings.Builder
 	for _, r := range command {
 		switch r {
-		case '"', '\'', '`':
+		case '"', '\'':
+			continue
+		case '`':
+			text.WriteRune(' ')
 			continue
 		case '\\':
 			if fold {

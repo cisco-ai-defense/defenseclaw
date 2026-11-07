@@ -291,3 +291,68 @@ func TestGAP0625PathScanSpanBudget(t *testing.T) {
 		t.Errorf("bounded scan took %v", elapsed)
 	}
 }
+
+// The program of a command is a word of the shell lexer, found by its position
+// after the prefixes and not by the first byte of the text. A quoted literal
+// that names an existing file is that one file, whatever bytes it holds. A word
+// with a command substitution or backticks (in double quotes) is not a literal:
+// the shell runs the substitution first, so a managed hook named inside it
+// stays protected whatever file the bytes name. Single quotes keep both
+// literal, so the same file name there is the user's program.
+func TestGAP0625PathScanProgramWordTokens(t *testing.T) {
+	prefixes := []string{
+		"", "env ", "TOKEN=one ", "command ", "exec ", "nohup ", "nice ", "nice -n 5 ",
+		"env -i TOKEN=one ", "env TOKEN=one command exec ", "TOKEN=one env ", "true && ",
+	}
+	quotings := []struct {
+		name string
+		word func(string) string
+	}{
+		{"single", shellWord},
+		{"double", func(path string) string { return "\"" + path + "\"" }},
+	}
+	shapes := []struct {
+		name    string
+		file    func(home, owned string) string
+		managed map[string]bool // quoting name -> a managed hook is run
+	}{
+		{"managed text in a file name", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) }, nil},
+		{"command substitution in a file name", func(home, owned string) string { return filepath.Join(home, "ordinary$("+owned+")") }, map[string]bool{"double": true}},
+		{"backticks in a file name", func(home, owned string) string { return filepath.Join(home, "ordinary`"+owned+"`") }, map[string]bool{"double": true}},
+	}
+	for _, prefix := range prefixes {
+		for _, quoting := range quotings {
+			for _, shape := range shapes {
+				name := fmt.Sprintf("%s|%s|%s", strings.TrimSpace(prefix), quoting.name, shape.name)
+				t.Run(name, func(t *testing.T) {
+					verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+						owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+						program := gap0625WriteExecutable(t, shape.file(home, owned))
+						return prefix + quoting.word(program) + " --event pre_tool_call"
+					})
+					if shape.managed[quoting.name] {
+						gap0625ExpectProtected(t, verifyErr, commands, userHook)
+					} else {
+						gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
+					}
+				})
+			}
+		}
+	}
+}
+
+// A prefix whose options are not read, and a program that is not a prefix, make
+// the quoted word that follows an argument or a shell line: it stays protected
+// when it names a managed hook, whatever file the bytes name.
+func TestGAP0625PathScanProgramWordUnknownPrefix(t *testing.T) {
+	for _, prefix := range []string{"env -S ", "sh -c ", "sudo ", "command -v ", "env -u "} {
+		t.Run(strings.TrimSpace(prefix), func(t *testing.T) {
+			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+				program := gap0625WriteExecutable(t, filepath.Join(home, "ordinary; "+owned))
+				return prefix + shellWord(program) + " --event pre_tool_call"
+			})
+			gap0625ExpectProtected(t, verifyErr, commands, userHook)
+		})
+	}
+}
