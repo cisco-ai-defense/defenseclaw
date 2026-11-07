@@ -56,7 +56,8 @@ def test_the_codex_state_hold_is_a_retryable_named_refusal() -> None:
     # The holders are named by Restart Manager, as for the installed hook.
     assert "Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($path)" in body
     probe = _function_body(_text(), "Test-DefenseClawFileReadBlocked")
-    assert "GetDirectoryOpenError($Path, [uint32]2147483648) -in @(32, 33)" in probe
+    assert "[IO.FileAccess]::Read" in probe
+    assert "-band 0xFFFF) -in @(32, 33)" in probe
     assert "return $false" in probe  # a failed probe never blocks: the read reports it
 
 
