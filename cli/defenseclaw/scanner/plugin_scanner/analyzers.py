@@ -45,6 +45,7 @@ from defenseclaw.scanner.plugin_scanner.helpers import (
     strip_comment,
     strip_hash_comment,
 )
+from defenseclaw.scanner.plugin_scanner.regexp_receiver import RegexpReceivers
 from defenseclaw.scanner.plugin_scanner.rules import (
     BINARY_EXTENSIONS,
     BUNDLE_DIRS,
@@ -627,12 +628,19 @@ def _scan_suspicious_patterns(
     language: str = "js",
     evidence_lines: list[str] | None = None,
 ) -> None:
+    receivers = RegexpReceivers(code_lines) if language == "js" else None
     for rule in SOURCE_PATTERN_RULES:
         if profile not in rule.profiles or language not in rule.languages:
             continue
 
         for i, line in enumerate(code_lines):
             if rule.pattern.search(line):
+                if (
+                    rule.pattern_match_is_not_execution
+                    and receivers is not None
+                    and receivers.only_pattern_matches(line)
+                ):
+                    continue
                 if evidence_lines is not None and i < len(evidence_lines):
                     line = evidence_lines[i]
                 if rule.capability:

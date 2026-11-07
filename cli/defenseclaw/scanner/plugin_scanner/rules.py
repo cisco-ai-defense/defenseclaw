@@ -166,6 +166,9 @@ class SourcePatternRule:
     capability: str | None = None
     # Source languages the rule applies to: "js" (JS/TS) and/or "py".
     languages: tuple[str, ...] = ("js",)
+    # A JavaScript line whose only matches are RegExp.prototype.exec calls is
+    # not a finding (see regexp_receiver).
+    pattern_match_is_not_execution: bool = False
 
 
 SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
@@ -219,6 +222,7 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         tags=["code-execution"],
         capability="child-process",
         languages=("js", "py"),
+        pattern_match_is_not_execution=True,
     ),
     # Python plugins (Hermes): the subprocess/os counterparts of child_process.
     SourcePatternRule(
