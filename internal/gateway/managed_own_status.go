@@ -153,17 +153,15 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 // reads, copied where the service can read it). The other configured
 // connectors, and every row while that scan is unknown, are unconfirmed.
 func (a *APIServer) ownWindowsConnectorStates(cfg *config.Config, sid, name string) map[string]any {
-	unprotected, known := a.ownUnprotectedAgents(cfg, ownStatusCaller{sid: sid, name: name})
+	scan := a.ownUnprotectedAgents(cfg, ownStatusCaller{sid: sid, name: name})
 	states := make(map[string]any)
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
 		state := map[string]any{"protected": false, "state": "not confirmed"}
-		if known {
-			if gap, ok := ownUnprotectedGap(unprotected, connector); ok {
-				state = ownUnprotectedState(gap)
-			} else if connector == enterprisepolicy.ConnectorClaudeCode {
-				state["protected"] = true
-				state["state"] = "protected"
-			}
+		if decided, ok := scan.state(connector); ok {
+			state = decided
+		} else if connector == enterprisepolicy.ConnectorClaudeCode {
+			state["protected"] = true
+			state["state"] = "protected"
 		}
 		states[connector] = state
 	}
@@ -191,8 +189,9 @@ func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map
 	}
 	// Agents the enumerator cannot protect for this caller: the administrator's
 	// status lists them, so the caller's own status never says protected for
-	// them. An unreadable record confirms nothing.
-	unprotected, unprotectedKnown := a.ownUnprotectedAgents(cfg, ownStatusCaller{uid: &callerUID, name: name})
+	// them. An unreadable record, or an entry that may be the caller but
+	// cannot be matched, confirms nothing.
+	scan := a.ownUnprotectedAgents(cfg, ownStatusCaller{uid: &callerUID, name: name})
 	peer := managedHookPeer{UID: callerUID, Name: name}
 	strictExempt := strict && len(cfg.Enterprise.Enrollment.ExemptUsers) > 0 &&
 		(&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).hostRunExempt(peer)
@@ -213,12 +212,8 @@ func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map
 	}
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
 		state := map[string]any{"protected": false, "state": "not confirmed"}
-		if !unprotectedKnown {
-			states[connector] = state
-			continue
-		}
-		if gap, ok := ownUnprotectedGap(unprotected, connector); ok {
-			states[connector] = ownUnprotectedState(gap)
+		if decided, ok := scan.state(connector); ok {
+			states[connector] = decided
 			continue
 		}
 		if view != nil && (view.admitted == nil || view.admitted[connector]) {

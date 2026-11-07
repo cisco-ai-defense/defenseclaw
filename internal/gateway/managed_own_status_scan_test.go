@@ -92,6 +92,8 @@ func TestReadManagedUnprotectedAgentsNeedsACompletedMatchedScan(t *testing.T) {
 			_ = os.WriteFile(path, data, 0o640)
 		},
 		"a malformed record": func() { _ = os.WriteFile(path, []byte("{"), 0o640) },
+		// The enumerator empties a copy it cannot replace or remove.
+		"an emptied copy": func() { _ = os.WriteFile(path, nil, 0o640) },
 	} {
 		dir := scanFixture(t, nil, 7, "digest-7")
 		path = filepath.Join(dir, managed.HookGuardianUnprotectedAgentsFile)

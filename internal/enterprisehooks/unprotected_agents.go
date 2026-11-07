@@ -14,6 +14,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -198,6 +200,41 @@ type unprotectedAgentsFile struct {
 func UnprotectedAgentsPath(manifestPath string) string {
 	return filepath.Join(filepath.Dir(filepath.Clean(manifestPath)), UnprotectedAgentsFileName)
 }
+
+// ReadUnprotectedAgentsRecord reads the record at path as status reads it:
+// the bytes of a regular file within UnprotectedAgentsMaxBytes, and the time
+// of the scan it holds (the file modification time the writer refreshes every
+// cycle). The enumerator mirrors these bytes for the gateway.
+func ReadUnprotectedAgentsRecord(path string) ([]byte, time.Time, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, time.Time{}, fmt.Errorf("enterprise hooks: %s is not a regular file", path)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, UnprotectedAgentsMaxBytes+1))
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	if len(data) > UnprotectedAgentsMaxBytes {
+		return nil, time.Time{}, fmt.Errorf("enterprise hooks: %s exceeds %d bytes", path, UnprotectedAgentsMaxBytes)
+	}
+	scanned, err := file.Stat()
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return data, scanned.ModTime(), nil
+}
+
+// UnprotectedUnknownAccount is the user of an entry for an agent whose account
+// could not be identified in the cycle (Windows running-agent scan).
+const UnprotectedUnknownAccount = "(unknown account)"
 
 // UnprotectedCodeForReason classifies an admission reason.
 func UnprotectedCodeForReason(reason string) string {

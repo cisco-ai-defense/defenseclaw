@@ -291,3 +291,69 @@ func TestOwnStatusWindowsAccountLevelEntryAndUnknownScan(t *testing.T) {
 		t.Fatalf("unknown scan: Claude Code row = %#v, answer = %#v, want not confirmed", row, out)
 	}
 }
+
+// The enumerator can name an entry by account only (its SID lookup failed),
+// and the gateway can fail to name the caller account too. Such an entry may
+// be the caller, so a row it can affect is not confirmed (review 2 M2); a row
+// it cannot affect, and an account whose name is known, are judged as before.
+func TestOwnStatusNameOnlyEntryOfAnUnnamedWindowsCallerIsNotProtected(t *testing.T) {
+	nameOnly := func(user, connector string) enterprisehooks.UnprotectedAgent {
+		return enterprisehooks.UnprotectedAgent{User: user, Connector: connector,
+			Code: enterprisehooks.UnprotectedCodeAgentUnprotected, Reason: "running copy has no resolved SID"}
+	}
+	unnamed := func(t *testing.T, agents []enterprisehooks.UnprotectedAgent) *APIServer {
+		t.Helper()
+		api := windowsOwnStatusAPI(t, agents, nil)
+		ownStatusWindowsAccountName = func(string) string { return "" }
+		return api
+	}
+	// A name-only Claude Code entry, and one for an account that could not be
+	// identified at all: the Claude Code row and Cowork are not protected.
+	for name, entry := range map[string]enterprisehooks.UnprotectedAgent{
+		"name only":          nameOnly("alice", "claudecode"),
+		"unidentified owner": nameOnly(enterprisehooks.UnprotectedUnknownAccount, "claudecode"),
+	} {
+		row, out := windowsOwnStatusRow(t, unnamed(t, []enterprisehooks.UnprotectedAgent{entry}), windowsAliceSID, "claudecode")
+		if row["protected"] != false || !strings.HasPrefix(row["state"].(string), "not confirmed") ||
+			out["claude_code"].(map[string]any)["protected"] != false || out["cowork"].(map[string]any)["protected"] != false {
+			t.Fatalf("%s: Claude Code row = %#v, answer = %#v, want not confirmed", name, row, out)
+		}
+	}
+	// An account-level name-only entry affects every connector.
+	account := nameOnly("alice", "")
+	account.Code = enterprisehooks.UnprotectedCodeHomeUntrusted
+	if row, _ := windowsOwnStatusRow(t, unnamed(t, []enterprisehooks.UnprotectedAgent{account}), windowsAliceSID, "codex"); row["protected"] != false {
+		t.Fatalf("account-level name-only entry: Codex row = %#v, want not protected", row)
+	}
+	// Benign twins: a name-only entry for another connector leaves Claude Code
+	// protected; the caller account name known, the entry of another account
+	// is not the caller, and the entry of the caller still is.
+	if row, _ := windowsOwnStatusRow(t, unnamed(t, []enterprisehooks.UnprotectedAgent{nameOnly("alice", "codex")}), windowsAliceSID, "claudecode"); row["protected"] != true {
+		t.Fatalf("name-only Codex entry: Claude Code row = %#v, want protected", row)
+	}
+	api := windowsOwnStatusAPI(t, []enterprisehooks.UnprotectedAgent{nameOnly("bob", "claudecode")}, nil)
+	if row, _ := windowsOwnStatusRow(t, api, windowsAliceSID, "claudecode"); row["protected"] != true {
+		t.Fatalf("another account name-only entry: Claude Code row = %#v, want protected", row)
+	}
+	if row, _ := windowsOwnStatusRow(t, api, windowsBobSID, "claudecode"); row["protected"] != false {
+		t.Fatalf("own name-only entry: Claude Code row = %#v, want not protected", row)
+	}
+}
+
+// The same rule on Unix: a name-only entry and a caller whose name the
+// kernel peer lookup did not give.
+func TestOwnStatusNameOnlyEntryOfAnUnnamedUnixCallerIsNotProtected(t *testing.T) {
+	entry := enterprisehooks.UnprotectedAgent{User: "alice", Connector: "opencode",
+		Code: enterprisehooks.UnprotectedCodeOpenCodeV1, Reason: "V1 copy"}
+	api := ownStatusUnprotectedFixture(t, []enterprisehooks.UnprotectedAgent{entry}, nil)
+	if row := ownStatusConnectorRow(t, api, "5001", "", "opencode"); row["protected"] != false {
+		t.Fatalf("unnamed caller OpenCode row = %#v, want not protected", row)
+	}
+	// Benign twins: the other connectors of that caller, and the named caller.
+	if row := ownStatusConnectorRow(t, api, "5001", "", "codex"); row["protected"] != true {
+		t.Fatalf("unnamed caller Codex row = %#v, want protected", row)
+	}
+	if row := ownStatusConnectorRow(t, api, "5002", "bob", "opencode"); row["protected"] != true {
+		t.Fatalf("another named caller OpenCode row = %#v, want protected", row)
+	}
+}

@@ -122,20 +122,47 @@ type ownStatusCaller struct {
 	name string
 }
 
-// owns reports whether an unprotected-agent entry is the caller's: matched by
-// the entry's uid or SID, and by account name only when it carries neither.
-func (c ownStatusCaller) owns(agent enterprisehooks.UnprotectedAgent) bool {
+// ownMatch is whose an unprotected-agent entry is, as far as the caller can
+// tell.
+type ownMatch int
+
+const (
+	// ownNotMine: the entry names another uid, SID or account.
+	ownNotMine ownMatch = iota
+	// ownMine: the entry carries the caller uid or SID, or the caller account name.
+	ownMine
+	// ownUnresolved: the entry names no uid or SID, and its account name
+	// cannot be compared with the caller: the status cannot name the caller
+	// account (the OS lookup failed), or the enumerator could not name the
+	// entry account. It may be the caller, so it confirms nothing.
+	ownUnresolved
+)
+
+// match reports whose an unprotected-agent entry is: by the entry uid or SID,
+// and by account name only when it carries neither.
+func (c ownStatusCaller) match(agent enterprisehooks.UnprotectedAgent) ownMatch {
 	switch {
 	case agent.UID != nil:
-		return c.uid != nil && *c.uid == *agent.UID
+		return ownBool(c.uid != nil && *c.uid == *agent.UID)
 	case strings.TrimSpace(agent.SID) != "":
-		return c.sid != "" && strings.EqualFold(c.sid, strings.TrimSpace(agent.SID))
+		return ownBool(c.sid != "" && strings.EqualFold(c.sid, strings.TrimSpace(agent.SID)))
+	}
+	user := strings.TrimSpace(agent.User)
+	if user == "" || user == enterprisehooks.UnprotectedUnknownAccount || strings.TrimSpace(c.name) == "" {
+		return ownUnresolved
 	}
 	if c.uid != nil {
 		// Unix account names are exact.
-		return c.name != "" && c.name == agent.User
+		return ownBool(c.name == agent.User)
 	}
-	return ownStatusSameAccount(c.name, agent.User)
+	return ownBool(ownStatusSameAccount(c.name, agent.User))
+}
+
+func ownBool(mine bool) ownMatch {
+	if mine {
+		return ownMine
+	}
+	return ownNotMine
 }
 
 // ownStatusSameAccount compares account names; on Windows a name may carry
@@ -162,31 +189,57 @@ func ownStatusSameAccount(a, b string) bool {
 	return strings.EqualFold(aShort, bShort)
 }
 
-// ownUnprotectedAgents maps the caller's own entries of the last completed
-// scan by connector; "" holds an account-level entry (an account whose home
-// is untrusted), which covers every connector. ok is false when the scan is
-// unknown: the caller's protection is then not confirmed. The record is read
-// the way the administrator's status reads it; on Unix it must be stamped
-// with the installed config.
-func (a *APIServer) ownUnprotectedAgents(cfg *config.Config, caller ownStatusCaller) (map[string][]enterprisehooks.UnprotectedAgent, bool) {
-	agents, err := ownStatusUnprotectedAgents(a.configDataDir(), cfg.ConfigFilePath, caller.uid != nil)
-	if err != nil {
-		return nil, false
-	}
-	mine := make(map[string][]enterprisehooks.UnprotectedAgent)
-	for _, agent := range agents {
-		if caller.owns(agent) {
-			mine[agent.Connector] = append(mine[agent.Connector], agent)
-		}
-	}
-	return mine, true
+// ownScan is the caller view of the enumerator last completed scan.
+type ownScan struct {
+	// known is false when the scan is unknown: the caller protection is then
+	// not confirmed.
+	known bool
+	// mine holds the caller own entries by connector; "" holds an
+	// account-level entry (an account whose home is untrusted), which covers
+	// every connector.
+	mine map[string][]enterprisehooks.UnprotectedAgent
+	// unresolved holds the connectors with an entry that may be the caller
+	// (ownUnresolved), "" for an account-level one.
+	unresolved map[string]bool
 }
 
-// ownUnprotectedGap is the caller's entries that make connector unprotected:
-// its own, or the account-level ones.
-func ownUnprotectedGap(mine map[string][]enterprisehooks.UnprotectedAgent, connector string) ([]enterprisehooks.UnprotectedAgent, bool) {
-	gap := append(append([]enterprisehooks.UnprotectedAgent(nil), mine[connector]...), mine[""]...)
-	return gap, len(gap) > 0
+// ownUnprotectedAgents reads the scan for the caller. The record is read the
+// way the administrator status reads it; on Unix it must be stamped with the
+// installed config.
+func (a *APIServer) ownUnprotectedAgents(cfg *config.Config, caller ownStatusCaller) ownScan {
+	agents, err := ownStatusUnprotectedAgents(a.configDataDir(), cfg.ConfigFilePath, caller.uid != nil)
+	if err != nil {
+		return ownScan{}
+	}
+	scan := ownScan{known: true, mine: make(map[string][]enterprisehooks.UnprotectedAgent), unresolved: make(map[string]bool)}
+	for _, agent := range agents {
+		switch caller.match(agent) {
+		case ownMine:
+			scan.mine[agent.Connector] = append(scan.mine[agent.Connector], agent)
+		case ownUnresolved:
+			scan.unresolved[agent.Connector] = true
+		}
+	}
+	return scan
+}
+
+// state is the own-status row the scan decides for connector, or false when
+// the scan finds nothing against the caller. An unknown scan, and an entry
+// that may be the caller but cannot be matched, are not confirmed; the
+// caller own entries, and the account-level ones, are not protected with the
+// administrator warning for those agents.
+func (s ownScan) state(connector string) (map[string]any, bool) {
+	if !s.known {
+		return map[string]any{"protected": false, "state": "not confirmed"}, true
+	}
+	gap := append(append([]enterprisehooks.UnprotectedAgent(nil), s.mine[connector]...), s.mine[""]...)
+	if len(gap) > 0 {
+		return ownUnprotectedState(gap), true
+	}
+	if s.unresolved[connector] || s.unresolved[""] {
+		return map[string]any{"protected": false, "state": "not confirmed: the administrator status lists an agent here that cannot be matched to this account"}, true
+	}
+	return nil, false
 }
 
 // ownUnprotectedReasonsMax bounds how many reasons one row names.

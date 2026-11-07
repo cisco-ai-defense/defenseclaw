@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -11,24 +12,64 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// publishEnterpriseHookGatewayUnprotectedAgents publishes the enumerator's
-// completed scan for the gateway next to the guardian ledger: the same bytes
-// as the protected unprotected-agents record (agents, install generation and
-// the config stamp), which the gateway cannot read. A user's own status is
-// answered from it, so it says what the administrator's status says about
-// that user (rel-1-0-6 GAP-0789). A scan that found nothing is published too:
-// an absent, old or unmatched copy is an unknown scan, never "nothing found".
-// When the copy cannot be written the previous one is withdrawn, so it does
-// not speak for a scan this cycle replaced.
-func publishEnterpriseHookGatewayUnprotectedAgents(dataDir string, agents []enterprisehooks.UnprotectedAgent, configGeneration uint64, configSHA256 string) error {
-	data, err := enterprisehooks.MarshalUnprotectedAgentsForConfig(agents, configGeneration, configSHA256)
+// mirrorEnterpriseHookGatewayUnprotectedAgents makes the gateway copy of the
+// administrator status record (unprotected-agents.json), next to the guardian
+// ledger where the gateway can read it (it cannot read the root-only record).
+// A user own status is answered from this copy, so it says what the
+// administrator status says about that user (rel-1-0-6 GAP-0789).
+//
+// The copy is the bytes of the record as it stands after this cycle write,
+// with the record scan time, never a second computation: when the record
+// could not be replaced the copy keeps speaking for the record the
+// administrator still sees, so a copy and a record cannot disagree. When the
+// record cannot be read or the copy cannot be written, the previous copy is
+// withdrawn (withdrawEnterpriseHookGatewayUnprotectedAgents), so an absent or
+// emptied copy is an unknown scan to the gateway, never "nothing found".
+func mirrorEnterpriseHookGatewayUnprotectedAgents(dataDir, rootRecordPath string) error {
+	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), managed.HookGuardianUnprotectedAgentsFile)
+	err := func() error {
+		data, scanned, err := enterprisehooks.ReadUnprotectedAgentsRecord(rootRecordPath)
+		if err != nil {
+			return err
+		}
+		if _, err := enterprisehooks.ParseUnprotectedAgents(data); err != nil {
+			return err
+		}
+		if err := writeEnterpriseHookGatewayRecord(path, data); err != nil {
+			return err
+		}
+		// The copy is as old as the scan it holds, so a record that was not
+		// replaced does not look fresh through its copy.
+		return os.Chtimes(path, scanned, scanned)
+	}()
+	if err == nil {
+		return nil
+	}
+	return errors.Join(err, withdrawEnterpriseHookGatewayUnprotectedAgents(path))
+}
+
+// withdrawEnterpriseHookGatewayUnprotectedAgents removes the gateway copy. A
+// directory that refuses the removal still lets the file be emptied in place,
+// which the gateway reads as an unknown scan; only when neither works does the
+// old copy stand (until its age runs out).
+func withdrawEnterpriseHookGatewayUnprotectedAgents(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), managed.HookGuardianUnprotectedAgentsFile)
-	if err := writeEnterpriseHookGatewayRecord(path, data); err != nil {
-		_ = os.Remove(path)
-		return err
+	removeErr := os.Remove(path)
+	if removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+		return nil
 	}
-	return nil
+	if !info.Mode().IsRegular() {
+		return removeErr
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return errors.Join(removeErr, err)
+	}
+	return file.Close()
 }
