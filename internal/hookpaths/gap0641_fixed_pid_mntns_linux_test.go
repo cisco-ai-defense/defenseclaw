@@ -39,34 +39,8 @@ func TestGAP0641FixedPIDLinkNeedsTheSameMountTree(t *testing.T) {
 		t.Fatalf("shared mount namespace: ordinary path %q grade=%s, want None", path, got)
 	}
 
-	other, err := os.Stat(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	own := readProcMountView
-	t.Cleanup(func() { readProcMountView = own })
-	foreign := func(namespace os.FileInfo, table string) {
-		readProcMountView = func(dir string) (procMountView, error) {
-			view, err := own(dir)
-			if err == nil && dir != "/proc/thread-self" {
-				if namespace != nil {
-					view.namespace = namespace
-				}
-				view.table += table
-			}
-			return view, err
-		}
-	}
-	for name, set := range map[string]func(){
-		"other namespace":   func() { foreign(other, "") },
-		"other mount table": func() { foreign(nil, "99 1 0:1 / /private rw - tmpfs tmpfs rw\n") },
-		"unreadable": func() {
-			readProcMountView = func(string) (procMountView, error) { return procMountView{}, os.ErrPermission }
-		},
-		"oversized": func() {
-			readProcMountView = func(string) (procMountView, error) { return procMountView{}, errProcMountTableTooLarge }
-		},
-	} {
+	views, restore := foreignMountViews(t)
+	for name, set := range views {
 		set()
 		if fixedPIDLinkProved(pidPath) {
 			t.Errorf("%s: link %q proved", name, pidPath)
@@ -77,7 +51,7 @@ func TestGAP0641FixedPIDLinkNeedsTheSameMountTree(t *testing.T) {
 		if got := LateCallGrade("cat "+path, runner, home); got == GradeNone {
 			t.Errorf("%s: command on %q grade=None, want uncertain", name, path)
 		}
-		readProcMountView = own
+		restore()
 	}
 }
 

@@ -87,7 +87,7 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 		unread = unread || ShareUnanswered(err)
 		return link, err
 	}
-	resolved, _, _, ok := walkWritePathMemoWithReaders("", parent, 0, false, false, nil, lstat, readlink, procLinks.unproved)
+	resolved, _, _, ok := walkWritePathMemoWithReaders("", parent, 0, false, false, nil, lstat, readlink, procLinks.unproved, true)
 	answer := reachParentAnswer{resolved: resolved}
 	switch {
 	case reached || ok && names.hasCandidate(resolved):
@@ -253,7 +253,7 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		// it is not graded before the link walk.
 		return m.dotDotReach(raw, target, home, sshOnly)
 	}
-	if unprovedProcessLink(target) {
+	if unprovedProcessLink(target, false) {
 		// The kernel resolves this hop for the process that opens it, or the
 		// hook cannot show that its own reading reaches the same file.
 		return GradePossible
@@ -404,7 +404,7 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		}
 		return link, err
 	}
-	resolved, _, _, ok := walkWritePathMemoWithReaders("", target, 0, false, false, nil, lstat, readlink, procLinks.unproved)
+	resolved, _, _, ok := walkWritePathMemoWithReaders("", target, 0, false, false, nil, lstat, readlink, procLinks.unproved, false)
 	if reached || ok && names.has(resolved) {
 		return GradeNamed
 	}
@@ -449,7 +449,7 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 	steps := strings.Split(filepath.ToSlash(raw), "/")
 	for i, step := range steps {
-		if step == ".." && unprovedProcessLink(strings.Join(steps[:i], "/")) {
+		if step == ".." && unprovedProcessLink(strings.Join(steps[:i], "/"), true) {
 			return GradePossible
 		}
 	}
@@ -458,17 +458,13 @@ func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 	// process that opens the path, so the walk proves nothing past it.
 	processRelative := false
 	var procLinks procLinkGuard
-	unproved := func(path string) bool {
-		if procLinks.unproved(path) {
+	unproved := func(path string, below bool) bool {
+		if procLinks.unproved(path, below) {
 			processRelative = true
 		}
 		return processRelative
 	}
-	readlink := func(path string) (string, error) {
-		unproved(path)
-		return procLinks.readlink(path)
-	}
-	physical, _, _, ok := walkWritePathMemoWithReaders("", raw, 0, false, false, nil, PathLstat, readlink, unproved)
+	physical, _, _, ok := walkWritePathMemoWithReaders("", raw, 0, false, false, nil, PathLstat, procLinks.readlink, unproved, false)
 	if processRelative {
 		return GradePossible
 	}
@@ -641,19 +637,13 @@ func sharesMountTree(dir string) bool {
 	return err == nil && os.SameFile(ours.namespace, theirs.namespace) && ours.table == theirs.table
 }
 
-// fixedPIDLinkProved reports that the link of an explicit process id leads
-// to the file the hook reads for it. The kernel resolves the link the same
-// way for the hook and for the process that opens the path, but a path that
-// goes on below the link is resolved in the mount tree of the process the
-// link names. The proof needs that tree to be the hook tree and then a
-// reading that reaches one file identity through both the link and its target
-// text. An unreadable link, a text that is not a path, or two identities that
-// differ stay unproved.
-func fixedPIDLinkProved(link string) bool {
-	dir := fixedPIDProcDir(link)
-	if dir == "" || !sharesMountTree(dir) {
-		return false
-	}
+// fixedPIDLeafProved reports that the link of an explicit process id leads to
+// the file the hook reads for it, as a path that ends at the link. The kernel
+// resolves the link itself the same way for the hook and for the process that
+// opens the path, so the proof is a reading that reaches one file identity
+// through both the link and its target text. An unreadable link, a text that
+// is not a path, or two identities that differ stay unproved.
+func fixedPIDLeafProved(link string) bool {
 	target, err := PathReadlink(link)
 	if err != nil || !filepath.IsAbs(target) {
 		return false
@@ -664,6 +654,14 @@ func fixedPIDLinkProved(link string) bool {
 	}
 	named, err := PathStat(target)
 	return err == nil && os.SameFile(via, named)
+}
+
+// fixedPIDLinkProved is the proof for a path that goes on below the link. That
+// part is resolved in the mount tree of the process the link names, so the
+// proof needs that tree to be the hook tree besides the leaf proof.
+func fixedPIDLinkProved(link string) bool {
+	dir := fixedPIDProcDir(link)
+	return dir != "" && sharesMountTree(dir) && fixedPIDLeafProved(link)
 }
 
 // procLinkGuard follows the links one reading crosses. The aliases
@@ -687,8 +685,9 @@ func (g *procLinkGuard) readlink(path string) (string, error) {
 // unproved reports a path that starts with a per-process link the hook cannot
 // read for the process that opens it: an opener-relative alias, a process id
 // the hook reached through such an alias, or an explicit process id whose
-// link the hook does not prove.
-func (g *procLinkGuard) unproved(path string) bool {
+// link the hook does not prove. A path that ends at the link needs only the
+// leaf proof; below tells that the path goes on below it.
+func (g *procLinkGuard) unproved(path string, below bool) bool {
 	if processRelativeLink(path) {
 		return true
 	}
@@ -697,10 +696,16 @@ func (g *procLinkGuard) unproved(path string) bool {
 		return false
 	}
 	pid, _, _ := strings.Cut(strings.TrimPrefix(link, "/proc/"), "/")
-	return g.aliased[pid] || !fixedPIDLinkProved(link)
+	if g.aliased[pid] {
+		return true
+	}
+	if below || filepath.ToSlash(path) != link {
+		return !fixedPIDLinkProved(link)
+	}
+	return !fixedPIDLeafProved(link)
 }
 
-func unprovedProcessLink(path string) bool {
+func unprovedProcessLink(path string, below bool) bool {
 	var g procLinkGuard
-	return g.unproved(path)
+	return g.unproved(path, below)
 }
