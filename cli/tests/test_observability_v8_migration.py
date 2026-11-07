@@ -36,6 +36,8 @@ from defenseclaw.observability.v8_migration import (
     convert_v7_observability_to_v8,
 )
 
+from tests.helpers import registered_audit_action_count
+
 _GENERATED_COMPATIBILITY = json.loads(v7_exporter_selection_bytes())
 _TYPED_COMPATIBILITY = V7CompatibilitySelection.from_mapping(_GENERATED_COMPATIBILITY)
 _ALL_BUCKETS = list(BUCKETS)
@@ -3496,7 +3498,7 @@ audit_sinks:
         "redaction_profile": "v7-compatible",
     }
     action_selector = routes[1]["selector"]["actions"]
-    assert len(action_selector) == 239
+    assert len(action_selector) == registered_audit_action_count()
     assert "fleet.device.credential_provision_authorized" in action_selector
     assert "fleet.device.decommission_authorized" in action_selector
     assert "setup-redaction-policy" in action_selector
