@@ -190,7 +190,7 @@ func validatePrivateOwnership(path string, wantDirectory, trustSystemOwners bool
 		return err
 	}
 	if !repairable {
-		return fmt.Errorf("safefile: private path DACL is unsafe to repair: %s", path)
+		return unsafePrivateDACLError(path, identity, trustSystemOwners)
 	}
 	return nil
 }
@@ -856,26 +856,52 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 	identity windowsProtectionSubject,
 	trustSystemOwners bool,
 ) (bool, error) {
+	refusal, err := privateSecurityDescriptorRefusal(sd, identity, trustSystemOwners)
+	return refusal == nil && err == nil, err
+}
+
+// daclRefusal is why privateSecurityDescriptorRefusal refused a descriptor.
+// sid is the trustee of the refused entry; it is nil when no single entry is
+// to blame (no descriptor, an untrusted owner, no DACL, an entry of a kind
+// this check does not parse).
+type daclRefusal struct {
+	sid       *windows.SID
+	aceFlags  byte
+	deny      bool
+	inherited bool
+}
+
+// privateSecurityDescriptorRefusal is the one rule behind "writer repairable":
+// it returns nil when sd may be repaired by its writer, and the refused entry
+// otherwise. The boolean answer and the named entry cannot disagree.
+func privateSecurityDescriptorRefusal(
+	sd *windows.SECURITY_DESCRIPTOR,
+	identity windowsProtectionSubject,
+	trustSystemOwners bool,
+) (*daclRefusal, error) {
 	if sd == nil {
-		return false, nil
+		return &daclRefusal{}, nil
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	dacl, _, err := sd.DACL()
-	if err != nil || dacl == nil {
-		return false, err
+	if err != nil {
+		return nil, err
+	}
+	if dacl == nil {
+		return &daclRefusal{}, nil
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if identity.sid == nil {
-		return false, fmt.Errorf("safefile: protection subject SID is unavailable")
+		return nil, fmt.Errorf("safefile: protection subject SID is unavailable")
 	}
 	if !ownerTrustedForSubject(owner, identity, trustSystemOwners) {
-		return false, nil
+		return &daclRefusal{}, nil
 	}
 	untrustedWrite := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |
@@ -892,29 +918,35 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			return false, err
+			return nil, err
 		}
 		if ace == nil {
 			continue
 		}
 		if !isSimpleDiscretionaryACE(ace.Header.AceType) {
-			return false, nil
+			return &daclRefusal{}, nil
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		trusted := sid.Equals(identity.sid) || sid.Equals(system) ||
 			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) ||
 			(trustSystemOwners && winowner.Trusted(sid.String(), ""))
-		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+		refusal := &daclRefusal{
+			sid:       sid,
+			aceFlags:  ace.Header.AceFlags,
+			deny:      ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE,
+			inherited: ace.Header.AceFlags&windows.INHERITED_ACE != 0,
+		}
+		if refusal.deny {
 			if trusted && ace.Mask != 0 {
-				return false, nil
+				return refusal, nil
 			}
 			continue
 		}
 		if !trusted && ace.Mask&untrustedWrite != 0 {
-			return false, nil
+			return refusal, nil
 		}
 	}
-	return true, nil
+	return nil, nil
 }
 
 // isSimpleDiscretionaryACE deliberately recognizes only the two ACE layouts
