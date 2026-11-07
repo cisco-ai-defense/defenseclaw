@@ -350,6 +350,11 @@ class InstalledVersionCheck:
 _PROBE_SHARE_SECONDS = 120.0
 _probe_answers: dict[tuple[str, str, str], tuple[float, str, str]] = {}
 _candidate_lists: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
+#: The discovery evidence the run judges (it names the recorded executable and
+#: version every candidate list is ordered against). It is read once per run:
+#: a cache or lock update halfway through must not hand the gate one recorded
+#: path and the row another. Only a run shares it; there is no time bound.
+_run_evidence: dict[str, Any] = {}
 _probe_run_scoped = False
 
 
@@ -375,6 +380,22 @@ def reset_installed_version_probes() -> None:
 
     _probe_answers.clear()
     _candidate_lists.clear()
+    _run_evidence.clear()
+
+
+def read_run_discovery(data_dir: str) -> Any | None:
+    """:func:`read_cached_discovery`, read once for the whole Doctor run.
+
+    The gate, the planner and the row all start from this one evidence object,
+    so they pick the same recorded path and compare the same recorded version.
+    Outside a run every call reads the cache again.
+    """
+
+    if not _probe_run_scoped:
+        return read_cached_discovery(data_dir)
+    if data_dir not in _run_evidence:
+        _run_evidence[data_dir] = read_cached_discovery(data_dir)
+    return _run_evidence[data_dir]
 
 
 def _fresh(stamp: float) -> bool:
@@ -515,15 +536,30 @@ def _recheck_kiro(signal: Any, data_dir: str) -> tuple[Any, bool, str]:
             if retired:
                 gone = gone or _probe_failure_reason(error)
                 continue
-            reason = reason or _probe_failure_reason(error)
+            why = _probe_failure_reason(error)
+            reason = reason or why
             if held is not None:
+                # An install that cannot answer now is unread, as fresh
+                # discovery records it: the version it had when recorded is
+                # kept out of the judgment, so it neither protects (a stale
+                # PASS) nor makes a below-floor install that did answer an
+                # auxiliary finding.
                 held_version = held.get("version", "")
                 ide = bool(held_version) and not held_version.startswith("kiro-cli")
-                updated.append({**held, "kind": held.get("kind", "") or (KIRO_FORM_IDE if ide else KIRO_FORM_CLI)})
+                updated.append(
+                    {
+                        "kind": held.get("kind", "") or (KIRO_FORM_IDE if ide else KIRO_FORM_CLI),
+                        "version": "",
+                        "unread": f"{path} is installed, but its version could not be read ({why})",
+                        "path": path,
+                    }
+                )
             continue
         read = f"kiro-cli {normalized}" if surface == KIRO_FORM_CLI else normalized
         updated.append({"kind": surface, "version": read, "unread": "", "path": path})
-    if not updated:
+    if not any(form["version"] for form in updated):
+        # Nothing answered: there is no positive evidence either way, so the
+        # recorded evidence stays and the row calls it recorded.
         return signal, False, reason or gone or "none of the installs it recorded answers now"
 
     def same(a: dict[str, str], b: dict[str, str]) -> bool:
@@ -566,7 +602,9 @@ def _recheck_kiro(signal: Any, data_dir: str) -> tuple[Any, bool, str]:
             kiro_forms=updated,
         ),
         True,
-        reason,
+        # At least one install was read now; an install that did not answer is
+        # its own unread finding, not a "recorded" label on the versions read.
+        "",
     )
 
 

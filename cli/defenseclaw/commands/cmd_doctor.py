@@ -4391,7 +4391,7 @@ def _check_component_connector_compatibility(
         HealthStatus,
         build_health_report,
         hook_call_after_scan,
-        read_cached_discovery,
+        read_run_discovery,
         recheck_installed_versions,
         supported_range_text,
     )
@@ -4417,7 +4417,7 @@ def _check_component_connector_compatibility(
         return live_activity.get(connector)
 
     try:
-        rechecked = recheck_installed_versions(read_cached_discovery(data_dir), enabled, data_dir)
+        rechecked = recheck_installed_versions(read_run_discovery(data_dir), enabled, data_dir)
         discovery = rechecked.discovery
         report = build_health_report(
             enabled,
@@ -16149,7 +16149,7 @@ def _connector_compatibility_problems(cfg) -> tuple[object, ...]:
     from defenseclaw.doctor_health import (
         HealthStatus,
         assess_connector_health,
-        read_cached_discovery,
+        read_run_discovery,
         recheck_installed_versions,
     )
 
@@ -16157,7 +16157,7 @@ def _connector_compatibility_problems(cfg) -> tuple[object, ...]:
     if not connectors:
         return ()
     data_dir = str(getattr(cfg, "data_dir", "") or "")
-    discovery = recheck_installed_versions(read_cached_discovery(data_dir), connectors, data_dir).discovery
+    discovery = recheck_installed_versions(read_run_discovery(data_dir), connectors, data_dir).discovery
     findings = assess_connector_health(connectors, discovery)
     return tuple(finding for finding in findings if finding.status is not HealthStatus.SUPPORTED)
 
