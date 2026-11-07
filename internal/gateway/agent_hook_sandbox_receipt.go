@@ -122,7 +122,9 @@ func (a *APIServer) recordSandboxHookReceiptState(ctx context.Context, p *pendin
 	if err != nil {
 		return err
 	}
+	leave := a.sandboxWriteLanes.enter(journalLane)
 	stored, err := a.store.UpdateHookDelivery(ctx, p.ID, encoded, pendingHookJournalLimits)
+	leave()
 	if err != nil {
 		return err
 	}
@@ -130,6 +132,16 @@ func (a *APIServer) recordSandboxHookReceiptState(ctx context.Context, p *pendin
 		return errors.New("sandbox hook receipt journal row disappeared")
 	}
 	return nil
+}
+
+// finalizeSandboxReceiptAnswer writes the audit verdict of a receipt with no
+// journal write beside it (sandboxWriteLanes).
+func (a *APIServer) finalizeSandboxReceiptAnswer(ctx context.Context, connectorName string, req agentHookRequest,
+	resp agentHookResponse, p *pendingHookOccurrence) hookFinalizationResult {
+	leave := a.sandboxWriteLanes.enter(auditLane)
+	defer leave()
+	return a.finalizeAgentHookAnswer(ctx, connectorName, req, resp, p.RawEventIDs,
+		nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
 }
 
 func (p *pendingHookOccurrence) sandboxReceiptMatches(stored audit.StoredHookVerdict) bool {
@@ -204,8 +216,6 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "sandbox hook receipt expired or closed"})
 		return
 	}
-	a.sandboxReceiptWriteMu.Lock()
-	defer a.sandboxReceiptWriteMu.Unlock()
 	req := p.request()
 	req.sandboxReceiptAcknowledgment = true
 	req.pendingSandboxCallRef = p.SandboxReceipt.CallRef
@@ -230,16 +240,14 @@ func (a *APIServer) handleSandboxHookReceipt(w http.ResponseWriter, r *http.Requ
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 		return
 	}
-	result := a.finalizeAgentHookAnswer(ctx, connectorName, req, resp, p.RawEventIDs,
-		nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
+	result := a.finalizeSandboxReceiptAnswer(ctx, connectorName, req, resp, &p)
 	if !result.AuditPersisted {
 		// A write can return an error after it committed. Confirm its exact
 		// verdict before telling the hook to use the proposed answer.
 		stored, recorded, err = a.store.StoredHookVerdict(ctx, p.ID)
 		if err != nil || !recorded || !p.sandboxReceiptMatches(stored) {
 			if err == nil && !recorded {
-				closedResult := a.finalizeAgentHookAnswer(ctx, connectorName, req, closed, p.RawEventIDs,
-					nil, time.Duration(p.ElapsedNanos), p.Panicked, p.Extra, false)
+				closedResult := a.finalizeSandboxReceiptAnswer(ctx, connectorName, req, closed, &p)
 				a.markSandboxHookReceiptSettled(ctx, &p, closedResult)
 				if closedResult.AuditPersisted {
 					a.dispatchFinalizedAgentHookNotification(ctx, req, closed, closedResult)

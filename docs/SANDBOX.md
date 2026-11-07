@@ -602,7 +602,8 @@ Each request passes these steps in order:
    uploads in `x-defenseclaw-source`, which defaults to the binding's
    connector. A mismatch answers 403.
 4. **Limit.** Per binding, hook, notify and inspect calls share a bucket of
-   25 requests a second with a burst of 100 and at most 128 in flight. OTLP
+   25 requests a second with a burst of 100 and at most 475 in flight (the
+   burst plus the rate over the 15 s a request can stay open). OTLP
    has its own bucket (10 a second, burst 50), at most 4 uploads in flight per
    binding and 16 across all bindings, and a 4 MiB body cap. Over a limit the
    answer is 429 with `Retry-After: 1`.
