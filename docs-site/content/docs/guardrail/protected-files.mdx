@@ -38,15 +38,17 @@ folder all show as a change.
 The hook rules read an agent shell command before it runs. A command that
 writes, appends, copies, moves, links or extracts into one of these files
 (or into `.ssh/config`, `.ssh/environment`, `.ssh/rc` and active Git hooks)
-and names it, directly, through a value the command sets or through a link, is
-blocked in action mode in every rule pack. When the rules only suspect such a
+and names it as the operand it writes, directly, through a value the command
+sets or through a link, is blocked in action mode in every rule pack. A
+protected name in a comment, or in text the command only prints or writes
+elsewhere, does not name a target. When the rules only suspect such a
 write (the command does not name a protected file), the `default` (balanced)
 and `permissive` rule packs raise an alert instead: the agent shows the warning
 with the rule ID, the command runs, and the audit record has `decision=alert`.
 The `strict` pack, and a managed strict policy, block it. This holds per-user
 and managed, and on every connector. A native file tool (Write, Edit,
 apply_patch) that writes `authorized_keys`, and any command that changes
-DefenseClaw itself, block in every pack. To block these commands, use the `strict` pack.
+DefenseClaw itself, block in every pack. To also block the commands that only raise an alert, use the `strict` pack.
 
 ## What happens on a change
 
