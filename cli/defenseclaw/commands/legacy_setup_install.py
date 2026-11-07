@@ -130,9 +130,9 @@ def find(platform_name: str) -> LegacySetupInstall | None:
         problem = "its install state does not describe a per-user install"
         step = f"Uninstall it with its own uninstaller (Apps & Features), or ask an administrator to remove {root}."
     elif not isinstance(install_root, str) or not _same_path(install_root, root):
-        problem = f"its install state names another program folder ({install_root})"
         # The folder comes from a file the user can edit: name it, never advise deleting it.
         named = "".join(ch for ch in str(install_root) if ch.isprintable())[:260]
+        problem = f"its install state names another program folder ({named})"
         step = (
             f"Uninstall DefenseClaw Setup from Apps & Features. Its install state names {named}: "
             "ask an administrator to check that folder. DefenseClaw does not remove it."

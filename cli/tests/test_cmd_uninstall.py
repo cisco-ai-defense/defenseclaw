@@ -2788,6 +2788,7 @@ class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
             patch.object(cmd_uninstall, "_remove_data_dir", side_effect=remove_data),
             patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
             patch.object(cmd_uninstall, "remove_own_api_port_claims") as claims,
+            patch.object(cmd_uninstall, "_configured_claim_ports", return_value=frozenset({18970, 4000})),
             patch.object(cmd_uninstall, "_remove_binaries") as binaries,
             capture_click_output(),
         ):
@@ -2795,7 +2796,7 @@ class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
 
         self.assertTrue(result.succeeded)
         self.assertEqual([p.name for p in result.phases][-2:], ["data removal", "binary removal"])
-        claims.assert_called_once()
+        claims.assert_called_once_with(frozenset({18970, 4000}))
         binaries.assert_called_once_with(plan)
 
 

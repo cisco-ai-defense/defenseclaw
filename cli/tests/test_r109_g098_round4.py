@@ -126,3 +126,53 @@ def test_init_looks_up_the_install_gateway_not_the_environment_one(two_gateways)
         cmd_init._restart_gateway_quiet()
     assert [call.args[0][0] for call in run.call_args_list] == [str(real), str(real)]
 
+
+# ---- L-b: an override that names no file is reported as such
+
+
+def test_readiness_says_when_the_override_names_a_missing_file(tmp_path: Path) -> None:
+    from defenseclaw.config import default_config
+
+    missing = tmp_path / "nowhere" / "defenseclaw-gateway"
+    options = bootstrap.FirstRunOptions(connector="none")
+    with (
+        patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_BIN": str(missing)}),
+        patch.object(bootstrap, "_scanner_availability", return_value=[]),
+    ):
+        steps = bootstrap.targeted_readiness(default_config(), options)
+    step = next(s for s in steps if s.name == "Gateway binary")
+    assert step.status == "warn"
+    assert step.detail.startswith("set by DEFENSECLAW_GATEWAY_BIN, not found")
+
+
+def test_readiness_passes_when_the_override_names_a_real_file(tmp_path: Path) -> None:
+    from defenseclaw.config import default_config
+
+    present = _file(tmp_path / "defenseclaw-gateway")
+    options = bootstrap.FirstRunOptions(connector="none")
+    with (
+        patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_BIN": str(present)}),
+        patch.object(bootstrap, "_scanner_availability", return_value=[]),
+    ):
+        steps = bootstrap.targeted_readiness(default_config(), options)
+    step = next(s for s in steps if s.name == "Gateway binary")
+    assert (step.status, step.detail) == ("pass", f"found at {present}")
+
+
+# ---- L-a: the problem line strips control characters from the install root
+
+
+def test_the_problem_line_strips_control_characters_from_the_install_root(tmp_path: Path) -> None:
+    from tests.test_uninstall_legacy_setup_install import _install
+
+    local = tmp_path.resolve() / "LocalAppData"
+    local.mkdir()
+    _install(local, install_root="C:\\Other\\Docs\x07\x1b[31m")
+    with (
+        patch.object(legacy_setup_install, "local_app_data", return_value=str(local)),
+        patch.object(legacy_setup_install, "_ownership_problem", return_value=""),
+    ):
+        found = legacy_setup_install.find("win32")
+    assert found is not None
+    assert "C:\\Other\\Docs" in found.problem
+    assert "\x07" not in found.problem and "\x1b" not in found.problem

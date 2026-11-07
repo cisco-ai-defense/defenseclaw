@@ -1315,10 +1315,25 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
                 "make gateway-install",
             )
         )
+    elif _gateway_override_missing(gateway_binary):
+        steps.append(
+            StepResult(
+                "Gateway binary",
+                "warn",
+                f"set by DEFENSECLAW_GATEWAY_BIN, not found: {gateway_binary}",
+                "unset DEFENSECLAW_GATEWAY_BIN, or point it at defenseclaw-gateway",
+            )
+        )
     else:
         steps.append(StepResult("Gateway binary", "pass", f"found at {gateway_binary}"))
 
     return steps
+
+
+def _gateway_override_missing(gateway_binary: str) -> bool:
+    """True when ``gateway_binary`` came from DEFENSECLAW_GATEWAY_BIN and is not a file."""
+    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
+    return bool(override) and gateway_binary == override and not os.path.isfile(override)
 
 
 def _normalize_connector(raw: str | None) -> str:
