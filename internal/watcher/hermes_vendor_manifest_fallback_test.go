@@ -88,6 +88,52 @@ var manifestReaderCases = []manifestReaderCase{
 	{"unterminated flow", "plugin.yaml", "main: " + cachedGenerated + "\nx: [a\n", nil},
 	{"json with trailing data", "package.json", `{"main":"lib/a.js"} {"main":"` + cachedGenerated + `"}`, nil},
 	{"json root that is a list", "package.json", `["main","` + cachedGenerated + `"]`, nil},
+
+	// The loader refuses the whole document where a constructor raises, even
+	// beside a path that a tolerant reader would take (GAP-0645 review 23).
+	{"explicit int that is not a number", "plugin.yaml", "main: " + cachedGenerated + "\nmetadata: !!int nope\n", nil},
+	{"explicit float that is not a number", "plugin.yaml", "main: " + cachedGenerated + "\nmetadata: !!float nope\n", nil},
+	{"explicit binary that is not base64", "plugin.yaml", "main: " + cachedGenerated + "\nmetadata: !!binary 'A'\n", nil},
+	{"date the calendar does not have", "plugin.yaml", "main: " + cachedGenerated + "\nwhen: 2001-13-45\n", nil},
+	{"plain equals sign as a value", "plugin.yaml", "main: " + cachedGenerated + "\na: =\n", nil},
+	{"plain merge indicator as a value", "plugin.yaml", "main: " + cachedGenerated + "\na: <<\n", nil},
+	{"set beside a path", "plugin.yaml", "main: " + cachedProtected + "\ns: !!set {a, b}\n", []string{cachedProtected}},
+	{"omap beside a path", "plugin.yaml", "main: " + cachedProtected + "\no: !!omap [a: 1, b: 2]\n", []string{cachedProtected}},
+	{"binary beside a path", "plugin.yaml", "main: " + cachedProtected + "\nb: !!binary |\n  R0lG\n  ODlh\n", []string{cachedProtected}},
+	{"valid timestamps beside a path", "plugin.yaml", "main: " + cachedProtected + "\na: 2001-12-14t21:59:43.10-05:00\nb: 2001-12-14\n", []string{cachedProtected}},
+
+	// A mapping that merges itself is a valid document.
+	{"mapping that merges itself", "plugin.yaml", "r: &r\n  <<: *r\n  a: 1\nmain: " + cachedProtected + "\n", []string{cachedProtected}},
+	{"two mappings that merge each other", "plugin.yaml", "a: &a\n  c: &b\n    <<: *a\n    y: 2\n  <<: *b\n  x: 1\nmain: " + cachedProtected + "\n", []string{cachedProtected}},
+	{"alias key with a merged override", "plugin.yaml", "base: &b {main: " + cachedGenerated + "}\n<<: *b\nmain: " + cachedProtected + "\n", []string{cachedProtected}},
+	{"tagged string key", "plugin.yaml", "? !!str main\n: " + cachedProtected + "\n", []string{cachedProtected}},
+
+	// Only a string is a path. A number, a boolean, a null and a binary are
+	// other types, an explicit !!str is a string.
+	{"number is not a path", "plugin.yaml", "main: 12\nentry: lib/run.js\n", []string{"lib/run.js"}},
+	{"boolean is not a path", "plugin.yaml", "main: yes\nentry: lib/run.js\n", []string{"lib/run.js"}},
+	{"binary is not a path", "plugin.yaml", "main: !!binary |\n  bGliL2EuanM=\nentry: lib/run.js\n", []string{"lib/run.js"}},
+	{"tagged number is a path", "plugin.yaml", "main: !!str 12\n", []string{"12"}},
+
+	// One dictionary key is one entry, whatever its spelling: the last value
+	// stays, so a shadowed value declares nothing. A quoted number is a
+	// string, a different key.
+	{"bin keys 1 and 01", "plugin.yaml", "bin:\n  1: " + cachedGenerated + "\n  01: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys 1 and true", "plugin.yaml", "bin:\n  1: " + cachedGenerated + "\n  true: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys yes and true", "plugin.yaml", "bin:\n  yes: " + cachedGenerated + "\n  true: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys on and true", "plugin.yaml", "bin:\n  on: " + cachedGenerated + "\n  true: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys null and tilde", "plugin.yaml", "bin:\n  null: " + cachedGenerated + "\n  ~: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys 1.0 and 1", "plugin.yaml", "bin:\n  1.0: " + cachedGenerated + "\n  1: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys hex and decimal", "plugin.yaml", "bin:\n  0x10: " + cachedGenerated + "\n  16: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys sexagesimal and decimal", "plugin.yaml", "bin:\n  1:00: " + cachedGenerated + "\n  60: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys equal dates", "plugin.yaml", "bin:\n  2001-01-01: " + cachedGenerated + "\n  2001-01-01: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys quoted number and number", "plugin.yaml", "bin:\n  '1': " + cachedGenerated + "\n  1: lib/run.js\n", []string{cachedGenerated, "lib/run.js"}},
+	{"bin keys date and string", "plugin.yaml", "bin:\n  '2001-01-01': " + cachedGenerated + "\n  2001-01-01: lib/run.js\n", []string{cachedGenerated, "lib/run.js"}},
+	{"bin keys two .nan are one key", "plugin.yaml", "bin:\n  .nan: " + cachedGenerated + "\n  .nan: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys equal instants", "plugin.yaml", "bin:\n  2001-12-14 21:59:43 +05:00: " + cachedGenerated + "\n  2001-12-14T16:59:43Z: lib/run.js\n", []string{"lib/run.js"}},
+	{"bin keys exponent without a dot is a string", "plugin.yaml", "bin:\n  1e3: " + cachedGenerated + "\n  1000: lib/run.js\n", []string{cachedGenerated, "lib/run.js"}},
+	{"tagged mapping with a value key is a string", "plugin.yaml", "main: " + cachedGenerated + "\nx: !!str {=: b}\n", []string{cachedGenerated}},
+	{"tagged mapping is not a string", "plugin.yaml", "main: " + cachedGenerated + "\nx: !!str {a: b}\n", nil},
 }
 
 // The reader used while the plugin scanner cannot be asked returns exactly
@@ -95,7 +141,7 @@ var manifestReaderCases = []manifestReaderCase{
 func TestHermesFallbackReadsTheEffectiveMapping(t *testing.T) {
 	for _, tc := range manifestReaderCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)})
+			got, _ := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)})
 			if !sameStrings(got, tc.want) {
 				t.Errorf("candidates = %q, want %q", got, tc.want)
 			}
@@ -114,7 +160,7 @@ func TestHermesFallbackEntrypointsMatchScanner(t *testing.T) {
 			if err != nil {
 				t.Fatalf("scanner: %v", err)
 			}
-			if got := hermesManifestCandidates(manifests); !sameStrings(got, scanned) {
+			if got, _ := hermesManifestCandidates(manifests); !sameStrings(got, scanned) {
 				t.Errorf("fallback = %q, scanner = %q", got, scanned)
 			}
 		})
@@ -135,7 +181,7 @@ func sameStrings(a, b []string) bool {
 func TestHermesManifestOutageScansOnlyWhatTheScannerWouldRead(t *testing.T) {
 	for _, tc := range manifestReaderCases {
 		wantScans := 0
-		if slices.ContainsFunc(tc.want, func(e string) bool { return e == cachedProtected }) {
+		if slices.ContainsFunc(tc.want, func(e string) bool { return e == cachedProtected || e == cachedGenerated }) {
 			wantScans = 1
 		}
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,7 +228,7 @@ func TestHermesManifestAnswerFollowsScannerDependency(t *testing.T) {
 		}
 	}
 	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\n")}
-	load := newHermesManifestCache().loader(&scanner.PluginScanner{BinaryPath: script})
+	load := hermesManifestsFrom(&scanner.PluginScanner{BinaryPath: script})
 	declare("__pycache__/a.pyc")
 	if got, err := load(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/a.pyc"}) {
 		t.Fatalf("first answer = %q, %v", got, err)

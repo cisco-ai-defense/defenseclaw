@@ -19,7 +19,9 @@ package watcher
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +30,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -52,6 +55,21 @@ var (
 	// PATH for their own test.
 	hermesTestPath = os.Getenv("PATH")
 )
+
+// hermesManifestKey is the digest of the names and bytes of manifests.
+func hermesManifestKey(manifests map[string][]byte) string {
+	names := make([]string, 0, len(manifests))
+	for name := range manifests {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	digest := sha256.New()
+	for _, name := range names {
+		fmt.Fprintf(digest, "%s\x00%d\x00", name, len(manifests[name]))
+		_, _ = digest.Write(manifests[name])
+	}
+	return hex.EncodeToString(digest.Sum(nil))
+}
 
 // hermesLookPython finds python3 on the PATH the process started with.
 func hermesLookPython() (string, error) {
@@ -212,11 +230,10 @@ func TestHermesManifestLoaderFailureBindsEveryCacheFile(t *testing.T) {
 	}
 }
 
-// An answer is never remembered (what the scanner declares can change while
-// its launcher and the manifest stay the same), so each request starts the
-// scanner. A failure is remembered briefly for the same manifest, so a scanner
-// that cannot run is not started for every file event.
-func TestHermesManifestLoaderAsksTheScannerEveryTimeAndRemembersOnlyFailures(t *testing.T) {
+// Nothing is remembered, neither an answer nor a failure (what the scanner
+// declares, and whether it can run, change while its launcher and the manifest
+// stay the same), so each request starts the scanner.
+func TestHermesManifestLoaderAsksTheScannerEveryTime(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture")
 	}
@@ -227,7 +244,7 @@ func TestHermesManifestLoaderAsksTheScannerEveryTimeAndRemembersOnlyFailures(t *
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	load := newHermesManifestCache().loader(&scanner.PluginScanner{BinaryPath: script})
+	load := hermesManifestsFrom(&scanner.PluginScanner{BinaryPath: script})
 	runs := func() int {
 		data, _ := os.ReadFile(count)
 		return strings.Count(string(data), "x")
@@ -252,15 +269,15 @@ func TestHermesManifestLoaderAsksTheScannerEveryTimeAndRemembersOnlyFailures(t *
 	if err := os.WriteFile(failScript, []byte(failBody), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	failing := newHermesManifestCache().loader(&scanner.PluginScanner{BinaryPath: failScript})
+	failing := hermesManifestsFrom(&scanner.PluginScanner{BinaryPath: failScript})
 	for range 3 {
 		if _, err := failing(manifests); err == nil {
 			t.Fatal("a failing scanner gave an answer")
 		}
 	}
 	data, _ := os.ReadFile(failCount)
-	if got := strings.Count(string(data), "x"); got != 1 {
-		t.Errorf("a failing scanner was started %d times for three requests, want 1", got)
+	if got := strings.Count(string(data), "x"); got != 3 {
+		t.Errorf("a failing scanner was started %d times for three requests, want 3", got)
 	}
 }
 
@@ -317,8 +334,8 @@ func TestHermesManifestIncompleteReplyStillBindsNamedCacheFile(t *testing.T) {
 	writePluginFile(t, other, "one")
 	for _, open := range []bool{true, false} {
 		ps := &scanner.PluginScanner{BinaryPath: hermesReplyScript(t, "{}")}
-		cache := newHermesManifestCache()
-		load := cache.byPolicy(cache.loader(ps), func() bool { return open })
+		cache := newHermesManifestPolicy()
+		load := cache.byPolicy(hermesManifestsFrom(ps), func() bool { return open })
 		first := skippedTreeHash(dir, load)
 		writePluginFile(t, named, "two")
 		if skippedTreeHash(dir, load) == first {
@@ -538,7 +555,7 @@ func TestHermesManifestCandidatesHoldEveryEntrypointTheScannerReads(t *testing.T
 			if err != nil || len(got) == 0 {
 				t.Fatalf("scanner entrypoints = %q, %v", got, err)
 			}
-			candidates := hermesManifestCandidates(manifests)
+			candidates, _ := hermesManifestCandidates(manifests)
 			for _, entrypoint := range got {
 				if !slices.Contains(candidates, entrypoint) {
 					t.Errorf("scanner entrypoint %q is not among the candidates %q", entrypoint, candidates)
@@ -676,8 +693,8 @@ func TestHermesManifestNullListElementIsNotAnAnswer(t *testing.T) {
 	dir := t.TempDir()
 	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "main: __pycache__/run.pyc\n")
 	writePluginFile(t, filepath.Join(dir, "__pycache__", "run.pyc"), "exec()\n")
-	cache := newHermesManifestCache()
-	load := cache.byPolicy(cache.loader(ps), func() bool { return false })
+	cache := newHermesManifestPolicy()
+	load := cache.byPolicy(hermesManifestsFrom(ps), func() bool { return false })
 	if skippedTreeHash(dir, load) == "" {
 		t.Error("the closed fallback left a declared cache file unhashed after an invalid reply")
 	}
@@ -706,7 +723,7 @@ func TestHermesManifestOutageCandidatesKeepPunctuationOfDeclaredNames(t *testing
 		{"json value on the next line", "package.json", "{\n\"main\":\n\"__pycache__/run,1.pyc\"}", "__pycache__/run,1.pyc"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			candidates := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)})
+			candidates, _ := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)})
 			if !slices.Contains(candidates, tc.entry) {
 				t.Errorf("candidates omit the declared entrypoint %q: %q", tc.entry, candidates)
 			}
@@ -729,7 +746,7 @@ func TestHermesManifestOutageProseNamingCachePathBindsNothing(t *testing.T) {
 		{"comment", "plugin.yaml", "main: lib/run.js # __pycache__/generated.pyc\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if candidates := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)}); slices.Contains(candidates, "__pycache__/generated.pyc") {
+			if candidates, _ := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)}); slices.Contains(candidates, "__pycache__/generated.pyc") {
 				t.Errorf("prose is among the candidates: %q", candidates)
 			}
 			dir := t.TempDir()
@@ -810,7 +827,7 @@ func TestHermesManifestAnswerFollowsRewriteThatKeepsExecutableMetadata(t *testin
 		t.Fatal(err)
 	}
 	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\n")}
-	load := newHermesManifestCache().loader(&scanner.PluginScanner{BinaryPath: script})
+	load := hermesManifestsFrom(&scanner.PluginScanner{BinaryPath: script})
 	if got, err := load(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/a.pyc"}) {
 		t.Fatalf("first answer = %q, %v", got, err)
 	}
@@ -940,5 +957,77 @@ func TestHermesLargeDeclaredEntrypointEditReachesAdmission(t *testing.T) {
 	f.w.runRescanCycle(context.Background())
 	if got := f.scan.scans(path); got != firstScans+1 {
 		t.Errorf("a same-size edit of the large declared entrypoint caused %d additional scans, want 1", got-firstScans)
+	}
+}
+
+// GAP-0645 review 23: a scanner that could not run is asked again. Its
+// remembered failure must not hide the protected entrypoint the same launcher
+// declares once it runs, whatever the manifest and settings did in between.
+func TestHermesManifestRecoveredScannerDeclarationIsScanned(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "defenseclaw")
+	answer := filepath.Join(dir, "answer")
+	body := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.0.9\\n'; exit 0; fi\ncat >/dev/null\nIFS= read -r value < \"${0%/*}/answer\"\nif [ \"$value\" = fail ]; then exit 1; fi\nprintf '{\"entrypoints\":[\"%s\"]}' \"$value\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	say := func(text string) {
+		t.Helper()
+		if err := os.WriteFile(answer, []byte(text+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	say("fail")
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: lib/run.js\n")
+	f.pinVendor("web/ddgs", path)
+	f.w.hermesManifests = nil
+	f.cfg.Scanners.PluginScanner = script
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	// The outage: an ordinary cache write is neither scanned nor refused.
+	writePluginFile(t, filepath.Join(path, "__pycache__", "old.pyc"), "ordinary\n")
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got != 0 {
+		t.Fatalf("an ordinary cache write during the outage caused %d scans", got)
+	}
+	// The scanner recovers and declares a cache file.
+	say(cachedProtected)
+	writePluginFile(t, filepath.Join(path, filepath.FromSlash(cachedProtected)), "exec()\n")
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got != 1 {
+		t.Errorf("the entrypoint the recovered scanner declares caused %d scans, want 1", got)
+	}
+}
+
+// A manifest too deeply nested to read within the reader's bounds is neither
+// refused nor read: what it declares is unknown, and the caller binds every
+// cache file. A manifest nested within the bounds is decided.
+func TestHermesManifestCandidatesUndecidedBeyondTheBounds(t *testing.T) {
+	nested := func(depth int) string {
+		return "main: " + cachedProtected + "\nx: " + strings.Repeat("[", depth) + strings.Repeat("]", depth) + "\n"
+	}
+	if got, decided := hermesManifestCandidates(map[string][]byte{"plugin.yaml": []byte(nested(10))}); !decided || !slices.Equal(got, []string{cachedProtected}) {
+		t.Errorf("a manifest nested ten deep = %q, decided %v", got, decided)
+	}
+	if got, decided := hermesManifestCandidates(map[string][]byte{"plugin.yaml": []byte(nested(hermesYAMLMaxDepth + 10))}); decided {
+		t.Errorf("a manifest nested past the bound was decided as %q", got)
+	}
+
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), nested(hermesYAMLMaxDepth+10))
+	cache := filepath.Join(dir, "__pycache__", "generated.pyc")
+	writePluginFile(t, cache, "one")
+	failing := func(map[string][]byte) ([]string, error) {
+		return nil, fmt.Errorf("%w: scanner unavailable", errHermesManifestFailOpen)
+	}
+	first := skippedTreeHash(dir, failing)
+	writePluginFile(t, cache, "two")
+	if skippedTreeHash(dir, failing) == first {
+		t.Error("an edit of a cache file was not seen beside a manifest the reader could not read")
 	}
 }
