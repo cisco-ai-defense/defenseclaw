@@ -19,6 +19,7 @@ func TestGAP0714PreflightRefusesWhatReclaimRefuses(t *testing.T) {
 	old := effectiveUID
 	t.Cleanup(func() { effectiveUID = old })
 	effectiveUID = func() int { return 0 }
+	t.Setenv("SUDO_UID", "")
 
 	// Group- and other-writable: a directory a private file cannot be given to.
 	open := filepath.Join(t.TempDir(), "open home")
@@ -57,6 +58,7 @@ func TestGAP0714PreflightLetsOrdinaryHomesThrough(t *testing.T) {
 	old := effectiveUID
 	t.Cleanup(func() { effectiveUID = old })
 	effectiveUID = func() int { return 0 }
+	t.Setenv("SUDO_UID", "")
 
 	private := filepath.Join(t.TempDir(), "private home")
 	if err := os.Mkdir(private, 0o700); err != nil {
@@ -133,6 +135,7 @@ func TestGAP0714PreflightRefusesToCreateAHomeInsideAFolderOtherAccountsCanWrite(
 	old := effectiveUID
 	t.Cleanup(func() { effectiveUID = old })
 	effectiveUID = func() int { return 0 }
+	t.Setenv("SUDO_UID", "")
 	oldOwner := pathOwnerAndMode
 	t.Cleanup(func() { pathOwnerAndMode = oldOwner })
 
@@ -172,5 +175,72 @@ func TestGAP0714PreflightRefusesToCreateAHomeInsideAFolderOtherAccountsCanWrite(
 		if err := PreflightReclaimDirectory(filepath.Join("/tmp", "dc-g629m-preflight-not-created", ".defenseclaw")); err == nil {
 			t.Fatal("a missing home directly below /tmp was not refused")
 		}
+	}
+}
+
+// GAP-0714 (review 7): a sudo start is for the account that ran sudo. A missing
+// home below a root-owned folder nobody else can write (/home) would be created
+// by root, owned by root and mode 0700, and the account could not enter it to
+// start its own gateway. The root-owned folder alone is no proof the new home
+// belongs to root: it is let through only inside root's own home, so a sudo
+// start for a missing account home is refused before anything is created.
+func TestGAP0714PreflightRefusesToCreateAnAccountHomeForTheSudoAccount(t *testing.T) {
+	old := effectiveUID
+	t.Cleanup(func() { effectiveUID = old })
+	effectiveUID = func() int { return 0 }
+	oldOwner := pathOwnerAndMode
+	t.Cleanup(func() { pathOwnerAndMode = oldOwner })
+	oldRoot := rootHomeDir
+	t.Cleanup(func() { rootHomeDir = oldRoot })
+
+	// A root-owned 0755 homes folder (/home) and a root home beside it.
+	base := t.TempDir()
+	homes := filepath.Join(base, "home")
+	rootHome := filepath.Join(base, "rootuser")
+	for _, dir := range []string{homes, rootHome} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pathOwnerAndMode = func(string) (uint32, os.FileMode, error) { return 0, 0o755, nil }
+	rootHomeDir = func() string { return rootHome }
+
+	missingAccountHome := filepath.Join(homes, "someone", ".defenseclaw")
+	t.Setenv("SUDO_UID", "1000")
+	for _, target := range []string{
+		missingAccountHome,
+		filepath.Join(homes, "someone"),
+		filepath.Join(homes, "someone", "a", "b", ".defenseclaw"),
+	} {
+		err := PreflightReclaimDirectory(target)
+		if err == nil || !strings.Contains(err.Error(), "account that ran sudo") {
+			t.Errorf("%s: a sudo start was allowed to create a root-owned account home: %v", target, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(homes, "someone")); !os.IsNotExist(err) {
+		t.Fatalf("the preflight created the home: %v", err)
+	}
+
+	// Benign twins: root's own home under sudo, a run with no sudo account
+	// and one started by root itself (SUDO_UID 0) all create root's own state.
+	rootOwn := filepath.Join(rootHome, ".defenseclaw")
+	if err := PreflightReclaimDirectory(rootOwn); err != nil {
+		t.Errorf("a sudo start in root's own home was refused: %v", err)
+	}
+	for _, raw := range []string{"", "0"} {
+		t.Setenv("SUDO_UID", raw)
+		if err := PreflightReclaimDirectory(missingAccountHome); err != nil {
+			t.Errorf("SUDO_UID %q: a root run below a root-owned folder was refused: %v", raw, err)
+		}
+	}
+	// A root home reached through a link is still root's home.
+	t.Setenv("SUDO_UID", "1000")
+	linkedRoot := filepath.Join(base, "rootlink")
+	if err := os.Symlink(rootHome, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+	rootHomeDir = func() string { return linkedRoot }
+	if err := PreflightReclaimDirectory(rootOwn); err != nil {
+		t.Errorf("a sudo start in root's home reached through a link was refused: %v", err)
 	}
 }
