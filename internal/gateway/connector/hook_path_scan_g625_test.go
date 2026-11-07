@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // gap0625HermesRun puts the command build returns into the Hermes config next
@@ -396,6 +399,28 @@ func TestGAP0625PathScanProgramWordEscapesAndAdjacentParts(t *testing.T) {
 			func(program string) string { return "'" + program + "'\"$(" + program + ")\"" }, true},
 		{"unquoted glob after a quoted part", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
 			func(program string) string { return "'" + program + "'*" }, true},
+		{"ansi-c quoted word", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "$'" + program + "'" }, false},
+		{"ansi-c quoted word with octal and hex escapes", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string {
+				return "$'" + strings.NewReplacer("\\", "\\\\", "'", "\\'", "/", "\\057", ";", "\\x3b").Replace(program) + "'"
+			}, false},
+		{"tilde inside the word", func(home, owned string) string { return filepath.Join(home, "ordinary~; "+owned) },
+			func(program string) string { return strings.NewReplacer(";", "\\;", " ", "\\ ").Replace(program) }, false},
+		{"braces without a comma or sequence", func(home, owned string) string { return filepath.Join(home, "ordinary{literal}; "+owned) },
+			func(program string) string { return strings.NewReplacer(";", "\\;", " ", "\\ ").Replace(program) }, false},
+		{"escaped glob characters", func(home, owned string) string { return filepath.Join(home, "ordinary*?; "+owned) },
+			func(program string) string {
+				return strings.NewReplacer("*", "\\*", "?", "\\?", ";", "\\;", " ", "\\ ").Replace(program)
+			}, false},
+		{"ansi-c word cut short by a NUL escape", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "$'" + program + "\\x00'" }, true},
+		{"ansi-c word with an escape it cannot decode", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "$'" + program + "\\cA'" }, true},
+		{"brace expansion after a quoted part", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "'" + program + "'{x,y}" }, true},
+		{"brace sequence after a quoted part", func(home, owned string) string { return filepath.Join(home, "ordinary; "+owned) },
+			func(program string) string { return "'" + program + "'{1..2}" }, true},
 	}
 	for _, prefix := range prefixes {
 		for _, tc := range cases {
@@ -412,5 +437,78 @@ func TestGAP0625PathScanProgramWordEscapesAndAdjacentParts(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// An ANSI-C quoted word that decodes to a managed hook is that hook, in every
+// quoting of its bytes; the decoded text, not the source text, names the file.
+func TestGAP0625PathScanAnsiCQuotedManagedHook(t *testing.T) {
+	words := map[string]func(string) string{
+		"plain":   func(owned string) string { return "$'" + owned + "'" },
+		"octal":   func(owned string) string { return "$'" + strings.ReplaceAll(owned, "/", "\\057") + "'" },
+		"hex":     func(owned string) string { return "$'" + strings.ReplaceAll(owned, "/", "\\x2f") + "'" },
+		"unicode": func(owned string) string { return "$'" + strings.ReplaceAll(owned, "/", "\\u002f") + "'" },
+	}
+	for _, prefix := range []string{"", "env ", "command "} {
+		for name, word := range words {
+			t.Run(strings.TrimSpace(prefix)+"|"+name, func(t *testing.T) {
+				verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+					owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
+					return prefix + word(owned) + " --event pre_tool_call"
+				})
+				gap0625ExpectProtected(t, verifyErr, commands, userHook)
+			})
+		}
+	}
+}
+
+// hookLiteralWord reads only words whose text the shell fixes before it picks
+// the program.
+func TestGAP0625LiteralWordTable(t *testing.T) {
+	for _, tc := range []struct {
+		word string
+		text string
+		ok   bool
+	}{
+		{`/a/b`, "/a/b", true},
+		{`$'/a/b'`, "/a/b", true},
+		{`$'/a\x2fb\057cA'`, "/a/b/cA", true},
+		{`$'a\'b'`, "a'b", true},
+		{`$'a\x00b'`, "", false},
+		{`$'a\qb'`, "", false},
+		{`$'a\cb'`, "", false},
+		{`$'a\400'`, "", false},
+		{`/a/b~c`, "/a/b~c", true},
+		{`~/a`, "", false},
+		{`\~/a`, "~/a", true},
+		{`/a/{lit}`, "/a/{lit}", true},
+		{`/a/{lit`, "/a/{lit", true},
+		{`/a/{x,y}`, "", false},
+		{`/a/{1..3}`, "", false},
+		{`/a/{x,{y}}`, "", false},
+		{`/a/{{y}}`, "/a/{{y}}", true},
+		{`/a/'{'x,y}`, "/a/{x,y}", true},
+		{`/a/\{x,y\}`, "/a/{x,y}", true},
+		{`/a/*`, "", false},
+		{`/a/\*`, "/a/*", true},
+		{`/a/[b]`, "", false},
+		{`/a/$b`, "", false},
+		{`"/a/$b"`, "", false},
+		{`$"/a/b"`, "", false},
+	} {
+		t.Run(tc.word, func(t *testing.T) {
+			file, ok := shellparse.Parse(tc.word)
+			if !ok || len(file.Stmts) != 1 {
+				t.Fatalf("%q does not parse as one statement", tc.word)
+			}
+			call, isCall := file.Stmts[0].Cmd.(*syntax.CallExpr)
+			if !isCall || len(call.Args) != 1 {
+				t.Fatalf("%q is not one word", tc.word)
+			}
+			text, ok := hookLiteralWord(call.Args[0], false)
+			if ok != tc.ok || text != tc.text {
+				t.Fatalf("hookLiteralWord(%q) = %q, %v; want %q, %v", tc.word, text, ok, tc.text, tc.ok)
+			}
+		})
 	}
 }
