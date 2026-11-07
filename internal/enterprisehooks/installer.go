@@ -181,30 +181,32 @@ func RemoveManagedPolicy(ctx context.Context, opts InstallOptions) error {
 	return platformRemoveManagedPolicy(ctx, opts)
 }
 
-// Verify validates one explicit enterprise hook target without repairing or
-// otherwise mutating its native configuration, runtime files, or authorization
-// state. Callers can use the returned InstallResult-shaped inventory alongside
-// Install results without maintaining a second artifact schema.
-func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
-	if result, handled, err := platformVerify(ctx, opts); handled {
-		return result, err
-	}
-	if errEnterpriseHooksUnsupportedWindows != nil {
-		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
-	}
-	if err := refuseStandaloneRootInProcess("verify"); err != nil {
-		return InstallResult{}, err
+// verifyTarget is one explicit enterprise hook target resolved the way Verify
+// checks it: its home and owner, its data folder, its connector and the setup
+// options the installed hooks are compared with.
+type verifyTarget struct {
+	home, dataDir string
+	uid, gid      int
+	conn          connector.Connector
+	setupOpts     connector.SetupOpts
+}
+
+// newVerifyTarget resolves opts for operation, which names it in the refusal
+// of a standalone root process. It reads and changes nothing.
+func newVerifyTarget(opts InstallOptions, operation string) (verifyTarget, error) {
+	if err := refuseStandaloneRootInProcess(operation); err != nil {
+		return verifyTarget{}, err
 	}
 	home, err := validateUserHome(opts.UserHome)
 	if err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 	uid, gid, err := resolveOwner(home, opts.OwnerUID, opts.OwnerGID)
 	if err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 	if err := validateHomeOwner(home, uid); err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 	dataDir := strings.TrimSpace(opts.DataDir)
 	if dataDir == "" {
@@ -212,13 +214,13 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 	dataDir, err = filepath.Abs(dataDir)
 	if err != nil {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
 	}
 	if err := validateUserDataDir(home, dataDir, uid); err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 	if err := verifyOwnedDataDirModes(home, dataDir, uid); err != nil {
-		return InstallResult{}, err
+		return verifyTarget{}, err
 	}
 
 	reg := opts.Registry
@@ -227,20 +229,20 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	}
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
 	if name == "" {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector is required")
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: connector is required")
 	}
 	conn, ok := reg.Get(name)
 	if !ok {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
 	}
 	if connector.IsProxyConnector(conn.Name()) {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q is proxy/plugin setup-only; per-user hook verification is not supported", conn.Name())
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: connector %q is proxy/plugin setup-only; per-user hook verification is not supported", conn.Name())
 	}
 	if !connector.OwnsManagedHookRuntime(conn) {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q does not own a managed hook runtime", conn.Name())
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: connector %q does not own a managed hook runtime", conn.Name())
 	}
 	if !connector.ConnectorSupportedOnHostOS(conn.Name()) {
-		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q is not supported on this host OS", conn.Name())
+		return verifyTarget{}, fmt.Errorf("enterprise hooks: connector %q is not supported on this host OS", conn.Name())
 	}
 
 	setupOpts := connector.SetupOpts{
@@ -285,6 +287,25 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		setupOpts.HookContractID = defaultHookContractID(resolveHookContract(conn.Name(), setupOpts.AgentVersion))
 	}
 
+	return verifyTarget{home: home, dataDir: dataDir, uid: uid, gid: gid, conn: conn, setupOpts: setupOpts}, nil
+}
+
+// Verify validates one explicit enterprise hook target without repairing or
+// otherwise mutating its native configuration, runtime files, or authorization
+// state. Callers can use the returned InstallResult-shaped inventory alongside
+// Install results without maintaining a second artifact schema.
+func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	if result, handled, err := platformVerify(ctx, opts); handled {
+		return result, err
+	}
+	if errEnterpriseHooksUnsupportedWindows != nil {
+		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
+	}
+	target, err := newVerifyTarget(opts, "verify")
+	if err != nil {
+		return InstallResult{}, err
+	}
+	home, dataDir, uid, gid, conn, setupOpts := target.home, target.dataDir, target.uid, target.gid, target.conn, target.setupOpts
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
 		// As root, before the euid drop: no agent policy child starts inside

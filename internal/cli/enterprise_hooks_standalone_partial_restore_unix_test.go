@@ -20,15 +20,17 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
-// GAP-0754: a worker that put hook files back and left the target failed is
-// a restore (counted, audited, recorded) and a failure (the row is not OK, so
-// the pass retries and the owned-files record does not call it verified). A
-// worker that restored nothing and failed is only a failure.
+// GAP-0754: a worker that put a protected element back and left the target
+// failed is a restore (counted, audited, recorded) and a failure (the row is
+// not OK, so the pass retries and the owned-files record does not call it
+// verified). A worker that restored nothing and failed is only a failure,
+// whether or not it rewrote files.
 func TestStandalonePassAccountsARestoreOnATargetThatStaysFailed(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		restored bool
-	}{{"restored", true}, {"nothing restored", false}} {
+		rewrote  bool
+	}{{"restored", true, true}, {"nothing restored", false, false}, {"rewritten, nothing restored", false, true}} {
 		t.Run(tc.name, func(t *testing.T) {
 			uid, gid := os.Getuid(), os.Getgid()
 			resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}, transient: map[string]bool{}}
@@ -61,7 +63,8 @@ func TestStandalonePassAccountsARestoreOnATargetThatStaysFailed(t *testing.T) {
 				for i := range response.Targets {
 					response.Targets[i].OK, response.Targets[i].Result, response.Targets[i].AgentConfig = false, nil, ""
 					response.Targets[i].Error = "install failed after it wrote the script"
-					response.Targets[i].Repaired = tc.restored
+					response.Targets[i].Repaired = tc.restored || tc.rewrote
+					response.Targets[i].RestoredElements = map[bool][]string{true: runtimeElement, false: nil}[tc.restored]
 				}
 				return response, err
 			}
@@ -77,7 +80,7 @@ func TestStandalonePassAccountsARestoreOnATargetThatStaysFailed(t *testing.T) {
 			mu.Lock()
 			got := append([]string(nil), reports...)
 			mu.Unlock()
-			if run.Repairs != want || len(run.RepairedTargets) != want || len(got) != want {
+			if run.Repairs != want || len(got) != want || len(run.RepairedTargets) != map[bool]int{true: 1, false: 0}[tc.restored || tc.rewrote] {
 				t.Fatalf("repairs = %d (%v), audit reports = %v, want %d", run.Repairs, run.RepairedTargets, got, want)
 			}
 			data, readErr := os.ReadFile(filepath.Join(f.dataDir, hookGuardianRepairsFile))

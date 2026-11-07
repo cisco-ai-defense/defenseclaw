@@ -117,7 +117,8 @@ func testGAP0689ActiveWorkerWriteKeepsItsRepairPass(t *testing.T, name string, r
 		for _, target := range request.Targets {
 			response.Targets = append(response.Targets, enterpriseHookWorkerTargetResult{
 				Index: target.Index, OK: true, Repaired: (!replay && call == 2) || (replay && call == 3),
-				Result: &enterprisehooks.InstallResult{Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome},
+				RestoredElements: restoredElementsIf((!replay && call == 2) || (replay && call == 3)),
+				Result:           &enterprisehooks.InstallResult{Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome},
 			})
 		}
 		_ = ctx

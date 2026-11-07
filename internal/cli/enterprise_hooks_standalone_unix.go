@@ -532,9 +532,16 @@ func enterpriseHookRecheckTouches(dirs ...string) bool {
 
 // enterpriseHookStandaloneOutcome is one row's worker disposition.
 type enterpriseHookStandaloneOutcome struct {
-	ok       bool
-	pending  bool
+	ok      bool
+	pending bool
+	// repaired: the worker rewrote the target. The guardian own writes are
+	// told from a tamper by it, and a rewritten target is not recorded
+	// verified.
 	repaired bool
+	// restored names the protected elements the worker put back, whether or
+	// not the target is healthy after it (GAP-0754). It alone is counted,
+	// audited and recorded as a restore.
+	restored []string
 	err      string
 	result   *enterprisehooks.InstallResult
 	// agentConfig is the worker's connector.AgentConfigStatus code.
@@ -586,10 +593,10 @@ func dispatchEnterpriseHookStandaloneJobs(
 				if !result.OK {
 					// repaired: the target failed, and the worker (or the files)
 					// show it put hook files back first (GAP-0754).
-					outcomes[target.Index] = enterpriseHookStandaloneOutcome{repaired: result.Repaired, err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
+					outcomes[target.Index] = enterpriseHookStandaloneOutcome{repaired: result.Repaired, restored: knownEnterpriseHookElements(result.RestoredElements), err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
 					continue
 				}
-				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, result: result.Result, agentConfig: result.AgentConfig}
+				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, restored: knownEnterpriseHookElements(result.RestoredElements), result: result.Result, agentConfig: result.AgentConfig}
 			}
 		}
 	}
@@ -1074,10 +1081,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 		// finished put their targets back: those repairs still happened and
 		// are reported, because the next pass finds the files in order
 		// (GAP-0754). The dispatch gave each running worker the interrupt
-		// drain to answer, so a worker that restored a file is not killed
+		// drain to answer, so a worker that restored an element is not killed
 		// before it says so.
-		run.RepairedTargets = reportEnterpriseHookStandaloneInterruptedRepairs(cfg.DataDir, hookSocket, slots, rows, outcomes)
-		run.Repairs = len(run.RepairedTargets)
+		run.RepairedTargets, run.Repairs = reportEnterpriseHookStandaloneInterruptedRepairs(cfg.DataDir, hookSocket, slots, rows, outcomes)
 		return run, err
 	}
 	for index, outcome := range cachedFailures {
@@ -1132,10 +1138,15 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			row.Error = outcome.err
 		}
 		if ok && outcome.repaired && !outcome.pending {
+			repairedTargets[slot.key] = true
+		}
+		if ok && len(outcome.restored) > 0 && !outcome.pending {
 			// A restore counts whether or not the target is healthy after it:
 			// a target the worker put back in part stays failed, and its
-			// retry must not be the only trace of the files it restored.
-			repairedTargets[slot.key] = true
+			// retry must not be the only trace of the elements it restored.
+			// Only a protected element that went from not matching to
+			// matching is a restore.
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s restored: %s\n", enterpriseHookTargetLabel(row), strings.Join(outcome.restored, ", "))
 			repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
 			auditRepairs = append(auditRepairs, enterpriseHookGuardianAuditReport{User: row.User, UID: slot.account.UID, Connector: row.Connector})
 			repairs++
@@ -1207,15 +1218,16 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 }
 
 // reportEnterpriseHookStandaloneInterruptedRepairs accounts the targets the
-// workers of an interrupted pass answered as repaired, exactly as a pass that
-// ran to its end does: the repairs record, the audit report to the gateway
+// workers of an interrupted pass restored a protected element of, exactly as a
+// pass that ran to its end does: the repairs record, the audit report to the gateway
 // (on a context the interrupt did not cancel), the agent config notice the
 // worker returned and the restore entry, recorded now because the pass that
-// records them may not come soon. It returns the repaired targets by slot key;
-// the caller counts them as the pass repairs and the watch loop logs them
+// records them may not come soon. It returns the rewritten targets by slot key
+// (the watch loop tells the writes of the guardian from a tamper by them) and
+// the number of restores, which the caller counts as the pass repairs
 // (GAP-0754).
 func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string, slots map[int]enterpriseHookStandaloneSlot,
-	rows []enterpriseHookReconcileRow, outcomes map[int]enterpriseHookStandaloneOutcome) map[string]bool {
+	rows []enterpriseHookReconcileRow, outcomes map[int]enterpriseHookStandaloneOutcome) (map[string]bool, int) {
 	repairedTargets := map[string]bool{}
 	var repaired []enterpriseHookGuardianRepair
 	var audits []enterpriseHookGuardianAuditReport
@@ -1225,12 +1237,18 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 	restoredAt := time.Now().UTC().Format(time.RFC3339Nano)
 	for index, slot := range slots {
 		outcome, ok := outcomes[index]
-		if !ok || !outcome.repaired || outcome.pending || index >= len(rows) {
+		if !ok || outcome.pending || index >= len(rows) {
+			continue
+		}
+		if outcome.repaired {
+			repairedTargets[slot.key] = true
+		}
+		if len(outcome.restored) == 0 {
 			continue
 		}
 		user, name := rows[index].User, rows[index].Connector
 		uid := slot.account.UID
-		repairedTargets[slot.key] = true
+		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s restored: %s\n", enterpriseHookTargetLabel(rows[index]), strings.Join(outcome.restored, ", "))
 		repaired = append(repaired, enterpriseHookGuardianRepair{User: user, Connector: name})
 		audits = append(audits, enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: name})
 		restored = append(restored, enterpriseHookGuardianRestore{UID: &uid, User: user, Connector: name, RestoredAt: restoredAt})
@@ -1240,7 +1258,7 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 		}
 	}
 	if len(repaired) == 0 {
-		return nil
+		return repairedTargets, 0
 	}
 	writeEnterpriseHookGuardianRepairs(dataDir, repaired)
 	// The record holds every target notice, and this pass answered only some:
@@ -1257,7 +1275,20 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, audits)
 	// A failed record is kept in memory and written by a later pass.
 	_ = recordEnterpriseHookGuardianRestores(enterpriseHookWorkerLog, dataDir, rows, restored)
-	return repairedTargets
+	return repairedTargets, len(repaired)
+}
+
+// knownEnterpriseHookElements keeps the protected element names the guardian
+// knows from what a worker, which runs as the user, reported: a name it made
+// up is no restore.
+func knownEnterpriseHookElements(names []string) []string {
+	var known []string
+	for _, name := range names {
+		if (name == enterprisehooks.HookElementEntry || name == enterprisehooks.HookElementRuntime) && !slices.Contains(known, name) {
+			known = append(known, name)
+		}
+	}
+	return known
 }
 
 // enterpriseHookCredentialKeyID names the per-user credential key a

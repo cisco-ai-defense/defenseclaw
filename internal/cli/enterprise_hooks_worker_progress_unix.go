@@ -9,54 +9,51 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"maps"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // A worker answers once, after its last target. The guardian watch loop
 // interrupts a pass for every new file event, and a worker the parent kills
-// before that answer takes the evidence of the hook files and config entries
-// it already put back with it: the restore is counted, audited and recorded
-// nowhere, and the next pass finds everything in order (GAP-0754). So a worker
-// whose parent asked for it (enterpriseHookWorkerRequest.Progress) also writes
-// one line to its output when it begins to repair a target, and one when it
-// ends, with the repaired target's result. The parent keeps those results when
-// it kills the worker, and does not kill a worker that is in the middle of a
-// repair (enterpriseHookWorkerContext).
+// before that answer takes the evidence of the hook elements it already put
+// back with it: the restore is counted, audited and recorded nowhere, and the
+// next pass finds everything in order (GAP-0754). So a worker whose parent
+// asked for it (enterpriseHookWorkerRequest.Progress) also writes one line to
+// its output when it begins to repair a target, and one when it ends. The
+// parent keeps those lines when it kills the worker, and does not kill a
+// worker that is in the middle of a repair (enterpriseHookWorkerContext).
 //
-// A repair that has no end line, or that ended in a failure, is neither a
-// healthy target nor a no-op. Whether the target is healthy is the worker's
-// word and only a completed install gives it; whether the worker put a file
-// back is a fact of the files. The parent fingerprints the target's owned
-// hook files before it starts the worker (enterpriseHookWorkerRestoreFiles)
-// and again once the worker has ended without a healthy answer for a target
-// whose repair began: a changed file is a restore, counted, audited and
-// recorded, and the target stays failed so that the next pass checks it
-// again. A worker that died before it wrote anything leaves no evidence and
-// no restore.
+// A restore is a result, never a write. The protected elements of a target are
+// its hook entry in the agent config and its hook runtime files
+// (enterprisehooks.ProbeHookElements). The worker probes them when it begins
+// a repair and again when the install returns, and reports a restore for each
+// element that did not match before and matches now (RestoredElements),
+// whether or not the target is healthy. A write to a file the agent also
+// writes for its own settings, or any other write, that leaves an element as
+// it was reports nothing. When the worker ends in the middle of the install,
+// the parent has the elements that were broken from the begin line and asks a
+// short worker for the account to probe them again (probeUnfinishedRepairs).
 
 // enterpriseHookWorkerProgress is one of those lines.
 type enterpriseHookWorkerProgress struct {
 	// Repairing: the worker began to repair the protected target Index.
 	Repairing bool `json:"repairing,omitempty"`
 	Index     int  `json:"index"`
-	// Restores, on a begin line: the install rewrites the target's hook
-	// files, not only its configuration (the hook runtime being intact), so
-	// the parent looks for a restore if the repair does not end healthy.
-	Restores bool `json:"restores,omitempty"`
-	// Result, on an end line: the target the worker put back. A repair that
-	// ended without one (it failed, or it only changed configuration) leaves
-	// it nil.
+	// Broken, on a begin line: the protected elements that did not match
+	// when the install began (enterprisehooks.HookElement*). None when the
+	// install only changes configuration, or the elements could not be read.
+	Broken []string `json:"broken,omitempty"`
+	// Result, on an end line: the target when the repair rewrote it. A repair
+	// that ended in a failure without restoring an element leaves it nil.
 	Result *enterpriseHookWorkerTargetResult `json:"result,omitempty"`
 }
 
-// enterpriseHookWorkerProgressWriter writes progress lines to the worker's
+// enterpriseHookWorkerProgressWriter writes progress lines to the worker
 // output. A nil writer drops them: the parent did not ask.
 type enterpriseHookWorkerProgressWriter struct {
 	mu  sync.Mutex
@@ -85,34 +82,76 @@ func (w *enterpriseHookWorkerProgressWriter) emit(progress enterpriseHookWorkerP
 	_ = json.NewEncoder(w.out).Encode(enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion, Progress: &progress})
 }
 
-// begin says a repair of a protected target starts. restores is false when
-// the install only changes configuration.
-func (w *enterpriseHookWorkerProgressWriter) begin(target enterpriseHookWorkerTarget, restores bool) {
+// begin says a repair of a protected target starts, with the elements that
+// did not match before it.
+func (w *enterpriseHookWorkerProgressWriter) begin(target enterpriseHookWorkerTarget, broken []string) {
 	if w == nil {
 		return
 	}
-	w.emit(enterpriseHookWorkerProgress{Repairing: true, Index: target.Index, Restores: restores})
+	w.emit(enterpriseHookWorkerProgress{Repairing: true, Index: target.Index, Broken: broken})
 }
 
-// end says the repair that began has ended, with the target when it put one
-// back.
+// end says the repair that began has ended, with the target when it rewrote
+// it.
 func (w *enterpriseHookWorkerProgressWriter) end(outcome enterpriseHookWorkerTargetResult) {
 	progress := enterpriseHookWorkerProgress{Index: outcome.Index}
-	if outcome.OK && outcome.Repaired {
+	if outcome.Repaired {
 		progress.Result = &outcome
 	}
 	w.emit(progress)
 }
 
-// enterpriseHookWorkerOutput is a worker's output as far as it is readable:
+// repairEnterpriseHookTarget puts a protected target back after its check
+// found it broken. When the parent asked for progress it reads which
+// protected elements did not match before the install (broken, and only when
+// the install rewrites hook material, restores) and which of them match once
+// it has returned, error or not, and returns those as the restore. Without
+// progress nothing is read and no restore is named.
+func repairEnterpriseHookTarget(ctx context.Context, progress *enterpriseHookWorkerProgressWriter, target enterpriseHookWorkerTarget, opts enterprisehooks.InstallOptions, restores bool) (enterprisehooks.InstallResult, []string, error) {
+	var broken []string
+	if progress != nil && restores {
+		if before, err := enterpriseHookWorkerProber(ctx, opts); err == nil {
+			broken = before.Broken()
+		}
+	}
+	progress.begin(target, broken)
+	result, err := reinstallEnterpriseHookTarget(ctx, opts)
+	var restored []string
+	if len(broken) > 0 {
+		if after, probeErr := enterpriseHookWorkerProber(ctx, opts); probeErr == nil {
+			restored = restoredHookElements(broken, after)
+		}
+	}
+	return result, restored, err
+}
+
+// restoredHookElements returns the elements of broken that match in after, in
+// the order of broken. Only the protected elements the guardian knows are
+// returned, so a name a worker made up reports nothing.
+func restoredHookElements(broken []string, after enterprisehooks.HookElements) []string {
+	var restored []string
+	for _, name := range broken {
+		switch {
+		case name == enterprisehooks.HookElementEntry && after.Entry,
+			name == enterprisehooks.HookElementRuntime && after.Runtime:
+			if !slices.Contains(restored, name) {
+				restored = append(restored, name)
+			}
+		}
+	}
+	return restored
+}
+
+// enterpriseHookWorkerOutput is a worker output as far as it is readable:
 // the progress lines, then the answer when it came.
 type enterpriseHookWorkerOutput struct {
 	// repairing counts the repairs that began and have not ended.
 	repairing int
-	// restoring holds the targets whose repair began with a restore of their
-	// hook files, ended or not.
-	restoring map[int]bool
-	// repaired holds the targets the worker ended a healthy repair of, by index.
+	// unfinished holds, by target index, the protected elements that did not
+	// match when a repair began that has not ended.
+	unfinished map[int][]string
+	// repaired holds the targets the worker ended a repair of that rewrote
+	// them, by index.
 	repaired []enterpriseHookWorkerTargetResult
 	// response is the answer, once answered. err is why the output holds none.
 	response enterpriseHookWorkerResponse
@@ -123,10 +162,19 @@ type enterpriseHookWorkerOutput struct {
 // parseEnterpriseHookWorkerOutput reads raw, which may end in the middle of
 // a line (the worker is still writing, or was killed).
 func parseEnterpriseHookWorkerOutput(raw []byte) (out enterpriseHookWorkerOutput) {
-	open := map[int]bool{}
+	open := map[int][]string{}
 	defer func() {
 		if !out.answered {
 			out.repairing = len(open)
+			for index, broken := range open {
+				if len(broken) == 0 {
+					continue
+				}
+				if out.unfinished == nil {
+					out.unfinished = map[int][]string{}
+				}
+				out.unfinished[index] = broken
+			}
 			slices.SortFunc(out.repaired, func(a, b enterpriseHookWorkerTargetResult) int { return a.Index - b.Index })
 		}
 	}()
@@ -147,13 +195,7 @@ func parseEnterpriseHookWorkerOutput(raw []byte) (out enterpriseHookWorkerOutput
 		}
 		progress := line.Progress
 		if progress.Repairing {
-			open[progress.Index] = true
-			if progress.Restores {
-				if out.restoring == nil {
-					out.restoring = map[int]bool{}
-				}
-				out.restoring[progress.Index] = true
-			}
+			open[progress.Index] = progress.Broken
 			continue
 		}
 		delete(open, progress.Index)
@@ -171,77 +213,43 @@ func parseEnterpriseHookWorkerOutput(raw []byte) (out enterpriseHookWorkerOutput
 	}
 }
 
-// enterpriseHookWorkerRestoreFiles holds, by target index, the fingerprints
-// of the owned hook files of a protected target before its worker ran.
-type enterpriseHookWorkerRestoreFiles map[int]map[string]string
+// enterpriseHookWorkerPostmortem bounds the worker that reads what a repair
+// the parent ended left behind.
+var enterpriseHookWorkerPostmortem = 10 * time.Second
 
-// snapshotEnterpriseHookWorkerRestoreFiles fingerprints the owned files of
-// every protected target the worker may repair, for a request that asked for
-// progress. The parent reads before and after, so both are read by the
-// same account.
-func snapshotEnterpriseHookWorkerRestoreFiles(request enterpriseHookWorkerRequest) enterpriseHookWorkerRestoreFiles {
-	if !request.Progress {
-		return nil
-	}
-	var files enterpriseHookWorkerRestoreFiles
-	var registry *connector.Registry
+// restoresOfEndedWorker returns, for a worker that ended without its answer,
+// the targets it restored: those it finished repairing and said so, and those
+// whose repair it began and did not finish, read again by a short worker for
+// the account (a probe_elements target per repair) because only the result
+// tells what the install put back before it ended. A target the second
+// worker cannot read reports no restore, and its failure is the cause.
+func restoresOfEndedWorker(account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest, output enterpriseHookWorkerOutput, cause error) []enterpriseHookWorkerTargetResult {
+	results := slices.Clone(output.repaired)
+	var probes []enterpriseHookWorkerTarget
 	for _, target := range request.Targets {
-		if target.Mode != enterpriseHookWorkerModeVerifyOrRepair || !target.PreviouslyProtected {
-			continue
+		if broken := output.unfinished[target.Index]; len(broken) > 0 && target.Mode == enterpriseHookWorkerModeVerifyOrRepair {
+			target.Mode, target.Broken = enterpriseHookWorkerModeProbeElements, broken
+			probes = append(probes, target)
 		}
-		if registry == nil {
-			registry = newEnterpriseHooksConnectorRegistry()
-		}
-		owned, err := enterprisehooks.WatchOwnedFiles(target.Options.installOptions(registry))
-		if err != nil {
-			continue
-		}
-		before := map[string]string{}
-		for _, path := range slices.Concat(owned.ExclusiveWriter, owned.SharedWriter) {
-			before[path] = enterpriseHookOwnedFileFingerprint(path)
-		}
-		if files == nil {
-			files = enterpriseHookWorkerRestoreFiles{}
-		}
-		files[target.Index] = before
 	}
-	return files
-}
-
-// withRestores marks, in results, every target whose repair began with a
-// restore, did not end healthy, and left an owned file other than it found
-// it: Repaired true, the target otherwise as the worker left it (a target
-// with no result of its own is failed with cause). Healthy targets keep what
-// their worker said.
-func (files enterpriseHookWorkerRestoreFiles) withRestores(results []enterpriseHookWorkerTargetResult, restoring map[int]bool, cause error) []enterpriseHookWorkerTargetResult {
-	for _, index := range slices.Sorted(maps.Keys(restoring)) {
-		before, ok := files[index]
-		if !ok {
-			continue
-		}
-		at := slices.IndexFunc(results, func(r enterpriseHookWorkerTargetResult) bool { return r.Index == index })
-		if at >= 0 && (results[at].OK || results[at].Repaired || results[at].Pending) {
-			continue
-		}
-		changed := false
-		for path, fingerprint := range before {
-			if enterpriseHookOwnedFileFingerprint(path) != fingerprint {
-				changed = true
-				break
-			}
-		}
-		if !changed {
-			continue
-		}
-		if at >= 0 {
-			results[at].Repaired = true
-			continue
-		}
+	if len(probes) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), enterpriseHookWorkerPostmortem)
+		defer cancel()
 		message := "the worker ended before it answered for this target"
 		if cause != nil {
 			message = cause.Error()
 		}
-		results = append(results, enterpriseHookWorkerTargetResult{Index: index, Repaired: true, Error: message})
+		response, err := runEnterpriseHookWorker(ctx, account, enterpriseHookWorkerRequest{
+			Operation: enterpriseHookWorkerOpApply, Standalone: request.Standalone, Targets: probes})
+		if err != nil {
+			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: could not read what the ended worker of %s restored: %v\n", account.User, err)
+		}
+		for _, probe := range response.Targets {
+			if len(probe.RestoredElements) > 0 && !slices.ContainsFunc(results, func(r enterpriseHookWorkerTargetResult) bool { return r.Index == probe.Index }) {
+				results = append(results, enterpriseHookWorkerTargetResult{Index: probe.Index, Repaired: true,
+					RestoredElements: probe.RestoredElements, Error: message})
+			}
+		}
 	}
 	slices.SortFunc(results, func(a, b enterpriseHookWorkerTargetResult) int { return a.Index - b.Index })
 	return results
