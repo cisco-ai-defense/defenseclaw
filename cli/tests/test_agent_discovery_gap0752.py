@@ -19,9 +19,11 @@ record is missing (the scan ran before setup) or older than its executable."""
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -1111,3 +1113,194 @@ def test_a_peer_missing_from_the_scan_keeps_its_cached_version(tmp_path):
     assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
 
     assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+# --- GAP-0752 review 7: the cache write, the returned scan and the peer check
+# --- judge the executable at the moment they act, not before ----
+
+
+@pytest.mark.parametrize(("prior", "current"), [("3.19.13", "cursor 2.3.99"), ("cursor 2.3.99", "3.19.13")])
+def test_a_writer_that_waited_for_the_cache_lock_does_not_write_what_was_true_before_the_wait(
+    monkeypatch, tmp_path, prior, current
+):
+    binary = tmp_path / "cursor"
+    binary.write_text(prior, encoding="utf-8")
+    scan = _identified_scan(binary, prior)
+    locked = ad._cache_update
+
+    @contextmanager
+    def replaced_while_waiting(path):
+        _replace(binary, current)
+        with locked(path):
+            yield
+
+    monkeypatch.setattr(ad, "_cache_update", replaced_while_waiting)
+
+    assert ad._write_cache(scan, data_dir=tmp_path)
+
+    cached = ad._read_cache(data_dir=tmp_path).agents["cursor"]
+    assert cached.version == ""
+    assert cached.installed and cached.error == ad.VERSION_NOT_PROBED
+
+
+def test_a_writer_that_waited_for_the_cache_lock_writes_an_executable_that_did_not_change(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    scan = _identified_scan(binary, "3.19.13")
+    locked = ad._cache_update
+
+    @contextmanager
+    def waiting(path):
+        time.sleep(0.05)
+        with locked(path):
+            yield
+
+    monkeypatch.setattr(ad, "_cache_update", waiting)
+
+    assert ad._write_cache(scan, data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+@pytest.mark.parametrize(("prior", "current"), [("3.19.13", "cursor 2.3.99"), ("cursor 2.3.99", "3.19.13")])
+def test_a_discovery_does_not_hand_back_a_version_of_an_executable_replaced_before_its_cache_write(
+    monkeypatch, tmp_path, prior, current
+):
+    data = tmp_path / "data"
+    data.mkdir()
+    binary = tmp_path / "cursor"
+    binary.write_text(prior, encoding="utf-8")
+    _one_cursor(monkeypatch, binary, lambda _n, path, *_a, **_k: (Path(path).read_text(encoding="utf-8"), ""))
+    written = ad._write_cache
+
+    def replaced_before_the_write(disc, *, data_dir=None):
+        _replace(binary, current)
+        return written(disc, data_dir=data_dir)
+
+    monkeypatch.setattr(ad, "_write_cache", replaced_before_the_write)
+
+    result = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
+
+    returned = result.agents["cursor"]
+    assert returned.version == "" and returned.installed and returned.error == ad.VERSION_NOT_PROBED
+    assert ad._read_cache(data_dir=data).agents["cursor"].version == ""
+
+
+def test_a_discovery_hands_back_the_version_of_an_executable_that_stayed_the_same(monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    _one_cursor(monkeypatch, binary, lambda _n, path, *_a, **_k: (Path(path).read_text(encoding="utf-8"), ""))
+
+    result = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
+
+    assert result.agents["cursor"].version == "3.19.13"
+    assert ad._read_cache(data_dir=data).agents["cursor"].version == "3.19.13"
+
+
+def _strip_identities(tmp_path: Path) -> None:
+    cache = tmp_path / ad.CACHE_FILENAME
+    payload = json.loads(cache.read_text(encoding="utf-8"))
+    for entry in payload["agents"].values():
+        entry.pop("identity", None)
+    cache.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_a_peer_cached_before_identities_existed_loses_its_version_when_its_executable_changed_unreadable(tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    _peer_cache(tmp_path, binary, "3.19.13")
+    _strip_identities(tmp_path)
+    _replace(binary, "timeout")
+    fresh = _later_scan_of_the_peer(binary, error=f"{binary}: {ad.VERSION_PROBE_TIMED_OUT}")
+    fresh.agents["cursor"].identity = []
+
+    assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+
+
+def test_a_peer_cached_before_identities_existed_keeps_its_version_when_its_executable_did_not_change(tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    scan = _identified_scan(binary, "3.19.13")
+    scan.agents["cursor"].observed_at = ad._format_rfc3339(ad._now_utc())
+    assert ad._write_cache(scan, data_dir=tmp_path)
+    _strip_identities(tmp_path)
+    fresh = _later_scan_of_the_peer(binary, error=f"{binary}: {ad.VERSION_PROBE_TIMED_OUT}")
+    fresh.agents["cursor"].identity = []
+    for signal in fresh.agents.values():
+        signal.observed_at = ad._format_rfc3339(ad._now_utc() + timedelta(seconds=5))
+
+    assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+def test_a_peer_whose_replaced_executable_kept_changing_loses_its_cached_version(tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    _peer_cache(tmp_path, binary, "3.19.13")
+    _replace(binary, "2.3.99-0")
+    fresh = _later_scan_of_the_peer(binary, error="")
+    # Nothing was selected: not installed, no path, no version, no identity.
+    fresh.agents["cursor"] = _signal("cursor", error=f"{binary}: {ad.VERSION_EXECUTABLE_CHANGED}")
+    fresh.agents["cursor"].observed_at = fresh.agents["codex"].observed_at
+
+    assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == ""
+
+
+def test_a_peer_the_scan_did_not_select_keeps_its_cached_version_while_its_executable_is_unchanged(tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    _peer_cache(tmp_path, binary, "3.19.13")
+    fresh = _later_scan_of_the_peer(binary, error="")
+    fresh.agents["cursor"] = _signal("cursor", error=f"{binary}: {ad.VERSION_EXECUTABLE_CHANGED}")
+    fresh.agents["cursor"].observed_at = fresh.agents["codex"].observed_at
+
+    assert ad._publish_agent_signal(fresh, "codex", data_dir=tmp_path)
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
+
+
+def test_a_same_size_rewrite_that_restores_the_modification_time_changes_the_identity(tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    first = binary.stat()
+    before = ad._executable_identity(str(binary))
+    assert ad._executable_identity(str(binary)) == before
+
+    binary.write_text("2.3.999", encoding="utf-8")
+    os.utime(binary, ns=(first.st_atime_ns, first.st_mtime_ns))
+
+    after = ad._executable_identity(str(binary))
+    assert after != before
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the change time of a write is not kept on Windows")
+def test_an_executable_rewritten_in_place_with_its_time_restored_while_it_answers_is_read_again(monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    binary = tmp_path / "cursor"
+    binary.write_text("3.19.13", encoding="utf-8")
+    initial = binary.stat()
+    calls = [0]
+
+    def probe(_name, path, *_args, **_kwargs):
+        calls[0] += 1
+        answer = Path(path).read_text(encoding="utf-8")
+        if calls[0] == 1:
+            binary.write_text("2.3.999", encoding="utf-8")
+            os.utime(binary, ns=(initial.st_atime_ns, initial.st_mtime_ns))
+        return answer, ""
+
+    _one_cursor(monkeypatch, binary, probe)
+
+    result = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
+
+    assert calls[0] == 2
+    assert result.agents["cursor"].version == "2.3.999"
+    assert ad._read_cache(data_dir=data).agents["cursor"].version == "2.3.999"
