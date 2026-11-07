@@ -304,3 +304,170 @@ func TestHealManagedApprovedConfigSourceLeavesWhatItDoesNotOwn(t *testing.T) {
 		t.Fatal("an unknown install state folder was accepted")
 	}
 }
+
+// stageConfigGeneration writes the config.generation.json a writer leaves for
+// recordedBody, with the given actor.
+func stageConfigGeneration(t *testing.T, configPath, recordedBody, actor string) {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"generation": 3, "config_sha256": configwrite.SHA256Hex([]byte(recordedBody)), "actor": actor, "written_at": "2026-11-07T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configwrite.GenerationPath(configPath), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// lockProbe is the lifecycle lock of a heal: it counts how often it was taken.
+type lockProbe struct {
+	acquired, released int
+	err                error
+}
+
+func (p *lockProbe) acquire() (func(), error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	p.acquired++
+	return func() { p.released++ }, nil
+}
+
+// A stale source (the older build approved A, B is installed) is replaced
+// only by bytes the generation record binds to a lifecycle write, as the
+// verify of the run accepted them. An edit after the verify, a hand-edit
+// record, a missing record and a link in place of config.yaml all leave A and
+// fail the heal, so the run cannot report success while A stays restorable.
+func TestHealManagedApprovedConfigSourcePublishesOnlyWhatTheGenerationBinds(t *testing.T) {
+	for _, tc := range []struct {
+		name, installed, recorded, actor string
+		noRecord, link                   bool
+		wantCopy                         string
+		wantErr                          bool
+	}{
+		{name: "config the lifecycle recorded", installed: approvedSourceConfigB, recorded: approvedSourceConfigB, actor: "lifecycle", wantCopy: approvedSourceConfigB},
+		{name: "edited after the verify", installed: approvedSourceConfigB + "# edit\n", recorded: approvedSourceConfigB, actor: "lifecycle", wantCopy: approvedSourceConfigA, wantErr: true},
+		{name: "recorded as a hand edit", installed: approvedSourceConfigB, recorded: approvedSourceConfigB, actor: configwrite.ActorUnattributedHandEdit, wantCopy: approvedSourceConfigA, wantErr: true},
+		{name: "no generation record", installed: approvedSourceConfigB, noRecord: true, wantCopy: approvedSourceConfigA, wantErr: true},
+		{name: "config.yaml is a link", installed: approvedSourceConfigB, recorded: approvedSourceConfigB, actor: "lifecycle", link: true, wantCopy: approvedSourceConfigA, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := approvedSourceFolder(t)
+			configPath := filepath.Join(t.TempDir(), "config.yaml")
+			if tc.link {
+				target := filepath.Join(t.TempDir(), "elsewhere.yaml")
+				if err := os.WriteFile(target, []byte(tc.installed), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, configPath); err != nil {
+					t.Skip("cannot create a link here:", err)
+				}
+			} else if err := os.WriteFile(configPath, []byte(tc.installed), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.noRecord {
+				stageConfigGeneration(t, configPath, tc.recorded, tc.actor)
+			}
+			lock := &lockProbe{}
+			changed, err := healManagedApprovedConfigSourceBound(dir, configPath, lock.acquire)
+			if (err != nil) != tc.wantErr || changed == tc.wantErr {
+				t.Fatalf("heal: changed=%v err=%v, want error %v", changed, err, tc.wantErr)
+			}
+			if lock.acquired != lock.released {
+				t.Fatalf("the lock was taken %d times and released %d times", lock.acquired, lock.released)
+			}
+			if got := approvedRepairRestores(t, dir); got != tc.wantCopy {
+				t.Fatalf("Repair restores %q, want %q", got, tc.wantCopy)
+			}
+		})
+	}
+}
+
+// Benign twins: a source that already is the installed config needs no lock
+// and no generation record, and does not fail a run whose config is a hand
+// edit or has no record; a lock another run holds fails only a heal that has
+// something to write.
+func TestHealManagedApprovedConfigSourceLeavesACurrentSourceAlone(t *testing.T) {
+	dir := approvedSourceFolder(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(approvedSourceConfigA), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	busy := &lockProbe{err: errManagedApprovedSourceBusy}
+	for _, actor := range []string{"", configwrite.ActorUnattributedHandEdit} {
+		if actor != "" {
+			stageConfigGeneration(t, configPath, approvedSourceConfigA, actor)
+		}
+		if changed, err := healManagedApprovedConfigSourceBound(dir, configPath, busy.acquire); err != nil || changed {
+			t.Fatalf("a current source (record actor %q): changed=%v err=%v", actor, changed, err)
+		}
+	}
+
+	stale := approvedSourceFolder(t)
+	if err := os.WriteFile(configPath, []byte(approvedSourceConfigB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, configPath, approvedSourceConfigB, "lifecycle")
+	if changed, err := healManagedApprovedConfigSourceBound(stale, configPath, busy.acquire); !errors.Is(err, errManagedApprovedSourceBusy) || changed {
+		t.Fatalf("a busy lock: changed=%v err=%v", changed, err)
+	}
+	if got := approvedRepairRestores(t, stale); got != approvedSourceConfigA {
+		t.Fatalf("a busy lock changed the source to %q", got)
+	}
+}
+
+// A transient failure to write the deployment record is an error the caller
+// fails the run with, and it leaves A in place, digest-valid: that is why the
+// run must fail instead of warning (a later hand edit and Repair would restore
+// A after an apparently successful ensure).
+func TestHealManagedApprovedConfigSourceReportsARecordThatCannotBeWritten(t *testing.T) {
+	dir := approvedSourceFolder(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(approvedSourceConfigB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, configPath, approvedSourceConfigB, "lifecycle")
+	restore := writeManagedApprovedSourceFile
+	t.Cleanup(func() { writeManagedApprovedSourceFile = restore })
+	writeManagedApprovedSourceFile = func(path string, data []byte, sibling string) error {
+		if filepath.Base(path) == managedDeploymentRecordFile {
+			return errors.New("access denied")
+		}
+		return restore(path, data, sibling)
+	}
+	if changed, err := healManagedApprovedConfigSourceBound(dir, configPath, (&lockProbe{}).acquire); err == nil || changed {
+		t.Fatalf("an unwritable record: changed=%v err=%v", changed, err)
+	}
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigA {
+		t.Fatalf("the failed heal left %q", got)
+	}
+}
+
+// Direct upgrade, then Repair before any ensure: installed B, approved copy
+// and digest A (what an older build left). A binary-only upgrade publishes no
+// config and carries the digest forward; the check every upgrade, repair and
+// ensure ends with is what makes B the approved source before a hand edit and
+// a Repair.
+func TestHealManagedApprovedConfigSourceAfterABinaryOnlyUpgradeBeforeRepair(t *testing.T) {
+	dir := approvedSourceFolder(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(approvedSourceConfigB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, configPath, approvedSourceConfigB, "lifecycle")
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigA {
+		t.Fatalf("setup: the carried source is %q", got)
+	}
+	if changed, err := healManagedApprovedConfigSourceBound(dir, configPath, (&lockProbe{}).acquire); err != nil || !changed {
+		t.Fatalf("heal after the upgrade: changed=%v err=%v", changed, err)
+	}
+	// The hand edit and the guardian record come after.
+	if err := os.WriteFile(configPath, []byte(approvedSourceConfigB+"# edit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, configPath, approvedSourceConfigB+"# edit\n", configwrite.ActorUnattributedHandEdit)
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigB {
+		t.Fatalf("Repair after the hand edit restores %q, want B", got)
+	}
+}

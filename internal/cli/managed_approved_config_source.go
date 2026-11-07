@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
@@ -57,7 +58,7 @@ var writeManagedApprovedSourceFile = writeFileKeepingDACL
 // other field of deployment.json, and the approved manifest digest, keep their
 // values. Both files keep deployment.json access control.
 func refreshManagedApprovedConfigSource(installDir string, installed []byte) error {
-	_, err := publishManagedApprovedConfigSource(installDir, installed, false)
+	_, err := publishManagedApprovedConfigSource(installDir, installed, approvedPublishAlways)
 	return err
 }
 
@@ -71,10 +72,87 @@ func refreshManagedApprovedConfigSource(installDir string, installed []byte) err
 // that records none, or has no deployment record, is left as it is (Repair
 // refuses it and names the next step). It reports whether it changed anything.
 func healManagedApprovedConfigSource(installDir string, installed []byte) (bool, error) {
-	return publishManagedApprovedConfigSource(installDir, installed, true)
+	return publishManagedApprovedConfigSource(installDir, installed, approvedPublishIfRecorded)
 }
 
-func publishManagedApprovedConfigSource(installDir string, installed []byte, onlyIfRecorded bool) (bool, error) {
+// approvedPublishMode says when publishManagedApprovedConfigSource writes.
+type approvedPublishMode int
+
+const (
+	// approvedPublishAlways publishes installed, filling a missing source.
+	approvedPublishAlways approvedPublishMode = iota
+	// approvedPublishIfRecorded publishes only over a recorded source.
+	approvedPublishIfRecorded
+	// approvedPublishCheck is approvedPublishIfRecorded without the writes:
+	// it reports whether a heal would change anything.
+	approvedPublishCheck
+)
+
+// errManagedApprovedSourceBusy is a lifecycle lock another run holds.
+var errManagedApprovedSourceBusy = errors.New("another DefenseClaw lifecycle run holds lifecycle.lock")
+
+// readManagedConfigBoundToGeneration reads the installed config.yaml only
+// when it is exactly the config its generation record names and that record
+// is not a hand edit: the bytes a lifecycle run applied and a verify
+// accepted. Anything else (a link in place of the file, an edit made between
+// the verify and this read, an unreadable or missing record) is an error, so
+// bytes nobody approved never become the source Repair restores (GAP-0779).
+func readManagedConfigBoundToGeneration(configPath string) ([]byte, error) {
+	info, err := os.Lstat(configPath)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", configPath)
+	}
+	raw, err := readBoundedConfigFile(configPath, managedApprovedRecordMaxBytes)
+	if err != nil {
+		return nil, err
+	}
+	state, err := configwrite.ReadGenerationState(configPath)
+	switch {
+	case err != nil:
+		return nil, fmt.Errorf("the config generation record cannot be read: %w", err)
+	case configwrite.IsHandEditActor(state.Actor):
+		return nil, errors.New("the config generation record calls config.yaml a hand edit")
+	case !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)):
+		return nil, errors.New("config.yaml is not the config its generation record names")
+	}
+	return raw, nil
+}
+
+// healManagedApprovedConfigSourceBound is the one check every lifecycle exit
+// shares (ensure, upgrade, repair): when the deployment records an approved
+// config source that differs from the installed config.yaml, the installed
+// config becomes the source under acquire lock, but only bytes the generation
+// record binds to a lifecycle write (readManagedConfigBoundToGeneration). A
+// source that is already current is not touched and needs no lock. A failure
+// leaves the source as it was and is returned for the caller to fail the run:
+// a run must not report success while a stale source stays restorable.
+// acquire reports a lock another run holds as errManagedApprovedSourceBusy.
+func healManagedApprovedConfigSourceBound(installDir, configPath string, acquire func() (func(), error)) (bool, error) {
+	peek, err := readBoundedConfigFile(configPath, managedApprovedRecordMaxBytes)
+	if err != nil {
+		return false, fmt.Errorf("read the installed config: %w", err)
+	}
+	stale, err := publishManagedApprovedConfigSource(installDir, peek, approvedPublishCheck)
+	if err != nil || !stale {
+		return false, err
+	}
+	release, err := acquire()
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	installed, err := readManagedConfigBoundToGeneration(configPath)
+	if err != nil {
+		return false, fmt.Errorf("the installed config cannot be approved: %w", err)
+	}
+	return healManagedApprovedConfigSource(installDir, installed)
+}
+
+func publishManagedApprovedConfigSource(installDir string, installed []byte, mode approvedPublishMode) (bool, error) {
+	onlyIfRecorded := mode != approvedPublishAlways
 	if installDir == "" {
 		return false, errors.New("the install state folder is unknown")
 	}
@@ -128,6 +206,9 @@ func publishManagedApprovedConfigSource(installDir string, installed []byte, onl
 	}
 	if sources[managedApprovedConfigKey] == digest && copyExisted && bytes.Equal(previousCopy, installed) {
 		return false, nil
+	}
+	if mode == approvedPublishCheck {
+		return true, nil
 	}
 	sources[managedApprovedConfigKey] = digest
 	encodedSources, err := json.Marshal(sources)
