@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func writeG669Files(t *testing.T, dataDir string, rels []string) {
+func writeUserStateFiles(t *testing.T, dataDir string, rels []string) {
 	t.Helper()
 	for _, rel := range rels {
 		path := filepath.Join(dataDir, filepath.FromSlash(rel))
@@ -40,7 +40,7 @@ func TestGAP0669PurgeRemovesManagedACPState(t *testing.T) {
 		"acp/enterprise-token-index/" + strings.Repeat("a", 64) + ".json",
 		"acp/enterprise-credentials/" + strings.Repeat("b", 64) + ".json",
 	}
-	writeG669Files(t, dataDir, managed)
+	writeUserStateFiles(t, dataDir, managed)
 	if err := PurgeUserState(dataDir); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestGAP0669PurgeKeepsAccountFilesInACP(t *testing.T) {
 		"acp/enterprise-token-index/" + strings.Repeat("A", 64) + ".json",
 		"acp/deeper/zed-kiro.token",
 	}
-	writeG669Files(t, dataDir, append(keep, "acp/zed-kiro.token", "session-facts.json"))
+	writeUserStateFiles(t, dataDir, append(keep, "acp/zed-kiro.token", "session-facts.json"))
 	if err := PurgeUserState(dataDir); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestGAP0669PurgeRemovesManagedLocks(t *testing.T) {
 		"hooks/.otlp-codex.token.lock",
 		"hooks/.hookcfg.lock",
 	}
-	writeG669Files(t, dataDir, managed)
+	writeUserStateFiles(t, dataDir, managed)
 	if err := PurgeUserState(dataDir); err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestGAP0669PurgeKeepsLocksOfAccountFiles(t *testing.T) {
 		"agent_selection.json.lock.lock", "hooks/.hookcfg.lock.lock", "hooks/.otlp-codex.token.lock.lock",
 		"acp/zed-kiro.token.lock", "acp/owned-entries.json.lock", "acp/zed-kiro.contract-lock.json.lock",
 	}
-	writeG669Files(t, dataDir, keep)
+	writeUserStateFiles(t, dataDir, keep)
 	if err := PurgeUserState(dataDir); err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestGAP0669TeardownRemovesItsOwnLock(t *testing.T) {
 	conn := &createdDirsConnector{stubConnector: stubConnector{name: "codex"}}
 	err := WithUserHomeDir(home, func() error {
 		return RemovalLeavingNoNewDirs(conn, SetupOpts{DataDir: dataDir}, func() error {
-			writeG669Files(t, dataDir, []string{"hooks/fake-hook.sh", ".codex-lifecycle.lock", "hooks/.otlp-codex.token.lock"})
+			writeUserStateFiles(t, dataDir, []string{"hooks/fake-hook.sh", ".codex-lifecycle.lock", "hooks/.otlp-codex.token.lock"})
 			return nil
 		})
 	})
@@ -178,7 +178,7 @@ func TestGAP0669PurgeKeepsLifecycleLocksNoWriterCreates(t *testing.T) {
 		t.Fatal("no built-in connector without a lifecycle lock writer")
 	}
 	keep = append(keep, ".amp-lifecycle.lock", ".cursor-lifecycle.lock", ".notaconnector-lifecycle.lock")
-	writeG669Files(t, dataDir, append(slices.Clone(keep), written...))
+	writeUserStateFiles(t, dataDir, append(slices.Clone(keep), written...))
 	if err := PurgeUserState(dataDir); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestGAP0669PurgeKeepsRootLevelHookLookalikes(t *testing.T) {
 		".hookcfg.codex",
 	}
 	managed := []string{"hooks/.hook-codex.token", "hooks/.hookcfg.codex", "session-facts.json"}
-	writeG669Files(t, dataDir, append(slices.Clone(keep), managed...))
+	writeUserStateFiles(t, dataDir, append(slices.Clone(keep), managed...))
 	result, err := PurgeUserStateWithResult(dataDir)
 	if err != nil {
 		t.Fatal(err)

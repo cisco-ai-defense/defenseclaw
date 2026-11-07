@@ -191,7 +191,7 @@ func TestPurgeWindowsUserStateKeepsAccountEntries(t *testing.T) {
 	sid := currentWindowsTestSID(t)
 	// The account can deny SYSTEM on a file it owns; the test denies its
 	// own account, which the purge runs as here.
-	windowsRelaxTestSetDACL(t, filepath.Join(dataDir, "logs", "hook-failures.jsonl"), "D:P(D;FA;;;"+sid.String()+")")
+	windowsRelaxTestSetDACL(t, filepath.Join(dataDir, "logs", "hook-failures.jsonl"), "D:P(D;;FA;;;"+sid.String()+")")
 	if err := PurgeWindowsUserState(home, target, ""); err == nil {
 		t.Fatal("the purge ran without LocalSystem")
 	}

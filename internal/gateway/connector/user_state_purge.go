@@ -19,7 +19,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"syscall"
 	"unicode"
 )
 
@@ -104,7 +103,7 @@ func purgeUserStateWithManagedFiles(dataDir string, managedFiles []string) (User
 	if current, statErr := os.Lstat(dataDir); statErr == nil && os.SameFile(info, current) {
 		if removeErr := os.Remove(dataDir); removeErr == nil {
 			result.Removed = true
-		} else if !errors.Is(removeErr, os.ErrNotExist) && !errors.Is(removeErr, fs.ErrExist) && !errors.Is(removeErr, syscall.ENOTEMPTY) {
+		} else if !errors.Is(removeErr, os.ErrNotExist) && !errors.Is(removeErr, fs.ErrExist) {
 			err = errors.Join(err, removeErr)
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -161,7 +160,10 @@ func purgeManagedUserStateDir(root *os.Root, rel string, managedFiles []string, 
 			}
 			if err := root.Remove(entry.Name()); err == nil {
 				result.Removed = true
-			} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+			} else if !errors.Is(err, os.ErrNotExist) && !errors.Is(err, fs.ErrExist) {
+				// A directory that still holds account files stays. fs.ErrExist is
+				// the portable not-empty test: it matches ENOTEMPTY on Linux and
+				// macOS and ERROR_DIR_NOT_EMPTY on Windows.
 				errs = append(errs, err)
 			}
 		case info.Mode().IsRegular() && (ManagedUserStateFile(child) || slices.Contains(managedFiles, filepath.ToSlash(child))):
