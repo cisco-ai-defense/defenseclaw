@@ -3,8 +3,11 @@
 
 """The provider identity needs the install to come from the registry.
 
-Published bytes are not enough: an install record that names a file, a link or
-another address is judged by the ordinary scan. A release the registry cannot
+Published bytes are not enough: every place an install names its source (the
+manifest fields, the lock entry, the spec its owner gives it) must say the
+registry. A source of any other kind (a file, a link, a path, a git address, a
+URL alias, a list or an object) gives no identity and the ordinary scan applies;
+no spec or address is ever read as a file name. A release the registry cannot
 confirm because it is unreachable is admitted by the ordinary profiles on its
 install record, with a visible warning, and never by strict.
 """
@@ -16,7 +19,6 @@ import hashlib
 import http.client
 import json
 import shutil
-import sys
 import urllib.error
 
 import pytest
@@ -368,8 +370,9 @@ def test_pinned_release_is_verified_without_the_registry(tmp_path, monkeypatch) 
 
 @requires_symlink_privilege
 def test_manifest_install_metadata_is_not_an_install_record(tmp_path, monkeypatch) -> None:
-    """The lock entry of the package is the record; manifest fields that name no
-    protected source say nothing either way (see the protected-source tests)."""
+    """The lock entry of the package is the record. Manifest fields that say the
+    registry change nothing on a pinned tree and cannot stand in for the entry
+    on an outage; fields that say another source give no identity."""
 
     project, installed = _pinned_npm_install(tmp_path, monkeypatch)
     spellings = {
@@ -383,11 +386,15 @@ def test_manifest_install_metadata_is_not_an_install_record(tmp_path, monkeypatc
         },
     }
     for name, fields in spellings.items():
-        # Published bytes proven by the pinned digest: the identity does not depend on them.
         root = tmp_path / "case" / name
         shutil.copytree(project, root, symlinks=True)
-        _edit_manifest(root / PACKAGE_KEY, lambda m, fields=fields: m.update(fields))
-        assert vendor_identity.inspect_official_provider_tree(str(root / PACKAGE_KEY)) is not None, name
+        target = root / PACKAGE_KEY
+        _edit_manifest(target, lambda m, fields=fields: m.update(fields))
+        identity = vendor_identity.inspect_official_provider_tree(str(target))
+        assert (identity is not None) == (name == "registry-looking"), name
+        if name == "source-looking":
+            for profile in ("default", "permissive", "strict"):
+                assert "SRC-EXEC" in _high(target, profile), f"{name} {profile}"
 
         # Nor can they stand in for the entry when the registry cannot be asked.
         outage = tmp_path / "outage" / name
@@ -401,31 +408,49 @@ def test_manifest_install_metadata_is_not_an_install_record(tmp_path, monkeypatc
 
 
 PROTECTED_SOURCE = "file:/home/user/.ssh/provider.tgz"
-PROTECTED_SPELLINGS = {
-    "absolute-file": PROTECTED_SOURCE,
-    "home-relative": "file:~/.ssh/provider.tgz",
-    "climbing-path": "file:../../../.aws/provider.tgz",
-    "windows-drive": "file:///C:/Users/user/.ssh/provider.tgz",
-    "windows-backslash": "C:\\Users\\user\\.gnupg\\provider.tgz",
-    "percent-encoded": "file:/home/user/%2Essh/provider.tgz",
-    "named-package": PROVIDER + "@file:/home/user/.codex/provider.tgz",
-    "credential-file": "link:/home/user/.claude.json",
-}
-BENIGN_SPELLINGS = {
-    "registry-version": VERSION,
-    "registry-range": "^2026.10.0",
-    "scoped-request": PROVIDER + "@" + VERSION,
-    "alias-of-same-package": f"npm:{PROVIDER}@{VERSION}",
-    "local-folder-not-protected": "file:../provider",
-    "local-archive-not-protected": "file:/home/user/downloads/provider.tgz",
-}
+MIRROR_ARCHIVE = f"https://mirror.example/api/npm/team/{PROVIDER}/-/amazon-bedrock-provider-{VERSION}.tgz"
 
-
-def _manifest_metadata(spec: str) -> dict:
-    return {
-        "_resolved": spec, "_from": spec,
-        "_requested": {"type": "version", "raw": spec, "rawSpec": spec, "fetchSpec": spec},
-    }
+# Sources that say the registry, as a spec (a version, a range, a tag, the name
+# with one of them, an archive address) ...
+REGISTRY_SOURCES = {
+    "version": VERSION,
+    "range": "^2026.10.0",
+    "tag": "latest",
+    "name-and-version": PROVIDER + "@" + VERSION,
+    "registry-archive": _archive_address(VERSION),
+    "mirror-archive": MIRROR_ARCHIVE,
+}
+# ... and the ones that are an address of an archive of the package.
+ARCHIVE_SOURCES = ("registry-archive", "mirror-archive")
+# Every other kind of source gets no identity bonus.
+OTHER_SOURCES = {
+    "file-protected": PROTECTED_SOURCE,
+    "file-ordinary": "file:../provider",
+    "file-home": "file:~/.ssh/provider.tgz",
+    "file-multi-dot-folder": "file:C:/ordinary/.ssh../provider.tgz",
+    "file-percent-encoded": "file:/home/user/%2Essh/provider.tgz",
+    "link": "link:../provider",
+    "relative": "../provider",
+    "relative-dot": ".",
+    "bare-archive-name": "provider.tgz",
+    "absolute": "/home/user/provider.tgz",
+    "windows-path": "C:\\Users\\user\\provider.tgz",
+    "git": "git+https://example.invalid/provider.git#abc",
+    "github-shorthand": "example/provider",
+    "url-alias": "https://example.invalid/provider.tgz",
+    "plain-http-archive": _archive_address(VERSION).replace("https", "http"),
+    "npm-alias-other-package": "npm:other@1.0.0",
+    "npm-alias-same-package": f"npm:{PROVIDER}@{VERSION}",
+    "named-file": PROVIDER + "@file:../provider",
+}
+# A dependency whose spec is not a string at all.
+STRUCTURED_SOURCES = {
+    "object": {"rawSpec": PROTECTED_SOURCE},
+    "object-registry-looking": {"rawSpec": VERSION},
+    "list": [VERSION, PROTECTED_SOURCE],
+    "list-registry-looking": [VERSION],
+    "number": 1,
+}
 
 
 def _case(project, tmp_path, label):
@@ -447,61 +472,184 @@ def _v3_root_spec(root, field, spec, *, entry) -> None:
     _write(root / "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": packages}))
 
 
+def _v3_nested_owner(root, spec) -> None:
+    _write(root / "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+        "node_modules/sibling": {"version": "1.0.0", "dependencies": {PROVIDER: spec}},
+    }}))
+
+
+# Where an install names its source. ``archive_only`` places hold an address.
+PLACES = {
+    "manifest-resolved": (True, lambda t, r, v: _edit_manifest(t, lambda m: m.update(_resolved=v))),
+    "manifest-from": (False, lambda t, r, v: _edit_manifest(t, lambda m: m.update(_from=v))),
+    "manifest-requested-text": (
+        False, lambda t, r, v: _edit_manifest(t, lambda m: m.update(_requested=v))),
+    "manifest-requested-object": (False, lambda t, r, v: _edit_manifest(
+        t, lambda m: m.update(_requested={"type": "version", "rawSpec": v}))),
+    "v1-resolved": (True, lambda t, r, v: _v1_lock(r, {"version": VERSION, "resolved": v})),
+    "v1-from": (False, lambda t, r, v: _v1_lock(r, {
+        "version": VERSION, "resolved": _archive_address(VERSION), "from": v})),
+    "v3-entry-resolved": (True, lambda t, r, v: _lock(
+        r / "package-lock.json", {"version": VERSION, "resolved": v})),
+    "v3-root-dependency": (False, lambda t, r, v: _v3_root_spec(
+        r, "dependencies", v, entry=True)),
+    "v3-root-dev-dependency-without-entry": (False, lambda t, r, v: _v3_root_spec(
+        r, "devDependencies", v, entry=False)),
+}
+
+
 @requires_symlink_privilege
-def test_install_that_names_a_protected_source_gives_no_identity(tmp_path, monkeypatch) -> None:
-    """Wherever the install names its source, a protected file or link keeps the ordinary block."""
+@pytest.mark.parametrize("place", sorted(PLACES))
+def test_only_a_source_that_says_the_registry_gives_an_identity(tmp_path, monkeypatch, place) -> None:
+    """One cell per kind of source: the registry is identified, any other kind
+    gets exactly the verdict of the ordinary scan."""
+
+    only_addresses, edit = PLACES[place]
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    sources = {**{f"registry/{k}": v for k, v in REGISTRY_SOURCES.items()},
+               **{f"other/{k}": v for k, v in OTHER_SOURCES.items()}}
+    for label, value in sources.items():
+        # A registry address and a plain spec are both registry sources, but a
+        # field that holds an address holds nothing else.
+        registry = label.startswith("registry/") and (
+            not only_addresses or label.split("/", 1)[1] in ARCHIVE_SOURCES
+        )
+        root, target = _case(project, tmp_path, f"{place}-{label.replace('/', '-')}")
+        edit(target, root, value)
+        identity = vendor_identity.inspect_official_provider_tree(str(target))
+        assert (identity is not None) == registry, f"{place} {label}"
+        for profile in ("default", "permissive", "strict"):
+            high = _high(target, profile)
+            if registry and profile != "strict":
+                assert high == set(), f"{place} {label} {profile}"
+            elif not registry:
+                ordinary = scan_plugin(
+                    str(target), PluginScanOptions(policy=profile, disable_vendor_identity=True),
+                )
+                assert "SRC-EXEC" in high, f"{place} {label} {profile}"
+                assert sorted((f.rule_id, f.severity) for f in ordinary.findings) == sorted(
+                    (f.rule_id, f.severity)
+                    for f in scan_plugin(str(target), PluginScanOptions(policy=profile)).findings
+                ), f"{place} {label} {profile}"
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("kind", sorted(STRUCTURED_SOURCES))
+def test_dependency_spec_that_is_not_text_gives_no_identity(tmp_path, monkeypatch, kind) -> None:
+    """An object or a list is not a registry request, whatever it holds."""
 
     project, installed = _pinned_npm_install(tmp_path, monkeypatch)
-    registry = {"version": VERSION, "resolved": _archive_address(VERSION)}
-    for spelling, spec in PROTECTED_SPELLINGS.items():
-        places = {
-            "manifest-resolved": lambda t, r, spec=spec: _edit_manifest(
-                t, lambda m: m.update(_resolved=spec)),
-            "manifest-from": lambda t, r, spec=spec: _edit_manifest(
-                t, lambda m: m.update(_from=spec)),
-            "manifest-requested": lambda t, r, spec=spec: _edit_manifest(
-                t, lambda m: m.update(_requested={"type": "version", "rawSpec": spec})),
-            "v1-resolved": lambda t, r, spec=spec: _v1_lock(r, {**registry, "resolved": spec}),
-            "v1-from": lambda t, r, spec=spec: _v1_lock(r, {**registry, "from": spec}),
-            "v1-link": lambda t, r, spec=spec: _v1_lock(r, {"version": spec, "link": True}),
-            "v3-root-spec-without-entry": lambda t, r, spec=spec: _v3_root_spec(
-                r, "dependencies", spec, entry=False),
-            "v3-root-spec-with-registry-entry": lambda t, r, spec=spec: _v3_root_spec(
-                r, "devDependencies", spec, entry=True),
-        }
-        for place, edit in places.items():
-            label = f"{spelling} in {place}"
-            root, target = _case(project, tmp_path, label.replace(" ", "_"))
-            edit(target, root)
-            assert vendor_identity.inspect_official_provider_tree(str(target)) is None, label
-            for profile in ("default", "permissive", "strict"):
-                assert "SRC-EXEC" in _high(target, profile), f"{label} {profile}"
+    value = STRUCTURED_SOURCES[kind]
+    nested_key = "node_modules/sibling/" + PACKAGE_KEY
+    cases = {
+        "root-dependency": lambda t, r: _v3_root_spec(r, "dependencies", value, entry=True),
+        "root-dev-dependency": lambda t, r: _v3_root_spec(r, "devDependencies", value, entry=False),
+        "v1-from": lambda t, r: _v1_lock(r, {
+            "version": VERSION, "resolved": _archive_address(VERSION), "from": value}),
+        "manifest-from": lambda t, r: _edit_manifest(t, lambda m: m.update(_from=value)),
+        "manifest-requested-member": lambda t, r: _edit_manifest(
+            t, lambda m: m.update(_requested={"type": "version", "rawSpec": value})),
+    }
+    for place, edit in cases.items():
+        root, target = _case(project, tmp_path, f"{kind}-{place}")
+        edit(target, root)
+        assert vendor_identity.inspect_official_provider_tree(str(target)) is None, place
+        for profile in ("default", "permissive", "strict"):
+            assert "SRC-EXEC" in _high(target, profile), f"{place} {profile}"
+
+    # The package that owns a nested copy gives it its spec.
+    root = tmp_path / "case" / f"{kind}-nested-owner"
+    nested = root / nested_key
+    nested.parent.mkdir(parents=True)
+    shutil.copytree(installed, nested, symlinks=True)
+    _write(root / "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+        "node_modules/sibling": {"version": "1.0.0", "dependencies": {PROVIDER: value}},
+        nested_key: {"version": VERSION, "resolved": _archive_address(VERSION)},
+    }}))
+    assert vendor_identity.inspect_official_provider_tree(str(nested)) is None
+    for profile in ("default", "permissive", "strict"):
+        assert "SRC-EXEC" in _high(nested, profile), profile
+
+
+def _link_to(root, folder: str, alias: str = "alias") -> None:
+    (root / folder).mkdir(parents=True)
+    (root / folder / "provider.tgz").write_bytes(b"fixture")
+    (root / alias).symlink_to(root / folder, target_is_directory=True)
 
 
 @requires_symlink_privilege
-def test_install_that_names_a_registry_request_or_an_unprotected_source_keeps_the_identity(
-    tmp_path, monkeypatch,
+@pytest.mark.parametrize("folder", [".ssh", "vendor"])
+def test_relative_source_is_a_path_and_gets_no_identity_whatever_a_link_leads_to(
+    tmp_path, monkeypatch, folder,
 ) -> None:
-    """Benign twin: only a protected name changes the verdict, never the shape of the spec."""
+    """A relative source is not judged by where a link leads: it is not the
+    registry. The verdict is the ordinary one, as for the absolute spelling."""
 
     project, installed = _pinned_npm_install(tmp_path, monkeypatch)
-    for spelling, spec in BENIGN_SPELLINGS.items():
-        places = {
-            "manifest": lambda t, r, spec=spec: _edit_manifest(
-                t, lambda m: m.update(_manifest_metadata(spec))),
-            "v3-root-spec": lambda t, r, spec=spec: _v3_root_spec(
-                r, "dependencies", spec, entry=True),
-            "v1-entry": lambda t, r, spec=spec: _v1_lock(r, {
-                "version": VERSION, "resolved": _archive_address(VERSION), "from": spec,
-            }),
-        }
-        for place, edit in places.items():
-            label = f"{spelling} in {place}"
-            root, target = _case(project, tmp_path, label.replace(" ", "_"))
-            edit(target, root)
-            assert vendor_identity.inspect_official_provider_tree(str(target)) is not None, label
-            for profile in ("default", "permissive"):
-                assert _high(target, profile) == set(), f"{label} {profile}"
+    for place, edit in {
+        "manifest-resolved": lambda t, r: _edit_manifest(
+            t, lambda m: m.update(_resolved="file:../../../alias/provider.tgz")),
+        "manifest-from": lambda t, r: _edit_manifest(
+            t, lambda m: m.update(_from="file:../../../alias/provider.tgz")),
+        "v3-root-spec": lambda t, r: _v3_root_spec(
+            r, "dependencies", "file:./alias/provider.tgz", entry=True),
+        "v1-from": lambda t, r: _v1_lock(r, {
+            "version": VERSION, "resolved": _archive_address(VERSION),
+            "from": "file:./alias/provider.tgz"}),
+    }.items():
+        root, target = _case(project, tmp_path, f"{folder}-{place}")
+        _link_to(root, folder)
+        edit(target, root)
+        assert vendor_identity.inspect_official_provider_tree(str(target)) is None, place
+        for profile in ("default", "permissive", "strict"):
+            assert "SRC-EXEC" in _high(target, profile), f"{place} {profile}"
+
+
+@requires_symlink_privilege
+def test_install_below_protected_state_is_judged_by_its_source_only(tmp_path, monkeypatch) -> None:
+    """The place of the project says nothing: a registry install keeps the
+    identity wherever the project sits, and a relative alias or a direct
+    spelling of a file there gives none."""
+
+    published = tmp_path / "published"
+    _published_provider(published)
+    monkeypatch.setitem(
+        vendor_identity.VENDOR_DIGESTS, (PROVIDER, VERSION),
+        vendor_identity._package_digest(str(published)),
+    )
+    cases = {
+        "registry": (True, lambda m: m.update(_resolved=_archive_address(VERSION))),
+        "alias": (False, lambda m: m.update(_resolved="file:../../../alias/provider.tgz")),
+        "direct": (False, lambda m: m.update(_resolved="file:../../../.ssh/provider.tgz")),
+    }
+    for label, (admitted, change) in cases.items():
+        project = tmp_path / label / ".ssh" / "project"
+        installed = project / PACKAGE_KEY
+        _installed_by_openclaw(published, installed, _openclaw_peer(tmp_path / label))
+        (project.parent / "provider.tgz").write_bytes(b"fixture")
+        (project / "alias").symlink_to(project.parent, target_is_directory=True)
+        _edit_manifest(installed, change)
+        assert (vendor_identity.inspect_official_provider_tree(str(installed)) is not None) == admitted
+        for profile in ("default", "permissive", "strict"):
+            assert ("SRC-EXEC" in _high(installed, profile)) == (
+                not admitted or profile == "strict"
+            ), f"{label} {profile}"
+
+
+@requires_symlink_privilege
+def test_registry_address_is_identity_data_and_never_a_path(tmp_path, monkeypatch) -> None:
+    """A local link named like the scheme of an address changes nothing."""
+
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    root, target = _case(project, tmp_path, "scheme-link")
+    (root / ".ssh").mkdir()
+    (root / "https:").symlink_to(root / ".ssh", target_is_directory=True)
+    _edit_manifest(target, lambda m: m.update(
+        _from=_archive_address(VERSION), _resolved=_archive_address(VERSION),
+    ))
+    assert vendor_identity.inspect_official_provider_tree(str(target)) is not None
+    for profile in ("default", "permissive"):
+        assert _high(target, profile) == set(), profile
 
 
 @requires_symlink_privilege
@@ -574,132 +722,48 @@ def test_dependency_specs_of_other_packages_do_not_decide_this_install(
             assert _high(installed, profile) == set(), profile
 
 
-FOLDED_SPELLINGS = {
-    # spelling: the name foldings under which it is the protected folder
-    "file:/home/user/.SSH/provider.tgz": {"windows", "case"},
-    "file:/home/user/.ssh./provider.tgz": {"windows"},
-}
-
-
-@requires_symlink_privilege
-@pytest.mark.parametrize("folding", ["windows", "case", "exact"])
-def test_source_names_fold_the_way_the_platform_compares_them(
-    tmp_path, monkeypatch, folding,
-) -> None:
-    """``.SSH`` is the protected folder where names ignore case, and an ordinary
-    folder of its own on Linux; a trailing dot is dropped on Windows only."""
-
-    if folding == "exact" and sys.platform == "win32":
-        pytest.skip("Windows drops a trailing dot whatever the setting")
-    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
-    monkeypatch.setattr(vendor_identity, "_name_folding", lambda: folding)
-    for spelling, protected_under in FOLDED_SPELLINGS.items():
-        root, target = _case(project, tmp_path, f"{folding}-{abs(hash(spelling))}")
-        _edit_manifest(target, lambda m, spelling=spelling: m.update(_resolved=spelling))
-        identity = vendor_identity.inspect_official_provider_tree(str(target))
-        if folding in protected_under:
-            assert identity is None, (folding, spelling)
-            for profile in ("default", "permissive", "strict"):
-                assert "SRC-EXEC" in _high(target, profile), (folding, spelling, profile)
-        else:
-            assert identity is not None, (folding, spelling)
-            for profile in ("default", "permissive"):
-                assert _high(target, profile) == set(), (folding, spelling, profile)
-
-
-def _link_to(root, folder: str, alias: str = "alias") -> None:
-    (root / folder).mkdir(parents=True)
-    (root / folder / "provider.tgz").write_bytes(b"fixture")
-    (root / alias).symlink_to(root / folder, target_is_directory=True)
-
-
-RELATIVE_THROUGH_ALIAS = {
-    "manifest-resolved": lambda t, r: _edit_manifest(
-        t, lambda m: m.update(_resolved="file:../../../alias/provider.tgz")),
-    "manifest-from": lambda t, r: _edit_manifest(
-        t, lambda m: m.update(_from="file:../../../alias/provider.tgz")),
-    "v3-root-spec": lambda t, r: _v3_root_spec(
-        r, "dependencies", "file:./alias/provider.tgz", entry=True),
-    "v3-root-spec-without-entry": lambda t, r: _v3_root_spec(
-        r, "devDependencies", "link:alias/provider.tgz", entry=False),
-    "v1-from": lambda t, r: _v1_lock(r, {
-        "version": VERSION, "resolved": _archive_address(VERSION),
-        "from": "file:./alias/provider.tgz",
-    }),
-}
-
-
-@requires_symlink_privilege
-@pytest.mark.parametrize("place", sorted(RELATIVE_THROUGH_ALIAS))
-def test_relative_source_through_a_link_to_protected_state_gives_no_identity(
-    tmp_path, monkeypatch, place,
-) -> None:
-    """A relative source is resolved: a link on its way to a protected folder
-    makes it a protected source, as the absolute spelling is."""
-
-    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
-    root, target = _case(project, tmp_path, "protected")
-    _link_to(root, ".ssh")
-    RELATIVE_THROUGH_ALIAS[place](target, root)
-    assert vendor_identity.inspect_official_provider_tree(str(target)) is None, place
-    for profile in ("default", "permissive", "strict"):
-        assert "SRC-EXEC" in _high(target, profile), f"{place} {profile}"
-
-
-@requires_symlink_privilege
-@pytest.mark.parametrize("place", sorted(RELATIVE_THROUGH_ALIAS))
-def test_relative_source_through_a_link_to_an_ordinary_folder_keeps_the_identity(
-    tmp_path, monkeypatch, place,
-) -> None:
-    """Benign twin: the same links and spellings leading to an ordinary folder."""
-
-    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
-    root, target = _case(project, tmp_path, "ordinary")
-    _link_to(root, "vendor")
-    RELATIVE_THROUGH_ALIAS[place](target, root)
-    assert vendor_identity.inspect_official_provider_tree(str(target)) is not None, place
-    for profile in ("default", "permissive"):
-        assert _high(target, profile) == set(), f"{place} {profile}"
-
-
 @requires_symlink_privilege
 def test_dependency_spec_of_the_owning_package_decides_a_nested_copy(tmp_path, monkeypatch) -> None:
-    """A copy below ``node_modules/a`` is the one ``a`` asks for: a protected
-    source in that spec names this copy, as the root spec names a top-level one."""
+    """A copy below ``node_modules/a`` is the one ``a`` asks for: its spec must
+    say the registry, as the root spec must for a top-level copy."""
 
     project, installed = _pinned_npm_install(tmp_path, monkeypatch)
     nested_key = "node_modules/sibling/" + PACKAGE_KEY
     registry = {"version": VERSION, "resolved": _archive_address(VERSION)}
     owners = {
-        "v3-dependencies": {"lockfileVersion": 3, "packages": {
-            "node_modules/sibling": {"version": "1.0.0", "dependencies": {PROVIDER: "{spec}"}},
+        "v3-dependencies": lambda spec: {"lockfileVersion": 3, "packages": {
+            "node_modules/sibling": {"version": "1.0.0", "dependencies": {PROVIDER: spec}},
             nested_key: registry,
         }},
-        "v3-optional-dependencies": {"lockfileVersion": 3, "packages": {
+        "v3-optional-dependencies": lambda spec: {"lockfileVersion": 3, "packages": {
             "": {"dependencies": {"sibling": "1.0.0"}},
-            "node_modules/sibling": {"optionalDependencies": {PROVIDER: "{spec}"}},
+            "node_modules/sibling": {"optionalDependencies": {PROVIDER: spec}},
         }},
-        "v1-requires": {"lockfileVersion": 1, "dependencies": {"sibling": {
-            "version": "1.0.0", "requires": {PROVIDER: "{spec}"},
-            "dependencies": {PROVIDER: registry},
+        "v1-requires": lambda spec: {"lockfileVersion": 1, "dependencies": {"sibling": {
+            "version": "1.0.0", "requires": {PROVIDER: spec}, "dependencies": {PROVIDER: registry},
         }}},
     }
-    for label, spec, protected in (
-        ("protected", PROTECTED_SOURCE, True),
-        ("registry", VERSION, False),
-        ("unprotected-local", "file:../provider", False),
-    ):
-        for owner, lock in owners.items():
+    specs = {
+        "registry": (VERSION, True),
+        "registry-range": ("^2026.10.0", True),
+        "protected": (PROTECTED_SOURCE, False),
+        "unprotected-local": ("file:../provider", False),
+        "git": ("git+https://example.invalid/provider.git", False),
+    }
+    for label, (spec, admitted) in specs.items():
+        for owner, make in owners.items():
             root = tmp_path / "nested" / f"{label}-{owner}"
             nested = root / nested_key
             nested.parent.mkdir(parents=True)
             shutil.copytree(installed, nested, symlinks=True)
-            _write(root / "package-lock.json", json.dumps(lock).replace("{spec}", spec))
+            _write(root / "package-lock.json", json.dumps(make(spec)))
             identity = vendor_identity.inspect_official_provider_tree(str(nested))
-            assert (identity is None) == protected, f"{label} {owner}"
+            assert (identity is not None) == admitted, f"{label} {owner}"
             for profile in ("default", "permissive"):
-                assert (("SRC-EXEC" in _high(nested, profile)) == protected), f"{label} {owner} {profile}"
-            if protected:
+                assert ("SRC-EXEC" in _high(nested, profile)) == (not admitted), (
+                    f"{label} {owner} {profile}"
+                )
+            if not admitted:
                 assert "SRC-EXEC" in _high(nested, "strict"), f"{label} {owner}"
 
 
