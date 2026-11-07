@@ -104,60 +104,336 @@ func init() {
 	}
 }
 
-// constString folds an expression to the string it always holds: a string
-// literal, a constant of the package, a sum of them or a path.Join /
-// filepath.Join of them.
-func constString(e ast.Expr, consts map[string]ast.Expr, depth int) (string, bool) {
-	if depth > 8 {
-		return "", false
+// maxShellValues bounds the values tracked for one expression.
+const maxShellValues = 64
+
+// binding is an expression a name holds somewhere, with the function whose
+// scope it is evaluated in ("" for the package).
+type binding struct {
+	expr ast.Expr
+	fn   string
+}
+
+// valueIndex collects every expression each name can hold in the files: the
+// constants and variables of the package, the declarations, assignments and
+// range variables of each function, the arguments a package function is
+// called with (for its parameters) and the values given to a struct field.
+// It is flow-insensitive on purpose: a name holds a shell if any of its
+// values is one, wherever it is set and in whatever order.
+type valueIndex struct {
+	names  map[string][]binding // fn + NUL + name
+	fields map[string][]binding // field name
+	params map[string][]string  // function name to its parameter names
+	types  map[string]ast.Expr  // package type name to its declaration
+}
+
+func nameKey(fn, name string) string { return fn + "\x00" + name }
+
+// bindName records e, evaluated in the scope from, as a value of the name
+// in the scope fn.
+func (v *valueIndex) bindName(fn, name string, e ast.Expr, from string) {
+	if name != "_" {
+		k := nameKey(fn, name)
+		v.names[k] = append(v.names[k], binding{e, from})
 	}
+}
+
+// bindTarget records e as a value of the assigned expression: a name, or a
+// field of a value.
+func (v *valueIndex) bindTarget(fn string, lhs, e ast.Expr) {
+	switch l := lhs.(type) {
+	case *ast.Ident:
+		v.bindName(fn, l.Name, e, fn)
+	case *ast.SelectorExpr:
+		v.fields[l.Sel.Name] = append(v.fields[l.Sel.Name], binding{e, fn})
+	}
+}
+
+func (v *valueIndex) bindSpec(fn string, spec ast.Spec) {
+	if s, ok := spec.(*ast.ValueSpec); ok && len(s.Names) == len(s.Values) {
+		for i := range s.Names {
+			v.bindName(fn, s.Names[i].Name, s.Values[i], fn)
+		}
+	}
+}
+
+// callee names the package function or method a call may reach.
+func callee(call *ast.CallExpr) string {
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
+}
+
+func newValueIndex(files []*ast.File) *valueIndex {
+	v := &valueIndex{names: map[string][]binding{}, fields: map[string][]binding{}, params: map[string][]string{}, types: map[string]ast.Expr{}}
+	for _, file := range files {
+		for _, d := range file.Decls {
+			if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.TYPE {
+				for _, spec := range gd.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok {
+						v.types[ts.Name.Name] = ts.Type
+					}
+				}
+			}
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Type.Params != nil {
+				for _, f := range fd.Type.Params.List {
+					for _, n := range f.Names {
+						v.params[fd.Name.Name] = append(v.params[fd.Name.Name], n.Name)
+					}
+				}
+			}
+		}
+	}
+	for _, file := range files {
+		for _, d := range file.Decls {
+			fn := ""
+			if fd, ok := d.(*ast.FuncDecl); ok {
+				fn = fd.Name.Name
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.GenDecl:
+					for _, spec := range n.Specs {
+						v.bindSpec(fn, spec)
+					}
+				case *ast.AssignStmt:
+					if len(n.Lhs) == len(n.Rhs) {
+						for i := range n.Lhs {
+							v.bindTarget(fn, n.Lhs[i], n.Rhs[i])
+						}
+					}
+				case *ast.RangeStmt:
+					if val, ok := n.Value.(*ast.Ident); ok {
+						v.bindName(fn, val.Name, &ast.IndexExpr{X: n.X}, fn)
+					}
+				case *ast.CompositeLit:
+					if n.Type != nil {
+						v.bindLit(fn, n, n.Type, 0)
+					}
+				case *ast.KeyValueExpr:
+					if k, ok := n.Key.(*ast.Ident); ok {
+						v.fields[k.Name] = append(v.fields[k.Name], binding{n.Value, fn})
+					}
+				case *ast.CallExpr:
+					if params, ok := v.params[callee(n)]; ok {
+						for i, arg := range n.Args {
+							if i < len(params) {
+								v.bindName(callee(n), params[i], arg, fn)
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	return v
+}
+
+// bindLit records the elements of a composite literal as values of the
+// fields they fill by position: a struct literal, a list of them or a map of
+// them, with the inner type left out or spelled.
+func (v *valueIndex) bindLit(fn string, lit *ast.CompositeLit, typ ast.Expr, depth int) {
+	if depth > 8 {
+		return
+	}
+	switch t := typ.(type) {
+	case *ast.StarExpr:
+		v.bindLit(fn, lit, t.X, depth+1)
+	case *ast.Ident:
+		if decl, ok := v.types[t.Name]; ok {
+			v.bindLit(fn, lit, decl, depth+1)
+		}
+	case *ast.ArrayType:
+		v.bindElts(fn, lit, t.Elt, depth)
+	case *ast.MapType:
+		v.bindElts(fn, lit, t.Value, depth)
+	case *ast.StructType:
+		var fields []string
+		for _, f := range t.Fields.List {
+			for _, n := range f.Names {
+				fields = append(fields, n.Name)
+			}
+		}
+		for i, el := range lit.Elts {
+			if _, keyed := el.(*ast.KeyValueExpr); !keyed && i < len(fields) {
+				v.fields[fields[i]] = append(v.fields[fields[i]], binding{el, fn})
+			}
+		}
+	}
+}
+
+func (v *valueIndex) bindElts(fn string, lit *ast.CompositeLit, elem ast.Expr, depth int) {
+	for _, el := range lit.Elts {
+		if kv, ok := el.(*ast.KeyValueExpr); ok {
+			el = kv.Value
+		}
+		if inner, ok := el.(*ast.CompositeLit); ok && inner.Type == nil {
+			v.bindLit(fn, inner, elem, depth+1)
+		}
+	}
+}
+
+// lookup returns every binding of the name visible in the function.
+func (v *valueIndex) lookup(fn, name string) []binding {
+	out := v.names[nameKey(fn, name)]
+	if fn != "" {
+		out = append(out[:len(out):len(out)], v.names[nameKey("", name)]...)
+	}
+	return out
+}
+
+// combine folds the possible values of each part into the possible values of
+// the whole, or nothing when a part has none.
+func combine(parts [][]string, f func([]string) string) []string {
+	for _, p := range parts {
+		if len(p) == 0 {
+			return nil
+		}
+	}
+	var out []string
+	pick := make([]string, len(parts))
+	var rec func(i int)
+	rec = func(i int) {
+		if len(out) >= maxShellValues {
+			return
+		}
+		if i == len(parts) {
+			out = append(out, f(pick))
+			return
+		}
+		for _, s := range parts[i] {
+			pick[i] = s
+			rec(i + 1)
+		}
+	}
+	rec(0)
+	return out
+}
+
+// strs returns the strings the expression can hold: a string literal, a
+// name, a field, an element of a list, a sum of these or a path.Join /
+// filepath.Join of them. It returns nothing for a value it cannot fold,
+// such as the result of an accessor.
+func (v *valueIndex) strs(e ast.Expr, fn string, seen map[string]bool) []string {
 	switch e := e.(type) {
 	case *ast.BasicLit:
-		if e.Kind != token.STRING {
-			return "", false
+		if e.Kind == token.STRING {
+			if s, err := strconv.Unquote(e.Value); err == nil {
+				return []string{s}
+			}
 		}
-		s, err := strconv.Unquote(e.Value)
-		return s, err == nil
 	case *ast.ParenExpr:
-		return constString(e.X, consts, depth+1)
+		return v.strs(e.X, fn, seen)
 	case *ast.Ident:
-		if v, ok := consts[e.Name]; ok {
-			return constString(v, consts, depth+1)
+		return v.ofBindings(v.lookup(fn, e.Name), nameKey(fn, e.Name), seen, v.strs)
+	case *ast.SelectorExpr:
+		return v.ofBindings(v.fields[e.Sel.Name], "field\x00"+e.Sel.Name, seen, v.strs)
+	case *ast.IndexExpr:
+		var out []string
+		for _, el := range v.elems(e.X, fn, seen) {
+			out = append(out, v.strs(el.expr, el.fn, seen)...)
 		}
+		return out
 	case *ast.BinaryExpr:
-		if e.Op != token.ADD {
-			return "", false
+		if e.Op == token.ADD {
+			return combine([][]string{v.strs(e.X, fn, seen), v.strs(e.Y, fn, seen)},
+				func(p []string) string { return p[0] + p[1] })
 		}
-		l, lok := constString(e.X, consts, depth+1)
-		r, rok := constString(e.Y, consts, depth+1)
-		return l + r, lok && rok
 	case *ast.CallExpr:
 		sel, ok := e.Fun.(*ast.SelectorExpr)
 		if !ok {
-			return "", false
+			return nil
 		}
 		pkg, ok := sel.X.(*ast.Ident)
 		if !ok || sel.Sel.Name != "Join" || (pkg.Name != "path" && pkg.Name != "filepath") {
-			return "", false
+			return nil
 		}
-		parts := make([]string, len(e.Args))
+		parts := make([][]string, len(e.Args))
 		for i, arg := range e.Args {
-			s, ok := constString(arg, consts, depth+1)
-			if !ok {
-				return "", false
-			}
-			parts[i] = s
+			parts[i] = v.strs(arg, fn, seen)
 		}
-		return path.Join(parts...), true
+		return combine(parts, func(p []string) string { return path.Join(p...) })
+	}
+	return nil
+}
+
+// ofBindings unions what a visible name or field can hold, once per chain so
+// that a name set from itself ends.
+func (v *valueIndex) ofBindings(bs []binding, key string, seen map[string]bool, f func(ast.Expr, string, map[string]bool) []string) []string {
+	if len(bs) == 0 || seen[key] {
+		return nil
+	}
+	seen[key] = true
+	defer delete(seen, key)
+	var out []string
+	for _, b := range bs {
+		out = append(out, f(b.expr, b.fn, seen)...)
+	}
+	return out
+}
+
+// elems returns the expressions a list expression can hold as elements.
+func (v *valueIndex) elems(e ast.Expr, fn string, seen map[string]bool) []binding {
+	switch e := e.(type) {
+	case *ast.ParenExpr:
+		return v.elems(e.X, fn, seen)
+	case *ast.SliceExpr:
+		return v.elems(e.X, fn, seen)
+	case *ast.CompositeLit:
+		var out []binding
+		for _, el := range e.Elts {
+			if kv, ok := el.(*ast.KeyValueExpr); ok {
+				el = kv.Value
+			}
+			out = append(out, binding{el, fn})
+		}
+		return out
+	case *ast.Ident:
+		bs := v.lookup(fn, e.Name)
+		key := "elems\x00" + nameKey(fn, e.Name)
+		if len(bs) == 0 || seen[key] {
+			return nil
+		}
+		seen[key] = true
+		defer delete(seen, key)
+		var out []binding
+		for _, b := range bs {
+			out = append(out, v.elems(b.expr, b.fn, seen)...)
+		}
+		return out
+	}
+	return nil
+}
+
+func anyShellPath(ss []string) (string, bool) {
+	for _, s := range ss {
+		if shellPaths[s] {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+func anyShellName(ss []string) (string, bool) {
+	for _, s := range ss {
+		if shellNames[s] {
+			return s, true
+		}
 	}
 	return "", false
 }
 
 // shellNamings reports every place the files name a POSIX shell outside the
-// accessors: any expression that is always a shell path (a literal, a
-// constant, a sum or a join of them, wherever it flows: a variable, a list,
-// an argument, the parameter of a helper), and a bare shell name handed to
-// exec.Command, exec.CommandContext or exec.LookPath.
+// accessors: any expression that can be a shell path (a literal, a constant,
+// a variable, a parameter, a field or an element that holds one, a sum or a
+// join of them, wherever it flows), and a bare shell name that can reach
+// exec.Command, exec.CommandContext or exec.LookPath as the program, held
+// directly or through any of those.
 func shellNamings(files map[string]string) ([]string, error) {
 	names := make([]string, 0, len(files))
 	for name := range files {
@@ -165,62 +441,61 @@ func shellNamings(files map[string]string) ([]string, error) {
 	}
 	sort.Strings(names)
 	fset := token.NewFileSet()
-	parsed := map[string]*ast.File{}
-	consts := map[string]ast.Expr{}
+	var parsed []*ast.File
 	for _, name := range names {
 		file, err := parser.ParseFile(fset, name, files[name], 0)
 		if err != nil {
 			return nil, err
 		}
-		parsed[name] = file
-		ast.Inspect(file, func(n ast.Node) bool {
-			if d, ok := n.(*ast.GenDecl); ok && d.Tok == token.CONST {
-				for _, spec := range d.Specs {
-					if v, ok := spec.(*ast.ValueSpec); ok && len(v.Names) == len(v.Values) {
-						for i := range v.Names {
-							consts[v.Names[i].Name] = v.Values[i]
-						}
-					}
-				}
-			}
-			return true
-		})
+		parsed = append(parsed, file)
 	}
+	index := newValueIndex(parsed)
 	var found []string
 	report := func(n ast.Node, what string) {
 		p := fset.Position(n.Pos())
 		found = append(found, p.Filename+":"+strconv.Itoa(p.Line)+": "+what)
 	}
-	for _, name := range names {
-		ast.Inspect(parsed[name], func(n ast.Node) bool {
-			e, ok := n.(ast.Expr)
-			if !ok {
-				return true
+	for _, file := range parsed {
+		for _, d := range file.Decls {
+			fn := ""
+			if fd, ok := d.(*ast.FuncDecl); ok {
+				fn = fd.Name.Name
 			}
-			if s, ok := constString(e, consts, 0); ok && shellPaths[s] {
-				report(e, strconv.Quote(s))
-				return false
-			}
-			if call, ok := e.(*ast.CallExpr); ok {
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "exec" {
-						arg := -1
-						switch sel.Sel.Name {
-						case "Command", "LookPath":
-							arg = 0
-						case "CommandContext":
-							arg = 1
-						}
-						if arg >= 0 && arg < len(call.Args) {
-							if s, ok := constString(call.Args[arg], consts, 0); ok && shellNames[s] {
-								report(call, strconv.Quote(s)+" looked up on PATH")
-							}
-						}
+			ast.Inspect(d, func(n ast.Node) bool {
+				e, ok := n.(ast.Expr)
+				if !ok {
+					return true
+				}
+				if s, ok := anyShellPath(index.strs(e, fn, map[string]bool{})); ok {
+					report(e, strconv.Quote(s))
+					return false
+				}
+				call, ok := e.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "exec" {
+					return true
+				}
+				arg := -1
+				switch sel.Sel.Name {
+				case "Command", "LookPath":
+					arg = 0
+				case "CommandContext":
+					arg = 1
+				}
+				if arg >= 0 && arg < len(call.Args) {
+					if s, ok := anyShellName(index.strs(call.Args[arg], fn, map[string]bool{})); ok {
+						report(call, strconv.Quote(s)+" looked up on PATH")
 					}
 				}
-			}
-			return true
-		})
+				return true
+			})
+		}
 	}
 	return found, nil
 }
@@ -321,6 +596,39 @@ func TestX(t *testing.T) { check(t, false)
 exec.Command("/bin/sh").Run() }`, true},
 		{"check after the use", `func TestX(t *testing.T) { exec.Command("/bin/sh").Run()
 if _, err := os.Stat("/bin/sh"); err != nil { t.Skip() } }`, true},
+		{"bare name held in a local variable", `func TestX(t *testing.T) { shell := "sh"; exec.Command(shell, "-c", "true").Run() }`, true},
+		{"bare name in a var declaration", `func TestX(t *testing.T) { var shell = "bash"; exec.CommandContext(nil, shell).Run() }`, true},
+		{"bare name set after the declaration", `func TestX(t *testing.T) { shell := "true"; shell = "sh"; exec.Command(shell).Run() }`, true},
+		{"bare name in a package constant", `const shellName = "dash"
+func TestX(t *testing.T) { exec.LookPath(shellName) }`, true},
+		{"path joined from a local directory", `func TestX(t *testing.T) { dir := "/bin"; exec.Command(path.Join(dir, "sh")).Run() }`, true},
+		{"path joined from two locals", `func TestX(t *testing.T) { dir, name := "/usr/bin", "bash"; exec.Command(filepath.Join(dir, name)).Run() }`, true},
+		{"path summed from a local directory", `func TestX(t *testing.T) { dir := "/bin/"; exec.Command(dir + "sh").Run() }`, true},
+		{"path joined from a ranged directory", `func TestX(t *testing.T) { for _, dir := range []string{"/opt", "/bin"} { exec.Command(path.Join(dir, "sh")).Run() } }`, true},
+		{"bare names in a ranged list", `func TestX(t *testing.T) { for _, p := range []string{"python3", "sh"} { exec.Command(p).Run() } }`, true},
+		{"bare name in a list element", `func TestX(t *testing.T) { progs := []string{"sh"}; exec.Command(progs[0]).Run() }`, true},
+		{"bare name in a sliced list", `func TestX(t *testing.T) { progs := []string{"x", "sh"}; for _, p := range progs[1:] { exec.Command(p).Run() } }`, true},
+		{"bare name given to a helper", `func run(prog string) { exec.Command(prog).Run() }
+func TestX(t *testing.T) { run("sh") }`, true},
+		{"path joined in a helper argument", `func run(prog string) { exec.Command(prog).Run() }
+func TestX(t *testing.T) { dir := "/bin"; run(path.Join(dir, "bash")) }`, true},
+		{"bare name in a keyed table", `func TestX(t *testing.T) { for _, tc := range []struct{ prog string }{{prog: "sh"}} { exec.Command(tc.prog).Run() } }`, true},
+		{"bare name in a positional table", `func TestX(t *testing.T) { for _, tc := range []struct{ name, prog string }{{"case", "sh"}} { exec.Command(tc.prog).Run() } }`, true},
+		{"bare name in a named struct table", `type job struct{ name, prog string }
+func TestX(t *testing.T) { for _, tc := range []job{{"case", "bash"}} { exec.Command(tc.prog).Run() } }`, true},
+		{"bare name in a positional struct", `type job struct{ prog string }
+func TestX(t *testing.T) { j := job{"sh"}; exec.Command(j.prog).Run() }`, true},
+		{"bare name in a map table", `func TestX(t *testing.T) { for _, tc := range map[string]struct{ prog string }{"a": {"sh"}} { exec.Command(tc.prog).Run() } }`, true},
+		{"program names that are not shells in a table", `func TestX(t *testing.T) { for _, tc := range []struct{ name, prog string }{{"sh", "python3"}} { exec.Command(tc.prog, tc.name).Run() } }`, false},
+		{"bare name set on a field", `type job struct{ prog string }
+func TestX(t *testing.T) { var j job; j.prog = "zsh"; exec.Command(j.prog).Run() }`, true},
+		{"name set from itself", `func TestX(t *testing.T) { shell := "x"; shell = shell + ""; shell = "sh"; exec.Command(shell).Run() }`, true},
+		{"local name that is not a shell", `func TestX(t *testing.T) { prog := "python3"; dir := "/bin"; exec.Command(prog).Run(); exec.Command(path.Join(dir, "python3")).Run() }`, false},
+		{"shell word held only as an argument", `func TestX(t *testing.T) { shell := "sh"; exec.Command("wrapper", shell, "one").Run() }`, false},
+		{"same name in another function", `func other() { shell := "sh"; _ = shell }
+func TestX(t *testing.T) { shell := binSh(t); exec.Command(shell, "-n").Run() }`, false},
+		{"helper handed the accessor", `func run(prog string) { exec.Command(prog).Run() }
+func TestX(t *testing.T) { run(binBash(t)) }`, false},
 		{"binSh", `func TestX(t *testing.T) { exec.Command(binSh(t), "-c", "true").Run() }`, false},
 		{"binBash as a wrapper argument", `func TestX(t *testing.T) { exec.Command("wrapper", binBash(t), "-c", "true").Run() }`, false},
 		{"soft shell", `func TestX(t *testing.T) { sh := maybeBinSh()
