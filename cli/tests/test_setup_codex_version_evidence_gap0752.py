@@ -101,3 +101,38 @@ def test_windows_setup_keeps_a_peer_version_the_fresh_scan_missed(tmp_path) -> N
     assert ok is True
     assert cache.agents["codex"].version == "codex-cli 0.160.0"
     assert cache.agents["cursor"].version == "3.19.13"
+
+
+def test_windows_setup_replaces_a_peer_version_the_fresh_scan_read(tmp_path) -> None:
+    scanned = ad._format_rfc3339(ad._now_utc())
+    for previous, fresh_version in (("3.19.13", "cursor 2.3.99"), ("cursor 2.3.99", "3.19.13")):
+        data = tmp_path / fresh_version.replace(" ", "-")
+        data.mkdir()
+        agents = {
+            name: ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+            for name in ad.DISCOVERABLE_CONNECTORS
+        }
+        agents["cursor"] = ad.AgentSignal(
+            name="cursor", installed=True, config_path="", binary_path="/opt/cursor/bin/cursor", version=previous, error=""
+        )
+        assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=agents, cache_hit=False), data_dir=data)
+        disc = _disc()
+        disc.agents["cursor"] = ad.AgentSignal(
+            name="cursor",
+            installed=True,
+            config_path="",
+            binary_path="/opt/cursor/bin/cursor",
+            version=fresh_version,
+            error="",
+        )
+
+        with (
+            mock.patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+            mock.patch.object(cmd_setup.agent_discovery, "discover_with_probes", return_value=disc),
+        ):
+            ok = cmd_setup._check_connector_version_supported_for_setup(
+                "codex", mode="action", emit=False, data_dir=str(data), _allow_prompt=False
+            )
+
+        assert ok is True
+        assert ad._read_cache(data_dir=data).agents["cursor"].version == fresh_version

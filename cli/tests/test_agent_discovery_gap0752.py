@@ -240,3 +240,95 @@ def test_publishing_with_no_cache_takes_the_scan(tmp_path):
     )
 
     assert ad._read_cache(data_dir=tmp_path).agents["codex"].version == "codex-cli 0.160.0"
+
+
+def _skipped_link_cache(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    """Cache whose selected codex sits behind a skipped (failed) earlier link."""
+    ahead, picked, data = tmp_path / "ahead", tmp_path / "picked", tmp_path / "data"
+    for folder in (ahead, picked, data):
+        folder.mkdir()
+    failed, working, selected = ahead / "codex-0.150", ahead / "codex-0.167", picked / "codex"
+    for path in (failed, working, selected):
+        path.write_text("#!/bin/sh\n")
+    link = ahead / "codex"
+    link.symlink_to(failed)
+    time.sleep(1.2)
+    codex = _signal("codex", binary=str(selected), version="codex-cli 0.160.0")
+    codex.skipped_binaries = (str(link),)
+    _seed(data, codex, age=timedelta(0))
+    time.sleep(1.2)
+    return link, working, selected, data
+
+
+def test_a_skipped_link_switched_to_another_installed_version_is_probed_again(monkeypatch, tmp_path):
+    # The earlier launch candidate failed its version probe at scan time. The
+    # link now points at a codex installed long before the scan, so neither
+    # the target file nor the selected binary look changed.
+    link, working, selected, data = _skipped_link_cache(tmp_path)
+    _launch_order(monkeypatch, link, selected)
+    switched = link.parent / "switched"
+    switched.symlink_to(working)
+    os.replace(switched, link)
+    calls: list[str] = []
+    monkeypatch.setattr(ad, "_scan_agent", _scan_returning("codex-cli 0.167.0", calls))
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert disc.cache_hit is False
+    assert disc.agents["codex"].version == "codex-cli 0.167.0"
+    assert "codex" in calls
+
+
+def test_a_skipped_link_that_did_not_move_keeps_the_cached_version(monkeypatch, tmp_path):
+    link, _working, selected, data = _skipped_link_cache(tmp_path)
+    _launch_order(monkeypatch, link, selected)
+    monkeypatch.setattr(ad, "_scan_agent", lambda name, **_k: (_ for _ in ()).throw(AssertionError(name)))
+
+    disc = ad.discover_agents(data_dir=data)
+
+    assert disc.cache_hit is True
+    assert disc.agents["codex"].version == "codex-cli 0.160.0"
+
+
+def test_publishing_one_agent_replaces_a_peer_the_scan_read_at_another_version(tmp_path):
+    # Both directions: a successfully read peer is the newer fact, so the
+    # gateway admits the version the machine runs now, not the old record.
+    for before, after in (("3.19.13", "cursor 2.3.99"), ("cursor 2.3.99", "3.19.13")):
+        data = tmp_path / after.replace(" ", "-")
+        data.mkdir()
+        peers = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+        peers["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version=before)
+        scanned = ad._format_rfc3339(ad._now_utc() - timedelta(minutes=5))
+        assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=data)
+        fresh = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+        fresh["codex"] = _signal("codex", binary="/opt/codex/bin/codex", version="codex-cli 0.160.0")
+        fresh["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version=after)
+
+        assert ad._publish_agent_signal(
+            ad.AgentDiscovery(scanned_at=ad._format_rfc3339(ad._now_utc()), agents=fresh, cache_hit=False),
+            "codex",
+            data_dir=data,
+        )
+
+        cache = ad._read_cache(data_dir=data)
+        assert cache.agents["cursor"].version == after
+        assert cache.agents["codex"].version == "codex-cli 0.160.0"
+        assert cache.scanned_at == scanned
+
+
+def test_publishing_one_agent_keeps_a_peer_the_scan_found_but_did_not_version(tmp_path):
+    peers = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+    peers["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", version="3.19.13")
+    scanned = ad._format_rfc3339(ad._now_utc() - timedelta(minutes=5))
+    assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=tmp_path)
+    fresh = {name: _signal(name) for name in ad.DISCOVERABLE_CONNECTORS}
+    fresh["codex"] = _signal("codex", binary="/opt/codex/bin/codex", version="codex-cli 0.160.0")
+    fresh["cursor"] = _signal("cursor", binary="/opt/cursor/bin/cursor", error=ad.VERSION_NOT_PROBED)
+
+    assert ad._publish_agent_signal(
+        ad.AgentDiscovery(scanned_at=ad._format_rfc3339(ad._now_utc()), agents=fresh, cache_hit=False),
+        "codex",
+        data_dir=tmp_path,
+    )
+
+    assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
