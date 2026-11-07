@@ -859,7 +859,9 @@ func TestWindowsHolderAuditPostDoesNotBlockQueueingOrTheGuardianMutex(t *testing
 	done := make(chan struct{})
 	go func() { flushWindowsHolderAudit(&rig.log); close(done) }()
 	<-inPost
-	windowsHookBinaryMu.Lock() // the guardian's mutex is free while the post is stuck
+	if !windowsHookBinaryMu.TryLock() { // the guardian's mutex is free while the post is stuck
+		t.Fatal("the guardian's mutex was held while a post was in flight")
+	}
 	windowsHookBinaryMu.Unlock()
 	queued := make(chan struct{})
 	go func() { queueWindowsHolderAudit(windowsHolderAuditRow{Hook: rig.target}); close(queued) }()
@@ -1209,7 +1211,7 @@ func TestWindowsHolderARotatingHolderIsClosedAtTheSecondCheckAndBacksOff(t *test
 	var closes []time.Duration
 	elapsed := time.Duration(0)
 	for elapsed < 130*time.Second {
-		current = rotate()
+		rotate()
 		rig.advance(windowsHookBinaryCheckInterval)
 		elapsed += windowsHookBinaryCheckInterval
 		n, err := rig.check()
