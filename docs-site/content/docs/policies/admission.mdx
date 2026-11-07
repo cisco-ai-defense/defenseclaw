@@ -136,8 +136,8 @@ first call and every later call of such a server get the same decision: in the
 per-user default and permissive tiers the call runs with a warning, and in the
 strict tier and on a managed device it is blocked. The agent is told why the
 server could not be scanned and the one next step: `defenseclaw mcp allow
-<name>` (on a managed device, ask the administrator, because the command is
-refused there), or start the server with `npx` or `uvx`, or serve it from a
+<name>` (on a managed device, ask the administrator, because the managed launcher
+[refuses it](/docs/enterprise/managed-commands)), or start the server with `npx` or `uvx`, or serve it from a
 public URL. `defenseclaw mcp list` says the same.
 
 An administrator's allow rule for the server beats that block in every tier,
