@@ -2174,7 +2174,7 @@ func readTrustedWindowsManagedPolicyFile(path string) ([]byte, bool, error) {
 		return readErr
 	}
 	err := safefile.RetryTransientRead(read)
-	if errors.Is(err, safefile.ErrReadIdentityChanged) {
+	if seen && safefile.IsTransientReadError(err) {
 		err = safefile.RetryPublishedRead(read)
 	}
 	if errors.Is(err, os.ErrNotExist) && !seen {
