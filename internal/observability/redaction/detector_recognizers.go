@@ -607,54 +607,30 @@ func recognizeHighEntropy(input string, fieldClass observability.FieldClass, pri
 		boundary := entropyBoundary(input, index[0], index[1])
 		span := input[index[0]:index[1]]
 		parts, folderFound := splitAtProductFolders(span)
-		// A folder name is not what decides the outcome.
-		//   - The detector redacts the span as written: it is a secret only if it
-		//     is still one with the folder components taken out; then every
-		//     remaining range is redacted, even when each piece alone is below the
-		//     length minimum, and the folder names stay readable. If it is not,
-		//     each range is judged on its own (a range of a span the base
-		//     redacted is never newly redacted).
-		//   - The detector leaves the span alone as written (a hyphenated folder
-		//     name inside a slash-form path makes the alphabet check fail): the
-		//     remaining ranges are not pulled in as paths, so an ordinary parent
-		//     directory stays readable; only a path component that is a
-		//     high-entropy value on its own is redacted, as in the backslash form.
-		//   - No folder component: the base path exactly.
-		asWritten := boundary && validHighEntropy(span, fieldClass)
-		whole := asWritten && validHighEntropy(joinRanges(span, parts), fieldClass)
-		units := parts
-		if folderFound && !asWritten {
-			units = splitComponents(span, parts)
-		}
-		for _, part := range units {
-			start, end := index[0]+part[0], index[0]+part[1]
-			accepted := whole || (boundary && validHighEntropy(input[start:end], fieldClass))
-			if overlapsCredentialClaim(start, end, prior) {
+		// A product folder component is neutral. A span without one is judged
+		// exactly as before. A span with one is a secret only when the detector
+		// redacts it as written AND still redacts the path that remains with the
+		// folder components taken out (the same rule applied to the whole
+		// remaining path, never to pieces of it); then every remaining range is
+		// redacted and the folder names stay readable. A span the detector leaves
+		// alone as written (a hyphenated folder name inside a slash-form path
+		// fails the alphabet check) is never newly redacted, so the result is
+		// never more than the unchanged detector gives.
+		accepted := boundary && validHighEntropy(span, fieldClass)
+		if !folderFound {
+			if overlapsCredentialClaim(index[0], index[1], prior) {
 				accepted = false
 			}
-			result = append(result, candidate{start: start, end: end, accepted: accepted})
+			result = append(result, candidate{start: index[0], end: index[1], accepted: accepted})
+			continue
+		}
+		accepted = accepted && validHighEntropy(joinRanges(span, parts), fieldClass)
+		for _, part := range parts {
+			start, end := index[0]+part[0], index[0]+part[1]
+			result = append(result, candidate{start: start, end: end, accepted: accepted && !overlapsCredentialClaim(start, end, prior)})
 		}
 	}
 	return result
-}
-
-// splitComponents cuts each range at slashes and returns the non-empty path
-// components.
-func splitComponents(span string, parts [][2]int) [][2]int {
-	components := make([][2]int, 0, len(parts))
-	for _, part := range parts {
-		for componentStart := part[0]; componentStart <= part[1]; {
-			componentEnd := part[1]
-			if cut := strings.IndexByte(span[componentStart:part[1]], byte(0x2f)); cut >= 0 {
-				componentEnd = componentStart + cut
-			}
-			if componentEnd > componentStart {
-				components = append(components, [2]int{componentStart, componentEnd})
-			}
-			componentStart = componentEnd + 1
-		}
-	}
-	return components
 }
 
 // joinRanges rebuilds span with the product folder components taken out: the

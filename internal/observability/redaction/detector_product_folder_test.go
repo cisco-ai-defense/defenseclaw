@@ -45,25 +45,29 @@ func TestProductFolderNamesStayVisibleInPathTargets(t *testing.T) {
 }
 
 // Real key material inside a path is still redacted, and the product folder
-// next to it stays visible.
+// next to it stays visible. The hyphenated folder is covered in the backslash
+// form (each folder is its own span there); in the slash form the unchanged
+// detector does not read a hyphenated span as a value at all, so the plain
+// folder carries the slash cases.
 func TestPlantedTokenInPathStaysRedactedBesideProductFolder(t *testing.T) {
 	t.Parallel()
-	folder := productlayout.WindowsHookRuntimeFolder
-	for _, input := range []string{
-		`C:\ProgramData\Cisco\` + folder + `\` + plantedPathToken,
-		`C:\ProgramData\Cisco\` + plantedPathToken + `\` + folder + `\x.log`,
-		`C:\ProgramData\Cisco\` + folder + `\` + plantedPathToken + `\x.log`,
-		`/var/` + plantedPathToken + `/x`,
-		`/var/` + folder + `/` + plantedPathToken,
-		`/var/` + plantedPathToken + `/` + folder + `/x`,
-		`C:/Users/a/` + plantedPathToken + `/x`,
+	hyphenated := productlayout.WindowsHookRuntimeFolder
+	plain := productlayout.ProductFolder
+	for _, tc := range []struct{ input, folder string }{
+		{`C:\ProgramData\Cisco\` + hyphenated + `\` + plantedPathToken, hyphenated},
+		{`C:\ProgramData\Cisco\` + plantedPathToken + `\` + hyphenated + `\x.log`, hyphenated},
+		{`C:\ProgramData\Cisco\` + hyphenated + `\` + plantedPathToken + `\x.log`, hyphenated},
+		{`/var/` + plantedPathToken + `/x`, ""},
+		{`/var/` + plain + `/` + plantedPathToken, plain},
+		{`/var/` + plantedPathToken + `/` + plain + `/x`, plain},
+		{`C:/Users/a/` + plantedPathToken + `/x`, ""},
 	} {
-		got := redactAuditTarget(t, input)
+		got := redactAuditTarget(t, tc.input)
 		if strings.Contains(got, plantedPathToken) {
-			t.Errorf("token left in path: %q -> %q", input, got)
+			t.Errorf("token left in path: %q -> %q", tc.input, got)
 		}
-		if strings.Contains(input, folder) && !strings.Contains(got, folder) {
-			t.Errorf("product folder lost beside a token: %q -> %q", input, got)
+		if tc.folder != "" && !strings.Contains(got, tc.folder) {
+			t.Errorf("product folder lost beside a token: %q -> %q", tc.input, got)
 		}
 	}
 }
@@ -177,11 +181,11 @@ func TestProductFolderBehindOrdinaryParentsStaysVisible(t *testing.T) {
 	}
 }
 
-// A token is still redacted when ordinary parents stand in front of the
-// hyphenated product folder, and the folder stays readable.
+// A token is still redacted when ordinary parents stand in front of the plain
+// product folder, and the folder stays readable.
 func TestPlantedTokenBehindOrdinaryParentsStaysRedacted(t *testing.T) {
 	t.Parallel()
-	folder := productlayout.WindowsHookRuntimeFolder
+	folder := productlayout.ProductFolder
 	for _, input := range []string{
 		"/opt/MyService/CurrentRelease/" + plantedPathToken + "/" + folder + "/x",
 		"/opt/MyService/CurrentRelease/" + folder + "/" + plantedPathToken,
@@ -193,6 +197,27 @@ func TestPlantedTokenBehindOrdinaryParentsStaysRedacted(t *testing.T) {
 		}
 		if !strings.Contains(got, folder) {
 			t.Errorf("product folder lost beside a token: %q -> %q", input, got)
+		}
+	}
+}
+
+// Ordinary long mixed-case directory names (with a year) around the hyphenated
+// product folder stay readable: the unchanged detector leaves these spans
+// alone and the folder name does not change that. Neither side of the folder
+// is judged as a path of its own.
+func TestProductFolderBesideMixedCaseNamesStaysVisible(t *testing.T) {
+	t.Parallel()
+	folder := productlayout.WindowsHookRuntimeFolder
+	for _, input := range []string{
+		"/opt/MyService/ApplicationSupport2026/" + folder + "/x",
+		"C:/ProgramData/Cisco/SecureClientRuntime2026/" + folder + "/x",
+		"/srv/CurrentRelease/CustomerIntegration2026/" + folder + "/x",
+		"/Users/Example/Library/ApplicationSupport2026/" + folder + "/x",
+		"/opt/MyService/" + folder + "/ApplicationSupport2026/x",
+		"C:/ProgramData/Cisco/" + folder + "/SecureClientRuntime2026/x",
+	} {
+		if got := redactAuditTarget(t, input); got != input {
+			t.Errorf("ordinary mixed-case path redacted: %q -> %q", input, got)
 		}
 	}
 }
