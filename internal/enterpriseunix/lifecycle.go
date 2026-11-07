@@ -2590,6 +2590,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		if l.awaitGuardianReport(ctx, activationStarted) {
 			l.noteRepairedTargets(activationStarted)
 		}
+		// The enumerator restarted with the new install publishes its first
+		// record a few seconds later; the result below reads that record.
+		l.awaitInstallScan(ctx)
 	}
 	// The change succeeds only when the gateway runs it. A config.yaml
 	// replaced during the run is confirmed by its follow-up transaction, and

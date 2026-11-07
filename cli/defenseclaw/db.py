@@ -1531,10 +1531,20 @@ class Store:
     def agent_facts_for_alerts(self, alert_ids: list[str]) -> dict[str, dict[str, str]]:
         """Map alert IDs to who the alert is about (GAP-0381).
 
-        The user, the agent identity (``agt-``), the agent instance (``ais-``),
-        the session and the sub-agent depth come from the alert row and from
-        the hook-decision row of the same request; the alert row's own value
-        wins.
+        The user, the verified agent identity (``agt-``), the agent instance
+        (``ais-``), the session and the sub-agent depth come from the alert
+        row's structured facts and from a hook-decision or direct-inspect row
+        of the same occurrence; the alert row's own structured value wins.
+
+        Request, run and session IDs are client supplied or shared by many
+        calls, so none of them names one occurrence. The gateway assigns the
+        agent instance (``ais-``) from the verified agent identity and the
+        session, and a row posted to ``/audit/event`` never carries one, so a
+        hook or inspect row is borrowed from only when it carries the same
+        non-empty instance as the alert row (GAP-0647). A row without
+        that instance is never borrowed from, and a fact the matching rows
+        disagree on is not shown, so a later request cannot change or replace
+        an earlier alert's Agent.
         """
         ids = [alert_id for alert_id in alert_ids if alert_id]
         columns, _tables = self._audit_projection_schema()
@@ -1543,21 +1553,34 @@ class Store:
 
         def row_facts(alias: str) -> str:
             cols = [f"{alias}.{name}" if name in columns else "NULL" for name in ("session_id", "agent_instance_id")]
-            cols += [
-                self._safe_json_extract(self._structured_sql(alias), f'$."{key}"') for key in self._ALERT_AGENT_KEYS
-            ]
+            for key in self._ALERT_AGENT_KEYS:
+                value = self._safe_json_extract(self._structured_sql(alias), f'$."{key}"')
+                cols.append(value)
             return ", ".join(cols)
 
         width = 2 + len(self._ALERT_AGENT_KEYS)
         join, hook_cols = "", ", ".join(["NULL"] * width)
-        if "request_id" in columns:
-            # Request IDs are client supplied. Borrow hook facts only when
-            # both records identify the same user independently of that ID.
+        if "request_id" in columns and "agent_instance_id" in columns:
+            # Borrow hook or direct inspect facts only from a row of the same
+            # occurrence: the same user and connector, the gateway-assigned
+            # agent instance of the alert row, and no conflicting run or
+            # session. OpenClaw tool checks have no hook_decision row.
             f_user = self._safe_json_extract(self._structured_sql("f"), '$."user.id"')
             h_user = self._safe_json_extract(self._structured_sql("h"), '$."user.id"')
+            occurrence = (
+                "AND COALESCE(f.agent_instance_id, '') <> '' AND h.agent_instance_id = f.agent_instance_id "
+                + "".join(
+                    f"AND (COALESCE(f.{name}, '') = '' OR COALESCE(h.{name}, '') = '' OR h.{name} = f.{name}) "
+                    for name in ("run_id", "session_id")
+                    if name in columns
+                )
+            )
             join = (
                 "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
-                "AND h.action IN ('hook_decision', 'action') AND h.id <> f.id "
+                "AND h.connector = f.connector "
+                "AND h.action IN ('hook_decision', 'action', 'inspect-tool-block', 'inspect-tool-confirm', "
+                "'inspect-tool-alert', 'inspect-tool-allow') "
+                f"AND h.id <> f.id {occurrence}"
                 f"AND COALESCE({f_user}, '') <> '' AND {f_user} = {h_user}"
             )
             hook_cols = row_facts("h")
@@ -1567,16 +1590,24 @@ class Store:
             ids,
         )
         names = ("session", "agent_instance", "user_name", "user_id", "agent_identity", "depth", "conversation")
-        found: dict[str, dict[str, str]] = {}
+        own: dict[str, dict[str, str]] = {}
+        borrowed: dict[str, dict[str, set[str]]] = {}
         for row in cur.fetchall():
-            facts = found.setdefault(row[0], {})
-            for values in (row[1:1 + width], row[1 + width:]):
-                for name, value in zip(names, values):
-                    text = "" if value is None else str(value).strip()
-                    if text and not facts.get(name):
-                        facts[name] = text
+            facts = own.setdefault(row[0], {})
+            for name, value in zip(names, row[1:1 + width]):
+                text = "" if value is None else str(value).strip()
+                if text:
+                    facts.setdefault(name, text)
+            others = borrowed.setdefault(row[0], {})
+            for name, value in zip(names, row[1 + width:]):
+                text = "" if value is None else str(value).strip()
+                if text:
+                    others.setdefault(name, set()).add(text)
         out: dict[str, dict[str, str]] = {}
-        for alert_id, facts in found.items():
+        for alert_id, facts in own.items():
+            for name, values in borrowed.get(alert_id, {}).items():
+                if not facts.get(name) and len(values) == 1:
+                    facts[name] = next(iter(values))
             shown = {
                 "user": facts.get("user_name") or facts.get("user_id", ""),
                 "agent_identity": facts.get("agent_identity", ""),

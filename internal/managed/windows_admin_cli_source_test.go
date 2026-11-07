@@ -32,10 +32,6 @@ var managedWindowsBareCommandAllowed = map[string][]string{
 	"internal/cli/windows_enterprise_port_holder.go": {"`defenseclaw uninstall --all --binaries --yes`"},
 	// Per-user Codex setup refuses a linked CODEX_HOME.
 	"internal/gateway/connector/codex_config_dir_windows.go": {"run: defenseclaw setup codex"},
-	// The root-gateway remedy of a per-user install on Windows: stop the
-	// per-user gateway from an administrator prompt, then start it again. The
-	// launcher is on that user's PATH (GAP-0694, GAP-0706).
-	"internal/daemon/per_user_listener.go": {"(defenseclaw-gateway stop)", "(defenseclaw-gateway start)"},
 	// The per-user stable hook launcher (LocalAppData\DefenseClaw\HookRuntime);
 	// managed hooks run from the machine hook runtime instead.
 	"internal/hookruntime/unavailable_windows.go": {"Run `defenseclaw doctor`"},

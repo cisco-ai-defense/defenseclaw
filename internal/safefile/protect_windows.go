@@ -831,21 +831,6 @@ func privateSecurityDescriptorIsSafeForSubject(
 	return foundOwner && foundSystem, nil
 }
 
-// untrustedWriteMask is the access that makes a grant to another account
-// unsafe on a private path.
-const untrustedWriteMask = windows.ACCESS_MASK(
-	windows.GENERIC_ALL |
-		windows.GENERIC_WRITE |
-		windows.DELETE |
-		windows.WRITE_DAC |
-		windows.WRITE_OWNER |
-		windows.FILE_WRITE_DATA |
-		windows.FILE_APPEND_DATA |
-		windows.FILE_WRITE_EA |
-		windows.FILE_WRITE_ATTRIBUTES |
-		0x00000040, // FILE_DELETE_CHILD
-)
-
 func privateDACLIsWriterRepairableForSubject(
 	path string,
 	identity windowsProtectionSubject,
@@ -892,7 +877,18 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 	if !ownerTrustedForSubject(owner, identity, trustSystemOwners) {
 		return false, nil
 	}
-	untrustedWrite := untrustedWriteMask
+	untrustedWrite := windows.ACCESS_MASK(
+		windows.GENERIC_ALL |
+			windows.GENERIC_WRITE |
+			windows.DELETE |
+			windows.WRITE_DAC |
+			windows.WRITE_OWNER |
+			windows.FILE_WRITE_DATA |
+			windows.FILE_APPEND_DATA |
+			windows.FILE_WRITE_EA |
+			windows.FILE_WRITE_ATTRIBUTES |
+			0x00000040, // FILE_DELETE_CHILD
+	)
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {

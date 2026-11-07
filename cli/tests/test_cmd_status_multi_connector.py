@@ -947,8 +947,12 @@ class TestStatusJson(unittest.TestCase):
         reason = json.loads(as_json.output)["sidecar"]["reason"]
         for shown in (reason, as_text.output):
             self.assertIn(ROOT_GATEWAY_REASON, shown)
-            # The remedy is written for the running OS (GAP-0706).
-            self.assertIn(("sudo env DEFENSECLAW_HOME=" if sys.platform != "win32" else "administrator prompt"), shown)
+            if sys.platform.startswith("win"):
+                # GAP-0747: the Windows remedy is an elevated PowerShell prompt, never sudo.
+                self.assertIn("elevated PowerShell prompt", shown)
+                self.assertNotIn("sudo", shown)
+            else:
+                self.assertIn("sudo env DEFENSECLAW_HOME=", shown)
             self.assertNotIn("--api-port", shown)
 
     def test_json_roster_has_per_connector_mode(self):

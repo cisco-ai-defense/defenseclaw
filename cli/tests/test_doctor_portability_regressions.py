@@ -941,6 +941,27 @@ def test_root_gateway_remedy_is_written_for_the_running_os(monkeypatch, tmp_path
     assert ("sudo chown -R" in remedy) == (platform_name != "win32")
     assert not remedy.endswith(".") and ".." not in remedy
     assert (cmd_doctor.ROOT_GATEWAY_REASON + " " + remedy + ".").count("..") == 0
+    if platform_name == "win32":
+        # GAP-0747: rendered like managed.WindowsCommandLine, never a bare command.
+        assert remedy == (
+            "Stop it from an elevated PowerShell prompt (& 'defenseclaw-gateway.exe' stop), "
+            "then start it as yourself from a normal PowerShell prompt (& 'defenseclaw-gateway.exe' start)"
+        )
+        assert "(defenseclaw-gateway " not in remedy
+        # The call operator runs only in PowerShell (not cmd.exe): both steps name it.
+        assert "from an elevated PowerShell prompt (" in remedy and "from a normal PowerShell prompt (" in remedy
+        assert "administrator prompt" not in remedy
+
+
+def test_windows_root_gateway_remedy_quotes_the_resolved_gateway_path(monkeypatch, tmp_path) -> None:
+    """GAP-0747: a gateway path with a space or an apostrophe is one inert literal."""
+    path = os.fspath(tmp_path / "O'Brien Jr" / "defenseclaw-gateway.exe")
+    monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: path)
+    remedy = cmd_doctor._root_gateway_remedy_for("win32", SimpleNamespace(data_dir=os.fspath(tmp_path), deployment_mode=""))
+    quoted = path.replace("'", "''")
+    assert f"(& '{quoted}' stop)" in remedy
+    assert f"(& '{quoted}' start)" in remedy
+    assert "sudo" not in remedy
 
 
 def _gateway_account_fixture(monkeypatch, tmp_path, *, process_uid, deployment_mode=""):
@@ -982,6 +1003,10 @@ def test_doctor_gateway_account_hint_quotes_the_home(monkeypatch, tmp_path) -> N
     binary.write_text("#!/bin/sh\nexit 0\n")
     binary.chmod(0o700)
     monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: os.fspath(binary))
+    # The gateway home is the one DEFENSECLAW_HOME names; the remedy reads it
+    # from there, not from the data_dir doctor loaded (GAP-0711, GAP-0713).
+    monkeypatch.setenv("DEFENSECLAW_HOME", os.fspath(home))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
     result = _gateway_account_fixture(monkeypatch, home, process_uid=0)
 
     remediation = result.checks[-1]["remediation"]

@@ -67,13 +67,13 @@ func TestGAP0714PreflightLetsOrdinaryHomesThrough(t *testing.T) {
 	}
 	// A home that does not exist yet is created by root, so it is let through
 	// only below a root-owned folder (root is its owner there).
-	oldOwner := pathOwnerUID
-	t.Cleanup(func() { pathOwnerUID = oldOwner })
-	pathOwnerUID = func(string) (uint32, error) { return 0, nil }
+	oldOwner := pathOwnerAndMode
+	t.Cleanup(func() { pathOwnerAndMode = oldOwner })
+	pathOwnerAndMode = func(string) (uint32, os.FileMode, error) { return 0, 0o755, nil }
 	if err := PreflightReclaimDirectory(filepath.Join(private, "not yet", "deeper")); err != nil {
 		t.Fatalf("a home below a root-owned folder was refused: %v", err)
 	}
-	pathOwnerUID = oldOwner
+	pathOwnerAndMode = oldOwner
 
 	open := filepath.Join(t.TempDir(), "open home")
 	if err := os.Mkdir(open, 0o700); err != nil {
@@ -121,5 +121,56 @@ func TestGAP0714PreflightRefusesToCreateAHomeInsideAnotherAccountsFolder(t *test
 	}
 	if err := PreflightReclaimDirectory(home); err != nil {
 		t.Fatalf("an existing private home owned by this account was refused: %v", err)
+	}
+}
+
+// GAP-0714 (review 6): a root-owned folder that other accounts can write (/tmp,
+// a group-writable shared folder) is no better than a folder owned by another
+// account: root would create the home owned by root and the account it is for
+// could not use it. Only a root-owned folder nobody else can write passes; the
+// 0700 and 0755 rows are the benign twins.
+func TestGAP0714PreflightRefusesToCreateAHomeInsideAFolderOtherAccountsCanWrite(t *testing.T) {
+	old := effectiveUID
+	t.Cleanup(func() { effectiveUID = old })
+	effectiveUID = func() int { return 0 }
+	oldOwner := pathOwnerAndMode
+	t.Cleanup(func() { pathOwnerAndMode = oldOwner })
+
+	home := filepath.Join(t.TempDir(), ".defenseclaw")
+	for _, tc := range []struct {
+		name    string
+		uid     uint32
+		perm    os.FileMode
+		refused bool
+	}{
+		{"root-owned world-writable (like /tmp)", 0, 0o777, true},
+		{"root-owned group-writable", 0, 0o775, true},
+		{"root-owned other-writable only", 0, 0o757, true},
+		{"root-owned private folder", 0, 0o700, false},
+		{"root-owned ordinary folder", 0, 0o755, false},
+		{"folder owned by another account", 1000, 0o755, true},
+	} {
+		pathOwnerAndMode = func(string) (uint32, os.FileMode, error) { return tc.uid, tc.perm, nil }
+		// A deeper missing path is judged by the nearest existing folder.
+		for _, target := range []string{home, filepath.Join(home, "deeper", "still")} {
+			err := PreflightReclaimDirectory(target)
+			if tc.refused && (err == nil || !strings.Contains(err.Error(), "does not exist")) {
+				t.Errorf("%s: %s was not refused: %v", tc.name, target, err)
+			}
+			if !tc.refused && err != nil {
+				t.Errorf("%s: %s was refused: %v", tc.name, target, err)
+			}
+		}
+	}
+	// Nothing was created by any of the checks.
+	if _, err := os.Lstat(home); !os.IsNotExist(err) {
+		t.Fatalf("the preflight created the home: %v", err)
+	}
+	// The real /tmp (root-owned and open to everyone on Linux and macOS) is refused.
+	pathOwnerAndMode = oldOwner
+	if uid, perm, err := pathOwnerAndMode("/tmp"); err == nil && uid == 0 && perm&0o002 != 0 {
+		if err := PreflightReclaimDirectory(filepath.Join("/tmp", "dc-g629m-preflight-not-created", ".defenseclaw")); err == nil {
+			t.Fatal("a missing home directly below /tmp was not refused")
+		}
 	}
 }

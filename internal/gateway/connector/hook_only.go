@@ -1736,9 +1736,8 @@ func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("plugin path must be absolute: %q", path)
 	}
-	dir := filepath.Dir(filepath.Clean(path))
-	if err := hookAPIValidateDirectoryFor(dir, trustedOwnerSID); err != nil {
-		return explainPluginFolderCustody(dir, err)
+	if err := hookAPIValidateDirectoryFor(filepath.Dir(filepath.Clean(path)), trustedOwnerSID); err != nil {
+		return err
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -1756,10 +1755,7 @@ func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
 	if err := hookAPIValidateOwnerFor(path, info, trustedOwnerSID); err != nil {
 		return err
 	}
-	if err := hookAPIValidatePluginFilePermissions(path, info); err != nil {
-		return explainPluginFileCustody(path, info, err)
-	}
-	return nil
+	return hookAPIValidatePluginFilePermissions(path, info)
 }
 
 // hookCommand returns the command an agent runs for this connector's hook. On

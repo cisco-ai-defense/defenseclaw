@@ -13,6 +13,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -202,4 +203,176 @@ func TestEnsureWindowsManagedPolicyDirectoryRecordsOnlyTheFoldersItCreated(t *te
 	if len(recorded) != 1 || !slices.Equal(recorded[0], []string{codex, leaf}) {
 		t.Fatalf("recorded = %q, want [[%s %s]]", recorded, codex, leaf)
 	}
+}
+
+// GAP-0091 review 2 S1: a failed Claude Code publish leaves each folder the
+// install created together with its record. The transaction creates and
+// records managed-settings.d and ClaudeCode before it takes its lock file in
+// there, so the publish creates nothing and its rollback removes no folder:
+// a record never outlives its folder, and a purge removes both once empty.
+// Run with the real transaction lock and with the publish alone (the
+// transaction stubbed, as the other install tests do, so the publish's own
+// folder step creates them).
+func TestClaudePublishRollbackKeepsEachCreatedFolderWithItsRecord(t *testing.T) {
+	for _, realLock := range []bool{true, false} {
+		name := "publish alone"
+		if realLock {
+			name = "real transaction lock"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := newWindowsManagedInstallFixture(t, nil)
+			policyDir := filepath.Dir(fixture.policyPath)
+			policyRoot := filepath.Dir(policyDir)
+			for _, dir := range []string{policyDir, policyRoot} {
+				if err := os.Remove(dir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previousTransaction, previousRecorder, previousWriter := windowsClaudeManagedPolicyTransaction, windowsCreatedFolderRecorder, windowsManagedPolicyWriter
+			t.Cleanup(func() {
+				windowsClaudeManagedPolicyTransaction, windowsCreatedFolderRecorder, windowsManagedPolicyWriter = previousTransaction, previousRecorder, previousWriter
+			})
+			if realLock {
+				windowsClaudeManagedPolicyTransaction = withWindowsClaudeManagedPolicyTransaction
+			}
+			recorded := map[string]bool{}
+			windowsCreatedFolderRecorder = func(created []string) error {
+				for _, folder := range created {
+					recorded[strings.ToLower(filepath.Clean(folder))] = true
+				}
+				return nil
+			}
+			windowsManagedPolicyWriter = func(path string, data []byte, readable bool) error {
+				if filepath.Base(path) == windowsClaudeManagedStateFile {
+					return errors.New("injected state publication failure")
+				}
+				return writeWindowsManagedFile(path, data, readable)
+			}
+			_, err := Install(context.Background(), windowsManagedInstallOptions(fixture))
+			if err == nil || !strings.Contains(err.Error(), "injected state publication failure") {
+				t.Fatalf("Install error = %v, want the injected publish failure", err)
+			}
+			for _, path := range []string{fixture.policyPath, filepath.Join(policyDir, windowsClaudeManagedStateFile)} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the rollback left %s: %v", path, err)
+				}
+			}
+			for _, dir := range []string{policyRoot, policyDir} {
+				if _, err := os.Lstat(dir); err != nil {
+					t.Fatalf("created folder %s after the rollback: %v", dir, err)
+				}
+				if !recorded[strings.ToLower(dir)] {
+					t.Fatalf("created folder %s has no record (records: %v)", dir, recorded)
+				}
+			}
+			if len(recorded) != 2 {
+				t.Fatalf("records = %v, want ClaudeCode and managed-settings.d only", recorded)
+			}
+		})
+	}
+}
+
+// GAP-0091 review 2 S1: DefenseClaw's own folders in the Cisco folders are
+// not recorded: the purge and the hooks' teardown remove them with the
+// deployment, so a record of one would outlive it. The Cisco folder itself
+// is.
+func TestStandaloneCreatedFolderRecordSkipsDefenseClawsOwnFolders(t *testing.T) {
+	fixture := useCreatedFolderFixture(t, true, trustAll)
+	vendor := filepath.Join(fixture.programData, "Cisco")
+	own := []string{
+		filepath.Join(vendor, "DefenseClaw-HookRuntime"),
+		filepath.Join(vendor, "DefenseClaw-HookRuntime", "opencode"),
+		filepath.Join(fixture.programFiles, "Cisco", "DefenseClaw", "bin"),
+		filepath.Join(vendor, "defenseclaw-mdm"),
+	}
+	if err := recordWindowsCreatedFolders(append(own, vendor, filepath.Join(vendor, "DefenseClawOther"))); err != nil {
+		t.Fatal(err)
+	}
+	records := readCreatedFolderRecords(t, fixture.records)
+	if len(records) != 2 || records[windowsCreatedFolderRecordName(vendor)] != vendor ||
+		records[windowsCreatedFolderRecordName(filepath.Join(vendor, "DefenseClawOther"))] == "" {
+		t.Fatalf("records = %v, want only %s and Cisco\\DefenseClawOther (not a DefenseClaw folder name)", records, vendor)
+	}
+}
+
+// GAP-0091 review 2 S1: the CLI's removal of C:\Program Files\Cisco removes
+// only a recorded, empty, trusted plain folder, and takes its record with it.
+func TestRemoveWindowsCreatedFolderIfEmptyTakesTheRecordWithTheFolder(t *testing.T) {
+	previousFileTrust := windowsManagedPolicyFileTrustCheck
+	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = previousFileTrust })
+	windowsManagedPolicyFileTrustCheck = trustAll
+	fixture := useCreatedFolderFixture(t, true, trustAll)
+	folder := filepath.Join(fixture.programFiles, "Cisco")
+	record := filepath.Join(fixture.records, windowsCreatedFolderRecordName(folder))
+	reset := func(t *testing.T, recordIt bool, content string) {
+		t.Helper()
+		_ = os.RemoveAll(folder)
+		_ = os.Remove(record)
+		if err := os.MkdirAll(folder, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if content != "" {
+			if err := os.WriteFile(filepath.Join(folder, content), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if recordIt {
+			if err := recordWindowsCreatedFolders([]string{folder}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	exists := func(path string) bool {
+		_, err := os.Lstat(path)
+		return err == nil
+	}
+
+	reset(t, true, "")
+	if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err != nil || !removed || exists(folder) || exists(record) {
+		t.Fatalf("recorded empty folder: removed=%v err=%v folder=%v record=%v, want both gone", removed, err, exists(folder), exists(record))
+	}
+	reset(t, true, "other-product.txt")
+	if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err != nil || removed || !exists(folder) || !exists(record) {
+		t.Fatalf("recorded folder holding a file: removed=%v err=%v, want both kept", removed, err)
+	}
+	reset(t, false, "")
+	if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err != nil || removed || !exists(folder) {
+		t.Fatalf("a folder that existed before the install (no record): removed=%v err=%v, want kept", removed, err)
+	}
+	t.Run("untrusted folder", func(t *testing.T) {
+		reset(t, true, "")
+		windowsManagedPolicyAncestorTrustCheck = func(path string) error {
+			if strings.EqualFold(path, folder) {
+				return errors.New("untrusted owner")
+			}
+			return nil
+		}
+		t.Cleanup(func() { windowsManagedPolicyAncestorTrustCheck = trustAll })
+		if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err == nil || removed || !exists(folder) || !exists(record) {
+			t.Fatalf("untrusted folder: removed=%v err=%v, want both kept with an error", removed, err)
+		}
+	})
+	t.Run("junction at the recorded folder", func(t *testing.T) {
+		reset(t, true, "")
+		if err := os.Remove(folder); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(t.TempDir(), "target")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		makeTestJunction(t, folder, target)
+		t.Cleanup(func() { _ = os.Remove(folder) })
+		if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err == nil || removed || !exists(target) || !exists(record) {
+			t.Fatalf("junction: removed=%v err=%v target=%v record=%v, want refused", removed, err, exists(target), exists(record))
+		}
+	})
+	t.Run("secure client", func(t *testing.T) {
+		reset(t, true, "")
+		windowsEnterpriseStandaloneProcess = func() bool { return false }
+		t.Cleanup(func() { windowsEnterpriseStandaloneProcess = func() bool { return true } })
+		if removed, err := RemoveWindowsCreatedFolderIfEmpty(folder); err != nil || removed || !exists(folder) {
+			t.Fatalf("Secure Client: removed=%v err=%v, want nothing removed", removed, err)
+		}
+	})
 }

@@ -53,7 +53,7 @@ func RootGatewayListenerRemedy(dataDir string) string {
 // whole; a note about it comes before it.
 func rootGatewayRemedyFor(goos, dataDir string) string {
 	if goos == "windows" {
-		return "Stop it from an administrator prompt (defenseclaw-gateway stop), then start it as yourself (defenseclaw-gateway start)"
+		return windowsRootGatewayRemedy(rootGatewayWindowsExecutable())
 	}
 	command, note := rootGatewayRecoverySteps(dataDir)
 	if goos == "darwin" {
@@ -61,6 +61,32 @@ func rootGatewayRemedyFor(goos, dataDir string) string {
 			"returns its files to you and starts the gateway as you. Without the app, run: " + command
 	}
 	return note + "Stop it, return its files to your account and start it as yourself with: " + command
+}
+
+// windowsRootGatewayRemedy names the elevated stop and the account start of
+// the gateway at executable. Both commands are rendered by
+// managed.WindowsCommandLine, the one place a PowerShell command line is
+// built (TestManagedWindowsCommandsComeFromTheRenderer). The call-operator
+// form runs only in PowerShell, so the text names PowerShell for both steps
+// (a Command Prompt cannot run it); a bare command would not run as typed and a
+// path with a space or an apostrophe would break it.
+func windowsRootGatewayRemedy(executable string) string {
+	return "Stop it from an elevated PowerShell prompt (" + managed.WindowsCommandLine(executable, "stop") +
+		"), then start it as yourself from a normal PowerShell prompt (" + managed.WindowsCommandLine(executable, "start") + ")"
+}
+
+// rootGatewayWindowsExecutable is the gateway of this account: the running
+// binary when it is the gateway, else the one on PATH. With neither it is the
+// bare file name, which a per-user install has on PATH.
+func rootGatewayWindowsExecutable() string {
+	const name = "defenseclaw-gateway.exe"
+	if self, err := os.Executable(); err == nil && strings.EqualFold(filepath.Base(self), name) {
+		return self
+	}
+	if found, err := exec.LookPath(name); err == nil && filepath.IsAbs(found) {
+		return found
+	}
+	return name
 }
 
 // rootGatewayRecoverySteps returns the shell command that stops the root

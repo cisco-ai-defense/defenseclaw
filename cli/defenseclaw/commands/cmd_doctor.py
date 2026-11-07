@@ -89,8 +89,6 @@ from defenseclaw.connector_paths import (
     hermes_profile_unsupported_reason,
     managed_plugin_path,
     normalize,
-    opencode_custody_fix,
-    opencode_writable_plugin_file,
     opencode_writable_plugin_folder,
     rule_paths,
 )
@@ -153,7 +151,7 @@ from defenseclaw.process_liveness import pid_alive
 from defenseclaw.safety import NoRedirectError, build_no_redirect_opener, is_symlink
 from defenseclaw.scanner_binary import SKILL_SCANNER_BINARY, resolve_scanner_binary
 from defenseclaw.webhooks import list_webhooks, network_error_text, validate_webhook_url
-from defenseclaw.winquote import powershell_literal, run_instruction
+from defenseclaw.winquote import powershell_command_line, powershell_literal, run_instruction
 
 # Doctor status markers, recomputed per emission so the per-call
 # TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
@@ -1878,9 +1876,12 @@ def _root_gateway_remedy(cfg) -> str:
 
 def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
     if platform_name.startswith("win"):
+        executable = _root_gateway_windows_executable()
+        stop = powershell_command_line(executable, "stop")
+        start = powershell_command_line(executable, "start")
         return (
-            "Stop it from an administrator prompt (defenseclaw-gateway stop), "
-            "then start it as yourself (defenseclaw-gateway start)"
+            f"Stop it from an elevated PowerShell prompt ({stop}), "
+            f"then start it as yourself from a normal PowerShell prompt ({start})"
         )
     note = _root_gateway_recovery_note(cfg)
     if platform_name == "darwin":
@@ -1897,6 +1898,20 @@ def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
     )
 
 
+def _root_gateway_windows_executable() -> str:
+    """The gateway of this account for the Windows remedy, as the Go windowsRootGatewayRemedy renders it.
+
+    The resolved binary when it is an absolute path, else the bare file name
+    a per-user install has on PATH.
+    """
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    binary = resolve_gateway_binary()
+    if binary and os.path.isabs(binary):
+        return binary
+    return "defenseclaw-gateway.exe"
+
+
 def _root_gateway_recovery_command(cfg) -> str:
     """Stop the root gateway, return the home and the store, start as this account."""
     return _root_gateway_stop_command(cfg) + " && " + _root_gateway_return_and_start_command(cfg)
@@ -1905,7 +1920,7 @@ def _root_gateway_recovery_command(cfg) -> str:
 def _root_gateway_return_and_start_command(cfg) -> str:
     """Give the install home and the moved store back to this account, then start."""
     home = _root_gateway_install_home(cfg)
-    store = _root_gateway_moved_store(cfg)[0]
+    store = _root_gateway_moved_store()[0]
     homes = [home]
     if store and store not in homes:
         homes.append(store)
@@ -1916,16 +1931,19 @@ def _root_gateway_return_and_start_command(cfg) -> str:
     )
 
 
-def _root_gateway_moved_store(cfg) -> tuple[str, str, bool]:
+def _root_gateway_moved_store() -> tuple[str, str, bool]:
     """The folder the gateway's config moved the store to, as the gateway reads it.
 
     Returns ``(store, config_file, unreadable)``. The gateway starts with the
     install home as its working directory, so a relative ``DEFENSECLAW_CONFIG``
     and a relative ``data_dir`` are both taken from there, not from the folder
     doctor was run in (GAP-0711, GAP-0713). The config is read from that
-    place. Only when it does not exist does the data_dir this process loaded
-    stand in; ``unreadable`` reports a config that exists but cannot be read,
-    so the caller says the folder list may be incomplete.
+    place and from nowhere else: the data_dir this process loaded may come from
+    a different file of the same relative name in the folder doctor runs in, so
+    it never stands in. A config that does not exist moves nothing (the gateway
+    uses the install home); ``unreadable`` reports one that exists but cannot
+    be read, whose store is unknown, so the caller says the folder list may be
+    incomplete.
     """
     import yaml
 
@@ -1945,9 +1963,9 @@ def _root_gateway_moved_store(cfg) -> tuple[str, str, bool]:
     try:
         raw = parse_config_yaml(read_config_text(config_file))
     except (FileNotFoundError, NotADirectoryError):
-        return _configured_gateway_data_dir(cfg), config_file, False
+        return "", config_file, False
     except (OSError, UnicodeError, ValueError, yaml.YAMLError):
-        return _configured_gateway_data_dir(cfg), config_file, True
+        return "", config_file, True
     configured = raw.get("data_dir") if isinstance(raw, dict) else None
     if not isinstance(configured, str) or not configured.strip():
         return "", config_file, False
@@ -1961,7 +1979,7 @@ def _root_gateway_recovery_note(cfg) -> str:
     cannot be read here, the moved store is unknown and the chown does not
     cover it.
     """
-    _store, config_file, unreadable = _root_gateway_moved_store(cfg)
+    _store, config_file, unreadable = _root_gateway_moved_store()
     if not unreadable:
         return ""
     return (
@@ -2004,7 +2022,7 @@ def _root_gateway_install_home(cfg) -> str:
     """The PID-record home that the root gateway was started for."""
     from defenseclaw.config import default_data_path
 
-    data_dir = _root_gateway_moved_store(cfg)[0] or os.fspath(default_data_path())
+    data_dir = _root_gateway_moved_store()[0] or os.fspath(default_data_path())
     try:
         return gateway_home_for_data_dir(data_dir)
     except (OSError, TypeError, ValueError):
@@ -4483,17 +4501,21 @@ def _check_component_connector_compatibility(
 ) -> None:
     """Render bounded component and connector-contract evidence.
 
-    Discovery is read from the existing protected cache only.  This keeps
-    ``doctor --fix --dry-run`` read-only and prevents Doctor from executing an
-    unsupported connector binary merely to decide whether it should be
-    repaired.
+    Discovery is read from the existing protected cache only, and never
+    rescanned or written, so ``doctor --fix --dry-run`` stays read-only. The
+    one thing run is the bounded ``--version`` probe of the executable that
+    evidence names, at a trusted install path (``recheck_installed_versions``):
+    a cached or setup-recorded version can be a day or an agent update old,
+    and the row must not call it installed (GAP-0723). A probe that cannot
+    run leaves the row on the recorded version and says so.
     """
 
     from defenseclaw.doctor_health import (
         HealthStatus,
         build_health_report,
         hook_call_after_scan,
-        read_cached_discovery,
+        read_run_discovery,
+        recheck_installed_versions,
         supported_range_text,
     )
 
@@ -4518,7 +4540,8 @@ def _check_component_connector_compatibility(
         return live_activity.get(connector)
 
     try:
-        discovery = read_cached_discovery(data_dir)
+        rechecked = recheck_installed_versions(read_run_discovery(data_dir), enabled, data_dir)
+        discovery = rechecked.discovery
         report = build_health_report(
             enabled,
             discovery,
@@ -4571,8 +4594,20 @@ def _check_component_connector_compatibility(
     agents = getattr(discovery, "agents", None)
     for finding in report.connectors:
         detail = finding.summary
-        if finding.installed_version:
+        if finding.installed_version and finding.connector in rechecked.unchecked:
+            detail += (
+                f"; recorded={finding.installed_version} "
+                f"(not re-checked now: {rechecked.unchecked[finding.connector]})"
+            )
+        elif finding.installed_version:
             detail += f"; installed={finding.installed_version}"
+            if finding.connector in rechecked.changed:
+                # Only a plain semver of the recorded text reaches the row.
+                was = rechecked.changed[finding.connector]
+                detail += (
+                    f" (recorded as {was} before the agent updated)" if was else " (it changed since it was recorded)"
+                )
+        if finding.installed_version:
             signal = agents.get(finding.connector) if isinstance(agents, dict) else None
             if getattr(signal, "source", "") == "claude-desktop":
                 # GAP-0036: the version is the one of Claude Desktop's engine.
@@ -11485,18 +11520,24 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         else:
             candidates = [os.path.join(home, rel) for rel in rel_candidates]
     present = [p for p in candidates if os.path.isfile(p)]
-    if connector == "opencode" and (unsafe := _opencode_custody_problem(candidates)):
-        # The gateway refuses to publish the plugin into a folder, or over a
-        # file, other accounts can write, and stops. A running gateway passed
-        # that check at its last start, so without this row the hook rows say
-        # PASS until the next restart fails (GAP-0730).
-        _emit("fail", label, unsafe, r=r)
-        return
     if not present:
         if connector == "hermes":
             _emit(
                 "fail", label, f"Hermes active hook registration is missing at {candidates[0]}; live=false", r=r,
                 remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME",
+            )
+            return
+        if connector == "opencode" and (loose := opencode_writable_plugin_folder(candidates)):
+            # The gateway refuses to publish the plugin into a folder other
+            # accounts can write, and stops; the other rows only showed the
+            # gateway down.
+            _emit(
+                "fail",
+                label,
+                f"{loose} can be written by other accounts, so the gateway refuses to install the "
+                f"OpenCode plugin there and does not start. Run `chmod go-w {shlex.quote(loose)}`, "
+                "then `defenseclaw-gateway restart`",
+                r=r,
             )
             return
         _emit("fail", label, "hook file not found: " + ", ".join(candidates), r=r)
@@ -11854,25 +11895,6 @@ def _amp_non_defenseclaw_direct_plugins(cfg) -> list[str]:
     return discovered
 
 
-def _opencode_custody_problem(candidates: list[str]) -> str:
-    """Name the first folder (or the plugin file) other accounts can write, with the fix.
-
-    The same folder and the same command as setup and the gateway's start
-    error: the outermost unsafe folder first.
-    """
-    if loose := opencode_writable_plugin_folder(candidates):
-        what = loose
-    elif loose := opencode_writable_plugin_file(candidates):
-        what = loose
-    else:
-        return ""
-    return (
-        f"{what} can be written by other accounts, so the gateway refuses to install the "
-        f"OpenCode plugin there and does not start (or will not start at its next restart). "
-        f"Run `{opencode_custody_fix(what)}`, then `defenseclaw-gateway restart`"
-    )
-
-
 def _check_connector_skipped_at_start(connector: str, live_health: dict | None, r: _DoctorResult) -> None:
     """Warn when the running gateway skipped *connector* at start.
 
@@ -11895,14 +11917,11 @@ def _check_connector_skipped_at_start(connector: str, live_health: dict | None, 
             r=r,
         )
         return
-    from defenseclaw.commands.cmd_status import _connectors_not_started_reasons
-
-    why = _connectors_not_started_reasons(live_health).get(connector, "").strip()[:600]
     _emit(
         "warn",
         "Connector setup",
         f"{_CONNECTOR_LABELS.get(connector, connector)} was skipped when the gateway started, so it is not "
-        + (f"enforced: {why}" if why else "enforced; gateway.log has the reason"),
+        "enforced; gateway.log has the reason",
         r=r,
         remediation=f"defenseclaw setup {connector}",
     )
@@ -12015,7 +12034,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
             lock_drift,
         )
 
-    configured_mode = str(fail_mode.get("configured") or "")
+    configured_mode = str(fail_mode.get("configured") or fail_mode.get("desired") or "")
     lock_mode_target = configured_mode
     # Runtime locks are rendered from the mode-aware desired posture.  The
     # report keeps the raw legacy/global value in ``configured`` so Status can
@@ -15454,6 +15473,12 @@ def doctor(
     failed/dependency-blocked repair.
     """
     global _json_mode
+    from defenseclaw.doctor_health import begin_installed_version_run, end_installed_version_run
+
+    # One version probe per agent for the whole run, however long it takes (GAP-0723).
+    begin_installed_version_run()
+    if (click_ctx := click.get_current_context(silent=True)) is not None:
+        click_ctx.call_on_close(end_installed_version_run)
     if dry_run and not do_fix:
         raise click.UsageError("--dry-run requires --fix")
     if assume_yes and not do_fix:
@@ -16247,13 +16272,15 @@ def _connector_compatibility_problems(cfg) -> tuple[object, ...]:
     from defenseclaw.doctor_health import (
         HealthStatus,
         assess_connector_health,
-        read_cached_discovery,
+        read_run_discovery,
+        recheck_installed_versions,
     )
 
     connectors = tuple(connector for connector in _doctor_active_connectors(cfg) if _connector_enabled(cfg, connector))
     if not connectors:
         return ()
-    discovery = read_cached_discovery(str(getattr(cfg, "data_dir", "") or ""))
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    discovery = recheck_installed_versions(read_run_discovery(data_dir), connectors, data_dir).discovery
     findings = assess_connector_health(connectors, discovery)
     return tuple(finding for finding in findings if finding.status is not HealthStatus.SUPPORTED)
 
@@ -16419,6 +16446,9 @@ def _fix_connector_compatibility_review(cfg, *, assume_yes: bool) -> tuple[str, 
             "fail",
             f"{type(exc).__name__}: bounded connector version discovery failed; no version change was attempted",
         )
+    from defenseclaw.doctor_health import reset_installed_version_probes
+
+    reset_installed_version_probes()  # the refresh just re-read every version
     remaining = _connector_compatibility_problems(cfg)
     if not remaining:
         return ("pass", "refreshed version evidence now matches registered connector contracts")
@@ -19967,7 +19997,7 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
         # The gateway stops when OpenCode's plugin folder is writable by
         # other accounts; name the folder instead of a generic readiness line.
         if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
-            reason = f"{loose} can be written by other accounts; run `{opencode_custody_fix(loose)}`"
+            reason = f"{loose} can be written by other accounts; run `chmod go-w {shlex.quote(loose)}`"
     if not repaired and not reason:
         reason = (
             "managed lifecycle did not reach verified readiness; run `defenseclaw-gateway start` to see why"

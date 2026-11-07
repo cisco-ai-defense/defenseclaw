@@ -16384,17 +16384,12 @@ def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntime
 
 def _preflight_opencode_plugin_folder() -> None:
     """Reject an unsafe OpenCode plugin folder before setup writes config."""
-    from defenseclaw.connector_paths import (
-        connector_config_files,
-        opencode_custody_fix,
-        opencode_writable_plugin_folder,
-    )
+    from defenseclaw.connector_paths import connector_config_files, opencode_writable_plugin_folder
 
     if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
-        fix = opencode_custody_fix(loose)
-        cause = "has an ACL entry that grants write" if fix.startswith("setfacl") else "is group/other writable"
         raise click.ClickException(
-            f"OpenCode plugin folder {loose} {cause}; run `{fix}` and retry setup. No changes made."
+            f"OpenCode plugin folder {loose} is group/other writable; "
+            f"run `chmod go-w {shlex.quote(loose)}` and retry setup. No changes made."
         )
 
 

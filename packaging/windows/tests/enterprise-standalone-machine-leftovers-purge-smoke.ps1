@@ -219,8 +219,30 @@ $failures = & $module {
                 # are collected here, not written to this computer's log.
                 $logged = [Collections.Generic.List[string]]::new()
                 function Write-DefenseClawLifecycleLogDiagnostic { param([string]$Message) $logged.Add($Message) }
+                # As in the self-uninstall finalizer, which writes them (in a
+                # lifecycle run the result carries them, review 2 L3).
+                $script:DefenseClawCreatedFolderLogToLifecycleLog = $true
                 $adminOnly = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
                 $native = Initialize-DefenseClawNativeSecurity
+                # A fixture folder a purge may remove is owned by
+                # BUILTIN\Administrators, as the folders Setup and the hooks
+                # create are. A folder an elevated administrator creates is
+                # owned by that account itself where "Default owner for objects
+                # created by members of the Administrators group" is "Object
+                # creator" (the GitHub runner's runneradmin), and the purge's
+                # owner check rightly refuses it; SYSTEM and hosts set to
+                # "Administrators group" get BUILTIN\Administrators anyway.
+                # The negative rows keep what makes them negative (a junction,
+                # a Users write entry).
+                function Set-G091AdministratorsOwner {
+                    param([string[]]$Path)
+                    foreach ($folder in $Path) {
+                        $out = & "$env:SystemRoot\System32\icacls.exe" $folder /setowner '*S-1-5-32-544' /Q 2>&1
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "set the owner of $folder to BUILTIN\Administrators: $out"
+                        }
+                    }
+                }
                 [void][IO.Directory]::CreateDirectory($Scratch)
                 $root = Microsoft.PowerShell.Management\Join-Path $Scratch 'gap0091'
                 [void]$native::CreateDirectorySecure($root, $adminOnly)
@@ -264,6 +286,9 @@ $failures = & $module {
                         ([IO.Path]::Combine($parentTarget, 'Codex')), $recreated, $userParentChild, $openRecordFolder)) {
                     [void][IO.Directory]::CreateDirectory($folder)
                 }
+                Set-G091AdministratorsOwner -Path @($pd, $pf, $outsideRoot, $vendor, $cursor, $openai, $codex, $before,
+                    $claude, $dropIns, $shared, $sharedSub, $leafTarget, $parentTarget, ([IO.Path]::Combine($parentTarget, 'Codex')),
+                    $recreated, $userParent, $userParentChild, $openRecordFolder)
                 [IO.File]::WriteAllText($foreignFile, '{}')
                 [IO.File]::WriteAllText([IO.Path]::Combine($life, 'lifecycle.lock'), '')
                 foreach ($link in @(@($leafLink, $leafTarget), @($parentLink, $parentTarget))) {
@@ -433,6 +458,7 @@ $failures = & $module {
                 $rollbackVendor = [IO.Path]::Combine($pd, 'OpenAI')
                 $rollbackCodex = [IO.Path]::Combine($rollbackVendor, 'Codex')
                 [void][IO.Directory]::CreateDirectory($rollbackCodex)
+                Set-G091AdministratorsOwner -Path @($vendor, $rollbackVendor, $rollbackCodex)
                 Add-DefenseClawStandaloneCreatedFolderRecord -Path @($rollbackVendor, $rollbackCodex) -RecordDirectory $records -Roots $roots
                 & {
                     function Get-DefenseClawStandaloneCreatedFolderRecordDirectory { return $records }
@@ -471,7 +497,11 @@ $failures = & $module {
                         @('Setup''s descriptor holding another product''s folder', $vendorThisFolder, $false, @('DefenseClaw', 'Cisco Secure Client'), $false, $false),
                         @('the Program Files descriptor on the ProgramData folder', $vendorInherited, $false, @('DefenseClaw'), $false, $false),
                         @('Setup''s descriptor with one more entry', ($vendorThisFolder + '(A;;0x1301bf;;;BU)'), $false, @('DefenseClaw'), $false, $false),
-                        @('SYSTEM and Administrators only (another Cisco product)', $adminOnly, $false, @('DefenseClaw'), $false, $false))) {
+                        @('SYSTEM and Administrators only (another Cisco product)', $adminOnly, $false, @('DefenseClaw'), $false, $false),
+                        # Review 2 L4: 1.0.2 and 1.0.3 added this Users entry to
+                        # a folder they found, and kept no record of it.
+                        @('the 1.0.2/1.0.3 Users grant (0x1200a0) with no grant record', ($adminOnly + '(A;;0x1200a0;;;BU)'), $false, @('DefenseClaw'), $false, $false),
+                        @('Setup''s exact descriptor with a Users-read grant record', $vendorThisFolder, $false, @('DefenseClaw'), $false, $false, $true))) {
                     $index++
                     $caseRoot = [IO.Path]::Combine($backfill, "c$index")
                     $casePd = [IO.Path]::Combine($caseRoot, 'ProgramData')
@@ -495,6 +525,13 @@ $failures = & $module {
                     $caseLife = [IO.Path]::Combine($caseRoot, 'Lifecycle')
                     [void]$native::CreateDirectorySecure($caseLife, $adminOnly)
                     $caseRecords = [IO.Path]::Combine($caseLife, 'created-folders')
+                    $grantFile = [IO.Path]::Combine($caseLife, 'vendor-users-read-grant.json')
+                    if ($case.Count -gt 6 -and $case[6]) {
+                        # The record GAP-0578 writes when Setup adds Users read
+                        # to a folder it found.
+                        [IO.File]::WriteAllText($grantFile, (@{ sid = $script:UsersSID; path = $caseVendor; added_rights = 0x1200a9; scopes = @($caseVendor) } |
+                            Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+                    }
                     $backfillArgs = @{ RecordDirectory = $caseRecords; Roots = @($casePd, $casePf) }
                     if ($case[2]) {
                         $backfillArgs.ProgramFilesVendorFolder = $caseVendor
@@ -504,11 +541,298 @@ $failures = & $module {
                         $backfillArgs.ProgramDataVendorFolder = $caseVendor
                         $backfillArgs.ProgramFilesVendorFolder = [IO.Path]::Combine($casePf, 'Cisco')
                     }
-                    Add-DefenseClawStandaloneUpgradeVendorFolderRecords @backfillArgs
+                    & {
+                        function Get-DefenseClawVendorUsersReadGrantPath { return $grantFile }
+                        Add-DefenseClawStandaloneUpgradeVendorFolderRecords @backfillArgs
+                    }
                     $recordedNow = [IO.File]::Exists([IO.Path]::Combine($caseRecords, (Get-DefenseClawCreatedFolderRecordName -Path $caseVendor)))
                     if ($recordedNow -ne $case[5]) {
                         $failures.Add("GAP-0091 back-fill: $($case[0]) recorded=$recordedNow, want $($case[5]): $(Get-DefenseClawVendorFolderBackfillRefusal -Path $caseVendor -UsersInherit:([bool]$case[2]))")
                     }
+                }
+
+                # Review 2 L1: the record of the folder above the lifecycle
+                # folder goes only when that folder holds nothing but the
+                # lifecycle folder; with anything else (here a kept MDM
+                # journal) the folder stays, and its record with it. L2: a
+                # recorded folder two levels down is kept when a folder above
+                # its parent is open to someone else. L3: every kept folder is
+                # in the list the result carries.
+                $r3 = [IO.Path]::Combine($root, 'r3')
+                $r3pd = [IO.Path]::Combine($r3, 'ProgramData')
+                $r3pf = [IO.Path]::Combine($r3, 'Program Files')
+                $r3roots = @($r3pd, $r3pf)
+                $r3vendor = [IO.Path]::Combine($r3pd, 'Cisco')
+                $r3life = [IO.Path]::Combine($r3vendor, 'DefenseClaw-Lifecycle')
+                $r3records = [IO.Path]::Combine($r3life, 'created-folders')
+                $r3journal = [IO.Path]::Combine($r3vendor, 'DefenseClaw-MDM', 'rotation')
+                $r3open = [IO.Path]::Combine($r3pd, 'Open2')
+                $r3deep = [IO.Path]::Combine($r3open, 'Mid', 'Leaf')
+                foreach ($folder in @($r3pd, $r3pf, $r3vendor, $r3journal)) {
+                    [void][IO.Directory]::CreateDirectory($folder)
+                }
+                [void]$native::CreateDirectorySecure($r3life, $adminOnly)
+                [IO.File]::WriteAllText([IO.Path]::Combine($r3life, 'lifecycle.lock'), '')
+                [void][IO.Directory]::CreateDirectory($r3open)
+                Set-G091AdministratorsOwner -Path @($r3pd, $r3pf, $r3vendor, ([IO.Path]::GetDirectoryName($r3journal)), $r3journal, $r3open)
+                foreach ($folder in @(([IO.Path]::Combine($r3open, 'Mid')), $r3deep)) {
+                    [void]$native::CreateDirectorySecure($folder, $adminOnly)
+                }
+                $openAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $r3open
+                $openAcl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                    [Security.Principal.SecurityIdentifier]::new($script:UsersSID),
+                    [Security.AccessControl.FileSystemRights]::Modify,
+                    [Security.AccessControl.InheritanceFlags]::None,
+                    [Security.AccessControl.PropagationFlags]::None,
+                    [Security.AccessControl.AccessControlType]::Allow))
+                Microsoft.PowerShell.Security\Set-Acl -LiteralPath $r3open -AclObject $openAcl
+                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($r3vendor, $r3deep) -RecordDirectory $r3records -Roots $r3roots
+                $logged.Clear()
+                $script:DefenseClawCreatedFoldersKept.Clear()
+                $r3layout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($r3life, ('self-uninstall-' + ('2' * 64) + '.json')) }
+                $r3deferred = @(Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout $r3layout -RecordDirectory $r3records -Roots $r3roots -SkipDeploymentCheck)
+                if ($r3deferred.Count -ne 0 -or
+                    -not [IO.File]::Exists([IO.Path]::Combine($r3records, (Get-DefenseClawCreatedFolderRecordName -Path $r3deep)))) {
+                    $failures.Add("review 2 L2: a recorded folder under an open grandparent was handed on or lost its record: $($r3deferred -join '; ')")
+                }
+                if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $r3deep)) {
+                    $failures.Add('review 2 L2: a recorded folder under a grandparent someone else can write was removed')
+                }
+                # The open grandparent goes; the journal still holds the vendor folder.
+                [IO.Directory]::Delete($r3deep, $false)
+                [IO.Directory]::Delete([IO.Path]::Combine($r3open, 'Mid'), $false)
+                [IO.Directory]::Delete($r3open, $false)
+                $logged.Clear()
+                $script:DefenseClawCreatedFoldersKept.Clear()
+                $r3deferred = @(Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout $r3layout -RecordDirectory $r3records -Roots $r3roots -SkipDeploymentCheck)
+                $r3vendorRecord = [IO.Path]::Combine($r3records, (Get-DefenseClawCreatedFolderRecordName -Path $r3vendor))
+                if ($r3deferred.Count -ne 0 -or -not [IO.File]::Exists($r3vendorRecord)) {
+                    $failures.Add("review 2 L1: the record of a vendor folder that still holds a kept journal went: handed on '$($r3deferred -join '; ')', record=$([IO.File]::Exists($r3vendorRecord))")
+                }
+                if (@($logged | Microsoft.PowerShell.Core\Where-Object { $_.StartsWith("defenseclaw_skip path=${r3vendor}: a folder DefenseClaw created stays, and so does its record: it holds") }).Count -ne 1) {
+                    $failures.Add("review 2 L1: the lifecycle log does not say once why the vendor folder and its record stay: $($logged -join ' | ')")
+                }
+                $kept = @(Get-DefenseClawCreatedFoldersKept)
+                if ($kept.Count -ne 1 -or -not ([string]$kept[0]).StartsWith("${r3vendor}: a folder DefenseClaw created stays, and so does its record: it holds")) {
+                    $failures.Add("review 2 L3: the result's kept list is not the vendor folder once: $($kept -join ' | ')")
+                }
+                # The journal goes: the record goes, the folder is handed on and
+                # removed last.
+                [IO.Directory]::Delete($r3journal, $false)
+                [IO.Directory]::Delete([IO.Path]::GetDirectoryName($r3journal), $false)
+                $script:DefenseClawCreatedFoldersKept.Clear()
+                $r3deferred = @(Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout $r3layout -RecordDirectory $r3records -Roots $r3roots -SkipDeploymentCheck)
+                if ($r3deferred.Count -ne 1 -or $r3deferred[0] -cne $r3vendor -or [IO.File]::Exists($r3vendorRecord)) {
+                    $failures.Add("review 2 L1: an emptied vendor folder was not handed on with its record gone: $($r3deferred -join '; ')")
+                }
+                # A folder handed on that cannot go any more (an install made
+                # something in it meanwhile) is reported without a record.
+                [IO.File]::Delete([IO.Path]::Combine($r3life, 'lifecycle.lock'))
+                [IO.Directory]::Delete($r3life)
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($r3vendor, 'DefenseClaw'))
+                $logged.Clear()
+                Remove-DefenseClawStandaloneCreatedFolders -Path $r3deferred -Roots $r3roots
+                if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $r3vendor) -or
+                    @($logged | Microsoft.PowerShell.Core\Where-Object { $_.StartsWith("defenseclaw_skip path=${r3vendor}: a folder DefenseClaw created stays; its record went with the lifecycle folder in it") }).Count -ne 1) {
+                    $failures.Add("review 2 L1: a handed-on folder that stays is not reported as record-less: $($logged -join ' | ')")
+                }
+                [IO.Directory]::Delete([IO.Path]::Combine($r3vendor, 'DefenseClaw'), $false)
+                Remove-DefenseClawStandaloneCreatedFolders -Path $r3deferred -Roots $r3roots
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $r3vendor) {
+                    $failures.Add('review 2 L1: the emptied vendor folder stayed')
+                }
+
+                # Review 2 L3: with a self-uninstall finalizer pending, the
+                # result names what the finalizer will keep: a recorded folder
+                # holding another program's file; not a Cisco folder holding
+                # only DefenseClaw's folders and the retired install root.
+                $pv = [IO.Path]::Combine($root, 'preview')
+                $pvpd = [IO.Path]::Combine($pv, 'ProgramData')
+                $pvpf = [IO.Path]::Combine($pv, 'Program Files')
+                $pvvendor = [IO.Path]::Combine($pvpd, 'Cisco')
+                $pvlife = [IO.Path]::Combine($pvvendor, 'DefenseClaw-Lifecycle')
+                $pvrecords = [IO.Path]::Combine($pvlife, 'created-folders')
+                $pvpfvendor = [IO.Path]::Combine($pvpf, 'Cisco')
+                $pvcursor = [IO.Path]::Combine($pvpd, 'Cursor')
+                foreach ($folder in @($pvpd, $pvpf, $pvvendor, $pvcursor, ([IO.Path]::Combine($pvpfvendor, ('DefenseClaw.retired-' + ('a' * 32)))))) {
+                    [void][IO.Directory]::CreateDirectory($folder)
+                }
+                Set-G091AdministratorsOwner -Path @($pvpd, $pvpf, $pvvendor, $pvcursor, $pvpfvendor, ([IO.Path]::Combine($pvpfvendor, ('DefenseClaw.retired-' + ('a' * 32)))))
+                [void]$native::CreateDirectorySecure($pvlife, $adminOnly)
+                [IO.File]::WriteAllText([IO.Path]::Combine($pvcursor, 'cursor-own.json'), '{}')
+                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($pvvendor, $pvpfvendor, $pvcursor) -RecordDirectory $pvrecords -Roots @($pvpd, $pvpf)
+                $pvlayout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($pvlife, ('self-uninstall-' + ('3' * 64) + '.json')) }
+                if (@(Get-DefenseClawStandaloneCreatedFolderPreview -Layout $pvlayout -RecordDirectory $pvrecords -Roots @($pvpd, $pvpf)).Count -ne 0) {
+                    $failures.Add('review 2 L3: the preview ran with no self-uninstall finalizer pending')
+                }
+                [IO.File]::WriteAllText($pvlayout.SelfUninstallReceiptPath, '{}')
+                $preview = @(Get-DefenseClawStandaloneCreatedFolderPreview -Layout $pvlayout -RecordDirectory $pvrecords -Roots @($pvpd, $pvpf))
+                if ($preview.Count -ne 1 -or $preview[0].Folder -cne $pvcursor -or
+                    -not ([string]$preview[0].Note).Contains('it holds cursor-own.json')) {
+                    $failures.Add("review 2 L3: the preview is not the Cursor folder alone: $(@($preview | Microsoft.PowerShell.Core\ForEach-Object { "$($_.Folder): $($_.Note)" }) -join ' | ')")
+                }
+
+                # GAP-0704: on a computer installed before 1.0.9 the agent
+                # folders are back-filled ("origin":"upgrade") only when all
+                # three proofs hold: (a) created no earlier than StateRoot,
+                # (b) exactly the permissions DefenseClaw creates them with,
+                # (c) only DefenseClaw's own files; a parent only when its
+                # only child is recorded. Anything else stays and the purge
+                # names it once (rule i). A Cisco folder that holds anything
+                # shaped like Secure Client is never back-filled or removed
+                # (rule ii).
+                $agentSddl = 'O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
+                $ag = [IO.Path]::Combine($root, 'g0704')
+                $agPd = [IO.Path]::Combine($ag, 'ProgramData')
+                $agPf = [IO.Path]::Combine($ag, 'Program Files')
+                $agRoots = @($agPd, $agPf)
+                $agVendor = [IO.Path]::Combine($agPd, 'Cisco')
+                $agState = [IO.Path]::Combine($agVendor, 'DefenseClaw')
+                $agLife = [IO.Path]::Combine($agVendor, 'DefenseClaw-Lifecycle')
+                $agRecords = [IO.Path]::Combine($agLife, 'created-folders')
+                $agClaude = [IO.Path]::Combine($agPf, 'ClaudeCode')
+                $agDropIns = [IO.Path]::Combine($agClaude, 'managed-settings.d')
+                $agCursor = [IO.Path]::Combine($agPd, 'Cursor')
+                $agOpenAI = [IO.Path]::Combine($agPd, 'OpenAI')
+                $agCodex = [IO.Path]::Combine($agOpenAI, 'Codex')
+                $agArgs = @{ RecordDirectory = $agRecords; Roots = $agRoots; StateRoot = $agState; ProgramData = $agPd; ProgramFiles = $agPf
+                    ProgramDataVendorFolder = $agVendor; ProgramFilesVendorFolder = [IO.Path]::Combine($agPf, 'Cisco') }
+                $agNew = {
+                    param([string[]]$Folders)
+                    foreach ($folder in $Folders) {
+                        [void]$native::CreateDirectorySecure($folder, $agentSddl)
+                    }
+                }
+                $agRecord = { param([string]$Folder) [IO.Path]::Combine($agRecords, (Get-DefenseClawCreatedFolderRecordName -Path $Folder)) }
+                foreach ($folder in @($agPd, $agPf, $agVendor, $agState)) {
+                    [void][IO.Directory]::CreateDirectory($folder)
+                }
+                Set-G091AdministratorsOwner -Path @($agPd, $agPf, $agVendor, $agState)
+                [void]$native::CreateDirectorySecure($agLife, $adminOnly)
+                [IO.File]::WriteAllText([IO.Path]::Combine($agLife, 'lifecycle.lock'), '')
+                $stateBorn = [IO.Directory]::GetCreationTimeUtc($agState)
+                & $agNew @($agClaude, $agDropIns, $agCursor, $agOpenAI, $agCodex)
+                foreach ($own in @(
+                        @($agDropIns, '90-defenseclaw.json'), @($agDropIns, '00-defenseclaw-version-floor.json'),
+                        @($agDropIns, '.defenseclaw-managed-hooks.lock'), @($agDropIns, '.defenseclaw-managed-runtime-selector.lock'),
+                        @($agCursor, '.defenseclaw-managed-runtime-selector.lock'),
+                        @($agCodex, '.defenseclaw-managed-hooks.lock'), @($agCodex, '.defenseclaw-managed-runtime-selector.lock'))) {
+                    [IO.File]::WriteAllText([IO.Path]::Combine($own[0], $own[1]), '{}')
+                }
+                # requirements.toml counts only when the state binds its hash
+                # and the ownership record says DefenseClaw published it where
+                # none was.
+                $toml = [IO.Path]::Combine($agCodex, 'requirements.toml')
+                [IO.File]::WriteAllText($toml, "[hooks]`n")
+                $tomlHash = Get-DefenseClawPlainFileSha256 -Path $toml
+                [IO.File]::WriteAllText([IO.Path]::Combine($agCodex, '.defenseclaw-managed-hooks.state'), (@{ requirements_sha256 = $tomlHash } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+                $ownershipPath = [IO.Path]::Combine($agState, 'install', 'codex-requirements-ownership.json')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($ownershipPath))
+                [IO.File]::WriteAllText($ownershipPath, (@{ preimage_existed = $true; postimage_sha256 = $tomlHash } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+                if (-not ([string](Get-DefenseClawAgentFolderBackfillRefusal -Path $agCodex -Kind Codex -StateRoot $agState -RecordDirectory $agRecords -CodexOwnershipPath $ownershipPath)).Contains('requirements.toml')) {
+                    $failures.Add('GAP-0704 (c): a requirements.toml that was there before DefenseClaw counted as its own')
+                }
+                [IO.File]::WriteAllText($ownershipPath, (@{ preimage_existed = $false; postimage_sha256 = $tomlHash } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
+                # (a) a folder that existed before StateRoot; (b) other
+                # permissions; (c) a foreign file. Each its own folder.
+                $agBefore = [IO.Path]::Combine($agPd, 'OpenAI-before')
+                $agBeforeCodex = [IO.Path]::Combine($agBefore, 'Codex')
+                & $agNew @($agBefore, $agBeforeCodex)
+                [IO.Directory]::SetCreationTimeUtc($agBeforeCodex, $stateBorn.AddMinutes(-5))
+                $agInherited = [IO.Path]::Combine($agPd, 'Inherited')
+                [void][IO.Directory]::CreateDirectory($agInherited)
+                $agExtra = [IO.Path]::Combine($agPd, 'Extra')
+                [void]$native::CreateDirectorySecure($agExtra, $agentSddl + '(A;OICI;0x1301bf;;;BU)')
+                $agForeign = [IO.Path]::Combine($agPd, 'Foreign')
+                & $agNew @($agForeign)
+                [IO.File]::WriteAllText([IO.Path]::Combine($agForeign, '.defenseclaw-managed-runtime-selector.lock'), '')
+                [IO.File]::WriteAllText([IO.Path]::Combine($agForeign, 'settings.json'), '{}')
+                foreach ($case in @(
+                        @('(a) a folder created before StateRoot', $agBeforeCodex, 'Codex', 'before DefenseClaw''s StateRoot'),
+                        @('(b) an inherited descriptor', $agInherited, 'Cursor', ''),
+                        @('(b) DefenseClaw''s descriptor with one more entry', $agExtra, 'Cursor', 'DefenseClaw gives a folder it creates'),
+                        @('(c) a foreign file', $agForeign, 'Cursor', 'settings.json'))) {
+                    $why = [string](Get-DefenseClawAgentFolderBackfillRefusal -Path $case[1] -Kind $case[2] -StateRoot $agState -RecordDirectory $agRecords -CodexOwnershipPath $ownershipPath)
+                    if ([string]::IsNullOrEmpty($why) -or ($case[3] -ne '' -and -not $why.Contains($case[3]))) {
+                        $failures.Add("GAP-0704 $($case[0]) was not refused as expected: '$why'")
+                    }
+                }
+                # A foreign file in managed-settings.d keeps it and ClaudeCode
+                # unrecorded; once it goes, both are back-filled.
+                $agForeignDropIn = [IO.Path]::Combine($agDropIns, '50-other-vendor.json')
+                [IO.File]::WriteAllText($agForeignDropIn, '{}')
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @agArgs
+                foreach ($case in @(@('Cursor', $agCursor, $true), @('OpenAI\Codex', $agCodex, $true), @('OpenAI (its only child recorded)', $agOpenAI, $true),
+                        @('managed-settings.d holding a foreign file', $agDropIns, $false), @('ClaudeCode above an unrecorded child', $agClaude, $false),
+                        @('the Cisco folder with an inherited descriptor', $agVendor, $false))) {
+                    if ([IO.File]::Exists((& $agRecord $case[1])) -ne $case[2]) {
+                        $failures.Add("GAP-0704 back-fill: $($case[0]) recorded=$(-not $case[2]), want $($case[2])")
+                    }
+                }
+                $unproven = @(Get-DefenseClawUnprovenVendorFolders -RecordDirectory $agRecords -ProgramData $agPd -ProgramFiles $agPf)
+                foreach ($want in @($agDropIns, $agClaude, $agVendor)) {
+                    if (@($unproven | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $want }).Count -ne 1) {
+                        $failures.Add("GAP-0704 rule (i): $want is not listed once as not provably created: $($unproven -join '; ')")
+                    }
+                }
+                if ($unproven.Count -ne 3) {
+                    $failures.Add("GAP-0704 rule (i): want exactly the three unproven folders, got: $($unproven -join '; ')")
+                }
+                [IO.File]::Delete($agForeignDropIn)
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @agArgs
+                foreach ($folder in @($agDropIns, $agClaude, $agCursor, $agCodex, $agOpenAI)) {
+                    $recordFile = & $agRecord $folder
+                    if (-not [IO.File]::Exists($recordFile)) {
+                        $failures.Add("GAP-0704 back-fill: $folder was not recorded once its foreign file went")
+                        continue
+                    }
+                    $document = [IO.File]::ReadAllText($recordFile) | Microsoft.PowerShell.Utility\ConvertFrom-Json
+                    if ([string]$document.origin -cne 'upgrade' -or [int]$document.schema_version -ne 1 -or [string]$document.path -cne $folder) {
+                        $failures.Add("GAP-0704: the record of $folder is not schema 1 with origin upgrade: $([IO.File]::ReadAllText($recordFile))")
+                    }
+                }
+                foreach ($folder in @($agBeforeCodex, $agBefore, $agInherited, $agExtra, $agForeign)) {
+                    if ([IO.File]::Exists((& $agRecord $folder))) {
+                        $failures.Add("GAP-0704: $folder was recorded")
+                    }
+                }
+                # The purge (after the teardown removed DefenseClaw's files)
+                # removes the back-filled folders and their records.
+                foreach ($folder in @($agDropIns, $agCursor, $agCodex)) {
+                    foreach ($file in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $folder -Force -File)) {
+                        [IO.File]::Delete($file.FullName)
+                    }
+                }
+                $agLayout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($agLife, ('self-uninstall-' + ('4' * 64) + '.json')) }
+                [void](Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout $agLayout -RecordDirectory $agRecords -Roots $agRoots -SkipDeploymentCheck)
+                foreach ($folder in @($agDropIns, $agClaude, $agCursor, $agCodex, $agOpenAI)) {
+                    if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $folder) -or [IO.File]::Exists((& $agRecord $folder))) {
+                        $failures.Add("GAP-0704: the purge left the back-filled empty folder $folder or its record")
+                    }
+                }
+                foreach ($folder in @($agBeforeCodex, $agInherited, $agExtra, $agForeign)) {
+                    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $folder)) {
+                        $failures.Add("GAP-0704: the purge removed $folder, which nothing proves DefenseClaw created")
+                    }
+                }
+
+                # Rule (ii): Secure Client.
+                $scCisco = [IO.Path]::Combine($ag, 'sc', 'ProgramData', 'Cisco')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($ag, 'sc', 'Program Files'))
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($scCisco))
+                Set-G091AdministratorsOwner -Path @(([IO.Path]::Combine($ag, 'sc')), ([IO.Path]::GetDirectoryName($scCisco)), ([IO.Path]::Combine($ag, 'sc', 'Program Files')))
+                [void]$native::CreateDirectorySecure($scCisco, $vendorThisFolder)
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($scCisco, 'Cisco Secure Client'))
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($scCisco, 'DefenseClaw'))
+                $scWhy = [string](Get-DefenseClawVendorFolderBackfillRefusal -Path $scCisco)
+                if (-not $scWhy.Contains('looks like Secure Client')) {
+                    $failures.Add("GAP-0704 rule (ii): a Cisco folder holding Cisco Secure Client was not refused as Secure Client: '$scWhy'")
+                }
+                [IO.Directory]::Delete([IO.Path]::Combine($scCisco, 'DefenseClaw'), $false)
+                $scRoots = @(([IO.Path]::Combine($ag, 'sc', 'ProgramData')), ([IO.Path]::Combine($ag, 'sc', 'Program Files')))
+                if ([string]::IsNullOrEmpty((Remove-DefenseClawStandaloneCreatedFolder -Path $scCisco -Roots $scRoots)) -or
+                    -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath ([IO.Path]::Combine($scCisco, 'Cisco Secure Client')))) {
+                    $failures.Add('GAP-0704 rule (ii): a recorded Cisco folder holding Cisco Secure Client was removed')
                 }
 
                 # Secure Client keeps no record and removes nothing.
@@ -532,6 +856,8 @@ $failures = & $module {
                     [IO.Directory]::Delete($link, $false)
                 }
             }
+            $script:DefenseClawCreatedFolderLogToLifecycleLog = $false
+            $script:DefenseClawCreatedFoldersKept.Clear()
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
         }
 

@@ -4720,6 +4720,20 @@ try {
                     -Force
         }
     }
+    # The folders DefenseClaw created that a purge kept, with why, so the
+    # Setup and CLI JSON name them, not only the lifecycle log (GAP-0091).
+    if ($Action -eq 'Uninstall' -and $null -ne $result -and
+        $null -ne (Microsoft.PowerShell.Core\Get-Command -Name 'DefenseClawEnterprise\Get-DefenseClawCreatedFoldersKept' -ErrorAction SilentlyContinue)) {
+        $foldersKept = [string[]]@(DefenseClawEnterprise\Get-DefenseClawCreatedFoldersKept)
+        if ($foldersKept.Count -gt 0) {
+            $result |
+                Microsoft.PowerShell.Utility\Add-Member `
+                    -MemberType NoteProperty `
+                    -Name created_folders_kept `
+                    -Value $foldersKept `
+                    -Force
+        }
+    }
     if ($null -ne $result.PSObject.Properties['ok'] -and -not [bool]$result.ok) {
         $exitCode = 1
     }

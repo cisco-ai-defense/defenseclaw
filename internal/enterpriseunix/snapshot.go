@@ -370,7 +370,12 @@ func (e *Env) restoreFiles(snap *snapshot) error {
 		path := e.P(entry.Path)
 		switch {
 		case entry.Dir:
-			if entry.Present {
+			// A directory whose mode and owner are already the snapshotted
+			// ones is left alone: a shared parent the plan only lists
+			// (/usr/local on macOS) is SIP-protected, and root gets EPERM
+			// from even a no-op chmod there, which failed every rollback
+			// with rollback_failed (GAP-0091 launcher parents).
+			if entry.Present && !e.dirMetadataIs(path, entry) {
 				if err := os.Chmod(path, entry.Mode); err != nil && !errors.Is(err, os.ErrNotExist) {
 					errs = append(errs, err)
 				}
@@ -402,6 +407,17 @@ func (e *Env) restoreFiles(snap *snapshot) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// dirMetadataIs reports whether the directory at path already has the mode
+// and owner the snapshot recorded.
+func (e *Env) dirMetadataIs(path string, entry snapshotEntry) bool {
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	uid, gid, err := e.OwnerOf(path)
+	return err == nil && info.Mode().Perm() == entry.Mode.Perm() && uid == entry.UID && gid == entry.GID
 }
 
 // restoreFile puts a preserved blob back at path without copying its bytes

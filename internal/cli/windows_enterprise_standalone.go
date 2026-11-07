@@ -183,6 +183,10 @@ type windowsEnterpriseInstallerReport struct {
 	// uninstall) or left (a purge that found a journal it must not remove),
 	// with the next step (GAP-1913).
 	MdmRotationJournalKept string `json:"mdm_rotation_journal_kept"`
+	// CreatedFoldersKept names, as "path: reason", each folder a purge left
+	// in place that DefenseClaw created or that it could not prove it
+	// created (GAP-0091).
+	CreatedFoldersKept []string `json:"created_folders_kept"`
 
 	// probeFailed marks a failure document that reports no deployment
 	// state at all (no installed field and no pending transaction): the
@@ -1737,6 +1741,7 @@ func applyWindowsEnterpriseInstallerReport(
 	}
 	addWindowsEnterpriseSelfUninstallCleanup(result, report)
 	addWindowsEnterpriseMdmRotationJournalKept(result, report)
+	addWindowsEnterpriseCreatedFoldersKept(result, report)
 	if !report.OK && len(result.Errors) == 0 {
 		code := "not_ready"
 		if !report.Installed {
@@ -1859,6 +1864,22 @@ func addWindowsEnterpriseMdmRotationJournalKept(result *enterprisestatus.Result,
 	}
 	if note := strings.TrimSpace(report.MdmRotationJournalKept); note != "" {
 		result.AddWarning("mdm_rotation_journal_kept", windowsEnterpriseBoundedDiagnostic(note))
+	}
+}
+
+// addWindowsEnterpriseCreatedFoldersKept names, one warning each, the
+// folders an uninstall left in place that DefenseClaw created (they keep
+// their records, so a later purge tries again) or could not prove it created
+// (GAP-0091). The JSON result, and so the lifecycle log line, says which and
+// why, not only the module's own log lines.
+func addWindowsEnterpriseCreatedFoldersKept(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	if report == nil || result.Action != "uninstall" {
+		return
+	}
+	for _, note := range report.CreatedFoldersKept {
+		if note = strings.TrimSpace(note); note != "" {
+			result.AddWarning("created_folders_kept", windowsEnterpriseBoundedDiagnostic(note))
+		}
 	}
 }
 

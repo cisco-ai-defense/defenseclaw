@@ -150,7 +150,11 @@ def test_doctor_sidecar_root_listener_uses_root_remedy(monkeypatch) -> None:
     assert holder == cmd_doctor.ROOT_GATEWAY_REASON
     detail = cmd_doctor._foreign_gateway_port_detail(cfg, holder)
     remedy = cmd_doctor._foreign_gateway_port_remediation(cfg, holder=holder)
-    assert ("sudo env DEFENSECLAW_HOME=" if sys.platform != "win32" else "administrator prompt") in detail and remedy in detail
+    if sys.platform.startswith("win"):
+        # GAP-0747: the Windows remedy is an elevated PowerShell prompt, never sudo.
+        assert "elevated PowerShell prompt" in detail and "sudo" not in detail and remedy in detail
+    else:
+        assert "sudo env DEFENSECLAW_HOME=" in detail and remedy in detail
     assert "--api-port" not in detail
 
 
@@ -470,7 +474,7 @@ def test_root_listener_names_the_remedy_and_keeps_the_token_withheld(monkeypatch
     )
     problem = gateway.foreign_loopback_listener("127.0.0.1", 18970)
     assert cmd_doctor.ROOT_GATEWAY_REASON in problem
-    assert ("sudo env DEFENSECLAW_HOME=" if sys.platform != "win32" else "administrator prompt") in problem
+    assert "sudo env DEFENSECLAW_HOME=" in problem
     assert "--api-port" not in problem
     assert "another account" in gateway.foreign_loopback_listener("127.0.0.1", 18980)
 
@@ -522,7 +526,7 @@ def test_trusted_listener_reclassifies_root_without_trusting_its_token(monkeypat
     root = cmd_doctor._trusted_gateway_listener(cfg, evidence=object(), platform_name="linux")
     assert root.code == "root_gateway"
     assert not root.trusted
-    assert ("sudo env DEFENSECLAW_HOME=" if sys.platform != "win32" else "administrator prompt") in root.detail
+    assert "sudo env DEFENSECLAW_HOME=" in root.detail
 
     for name, changed in (
         ("own UID", dict(process=SimpleNamespace(uid=os.getuid()))),

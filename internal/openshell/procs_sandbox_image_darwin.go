@@ -14,7 +14,8 @@ import (
 )
 
 // sandboxDaemonProcessPath obtains the process image path through the one
-// macOS resolver (procimage), which works without cgo.
+// kernel call the repository makes for it (procimage.Path, the same
+// interface as libproc's proc_pidpath). It works without cgo.
 func sandboxDaemonProcessPath(ctx context.Context, pid int) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err

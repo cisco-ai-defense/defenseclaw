@@ -14,9 +14,10 @@ import (
 
 // GAP-0629/GAP-0687: a second hand-made proc_pidpath call read the syscall
 // result as the path length, which the kernel never returns, so the macOS
-// foreground gateway proof never resolved. internal/procimage, which imports
-// nothing of ours, owns the one call; every other package (enterpriseunix, the
-// gateway status proof, openshell) uses procimage.Path.
+// foreground gateway proof never resolved. internal/procimage owns the one
+// call (a leaf package: internal/enterpriseunix imports internal/openshell, so
+// openshell cannot import enterpriseunix); every other package uses
+// procimage.Path, or enterpriseunix.ProcessImagePath, which wraps it.
 func TestGAP0687ProcPIDPathInfoHasOneResolver(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -25,7 +26,7 @@ func TestGAP0687ProcPIDPathInfoHasOneResolver(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("repository root not found from %s: %v", root, err)
 	}
-	const owner = "internal/procimage/procimage_darwin.go"
+	const owner = "internal/procimage/path_darwin.go"
 	procInfo := regexp.MustCompile(`(?i)pid_?path_?info|SYS_PROC_INFO`)
 	var owners []string
 	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {

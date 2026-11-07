@@ -37,11 +37,11 @@ func processExecPath(pid int) (string, error) {
 	return string(path), nil
 }
 
-// ProcessImagePath is the macOS answer for the image a process runs. The
-// gateway status same-home proof uses it; every proc_info caller shares
-// procimage.Path.
+// ProcessImagePath is the one macOS resolver for the image a process runs.
+// The gateway status same-home proof uses it; the call itself is
+// procimage.Path, shared with internal/openshell.
 func ProcessImagePath(pid int) (string, error) { return processImagePath(pid) }
 
 // processImagePath is the kernel's absolute path of the image process pid
-// runs; procimage owns the call.
+// runs (procimage.Path, the one proc_info caller).
 func processImagePath(pid int) (string, error) { return procimage.Path(pid) }

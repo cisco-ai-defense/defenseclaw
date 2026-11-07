@@ -59,7 +59,6 @@ import ntpath
 import os
 import posixpath
 import re
-import shlex
 import stat
 import subprocess
 import sys
@@ -3107,7 +3106,7 @@ def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
     """
     if os.name == "nt":
         return ""
-    from defenseclaw.file_permissions import other_accounts_can_write, posix_acl_grants_write
+    from defenseclaw.file_permissions import other_accounts_can_write
 
     for plugin_path in plugin_paths:
         plugin_folder = os.path.dirname(os.path.realpath(plugin_path))
@@ -3124,48 +3123,11 @@ def opencode_writable_plugin_folder(plugin_paths: list[str]) -> str:
                 info = os.lstat(folder)
             except OSError:
                 continue
-            if not stat.S_ISDIR(info.st_mode) or not (
-                other_accounts_can_write(folder, info) or posix_acl_grants_write(folder)
-            ):
+            if not stat.S_ISDIR(info.st_mode) or not other_accounts_can_write(folder, info):
                 continue
             if folder != plugin_folder and info.st_uid == 0 and info.st_mode & stat.S_ISVTX:
                 continue
             return folder
-    return ""
-
-
-def opencode_custody_fix(path: str) -> str:
-    """The one command that takes other accounts' write access off ``path``.
-
-    An access ACL entry needs ``setfacl -b``; a mode (other write, or a group
-    that is not the owner's own) needs ``chmod go-w``. The gateway's start
-    error and the CLI name this same command.
-    """
-    from defenseclaw.file_permissions import posix_acl_grants_write
-
-    verb = "setfacl -b" if posix_acl_grants_write(path) else "chmod go-w"
-    return f"{verb} {shlex.quote(path)}"
-
-
-def opencode_writable_plugin_file(plugin_paths: list[str]) -> str:
-    """Return the installed OpenCode plugin file when other accounts can write it.
-
-    The gateway reads the plugin as policy code and refuses to start over such
-    a file, so the file counts as well as the folders above it.
-    """
-    if os.name == "nt":
-        return ""
-    from defenseclaw.file_permissions import other_accounts_can_write, posix_acl_grants_write
-
-    for plugin_path in plugin_paths:
-        try:
-            info = os.lstat(plugin_path)
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode) and (
-            other_accounts_can_write(plugin_path, info) or posix_acl_grants_write(plugin_path)
-        ):
-            return plugin_path
     return ""
 
 

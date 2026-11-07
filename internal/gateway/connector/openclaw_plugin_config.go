@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path"
@@ -16,6 +18,8 @@ import (
 	"sort"
 
 	jsonschema "github.com/santhosh-tekuri/jsonschema/v5"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // openClawPluginConfigSchema reads the same manifest installed into OpenClaw.
@@ -114,10 +118,12 @@ func keepOpenClawSchemaValue(value interface{}, document map[string]interface{},
 func saveOpenClawPluginConfigBackup(configPath string, original []byte) (string, error) {
 	digest := sha256.Sum256(original)
 	backupPath := fmt.Sprintf("%s.defenseclaw-plugin-config.%x.bak", configPath, digest[:8])
-	file, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if os.IsExist(err) {
-		info, statErr := os.Lstat(backupPath)
-		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+	// safefile gives the backup the platform's owner-only protection: mode 0600
+	// on POSIX and a private non-inherited DACL on Windows, where the mode bits
+	// of os.OpenFile are ignored and the file would inherit the parent's access.
+	file, err := safefile.CreateExclusive(backupPath)
+	if errors.Is(err, fs.ErrExist) {
+		if validateErr := safefile.ValidatePrivateFile(backupPath); validateErr != nil {
 			return "", fmt.Errorf("existing OpenClaw plugin config backup is not a private regular file")
 		}
 		prior, readErr := os.ReadFile(backupPath)

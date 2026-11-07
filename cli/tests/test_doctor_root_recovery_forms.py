@@ -124,3 +124,30 @@ def test_ordinary_absolute_store_and_plain_home_are_complete(monkeypatch, accoun
     cfg = SimpleNamespace(data_dir=os.fspath(home), deployment_mode="")
     for name, remedy in _surfaces(cfg).items():
         assert _chowned(remedy) == [os.fspath(home)], name
+
+
+@pytest.mark.parametrize("home_config", ["missing", "malformed", "unreadable"])
+def test_the_store_doctor_loaded_never_stands_in_for_the_install_home_config(
+    monkeypatch, account, home_config
+) -> None:
+    """GAP-0711, GAP-0713: a config of the same relative name in doctors folder is not the gateways.
+
+    Doctor ran in a folder that holds a valid ``other.yaml`` naming an unrelated
+    store; the gateway starts in the install home, where ``other.yaml`` is
+    missing or cannot be read. The printed ``chown -R`` must not name the
+    unrelated store, and an unreadable config must say its store is unknown.
+    """
+    home, elsewhere = account
+    (elsewhere / "other.yaml").write_text("data_dir: /srv/unrelated-store\n")
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", "other.yaml")
+    if home_config == "malformed":
+        (home / "other.yaml").write_text("data_dir: [unterminated\n")
+    elif home_config == "unreadable":
+        (home / "other.yaml").write_bytes(b"\xff\xfe data_dir: \x00")
+    cfg = SimpleNamespace(data_dir="/srv/unrelated-store", deployment_mode="")
+
+    for name, remedy in _surfaces(cfg).items():
+        assert _chowned(remedy) == [os.fspath(home)], name
+        assert "/srv/unrelated-store" not in remedy, name
+        assert ("could not be read here" in remedy) == (home_config != "missing"), name
+    assert cmd_doctor._root_gateway_install_home(cfg) == os.fspath(home)
