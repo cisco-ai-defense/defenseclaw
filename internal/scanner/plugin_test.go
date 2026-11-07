@@ -17,6 +17,7 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -199,36 +200,40 @@ func resolvePluginCLI() (binary string, strict bool) {
 	return "defenseclaw", false
 }
 
-// errPluginCLINotLaunchable marks a CLI the operating system could not run at
-// all: the file or its interpreter is missing, or a shell launcher reported
-// the POSIX "cannot execute" (126) or "not found" (127) status. Only this
-// outcome means "not installed". A CLI that ran and then failed or hung is a
-// real defect and is never reported through this error.
+// errPluginCLINotLaunchable marks a CLI the operating system could not start:
+// the file is missing or not executable, or its interpreter (the shebang
+// target of a console script) was removed. The process is never created, so
+// cmd.Start fails. Only this outcome means "not installed". Once the process
+// started, its exit status is the CLI's own answer, whatever the number: a
+// shell launcher or a script can print its output and exit 126 or 127 for its
+// own reasons, so a status cannot show that the file was missing. A CLI that
+// ran and then failed or hung is a real defect and is never reported through
+// this error.
 var errPluginCLINotLaunchable = errors.New("plugin CLI cannot be launched")
 
 // pluginCLIStarts runs the CLI with --help (no scan). It returns an error
-// wrapping errPluginCLINotLaunchable when the CLI cannot be launched, a plain
-// error when it launched but exited nonzero or did not finish in time, and
-// nil when it answered.
+// wrapping errPluginCLINotLaunchable when the process could not be started, a
+// plain error when it started but exited nonzero or did not finish in time,
+// and nil when it answered.
 func pluginCLIStarts(binary string, timeout time.Duration) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, binary, "--help").CombinedOutput()
+	var output bytes.Buffer
+	cmd := exec.CommandContext(ctx, binary, "--help")
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("%w: %v", errPluginCLINotLaunchable, err)
+	}
+	err := cmd.Wait()
 	if err == nil {
 		return nil
 	}
-	detail := strings.TrimSpace(string(output))
+	detail := strings.TrimSpace(output.String())
 	if ctx.Err() != nil {
 		return fmt.Errorf("plugin CLI %s did not answer --help within %s: %w: %s", binary, timeout, err, detail)
 	}
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		if code := exit.ExitCode(); code == 126 || code == 127 {
-			return fmt.Errorf("%w: exit %d: %s", errPluginCLINotLaunchable, code, detail)
-		}
-		return fmt.Errorf("plugin CLI %s exited %d from --help: %s", binary, exit.ExitCode(), detail)
-	}
-	return fmt.Errorf("%w: %v", errPluginCLINotLaunchable, err)
+	return fmt.Errorf("plugin CLI %s failed --help after it started: %w: %s", binary, err, detail)
 }
 
 // gatePluginCLI decides what the integration test does with the CLI it
@@ -236,7 +241,8 @@ func pluginCLIStarts(binary string, timeout time.Duration) error {
 // start: a broken one is a real failure. A CLI found only on PATH can be a
 // stale install on a shared box (its interpreter removed with the tree it was
 // built from); only that, "cannot be launched", means skip. A PATH CLI that
-// launched and then failed or hung is still a failure.
+// started and then failed (any exit status, 126 and 127 included) or hung is
+// still a failure.
 func gatePluginCLI(binary string, strict bool, timeout time.Duration) (skip bool, err error) {
 	err = pluginCLIStarts(binary, timeout)
 	return err != nil && !strict && errors.Is(err, errPluginCLINotLaunchable), err
@@ -257,6 +263,9 @@ func TestGatePluginCLISkipsOnlyAnAbsentPathInstall(t *testing.T) {
 	absent := filepath.Join(dir, "missing")
 	broken := script("broken", "#!/bin/sh\nexit 23\n")
 	working := script("working", "#!/bin/sh\nexit 0\n")
+	stale := script("stale", "#!"+filepath.Join(dir, "removed-venv", "bin", "python")+"\nprint(1)\n")
+	startedThenNotFound := script("started-127", "#!/bin/sh\necho started --help\nexit 127\n")
+	startedThenCannotExec := script("started-126", "#!/bin/sh\necho started --help\nexit 126\n")
 	for _, tc := range []struct {
 		name     string
 		binary   string
@@ -265,7 +274,11 @@ func TestGatePluginCLISkipsOnlyAnAbsentPathInstall(t *testing.T) {
 		wantErr  bool
 	}{
 		{"path install that is absent skips", absent, false, true, true},
+		{"path install whose interpreter was removed skips", stale, false, true, true},
 		{"path install that exits nonzero fails", broken, false, false, true},
+		{"path install that starts and exits 127 fails", startedThenNotFound, false, false, true},
+		{"path install that starts and exits 126 fails", startedThenCannotExec, false, false, true},
+		{"explicit install that starts and exits 127 fails", startedThenNotFound, true, false, true},
 		{"explicit install that is absent fails", absent, true, false, true},
 		{"explicit install that exits nonzero fails", broken, true, false, true},
 		{"working path install runs", working, false, false, false},
@@ -294,9 +307,11 @@ func TestPluginCLIStartsRejectsAStaleInstallAndAcceptsAWorkingOne(t *testing.T) 
 	if err := pluginCLIStarts(stale, time.Minute); !errors.Is(err, errPluginCLINotLaunchable) {
 		t.Fatalf("a shim whose interpreter was removed must count as not installed, got %v", err)
 	}
-	launcher := script("launcher", "#!/bin/sh\nexit 127\n")
-	if err := pluginCLIStarts(launcher, time.Minute); !errors.Is(err, errPluginCLINotLaunchable) {
-		t.Fatalf("a launcher reporting command-not-found must count as not installed, got %v", err)
+	for _, code := range []string{"126", "127"} {
+		started := script("started-"+code, "#!/bin/sh\necho started --help\nexit "+code+"\n")
+		if err := pluginCLIStarts(started, time.Minute); err == nil || errors.Is(err, errPluginCLINotLaunchable) {
+			t.Fatalf("a CLI that started and exited %s is broken, not absent, got %v", code, err)
+		}
 	}
 	if err := pluginCLIStarts(filepath.Join(dir, "missing"), time.Minute); !errors.Is(err, errPluginCLINotLaunchable) {
 		t.Fatalf("a missing file must count as not installed, got %v", err)
