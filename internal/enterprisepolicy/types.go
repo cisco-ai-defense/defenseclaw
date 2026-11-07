@@ -156,11 +156,15 @@ type Options struct {
 	// the file DefenseClaw recorded in them (Windows, case c); the removal
 	// strips DefenseClaw's entry there only from a file it can still trust.
 	unprotected []unprotectedVendorFolder
+	// removing marks an uninstall's removal (removingFrom): a recorded file
+	// another account can change is then kept and warned about, not an error.
+	removing bool
 }
 
 // removingFrom is opts for a removal that found the unprotected folders.
 func (o Options) removingFrom(unprotected []unprotectedVendorFolder) Options {
 	o.unprotected = unprotected
+	o.removing = true
 	return o
 }
 
@@ -259,8 +263,12 @@ type State struct {
 	// Warnings are what the administrator must act on although the pass
 	// went on, for example a vendor folder an uninstall left unprotected.
 	Warnings []string `json:"warnings,omitempty"`
-	Changed  bool     `json:"changed"`
-	Covered  bool     `json:"covered"`
+	// Reprotected lists the vendor folders this pass put back to
+	// DefenseClaw's protected form (E3 case c, safe transaction); the caller
+	// writes one audit row for each.
+	Reprotected []ReprotectedFolder `json:"reprotected,omitempty"`
+	Changed     bool                `json:"changed"`
+	Covered     bool                `json:"covered"`
 	// Drift marks DefenseClaw entries that are in place but differ from
 	// what the next publish writes (a policy file mode agents cannot read
 	// through, a Claude Code floor drop-in it must withdraw). A conflict

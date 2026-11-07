@@ -64,7 +64,7 @@ func (retries *enterpriseHookWatchRetries) observe(reason string, run enterprise
 		seen[key] = struct{}{}
 		markFailed(key)
 	}
-	if run.StateErr != nil {
+	if run.StateErr != nil || run.PolicyErr != nil {
 		seen[enterpriseHookWatchGlobalRetry] = struct{}{}
 		markFailed(enterpriseHookWatchGlobalRetry)
 	}
