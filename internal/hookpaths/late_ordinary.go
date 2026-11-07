@@ -182,11 +182,11 @@ func newLateScan(cwd string) (*lateScan, bool) {
 	if err != nil || !filepath.IsAbs(home) {
 		return nil, false
 	}
-	realHome, err := filepath.EvalSymlinks(home)
+	realHome, err := pathEvalSymlinks(home)
 	if err != nil {
 		return nil, false
 	}
-	realCWD, err := filepath.EvalSymlinks(cwd)
+	realCWD, err := pathEvalSymlinks(cwd)
 	if err != nil || lateNamesProtected(realCWD) || realCWD == string(filepath.Separator) {
 		return nil, false
 	}
