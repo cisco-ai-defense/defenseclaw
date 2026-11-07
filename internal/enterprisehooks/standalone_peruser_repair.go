@@ -274,8 +274,12 @@ func standaloneHookRuntimeFaults(conn connector.Connector, setupOpts connector.S
 
 	shared, err := readSharedHookScriptDigests(opts.DataDir)
 	if err != nil {
-		add(HookElementRuntime, fmt.Errorf("enterprise hooks: connector %s: %w", name, err))
-		return faults
+		// An unreadable lock is a fault of the runtime as a whole; the files
+		// are still read against the render, which does not need the lock.
+		if !add(HookElementRuntime, fmt.Errorf("enterprise hooks: connector %s: %w", name, err)) {
+			return faults
+		}
+		shared = nil
 	}
 	hookDir := filepath.Join(filepath.Clean(opts.DataDir), "hooks")
 	rendersScript := false
