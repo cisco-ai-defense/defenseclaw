@@ -26649,14 +26649,27 @@ function Assert-DefenseClawCodexStateNotHeld {
 function Test-DefenseClawFileReadBlocked {
     <#
         GAP-0765: whether another handle keeps Path from being opened for
-        read. An open for read with every sharing mode allowed fails with
-        a sharing or lock violation exactly then. Any other refusal or a
-        failed probe answers $false: the read that follows reports it.
+        read. An open for read with every sharing mode allowed fails with a
+        sharing or lock violation (Win32 error 32 or 33) exactly then, as the
+        read of the snapshot and of the first Codex transaction does. Any
+        other refusal or a failed probe answers $false: the read that
+        follows reports it. The probe is a plain .NET open: the native
+        backup-semantics open of Initialize-DefenseClawNativeSecurity
+        succeeds against a no-sharing holder and cannot tell.
     #>
     param([Parameter(Mandatory)][string]$Path)
     try {
-        $native = Initialize-DefenseClawNativeSecurity
-        return ([int]$native::GetDirectoryOpenError($Path, [uint32]2147483648) -in @(32, 33))
+        $stream = [IO.File]::Open(
+            $Path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+        )
+        $stream.Dispose()
+        return $false
+    }
+    catch [IO.IOException] {
+        return ((([int]$_.Exception.HResult) -band 0xFFFF) -in @(32, 33))
     }
     catch {
         return $false
