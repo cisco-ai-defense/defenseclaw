@@ -291,7 +291,7 @@ func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, 
 // order: nil for a field of a value not known. A word that is one quoted
 // field is one field whatever its value; any other word with a known value is
 // the fields actionWordFields reads, none for an empty value. The list stops
-// at a word whose fields are not known (a pattern or brace character, a list
+// at a word whose fields are not known (an unquoted pattern or brace character, a list
 // such as "$@", an unknown value, a separator set the command changed): the
 // parameters after it have no known position.
 func actionCallParameters(call *syntax.CallExpr, state actionValues, cwd, home string) []*string {
@@ -307,7 +307,7 @@ func actionCallParameters(call *syntax.CallExpr, state actionValues, cwd, home s
 			}
 			continue
 		}
-		if !known || ifs || strings.ContainsAny(value, "*?[{") {
+		if !known || ifs {
 			break
 		}
 		fields, split := actionWordFields(arg, state, cwd, home)
@@ -337,7 +337,10 @@ func actionWordFields(word *syntax.Word, state actionValues, cwd, home string) (
 		}
 		switch part := part.(type) {
 		case *syntax.Lit:
-			if i > 0 && strings.HasPrefix(part.Value, "~") {
+			// Literal text with a pattern or brace character expands to
+			// names the reader does not know; quoted text and the value of an
+			// expansion are not brace-expanded.
+			if i > 0 && strings.HasPrefix(part.Value, "~") || strings.ContainsAny(part.Value, "*?[{") {
 				return nil, false
 			}
 			field, open = field+value, true
@@ -349,6 +352,11 @@ func actionWordFields(word *syntax.Word, state actionValues, cwd, home string) (
 			}
 			field, open = field+value, true
 		default:
+			if strings.ContainsAny(value, "*?[") {
+				// An unquoted value with a pattern character is matched
+				// against names.
+				return nil, false
+			}
 			for _, r := range value {
 				switch {
 				case !strings.ContainsRune(" \t\n", r):
