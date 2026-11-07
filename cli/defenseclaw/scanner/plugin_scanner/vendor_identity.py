@@ -112,7 +112,7 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
     # The install must not come from a file, a link or an address outside the
     # registry, whatever the bytes are (see ``_install_records``).
     try:
-        records = _install_records(plugin_dir, package, name)
+        records = _install_records(plugin_dir, name)
     except (OSError, ValueError):
         return None
     if records is None:
@@ -407,21 +407,21 @@ def _archive_package_digest(archive: bytes) -> str | None:
         return _package_digest(os.path.join(scratch, "package"))
 
 
-# Where an install came from. npm writes the ``resolved`` address of every
-# package into the lock files of the tree that holds it, and older npm writes
-# ``_resolved``, ``_from`` and ``_requested`` into the package manifest. The
-# bytes can match a published release while the record says the package was
-# taken from a file, a link or another address; such an install is judged by
-# the ordinary scan. A record that is absent is not evidence of a source, so an
-# install that left none (OpenClaw copies the package) is not held against.
+# Where an install came from. npm writes the lock entry of every package it
+# installs into the lock of the project that holds it, with the ``resolved``
+# address and the ``integrity`` of the archive. That entry, and only that
+# entry, is the install record: the bytes can match a published release while
+# the entry says the package was taken from a file, a link or another address,
+# and such an install is judged by the ordinary scan. Install metadata in the
+# package manifest and the dependency specs of other packages are not read:
+# they are spelled in more ways than a list can follow, and they say nothing
+# about the entry npm wrote for this copy. An entry that is absent is not
+# evidence of a source, so an install that left none (OpenClaw copies the
+# package) is not held against; only an outage needs one (see
+# ``_recorded_registry_release``).
 _LOCK_FILES = ("package-lock.json", "npm-shrinkwrap.json", "node_modules/.package-lock.json")
 _LOCK_MAX_BYTES = 32 * 1024 * 1024
 _RECORDED_VERSION = re.compile(r"[0-9][0-9A-Za-z.+-]*")
-_SPEC_CHARS = r"[0-9A-Za-z.+^~*<>=| -]*"
-_RECORDED_SPEC = r"(?:@" + _SPEC_CHARS + r")?"
-_DEPENDENCY_FIELDS = (
-    "dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
-)
 
 
 def _registry_archive(address: object, name: str, version: str | None = None) -> bool:
@@ -463,154 +463,38 @@ def _lock_folders(plugin_dir: str) -> list[str]:
     ]
 
 
-def _registry_spec(value: object, name: str) -> bool:
-    """Whether ``value`` asks the registry for a version, a range or a tag of ``name``.
-
-    A scheme, a path or an address is never a registry request, whatever the
-    scheme is called, so the check is on the shape of the spec and not on a
-    list of the source kinds npm knows.
-    """
-
-    if not isinstance(value, str):
-        return False
-    return any(
-        value.startswith(prefix) and re.fullmatch(_SPEC_CHARS, value[len(prefix):])
-        for prefix in ("", name + "@", "npm:" + name + "@")
-    )
-
-
 def _fold(path: str) -> str:
     return path.casefold() if os.name == "nt" else path
 
 
-def _key_names(key: str) -> list[str]:
-    """The package names on a lock path: ``node_modules/a/node_modules/@s/b`` -> a, @s/b."""
+def _lock_records(lock: dict, name: str, key: str | None) -> list[dict]:
+    """The entries of an npm lock that record this package.
 
-    if not key.startswith(_DEPENDENCY_DIR + "/"):
-        return []
-    return [part.rstrip("/") for part in re.split(r"(?:^|/)node_modules/", key)[1:]]
-
-
-def _resolved_copy(known: set[str], owner: str, name: str) -> str | None:
-    """The lock path that ``name`` resolves to for the package at ``owner``.
-
-    Node looks in the package own ``node_modules`` and then in each one above
-    it, so a copy nested under a package is the one that package gets.
+    ``key`` is the path of the package below the folder of the lock: only the
+    entry at that path describes this install. A lock that sits in the package
+    folder itself has no key, and every entry that names the package counts.
     """
 
-    base = owner
-    while True:
-        candidate = (base + "/" if base else "") + _DEPENDENCY_DIR + "/" + name
-        if candidate in known:
-            return candidate
-        if not base:
-            return None
-        cut = base.rfind(_DEPENDENCY_DIR + "/")
-        base = base[:cut].rstrip("/") if cut > 0 else ""
-
-
-def _flat_v1(tree: object) -> dict[str, dict]:
-    """The nested ``dependencies`` tree of an npm 6 lock as lock paths.
-
-    ``a`` with a nested ``b`` becomes ``node_modules/a`` and
-    ``node_modules/a/node_modules/b``, the form later locks use, so one reading
-    serves every lock version.
-    """
-
-    flat: dict[str, dict] = {}
-    pending: list[tuple[str, object]] = [("", tree)]
-    while pending:
-        base, dependencies = pending.pop()
-        if not isinstance(dependencies, dict):
-            continue
-        for dependency, entry in dependencies.items():
-            if not isinstance(dependency, str) or not isinstance(entry, dict):
-                continue
-            path = (base + "/" if base else "") + _DEPENDENCY_DIR + "/" + dependency
-            flat[path] = entry
-            pending.append((path, entry.get("dependencies")))
-    return flat
-
-
-def _lock_records(lock: dict, name: str, key: str | None) -> list[dict] | None:
-    """The entries of an npm lock that record this package, or None when a
-    dependency spec that resolves to it asks for a source other than the registry.
-
-    ``key`` is the path of the package below the folder of the lock. A lock
-    that sits in the package folder itself has no key: every record that names
-    the package counts. In a lock above it only what the lock records at that
-    path, and the specs that resolve to that path, describe this install; a
-    copy of the same name somewhere else in the project is another install.
-    The installed path is a copy whether or not the lock lists it, so a spec
-    that Node resolves to it counts when the lock has no entry for it.
-    """
-
-    entries: list[dict] = []
-    wanted = None if key is None else _fold(key)
-    tables: list[tuple[dict, tuple[str, ...]]] = [
-        (_flat_v1(lock.get("dependencies")), ("requires",)),
-    ]
     packages = lock.get("packages")
-    if isinstance(packages, dict):
-        tables.append((packages, _DEPENDENCY_FIELDS))
-    for table, fields in tables:
-        known = {_fold(path) for path in table if isinstance(path, str)}
-        if wanted is not None:
-            known.add(wanted)
-        for path, entry in table.items():
-            if not isinstance(path, str) or not isinstance(entry, dict):
-                continue
-            if path and (
-                _fold(path) == wanted if wanted is not None else (
-                    path == f"{_DEPENDENCY_DIR}/{name}"
-                    or path.endswith(f"/{_DEPENDENCY_DIR}/{name}")
-                    or entry.get("name") == name
-                )
-            ):
-                entries.append(entry)
-            for field in fields:
-                specs = entry.get(field)
-                if not isinstance(specs, dict) or name not in specs:
-                    continue
-                if wanted is not None and _resolved_copy(known, _fold(path), name) != wanted:
-                    continue
-                if not _registry_spec(specs[name], name):
-                    return None
-    return entries
+    if not isinstance(packages, dict):
+        return []
+    wanted = None if key is None else _fold(key)
+    return [
+        entry for path, entry in packages.items()
+        if isinstance(path, str) and isinstance(entry, dict) and path and (
+            _fold(path) == wanted if wanted is not None else (
+                path == f"{_DEPENDENCY_DIR}/{name}"
+                or path.endswith(f"/{_DEPENDENCY_DIR}/{name}")
+                or entry.get("name") == name
+            )
+        )
+    ]
 
 
-def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] | None:
-    """The lock entries that record this package, or None if any record names
-    a source other than the registry. A record that cannot be read raises."""
+def _install_records(plugin_dir: str, name: str) -> list[dict] | None:
+    """The lock entries that record this install, or None if one names a source
+    other than the registry. A record that cannot be read raises."""
 
-    resolved, source, requested = (
-        manifest.get(field) for field in ("_resolved", "_from", "_requested")
-    )
-    if resolved is not None and not _registry_archive(resolved, name):
-        return None
-    if source is not None and not (
-        isinstance(source, str) and re.fullmatch(re.escape(name) + _RECORDED_SPEC, source)
-    ):
-        return None
-    if requested is not None:
-        if not (
-            isinstance(requested, dict) and requested.get("type") in ("version", "range", "tag")
-        ):
-            return None
-        # The type is the installer's word for it; every address the record
-        # carries (raw, rawSpec, saveSpec, fetchSpec, ...) must agree.
-        for field, value in requested.items():
-            if field in ("type", "where", "name", "escapedName") or value is None or isinstance(
-                value, bool,
-            ):
-                continue
-            if field == "scope":
-                # The scope is part of the name, not a place to fetch from.
-                if value != name.split("/", 1)[0]:
-                    return None
-                continue
-            if not _registry_spec(value, name):
-                return None
     records: list[dict] = []
     root = os.path.abspath(plugin_dir)
     for position, folder in enumerate(_lock_folders(plugin_dir)):
@@ -634,10 +518,7 @@ def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] |
                 return None
             if not isinstance(lock, dict):
                 continue
-            scoped = _lock_records(lock, name, key)
-            if scoped is None:
-                return None
-            for entry in scoped:
+            for entry in _lock_records(lock, name, key):
                 version = entry.get("version")
                 if entry.get("link") or (
                     version is not None
