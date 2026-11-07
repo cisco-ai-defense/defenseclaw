@@ -84,6 +84,50 @@ func (c *Config) MCPAdmissionFailsClosed(connector string) bool {
 		c.HookPolicyTierForConnector(connector) == HookPolicyTierStrict
 }
 
+// The ways a user can use an MCP server whose scan cannot run
+// (AssetPolicyDecision.ScanNextStep).
+const (
+	// MCPNextStepAllow: run defenseclaw mcp allow NAME.
+	MCPNextStepAllow = "allow"
+	// MCPNextStepAdmin: a managed device refuses that command; the
+	// administrator allows the server in the managed policy.
+	MCPNextStepAdmin = "admin"
+	// MCPNextStepList: the name cannot be quoted safely for a command, so
+	// defenseclaw mcp list shows the server and its command.
+	MCPNextStepList = "list"
+)
+
+// MCPAdmissionNextStep is the next step to name for a server called name
+// whose scan cannot run. A managed device cannot write an allow rule with the
+// CLI, so its user is sent to the administrator; a name that is not plain
+// text is not put into a command line.
+func (c *Config) MCPAdmissionNextStep(name string) string {
+	switch {
+	case c != nil && managed.IsManagedEnterprise(c.DeploymentMode):
+		return MCPNextStepAdmin
+	case MCPNameIsCommandSafe(name):
+		return MCPNextStepAllow
+	}
+	return MCPNextStepList
+}
+
+// MCPNameIsCommandSafe reports a server name made only of characters that
+// need no shell quoting, the shape an agent-visible command may carry.
+func MCPNameIsCommandSafe(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case i > 0 && (r == '.' || r == '_' || r == ':' || r == '@' || r == '/' || r == '-'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule
 // pack, as the gateway reads its posture (internal/gateway packPosture): the
 // generation's pinned manifest posture, else the legacy folder-name table.

@@ -300,8 +300,17 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	}
 	// Pending admission must not override a listed deny or an earlier runtime
 	// disable. This check uses the request's pinned configuration generation.
-	if existing, matched := a.evaluateRuntimeMCPAssetPolicy(ctx, connectorName, hookEvent, probe); matched && existing.Action == "block" {
+	existing, matched := a.evaluateRuntimeMCPAssetPolicy(ctx, connectorName, hookEvent, probe)
+	if matched && existing.Action == "block" {
 		return existing, true
+	}
+	// A rule the administrator wrote for this server (asset_policy.mcp.allowed
+	// by name and URL or launcher, or defenseclaw mcp allow) beats a scan
+	// that could not complete in every tier, strict and managed included:
+	// the administrator has decided the server, and its scan cannot. An
+	// explicit deny was handled above (GAP-0775, GAP-0778).
+	if status.Failed && !matched && existing.Enabled && existing.Source == "admin-allow" {
+		return config.AssetPolicyDecision{}, false
 	}
 	name := status.Name
 	if name == "" {
@@ -314,10 +323,13 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 		// strict tier and managed profiles stay blocked (fail closed). The
 		// decision is the one a still-pending admission gets, so the first
 		// call and every later one agree (GAP-0775).
-		decision := runtimeAssetDisableBlockDecision("mcp", name, connectorName, "hook",
-			mcpAdmissionFailedText(name, status.ScanIssue), "mcp-admission-failed")
+		step := cfg.MCPAdmissionNextStep(name)
+		shown := mcpAdmissionAgentName(name, probe.ServerName)
+		decision := runtimeAssetDisableBlockDecision("mcp", shown, connectorName, "hook",
+			mcpAdmissionFailedText(shown, status.ScanIssue, step), "mcp-admission-failed")
 		decision.RegistryStatus = "unknown"
 		decision.ScanIssue = status.ScanIssue
+		decision.ScanNextStep = step
 		if !cfg.MCPAdmissionFailsClosed(connectorName) {
 			decision.Action = "allow"
 			decision.Mode = config.AssetPolicyModeObserve
@@ -2470,6 +2482,9 @@ func assetPolicyResponseReason(decision config.AssetPolicyDecision) string {
 	}
 	if decision.Source == "mcp-admission-failed" && decision.ScanIssue != "" {
 		parts = append(parts, "scan_issue="+decision.ScanIssue)
+	}
+	if decision.Source == "mcp-admission-failed" && decision.ScanNextStep != "" {
+		parts = append(parts, "next_step="+decision.ScanNextStep)
 	}
 	return strings.Join(parts, " ")
 }

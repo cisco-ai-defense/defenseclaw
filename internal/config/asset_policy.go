@@ -167,7 +167,11 @@ type AssetPolicyDecision struct {
 	RetryAfterSeconds int // bounded admission retry guidance, zero for other decisions
 	// ScanIssue says why a server whose admission scan failed cannot be
 	// scanned (launcher | address), "" when the definition does not show it.
-	ScanIssue          string
+	ScanIssue string
+	// ScanNextStep says how the user can use such a server: the CLI allow
+	// command, the administrator's policy (a managed device refuses the
+	// command), or only where to read the cause. See MCPAdmissionNextStep.
+	ScanNextStep       string
 	Reason             string
 	Source             string
 	RegistryStatus     string // registered | unregistered | unknown

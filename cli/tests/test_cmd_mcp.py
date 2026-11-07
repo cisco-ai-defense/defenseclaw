@@ -2563,6 +2563,18 @@ class TestFailedScanNextStepNamesTheAllowCommand(unittest.TestCase):
         self.assertIn("private or loopback address", loopback)
         self.assertIn("defenseclaw mcp allow srv", loopback)
 
+    def test_a_managed_device_is_sent_to_the_administrator_not_the_refused_command(self):
+        # `mcp allow` is refused on a managed device, so the list names the
+        # managed policy instead of a command that cannot run there.
+        from defenseclaw.commands.cmd_mcp import _failed_scan_next_step
+
+        launcher = MCPServerEntry(name="srv", command="python3", args=["server.py"])
+        text = _failed_scan_next_step("srv", "claudecode", "", "", launcher, managed=True)
+        self.assertIn("python3", text)
+        self.assertIn("ask your administrator", text)
+        self.assertNotIn("or trust it", text)
+        self.assertNotIn("mcp allow srv", text)
+
     def test_an_unreachable_server_keeps_the_reachability_hint(self):
         # The benign twin: a scan that failed for reachability is not a
         # refusal and is not told to be trusted.

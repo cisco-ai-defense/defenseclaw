@@ -56,7 +56,7 @@ See [Skill scanner](/docs/scanning/skill-scanner) for the commands and settings.
 
 ## MCP servers
 
-An MCP server lists tools an agent can call. The MCP scanner reads each tool's name, schema and description, and flags tools whose behavior does not match what they claim. DefenseClaw scans a server when you add it with `defenseclaw mcp set`, when an agent adds it, and on every rescan. While admission is pending, per-user default and permissive hooks allow a call with a visible warning; strict and managed hooks block it with retry guidance. A completed failed or rejected scan blocks in every tier. See [Admission](/docs/policies/admission#how-a-verdict-is-reached) for the tier table.
+An MCP server lists tools an agent can call. The MCP scanner reads each tool's name, schema and description, and flags tools whose behavior does not match what they claim. DefenseClaw scans a server when you add it with `defenseclaw mcp set`, when an agent adds it, and on every rescan. While admission is pending, per-user default and permissive hooks allow a call with a visible warning; strict and managed hooks block it with retry guidance. A scan that finds something blocks the server in every tier. A server DefenseClaw cannot scan (a launcher other than `npx` or `uvx`, or a loopback or private URL) runs with a warning in the default and permissive tiers and is blocked in strict and managed ones; an administrator's allow rule beats that block. See [Admission](/docs/policies/admission#how-a-verdict-is-reached) for the tier table.
 
 See [Scan an MCP server](/docs/scanning/mcp-scanner).
 

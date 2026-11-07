@@ -7,6 +7,7 @@ package gateway
 import (
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -27,40 +28,81 @@ func mcpScanIssueClause(issue string) string {
 	return ""
 }
 
-// mcpAdmissionNextStep is the one next step for a server that cannot be
-// scanned: the allow command, the definition a scan starts, or where to read
-// the cause. The same words reach the agent (hook) and the audit row;
-// defenseclaw mcp list words them from the CLI.
-func mcpAdmissionNextStep(name, issue string) string {
+// mcpAdmissionNextStep is the next step for a server that cannot be
+// scanned: the allow command (or, on a managed device, the administrator's
+// policy), the definition a scan starts, or where to read the cause. step is
+// config.MCPNextStep*. The same words reach the agent (hook) and the audit
+// row; defenseclaw mcp list words them from the CLI.
+func mcpAdmissionNextStep(name, issue, step string) string {
+	use := ""
+	switch step {
+	case config.MCPNextStepAllow:
+		if name != "" {
+			use = "run: defenseclaw mcp allow " + name
+		}
+	case config.MCPNextStepAdmin:
+		use = "ask your administrator to allow it in the managed MCP policy (asset_policy.mcp.allowed)"
+	}
+	alternative := ""
 	switch issue {
 	case watcher.MCPScanIssueLauncher:
-		return "run: defenseclaw mcp allow " + name + ", or start it with npx or uvx, or serve it from a public URL"
+		alternative = "start it with npx or uvx, or serve it from a public URL"
 	case watcher.MCPScanIssueAddress:
-		return "run: defenseclaw mcp allow " + name + ", or serve it from a public URL"
+		alternative = "serve it from a public URL"
 	}
-	return "see: defenseclaw mcp list, or run: defenseclaw mcp allow " + name
+	switch {
+	case alternative == "" && use == "":
+		return "see: defenseclaw mcp list"
+	case alternative == "":
+		return "see: defenseclaw mcp list, or " + use
+	case use == "":
+		return "see: defenseclaw mcp list, or " + alternative
+	}
+	return use + ", or " + alternative
+}
+
+// mcpShownName is the name worded for the agent: the placeholder when the
+// reason could not carry a name the agent may be shown.
+func mcpShownName(name string) string {
+	if name == "" {
+		return "(name not shown)"
+	}
+	return name
 }
 
 // mcpAdmissionFailedText words a completed admission scan failure with its
 // reason and next step: "MCP server X has a failed admission scan (why); to
 // use it, <next step>".
-func mcpAdmissionFailedText(name, issue string) string {
+func mcpAdmissionFailedText(name, issue, step string) string {
 	var b strings.Builder
-	b.WriteString("MCP server " + name + " has a failed admission scan")
+	b.WriteString("MCP server " + mcpShownName(name) + " has a failed admission scan")
 	if clause := mcpScanIssueClause(issue); clause != "" {
 		b.WriteString(" (could not be scanned: " + clause + ")")
 	}
-	b.WriteString("; " + mcpAdmissionNextStep(name, issue))
+	b.WriteString("; " + mcpAdmissionNextStep(name, issue, step))
 	return b.String()
 }
 
 // mcpAdmissionAllowedWarning is the agent-visible warning of a call allowed
 // to a server that could not be scanned.
-func mcpAdmissionAllowedWarning(name, issue string) string {
-	text := mcpAdmissionAllowedLead + name
+func mcpAdmissionAllowedWarning(name, issue, step string) string {
+	text := mcpAdmissionAllowedLead + mcpShownName(name)
 	if clause := mcpScanIssueClause(issue); clause != "" {
 		text += " (" + clause + ")"
 	}
 	return text + ". This call is allowed with a warning; the strict profile and managed deployments block it. Next step: " +
-		mcpAdmissionNextStep(name, issue)
+		mcpAdmissionNextStep(name, issue, step)
+}
+
+// mcpAdmissionAgentName is the name of a server worded for the agent: the
+// configured name when it is plain text, else the name the agent called it
+// by, else "". A configured name with spaces or controls is not copied into
+// the reason, and the cause and next step are kept without it.
+func mcpAdmissionAgentName(configured, called string) string {
+	for _, name := range []string{configured, called} {
+		if agentAssetPolicyNamePattern.MatchString(name) {
+			return name
+		}
+	}
+	return ""
 }

@@ -428,7 +428,7 @@ var agentAssetPolicyKinds = map[string]string{"mcp": "MCP server", "skill": "ski
 // agentAssetPolicyKeys are the fields assetPolicyResponseReason emits.
 var agentAssetPolicyKeys = []string{
 	"reason_code", "source", "asset_type", "asset_name", "connector",
-	"registry_status", "registry_configured", "surface", "retry_after_s", "scan_issue",
+	"registry_status", "registry_configured", "surface", "retry_after_s", "scan_issue", "next_step",
 }
 
 // agentAssetPolicyValuePattern is the shape of a value an asset-policy reason
@@ -508,7 +508,9 @@ func agentAssetPolicySubject(reason string) string {
 		return ""
 	}
 	kind, name := agentAssetPolicyKinds[values["asset_type"]], values["asset_name"]
-	if kind == "" || name == "" {
+	// A failed MCP admission scan is worded without a name the agent may not
+	// be shown (mcpAdmissionAgentName); its cause and next step stay.
+	if kind == "" || (name == "" && !agentMCPAdmissionFailedReason(values)) {
 		return ""
 	}
 	switch values["reason_code"] {
@@ -520,7 +522,7 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " admission is unavailable; try the call again in " + agentMCPAdmissionRetryText(values)
 	case "mcp-admission-failed":
 		if values["asset_type"] == "mcp" {
-			return mcpAdmissionFailedText(name, values["scan_issue"])
+			return mcpAdmissionFailedText(name, values["scan_issue"], values["next_step"])
 		}
 		return kind + " " + name + " has a failed admission scan"
 	case "not-in-approved-registry":
@@ -616,7 +618,7 @@ func agentMCPAdmissionRetryText(values map[string]string) string {
 
 func agentMCPAdmissionAllowedSentence(reason string) string {
 	values, ok := agentAssetPolicyFields(reason)
-	if !ok || values["asset_type"] != "mcp" || values["asset_name"] == "" {
+	if !ok || values["asset_type"] != "mcp" || (values["asset_name"] == "" && !agentMCPAdmissionFailedReason(values)) {
 		return ""
 	}
 	switch values["reason_code"] {
@@ -625,9 +627,15 @@ func agentMCPAdmissionAllowedSentence(reason string) string {
 	case "mcp-admission-unavailable":
 		return "DefenseClaw could not read admission for MCP server " + values["asset_name"] + ". This call is allowed with a warning."
 	case "mcp-admission-failed":
-		return mcpAdmissionAllowedWarning(values["asset_name"], values["scan_issue"])
+		return mcpAdmissionAllowedWarning(values["asset_name"], values["scan_issue"], values["next_step"])
 	}
 	return ""
+}
+
+// agentMCPAdmissionFailedReason reports the fields of a failed MCP admission
+// scan, whose reason can omit the server name.
+func agentMCPAdmissionFailedReason(values map[string]string) bool {
+	return values["asset_type"] == "mcp" && values["reason_code"] == "mcp-admission-failed"
 }
 
 // A project skill awaiting its first scan is a temporary refusal, so name
