@@ -2458,7 +2458,13 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		bindPackPostures(&next, boundPackPostures(nextGen.Config))
 		appliedCfg = s.publishConfig(&next)
 	} else {
-		bindPackPostures(appliedCfg, boundPackPostures(nextGen.Config))
+		// The reload mode belongs to the manager until a restart. Publish the
+		// candidate pack posture on a fresh copy of the live settings: the
+		// previous generation can still hold the current config for hook
+		// registration repair and in-flight decisions.
+		modeApplied := cloneConfig(current)
+		bindPackPostures(modeApplied, boundPackPostures(nextGen.Config))
+		appliedCfg = s.publishConfig(modeApplied)
 	}
 	nextGen.Config = appliedCfg
 	// The connector rule sets are replaced before the generation is
