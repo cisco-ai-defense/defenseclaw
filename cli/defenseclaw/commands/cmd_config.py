@@ -983,6 +983,182 @@ def _carry_hook_credentials(old_dir: str, new_dir: str, connectors: list[str]) -
     return notes
 
 
+# What `defenseclaw setup <connector>` seals under the data_dir and the
+# restarted gateway reads back from the new one: the hook contract lock (the
+# agent executable and version hook contract admission trusts; Windows has no
+# other source for an agent it cannot run from the gateway) and each
+# connector's backup of the agent settings DefenseClaw patched (teardown
+# restores it). Without them a moved data_dir left Codex and OpenCode skipped
+# ("agent version not probed") and Codex failing closed on a per-user Windows
+# install, and on other systems let a restarted gateway take its backup from
+# settings that already carry DefenseClaw's hooks (rel-1-0-6 GAP-0801).
+_MOVED_DATA_DIR_LOCK = "hook_contract_lock.json"
+_MOVED_DATA_DIR_BACKUP_TREE = "connector_backups"
+_MOVED_STATE_MAX_FILE_BYTES = 32 << 20
+_MOVED_STATE_MAX_ENTRIES = 4096
+_MOVED_STATE_MAX_DEPTH = 6
+
+
+def _state_entry_is_account_owned(path: str, info: os.stat_result) -> bool:
+    """Whether no other account could have written *path* (a file or folder).
+
+    These files are copied into a private store, so it does not matter who may
+    read the source; it matters that nobody else could have planted it, since
+    teardown writes the backups back into the agent's settings. POSIX: owned
+    by the effective user, with no group or other write. Windows: no reparse
+    point on the path and the one owner and writer trust set of the product
+    (this account, SYSTEM, Administrators, TrustedInstaller).
+    """
+    from defenseclaw.file_permissions import reject_reparse_path, windows_acl_custody_write_error
+
+    if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+        return False
+    if os.name == "nt":
+        try:
+            reject_reparse_path(path)
+        except OSError:
+            return False
+        return windows_acl_custody_write_error(path, allow_current_user=True) is None
+    return info.st_uid == os.geteuid() and not info.st_mode & 0o022
+
+
+def _moved_state_sources(old_dir: str) -> tuple[list[tuple[str, os.stat_result]], list[str]]:
+    """The regular files to carry (relative path, lstat) and the paths refused.
+
+    The backup tree comes first and the lock last, so an interrupted copy never
+    leaves a lock that claims a backup the new folder does not have.
+    """
+    files: list[tuple[str, os.stat_result]] = []
+    refused: list[str] = []
+    pending = [_MOVED_DATA_DIR_BACKUP_TREE, _MOVED_DATA_DIR_LOCK]
+    seen = 0
+    while pending:
+        rel = pending.pop()
+        path = os.path.join(old_dir, rel)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            refused.append(rel)
+            continue
+        seen += 1
+        if (
+            seen > _MOVED_STATE_MAX_ENTRIES
+            or rel.count(os.sep) >= _MOVED_STATE_MAX_DEPTH
+            or not _state_entry_is_account_owned(path, info)
+        ):
+            refused.append(rel)
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                names = sorted(os.listdir(path), reverse=True)
+            except OSError:
+                refused.append(rel)
+                continue
+            pending.extend(os.path.join(rel, name) for name in names)
+        elif info.st_size > _MOVED_STATE_MAX_FILE_BYTES:
+            refused.append(rel)
+        else:
+            files.append((rel, info))
+    files.sort(key=lambda item: (item[0] == _MOVED_DATA_DIR_LOCK, item[0]))
+    return files, refused
+
+
+def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
+    """Copy the hook contract lock and the connector backups the new data_dir lacks.
+
+    The same rules as :func:`_carry_connector_records`: nothing the new folder
+    already has is replaced, the old folder is left as it is, an
+    administrator copies nothing, and the source is opened without following
+    links. A file another account could have written is refused, and every
+    copy is private to this account whatever the source mode or ACL was.
+    """
+    from defenseclaw.file_permissions import make_private_directory, open_regular_file_no_follow
+
+    if config_module._is_admin_process() or not old_dir or not new_dir:
+        return []
+    try:
+        if os.path.samefile(old_dir, new_dir):
+            return []
+    except OSError:
+        if os.path.abspath(old_dir) == os.path.abspath(new_dir):
+            return []
+    try:
+        if not _hook_store_entry_is_account_private(old_dir, os.lstat(old_dir)):
+            raise OSError("not account-private")
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [
+            "warning: the hook contract lock and connector backups could not be carried to the new "
+            "data_dir; if the gateway skips a connector at start, run: defenseclaw setup <connector> --yes"
+        ]
+    sources, refused = _moved_state_sources(old_dir)
+    carried: list[str] = []
+    for rel, info in sources:
+        source = os.path.join(old_dir, rel)
+        target = os.path.join(new_dir, rel)
+        try:
+            if os.path.lexists(target):
+                continue
+            with os.fdopen(open_regular_file_no_follow(source, expected_stat=info), "rb") as handle:
+                data = handle.read(_MOVED_STATE_MAX_FILE_BYTES + 1)
+            if len(data) > _MOVED_STATE_MAX_FILE_BYTES:
+                raise OSError("file is too large")
+            make_private_directory(new_dir)
+            make_private_directory(os.path.dirname(target))
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            carried.append(rel)
+        except OSError:
+            refused.append(rel)
+    notes = []
+    if carried:
+        backups = sum(1 for rel in carried if rel != _MOVED_DATA_DIR_LOCK)
+        parts = ([_MOVED_DATA_DIR_LOCK] if _MOVED_DATA_DIR_LOCK in carried else []) + (
+            [f"{backups} connector backup file{'s' if backups != 1 else ''}"] if backups else []
+        )
+        notes.append("Copied the connector seals to the new data_dir: " + ", ".join(parts) + ".")
+    if refused:
+        notes.append(
+            f"warning: some connector state was not copied to {new_dir} ({', '.join(sorted(set(refused)))}); "
+            "if the gateway skips a connector at start, run: defenseclaw setup <connector> --yes"
+        )
+    return notes
+
+
+def _create_moved_audit_store(cfg) -> list[str]:
+    """Create the audit store of a new data_dir the way a first run does.
+
+    A store the gateway creates on its first start gets the gateway's own
+    protected descriptor, which on Windows names BUILTIN Administrators;
+    doctor refuses that for audit.db, while the store a first run creates
+    keeps only this account and SYSTEM (rel-1-0-6 GAP-0801). A store that
+    already exists, or that config keeps outside the data_dir, is left alone.
+    """
+    audit_db = str(getattr(cfg, "audit_db", "") or "")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not audit_db or not data_dir or config_module._is_admin_process() or os.path.lexists(audit_db):
+        return []
+    if os.path.normcase(os.path.dirname(os.path.abspath(audit_db))) != os.path.normcase(os.path.abspath(data_dir)):
+        return []
+    from defenseclaw.db import Store
+    from defenseclaw.file_permissions import make_private_directory
+
+    try:
+        make_private_directory(data_dir)
+        store = Store(audit_db)
+        try:
+            store.init()
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001 - the change is committed; the gateway creates the store if this cannot
+        return [f"warning: the audit store was not created in {data_dir} ({exc}); the gateway creates it at start."]
+    return []
+
+
 def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
     """Seed the rule packs, Rego policies and connector records under a new data_dir.
 
@@ -1005,6 +1181,8 @@ def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
             old_data_dir, new_data_dir,
             [name for name in cfg.active_connectors() if cfg.guardrail.effective_enabled(name)],
         ))
+        notes.extend(_carry_connector_seals(old_data_dir, new_data_dir))
+        notes.extend(_create_moved_audit_store(cfg))
     return notes + _seed_moved_policies(cfg)
 
 
