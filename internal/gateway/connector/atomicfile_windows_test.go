@@ -8,6 +8,7 @@ package connector
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -217,6 +218,51 @@ func TestAtomicWriteFilePublishesChangedContent(t *testing.T) {
 	body, err := os.ReadFile(path)
 	if err != nil || string(body) != "new\n" {
 		t.Fatalf("published body = %q, err %v", body, err)
+	}
+}
+
+func TestBoundWindowsConfigReplacementKeepsHeldReader(t *testing.T) {
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "settings.json")
+	stagePath := filepath.Join(dir, "stage.json")
+	if err := os.WriteFile(targetPath, []byte("old body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stagePath, []byte("new body"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := openAtomicTransformBoundDirectoryPlatform(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	stage, err := openAtomicTransformBoundFilePlatform(parent, "stage.json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Close()
+	name, err := windows.UTF16PtrFromString(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := os.NewFile(uintptr(handle), targetPath)
+	defer reader.Close()
+	if err := renameAtomicTransformBoundFilePlatform(parent, stage, "settings.json", true); err != nil {
+		t.Fatalf("publish while old file is held: %v", err)
+	}
+	oldBody, err := io.ReadAll(reader)
+	if err != nil || string(oldBody) != "old body" {
+		t.Fatalf("held reader body = %q, error = %v", oldBody, err)
+	}
+	newBody, err := os.ReadFile(targetPath)
+	if err != nil || string(newBody) != "new body" {
+		t.Fatalf("published body = %q, error = %v", newBody, err)
 	}
 }
 
