@@ -781,6 +781,143 @@ describe("module copies that share the transport, with a live copy of an older b
     expect(globalThis.fetch).toBe(baseFetch);
   });
 
+  /** Wrap every layer: the given fetch wrapper over fetch, plain delegating wrappers over the node http layers. */
+  function wrapEveryLayer(fetchWrapper: (previous: typeof fetch) => typeof fetch): typeof fetch {
+    const wrapped = fetchWrapper(globalThis.fetch);
+    globalThis.fetch = wrapped;
+    wrapNodeHttpLayersLikeAnotherComponent();
+    return wrapped;
+  }
+
+  it.each([
+    [
+      "refuses every request to the local network",
+      (previous: typeof fetch) =>
+        (async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (new URL(String(input)).hostname === "127.0.0.1") throw new Error("local network denied");
+          return previous(input, init);
+        }) as typeof fetch,
+    ],
+    [
+      "refuses the old loopback probe address",
+      (previous: typeof fetch) =>
+        (async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (String(input) === "http://127.0.0.1:1/defenseclaw-transport-probe") throw new Error("denied");
+          return previous(input, init);
+        }) as typeof fetch,
+    ],
+  ])(
+    "another component wraps every layer with a wrapper that %s, then a copy that never held the transport stops: no second patch, the model call still works, and the stop restores the native transport",
+    async (_name, wrapper) => {
+      const holder = olderBuildCopy(PORT);
+      holder.start();
+      const bystander = olderBuildCopy(PORT + 5);
+      bystander.start();
+      const { createFetchInterceptor } = await loadCopy();
+      const fresh = createFetchInterceptor(PORT + 1);
+      fresh.start();
+      holder.stop();
+      await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+      const wrapped = wrapEveryLayer(wrapper);
+
+      bystander.stop();
+      await settleRecheck();
+
+      expect(globalThis.fetch).toBe(wrapped);
+      await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+      expect(modelCalls(seen)).toEqual([
+        `http://127.0.0.1:${PORT + 1}/v1/chat/completions`,
+        `http://127.0.0.1:${PORT + 1}/v1/chat/completions`,
+      ]);
+      fresh.stop();
+      expect(globalThis.fetch).toBe(baseFetch);
+    },
+  );
+
+  it("another component answers the probe address itself and never forwards it: the copy keeps a second patch, its stop disarms the first, and a later copy uses its own proxy", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    holder.stop();
+    wrapEveryLayer(
+      (previous) =>
+        (async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = new URL(String(input));
+          if (url.pathname === "/v1/models") return new Response("cached");
+          return previous(input, init);
+        }) as typeof fetch,
+    );
+
+    bystander.stop(); // the probe cannot show whether the patch is still reachable: a second patch guards
+    await settleRecheck();
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
+
+    fresh.stop();
+    expect(http.request.name).not.toContain("patched");
+    // The first patch may still sit below the wrapper of the other component: it must not route to the stopped copy.
+    const later = createFetchInterceptor(PORT + 2);
+    later.start();
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([
+      `http://127.0.0.1:${PORT + 1}/v1/chat/completions`,
+      `http://127.0.0.1:${PORT + 2}/v1/chat/completions`,
+    ]);
+    later.stop();
+  });
+
+  it("a probe that a slow wrapper forwards late is not taken for the answer of a later check: the holder removed the transport, the patch stays and guards", async () => {
+    const slowBase = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/v1/models") || url.includes("transport-probe")) {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      seen.push(url);
+      return new Response("ok");
+    }) as typeof fetch;
+    globalThis.fetch = slowBase;
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const bystander2 = olderBuildCopy(PORT + 6);
+    bystander2.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    wrapEveryLayer((previous) => previous);
+    wrapEveryLayer(
+      (previous) =>
+        (async (input: RequestInfo | URL, init?: RequestInit) => {
+          await settleRecheck();
+          return previous(input, init);
+        }) as typeof fetch,
+    ); // plain delegating wrapper first
+    bystander.stop(); // the hand-over: the new copy takes the transport over the wrappers
+    const first = globalThis.fetch;
+    wrapEveryLayer(
+      (previous) =>
+        (async (input: RequestInfo | URL, init?: RequestInit) => {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return previous(input, init);
+        }) as typeof fetch,
+    );
+    bystander2.stop(); // first check of the patch starts and waits on the slow wrapper
+    holder.stop(); // the holder puts the old transport back over everything
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(first).not.toBe(slowBase);
+    expect(globalThis.fetch).not.toBe(slowBase);
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen).at(-1)).toBe(`http://127.0.0.1:${PORT + 1}/v1/chat/completions`);
+    fresh.stop();
+    expect(globalThis.fetch).toBe(slowBase);
+  });
+
   it("the current copy stops while the check of its patch is pending: nothing is patched afterwards", async () => {
     const holder = olderBuildCopy(PORT);
     holder.start();
