@@ -916,29 +916,66 @@ func hookScriptRenderDrift(
 	conn Connector, opts SetupOpts,
 	check func(string, os.FileMode) (bool, error),
 ) (string, error) {
-	files, err := renderedHookRuntimeFiles(conn, opts)
-	if err != nil {
-		return filepath.Join(opts.DataDir, "hooks"), err
-	}
-	for _, file := range files {
-		installed, err := safefile.ReadRegularFileBounded(file.path, hookRuntimeRenderMaxBytes)
-		if errors.Is(err, os.ErrNotExist) {
-			return file.path, nil
-		}
-		if err != nil {
-			return file.path, err
-		}
-		if !bytes.Equal(installed, file.body) {
-			return file.path, nil
-		}
-		if check != nil {
-			matches, err := check(file.path, file.mode)
-			if err != nil || !matches {
-				return file.path, err
-			}
-		}
+	if drifts := hookScriptRenderDrifts(conn, opts, check, true); len(drifts) > 0 {
+		return drifts[0].Path, drifts[0].Err
 	}
 	return "", nil
+}
+
+// HookRuntimeFileDrift is one hook runtime file that is missing, differs or
+// carries the wrong protection. Err is set when the file could not be read or
+// checked.
+type HookRuntimeFileDrift struct {
+	Path string
+	Err  error
+}
+
+// HookScriptRenderDrifts is HookScriptRenderDriftWithMetadata for a caller
+// that must know every file that drifted, not the first: the guardian counts a
+// restore per file, and a pass that puts one script back while another stays
+// broken has restored the one (GAP-0754). The first entry is the file
+// HookScriptRenderDriftWithMetadata returns.
+func HookScriptRenderDrifts(
+	conn Connector, opts SetupOpts,
+	check func(string, os.FileMode) (bool, error),
+) []HookRuntimeFileDrift {
+	return hookScriptRenderDrifts(conn, opts, check, false)
+}
+
+func hookScriptRenderDrifts(
+	conn Connector, opts SetupOpts,
+	check func(string, os.FileMode) (bool, error),
+	firstOnly bool,
+) []HookRuntimeFileDrift {
+	files, err := renderedHookRuntimeFiles(conn, opts)
+	if err != nil {
+		return []HookRuntimeFileDrift{{Path: filepath.Join(opts.DataDir, "hooks"), Err: err}}
+	}
+	var drifts []HookRuntimeFileDrift
+	for _, file := range files {
+		drift := HookRuntimeFileDrift{Path: file.path}
+		installed, err := safefile.ReadRegularFileBounded(file.path, hookRuntimeRenderMaxBytes)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+		case err != nil:
+			drift.Err = err
+		case !bytes.Equal(installed, file.body):
+		default:
+			if check == nil {
+				continue
+			}
+			matches, checkErr := check(file.path, file.mode)
+			if checkErr == nil && matches {
+				continue
+			}
+			drift.Err = checkErr
+		}
+		drifts = append(drifts, drift)
+		if firstOnly {
+			break
+		}
+	}
+	return drifts
 }
 
 // HookRuntimeTokenFile returns the connector-scoped token file the hook

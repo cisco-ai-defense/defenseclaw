@@ -1284,7 +1284,7 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 func knownEnterpriseHookElements(names []string) []string {
 	var known []string
 	for _, name := range names {
-		if (name == enterprisehooks.HookElementEntry || name == enterprisehooks.HookElementRuntime) && !slices.Contains(known, name) {
+		if enterprisehooks.KnownHookElement(name) && !slices.Contains(known, name) {
 			known = append(known, name)
 		}
 	}

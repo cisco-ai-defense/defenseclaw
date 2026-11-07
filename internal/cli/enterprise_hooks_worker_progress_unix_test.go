@@ -85,18 +85,25 @@ func TestParseEnterpriseHookWorkerOutputNamesUnfinishedRestoresWithoutKeepingThe
 // the guardian does not know are not restores.
 func TestRestoredHookElementsAreTheOnesThatWentFromBrokenToMatching(t *testing.T) {
 	both := []string{enterprisehooks.HookElementEntry, enterprisehooks.HookElementRuntime}
+	script := "hook runtime file hermes-hook.sh"
+	record := "hook runtime file .hookcfg.hermes"
 	for _, tc := range []struct {
 		name   string
 		broken []string
 		after  enterprisehooks.HookElements
 		want   []string
 	}{
-		{"both back", both, enterprisehooks.HookElements{Entry: true, Runtime: true}, both},
-		{"only the runtime back", both, enterprisehooks.HookElements{Runtime: true}, runtimeElement},
-		{"only the entry back", both, enterprisehooks.HookElements{Entry: true}, entryElement},
-		{"still broken", both, enterprisehooks.HookElements{}, nil},
-		{"was not broken", runtimeElement, enterprisehooks.HookElements{Entry: true}, nil},
-		{"unknown name", []string{"shared agent config"}, enterprisehooks.HookElements{Entry: true, Runtime: true}, nil},
+		{"both back", both, enterprisehooks.HookElements{Entry: true}, both},
+		{"only the runtime back", both, enterprisehooks.HookElements{}, runtimeElement},
+		{"only the entry back", both, enterprisehooks.HookElements{Entry: true, BrokenRuntime: runtimeElement}, entryElement},
+		{"still broken", both, enterprisehooks.HookElements{BrokenRuntime: runtimeElement}, nil},
+		{"was not broken", runtimeElement, enterprisehooks.HookElements{Entry: true, BrokenRuntime: runtimeElement}, nil},
+		{"unknown name", []string{"shared agent config"}, enterprisehooks.HookElements{Entry: true}, nil},
+		{"a name that is no file", []string{"hook runtime file ../escape", "hook runtime file "}, enterprisehooks.HookElements{Entry: true}, nil},
+		// The script is its own element: putting it back counts while another
+		// runtime file is still broken (GAP-0754).
+		{"script back, record still broken", []string{script, record}, enterprisehooks.HookElements{Entry: true, BrokenRuntime: []string{record}}, []string{script}},
+		{"record back, script still broken", []string{script, record}, enterprisehooks.HookElements{Entry: true, BrokenRuntime: []string{script}}, []string{record}},
 	} {
 		if got := restoredHookElements(tc.broken, tc.after); !slices.Equal(got, tc.want) {
 			t.Errorf("%s: restored = %v, want %v", tc.name, got, tc.want)
