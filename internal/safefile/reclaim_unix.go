@@ -203,19 +203,20 @@ func preflightMissingDirectory(dir string) error {
 
 // preflightRootOwnsNewDirectory is the intended-owner proof for a missing
 // directory below a root-owned folder nobody else can write (/home is one).
-// Without a sudo account the run is root's own and the directory is root's. A
-// sudo start belongs to the account that ran sudo, and the directory root would
-// create (a whole missing account home, with the log and PID record in it) is
-// owned by root and mode 0700, which that account cannot enter to start its own
-// gateway. It is let through only inside root's own home, where root is the
-// owner whoever ran sudo; anywhere else it is refused before anything is
-// created (GAP-0714).
+// The root-owned folder is no proof that the new directory belongs to root: a
+// root run creates it owned by root and mode 0700, and a whole missing account
+// home (with the log and PID record in it) then strands the account it is for,
+// whether root got there through sudo or was started with no sudo account in
+// the environment (SUDO_UID empty or 0 names nobody, it does not name root as
+// the owner). The target is the proof: root's own home is root's whoever ran
+// sudo; anywhere else the directory is refused before anything is created
+// (GAP-0714).
 func preflightRootOwnsNewDirectory(dir, ancestor string) error {
-	if raw := strings.TrimSpace(os.Getenv("SUDO_UID")); raw == "" || raw == "0" {
-		return nil
-	}
 	if home := rootHomeDir(); home != "" && insideDirectory(dir, ancestor, home) {
 		return nil
+	}
+	if raw := strings.TrimSpace(os.Getenv("SUDO_UID")); raw == "" || raw == "0" {
+		return fmt.Errorf("safefile: private directory %s does not exist and root would create it owned by root outside root's own home, where it would belong to no account that can use it: create the directory as the account it is for first", dir)
 	}
 	return fmt.Errorf("safefile: private directory %s does not exist and root would create it owned by root for the account that ran sudo: start the gateway as that account, or create the directory as that account first", dir)
 }

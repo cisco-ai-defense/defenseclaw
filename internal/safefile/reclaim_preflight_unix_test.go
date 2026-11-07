@@ -68,10 +68,14 @@ func TestGAP0714PreflightLetsOrdinaryHomesThrough(t *testing.T) {
 		t.Fatalf("a private home owned by this account was refused: %v", err)
 	}
 	// A home that does not exist yet is created by root, so it is let through
-	// only below a root-owned folder (root is its owner there).
+	// only below a root-owned folder, inside root's own home (root is its owner
+	// there; here the stand-in root home is the private folder).
 	oldOwner := pathOwnerAndMode
 	t.Cleanup(func() { pathOwnerAndMode = oldOwner })
-	pathOwnerAndMode = func(string) (uint32, os.FileMode, error) { return 0, 0o755, nil }
+	pathOwnerAndMode = ownedWhereItExists(0, 0o755)
+	oldRoot := rootHomeDir
+	t.Cleanup(func() { rootHomeDir = oldRoot })
+	rootHomeDir = func() string { return private }
 	if err := PreflightReclaimDirectory(filepath.Join(private, "not yet", "deeper")); err != nil {
 		t.Fatalf("a home below a root-owned folder was refused: %v", err)
 	}
@@ -140,6 +144,9 @@ func TestGAP0714PreflightRefusesToCreateAHomeInsideAFolderOtherAccountsCanWrite(
 	t.Cleanup(func() { pathOwnerAndMode = oldOwner })
 
 	home := filepath.Join(t.TempDir(), ".defenseclaw")
+	oldRoot := rootHomeDir
+	t.Cleanup(func() { rootHomeDir = oldRoot })
+	rootHomeDir = func() string { return filepath.Dir(home) } // the benign rows are root's own home
 	for _, tc := range []struct {
 		name    string
 		uid     uint32
@@ -153,7 +160,7 @@ func TestGAP0714PreflightRefusesToCreateAHomeInsideAFolderOtherAccountsCanWrite(
 		{"root-owned ordinary folder", 0, 0o755, false},
 		{"folder owned by another account", 1000, 0o755, true},
 	} {
-		pathOwnerAndMode = func(string) (uint32, os.FileMode, error) { return tc.uid, tc.perm, nil }
+		pathOwnerAndMode = ownedWhereItExists(tc.uid, tc.perm)
 		// A deeper missing path is judged by the nearest existing folder.
 		for _, target := range []string{home, filepath.Join(home, "deeper", "still")} {
 			err := PreflightReclaimDirectory(target)
@@ -202,7 +209,7 @@ func TestGAP0714PreflightRefusesToCreateAnAccountHomeForTheSudoAccount(t *testin
 			t.Fatal(err)
 		}
 	}
-	pathOwnerAndMode = func(string) (uint32, os.FileMode, error) { return 0, 0o755, nil }
+	pathOwnerAndMode = ownedWhereItExists(0, 0o755)
 	rootHomeDir = func() string { return rootHome }
 
 	missingAccountHome := filepath.Join(homes, "someone", ".defenseclaw")
@@ -221,17 +228,26 @@ func TestGAP0714PreflightRefusesToCreateAnAccountHomeForTheSudoAccount(t *testin
 		t.Fatalf("the preflight created the home: %v", err)
 	}
 
-	// Benign twins: root's own home under sudo, a run with no sudo account
-	// and one started by root itself (SUDO_UID 0) all create root's own state.
+	// Benign twin: root's own home, under sudo and with no sudo account or one
+	// that is root itself.
 	rootOwn := filepath.Join(rootHome, ".defenseclaw")
 	if err := PreflightReclaimDirectory(rootOwn); err != nil {
 		t.Errorf("a sudo start in root's own home was refused: %v", err)
 	}
 	for _, raw := range []string{"", "0"} {
 		t.Setenv("SUDO_UID", raw)
-		if err := PreflightReclaimDirectory(missingAccountHome); err != nil {
-			t.Errorf("SUDO_UID %q: a root run below a root-owned folder was refused: %v", raw, err)
+		if err := PreflightReclaimDirectory(rootOwn); err != nil {
+			t.Errorf("SUDO_UID %q: a root run in root's own home was refused: %v", raw, err)
 		}
+		// An absent or root sudo account is no proof that root owns another
+		// account's home: the target is outside root's home, so it is refused.
+		err := PreflightReclaimDirectory(missingAccountHome)
+		if err == nil || !strings.Contains(err.Error(), "root would create") {
+			t.Errorf("SUDO_UID %q: a root run was allowed to create a root-owned account home: %v", raw, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(homes, "someone")); !os.IsNotExist(err) {
+		t.Fatalf("the preflight created the home: %v", err)
 	}
 	// A root home reached through a link is still root's home.
 	t.Setenv("SUDO_UID", "1000")
@@ -242,5 +258,50 @@ func TestGAP0714PreflightRefusesToCreateAnAccountHomeForTheSudoAccount(t *testin
 	rootHomeDir = func() string { return linkedRoot }
 	if err := PreflightReclaimDirectory(rootOwn); err != nil {
 		t.Errorf("a sudo start in root's home reached through a link was refused: %v", err)
+	}
+}
+
+// ownedWhereItExists stands in for a folder owned by uid with mode perm: a path
+// that does not exist has no owner, as with the real call.
+func ownedWhereItExists(uid uint32, perm os.FileMode) func(string) (uint32, os.FileMode, error) {
+	return func(path string) (uint32, os.FileMode, error) {
+		if _, err := os.Stat(path); err != nil {
+			return 0, 0, err
+		}
+		return uid, perm, nil
+	}
+}
+
+// GAP-0714 (review 8): SUDO_UID empty or 0 names no account, so it is no proof
+// that root owns the home it is about to create. A root run aimed at another
+// account's missing home below a root-owned 0755 folder is refused before
+// anything is created; root's own home is the benign twin.
+func TestGAP0714PreflightRefusesAForeignMissingHomeWithoutASudoAccount(t *testing.T) {
+	oldUID, oldOwner, oldRoot := effectiveUID, pathOwnerAndMode, rootHomeDir
+	t.Cleanup(func() { effectiveUID, pathOwnerAndMode, rootHomeDir = oldUID, oldOwner, oldRoot })
+	effectiveUID = func() int { return 0 }
+	pathOwnerAndMode = ownedWhereItExists(0, 0o755)
+	base := t.TempDir()
+	rootHome := filepath.Join(base, "root")
+	homes := filepath.Join(base, "home")
+	for _, dir := range []string{rootHome, homes} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rootHomeDir = func() string { return rootHome }
+	foreign := filepath.Join(homes, "foreign", ".defenseclaw")
+	t.Setenv("DEFENSECLAW_HOME", foreign)
+	for _, raw := range []string{"", "0", " "} {
+		t.Setenv("SUDO_UID", raw)
+		if err := PreflightReclaimDirectory(foreign); err == nil || !strings.Contains(err.Error(), "root would create") {
+			t.Errorf("SUDO_UID %q: a root run into a missing foreign home passed the preflight: %v", raw, err)
+		}
+		if err := PreflightReclaimDirectory(filepath.Join(rootHome, ".defenseclaw")); err != nil {
+			t.Errorf("SUDO_UID %q: root's own home was refused: %v", raw, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(homes, "foreign")); !os.IsNotExist(err) {
+		t.Fatalf("the preflight created the foreign home: %v", err)
 	}
 }

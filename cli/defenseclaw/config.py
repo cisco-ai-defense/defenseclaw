@@ -598,20 +598,43 @@ def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
     """
     own = os.fspath(data_dir)
     try:
-        home = os.fspath(default_data_path())
+        home, configured, managed = _install_home_binding()
     except (OSError, KeyError, NotImplementedError):
         return own
+    if managed:
+        return own
+    if configured and _same_folder(configured, own):
+        return home
+    return own
+
+
+def _install_home_binding() -> tuple[str, str | None, bool]:
+    """The install home, the store its active config binds, and whether it is managed."""
+    home = os.fspath(default_data_path())
     active_config = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
     if not os.path.isabs(active_config):
         # The gateway starts in the install home, so it reads a relative
         # config path from there, whatever folder this process runs in.
         active_config = os.path.join(home, active_config)
     configured, managed = _home_config_binding(active_config, home)
-    if managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)):
-        return own
-    if configured and _same_folder(configured, own):
-        return home
-    return own
+    return home, configured, managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+
+
+def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
+    """The PID-record home of a store the install-home config itself names.
+
+    ``store`` came from reading that config's ``data_dir`` the way the gateway
+    does, so the config binds it by construction: the PID record is in the
+    install home. Asking :func:`gateway_home_for_data_dir` again would compare
+    the store with a second reading of the same text, which can differ (a
+    ``~/`` data_dir), and then name the store as the home (GAP-0711, GAP-0713).
+    A managed runtime keeps its own PID home.
+    """
+    try:
+        home, _configured, managed = _install_home_binding()
+    except (OSError, KeyError, NotImplementedError):
+        return os.fspath(store)
+    return os.fspath(store) if managed else home
 
 
 def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
