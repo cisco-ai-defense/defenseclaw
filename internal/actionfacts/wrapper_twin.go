@@ -74,6 +74,22 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 	// A static shell STRING is its own command line: a wrapper inside it
 	// (sh -c "setsid sh -c 'cp ...'") is read the same way, and the STRING
 	// word is written as the quoted reading (GAP-2519).
+	// The env words that bind USER or LOGNAME stay in the twin as prefix
+	// assignments of the call: the wrapped shell reads the values they give
+	// (rel-1-0-6:GAP-0630 review 3).
+	userBindings := func(args []*syntax.Word, upto int) string {
+		var kept strings.Builder
+		for _, word := range args[1:upto] {
+			if value := projectPOSIXWord(word); !value.Expands &&
+				(strings.HasPrefix(value.Value, "USER=") || strings.HasPrefix(value.Value, "LOGNAME=")) {
+				start, end := int(word.Pos().Offset()), int(word.End().Offset())
+				if start >= 0 && end >= start && end <= len(command) {
+					kept.WriteString(command[start:end] + " ")
+				}
+			}
+		}
+		return kept.String()
+	}
 	nested := func(word *syntax.Word) {
 		if depth >= maxNestedShellStrings {
 			return
@@ -118,14 +134,14 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 				nested(typed.Args[body])
 			}
 			if run.Dir == "" && shell {
-				replace(typed.Args[0].Pos(), typed.Args[text].Pos(), "sh -c ")
+				replace(typed.Args[0].Pos(), typed.Args[text].Pos(), userBindings(typed.Args, text)+"sh -c ")
 				return true
 			}
 			if run.Index == 0 {
 				return true
 			}
 			if run.Dir == "" {
-				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
+				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), userBindings(typed.Args, run.Index))
 				return true
 			}
 			// A=1 env -C dir cp ... is ( cd dir && A=1 cp ... ): the
@@ -135,9 +151,9 @@ func wrapperUnwrapTwin(command string, depth int) (twin string, ok bool) {
 			if len(typed.Assigns) > 0 {
 				open = typed.Assigns[0].Pos()
 				replace(open, open, "( cd "+wrapperDirWord(run.Dir)+" && ")
-				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), "")
+				replace(typed.Args[0].Pos(), typed.Args[run.Index].Pos(), userBindings(typed.Args, run.Index))
 			} else {
-				replace(open, typed.Args[run.Index].Pos(), "( cd "+wrapperDirWord(run.Dir)+" && ")
+				replace(open, typed.Args[run.Index].Pos(), "( cd "+wrapperDirWord(run.Dir)+" && "+userBindings(typed.Args, run.Index))
 			}
 			if shell {
 				replace(typed.Args[run.Index].Pos(), typed.Args[text].Pos(), "sh -c ")

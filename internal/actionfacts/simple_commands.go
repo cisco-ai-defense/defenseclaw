@@ -81,10 +81,13 @@ func (s simpleShellState) clone() simpleShellState {
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
 func SimpleCommands(input Input, facts Facts) []SimpleCommand {
-	return simpleCommands(input, facts, 0, "")
+	return simpleCommands(input, facts, 0, "", nil)
 }
 
-func simpleCommands(input Input, facts Facts, depth int, interpreter string) []SimpleCommand {
+// simpleCommands reads the commands of input. inherited holds the values
+// USER and LOGNAME have where a shell body starts (simpleChildUserVars); nil
+// is the start of the action, where both keep the home base name.
+func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string) []SimpleCommand {
 	if facts.Parse.Dialect == DialectPowerShell || facts.Parse.Dialect == DialectCMD {
 		return windowsSimpleCommands(input, facts)
 	}
@@ -114,10 +117,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 	if !ok {
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}
-	var bound map[string]bool
+	var bound, unfollowed map[string]bool
 	if strings.ContainsRune(source, '$') {
 		file, _ := shellparse.Parse(source)
-		bound = simpleBoundVariables(file)
+		bound, unfollowed = simpleBoundVariables(file)
 	}
 	if len(parts) == 0 {
 		return nil
@@ -159,21 +162,25 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 			return redirect.Op == syntax.DplIn || redirect.Op == syntax.DplOut
 		})
 		_, _, nested, _ := simpleNestedScript(call, nil, nil, nil)
-		if !prefix && !duplication && !nested {
+		// A body that names USER or LOGNAME is read with the values its
+		// caller hands over (inherited).
+		inheritsUser := inherited != nil && (strings.Contains(parts[0].text, "USER") || strings.Contains(parts[0].text, "LOGNAME"))
+		if !prefix && !duplication && !nested && !inheritsUser {
 			return nil
 		}
 	}
 	home, _ := normalizeActiveHome(input.ActiveHome)
 	initialVars := map[string]string{"HOME": home}
-	// USER and LOGNAME name the last element of a POSIX home, as the trusted
-	// home rewrite reads <parent>/$USER (userHomeRewriteWord) and the hook
-	// target scans read both names, so a child command spelled with them is
-	// judged as its literal spelling (rel-1-0-6:GAP-0601, GAP-0681). An
-	// action that binds either name (export, read, for) has no inherited
-	// value for them; a plain assignment still sets its own below.
-	if user := path.Base(home); strings.HasPrefix(home, "/") && user != "/" && user != "." &&
-		!bound["USER"] && !bound["LOGNAME"] {
-		initialVars["USER"], initialVars["LOGNAME"] = user, user
+	// USER and LOGNAME are two names, each with the value it has where the
+	// shell is: the last element of a POSIX home at the start of the action
+	// (the trusted home rewrite reads <parent>/$USER, userHomeRewriteWord,
+	// and the hook target scans read both names), changed in order by the
+	// assignments below and handed to a shell body by the call that starts
+	// it. A child command spelled with them is judged as its literal
+	// spelling (rel-1-0-6:GAP-0601, GAP-0681, GAP-0630 review 3). A name
+	// that a loop, read or eval binds has no value the walk can follow.
+	for name, value := range simpleInitialUserVars(home, inherited, unfollowed) {
+		initialVars[name] = value
 	}
 	if simplePathAbs(input.CWD) {
 		initialVars["PWD"] = simplePathClean(input.CWD)
@@ -260,6 +267,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 				}
 				if simplePrefixChangesResolution(call.Assigns) {
 					unprefixed = text[start:]
+				} else if simplePrefixBindsUser(call, effective) {
+					// The shell body inherits USER and LOGNAME from the
+					// prefix: the call without it names other files.
 				} else {
 					text = text[start:]
 					changed = true
@@ -343,7 +353,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string) []S
 					if innerInterpreter == "" {
 						innerInterpreter = interpreter
 					}
-					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter)
+					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
+						simpleChildUserVars(call, effective, shared))
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
 							innerFacts.Commands[0].Executable == "history"
@@ -1021,10 +1032,14 @@ func updateSimpleVariables(vars map[string]string, assigns []*syntax.Assign) {
 
 // The full action may bind a value that the simple-command walk cannot
 // resolve. Record only shell bindings, using the shared shell parser.
-func simpleBoundVariables(file *syntax.File) map[string]bool {
-	bound := make(map[string]bool)
+//
+// unfollowed holds the names a for or select loop, read, mapfile, printf -v
+// or the text of an eval, trap or source binds: no plain assignment of the
+// walk gives them a value.
+func simpleBoundVariables(file *syntax.File) (bound, unfollowed map[string]bool) {
+	bound, unfollowed = make(map[string]bool), make(map[string]bool)
 	if file == nil {
-		return bound
+		return bound, unfollowed
 	}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch part := node.(type) {
@@ -1034,7 +1049,17 @@ func simpleBoundVariables(file *syntax.File) map[string]bool {
 			}
 		case *syntax.WordIter:
 			if part.Name != nil {
-				bound[part.Name.Value] = true
+				bound[part.Name.Value], unfollowed[part.Name.Value] = true, true
+			}
+		case *syntax.DeclClause:
+			// A local name ends with its function: the walk gives it no
+			// value.
+			if part.Variant != nil && part.Variant.Value != "export" && part.Variant.Value != "readonly" {
+				for _, assign := range part.Args {
+					if assign != nil && assign.Name != nil && slices.Contains(simpleUserNames, assign.Name.Value) {
+						unfollowed[assign.Name.Value] = true
+					}
+				}
 			}
 		case *syntax.FuncDecl:
 			for i := '1'; i <= '9'; i++ {
@@ -1052,7 +1077,7 @@ func simpleBoundVariables(file *syntax.File) map[string]bool {
 			case "printf":
 				if len(part.Args) >= 3 && part.Args[1].Lit() == "-v" {
 					if name, known := simpleStaticWord(part.Args[2], nil); known && simpleVariableName(name) {
-						bound[name] = true
+						bound[name], unfollowed[name] = true, true
 					}
 				}
 			case "read", "mapfile", "readarray":
@@ -1065,15 +1090,22 @@ func simpleBoundVariables(file *syntax.File) map[string]bool {
 						continue
 					}
 					if simpleVariableName(name) {
-						bound[name] = true
+						bound[name], unfollowed[name] = true, true
 					}
 					break
+				}
+			case "eval", "trap", ".", "source":
+				for _, arg := range part.Args[1:] {
+					if text, known := simpleStaticWord(arg, nil); !known || strings.Contains(text, "USER") ||
+						strings.Contains(text, "LOGNAME") {
+						unfollowed["USER"], unfollowed["LOGNAME"] = true, true
+					}
 				}
 			}
 		}
 		return true
 	})
-	return bound
+	return bound, unfollowed
 }
 
 func simpleVariableName(name string) bool {
@@ -1874,4 +1906,77 @@ func simplePathClean(value string) string {
 // keeps its native (UNC) meaning on Windows.
 func simplePOSIXAbs(value string) bool {
 	return strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "//")
+}
+
+// simpleUserNames are the two names of the login a POSIX home spells.
+var simpleUserNames = []string{"USER", "LOGNAME"}
+
+// simpleInitialUserVars is the value of each of USER and LOGNAME where a
+// walk starts: the base name of a POSIX home at the start of the action,
+// the values inherited where a shell body starts. A name in unfollowed has
+// none (a for, select, read or eval binds it where the walk cannot follow).
+func simpleInitialUserVars(home string, inherited map[string]string, unfollowed map[string]bool) map[string]string {
+	vars := make(map[string]string, len(simpleUserNames))
+	user := path.Base(home)
+	for _, name := range simpleUserNames {
+		if unfollowed[name] {
+			continue
+		}
+		if inherited != nil {
+			if value, ok := inherited[name]; ok {
+				vars[name] = value
+			}
+		} else if strings.HasPrefix(home, "/") && user != "/" && user != "." {
+			vars[name] = user
+		}
+	}
+	return vars
+}
+
+// simpleChildUserVars is USER and LOGNAME as the shell that call starts
+// sees them: the caller values in effective (prefix assignments applied),
+// changed by the NAME=value words an env wrapper puts before the shell. A
+// name is left out when a wrapper option or a word the walk cannot read may
+// change the environment (env with an option, sudo, a command
+// substitution): the body then reads it as an unknown name. A shared body
+// (eval, trap) runs in the caller itself.
+func simpleChildUserVars(call *syntax.CallExpr, effective map[string]string, shared bool) map[string]string {
+	child := make(map[string]string, len(simpleUserNames))
+	for _, name := range simpleUserNames {
+		if value, ok := effective[name]; ok {
+			child[name] = value
+		}
+	}
+	if shared || call == nil {
+		return child
+	}
+	for _, arg := range call.Args {
+		word, static := simpleStaticWord(arg, effective)
+		if !static || strings.HasPrefix(word, "-") {
+			clear(child)
+			return child
+		}
+		if name, value, cut := strings.Cut(word, "="); cut && slices.Contains(simpleUserNames, name) {
+			child[name] = value
+			continue
+		}
+		switch filepath.Base(word) {
+		case "sh", "bash", "zsh", "dash", "ksh", "mksh", "ash":
+			return child
+		}
+	}
+	return child
+}
+
+// simplePrefixBindsUser reports a prefix assignment of USER or LOGNAME on a
+// call that starts a shell body: the body reads the assigned value, so the
+// call is read with its prefix.
+func simplePrefixBindsUser(call *syntax.CallExpr, effective map[string]string) bool {
+	if !slices.ContainsFunc(call.Assigns, func(assign *syntax.Assign) bool {
+		return assign != nil && assign.Name != nil && slices.Contains(simpleUserNames, assign.Name.Value)
+	}) {
+		return false
+	}
+	_, _, nested, _ := simpleNestedScript(call, effective, nil, nil)
+	return nested
 }
