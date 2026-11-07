@@ -208,12 +208,40 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
+def _launcher_defect(launcher: str) -> str:
+    """Why the launcher file at *launcher* cannot start, or "" when it can (or cannot be judged).
+
+    A launcher that is gone, a folder in its place, or an empty or non-PE file
+    fails every call; an unreadable one is not proof of damage (Defender or a
+    deny ACE holding it).
+    """
+
+    try:
+        mode = os.stat(launcher).st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return "is missing"
+    except OSError:
+        return ""
+    if not stat.S_ISREG(mode):
+        return "is not a regular file"
+    try:
+        with open(launcher, "rb") as stream:
+            header = stream.read(2)
+    except OSError:
+        return ""
+    return "" if header == b"MZ" else "is not a Windows executable"
+
+
 def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
-    """Report a Windows hook registration whose native launcher file is gone.
+    """Report a Windows hook registration whose native launcher file cannot start.
 
     An antivirus quarantine or a cleanup tool can remove
-    ``defenseclaw-hook.exe``; every hook call then fails while status showed
-    the connector as running (GAP-0378). A Codex or Devin entry that starts
+    ``defenseclaw-hook.exe``, or a folder can take its place; every hook call
+    then fails while status showed the connector as running (GAP-0378,
+    GAP-0810). The launcher is read from every string of the recorded hook
+    files and from the script of a PowerShell -EncodedCommand in it, so the
+    bridges Kiro, Antigravity and the Codex fallback register are covered the
+    same as a plain launcher path. A Codex or Devin entry that starts
     the hook guard is reported when the guard is missing, not a regular file
     or not the copy the installer recorded (rel-1-0-6 GAP-0676).
     """
@@ -230,10 +258,10 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
         except (OSError, ValueError):
             continue
         for value in _strings(document):
-            for match in _WINDOWS_LAUNCHER.finditer(value):
+            for match in _WINDOWS_LAUNCHER.finditer(_decoded_command(value)):
                 launcher = match.group(1)
-                if not os.path.isfile(launcher):
-                    return [f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} is missing, so every hook call fails"]
+                if defect := _launcher_defect(launcher):
+                    return [f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {defect}, so every hook call fails"]
             guard = hook_guard_program(connector, value)
             if guard and guard not in guards:
                 guards.append(guard)
