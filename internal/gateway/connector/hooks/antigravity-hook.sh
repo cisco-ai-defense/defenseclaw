@@ -645,8 +645,12 @@ elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/nul
   # The request was refused (a malformed hook input, a token or route the
   # ingress does not accept, a rate limit), which is no unreachable service.
   if [ "$HTTP_CODE" = 429 ]; then
-    rate_reason="$(defenseclaw_sandbox_rate_refusal_reason "$RESULT")"
-    fail_response "$rate_reason" "$rate_reason"
+    # The reason keeps the refusal text the agent has always been shown and
+    # adds the limit the gateway named, when it named one.
+    rate_message="$(defenseclaw_sandbox_rate_refusal_message "$RESULT")"
+    if [ -n "$rate_message" ]; then
+      fail_response "gateway returned HTTP 429: ${rate_message}" "DefenseClaw hook request was refused (HTTP 429), so the tool call is blocked: ${rate_message}"
+    fi
   fi
   fail_response "gateway returned HTTP ${HTTP_CODE}" "DefenseClaw hook request was refused (HTTP ${HTTP_CODE}), so the tool call is blocked."
 {{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
