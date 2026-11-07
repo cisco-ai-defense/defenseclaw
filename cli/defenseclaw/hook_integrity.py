@@ -238,6 +238,8 @@ _PE_MAX_SECTIONS = 96
 _IMAGE_FILE_EXECUTABLE = 0x0002
 _IMAGE_FILE_DLL = 0x2000
 _IMAGE_SCN_MEM_EXECUTE = 0x20000000
+_PE_IMAGE_BASE_ALIGNMENT = 0x10000
+_PE_PAGE_SIZE = 0x1000
 
 
 def _le(buffer: bytes, at: int, width: int) -> int:
@@ -259,8 +261,10 @@ def _pe_image_defect(stream: Any, size: int) -> str:
     what the Windows loader reads before it maps an executable: a PE header
     where the DOS header points, a known machine whose bitness matches the
     optional header, a consistent optional header (alignments, SizeOfImage,
-    SizeOfHeaders, subsystem, entry point), and sections that follow the
-    headers in order, lie inside SizeOfImage and inside the file, with the
+    SizeOfHeaders, ImageBase, the reserved Win32VersionValue, subsystem,
+    entry point), and sections that follow the headers in order, lie inside
+    SizeOfImage and inside the file, start and size on FileAlignment (or sit
+    at their own address when SectionAlignment is below a page), with the
     entry point on executable bytes the file holds. A truncated, overwritten
     or hand-made stub therefore reads like a missing launcher.
     """
@@ -311,11 +315,18 @@ def _pe_image_defect(stream: Any, size: int) -> str:
         return bad
     if not _is_power_of_two(section_alignment) or section_alignment < file_alignment:
         return bad
+    # Below a page the image is mapped as it lies in the file.
+    packed = section_alignment < _PE_PAGE_SIZE
+    if packed and file_alignment != section_alignment:
+        return bad
+    image_base = _le(optional, 24, 8) if magic == _PE32_PLUS else _le(optional, 28, 4)
+    if image_base % _PE_IMAGE_BASE_ALIGNMENT or _le(optional, 52, 4):
+        return bad
     if _le(optional, 68, 2) not in _PE_SUBSYSTEMS:
         return bad
     if not table_end <= headers_size <= min(size, image_size):
         return bad
-    if image_size % section_alignment:
+    if image_size % section_alignment or headers_size % file_alignment:
         return bad
     next_address = _align_up(headers_size, section_alignment)
     entry_backed = False
@@ -331,6 +342,8 @@ def _pe_image_defect(stream: Any, size: int) -> str:
         if next_address > image_size:
             return bad
         if raw_size and (raw_at < headers_size or raw_at + raw_size > size):
+            return bad
+        if raw_size and (raw_size % file_alignment or raw_at % file_alignment or (packed and raw_at != address)):
             return bad
         if address <= entry < address + min(span, raw_size) and flags & _IMAGE_SCN_MEM_EXECUTE:
             entry_backed = True
