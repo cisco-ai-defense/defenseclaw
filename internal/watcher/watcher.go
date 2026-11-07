@@ -2580,21 +2580,30 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// A default deny or registry_required that a reload switched on while
 	// the scan ran applies as the pre-scan check applies it; the lists
 	// alone missed it (GAP-1155).
+	var postDecision config.AssetPolicyDecision
+	var postDenying []string
 	if post := decisionPolicy.Config; post != nil {
-		if decision, _, denying := w.rootAssetPolicy(post, evt, connector); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
-			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
-				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
-			scanID := w.logScanID(ctx, evt, result, "blocked")
-			w.journalPolicyDenied(post, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), denying)
-			w.recordAdmission(ctx, "blocked", targetType)
-			res = AdmissionResult{
-				ScanID: scanID,
-				Event:  evt, Verdict: VerdictBlocked, Reason: decision.Reason,
-				MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
-				InstallAction: "block",
-			}
-			return res
+		postDecision, _, postDenying = w.rootAssetPolicy(post, evt, connector)
+	}
+	// The policy read above and the input built from it read the definition
+	// again, after the scan. Every decision below comes from those reads, so
+	// none is published or enforced for a definition the snapshot did not name.
+	if w.mcpDefinitionMoved(evt) {
+		return w.mcpMovedAdmission(evt)
+	}
+	if decision := postDecision; decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
+		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
+			fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
+		scanID := w.logScanID(ctx, evt, result, "blocked")
+		w.journalPolicyDenied(decisionPolicy.Config, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), postDenying)
+		w.recordAdmission(ctx, "blocked", targetType)
+		res = AdmissionResult{
+			ScanID: scanID,
+			Event:  evt, Verdict: VerdictBlocked, Reason: decision.Reason,
+			MaxSeverity: string(result.MaxSeverity()), FindingCount: len(result.Findings),
+			InstallAction: "block",
 		}
+		return res
 	}
 	if input.BlockListed() {
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
@@ -2628,6 +2637,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	policy.WarnJudgeOnlyPluginHigh(decisionPolicy.Config, connector, &input)
 	out = w.evaluateAdmissionSnapshot(ctx, input, decisionPolicy)
+	if w.mcpDefinitionMoved(evt) {
+		return w.mcpMovedAdmission(evt)
+	}
 	w.applyPostScanEnforcement(ctx, out, evt, targetType, result, s.Name())
 	scanID := w.logScanID(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
