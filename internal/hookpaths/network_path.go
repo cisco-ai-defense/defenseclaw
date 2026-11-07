@@ -43,14 +43,18 @@ import (
 // its own wait with no bound on the sum would add up past the hook answer
 // budget. A hook call (the hook client resolving its targets, the gateway
 // answering one hook request: HookCall) waits for share answers
-// networkShareCallShares times networkShareAnswerWait in all. A share that
-// does not answer costs the call its own wait and no other share its
-// chance: each of the first shares a call asks is waited for at most
+// networkShareCallShares full waits and one tail of half a wait in all. A
+// share that does not answer costs the call its own wait and no other share
+// its chance: each of the first shares a call asks is waited for at most
 // networkShareAnswerWait, whatever the shares before it did, and a share
-// that answers within it is read (rel-1-0-6:GAP-0482 review 3). A fresh
-// share asked once the call has spent all of its wait reads as unknown at
-// once, as a share that did not answer within its wait reads, and is read
-// once it has answered. The wait belongs to the call alone: no other call,
+// that answers within it is read (rel-1-0-6:GAP-0482 review 3). The shares
+// asked after those share the tail, each waited for half of what remains of
+// it: the wait of a later share shrinks but never drops to nothing while the
+// call has waited less than its budget, so a share that answers within it is
+// read after any number of shares that did not (rel-1-0-6:GAP-0482 review
+// 4). A fresh share asked once the wait is spent reads as unknown at once,
+// as a share that did not answer within its wait reads, and is read once it
+// has answered. The wait belongs to the call alone: no other call,
 // before it or alongside it in the same process, spends it
 // (rel-1-0-6:GAP-0482 review 2). The readers take no context, so a call is
 // the goroutine that runs it, from HookCall to its end; a read outside a
@@ -79,8 +83,10 @@ var (
 )
 
 // networkShareCallShares is how many full answer waits one hook call may
-// spend in all: two shares that do not answer cost it 1.5 s, and the hook
-// answer budget (3.5 s) keeps room for the rest of the call.
+// spend on shares that do not answer: two cost it 1.5 s. After them the
+// call has a tail of half an answer wait (0.375 s) in all, so the call
+// waits under 1.9 s whatever the number of shares, and the hook answer
+// budget (3.5 s) keeps room for the rest of the call.
 const networkShareCallShares = 2
 
 // networkShareProbeLimit bounds the shares remembered at once.
@@ -107,13 +113,20 @@ var hookCalls struct {
 
 type hookCall struct {
 	// waitLeft is how long the call may still wait for share answers
-	// (networkShareCallShares answer waits at its start).
-	waitLeft time.Duration
+	// (networkShareCallShares answer waits and tail at its start); tail is
+	// the part of it that the shares after the full waits share.
+	waitLeft, tail time.Duration
+}
+
+// shareWait is how long the call may wait for the next share: a full answer
+// wait while the full waits last, then half of what remains of the tail.
+func (call *hookCall) shareWait() time.Duration {
+	return max(call.waitLeft-call.tail, call.waitLeft/2)
 }
 
 // HookCall begins a hook call on the calling goroutine and returns its end.
 // The reads of the goroutine until then wait for share answers
-// networkShareCallShares answer waits in all. Within a call it begins
+// networkShareCallShares answer waits and a tail in all. Within a call it begins
 // nothing more, so the gateway's request and the target resolution it runs are one call.
 func HookCall() (end func()) {
 	id := goroutineID()
@@ -128,7 +141,8 @@ func HookCall() (end func()) {
 	if hookCalls.calls == nil {
 		hookCalls.calls = make(map[uint64]*hookCall)
 	}
-	hookCalls.calls[id] = &hookCall{waitLeft: networkShareCallShares * networkShareAnswerWait}
+	tail := networkShareAnswerWait / 2
+	hookCalls.calls[id] = &hookCall{waitLeft: networkShareCallShares*networkShareAnswerWait + tail, tail: tail}
 	return func() {
 		hookCalls.mu.Lock()
 		delete(hookCalls.calls, id)
@@ -219,7 +233,7 @@ func networkPathUnanswered(path string) bool {
 	wait := networkShareAnswerWait - now.Sub(probe.started)
 	call := currentHookCall()
 	if call != nil {
-		wait = min(wait, call.waitLeft)
+		wait = min(wait, call.shareWait())
 	}
 	if wait <= 0 {
 		select {
