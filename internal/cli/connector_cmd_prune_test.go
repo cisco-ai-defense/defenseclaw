@@ -811,3 +811,76 @@ func TestConnectorPruneOrphansRollbackIgnoresBackupOutsideAccountHome(t *testing
 		t.Fatalf("the file outside the account home still holds DefenseClaw entries: %v", err)
 	}
 }
+
+// A backup record whose target sits inside the older data folder is no
+// rollback proof however --data-dir is spelled: absolute, relative to the
+// working directory, or through a link (GAP-0697). The same unmodified record
+// with a linked data folder still rolls back.
+func TestConnectorPruneOrphansDataDirSpellingDoesNotValidateInDataBackupTarget(t *testing.T) {
+	pristine := []byte("{\"operator\":\"before\"}\n")
+	for _, tc := range []struct {
+		name     string
+		inData   bool
+		spelling string
+	}{
+		{"absolute", true, "absolute"},
+		{"relative", true, "relative"},
+		{"linked", true, "linked"},
+		{"linked, record names the agent file", false, "linked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+			defer withConnectorState(t, dataDir, "codex")()
+			installed, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.inData {
+				found := false
+				walkErr := filepath.Walk(filepath.Join(saved, "connector_backups"), func(p string, info os.FileInfo, err error) error {
+					if err != nil || info.IsDir() || !strings.HasSuffix(p, ".json") {
+						return err
+					}
+					var rec map[string]any
+					data, err := os.ReadFile(p)
+					if err != nil || json.Unmarshal(data, &rec) != nil {
+						t.Fatalf("read record: %v", err)
+					}
+					rec["path"] = filepath.Join(dataDir, "config.json")
+					if data, err = json.Marshal(rec); err != nil {
+						return err
+					}
+					found = true
+					return os.WriteFile(p, data, 0o600)
+				})
+				if walkErr != nil || !found {
+					t.Fatalf("no backup record to change: found=%v err=%v", found, walkErr)
+				}
+			}
+			flagDir := dataDir
+			switch tc.spelling {
+			case "relative":
+				t.Chdir(filepath.Dir(dataDir))
+				flagDir = filepath.Base(dataDir)
+			case "linked":
+				flagDir = filepath.Join(filepath.Dir(dataDir), "linked-older-data")
+				if err := os.Symlink(dataDir, flagDir); err != nil {
+					t.Skipf("cannot create a link: %v", err)
+				}
+			}
+			cfg = nil
+			_, stderr, _ := runConnectorCmd(t, "prune-orphans", "--data-dir", flagDir, "--rollback-backups-dir", saved)
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refused := strings.Contains(stderr, "nothing was removed") && bytes.Equal(after, installed)
+			if tc.inData && !refused {
+				t.Fatalf("in-data target accepted with a %s data folder: stderr=%q", tc.spelling, stderr)
+			}
+			if !tc.inData && !bytes.Equal(after, pristine) {
+				t.Fatalf("rollback with a %s data folder did not restore: stderr=%q file=%q", tc.spelling, stderr, after)
+			}
+		})
+	}
+}
