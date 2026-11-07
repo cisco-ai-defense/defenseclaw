@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 )
 
@@ -123,5 +124,58 @@ func TestHookAssetFactsReadTheAgentCommandLine(t *testing.T) {
 	args = []string{"claude", "--mcp-config", filepath.Join(home, "missing.json")}
 	if got := facts("claudecode", "mcp__acme-notes__count_words"); got.MCP != nil || got.MCPUnproven != "acme-notes" {
 		t.Fatalf("unreadable --mcp-config facts = %+v, want the server unproven", got)
+	}
+}
+
+// GAP-0686: the hook says when the definition it read is in the config.toml
+// of a CODEX_HOME other than ~/.codex, so the gateway judges the file the
+// agent runs and a managed Windows gateway admits only a published one.
+func TestHookAssetFactsMarkTheRelocatedCodexConfig(t *testing.T) {
+	home := t.TempDir()
+	for _, name := range []string{"HOME", "USERPROFILE"} {
+		t.Setenv(name, home)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	saved := hookAgentCommandLine
+	t.Cleanup(func() { hookAgentCommandLine = saved })
+	hookAgentCommandLine = func() ([]string, string, error) { return nil, "", agentprocess.ErrNoAgent }
+	write := func(dir, url string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte("[mcp_servers.notes]\nurl = \""+url+"\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(home, ".codex"), "http://127.0.0.1:28562/mcp")
+	relocated := filepath.Join(t.TempDir(), "codex-home")
+	write(relocated, "http://127.0.0.1:28561/mcp")
+	project := t.TempDir()
+	facts := func(connector string) *assetfacts.MCPServer {
+		t.Helper()
+		got, _ := assetfacts.Decode(hookAssetFacts(connector, []byte(`{"tool_name":"mcp__notes__count_words","cwd":"`+filepath.ToSlash(project)+`"}`)))
+		return got.MCP
+	}
+	t.Setenv("CODEX_HOME", relocated)
+	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28561/mcp" || !got.Relocated {
+		t.Fatalf("CODEX_HOME facts = %+v, want the relocated definition marked", got)
+	}
+	// Twins that stay unmarked: no CODEX_HOME, CODEX_HOME naming the default
+	// folder, and another connector.
+	t.Setenv("CODEX_HOME", "")
+	if got := facts("codex"); got == nil || got.URL != "http://127.0.0.1:28562/mcp" || got.Relocated {
+		t.Fatalf("default facts = %+v, want the default definition unmarked", got)
+	}
+	t.Setenv("CODEX_HOME", filepath.Join(home, ".codex"))
+	if got := facts("codex"); got == nil || got.Relocated {
+		t.Fatalf("CODEX_HOME=~/.codex facts = %+v, want it unmarked", got)
+	}
+	t.Setenv("CODEX_HOME", relocated)
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"mcpServers":{"notes":{"type":"http","url":"http://127.0.0.1:28562/mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := facts("claudecode"); got == nil || got.Relocated {
+		t.Fatalf("claude facts = %+v, want them unmarked", got)
 	}
 }

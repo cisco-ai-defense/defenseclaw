@@ -454,6 +454,16 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 	if !serviceAccount {
 		return cfg.LookupMCPToolServerForConnector(connector, cwd, name)
 	}
+	// The config file the agent runs is the one under its CODEX_HOME, which
+	// the hook read; the default under the home is not the server it starts
+	// (GAP-0686).
+	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Relocated && connector == "codex" &&
+		config.SameMCPToolServer(connector, server.Name, name) {
+		return config.MCPServerEntry{
+			Name: server.Name, URL: server.URL, Command: server.Command,
+			Args: append([]string(nil), server.Args...), Transport: server.Transport,
+		}, true
+	}
 	if home != "" {
 		// Native MCP readers guard each config file; a refused file is
 		// treated like any other unreadable source, so other files remain.

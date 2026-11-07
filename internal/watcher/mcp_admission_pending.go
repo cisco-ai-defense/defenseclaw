@@ -9,6 +9,7 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -178,6 +179,32 @@ func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
 	return strings.HasSuffix(fingerprint, mcpScanFailedMark) ||
 		strings.HasSuffix(fingerprint, mcpLauncherRefusedMark) ||
 		strings.HasSuffix(fingerprint, unverifiedMCPMark)
+}
+
+// MCPDefinitionPublished reports whether the servers this watcher admits for
+// the caller (q) include one with the URL, command and arguments of def. A
+// managed Windows gateway learns an enrolled account's Codex servers only
+// from the record the enumerator publishes; a definition the account's agent
+// runs that is not in it was never scanned (GAP-0686).
+func (w *InstallWatcher) MCPDefinitionPublished(q MCPAdmissionQuery, def config.MCPServerEntry) bool {
+	if w == nil {
+		return false
+	}
+	servers, err := w.readMCPServers()
+	if err != nil {
+		return false
+	}
+	for _, server := range servers {
+		if server.Bundled || !mcpServerServesQuery(server, q) {
+			continue
+		}
+		if strings.TrimSpace(server.URL) == strings.TrimSpace(def.URL) &&
+			strings.TrimSpace(server.Command) == strings.TrimSpace(def.Command) &&
+			slices.Equal(server.Args, def.Args) {
+			return true
+		}
+	}
+	return false
 }
 
 // mcpBaselineMatches reports whether the baseline admission recorded for an

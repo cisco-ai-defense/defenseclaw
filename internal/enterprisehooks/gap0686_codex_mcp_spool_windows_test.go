@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -16,18 +17,22 @@ import (
 )
 
 // GAP-0686: the enumerator publishes, for every account it enrolls for
-// Codex, the servers of ~/.codex/config.toml and of the config.toml under
-// the account persistent CODEX_HOME, each account in its own record. A file
-// it cannot read as the account makes that account record unreadable (no
-// servers), never an empty list, and leaves the other accounts alone.
+// Codex, the servers of the one config.toml Codex reads for it: the file
+// under the account persistent CODEX_HOME when that is set, else
+// ~/.codex/config.toml. Each account has its own record. A file it cannot
+// read as the account makes that account record unreadable (no servers),
+// never an empty list, and leaves the other accounts alone. The default file
+// of an account whose Codex reads CODEX_HOME is never read: a same-named old
+// definition does not displace the one that runs, and an unreadable default
+// does not refuse the account calls.
 func TestGAP0686WindowsCodexRecordPerAccountWithCodexHome(t *testing.T) {
 	root := t.TempDir()
 	alice, bob := filepath.Join(root, "alice"), filepath.Join(root, "bob")
 	const aliceSID, bobSID = "S-1-5-21-1-1001", "S-1-5-21-1-1002"
 	relocated := filepath.Join(root, "codex-home-alice")
 	files := map[string]string{
-		strings.ToLower(filepath.Join(alice, ".codex", "config.toml")): "[mcp_servers.r109loop]\ncommand = \"node\"\nargs = [\"server.js\"]\n",
-		strings.ToLower(filepath.Join(relocated, "config.toml")):       "[mcp_servers.r109home]\nurl = \"http://127.0.0.1:28561/mcp\"\n",
+		strings.ToLower(filepath.Join(alice, ".codex", "config.toml")): "[mcp_servers.r109loop]\ncommand = \"node\"\nargs = [\"server.js\"]\n[mcp_servers.notes]\nurl = \"http://127.0.0.1:1/old\"\n",
+		strings.ToLower(filepath.Join(relocated, "config.toml")):       "[mcp_servers.r109home]\nurl = \"http://127.0.0.1:28561/mcp\"\n[mcp_servers.notes]\nurl = \"http://127.0.0.1:2/new\"\n",
 		strings.ToLower(filepath.Join(bob, ".codex", "config.toml")):   "[mcp_servers.r109loop]\ncommand = \"node\"\nargs = [\"other.js\"]\n",
 	}
 	failing := map[string]error{}
@@ -71,10 +76,20 @@ func TestGAP0686WindowsCodexRecordPerAccountWithCodexHome(t *testing.T) {
 			}
 			out = append(out, server.Name)
 		}
+		sort.Strings(out)
 		return strings.Join(out, ","), unreadable
 	}
-	if got, unreadable := names(aliceSID); got != "r109loop,r109home" || unreadable != nil {
-		t.Fatalf("alice published %q (%+v), want her default and CODEX_HOME servers", got, unreadable)
+	if got, unreadable := names(aliceSID); got != "notes,r109home" || unreadable != nil {
+		t.Fatalf("alice published %q (%+v), want only the CODEX_HOME servers", got, unreadable)
+	}
+	servers, _, err := ReadMCPSpool(dir, aliceSID, "codex", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, server := range servers {
+		if server.Name == "notes" && server.URL != "http://127.0.0.1:2/new" {
+			t.Fatalf("alice notes is %q; the default file definition displaced the one Codex runs", server.URL)
+		}
 	}
 	if got, unreadable := names(bobSID); got != "r109loop" || unreadable != nil {
 		t.Fatalf("bob published %q (%+v), want his own server", got, unreadable)
@@ -82,6 +97,16 @@ func TestGAP0686WindowsCodexRecordPerAccountWithCodexHome(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "S-1-5-21-1-1003.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("an account not enrolled for Codex has a Codex record: %v", err)
 	}
+
+	// An unreadable default file Codex does not read changes nothing.
+	failing[strings.ToLower(filepath.Join(alice, ".codex", "config.toml"))] = errWindowsAccountFileNotOwned
+	if err := WriteWindowsMCPSpool(dir, "codex", manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	if got, unreadable := names(aliceSID); got != "notes,r109home" || unreadable != nil {
+		t.Fatalf("alice published %q (%+v) with an unused default file unreadable, want her CODEX_HOME servers", got, unreadable)
+	}
+	delete(failing, strings.ToLower(filepath.Join(alice, ".codex", "config.toml")))
 
 	failing[strings.ToLower(filepath.Join(relocated, "config.toml"))] = errWindowsAccountFileNotOwned
 	if err := WriteWindowsMCPSpool(dir, "codex", manifest, nil, t.Logf); err != nil {
