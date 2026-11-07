@@ -1208,3 +1208,29 @@ func TestGAP0714FailedPIDWriteTakesBackOnlyItsOwnRecord(t *testing.T) {
 		t.Fatalf("another process's PID record = %+v, %v", got, err)
 	}
 }
+
+// GAP-0714: a start whose home's owner cannot be proven is refused before the
+// first write. The log file and the lock are created before the PID record,
+// so refusing at the PID write left them root-owned for the account's start.
+func TestGAP0714RefusedStartWritesNothingIntoTheHome(t *testing.T) {
+	old := preflightStartHome
+	t.Cleanup(func() { preflightStartHome = old })
+	preflightStartHome = func(string) error {
+		return errors.New("safefile: private directory has an untrusted owner")
+	}
+	home := t.TempDir()
+	d := New(home)
+	pid, err := d.Start(nil)
+	if err == nil || pid != 0 || !strings.Contains(err.Error(), "untrusted owner") {
+		t.Fatalf("Start in an unprovable home = %d, %v", pid, err)
+	}
+	entries, readErr := os.ReadDir(home)
+	if readErr != nil || len(entries) != 0 {
+		t.Fatalf("the refused start left %d entries in the home (%v): %v", len(entries), readErr, entries)
+	}
+	// The benign twin: a provable home is not refused by this step.
+	preflightStartHome = func(string) error { return nil }
+	if err := RefuseStartInUntrustedHome(home); err != nil {
+		t.Fatalf("a provable home was refused: %v", err)
+	}
+}

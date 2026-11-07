@@ -885,9 +885,16 @@ def test_doctor_leftovers_remedy_returns_install_home_and_moved_store(monkeypatc
 
     remediation = result.checks[-1]["remediation"]
     assert _chowned_dirs(remediation) == [os.fspath(home), os.fspath(store)]
-    assert remediation.index("chown") < remediation.index("defenseclaw-gateway start")
-    assert "stopped first" in remediation and "stop" in remediation.rsplit("stopped first", 1)[1]
+    # One chain, in the order it must run: stop (succeeds when the gateway is
+    # already stopped), return the files, start. A live root gateway makes the
+    # start before the stop fail, so the stop comes first.
+    steps = remediation.split(": sudo env ", 1)[1].split(" && ")
+    assert len(steps) == 3, remediation
+    assert steps[0].endswith(" stop") and steps[0].startswith("DEFENSECLAW_HOME=")
+    assert steps[1].startswith('sudo chown -R "$(id -un)" ')
+    assert steps[2] == "defenseclaw-gateway start"
     assert "rerun the gateway once with sudo" not in remediation
+    assert "stopped first" not in remediation
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")

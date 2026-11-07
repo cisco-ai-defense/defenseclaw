@@ -1928,14 +1928,13 @@ def _root_leftovers_remedy(cfg) -> str:
 
     The gateway refuses to run as root over an account's files, so asking for
     another sudo run cannot repair them (GAP-0711, GAP-0713). The same
-    sequence as ``_root_gateway_remedy``: return the install home and the
-    moved store, then start as this account.
+    stop, return, start sequence as ``_root_gateway_remedy``, in that order:
+    a root gateway that is still alive keeps writing, and the stop of one that
+    is already stopped succeeds, so the sequence reads the same either way.
     """
     return (
-        "give the files back to this account and start the gateway: "
-        + _root_gateway_return_and_start_command(cfg)
-        + "; a gateway still running as root must be stopped first with: "
-        + _root_gateway_stop_command(cfg)
+        "stop the gateway if it runs as root, give its files back to this account and start it as yourself: "
+        + _root_gateway_recovery_command(cfg)
     )
 
 

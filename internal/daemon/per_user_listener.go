@@ -4,6 +4,10 @@
 package daemon
 
 import (
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -14,7 +18,6 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // PerUserListenerClass describes a listener for display. It never authorizes
@@ -60,63 +63,106 @@ func rootGatewayRemedyFor(goos, dataDir string) string {
 // rootGatewayRecoveryCommand stops the root gateway, returns the install home
 // and the moved store to the calling account and starts the gateway as that
 // account. The root run leaves root-owned files in both (GAP-0711, GAP-0713).
+// When the home's configuration exists but cannot say where the store is, the
+// sequence names the install home only and says so, instead of presenting
+// itself as complete.
 func rootGatewayRecoveryCommand(dataDir string) string {
-	dirs := rootGatewayRecoveryDirs(dataDir)
+	dirs, configFile, storeErr := rootGatewayRecoveryDirs(dataDir)
 	for i, dir := range dirs {
 		dirs[i] = shellQuote(dir)
 	}
-	return rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ") +
+	command := rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ") +
 		" && defenseclaw-gateway start"
+	if storeErr != nil {
+		command += " (the configuration " + shellQuote(configFile) + " could not be read here, so a data_dir it sets is " +
+			"not in the chown above: return that folder to your account too)"
+	}
+	return command
 }
 
 // rootGatewayRecoveryDirs are the directories a root-run gateway for the
 // install home writes to: the home that holds the PID record, and the store
 // that home's config moved the data to (defenseclaw config set data_dir). A
 // chown of the home alone leaves the store's connector state root-owned, so
-// the account start fails on it.
-func rootGatewayRecoveryDirs(installHome string) []string {
+// the account start fails on it. configFile and a non-nil err report a
+// configuration that exists but names no readable store.
+func rootGatewayRecoveryDirs(installHome string) (dirs []string, configFile string, err error) {
 	home := absoluteDataDir(installHome)
-	dirs := []string{home}
-	if store := movedStoreOfHome(home); store != "" && store != home {
+	dirs = []string{home}
+	store, configFile, err := movedStoreOfHome(home)
+	if store != "" && store != home {
 		dirs = append(dirs, store)
 	}
-	return dirs
+	return dirs, configFile, err
 }
 
-// movedStoreOfHome reads data_dir from the config the gateway reads for the
-// install home: DEFENSECLAW_CONFIG when set, else home/config.yaml. It
-// returns "" when there is none, it cannot be read or it names no directory.
-// A relative data_dir is taken relative to the config file, as the gateway does.
-func movedStoreOfHome(home string) string {
-	configFile := os.Getenv(managed.ConfigPathEnv)
+// movedStoreOfHome resolves the store the way the gateway does. The gateway
+// is started with the install home as its working directory, so a relative
+// DEFENSECLAW_CONFIG and a relative data_dir are both taken from there (the
+// loader makes a config path absolute and the compiler a data_dir, each from
+// the working directory). The config is opened as the loader opens it, so a
+// link to it is followed. It returns "" and no error when there is no config
+// or it sets no data_dir, and an error when the config exists but cannot be
+// read or parsed, so the caller can say the recovery is incomplete.
+func movedStoreOfHome(home string) (store, configFile string, err error) {
+	configFile = os.Getenv(managed.ConfigPathEnv)
 	if configFile == "" {
 		configFile = filepath.Join(home, "config.yaml")
 	}
 	if !filepath.IsAbs(configFile) {
-		return ""
+		configFile = filepath.Join(home, configFile)
 	}
-	raw, err := safefile.ReadRegularFileBounded(configFile, maxRemedyConfigBytes)
+	configFile = filepath.Clean(configFile)
+	raw, err := readRemedyConfig(configFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", configFile, nil
+	}
 	if err != nil {
-		return ""
+		return "", configFile, err
 	}
 	var source struct {
 		DataDir string `yaml:"data_dir"`
 	}
-	if yaml.Unmarshal(raw, &source) != nil {
-		return ""
+	if err := yaml.Unmarshal(raw, &source); err != nil {
+		return "", configFile, err
 	}
-	store := strings.TrimSpace(source.DataDir)
+	store = strings.TrimSpace(source.DataDir)
 	if store == "" {
-		return ""
+		return "", configFile, nil
 	}
 	if !filepath.IsAbs(store) {
-		store = filepath.Join(filepath.Dir(configFile), store)
+		store = filepath.Join(home, store)
 	}
-	return filepath.Clean(store)
+	return filepath.Clean(store), configFile, nil
 }
 
-// maxRemedyConfigBytes bounds the config read for a remedy. A larger file
-// names no store here; the remedy then covers the install home only.
+// readRemedyConfig reads at most maxRemedyConfigBytes of the file the way the
+// gateway's config loader opens it (a link is followed) and requires a
+// regular file.
+func readRemedyConfig(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxRemedyConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxRemedyConfigBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, maxRemedyConfigBytes)
+	}
+	return raw, nil
+}
+
+// maxRemedyConfigBytes bounds the config read for a remedy.
 const maxRemedyConfigBytes = 4 << 20
 
 func rootGatewayStopCommand(dataDir string) string {

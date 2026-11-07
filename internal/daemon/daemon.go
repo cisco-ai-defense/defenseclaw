@@ -619,7 +619,31 @@ func (d *Daemon) ValidateStartIdentityFiles() error {
 	return nil
 }
 
+// RefuseStartInUntrustedHome is the first step of a start. A root run writes
+// the lock, log, PID record and login path into the home before the ownership
+// step that gives them back, so a home whose owner it cannot prove must be
+// refused before the first write: a refusal after it leaves root-owned files
+// that stop the account's own start (GAP-0714). It is the check
+// safefile.ReclaimToDirectoryOwner makes, run early. A managed install keeps
+// its own trust model.
+func RefuseStartInUntrustedHome(dataDir string) error {
+	if managed.IsManagedEnterprise(managed.PinnedDeploymentMode()) {
+		return nil
+	}
+	if err := preflightStartHome(dataDir); err != nil {
+		return fmt.Errorf("daemon: refusing to start: %w", err)
+	}
+	return nil
+}
+
+// preflightStartHome is the ownership check RefuseStartInUntrustedHome runs. A
+// variable so a test can stand in for the root run it cannot be.
+var preflightStartHome = safefile.PreflightReclaimDirectory
+
 func (d *Daemon) Start(args []string) (int, error) {
+	if err := RefuseStartInUntrustedHome(d.dataDir); err != nil {
+		return 0, err
+	}
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return 0, err
 	}
