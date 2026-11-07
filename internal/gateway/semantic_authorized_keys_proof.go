@@ -2096,11 +2096,13 @@ func interpreterCommentStart(code string, i int, language string) bool {
 // that file), which the checks below judge as they judge a write_file target.
 // A link that changes after the hook read it is refused by the hook itself
 // (hookpaths.PatchTargetWatch, after the answer and again once it is written).
+// The strict policy tier does not trust a link it cannot read again: there
+// only a target resolved to itself is proved (request.strictPatchLinks).
 func hermesClientPatchTarget(request trustedActionRequest, clientTargets map[string]string, clientCWD, target string) bool {
 	return request.ProtectedHomeHook && filepath.IsAbs(clientCWD) && filepath.IsAbs(target) &&
 		clientTargets[hookpaths.CWDKey] == clientCWD &&
 		clientTargets[hookpaths.PatchCompleteKey] == "1" &&
 		clientTargets[hookpaths.TruncatedKey] == "" &&
 		clientTargets[hookpaths.UnprovenReasonKey] == "" &&
-		clientTargets[target] != ""
+		clientTargets[target] != "" && (!request.strictPatchLinks || clientTargets[target] == target)
 }

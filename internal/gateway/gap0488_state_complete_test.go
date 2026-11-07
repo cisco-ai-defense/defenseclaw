@@ -135,3 +135,24 @@ func TestG622b9LinksToStateStayBlockedForNativePatches(t *testing.T) {
 		}
 	}
 }
+
+// The strict policy tier does not trust a Hermes V4A link it cannot read
+// again: an ordinary project symlink is refused there (owner steer: the
+// protective rule that causes the false block moves to strict), while an
+// ordinary hard link, which has no link to retarget, stays allowed.
+func TestG622b9StrictTierRefusesAnUnreadableHermesLinkOnly(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	notes := filepath.Join(project, "notes.txt")
+	if err := os.Symlink(notes, filepath.Join(project, "soft-link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(notes, filepath.Join(project, "hard-link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"soft-link.txt": "block", "hard-link.txt": "allow", "notes.txt": "allow"} {
+		if got := g622b9PatchOutcome(t, "hermes", home, project, name, "strict"); got.action != want {
+			t.Errorf("strict, %s: %s, want %s", name, got, want)
+		}
+	}
+}
