@@ -16442,6 +16442,9 @@ def _restart_services(
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
+    # OpenClaw restart failed but its gateway answers (GAP-0744); the note that
+    # the config is kept is printed at the end, only if nothing else failed.
+    kept_note_pending = False
 
     hook_targets = sorted(
         {
@@ -16640,14 +16643,7 @@ def _restart_services(
         if not _check_openclaw_gateway(oc_host, oc_port):
             failed.append("openclaw-gateway")
         elif not restart_ok:
-            click.echo(
-                "  OpenClaw could not restart its gateway through a service manager here, but the "
-                f"gateway answers at {oc_host}:{oc_port}, so the new configuration is kept."
-            )
-            click.echo(
-                "    OpenClaw reloads openclaw.json on its own; if it does not load the DefenseClaw "
-                "plugin, restart the gateway where it runs (for example `openclaw gateway run` in its terminal)."
-            )
+            kept_note_pending = True
     elif connector in _PROXY_BACKED_CONNECTORS:
         # OpenClaw is the only proxy-backed connector that owns its own
         # gateway process; others (ZeptoClaw today) get the proxy
@@ -16679,6 +16675,17 @@ def _restart_services(
             )
 
     click.echo()
+    if kept_note_pending and not failed:
+        # Said only when nothing else failed: with a failed defenseclaw-gateway
+        # restart the setup rolls back, and the config is not kept.
+        click.echo(
+            "  OpenClaw could not restart its gateway through a service manager here, but the "
+            f"gateway answers at {oc_host}:{oc_port}, so the new configuration is kept."
+        )
+        click.echo(
+            "    OpenClaw reloads openclaw.json on its own; if it does not load the DefenseClaw "
+            "plugin, restart the gateway where it runs (for example `openclaw gateway run` in its terminal)."
+        )
     _fail_if_restart_failed(failed)
 
 
@@ -17716,7 +17723,7 @@ def _restart_openclaw_gateway() -> bool:
     effect.
 
     Returns True when the restart succeeded, False on any failure
-    (missing CLI, timeout, or non-zero exit). Avarice F-0143: this used
+    (missing or unrunnable CLI, timeout, or non-zero exit). Avarice F-0143: this used
     to swallow every failure and return ``None`` so the caller could not
     tell the OpenClaw gateway never came back — setup then reported
     success while traffic kept flowing past a down (fail-open) gateway."""
@@ -17770,6 +17777,13 @@ def _restart_openclaw_gateway() -> bool:
         # (GAP-0744), and the native DefenseClaw gateway helper below performs
         # its own identity-aware timeout reconciliation.
         ux.echo(" ✗ (timed out)")
+        return False
+    except OSError as exc:
+        # Any other failure to start the command (not executable, wrong
+        # executable format, no permission) is a failed restart like a missing
+        # CLI; the caller decides from the health probe (GAP-0744).
+        ux.echo(f" ✗ (could not run the openclaw CLI: {exc.strerror or type(exc).__name__})")
+        click.echo("    Fix the openclaw CLI or restart its gateway manually.")
         return False
 
 

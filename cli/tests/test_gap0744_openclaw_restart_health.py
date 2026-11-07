@@ -84,11 +84,50 @@ def test_restart_command_failing_on_a_missing_service_manager_is_not_a_gateway_f
 
 
 def test_defenseclaw_gateway_failure_still_fails_even_when_openclaw_answers(tmp_path) -> None:
+    buf = io.StringIO()
     with (
         patch.object(cmd_setup, "_restart_defense_gateway", return_value=False),
         patch.object(cmd_setup, "_restart_openclaw_gateway", return_value=False),
         patch.object(cmd_setup, "_check_openclaw_gateway", return_value=True),
-        contextlib.redirect_stdout(io.StringIO()),
+        contextlib.redirect_stdout(buf),
         pytest.raises(ClickException),
     ):
         cmd_setup._restart_services(str(tmp_path), connector="openclaw")
+    # The setup rolls back here, so it must not claim the configuration is kept.
+    assert "configuration is kept" not in buf.getvalue()
+
+
+_UNRUNNABLE = [
+    PermissionError(13, "Permission denied"),
+    OSError(8, "Exec format error"),
+    FileNotFoundError(2, "No such file or directory"),
+]
+
+
+@pytest.mark.parametrize("exc", _UNRUNNABLE, ids=lambda e: type(e).__name__ + str(e.errno))
+def test_openclaw_cli_that_cannot_run_is_decided_by_the_health_probe(tmp_path, exc: OSError) -> None:
+    buf = io.StringIO()
+    with (
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
+        patch.object(cmd_setup.subprocess, "run", side_effect=exc),
+        patch.object(cmd_setup, "_check_openclaw_gateway", return_value=True) as check,
+        contextlib.redirect_stdout(buf),
+    ):
+        cmd_setup._restart_services(str(tmp_path), connector="openclaw")
+    check.assert_called_once()
+    assert "the new configuration is kept" in buf.getvalue()
+
+
+@pytest.mark.parametrize("exc", _UNRUNNABLE, ids=lambda e: type(e).__name__ + str(e.errno))
+def test_openclaw_cli_that_cannot_run_with_a_down_gateway_still_rolls_back(tmp_path, exc: OSError) -> None:
+    buf = io.StringIO()
+    with (
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
+        patch.object(cmd_setup.subprocess, "run", side_effect=exc),
+        patch.object(cmd_setup, "_check_openclaw_gateway", return_value=False) as check,
+        contextlib.redirect_stdout(buf),
+        pytest.raises(cmd_setup._OpenClawGatewayNotRunning),
+    ):
+        cmd_setup._restart_services(str(tmp_path), connector="openclaw")
+    check.assert_called_once()
+    assert "configuration is kept" not in buf.getvalue()
