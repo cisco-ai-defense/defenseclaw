@@ -131,6 +131,36 @@ try {
                 if ((Get-Sddl $path).Contains(';;;BU)')) { throw "admin file stamp after $($entry.Name) let go left the Users entry" }
             }
 
+            # g582 round 11c, M1. A file that already carries the canonical
+            # access list is not probed: no holder is in the way of a write
+            # that is not needed, and nothing is written.
+            foreach ($entry in $holders) {
+                $path = New-DriftedFile ('canonical-' + [Guid]::NewGuid().ToString('N') + '.toml')
+                Set-DefenseClawPathAcl -Path $path -Kind MachinePolicyFile -GatewayServiceSID $admins
+                $handle = Open-Holder $path $entry.Access $entry.Share
+                try {
+                    $before = Get-Sddl $path
+                    Set-DefenseClawPathAcl -Path $path -Kind MachinePolicyFile -GatewayServiceSID $admins
+                    if ((Get-Sddl $path) -ne $before) { throw "canonical file with $($entry.Name): the access list changed" }
+                }
+                finally { Close-Holder $handle }
+            }
+
+            # A hook copy of the Codex state (.state.<n>) that a user holds is
+            # neither re-stamped in place nor refused, whatever the holder;
+            # once released it is stamped as any other file.
+            foreach ($entry in $holders) {
+                $path = New-DriftedFile ('.defenseclaw-managed-hooks.state.' + (Get-Random -Minimum 10 -Maximum 99999) )
+                $handle = Open-Holder $path $entry.Access $entry.Share
+                try {
+                    $before = Get-Sddl $path
+                    Set-DefenseClawPathAcl -Path $path -Kind MachinePolicyFile -GatewayServiceSID $admins
+                    if ((Get-Sddl $path) -ne $before) { throw "state copy held by $($entry.Name): stamped in place" }
+                }
+                finally { Close-Holder $handle }
+                Assert-Healed { Set-DefenseClawPathAcl -Path $path -Kind MachinePolicyFile -GatewayServiceSID $admins } $path "state copy after $($entry.Name) let go"
+            }
+
             # An antivirus scan or a backup agent reads with delete sharing: it does not stop the heal.
             $path = New-DriftedFile ('reader-' + [Guid]::NewGuid().ToString('N') + '.toml')
             $handle = Open-Holder $path ($READ_DATA -bor $READ_ATTR) ($SHARE_R -bor $SHARE_W -bor $SHARE_D)
