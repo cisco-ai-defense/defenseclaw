@@ -76,6 +76,9 @@ from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
     FileSnapshot,
     fail_mode_transaction_lock,
+    proxy_model_outage_mode,
+    proxy_outage_summary,
+    proxy_requests_note,
     reconcile_connector_registration,
     registration_integrity_drift,
     resolve_connector_fail_mode,
@@ -1029,10 +1032,9 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
         cfm = configured_cfm
         fail_drift = ""
         if _is_proxy_connector(name):
-            # A proxy-backed connector has no hooks: its model calls fail
-            # while the gateway is down, as `guardrail fail-mode` shows
-            # (GAP-1963 R6-F1). The hook outage mode does not apply.
-            cfm = "closed"
+            # A proxy-backed connector has no hooks: its model calls follow the
+            # outage mode `guardrail fail-mode` shows (GAP-0824).
+            cfm = proxy_model_outage_mode(app.cfg, name)
         elif normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS:
             runtime_state = resolve_connector_fail_mode(app.cfg, name)
             if runtime_state.runtime is not None:
@@ -1064,12 +1066,6 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
             if cfm == "closed":
                 runtime_limit_rows.append(f"{_connector_label(name)} ({name}) is closed: {runtime_state.limit}")
-        if _is_proxy_connector(name):
-            # A proxy connector has no hooks: its proxy refuses every call
-            # while the gateway is down, whatever hook_fail_mode says. Show
-            # what `guardrail fail-mode` shows (GAP-1646), so neither the
-            # Fail column nor a hooks-allow warning over-states the risk.
-            cfm = "closed"
         # Per-connector on/off: a connector turned off via
         # `guardrail disable --connector X` is reported as disabled so the
         # roster never implies it is enforcing when its hooks have been torn
@@ -1102,7 +1098,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                     f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
                     f"to a hook the agent does not run; repair: {repair_command(name, unrunnable)}"
                 )
-            elif cfm == "open" and not upstream_fail_open(app.cfg, name) and (
+            elif cfm == "open" and not _is_proxy_connector(name) and not upstream_fail_open(app.cfg, name) and (
                 (cmode or "") == "action" or _action_profiles_for(gc, name)
             ):
                 # An upgrade keeps the fail mode an older setup chose, while a
@@ -1749,7 +1745,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         # mode of their PATH shims, which ask the gateway program for it each
         # time they run (rel-1-0-6 GAP-0576).
         ux.subhead(_proxy_shim_fail_mode_note(label, mode), indent="  ")
-        ux.subhead(_PROXY_REQUESTS_NOTE, indent="    ")
+        ux.subhead(proxy_requests_note(app.cfg, key, saved=mode), indent="    ")
     elif outage_only and mode == "closed":
         ux.warn(f"A gateway outage will now BLOCK supported {label} calls.", indent="  ")
         ux.subhead("Other delivery and response failures remain closed.", indent="    ")
@@ -2103,7 +2099,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         if not enforcing:
             shown = "disabled (no hooks)"
         elif _is_proxy_connector(name):
-            shown = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+            shown = proxy_outage_summary(proxy_model_outage_mode(app.cfg, name))
         else:
             tier = gc.hook_policy_tier(name) if hasattr(gc, "hook_policy_tier") else "default"
             resolver = getattr(gc, "effective_hook_fail_mode", None)
@@ -2254,7 +2250,7 @@ def fail_mode_cmd(
                 elif _state.note:
                     _eff += f" ({_state.note})"
             elif _is_proxy_connector(_name):
-                _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+                _eff = proxy_outage_summary(proxy_model_outage_mode(app.cfg, _name))
             if _enforcing and normalize_connector(_name) not in _RUNTIME_FAIL_MODE_CONNECTORS:
                 # A hook entry the agent skips, or one that does not run
                 # DefenseClaw's current hook, leaves calls unchecked whatever
@@ -2433,12 +2429,14 @@ def fail_mode_cmd(
         if single_explicit:
             for name in active_names:
                 ux.subhead(_proxy_shim_fail_mode_note(_connector_label(name), mode), indent="  ")
-            ux.subhead(_PROXY_REQUESTS_NOTE, indent="    ")
+                ux.subhead(proxy_requests_note(app.cfg, name, saved=mode), indent="    ")
         else:
             ux.subhead(
-                "No active hooks use this setting; proxy-backed connectors still block while the gateway is down. "
-                "The choice is saved for hook connectors added later.", indent="  ",
+                "No active hooks use this setting. The choice is saved for hook connectors added later.", indent="  "
             )
+            for name in active_names:
+                note = proxy_requests_note(app.cfg, name, saved=mode)
+                ux.subhead(f"{_connector_label(name)}: {note}", indent="    ")
     elif outage_only and mode == "closed":
         ux.warn("A gateway outage will now BLOCK supported calls. Other failures remain closed.", indent="  ")
     elif outage_only:
@@ -2525,9 +2523,6 @@ def _is_proxy_connector(name: str) -> bool:
     from defenseclaw.platform_support import PROXY_CONNECTORS
 
     return normalize_connector(name) in PROXY_CONNECTORS
-
-
-_PROXY_REQUESTS_NOTE = "Its proxied model requests are blocked while the gateway is down, whatever this value says."
 
 
 def _proxy_shim_fail_mode_note(label: str, mode: str) -> str:
