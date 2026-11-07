@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -61,7 +62,10 @@ func launcherRefusalFor(goos string) string {
 	if platform == "darwin" {
 		platform = "macos"
 	}
-	gateway := filepath.Join(layout.BinDir, "defenseclaw-gateway")
+	// The layout is the target OS's POSIX layout, so join with path, not the
+	// host separator: the text must be the same when a Windows host evaluates
+	// the Linux or macOS refusal (the docs fixture).
+	gateway := path.Join(layout.BinDir, "defenseclaw-gateway")
 	return message + fmt.Sprintf(" For administrator views, run `sudo %s enterprise %s status`, `sudo %s enterprise %s verify`, or `sudo %s audit export --since 2h`. The managed launcher does not offer doctor, alerts, or tui.", gateway, platform, gateway, platform, gateway)
 }
 
