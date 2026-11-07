@@ -58,7 +58,7 @@ func TestGAP0730RefusalNamesEveryOpenFolderOutermostFirstWithOneCommand(t *testi
 	if want := "chmod go-w " + config + " " + opencode; !strings.Contains(text, want) {
 		t.Fatalf("refusal lacks one command for both folders %q:\n%s", want, text)
 	}
-	if strings.Index(text, "outermost first: "+config) < 0 || strings.Index(text, config+", "+opencode) < 0 {
+	if !strings.Contains(text, "outermost first: "+config) || !strings.Contains(text, config+", "+opencode) {
 		t.Fatalf("refusal does not list the outer folder first:\n%s", text)
 	}
 	if !strings.Contains(text, opencode+" has group/other writable mode") {
