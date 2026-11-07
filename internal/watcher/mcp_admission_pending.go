@@ -98,12 +98,18 @@ func failedMCPStatus(server config.MCPServerEntry) MCPAdmissionStatus {
 	return MCPAdmissionStatus{Name: server.Name, Failed: true, ScanIssue: mcpScanIssue(server)}
 }
 
+// mcpAdmissionOutcome is the latest completed admission of one definition.
+type mcpAdmissionOutcome struct {
+	hash   string
+	failed bool
+}
+
 // noteMCPAdmissionOutcome records the outcome of an admission run on snap's
-// definition as soon as it is decided: a scan failure is kept by (key, hash)
-// so MCPAdmissionStatus reports it as failed whether or not the baseline row
-// is written yet, or could be written at all. Any other completed outcome
-// forgets an earlier failure of the key, and a run the watcher stopping cut
-// off decides nothing.
+// definition as soon as it is decided, by (key, hash): a scan failure
+// reports as failed, and any other completed outcome (an allow after the
+// administrator allowed the server, a clean rescan) reports as not failed,
+// whether or not the baseline row is written yet, or could be written at
+// all. A run the watcher stopping cut off decides nothing.
 func (w *InstallWatcher) noteMCPAdmissionOutcome(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
 	if evt.Type != InstallMCP || snap == nil || res.Interrupted || w.secureClientActive() {
 		return
@@ -112,23 +118,35 @@ func (w *InstallWatcher) noteMCPAdmissionOutcome(evt InstallEvent, snap *TargetS
 		(res.Verdict == VerdictScanError && keptUnscannedMCPReason(res.Reason))
 	w.mcpAdmissionMu.Lock()
 	defer w.mcpAdmissionMu.Unlock()
-	if !failed {
-		delete(w.mcpFailedOutcomes, evt.Path)
-		return
+	if w.mcpOutcomes == nil {
+		w.mcpOutcomes = map[string]mcpAdmissionOutcome{}
 	}
-	if w.mcpFailedOutcomes == nil {
-		w.mcpFailedOutcomes = map[string]string{}
-	}
-	w.mcpFailedOutcomes[evt.Path] = snap.ContentHash
+	w.mcpOutcomes[evt.Path] = mcpAdmissionOutcome{hash: snap.ContentHash, failed: failed}
 }
 
-// mcpFailedOutcome reports a scan failure this process completed for the
-// definition with this hash at this key.
-func (w *InstallWatcher) mcpFailedOutcome(path, hash string) bool {
+// mcpOutcome returns the outcome this process completed for the definition
+// with this hash at this key, if no baseline has superseded it.
+func (w *InstallWatcher) mcpOutcome(path, hash string) (mcpAdmissionOutcome, bool) {
 	w.mcpAdmissionMu.RLock()
 	defer w.mcpAdmissionMu.RUnlock()
-	known, ok := w.mcpFailedOutcomes[path]
-	return ok && hash != "" && known == hash
+	known, ok := w.mcpOutcomes[path]
+	return known, ok && hash != "" && known.hash == hash
+}
+
+// noteMCPBaseline keeps the outcome a written baseline records, so the latest
+// verdict this process decided or stored for a definition is the one the hook
+// reads, whichever route wrote it. persistSnapshot is the only writer of an
+// MCP admission baseline.
+func (w *InstallWatcher) noteMCPBaseline(path, hash, fingerprint string) {
+	if hash == "" || w.secureClientActive() {
+		return
+	}
+	w.mcpAdmissionMu.Lock()
+	defer w.mcpAdmissionMu.Unlock()
+	if w.mcpOutcomes == nil {
+		w.mcpOutcomes = map[string]mcpAdmissionOutcome{}
+	}
+	w.mcpOutcomes[path] = mcpAdmissionOutcome{hash: hash, failed: mcpFingerprintFailed(fingerprint)}
 }
 
 type mcpKnownDefinition struct {
@@ -199,17 +217,23 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 			return MCPAdmissionStatus{Name: server.Name, Unavailable: true, RetryAfter: defaultScanTimeout}
 		}
 		matched := err == nil && mcpBaselineMatches(row, server)
+		// A verdict this process decided for this exact definition stands
+		// before its baseline is written: a failure is not pending, and an
+		// allow that replaces a failure is not held by the old failed
+		// baseline (GAP-0775, GAP-0778).
+		if hash, hashErr := mcpDefinitionHash(server); hashErr == nil {
+			if outcome, ok := w.mcpOutcome(path, hash); ok {
+				if outcome.failed {
+					return failedMCPStatus(server)
+				}
+				continue
+			}
+		}
 		if matched && mcpSnapshotFailed(row) {
 			return failedMCPStatus(server)
 		}
 		if matched {
 			continue
-		}
-		// The verdict for this exact definition is decided but its baseline
-		// is not (yet) readable: it is a completed failure, not a scan that
-		// is still running (GAP-0775).
-		if hash, hashErr := mcpDefinitionHash(server); hashErr == nil && w.mcpFailedOutcome(path, hash) {
-			return failedMCPStatus(server)
 		}
 		if firstCycle && (!w.mcpStartupListed.Load() || w.listedAtStartup(path)) {
 			continue
@@ -275,10 +299,12 @@ func mcpFailedSnapshotServesQuery(path string, row *audit.SnapshotRow, q MCPAdmi
 }
 
 func mcpSnapshotFailed(row *audit.SnapshotRow) bool {
-	if row == nil {
-		return false
-	}
-	fingerprint := row.ScannerFingerprint
+	return row != nil && mcpFingerprintFailed(row.ScannerFingerprint)
+}
+
+// mcpFingerprintFailed reports a scanner fingerprint that marks a failed
+// scan, a refused launcher or a server kept unverified.
+func mcpFingerprintFailed(fingerprint string) bool {
 	return strings.HasSuffix(fingerprint, mcpScanFailedMark) ||
 		strings.HasSuffix(fingerprint, mcpLauncherRefusedMark) ||
 		strings.HasSuffix(fingerprint, unverifiedMCPMark)
