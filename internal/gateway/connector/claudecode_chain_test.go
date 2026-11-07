@@ -98,6 +98,109 @@ func TestClaudeCodeChainRendersEveryEventAndKeepsForeignCommands(t *testing.T) {
 	}
 }
 
+func TestManagedClaudeCodeWrapperAnswersEveryEvent(t *testing.T) {
+	launcher := `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	guard := `C:\Program Files\DefenseClaw\bin\defenseclaw-hook-guard.exe`
+	hookArgs := []string{"hook", "--connector", "claudecode", "--enterprise-managed"}
+	seen := map[string]bool{}
+	for _, group := range claudeCodeAllHookGroups {
+		if seen[group.eventType] {
+			continue
+		}
+		seen[group.eventType] = true
+		command, args := claudeManagedGuardWrapperInvocation(group.eventType, launcher, hookArgs)
+		if command != claudeCodeWindowsCommandProcessor() || !slices.Equal(args, claudeManagedGuardWrapperArgs(guard, launcher, group.eventType, hookArgs)) {
+			t.Fatalf("%s managed handler = %q %q", group.eventType, command, args)
+		}
+		want := "2"
+		if hookguard.NeutralEvent(group.eventType) {
+			want = "1"
+		}
+		if args[len(args)-1] != want {
+			t.Fatalf("%s unavailable exit = %q, want %s", group.eventType, args[len(args)-1], want)
+		}
+		handler := map[string]interface{}{"command": command, "args": args}
+		if got, inner, ok := claudeCodeLauncherGuardParts(handler); !ok || got != launcher || !slices.Equal(inner, hookArgs) {
+			t.Fatalf("%s managed wrapper is not owned", group.eventType)
+		}
+		view := claudeCodeExecView(handler).(map[string]interface{})
+		if view["command"] != launcher || !codexValueMatches(view["args"], hookArgs) {
+			t.Fatalf("%s managed exec view = %#v", group.eventType, view)
+		}
+	}
+	if len(seen) != 29 {
+		t.Fatalf("rendered %d managed events, want 29", len(seen))
+	}
+	command, args := claudeManagedGuardWrapperInvocation("UserPromptSubmit", launcher,
+		[]string{"hook", "--connector", "claudecode"})
+	if command != launcher || !slices.Equal(args, []string{"hook", "--connector", "claudecode"}) {
+		t.Fatal("ordinary non-managed command changed")
+	}
+	if err := claudeCodeChainAdmission(SetupOpts{ManagedEnterprise: true},
+		`C:\Program%Files\DefenseClaw\bin\defenseclaw-hook.exe`, hookArgs, "windows"); err == nil {
+		t.Fatal("managed setup admitted a path cmd.exe would expand")
+	}
+}
+
+func TestManagedClaudeCodeSetupPublishesAvailabilityParent(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows managed registration")
+	}
+	launcher := `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	opts := SetupOpts{ManagedEnterprise: true, HookExecutable: launcher}
+	groups, err := claudeCodeHookGroupsForSetup(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command, args := claudeCodeManagedHookInvocation(opts, `C:\ProgramData\DefenseClaw\hooks\claude-code-hook.sh`)
+	hooks := map[string]interface{}{}
+	if err := appendClaudeCodeHookMatrixForSetup(hooks, command, args, opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyClaudeCodeHookMatrixForSetup(hooks, command, args, `C:\ProgramData\DefenseClaw\hooks`, opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range groups {
+		handler := claudeHandlersOf(t, hooks, group.eventType)[0]
+		if handler["command"] != claudeCodeWindowsCommandProcessor() {
+			t.Fatalf("%s registered %q", group.eventType, handler["command"])
+		}
+	}
+	secureClient := opts
+	secureClient.SecureClientHookDelivery = true
+	secureHooks := map[string]interface{}{}
+	if err := appendClaudeCodeHookMatrixForSetup(secureHooks, command, args, secureClient); err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range groups {
+		handler := claudeHandlersOf(t, secureHooks, group.eventType)[0]
+		if handler["command"] != launcher {
+			t.Fatalf("Secure Client %s command changed", group.eventType)
+		}
+	}
+}
+
+func TestClaudeCodeChainRechecksSavedGuardModeBeforeReuse(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chain")
+	source := filepath.Join(t.TempDir(), windowsHookGuardBinaryName)
+	launcher := filepath.Join(t.TempDir(), windowsHookBinaryName)
+	if err := os.WriteFile(source, []byte("MZ current guard"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldDir, oldSource, oldProbe := claudeChainDir, claudeChainSource, claudeChainProbe
+	claudeChainDir = func() string { return dir }
+	claudeChainSource = func(string) string { return source }
+	claudeChainProbe = func(string, string) error { return nil }
+	t.Cleanup(func() { claudeChainDir, claudeChainSource, claudeChainProbe = oldDir, oldSource, oldProbe })
+	if err := ensureClaudeChain(launcher); err != nil {
+		t.Fatal(err)
+	}
+	claudeChainProbe = func(string, string) error { return fmt.Errorf("guard does not answer current mode") }
+	if err := ensureClaudeChain(launcher); err == nil {
+		t.Fatal("a saved guard without the current answer was reused")
+	}
+}
+
 func TestClaudeCodeChainKeepsPackagedPreToolStartPath(t *testing.T) {
 	launcher := `C:\Users\Owner\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe`
 	installed := `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`

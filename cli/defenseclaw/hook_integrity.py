@@ -935,6 +935,53 @@ def _claude_chain_wrapper_parts(handler: Any) -> tuple[str, list[str], str, str]
     return None
 
 
+def _claude_managed_wrapper_words(guard: str, launcher: str, event: str) -> list[str]:
+    fail_code = "1" if event in _CLAUDE_NEUTRAL_EVENTS else "2"
+    warning = ["echo", *_CLAUDE_CHAIN_WARNING, "1>&2", "&", "exit", "/b", fail_code]
+    return [
+        "/d", "/v:on", "/c", "if", "not", "exist", guard, "(", *warning, ")",
+        "&", guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND, launcher,
+        "hook", "--connector", "claudecode", "--enterprise-managed", "--event", event,
+        "&", "set", "dc_hook_status=!errorlevel!",
+        "&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
+        "&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
+        "&", "if", "!dc_hook_status!", "geq", str(_CLAUDE_WRAPPED_EXIT_BASE + 1),
+        "if", "!dc_hook_status!", "leq", str(2 * _CLAUDE_WRAPPED_EXIT_BASE - 1),
+        "(", "set", "/a", f"dc_hook_result=!dc_hook_status!-{_CLAUDE_WRAPPED_EXIT_BASE}", ">nul",
+        "&", "exit", "/b", "!dc_hook_result!", ")", "&", *warning,
+    ]
+
+
+def _claude_managed_wrapper_parts(handler: Any) -> tuple[str, list[str]] | None:
+    if not isinstance(handler, dict):
+        return None
+    command, args = handler.get("command"), handler.get("args")
+    if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        return None
+    system_root = os.environ.get("SystemRoot") or "C:\\Windows"
+    processor = ntpath.join(system_root, "System32", "cmd.exe")
+    if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
+        return None
+    if len(args) < 25 or args[:6] != ["/d", "/v:on", "/c", "if", "not", "exist"]:
+        return None
+    guard = args[6]
+    for index in range(8, len(args) - 8):
+        if args[index:index + 2] != [guard, _CLAUDE_WRAPPED_GUARD_SUBCOMMAND]:
+            continue
+        launcher = args[index + 2]
+        if not _claude_wrapper_safe(launcher) or not _claude_guardable_hook_executable(launcher):
+            continue
+        expected_guard = ntpath.join(ntpath.dirname(launcher), "defenseclaw-hook-guard.exe")
+        if ntpath.normcase(ntpath.normpath(guard)) != ntpath.normcase(ntpath.normpath(expected_guard)):
+            continue
+        event = args[index + 8]
+        if not event or len(event) > 64 or not event.isascii() or not event.isalnum():
+            continue
+        if args == _claude_managed_wrapper_words(guard, launcher, event):
+            return launcher, ["hook", "--connector", "claudecode", "--enterprise-managed"]
+    return None
+
+
 def _claude_chain_files_match(guard: str, approved: str) -> bool:
     pair_dir = os.path.dirname(guard)
     generation = os.path.basename(pair_dir)
@@ -1033,6 +1080,12 @@ def claude_launcher_guard_view(handler: Any) -> Any:
     chain = _claude_chain_wrapper_parts(handler)
     if chain is not None:
         launcher, inner, _guard, _approved = chain
+        view = dict(handler)
+        view["command"], view["args"] = launcher, inner
+        return view
+    managed = _claude_managed_wrapper_parts(handler)
+    if managed is not None:
+        launcher, inner = managed
         view = dict(handler)
         view["command"], view["args"] = launcher, inner
         return view
@@ -1804,8 +1857,8 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
 # sources the gateway checks too: user, ~/.claude.json, managed, and the
 # project of the pinned claw.workspace_dir. Otherwise, and for the folder
 # doctor or status runs in, it is a warning (agent_hook_env_warnings).
-# A managed Claude Code install starts the native hook in exec form, so its
-# settings env does not govern the hook launch. doctor and status still report
+# A managed Claude Code install starts the native hook in exec form on POSIX,
+# so its settings env does not govern the hook launch. Doctor and status still report
 # SHELLOPTS values that can affect Bash tool scripts.
 HOOK_SHELL_ENV_NAMES = ("BASHOPTS", "BASH_ENV", "CLAUDE_CODE_SHELL_PREFIX", "FUNCNEST", "SHELLOPTS")
 _HOOK_SHELL_ENV_FUNCTION_PREFIX = "BASH_FUNC_"

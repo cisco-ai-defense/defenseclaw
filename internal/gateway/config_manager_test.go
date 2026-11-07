@@ -1979,6 +1979,28 @@ func TestPerUserSavedOutageModeEditRefreshesConnectorSetup(t *testing.T) {
 	}
 }
 
+func TestClaudeTierChangeWithSavedOpenRefreshesRegistration(t *testing.T) {
+	for _, tc := range []struct{ before, after string }{
+		{"default", "strict"}, {"strict", "default"},
+	} {
+		oldCfg := config.DefaultConfig()
+		oldCfg.Guardrail.Enabled = true
+		oldCfg.Guardrail.Connector = "claudecode"
+		oldCfg.Guardrail.HookSelfHeal = false
+		oldCfg.Guardrail.HookFailMode = "open"
+		oldCfg.Guardrail.RulePack = tc.before
+		newCfg := cloneConfig(oldCfg)
+		newCfg.Guardrail.RulePack = tc.after
+		if oldCfg.EffectiveHookOutageFailModeForConnector("claudecode") != "open" ||
+			newCfg.EffectiveHookOutageFailModeForConnector("claudecode") != "open" {
+			t.Fatal("fixture requires an unchanged saved outage mode")
+		}
+		if !hookRuntimePolicyChanged(oldCfg, newCfg, "claudecode") || !hookPolicyNeedsSetup(oldCfg, newCfg) {
+			t.Fatalf("%s to %s did not refresh the registration", tc.before, tc.after)
+		}
+	}
+}
+
 func TestHookModeAndHILTChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
 	for _, tc := range []struct {
 		name string

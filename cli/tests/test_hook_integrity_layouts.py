@@ -383,6 +383,24 @@ def test_claude_chain_profile_bound_open_answer_is_owned(tmp_path):
     assert hook_integrity.claude_launcher_guard_view(direct)["args"] == ["hook", "--connector", "claudecode"]
 
 
+def test_managed_claude_guard_view_carries_closed_and_neutral_answers(monkeypatch):
+    monkeypatch.setenv("SystemRoot", "C:\\Windows")
+    launcher = "C:\\Program Files\\DefenseClaw\\bin\\defenseclaw-hook.exe"
+    guard = "C:\\Program Files\\DefenseClaw\\bin\\defenseclaw-hook-guard.exe"
+    for event, unavailable_exit in (("UserPromptSubmit", "2"), ("PreToolUse", "2"),
+                                    ("Stop", "1"), ("SubagentStop", "1")):
+        words = hook_integrity._claude_managed_wrapper_words(guard, launcher, event)
+        handler = {"command": "C:\\Windows\\System32\\cmd.exe", "args": words}
+        assert words[-1] == unavailable_exit
+        assert hook_integrity.claude_launcher_guard_view(handler) == {
+            **handler,
+            "command": launcher,
+            "args": ["hook", "--connector", "claudecode", "--enterprise-managed"],
+        }
+        edited = {**handler, "args": [*words[:-1], "0"]}
+        assert hook_integrity.claude_launcher_guard_view(edited) is edited
+
+
 def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_registered(tmp_path, monkeypatch):
     # The Windows Copilot entry runs the PowerShell adapter in the data
     # directory's hooks folder; only the data directory names DefenseClaw, and

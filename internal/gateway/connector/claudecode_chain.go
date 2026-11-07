@@ -187,6 +187,8 @@ var claudeChainProbe = func(program, dir string) error {
 		{claudeGuardEventArgs(absent, []string{"hook", "--connector", "claudecode"}, "PreToolUse", false), 2, hookguard.MissingMessage},
 		{claudeGuardEventArgs(absent, []string{"hook", "--connector", "claudecode"}, "UserPromptSubmit", true), 2, hookguard.MissingMessage},
 		{claudeGuardEventArgs(absent, []string{"hook", "--connector", "claudecode"}, "Stop", true), hookguard.WrappedExitBase + 1, hookguard.NonBlockingExitMessage},
+		{claudeGuardEventArgs(absent, []string{"hook", "--connector", "claudecode"}, "PreToolUse", false, true), 1, hookguard.OpenExitMessage},
+		{claudeGuardEventArgs(absent, []string{"hook", "--connector", "claudecode"}, "UserPromptSubmit", true, true), hookguard.WrappedExitBase + 1, hookguard.OpenExitMessage},
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		cmd := exec.CommandContext(ctx, program, check.args...)
@@ -233,7 +235,7 @@ func ensureClaudeChain(launcher string) error {
 	source := claudeChainSource(launcher)
 	if source == "" {
 		if present && claudeFileMatches(files.approved, record.Digest) {
-			return restoreClaudeChainGuard(files, record.Digest)
+			return restoreProbedClaudeChainGuard(files, record.Digest, dir)
 		}
 		if stable := canonicalNativeWindowsHookBinary(); stable != "" && pathidentity.Same(launcher, stable) {
 			return fmt.Errorf("the packaged Claude Code hook guard is unavailable; run the DefenseClaw installer again")
@@ -254,7 +256,7 @@ func ensureClaudeChain(launcher string) error {
 	digest := sha256.Sum256(body)
 	want := hex.EncodeToString(digest[:])
 	if present && strings.EqualFold(record.Digest, want) && claudeFileMatches(files.approved, want) {
-		return restoreClaudeChainGuard(files, want)
+		return restoreProbedClaudeChainGuard(files, want, dir)
 	}
 	staged := filepath.Join(dir, ".claude-chain-probe-"+strconv.FormatInt(time.Now().UnixNano(), 10)+".exe")
 	if err := writeClaudeChainFile(staged, body); err != nil {
@@ -263,7 +265,7 @@ func ensureClaudeChain(launcher string) error {
 	defer os.Remove(staged)
 	if err := claudeChainProbe(staged, dir); err != nil {
 		if present && claudeFileMatches(files.approved, record.Digest) {
-			return restoreClaudeChainGuard(files, record.Digest)
+			return restoreProbedClaudeChainGuard(files, record.Digest, dir)
 		}
 		return fmt.Errorf("installed Claude Code guard cannot start; run the DefenseClaw installer again: %w", err)
 	}
@@ -295,6 +297,16 @@ func ensureClaudeChain(launcher string) error {
 		return err
 	}
 	published = true
+	return nil
+}
+
+func restoreProbedClaudeChainGuard(files claudeChainFiles, digest, dir string) error {
+	if err := restoreClaudeChainGuard(files, digest); err != nil {
+		return err
+	}
+	if err := claudeChainProbe(files.guard, dir); err != nil {
+		return fmt.Errorf("installed Claude Code guard cannot answer the current mode; run the DefenseClaw installer again: %w", err)
+	}
 	return nil
 }
 
@@ -386,6 +398,77 @@ func claudeGuardWrapperArgsWith(compare, guard, approved, launcher, event string
 		"(", "set", "/a", "dc_hook_result=!dc_hook_status!-"+strconv.Itoa(hookguard.WrappedExitBase), ">nul",
 		"&", "exit", "/b", "!dc_hook_result!", ")", "&")
 	return append(args, fail()...)
+}
+
+func claudeManagedGuardPath(launcher string) string {
+	last := strings.LastIndexAny(launcher, `\/`)
+	if last < 0 {
+		return ""
+	}
+	return launcher[:last+1] + windowsHookGuardBinaryName
+}
+
+// The managed policy keeps cmd.exe as the registered parent. The small
+// installed guard checks whether the full hook starts and preserves its
+// answer. If the guard itself cannot start, cmd.exe gives the same event's
+// documented unavailable answer.
+func claudeManagedGuardWrapperInvocation(event, launcher string, hookArgs []string) (string, []string) {
+	if !slices.Equal(hookArgs, []string{"hook", "--connector", "claudecode", "--enterprise-managed"}) ||
+		!hookguard.AbsoluteHookExecutable(launcher) || !claudeWrapperSafe(launcher) {
+		return launcher, hookArgs
+	}
+	guard := claudeManagedGuardPath(launcher)
+	if !claudeWrapperSafe(guard) {
+		return launcher, hookArgs
+	}
+	return claudeCodeWindowsCommandProcessor(), claudeManagedGuardWrapperArgs(guard, launcher, event, hookArgs)
+}
+
+func claudeManagedGuardWrapperArgs(guard, launcher, event string, hookArgs []string) []string {
+	failCode := "2"
+	if hookguard.NeutralEvent(event) {
+		failCode = "1"
+	}
+	warning := []string{"echo", "DefenseClaw", "could", "not", "start", "its", "Claude", "Code", "hook", "guard.",
+		"Run", "the", "DefenseClaw", "installer", "again", "to", "repair", "it.", "1>&2", "&", "exit", "/b", failCode}
+	args := []string{"/d", "/v:on", "/c", "if", "not", "exist", guard, "("}
+	args = append(args, warning...)
+	args = append(args, ")", "&", guard)
+	args = append(args, claudeGuardEventArgs(launcher, hookArgs, event, true)...)
+	args = append(args,
+		"&", "set", "dc_hook_status=!errorlevel!",
+		"&", "if", "!dc_hook_status!", "equ", "0", "exit", "/b", "0",
+		"&", "if", "!dc_hook_status!", "equ", "2", "exit", "/b", "2",
+		"&", "if", "!dc_hook_status!", "geq", strconv.Itoa(hookguard.WrappedExitBase+1),
+		"if", "!dc_hook_status!", "leq", strconv.Itoa(2*hookguard.WrappedExitBase-1),
+		"(", "set", "/a", "dc_hook_result=!dc_hook_status!-"+strconv.Itoa(hookguard.WrappedExitBase), ">nul",
+		"&", "exit", "/b", "!dc_hook_result!", ")", "&")
+	return append(args, warning...)
+}
+
+func claudeManagedGuardWrapperParts(hook map[string]interface{}) (string, []string, bool) {
+	command, _ := hook["command"].(string)
+	if normalizeWindowsHookExecutable(command) != normalizeWindowsHookExecutable(claudeCodeWindowsCommandProcessor()) {
+		return "", nil, false
+	}
+	args, ok := claudeCodeNativeExecArguments(hook)
+	if !ok || len(args) < 25 || !slices.Equal(args[:6], []string{"/d", "/v:on", "/c", "if", "not", "exist"}) {
+		return "", nil, false
+	}
+	guard := args[6]
+	for i := 8; i+8 < len(args); i++ {
+		if args[i] != guard || args[i+1] != hookguard.WrappedSubcommand {
+			continue
+		}
+		launcher, hookArgs, event, wrapped, open, valid := hookguard.ParseInvocationMode(args[i+1 : i+9])
+		if valid && wrapped && !open &&
+			slices.Equal(hookArgs, []string{"hook", "--connector", "claudecode", "--enterprise-managed"}) &&
+			claudeManagedGuardPath(launcher) == guard &&
+			slices.Equal(args, claudeManagedGuardWrapperArgs(guard, launcher, event, hookArgs)) {
+			return launcher, hookArgs, true
+		}
+	}
+	return "", nil, false
 }
 
 func claudeGuardWrapperParts(hook map[string]interface{}) (string, []string, bool) {
