@@ -1475,13 +1475,14 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				resolved = filepath.Join(state, filepath.Base(resolutionPath))
 			}
 		}
-		if ok && nativePatch && !entryOnly && multiplyLinkedFile(resolved) {
+		if ok && nativePatch && !entryOnly {
 			// A hard link keeps its own name while it is a state file: a
 			// managed gateway cannot compare the identity of a file in the
 			// user's project, so the target map names the state file the
 			// patch target is (the full active-state set, read fresh; GAP-0488,
-			// GAP-0073). Where that cannot be proved the target is left
-			// unresolved, so the patch is not attested.
+			// GAP-0073). An ordinary single-link target costs one stat. Where
+			// the state cannot be proved the target is left unresolved, so
+			// the patch is not attested.
 			state, same, complete := ResolveActiveStateIdentity(resolved, home)
 			switch {
 			case !complete:
@@ -1961,15 +1962,6 @@ func sameAliasValue(a, b json.RawMessage) bool {
 	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
-// multiplyLinkedFile reports an existing regular file with more than one
-// link: the only kind that can be a hard link to a file of the active state,
-// so an ordinary single-link target costs one stat and no index lookup. An
-// unknown link count reads as more than one (linkCount).
-func multiplyLinkedFile(path string) bool {
-	info, err := pathStat(path)
-	return err == nil && info.Mode().IsRegular() && linkCount(path, info) > 1
-}
-
 // PatchTargetWatch reads the targets of a patch the hook attested complete
 // (PatchCompleteKey in the evidence the hook sent the gateway) again. Behind
 // ProtectHome the gateway cannot read a patch target a second time, so the
@@ -2019,12 +2011,10 @@ func (w *PatchTargetWatch) Changed() bool {
 		if !ok || resolved != attested || w.protected.has(resolved) {
 			return true
 		}
-		if multiplyLinkedFile(resolved) {
-			// Read fresh and complete: a state file made since the proof, or
-			// one a bounded walk did not reach, must refuse the patch.
-			if _, state, complete := ResolveActiveStateIdentity(resolved, w.home); state || !complete {
-				return true
-			}
+		// Read fresh and complete: a state file made since the proof, or one
+		// the walk could not see, must refuse the patch.
+		if _, state, complete := ResolveActiveStateIdentity(resolved, w.home); state || !complete {
+			return true
 		}
 	}
 	return false
