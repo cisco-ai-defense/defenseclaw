@@ -1314,7 +1314,10 @@ def test_a_peer_the_scan_did_not_select_keeps_its_cached_version_while_its_execu
     assert ad._read_cache(data_dir=tmp_path).agents["cursor"].version == "3.19.13"
 
 
-def test_a_same_size_rewrite_that_restores_the_modification_time_changes_the_identity(tmp_path):
+def test_a_same_size_rewrite_that_restores_the_modification_time_changes_the_identity(monkeypatch, tmp_path):
+    # The file rules of the system the test runs on: on Windows the identity carries the
+    # NTFS change time (``st_ctime`` there is the creation time, which a rewrite leaves alone).
+    _file_times_of_this_system(monkeypatch)
     binary = tmp_path / "cursor"
     binary.write_text("3.19.13", encoding="utf-8")
     first = binary.stat()
@@ -1329,8 +1332,8 @@ def test_a_same_size_rewrite_that_restores_the_modification_time_changes_the_ide
     assert after != before
 
 
-@pytest.mark.skipif(os.name == "nt", reason="the change time of a write is not kept on Windows")
 def test_an_executable_rewritten_in_place_with_its_time_restored_while_it_answers_is_read_again(monkeypatch, tmp_path):
+    _file_times_of_this_system(monkeypatch)
     data = tmp_path / "data"
     data.mkdir()
     binary = tmp_path / "cursor"
