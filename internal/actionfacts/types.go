@@ -1178,6 +1178,23 @@ type PathFact struct {
 	Normalized string
 	Absolute   bool
 	Resolved   string
+	// Linked marks a fact the gateway adds for the file an operand reaches
+	// through an existing link. It is one more spelling of an operand the
+	// call already names, never a further operand, so a proof that counts
+	// the operands of a call counts it with OperandPaths (GAP-0819).
+	Linked bool
+}
+
+// OperandPaths returns the path facts that are operands of the call: every
+// fact except those added for the file a link reaches.
+func (f Facts) OperandPaths() []PathFact {
+	operands := make([]PathFact, 0, len(f.Paths))
+	for _, candidate := range f.Paths {
+		if !candidate.Linked {
+			operands = append(operands, candidate)
+		}
+	}
+	return operands
 }
 
 type PathAccess string

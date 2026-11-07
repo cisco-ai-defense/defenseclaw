@@ -35,7 +35,7 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 }
 
 func exactDockerDaemonWriteFacts(facts Facts) bool {
-	if len(facts.Commands) != 1 || len(facts.Paths) != 1 {
+	if len(facts.Commands) != 1 || len(facts.OperandPaths()) != 1 {
 		return false
 	}
 	command := facts.Commands[0]
@@ -45,7 +45,7 @@ func exactDockerDaemonWriteFacts(facts Facts) bool {
 		len(command.Operations) != 2 {
 		return false
 	}
-	path := facts.Paths[0]
+	path := facts.OperandPaths()[0]
 	return path.CommandID == command.ID && path.Access == PathAccessWrite &&
 		path.Flavor == PathFlavorPOSIX && path.Value == dockerDaemonConfigPath &&
 		path.Normalized == dockerDaemonConfigPath && path.Absolute &&

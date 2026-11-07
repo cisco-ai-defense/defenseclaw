@@ -1532,6 +1532,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			candidate.Access != actionfacts.PathAccessAppend {
 			continue
 		}
+		// A fact for the file a link reaches is no further operand: the
+		// operand it was added for is judged here with the client's answer
+		// for it, which already names that file. The client lists no entry
+		// for the physical name, so judging it as an operand would read
+		// the missing entry as an operand the client left out (GAP-0819).
+		if candidate.Linked {
+			if isProtected(candidate.Resolved) {
+				return confirmed()
+			}
+			continue
+		}
 		command, ok := integrityCommandByID(view, candidate.CommandID)
 		if !ok || !integrityCommandMutatesPath(command, candidate) ||
 			((!(integrityExplicitCommandMutator(command, candidate)) && (command.Program != "dd" || !(command.ArgvComplete))) && !(integrityStructuredFileMutator(view, command))) {

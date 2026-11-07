@@ -49,6 +49,7 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 		linked.Value = physical
 		linked.Normalized = physical
 		linked.Resolved = physical
+		linked.Linked = true
 		facts.Paths = append(facts.Paths, linked)
 	}
 	return facts
