@@ -199,6 +199,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 		// enrolls every eligible account): verify the guardian reconcile of it,
 		// not the seconds before it (GAP-2176).
 		l.awaitGuardianManifestReconcile(ctx)
+		l.awaitGuardianRetire(ctx)
 	}
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.warnLowDiskSpace()
