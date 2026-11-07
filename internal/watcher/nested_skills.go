@@ -163,7 +163,7 @@ func cursorSkillFoldersWithLimit(root, subtree string, directoryLimit, entryLimi
 		if depthLimit > 0 && strings.Count(path[len(walkSubtree):], string(filepath.Separator)) > depthLimit {
 			return hermesskills.ErrDirectoryLimit
 		}
-		if !(sameWatcherPath(root, subtree) && sameWatcherPath(path, walkSubtree)) && hasSkillMarker(path) {
+		if (!sameWatcherPath(root, subtree) || !sameWatcherPath(path, walkSubtree)) && hasSkillMarker(path) {
 			logical, err := logicalWalkPath(subtree, walkSubtree, path)
 			if err != nil {
 				return err
