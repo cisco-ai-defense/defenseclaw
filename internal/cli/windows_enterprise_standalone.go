@@ -3169,7 +3169,20 @@ var windowsEnterpriseVendorFolderProblems = func() []enterprisepolicy.VendorFold
 	if err != nil || !standalone {
 		return nil
 	}
+	defer pinWindowsStandaloneTrustScope()()
 	return enterprisepolicy.InspectRecordedVendorFolders(opts, connectors)
+}
+
+// pinWindowsStandaloneTrustScope makes this process judge managed trust by the
+// standalone profile's rules until the returned function runs. The guardian
+// and the installed CLI carry that scope (the services' profile pin, or a
+// binary in the install root); Setup's own process runs from wherever the
+// administrator put it and carries neither, so it judged a vendor folder with
+// the Secure Client rules and found nothing wrong with the folder the guardian
+// and machine-policy verify found uncovered (GAP-0756). The profile is the
+// installed config's, checked by the caller.
+func pinWindowsStandaloneTrustScope() func() {
+	return setTemporaryEnvironment(map[string]string{managed.EnterpriseProfileEnv: managed.ProfileStandalone})
 }
 
 // windowsEnterpriseVendorFolderHeal runs the safe transaction for each such
@@ -3185,6 +3198,7 @@ var windowsEnterpriseVendorFolderHeal = func() ([]enterprisepolicy.ReprotectedFo
 	if err != nil || !standalone {
 		return nil, nil
 	}
+	defer pinWindowsStandaloneTrustScope()()
 	return enterprisepolicy.ReprotectRecordedVendorFolders(opts, connectors)
 }
 
