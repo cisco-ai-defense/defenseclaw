@@ -117,16 +117,19 @@ func TestCFRRealClientSourceChangedAfterProofMustBlock(t *testing.T) {
 	}
 }
 
-// A header from an ordinary link, replayed after the link was retargeted to a
-// protected file, is judged by a gateway that cannot read the link again: the
-// strict policy tier refuses a link it cannot read again; the default tier
-// trusts the hook client, which reads where the target leads again after the
-// answer and once it is written (hookpaths.PatchTargetWatch, TestGAP0488
-// PatchTargetSwappedAfterReadingIsRefused in hookexec). The strict cell is the
-// original expectation (GAP-0488, owner steer: a protective rule that causes
-// the false block of an ordinary link moves to the strict profile).
-func TestCFRRealClientHermesLinkChangedAfterProofMustBlock(t *testing.T) {
-	for _, pack := range []string{"strict", ""} {
+// A header the hook made from an ordinary link, posted straight to the gateway
+// after the link was retargeted to a protected file (a direct gateway replay,
+// not a hook run). The gateway cannot read the link again, so the strict policy
+// tier refuses a link it cannot read again and blocks; balanced and permissive
+// trust the hook header and allow, as the same request for an ordinary link
+// that was not retargeted is allowed (owner steer 2: the protective rule that
+// causes the false block of an ordinary link moves to strict). The allow is
+// not agent-visible: the real hook reads where the target leads again after the
+// answer and once it is written and refuses a retargeted link in every profile
+// (TestRealHookRefusesAHermesLinkRetargetedAfterTheGatewayAnswer here, and
+// TestGAP0488PatchTargetSwappedAfterReadingIsRefused in hookexec).
+func TestCFRDirectGatewayReplayOfHermesLinkHeaderAfterRetarget(t *testing.T) {
+	for _, pack := range []string{"strict", "", "permissive"} {
 		t.Run("pack="+pack, func(t *testing.T) {
 			home, project := hermesPatchHome(t)
 			parent := filepath.Dir(home)
@@ -168,7 +171,7 @@ func TestCFRRealClientHermesLinkChangedAfterProofMustBlock(t *testing.T) {
 				want = "block"
 			}
 			if got := hermesOutcome(t, out.Body.String()).action; got != want {
-				t.Fatalf("pack %q: client header from ordinary link replayed after protected retarget: %s, want %s", pack, got, want)
+				t.Fatalf("pack %q: direct gateway replay of a header from an ordinary link after a protected retarget: %s, want %s", pack, got, want)
 			}
 		})
 	}
