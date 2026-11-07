@@ -15,7 +15,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 	"unicode/utf16"
 
 	"golang.org/x/sys/windows"
@@ -53,8 +52,9 @@ func TestRecordedVendorFolderFixTextWorksOnARealProgramDataFolder(t *testing.T) 
 	}
 	for index, variant := range variants {
 		t.Run(variant.name, func(t *testing.T) {
-			dir := filepath.Join(programData, fmt.Sprintf("dc-g582-fixtext-%d-%d", time.Now().UnixNano(), index))
-			if err := os.Mkdir(dir, 0o755); err != nil {
+			// A unique name: an administrator and SYSTEM may run this at once.
+			dir, err := os.MkdirTemp(programData, fmt.Sprintf("dc-g582-fixtext-%d-", index))
+			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.RemoveAll(dir) })
