@@ -1563,8 +1563,8 @@
     {
       "name": "DEFENSECLAW_GATEWAY_BIN",
       "category": "runtime_path",
-      "purpose": "Override path to the defenseclaw-gateway binary. Used by CI / packagers when the binary isn't on PATH.",
-      "default": "(discovered via PATH lookup)",
+      "purpose": "Override path to the defenseclaw-gateway binary, for CI and packagers. The gateway resolver, the readiness report and the connected verifier (after its custody check) follow it. Uninstall, init, hook registration and the sidecar start ignore it and use the gateway of this install.",
+      "default": "(the gateway of this install, then PATH)",
       "accepted_values": [
         "any-absolute-path"
       ],
