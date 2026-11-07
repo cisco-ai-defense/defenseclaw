@@ -91,7 +91,21 @@ var (
 	// windowsEnterpriseHotConfigFailClosed stops the gateway after an undo
 	// that could not be proven, once its hooks are durably closed.
 	windowsEnterpriseHotConfigFailClosed = stopWindowsStandaloneGatewayFailClosed
+	// windowsEnterpriseHotConfigApproveSource makes the config this ensure
+	// applied the approved config source Repair restores (GAP-0779).
+	windowsEnterpriseHotConfigApproveSource = approveWindowsStandaloneConfigSource
 )
+
+// approveWindowsStandaloneConfigSource records the installed config.yaml as
+// the approved config source of the layout, in the protected install state
+// folder (refreshManagedApprovedConfigSource).
+func approveWindowsStandaloneConfigSource(layout managed.StandaloneLayout) error {
+	installed, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return fmt.Errorf("read the installed config: %w", err)
+	}
+	return refreshManagedApprovedConfigSource(layout.LifecycleDir, installed)
+}
 
 // reloadWindowsStandaloneBundlePolicy asks the installed gateway to load the
 // config now. A Windows directory notification can be lost during an atomic
@@ -837,6 +851,20 @@ func windowsEnterpriseHotConfigApply(
 		}
 		failBundle("bundle_post_verify_failed", message)
 		return false, nil
+	}
+	if !bundleChange && !payloadlessRollback {
+		// The approved source is what Repair puts back over a hand edit, so
+		// the config this ensure applied has to become it: otherwise a
+		// repair restores the config of an earlier ensure. The config stays
+		// applied only with its approved source; any failure puts the
+		// previous config back and leaves the change to the upgrade
+		// transaction, which publishes both (GAP-0779).
+		if err := windowsEnterpriseHotConfigApproveSource(layout); err != nil {
+			noteWindowsEnterpriseEnsure(cmd, opts, "[ensure] the applied config could not be recorded as the approved config source ("+
+				windowsEnterpriseBoundedDiagnostic(err.Error())+"); the previous config goes back and the upgrade transaction applies the change")
+			undo()
+			return false, nil
+		}
 	}
 	accepted := *verifyReport
 	accepted.OK = true
