@@ -884,22 +884,31 @@ def _failed_scan_next_step(
     A definition the scanner refuses to start gets the scanner's own reason
     and the ``mcp set`` fix the upgrade notice and doctor give (GAP-1340).
     """
+    import shlex
+
     from defenseclaw.scanner.mcp import mcp_scan_refusal, mcp_scannable_fix
 
     cmd = _mcp_scan_command(name, connector)
+    # GAP-0776: the agent-visible block text names the same one next step, so
+    # the user finds it here: trust the server by name, or give it a
+    # definition a scan can start.
+    allow = f"or trust it: defenseclaw mcp allow {shlex.quote(name)}"
     err = (error or "").lower()
     refusal = mcp_scan_refusal(entry) if entry is not None else None
     if refusal:
-        return f"refused, {refusal}; fix: {mcp_scannable_fix(name, entry, connector)}, then: {cmd}"
+        return f"refused, {refusal}; fix: {mcp_scannable_fix(name, entry, connector)}, then: {cmd}; {allow}"
     if "--allow-private" in err:
-        return f"refused, the URL is a private or loopback address; to scan it anyway: {cmd} --allow-private"
+        return (
+            "refused, the URL is a private or loopback address; to scan it anyway: "
+            f"{cmd} --allow-private; or serve it from a public URL; {allow}"
+        )
     if "allowlisted stdio launcher" in err:
         # The refused definition was changed to one a scan starts.
         return f"the definition changed since the refused scan; scan it again: {cmd}"
     if "disallowed address" in err:
         return (
             "refused, the URL resolves to an address the scanner never connects to; "
-            "point it at a public or private host"
+            f"point it at a public or private host; {allow}"
         )
     return f"fix reachability, then scan again: {_mcp_scan_command(name, connector, url)}"
 
