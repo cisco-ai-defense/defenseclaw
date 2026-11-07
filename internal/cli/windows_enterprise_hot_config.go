@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A config-only ensure used to run the whole upgrade transaction: it stops
@@ -156,6 +157,38 @@ func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) 
 	case changed:
 		result.Changes = append(result.Changes, "refreshed the approved config source to the installed config, which an earlier release had left at an older config")
 	}
+}
+
+// refuseWindowsEnterpriseRepairOverUnprovenApprovedSource stops a Repair that
+// would put the approved config source over a hand-edited config.yaml when
+// nothing proves that source is the config the last lifecycle run applied. The
+// installer restores it before any Go code runs again, and a release that
+// applied configs in place left the copy at an older config with a matching
+// digest, so the check has to come first (GAP-0779). It acts only on a
+// standalone repair of an installed deployment that supplies no config of its
+// own, has stored no signed bundle (the installer refuses those and names the
+// CLI repair) and has no recovery pending; everything else is left to the
+// installer. The first ensure, upgrade, install or repair of this release
+// writes the proof, so the refusal names an ensure.
+func refuseWindowsEnterpriseRepairOverUnprovenApprovedSource(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if action != "repair" || !windowsEnterpriseStandalone(opts) || strings.TrimSpace(opts.configPath) != "" ||
+		strings.TrimSpace(opts.stateRoot) != "" || opts.bundle != nil {
+		return nil
+	}
+	deployment, err := windowsEnterpriseTargetDeployment(opts)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || windowsEnterpriseStandaloneRecoveryPending(opts) {
+		return nil
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil || layout.LifecycleDir == "" || windowsStandaloneBundleStoreHoldsVersions(layout) {
+		return nil
+	}
+	if err := unprovenApprovedConfigSourceForHandEdit(layout.LifecycleDir, layout.ConfigPath); err != nil {
+		return windowsEnterpriseInvalidArguments("%s; the earlier approved config may be older than the one now installed. Next step: run %s "+
+			"from an elevated PowerShell prompt with the approved config (nothing was changed)%s",
+			err.Error(), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1"), windowsEnterpriseSetupSourceNote)
+	}
+	return nil
 }
 
 // windowsStandaloneBundleStoreHoldsVersions is whether the deployment ever
