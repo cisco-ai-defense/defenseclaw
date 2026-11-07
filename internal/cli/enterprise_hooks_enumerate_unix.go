@@ -396,7 +396,9 @@ func runEnterpriseHooksEnumerateCycle(
 	}
 	// Status and verify report agents found installed but not enrollable,
 	// so an unprotected agent is never a silent gap.
-	if err := enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected, configGeneration, configSHA256); err != nil {
+	if err := replaceEnterpriseHookUnprotectedAgentsRecord(current.DataDir, func() error {
+		return enterpriseHooksEnumerateUnprotectedWriter(enterprisehooks.UnprotectedAgentsPath(manifestPath), cycle.Unprotected, configGeneration, configSHA256)
+	}); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] warn: could not publish the unprotected agents: %v\n", err)
 	}
 	// The gateway cannot read that root-only record; it answers a user own

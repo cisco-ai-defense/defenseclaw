@@ -348,7 +348,10 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; the next cycle publishes again
 		publishEnterpriseWindowsIDEAppData(cfg, manifest, stderr)
 		unprotected = append(unprotected, ownerUnknown...)
-		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
+		if recordErr := replaceEnterpriseHookUnprotectedAgentsRecord(cfg.DataDir, func() error {
+			_, writeErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected)
+			return writeErr
+		}); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
 		}
 		publishEnterpriseWindowsGatewayUnprotectedAgents(cfg, stderr, manifestPath)
@@ -449,7 +452,10 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 		agents = enterprisehooks.WindowsManifestScanIncomplete(opts.ManifestSubjects, opts.ExcludeUsers, agents, err)
 	}
 	agents = append(agents, ownerUnknown...)
-	if _, err := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents); err != nil {
+	if err := replaceEnterpriseHookUnprotectedAgentsRecord(cfg.DataDir, func() error {
+		_, writeErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents)
+		return writeErr
+	}); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %s\n", enumeratorErrorText(err))
 	}
 	publishEnterpriseWindowsGatewayUnprotectedAgents(cfg, stderr, manifestPath)
