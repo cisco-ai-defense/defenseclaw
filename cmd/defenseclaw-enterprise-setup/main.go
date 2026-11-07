@@ -108,6 +108,7 @@ var standalonePayloadFiles = []string{
 	"DefenseClawEnterprise.psm1",
 	"defenseclaw-acp.exe",
 	"defenseclaw-gateway.exe",
+	"defenseclaw-hook-guard.exe",
 	"defenseclaw-hook.exe",
 	"defenseclaw-scanners.exe",
 	"defenseclaw-sensor-helper.exe",
