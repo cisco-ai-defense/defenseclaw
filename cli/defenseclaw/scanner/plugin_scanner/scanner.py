@@ -122,11 +122,29 @@ def scan_plugin(
     if (profile in ("default", "permissive")
             and policy.profile in ("default", "permissive")
             and not (options and (options.include_self or options.disable_vendor_identity))):
-        official_name = inspect_official_provider_tree(target)
-        if official_name is not None:
+        official = inspect_official_provider_tree(
+            target, data_dir=options.data_dir if options else "",
+        )
+        if official is not None:
+            findings = audit_skipped_dirs_for_native(target)
+            if official.possible_peer:
+                findings.append(make_finding(
+                    len(findings) + 1,
+                    rule_id="VENDOR-PEER-POSSIBLE",
+                    severity="INFO",
+                    confidence=1.0,
+                    title="OpenClaw peer link has possible provenance",
+                    description=(
+                        "Published provider bytes match. The peer link resolves to an "
+                        "OpenClaw package outside protected and state paths; the "
+                        "active runtime package is not verified."
+                    ),
+                    location=os.path.join(target, "node_modules", "openclaw"),
+                    tags=["supply-chain"],
+                ))
             return build_result(
-                target, audit_skipped_dirs_for_native(target), start_ms,
-                ScanMetadata(manifest_name=official_name),
+                target, findings, start_ms,
+                ScanMetadata(manifest_name=official.name),
             )
 
     # --- Load manifest ---

@@ -47,6 +47,7 @@ stores nothing. --name must be the credential that
 enterprise.inspection.ai_defense.credential names. Exit codes: 0 when AI Defense
 accepted the key, 1 when it did not (errors[0].code names why), 2 invalid arguments.`,
 		Example:      "  sudo " + managedHostGatewayCommand() + " enterprise secret check --name ai-defense-api-key --json",
+		Annotations:  map[string]string{secureClientExampleAnnotation: "  sudo defenseclaw-gateway enterprise secret check --name ai-defense-api-key --json"},
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runEnterpriseSecretCheck(cmd, opts)
