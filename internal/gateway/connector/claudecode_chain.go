@@ -23,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -417,12 +418,14 @@ func claudeManagedGuardWrapperInvocation(event, launcher string, hookArgs []stri
 
 // claudeManagedGuardMissingWords is what the managed wrapper prints when the
 // guard image is absent from the install folder: it names the guard and the
-// one repair command. No word may hold a cmd.exe metacharacter, since the text
-// sits inside the wrapper's parenthesised block. The Python mirror is
-// _CLAUDE_MANAGED_GUARD_MISSING in cli/defenseclaw/hook_integrity.py.
+// one repair that can restore it. Only Setup carries the guard payload: the
+// installed CLI has no source to copy it from and refuses a repair while the
+// recorded guard is missing. No word may hold a cmd.exe metacharacter, since
+// the text sits inside the wrapper's parenthesised block. The Python mirror
+// is _CLAUDE_MANAGED_GUARD_MISSING in cli/defenseclaw/hook_integrity.py.
 var claudeManagedGuardMissingWords = strings.Fields("DefenseClaw could not start its Claude Code hook guard " +
 	windowsHookGuardBinaryName + " because it is missing from the install folder. " +
-	"Run defenseclaw.exe enterprise windows repair --profile standalone from that folder as an administrator to restore it.")
+	"Run " + managed.WindowsStandaloneSetupName + " /repair as an administrator to restore it. " + managed.WindowsSetupSource + ".")
 
 func claudeManagedGuardWrapperArgs(guard, launcher, event string, hookArgs []string) []string {
 	failCode := "2"

@@ -38016,6 +38016,12 @@ function Get-DefenseClawLifecycleSources {
             @('HookBinary', $HookBinary),
             @('SensorHelperBinary', $SensorHelperBinary)
         )
+        if (-not $brokerEnabled) {
+            # The standalone Claude Code policy starts every hook through the
+            # guard installed beside the hook; without it each ordinary call
+            # is refused. Setup carries the guard in every payload.
+            $required += @(,@('HookGuardBinary', $HookGuardBinary))
+        }
         # Deferred Install supplies authenticated placeholder config and
         # manifest sources; their Fleet content is inspected at Repair.
         if (-not $DeferredConfig) {
@@ -38034,8 +38040,9 @@ function Get-DefenseClawLifecycleSources {
         ([string]::IsNullOrWhiteSpace($GatewayBinary) -or
         [string]::IsNullOrWhiteSpace($ACPBinary) -or
         [string]::IsNullOrWhiteSpace($HookBinary) -or
+        [string]::IsNullOrWhiteSpace($HookGuardBinary) -or
         [string]::IsNullOrWhiteSpace($SensorHelperBinary))) {
-        throw 'Upgrade requires -GatewayBinary, -ACPBinary, -HookBinary, and -SensorHelperBinary'
+        throw 'Upgrade requires -GatewayBinary, -ACPBinary, -HookBinary, -HookGuardBinary, and -SensorHelperBinary'
     }
     if ($Action -eq 'Upgrade' -and $brokerEnabled -and
         ([string]::IsNullOrWhiteSpace($BrokerBinary) -or
@@ -41180,7 +41187,6 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-gateway.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook.exe'),
-        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook-guard.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-sensor-helper.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'agents\codex.exe'),
@@ -41198,6 +41204,9 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
             (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw')
         )
         $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'lib\defenseclaw\policy_compiler.py')
+        # Only the standalone payload carries the Claude Code hook guard;
+        # Secure Client's retired-tree verdict on that name is unchanged.
+        $files += (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-hook-guard.exe')
     }
     return @{
         directories = @(
