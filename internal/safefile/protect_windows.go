@@ -734,7 +734,7 @@ func privateSecurityDescriptorIsSafeForSubject(
 	if err != nil {
 		return false, err
 	}
-	dacl, _, err := sd.DACL()
+	dacl, err := descriptorDACL(sd)
 	if err != nil || dacl == nil {
 		return false, err
 	}
@@ -831,6 +831,20 @@ func privateSecurityDescriptorIsSafeForSubject(
 	return foundOwner && foundSystem, nil
 }
 
+// descriptorDACL returns the DACL of sd, or nil when sd grants no access list:
+// a NULL DACL (present, grants everyone every access) and a descriptor with no
+// DACL component at all. SECURITY_DESCRIPTOR.DACL reports the second as
+// ERROR_OBJECT_NOT_FOUND; the private-descriptor judgements treat both as the
+// refusal "no DACL" instead of an error that names nothing. Any other error is
+// returned as is.
+func descriptorDACL(sd *windows.SECURITY_DESCRIPTOR) (*windows.ACL, error) {
+	dacl, _, err := sd.DACL()
+	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
+		return nil, nil
+	}
+	return dacl, err
+}
+
 func privateDACLIsWriterRepairableForSubject(
 	path string,
 	identity windowsProtectionSubject,
@@ -916,7 +930,7 @@ func privateSecurityDescriptorRefusals(
 	if err != nil {
 		return nil, err
 	}
-	dacl, _, err := sd.DACL()
+	dacl, err := descriptorDACL(sd)
 	if err != nil {
 		return nil, err
 	}
