@@ -489,9 +489,24 @@ class RegistryAndDocsInSyncTests(unittest.TestCase):
             text=True,
         )
         if result.returncode != 0:
+            # The artifacts read by the check, as they are now: a failure that
+            # a solitary run does not repeat (GAP-0794) shows here whether one
+            # of them changed under a parallel worker.
+            state = []
+            for relative in (
+                "internal/envvars/registry.json",
+                "cli/defenseclaw/_data/envvars/registry.json",
+                "docs-site/content/docs/reference/env-vars.mdx",
+            ):
+                try:
+                    info = (_REPO_ROOT / relative).stat()
+                    state.append(f"  {relative}: {info.st_size} bytes, mtime_ns {info.st_mtime_ns}")
+                except OSError as exc:
+                    state.append(f"  {relative}: {exc}")
             self.fail(
                 f"env-var generated artifacts are out of date. Regenerate with "
                 f"`python scripts/gen_envvars_docs.py`.\nstderr:\n{result.stderr}"
+                f"stdout:\n{result.stdout}\nartifacts now:\n" + "\n".join(state)
             )
 
 
