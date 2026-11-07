@@ -206,7 +206,10 @@ def scan_plugin(
         capabilities=set(),
         finding_counter=[1],
         previous_findings=[],
-        metadata={"secure_client_rules": bool(options and options.disable_vendor_identity)},
+        metadata={
+            "secure_client_rules": bool(options and options.disable_vendor_identity),
+            "data_dir": options.data_dir if options else "",
+        },
     )
 
     # --- Run analyzers sequentially ---
@@ -231,7 +234,7 @@ def scan_plugin(
     # protected state is judged here, on every profile and for every vendor.
     # Secure Client keeps its ordinary scan decision.
     if not ctx.metadata["secure_client_rules"]:
-        for f in audit_protected_links(target, data_dir=options.data_dir if options else ""):
+        for f in audit_protected_links(target, data_dir=ctx.metadata["data_dir"]):
             f.id = f"plugin-{ctx.finding_counter[0]}"
             ctx.finding_counter[0] += 1
             all_findings.append(f)

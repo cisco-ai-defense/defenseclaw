@@ -12,17 +12,22 @@ receiver is provably a regular expression in this file:
 * a regular expression literal, bare or in parentheses: ``/re/g.exec(t)``,
   ``(/re/).exec(t)``;
 * a construction: ``new RegExp(...)`` or ``RegExp(...)``;
-* a name whose single binding is one of those (``const NAME = /re/``) and
+* a name whose single binding is one of those (``const NAME = /re/``, with or without a ``: RegExp`` type) and
   whose every other use is the object of a property access (``NAME.exec(``,
   ``NAME.lastIndex = 0``) or an argument of a logging call. A name that is
   rebound, passed to any other function, returned, indexed or shadowed by a
   parameter is not proven and keeps the finding.
 
-Nothing is proven in a file that can change what ``exec`` does: one that
-assigns an ``exec`` property, names ``exec`` without calling it (an object
-key, a quoted name, a destructuring), redefines properties or prototypes, or
-rebinds ``RegExp``. The object a call reaches is then not the one the source
-text suggests, so the finding stays, as it did before this module.
+Nothing is proven in a plugin that can change what a regular expression
+reaches. The guard reads every JavaScript and TypeScript file of the plugin,
+not the one with the call, and works from the routes that lead to the built-in
+object, not from spellings of the word ``exec``: the name ``RegExp`` may only be
+called, tested with ``instanceof`` or (in TypeScript) used as a type; a
+prototype is never read from an object, passed on, replaced or given a computed
+member; properties are never defined through reflection, proxies or the global
+object by computed name. A plugin that does any of this keeps the finding, as it
+did before this module. An unrelated string or key that happens to read
+'exec' does not change the proof.
 
 A bare ``exec(``, ``cp.exec(``, ``obj.pattern.exec(`` or any receiver this
 module cannot prove stays reported.
@@ -41,7 +46,7 @@ _REGEXP_CONSTRUCTION = re.compile(r"(?<![\w$.])(?:new\s+)?RegExp$")
 # that ends a value it is a call, whose result is not proven.
 _GROUPING_KEYWORD = re.compile(r"\b(?:return|typeof|await|yield|case|void|in|of|else|do)$")
 _BINDING = re.compile(
-    r"(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*="
+    r"(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::\s*RegExp\s*)?="
     r"\s*(?:/(?![/*])|(?:new\s+)?RegExp\s*\()"
 )
 _EXEC_CALL = re.compile(r"\bexec\s*\(")
@@ -50,41 +55,74 @@ _LOG_CALL_BEFORE = re.compile(
     r"(?<![\w$])(?:console|[\w$]*[Ll]og(?:ger)?)\s*\.\s*"
     r"(?:log|debug|info|warn|error|trace|dir|verbose|silly)\s*\([^()]*$"
 )
+_QUOTE = r"[\x27\"`]"
 # Anything that can change what a regular expression call reaches.
 _EXEC_CHANGED = re.compile(
-    r"(?<![.\w$])exec\b(?!\s*\()"
-    r"|\.\s*exec\s*=(?!=)"
-    r"|\b(?:defineProperty|defineProperties|setPrototypeOf|getPrototypeOf|__proto__"
+    r"\b(?:defineProperty|defineProperties|setPrototypeOf|getPrototypeOf|__proto__"
     r"|__defineGetter__|__defineSetter__|Proxy)\b"
     r"|\bReflect\s*\.\s*(?:set|defineProperty|setPrototypeOf)\b"
+    r"|\.\s*exec\s*=(?!=)"
+    rf"|\[\s*{_QUOTE}exec{_QUOTE}\s*\]\s*=(?!=)"
     r"|\bprototype\s*\["
-    r"|\bRegExp\s*=(?!=)"
-    r"|\b(?:const|let|var|function|class)\s+RegExp\b"
-    r"|[\x27\"`]RegExp[\x27\"`]\s*\]\s*="
+    r"|\bprototype\b\s*(?:[,;)\]}>]|=(?!=)|$)"
+    r"|\bconstructor\b[^;\n]*\bprototype\b"
+    r"|\b(?:globalThis|global|window)\s*\["
+    r"|\b(?:function|class)\s+RegExp\b|\b(?:const|let|var)\s+RegExp\b",
+    re.MULTILINE,
 )
+_REGEXP_NAME = re.compile(r"(?<![\w$])RegExp(?![\w$])")
+_TYPESCRIPT = (".ts", ".tsx", ".cts", ".mts")
 _LITERAL_WINDOW = 2000
 
 
+def regexp_may_be_changed(path: str, lines: list[str]) -> bool:
+    """True when the file can change what a regular expression call reaches.
+
+    Judged over every file of the plugin before any call is proven, so a
+    change made by one file voids the proof in all of them.
+    """
+
+    text = "\n".join(lines)
+    if _EXEC_CHANGED.search(text) is not None:
+        return True
+    typescript = path.casefold().endswith(_TYPESCRIPT)
+    for line in lines:
+        for name in _REGEXP_NAME.finditer(line):
+            if not _regexp_name_is_plain(line[:name.start()].rstrip(), line[name.end():].lstrip(), typescript):
+                return True
+    return False
+
+
+def _regexp_name_is_plain(before: str, after: str, typescript: bool) -> bool:
+    """The name is called, tested with instanceof, or (TypeScript) a type."""
+
+    if after.startswith("("):
+        return not re.search(r"\b(?:function|class)\s*\*?$", before)
+    if re.search(r"(?<![\w$.])instanceof$", before):
+        return True
+    if not typescript:
+        return False
+    return before.endswith((":", "<", "|", "&")) or (before.endswith(",") and after.startswith(">"))
+
+
 class RegexpReceivers:
-    """Judge ``exec(`` calls of one source file; bindings are read on first use."""
+    """Judge ``exec(`` calls of one source file; bindings are read on first use.
+
+    The caller has already checked the whole plugin with
+    ``regexp_may_be_changed``.
+    """
 
     def __init__(self, lines: list[str]) -> None:
         self._text = "\n".join(lines)
         self._names: frozenset[str] | None = None
-        self._changed: bool | None = None
 
     def only_pattern_matches(self, line: str) -> bool:
         """True when every ``exec(`` call on the line is a RegExp match."""
 
         calls = list(_EXEC_CALL.finditer(line))
-        if not calls or self._exec_may_be_changed():
+        if not calls:
             return False
         return all(self._is_pattern_match(line, call.start()) for call in calls)
-
-    def _exec_may_be_changed(self) -> bool:
-        if self._changed is None:
-            self._changed = _EXEC_CHANGED.search(self._text) is not None
-        return self._changed
 
     def _is_pattern_match(self, line: str, start: int) -> bool:
         receiver = line[:start].rstrip()
