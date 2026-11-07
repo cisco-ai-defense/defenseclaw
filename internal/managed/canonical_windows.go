@@ -683,7 +683,10 @@ func isSharingViolation(err error) bool {
 // by DefenseClaw's own short transactions. The database and log files the
 // gateway holds open for write (RuntimeFile) keep the delete-only check, and
 // the credential file keeps its own, so a live gateway never blocks the
-// guardian's repair of them.
+// guardian's repair of them. The guardian and broker logs are listed with the
+// administrator kind, but RepairWindowsManagedInstall repairs them as objects
+// outside the class (inPlaceOutOfClass), never under this hold, so the
+// services that keep them open for write never block their repair either.
 func (kind ObjectKind) heldAgainstWriters() bool {
 	return kind == ObjectConfigFile || kind == ObjectAdminFile
 }

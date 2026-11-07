@@ -12,9 +12,11 @@ package enterprisepolicy
 
 import (
 	"fmt"
-	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+
+	"golang.org/x/sys/windows"
 )
 
 var keptPolicyFileSID = regexp.MustCompile(`S-1-[0-9]+(?:-[0-9]+)+`)
@@ -45,7 +47,10 @@ const StaleHookKept = "stale hook: "
 // entry is "path: stale hook: <why the file is not trusted>", for the
 // lifecycle's machine_state_remaining report, so the administrator is told
 // once, in the result, which files to clean (GAP-0761). A trusted file, or one
-// that names no DefenseClaw program, is not listed.
+// that names no DefenseClaw program, is not listed. Nothing is followed: a
+// path with a link on any part below ProgramData is skipped, so a linked
+// vendor folder is reported only as a kept link (the teardown's
+// machine_state_remaining "kept" entry) and never read through as SYSTEM.
 func KeptUntrustedPolicyFiles(opts Options) []string {
 	if opts.goos() != "windows" || opts.SkipTrustChecks {
 		return nil
@@ -67,19 +72,61 @@ func KeptUntrustedPolicyFiles(opts Options) []string {
 	var kept []string
 	for _, path := range paths {
 		path = platformPath(opts, path)
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Size() > policyFileLimit {
+		if programDataPathHasLink(opts, path) {
 			continue
 		}
 		trustErr := validateTrustedFileItself(path)
 		if trustErr == nil {
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readKeptPolicyFileNoFollow(path)
 		if err != nil || !strings.Contains(strings.ToLower(string(data)), "defenseclaw") {
 			continue
 		}
 		kept = append(kept, path+": "+StaleHookKept+trustErr.Error()+". Fix: "+keptPolicyFileFix(path, trustErr.Error()))
 	}
 	return kept
+}
+
+// programDataPathHasLink reports whether a part of path below ProgramData,
+// the file included, is a reparse point, or path is not there or not below
+// ProgramData. It only reads attributes.
+func programDataPathHasLink(opts Options, path string) bool {
+	root, rel, ok := programDataRelative(opts, path)
+	if !ok {
+		return true
+	}
+	cur := root
+	for _, part := range strings.Split(rel, `\`) {
+		cur = filepath.Join(cur, part)
+		name, err := windows.UTF16PtrFromString(cur)
+		if err != nil {
+			return true
+		}
+		attributes, err := windows.GetFileAttributes(name)
+		if err != nil || attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// readKeptPolicyFileNoFollow reads the regular file at path, up to
+// policyFileLimit, through a handle that does not follow a reparse point at
+// it. The folders above it were checked just before (programDataPathHasLink);
+// this only reports, so that check is enough for them.
+func readKeptPolicyFileNoFollow(path string) ([]byte, error) {
+	handle, err := openNoDeleteShare(path, windows.FILE_READ_DATA|windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = windows.CloseHandle(handle) }()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return nil, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	return readHandleBounded(handle, policyFileLimit)
 }

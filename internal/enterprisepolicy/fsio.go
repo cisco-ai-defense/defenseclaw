@@ -98,6 +98,10 @@ type ReprotectedFolder struct {
 	Why    string `json:"why"`
 	Before string `json:"before"`
 	After  string `json:"after"`
+	// Displaced says what the transaction moved aside: a file another
+	// account added to a folder whose vendor loads every file in it, between
+	// the transaction's checks and its stamp.
+	Displaced []string `json:"displaced,omitempty"`
 }
 
 // policyFolderUse is how the vendor uses the folder that holds a policy
@@ -163,6 +167,9 @@ func takeBackPolicyPathFor(opts Options, path string, use policyFolderUse, state
 		folder.Connector = state.Connector
 		state.detail("re-protected %s: %s; nothing held it open, DefenseClaw's recorded files in it were as DefenseClaw wrote them and it held "+
 			"nothing else DefenseClaw did not account for, so it now has DefenseClaw's owner and protected access list", folder.Dir, folder.Why)
+		for _, note := range folder.Displaced {
+			state.detail("%s", note)
+		}
 		state.Reprotected = append(state.Reprotected, folder)
 		state.Changed = true
 	}

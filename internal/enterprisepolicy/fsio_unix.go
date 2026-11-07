@@ -976,9 +976,6 @@ func ReprotectRecordedVendorFolders(Options, []string) ([]ReprotectedFolder, []V
 // VendorFolderProblemFor reports nothing off Windows.
 func VendorFolderProblemFor(Options, string) *VendorFolderProblem { return nil }
 
-// IsVendorFolderRefusal is false off Windows.
-func IsVendorFolderRefusal(error) bool { return false }
-
 // reclaimRefusesContentDrift is the Windows standalone rule for vendor
 // folders; no unix vendor folder is taken over or kept, so it is false.
 var reclaimRefusesContentDrift = func() bool { return false }

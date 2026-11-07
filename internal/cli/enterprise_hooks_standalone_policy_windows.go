@@ -362,7 +362,7 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) error {
 	var refusal error
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
-		if windowsIsVendorFolderRefusal(err) {
+		if len(windowsVendorFolderRefusals(err)) != 0 {
 			refusal = err
 		}
 	}
@@ -383,8 +383,8 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) error {
 	return refusal
 }
 
-// windowsIsVendorFolderRefusal is replaceable in tests.
-var windowsIsVendorFolderRefusal = enterprisepolicy.IsVendorFolderRefusal
+// windowsVendorFolderRefusals is replaceable in tests.
+var windowsVendorFolderRefusals = enterprisepolicy.VendorFolderRefusals
 
 // enterpriseHookWindowsHookRepairedAudit is replaceable in tests.
 var enterpriseHookWindowsHookRepairedAudit = postWindowsManagedHookRepaired
@@ -392,9 +392,11 @@ var enterpriseHookWindowsHookRepairedAudit = postWindowsManagedHookRepaired
 // enterpriseHookWindowsVendorFolderAlert is replaceable in tests.
 var enterpriseHookWindowsVendorFolderAlert = postWindowsManagedCoverageAlert
 
-// windowsGuardianVendorFolderRefusals remembers the refusal each vendor
-// folder last had, so the audit alert is written when the refusal appears or
-// changes and not at every pass.
+// windowsGuardianVendorFolderRefusals remembers, by folder, the refusal each
+// vendor folder had at the last pass, so the audit alert is written when a
+// folder's refusal appears or changes and not at every pass. A folder that is
+// healed or no longer refused is forgotten, so a refusal that comes back
+// after a recovery is alerted again.
 var (
 	windowsGuardianVendorFolderMu       sync.Mutex
 	windowsGuardianVendorFolderRefusals = map[string]string{}
@@ -403,37 +405,58 @@ var (
 // reportWindowsGuardianVendorFolders reports, once each, what the pass did to
 // the vendor folders DefenseClaw did not create that hold a file it recorded:
 // a folder it re-protected gets one HIGH connector-hook-repaired audit row
-// and one log line; a refusal gets one alert row naming the folder (and not a
-// repaired row), and the log line at every pass (GAP-0756, GAP-0760).
+// and one log line; a refused folder gets one alert row naming it (and not a
+// repaired row), and the log line at every pass (GAP-0756, GAP-0760). An
+// alert that could not be written is tried again at the next pass.
 func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepolicy.Result, publishErr error) {
 	for _, state := range published.States {
 		for _, folder := range state.Reprotected {
 			fmt.Fprintf(stderr, "[hook-guardian] re-protected %s (%s): %s; access list before %s, after %s\n",
 				folder.Dir, folder.Connector, folder.Why, folder.Before, folder.After)
+			for _, note := range folder.Displaced {
+				fmt.Fprintf(stderr, "[hook-guardian] %s\n", note)
+			}
 			if err := enterpriseHookWindowsHookRepairedAudit(folder, "defenseclaw-hook-guardian"); err != nil {
 				fmt.Fprintf(stderr, "[hook-guardian] the audit row for %s could not be written: %v\n", folder.Dir, err)
 			}
+		}
+	}
+	refused := map[string]bool{}
+	var fresh []enterprisepolicy.VendorFolderRefusal
+	windowsGuardianVendorFolderMu.Lock()
+	for _, refusal := range windowsVendorFolderRefusals(publishErr) {
+		key := windowsGuardianVendorFolderKey(refusal.Dir)
+		refused[key] = true
+		if windowsGuardianVendorFolderRefusals[key] != refusal.Message {
+			windowsGuardianVendorFolderRefusals[key] = refusal.Message
+			fresh = append(fresh, refusal)
+		}
+	}
+	for key := range windowsGuardianVendorFolderRefusals {
+		if !refused[key] {
+			delete(windowsGuardianVendorFolderRefusals, key)
+		}
+	}
+	windowsGuardianVendorFolderMu.Unlock()
+	for _, refusal := range fresh {
+		if err := enterpriseHookWindowsVendorFolderAlert("managed-vendor-folder", "managed_vendor_folder_not_protected",
+			windowsVendorFolderAlertDetails(refusal.Dir, refusal.Message)); err != nil {
+			fmt.Fprintf(stderr, "[hook-guardian] the audit row for the refused vendor folder %s could not be written: %v\n", refusal.Dir, err)
 			windowsGuardianVendorFolderMu.Lock()
-			delete(windowsGuardianVendorFolderRefusals, strings.ToLower(folder.Dir))
+			delete(windowsGuardianVendorFolderRefusals, windowsGuardianVendorFolderKey(refusal.Dir))
 			windowsGuardianVendorFolderMu.Unlock()
 		}
 	}
-	if publishErr == nil || !windowsIsVendorFolderRefusal(publishErr) {
-		return
-	}
-	key := "refused"
-	message := publishErr.Error()
-	windowsGuardianVendorFolderMu.Lock()
-	seen := windowsGuardianVendorFolderRefusals[key] == message
-	windowsGuardianVendorFolderRefusals[key] = message
-	windowsGuardianVendorFolderMu.Unlock()
-	if seen {
-		return
-	}
-	if err := enterpriseHookWindowsVendorFolderAlert("managed-vendor-folder", "managed_vendor_folder_not_protected",
-		map[string]any{"coverage_state": "incomplete", "message": message}); err != nil {
-		fmt.Fprintf(stderr, "[hook-guardian] the audit row for the refused vendor folder could not be written: %v\n", err)
-	}
+}
+
+func windowsGuardianVendorFolderKey(dir string) string {
+	return strings.ToLower(filepath.Clean(dir))
+}
+
+// windowsVendorFolderAlertDetails are the details of the
+// managed_vendor_folder_not_protected alert, from the guardian and from Setup.
+func windowsVendorFolderAlertDetails(dir, message string) map[string]any {
+	return map[string]any{"coverage_state": "incomplete", "path": dir, "message": message}
 }
 
 // enterpriseHookWindowsClaudeHooksOnlyLock is replaceable in tests.
