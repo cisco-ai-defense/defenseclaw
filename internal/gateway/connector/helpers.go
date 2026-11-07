@@ -357,76 +357,53 @@ func hookCommandNamesHookDir(command, hookScript string) bool {
 		if !filepath.IsAbs(strings.TrimSpace(home)) {
 			continue
 		}
-		text := hookCommandPathText(command, normalizeHookPath(filepath.Clean(home), fold), fold)
-		candidates := hookCommandPathCandidates(text, fold)
-		if hookPathCandidatesNameDir(candidates, files, dirs, fold, false) ||
-			hookPathCandidatesNameDir(candidates, files, dirs, fold, true) {
+		if hookCommandNamesDir(command, normalizeHookPath(filepath.Clean(home), fold), files, dirs, fold) {
 			return true
 		}
 	}
 	return false
 }
 
-// hookPathCandidatesNameDir reports whether any candidate, cleaned (and, with
-// resolve, with its existing ancestors and links resolved), is a managed hook
-// file or lies in a managed hook directory. Cleaning happens before the
-// comparison: "<hooks>/../user.sh" and "/other<hooks>/x" are not managed.
-func hookPathCandidatesNameDir(candidates, files, dirs []string, fold, resolve bool) bool {
-	for _, word := range candidates {
-		name := filepath.FromSlash(word)
-		form := normalizeHookPath(filepath.Clean(name), fold)
-		if resolve {
-			resolved, ok := resolveHookPathAllowMissing(name)
-			if !ok {
-				continue
-			}
-			form = normalizeHookPath(resolved, fold)
-		}
-		if slices.Contains(files, form) {
-			return true
-		}
-		for _, managed := range dirs {
-			if form == managed || strings.HasPrefix(form, managed+"/") {
+// maxHookPathLen is the longest span tried as one path word: PATH_MAX. A name
+// cannot be longer, so a complete file name is always among the spans however
+// many commas, colons or equals signs it holds.
+const maxHookPathLen = 4096
+
+// maxHookPathSpans bounds the spans tried (repeats included) for one command, so a command made
+// of thousands of path starts cannot stall setup or teardown. Past it the
+// command counts as naming the managed directory: the protected answer.
+const maxHookPathSpans = 1 << 14
+
+// hookPathScan matches the path words in hook command text against the
+// managed hook files and directories.
+type hookPathScan struct {
+	files, dirs []string
+	fold        bool
+	budget      int
+	exists      map[string]bool
+}
+
+// hookCommandNamesDir reports whether hook command text (as read by
+// hookCommandPathText) holds a path word that names a managed hook file or
+// lies in a managed hook directory. A word starts at an absolute path after
+// the start of the text or a delimiter, and "NAME=" counts as a delimiter only
+// before the first "/" of a word. Ordinary file names hold spaces, commas and
+// equals signs, so each start yields every span up to a later delimiter and
+// the rest of the text, and a complete name is always among them. A span that
+// exists and is not managed is one ordinary path: the starts inside it are not
+// read, so "/home/u/a,/home/u/.defenseclaw/hooks/b" stays the user's file when
+// it exists. The text is never run.
+func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) bool {
+	scan := &hookPathScan{files: files, dirs: dirs, fold: fold, budget: maxHookPathSpans, exists: map[string]bool{}}
+	text := hookCommandPathText(scan.blankOrdinaryQuoted(command, home), home, fold)
+	startOK, wordSlash, skipTo := true, false, 0
+	for i, r := range text {
+		if startOK && i >= skipTo && hookPathStart(text, i, fold) {
+			claimed, ordinary := scan.start(text, i)
+			if claimed {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// maxHookPathEnds bounds the path-word ends tried from one start.
-const maxHookPathEnds = 32
-
-// hookCommandPathCandidates returns the path words in hook command text (as
-// built by hookCommandPathText). A word starts at an absolute path after the
-// start of the text or a delimiter, and "NAME=" counts as a delimiter only
-// before the first "/" of a word. Because ordinary file names hold spaces,
-// commas and equals signs, each start yields every span up to a later
-// delimiter, and the rest of the text, so a complete name is always among
-// the candidates. The text is never run.
-func hookCommandPathCandidates(text string, fold bool) []string {
-	var out []string
-	seen := map[string]bool{}
-	add := func(word string) {
-		if word != "" && !seen[word] {
-			seen[word] = true
-			out = append(out, word)
-		}
-	}
-	startOK, wordSlash := true, false
-	for i, r := range text {
-		if startOK && hookPathStart(text, i, fold) {
-			ends := 0
-			for j, next := range text[i+1:] {
-				if ends >= maxHookPathEnds {
-					break
-				}
-				if hookCommandPathDelimiter(next, fold) {
-					add(text[i : i+1+j])
-					ends++
-				}
-			}
-			add(text[i:])
+			skipTo = i + ordinary
 		}
 		switch {
 		case unicode.IsSpace(r) || strings.ContainsRune(";|&()<>{}[]$", r):
@@ -442,7 +419,110 @@ func hookCommandPathCandidates(text string, fold bool) []string {
 			wordSlash = true
 		}
 	}
-	return out
+	return false
+}
+
+// blankOrdinaryQuoted returns command with each quoted word replaced by "_"
+// when the word, with a space or another shell separator in it, is one
+// existing absolute path that is not managed. Quotes make it one word to a
+// shell, so the managed path inside "/home/u/a /home/u/.defenseclaw/hooks/b"
+// is not a word of its own. A quoted command line ("sh -c '...'") is not an
+// existing path and stays.
+func (s *hookPathScan) blankOrdinaryQuoted(command, home string) string {
+	var out strings.Builder
+	for i := 0; i < len(command); {
+		quote := command[i]
+		if quote != '\'' && quote != '"' {
+			out.WriteByte(quote)
+			i++
+			continue
+		}
+		end := strings.IndexByte(command[i+1:], quote)
+		if end < 0 {
+			out.WriteString(command[i:])
+			break
+		}
+		end += i + 2
+		word := hookCommandPathText(command[i+1:end-1], home, s.fold)
+		if strings.ContainsFunc(word, hookShellSeparator) && hookPathStart(word, 0, s.fold) {
+			if named, exists := s.span(word); !named && exists {
+				out.WriteByte('_')
+				i = end
+				continue
+			}
+		}
+		out.WriteString(command[i:end])
+		i = end
+	}
+	return out.String()
+}
+
+// start tries every span that starts at text[i]. It returns whether a span
+// names a managed path and, when none does, the length of the longest span
+// that exists as one ordinary path (a shell would read it as one word).
+func (s *hookPathScan) start(text string, i int) (claimed bool, ordinary int) {
+	try := func(end int) bool {
+		word := text[i:end]
+		named, exists := s.span(word)
+		if exists && end-i > ordinary && !strings.ContainsFunc(word, hookShellSeparator) {
+			ordinary = end - i
+		}
+		return named
+	}
+	for j, next := range text[i+1:] {
+		if j >= maxHookPathLen {
+			break
+		}
+		if hookCommandPathDelimiter(next, s.fold) && try(i+1+j) {
+			return true, 0
+		}
+	}
+	if try(len(text)) {
+		return true, 0
+	}
+	return false, ordinary
+}
+
+// hookShellSeparator is a character that ends a shell word when unquoted.
+func hookShellSeparator(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune(";|&()<>{}[]$", r)
+}
+
+// span reports whether word, cleaned or resolved through its links, names a
+// managed hook file or lies in a managed hook directory, and whether it
+// exists. Cleaning happens before the comparison: "<hooks>/../user.sh" and
+// "/other<hooks>/x" are not managed.
+func (s *hookPathScan) span(word string) (named, exists bool) {
+	if s.budget--; s.budget < 0 {
+		return true, false
+	}
+	if exists, seen := s.exists[word]; seen {
+		return false, exists
+	}
+	name := filepath.FromSlash(word)
+	if s.names(normalizeHookPath(filepath.Clean(name), s.fold)) {
+		return true, false
+	}
+	if resolved, ok := resolveHookPathAllowMissing(name); ok && s.names(normalizeHookPath(resolved, s.fold)) {
+		return true, false
+	}
+	_, err := os.Lstat(name)
+	s.exists[word] = err == nil
+	return false, err == nil
+}
+
+// names reports whether form is a managed hook file or lies in a managed
+// hook directory.
+func (s *hookPathScan) names(form string) bool {
+	if slices.Contains(s.files, form) {
+		return true
+	}
+	for _, managed := range s.dirs {
+		if form == managed || strings.HasPrefix(form, managed+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // hookPathStart reports whether text holds an absolute path at i.
@@ -521,8 +601,10 @@ func hookCommandPathDelimiter(r rune, fold bool) bool {
 }
 
 // resolveHookPathAllowMissing resolves existing ancestors so a removed hook
-// file can still be classified by its directory. A dangling link is not a
-// missing file in that directory and cannot establish ownership.
+// file can still be classified by its directory. Links are resolved before a
+// later ".." component is read, as the kernel does: "<link>/../x" is x beside
+// the link's target, not beside the link. A dangling link is not a missing
+// file in that directory and cannot establish ownership.
 func resolveHookPathAllowMissing(name string) (string, bool) {
 	return resolveHookPathAllowMissingDepth(name, 0)
 }
@@ -531,6 +613,37 @@ func resolveHookPathAllowMissingDepth(name string, depth int) (string, bool) {
 	if depth > 16 {
 		return "", false
 	}
+	volume := filepath.VolumeName(name)
+	cur := volume + string(filepath.Separator)
+	var pending []string
+	flush := func() bool {
+		if len(pending) == 0 {
+			return true
+		}
+		resolved, ok := resolveHookPathSteps(filepath.Join(append([]string{cur}, pending...)...), depth)
+		cur, pending = resolved, nil
+		return ok
+	}
+	for _, part := range strings.FieldsFunc(name[len(volume):], func(r rune) bool { return r == '/' || r == filepath.Separator }) {
+		switch part {
+		case ".":
+		case "..":
+			if !flush() {
+				return "", false
+			}
+			cur = filepath.Dir(cur)
+		default:
+			pending = append(pending, part)
+		}
+	}
+	if !flush() {
+		return "", false
+	}
+	return cur, true
+}
+
+// resolveHookPathSteps resolves name, which holds no ".." component.
+func resolveHookPathSteps(name string, depth int) (string, bool) {
 	name = filepath.Clean(name)
 	var missing []string
 	for {
@@ -550,7 +663,7 @@ func resolveHookPathAllowMissingDepth(name string, depth int) (string, bool) {
 				return "", false
 			}
 			if !filepath.IsAbs(target) {
-				target = filepath.Join(filepath.Dir(name), target)
+				target = filepath.Dir(name) + string(filepath.Separator) + target
 			}
 			resolved, valid := resolveHookPathAllowMissingDepth(target, depth+1)
 			if !valid {
