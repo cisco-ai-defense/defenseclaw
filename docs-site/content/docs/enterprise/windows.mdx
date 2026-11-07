@@ -975,8 +975,11 @@ still have the permissions Setup gave them and hold only DefenseClaw folders. It
 `C:\ProgramData\OpenAI\Codex` only when all three hold: the folder was created after
 `C:\ProgramData\Cisco\DefenseClaw`, it has exactly the permissions DefenseClaw creates it with, and
 it holds only DefenseClaw's own files. `ClaudeCode` and `OpenAI` follow when their only child is
-recorded. A folder that fails any of these stays after a purge, and the purge names it once as
-"left in place: not provably created by DefenseClaw". Such a record only lets a purge remove an
+recorded. Setup checks these folders once, on the first install, upgrade or repair after the
+upgrade; a folder an administrator makes later and Setup adopts is never recorded. A folder that
+fails any of these stays after a purge, and the purge names it once as
+"left in place: not provably created by DefenseClaw" when DefenseClaw had written a file or a
+folder into it. Such a record only lets a purge remove an
 empty folder; it never makes DefenseClaw treat the folder as its own. A folder that holds anything
 that looks like Secure Client is never recorded or removed. A standalone
 Setup uninstall removes the administrator-only

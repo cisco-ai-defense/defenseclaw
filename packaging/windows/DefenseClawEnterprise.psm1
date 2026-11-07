@@ -18377,6 +18377,51 @@ function Test-DefenseClawCreatedFolderRecordable {
     return $false
 }
 
+# Makes sure RecordDirectory exists and is administrator-only, with no reparse
+# point on its path. $false when the lifecycle folder above it is not there
+# (nothing creates that here). Throws on an unsafe path.
+function Initialize-DefenseClawCreatedFolderRecordDirectory {
+    param([Parameter(Mandatory)][string]$RecordDirectory)
+    $lifecycle = [IO.Path]::GetDirectoryName($RecordDirectory)
+    if (-not [IO.Directory]::Exists($lifecycle)) {
+        return $false
+    }
+    $null = Assert-DefenseClawNoReparsePath -Path $lifecycle
+    if (-not [IO.Directory]::Exists($RecordDirectory)) {
+        [void](New-DefenseClawProtectedDirectory -Path $RecordDirectory)
+    }
+    $null = Assert-DefenseClawNoReparsePath -Path $RecordDirectory
+    $null = Assert-DefenseClawPathAcl `
+        -Path $RecordDirectory `
+        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+    return $true
+}
+
+# Writes one administrator-only file in the record folder, once: the first
+# writer's file stands (CREATE_NEW).
+function Write-DefenseClawCreatedFolderRecordFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][byte[]]$Body
+    )
+    try {
+        $stream = [IO.FileStream]::new($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    }
+    catch [IO.IOException] {
+        if ([IO.File]::Exists($Path)) {
+            return
+        }
+        throw
+    }
+    try {
+        $stream.Write($Body, 0, $Body.Length)
+    }
+    finally {
+        $stream.Dispose()
+    }
+    Set-DefenseClawPathAcl -Path $Path -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+}
+
 # Records folders this run created. Best effort: a folder it cannot record
 # stays after a purge, the safe side, so a failure never fails the run that
 # created it. It never creates the lifecycle folder itself.
@@ -18399,18 +18444,9 @@ function Add-DefenseClawStandaloneCreatedFolderRecord {
         if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
             $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
         }
-        $lifecycle = [IO.Path]::GetDirectoryName($RecordDirectory)
-        if (-not [IO.Directory]::Exists($lifecycle)) {
+        if (-not (Initialize-DefenseClawCreatedFolderRecordDirectory -RecordDirectory $RecordDirectory)) {
             return
         }
-        Assert-DefenseClawNoReparsePath -Path $lifecycle
-        if (-not [IO.Directory]::Exists($RecordDirectory)) {
-            [void](New-DefenseClawProtectedDirectory -Path $RecordDirectory)
-        }
-        Assert-DefenseClawNoReparsePath -Path $RecordDirectory
-        Assert-DefenseClawPathAcl `
-            -Path $RecordDirectory `
-            -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
         foreach ($folder in @($Path)) {
             if (-not (Test-DefenseClawCreatedFolderRecordable -Path $folder -Roots $Roots)) {
                 continue
@@ -18425,22 +18461,7 @@ function Add-DefenseClawStandaloneCreatedFolderRecord {
                 $document['origin'] = $Origin
             }
             $body = [Text.Encoding]::UTF8.GetBytes(($document | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress))
-            try {
-                $stream = [IO.FileStream]::new($recordPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
-            }
-            catch [IO.IOException] {
-                if ([IO.File]::Exists($recordPath)) {
-                    continue
-                }
-                throw
-            }
-            try {
-                $stream.Write($body, 0, $body.Length)
-            }
-            finally {
-                $stream.Dispose()
-            }
-            Set-DefenseClawPathAcl -Path $recordPath -Kind AdminFile -GatewayServiceSID $script:AdministratorsSID
+            Write-DefenseClawCreatedFolderRecordFile -Path $recordPath -Body $body
         }
     }
     catch {
@@ -18691,7 +18712,9 @@ function Get-DefenseClawCreatedFolderOtherEntry {
 # The usable records in RecordDirectory, as Folder and File: the folder must
 # be administrator-only with no reparse point on its path, and so must each
 # record, which must be this schema and named for its path. Any other file
-# is not used, and stays.
+# is not used, and stays. The "origin" of a record is not read: a purge treats
+# a back-filled record (origin upgrade) and one written at creation alike, and
+# no record gives ownership (GAP-0704 rule iii, review 3 L3).
 function Get-DefenseClawStandaloneCreatedFolderRecords {
     param([Parameter(Mandatory)][string]$RecordDirectory)
     Assert-DefenseClawNoReparsePath -Path $RecordDirectory
@@ -18725,7 +18748,6 @@ function Get-DefenseClawStandaloneCreatedFolderRecords {
         $records.Add([pscustomobject]@{
             Folder = [IO.Path]::GetFullPath($recorded).TrimEnd('\')
             File   = $item.FullName
-            Origin = if ($null -ne $document.PSObject.Properties['origin']) { [string]$document.origin } else { '' }
         })
     }
     return $records.ToArray()
@@ -18892,6 +18914,11 @@ function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
     foreach ($record in $deferred) {
         [IO.File]::Delete($record.File)
     }
+    # The one-shot back-fill marker goes with the records (review 3 S2).
+    $backfillMarker = [IO.Path]::Combine($RecordDirectory, $script:AgentFolderBackfillMarker)
+    if ([IO.File]::Exists($backfillMarker)) {
+        [IO.File]::Delete($backfillMarker)
+    }
     if ($null -eq (Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $RecordDirectory -Force |
             Microsoft.PowerShell.Utility\Select-Object -First 1)) {
         [IO.Directory]::Delete($RecordDirectory, $false)
@@ -18924,6 +18951,34 @@ function Remove-DefenseClawStandaloneCreatedFolders {
     }
 }
 
+# The agent-folder back-fill is one-shot (GAP-0704 review 3 S2). The first
+# install, upgrade or repair that finds no marker runs it and leaves this
+# marker, administrator-only, in the record folder; no later run back-fills
+# an agent folder again. Why: Setup adopts an empty folder an administrator
+# made (the vendor folder case b, GAP-0092) and stamps it with the descriptor
+# that proof (b) tests for, so a later back-fill would take the adopted folder
+# for one DefenseClaw created and a purge would remove it. Any entry with this
+# name counts as done. A marker that cannot be written leaves the back-fill to
+# the next run, which can only add a record. A purge removes the marker with
+# the record folder, so a new deployment starts clean. It is not part of the
+# deployment record, so g582's adoption needs no change.
+$script:AgentFolderBackfillMarker = 'agent-folder-backfill.done'
+
+function Test-DefenseClawAgentFolderBackfillDone {
+    param([Parameter(Mandatory)][string]$RecordDirectory)
+    $marker = [IO.Path]::Combine($RecordDirectory, $script:AgentFolderBackfillMarker)
+    return ([IO.File]::Exists($marker) -or [IO.Directory]::Exists($marker))
+}
+
+function Set-DefenseClawAgentFolderBackfillDone {
+    param([Parameter(Mandatory)][string]$RecordDirectory)
+    if (-not (Initialize-DefenseClawCreatedFolderRecordDirectory -RecordDirectory $RecordDirectory)) {
+        return
+    }
+    $body = [Text.Encoding]::UTF8.GetBytes('{"schema_version":1,"agent_folder_backfill":"done"}')
+    Write-DefenseClawCreatedFolderRecordFile -Path ([IO.Path]::Combine($RecordDirectory, $script:AgentFolderBackfillMarker)) -Body $body
+}
+
 # Upgrade back-fill (a computer installed before 1.0.9 kept no
 # created-folder record). On install, upgrade or repair Setup records, with
 # "origin":"upgrade":
@@ -18936,7 +18991,8 @@ function Remove-DefenseClawStandaloneCreatedFolders {
 #   Get-DefenseClawAgentFolderBackfillRefusal). DefenseClaw re-stamps an
 #   existing agent folder with the descriptor it creates one with, so the
 #   descriptor alone does not tell who made it; the folder's creation time
-#   does: a folder older than StateRoot existed before DefenseClaw.
+#   does: a folder older than StateRoot existed before DefenseClaw. This part
+#   runs once per deployment (Test-DefenseClawAgentFolderBackfillDone).
 # A folder that fails any proof is not recorded and stays after a purge,
 # which names it (left in place: not provably created by DefenseClaw). Such
 # a record never gives ownership for a repair or a takeover; a purge uses it
@@ -18986,6 +19042,12 @@ function Add-DefenseClawStandaloneUpgradeVendorFolderRecords {
         Microsoft.PowerShell.Utility\Write-Verbose "vendor folder back-fill skipped: $($_.Exception.Message)"
     }
     try {
+        if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
+            $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
+        }
+        if (Test-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory) {
+            return
+        }
         if ([string]::IsNullOrWhiteSpace($StateRoot)) {
             $StateRoot = [string](Get-DefenseClawProfileRoots -EnterpriseProfile Standalone).StateRoot
         }
@@ -19013,6 +19075,7 @@ function Add-DefenseClawStandaloneUpgradeVendorFolderRecords {
             }
             Add-DefenseClawStandaloneCreatedFolderRecord -Path @($folder) -RecordDirectory $RecordDirectory -Roots $Roots -Origin upgrade
         }
+        Set-DefenseClawAgentFolderBackfillDone -RecordDirectory $RecordDirectory
     }
     catch {
         Microsoft.PowerShell.Utility\Write-Verbose "agent folder back-fill skipped: $($_.Exception.Message)"
@@ -19067,6 +19130,59 @@ function Read-DefenseClawSmallJson {
     catch {
         return $null
     }
+}
+
+# Whether Name is a file DefenseClaw itself writes in an agent folder of this
+# Kind: the lock, state and selector files of the hooks, and per kind the
+# drop-ins (Claude Code), the hook script and receipt (Cursor), and for Codex
+# the writer lock and the state copies of the Codex machine-policy writer
+# (.state.committed and .state.<n>, GAP-0650; review 3 S1). A file with an
+# agent's own name (requirements.toml, hooks.json) is not one; the refusal
+# judges those by DefenseClaw's records.
+function Test-DefenseClawAgentFolderOwnFileName {
+    param(
+        [Parameter(Mandatory)][string]$Kind,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $own = @('.defenseclaw-managed-hooks.state', '.defenseclaw-managed-hooks.lock',
+        '.defenseclaw-managed-runtime-selector.state', '.defenseclaw-managed-runtime-selector.lock')
+    switch ($Kind) {
+        'ClaudeDropIns' { $own += @('90-defenseclaw.json', '00-defenseclaw-version-floor.json') }
+        'Cursor' { $own += @('defenseclaw-hook.ps1', '.defenseclaw-managed-hooks.receipt') }
+        'Codex' { $own += @('.defenseclaw-managed-hooks.writer.lock', '.defenseclaw-managed-hooks.state.committed') }
+    }
+    if ($own -ccontains $Name) {
+        return $true
+    }
+    return ($Kind -ceq 'Codex' -and $Name -cmatch '^\.defenseclaw-managed-hooks\.state\.[1-9][0-9]{0,7}$')
+}
+
+# The requirements_sha256 each DefenseClaw state copy in a Codex folder binds,
+# lower case: the 1.0.8 fixed name, the writer copy and the hook copy the
+# writer lock names (<state>.<n>, n the even counter the lock carries as its
+# size). After the Codex machine-policy writer of this release has run, the
+# fixed name is gone and the copies hold the state (GAP-0650; review 3 S1).
+function Get-DefenseClawCodexStateRequirementsHashes {
+    param([Parameter(Mandatory)][string]$Directory)
+    $names = [Collections.Generic.List[string]]::new()
+    $names.Add('.defenseclaw-managed-hooks.state')
+    $names.Add('.defenseclaw-managed-hooks.state.committed')
+    $lock = [IO.FileInfo]::new([IO.Path]::Combine($Directory, '.defenseclaw-managed-hooks.writer.lock'))
+    if ($lock.Exists -and $lock.Length -gt 0) {
+        $counter = [int64]$lock.Length
+        if (($counter % 2) -ne 0) {
+            $counter++
+        }
+        $names.Add(('.defenseclaw-managed-hooks.state.{0}' -f $counter))
+    }
+    $hashes = [Collections.Generic.List[string]]::new()
+    foreach ($name in $names) {
+        $state = Read-DefenseClawSmallJson -Path ([IO.Path]::Combine($Directory, $name))
+        if ($null -ne $state -and $null -ne $state.PSObject.Properties['requirements_sha256']) {
+            $hashes.Add(([string]$state.requirements_sha256).ToLowerInvariant())
+        }
+    }
+    return $hashes.ToArray()
 }
 
 # Why an agent folder is not provably one DefenseClaw created, or '' when it
@@ -19152,26 +19268,20 @@ function Get-DefenseClawAgentFolderBackfillRefusal {
             }
             return ''
         }
-        $own = @('.defenseclaw-managed-hooks.state', '.defenseclaw-managed-hooks.lock',
-            '.defenseclaw-managed-runtime-selector.state', '.defenseclaw-managed-runtime-selector.lock')
-        switch ($Kind) {
-            'ClaudeDropIns' { $own += @('90-defenseclaw.json', '00-defenseclaw-version-floor.json') }
-            'Cursor' { $own += @('defenseclaw-hook.ps1', '.defenseclaw-managed-hooks.receipt') }
-        }
         foreach ($child in $children) {
             if ($child.PSIsContainer -or ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 return "it holds $($child.Name), which is not a plain file"
             }
-            if ($own -ccontains $child.Name) {
+            if (Test-DefenseClawAgentFolderOwnFileName -Kind $Kind -Name $child.Name) {
                 continue
             }
             if ($Kind -ceq 'Codex' -and $child.Name -ceq 'requirements.toml') {
-                # Bound by the managed-hook state, and published where none was.
-                $state = Read-DefenseClawSmallJson -Path ([IO.Path]::Combine($Path, '.defenseclaw-managed-hooks.state'))
+                # Bound by a managed-hook state copy, and published where none was.
+                $stateHashes = @(Get-DefenseClawCodexStateRequirementsHashes -Directory $Path)
                 $ownership = if ([string]::IsNullOrWhiteSpace($CodexOwnershipPath)) { $null } else { Read-DefenseClawSmallJson -Path $CodexOwnershipPath }
                 $hash = Get-DefenseClawPlainFileSha256 -Path $child.FullName
-                if ($null -eq $state -or $null -eq $ownership -or [string]::IsNullOrEmpty($hash) -or
-                    ([string]$state.requirements_sha256).ToLowerInvariant() -cne $hash -or
+                if ($stateHashes.Count -eq 0 -or $null -eq $ownership -or [string]::IsNullOrEmpty($hash) -or
+                    $stateHashes -cnotcontains $hash -or
                     [bool]$ownership.preimage_existed -or
                     ([string]$ownership.postimage_sha256).ToLowerInvariant().Replace('sha256:', '') -cne $hash) {
                     return 'it holds requirements.toml, which DefenseClaw''s records do not show it published there first'
@@ -19199,10 +19309,14 @@ function Get-DefenseClawAgentFolderBackfillRefusal {
     }
 }
 
-# GAP-0704 binding rule (i): a purge names, once, each vendor folder it left
-# because nothing proves DefenseClaw created it: there with no record (it
-# existed before the install, or the upgrade back-fill could not prove it).
-function Get-DefenseClawUnprovenVendorFolders {
+# The vendor folders DefenseClaw touched that have no record: an agent folder
+# that holds a file DefenseClaw writes there (Test-DefenseClawAgentFolderOwnFileName),
+# or above one that is recorded or touched; a Cisco folder that holds a
+# DefenseClaw folder. Taken before an uninstall removes DefenseClaw's files, so
+# the purge names only these when it leaves them (GAP-0704 rule i; review 3
+# L4): a Cursor folder Cursor's MDM made, where the connector was never
+# enabled, was never DefenseClaw's business and is not named.
+function Get-DefenseClawTouchedUnrecordedVendorFolders {
     param(
         [string]$RecordDirectory,
         [string]$ProgramData = $script:ProgramData,
@@ -19214,14 +19328,121 @@ function Get-DefenseClawUnprovenVendorFolders {
     if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
         $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
     }
-    $folders = @(@(Get-DefenseClawAgentFolders -ProgramData $ProgramData -ProgramFiles $ProgramFiles) |
-            Microsoft.PowerShell.Core\ForEach-Object { [string]$_.Path }) +
-        @([IO.Path]::Combine($ProgramData, 'Cisco'), [IO.Path]::Combine($ProgramFiles, 'Cisco'))
-    foreach ($folder in $folders) {
-        if ([IO.Directory]::Exists($folder) -and
+    $recorded = {
+        param([string]$Folder)
+        [IO.File]::Exists([IO.Path]::Combine($RecordDirectory, (Get-DefenseClawCreatedFolderRecordName -Path $Folder)))
+    }
+    $touched = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($agent in @(Get-DefenseClawAgentFolders -ProgramData $ProgramData -ProgramFiles $ProgramFiles)) {
+        $folder = [string]$agent.Path
+        if (-not [IO.Directory]::Exists($folder) -or (& $recorded $folder)) {
+            continue
+        }
+        try {
+            foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $folder -Force)) {
+                $holds = if ([string]$agent.Kind -ceq 'Parent') {
+                    $child.PSIsContainer -and ((& $recorded $child.FullName) -or $touched.Contains($child.FullName))
+                }
+                else {
+                    -not $child.PSIsContainer -and (Test-DefenseClawAgentFolderOwnFileName -Kind ([string]$agent.Kind) -Name $child.Name)
+                }
+                if ($holds) {
+                    [void]$touched.Add($folder)
+                    break
+                }
+            }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "not listed as touched, ${folder}: $($_.Exception.Message)"
+        }
+    }
+    foreach ($cisco in @([IO.Path]::Combine($ProgramData, 'Cisco'), [IO.Path]::Combine($ProgramFiles, 'Cisco'))) {
+        if (-not [IO.Directory]::Exists($cisco) -or (& $recorded $cisco)) {
+            continue
+        }
+        try {
+            foreach ($child in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $cisco -Force)) {
+                if ($child.PSIsContainer -and $child.Name -cmatch '^DefenseClaw(-[A-Za-z]+)?$') {
+                    [void]$touched.Add($cisco)
+                    break
+                }
+            }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "not listed as touched, ${cisco}: $($_.Exception.Message)"
+        }
+    }
+    return [string[]]@($touched)
+}
+
+# GAP-0704 binding rule (i): a purge names, once, each vendor folder it left
+# because nothing proves DefenseClaw created it: one DefenseClaw touched
+# (Touched, from Get-DefenseClawTouchedUnrecordedVendorFolders before the
+# uninstall) that is still there with no record (it existed before the
+# install, or the upgrade back-fill could not prove it).
+function Get-DefenseClawUnprovenVendorFolders {
+    param(
+        [AllowEmptyCollection()][string[]]$Touched = @(),
+        [string]$RecordDirectory
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    if ([string]::IsNullOrWhiteSpace($RecordDirectory)) {
+        $RecordDirectory = Get-DefenseClawStandaloneCreatedFolderRecordDirectory
+    }
+    foreach ($folder in @($Touched)) {
+        if (-not [string]::IsNullOrWhiteSpace($folder) -and [IO.Directory]::Exists($folder) -and
             -not [IO.File]::Exists([IO.Path]::Combine($RecordDirectory, (Get-DefenseClawCreatedFolderRecordName -Path $folder)))) {
             $folder
         }
+    }
+}
+
+# What an uninstall reports about the vendor folders it left, in the lifecycle
+# `finally` (review 2 L3; review 3 L1, L4): with a self-uninstall finalizer
+# pending, the recorded folders it will keep; once the deployment is gone,
+# each touched vendor folder with no record. It never throws: it runs after
+# the uninstall finished or failed, and an error here (a record folder that
+# cannot be listed, a resilience-event write that fails) must not replace the
+# lifecycle's own error or fail an uninstall that has already finished. Each
+# folder is reported on its own, so one failure loses no other.
+function Write-DefenseClawUninstallCreatedFolderReport {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [AllowEmptyCollection()][string[]]$Touched = @(),
+        [bool]$LeftNothing
+    )
+    try {
+        foreach ($kept in @(Get-DefenseClawStandaloneCreatedFolderPreview -Layout $Layout)) {
+            try {
+                Add-DefenseClawCreatedFolderKept -Folder $kept.Folder -Note $kept.Note
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Verbose "created-folder note not written: $($_.Exception.Message)"
+            }
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "created-folder preview not reported: $($_.Exception.Message)"
+    }
+    try {
+        # GAP-0704 rule (i): once the deployment is gone, each touched vendor
+        # folder left with no record, once.
+        $receiptLeft = Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name SelfUninstallReceiptPath
+        if ($LeftNothing -or (-not [string]::IsNullOrWhiteSpace($receiptLeft) -and [IO.File]::Exists($receiptLeft))) {
+            foreach ($unproven in @(Get-DefenseClawUnprovenVendorFolders -Touched $Touched)) {
+                try {
+                    Add-DefenseClawCreatedFolderKept -Folder $unproven -Note 'left in place: not provably created by DefenseClaw'
+                }
+                catch {
+                    Microsoft.PowerShell.Utility\Write-Verbose "unproven-folder note not written: $($_.Exception.Message)"
+                }
+            }
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "unproven vendor folders not reported: $($_.Exception.Message)"
     }
 }
 
@@ -48274,6 +48495,17 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -Label 'lifecycle lock directory' `
         -RequiredBase $script:ProgramData
     $lifecycleLock = Enter-DefenseClawLifecycleLock -Layout $layout
+    # The vendor folders DefenseClaw touched, before an uninstall removes its
+    # files (GAP-0704 rule i, review 3 L4).
+    $touchedVendorFolders = [string[]]@()
+    if ($Action -ceq 'Uninstall' -and (Test-DefenseClawStandaloneProfile)) {
+        try {
+            $touchedVendorFolders = [string[]]@(Get-DefenseClawTouchedUnrecordedVendorFolders)
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "touched vendor folders not listed: $($_.Exception.Message)"
+        }
+    }
     try {
         # Revalidate current/global/GUID drive identity after the bounded lock
         # wait, before any filesystem or SCM mutation. Source descriptors are
@@ -48816,17 +49048,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # runs after this result; the result names the ones it will keep
         # (review 2 L3).
         if ($Action -ceq 'Uninstall') {
-            foreach ($kept in @(Get-DefenseClawStandaloneCreatedFolderPreview -Layout $layout)) {
-                Add-DefenseClawCreatedFolderKept -Folder $kept.Folder -Note $kept.Note
-            }
-            # GAP-0704 rule (i): once the deployment is gone, each vendor
-            # folder left with no record, once.
-            $receiptLeft = Get-DefenseClawOptionalLayoutValue -Layout $layout -Name SelfUninstallReceiptPath
-            if ($leftNothing -or (-not [string]::IsNullOrWhiteSpace($receiptLeft) -and [IO.File]::Exists($receiptLeft))) {
-                foreach ($unproven in @(Get-DefenseClawUnprovenVendorFolders)) {
-                    Add-DefenseClawCreatedFolderKept -Folder $unproven -Note 'left in place: not provably created by DefenseClaw'
-                }
-            }
+            Write-DefenseClawUninstallCreatedFolderReport -Layout $layout -Touched $touchedVendorFolders -LeftNothing:([bool]$leftNothing)
         }
     }
 }

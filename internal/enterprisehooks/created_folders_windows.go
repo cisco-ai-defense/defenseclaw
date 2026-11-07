@@ -56,10 +56,13 @@ type windowsCreatedFolderRecord struct {
 	Path          string `json:"path"`
 	// Origin is "upgrade" on a record the lifecycle back-filled on a
 	// computer installed before 1.0.9 (GAP-0704); the hooks never write
-	// one. Binding rule: such a record never gives ownership for a repair,
-	// a re-stamp or a takeover; it only lets a purge remove the folder once
-	// it is empty, which is all RemoveWindowsCreatedFolderIfEmpty does with
-	// any record.
+	// one, and no code here reads it: a record of either origin lets a purge
+	// remove the folder once it is empty, which is all
+	// RemoveWindowsCreatedFolderIfEmpty does with any record. The field
+	// documents the on-disk schema for a reader that wires the records into
+	// ownership (the g582 integrator), which must skip every record with an
+	// origin (CLASS-g091-g582.md): such a record never gives ownership for a
+	// repair, a re-stamp or a takeover.
 	Origin string `json:"origin,omitempty"`
 }
 
@@ -242,9 +245,15 @@ func writeWindowsCreatedFolderRecord(lifecycleDir, path string) error {
 // Remove-DefenseClawStandaloneCreatedFolder). It reports whether path is gone
 // now. An unrecorded folder, one that holds anything and any failed check
 // leave the folder and its record; a missing folder leaves an unused record
-// for the purge, which deletes it. Standalone only.
+// for the purge, which deletes it. It does not test the process's profile pin
+// (GAP-0091 review 3 L2): its one caller is the standalone lifecycle's result
+// handler in the CLI, which runs in a process that carries no
+// DEFENSECLAW_ENTERPRISE_PROFILE (only the helpers it starts do), and
+// windowsCreatedFolderRoots names the standalone lifecycle folder, as the
+// caller's TrustedEnterpriseRoots(standalone) does. A Secure Client computer
+// keeps no record, so nothing is removed there.
 func RemoveWindowsCreatedFolderIfEmpty(path string) (bool, error) {
-	if !windowsEnterpriseStandaloneProcess() || !filepath.IsAbs(path) {
+	if !filepath.IsAbs(path) {
 		return false, nil
 	}
 	path = filepath.Clean(path)
