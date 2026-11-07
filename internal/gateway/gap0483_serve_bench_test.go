@@ -31,13 +31,17 @@ func BenchmarkGAP0483ServeOperands(b *testing.B) {
 		b.Fatal(err)
 	}
 	b.Setenv("HOME", f.home)
-	words := make([]string, 2000)
+	words := make([]string, 4000)
 	for i := range words {
 		words[i] = fmt.Sprintf("lo%d.txt", i)
 	}
 	for _, bc := range []struct{ name, command string }{
 		{"echo", "echo hi"},
-		{"touch-2000", "touch " + strings.Join(words, " ")},
+		{"touch-250", "touch " + strings.Join(words[:250], " ")},
+		{"touch-500", "touch " + strings.Join(words[:500], " ")},
+		{"touch-1000", "touch " + strings.Join(words[:1000], " ")},
+		{"touch-2000", "touch " + strings.Join(words[:2000], " ")},
+		{"touch-4000", "touch " + strings.Join(words, " ")},
 	} {
 		payload, err := json.Marshal(map[string]any{"session_id": "g483", "hook_event_name": "PreToolUse", "cwd": f.project,
 			"permission_mode": "default", "tool_name": "Bash", "tool_use_id": "toolu_g483",
