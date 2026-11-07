@@ -11833,6 +11833,14 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
         if registered and (unguarded := _unguarded_tool_call_problem(cfg, connector, path)):
             _emit("fail", label, unguarded, r=r, remediation=unguarded.repair)
             return
+        if registered and (launcher := _hook_launcher_problem(cfg, connector)):
+            # Per-user Windows: a hook that names a launcher the agent cannot
+            # start is blocked on every call, so the row cannot pass on the
+            # registration alone (rel-1-0-6 GAP-0810).
+            from defenseclaw.hook_integrity import repair_command
+
+            _emit("fail", label, launcher, r=r, remediation=repair_command(connector, launcher))
+            return
         if registered:
             if connector == "cursor":
                 _check_cursor_configured_runtime(
@@ -19018,6 +19026,17 @@ def _check_hook_contract_lock(
             _emit("pass", "Hook contract", detail, r=r)
     else:
         _emit("warn", "Hook contract", detail, r=r)
+
+
+def _hook_launcher_problem(cfg, connector: str) -> str:
+    """The first launcher or guard problem of the registered hooks of ``connector``, or "" (GAP-0810)."""
+    from defenseclaw.hook_integrity import hook_launcher_problems
+
+    try:
+        problems = hook_launcher_problems(cfg, connector)
+    except Exception:  # noqa: BLE001 - the hook rows still report what they can read.
+        return ""
+    return problems[0] if problems else ""
 
 
 def _hook_runtime_file_problems(cfg, connector: str) -> list[str]:
