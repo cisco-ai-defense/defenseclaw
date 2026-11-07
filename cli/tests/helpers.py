@@ -54,17 +54,19 @@ from defenseclaw.models import Event, ScanResult
 POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
 
 
-def run_powershell(arguments, **kwargs) -> subprocess.CompletedProcess:
+def run_powershell(arguments, *, interpreter=None, **kwargs) -> subprocess.CompletedProcess:
     """The one place a test starts PowerShell.
 
     A host without PowerShell skips the test here instead of failing it with a
     TypeError from launching None. Tests pass the arguments after the
-    interpreter; test_powershell_launch_hygiene.py keeps every other launch out
+    interpreter; a test that runs once per discovered interpreter passes it as
+    interpreter. test_powershell_launch_hygiene.py keeps every other launch out
     of the test files.
     """
-    if POWERSHELL is None:
+    shell = POWERSHELL if interpreter is None else interpreter
+    if shell is None:
         pytest.skip("PowerShell is not installed")
-    return subprocess.run([POWERSHELL, *arguments], **kwargs)
+    return subprocess.run([shell, *arguments], **kwargs)
 
 
 def record_test_setup_agent_selections(data_dir, connectors):
