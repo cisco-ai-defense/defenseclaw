@@ -685,6 +685,11 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		logEnterpriseForeignHookBlocks(stderr, user, outcome.Response.Blocks, outcome.Response.BlocksDropped, outcome.Response.BlocksError)
 		if want := outcome.Job.Request.OpenCodeServicePort; want > 0 {
 			report := outcome.Response.OpenCodeServicePort
+			if report != nil {
+				for _, dir := range boundedStrings(report.Sealed, 8) {
+					fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: made %s's folder %s sticky: its group can write it, so now only the owner of an entry in it can rename or remove it\n", user, boundedString(dir, 512))
+				}
+			}
 			account := enterprisehooks.UnixEligibleAccount{UID: outcome.Job.Account.UID, User: user, Home: outcome.Job.Account.Home}
 			path := enterprisepolicy.OpenCodeServiceConfigPath(outcome.Job.Account.Home)
 			switch {
@@ -1179,6 +1184,8 @@ func openCodeUnknownFix(account enterprisehooks.UnixEligibleAccount, path, reaso
 	lower := strings.ToLower(reason)
 	user := account.User
 	switch {
+	case strings.Contains(lower, "sticky"):
+		return fmt.Sprintf("close the folder named above to other accounts (as its owner: chmod g-w, or chmod +t), or make it owned by %s; the next pass retries", user)
 	case port > 0 && (strings.Contains(lower, "not a directory") || strings.Contains(lower, "read-only") || strings.Contains(lower, "permission") || strings.Contains(lower, "denied")):
 		return fmt.Sprintf("as %s, run 'opencode service set port %d' (it writes through a link), or make %s a folder (not a link) that %s can write; the next pass retries", user, port, filepath.Dir(path), user)
 	case strings.Contains(lower, "not available") || strings.Contains(lower, "did not answer") || strings.Contains(lower, "timed out") || strings.Contains(lower, "deadline"):
@@ -1220,7 +1227,7 @@ func sameOpenCodeUnknown(a, b []enterprisehooks.UnixOpenCodeServicePortUnknown) 
 // runEnterpriseHookWorkerOpenCodePort runs inside the worker as the user.
 func runEnterpriseHookWorkerOpenCodePort(request enterpriseHookWorkerRequest) *enterpriseHookWorkerOpenCodePortReport {
 	result, err := enterprisepolicy.SetOpenCodeServicePort(filepath.Clean(request.Home), request.OpenCodeServicePort)
-	report := &enterpriseHookWorkerOpenCodePortReport{Port: result.Port, Previous: result.Previous, Changed: result.Changed, Created: result.CreatedDirs}
+	report := &enterpriseHookWorkerOpenCodePortReport{Port: result.Port, Previous: result.Previous, Changed: result.Changed, Created: result.CreatedDirs, Sealed: result.Sealed}
 	if err != nil {
 		report.Error = err.Error()
 	}
