@@ -179,8 +179,9 @@ def _plugin_darwin_acl_refused(path: str) -> bool:
     right. Every other scope (a per-user install, Secure Client) refuses only
     an effective allow entry with a write-class right for a principal other
     than root, wheel and admin, and leaves read, deny, inherit-only and those
-    trusted entries alone. An ACL that cannot be read or parsed is a refusal in
-    both. Asking the stricter rule everywhere would warn about, and make setup
+    trusted entries alone. An ACL that cannot be read, or an entry that cannot
+    be parsed, is a refusal in both: the gateway strict parser refuses the same
+    entry. Asking the stricter rule everywhere would warn about, and make setup
     refuse, a folder the gateway accepts.
     """
     mode_field, acl_text = _darwin_acl_output(path)
@@ -188,8 +189,7 @@ def _plugin_darwin_acl_refused(path: str) -> bool:
         return True
     if not acl_text:
         return "+" in mode_field
-    if _plugin_standalone_scope():
-        return _darwin_acl_allows(acl_text, _DARWIN_ACL_WRITE_PERMISSIONS)
+    standalone = _plugin_standalone_scope()
     for raw_line in acl_text.splitlines():
         index, colon, entry = raw_line.strip().lower().partition(":")
         if not colon or not index.isdigit():
@@ -198,10 +198,17 @@ def _plugin_darwin_acl_refused(path: str) -> bool:
         verb = next((i for i, field in enumerate(fields) if field in ("allow", "deny")), -1)
         if verb < 1 or verb + 1 >= len(fields):
             return True
-        if fields[verb] != "allow" or fields[0] in _DARWIN_ACL_TRUSTED_PRINCIPALS:
+        if fields[verb] != "allow":
             continue
         rights = set(fields[verb + 1].split(","))
-        if rights & _DARWIN_ACL_WRITE_PERMISSIONS and "only_inherit" not in rights:
+        if standalone:
+            if rights & _DARWIN_ACL_WRITE_PERMISSIONS:
+                return True
+        elif (
+            fields[0] not in _DARWIN_ACL_TRUSTED_PRINCIPALS
+            and rights & _DARWIN_ACL_WRITE_PERMISSIONS
+            and "only_inherit" not in rights
+        ):
             return True
     return False
 
@@ -1162,22 +1169,35 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
     return resolved
 
 
+#: The gateway inspection bound (hookAPIACLInspectionTimeout) and its retry: a
+#: slow ls under a process scanner is inspected once more, and a second timeout
+#: is the verdict. The CLI must reach the same outcome the gateway does.
+_DARWIN_ACL_INSPECTION_TIMEOUT = 5.0
+
+
 def _darwin_acl_output(path: str | os.PathLike[str]) -> tuple[str, str]:
     """Return ``(mode, ACL text)`` from a fixed-path Darwin inspection."""
     if sys.platform != "darwin":
         return "", ""
-    try:
-        result = subprocess.run(
-            ["/bin/ls", "-lde", os.path.abspath(os.fspath(path))],
-            capture_output=True,
-            text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            env=trusted_system_subprocess_env(),
-            timeout=2.0,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+    result = None
+    for _attempt in range(2):
+        try:
+            result = subprocess.run(
+                ["/bin/ls", "-lde", os.path.abspath(os.fspath(path))],
+                capture_output=True,
+                text=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                env=trusted_system_subprocess_env(),
+                timeout=_DARWIN_ACL_INSPECTION_TIMEOUT,
+                check=False,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            continue
+        except (FileNotFoundError, OSError):
+            return "", ""
+    if result is None:
         return "", ""
     if result.returncode != 0:
         return "", ""

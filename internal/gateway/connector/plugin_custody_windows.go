@@ -8,31 +8,29 @@ package connector
 
 import (
 	"errors"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // explainPluginArtifactRefusal adds the command that clears a refused plugin
-// folder DACL to the refusal (GAP-0731). safefile names the account whose
-// entry makes the DACL unsafe and every folder that holds the entry itself;
-// the entry is removed at each of them, because removing it from an inheriting
-// child does nothing and one granted again higher up is inherited again. Any
-// other cause, and a DACL refusal that names no single entry, is returned
-// unchanged. Several commands are separated by a semicolon, which PowerShell runs
-// in turn (&& is not available in Windows PowerShell 5).
+// folder DACL to the refusal (GAP-0731). safefile names every account whose
+// entry makes the DACL unsafe and every folder that holds each entry itself;
+// icaclsRemovalFix removes each account at each of them. Any other cause, and a
+// DACL refusal that names no single entry or cannot place one of its entries,
+// is returned unchanged.
 func explainPluginArtifactRefusal(_ string, cause error) error {
 	var refusal *safefile.UnsafePrivateDACLError
-	if !errors.As(cause, &refusal) || refusal.Trustee == "" || len(refusal.Carriers) == 0 {
+	if !errors.As(cause, &refusal) || len(refusal.Entries) == 0 {
 		return cause
 	}
-	scope := ":g"
-	if refusal.Deny {
-		scope = ":d"
+	entries := make([]icaclsRefusedEntry, 0, len(refusal.Entries))
+	for _, entry := range refusal.Entries {
+		if entry.Trustee == "" || len(entry.Carriers) == 0 {
+			// A repair that leaves one refused entry in place is not offered.
+			return cause
+		}
+		entries = append(entries, icaclsRefusedEntry{trustee: entry.Trustee, deny: entry.Deny, carriers: entry.Carriers})
 	}
-	steps := make([]string, len(refusal.Carriers))
-	for i, carrier := range refusal.Carriers {
-		steps[i] = "icacls \"" + carrier + "\" /remove" + scope + " \"" + refusal.Trustee + "\""
-	}
-	return &pluginCustodyError{cause: cause, failing: refusal.Carriers, fix: strings.Join(steps, "; ")}
+	fix, failing := icaclsRemovalFix(entries)
+	return &pluginCustodyError{cause: cause, failing: failing, fix: fix}
 }

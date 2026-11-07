@@ -13,46 +13,40 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
 
-// GAP-0731: a foreign entry inherited by the plugin folder is removed where it
-// is set, with one icacls command that names the account.
+// GAP-0731: the refusal of a Windows plugin folder DACL carries the printed
+// repair for every refused account; the rendering rows are in
+// TestGAP0731IcaclsRemovalFix.
 func TestGAP0731RefusalNamesTheCarrierAndTheIcaclsCommand(t *testing.T) {
 	cause := &safefile.UnsafePrivateDACLError{
-		Path:     `C:\Users\lane\.config\opencode\plugins`,
-		Carriers: []string{`C:\Users\lane\.config\opencode`},
-		Trustee:  `HOST\other`,
+		Path: `C:\Users\lane\.config\opencode\plugins`,
+		Entries: []safefile.UnsafeDACLEntry{
+			{Trustee: `HOST\other`, Carriers: []string{`C:\Users\lane\.config\opencode`}},
+			{Trustee: `HOST\third`, Carriers: []string{`C:\Users\lane\.config\opencode`}},
+		},
 	}
 	err := explainPluginArtifactRefusal(`C:\Users\lane\.config\opencode\plugins\defenseclaw.js`, cause)
 	if !errors.Is(err, ErrPluginFolderCustody) || !errors.Is(err, cause) {
 		t.Fatalf("err=%v", err)
 	}
-	want := `fix: icacls "C:\Users\lane\.config\opencode" /remove:g "HOST\other"`
+	want := `fix: icacls 'C:\Users\lane\.config\opencode' /remove:g 'HOST\other'; icacls 'C:\Users\lane\.config\opencode' /remove:g 'HOST\third'`
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("message lacks %q:\n%v", want, err)
 	}
-	// An entry granted at two levels is removed at both, each as its own
-	// complete command (review 2 of GAP-0731).
-	two := &safefile.UnsafePrivateDACLError{
-		Path:     `C:\Users\lane\.config\opencode\plugins`,
-		Carriers: []string{`C:\Users\lane\.config`, `C:\Users\lane\.config\opencode`},
-		Trustee:  `HOST\other`,
-	}
-	wantTwo := `fix: icacls "C:\Users\lane\.config" /remove:g "HOST\other"; icacls "C:\Users\lane\.config\opencode" /remove:g "HOST\other"`
-	if got := explainPluginArtifactRefusal("", two).Error(); !strings.Contains(got, wantTwo) {
-		t.Fatalf("message lacks %q:\n%s", wantTwo, got)
-	}
-	cause.Deny = true
-	if got := explainPluginArtifactRefusal("", cause).Error(); !strings.Contains(got, `/remove:d "HOST\other"`) {
-		t.Fatalf("a deny entry is removed with :d: %s", got)
-	}
 
-	// Benign twins: a refusal naming no single entry, and any other cause,
-	// are returned as they were.
+	// Benign twins: a refusal naming no single entry, one naming an entry whose
+	// folder cannot be found (a repair that leaves it would mislead), and any
+	// other cause, are returned as they were.
 	for _, other := range []error{
 		&safefile.UnsafePrivateDACLError{Path: cause.Path},
+		&safefile.UnsafePrivateDACLError{Path: cause.Path, Entries: []safefile.UnsafeDACLEntry{
+			{Trustee: `HOST\other`, Carriers: []string{`C:\Users\lane\.config\opencode`}},
+			{Trustee: `HOST\third`},
+		}},
 		errors.New("plugin target must be a regular file"),
 	} {
 		if got := explainPluginArtifactRefusal("", other); got != other {
@@ -107,7 +101,7 @@ func TestGAP0731PluginFileWithAForeignWriteEntryNamesTheIcaclsCommand(t *testing
 	if err == nil || !errors.Is(err, ErrPluginFolderCustody) {
 		t.Fatalf("err=%v, want a custody refusal with a fix", err)
 	}
-	if !strings.Contains(err.Error(), `icacls "`+plugin+`" /remove:g "Everyone"`) {
+	if !strings.Contains(err.Error(), `icacls `+managed.PowerShellLiteral(plugin)+` /remove:g 'Everyone'`) {
 		t.Fatalf("refusal lacks the icacls command for the plugin file:\n%v", err)
 	}
 }
