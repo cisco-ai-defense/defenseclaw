@@ -563,6 +563,10 @@ def _lock_entry_is_valid(entry: object, spec_fields: tuple[str, ...]) -> bool:
     )
 
 
+def _is_integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _lock_is_valid(lock: dict) -> bool:
     """Whether the whole lock has the npm lock shape: every package table and every entry.
 
@@ -571,23 +575,27 @@ def _lock_is_valid(lock: dict) -> bool:
     is not read as an install record at all.
     """
 
-    packages = lock.get("packages")
-    if packages is not None and not (
-        isinstance(packages, dict)
-        and all(_lock_entry_is_valid(entry, _DEPENDENCY_FIELDS) for entry in packages.values())
-    ):
+    # A key that is present must hold the type npm writes: a JSON null is a
+    # malformed value, not an absent table.
+    if "lockfileVersion" in lock and not _is_integer(lock["lockfileVersion"]):
         return False
-    pending = [lock.get("dependencies")]
+    if "packages" in lock:
+        packages = lock["packages"]
+        if not (
+            isinstance(packages, dict)
+            and all(_lock_entry_is_valid(entry, _DEPENDENCY_FIELDS) for entry in packages.values())
+        ):
+            return False
+    pending = [lock["dependencies"]] if "dependencies" in lock else []
     while pending:
         tree = pending.pop()
-        if tree is None:
-            continue
         if not isinstance(tree, dict):
             return False
         for entry in tree.values():
             if not _lock_entry_is_valid(entry, ("requires",)):
                 return False
-            pending.append(entry.get("dependencies"))
+            if "dependencies" in entry:
+                pending.append(entry["dependencies"])
     return True
 
 
