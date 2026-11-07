@@ -98,8 +98,9 @@ func TestStandaloneRepairRefusesAFileAnotherProgramHolds(t *testing.T) {
 }
 
 // A runtime file the gateway keeps open for write (the audit database, a log)
-// is judged with the delete-only check it always had: a live gateway never
-// blocks the guardian's repair, a DELETE handle still does.
+// is judged with a lighter check: a live gateway, which shares reading and
+// writing, never blocks the guardian's repair; a handle with DELETE access, or
+// one that does not share reading, still does.
 func TestStandaloneRepairOfARuntimeFileOnlyRefusesADeleteHolder(t *testing.T) {
 	requireHiddenDescriptorElevated(t)
 	t.Setenv(TrustStrictAncestorsEnv, "")
@@ -121,9 +122,9 @@ func TestStandaloneRepairOfARuntimeFileOnlyRefusesADeleteHolder(t *testing.T) {
 				t.Fatal(err)
 			}
 			after := privilegedDescriptorForTest(t, path)
-			if holder.deleteOnly {
+			if holder.deleteOnly || strings.Contains(holder.name, "does not share read") {
 				if result.Outcome == CanonicalRepaired || after != before || !strings.Contains(result.RepairError, heldFileRefusal) {
-					t.Fatalf("a delete holder: %+v, descriptor %s -> %s; want the refusal and no change", result, before, after)
+					t.Fatalf("%s: %+v, descriptor %s -> %s; want the refusal and no change", holder.name, result, before, after)
 				}
 				return
 			}
