@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
@@ -39,6 +40,7 @@ func hookAssetFacts(connector string, payload []byte) string {
 		CWD           string         `json:"cwd"`
 		Prompt        string         `json:"prompt"`
 		MCPServerName string         `json:"mcp_server_name"`
+		CommandName   string         `json:"command_name"`
 	}
 	if json.Unmarshal(payload, &event) != nil {
 		return ""
@@ -90,7 +92,76 @@ func hookAssetFacts(connector string, payload []byte) string {
 			}
 		}
 	}
+	facts.Contents = hookAssetContents(connector, home, event.ToolName, event.ToolInput, event.Prompt, event.CommandName, facts.SkillDirs)
 	return assetfacts.Encode(facts)
+}
+
+// hookAssetContents reads, as the user, the text of the skill folders a
+// request selects and of the Claude Code plugin it belongs to (a plugin
+// skill or command, or a tool of a server the plugin bundles). A managed
+// Windows gateway reads nothing in a profile and judges this text instead
+// (GAP-0699, GAP-0701). Nothing is read for a request that selects neither.
+func hookAssetContents(connector, home, toolName string, toolInput map[string]any, prompt, commandName string, skillDirs []string) []assetfacts.Content {
+	var out []assetfacts.Content
+	for _, dir := range skillDirs {
+		if content, ok := assetfacts.ReadContent(assetfacts.ContentSkill, filepath.Base(dir), dir); ok {
+			out = append(out, content)
+		}
+	}
+	if connector != "claudecode" {
+		return out
+	}
+	claudeDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
+	if claudeDir == "" {
+		claudeDir = filepath.Join(home, ".claude")
+	}
+	for _, plugin := range hookInvokedPluginNames(claudeDir, toolName, toolInput, prompt, commandName) {
+		for _, root := range assetfacts.ClaudePluginRoots(claudeDir, plugin) {
+			if content, ok := assetfacts.ReadContent(assetfacts.ContentPlugin, plugin, root); ok {
+				out = append(out, content)
+			}
+		}
+	}
+	return out
+}
+
+// hookInvokedPluginNames are the plugins a Claude Code request belongs to: a
+// Skill call or /command spelled plugin:name, or a tool of a bundled server
+// (mcp__plugin_<plugin>_<server>__<tool>).
+func hookInvokedPluginNames(claudeDir, toolName string, toolInput map[string]any, prompt, commandName string) []string {
+	var names []string
+	add := func(name string) {
+		if name = strings.TrimSpace(name); name != "" && !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+	}
+	qualified := func(spelled string) {
+		if plugin, _, ok := strings.Cut(strings.TrimPrefix(strings.TrimSpace(spelled), "/"), ":"); ok {
+			add(plugin)
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(toolName), "Skill") {
+		skill, _ := toolInput["skill"].(string)
+		qualified(skill)
+	}
+	qualified(commandName)
+	if fields := strings.Fields(prompt); len(fields) > 0 && strings.HasPrefix(fields[0], "/") {
+		qualified(fields[0])
+	}
+	if rest, ok := strings.CutPrefix(strings.TrimSpace(toolName), "mcp__plugin_"); ok {
+		server, _, _ := strings.Cut(rest, "__")
+		best := ""
+		for _, plugin := range assetfacts.ClaudePluginNames(claudeDir) {
+			if strings.HasPrefix(server, plugin+"_") && len(plugin) > len(best) {
+				best = plugin
+			}
+		}
+		add(best)
+	}
+	if len(names) > 2 {
+		names = names[:2]
+	}
+	return names
 }
 
 // hookAgentCommandLine reads the agent process's arguments; tests replace it.

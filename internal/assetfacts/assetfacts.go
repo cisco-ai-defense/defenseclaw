@@ -40,7 +40,7 @@ import (
 const Header = "X-DefenseClaw-Asset-Facts"
 
 const (
-	maxHeaderBytes   = 128 << 10
+	maxHeaderBytes   = 256 << 10
 	maxSkills        = 16
 	maxFieldBytes    = 1024
 	maxArgs          = 32
@@ -71,6 +71,10 @@ type Facts struct {
 	// a gateway that cannot read it cannot prove it is not a denied skill
 	// (GAP-1303).
 	SkillsTruncated bool `json:"skills_truncated,omitempty"`
+	// Contents holds the text of the skill or plugin folders the request
+	// selects, read as the user, for a gateway that may not read a profile
+	// (GAP-0699, GAP-0701).
+	Contents []Content `json:"contents,omitempty"`
 }
 
 // SourceCommandLine marks an MCP definition read from the agent's command
@@ -116,7 +120,7 @@ type MCPServer struct {
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && !facts.SkillsTruncated {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && !facts.SkillsTruncated && len(facts.Contents) == 0 {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -148,7 +152,7 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || facts.SkillsTruncated
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || facts.SkillsTruncated || len(facts.Contents) > 0
 }
 
 // DeclaredFor returns the names the facts say folder declares.
@@ -183,6 +187,7 @@ func bounded(facts Facts) Facts {
 		}
 	}
 	facts.SkillDirs = dirs
+	facts.Contents = boundedContents(facts.Contents)
 	if server := facts.MCP; server != nil {
 		out := MCPServer{
 			Name: clean(server.Name, maxNameBytes), URL: clean(server.URL, maxFieldBytes),
