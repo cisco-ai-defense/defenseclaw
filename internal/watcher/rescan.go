@@ -1236,6 +1236,7 @@ func (w *InstallWatcher) rescanMCPAdmittedWithoutScan(ctx context.Context, evt I
 	}
 	fmt.Fprintf(os.Stderr, "[rescan] mcp %s is admitted without a scan; running install admission\n", evt.Name)
 	res := w.runAdmission(ctx, evt)
+	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if !res.Interrupted {
 		w.persistSnapshot(evt, snap, res.ScanID, w.admissionFingerprint(res, fingerprint))
@@ -1259,7 +1260,7 @@ func (w *InstallWatcher) admissionFingerprint(res AdmissionResult, fingerprint s
 	if res.Unenforced {
 		return fingerprint + unenforcedRejectionMark
 	}
-	if res.Event.Type == InstallMCP && res.Verdict == VerdictScanError && strings.HasPrefix(res.Reason, unverifiedMCPReason) {
+	if res.Event.Type == InstallMCP && res.Verdict == VerdictScanError && keptUnscannedMCPReason(res.Reason) {
 		return fingerprint + unverifiedMCPMark
 	}
 	if res.Event.Type == InstallMCP && res.Verdict == VerdictAllowed && res.ScanID == "" {
@@ -1326,6 +1327,7 @@ func (w *InstallWatcher) readmitUnenforcedRejection(ctx context.Context, evt Ins
 func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, baseline *audit.SnapshotRow, snap *TargetSnapshot, deltas []DriftDelta, fingerprint, source string) rescanOutcome {
 	fmt.Fprintf(os.Stderr, "[%s] %s %s needs admission; scanning\n", source, evt.Type, evt.Name)
 	res := w.runAdmission(ctx, evt)
+	w.noteMCPAdmissionOutcome(evt, snap, res)
 	w.notifyAdmission(res)
 	if res.ScanID != "" {
 		if current, err := w.loadScanResult(res.ScanID); err == nil {
@@ -1338,7 +1340,7 @@ func (w *InstallWatcher) readmitChanged(ctx context.Context, evt InstallEvent, b
 	switch {
 	case res.Interrupted:
 		w.markInterruptedAdmission(evt, snap, fingerprint)
-	case res.Verdict == VerdictScanError && evt.Type == InstallMCP && strings.HasPrefix(res.Reason, unverifiedMCPReason):
+	case res.Verdict == VerdictScanError && evt.Type == InstallMCP && keptUnscannedMCPReason(res.Reason):
 		if w.targetStillPresent(evt) {
 			w.persistSnapshot(evt, snap, "", w.admissionFingerprint(res, fingerprint))
 		}

@@ -700,7 +700,8 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 		return ""
 	}
 	if strings.HasPrefix(reason, "DefenseClaw is still scanning MCP server ") ||
-		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") {
+		strings.HasPrefix(reason, "DefenseClaw could not read admission for MCP server ") ||
+		strings.HasPrefix(reason, mcpAdmissionAllowedLead) {
 		return reason
 	}
 	if mode != "action" && guardrailSeverityRank(severity) < codexObserveContextMinSeverity {
