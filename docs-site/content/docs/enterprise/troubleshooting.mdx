@@ -367,8 +367,9 @@ Setup is not installed on the computer: use the copy in your MDM package or the 
 ### Known limits for managed hooks
 
 - GAP-0409: an unexpected Claude Code policy value type, an untrusted key access list, or server-managed settings can still surface as a slower Setup failure instead of an early policy diagnostic. Setup refuses the policy and keeps the last verified state; inspect the named settings source and correct it before retrying.
-- A managed Claude Code or Codex shell command is blocked if it has more write targets than the
-  hook can report: more than 512 targets or more than 64 KiB of target paths. The refusal names rule
+- A managed Claude Code or Codex shell command that has more write targets than the
+  hook can report (more than 512 targets or more than 64 KiB of target paths) is blocked in the
+  strict profile and runs with an alert in the default and permissive profiles. The verdict names rule
   `ACTION-COMPOUND-LIMIT` ("Shell command exceeds policy evaluation limit"), the same rule as a call
   of more than 128 commands ([evaluation limit](/docs/policies/defaults)). Split the command into
   smaller calls. Per-user mode has only the 128-command limit. A protected file among the targets is

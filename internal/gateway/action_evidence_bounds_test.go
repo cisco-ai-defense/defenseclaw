@@ -22,6 +22,23 @@ import (
 // to it that only the user's hook client can see.
 type b36ManagedHookFixture struct {
 	homes, home, project, keys string
+	// packDir is the rule pack folder of the gateway the fixture drives; ""
+	// names none (the default posture).
+	packDir string
+}
+
+// strict is the fixture with the gateway on the strict rule pack, the
+// profile in which a call over the evaluation limit blocks (outside strict
+// it alerts, rel-1-0-6:GAP-0675 round 10).
+func (f b36ManagedHookFixture) strict(t *testing.T) b36ManagedHookFixture {
+	t.Helper()
+	f.packDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+	// The fixture hides the home (ProtectHome) from a gateway that is not
+	// configured as managed, so the strict tier would read the unreadable
+	// install lock of that home as an install window and refuse every call.
+	// A readable data directory takes the fixture out of that gate.
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	return f
 }
 
 func newB36ManagedHookFixture(t *testing.T) b36ManagedHookFixture {
@@ -78,6 +95,7 @@ func (f b36ManagedHookFixture) post(t *testing.T, connector string, payload []by
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
+	cfg.Guardrail.RulePackDir = f.packDir
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(payload)))
 	if header != "" {
@@ -257,7 +275,7 @@ func TestCommandHookResolvedWritesScope(t *testing.T) {
 // also denied, as over the evaluation budget (ACTION-COMPOUND-LIMIT,
 // GAP-0146): the documented managed known limit (rel-1-0-3 GAP-0291).
 func TestR103B36BoundedHeaderOmittedOperandsStayUnknown(t *testing.T) {
-	f := newB36ManagedHookFixture(t)
+	f := newB36ManagedHookFixture(t).strict(t)
 	if err := os.Symlink("../.ssh", filepath.Join(f.project, "dirlink")); err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +350,7 @@ func TestR103B36UnicodeHomeAliasBlocks(t *testing.T) {
 		t.Skip("root can search a mode 0 directory")
 	}
 	root := t.TempDir()
-	f := b36ManagedHookFixture{homes: filepath.Join(root, "homes")}
+	f := b36ManagedHookFixture{homes: filepath.Join(root, "homes")}.strict(t)
 	f.home = filepath.Join(f.homes, "ilice")
 	f.project = filepath.Join(f.home, "project")
 	f.keys = filepath.Join(f.home, ".ssh", "authorized_keys")

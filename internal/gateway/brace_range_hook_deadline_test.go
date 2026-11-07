@@ -19,7 +19,7 @@ import (
 // well inside the deadline, per-user and managed, both connectors; protected
 // brace forms and the over-bound range still block.
 func TestBenignBraceRangeAnswersInsideHookDeadline(t *testing.T) {
-	f := newB36ManagedHookFixture(t)
+	f := newB36ManagedHookFixture(t).strict(t)
 	const perCall = time.Second // the hook deadline is about 3 s, the client process takes about 1 s
 	benign := []string{
 		"echo {1..40000} | wc -c",
