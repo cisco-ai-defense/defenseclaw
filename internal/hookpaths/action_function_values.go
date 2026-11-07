@@ -288,10 +288,10 @@ func actionFunctionBodyEffect(function *syntax.FuncDecl, call *syntax.CallExpr, 
 }
 
 // actionCallParameters returns the positional parameters a call gives, in
-// order: nil for a field of a value not known. A quoted word is one field
-// whatever its value; an unquoted word with a known value is the fields the
-// default separators leave of it, none for an empty value. The list stops at
-// a word whose fields are not known (a pattern or brace character, a list
+// order: nil for a field of a value not known. A word that is one quoted
+// field is one field whatever its value; any other word with a known value is
+// the fields actionWordFields reads, none for an empty value. The list stops
+// at a word whose fields are not known (a pattern or brace character, a list
 // such as "$@", an unknown value, a separator set the command changed): the
 // parameters after it have no known position.
 func actionCallParameters(call *syntax.CallExpr, state actionValues, cwd, home string) []*string {
@@ -310,11 +310,59 @@ func actionCallParameters(call *syntax.CallExpr, state actionValues, cwd, home s
 		if !known || ifs || strings.ContainsAny(value, "*?[{") {
 			break
 		}
-		for _, field := range strings.FieldsFunc(value, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' }) {
-			params = append(params, &field)
+		fields, split := actionWordFields(arg, state, cwd, home)
+		if !split {
+			break
+		}
+		for i := range fields {
+			params = append(params, &fields[i])
 		}
 	}
 	return params
+}
+
+// actionWordFields returns the fields a word expands to under the default
+// separators, part by part: literal and quoted text stays in the field it
+// touches, and only the value of an unquoted expansion is split at blanks. A
+// word that is only quoted text next to an empty expansion is one field, and
+// an unquoted expansion that is empty adds none. It reports false when a part
+// has no known value or expands to a list.
+func actionWordFields(word *syntax.Word, state actionValues, cwd, home string) ([]string, bool) {
+	var fields []string
+	field, open := "", false
+	for i, part := range word.Parts {
+		value, known := actionWordValue(&syntax.Word{Parts: []syntax.WordPart{part}}, state, cwd, home)
+		if !known {
+			return nil, false
+		}
+		switch part := part.(type) {
+		case *syntax.Lit:
+			if i > 0 && strings.HasPrefix(part.Value, "~") {
+				return nil, false
+			}
+			field, open = field+value, true
+		case *syntax.SglQuoted:
+			field, open = field+value, true
+		case *syntax.DblQuoted:
+			if actionDoubleQuotedList(part) {
+				return nil, false
+			}
+			field, open = field+value, true
+		default:
+			for _, r := range value {
+				switch {
+				case !strings.ContainsRune(" \t\n", r):
+					field, open = field+string(r), true
+				case open:
+					fields, field, open = append(fields, field), "", false
+				}
+			}
+		}
+	}
+	if open {
+		fields = append(fields, field)
+	}
+	return fields, true
 }
 
 // actionWordQuotedField reports a word that expands to exactly one field:
@@ -332,14 +380,7 @@ func actionWordQuotedField(word *syntax.Word) bool {
 				return false
 			}
 		case *syntax.DblQuoted:
-			list := false
-			syntax.Walk(part, func(node syntax.Node) bool {
-				if param, ok := node.(*syntax.ParamExp); ok {
-					list = list || param.Param == nil || param.Param.Value == "@" || param.Index != nil
-				}
-				return !list
-			})
-			if list {
+			if actionDoubleQuotedList(part) {
 				return false
 			}
 		default:
@@ -347,6 +388,19 @@ func actionWordQuotedField(word *syntax.Word) bool {
 		}
 	}
 	return true
+}
+
+// actionDoubleQuotedList reports a double-quoted part that expands to a list
+// of fields, such as "$@".
+func actionDoubleQuotedList(part *syntax.DblQuoted) bool {
+	list := false
+	syntax.Walk(part, func(node syntax.Node) bool {
+		if param, ok := node.(*syntax.ParamExp); ok {
+			list = list || param.Param == nil || param.Param.Value == "@" || param.Index != nil
+		}
+		return !list
+	})
+	return list
 }
 
 // actionWordUsesGivenParameters reports that a word reads no special
