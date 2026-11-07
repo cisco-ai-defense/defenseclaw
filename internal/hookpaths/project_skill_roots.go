@@ -258,10 +258,10 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 
 // projectSkillIdentities holds the file identities a resolved source names.
 // any matches a project folder whose manifest reaches the file by a link or a
-// hard link. placed matches only a manifest that is a regular file placed in a
-// project folder the caller does not hold privately: a hard link to the file
-// in a refused root is that file, while a link from a project folder to a
-// caller private file is only a pointer to the user own selection.
+// hard link. placed matches only a manifest whose final target is not the
+// caller private file: a hard link to the file in a refused root, or a link
+// to it that leaves the profile, is that file, while a link from a project
+// folder to a caller private file is only a pointer to the user own selection.
 type projectSkillIdentities struct {
 	any, placed []os.FileInfo
 }
@@ -323,12 +323,12 @@ func projectSkillIdentityMatches(home, entry string, ids projectSkillIdentities)
 	if len(ids.placed) == 0 || !slices.ContainsFunc(ids.placed, func(id os.FileInfo) bool { return os.SameFile(id, manifest) }) {
 		return false
 	}
-	resolved, err := filepath.EvalSymlinks(entry)
-	if err != nil || projectSkillPrivateFolder(home, resolved) {
-		return false
-	}
-	placed, err := os.Lstat(filepath.Join(resolved, "SKILL.md"))
-	return err == nil && placed.Mode().IsRegular()
+	// The manifest counts when its final target is not the caller private
+	// file: a regular file placed in the folder, or a link that leaves the
+	// profile or lands where another user can write. A link to a private
+	// file is only a pointer to the user own selection.
+	final, err := filepath.EvalSymlinks(filepath.Join(entry, "SKILL.md"))
+	return err == nil && !projectSkillPrivateFolder(home, final)
 }
 
 // projectSkillSourceSelects reports whether a resolved source selects the
