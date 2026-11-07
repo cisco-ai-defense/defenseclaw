@@ -50,6 +50,21 @@ func containsFold(list []string, name string) bool {
 	return false
 }
 
+// rootAssetPolicy is evaluateRootAssetPolicy for the asset-policy input the
+// watcher builds for evt.
+func (w *InstallWatcher) rootAssetPolicy(cfg *config.Config, evt InstallEvent, owner string) (config.AssetPolicyDecision, string) {
+	return w.evaluateRootAssetPolicy(cfg, evt, owner, func(c string) config.AssetPolicyInput {
+		return w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
+			TargetType:     string(evt.Type),
+			Name:           evt.Name,
+			DeclaredNames:  declaredAssetNames(cfg, evt),
+			Connector:      c,
+			SourcePath:     evt.Path,
+			RuntimeSurface: "watcher",
+		})
+	})
+}
+
 // evaluateRootAssetPolicy is the asset-policy decision for an install event
 // across every connector that loads its root: the first connector whose rules
 // block it, else the first whose rules would block it (observe mode), else
