@@ -660,7 +660,7 @@ The table follows `defenseclaw setup guardrail --help`.
 ## What setup writes
 
 The tree below shows Claude Code on Linux and macOS. On Windows the registered
-command uses a small guarded launcher; the system `cmd.exe` checks that guard on
+command runs `defenseclaw-hook.exe` through a small guarded launcher; the system `cmd.exe` checks that guard on
 events other than `PreToolUse`. Shell scripts are compatibility assets. See the [Claude Code paths](/docs/connectors/claudecode#files-defenseclaw-will-modify).
 
 <Files>
