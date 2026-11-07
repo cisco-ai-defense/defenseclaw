@@ -5797,7 +5797,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             r=r,
             remediation=(
                 "run 'defenseclaw-gateway restart', then 'defenseclaw doctor'; "
-                f"if it still fails, read {os.path.join(cfg.data_dir, 'gateway.log')}"
+                f"if it still fails, read {os.path.join(gateway_home_for_data_dir(cfg.data_dir), 'gateway.log')}"
             ),
         )
     return None
@@ -7459,8 +7459,12 @@ def _inspect_windows_watchdog_runtime(cfg, evidence: GatewayEvidence) -> tuple[s
     from unsafe or live-foreign identity evidence. Only the former may be
     handed to the gateway's own lifecycle repair path.
     """
-    pid_path = os.path.join(cfg.data_dir, "watchdog.pid")
-    ownership_path = os.path.join(cfg.data_dir, ".watchdog.lock")
+    # The watchdog keeps its PID, ownership lock and state beside gateway.pid
+    # in the install home, which is not the data_dir once config set data_dir
+    # has moved the store (GAP-0801).
+    home = gateway_home_for_data_dir(cfg.data_dir)
+    pid_path = os.path.join(home, "watchdog.pid")
+    ownership_path = os.path.join(home, ".watchdog.lock")
     record = evidence.watchdog_pid_record(pid_path)
     if record.status == "malformed":
         reason = record.reason or "canonical PID file is invalid"
@@ -7543,7 +7547,7 @@ def _inspect_windows_watchdog_runtime(cfg, evidence: GatewayEvidence) -> tuple[s
             None,
         )
 
-    state_path = os.path.join(cfg.data_dir, "watchdog.state")
+    state_path = os.path.join(home, "watchdog.state")
     return (
         "running",
         f"PID {record.pid} executable/start identity match and {ownership_label} ownership is held",
@@ -13190,7 +13194,8 @@ def _check_private_upstream_refusals(cfg, r: _DoctorResult) -> None:
     """
     if not cfg.guardrail.enabled:
         return
-    log_path = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "gateway.log")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    log_path = os.path.join(gateway_home_for_data_dir(data_dir) if data_dir else "", "gateway.log")
     try:
         with open(log_path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
