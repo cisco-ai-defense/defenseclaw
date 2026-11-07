@@ -648,7 +648,7 @@ A user who is not signed in has no session token: their servers stay blocked unt
 they sign in, and are scanned again within about 30 seconds. If `seclogon` is
 disabled, set it back to Manual. MCP servers of other connectors in a profile,
 and Codex project `.codex\config.toml` files, are not published and get no
-install scan.
+install scan (see below for what the gateway does with a Codex project server).
 
 Codex reads one user `config.toml`: the one under `CODEX_HOME` when that is set,
 otherwise `.codex\config.toml`. The enumerator publishes only that file for the
@@ -657,7 +657,15 @@ and an unreadable unused file does not block the account. `CODEX_HOME` counts
 when it is set for the account (the user environment); one set only for a
 session is not seen by the enumerator, and the gateway refuses a call to a Codex
 server defined in that file until the same definition is published
-(`mcp-source-unpublished`).
+(`mcp-source-unpublished`). The hook sends a digest of the whole definition
+(URL, command, every argument and the environment), and the gateway compares
+that digest with the published server, so a definition that differs in an
+argument past the 32nd, in a long URL or in the environment is not taken for the
+scanned one. A Codex project `.codex\config.toml` takes precedence over the user
+file and is not published: a project server is refused the same way when it
+would override a published server of that name, or when asset policy is enabled
+in action mode with MCP runtime detection on; otherwise it keeps running as
+before.
 
 ### Release a blocked or quarantined skill
 
