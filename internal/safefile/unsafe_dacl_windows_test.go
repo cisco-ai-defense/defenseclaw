@@ -75,6 +75,12 @@ func TestPrivateSecurityDescriptorRefusalNamesTheRefusedEntry(t *testing.T) {
 	if refusals, err := privateSecurityDescriptorRefusals(owned, subject, true); err != nil || len(refusals) != 1 || refusals[0].sid != nil {
 		t.Fatalf("a descriptor without a DACL: refusals=%+v err=%v", refusals, err)
 	}
+	if safe, err := privateSecurityDescriptorIsSafeForSubject(owned, subject); err != nil || safe {
+		t.Fatalf("a descriptor without a DACL: safe=%v err=%v, want refused without an error", safe, err)
+	}
+	if repairable, err := privateSecurityDescriptorIsWriterRepairableForSubject(owned, subject, true); err != nil || repairable {
+		t.Fatalf("a descriptor without a DACL: repairable=%v err=%v, want refused without an error", repairable, err)
+	}
 }
 
 // The entry sits on the folder above; the error names that folder and the
