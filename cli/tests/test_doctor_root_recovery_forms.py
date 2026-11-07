@@ -287,3 +287,66 @@ def test_managed_install_home_keeps_the_store_as_its_own_pid_home(monkeypatch, t
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
     monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
     assert config_module.install_home_for_bound_store(home / "moved") == str(home / "moved")
+
+
+def _unreadable_install_config(monkeypatch, tmp_path, readable: bool):
+    """A relative config only root can read, and a different file of that name where doctor runs."""
+    home = tmp_path / "install"
+    elsewhere = tmp_path / "elsewhere"
+    actual = tmp_path / "root-store"
+    unrelated = tmp_path / "unrelated"
+    for path in (home, elsewhere, actual, unrelated):
+        path.mkdir()
+    install_config = home / "other.yaml"
+    install_config.write_text(f"config_version: 8\ndata_dir: {actual}\n")
+    if not readable:
+        install_config.chmod(0)
+    (elsewhere / "other.yaml").write_text(f"config_version: 8\ndata_dir: {unrelated}\n")
+    (unrelated / "hook_contract_lock.json").write_text("{}")
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", "other.yaml")
+    monkeypatch.chdir(elsewhere)
+    cfg = config_module.load()
+    assert os.path.realpath(cfg.data_dir) == os.path.realpath(unrelated)
+    return actual, unrelated, cfg
+
+
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs a config this account cannot read")
+def test_unreadable_install_config_leaves_the_store_unknown_not_doctors_unrelated_one(monkeypatch, tmp_path):
+    """Round 9: the unrelated store doctor loaded never stands in for an unreadable gateway config."""
+    actual, unrelated, cfg = _unreadable_install_config(monkeypatch, tmp_path, readable=False)
+    assert cmd_doctor._gateway_store_dir(cfg) == ""
+    scanned = []
+    monkeypatch.setattr(
+        cmd_doctor, "sudo_runtime_leftover_relpaths", lambda data_dir: scanned.append(data_dir) or ["x.json"]
+    )
+    opened = []
+    real_open = open
+
+    def tracking_open(path, *args, **kwargs):
+        if os.path.basename(str(path)) == "hook_contract_lock.json":
+            opened.append(str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", tracking_open)
+    for check in (
+        cmd_doctor._check_sudo_runtime_leftovers,
+        lambda c, r: cmd_doctor._check_hook_contract_lock(c, "codex", r),
+    ):
+        result = cmd_doctor._DoctorResult(quiet=True)
+        check(cfg, result)
+        row = result.checks[-1]
+        assert row["status"] == "warn", row
+        assert "could not be read" in row["detail"], row
+    assert scanned == [] and opened == [], (scanned, opened)
+
+
+def test_readable_install_config_still_selects_its_store(monkeypatch, tmp_path):
+    """Benign twin: the same layout with a readable install-home config checks that config store."""
+    actual, unrelated, cfg = _unreadable_install_config(monkeypatch, tmp_path, readable=True)
+    assert os.path.realpath(cmd_doctor._gateway_store_dir(cfg)) == os.path.realpath(actual)
+    scanned = []
+    monkeypatch.setattr(cmd_doctor, "sudo_runtime_leftover_relpaths", lambda data_dir: scanned.append(data_dir) or [])
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_sudo_runtime_leftovers(cfg, result)
+    assert result.checks[-1]["status"] == "pass" and [os.path.realpath(p) for p in scanned] == [os.path.realpath(actual)]

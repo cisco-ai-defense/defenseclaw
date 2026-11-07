@@ -1774,6 +1774,9 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
 
     if os.name == "nt":
         return
+    if _gateway_store_unknown(cfg):
+        _emit_gateway_store_unknown("Sudo leftovers", r)
+        return
     data_dir = _gateway_store_dir(cfg)
     if not data_dir:
         return
@@ -1994,15 +1997,46 @@ def _install_home_store(cfg) -> str:
     return os.path.abspath(os.fspath(default_data_path()))
 
 
+def _gateway_store_unknown(cfg) -> bool:
+    """Whether the gateway reads a config doctor cannot read, so its store is unknown.
+
+    A relative ``DEFENSECLAW_CONFIG`` names a file in the install home for the
+    gateway. When that file exists but cannot be read here, nothing doctor
+    loaded from another folder says where the gateway keeps its store, so no
+    check may stand a different folder in for it (GAP-0711, GAP-0713).
+    """
+    from defenseclaw.config import CONFIG_PATH_ENV
+
+    configured = os.environ.get(CONFIG_PATH_ENV)
+    if not configured or os.path.isabs(configured):
+        return False
+    return _root_gateway_moved_store()[2]
+
+
 def _gateway_store_dir(cfg) -> str:
     """The folder the gateway reads and writes its store in, as a checked path.
 
-    The one rule for every check of "the gateway's store": the install-home
-    config's store when ``cfg`` was loaded from another folder, else ``cfg``'s
-    ``data_dir`` made absolute from the install home, the gateway's working
-    directory (GAP-0711, GAP-0713). "" when no store is configured.
+    The one rule for every check of the gateway store: the install-home
+    config store when ``cfg`` was loaded from another folder, else ``cfg``
+    ``data_dir`` made absolute from the install home, the gateway working
+    directory (GAP-0711, GAP-0713). "" when no store is configured or the store
+    is unknown (``_gateway_store_unknown``), never another folder.
     """
+    if _gateway_store_unknown(cfg):
+        return ""
     return _install_home_store(cfg) or _configured_gateway_data_dir(cfg)
+
+
+def _emit_gateway_store_unknown(label: str, r: _DoctorResult) -> None:
+    """Report a check that could not run because the gateway store is unknown."""
+    config_file = _root_gateway_moved_store()[1]
+    _emit(
+        "warn",
+        label,
+        f"not checked: the configuration {config_file} the gateway reads could not be read "
+        "here, so the folder it keeps its store in is unknown",
+        r=r,
+    )
 
 
 def _root_gateway_recovery_note(cfg) -> str:
@@ -18401,6 +18435,9 @@ def _check_hook_contract_lock(
             "not-gated; native hooks install to .kiro/hooks and the defenseclaw CLI 2.x agent. ACP remains optional",
             r=r,
         )
+        return
+    if _gateway_store_unknown(cfg):
+        _emit_gateway_store_unknown("Hook contract", r)
         return
     data_dir = _gateway_store_dir(cfg)
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")
