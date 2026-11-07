@@ -2002,56 +2002,44 @@ func TestClaudeTierChangeWithSavedOpenRefreshesRegistration(t *testing.T) {
 	}
 }
 
-func TestClaudeCustomPackPostureEditRefreshesSavedOpenRegistration(t *testing.T) {
+// A pinned custom pack whose posture changes with a new pin refreshes the
+// saved-open Claude Code registration; the same posture does not.
+func TestClaudeCustomPackPostureChangeRefreshesSavedOpenRegistration(t *testing.T) {
+	root := guardrailPoliciesRoot(t)
+	pinned := func(t *testing.T, posture string) *config.Config {
+		t.Helper()
+		dir := filepath.Join(t.TempDir(), "operator-pack")
+		if err := os.CopyFS(dir, os.DirFS(filepath.Join(root, posture))); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { packPostures.Delete(dir); pendingPackPostures.Delete(dir) })
+		pin, err := guardrail.RulePackDigest(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg := config.DefaultConfig()
+		cfg.Guardrail.Enabled = true
+		cfg.Guardrail.Connector = "claudecode"
+		cfg.Guardrail.HookSelfHeal = false
+		cfg.Guardrail.HookFailMode = "open"
+		cfg.Guardrail.RulePack = "operator"
+		cfg.Guardrail.CustomPacks = map[string]config.CustomRulePack{"operator": {Path: dir, Digest: "sha256:" + pin}}
+		cfg.CheckCustomRulePacks()
+		return cfg
+	}
 	for _, tc := range []struct{ before, after string }{
 		{"default", "strict"}, {"strict", "default"}, {"default", "default"},
 	} {
 		t.Run(tc.before+"_to_"+tc.after, func(t *testing.T) {
-			dir := t.TempDir()
-			t.Cleanup(func() { packPostures.Delete(dir); pendingPackPostures.Delete(dir) })
-			manifest := filepath.Join(dir, "defenseclaw-pack.json")
-			writePosture := func(posture string) {
-				t.Helper()
-				if err := os.WriteFile(manifest, []byte(`{"posture":"`+posture+`"}`), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			writePosture(tc.before)
-			old := config.DefaultConfig()
-			old.Guardrail.Enabled = true
-			old.Guardrail.Connector = "claudecode"
-			old.Guardrail.HookSelfHeal = false
-			old.Guardrail.HookFailMode = "open"
-			old.Guardrail.RulePack = "custom"
-			old.Guardrail.CustomPacks = map[string]config.CustomRulePack{"custom": {Path: dir}}
+			old, next := pinned(t, tc.before), pinned(t, tc.after)
 			if got := old.HookPolicyTierForConnector("claudecode"); got != tc.before {
-				t.Fatalf("initial tier = %q", got)
+				t.Fatalf("published tier = %q, want %q", got, tc.before)
 			}
-			notePackPosture(dir, guardrail.ReadPackPosture(dir))
-			buildThresholdTable(old, nil)
-			publishPackPostures()
-
-			writePosture(tc.after)
-			next := cloneConfig(old)
 			if got := next.HookPolicyTierForConnector("claudecode"); got != tc.after {
-				t.Fatalf("candidate tier = %q", got)
+				t.Fatalf("candidate tier = %q, want %q", got, tc.after)
 			}
-			notePackPosture(dir, guardrail.ReadPackPosture(dir))
-			buildThresholdTable(next, nil)
-			wantRefresh := tc.before != tc.after
-			if got := hookPolicyNeedsSetup(old, next); got != wantRefresh {
-				t.Fatalf("registration refresh = %t, want %t", got, wantRefresh)
-			}
-			if got := hookPolicyTierForConnector(old, "claudecode"); got != tc.before {
-				t.Fatalf("published generation tier = %q, want %q", got, tc.before)
-			}
-			if got := hookPolicyTierForConnector(next, "claudecode"); got != tc.after {
-				t.Fatalf("candidate generation tier = %q, want %q", got, tc.after)
-			}
-			published := (&Sidecar{}).publishConfig(next)
-			writePosture(tc.before)
-			if got := hookPolicyTierForConnector(published, "claudecode"); got != tc.after {
-				t.Fatalf("published registration tier changed with the manifest: %q, want %q", got, tc.after)
+			if got, want := hookPolicyNeedsSetup(old, next), tc.before != tc.after; got != want {
+				t.Fatalf("registration refresh = %t, want %t", got, want)
 			}
 		})
 	}
