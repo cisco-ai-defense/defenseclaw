@@ -17,8 +17,10 @@
 package watcher
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,9 +30,11 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"gopkg.in/yaml.v3"
 )
 
 // Hermes ships plugins in its checkout (hermes-agent/plugins). A shipped
@@ -260,14 +264,112 @@ func inBytecodeCache(name string) bool {
 	return slices.Contains(parts[:len(parts)-1], "__pycache__")
 }
 
+// hermesManifestFiles are the manifests the plugin scanner reads for declared
+// entrypoints (_MANIFEST_CANDIDATES in plugin_scanner/scanner.py;
+// TestHermesManifestFilesMatchScanner keeps them equal).
+var hermesManifestFiles = []string{
+	"package.json", "manifest.json", "plugin.json", "openclaw.plugin.json",
+	".claude-plugin/plugin.json", ".codex-plugin/plugin.json", ".cursor-plugin/plugin.json",
+	"plugin.yaml", "plugin.yml",
+}
+
+// hermesManifestMaxStrings bounds the strings hermesDeclaredFiles resolves.
+const hermesManifestMaxStrings = 10000
+
+// hermesDeclaredFiles returns the files in root that a plugin manifest may
+// name as a runtime entrypoint. The plugin scanner reads each declared
+// entrypoint whatever folder it is in (resolve_entrypoint_files), so a
+// declared file in a bytecode cache is scanner-readable. The set is a
+// superset by construction: every string anywhere in any manifest, under any
+// key, is resolved as a path relative to root, so a manifest key the scanner
+// adds later cannot hide an entrypoint. ok is false when a manifest exists
+// that cannot be read or parsed here, since the scanner may still read it;
+// the caller then treats every file as declared.
+func hermesDeclaredFiles(root string) (declared []fs.FileInfo, ok bool) {
+	strs := 0
+	add := func(value string) bool {
+		if strs++; strs > hermesManifestMaxStrings {
+			return false
+		}
+		value = strings.TrimLeft(strings.TrimSpace(value), "/\\")
+		if value == "" || len(value) > 4096 || strings.ContainsRune(value, 0) {
+			return true
+		}
+		if info, err := os.Stat(filepath.Join(root, filepath.FromSlash(value))); err == nil && info.Mode().IsRegular() {
+			declared = append(declared, info)
+		}
+		return true
+	}
+	for _, rel := range hermesManifestFiles {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		info, err := os.Lstat(path)
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			continue
+		}
+		if err != nil {
+			return nil, false
+		}
+		if !info.Mode().IsRegular() {
+			// The scanner reads a manifest only when it is a plain file.
+			continue
+		}
+		if info.Size() > hermesPluginMaxFileBytes {
+			return nil, false
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, false
+		}
+		if strings.HasSuffix(rel, ".yaml") || strings.HasSuffix(rel, ".yml") {
+			var doc yaml.Node
+			if yaml.Unmarshal(data, &doc) != nil || !walkYAMLStrings(&doc, add) {
+				return nil, false
+			}
+			continue
+		}
+		if !json.Valid(data) {
+			return nil, false
+		}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		for {
+			token, err := decoder.Token()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				return nil, false
+			}
+			if value, isString := token.(string); isString && !add(value) {
+				return nil, false
+			}
+		}
+	}
+	return declared, true
+}
+
+// walkYAMLStrings calls add for every scalar in a YAML tree; it stops and
+// reports false when add does.
+func walkYAMLStrings(node *yaml.Node, add func(string) bool) bool {
+	if node.Kind == yaml.ScalarNode && !add(node.Value) {
+		return false
+	}
+	for _, child := range node.Content {
+		if !walkYAMLStrings(child, add) {
+			return false
+		}
+	}
+	return true
+}
+
 // skippedTreeHash describes what SnapshotTarget leaves out of a plugin, as
 // one hash (empty when there is nothing): every link, and every file in a
 // folder the snapshot skips (.git, node_modules, __pycache__, .venv, venv)
-// except a bytecode cache file without a native extension, which Hermes
-// writes at run time and the plugin scanner ignores. The plugin scanner
-// reports a native file in those folders and reads a declared entrypoint
-// there, so a shipped plugin folds this hash into its content hash: a change
-// anywhere in the tree reaches a scan, whatever was admitted before. Every
+// except a bytecode cache file that has no native extension and that no
+// manifest declares (hermesDeclaredFiles), which Hermes writes at run time
+// and the plugin scanner ignores. The plugin scanner reports a native file in
+// those folders and reads a declared entrypoint there, so a shipped plugin
+// folds this hash into its content hash: a change anywhere in the tree
+// reaches a scan, whatever was admitted before. Every
 // file the scanner can read (up to hermesScannerReadBytes) is hashed, however
 // much skipped data precedes it; a larger file is described by name and size,
 // since the scanner reads none of its bytes. A tree over
@@ -276,6 +378,24 @@ func inBytecodeCache(name string) bool {
 func skippedTreeHash(root string) string {
 	var entries []string
 	read := int64(0)
+	var declared []fs.FileInfo
+	declaredOK, declaredLoaded := false, false
+	// declaredEntrypoint reports a bytecode cache file the scanner can read
+	// because a manifest declares it; the manifests are read at most once.
+	declaredEntrypoint := func(path string) bool {
+		if !declaredLoaded {
+			declared, declaredOK = hermesDeclaredFiles(root)
+			declaredLoaded = true
+		}
+		if !declaredOK {
+			return true
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return true
+		}
+		return slices.ContainsFunc(declared, func(d fs.FileInfo) bool { return os.SameFile(info, d) })
+	}
 	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil || rel == "." {
@@ -291,7 +411,7 @@ func skippedTreeHash(root string) string {
 			target, _ := os.Readlink(path)
 			entries = append(entries, "link:"+name+"->"+target)
 		case entry.IsDir():
-		case !snapshotSkipsPath(name) || inBytecodeCache(name) && !hermesNativePayload(name):
+		case !snapshotSkipsPath(name) || inBytecodeCache(name) && !hermesNativePayload(name) && !declaredEntrypoint(path):
 		case !entry.Type().IsRegular():
 			entries = append(entries, "special:"+name+":"+entry.Type().String())
 		default:
