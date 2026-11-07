@@ -186,6 +186,8 @@ func TestGAP0518LateOrdinaryCall(t *testing.T) {
 		{"sed regexp print", "sed -n /x/p plain.txt", true},
 		{"sed substitute", "sed -e s/a/b/g plain.txt && sed -i s/a/b/ plain.txt", true},
 		{"sed bundled flags and script", "sed -ne p plain.txt", true},
+		{"path-qualified echo reads its words", "./echo keylink", false},
+		{"path-qualified ls reads attached values", "/bin/ls -Ikeylink", false},
 		{"echo redirect to a link", "echo x > keylink", false},
 		{"printf redirect to a link", "printf x >> keylink", false},
 		{"sed w command in a quoted script", "sed -n -e \"w keylink\" plain.txt", false},

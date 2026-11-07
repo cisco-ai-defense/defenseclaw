@@ -387,6 +387,11 @@ func (s *lateScan) command(command string) bool {
 			if slices.Contains(lateWrappers, base) || afterPipe && !slices.Contains(lateFilters, base) {
 				return false
 			}
+			if strings.Contains(text, "/") {
+				// A program given by a path is not the one of that name:
+				// its words are read as if its options were unknown.
+				base = ""
+			}
 			atCommand, afterPipe, program, sed = false, false, base, lateSed{}
 			if !s.word("", text) {
 				return false
