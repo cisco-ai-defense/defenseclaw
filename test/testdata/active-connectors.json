@@ -166,5 +166,143 @@
         "kiro"
       ]
     }
+  ],
+  "comment_boot": "boot_cases are final config.yaml bodies. Go (internal/config TestGuardrailBootSetParityFixture) checks Config.GuardrailBootSet (multi, enabled, disabled); Python (cli/tests/test_active_connectors_parity.py) checks that config set/unset refuses a file exactly when config_set is 'refused', and that every file whose shared boot sets up a proxy connector (proxy_boot_fails) is refused, so a successful edit never saves a file the gateway rejects (GAP-0588).",
+  "boot_cases": [
+    {
+      "name": "openclaw_with_disabled_kiro",
+      "config": "guardrail:\n  connector: openclaw\n  connectors:\n    openclaw: {}\n    kiro:\n      enabled: false\n",
+      "multi": true,
+      "enabled": [
+        "openclaw"
+      ],
+      "disabled": [
+        "kiro"
+      ],
+      "proxy_boot_fails": true,
+      "config_set": "refused"
+    },
+    {
+      "name": "disabled_kiro_listed_before_own_openclaw",
+      "config": "guardrail:\n  connector: openclaw\n  connectors:\n    kiro:\n      enabled: false\n    openclaw: {}\n",
+      "multi": true,
+      "enabled": [
+        "openclaw"
+      ],
+      "disabled": [
+        "kiro"
+      ],
+      "proxy_boot_fails": true,
+      "config_set": "refused"
+    },
+    {
+      "name": "zeptoclaw_with_disabled_codex",
+      "config": "guardrail:\n  connector: zeptoclaw\n  connectors:\n    zeptoclaw: {}\n    codex:\n      enabled: false\n",
+      "multi": true,
+      "enabled": [
+        "zeptoclaw"
+      ],
+      "disabled": [
+        "codex"
+      ],
+      "proxy_boot_fails": true,
+      "config_set": "refused"
+    },
+    {
+      "name": "openclaw_with_enabled_kiro",
+      "config": "guardrail:\n  connector: openclaw\n  connectors:\n    openclaw: {}\n    kiro: {}\n",
+      "multi": true,
+      "enabled": [
+        "kiro",
+        "openclaw"
+      ],
+      "disabled": [],
+      "proxy_boot_fails": true,
+      "config_set": "refused"
+    },
+    {
+      "name": "kiro_with_disabled_openclaw",
+      "config": "guardrail:\n  connector: kiro\n  connectors:\n    kiro: {}\n    openclaw:\n      enabled: false\n",
+      "multi": true,
+      "enabled": [
+        "kiro"
+      ],
+      "disabled": [
+        "openclaw"
+      ],
+      "proxy_boot_fails": false,
+      "config_set": "allowed"
+    },
+    {
+      "name": "openclaw_own_entry_only",
+      "config": "guardrail:\n  connector: openclaw\n  connectors:\n    openclaw: {}\n",
+      "multi": false,
+      "enabled": [
+        "openclaw"
+      ],
+      "disabled": [],
+      "proxy_boot_fails": false,
+      "config_set": "allowed"
+    },
+    {
+      "name": "openclaw_primary_one_disabled_hook_entry",
+      "config": "guardrail:\n  connector: openclaw\n  connectors:\n    kiro:\n      enabled: false\n",
+      "multi": false,
+      "enabled": [],
+      "disabled": [
+        "kiro"
+      ],
+      "proxy_boot_fails": false,
+      "config_set": "allowed"
+    },
+    {
+      "name": "hook_pair",
+      "config": "guardrail:\n  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
+      "multi": true,
+      "enabled": [
+        "codex",
+        "kiro"
+      ],
+      "disabled": [],
+      "proxy_boot_fails": false,
+      "config_set": "allowed"
+    },
+    {
+      "name": "openclaw_disabled_own_entry_beside_kiro",
+      "config": "guardrail:\n  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n    kiro: {}\n",
+      "multi": true,
+      "enabled": [
+        "kiro"
+      ],
+      "disabled": [
+        "openclaw"
+      ],
+      "proxy_boot_fails": false,
+      "config_set": "allowed"
+    },
+    {
+      "name": "openclaw_primary_outside_hook_pair",
+      "config": "guardrail:\n  connector: openclaw\n  connectors:\n    kiro: {}\n    codex: {}\n",
+      "multi": true,
+      "enabled": [
+        "codex",
+        "kiro"
+      ],
+      "disabled": [],
+      "proxy_boot_fails": false,
+      "config_set": "refused"
+    },
+    {
+      "name": "openclaw_primary_outside_disabled_pair",
+      "config": "guardrail:\n  connector: openclaw\n  connectors:\n    kiro:\n      enabled: false\n    codex:\n      enabled: false\n",
+      "multi": true,
+      "enabled": [],
+      "disabled": [
+        "codex",
+        "kiro"
+      ],
+      "proxy_boot_fails": false,
+      "config_set": "refused"
+    }
   ]
 }

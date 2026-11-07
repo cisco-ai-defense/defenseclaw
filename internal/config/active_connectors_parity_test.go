@@ -83,6 +83,68 @@ func TestActiveConnectorsParityFixture(t *testing.T) {
 	}
 }
 
+// TestGuardrailBootSetParityFixture pins the boot decision the Python config
+// set check mirrors (cli/tests/test_active_connectors_parity.py): which boot
+// runs and which listed connectors it sets up, enabled or disabled (GAP-0588).
+func TestGuardrailBootSetParityFixture(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "test", "testdata", "active-connectors.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		BootCases []struct {
+			Name           string   `json:"name"`
+			Config         string   `json:"config"`
+			Multi          bool     `json:"multi"`
+			Enabled        []string `json:"enabled"`
+			Disabled       []string `json:"disabled"`
+			ProxyBootFails bool     `json:"proxy_boot_fails"`
+		} `json:"boot_cases"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.BootCases) == 0 {
+		t.Fatal("fixture has no boot_cases")
+	}
+	proxies := map[string]bool{"openclaw": true, "zeptoclaw": true}
+	for _, tc := range fixture.BootCases {
+		t.Run(tc.Name, func(t *testing.T) {
+			testenv.SetHome(t, t.TempDir())
+			dir := t.TempDir()
+			path := filepath.Join(dir, DefaultConfigName)
+			body := "config_version: 9\ndata_dir: " + strconv.Quote(dir) + "\n" + tc.Config
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadFromFile(path)
+			if err != nil {
+				t.Fatalf("LoadFromFile: %v", err)
+			}
+			multi, enabled, disabled := cfg.GuardrailBootSet()
+			if multi != tc.Multi {
+				t.Errorf("multi = %v, want %v", multi, tc.Multi)
+			}
+			if got := nonNil(enabled); !reflect.DeepEqual(got, nonNil(tc.Enabled)) {
+				t.Errorf("enabled = %v, want %v", got, tc.Enabled)
+			}
+			if got := nonNil(disabled); !reflect.DeepEqual(got, nonNil(tc.Disabled)) {
+				t.Errorf("disabled = %v, want %v", got, tc.Disabled)
+			}
+			// The shared boot is hook-only: a proxy connector it would set up fails it.
+			fails := false
+			if multi {
+				for _, name := range enabled {
+					fails = fails || proxies[name]
+				}
+			}
+			if fails != tc.ProxyBootFails {
+				t.Errorf("proxy connector in the shared boot = %v, want %v", fails, tc.ProxyBootFails)
+			}
+		})
+	}
+}
+
 func nonNil(names []string) []string {
 	if names == nil {
 		return []string{}

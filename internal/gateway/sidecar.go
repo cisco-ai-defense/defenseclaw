@@ -1671,7 +1671,7 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 		return err
 	}
 	runGuardrailFn := s.runGuardrail
-	if len(s.currentConfig().ActiveConnectors()) > 1 {
+	if multi, _, _ := s.currentConfig().GuardrailBootSet(); multi {
 		runGuardrailFn = s.runGuardrailMulti
 	}
 	err := runGuardrailFn(ctx)
@@ -5471,13 +5471,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// defaults to true, so a connector with no explicit override is
 	// unaffected and single-connector installs never reach this path.
 	configured := s.currentConfig().ActiveConnectors()
-	names := make([]string, 0, len(configured))
-	for _, name := range configured {
-		if s.currentConfig().Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
-			names = append(names, name)
-		} else {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — excluded from active set; teardown will run\n", name, name)
-		}
+	_, names, disabledNames := s.currentConfig().GuardrailBootSet()
+	for _, name := range disabledNames {
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — excluded from active set; teardown will run\n", name, name)
 	}
 
 	// Resolve every enabled connector up front. An unknown connector

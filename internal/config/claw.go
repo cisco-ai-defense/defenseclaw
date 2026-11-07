@@ -206,6 +206,27 @@ func (c *Config) activeConnectors() []string {
 	return []string{c.activeConnector()}
 }
 
+// GuardrailBootSet is the one decision the gateway boot makes from the roster.
+// multi is true when more than one connector is listed under
+// guardrail.connectors, enabled or not: the shared (multi-connector) boot runs
+// then and the single-connector boot does not. enabled and disabled split the
+// listed connectors by guardrail.connectors.<name>.enabled; enabled is what the
+// shared boot sets up, and a proxy connector in it makes that boot fail.
+// The Python config set check (cmd_config._check_guardrail_connector_roster)
+// refuses the files this decision cannot boot; test/testdata/active-connectors.json
+// pins both sides to the same cases.
+func (c *Config) GuardrailBootSet() (multi bool, enabled, disabled []string) {
+	configured := c.ActiveConnectors()
+	for _, name := range configured {
+		if c.Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
+			enabled = append(enabled, name)
+		} else {
+			disabled = append(disabled, name)
+		}
+	}
+	return len(configured) > 1, enabled, disabled
+}
+
 func (c *Config) rosterConnectorNames() []string {
 	if c == nil {
 		return nil

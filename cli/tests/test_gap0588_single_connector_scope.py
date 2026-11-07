@@ -488,3 +488,64 @@ def test_root_config_command_hook_roster_without_primary_stays_editable(tmp_path
         result = CliRunner().invoke(cli, ["config", "set", "guardrail.connectors.codex.hook_fail_mode", "closed"])
     assert result.exit_code == 0, result.output
     assert path.read_bytes() != before
+
+
+def _root_config(tmp_path: Path, guardrail: str, *args: str):
+    from defenseclaw.main import cli
+
+    path = tmp_path / "config.yaml"
+    path.write_text(f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{guardrail}", encoding="utf-8")
+    before = path.read_bytes()
+    with (
+        patch.object(dcconfig, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "_refresh_stopped_gateway_hooks", return_value=[]),
+    ):
+        result = CliRunner().invoke(cli, ["config", *args])
+    return result, before, path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("guardrail", "args"),
+    [
+        # A disabled hook entry beside a proxy still makes the gateway choose the shared boot (REVIEW-10).
+        ("  enabled: true\n  connector: openclaw\n  connectors:\n    openclaw: {}\n",
+         ["set", "guardrail.connectors.kiro.enabled", "false"]),
+        ("  enabled: true\n  connector: zeptoclaw\n  connectors:\n    zeptoclaw: {}\n",
+         ["set", "guardrail.connectors.codex.enabled", "false"]),
+        ("  enabled: true\n  connector: openclaw\n  connectors:\n    kiro:\n      enabled: false\n",
+         ["set", "guardrail.connectors.openclaw", "{}", "--json"]),
+        ("  enabled: true\n  connector: openclaw\n  connectors:\n    openclaw: {}\n",
+         ["set", "guardrail.connectors", '{"openclaw": {}, "kiro": {"enabled": false}}', "--json"]),
+    ],
+)
+def test_root_config_command_refuses_disabled_hook_entry_beside_proxy(
+    tmp_path: Path, guardrail: str, args: list[str]
+) -> None:
+    result, before, after = _root_config(tmp_path, guardrail, *args)
+    assert result.exit_code != 0
+    assert "needs a proxy binding" in result.output
+    assert "A disabled entry under guardrail.connectors still counts" in result.output
+    assert after == before
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["set", "guardrail.connectors.kiro.hook_fail_mode", "closed"],
+        ["set", "guardrail.connectors.openclaw.hook_fail_mode", "closed"],
+        ["unset", "guardrail.connectors.openclaw"],
+    ],
+)
+def test_root_config_command_hook_primary_with_disabled_proxy_entry_stays_editable(
+    tmp_path: Path, args: list[str]
+) -> None:
+    """Benign twin: a hook primary beside a disabled proxy entry boots the hook connector alone."""
+    result, before, after = _root_config(
+        tmp_path,
+        "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n    openclaw:\n      enabled: false\n",
+        *args,
+    )
+    assert result.exit_code == 0, result.output
+    assert after != before
