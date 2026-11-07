@@ -129,18 +129,29 @@ defenseclaw_sandbox_unreachable_reason() {
   esac
 }
 
-# defenseclaw_sandbox_rate_refusal_reason BODY prints why a sandbox hook
-# blocked a call the gateway refused 429. The gateway's own message names
+# defenseclaw_sandbox_rate_refusal_message BODY [legacy] prints the message the
+# gateway wrote for a call it refused 429. The gateway's own message names
 # which limit refused it (this sandbox's rate, its waiting requests, the
 # user's sandboxes together, or the gateway as a whole): the cause and the
 # numbers live there, not here. It is cut to one printable line of at most
-# 300 characters. A refusal for rate is the gateway answering, not an outage,
-# and says so.
+# 300 characters. With "legacy" a body that carries only an error field (the
+# older gateway answer) counts as its message; without it only the message
+# field does.
+defenseclaw_sandbox_rate_refusal_message() {
+  local message filter='if type == "object" then (.message // "") else "" end'
+  [ "${2:-}" = legacy ] && filter='if type == "object" then (.message // .error // "") else "" end'
+  message="$(printf %s "$1" | _dc_jq -r "$filter" 2>/dev/null)" || message=""
+  message="$(printf %s "$message" | LC_ALL=C tr -d '\000-\037\177')"
+  printf %s "${message:0:300}"
+}
+
+# defenseclaw_sandbox_rate_refusal_reason BODY prints why a sandbox hook
+# blocked a call the gateway refused 429, with the gateway's message when it
+# gave one. A refusal for rate is the gateway answering, not an outage, and
+# says so.
 defenseclaw_sandbox_rate_refusal_reason() {
   local message
-  message="$(printf %s "$1" | _dc_jq -r 'if type == "object" then (.message // .error // "") else "" end' 2>/dev/null)" || message=""
-  message="$(printf %s "$message" | LC_ALL=C tr -d '\000-\037\177')"
-  message="${message:0:300}"
+  message="$(defenseclaw_sandbox_rate_refusal_message "$1" legacy)"
   if [ -n "$message" ]; then
     printf 'DefenseClaw refused this tool call, the gateway is limiting requests (not an outage): %s' "$message"
   else
