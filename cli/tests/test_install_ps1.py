@@ -41,17 +41,49 @@ _RUN_BOUND_AT_IMPORT = subprocess.run
 _POPEN_BOUND_AT_IMPORT = subprocess.Popen
 
 
+_POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
+_ENV_NAMES = frozenset({"env", "env.exe"})
+_ENV_OPTIONS_WITH_A_VALUE = frozenset({"-u", "--unset", "-C", "--chdir"})
+
+
+def _base_name(word) -> str:  # type: ignore[no-untyped-def]
+    return re.split(r"[\\/]", str(os.fspath(word)))[-1].lower()
+
+
+def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
+    # The word a launch runs: the executable, or the first word of the argv or
+    # shell string, looking through `env [options] [NAME=VALUE ...]` wrappers,
+    # which hand the next word to the operating system unchanged.
+    if kwargs.get("executable") is not None:
+        return kwargs["executable"]
+    if isinstance(args, str):
+        words = args.split()
+    elif isinstance(args, (list, tuple)):
+        words = list(args)
+    else:
+        words = [args]
+    while words and isinstance(words[0], (str, os.PathLike)) and _base_name(words[0]) in _ENV_NAMES:
+        rest, i = words[1:], 0
+        while i < len(rest) and isinstance(rest[i], str) and (rest[i].startswith("-") or "=" in rest[i]):
+            i += 2 if rest[i] in _ENV_OPTIONS_WITH_A_VALUE else 1
+        words = rest[i:]
+    return words[0] if words else None
+
+
 def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
-    # Where PowerShell is not installed POWERSHELL is None, and a test that
-    # builds [POWERSHELL, ...] (or [str(POWERSHELL), ...]) launches "None".
+    # Where PowerShell is not installed POWERSHELL is None, so a test that
+    # builds [POWERSHELL, ...] launches None, and [str(POWERSHELL), ...]
+    # launches "None"; either may sit behind an `env` wrapper. A test that
+    # names the interpreter directly ("pwsh", "powershell.exe") launches a
+    # program that is not there. All three are the same missing interpreter.
     if POWERSHELL is not None:
         return False
-    first = kwargs.get("executable")
-    if first is None:
-        first = args[0] if isinstance(args, (list, tuple)) and args else args
-    if isinstance(first, str) and not isinstance(args, (list, tuple)):
-        first = first.split(None, 1)[0] if first.strip() else first
-    return first is None or str(first) == "None"
+    word = _command_word(args, kwargs)
+    if word is None or str(word) == "None":
+        return True
+    if not isinstance(word, (str, os.PathLike)):
+        return False
+    return _base_name(word) in _POWERSHELL_NAMES and shutil.which(word) is None and not os.path.isfile(word)
 
 
 def _skip_powershell_calls_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4720,7 +4752,9 @@ def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
     # reach PowerShell: the runner, an alias of subprocess.run bound before the
     # fixture, subprocess.Popen directly or by alias, and the check_* helpers.
     module = sys.modules[__name__]
+    env = shutil.which("env") or "/usr/bin/env"
     monkeypatch.setattr(module, "POWERSHELL", None)
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
     _skip_powershell_calls_when_missing(monkeypatch)
     alias = _run_powershell
     ps_args = ["-NoProfile", "-Command", "exit 0"]
@@ -4736,6 +4770,15 @@ def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
         lambda: subprocess.check_output([POWERSHELL, *ps_args]),
         lambda: subprocess.check_call([str(POWERSHELL), *ps_args]),
         lambda: subprocess.run(f"{POWERSHELL} -NoProfile -Command exit", shell=True, check=False),
+        # The same missing interpreter behind an `env` wrapper, or named directly.
+        lambda: subprocess.run([env, POWERSHELL, *ps_args], check=False),
+        lambda: subprocess.run([env, str(POWERSHELL), *ps_args], check=False),
+        lambda: subprocess.run([env, "-i", "PATH=/usr/bin", POWERSHELL, *ps_args], check=False),
+        lambda: subprocess.run(["env", "-u", "HOME", POWERSHELL, *ps_args], check=False),
+        lambda: subprocess.run(["pwsh", *ps_args], check=False),
+        lambda: subprocess.run(["powershell.exe", *ps_args], check=False),
+        lambda: subprocess.Popen(["PWSH.EXE", *ps_args]),
+        lambda: subprocess.run("pwsh -NoProfile -Command exit", shell=True, check=False),
     ):
         with pytest.raises(pytest.skip.Exception):
             reach()
@@ -4747,6 +4790,13 @@ def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
     assert _POPEN_BOUND_AT_IMPORT(python).wait() == 0
     assert subprocess.check_call(python) == 0
     assert subprocess.check_output([sys.executable, "-c", "print('ok')"], text=True).strip() == "ok"
+    # ... including behind an `env` wrapper, and a word that merely contains
+    # a PowerShell name or the text "None" as an argument.
+    if os.path.isfile(env):
+        assert subprocess.run([env, sys.executable, "-c", "pass"], check=False).returncode == 0
+        assert subprocess.run([env, "A=1", sys.executable, "-c", "pass"], check=False).returncode == 0
+    arg_twin = [sys.executable, "-c", "import sys; sys.exit(sys.argv[1:] != ['None', 'pwsh'])", "None", "pwsh"]
+    assert subprocess.run(arg_twin, check=False).returncode == 0
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
