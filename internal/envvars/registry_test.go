@@ -302,6 +302,9 @@ func TestManagedIgnoredOptOutsAreReadThroughLookup(t *testing.T) {
 			raw, readErr := os.ReadFile(path)
 			if readErr == nil {
 				rel, _ := filepath.Rel(root, path)
+				// The exemption list below is keyed by slash paths; Windows
+				// reports the relative path with backslashes.
+				rel = filepath.ToSlash(rel)
 				for _, match := range direct.FindAllStringSubmatch(string(raw), -1) {
 					// These readers are restricted to per-user hooks or skip the
 					// value in managed mode, as checked by the hook policy test.
