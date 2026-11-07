@@ -151,15 +151,27 @@ func (l machineLayout) posixPath(value string, caseFold bool) bool {
 // its own is on it. It is read from the working directory the gateway placed
 // (facts.CWD) and, where the gateway could not place it (a service account
 // that cannot reach the user directories), from the directory the hook
-// payload reported. known is false when neither is given; the drive is empty
-// when the directory has none (a UNC share or a POSIX directory), and a path
-// with no drive is then not on any drive of the layout.
+// payload reported. known is false when neither is given on a Windows target;
+// the drive is empty when the directory has none (a UNC share or a POSIX
+// directory), and a path with no drive is then not on any drive of the layout.
 func windowsCurrentDrive(facts actionfacts.Facts) (drive string, known bool) {
 	if facts.CWD != "" {
 		drive, _, _ = windowsVolumeAndNames(facts.CWD)
 		return drive, true
 	}
-	return facts.CurrentWindowsDrive, facts.CurrentWindowsDrive != ""
+	if facts.CurrentWindowsDrive != "" {
+		return facts.CurrentWindowsDrive, true
+	}
+	// Nothing places the directory. On a POSIX host with a POSIX home the
+	// target is POSIX: its /ProgramData is an ordinary path, never a drive
+	// folder. Elsewhere the drive stays unknown and a path with no drive is
+	// read on every drive.
+	if runtime.GOOS != "windows" {
+		if homeDrive, _, ok := windowsVolumeAndNames(facts.ActiveHome); !ok || homeDrive == "" {
+			return "", true
+		}
+	}
+	return "", false
 }
 
 // reportedWindowsDrive is the drive of the directory a hook payload reported,
@@ -215,7 +227,11 @@ func (f windowsMachineFolder) holds(drive string, names []string) bool {
 // suffix, as NTFS compares them, with . and .. applied.
 func windowsVolumeAndNames(value string) (drive string, names []string, ok bool) {
 	slashed := strings.ReplaceAll(value, `\`, "/")
-	rooted := strings.HasPrefix(slashed, "/") && !strings.HasPrefix(slashed, "//")
+	// Windows reads exactly two leading separators and a server name as a
+	// UNC path. One separator, or three or more (an empty server name), is
+	// rooted on the current drive, as the platform resolvers read them.
+	unc := strings.HasPrefix(slashed, "//") && !strings.HasPrefix(slashed, "///")
+	rooted := strings.HasPrefix(slashed, "/") && !unc
 	if rest, found := strings.CutPrefix(slashed, "//?/"); found {
 		slashed = rest
 	} else if rest, found := strings.CutPrefix(slashed, "//./"); found {
@@ -227,7 +243,7 @@ func windowsVolumeAndNames(value string) (drive string, names []string, ok bool)
 	shellDrive, shellRest := posixShellDrive(slashed)
 	var rest string
 	switch {
-	case strings.HasPrefix(slashed, "//"):
+	case unc:
 		// //host/C$/rest: the share names the volume.
 		parts := strings.SplitN(slashed[2:], "/", 3)
 		if len(parts) < 3 || len(parts[1]) != 2 || parts[1][1] != '$' || !isASCIILetterByte(parts[1][0]) {

@@ -469,3 +469,76 @@ func TestMachineLayoutWindowsDriveLessPathFollowsTheCurrentDrive(t *testing.T) {
 		}
 	}
 }
+
+// Windows reads exactly two leading separators and a server name as a UNC
+// path; one, or three and more, is rooted on the current drive whatever the
+// mix of slashes and backslashes. A real //server/share path stays distinct.
+func TestMachineLayoutWindowsRepeatedLeadingSeparatorsAreRootedOnTheCurrentDrive(t *testing.T) {
+	previous := defenseClawMachineLayout
+	defenseClawMachineLayout = func() machineLayout {
+		return newMachineLayout(func() (string, string, error) { return `C:\Program Files`, `C:\ProgramData`, nil })
+	}
+	t.Cleanup(func() { defenseClawMachineLayout = previous })
+	const home = `C:\Users\tester`
+	files := []string{
+		`/\/ProgramData/Cisco/DefenseClaw/etc/config.yaml`,
+		`\\\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`///ProgramData/Cisco/DefenseClaw/etc/config.yaml`,
+		`\/\/Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		`////ProgramData\Cisco/DefenseClaw-HookRuntime/enroll.json`,
+	}
+	for _, managed := range []bool{false, true} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			for _, file := range files {
+				for _, project := range []string{`D:\proj`, `/mnt/d/proj`} {
+					if _, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
+						t.Errorf("Write %s from %s managed=%t pack=%q = %.200s, want allow", file, project, managed, pack, got)
+					}
+				}
+				for _, project := range []string{`C:\proj`, `c:/proj`} {
+					if blocked, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); !blocked {
+						t.Errorf("Write %s from %s managed=%t pack=%q = %.200s, want protected block", file, project, managed, pack, got)
+					}
+				}
+			}
+			for _, share := range []string{`//server/share/ProgramData/Cisco/DefenseClaw/etc/config.yaml`, `\\server\share\ProgramData\Cisco\DefenseClaw\etc\config.yaml`} {
+				if _, got := machineLayoutCall(t, home, `C:\proj`, "Write", map[string]any{"file_path": share, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
+					t.Errorf("Write %s managed=%t pack=%q = %.200s, want allow", share, managed, pack, got)
+				}
+			}
+		}
+	}
+}
+
+// On a POSIX target a /ProgramData path is an ordinary path, never a
+// drive-less Windows one, whether the hook reports no directory or one the
+// gateway cannot place. Where the target is Windows and nothing places the
+// drive, the drive-less machine folder stays protected on every drive.
+func TestMachineLayoutPOSIXTargetWithoutPlacedDirectoryIsNotADriveLessWindowsPath(t *testing.T) {
+	previous := defenseClawMachineLayout
+	defenseClawMachineLayout = func() machineLayout {
+		return newMachineLayout(func() (string, string, error) { return `C:\Program Files`, `C:\ProgramData`, nil })
+	}
+	t.Cleanup(func() { defenseClawMachineLayout = previous })
+	const posixHome = "/home/tester"
+	files := []string{
+		`/ProgramData/Cisco/DefenseClaw/etc/project.yaml`,
+		`/Program Files/Cisco/DefenseClaw/bin/project.exe`,
+	}
+	for _, managed := range []bool{false, true} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			for _, file := range files {
+				for _, project := range []string{"", posixHome + "/proj"} {
+					if _, got := machineLayoutCall(t, posixHome, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
+						t.Errorf("Write %s from %q managed=%t pack=%q = %.200s, want allow", file, project, managed, pack, got)
+					}
+				}
+			}
+		}
+	}
+	for _, file := range files {
+		if blocked, got := machineLayoutCall(t, `C:\Users\tester`, "", "Write", map[string]any{"file_path": file, "content": "x"}, true, ""); !blocked {
+			t.Errorf("Write %s with a Windows home and no directory = %.200s, want protected block", file, got)
+		}
+	}
+}
