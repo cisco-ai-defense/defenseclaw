@@ -996,8 +996,9 @@ _MOVED_DATA_DIR_LOCK = "hook_contract_lock.json"
 _MOVED_DATA_DIR_BACKUP_TREE = "connector_backups"
 _MOVED_STATE_MAX_FILE_BYTES = 32 << 20
 _MOVED_STATE_MAX_ENTRIES = 4096
-# A CodeGuard archive of a skill folder sits five folders deep and holds that folder as it was.
-_MOVED_STATE_MAX_DEPTH = 16
+# A CodeGuard archive holds a copy of the skill folder it replaced, as deep as that folder was, so the
+# walk is bounded by the entry count and the length of the path, never by a folder count.
+_MOVED_STATE_MAX_PATH_CHARS = 4096
 
 
 def _state_entry_is_account_owned(path: str, info: os.stat_result) -> bool:
@@ -1046,7 +1047,7 @@ def _moved_state_sources(old_dir: str) -> tuple[list[tuple[str, os.stat_result]]
         seen += 1
         if (
             seen > _MOVED_STATE_MAX_ENTRIES
-            or rel.count(os.sep) >= _MOVED_STATE_MAX_DEPTH
+            or len(rel) > _MOVED_STATE_MAX_PATH_CHARS
             or not _state_entry_is_account_owned(path, info)
         ):
             refused.append(rel)
@@ -1073,9 +1074,12 @@ class _MovedStateConflictError(OSError):
 def _store_moved_state_file(new_dir: str, rel: str, data: bytes) -> bool:
     """Create ``new_dir/rel`` with *data*, private; never replace or follow a link.
 
-    True when the file was created, False when an identical regular file was
-    already there. Raises :class:`_MovedStateConflictError` for anything else that is
-    already there (different bytes, a link, a folder) and ``OSError`` when a
+    True when the file was created, False when an identical regular file that
+    only this account can use was already there (the gateway refuses a lock or
+    backup with group or other access, so equal bytes alone do not make it
+    usable). Raises :class:`_MovedStateConflictError` for anything else that is
+    already there (different bytes, a link, a folder, a file the gateway would
+    refuse) and ``OSError`` when a
     folder on the way is a link, belongs to another account or cannot be made.
     On POSIX every folder is opened from the one before it without following
     links, so the destination stays bound while the file is written; Windows
@@ -1098,7 +1102,9 @@ def _store_moved_state_file(new_dir: str, rel: str, data: bytes) -> bool:
         except FileExistsError:
             try:
                 with os.fdopen(open_regular_file_no_follow(target), "rb") as handle:
-                    same = handle.read(len(data) + 1) == data
+                    same = handle.read(len(data) + 1) == data and _hook_store_entry_is_account_private(
+                        target, os.lstat(target)
+                    )
             except OSError as exc:
                 raise _MovedStateConflictError(rel) from exc
             if same:
@@ -1133,7 +1139,9 @@ def _store_moved_state_file(new_dir: str, rel: str, data: bytes) -> bool:
             except OSError as exc:
                 raise _MovedStateConflictError(rel) from exc
             with os.fdopen(existing, "rb") as handle:
-                same = stat.S_ISREG(os.fstat(handle.fileno()).st_mode) and handle.read(len(data) + 1) == data
+                same = _hook_store_entry_is_account_private(name, os.fstat(handle.fileno())) and (
+                    handle.read(len(data) + 1) == data
+                )
             if same:
                 return False
             raise _MovedStateConflictError(rel) from None
@@ -1203,7 +1211,8 @@ def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
     if differs:
         notes.append(
             f"warning: {new_dir} already has connector state that differs from the old data_dir's, "
-            f"or that is not a plain file; it was kept as it is ({', '.join(sorted(set(differs)))}); {repair}"
+            "is not a plain file, or is open to other accounts; it was kept as it is "
+            f"({', '.join(sorted(set(differs)))}); {repair}"
         )
     if refused:
         notes.append(
