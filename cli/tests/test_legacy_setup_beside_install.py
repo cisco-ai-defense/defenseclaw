@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""cowork-1-0-8 round 2: GAP-0100, GAP-0101, GAP-0102 (a 0.8.x Setup install beside this one)."""
+"""A 0.8.x per-user Setup install beside this one: companion lookup, older-install refusal, port markers (cowork GAP-0100..0102)."""
 
 from __future__ import annotations
 

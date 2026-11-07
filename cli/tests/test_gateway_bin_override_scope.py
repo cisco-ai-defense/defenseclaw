@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""cowork-1-0-8 round 4 review items for GAP-0098..0102: state-changing flows ignore DEFENSECLAW_GATEWAY_BIN."""
+"""State-changing flows ignore DEFENSECLAW_GATEWAY_BIN (cowork GAP-0099/0100)."""
 
 from __future__ import annotations
 
