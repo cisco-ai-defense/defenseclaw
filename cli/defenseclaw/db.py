@@ -1539,8 +1539,9 @@ class Store:
         Request, run and session IDs are client supplied or shared by many
         calls, so none of them names one occurrence. The gateway assigns the
         agent instance (``ais-``) from the verified agent identity and the
-        session, so a hook or inspect row is borrowed from only when it carries
-        the same non-empty instance as the alert row (GAP-0647). A row without
+        session, and a row posted to ``/audit/event`` never carries one, so a
+        hook or inspect row is borrowed from only when it carries the same
+        non-empty instance as the alert row (GAP-0647). A row without
         that instance is never borrowed from, and a fact the matching rows
         disagree on is not shown, so a later request cannot change or replace
         an earlier alert's Agent.

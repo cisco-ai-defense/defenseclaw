@@ -3054,6 +3054,8 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	// Sandbox attribution comes only from an authenticated sandbox binding
 	// (audit.CorrelationEnvelope), never from a request body.
 	event.SandboxID, event.SandboxName = "", ""
+	// The same holds for the agent identity and the verified caller facts.
+	dropBodyAssignedIdentity(&event)
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}
