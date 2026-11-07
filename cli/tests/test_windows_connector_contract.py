@@ -229,5 +229,6 @@ def test_the_lifecycle_cell_has_a_user_path_entry_to_remove() -> None:
     lifecycle = _jobs()["install-lifecycle"]
     steps = "\n".join(step.get("run", "") for step in lifecycle["steps"])
     assert "run-windows-install.ps1 -Operation lifecycle -PersistPath" in steps
-    # fresh and files-in-use took 8 and 3.5 minutes on a faster host: the job needs room.
-    assert lifecycle["timeout-minutes"] >= 30
+    # files-in-use is the longest cell: 10-15 minutes of whole-job time on hosted runners
+    # (ci.yml runs the same lane), so the job keeps the full 20-minute pull request budget.
+    assert lifecycle["timeout-minutes"] == 20

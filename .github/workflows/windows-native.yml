@@ -866,10 +866,16 @@ jobs:
     needs: [changes, contract-assets]
     if: ${{ !cancelled() && needs.contract-assets.result == 'success' }}
     runs-on: windows-latest
-    # Hosted runners are slower than the EC2 hosts the cells were timed on
-    # (files-in-use took 480-505 s there; release.yaml measured about 7 minutes
-    # a lane on hosted runners). This is the job's budget, not a test timeout.
-    timeout-minutes: 30
+    # The budget of the job, not a test timeout. The two lanes also run on
+    # windows-latest in ci.yml (Install and Upgrade Smoke), with the same
+    # checkout, uv and asset-download setup; 22 successful runs, whole-job time:
+    # fresh 4.2-6.7 min (longest run 42293860826), files-in-use 10.1-14.8 min
+    # (median 12.4, longest run 42195438647). The uninstall cell has no hosted
+    # run yet; the 179 successful connector-contract cells, which do the same
+    # install.ps1 install and cleanup, took 2.7-6.5 min (longest run
+    # 42293860785), and the cell adds doctor, the TUI, a repair re-run and an
+    # uninstall. Every cell fits 20 minutes with a margin of 5 or more.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
