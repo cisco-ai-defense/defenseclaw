@@ -1235,8 +1235,18 @@ def _stdio_path_command_error(cmd: str) -> str:
     )
 
 
-def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
-    """Return a concise refusal reason, or ``None`` for an admitted command."""
+# The way out of a refused launcher on a device whose MCP policy an
+# administrator owns: that device refuses ``defenseclaw mcp allow``.
+_MANAGED_ALLOW_STEP = (
+    "ask your administrator to allow that definition in the managed MCP policy (asset_policy.mcp.allowed)"
+)
+
+
+def _stdio_scan_command_error(command: str, args: list | None, managed: bool = False) -> str | None:
+    """Return a concise refusal reason, or ``None`` for an admitted command.
+
+    ``managed`` words the way out for a managed device (GAP-0776).
+    """
     if not isinstance(command, str):
         return "command must be a string"
     cmd = command.strip()
@@ -1267,8 +1277,12 @@ def _stdio_scan_command_error(command: str, args: list | None) -> str | None:
         return (
             f"command {cmd!r} is not an allowlisted stdio launcher (allowed: npx, uvx): "
             "a scan starts only npm or PyPI packages through npx or uvx, never another program. "
-            "Start the server with npx or uvx, serve it over HTTP and use its URL, or review it "
-            "and allow that definition with 'defenseclaw mcp allow <name> --command ... --args ...'"
+            "Start the server with npx or uvx, serve it over HTTP and use its URL, or "
+            + (
+                _MANAGED_ALLOW_STEP
+                if managed
+                else "review it and allow that definition with 'defenseclaw mcp allow <name> --command ... --args ...'"
+            )
         )
 
     if not isinstance(argv, (list, tuple)):
@@ -1306,18 +1320,18 @@ def is_safe_stdio_scan_command(command: str, args: list | None) -> bool:
     return _stdio_scan_command_error(command, args) is None
 
 
-def mcp_scan_refusal(entry: Any) -> str | None:
+def mcp_scan_refusal(entry: Any, managed: bool = False) -> str | None:
     """Why a scan refuses to start a configured MCP server, or None.
 
     A URL entry is scanned over the network; a local one only through the
     launcher check above. ``mcp scan``, ``mcp list``, the upgrade notice and
     doctor all ask this one function, so they name the same servers
-    (GAP-1340).
+    (GAP-1340). ``managed`` names the administrator instead of ``mcp allow``.
     """
     command = getattr(entry, "command", "") or ""
     if not command or getattr(entry, "url", ""):
         return None
-    return _stdio_scan_command_error(command, list(getattr(entry, "args", None) or []))
+    return _stdio_scan_command_error(command, list(getattr(entry, "args", None) or []), managed)
 
 
 def mcp_scannable_fix(name: str, entry: Any, connector: str = "") -> str:

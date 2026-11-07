@@ -111,7 +111,8 @@ type mcpAdmissionOutcome struct {
 // whether or not the baseline row is written yet, or could be written at
 // all. A run the watcher stopping cut off decides nothing.
 func (w *InstallWatcher) noteMCPAdmissionOutcome(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
-	if evt.Type != InstallMCP || snap == nil || res.Interrupted || w.secureClientActive() {
+	if evt.Type != InstallMCP || snap == nil || res.Interrupted || w.secureClientActive() ||
+		!w.mcpDefinitionIsSnapshot(evt, snap) {
 		return
 	}
 	failed := mcpScanFailureBlocked(res) ||
@@ -122,6 +123,22 @@ func (w *InstallWatcher) noteMCPAdmissionOutcome(evt InstallEvent, snap *TargetS
 		w.mcpOutcomes = map[string]mcpAdmissionOutcome{}
 	}
 	w.mcpOutcomes[evt.Path] = mcpAdmissionOutcome{hash: snap.ContentHash, failed: failed}
+}
+
+// mcpDefinitionIsSnapshot reports whether the server still has the definition
+// snap hashed. The scanner reads the definition by name when it runs, so an
+// agent config rewritten between the snapshot and the scan makes the verdict
+// one for a definition the snapshot does not name. Such a verdict is neither
+// kept nor stored as the baseline of the snapshot: the server stays without an
+// outcome (pending) and the next cycle admits the definition it has now. A
+// listing that cannot be read decides nothing either.
+func (w *InstallWatcher) mcpDefinitionIsSnapshot(evt InstallEvent, snap *TargetSnapshot) bool {
+	entry, err := w.lookupMCPServer(evt)
+	if err != nil {
+		return false
+	}
+	hash, err := mcpDefinitionHash(*entry)
+	return err == nil && hash == snap.ContentHash
 }
 
 // mcpOutcome returns the outcome this process completed for the definition
