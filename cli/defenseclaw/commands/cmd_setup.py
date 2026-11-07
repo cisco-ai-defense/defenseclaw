@@ -6377,9 +6377,10 @@ def _check_connector_version_supported_for_setup(
             # reads the protected setup selection), so a write that fails
             # changes no admission. The version setup just accepted is still
             # published where doctor and `agent discover` read it, or both
-            # report it as not observed until `agent discover --refresh`
-            # (GAP-0752).
-            agent_discovery._write_cache(disc, data_dir=data_dir)
+            # report it as not observed until `agent discover --refresh`.
+            # Only this connector entry is replaced, so a peer the scan
+            # missed keeps its evidence (GAP-0752).
+            agent_discovery._publish_agent_signal(disc, connector, data_dir=data_dir)
         elif _discovery is None:
             if not agent_discovery._write_cache(disc, data_dir=data_dir):
                 if emit:
