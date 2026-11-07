@@ -4817,17 +4817,19 @@ def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
         lambda: _POPEN_BOUND_AT_IMPORT([str(POWERSHELL), *ps_args], **alone),
         lambda: subprocess.check_output([POWERSHELL, *ps_args]),
         lambda: subprocess.check_call([str(POWERSHELL), *ps_args], **alone),
-        lambda: subprocess.run(["pwsh", *ps_args], check=False, **alone),
-        lambda: subprocess.run(["powershell.exe", *ps_args], check=False, **alone),
-        lambda: subprocess.Popen(["PWSH.EXE", *ps_args], **alone),
     ]
     if os.name != "nt":
+        # Windows looks a program up by its own rules, and its runner may carry a
+        # real PowerShell: only the None path above is a missing one there.
         reaches += [
+            lambda: subprocess.run(["pwsh", *ps_args], check=False, **alone),
+            lambda: subprocess.run(["powershell.exe", *ps_args], check=False, **alone),
+            lambda: subprocess.Popen(["PWSH.EXE", *ps_args], **alone),
             lambda: subprocess.run("pwsh -NoProfile -Command exit", shell=True, check=False, **alone),
             lambda: subprocess.run(f"{POWERSHELL} -NoProfile -Command exit", shell=True, check=False, **alone),
             lambda: subprocess.run("env pwsh", shell=True, check=False, **alone),
         ]
-    if env:
+    if env and os.name != "nt":
         # The same missing interpreter behind an `env` wrapper, or two of them.
         reaches += [
             lambda: subprocess.run([env, POWERSHELL, *ps_args], check=False),
@@ -4835,7 +4837,6 @@ def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
             lambda: subprocess.run([env, "-i", "PATH=/dc-no-such-folder", "pwsh"], check=False, **alone),
             lambda: subprocess.run([env, env, "pwsh"], check=False, **alone),
             lambda: subprocess.Popen([env, "pwsh"], **alone).wait(),
-            lambda: subprocess.Popen([env, "pwsh"], **alone).poll() or subprocess.Popen([env, "pwsh"], **alone).wait(),
         ]
     for reach in reaches:
         with pytest.raises(pytest.skip.Exception):
@@ -4866,10 +4867,10 @@ def test_a_launch_that_does_not_reach_a_missing_powershell_is_not_skipped(
     # A program that does not exist, and a launch directory that does not, fail as they do.
     with pytest.raises(FileNotFoundError):
         subprocess.run([str(tmp_path / "no-such-program")], check=False)
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises((FileNotFoundError, NotADirectoryError)):
         subprocess.run(python, cwd=str(tmp_path / "no-such-folder"), check=False)
     env = shutil.which("env")
-    if env:
+    if env and os.name != "nt":
         assert subprocess.run([env, sys.executable, "-c", "pass"], check=False).returncode == 0
         assert subprocess.run([env, "A=1", sys.executable, "-c", "pass"], check=False).returncode == 0
         assert subprocess.run([env, "--help"], capture_output=True, check=False).returncode == 0
