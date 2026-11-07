@@ -90,7 +90,7 @@ _HOOK_GUARD_COMMANDS = {
 # install.ps1 Save-HelperRecoveryCopy records "<sha256>  <name>" lines here.
 _BINARY_DIGESTS = ("installer", "binaries.sha256")
 _BINARY_DIGESTS_LIMIT = 64 * 1024
-_HOOK_GUARD_SIZE_LIMIT = 512 * 1024 * 1024
+_RECORDED_BINARY_SIZE_LIMIT = 512 * 1024 * 1024
 _SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
 
 
@@ -127,19 +127,29 @@ def _recorded_binary_digest(data_dir: str, name: str) -> str:
     return recorded
 
 
-def _file_sha256(path: str) -> str:
+def _differs_from_recorded(path: str, recorded: str) -> bool:
+    """True when the file at *path* is not the copy whose sha256 the installer *recorded*.
+
+    A file larger than the installer ever records cannot be that copy, so a
+    size over the limit is a mismatch, not a digest that went unchecked. A
+    file that cannot be read is not proof of damage (Defender or a deny ACE
+    holding it), and nothing recorded means nothing to compare.
+    """
+
+    if not recorded:
+        return False
     digest = hashlib.sha256()
     read = 0
     try:
         with open(path, "rb") as stream:
             while chunk := stream.read(1024 * 1024):
                 read += len(chunk)
-                if read > _HOOK_GUARD_SIZE_LIMIT:
-                    return ""
+                if read > _RECORDED_BINARY_SIZE_LIMIT:
+                    return True
                 digest.update(chunk)
     except OSError:
-        return ""
-    return digest.hexdigest()
+        return False
+    return digest.hexdigest() != recorded
 
 
 def hook_guard_problem(data_dir: str, connector: str, guard: str) -> HookProblem | None:
@@ -171,8 +181,7 @@ def hook_guard_problem(data_dir: str, connector: str, guard: str) -> HookProblem
             blocking=True,
         )
     recorded = _recorded_binary_digest(data_dir, HOOK_GUARD_NAME)
-    actual = _file_sha256(guard) if recorded else ""
-    if recorded and actual and actual != recorded:
+    if _differs_from_recorded(guard, recorded):
         return HookProblem(
             f"{subject} does not match the copy the installer recorded, "
             f"so {agent} prompts and tool calls may run without DefenseClaw",
@@ -220,55 +229,112 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-_PE_OPTIONAL_MAGICS = (0x10B, 0x20B)
+_PE32, _PE32_PLUS = 0x10B, 0x20B
+_PE_MACHINES_32 = (0x14C, 0x1C4)  # i386, ARM Thumb-2
+_PE_MACHINES_64 = (0x8664, 0xAA64)  # x64, ARM64
+_PE_SUBSYSTEMS = (2, 3)  # Windows GUI, Windows console
+_PE_MAX_DATA_DIRECTORIES = 16
+_PE_MAX_SECTIONS = 96
 _IMAGE_FILE_EXECUTABLE = 0x0002
 _IMAGE_FILE_DLL = 0x2000
+_IMAGE_SCN_MEM_EXECUTE = 0x20000000
+
+
+def _le(buffer: bytes, at: int, width: int) -> int:
+    return int.from_bytes(buffer[at : at + width], "little")
+
+
+def _is_power_of_two(value: int) -> bool:
+    return value > 0 and value & (value - 1) == 0
+
+
+def _align_up(value: int, alignment: int) -> int:
+    return (value + alignment - 1) // alignment * alignment
 
 
 def _pe_image_defect(stream: Any, size: int) -> str:
     """Why the open file *stream* of *size* bytes is not a runnable Windows executable, or "".
 
-    Two bytes of ``MZ`` start every DOS stub and are not an image: the PE
-    header must be where the DOS header points, name an executable (not a
-    DLL) with a sane optional header, and every section must lie inside the
-    file, so a truncated or overwritten launcher is named like a missing one.
+    ``MZ`` starts every DOS stub and is not an image. The file must carry
+    what the Windows loader reads before it maps an executable: a PE header
+    where the DOS header points, a known machine whose bitness matches the
+    optional header, a consistent optional header (alignments, SizeOfImage,
+    SizeOfHeaders, subsystem, entry point), and sections that follow the
+    headers in order, lie inside SizeOfImage and inside the file, with the
+    entry point on executable bytes the file holds. A truncated, overwritten
+    or hand-made stub therefore reads like a missing launcher.
     """
 
     bad = "is not a Windows executable"
+    stream.seek(0)
     dos = stream.read(64)
     if len(dos) < 64 or dos[:2] != b"MZ":
         return bad
-    lfanew = int.from_bytes(dos[0x3C:0x40], "little")
+    lfanew = _le(dos, 0x3C, 4)
     if lfanew < 64 or lfanew + 24 > size:
         return bad
     stream.seek(lfanew)
-    header = stream.read(24)
-    if len(header) < 24 or header[:4] != b"PE\0\0":
+    coff = stream.read(24)
+    if len(coff) < 24 or coff[:4] != b"PE\0\0":
         return bad
-    sections = int.from_bytes(header[6:8], "little")
-    optional = int.from_bytes(header[20:22], "little")
-    characteristics = int.from_bytes(header[22:24], "little")
-    if not 1 <= sections <= 96 or optional < 2 or not characteristics & _IMAGE_FILE_EXECUTABLE:
+    machine = _le(coff, 4, 2)
+    sections = _le(coff, 6, 2)
+    optional_size = _le(coff, 20, 2)
+    characteristics = _le(coff, 22, 2)
+    if not 1 <= sections <= _PE_MAX_SECTIONS:
         return bad
-    if characteristics & _IMAGE_FILE_DLL:
+    if not characteristics & _IMAGE_FILE_EXECUTABLE or characteristics & _IMAGE_FILE_DLL:
         return bad
-    table = lfanew + 24 + optional
-    if table + 40 * sections > size:
+    table_end = lfanew + 24 + optional_size + 40 * sections
+    if table_end > size:
         return bad
-    magic = stream.read(2)
-    if len(magic) < 2 or int.from_bytes(magic, "little") not in _PE_OPTIONAL_MAGICS:
+    body = stream.read(optional_size + 40 * sections)
+    if len(body) < optional_size + 40 * sections:
         return bad
-    stream.seek(table)
-    raw = stream.read(40 * sections)
-    if len(raw) < 40 * sections:
+    optional, raw = body[:optional_size], body[optional_size:]
+    magic = _le(optional, 0, 2)
+    if magic == _PE32_PLUS and machine in _PE_MACHINES_64:
+        fixed = 112
+    elif magic == _PE32 and machine in _PE_MACHINES_32:
+        fixed = 96
+    else:
         return bad
+    if optional_size < fixed:
+        return bad
+    directories = _le(optional, fixed - 4, 4)
+    if directories > _PE_MAX_DATA_DIRECTORIES or optional_size < fixed + 8 * directories:
+        return bad
+    entry = _le(optional, 16, 4)
+    section_alignment, file_alignment = _le(optional, 32, 4), _le(optional, 36, 4)
+    image_size, headers_size = _le(optional, 56, 4), _le(optional, 60, 4)
+    if not (_is_power_of_two(file_alignment) and 512 <= file_alignment <= 65536):
+        return bad
+    if not _is_power_of_two(section_alignment) or section_alignment < file_alignment:
+        return bad
+    if _le(optional, 68, 2) not in _PE_SUBSYSTEMS:
+        return bad
+    if not table_end <= headers_size <= min(size, image_size):
+        return bad
+    if image_size % section_alignment:
+        return bad
+    next_address = _align_up(headers_size, section_alignment)
+    entry_backed = False
     for index in range(sections):
-        entry = raw[40 * index : 40 * index + 40]
-        raw_size = int.from_bytes(entry[16:20], "little")
-        raw_at = int.from_bytes(entry[20:24], "little")
-        if raw_size and raw_at + raw_size > size:
+        header = raw[40 * index : 40 * index + 40]
+        virtual_size, address = _le(header, 8, 4), _le(header, 12, 4)
+        raw_size, raw_at = _le(header, 16, 4), _le(header, 20, 4)
+        flags = _le(header, 36, 4)
+        span = virtual_size or raw_size
+        if span == 0 or address % section_alignment or address < next_address:
             return bad
-    return ""
+        next_address = address + _align_up(span, section_alignment)
+        if next_address > image_size:
+            return bad
+        if raw_size and (raw_at < headers_size or raw_at + raw_size > size):
+            return bad
+        if address <= entry < address + min(span, raw_size) and flags & _IMAGE_SCN_MEM_EXECUTE:
+            entry_backed = True
+    return "" if entry_backed else bad
 
 
 def _launcher_defect(launcher: str, data_dir: str = "") -> str:
@@ -296,8 +362,7 @@ def _launcher_defect(launcher: str, data_dir: str = "") -> str:
     if defect:
         return defect
     recorded = _recorded_binary_digest(data_dir, LAUNCHER_NAME)
-    actual = _file_sha256(launcher) if recorded else ""
-    if recorded and actual and actual != recorded:
+    if _differs_from_recorded(launcher, recorded):
         return "does not match the copy the installer recorded"
     return ""
 
