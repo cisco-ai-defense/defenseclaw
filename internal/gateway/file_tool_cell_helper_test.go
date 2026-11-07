@@ -13,6 +13,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
+// fileToolBlockPrefix starts the response of a blocked file-tool call.
+const fileToolBlockPrefix = `{"action":"block"`
+
 // postFileToolCell posts one PreToolUse call of a native file tool to the
 // Claude Code hook, as the per-user hook or as a managed hook peer of home,
 // under the rule pack, and reports whether the verdict blocks with the

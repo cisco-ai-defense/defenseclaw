@@ -4,16 +4,46 @@
 package gateway
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
+
+// postManagedSettingsShellCell posts a shell command to the hook of a
+// connector, per-user or as a managed hook peer of home, under the rule pack
+// ("" is the default pack), and returns the response.
+func postManagedSettingsShellCell(t *testing.T, home, project, connector, pack string, managed bool, command string) string {
+	t.Helper()
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = connector
+	cfg.Guardrail.RulePack = pack
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	body := mustJSON(t, map[string]any{"session_id": "managed-settings-session", "hook_event_name": "PreToolUse",
+		"tool_name": "Bash", "cwd": project, "tool_input": map[string]any{"command": command, "description": "d"}})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hook", strings.NewReader(string(body)))
+	if connector == "codex" {
+		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
+	}
+	if managed {
+		req.Header.Set(hookpaths.Header, hookpaths.Resolve(body))
+		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
+	}
+	recorder := httptest.NewRecorder()
+	api.handleAgentHook(connector).ServeHTTP(recorder, req)
+	return recorder.Body.String()
+}
 
 // rel-1-0-6:GAP-0734: a write to a managed agent settings file DefenseClaw
 // publishes (Claude Code managed-settings.json and managed-settings.d, Codex
 // requirements.toml, the Cursor, Copilot and OpenCode machine policy) is a
 // state mutation in every profile, per-user and managed, on both hooks. A
 // read of the same files, and a write beside them, stay allowed.
-func TestG235bManagedAgentSettingsAreSelfProtection(t *testing.T) {
+func TestManagedAgentSettingsAreSelfProtection(t *testing.T) {
 	home, project := dynamicWordParityProject(t)
 	type row struct {
 		command   string
@@ -29,9 +59,6 @@ func TestG235bManagedAgentSettingsAreSelfProtection(t *testing.T) {
 		"/etc/cursor/hooks.json",
 		"/etc/github-copilot/policy.d/50-defenseclaw.json",
 		"/etc/opencode/opencode.json",
-		"/private/etc/codex/requirements.toml",
-		"/private/etc/claude-code/managed-settings.d/50-defenseclaw.json",
-		"/private/etc/cursor/hooks.json",
 	} {
 		q := "\x27" + file + "\x27"
 		for _, form := range []string{
@@ -62,12 +89,20 @@ func TestG235bManagedAgentSettingsAreSelfProtection(t *testing.T) {
 		row{"printf x > /private/var/etc/codex/requirements.toml", false},
 		row{"printf x > " + project + "/etc/codex/requirements.toml", false},
 		row{"sed -i d " + project + "/managed-settings.json", false},
+		// A Linux file system tells these from the published names, and
+		// /private is an ordinary directory there (macOS: see
+		// TestManagedAgentSettingsOnMacOSIgnoreCase).
+		row{"printf x > /etc/claude-code/MANAGED-SETTINGS.JSON", false},
+		row{"printf x > /etc/codex/REQUIREMENTS.TOML", false},
+		row{"printf x > /etc/claude-code/Managed-Settings.d/50-defenseclaw.json", false},
+		row{"printf x > /private/etc/codex/requirements.toml", false},
+		row{"printf x > /library/application support/claudecode/managed-settings.json", false},
 	)
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, pack := range []string{"", "strict", "permissive"} {
 			for _, managed := range []bool{false, true} {
 				for _, row := range rows {
-					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
+					got := postManagedSettingsShellCell(t, home, project, connector, pack, managed, row.command)
 					block := strings.HasPrefix(got, `{"action":"block"`)
 					switch {
 					case row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")):
@@ -87,7 +122,7 @@ func TestG235bManagedAgentSettingsAreSelfProtection(t *testing.T) {
 // file-tool write in every spelling of the drive and the case, and in every
 // profile. A file of the project with the same names, or a directory that
 // only starts with the same letters, stays allowed.
-func TestG235bWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
+func TestWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 	const home = `C:\Users\vn`
 	protected := []string{
 		`C:\Program Files\ClaudeCode\managed-settings.json`,
@@ -119,13 +154,21 @@ func TestG235bWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 		`\\otherhost\C$\Program Files\ClaudeCode\managed-settings.json`,
 		`\\localhost\C$\Program Files\Other\managed-settings.json`,
 		`C:\PROGRA~1\Other\managed-settings.json`,
+		// Short-name shapes that NTFS does not generate, and names that are
+		// already 8.3 and have no other name.
+		`C:\PROGRA~0\ClaudeCode\managed-settings.json`,
+		`C:\PROGRA~5\ClaudeCode\managed-settings.json`,
+		`C:\PROGRA~1\ClaudeCode\MANAGE~0.JSO`,
+		`C:\PROGRA~1\ClaudeCode\MANAGE~5.JSO`,
+		`C:\ProgramData\OpenAI\CODEX~1\requirements.toml`,
+		`C:\ProgramData\CURSOR~1\hooks.json`,
 	}
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "strict", "permissive"} {
 			for _, file := range protected {
 				for _, input := range []map[string]any{
 					{"file_path": file, "content": "x"},
-					{"content": "x", "file_path": home + `\proj\a.txt`, "f": file},
+					{"content": "x", "file_path": home + `\proj\a.txt`, "destination": file},
 				} {
 					if block, got := postFileToolCell(t, home, home+`\proj`, "Write", input, managed, pack); !block {
 						t.Errorf("managed=%t pack=%s %v = %.160s, want protected block", managed, pack, input, got)
@@ -135,6 +178,45 @@ func TestG235bWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 			for _, file := range allowed {
 				if _, got := postFileToolCell(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
 					t.Errorf("managed=%t pack=%s %s = %.160s, want allow", managed, pack, file, got)
+				}
+			}
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0734 round 11: the managed settings files are matched by the
+// semantics of the file system they sit on. macOS ignores case and reads /etc
+// as /private/etc, so a case variant or the /private spelling is the file;
+// a managed hook peer whose home is under /Users is such a host. The same
+// names under a Linux home are ordinary files (Linux tells them apart).
+func TestManagedAgentSettingsOnMacOSIgnoreCase(t *testing.T) {
+	const macHome = "/Users/vn"
+	for _, file := range []string{
+		"/etc/claude-code/MANAGED-SETTINGS.JSON",
+		"/ETC/codex/requirements.toml",
+		"/private/etc/codex/requirements.toml",
+		"/PRIVATE/ETC/Cursor/HOOKS.JSON",
+		"/library/application support/claudecode/managed-settings.json",
+	} {
+		for _, pack := range []string{"", "strict", "permissive"} {
+			input := map[string]any{"file_path": file, "content": "x"}
+			if block, got := postFileToolCell(t, macHome, macHome+"/proj", "Write", input, true, pack); !block {
+				t.Errorf("macOS home pack=%s %s = %.160s, want protected block", pack, file, got)
+			}
+		}
+	}
+	home, project := dynamicWordParityProject(t)
+	for _, file := range []string{
+		"/etc/claude-code/MANAGED-SETTINGS.JSON",
+		"/etc/codex/REQUIREMENTS.TOML",
+		"/private/etc/codex/requirements.toml",
+		"/etc/CURSOR/hooks.json",
+	} {
+		for _, managed := range []bool{false, true} {
+			for _, pack := range []string{"", "permissive"} {
+				input := map[string]any{"file_path": file, "content": "x"}
+				if _, got := postFileToolCell(t, home, project, "Write", input, managed, pack); strings.HasPrefix(got, fileToolBlockPrefix) {
+					t.Errorf("Linux home managed=%t pack=%s %s = %.160s, want allow (distinct file)", managed, pack, file, got)
 				}
 			}
 		}
