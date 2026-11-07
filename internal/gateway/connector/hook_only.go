@@ -1090,7 +1090,7 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 }
 
 // hermesSetupWarningOutput receives Setup's warning about a Hermes release
-// whose TUI runs tools without the hooks (the gateway's log).
+// whose TUI runs tools without the hooks (the gateway's log), and teardown's notices about hook entries it removed or kept.
 var hermesSetupWarningOutput io.Writer = os.Stderr
 
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
@@ -2138,7 +2138,7 @@ func hermesHomeHoldsOwnedEntries(configPath, hookScript, command string) (hooks,
 	if err != nil {
 		return false, false, err
 	}
-	hooks = containsHookScript(cfg["hooks"], hookScript)
+	hooks = hermesHooksHoldOwnedEntries(cfg["hooks"], hookScript)
 	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
 	document, err := readHermesAllowlist(allowlistPath)
 	if err != nil {
@@ -2374,8 +2374,8 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 	if err != nil {
 		if os.IsNotExist(err) {
 			if c.name == "hermes" {
-				command := hermesConfiguredHookCommand(c.hookCommand(opts), opts.HookExecutable)
-				return verifyHermesCleanup(opts, configPath, command)
+				hookScript := c.hookCommand(opts)
+				return verifyHermesCleanup(opts, configPath, hookScript, hermesConfiguredHookCommand(hookScript, opts.HookExecutable))
 			}
 			return c.verifyCursorHookArtifactsClean(opts)
 		}
@@ -2462,7 +2462,7 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 	}
 	if c.name == "hermes" {
-		return verifyHermesCleanup(opts, configPath, hermesConfiguredHookCommand(needle, opts.HookExecutable))
+		return verifyHermesCleanup(opts, configPath, needle, hermesConfiguredHookCommand(needle, opts.HookExecutable))
 	}
 	return c.verifyCursorHookArtifactsClean(opts)
 }
@@ -2490,9 +2490,16 @@ func verifyOtherHermesHomesClean(opts SetupOpts, configPath, hookScript string) 
 	return nil
 }
 
-func verifyHermesCleanup(opts SetupOpts, configPath, command string) error {
+func verifyHermesCleanup(opts SetupOpts, configPath, hookScript, command string) error {
 	if err := validateHermesWindowsConfigPath(configPath); err != nil {
 		return err
+	}
+	config, err := readYAMLObject(configPath)
+	if err != nil {
+		return fmt.Errorf("hermes teardown not verified: inspect hook config: %w", err)
+	}
+	if hermesHooksHoldOwnedEntries(config["hooks"], hookScript) {
+		return fmt.Errorf("hermes teardown incomplete: DefenseClaw hook entries remain in %s", configPath)
 	}
 	allowlistPath := filepath.Join(filepath.Dir(configPath), hermesAllowlistFileName)
 	if _, err := os.Stat(allowlistPath); err == nil {
@@ -4574,7 +4581,7 @@ func hermesConfigBackupHoldsOwnedHooks(dataDir, logicalName, path, hookScript st
 	if yaml.Unmarshal(backup.PristineBytes, &cfg) != nil {
 		return false
 	}
-	return containsHookScript(cfg["hooks"], hookScript)
+	return hermesHooksHoldOwnedEntries(cfg["hooks"], hookScript)
 }
 
 // hermesAllowlistHoldsOwnedApprovals reports whether an allowlist document
@@ -4796,7 +4803,7 @@ func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpt
 	recognizedCommands := hermesRecognizedHookCommands(hookCommand)
 	for _, spec := range hermesRequiredHooks {
 		entry := hermesHookEntry(hookCommand, spec.event, spec.matcher, opts)
-		reconciled, reconcileErr := reconcileHermesHookEntries(hooks[spec.event], recognizedCommands, entry)
+		reconciled, reconcileErr := reconcileHermesHookEntries(hooks[spec.event], hookScript, recognizedCommands, entry)
 		if reconcileErr != nil {
 			return fmt.Errorf("reconcile Hermes event %s: %w", spec.event, reconcileErr)
 		}
@@ -4806,7 +4813,7 @@ func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpt
 		if _, required := hermesHookEventSet()[event]; required {
 			continue
 		}
-		reconciled, reconcileErr := removeStaleHermesHookEntries(raw, recognizedCommands)
+		reconciled, reconcileErr := removeStaleHermesHookEntries(raw, hookScript, recognizedCommands)
 		if reconcileErr != nil {
 			return fmt.Errorf("reconcile unexpected Hermes event %s: %w", event, reconcileErr)
 		}
@@ -4983,16 +4990,27 @@ func hermesHookEntry(hookCommand, event, matcher string, opts SetupOpts) map[str
 // hermesHookScriptName is the Hermes hook script Setup generates on Unix.
 const hermesHookScriptName = "hermes-hook.sh"
 
-// hermesReplaceableHookCommand reports whether Setup replaces a Hermes hook
-// handler with its own: an exact current or historical DefenseClaw command,
-// or the generated script at an edited path. Hermes hook failures are
-// fail-open, so refusing to repair an edited path left the agent unguarded
-// (GAP-0906). Other commands that only name DefenseClaw stay refused.
-func hermesReplaceableHookCommand(command string, recognizedCommands map[string]struct{}) bool {
+// hermesHookEntryOwned is the one ownership predicate Setup, repair, teardown
+// and verification share for a Hermes hook entry. An entry is DefenseClaw owned
+// when its command is one DefenseClaw writes (the recognized commands), the
+// generated script at an edited path (GAP-0906), or a command whose text names
+// a file in this account DefenseClaw hooks directory, whatever the file is
+// called and whether or not it still exists (GAP-0625). The decision reads the
+// command text only: it never runs or interprets a shell, so a user command
+// that reaches a managed hook some other way belongs to the user and stays.
+func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedCommands map[string]struct{}) bool {
+	if containsHookScript(entry, hookScript) ||
+		editedDefenseClawHookEntry(entry, hookScriptBaseName(hookScript)) {
+		return true
+	}
+	command, ok := hermesHookEntryCommand(entry)
+	if !ok {
+		return false
+	}
 	if _, recognized := recognizedCommands[command]; recognized {
 		return true
 	}
-	return editedDefenseClawHookCommand(command, hermesHookScriptName)
+	return hookCommandNamesHookDir(command, hookScript)
 }
 
 func hermesRecognizedHookCommands(current string) map[string]struct{} {
@@ -5038,6 +5056,7 @@ func hermesHookList(raw interface{}) ([]interface{}, error) {
 
 func reconcileHermesHookEntries(
 	raw interface{},
+	hookScript string,
 	recognizedCommands map[string]struct{},
 	expected map[string]interface{},
 ) ([]interface{}, error) {
@@ -5049,7 +5068,7 @@ func reconcileHermesHookEntries(
 	replaced := false
 	for _, item := range list {
 		command, hasCommand := hermesHookEntryCommand(item)
-		if hermesReplaceableHookCommand(command, recognizedCommands) {
+		if hermesHookEntryOwned(item, hookScript, recognizedCommands) {
 			if !replaced {
 				out = append(out, expected)
 				replaced = true
@@ -5069,6 +5088,7 @@ func reconcileHermesHookEntries(
 
 func removeStaleHermesHookEntries(
 	raw interface{},
+	hookScript string,
 	recognizedCommands map[string]struct{},
 ) ([]interface{}, error) {
 	list, err := hermesHookList(raw)
@@ -5078,7 +5098,7 @@ func removeStaleHermesHookEntries(
 	out := make([]interface{}, 0, len(list))
 	for _, item := range list {
 		command, hasCommand := hermesHookEntryCommand(item)
-		if hermesReplaceableHookCommand(command, recognizedCommands) {
+		if hermesHookEntryOwned(item, hookScript, recognizedCommands) {
 			continue
 		}
 		if hasCommand && hermesCommandClaimsDefenseClaw(command) {
@@ -5108,10 +5128,14 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 	if !ok {
 		return nil
 	}
+	named := hermesDirNamedEntryCount(hooks, hookScript)
 	for event, raw := range hooks {
 		hooks[event] = removeOwnedFlatHooks(raw, hookScript)
 	}
 	pruneEmptyMapArrays(hooks)
+	if kept := hermesKeptDefenseClawEvents(hooks); len(kept) > 0 {
+		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes teardown: kept hook entries in %s (events: %s) whose command mentions DefenseClaw but is not an entry DefenseClaw wrote; remove them by hand if they run a DefenseClaw hook\n", path, strings.Join(kept, ", "))
+	}
 	// DefenseClaw owns entries in the hooks mapping only: every other byte of
 	// config.yaml (Hermes' commented template, the user's settings and their
 	// order and quoting) stays as it is. A hooks field that Setup added to a
@@ -5131,8 +5155,19 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 			return err
 		}
 	}
-	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
+	current, readErr := os.ReadFile(path)
+	if readErr == nil && bytes.Equal(current, data) {
 		return nil
+	}
+	if named > 0 && readErr == nil {
+		// An entry that only names the hooks directory is removed as
+		// DefenseClaw (GAP-0625); the file as it was is kept next to it and
+		// the removal is reported once.
+		copyPath := path + hermesEditedHooksBackupSuffix
+		if err := atomicWriteFile(copyPath, current, 0o600); err != nil {
+			return fmt.Errorf("keep a copy of %s before removing edited DefenseClaw hook entries: %w", path, err)
+		}
+		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes teardown: removed %d edited DefenseClaw hook entries from %s; the previous file is at %s\n", named, path, copyPath)
 	}
 	return atomicWriteFile(path, data, 0o600)
 }
@@ -6424,14 +6459,30 @@ func removeHookScriptReferences(raw interface{}, hookScripts ...string) interfac
 func removeOwnedFlatHooks(raw interface{}, hookScript string) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list))
-	edited := hookScriptBaseName(hookScript)
+	recognized := hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, ""))
 	for _, item := range list {
-		if containsHookScript(item, hookScript) || editedDefenseClawHookEntry(item, edited) {
+		if hermesHookEntryOwned(item, hookScript, recognized) {
 			continue
 		}
 		out = append(out, item)
 	}
 	return out
+}
+
+// hermesHooksHoldOwnedEntries reports whether a Hermes hooks mapping holds an
+// entry DefenseClaw owns (hermesHookEntryOwned).
+func hermesHooksHoldOwnedEntries(raw interface{}, hookScript string) bool {
+	hooks, _ := raw.(map[string]interface{})
+	recognized := hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, ""))
+	for _, event := range hooks {
+		entries, _ := hermesHookList(event)
+		for _, entry := range entries {
+			if hermesHookEntryOwned(entry, hookScript, recognized) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // pruneNewlyEmptyHookEntries removes only containers emptied by removing an
