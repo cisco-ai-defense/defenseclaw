@@ -53,6 +53,27 @@ func TestReadStateRetriesTransientPathTrustFailure(t *testing.T) {
 	}
 }
 
+func TestReadStateSurvivesTransientNameBurst(t *testing.T) {
+	_, _, path := installedStateFixture(t)
+	if err := WriteState(path, StateReady); err != nil {
+		t.Fatal(err)
+	}
+	previous := readStateReparseCheck
+	const transientChecks = 20
+	checks := 0
+	readStateReparseCheck = func(checked string) error {
+		checks++
+		if checks <= transientChecks {
+			return windows.ERROR_FILE_NOT_FOUND
+		}
+		return winpath.RejectReparseChain(checked)
+	}
+	t.Cleanup(func() { readStateReparseCheck = previous })
+	if got := ReadState(path); got != StateReady || checks != transientChecks+1 {
+		t.Fatalf("state=%q checks=%d; want ready after %d transient checks", got, checks, transientChecks)
+	}
+}
+
 func TestPathForDataDirWindowsInstalledGuardianTransitions(t *testing.T) {
 	runtimeDir, _, actualState := installedStateFixture(t)
 	path := PathForDataDir(runtimeDir)

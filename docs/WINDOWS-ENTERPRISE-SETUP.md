@@ -243,8 +243,8 @@ already match. The standalone module's JSON and metadata writers publish a
 staged file by rename without deleting the destination first. When an install,
 upgrade, repair, or policy change replaces a named file, Windows can briefly
 return `ERROR_FILE_NOT_FOUND` or a sharing error to another process opening
-that name. DefenseClaw's own managed-file readers retry transient opens for
-about 50 ms. A separate application that opens the file at that instant may
+that name. DefenseClaw's own managed-file readers use a bounded retry for
+transient opens. A separate application that opens the file at that instant may
 need to reopen it. Run upgrades while clients are idle when possible.
 Third-party readers must open with `FILE_SHARE_DELETE` or retry a transient open failure.
 
@@ -256,6 +256,14 @@ returned a missing name in 1 of 78,734 opens. A classic rename run returned
 returned 2,667 in 69,765 opens. The rate varies with scheduling and workload;
 neither rename request establishes a zero-error guarantee for a fresh external
 open.
+
+In a 2026-11-07 Windows Server 2025 NTFS stress run at branch head
+`afc6eea8c6`, each reader made 200,000 opens during repeated changed-body
+publication. A deletion-sharing reader saw 46 missing names with paced
+managed-policy reads, 93,424 with continuous guardian-state reads (5,204
+paced), and 267 with paced safefile replacement reads. The standalone module
+metadata reader saw 8,288 missing names. These are stress-run counts, not
+field rates; the exact values depend on writer frequency and scheduling.
 
 ### Build
 

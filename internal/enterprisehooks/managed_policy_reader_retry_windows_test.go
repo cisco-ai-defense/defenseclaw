@@ -74,6 +74,32 @@ func TestReadTrustedWindowsManagedPolicyRetriesChangedIdentity(t *testing.T) {
 	}
 }
 
+func TestReadTrustedWindowsManagedPolicySurvivesReplacementBurst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "90-defenseclaw.json")
+	if err := os.WriteFile(path, []byte("initial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousTrust := windowsManagedPolicyFileTrustCheck
+	const replacements = 20
+	changed := 0
+	windowsManagedPolicyFileTrustCheck = func(string) error {
+		if changed == replacements {
+			return nil
+		}
+		changed++
+		stage := filepath.Join(filepath.Dir(path), "next-policy")
+		if err := os.WriteFile(stage, []byte("published"), 0o600); err != nil {
+			return err
+		}
+		return safefile.ReplaceFileAtomically(stage, path)
+	}
+	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = previousTrust })
+	data, present, err := readTrustedWindowsManagedPolicyFile(path)
+	if err != nil || !present || string(data) != "published" || changed != replacements {
+		t.Fatalf("body=%q present=%v replacements=%d err=%v", data, present, changed, err)
+	}
+}
+
 func TestWindowsManagedPolicyWriterKeepsMatchingFileAfterFirstMiss(t *testing.T) {
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	path := paths.Adapter
