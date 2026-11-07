@@ -287,11 +287,12 @@ func dispatchTrustedAction(
 		return nil
 	}
 	// A script body the hook call kept unread because its network share
-	// budget was spent is not a body that writes nothing: the call is judged
-	// as one past the evaluation limit, in every profile (rel-1-0-6:GAP-0482).
+	// budget was spent is not a body that writes nothing: the strict tier
+	// judges the call as one past the evaluation limit, the others alert
+	// (shareBodyUnreadFindings, rel-1-0-6:GAP-0482).
 	defer func() {
-		if hookpaths.ShareBodyUnread() && !slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "ACTION-COMPOUND-LIMIT" }) {
-			findings = append(findings, trustedActionLimitFindings(request.EnforcementCapable)...)
+		if hookpaths.ShareBodyUnread() {
+			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable)
 		}
 	}()
 	if _, ok := managedHookPeerFromContext(parent); ok {
