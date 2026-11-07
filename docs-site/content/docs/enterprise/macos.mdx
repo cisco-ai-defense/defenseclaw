@@ -343,7 +343,7 @@ recipes are in [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 On a Mac with `/opt/cisco/defenseclaw/etc/managed-runtime.json` the per-user
 product refuses to run: the current `install.sh` (the one-line installer) refuses
 and changes nothing, even when the managed launcher is on the user's
-`PATH`; `defenseclaw upgrade` refuses; and the per-user gateway refuses to start.
+`PATH`; `defenseclaw upgrade` refuses ([Managed command availability](/docs/enterprise/managed-commands)); and the per-user gateway refuses to start.
 
 Installers from 0.8.x predate the managed marker and do not check for it, so a
 user can still run one after you deploy. It installs a per-user copy, but the
