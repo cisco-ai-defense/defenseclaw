@@ -856,18 +856,17 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 	identity windowsProtectionSubject,
 	trustSystemOwners bool,
 ) (bool, error) {
-	refusal, err := privateSecurityDescriptorRefusal(sd, identity, trustSystemOwners)
-	return refusal == nil && err == nil, err
+	refusals, err := privateSecurityDescriptorRefusals(sd, identity, trustSystemOwners)
+	return len(refusals) == 0 && err == nil, err
 }
 
-// daclRefusal is why privateSecurityDescriptorRefusal refused a descriptor.
-// sid is the trustee of the refused entry; it is nil when no single entry is
-// to blame (no descriptor, an untrusted owner, no DACL, an entry of a kind
-// this check does not parse).
+// daclRefusal is one reason privateSecurityDescriptorRefusals refused a
+// descriptor. sid is the trustee of the refused entry; it is nil when no
+// single entry is to blame (no descriptor, an untrusted owner, no DACL, an
+// entry of a kind this check does not parse).
 type daclRefusal struct {
-	sid       *windows.SID
-	deny      bool
-	inherited bool
+	sid  *windows.SID
+	deny bool
 }
 
 // untrustedDACLWrite is the access that makes an allow entry of an untrusted
@@ -887,7 +886,7 @@ const untrustedDACLWrite = windows.ACCESS_MASK(
 
 // daclEntryRefused is the one judgement of a single entry: a deny entry of a
 // trusted account with any access, or an allow entry of an untrusted account
-// with write access. privateSecurityDescriptorRefusal applies it to the refused
+// with write access. privateSecurityDescriptorRefusals applies it to the refused
 // path, and the carrier lookup applies it to the parents, so both look for the
 // same kind of entry.
 func daclEntryRefused(deny, trusted bool, mask windows.ACCESS_MASK) bool {
@@ -897,16 +896,21 @@ func daclEntryRefused(deny, trusted bool, mask windows.ACCESS_MASK) bool {
 	return !trusted && mask&untrustedDACLWrite != 0
 }
 
-// privateSecurityDescriptorRefusal is the one rule behind "writer repairable":
-// it returns nil when sd may be repaired by its writer, and the refused entry
-// otherwise. The boolean answer and the named entry cannot disagree.
-func privateSecurityDescriptorRefusal(
+// privateSecurityDescriptorRefusals is the one rule behind "writer repairable":
+// it returns nil when sd may be repaired by its writer, and every refused
+// entry otherwise (one per account and kind, in DACL order). A DACL can hold
+// several, and a repair that clears the first leaves the refusal in place.
+// When the refusal is not an entry (no descriptor, an untrusted owner, no
+// DACL, an entry of a kind this check does not parse) the result is one
+// refusal with no sid. The boolean answer and the named entries cannot
+// disagree.
+func privateSecurityDescriptorRefusals(
 	sd *windows.SECURITY_DESCRIPTOR,
 	identity windowsProtectionSubject,
 	trustSystemOwners bool,
-) (*daclRefusal, error) {
+) ([]*daclRefusal, error) {
 	if sd == nil {
-		return &daclRefusal{}, nil
+		return []*daclRefusal{{}}, nil
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
@@ -917,7 +921,7 @@ func privateSecurityDescriptorRefusal(
 		return nil, err
 	}
 	if dacl == nil {
-		return &daclRefusal{}, nil
+		return []*daclRefusal{{}}, nil
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
@@ -927,8 +931,9 @@ func privateSecurityDescriptorRefusal(
 		return nil, fmt.Errorf("safefile: protection subject SID is unavailable")
 	}
 	if !ownerTrustedForSubject(owner, identity, trustSystemOwners) {
-		return &daclRefusal{}, nil
+		return []*daclRefusal{{}}, nil
 	}
+	var refused []*daclRefusal
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
@@ -938,18 +943,25 @@ func privateSecurityDescriptorRefusal(
 			continue
 		}
 		if !isSimpleDiscretionaryACE(ace.Header.AceType) {
-			return &daclRefusal{}, nil
+			return []*daclRefusal{{}}, nil
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		trusted := sid.Equals(identity.sid) || sid.Equals(system) ||
 			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) ||
 			(trustSystemOwners && winowner.Trusted(sid.String(), ""))
 		deny := ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE
-		if daclEntryRefused(deny, trusted, ace.Mask) {
-			return &daclRefusal{sid: sid, deny: deny, inherited: ace.Header.AceFlags&windows.INHERITED_ACE != 0}, nil
+		if !daclEntryRefused(deny, trusted, ace.Mask) {
+			continue
+		}
+		known := false
+		for _, earlier := range refused {
+			known = known || (earlier.deny == deny && earlier.sid.Equals(sid))
+		}
+		if !known {
+			refused = append(refused, &daclRefusal{sid: sid, deny: deny})
 		}
 	}
-	return nil, nil
+	return refused, nil
 }
 
 // isSimpleDiscretionaryACE deliberately recognizes only the two ACE layouts
