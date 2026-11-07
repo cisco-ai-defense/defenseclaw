@@ -2355,8 +2355,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && !w.secureClientActive() {
 				// skill list and skill info say the quarantine of a
 				// denied asset failed, as they do for a scan verdict;
-				// they said quarantined (GAP-0133).
-				w.journalFailedQuarantine(evt, targetType, err)
+				// they said quarantined (GAP-0133). The connector whose
+				// rule denied it is told too when it is not the owner.
+				w.journalFailedQuarantine(evt, targetType, err, assetConnector)
 			}
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
@@ -2538,7 +2539,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// the scan ran applies as the pre-scan check applies it; the lists
 	// alone missed it (GAP-1155).
 	if post := decisionPolicy.Config; post != nil {
-		if decision, _ := w.evaluateRootAssetPolicy(post, evt, connector, func(c string) config.AssetPolicyInput {
+		if decision, decidedBy := w.evaluateRootAssetPolicy(post, evt, connector, func(c string) config.AssetPolicyInput {
 			return w.withMCPDefinition(post, evt, config.AssetPolicyInput{
 				TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(post, evt),
 				Connector: c, SourcePath: evt.Path, RuntimeSurface: "watcher",
@@ -2547,7 +2548,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
 			scanID := w.logScanID(ctx, evt, result, "blocked")
-			w.enforceBlock(ctx, evt)
+			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && decidedBy != connector && !w.secureClientActive() {
+				w.journalFailedQuarantine(evt, targetType, err, decidedBy)
+			}
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{
 				ScanID: scanID,
@@ -3331,7 +3334,11 @@ func blockedPathGone(path string) bool {
 // journalFailedQuarantine records on the journal that the quarantine of a
 // blocked asset failed (err), or that its link was removed: install block,
 // with the reason skill list and skill info show.
-func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType string, err error) {
+//
+// A root several connectors load is journaled for the owner and for each
+// connector in also (the one whose rule denied the asset), so the denying
+// connector is never left without the action.
+func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType string, err error, also ...string) {
 	if w.store == nil {
 		return
 	}
@@ -3339,9 +3346,16 @@ func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType st
 	if errors.Is(err, errLinkRemoved) {
 		reason = err.Error()
 	}
-	scope := w.journalScope(w.eventConnector(evt))
 	rowType, rowName := journalTarget(evt, targetType)
-	_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", reason)
+	scopes := []string{w.journalScope(w.eventConnector(evt))}
+	for _, connector := range also {
+		if scope := w.journalScope(connector); !slices.Contains(scopes, scope) {
+			scopes = append(scopes, scope)
+		}
+	}
+	for _, scope := range scopes {
+		_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", reason)
+	}
 }
 
 // quarantineFailedReason and errLinkRemoved lead the journal reason of a
