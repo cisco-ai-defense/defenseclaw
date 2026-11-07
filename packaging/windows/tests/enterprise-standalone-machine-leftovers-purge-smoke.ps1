@@ -642,6 +642,85 @@ $failures = & $module {
                     $failures.Add('review 2 L1: the emptied vendor folder stayed')
                 }
 
+                # Batch red (rel/1.0.9 Windows install and upgrade lanes): the
+                # Go scanner step removes DefenseClaw-ScannerRuntime only after
+                # this script returned, so a Setup /uninstall found the Cisco
+                # folder holding it, reported the folder as kept and left it.
+                # The purge now retires the runtime (a sibling of the
+                # lifecycle folder) first: under its lock, never through a
+                # junction, only when administrator-only.
+                $sr = [IO.Path]::Combine($root, 'scanner')
+                $srpd = [IO.Path]::Combine($sr, 'ProgramData')
+                $srpf = [IO.Path]::Combine($sr, 'Program Files')
+                $srroots = @($srpd, $srpf)
+                $srvendor = [IO.Path]::Combine($srpd, 'Cisco')
+                $srlife = [IO.Path]::Combine($srvendor, 'DefenseClaw-Lifecycle')
+                $srrecords = [IO.Path]::Combine($srlife, 'created-folders')
+                $srruntime = [IO.Path]::Combine($srvendor, 'DefenseClaw-ScannerRuntime')
+                $srsite = [IO.Path]::Combine($srruntime, 'cpython', 'Lib')
+                $srtarget = [IO.Path]::Combine($sr, 'link-target')
+                foreach ($folder in @($srpd, $srpf, $srvendor, $srtarget)) {
+                    [void][IO.Directory]::CreateDirectory($folder)
+                }
+                Set-G091AdministratorsOwner -Path @($srpd, $srpf, $srvendor)
+                [void]$native::CreateDirectorySecure($srlife, $adminOnly)
+                [IO.File]::WriteAllText([IO.Path]::Combine($srlife, 'lifecycle.lock'), '')
+                [void]$native::CreateDirectorySecure($srruntime, $adminOnly)
+                [void]$native::CreateDirectorySecure([IO.Path]::Combine($srruntime, 'cpython'), $adminOnly)
+                [void]$native::CreateDirectorySecure($srsite, $adminOnly)
+                [IO.File]::WriteAllText([IO.Path]::Combine($srruntime, 'defenseclaw-scanners.exe'), 'x')
+                [IO.File]::WriteAllText([IO.Path]::Combine($srsite, 'site.py'), 'x')
+                [IO.File]::SetAttributes([IO.Path]::Combine($srsite, 'site.py'), [IO.FileAttributes]::ReadOnly)
+                [IO.File]::WriteAllText([IO.Path]::Combine($srtarget, 'keep.txt'), 'keep')
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path ([IO.Path]::Combine($srsite, 'out')) -Target $srtarget)
+                $junctions.Add([IO.Path]::Combine($srsite, 'out'))
+                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($srvendor) -RecordDirectory $srrecords -Roots $srroots
+                $srlayout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($srlife, ('self-uninstall-' + ('4' * 64) + '.json')) }
+                # A run that holds the scanner runtime lock keeps the runtime,
+                # and with it the Cisco folder, which is named as kept.
+                $held = [IO.FileStream]::new([IO.Path]::Combine($srruntime, 'scanner-runtime.lock'),
+                    [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                try {
+                    $script:DefenseClawCreatedFoldersKept.Clear()
+                    $srdeferred = @(Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout $srlayout -RecordDirectory $srrecords -Roots $srroots -SkipDeploymentCheck)
+                }
+                finally {
+                    $held.Dispose()
+                }
+                $srkept = @(Get-DefenseClawCreatedFoldersKept)
+                if ($srdeferred.Count -ne 0 -or -not [IO.File]::Exists([IO.Path]::Combine($srsite, 'site.py')) -or
+                    $srkept.Count -ne 1 -or -not ([string]$srkept[0]).Contains('DefenseClaw-ScannerRuntime')) {
+                    $failures.Add("scanner runtime: a runtime whose lock another run holds was removed or the Cisco folder not named as kept: handed on '$($srdeferred -join '; ')', kept=$($srkept -join ' | ')")
+                }
+                # With the lock free, a junction inside the runtime is left
+                # as found (its target is untouched) and keeps the runtime,
+                # which the Go step then removes as a link.
+                $script:DefenseClawCreatedFoldersKept.Clear()
+                $srdeferred = @(Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout $srlayout -RecordDirectory $srrecords -Roots $srroots -SkipDeploymentCheck)
+                if (-not [IO.File]::Exists([IO.Path]::Combine($srtarget, 'keep.txt'))) {
+                    $failures.Add('scanner runtime: a junction inside the runtime was followed')
+                }
+                if ($srdeferred.Count -ne 0 -or @(Get-DefenseClawCreatedFoldersKept).Count -ne 1) {
+                    $failures.Add("scanner runtime: a runtime holding a junction did not keep the Cisco folder as kept: handed on '$($srdeferred -join '; ')'")
+                }
+                # Without the junction it goes, and the Cisco folder is handed
+                # on with its record gone, to be removed last.
+                [IO.Directory]::Delete([IO.Path]::Combine($srsite, 'out'), $false)
+                $script:DefenseClawCreatedFoldersKept.Clear()
+                $srdeferred = @(Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout $srlayout -RecordDirectory $srrecords -Roots $srroots -SkipDeploymentCheck)
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $srruntime) {
+                    $failures.Add('scanner runtime: the DefenseClaw-ScannerRuntime folder stayed with no deployment left')
+                }
+                if ($srdeferred.Count -ne 1 -or $srdeferred[0] -cne $srvendor -or @(Get-DefenseClawCreatedFoldersKept).Count -ne 0) {
+                    $failures.Add("scanner runtime: the Cisco folder was not handed on without a kept note once the runtime was gone: handed on '$($srdeferred -join '; ')', kept=$(@(Get-DefenseClawCreatedFoldersKept) -join ' | ')")
+                }
+                [IO.File]::Delete([IO.Path]::Combine($srlife, 'lifecycle.lock'))
+                [IO.Directory]::Delete($srlife)
+                Remove-DefenseClawStandaloneCreatedFolders -Path $srdeferred -Roots $srroots
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $srvendor) {
+                    $failures.Add('scanner runtime: the Cisco folder stayed after the runtime and the lifecycle folder were gone')
+                }
+
                 # Review 2 L3: with a self-uninstall finalizer pending, the
                 # result names what the finalizer will keep: a recorded folder
                 # holding another program's file; not a Cisco folder holding

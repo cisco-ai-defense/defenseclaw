@@ -6058,6 +6058,26 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "SelfUninstallReceiptPath" in consumer
     assert "$entry.Name -cne 'lifecycle.lock' -and $entry.Name -cne $recordName" in consumer
     assert "@(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)" in consumer
+    # The Go scanner step removes DefenseClaw-ScannerRuntime only after this
+    # script returned, so a Setup /uninstall found the Cisco folder holding it
+    # (created_folders_kept in the install and upgrade lanes) and left the
+    # folder and its record: the purge retires the runtime first, under its
+    # lock, never through a link.
+    assert consumer.index(
+        "Remove-DefenseClawStandaloneScannerRuntimeLeftover -LifecycleFolder $lifecycle"
+    ) < consumer.index("@(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)")
+    assert consumer.index("$entry.Name -cne 'lifecycle.lock'") < consumer.index(
+        "Remove-DefenseClawStandaloneScannerRuntimeLeftover -LifecycleFolder $lifecycle"
+    )
+    scanner = _psm1_function(module, "Remove-DefenseClawStandaloneScannerRuntimeLeftover")
+    assert "'DefenseClaw-ScannerRuntime'" in scanner
+    assert "scanner-runtime.lock" in scanner
+    assert "[IO.FileShare]::None" in scanner
+    assert scanner.index("Assert-DefenseClawNoReparsePath -Path $root") < scanner.index("Assert-DefenseClawPathAcl")
+    assert scanner.index("Assert-DefenseClawPathAcl") < scanner.index("[IO.FileShare]::None")
+    assert scanner.index("[IO.FileShare]::None") < scanner.index("Remove-DefenseClawNoFollowTree")
+    assert "[IO.Directory]::Delete($root, $false)" in scanner
+    assert "Remove-Item" not in scanner
     reader = _psm1_function(module, "Get-DefenseClawStandaloneCreatedFolderRecords")
     assert "(Get-DefenseClawCreatedFolderRecordName -Path $recorded) -cne $item.Name" in reader
     # Review 2 L1: the record of the folder above the lifecycle folder goes

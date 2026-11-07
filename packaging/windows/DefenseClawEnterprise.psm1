@@ -18871,6 +18871,64 @@ function Get-DefenseClawStandaloneCreatedFolderPreview {
     }
 }
 
+# The scanner runtime folder (ProgramData\Cisco\DefenseClaw-ScannerRuntime,
+# beside the lifecycle folder) is DefenseClaw's own and holds no record, but
+# the Go scanner step removes it only after this script returned. A Setup
+# /uninstall therefore found the Cisco folder holding it, reported the folder
+# as kept ("it holds DefenseClaw-ScannerRuntime", a folder that was gone
+# moments later) and left it, its record and the lifecycle folder behind.
+# Called once no deployment of any scope is left and the purge holds the
+# lifecycle lock, this removes the runtime the way the Go step does: under
+# the scanner runtime lock (a run that holds it keeps the folder, and the Go
+# step retires it), only a real administrator-only folder, never through a
+# link (Remove-DefenseClawNoFollowTree). A folder that cannot be removed this
+# way stays for the Go step, which names it.
+function Remove-DefenseClawStandaloneScannerRuntimeLeftover {
+    param([Parameter(Mandatory)][string]$LifecycleFolder)
+    $stream = $null
+    try {
+        $root = [IO.Path]::Combine([IO.Path]::GetDirectoryName($LifecycleFolder), 'DefenseClaw-ScannerRuntime')
+        if (-not (Test-DefenseClawPathPresentNoFollow -Path $root)) {
+            return
+        }
+        $null = Assert-DefenseClawNoReparsePath -Path $root
+        Assert-DefenseClawPathAcl `
+            -Path $root `
+            -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
+        $lock = [IO.Path]::Combine($root, 'scanner-runtime.lock')
+        $stream = [IO.FileStream]::new(
+            $lock,
+            [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None,
+            1,
+            [IO.FileOptions]::DeleteOnClose
+        )
+        $remaining = [Collections.Generic.List[string]]::new()
+        foreach ($child in @([IO.Directory]::GetFileSystemEntries($root))) {
+            if (-not [string]::Equals([IO.Path]::GetFileName($child), 'scanner-runtime.lock', [StringComparison]::OrdinalIgnoreCase)) {
+                $null = Remove-DefenseClawNoFollowTree -Path ([string]$child) -Remaining $remaining
+            }
+        }
+        $stream.Dispose()
+        $stream = $null
+        if ($remaining.Count -eq 0) {
+            [IO.Directory]::Delete($root, $false)
+        }
+        else {
+            Microsoft.PowerShell.Utility\Write-Verbose "scanner runtime stays: $($remaining[0])"
+        }
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "scanner runtime stays: $($_.Exception.Message)"
+    }
+    finally {
+        if ($null -ne $stream) {
+            $stream.Dispose()
+        }
+    }
+}
+
 # Runs under the lifecycle lock (Remove-DefenseClawStandaloneLifecycleLockLeftover
 # holds it exclusively), once no deployment of any scope is left, no
 # self-uninstall finalizer is pending and the lifecycle folder holds nothing
@@ -18916,6 +18974,10 @@ function Invoke-DefenseClawStandaloneCreatedFolderRemoval {
             return
         }
     }
+    # Nothing is left to own the scanner runtime, and it is the one DefenseClaw
+    # folder the Cisco folder can still hold: it goes first, so the Cisco
+    # folder and its record go with it in this run.
+    Remove-DefenseClawStandaloneScannerRuntimeLeftover -LifecycleFolder $lifecycle
     $records = @(Get-DefenseClawStandaloneCreatedFolderRecords -RecordDirectory $RecordDirectory)
     $lifecycleFull = [IO.Path]::GetFullPath($lifecycle).TrimEnd('\')
     $deferred = [Collections.Generic.List[object]]::new()
