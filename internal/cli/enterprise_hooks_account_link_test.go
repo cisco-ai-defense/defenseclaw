@@ -31,10 +31,10 @@ func TestGAP0193AccountFolderLinkExcusesOnlyItsOwnFailedRow(t *testing.T) {
 	if !enterpriseHookTargetAccountLink(target, home, sid) {
 		t.Fatal("the account's canonical folder link was not recognized")
 	}
-	missingDir := target
-	missingDir.DataDir = ""
-	if enterpriseHookTargetAccountLink(missingDir, home, sid) {
-		t.Fatal("a missing data directory was treated as the canonical link")
+	omittedDir := target
+	omittedDir.DataDir = ""
+	if !enterpriseHookTargetAccountLink(omittedDir, home, sid) {
+		t.Fatal("an omitted data_dir resolves to the canonical folder and must see its link")
 	}
 	otherDir := target
 	otherDir.DataDir = filepath.Join(home, "other")
@@ -163,5 +163,35 @@ func TestGAP0585PlainFolderIsNotAForeignLink(t *testing.T) {
 	row := enterpriseHookReconcileRow{UserHome: home, SID: target.SID, Error: "enterprise hooks: another failure"}
 	if enterpriseHookAccountLinkRow(row) {
 		t.Fatal("an ordinary failed row was excused")
+	}
+}
+
+// A manifest target may omit data_dir (the Windows runtime resolves it to the
+// canonical folder), so a foreign link at that folder is named the same way;
+// a data_dir elsewhere is never classified (GAP-0585 review 1).
+func TestGAP0585OmittedDataDirNamesTheForeignLink(t *testing.T) {
+	previousCfg, previousForeign := cfg, enterpriseHookForeignDataDirLink
+	t.Cleanup(func() { cfg, enterpriseHookForeignDataDirLink = previousCfg, previousForeign })
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
+	home := filepath.Join(t.TempDir(), "alice")
+	const sid = "S-1-5-21-1-2-3-1001"
+	enterpriseHookForeignDataDirLink = func(gotHome, gotSID string) bool {
+		return gotHome == home && gotSID == sid
+	}
+	target := enterprisehooks.ManifestTarget{UserHome: home, SID: sid, Connector: "claudecode"}
+	for _, dir := range []string{"", "   ", filepath.Join(home, ".defenseclaw")} {
+		target.DataDir = dir
+		if !enterpriseHookTargetForeignLink(target, home, sid) {
+			t.Fatalf("data_dir %q: the foreign link was not classified", dir)
+		}
+	}
+	target.DataDir = filepath.Join(home, "other")
+	if enterpriseHookTargetForeignLink(target, home, sid) {
+		t.Fatal("a data_dir outside the canonical folder was classified as the foreign link")
+	}
+	target.DataDir = ""
+	if enterpriseHookTargetForeignLink(target, home, "S-1-5-21-1-2-3-1002") {
+		t.Fatal("another account was classified as linked")
 	}
 }
