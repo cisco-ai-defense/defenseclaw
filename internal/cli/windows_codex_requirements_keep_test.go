@@ -27,13 +27,15 @@ func sameFunc(a, b any) bool {
 	return reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()
 }
 
+// The reconcile that turns Codex off calls connector.RemoveWindowsCodexMachineRequirements
+// itself, so no cli variable names it: TestWindowsCodexMachineNonTeardownRemovalsRefuseALink
+// (internal/gateway/connector) drives it over a real junction.
 func TestWindowsCodexRemovalWiringKeepsALinkForTheUninstallOnly(t *testing.T) {
 	strict := connector.RemoveWindowsCodexMachineRequirements
 	teardown := connector.RemoveWindowsCodexMachineRequirementsForTeardown
 	for name, got := range map[string]any{
-		"hidden remove action":                    windowsCodexRequirementsRemover,
-		"guardian remover":                        enterpriseHookCodexRequirementsRemover,
-		"disabled Codex reconcile through Remove": strict,
+		"hidden remove action": windowsCodexRequirementsRemover,
+		"guardian remover":     enterpriseHookCodexRequirementsRemover,
 	} {
 		if !sameFunc(got, strict) {
 			t.Errorf("%s is not the strict removal", name)
@@ -173,5 +175,37 @@ func TestWindowsCodexRemovalsOtherThanTheUninstallsRefuseALink(t *testing.T) {
 				t.Fatalf("the folder behind the link now holds %d entries, want %d", len(entries), len(decoys))
 			}
 		})
+	}
+}
+
+// The uninstall Codex removal may go on after a kept link only when the
+// report names the link; any other report needs OK and SafeToRemoveBinary, and
+// none may leave a reference to the owned binary tree.
+func TestWindowsManagedHooksTeardownAcceptsAKeptLinkOnlyByName(t *testing.T) {
+	const link = `C:\ProgramData\OpenAI\Codex`
+	for _, tc := range []struct {
+		name   string
+		report connector.WindowsCodexMachineRequirementsReport
+		want   bool
+	}{
+		{"kept link, named", connector.WindowsCodexMachineRequirementsReport{
+			OK: true, Disposition: "link_kept", LinkKept: link}, true},
+		{"kept link, not named", connector.WindowsCodexMachineRequirementsReport{
+			OK: true, Disposition: "link_kept"}, false},
+		{"kept link, not OK", connector.WindowsCodexMachineRequirementsReport{
+			Disposition: "link_kept", LinkKept: link}, false},
+		{"kept link, a reference survives", connector.WindowsCodexMachineRequirementsReport{
+			OK: true, Disposition: "link_kept", LinkKept: link, SurvivingOwnedPathReferences: 1}, false},
+		{"ordinary report, not safe to remove the binary", connector.WindowsCodexMachineRequirementsReport{
+			OK: true, Disposition: "removed"}, false},
+		{"ordinary report, safe", connector.WindowsCodexMachineRequirementsReport{
+			OK: true, Disposition: "removed", SafeToRemoveBinary: true}, true},
+		{"ordinary report, safe, a reference survives", connector.WindowsCodexMachineRequirementsReport{
+			OK: true, Disposition: "removed", SafeToRemoveBinary: true, SurvivingOwnedPathReferences: 2}, false},
+		{"not OK", connector.WindowsCodexMachineRequirementsReport{SafeToRemoveBinary: true}, false},
+	} {
+		if got := windowsManagedHooksTeardownCodexRemovalClean(tc.report); got != tc.want {
+			t.Errorf("%s: accepted = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
