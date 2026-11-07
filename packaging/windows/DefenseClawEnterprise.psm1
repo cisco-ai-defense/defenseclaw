@@ -16058,6 +16058,31 @@ function Repair-DefenseClawDeploymentAclDrift {
     return $true
 }
 
+# The link on the path of the Codex machine-policy folder (a junction at
+# ProgramData\OpenAI\Codex or above it), or '' when there is none. Standalone
+# only: Secure Client keeps its refusal. Nothing is created, opened or
+# followed (GAP-0773).
+function Get-DefenseClawCodexMachineFolderLink {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return ''
+    }
+    $directory = [string]$Layout.CodexMachinePolicyDirectory
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        return ''
+    }
+    try {
+        Assert-DefenseClawNoReparsePath -Path $directory -AllowMissingLeaf
+    }
+    catch {
+        if ($_.Exception.Message -match '^reparse points are not allowed in managed path: (?<link>.+)$') {
+            return [string]$Matches['link']
+        }
+        throw
+    }
+    return ''
+}
+
 function New-DefenseClawTransaction {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -16065,6 +16090,11 @@ function New-DefenseClawTransaction {
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$PriorDeploymentActive,
         [switch]$IncludeCodexMachineState,
+        # An uninstall leaves the Codex machine-policy files alone when a link
+        # sits on the folder's path, so there is nothing behind it to snapshot
+        # (GAP-0773). Install, ensure and repair do not set it and still
+        # refuse the link.
+        [switch]$SkipLinkedCodexMachineState,
         [switch]$ManagedHooksTeardownPrepared,
         [switch]$PreserveManagedHooksTeardownJournal,
         [switch]$RecoverLegacyManagedHooksLifecycleJournal,
@@ -16514,12 +16544,23 @@ function New-DefenseClawTransaction {
         )
     }
     if ($IncludeCodexMachineState) {
+        $codexFolderLink = ''
+        if ($SkipLinkedCodexMachineState) {
+            $codexFolderLink = Get-DefenseClawCodexMachineFolderLink -Layout $Layout
+        }
         foreach ($destination in @(
             $Layout.CodexMachinePolicyPath,
             $Layout.CodexManagedHooksStatePath,
             $Layout.CodexRequirementsOwnershipPath,
             $Layout.CodexRequirementsAclBackupPath
         )) {
+            # A file behind the link is not opened, read or copied (GAP-0773).
+            if ($codexFolderLink -ne '' -and [string]::Equals(
+                    [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$destination)).TrimEnd('\'),
+                    [IO.Path]::GetFullPath([string]$Layout.CodexMachinePolicyDirectory).TrimEnd('\'),
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                continue
+            }
             $destinations.Add([string]$destination)
         }
     }
@@ -27270,6 +27311,13 @@ function Complete-DefenseClawCodexRequirementsRemoval {
         throw 'Codex requirements removal did not prove zero surviving references to the owned binary tree'
     }
     $disposition = [string]$Report.disposition
+    if ($disposition -ceq 'link_kept') {
+        # A link sits at the Codex machine-policy folder (GAP-0773). It was kept
+        # and nothing behind it was read, written or deleted, so there is no
+        # requirements file, state or preimage of this deployment to remove
+        # or restore there. What it recorded under StateRoot goes with StateRoot.
+        return
+    }
     $ownedRemovalDisposition = $disposition -in @(
         'restored_preimage',
         'surgical_preservation',
@@ -46802,6 +46850,7 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -PriorDeploymentActive `
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
+            -SkipLinkedCodexMachineState `
             -PreserveManagedHooksTeardownJournal `
             -SkipRedactionKeySnapshot
         [void](Suspend-DefenseClawSensorHelperForServicing -Layout $Layout)
