@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"container/list"
+	"hash/maphash"
 	"sync"
 	"time"
 )
@@ -26,6 +27,11 @@ const (
 	// Why a Windows account has no sign-in token groups (profileSubjectFromVerified).
 	tokenGroupsCauseNoDesktopSession = "the account has no desktop session, so its sign-in token groups are unknown until it signs in at the desktop again"
 	tokenGroupsCauseNoGuardianRecord = "the guardian has no identity record for this account yet; a desktop sign-in (console or Remote Desktop) writes it"
+
+	// identityRefusalConnectorHint follows the explain command when a
+	// connector the administrator configured stands in it as a placeholder:
+	// the name itself is configuration text and never rides in the reason.
+	identityRefusalConnectorHint = " (replace " + profileConnectorPlaceholder + " with the name of the connector from the configuration)"
 )
 
 // identityFactSentences names each unproven identity fact without naming a
@@ -59,11 +65,15 @@ func identityFactClause(fact string) string {
 // Three rules keep it bounded without losing a text that is still needed.
 //   - The recent list holds the last identityRefusalIssuedMax distinct texts,
 //     the least recently issued dropped first; issuing a text again
-//     refreshes it.
-//   - A text issued while a session start is being judged (openStartWindow)
-//     is kept until that start has pinned it, up to identityRefusalHeldMax
-//     texts, so no number of other refusals turns the reason of a start into
-//     redacted spans before the gate retains it.
+//     refreshes it. It serves the call that meets the refusal.
+//   - A session start being judged owns a watch (watchIdentityRefusals) that
+//     records every text issued while it lasts, as a fingerprint, so the
+//     reason the start ends with can still be pinned however many other
+//     refusals were issued meanwhile. The watch is the start's own: it has
+//     its own lifetime, is never shared with another start, and is not
+//     bounded by a count that another start's traffic could fill (a
+//     fingerprint is issued once per distinct text and only for as long as
+//     the start lasts, at most identityRefusalWatchMax).
 //   - A text the session start gate retains for a blocked session is pinned
 //     for as long as the gate keeps that verdict (up to its 4,096 sessions
 //     and seven days).
@@ -73,22 +83,18 @@ func identityFactClause(fact string) string {
 var identityRefusals identityRefusalRegistry
 
 type identityRefusalRegistry struct {
-	mu     sync.Mutex
-	recent map[string]*list.Element // text -> its element of order
-	order  list.List                // of *identityRefusalIssue, newest first
-	seq    uint64
-	open   map[uint64]identityRefusalWindow // first seq of a window -> window
-	pinned map[string]int
+	mu      sync.Mutex
+	recent  map[string]*list.Element // text -> its element of order
+	order   list.List                // of string, newest first
+	watches map[*identityRefusalWatch]struct{}
+	pinned  map[string]int
 }
 
-type identityRefusalIssue struct {
-	text string
-	seq  uint64
-}
-
-type identityRefusalWindow struct {
-	opened time.Time
-	starts int
+// identityRefusalWatch is one session start's record of the refusals issued
+// while it is judged. It is guarded by the registry's mutex.
+type identityRefusalWatch struct {
+	deadline time.Time
+	seen     map[uint64]struct{} // fingerprints of the texts issued
 }
 
 const (
@@ -96,13 +102,20 @@ const (
 	// of one account, connector and fact set, so a host has few distinct
 	// ones.
 	identityRefusalIssuedMax = 512
-	// identityRefusalHeldMax bounds the texts kept for starts being judged.
-	identityRefusalHeldMax = 16384
-	// identityRefusalWindowMax is how long a start window holds texts. A
-	// start ends at its hook answer or its in-place check timeout, well
-	// inside it; past it the texts age out like any other.
-	identityRefusalWindowMax = 2 * time.Minute
+	// identityRefusalWatchMax is how long a start's watch records. A start
+	// ends at its hook answer or its in-place check timeout, well inside it;
+	// a start that never finishes stops recording at it and the texts age
+	// out like any other.
+	identityRefusalWatchMax = 2 * time.Minute
 )
+
+// identityRefusalSeed keys the fingerprints, so no text can be crafted to
+// collide with an issued one.
+var identityRefusalSeed = maphash.MakeSeed()
+
+func identityRefusalFingerprint(text string) uint64 {
+	return maphash.String(identityRefusalSeed, text)
+}
 
 // issueIdentityRefusal records a refusal text the producer has just written
 // and returns it.
@@ -110,89 +123,85 @@ func issueIdentityRefusal(text string) string {
 	r := &identityRefusals
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.seq++
 	if elem, ok := r.recent[text]; ok {
-		elem.Value.(*identityRefusalIssue).seq = r.seq
 		r.order.MoveToFront(elem)
-		return text
+	} else {
+		if r.recent == nil {
+			r.recent = make(map[string]*list.Element, identityRefusalIssuedMax)
+		}
+		r.recent[text] = r.order.PushFront(text)
+		for r.order.Len() > identityRefusalIssuedMax {
+			oldest := r.order.Back()
+			r.order.Remove(oldest)
+			delete(r.recent, oldest.Value.(string))
+		}
 	}
-	if r.recent == nil {
-		r.recent = make(map[string]*list.Element, identityRefusalIssuedMax)
+	if len(r.watches) > 0 {
+		now, fingerprint := time.Now(), identityRefusalFingerprint(text)
+		for watch := range r.watches {
+			if now.After(watch.deadline) {
+				delete(r.watches, watch)
+				continue
+			}
+			watch.seen[fingerprint] = struct{}{}
+		}
 	}
-	r.recent[text] = r.order.PushFront(&identityRefusalIssue{text: text, seq: r.seq})
-	r.trimLocked(time.Now())
 	return text
 }
 
-// trimLocked drops the least recently issued texts past the bound, except
-// the ones issued since the oldest live start window opened.
-func (r *identityRefusalRegistry) trimLocked(now time.Time) {
-	holdFrom := uint64(0)
-	for first, window := range r.open {
-		if now.Sub(window.opened) > identityRefusalWindowMax {
-			delete(r.open, first)
-		} else if holdFrom == 0 || first < holdFrom {
-			holdFrom = first
-		}
-	}
-	for r.order.Len() > identityRefusalIssuedMax {
-		oldest := r.order.Back()
-		issue := oldest.Value.(*identityRefusalIssue)
-		if holdFrom != 0 && issue.seq >= holdFrom && r.order.Len() <= identityRefusalHeldMax {
-			return
-		}
-		r.order.Remove(oldest)
-		delete(r.recent, issue.text)
-	}
-}
-
-// openStartWindow marks a session start being judged: every text issued from
-// now until closeStartWindow stays trusted, so the reason the start ends with
-// can still be pinned. It returns the window to close.
-func openStartWindow() uint64 {
+// watchIdentityRefusals starts the record of a session start being judged:
+// every text issued from now until close stays pinnable by that start. The
+// caller closes it.
+func watchIdentityRefusals() *identityRefusalWatch {
 	r := &identityRefusals
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	first := r.seq + 1
-	if r.open == nil {
-		r.open = make(map[uint64]identityRefusalWindow)
+	now := time.Now()
+	for other := range r.watches {
+		if now.After(other.deadline) {
+			delete(r.watches, other)
+		}
 	}
-	window := r.open[first]
-	if window.starts == 0 {
-		window.opened = time.Now()
+	watch := &identityRefusalWatch{deadline: now.Add(identityRefusalWatchMax), seen: make(map[uint64]struct{})}
+	if r.watches == nil {
+		r.watches = make(map[*identityRefusalWatch]struct{})
 	}
-	window.starts++
-	r.open[first] = window
-	return first
+	r.watches[watch] = struct{}{}
+	return watch
 }
 
-// closeStartWindow ends a window of openStartWindow once its start has
-// pinned the reason it retains (or has none to pin).
-func closeStartWindow(first uint64) {
-	r := &identityRefusals
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	window, ok := r.open[first]
-	if !ok {
+// adopt records the refusal of the decision this start's own request was
+// resolved to, which the producer issued before the start began: that
+// text is the one the start is expected to end with. text is the Refused
+// field of a profileDecision, written only by identityUncertaintyReason.
+func (w *identityRefusalWatch) adopt(text string) {
+	if w == nil || text == "" {
 		return
 	}
-	if window.starts--; window.starts > 0 {
-		r.open[first] = window
-	} else {
-		delete(r.open, first)
-	}
-	r.trimLocked(time.Now())
-}
-
-// pinIdentityRefusal keeps a refusal text trusted until it is unpinned, for
-// a verdict the session start gate retains. It pins only a text the
-// producer issued and reports whether it did.
-func pinIdentityRefusal(text string) bool {
 	r := &identityRefusals
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.recent[text]; !ok && r.pinned[text] == 0 {
-		return false
+	if w.seen != nil {
+		w.seen[identityRefusalFingerprint(text)] = struct{}{}
+	}
+}
+
+// pin keeps a refusal text trusted until it is unpinned, for a verdict the
+// session start gate retains. It pins only a text the producer issued
+// (recent, pinned already, or recorded by this start's watch) and reports
+// whether it did.
+func (w *identityRefusalWatch) pin(text string) bool {
+	r := &identityRefusals
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, issued := r.recent[text]
+	if !issued && r.pinned[text] == 0 {
+		if w == nil {
+			return false
+		}
+		if _, issued = w.seen[identityRefusalFingerprint(text)]; !issued { // a closed watch has no seen
+			return false
+		}
 	}
 	if r.pinned == nil {
 		r.pinned = make(map[string]int)
@@ -201,7 +210,20 @@ func pinIdentityRefusal(text string) bool {
 	return true
 }
 
-// unpinIdentityRefusal releases one pin of pinIdentityRefusal.
+// close ends the watch once its start has pinned the reason it retains (or
+// has none to pin).
+func (w *identityRefusalWatch) close() {
+	if w == nil {
+		return
+	}
+	r := &identityRefusals
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.watches, w)
+	w.seen = nil
+}
+
+// unpinIdentityRefusal releases one pin of pin.
 func unpinIdentityRefusal(text string) {
 	r := &identityRefusals
 	r.mu.Lock()

@@ -15,7 +15,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -587,8 +586,12 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 	if subject != nil && subject.tokenGroupsCause != "" {
 		why = append(why, subject.tokenGroupsCause)
 	}
+	hint := ""
+	if set.profileCommandConnector(connectorName) && profileCommandConnectorArgument(connectorName) == profileConnectorPlaceholder {
+		hint = identityRefusalConnectorHint
+	}
 	return issueIdentityRefusal(identityRefusalPrefix + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + identityRefusalTail)
+		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + identityRefusalTail + hint)
 }
 
 // explainOnRequestPaths is explain's decision for connectorName's requests:
@@ -739,37 +742,23 @@ func (set *guardrailProfileSet) profileCommandConnector(name string) bool {
 	return profileCommandToken(name) && (connector.IsKnownBuiltinConnector(name) || set.knownConnector(name))
 }
 
-// profileConnectorPlaceholder stands for a configured connector name that
-// is shaped like a credential: the refusal text is shown as written, and a
-// name the credential and command-line detectors would mask must not ride
-// in it. The administrator knows the name; the flag stays so the command
-// still checks that connector.
+// profileConnectorPlaceholder stands for the name of a connector the
+// administrator configured. The refusal is shown as written, and an
+// administrator-chosen value cannot be told from a credential by any check
+// of the name alone (and what the display scrub masks depends on the text
+// around it), so no configured name rides in the reason: the flag stays so
+// the command still checks that connector, and the reason says to substitute
+// the name.
 const profileConnectorPlaceholder = "<connector>"
 
 // profileCommandConnectorArgument is the value of --connector for a name
-// that passed profileCommandConnector. A built-in connector name is ship
-// text. A configured name is administrator text: it is written as it is
-// only when the reason scrub behind every agent, notification and
-// compatibility display (redaction.ForSinkReason, which redacts whether or
-// not a display reveals) leaves it unchanged, else the placeholder stands
-// for it. The check is that scrub itself, not a list of what it masks, so a
-// short name it masks (a key prefix, a secret-looking word) never rides in
-// text shown as written; the credential and command-line detectors stay as
-// a second check.
+// that passed profileCommandConnector: a built-in connector name is ship
+// text; any other is the placeholder.
 func profileCommandConnectorArgument(name string) string {
 	if connector.IsKnownBuiltinConnector(name) {
 		return name
 	}
-	if redaction.AssertNoCredentials(name) != nil {
-		return profileConnectorPlaceholder
-	}
-	if words := redaction.CommandArgs([]string{name}); len(words) != 1 || words[0] != name {
-		return profileConnectorPlaceholder
-	}
-	if redaction.ForSinkReason(name) != name {
-		return profileConnectorPlaceholder
-	}
-	return name
+	return profileConnectorPlaceholder
 }
 
 func profileCommandToken(value string) bool {
