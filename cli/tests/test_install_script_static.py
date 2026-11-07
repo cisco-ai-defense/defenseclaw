@@ -40,6 +40,8 @@ from pathlib import Path
 import pytest
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 
+from tests.native_programs import native_program
+
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_SH = ROOT / "scripts" / "install.sh"
 HANDOFF_SH = ROOT / "scripts" / "defenseclaw-upgrade.sh"
@@ -977,7 +979,7 @@ def _rollback_to_0_8_with_a_damaged_store(tmp_path: Path, starts: bool) -> tuple
     (dc_home / ".venv" / "bin").mkdir(parents=True)
     (dc_home / ".venv" / "bin" / "python").symlink_to(sys.executable)
     bin_dir.mkdir(parents=True)
-    shutil.copy(shutil.which("sleep") or "/bin/sleep", tmp_path / "defenseclaw-sleep")
+    native_program(tmp_path / "defenseclaw-sleep", "sleep")
     calls = tmp_path / "calls.txt"
     log = f"echo \"$V $*\" >> '{calls}'"
     pid = '"$DEFENSECLAW_HOME/gateway.pid"'
@@ -1611,7 +1613,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     upgrade_guard = source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false")
     assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
 
-    sleep, home, path = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", []
+    sleep, home, path = str(native_program(tmp_path / "native-sleep", "sleep")), tmp_path / "home", []
     env: dict[str, str] = {}
     node = _program(tmp_path / "nodejs" / "bin" / "node", BASH)
     script_body = "sleep 60\n"
@@ -1894,7 +1896,7 @@ def test_manifest_names_never_establish_a_live_entry(tmp_path: Path, manifest: s
 def test_the_installed_agents_are_those_of_the_native_installers(tmp_path: Path) -> None:
     # Only a native fixed path or a package manager's launcher link records an
     # entry. An unrelated PATH name and a package manifest never do.
-    sleep, home, tools = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", tmp_path / "tools"
+    sleep, home, tools = str(native_program(tmp_path / "native-sleep", "sleep")), tmp_path / "home", tmp_path / "tools"
     _program(tools / "opencode", sleep)
     _program(tools / "amp", sleep)
     native = _program(home / ".amp" / "bin" / "amp", sleep)
@@ -3898,7 +3900,7 @@ def test_waiting_for_cli_calls_waits_for_a_call_from_the_old_venv(tmp_path: Path
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     sleeper = venv / "bin" / "defenseclaw-sleep"
-    sleeper.symlink_to(shutil.which("sleep"))
+    sleeper.symlink_to(native_program(tmp_path / "native-sleep", "sleep"))
     body = f"""
 VENV={shlex.quote(str(venv))}
 t0=$SECONDS; wait_cli_calls_done; echo "idle=$((SECONDS - t0))"
