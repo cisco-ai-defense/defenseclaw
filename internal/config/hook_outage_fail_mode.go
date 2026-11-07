@@ -71,6 +71,19 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), c.HookPolicyTierForConnector(connector))
 }
 
+// MCPAdmissionFailsClosed reports whether an MCP server whose install scan
+// could not be completed (a launcher or address the scanner refuses, a failed
+// scan) is refused for connector: a managed profile and the strict tier fail
+// closed. The OSS default (balanced) and permissive tiers keep it available
+// with a visible warning, so a server DefenseClaw cannot scan is not treated
+// as a malicious one. A completed scan that finds something blocks in every
+// profile; this does not decide that. Secure Client keeps its fail-closed
+// admission (issue #1092); its callers never reach this.
+func (c *Config) MCPAdmissionFailsClosed(connector string) bool {
+	return c == nil || managed.IsManagedEnterprise(c.DeploymentMode) ||
+		c.HookPolicyTierForConnector(connector) == HookPolicyTierStrict
+}
+
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule
 // pack, as the gateway reads its posture (internal/gateway packPosture): the
 // generation's pinned manifest posture, else the legacy folder-name table.

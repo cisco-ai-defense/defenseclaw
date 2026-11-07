@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -219,26 +220,82 @@ func TestGAP0034ReleaseBasePendingAllowAndBenignTwin(t *testing.T) {
 	}
 }
 
-func TestGAP0034CompletedScanFailureBlocksEveryTier(t *testing.T) {
-	for _, tc := range []struct{ name, pack, deployment, profile string }{
-		{"default", "default", "", ""}, {"permissive", "permissive", "", ""},
-		{"strict", "strict", "", ""}, {"managed", "default", "managed_enterprise", "standalone"},
+// A server DefenseClaw could not scan is not a malicious one (lead ruling
+// 2026-11-06, GAP-0775): the OSS default and permissive tiers allow its calls
+// with a visible warning and an audit row naming the cause and the next
+// step; the strict tier and managed profiles stay blocked (fail closed). The
+// first call after the server appears (pending) and every later one (failed)
+// get the same decision, so no window of a different answer exists. This
+// replaces TestGAP0034CompletedScanFailureBlocksEveryTier, whose default and
+// permissive cells expected a block.
+func TestCompletedScanFailureFollowsTierAndMatchesPending(t *testing.T) {
+	for _, tc := range []struct {
+		name, pack, deployment, profile, action string
+	}{
+		{"default", "default", "", "", "allow"}, {"permissive", "permissive", "", "", "allow"},
+		{"strict", "strict", "", "", "block"}, {"managed", "default", "managed_enterprise", "standalone", "block"},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy(), DeploymentMode: tc.deployment,
-				Enterprise: config.EnterpriseConfig{Profile: tc.profile}}
+		for _, status := range []watcher.MCPAdmissionStatus{
+			{Name: "notes", Pending: true, RetryAfter: time.Minute},
+			{Name: "notes", Failed: true},
+			{Name: "notes", Failed: true, ScanIssue: watcher.MCPScanIssueLauncher},
+		} {
+			t.Run(tc.name+fmt.Sprintf("/pending=%v/issue=%s", status.Pending, status.ScanIssue), func(t *testing.T) {
+				cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy(), DeploymentMode: tc.deployment,
+					Enterprise: config.EnterpriseConfig{Profile: tc.profile}}
+				cfg.Guardrail.Mode = "action"
+				cfg.Guardrail.Connector = "claudecode"
+				cfg.Guardrail.RulePack = tc.pack
+				api := &APIServer{scannerCfg: cfg}
+				api.SetMCPAdmissionStatus(func(_, _, _, _ string) watcher.MCPAdmissionStatus { return status })
+				resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+					HookEventName: "PreToolUse", ToolName: "mcp__notes__lookup", ToolInput: map[string]interface{}{}, CWD: t.TempDir(),
+				})
+				if resp.Action != tc.action || resp.RawAction != "block" || resp.WouldBlock != (tc.action == "allow") {
+					t.Fatalf("action=%q raw=%q would_block=%v, want %q/block: %+v", resp.Action, resp.RawAction, resp.WouldBlock, tc.action, resp)
+				}
+				if status.Failed && tc.action == "allow" {
+					if _, ok := resp.ClaudeCodeOutput["systemMessage"]; !ok ||
+						!strings.Contains(resp.AdditionalContext, "defenseclaw mcp allow notes") {
+						t.Fatalf("allowed failed server has no warning with a next step: %+v", resp)
+					}
+				}
+			})
+		}
+	}
+}
+
+// GAP-0776: the text the agent reads names why a server could not be scanned
+// and the one next step, in the block (strict) and in the warning (default).
+func TestFailedAdmissionTextNamesReasonAndNextStep(t *testing.T) {
+	for _, tc := range []struct {
+		issue string
+		pack  string
+		wants []string
+	}{
+		{watcher.MCPScanIssueLauncher, "strict", []string{"failed admission scan", "launcher is not npx or uvx", "defenseclaw mcp allow notes", "public URL"}},
+		{watcher.MCPScanIssueAddress, "strict", []string{"failed admission scan", "loopback, private or link-local", "defenseclaw mcp allow notes", "public URL"}},
+		{"", "strict", []string{"failed admission scan", "defenseclaw mcp list", "defenseclaw mcp allow notes"}},
+		{watcher.MCPScanIssueLauncher, "default", []string{"could not scan MCP server notes", "launcher is not npx or uvx", "defenseclaw mcp allow notes"}},
+		{watcher.MCPScanIssueAddress, "default", []string{"could not scan MCP server notes", "loopback, private or link-local", "defenseclaw mcp allow notes"}},
+	} {
+		t.Run(tc.pack+"/"+tc.issue, func(t *testing.T) {
+			cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 			cfg.Guardrail.Mode = "action"
 			cfg.Guardrail.Connector = "claudecode"
 			cfg.Guardrail.RulePack = tc.pack
 			api := &APIServer{scannerCfg: cfg}
 			api.SetMCPAdmissionStatus(func(_, server, _, _ string) watcher.MCPAdmissionStatus {
-				return watcher.MCPAdmissionStatus{Name: server, Failed: true}
+				return watcher.MCPAdmissionStatus{Name: server, Failed: true, ScanIssue: tc.issue}
 			})
 			resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
 				HookEventName: "PreToolUse", ToolName: "mcp__notes__lookup", ToolInput: map[string]interface{}{}, CWD: t.TempDir(),
 			})
-			if resp.Action != "block" || resp.WouldBlock || !strings.Contains(resp.Reason, "failed admission scan") {
-				t.Fatalf("completed failure: %+v", resp)
+			text := resp.Reason + " " + resp.AdditionalContext
+			for _, want := range tc.wants {
+				if !strings.Contains(text, want) {
+					t.Errorf("agent text %q lacks %q", text, want)
+				}
 			}
 		})
 	}

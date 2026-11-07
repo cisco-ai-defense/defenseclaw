@@ -25,7 +25,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
@@ -240,9 +239,20 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 		name = probe.ServerName
 	}
 	if status.Failed {
-		reason := fmt.Sprintf("MCP server %q has a failed admission scan; its calls stay blocked until a completed admission allows it", name)
-		decision := runtimeAssetDisableBlockDecision("mcp", name, connectorName, "hook", reason, "mcp-admission-failed")
+		// The scan could not be completed, which is not a malicious verdict:
+		// the OSS default and permissive tiers allow the call with a visible
+		// warning and an audit row naming the cause and the next step; the
+		// strict tier and managed profiles stay blocked (fail closed). The
+		// decision is the one a still-pending admission gets, so the first
+		// call and every later one agree (GAP-0775).
+		decision := runtimeAssetDisableBlockDecision("mcp", name, connectorName, "hook",
+			mcpAdmissionFailedText(name, status.ScanIssue), "mcp-admission-failed")
 		decision.RegistryStatus = "unknown"
+		decision.ScanIssue = status.ScanIssue
+		if !cfg.MCPAdmissionFailsClosed(connectorName) {
+			decision.Action = "allow"
+			decision.Mode = config.AssetPolicyModeObserve
+		}
 		a.recordMCPAdmissionDecision(ctx, connectorName, hookEvent, probe, decision)
 		return decision, true
 	}
@@ -264,7 +274,7 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	decision.RegistryStatus = "unknown"
 	decision.TargetName = name
 	decision.RetryAfterSeconds = retrySeconds
-	if !managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.HookPolicyTierForConnector(connectorName) != config.HookPolicyTierStrict {
+	if !cfg.MCPAdmissionFailsClosed(connectorName) {
 		decision.Action = "allow"
 		decision.Mode = config.AssetPolicyModeObserve
 	}
@@ -2121,6 +2131,9 @@ func assetPolicyResponseReason(decision config.AssetPolicyDecision) string {
 	}
 	if (decision.Source == "mcp-admission-pending" || decision.Source == "mcp-admission-unavailable") && decision.RetryAfterSeconds > 0 {
 		parts = append(parts, fmt.Sprintf("retry_after_s=%d", decision.RetryAfterSeconds))
+	}
+	if decision.Source == "mcp-admission-failed" && decision.ScanIssue != "" {
+		parts = append(parts, "scan_issue="+decision.ScanIssue)
 	}
 	return strings.Join(parts, " ")
 }
