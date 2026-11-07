@@ -6,6 +6,7 @@ package cli
 import (
 	"strings"
 	"testing"
+	"unicode"
 )
 
 // The reader follows the shell only where the shell does what it assumes: a
@@ -58,7 +59,10 @@ func TestOpenClawOutageKnownValuesKeepShellFlowHonest(t *testing.T) {
 
 // outageFieldSeparator returns a one-character IFS that is a plain word
 // character to the shell and is absent from path, so the path is one field
-// under that IFS whatever directory the tests run in.
+// under that IFS whatever directory the tests run in. It prefers the ASCII
+// characters below, and when a directory name holds all of them it takes the
+// first printable character past U+00A0 the path lacks, so a separator always
+// exists and no case is skipped.
 func outageFieldSeparator(t *testing.T, path string) string {
 	t.Helper()
 	for _, candidate := range []string{":", ",", "@", "+", "^"} {
@@ -66,8 +70,11 @@ func outageFieldSeparator(t *testing.T, path string) string {
 			return candidate
 		}
 	}
-	t.Skipf("every candidate IFS character is in the test path %q", path)
-	return ""
+	for r := rune(0xa1); ; r++ {
+		if unicode.IsPrint(r) && !unicode.IsSpace(r) && !strings.ContainsRune(path, r) {
+			return string(r)
+		}
+	}
 }
 
 // An unquoted known value splits at the field separators the shell has: the
