@@ -148,3 +148,108 @@ func TestGAP0769LinkResolvedThroughMacOSPrivateEtcIsProtected(t *testing.T) {
 		})
 	}
 }
+
+// The same physical spelling reaches every exact /etc rule, not only the
+// shadow and passwd file rules, and a shell write follows a link like a file
+// tool does: a shell write through a project link to the loader preload file
+// or the system profile is judged like the direct name in every non-strict
+// profile, whether the link target is spelled /etc or /private/etc
+// (GAP-0769 review round 6).
+func TestGAP0769ShellWriteLinkedToExactEtcRuleIsProtected(t *testing.T) {
+	installSandboxMarkerRules(t)
+	store, logger := testStoreAndLogger(t)
+	project := t.TempDir()
+	const preload = "echo /usr/local/lib/libguard.so > %s"
+	cases := []struct {
+		name, link, target, command, rule string
+		// physical spells the resolved target the macOS way.
+		physical bool
+		// blocks is the action the rule takes; an alert-only rule allows.
+		blocks bool
+	}{
+		{"direct loader preload", "", "/etc/ld.so.preload", preload, "persistence.global_ld_preload_install", false, true},
+		{"linked loader preload", "preload.txt", "/etc/ld.so.preload", preload, "persistence.global_ld_preload_install", false, true},
+		{"macOS linked loader preload", "preload-mac.txt", "/etc/ld.so.preload", preload, "persistence.global_ld_preload_install", true, true},
+		{"direct system profile", "", "/etc/profile", "echo export GUARD=1 >> %s", "persistence.shell_profile_write", false, false},
+		{"macOS linked system profile", "profile-mac.txt", "/etc/profile", "echo export GUARD=1 >> %s", "persistence.shell_profile_write", true, false},
+		{"macOS linked hosts twin", "hosts-mac.txt", "/etc/hosts", "echo 127.0.0.1 guard >> %s", "", true, false},
+		{"ordinary twin", "", "", "echo notes > %s", "", false, false},
+	}
+	for _, tier := range []string{"implicit", "default", "permissive"} {
+		t.Run(tier, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "copilot"
+			if tier != "implicit" {
+				cfg.Guardrail.RulePack = tier
+			}
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+			for index, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					file := filepath.Join(project, "ordinary.txt")
+					switch {
+					case tc.link != "":
+						file = filepath.Join(project, tier+"-"+tc.link)
+						if err := os.Symlink(tc.target, file); err != nil {
+							t.Fatal(err)
+						}
+					case tc.target != "":
+						file = tc.target
+					}
+					id := "gap0769-shell-" + tier + "-" + strconv.Itoa(index)
+					raw, err := json.Marshal(map[string]any{
+						"hook_event_name": "PreToolUse", "session_id": id,
+						"tool_use_id": id, "cwd": project,
+						"tool_name":  "run_in_terminal",
+						"tool_input": map[string]any{"command": strings.Replace(tc.command, "%s", file, 1), "explanation": "x", "isBackground": false},
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					targets, ok := hookpaths.Decode(hookpaths.ResolveConnector("copilot", "", "preToolUse", raw))
+					if !ok {
+						t.Fatal("hook evidence did not decode")
+					}
+					if tc.physical {
+						rewritten := 0
+						for key, value := range targets {
+							if value == tc.target {
+								targets[key] = "/private" + tc.target
+								rewritten++
+							}
+						}
+						if rewritten == 0 {
+							t.Fatalf("no resolved target to spell the macOS way: %v", targets)
+						}
+					}
+					req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(string(raw)))
+					req.Header.Set("Content-Type", "application/json")
+					req.Header.Set("X-DefenseClaw-Copilot-Event", "preToolUse")
+					req.Header.Set(hookpaths.Header, encodeTargets(t, targets))
+					w := httptest.NewRecorder()
+					api.handleAgentHook("copilot").ServeHTTP(w, req)
+					var answer struct {
+						Action  string   `json:"action"`
+						RuleIDs []string `json:"rule_ids"`
+					}
+					if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil || w.Code != http.StatusOK {
+						t.Fatalf("status=%d err=%v body=%s", w.Code, err, w.Body.String())
+					}
+					wantAction := "allow"
+					if tc.blocks {
+						wantAction = "block"
+					}
+					if tc.blocks && answer.Action != wantAction || !tc.blocks && answer.Action == "block" {
+						t.Fatalf("action=%s, want %s; rules=%v", answer.Action, wantAction, answer.RuleIDs)
+					}
+					if tc.rule == "" && len(answer.RuleIDs) != 0 {
+						t.Fatalf("ordinary call matched %v", answer.RuleIDs)
+					}
+					if tc.rule != "" && !slices.Contains(answer.RuleIDs, tc.rule) {
+						t.Fatalf("rule %s absent: %v", tc.rule, answer.RuleIDs)
+					}
+				})
+			}
+		})
+	}
+}
