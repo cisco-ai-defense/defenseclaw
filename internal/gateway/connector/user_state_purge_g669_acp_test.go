@@ -6,6 +6,7 @@ package connector
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -155,6 +156,40 @@ func TestGAP0669OwnershipReadsThePathFromTheDataDir(t *testing.T) {
 	} {
 		if got := ManagedUserStateFile(rel); got != want {
 			t.Errorf("ManagedUserStateFile(%q) = %v, want %v", rel, got, want)
+		}
+	}
+}
+
+// GAP-0669 review 3 M3: only the connectors whose setup writes a lifecycle lock
+// (codex, hermes) own that name. A lock-looking file named for any other built-in
+// connector, for a removed one or for an unknown one was never written by
+// DefenseClaw and stays, with the written locks removed beside it.
+func TestGAP0669PurgeKeepsLifecycleLocksNoWriterCreates(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	written := []string{codexLifecycleLockName, hermesLifecycleLockName}
+	var keep []string
+	for name := range builtinConnectorNames() {
+		lock := "." + name + "-lifecycle.lock"
+		if !slices.Contains(written, lock) {
+			keep = append(keep, lock)
+		}
+	}
+	if len(keep) == 0 {
+		t.Fatal("no built-in connector without a lifecycle lock writer")
+	}
+	keep = append(keep, ".amp-lifecycle.lock", ".cursor-lifecycle.lock", ".notaconnector-lifecycle.lock")
+	writeG669Files(t, dataDir, append(slices.Clone(keep), written...))
+	if err := PurgeUserState(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range keep {
+		if _, err := os.Lstat(filepath.Join(dataDir, rel)); err != nil {
+			t.Errorf("account entry %s removed: %v", rel, err)
+		}
+	}
+	for _, rel := range written {
+		if _, err := os.Lstat(filepath.Join(dataDir, rel)); !os.IsNotExist(err) {
+			t.Errorf("written lifecycle lock %s stayed: %v", rel, err)
 		}
 	}
 }

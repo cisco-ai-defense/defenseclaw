@@ -12,6 +12,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 )
 
+// The lifecycle locks that managed setup writes in the data directory. Only
+// these two connectors take one (the writers are in codex.go and hook_only.go);
+// a file named like another connector lifecycle lock was not written by
+// DefenseClaw, so it is the account own.
+const (
+	codexLifecycleLockName  = ".codex-lifecycle.lock"
+	hermesLifecycleLockName = ".hermes-lifecycle.lock"
+)
+
 // ManagedUserStateDir reports directories that a managed installation may
 // create below its per-user data folder. A directory is only traversed; its
 // contents are checked separately and it is removed only when empty.
@@ -46,14 +55,9 @@ func ManagedUserStateFile(rel string) bool {
 			"inventory.db", "inventory.db-journal", "inventory.db-shm", "inventory.db-wal",
 			"foreign-hook-env.json", "hermes-home-setup.json",
 			"removed-connectors-logged.json", "kiro-created-dirs.json", ".hook-api-token-publish.lock",
-			"gateway.pid", "gateway.stopped", "notify-bridge.sh":
+			"gateway.pid", "gateway.stopped", "notify-bridge.sh",
+			codexLifecycleLockName, hermesLifecycleLockName:
 			return true
-		}
-		if kind, ok := strings.CutPrefix(rel, "."); ok {
-			// The lifecycle lock of a connector with one (codex, hermes).
-			if kind, ok = strings.CutSuffix(kind, "-lifecycle.lock"); ok && (IsKnownBuiltinConnector(kind) || IsRemovedConnector(kind)) {
-				return true
-			}
 		}
 		if kind, ok := strings.CutPrefix(rel, ".hook-"); ok {
 			if kind, ok = strings.CutSuffix(kind, ".token"); ok && (IsKnownBuiltinConnector(kind) || IsRemovedConnector(kind)) {
