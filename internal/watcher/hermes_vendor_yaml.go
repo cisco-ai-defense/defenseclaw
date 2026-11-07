@@ -18,7 +18,6 @@ package watcher
 
 import (
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -476,34 +475,57 @@ func pyYAMLTimestampKey(text string) (string, error) {
 }
 
 // pyYAMLBinaryKey reads a binary scalar as construct_yaml_binary does: text
-// that is not ASCII, or whose base64 data is cut short, is an error; other
-// characters are skipped, as a2b_base64 skips them.
+// that is not ASCII is an error, and the rest goes through the a2b_base64 of
+// the binascii module in its default mode, which skips characters outside the
+// base64 alphabet, stops at the padding that completes a quad (whatever
+// follows it), forgets padding that a data character follows, and refuses
+// data that ends inside a quad.
 func pyYAMLBinaryKey(text string) (string, error) {
 	if !isASCII(text) {
 		return "", errPyLoad
 	}
-	var data []byte
-	pads := 0
+	const pad = 0x3d
+	var out []byte
+	var left byte
+	quad, pads := 0, 0
 	for i := 0; i < len(text); i++ {
-		switch c := text[i]; {
-		case c == '=':
-			pads++
-		case c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '+' || c == '/':
-			if pads > 0 {
-				return "", errPyUnknown
+		c := text[i]
+		if c == pad {
+			if quad >= 2 {
+				pads++
+				if quad+pads >= 4 {
+					return "b:" + string(out), nil
+				}
 			}
-			data = append(data, c)
+			continue
 		}
+		v := strings.IndexByte(pyBase64Alphabet, c)
+		if v < 0 {
+			continue
+		}
+		pads = 0
+		b := byte(v)
+		switch quad {
+		case 0:
+			left = b
+		case 1:
+			out = append(out, left<<2|b>>4)
+			left = b & 0x0f
+		case 2:
+			out = append(out, left<<4|b>>2)
+			left = b & 0x03
+		case 3:
+			out = append(out, left<<6|b)
+		}
+		quad = (quad + 1) % 4
 	}
-	if rest := len(data) % 4; rest == 1 || rest > 1 && pads < 4-rest {
+	if quad != 0 {
 		return "", errPyLoad
 	}
-	decoded, err := base64.RawStdEncoding.DecodeString(string(data))
-	if err != nil {
-		return "", errPyUnknown
-	}
-	return "b:" + string(decoded), nil
+	return "b:" + string(out), nil
 }
+
+const pyBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
 // pyYAMLInt reads an integer scalar as construct_yaml_int does.
 func pyYAMLInt(text string) (*big.Int, error) {
