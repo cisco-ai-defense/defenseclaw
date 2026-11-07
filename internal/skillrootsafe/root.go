@@ -38,10 +38,7 @@ func Resolve(path string, eval func(string) (string, error)) (string, error) {
 	if samePath(canonical, resolved) {
 		return resolved, nil
 	}
-	if err := validateLinkedPath(canonical, resolved); err != nil {
-		return "", err
-	}
-	return resolved, nil
+	return acceptLinkedRoot(canonical, resolved)
 }
 
 // UnlinkedAncestors is the fallback proof when a service can read a skills

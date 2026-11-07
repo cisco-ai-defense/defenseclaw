@@ -27,6 +27,15 @@ func pathParts(path string) []string {
 	return strings.FieldsFunc(path, func(r rune) bool { return r == filepath.Separator })
 }
 
+// acceptLinkedRoot returns the resolved root when every link on the route is
+// controlled by the account or root.
+func acceptLinkedRoot(path, resolved string) (string, error) {
+	if err := validateLinkedPath(path, resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
 func validateLinkedPath(path, want string) error {
 	// The first link is inside the account's own tree. Its plain parent gives
 	// the account UID even when a managed gateway itself runs as root.
@@ -88,7 +97,7 @@ func validateLinkedPath(path, want string) error {
 		}
 		// A root-owned sticky system temp folder protects entries by owner;
 		// any other writable ancestor could replace a validated link target.
-		if info.Mode().Perm()&0o022 != 0 && !(uid == 0 && info.Mode()&os.ModeSticky != 0) {
+		if info.Mode().Perm()&0o022 != 0 && (uid != 0 || info.Mode()&os.ModeSticky == 0) {
 			return unsafeRoot(path)
 		}
 		current = next
