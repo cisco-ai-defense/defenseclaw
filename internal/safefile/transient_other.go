@@ -5,5 +5,8 @@
 
 package safefile
 
-// RetryTransientRead runs read once: a rename never drops a name here.
-func RetryTransientRead(read func() error) error { return read() }
+import "errors"
+
+// A non-Windows rename does not drop the name, but validation can still
+// observe the old and new file identities in one read attempt.
+func transientReadError(err error) bool { return errors.Is(err, ErrReadIdentityChanged) }
