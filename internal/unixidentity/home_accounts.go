@@ -58,8 +58,14 @@ func dsclHomeAccounts(search func() (commandResult, error), read func(name strin
 	if found.exitCode != 0 {
 		return nil, fmt.Errorf("unixidentity: dscl exited %d", found.exitCode)
 	}
+	names, ok := dsclSearchRecordNames(string(found.stdout))
+	if !ok {
+		// A successful answer this reader cannot interpret is not an empty
+		// one: only an empty answer proves that no account holds the home.
+		return nil, errors.New("unixidentity: unclear search answer")
+	}
 	var accounts []HomeAccount
-	for _, name := range dsclSearchRecordNames(string(found.stdout)) {
+	for _, name := range names {
 		if len(accounts) >= homeAccountsLimit {
 			return nil, errors.New("unixidentity: too many accounts at one home")
 		}
@@ -86,22 +92,22 @@ func dsclHomeAccounts(search func() (commandResult, error), read func(name strin
 	return accounts, nil
 }
 
-// dsclSearchRecordNames are the record names of a `dscl -search` answer: the
-// text before the first tab of each line that starts in column zero ("name
-// <tab><tab>Attribute = (" is followed by indented value lines).
-func dsclSearchRecordNames(output string) []string {
-	var names []string
+// dsclSearchRecordNames are the record names of a `dscl -search` answer: each
+// line that starts in column zero must read "name <tab><tab>NFSHomeDirectory =
+// (", and is followed by indented value lines and a closing ")". Any other
+// nonblank line makes the answer unclear (ok false), whatever its shape, so an
+// answer that is not understood is never taken for an empty one.
+func dsclSearchRecordNames(output string) (names []string, ok bool) {
 	for _, line := range strings.Split(output, "\n") {
-		if line == "" || line[0] == ' ' || line[0] == '\t' || line[0] == ')' {
+		if strings.TrimSpace(line) == "" || strings.ContainsRune(" \t)", rune(line[0])) {
 			continue
 		}
-		name, _, ok := strings.Cut(line, "\t")
-		if !ok {
-			continue
+		name, attribute, found := strings.Cut(line, "\t")
+		name = strings.TrimSpace(name)
+		if !found || name == "" || !strings.HasPrefix(strings.TrimSpace(attribute), "NFSHomeDirectory") {
+			return nil, false
 		}
-		if name = strings.TrimSpace(name); name != "" {
-			names = append(names, name)
-		}
+		names = append(names, name)
 	}
-	return names
+	return names, true
 }
