@@ -638,12 +638,21 @@ class TestPerConnectorWriteSurface(_BaseSetup):
     def test_additive_setup_selects_complete_roster_before_first_gateway_start(self):
         self._seed_map("amp", "claudecode", "codex", "cursor")
         atomic_write_private_bytes(os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), b"installed fixture")
+        launcher_identity = json.dumps({
+            "schema_version": 1,
+            "name": "defenseclaw-hook-launcher",
+            "version": "1.0.8",
+            "commit": "fixture",
+        }).encode()
 
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
             ),
+            patch("defenseclaw.commands.cmd_setup.subprocess.run", return_value=SimpleNamespace(
+                returncode=0, stdout=launcher_identity,
+            )) as launcher_probe,
             patch(
                 "defenseclaw.gateway.canonical_install_path",
                 return_value=os.path.join(self.tmp_dir, "defenseclaw-gateway.exe"),
@@ -670,6 +679,11 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             )
 
         selected.assert_called_once()
+        launcher_probe.assert_called_once()
+        self.assertEqual(
+            launcher_probe.call_args.args[0],
+            [os.path.join(self.tmp_dir, "defenseclaw-hook.exe"), "--version-json"],
+        )
         self.assertEqual(
             selected.call_args.args[1],
             ("amp", "claudecode", "codex", "cursor"),

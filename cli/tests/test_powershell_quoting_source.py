@@ -32,6 +32,7 @@ _ALLOWED_FUNCTIONS = {
     # The cmd.exe launcher-guard words a reader compares hook tokens against.
     ("hook_integrity.py", "claude_launcher_guard_view"): "a reader's cmd.exe word list",
     ("hook_integrity.py", "_claude_chain_wrapper_words"): "a reader's cmd.exe word list",
+    ("hook_integrity.py", "_claude_managed_wrapper_words"): "a reader's cmd.exe word list",
     # RFC 3986 sub-delims.
     ("observability/hash_v1.py", "<module>"): "a URL character class, not a command",
     # Go's json.Marshal escape table.
