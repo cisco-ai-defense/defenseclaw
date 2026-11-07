@@ -700,3 +700,170 @@ def test_two_overlapping_discoveries_leave_the_version_read_last(monkeypatch, tm
         assert not a.is_alive()
 
         assert ad._read_cache(data_dir=data).agents["cursor"].version == later
+
+
+# Round 6: the time is taken when the probe answers, and a later unread
+# result is a reading too.
+
+
+def _discover_with_a_held_scan(monkeypatch, tmp_path, data, answers, *, change_binary=None):
+    """Discovery A reads Cursor first and is then held in the probe-state
+    bookkeeping that follows the probes; discovery B (started a second later)
+    reads and publishes; A is then released and publishes last. *answers* are
+    the probe replies in order: A, then B."""
+    binary = tmp_path / "cursor"
+    binary.write_text("old executable")
+    held, released = threading.Event(), threading.Event()
+    guard = threading.Lock()
+    count = {"probes": 0, "bookkeeping": 0}
+    errors: list[str] = []
+
+    def probe(*_args, **_kwargs):
+        with guard:
+            count["probes"] += 1
+            return answers[count["probes"] - 1]
+
+    def record_state(*_args, **_kwargs):
+        with guard:
+            count["bookkeeping"] += 1
+            mine = count["bookkeeping"]
+        if mine == 1:
+            held.set()
+            assert released.wait(timeout=10)
+
+    def first_discovery():
+        try:
+            ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
+        except BaseException as exc:  # reported below, never lost in the thread
+            errors.append(repr(exc))
+
+    monkeypatch.setattr(ad, "_ai_discovery_trust_config", lambda _d: (False, []))
+    monkeypatch.setattr(ad, "_configured_probe_names", lambda _d: frozenset({"cursor"}))
+    monkeypatch.setattr(
+        ad, "_binary_candidates_for_agent", lambda name, spec: (str(binary),) if name == "cursor" else ()
+    )
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    monkeypatch.setattr(
+        ad,
+        "_missing_probe_state",
+        lambda name: ([str(tmp_path / "created-by-probe")], []) if name == "cursor" else ([], []),
+    )
+    monkeypatch.setattr(ad, "_record_probe_state", record_state)
+    first = threading.Thread(target=first_discovery)
+    first.start()
+    assert held.wait(timeout=10)
+    if change_binary:
+        binary.write_text("updated executable")
+    time.sleep(1.1)  # B starts in a later second than A
+    later = ad.discover_agents(use_cache=False, refresh=True, data_dir=data)
+    released.set()
+    first.join(timeout=20)
+    assert not first.is_alive() and not errors, errors
+    return later
+
+
+def test_a_version_read_before_a_delayed_publish_does_not_replace_a_later_reading(monkeypatch, tmp_path):
+    # A reads its Cursor version, then waits on bookkeeping; B reads and
+    # writes meanwhile. The stamp is the time of the read, so A, writing last,
+    # still loses to B in either direction of the version change.
+    for earlier, later_version in _VERSION_PAIRS:
+        data = tmp_path / f"post-{_slug(later_version)}"
+        data.mkdir()
+        later = _discover_with_a_held_scan(
+            monkeypatch, tmp_path, data, [(earlier, ""), (later_version, "")]
+        )
+
+        assert later.agents["cursor"].version == later_version
+        assert ad._read_cache(data_dir=data).agents["cursor"].version == later_version
+
+
+def test_the_stamp_is_the_time_the_selected_binary_answered_not_the_end_of_the_scan(monkeypatch, tmp_path):
+    binary = tmp_path / "cursor"
+    binary.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, spec: (str(binary),))
+    answered: list[object] = []
+
+    def probe(*_args, **_kwargs):
+        answered.append(ad._now_utc())
+        return "3.19.13", ""
+
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda name: ([str(tmp_path / "made")], []))
+    monkeypatch.setattr(ad, "_record_probe_state", lambda *_a, **_k: time.sleep(0.3))
+
+    signal = ad._scan_agent("cursor", data_dir=tmp_path)
+
+    stamp = ad._parse_rfc3339(signal.observed_at)
+    assert stamp is not None and answered[0] <= stamp < answered[0] + timedelta(seconds=0.2)
+
+
+def _unread_scan(*, read_ago: float, version: str, error: str, binary: str = "/opt/cursor/bin/cursor") -> ad.AgentDiscovery:
+    disc = _scan(seconds_old=0, cursor=version)
+    disc.agents["cursor"] = _signal("cursor", binary=binary, version=version, error=error)
+    stamp = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=read_ago))
+    disc.scanned_at = stamp
+    for signal in disc.agents.values():
+        signal.observed_at = stamp
+    return disc
+
+
+def test_a_later_unread_result_is_not_replaced_by_an_older_known_version(tmp_path):
+    for writer in ("publish", "write"):
+        data = tmp_path / writer
+        data.mkdir()
+        old = _unread_scan(read_ago=2, version="3.19.13", error="")
+        updated = _unread_scan(read_ago=1, version="", error=ad.VERSION_PROBE_TIMED_OUT)
+        assert ad._write_cache(updated, data_dir=data)
+
+        if writer == "publish":
+            assert ad._publish_agent_signal(old, "codex", data_dir=data)
+        else:
+            assert ad._write_cache(old, data_dir=data)
+
+        cursor = ad._read_cache(data_dir=data).agents["cursor"]
+        assert (cursor.version, cursor.error) == ("", ad.VERSION_PROBE_TIMED_OUT)
+
+
+def test_a_later_known_version_replaces_an_earlier_unread_result_in_any_order(tmp_path):
+    for writer in ("publish", "write"):
+        data = tmp_path / writer
+        data.mkdir()
+        unread = _unread_scan(read_ago=2, version="", error=ad.VERSION_PROBE_TIMED_OUT)
+        known = _unread_scan(read_ago=1, version="3.19.13", error="")
+        assert ad._write_cache(unread, data_dir=data)
+
+        if writer == "publish":
+            assert ad._publish_agent_signal(known, "codex", data_dir=data)
+        else:
+            assert ad._write_cache(known, data_dir=data)
+
+        assert ad._read_cache(data_dir=data).agents["cursor"].version == "3.19.13"
+
+
+def test_an_entry_never_probed_does_not_hold_back_an_older_known_version(tmp_path):
+    data = tmp_path
+    unprobed = _unread_scan(read_ago=1, version="", error=ad.VERSION_NOT_PROBED)
+    known = _unread_scan(read_ago=2, version="3.19.13", error="")
+    assert ad._write_cache(unprobed, data_dir=data)
+
+    assert ad._write_cache(known, data_dir=data)
+
+    assert ad._read_cache(data_dir=data).agents["cursor"].version == "3.19.13"
+
+
+def test_an_executable_replaced_between_two_discoveries_leaves_the_later_unread_result(monkeypatch, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    later = _discover_with_a_held_scan(
+        monkeypatch,
+        tmp_path,
+        data,
+        # A timed-out probe is asked once more before it is called slow.
+        [("3.19.13", ""), ("", ad.VERSION_PROBE_TIMED_OUT), ("", ad.VERSION_PROBE_TIMED_OUT)],
+        change_binary=True,
+    )
+
+    final = ad._read_cache(data_dir=data).agents["cursor"]
+    assert later.agents["cursor"].installed and later.agents["cursor"].version == ""
+    assert (final.installed, final.version) == (True, "")
+    assert final.error.endswith(ad.VERSION_PROBE_TIMED_OUT)
