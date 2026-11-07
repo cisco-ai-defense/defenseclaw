@@ -3299,11 +3299,11 @@ def test_a_setup_scan_probes_a_peer_whose_link_now_names_another_version(monkeyp
     ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
     scanned_at = ad._parse_rfc3339(ad._read_cache(data_dir=data_dir).scanned_at).timestamp()
     assert os.stat(tmp_path / "pkg" / "v2" / "bin" / "codex").st_mtime < scanned_at
-    assert ad._resolves_unchanged_since(str(bins / "codex"), scanned_at)
+    assert ad._resolves_unchanged_since(str(bins / "codex"), scanned_at, data_dir)
     time.sleep(1.1)  # the scan time has whole seconds
     (tmp_path / "pkg" / "current").unlink()
     (tmp_path / "pkg" / "current").symlink_to("v2")
-    assert not ad._resolves_unchanged_since(str(bins / "codex"), scanned_at)
+    assert not ad._resolves_unchanged_since(str(bins / "codex"), scanned_at, data_dir)
     versions["codex"] = "codex-cli 0.161.0"
     probed.clear()
     disc = ad.discover_with_probes(["claudecode"], use_cache=False, refresh=True, data_dir=data_dir)

@@ -64,6 +64,7 @@ from defenseclaw.connector_paths import (
     devin_hook_config_path,
     hermes_config_path,
 )
+from defenseclaw.file_lock import locked_file_update
 from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
     open_regular_file_no_follow,
@@ -1330,10 +1331,10 @@ def _configured_agent_evidence_is_stale(cached: AgentDiscovery, data_dir: str | 
             if signal.error == VERSION_NOT_PROBED:
                 return True
             continue
-        if not os.path.isabs(signal.binary_path) or not _resolves_unchanged_since(signal.binary_path, since):
+        if not os.path.isabs(signal.binary_path) or not _resolves_unchanged_since(signal.binary_path, since, data_dir):
             return True
         recorded = {"skipped_binaries": list(signal.skipped_binaries)}
-        if _unchanged_candidates_ahead(name, signal.binary_path, recorded, since) is None:
+        if _unchanged_candidates_ahead(name, signal.binary_path, recorded, since, data_dir) is None:
             return True
     return False
 
@@ -1425,7 +1426,9 @@ def _keep_versions_of_slow_unchanged_agents(
         elif previous_binary != signal.binary_path:
             if signal.error != VERSION_NOT_PROBED:
                 continue
-            ahead = _unchanged_candidates_ahead(signal.name, previous_binary, previous, previous_scan.timestamp())
+            ahead = _unchanged_candidates_ahead(
+                signal.name, previous_binary, previous, previous_scan.timestamp(), data_dir
+            )
             if ahead is None:
                 continue
             skipped = ahead
@@ -1497,22 +1500,32 @@ def _peers_with_unchanged_binaries(
             continue
         if require_trusted_binary_paths and not _is_trusted_binary_path(binary, data_dir=data_dir):
             continue
-        if _resolves_unchanged_since(binary, previous_scan.timestamp()):
+        if _resolves_unchanged_since(binary, previous_scan.timestamp(), data_dir):
             unchanged.add(name)
     return frozenset(unchanged)
 
 
-def _resolves_unchanged_since(path: str, since: float) -> bool:
-    """Whether *path* resolves to a regular file through links none of which,
-    nor the file or its folder, changed (mtime or ctime) at or after *since*.
+def _resolves_unchanged_since(path: str, since: float, data_dir: str | os.PathLike[str] | None = None) -> bool:
+    """Whether *path* resolves to a regular file through links and folders
+    none of which, nor the file, changed (mtime or ctime) at or after *since*.
 
     Every link on the way counts, also a link in a parent folder: switching a
     ``current`` link to another version folder, or installing a new version
-    over the old one, makes the agent changed. ctime cannot be set back.
+    over the old one, makes the agent changed. So does every folder on the
+    resolved path, not only the one holding the file: replacing a higher
+    folder with a ready-made one rebinds the whole tree below it while the
+    file and its own folder keep their old times, and the move changes that
+    folder ctime and its parent mtime. A folder that changed for another
+    reason only costs one new probe. The DefenseClaw data
+    folder and the folders above it are left out (the home folder changes
+    whenever a file is saved in it, the data folder whenever the cache is
+    written): replacing one of them replaces the cache being read as well.
+    ctime cannot be set back.
     """
     drive, rest = os.path.splitdrive(path.replace(os.altsep, os.sep) if os.altsep else path)
     pending = [part for part in reversed(rest.split(os.sep)) if part]
     resolved = drive + os.sep
+    chain = [resolved]
     links = 0
     while pending:
         part = pending.pop()
@@ -1520,6 +1533,7 @@ def _resolves_unchanged_since(path: str, since: float) -> bool:
             continue
         if part == "..":
             resolved = os.path.dirname(resolved)
+            chain.append(resolved)
             continue
         candidate = os.path.join(resolved, part)
         try:
@@ -1528,6 +1542,7 @@ def _resolves_unchanged_since(path: str, since: float) -> bool:
             return False
         if not stat.S_ISLNK(info.st_mode):
             resolved = candidate
+            chain.append(resolved)
             continue
         links += 1
         if links > 40 or max(info.st_mtime, info.st_ctime) >= since:
@@ -1540,7 +1555,11 @@ def _resolves_unchanged_since(path: str, since: float) -> bool:
         if os.path.isabs(target):
             resolved = (target_drive or drive) + os.sep
         pending.extend(part for part in reversed(target_rest.split(os.sep)) if part)
-    for checked in (resolved, os.path.dirname(resolved)):
+    holders = _data_dir_holders(data_dir)
+    always = {resolved, os.path.dirname(resolved)}
+    for checked in dict.fromkeys(chain):
+        if checked not in always and os.path.normcase(checked) in holders:
+            continue
         try:
             info = os.lstat(checked)
         except OSError:
@@ -1551,6 +1570,16 @@ def _resolves_unchanged_since(path: str, since: float) -> bool:
         return stat.S_ISREG(os.lstat(resolved).st_mode)
     except OSError:
         return False
+
+
+def _data_dir_holders(data_dir: str | os.PathLike[str] | None) -> frozenset[str]:
+    """The DefenseClaw data folder and the folders above it, as written and resolved."""
+    target = Path(data_dir) if data_dir else default_data_path()
+    holders: set[str] = set()
+    for form in (os.path.abspath(target), os.path.realpath(target)):
+        holders.add(os.path.normcase(form))
+        holders.update(os.path.normcase(str(parent)) for parent in Path(form).parents)
+    return frozenset(holders)
 
 
 def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
@@ -1565,6 +1594,7 @@ def _unchanged_candidates_ahead(
     previous_binary: str,
     previous: dict[str, Any],
     previous_scan: float,
+    data_dir: str | os.PathLike[str] | None = None,
 ) -> tuple[str, ...] | None:
     """Return the candidates ahead of *previous_binary* when they are exactly
     the ones the last probe passed over and none resolves differently since
@@ -1580,7 +1610,7 @@ def _unchanged_candidates_ahead(
         # selected one: its file, its folder or any link on the way written or
         # re-linked since the scan. A link moved to another installed version
         # keeps that version's old mtime, so the target alone cannot show it.
-        if not _resolves_unchanged_since(candidate, previous_scan):
+        if not _resolves_unchanged_since(candidate, previous_scan, data_dir):
             return None
     return ahead
 
@@ -3335,22 +3365,103 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
     return AgentDiscovery(scanned_at=scanned_at, agents=agents, cache_hit=True)
 
 
+#: How long a cache update waits for another process updating the same file.
+_CACHE_LOCK_SECONDS = 5.0
+
+#: Entry key: when the scan that produced the entry started. An entry without
+#: it was written with the file and carries the file ``scanned_at``.
+_ENTRY_OBSERVED_AT = "observed_at"
+
+
+@contextmanager
+def _cache_update(path: Path) -> Iterator[None]:
+    """Hold the cache update lock for one read, compare and write.
+
+    Two processes can scan at the same time (a setup and a doctor run), and
+    each writes when its scan ends, so the one that ends last would otherwise
+    replace the newer facts of the other. The lock is only taken where the
+    folder already exists: a missing folder has no other writer and is
+    created with its private permissions by the write itself.
+    """
+    if not path.parent.is_dir():
+        yield
+        return
+    # The write refuses a folder that redirects (a link); the lock file must
+    # not be created through it either.
+    reject_reparse_path(path)
+    with locked_file_update(str(path), timeout_seconds=_CACHE_LOCK_SECONDS):
+        yield
+
+
+def _entry_has_version(entry: Any) -> bool:
+    return (
+        isinstance(entry, dict)
+        and bool(entry.get("installed"))
+        and any(str(entry.get(key) or "") for key in ("version", "kiro_cli_version", "kiro_ide_version"))
+    )
+
+
+def _entry_observed_at(entry: dict[str, Any], payload: dict[str, Any]) -> datetime | None:
+    return _parse_rfc3339(str(entry.get(_ENTRY_OBSERVED_AT) or payload.get("scanned_at") or ""))
+
+
+def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], scan: datetime | None) -> bool:
+    """Whether a cached entry holds a version read by a scan that started after
+    *scan*. Such an entry is newer evidence than the scan being written and
+    stays. Equal times are not proof of order, so the scan being written
+    wins then, as it did before the entries were timed."""
+    if scan is None or not _entry_has_version(entry):
+        return False
+    observed = _entry_observed_at(entry, payload)
+    return observed is not None and observed > scan
+
+
+def _read_cache_payload(path: Path) -> dict[str, Any] | None:
+    """The cache file as written by this schema, else None."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != CACHE_SCHEMA_VERSION
+        or not isinstance(payload.get("agents"), dict)
+    ):
+        return None
+    return payload
+
+
 def _write_cache(
     disc: AgentDiscovery,
     *,
     data_dir: str | os.PathLike[str] | None = None,
 ) -> bool:
+    """Write one complete scan, keeping an entry a newer scan already read.
+
+    Another process can finish a later scan, and publish it, while this one is
+    still writing; its versions are the newer facts and replace nothing here.
+    """
     target_dir = Path(data_dir) if data_dir else default_data_path()
     path = _cache_path(data_dir=target_dir)
     try:
-        payload = {
-            "version": CACHE_SCHEMA_VERSION,
-            "scanned_at": disc.scanned_at,
-            "ttl_seconds": CACHE_TTL_SECONDS,
-            "agents": {name: asdict(signal) for name, signal in disc.agents.items()},
-        }
-        body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-        atomic_write_private_bytes(path, body.encode("utf-8"))
+        agents = {name: asdict(signal) for name, signal in disc.agents.items()}
+        with _cache_update(path):
+            existing = _read_cache_payload(path)
+            scan = _parse_rfc3339(disc.scanned_at)
+            if existing is not None:
+                for name, entry in existing["agents"].items():
+                    if name in agents and _cached_entry_is_newer(entry, existing, scan):
+                        observed = _format_rfc3339(_entry_observed_at(entry, existing))
+                        agents[name] = {**entry, _ENTRY_OBSERVED_AT: observed}
+            payload = {
+                "version": CACHE_SCHEMA_VERSION,
+                "scanned_at": disc.scanned_at,
+                "ttl_seconds": CACHE_TTL_SECONDS,
+                "agents": agents,
+            }
+            body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+            atomic_write_private_bytes(path, body.encode("utf-8"))
         return True
     except (OSError, TypeError, ValueError):
         return False
@@ -3376,40 +3487,39 @@ def _publish_agent_signal(
     reviewed at. A peer the scan did read (installed, with a version) is a
     newer fact than the cache holds and replaces it, whichever way the version
     moved: the gateway admits a peer by the version in this file. A peer the
-    scan could not read keeps its cached entry. A missing or unreadable cache
-    has nothing to keep and takes the scan; a cache past its time limit is
-    left alone: it is no longer read, and the next discovery scans again
-    (GAP-0752).
+    scan could not read keeps its cached entry. An entry read by a scan that
+    started after this one is newer still and stays (the read, compare and
+    write are one locked step, so a scan that ends late cannot put back what
+    a later one found). A missing or unreadable cache has nothing to keep and
+    takes the scan; a cache past its time limit is left alone: it is no longer
+    read, and the next discovery scans again (GAP-0752).
     """
     signal = disc.agents.get(name)
     if signal is None:
         return False
     path = _cache_path(data_dir=data_dir)
     try:
-        with open(path, encoding="utf-8") as fh:
-            payload = json.load(fh)
-    except FileNotFoundError:
-        return _write_cache(disc, data_dir=data_dir)
-    except (OSError, ValueError):
-        payload = None
-    if (
-        not isinstance(payload, dict)
-        or payload.get("version") != CACHE_SCHEMA_VERSION
-        or not isinstance(payload.get("agents"), dict)
-    ):
-        return _write_cache(disc, data_dir=data_dir)
-    scanned = _parse_rfc3339(str(payload.get("scanned_at") or ""))
-    if scanned is None or _now_utc() - scanned > timedelta(seconds=CACHE_TTL_SECONDS):
-        return False
-    for peer, fresh in disc.agents.items():
-        if peer == name or _scan_read_version(fresh):
-            payload["agents"][peer] = asdict(fresh)
-    try:
-        body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-        atomic_write_private_bytes(path, body.encode("utf-8"))
-        return True
+        with _cache_update(path):
+            payload = _read_cache_payload(path)
+            if payload is not None:
+                scanned = _parse_rfc3339(str(payload.get("scanned_at") or ""))
+                if scanned is None or _now_utc() - scanned > timedelta(seconds=CACHE_TTL_SECONDS):
+                    return False
+                scan = _parse_rfc3339(disc.scanned_at)
+                for peer, fresh in disc.agents.items():
+                    if peer != name and not _scan_read_version(fresh):
+                        continue
+                    if _cached_entry_is_newer(payload["agents"].get(peer), payload, scan):
+                        continue
+                    payload["agents"][peer] = {**asdict(fresh), _ENTRY_OBSERVED_AT: disc.scanned_at}
+                body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+                atomic_write_private_bytes(path, body.encode("utf-8"))
+                return True
     except (OSError, TypeError, ValueError):
         return False
+    # Nothing readable to keep: the scan is the cache (written outside the
+    # lock above, which the full write takes itself).
+    return _write_cache(disc, data_dir=data_dir)
 
 
 def _cache_path(*, data_dir: str | os.PathLike[str] | None = None) -> Path:
