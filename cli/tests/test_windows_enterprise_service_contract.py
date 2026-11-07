@@ -6318,6 +6318,17 @@ def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
     invoke = _psm1_function(module, "Invoke-DefenseClawCodexRequirementsCommand")
     assert "[switch]$Teardown" in invoke and "$codexRequirementsArguments += '--uninstall'" in invoke
     assert "$Teardown -and $Action -cne 'remove'" in invoke
+    # An installed gateway older than this build (1.0.3 and 1.0.8 define only
+    # --json) refuses --uninstall with no JSON line, which would fail and roll
+    # back the uninstall: the flag goes only to a gateway whose capabilities
+    # report it, and it is the only new gateway argument of the branch.
+    assert module.count("'--uninstall'") == 1
+    guard = invoke[invoke.index("if ($Teardown -and (Test-DefenseClawManagedHooksCommittedTeardownSupported"):]
+    guard = guard[: guard.index("$probe = Invoke-DefenseClawGatewayCommand")]
+    assert "-Capability codex_requirements_uninstall" in guard
+    assert guard.index("-Capability codex_requirements_uninstall") < guard.index("+= '--uninstall'")
+    probe = _psm1_function(module, "Test-DefenseClawManagedHooksCommittedTeardownSupported")
+    assert "'codex_requirements_uninstall'" in probe.split("param(")[1]
     complete = _psm1_function(module, "Complete-DefenseClawCodexRequirementsRemoval")
     assert "if ($Teardown -and $disposition -ceq 'link_kept'" in complete
     assert complete.index("link_kept") < complete.index("did not prove managed runtime state")
@@ -6340,6 +6351,9 @@ def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
     assert "windowsCodexRequirementsTeardownRemover(opts)" in cli_go
     teardown_go = read(ROOT / "internal" / "cli" / "windows_managed_hooks_teardown.go")
     assert "removeReport, err := windowsManagedHooksTeardownCodexRemover(opts)" in teardown_go
+    assert "if !windowsManagedHooksTeardownCodexRemovalClean(removeReport) {" in teardown_go
+    assert 'json:"codex_requirements_uninstall"' in teardown_go
+    assert "CodexRequirementsUninstall: true," in teardown_go
     assert "RemoveWindowsCodexMachineRequirementsForTeardown" not in read(
         ROOT / "internal" / "cli" / "enterprise_hooks_platform_windows.go"
     )

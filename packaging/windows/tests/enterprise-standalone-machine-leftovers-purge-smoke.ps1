@@ -1447,6 +1447,77 @@ $failures = & $module {
                     $failures.Add("GAP-0773: a step changed the folder behind the Codex link: $(& $g773Listing)")
                 }
 
+                # GAP-0773, review M1: the uninstall asks the installed gateway before it
+                # passes --uninstall to "codex-requirements remove". A gateway older than
+                # this build (1.0.3 has no capabilities command; 1.0.8 has one without the
+                # field) defines only --json, answers "unknown flag" to --uninstall with no
+                # JSON line, and gets the plain removal; a gateway that reports the field
+                # gets --uninstall. Any other call to the gateway fails the row.
+                & {
+                    $m1Layout = @{
+                        CodexMachinePolicyPath = 'C:\m1\requirements.toml'
+                        CodexRequirementsOwnershipPath = 'C:\m1\ownership.json'
+                        CodexManagedHooksStatePath = 'C:\m1\state'
+                        CodexManagedHooksDirectory = 'C:\m1\managed'
+                        HookPath = 'C:\m1\hook.exe'
+                    }
+                    function Assert-DefenseClawAdministrator { }
+                    function Invoke-DefenseClawGatewayCommand {
+                        param($Layout, $GatewayServiceName, [string[]]$Arguments, [switch]$Capture,
+                            [switch]$AllowFailure, [int]$TimeoutSeconds)
+                        $verb = ($Arguments -join ' ')
+                        $script:M1Calls.Add($verb)
+                        if ($verb -ceq 'enterprise windows teardown-managed-hooks capabilities --json') {
+                            return [pscustomobject]@{ exit_code = $script:M1CapabilityCode; output = $script:M1CapabilityOutput }
+                        }
+                        $accepts = $verb -ceq 'enterprise windows codex-requirements remove --json --uninstall' -and $script:M1Gateway -ceq 'new'
+                        if ($verb -ceq 'enterprise windows codex-requirements remove --json' -or $accepts) {
+                            $report = [ordered]@{
+                                schema_version = 2; action = 'remove'; ok = $true; disposition = 'ownership_absent'
+                                requirements_path = $m1Layout.CodexMachinePolicyPath
+                                ownership_path = $m1Layout.CodexRequirementsOwnershipPath
+                                managed_state_path = $m1Layout.CodexManagedHooksStatePath
+                                managed_dir = $m1Layout.CodexManagedHooksDirectory
+                                hook_binary = $m1Layout.HookPath
+                            }
+                            return [pscustomobject]@{ exit_code = 0; output = @(($report | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress)) }
+                        }
+                        return [pscustomobject]@{ exit_code = 1; output = @('Error: unknown flag: --uninstall') }
+                    }
+                    $script:M1Calls = [Collections.Generic.List[string]]::new()
+                    $goodOld = '{"schema_version":4,"action":"capabilities","ok":true,"committed_standalone_prepare":true,"precommit_check":true}'
+                    $goodNew = '{"schema_version":4,"action":"capabilities","ok":true,"committed_standalone_prepare":true,"precommit_check":true,"codex_requirements_uninstall":true}'
+                    foreach ($case in @(
+                        @{ name = '1.0.3: no capabilities command'; gateway = 'old'; code = 1; output = @('Error: unknown command "capabilities"'); flag = $false },
+                        @{ name = '1.0.8: report without the field'; gateway = 'old'; code = 0; output = @($goodOld); flag = $false },
+                        @{ name = 'field false'; gateway = 'old'; code = 0; output = @($goodNew.Replace('"codex_requirements_uninstall":true', '"codex_requirements_uninstall":false')); flag = $false },
+                        @{ name = 'this build'; gateway = 'new'; code = 0; output = @($goodNew); flag = $true }
+                    )) {
+                        $script:M1Gateway = $case.gateway
+                        $script:M1CapabilityCode = $case.code
+                        $script:M1CapabilityOutput = $case.output
+                        $script:M1Calls.Clear()
+                        try {
+                            [void](Invoke-DefenseClawCodexRequirementsCommand -Layout $m1Layout -GatewayServiceName DefenseClawGateway -Action remove -Teardown)
+                        }
+                        catch {
+                            $failures.Add("GAP-0773 M1, $($case.name): the uninstall removal failed: $($_.Exception.Message)")
+                            continue
+                        }
+                        $sent = @($script:M1Calls | Microsoft.PowerShell.Core\Where-Object { $_ -match 'codex-requirements' })
+                        if ($sent.Count -ne 1 -or (($sent[0] -match '--uninstall') -ne $case.flag)) {
+                            $failures.Add("GAP-0773 M1, $($case.name): --uninstall sent = $(($sent[0] -match '--uninstall')), want $($case.flag): $($sent -join ' | ')")
+                        }
+                    }
+                    # A removal that is not the uninstall never sends the flag and does not ask the gateway.
+                    $script:M1Gateway = 'new'; $script:M1CapabilityCode = 0; $script:M1CapabilityOutput = @($goodNew)
+                    $script:M1Calls.Clear()
+                    [void](Invoke-DefenseClawCodexRequirementsCommand -Layout $m1Layout -GatewayServiceName DefenseClawGateway -Action remove)
+                    if (($script:M1Calls -join ' | ') -cne 'enterprise windows codex-requirements remove --json') {
+                        $failures.Add("GAP-0773 M1: a removal that is not the uninstall called the gateway as: $($script:M1Calls -join ' | ')")
+                    }
+                }
+
                 # GAP-0767: C:\ProgramData\ampcode. The 1.0.2 policy writer
                 # created it empty, with the descriptor above and no marker; a
                 # 1.0.9 upgrade back-fills it (origin upgrade) under the same three

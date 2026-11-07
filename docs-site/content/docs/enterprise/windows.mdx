@@ -986,9 +986,10 @@ is named. Each path is decided on its own: a link at one of Devin's two folders 
 Only the uninstall keeps a link at the Codex folder, and it reports it as kept and not verified: because
 nothing behind the link is read, a Codex requirement there may still name the DefenseClaw hook program
 that the uninstall removes, so check the policy behind a link you made. Install, ensure, repair, the reconcile that
-turns Codex off and the guardian's Codex removal never write through a link: they stop with an error that
-names a link at the Codex folder, and report a link at any other vendor folder as an error too, except that
-a link a standard user made at the Copilot, OpenCode or Devin policy folder is removed first.
+turns Codex off and the guardian's Codex removal stop with an error when a link sits at a vendor folder,
+except that a link a standard user made at the Copilot, OpenCode or Devin policy folder is removed first.
+A newer Setup that uninstalls a deployment from before 1.0.9 runs that deployment's own gateway, which
+does not keep a link: there a link at the Codex folder behaves as it did in that release (the uninstall stops with an error).
 Releases before 1.0.9 kept no record. On a computer installed with one of them, the first 1.0.9
 install, upgrade or repair records `C:\Program Files\Cisco` and `C:\ProgramData\Cisco` when they
 still have the permissions Setup gave them and hold only DefenseClaw folders. It records

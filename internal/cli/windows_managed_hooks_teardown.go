@@ -838,6 +838,12 @@ type windowsManagedHooksTeardownCapabilities struct {
 	// a standalone uninstall asks it before its tombstone commits whether
 	// the post-commit prepare would accept this deployment (GAP-0571).
 	PrecommitCheck bool `json:"precommit_check"`
+	// CodexRequirementsUninstall says "codex-requirements remove" accepts
+	// --uninstall, the uninstall's removal that keeps a link at the Codex
+	// machine-policy folder (GAP-0773). Setup passes the flag only to a
+	// helper that reports this; the helpers of 1.0.3 and 1.0.8 define only
+	// --json and refuse the flag, and Setup runs their plain removal.
+	CodexRequirementsUninstall bool `json:"codex_requirements_uninstall"`
 }
 
 func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
@@ -855,6 +861,7 @@ func newWindowsManagedHooksTeardownCapabilitiesCommand() *cobra.Command {
 				OK:                         true,
 				CommittedStandalonePrepare: true,
 				PrecommitCheck:             true,
+				CodexRequirementsUninstall: true,
 			}
 			if jsonOutput {
 				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
@@ -1366,6 +1373,19 @@ func checkWindowsManagedHooksTeardownReady(
 	return verifyWindowsManagedHooksTeardownInstalled(opts, identity, selectorTargets)
 }
 
+// windowsManagedHooksTeardownCodexRemovalClean says whether the uninstall may
+// go on after the Codex requirements removal. A kept link is the one removal
+// that does not attest SafeToRemoveBinary: it was not read, so it is accepted
+// by name, as kept and not verified. Every other report needs OK and
+// SafeToRemoveBinary, and none may leave a reference to the owned binary tree.
+func windowsManagedHooksTeardownCodexRemovalClean(report connector.WindowsCodexMachineRequirementsReport) bool {
+	linkKept := report.OK && report.Disposition == "link_kept" && report.LinkKept != ""
+	if !linkKept && (!report.OK || !report.SafeToRemoveBinary) {
+		return false
+	}
+	return report.SurvivingOwnedPathReferences == 0
+}
+
 func prepareWindowsManagedHooksTeardown(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
@@ -1505,11 +1525,7 @@ func prepareWindowsManagedHooksTeardown(
 	if err != nil {
 		return restoreOnFailure(err, removeReport.SurvivingOwnedPathReferences)
 	}
-	// A kept link is the one removal that does not attest SafeToRemoveBinary:
-	// it was not read, so it is accepted by name, as kept and not verified.
-	linkKept := removeReport.OK && removeReport.Disposition == "link_kept" && removeReport.LinkKept != ""
-	if !linkKept && (!removeReport.OK || !removeReport.SafeToRemoveBinary) ||
-		removeReport.SurvivingOwnedPathReferences != 0 {
+	if !windowsManagedHooksTeardownCodexRemovalClean(removeReport) {
 		return restoreOnFailure(
 			errors.New("Codex managed-hook removal was not reference-clean"),
 			removeReport.SurvivingOwnedPathReferences,

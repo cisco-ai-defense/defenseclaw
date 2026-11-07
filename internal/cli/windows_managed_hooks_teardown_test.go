@@ -1474,6 +1474,15 @@ func TestWindowsManagedHooksTeardownReportsCommittedStandalonePrepare(t *testing
 	if report["precommit_check"] != true {
 		t.Fatalf("capabilities report does not offer the precommit check: %v", report)
 	}
+	// GAP-0773: Setup passes --uninstall to "codex-requirements remove" only
+	// when this report offers it, and the command it names has the flag.
+	if report["codex_requirements_uninstall"] != true {
+		t.Fatalf("capabilities report does not offer the Codex requirements uninstall removal: %v", report)
+	}
+	if remove, _, err := newWindowsCodexRequirementsCommand().Find([]string{"remove"}); err != nil ||
+		remove == nil || remove.Flags().Lookup("uninstall") == nil {
+		t.Fatalf("codex-requirements remove has no --uninstall flag: %v", err)
+	}
 	if child, _, err := command.Find([]string{"check"}); err != nil || child == nil || child.Name() != "check" {
 		t.Fatalf("teardown-managed-hooks has no check action: %v", err)
 	}

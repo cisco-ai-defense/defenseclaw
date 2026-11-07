@@ -19226,8 +19226,8 @@ function Set-DefenseClawAgentFolderBackfillDone {
 # - the agent folders the hooks and Setup create, Program Files\ClaudeCode\
 #   managed-settings.d, ProgramData\Cursor and ProgramData\OpenAI\Codex, and
 #   ClaudeCode or OpenAI when their only child is recorded, and
-#   ProgramData\ampcode, which the 1.0.2 policy writer created empty with the
-#   same descriptor and no marker (GAP-0704, GAP-0767,
+#   ProgramData\ampcode, which the 1.0.2 to 1.0.6 policy writers created empty
+#   with the same descriptor and no marker (1.0.7 and later add one) (GAP-0704, GAP-0767,
 #   Get-DefenseClawAgentFolderBackfillRefusal). Ampcode is judged in the same
 #   one-shot as the others: no release before 1.0.9 wrote the marker, so a
 #   computer upgraded from 1.0.2 through 1.0.8 has not run it, and a second
@@ -27074,7 +27074,11 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         [string]$Action,
         # The uninstall's removal: it alone keeps a link at the Codex
         # machine-policy folder (GAP-0773). Every other removal, and the
-        # disabled-Codex reconcile, refuses the link.
+        # disabled-Codex reconcile, refuses the link. The flag is passed to the
+        # installed gateway only when its capabilities report
+        # codex_requirements_uninstall: the gateways of 1.0.3 and 1.0.8 define
+        # only --json and refuse --uninstall, so a newer Setup uninstalling an
+        # older deployment runs the plain removal, as that release did.
         [switch]$Teardown
     )
     Assert-DefenseClawAdministrator
@@ -27088,7 +27092,10 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         $Action,
         '--json'
     )
-    if ($Teardown) {
+    if ($Teardown -and (Test-DefenseClawManagedHooksCommittedTeardownSupported `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Capability codex_requirements_uninstall)) {
         $codexRequirementsArguments += '--uninstall'
     }
     $probe = Invoke-DefenseClawGatewayCommand `
@@ -27473,12 +27480,14 @@ function Test-DefenseClawManagedHooksCommittedTeardownSupported {
         never commits a tombstone that no helper can finish. Anything but one
         well-formed report that says so counts as an older helper.
         -Capability precommit_check asks instead whether the helper accepts
-        the read-only "check" action (GAP-0571).
+        the read-only "check" action (GAP-0571); -Capability
+        codex_requirements_uninstall whether "codex-requirements remove"
+        accepts --uninstall (GAP-0773).
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [ValidateSet('committed_standalone_prepare', 'precommit_check')]
+        [ValidateSet('committed_standalone_prepare', 'precommit_check', 'codex_requirements_uninstall')]
         [string]$Capability = 'committed_standalone_prepare'
     )
     $probe = Invoke-DefenseClawGatewayCommand `
