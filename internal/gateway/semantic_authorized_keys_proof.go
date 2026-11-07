@@ -2120,17 +2120,19 @@ func interpreterCommentStart(code string, i int, language string) bool {
 }
 
 // hermesClientPatchTarget reports that the managed hook proved one Hermes V4A
-// patch target ordinary: behind ProtectHome only, in a complete map the hook
-// keyed in clientCWD that attests every patch target (hookpaths.
-// PatchCompleteKey), with the target resolved to itself. The hook lists a V4A
-// target only after its own patch-target walk accepted it. A target the hook
-// resolved through a link is not proved here: this gateway cannot read the
-// link again, and the link can change after the hook read it.
+// patch target: behind ProtectHome only, in a complete map the hook keyed in
+// clientCWD that attests every patch target (hookpaths.PatchCompleteKey), with
+// the target resolved to a file. The hook lists a V4A target only after its
+// own patch-target walk accepted it, and names the file the target leads to
+// (a link to an ordinary file is that file, a link to a key or state file is
+// that file), which the checks below judge as they judge a write_file target.
+// A link that changes after the hook read it is refused by the hook itself
+// (hookpaths.PatchTargetWatch, after the answer and again once it is written).
 func hermesClientPatchTarget(request trustedActionRequest, clientTargets map[string]string, clientCWD, target string) bool {
 	return request.ProtectedHomeHook && filepath.IsAbs(clientCWD) && filepath.IsAbs(target) &&
 		clientTargets[hookpaths.CWDKey] == clientCWD &&
 		clientTargets[hookpaths.PatchCompleteKey] == "1" &&
 		clientTargets[hookpaths.TruncatedKey] == "" &&
 		clientTargets[hookpaths.UnprovenReasonKey] == "" &&
-		clientTargets[target] == target
+		clientTargets[target] != ""
 }
