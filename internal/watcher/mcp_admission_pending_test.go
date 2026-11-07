@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -212,33 +213,52 @@ func TestChangedMCPServerDefinitionIsPendingUntilReadmitted(t *testing.T) {
 }
 
 // GAP-0686: a definition the account's agent runs is admitted only when the
-// watcher holds the same URL, command and arguments for that account.
-func TestMCPDefinitionPublishedIsPerAccountAndPerDefinition(t *testing.T) {
+// watcher holds a server of that account with the same complete definition:
+// URL, command, every argument and the environment.
+func TestMCPPublishedIsPerAccountAndPerDefinition(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
+	longArgs := make([]string, 40)
+	for i := range longArgs {
+		longArgs[i] = fmt.Sprintf("a%d", i)
+	}
 	servers := []config.MCPServerEntry{
 		{Name: "notes", URL: "http://127.0.0.1:28561/mcp", Connector: "codex", Home: "/home/u1"},
-		{Name: "loop", Command: "node", Args: []string{"a.js"}, Connector: "codex", Home: "/home/u1"},
+		{Name: "loop", Command: "node", Args: []string{"a.js"}, Env: map[string]string{"TARGET": "ordinary"}, Connector: "codex", Home: "/home/u1"},
+		{Name: "wide", Command: "node", Args: longArgs, Connector: "codex", Home: "/home/u1"},
 		{Name: "docs", URL: "https://docs.example/mcp", Connector: "codex", Home: "/home/u1", Bundled: true},
 	}
 	w := New(cfg, nil, nil, store, logger, nil, nil)
 	w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return servers, nil })
-	u1 := MCPAdmissionQuery{Connector: "codex", Server: "notes", Home: "/home/u1"}
+	query := func(server, home string) MCPAdmissionQuery {
+		return MCPAdmissionQuery{Connector: "codex", Server: server, Home: home}
+	}
 	for _, tc := range []struct {
-		name string
-		q    MCPAdmissionQuery
-		def  config.MCPServerEntry
-		want bool
+		name           string
+		q              MCPAdmissionQuery
+		def            config.MCPServerEntry
+		matched, named bool
 	}{
-		{"same url", u1, config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, true},
-		{"another url under the same name", u1, config.MCPServerEntry{URL: "http://127.0.0.1:28562/mcp"}, false},
-		{"another account", MCPAdmissionQuery{Connector: "codex", Server: "notes", Home: "/home/u2"}, config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, false},
-		{"another connector", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: "/home/u1"}, config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, false},
-		{"same command", MCPAdmissionQuery{Connector: "codex", Server: "loop", Home: "/home/u1"}, config.MCPServerEntry{Command: "node", Args: []string{"a.js"}}, true},
-		{"other arguments", MCPAdmissionQuery{Connector: "codex", Server: "loop", Home: "/home/u1"}, config.MCPServerEntry{Command: "node", Args: []string{"b.js"}}, false},
-		{"built-in server is not an admission target", MCPAdmissionQuery{Connector: "codex", Server: "docs", Home: "/home/u1"}, config.MCPServerEntry{URL: "https://docs.example/mcp"}, false},
+		{"same url", query("notes", "/home/u1"), config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, true, true},
+		{"another url under the same name", query("notes", "/home/u1"), config.MCPServerEntry{URL: "http://127.0.0.1:28562/mcp"}, false, true},
+		{"another account", query("notes", "/home/u2"), config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, false, false},
+		{"another connector", MCPAdmissionQuery{Connector: "claudecode", Server: "notes", Home: "/home/u1"}, config.MCPServerEntry{URL: "http://127.0.0.1:28561/mcp"}, false, false},
+		{"same command and environment", query("loop", "/home/u1"), config.MCPServerEntry{Command: "node", Args: []string{"a.js"}, Env: map[string]string{"TARGET": "ordinary"}}, true, true},
+		{"other arguments", query("loop", "/home/u1"), config.MCPServerEntry{Command: "node", Args: []string{"b.js"}, Env: map[string]string{"TARGET": "ordinary"}}, false, true},
+		{"changed environment", query("loop", "/home/u1"), config.MCPServerEntry{Command: "node", Args: []string{"a.js"}, Env: map[string]string{"TARGET": "protected"}}, false, true},
+		{"no environment", query("loop", "/home/u1"), config.MCPServerEntry{Command: "node", Args: []string{"a.js"}}, false, true},
+		{"more arguments than a hook fact carries", query("wide", "/home/u1"), config.MCPServerEntry{Command: "node", Args: longArgs}, true, true},
+		{"a different last argument", query("wide", "/home/u1"), config.MCPServerEntry{Command: "node", Args: append(append([]string(nil), longArgs[:39]...), "x")}, false, true},
+		{"built-in server is not an admission target", query("docs", "/home/u1"), config.MCPServerEntry{URL: "https://docs.example/mcp"}, false, false},
 	} {
-		if got := w.MCPDefinitionPublished(tc.q, tc.def); got != tc.want {
-			t.Errorf("%s: MCPDefinitionPublished = %v, want %v", tc.name, got, tc.want)
+		got := w.MCPPublished(tc.q, config.MCPLaunchDigest(tc.def))
+		if got.Matched != tc.matched || got.Named != tc.named {
+			t.Errorf("%s: MCPPublished = matched %v named %v, want matched %v named %v", tc.name, got.Matched, got.Named, tc.matched, tc.named)
 		}
+		if got.Matched && got.Entry.Name != tc.q.Server {
+			t.Errorf("%s: matched entry %q, want %q", tc.name, got.Entry.Name, tc.q.Server)
+		}
+	}
+	if got := w.MCPPublished(query("notes", "/home/u1"), ""); got.Matched || !got.Named {
+		t.Errorf("no digest: matched %v named %v, want unmatched and named", got.Matched, got.Named)
 	}
 }

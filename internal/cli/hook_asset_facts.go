@@ -81,8 +81,13 @@ func hookAssetFacts(connector string, payload []byte) string {
 				Name: entry.Name, URL: entry.URL, Command: entry.Command, Args: entry.Args, Transport: entry.Transport,
 				Source: source,
 			}
-			facts.MCP.Relocated = connector == "codex" && source == "" && !entry.Bundled &&
-				entry.SourceScope == "user" && config.CodexHomeRelocated()
+			if connector == "codex" && source == "" && !entry.Bundled {
+				facts.MCP.Relocated = entry.SourceScope == "user" && config.CodexHomeRelocated()
+				facts.MCP.ProjectScope = entry.SourceScope == "project"
+				if facts.MCP.Relocated || facts.MCP.ProjectScope {
+					facts.MCP.Digest = config.MCPLaunchDigest(entry)
+				}
+			}
 		}
 	}
 	return assetfacts.Encode(facts)

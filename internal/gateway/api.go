@@ -146,9 +146,9 @@ type APIServer struct {
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
 	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
-	// mcpDefinitionPublished says whether the servers the install watcher
-	// admits for the caller include the definition def (GAP-0686).
-	mcpDefinitionPublished func(connector, server, home, cwd string, def config.MCPServerEntry) bool
+	// mcpPublished looks for the definition, named by its launch digest, in
+	// the servers the install watcher admits for the caller (GAP-0686).
+	mcpPublished func(connector, server, home, cwd, digest string) watcher.MCPPublication
 	// mcpRefreshBeforeCall brings the gateway's view of the enrolled users'
 	// MCP servers up to date before an MCP tool call is decided (GAP-0216).
 	// Set once before serving.
@@ -1211,14 +1211,14 @@ func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home,
 	a.mcpAdmissionPending = pending
 }
 
-// SetMCPDefinitionPublished wires the install watcher's check that a
-// definition the caller's agent runs is one it admits (GAP-0686). Call it
-// before the server starts.
-func (a *APIServer) SetMCPDefinitionPublished(published func(connector, server, home, cwd string, def config.MCPServerEntry) bool) {
+// SetMCPPublished wires the install watcher's check that a definition the
+// caller's agent runs is one it admits (GAP-0686). Call it before the server
+// starts.
+func (a *APIServer) SetMCPPublished(published func(connector, server, home, cwd, digest string) watcher.MCPPublication) {
 	if a == nil {
 		return
 	}
-	a.mcpDefinitionPublished = published
+	a.mcpPublished = published
 }
 
 // SetMCPRefreshBeforeCall wires the refresh of the enrolled users' MCP

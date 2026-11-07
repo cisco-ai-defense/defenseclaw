@@ -457,12 +457,21 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 	// The config file the agent runs is the one under its CODEX_HOME, which
 	// the hook read; the default under the home is not the server it starts
 	// (GAP-0686).
-	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Relocated && connector == "codex" &&
-		config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && (server.Relocated || server.ProjectScope) &&
+		connector == "codex" && config.SameMCPToolServer(connector, server.Name, name) {
+		// The published definition with that digest is the complete one: the
+		// bounded claim may lack arguments or a long URL.
+		if a.mcpPublished != nil && home != "" {
+			if published := a.mcpPublished(connector, name, home, cwd, server.Digest); published.Matched {
+				return published.Entry, true
+			}
+		}
+		if server.Relocated {
+			return config.MCPServerEntry{
+				Name: server.Name, URL: server.URL, Command: server.Command,
+				Args: append([]string(nil), server.Args...), Transport: server.Transport,
+			}, true
+		}
 	}
 	if home != "" {
 		// Native MCP readers guard each config file; a refused file is

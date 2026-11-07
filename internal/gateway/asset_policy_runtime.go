@@ -183,32 +183,46 @@ func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorN
 	return decision, true
 }
 
-// mcpRelocatedUnpublishedDecision refuses, on a managed Windows gateway (the
-// only one that wires mcpDefinitionPublished), the
-// tool call of a Codex server the account's agent runs from a CODEX_HOME the
-// hook enumerator did not publish: a session-only CODEX_HOME is not in the
-// account environment the enumerator reads, so the server has no install
-// admission and no scan verdict, and nothing else would stop it (GAP-0686).
-// The hook names the definition it read from that file (assetfacts Relocated);
-// a definition the published record holds is admitted by the checks that
-// follow, so an ordinary server, the default one or one of a persistent
-// CODEX_HOME, stays allowed. Secure Client keeps main (#1092).
-func (a *APIServer) mcpRelocatedUnpublishedDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+// mcpUnpublishedSourceDecision refuses, on a managed Windows gateway (the
+// only one that wires mcpPublished), the tool call of a Codex server the
+// account's agent runs from a source the hook enumerator did not publish: a
+// session-only CODEX_HOME is not in the account environment the enumerator
+// reads, and a project .codex/config.toml is not read at all, so such a
+// server has no install admission and no scan verdict (GAP-0686). The hook
+// names the source (assetfacts Relocated, ProjectScope) and the launch digest
+// of the complete definition it read; a call is admitted by the checks that
+// follow only when a published server has that digest, so an ordinary
+// server, the default one or one of a persistent CODEX_HOME, stays allowed.
+// A project definition no published server matches is refused where it would
+// override a published server of that name, and where asset policy enforces
+// MCP runtime detection in action mode, which does not let an unscanned asset
+// run; elsewhere the project server stays as documented. Secure Client keeps
+// main (#1092).
+func (a *APIServer) mcpUnpublishedSourceDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.requestConfig(ctx)
-	if a.mcpDefinitionPublished == nil || cfg == nil || cfg.SecureClientIntegration() ||
+	if a.mcpPublished == nil || cfg == nil || cfg.SecureClientIntegration() ||
 		!probe.Matched || probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
 	server := claimedAssetFactsFromContext(ctx).MCP
 	home, serviceAccount := callerHomeForAssets(ctx)
-	if server == nil || !server.Relocated || !serviceAccount || home == "" || !config.SameMCPToolServer(connectorName, server.Name, probe.ServerName) {
+	if server == nil || !(server.Relocated || server.ProjectScope) || !serviceAccount || home == "" ||
+		!config.SameMCPToolServer(connectorName, server.Name, probe.ServerName) {
 		return config.AssetPolicyDecision{}, false
 	}
-	def := config.MCPServerEntry{Name: server.Name, URL: server.URL, Command: server.Command, Args: server.Args}
-	if a.mcpDefinitionPublished(connectorName, probe.ServerName, home, probe.WorkspaceDir, def) {
+	published := a.mcpPublished(connectorName, probe.ServerName, home, probe.WorkspaceDir, server.Digest)
+	if published.Matched {
 		return config.AssetPolicyDecision{}, false
 	}
-	reason := fmt.Sprintf("mcp server %q runs from a Codex config.toml under a CODEX_HOME that DefenseClaw has not scanned; set CODEX_HOME for the account (not only for the session) so its servers are admitted", probe.ServerName)
+	source := "a Codex config.toml under a CODEX_HOME"
+	if server.ProjectScope {
+		runtime, _ := cfg.AssetRuntimeDetectionFor("mcp")
+		if !published.Named && !(cfg.AssetPolicy.Enabled && cfg.AssetPolicy.Mode == config.AssetPolicyModeAction && runtime.Enabled) {
+			return config.AssetPolicyDecision{}, false
+		}
+		source = "a project .codex/config.toml"
+	}
+	reason := fmt.Sprintf("mcp server %q runs from %s that DefenseClaw has not scanned; define it in the account's own Codex config (CODEX_HOME set for the account, not only for the session) so it is admitted", probe.ServerName, source)
 	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, "mcp-source-unpublished")
 	decision.RegistryStatus = "unknown"
 	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
@@ -296,7 +310,7 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
-	if decision, refused := a.mcpRelocatedUnpublishedDecision(ctx, "codex", req.HookEventName, probe); refused {
+	if decision, refused := a.mcpUnpublishedSourceDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
 	a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe)
