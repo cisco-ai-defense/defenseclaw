@@ -276,7 +276,7 @@ func TestGAP0613SharedRootDeniedRestoredCopyIsDisabledAtRuntimeForTheDenyingConn
 	}
 	requireRuntimeHold(t, w, true)
 	entry, _ := w.store.GetActionForConnector("skill", evt.Name, "codex")
-	if entry == nil || entry.Actions.Install != "block" || entry.SourcePath != evt.Path || len(policyHeldFields(entry.Reason)) == 0 {
+	if entry == nil || entry.Actions.Install != "block" || entry.SourcePath != evt.Path || len(heldFieldsOf(entry.Reason)) == 0 {
 		t.Errorf("codex journal = %+v, want install block, runtime disable and the source path", entry)
 	}
 	// The hold does not make the next admission quarantine the restored copy.
@@ -658,4 +658,109 @@ func TestGAP0613PolicyHoldOverEarlierRuntimeEnableLiftsWithTheDenial(t *testing.
 		entry, _ := w.store.GetActionForConnector("skill", evt.Name, "codex")
 		t.Errorf("skill stays blocked after the denial went: disabled=%v err=%v row=%+v", disabled, err, entry)
 	}
+}
+
+func heldFieldsOf(reason string) []string {
+	fields, _ := parsePolicyHold(reason)
+	return fields
+}
+
+// writeSkillCopy puts a second copy of the skill at path.
+func writeSkillCopy(t *testing.T, path, name string) {
+	t.Helper()
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("---\nname: "+name+"\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func notDenied(v Verdict) bool {
+	return v != VerdictBlocked && v != VerdictRejected && v != VerdictScanError
+}
+
+// An operator's install block is pinned to copy A. A policy denial of copy B
+// whose quarantine fails adds a runtime hold for B only; when B is admitted
+// clean the hold goes with it, and A's block stays.
+func TestGAP0613PinnedInstallBlockDoesNotStrandRuntimeHoldOnOtherCopy(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	priorPath := filepath.Join(filepath.Dir(evt.Path), "earlier-location", evt.Name)
+	writeSkillCopy(t, priorPath, evt.Name)
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "amp", "install", "block", "operator blocked source A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.SetSourcePathForConnector("skill", evt.Name, "amp", priorPath); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("source B denial = %+v, want blocked", res)
+	}
+	cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"}}
+	if !w.policyHoldReleases(evt) {
+		t.Error("the rescan does not notice source B's releasable hold")
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	if res := w.runAdmission(context.Background(), evt); !notDenied(res.Verdict) {
+		t.Fatalf("source B replacement scan = %+v, want clean or allowed", res)
+	}
+	pe := enforce.NewPolicyEngine(w.store)
+	for _, connector := range []string{"amp", "codex"} {
+		if disabled, err := pe.IsDisabledForConnector("skill", evt.Name, connector); err != nil || disabled {
+			amp, _ := w.store.GetActionForConnector("skill", evt.Name, "amp")
+			t.Errorf("clean source B still runtime blocked for %s: disabled=%v err=%v amp=%+v", connector, disabled, err, amp)
+		}
+	}
+	amp, err := w.store.GetActionForConnector("skill", evt.Name, "amp")
+	if err != nil || amp == nil || amp.Actions.Install != "block" || amp.SourcePath != priorPath || amp.Reason != "operator blocked source A" {
+		t.Errorf("source A's independent install block changed: amp=%+v err=%v", amp, err)
+	}
+}
+
+// Two copies of one name are denied by the same default rule and both stay in
+// place. An allow rule scoped to the second copy admits it and leaves the
+// first one held, since the first is still denied.
+func TestGAP0613AllowForSecondDeniedCopyKeepsTheFirstCopyHeld(t *testing.T) {
+	w, cfg, first := sharedRootDefaultDenyWatcher(t, false)
+	firstRoot := filepath.Dir(first.Path)
+	secondRoot := filepath.Join(filepath.Dir(firstRoot), "second-skill-root")
+	second := first
+	second.Path = filepath.Join(secondRoot, first.Name)
+	writeSkillCopy(t, second.Path, first.Name)
+	w.skillDirs = append(w.skillDirs, secondRoot)
+	w.SetRootConnectors(map[string]string{firstRoot: "amp", secondRoot: "amp"})
+	w.SetRootConsumers([]RootConsumer{
+		{"skill", firstRoot, "amp"}, {"skill", firstRoot, "codex"},
+		{"skill", secondRoot, "amp"}, {"skill", secondRoot, "codex"},
+	})
+	pe := enforce.NewPolicyEngine(w.store)
+	for _, evt := range []InstallEvent{first, second} {
+		if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+			t.Fatalf("policy denial of %s = %+v, want blocked", evt.Path, res)
+		}
+	}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: second.Name, Connector: "codex", SourcePathContains: []string{second.Path}}}
+	if !w.policyDenies(first) || w.policyDenies(second) {
+		t.Fatalf("source-scoped allow: first denied=%v second denied=%v, want true and false", w.policyDenies(first), w.policyDenies(second))
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	if res := w.runAdmission(context.Background(), second); !notDenied(res.Verdict) {
+		t.Fatalf("second copy source allow = %+v, want admitted", res)
+	}
+	if disabled, err := pe.IsDisabledForConnector("skill", first.Name, "codex"); err != nil || !disabled {
+		amp, _ := w.store.GetActionForConnector("skill", first.Name, "amp")
+		codex, _ := w.store.GetActionForConnector("skill", first.Name, "codex")
+		t.Errorf("first copy callable while its default deny stands: disabled=%v err=%v amp=%+v codex=%+v", disabled, err, amp, codex)
+	}
+	// Benign twin: once the rule that denies the first copy goes too, the
+	// rescan of the first copy lifts the hold.
+	relaxCodexDefault(cfg)
+	if !w.policyHoldReleases(first) {
+		t.Error("the rescan does not notice the first copy's releasable hold")
+	}
+	if res := w.runAdmission(context.Background(), first); !notDenied(res.Verdict) {
+		t.Fatalf("first copy replacement scan = %+v, want clean or allowed", res)
+	}
+	requireRuntimeHold(t, w, false)
+	requireJournalClear(t, w)
 }
