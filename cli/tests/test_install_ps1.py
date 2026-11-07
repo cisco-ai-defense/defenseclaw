@@ -385,17 +385,63 @@ def _exec_candidates(word: str, environ, cwd) -> list[str]:  # type: ignore[no-u
     return [os.path.join(cwd, folder or os.curdir, word) for folder in os.get_exec_path(environ)]
 
 
+# What starting a wrapper file did, by identity of the file: one spawn per file.
+_WRAPPER_RUNS: dict[tuple, str] = {}
+_WRAPPER_NOT_EXECUTED = "not executed"
+_WRAPPER_RAN = "ran the command"
+_WRAPPER_DID_NOT_RUN = "started, did not run the command"
+
+
+def _wrapper_start(path: str) -> str:
+    # What happens when the file at `path` is started as env and given a command
+    # to run. A mode bit proves nothing: the kernel refuses an executable script
+    # whose interpreter is absent and a file that is no executable image
+    # (_WRAPPER_NOT_EXECUTED, exec goes on to the next candidate), and a program
+    # named env may be started and exit before it reaches the command
+    # (_WRAPPER_DID_NOT_RUN, the one exec ran). Ask it to run a command that
+    # prints a marker, and take the marker as the proof it got there.
+    status = os.stat(path)
+    identity = (path, status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size, status.st_mode)
+    if identity not in _WRAPPER_RUNS:
+        marker = "wrapper-ran-the-command"
+        try:
+            with _gate_off("probing env"):
+                probe = subprocess.run(
+                    [path, sys.executable, "-c", f"print({marker!r})"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=30,
+                    env={"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"},
+                )
+            ran = probe.returncode == 0 and probe.stdout.strip() == marker
+            _WRAPPER_RUNS[identity] = _WRAPPER_RAN if ran else _WRAPPER_DID_NOT_RUN
+        except OSError:
+            _WRAPPER_RUNS[identity] = _WRAPPER_NOT_EXECUTED
+        except subprocess.SubprocessError:
+            _WRAPPER_RUNS[identity] = _WRAPPER_DID_NOT_RUN
+    return _WRAPPER_RUNS[identity]
+
+
 def _can_start(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
-    # Whether exec ends up running `word` as the system looks it up: some
-    # candidate is a file this user may execute. exec passes over a candidate
-    # that is absent or not executable and tries the next, so a later good one
-    # still runs; with none, the launch fails (not found, or permission
-    # denied). Windows resolves a program by its own rules and has no env of
-    # its own; a wrapper there is taken to start, as before.
+    # Whether exec ends up running `word` as the system looks it up, as an env
+    # that reaches the command it is given. exec passes over a candidate that is
+    # absent, not executable or cannot be executed (an interpreter that is
+    # missing, no executable image) and tries the next, so a later good one
+    # still runs; the first candidate it can execute is the program that runs,
+    # and it either runs the command or does not. With none, the launch fails
+    # (not found, permission denied, exec format error). Windows resolves a
+    # program by its own rules and has no env of its own; a wrapper there is
+    # taken to start, as before.
     if os.name == "nt":
         return True
     word = os.fsdecode(os.fspath(word))
-    return any(os.path.isfile(path) and os.access(path, os.X_OK) for path in _exec_candidates(word, environ, cwd))
+    for path in _exec_candidates(word, environ, cwd):
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            result = _wrapper_start(path)
+            if result != _WRAPPER_NOT_EXECUTED:
+                return result == _WRAPPER_RAN
+    return False
 
 
 def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
@@ -5713,9 +5759,29 @@ def test_an_env_wrapper_that_cannot_start_is_not_taken_for_a_missing_powershell(
     (unexecutable / "env").chmod(0o644)
     directory = tmp_path / "directory"
     (directory / "env").mkdir(parents=True)
+    # Executable wrappers that do not get to the command: the interpreter of a
+    # script is absent, the file is no executable image, or a program named
+    # env exits before it reaches the command.
+    nointerpreter, badimage, early = (tmp_path / name for name in ("nointerpreter", "badimage", "early"))
+    for folder, body in (
+        (nointerpreter, b"#!/nonexistent/interpreter\n"),
+        (badimage, b"\x7fELF\x00\x01 not an executable image\n"),
+        (early, b"#!/bin/sh\nexit 42\n"),
+    ):
+        folder.mkdir()
+        (folder / "env").write_bytes(body)
+        (folder / "env").chmod(0o755)
     good = os.path.dirname(env)
     # (launch, kwargs, what the real launch does)
     broken = [
+        (["env", "pwsh"], {"env": {"PATH": str(nointerpreter)}}, "FileNotFoundError"),
+        (["env", "pwsh"], {"env": {"PATH": str(badimage)}}, "OSError"),
+        (["env", "pwsh"], {"env": {"PATH": str(early)}}, "exit 42"),
+        (["env", "pwsh"], {"env": {"PATH": f"{early}:{good}"}}, "exit 42"),
+        ([env, f"PATH={nointerpreter}", "env", "pwsh"], {}, "exit 127"),
+        ([env, f"PATH={badimage}", "env", "pwsh"], {}, "exit 127"),
+        ([env, f"PATH={early}", "env", "pwsh"], {}, "exit 42"),
+        ([env, f"PATH={early}:{good}", "env", "pwsh"], {}, "exit 42"),
         (["env", "pwsh"], {"env": {"PATH": missing}}, "FileNotFoundError"),
         (["env", "pwsh"], {"env": {"PATH": str(unexecutable)}}, "PermissionError"),
         (["env", "pwsh"], {"env": {"PATH": str(directory)}}, "PermissionError"),
@@ -5736,6 +5802,9 @@ def test_an_env_wrapper_that_cannot_start_is_not_taken_for_a_missing_powershell(
         ([env, f"PATH={unexecutable}:{good}", "env", "pwsh"], {}),
         ([env, f"PATH={directory}:{good}", "env", "pwsh"], {}),
         ([env, "-C", str(unexecutable), f"PATH=.:{good}", "env", "pwsh"], {}),
+        # exec passes over a wrapper it cannot execute and runs the next one.
+        (["env", "pwsh"], {"env": {"PATH": f"{nointerpreter}:{badimage}:{good}"}}),
+        ([env, f"PATH={nointerpreter}:{good}", "env", "pwsh"], {}),
     ]
     for launch, kwargs, expected in broken:
         with _gate_off("running the real launch"):
