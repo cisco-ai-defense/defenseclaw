@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,24 +24,30 @@ import (
 )
 
 func TestGAP0613SharedUnavailableSkillRootCoversEveryConnector(t *testing.T) {
-	assertSharedUnavailableSkillRootCoversEveryConnector(t, false, false)
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, false, false, false)
 }
 
 // An explicit gateway.watcher skill dir replaces every connector's own
 // folders, so an unavailable one is admission coverage lost for every
 // configured connector, not only the primary one.
 func TestGAP0613ExplicitSharedSkillRootCoversEveryConnector(t *testing.T) {
-	assertSharedUnavailableSkillRootCoversEveryConnector(t, true, false)
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, true, false, false)
 }
 
 // A connector named only under enterprise.machine_policy.connectors is
 // protected by a standalone managed gateway, so it depends on an explicit
 // skill dir exactly like an active connector does.
 func TestGAP0613ExplicitSkillRootCoversMachinePolicyOnlyConnector(t *testing.T) {
-	assertSharedUnavailableSkillRootCoversEveryConnector(t, true, true)
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, true, true, false)
 }
 
-func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit, policyOnly bool) {
+// The same with no active connector at all: the machine policy names the only
+// protected connector, and the explicit root is still its only coverage.
+func TestGAP0613ExplicitSkillRootCoversMachinePolicyOnlyConnectorWithNoActiveConnector(t *testing.T) {
+	assertSharedUnavailableSkillRootCoversEveryConnector(t, true, true, true)
+}
+
+func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit, policyOnly, noActive bool) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix ownership checks")
@@ -71,6 +78,14 @@ func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit
 		cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
 		cfg.Enterprise.Profile = managed.ProfileStandalone
 		cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"amp": {}}
+	}
+	wantNames := []string{"claudecode", "amp"}
+	if noActive {
+		cfg.Claw.Mode, cfg.Guardrail.Connector, cfg.Guardrail.Connectors = "", "", nil
+		if got := cfg.ActiveConnectors(); len(got) != 0 {
+			t.Fatalf("active connectors = %v, want none", got)
+		}
+		wantNames = []string{"amp"}
 	}
 	cfg.Gateway.Watcher.Enabled = true
 	cfg.Gateway.Watcher.Skill.Enabled = true
@@ -149,8 +164,14 @@ func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit
 			}
 		})
 	}
-	if names, ok := s.health.Snapshot().Watcher.Details["admission_scanning_off"].([]string); !ok || !slices.Contains(names, "claudecode") || !slices.Contains(names, "amp") {
-		t.Errorf("watcher health affected connectors = %v", names)
+	names, ok := s.health.Snapshot().Watcher.Details["admission_scanning_off"].([]string)
+	if !ok {
+		t.Fatalf("watcher health affected connectors = %v", names)
+	}
+	for _, want := range wantNames {
+		if !slices.Contains(names, want) {
+			t.Errorf("watcher health affected connectors = %v, missing %s", names, want)
+		}
 	}
 }
 
@@ -448,6 +469,189 @@ func TestGAP0613UnavailableRootAliasesStayCovered(t *testing.T) {
 						})
 					}
 				})
+			}
+		})
+	}
+}
+
+// With no active connector, the connectors only the standalone machine policy
+// names are still consumers and the event owner of each explicit folder
+// (round 6): the resolver used to return before reaching them.
+func TestGAP0613ExplicitRootsCoverMachinePolicyConnectorsWithNoActiveConnector(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	skillRoot, pluginRoot := filepath.Join(home, "skills"), filepath.Join(home, "plugins")
+	newCfg := func(managedProfile bool) *config.Config {
+		cfg := config.DefaultConfig()
+		cfg.DataDir = t.TempDir()
+		cfg.Claw.Mode, cfg.Guardrail.Connector, cfg.Guardrail.Connectors = "", "", nil
+		if managedProfile {
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"codex": {}, "amp": {}}
+		}
+		return cfg
+	}
+	wcfgFor := func(cfg *config.Config, explicit bool) config.GatewayWatcherConfig {
+		wcfg := cfg.Gateway.Watcher
+		wcfg.Enabled = true
+		wcfg.Skill.Enabled, wcfg.Plugin.Enabled = true, true
+		if explicit {
+			wcfg.Skill.Dirs, wcfg.Plugin.Dirs = []string{skillRoot}, []string{pluginRoot}
+		}
+		return wcfg
+	}
+	cfg := newCfg(true)
+	if got := cfg.ActiveConnectors(); len(got) != 0 {
+		t.Fatalf("active connectors = %v, want none", got)
+	}
+	conns := watcherConnectors(connector.NewDefaultRegistry(), cfg)
+	if len(conns) != 0 {
+		t.Fatalf("resolved connectors = %d, want 0", len(conns))
+	}
+	wcfg := wcfgFor(cfg, true)
+	skillDirs, pluginDirs, roots, src, consumers := resolveWatcherDirsForConnectors(cfg, conns, wcfg)
+	if !slices.Equal(skillDirs, []string{skillRoot}) || !slices.Equal(pluginDirs, []string{pluginRoot}) {
+		t.Fatalf("explicit dirs = %v %v", skillDirs, pluginDirs)
+	}
+	enrolled := &enrolledWatchSet{}
+	for name, list := range map[string][]watcher.RootConsumer{
+		"per-user": consumers,
+		"enrolled": enrolledRootConsumers(enrolled, consumers, src),
+	} {
+		for _, conn := range []string{"amp", "codex"} {
+			for _, kind := range []struct{ kind, path string }{{"skill", skillRoot}, {"plugin", pluginRoot}} {
+				if !slices.Contains(list, watcher.RootConsumer{Kind: kind.kind, Path: kind.path, Connector: conn}) {
+					t.Errorf("%s: explicit %s dir missing %s consumer: %+v", name, kind.kind, conn, list)
+				}
+			}
+		}
+	}
+	// One owner for the events of each explicit folder: the first of the
+	// sorted protected connectors, so its connector-scoped rules apply.
+	if roots[skillRoot] != "amp" || roots[pluginRoot] != "amp" {
+		t.Errorf("explicit dirs event owner = %v, want amp", roots)
+	}
+	// Benign twins: a gateway outside the standalone profile protects no
+	// connector it does not run, and folders discovered rather than named
+	// have no connector to cover.
+	for name, tc := range map[string]struct {
+		cfg      *config.Config
+		explicit bool
+	}{
+		"not-standalone": {newCfg(false), true},
+		"no-explicit":    {newCfg(true), false},
+	} {
+		_, _, roots, _, consumers := resolveWatcherDirsForConnectors(tc.cfg, nil, wcfgFor(tc.cfg, tc.explicit))
+		if len(consumers) != 0 || len(roots) != 0 {
+			t.Errorf("%s: consumers=%+v roots=%v, want none", name, consumers, roots)
+		}
+	}
+}
+
+// A trusted explicit root whose only connector is named by machine policy:
+// the connector-scoped asset rule decides its admission (round 6). The twin
+// has an active connector the rule is not scoped to, and stays admitted.
+func TestGAP0613TrustedExplicitRootAppliesMachinePolicyConnectorAssetRule(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix ownership checks")
+	}
+	for _, tc := range []struct {
+		name, active string
+		rejected     bool
+	}{
+		{"machine-policy-only-connector", "", true},
+		{"other-active-connector", "claudecode", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			testenv.SetHome(t, home)
+			t.Setenv("CLAUDE_CONFIG_DIR", "")
+			root := filepath.Join(t.TempDir(), "skills")
+			if err := os.MkdirAll(root, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.DefaultConfig()
+			cfg.DataDir = t.TempDir()
+			cfg.Claw.Mode, cfg.Guardrail.Connector, cfg.Guardrail.Connectors = "", tc.active, nil
+			if tc.active != "" {
+				cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{tc.active: {}}
+			}
+			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			cfg.Enterprise.Profile = managed.ProfileStandalone
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"amp": {}}
+			cfg.AssetPolicy = config.DefaultAssetPolicy()
+			cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "blocked-skill", Connector: "amp", Reason: "protected"}}
+			if got := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{TargetType: "skill", Name: "blocked-skill", Connector: "amp", RuntimeSurface: "watcher"}); got.Action != "block" {
+				t.Fatalf("Amp deny rule decision = %+v", got)
+			}
+			cfg.Gateway.Watcher.Enabled = true
+			cfg.Gateway.Watcher.Skill.Enabled = true
+			cfg.Gateway.Watcher.Skill.TakeAction = true
+			cfg.Gateway.Watcher.Skill.Dirs = []string{root}
+			cfg.Gateway.Watcher.Plugin.Enabled = false
+			cfg.Watch.DebounceMs = 50
+			store, logger := newNativeSkillRuntimeTestStore(t)
+			s := &Sidecar{cfg: cfg, store: store, logger: logger, health: NewSidecarHealth()}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- s.runWatcher(ctx) }()
+			defer func() {
+				cancel()
+				if err := <-done; err != nil && !errors.Is(err, context.Canceled) {
+					t.Errorf("runWatcher: %v", err)
+				}
+			}()
+			deadline := time.After(10 * time.Second)
+			for s.health.Snapshot().Watcher.State != StateRunning {
+				select {
+				case <-deadline:
+					t.Fatalf("watcher health = %+v", s.health.Snapshot().Watcher)
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			stage := filepath.Join(t.TempDir(), "blocked-skill")
+			if err := os.MkdirAll(stage, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(stage, "SKILL.md"), []byte("---\nname: blocked-skill\n---\n# test\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(root, "blocked-skill")
+			rejected := func() bool {
+				events, err := store.ListEvents(200)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range events {
+					if event.Action == string(audit.ActionInstallRejected) && strings.Contains(event.Target, "blocked-skill") {
+						return true
+					}
+				}
+				return false
+			}
+			// Let the watch register, then move the skill in whole.
+			time.Sleep(500 * time.Millisecond)
+			if err := os.Rename(stage, target); err != nil {
+				t.Fatal(err)
+			}
+			wait := 3 * time.Second
+			if tc.rejected {
+				wait = 15 * time.Second
+			}
+			end := time.After(wait)
+			for !rejected() {
+				select {
+				case <-end:
+					if tc.rejected {
+						t.Fatal("Amp-scoped denied skill was not rejected in a machine-policy-only root")
+					}
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+			if !tc.rejected {
+				t.Fatal("skill was rejected by a rule scoped to a connector that does not own the root")
 			}
 		})
 	}
