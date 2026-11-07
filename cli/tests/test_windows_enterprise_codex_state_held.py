@@ -85,6 +85,15 @@ def test_the_codex_hold_is_a_retryable_named_refusal() -> None:
     # requirements.toml is checked for a stamp-blocking holder only when its
     # access list has to be written.
     assert probe.index("Test-DefenseClawPathAclCanonical") < probe.index("Test-DefenseClawRestampHeldByOther")
+    # A holder that denies delete sharing stops the replace and the rollback of
+    # requirements.toml, so it defers the run too (nothing stopped yet).
+    assert probe.index("Test-DefenseClawFileDeleteBlocked -Path $requirements") < probe.index(
+        "Test-DefenseClawPathAclCanonical"
+    )
+    assert "open without delete sharing, so Setup could not replace it" in probe
+    delete_probe = _function_body(_text(), "Test-DefenseClawFileDeleteBlocked")
+    assert "[uint32]0x00010000) -in @(32, 33)" in delete_probe
+    assert "return $false" in delete_probe
     # Only the fixed-name state and requirements.toml are opened here; a hook
     # copy of the state (.state.<n>) is not, because a user may hold those.
     assert probe.count("[IO.FileStream]::new(") == 1
