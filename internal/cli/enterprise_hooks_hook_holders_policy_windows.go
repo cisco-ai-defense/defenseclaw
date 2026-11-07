@@ -414,7 +414,7 @@ func closeWindowsHolderHandle(target string, h windowsHolderHandle, want windows
 // many candidates, processes and file objects it chose from.
 func auditWindowsHolderClose(target string, h windowsHolderHandle, note string, counts windowsHolderCounts) {
 	account := windowsHolderAccount(h.Process.SID)
-	logWindowsHolder(fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) on %d file object(s)). %s", h.describe(), windowsHolderSubject(target), h.Access, counts.Handles, counts.Processes, counts.Objects, note))
+	logWindowsHolder(fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) %s). %s", h.describe(), windowsHolderSubject(target), h.Access, counts.Handles, counts.Processes, counts.where(), note))
 	queueWindowsHolderAudit(windowsHolderAuditRow{At: windowsHeldSwapNow().UTC(), Hook: target, Holder: h.Process, Handle: h.Handle, Access: h.Access,
 		Closed: true, Note: note, Account: account, Counts: counts})
 }
@@ -826,10 +826,24 @@ type windowsHolderCounts struct {
 	Handles   int
 	Processes int
 	Objects   int
-	Closed    int      // handles closed in the pass
-	Left      []string // holders that were named and not closed
+	// NoAddresses is true when a candidate's file object address is not shown
+	// to the guardian (the service on Windows Server 2025): such a handle is
+	// counted as a file object of its own, so Objects is then partly a count of
+	// handles.
+	NoAddresses bool
+	Closed      int      // handles closed in the pass
+	Left        []string // holders that were named and not closed
 	// Note is a sentence the audit rows of a pass add (the bounded override).
 	Note string
+}
+
+// where says, for a log line or an audit row, how many file objects the
+// candidates are on, and when that number counts handles.
+func (c windowsHolderCounts) where() string {
+	if c.NoAddresses {
+		return fmt.Sprintf("on %d file object(s), counting each handle whose file object address the system does not show to the guardian as a file object of its own", c.Objects)
+	}
+	return fmt.Sprintf("on %d file object(s)", c.Objects)
 }
 
 // windowsHolderObjectKey names a file object among the holders: the address
@@ -910,14 +924,19 @@ func (g *windowsHolderState) overrideCandidates(now time.Time, eligible []window
 // is finished before the next one starts, so a handle of the blocking object
 // is not left half closed while another object is closed; with one object
 // among the candidates every handle of it is needed, and nothing is
-// collateral. The objects are tried fewest handles first, then by process
+// collateral. The objects are tried fewest handles first; among objects with
+// as many handles, one with a handle that can write or append goes first (it
+// is the kind that can refuse a start; on a host that shows no addresses every
+// handle is an object of its own, so this is the order there), then by process
 // id. A handle whose object address the system did not show is an object of
 // its own.
 func orderWindowsHolderCandidates(eligible []windowsHolderHandle) ([]windowsHolderHandle, windowsHolderCounts) {
 	var users []windowsHolderGroup
 	byUser := map[windowsHolderGroup][]windowsHolderHandle{}
 	processes := map[windowsHolderProcKey]bool{}
+	noAddresses := false
 	for _, h := range eligible {
+		noAddresses = noAddresses || h.Object == 0
 		if _, seen := byUser[h.group()]; !seen {
 			users = append(users, h.group())
 		}
@@ -930,7 +949,7 @@ func orderWindowsHolderCandidates(eligible []windowsHolderHandle) ([]windowsHold
 		list, n := orderWindowsHolderUser(byUser[user])
 		ordered, objects = append(ordered, list...), objects+n
 	}
-	return ordered, windowsHolderCounts{Handles: len(eligible), Processes: len(processes), Objects: objects}
+	return ordered, windowsHolderCounts{Handles: len(eligible), Processes: len(processes), Objects: objects, NoAddresses: noAddresses}
 }
 
 // orderWindowsHolderUser orders one user's candidates by file object and
@@ -947,6 +966,14 @@ func orderWindowsHolderUser(eligible []windowsHolderHandle) ([]windowsHolderHand
 		}
 		return a.Handle < b.Handle
 	}
+	canRefuse := func(group []windowsHolderHandle) bool {
+		for _, h := range group {
+			if h.Access&windowsHolderWriteAccess != 0 {
+				return true
+			}
+		}
+		return false
+	}
 	for _, group := range groups {
 		sort.Slice(group, func(i, j int) bool { return less(group[i], group[j]) })
 		list = append(list, group)
@@ -954,6 +981,9 @@ func orderWindowsHolderUser(eligible []windowsHolderHandle) ([]windowsHolderHand
 	sort.Slice(list, func(i, j int) bool {
 		if len(list[i]) != len(list[j]) {
 			return len(list[i]) < len(list[j])
+		}
+		if a, b := canRefuse(list[i]), canRefuse(list[j]); a != b {
+			return a
 		}
 		return less(list[i][0], list[j][0])
 	})
@@ -1454,8 +1484,8 @@ func (s *windowsHolderScan) summary() string {
 // log line for every close, the HIGH audit row once per holder per streak.
 func (g *windowsHolderState) record(target string, holder windowsHolderHandle, closed bool, reason string, scan *windowsHolderScan, counts windowsHolderCounts) {
 	if closed {
-		line := fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) on %d file object(s), %d closed in this pass). %s and so was a test open for deletion; the file was not changed and the process was left running (close %d of this streak; if it takes the handle again it is closed again no sooner than %s; scan: %s)",
-			holder.describe(), windowsHolderSubject(target), holder.Access, counts.Handles, counts.Processes, counts.Objects, counts.Closed, windowsHolderRefusedWhat(target), g.closes, g.nextClose.Format("15:04:05"), scan.summary())
+		line := fmt.Sprintf("[hook-guardian] tamper: closed the handle %s had on %s (access 0x%08x; one of %d candidate handle(s) in %d process(es) %s, %d closed in this pass). %s and so was a test open for deletion; the file was not changed and the process was left running (close %d of this streak; if it takes the handle again it is closed again no sooner than %s; scan: %s)",
+			holder.describe(), windowsHolderSubject(target), holder.Access, counts.Handles, counts.Processes, counts.where(), counts.Closed, windowsHolderRefusedWhat(target), g.closes, g.nextClose.Format("15:04:05"), scan.summary())
 		if len(counts.Left) > 0 {
 			line += "; also open and not closed: " + strings.Join(counts.Left, "; ")
 		}
@@ -1529,8 +1559,8 @@ func (r windowsHolderAuditRow) event() audit.Event {
 	observed := windowsHolderRefusedWhat(r.Hook) + ", and so was a test open of it for deletion."
 	var details string
 	if r.Closed {
-		details = fmt.Sprintf("%s had %s open (access 0x%08x). %s The hook guardian closed that handle (one of %d candidate handle(s) in %d process(es) on %d file object(s)); the file was not changed and the process was not ended.",
-			who, windowsHolderSubject(r.Hook), r.Access, observed, r.Counts.Handles, r.Counts.Processes, r.Counts.Objects)
+		details = fmt.Sprintf("%s had %s open (access 0x%08x). %s The hook guardian closed that handle (one of %d candidate handle(s) in %d process(es) %s); the file was not changed and the process was not ended.",
+			who, windowsHolderSubject(r.Hook), r.Access, observed, r.Counts.Handles, r.Counts.Processes, r.Counts.where())
 	} else {
 		details = fmt.Sprintf("%s has %s open (access 0x%08x). %s This handle may be the cause. The hook guardian did not close it: %s.",
 			who, windowsHolderSubject(r.Hook), r.Access, observed, clean(r.Reason))
@@ -1546,7 +1576,7 @@ func (r windowsHolderAuditRow) event() audit.Event {
 			"holder_account": clean(r.Account), "holder_session": r.Holder.Session, "granted_access": fmt.Sprintf("0x%08x", r.Access),
 			"handle_value": uint64(r.Handle), "wow64": r.Holder.Wow64, "closed": r.Closed, "not_closed_reason": clean(r.Reason),
 			"streak_closes": r.Streak, "scan_ms": r.ScanMS, "handles_listed": r.Listed, "handles_inspected": r.Probed,
-			"candidate_handles": r.Counts.Handles, "candidate_processes": r.Counts.Processes, "candidate_file_objects": r.Counts.Objects,
+			"candidate_handles": r.Counts.Handles, "candidate_processes": r.Counts.Processes, "candidate_file_objects": r.Counts.Objects, "file_objects_counted_per_handle": r.Counts.NoAddresses,
 			"handles_closed_in_pass": r.Counts.Closed, "note": clean(r.Note),
 		},
 	}

@@ -1935,6 +1935,30 @@ func TestWindowsHolderTheLockFilesDefenseClawHoldsAreNeverActedOn(t *testing.T) 
 	}
 }
 
+// Within one user the handle that can write or append is tried first (it is
+// the kind that can refuse a start), also where the system shows no file
+// object addresses and every handle is an object of its own; the counts then
+// say they count handles.
+func TestWindowsHolderTriesTheWriteHandleFirstWhereNoAddressesAreShown(t *testing.T) {
+	user := windowsHolderProcess{PID: 4100, Started: 1, SID: fakeUserSID, Session: 2}
+	read1 := windowsHolderHandle{Process: user, Handle: 0x40, Access: 0x120089}
+	read2 := windowsHolderHandle{Process: user, Handle: 0x44, Access: 0x120089}
+	write := windowsHolderHandle{Process: user, Handle: 0x48, Access: fakeWriteAccess}
+	ordered, counts := orderWindowsHolderCandidates([]windowsHolderHandle{read1, read2, write})
+	if ordered[0].Handle != 0x48 || ordered[1].Handle != 0x40 || ordered[2].Handle != 0x44 {
+		t.Fatalf("order %#x %#x %#x, want the write handle first, then by handle value", ordered[0].Handle, ordered[1].Handle, ordered[2].Handle)
+	}
+	if !counts.NoAddresses || counts.Objects != 3 || !strings.Contains(counts.where(), "counting each handle whose file object address the system does not show") {
+		t.Fatalf("counts %+v: %s", counts, counts.where())
+	}
+	// With addresses shown the counts are file objects.
+	read1.Object, read2.Object, write.Object = 0xa0, 0xa0, 0xb0
+	_, counts = orderWindowsHolderCandidates([]windowsHolderHandle{read1, read2, write})
+	if counts.NoAddresses || counts.where() != "on 2 file object(s)" {
+		t.Fatalf("counts %+v: %s", counts, counts.where())
+	}
+}
+
 // A hold of machine-policy.json (every guarded call fails closed while the
 // hook cannot read it) is closed at the second check by the same bounded
 // close, with one HIGH row that names the file.
