@@ -854,30 +854,50 @@ func TestSkippedTreeHashBounds(t *testing.T) {
 	}
 }
 
+// hermesDeclaredEntrypointForms is every way a manifest the plugin scanner
+// reads declares a runtime entrypoint (top-level main, bin as a string or a
+// map, entrypoint and entry, in each manifest file, in JSON and YAML). DIR
+// stands for the folder the declared run.js is in; also is a second manifest
+// that declares nothing, which must not shadow the first.
+var hermesDeclaredEntrypointForms = map[string]struct{ file, body, alsoFile, alsoBody string }{
+	"main":           {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"DIR/run.js"}`},
+	"main-dotdir":    {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"./DIR/run.js"}`},
+	"main-lead":      {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"/DIR/run.js"}`},
+	"main-dotdot":    {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"lib/../DIR/run.js"}`},
+	"main-space":     {file: "package.json", body: `{"name":"p","main":"  DIR/run.js "}`},
+	"bin-string":     {file: "package.json", body: `{"name":"p","version":"1.0.0","bin":"DIR/run.js"}`},
+	"bin-map":        {file: "package.json", body: `{"name":"p","version":"1.0.0","bin":{"p":"DIR/run.js"}}`},
+	"bin-map-many":   {file: "package.json", body: `{"name":"p","bin":{"a":"lib/a.js","p":"DIR/run.js"}}`},
+	"entrypoint":     {file: "package.json", body: `{"name":"p","entrypoint":"DIR/run.js"}`},
+	"entry":          {file: "plugin.json", body: `{"name":"p","entry":"DIR/run.js"}`},
+	"manifest-json":  {file: "manifest.json", body: `{"name":"p","main":"DIR/run.js"}`},
+	"openclaw":       {file: "openclaw.plugin.json", body: `{"id":"p","entrypoint":"DIR/run.js"}`},
+	"claude-dir":     {file: ".claude-plugin/plugin.json", body: `{"name":"p","entrypoint":"DIR/run.js"}`},
+	"codex-dir":      {file: ".codex-plugin/plugin.json", body: `{"name":"p","entry":"DIR/run.js"}`},
+	"cursor-dir":     {file: ".cursor-plugin/plugin.json", body: `{"name":"p","main":"DIR/run.js"}`},
+	"yaml":           {file: "plugin.yaml", body: "name: p\nentrypoint: DIR/run.js\n"},
+	"yaml-entry":     {file: "plugin.yaml", body: "name: p\nentry: \"DIR/run.js\"\n"},
+	"yaml-main":      {file: "plugin.yml", body: "name: p\nmain: DIR/run.js\n"},
+	"yaml-bin":       {file: "plugin.yaml", body: "name: p\nbin:\n  p: DIR/run.js\n"},
+	"yaml-merge-key": {file: "plugin.yaml", body: "name: p\nbase: &b\n  entrypoint: DIR/run.js\n<<: *b\n"},
+	"shadowed": {file: "plugin.yaml", body: "name: p\nentrypoint: DIR/run.js\n",
+		alsoFile: "package.json", alsoBody: `{"name":"p","main":"lib/other.js"}`},
+}
+
 // GAP-0645 review 11: the plugin scanner reads a manifest-declared
 // entrypoint whatever folder it is in, a bytecode cache included, so an
 // edit to it must reach a scan; the cache Hermes writes stays unhashed.
 func TestHermesDeclaredEntrypointInSkippedDirChangesRescan(t *testing.T) {
-	manifests := map[string]struct{ file, body string }{
-		"main":        {"package.json", `{"name":"p","version":"1.0.0","main":"DIR/run.js"}`},
-		"main-dotdir": {"package.json", `{"name":"p","version":"1.0.0","main":"./DIR/run.js"}`},
-		"main-lead":   {"package.json", `{"name":"p","version":"1.0.0","main":"/DIR/run.js"}`},
-		"main-dotdot": {"package.json", `{"name":"p","version":"1.0.0","main":"lib/../DIR/run.js"}`},
-		"bin-string":  {"package.json", `{"name":"p","version":"1.0.0","bin":"DIR/run.js"}`},
-		"bin-map":     {"package.json", `{"name":"p","version":"1.0.0","bin":{"p":"DIR/run.js"}}`},
-		"entry":       {"plugin.json", `{"name":"p","entry":"DIR/run.js"}`},
-		"other-key":   {"plugin.json", `{"name":"p","launcher":{"path":"DIR/run.js"}}`},
-		"claude-dir":  {".claude-plugin/plugin.json", `{"name":"p","entrypoint":"DIR/run.js"}`},
-		"yaml":        {"plugin.yaml", "name: p\nentrypoint: DIR/run.js\n"},
-		"yaml-map":    {"plugin.yml", "name: p\nruntime:\n  - path: DIR/run.js\n"},
-	}
 	for _, dir := range []string{"node_modules", "__pycache__", "lib/__pycache__"} {
-		for name, manifest := range manifests {
+		for name, manifest := range hermesDeclaredEntrypointForms {
 			t.Run(dir+"/"+name, func(t *testing.T) {
 				f := newHermesPluginFixture(t)
 				path := f.plugin(f.bundledRoot, "web/ddgs")
 				writePluginFile(t, filepath.Join(path, filepath.FromSlash(manifest.file)),
 					strings.ReplaceAll(manifest.body, "DIR", dir))
+				if manifest.alsoFile != "" {
+					writePluginFile(t, filepath.Join(path, filepath.FromSlash(manifest.alsoFile)), manifest.alsoBody)
+				}
 				entry := filepath.Join(path, filepath.FromSlash(dir), "run.js")
 				writePluginFile(t, entry, "safe()\n")
 				f.w.runRescanCycle(context.Background())
@@ -1003,5 +1023,123 @@ func TestHermesManifestFilesMatchScanner(t *testing.T) {
 	slices.Sort(ours)
 	if len(scanned) == 0 || !slices.Equal(scanned, ours) {
 		t.Fatalf("manifest files = %q, scanner reads %q", ours, scanned)
+	}
+}
+
+// A manifest-declared entrypoint inside a bytecode cache is vendor content
+// only while its bytes are the pinned ones: the digest hashes it, so an edit
+// reaches admission and is scanned instead of being allowed as vendor bytes.
+func TestHermesDeclaredEntrypointIsBoundByVendorDigest(t *testing.T) {
+	for _, dir := range []string{"node_modules", "__pycache__", "lib/__pycache__"} {
+		for name, manifest := range hermesDeclaredEntrypointForms {
+			t.Run(dir+"/"+name, func(t *testing.T) {
+				f := newHermesPluginFixture(t)
+				path := f.plugin(f.bundledRoot, "web/ddgs")
+				writePluginFile(t, filepath.Join(path, filepath.FromSlash(manifest.file)),
+					strings.ReplaceAll(manifest.body, "DIR", dir))
+				if manifest.alsoFile != "" {
+					writePluginFile(t, filepath.Join(path, filepath.FromSlash(manifest.alsoFile)), manifest.alsoBody)
+				}
+				entry := filepath.Join(path, filepath.FromSlash(dir), "run.js")
+				writePluginFile(t, entry, "safe()\n")
+				f.pinVendor("web/ddgs", path)
+				f.w.runRescanCycle(context.Background())
+				f.unscannedVendor(path)
+
+				writePluginFile(t, entry, "exec()\n")
+				f.w.runRescanCycle(context.Background())
+				if got := f.scan.scans(path); got != 1 {
+					t.Fatalf("same-size edit to a declared entrypoint scans = %d, want 1", got)
+				}
+				f.refused(path)
+				if f.w.hermesVendorPlugin(InstallEvent{Type: InstallPlugin, Path: path}) {
+					t.Fatal("an edited declared entrypoint still matches the vendor digest")
+				}
+			})
+		}
+	}
+}
+
+// Benign twin: text in a manifest that is not an entrypoint field, such as a
+// description that names a generated cache file, declares nothing, so the
+// cache Hermes writes is neither hashed into the vendor digest nor a change.
+func TestHermesManifestProseDeclaresNothing(t *testing.T) {
+	prose := map[string]struct{ file, body string }{
+		"yaml-description": {"plugin.yaml", "name: p\ndescription: caches itself in DIR/provider.cpython-312.pyc\n"},
+		"json-description": {"package.json", `{"name":"p","description":"see DIR/provider.cpython-312.pyc"}`},
+		"launcher":         {"plugin.json", `{"name":"p","launcher":{"path":"DIR/provider.cpython-312.pyc"}}`},
+		"runtime":          {"plugin.yaml", "name: p\nruntime:\n  - path: DIR/provider.cpython-312.pyc\n"},
+		"nested":           {"package.json", `{"name":"p","defenseclaw":{"entrypoint":"DIR/provider.cpython-312.pyc"}}`},
+		"scripts":          {"package.json", `{"name":"p","scripts":{"start":"DIR/provider.cpython-312.pyc"}}`},
+		"entrypoints-list": {"package.json", `{"name":"p","entrypoints":["DIR/provider.cpython-312.pyc"]}`},
+		"main-list":        {"package.json", `{"name":"p","main":["DIR/provider.cpython-312.pyc"]}`},
+		"bin-list":         {"package.json", `{"name":"p","bin":["DIR/provider.cpython-312.pyc"]}`},
+		"yaml-nested-main": {"plugin.yaml", "name: p\nprovides:\n  main: DIR/provider.cpython-312.pyc\n"},
+	}
+	for _, dir := range []string{"__pycache__", "lib/__pycache__"} {
+		for name, manifest := range prose {
+			t.Run(dir+"/"+name, func(t *testing.T) {
+				f := newHermesPluginFixture(t)
+				path := f.plugin(f.bundledRoot, "web/ddgs")
+				writePluginFile(t, filepath.Join(path, filepath.FromSlash(manifest.file)),
+					strings.ReplaceAll(manifest.body, "DIR", dir))
+				before, err := hermesPluginTreeDigest(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.w.runRescanCycle(context.Background())
+				f.w.runRescanCycle(context.Background())
+				if got := f.scan.scans(path); got != 1 {
+					t.Fatalf("first-sight scans = %d, want 1", got)
+				}
+				admissions := len(f.admitted[path])
+
+				writePluginFile(t, filepath.Join(path, filepath.FromSlash(dir), "provider.cpython-312.pyc"), "cache one")
+				f.w.runRescanCycle(context.Background())
+				writePluginFile(t, filepath.Join(path, filepath.FromSlash(dir), "provider.cpython-312.pyc"), "cache two")
+				f.w.runRescanCycle(context.Background())
+				if got := f.scan.scans(path); got != 1 {
+					t.Fatalf("generated cache file caused a scan: %d scans", got)
+				}
+				if got := len(f.admitted[path]); got != admissions {
+					t.Fatalf("generated cache file caused %d admissions", got-admissions)
+				}
+				if after, err := hermesPluginTreeDigest(path); err != nil || after != before {
+					t.Fatalf("generated cache file changed the vendor digest: %v", err)
+				}
+				if extra := skippedTreeHash(path); extra != "" {
+					t.Fatalf("generated cache file hashed: %q", extra)
+				}
+			})
+		}
+	}
+}
+
+// The entrypoint keys the digest and the rescan hash resolve are the ones the
+// plugin scanner reads from a manifest.
+func TestHermesManifestEntrypointKeysMatchScanner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "cli", "defenseclaw", "scanner", "plugin_scanner", "scanner.py"))
+	if err != nil {
+		t.Skipf("plugin scanner: %v", err)
+	}
+	body := regexp.MustCompile(`(?s)def _manifest_entrypoints\(.*?\n    return eps`).Find(src)
+	if body == nil {
+		t.Fatal("_manifest_entrypoints not found in the plugin scanner")
+	}
+	var scanned []string
+	for _, m := range regexp.MustCompile(`raw\.get\("([A-Za-z_]+)"\)`).FindAllSubmatch(body, -1) {
+		scanned = append(scanned, string(m[1]))
+	}
+	if loop := regexp.MustCompile(`for key in \(([^)]*)\)`).FindSubmatch(body); loop != nil {
+		for _, m := range regexp.MustCompile(`"([A-Za-z_]+)"`).FindAllSubmatch(loop[1], -1) {
+			scanned = append(scanned, string(m[1]))
+		}
+	}
+	ours := slices.Clone(hermesManifestEntrypointKeys)
+	slices.Sort(scanned)
+	slices.Sort(ours)
+	scanned = slices.Compact(scanned)
+	if len(scanned) == 0 || !slices.Equal(scanned, ours) {
+		t.Fatalf("entrypoint keys = %q, scanner reads %q", ours, scanned)
 	}
 }
