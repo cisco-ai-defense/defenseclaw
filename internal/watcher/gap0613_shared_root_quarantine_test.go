@@ -446,3 +446,216 @@ func TestGAP0613PolicyReleaseKeepsAnEarlierRuntimeBlock(t *testing.T) {
 		t.Errorf("amp journal = %+v, want the operator's runtime disable and its reason, no install block", entry)
 	}
 }
+
+// A valid earlier runtime=enable row is a usable skill, not a protective
+// disable. A later enforced default deny must replace it while the denied
+// copy remains in its folder after quarantine fails.
+func TestGAP0613PolicyDenyOverridesEarlierRuntimeEnable(t *testing.T) {
+	w, _, evt := sharedRootDefaultDenyWatcher(t, false)
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "codex", "runtime", "enable", "operator previously enabled"); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("denial verdict = %+v, want blocked", res)
+	}
+	if _, err := os.Lstat(evt.Path); err != nil {
+		t.Fatalf("denied copy should remain after failed quarantine: %v", err)
+	}
+	disabled, err := enforce.NewPolicyEngine(w.store).IsDisabledForConnector("skill", evt.Name, "codex")
+	if err != nil || !disabled {
+		entry, _ := w.store.GetActionForConnector("skill", evt.Name, "codex")
+		t.Errorf("codex protected skill is callable: disabled=%v err=%v row=%+v", disabled, err, entry)
+	}
+}
+
+// An independent install block must not be claimed by a later policy hold.
+// Relaxing that policy after a clean scan does not remove an earlier manual
+// install block which no policy change authorized the watcher to lift.
+func TestGAP0613PolicyReleaseKeepsEarlierInstallBlock(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "amp", "install", "block", "operator blocked this skill"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.SetSourcePathForConnector("skill", evt.Name, "amp", evt.Path); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("denial verdict = %+v, want blocked", res)
+	}
+	cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{
+		Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"},
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	res := w.runAdmission(context.Background(), evt)
+	if res.Verdict == VerdictBlocked || res.Verdict == VerdictRejected || res.Verdict == VerdictScanError {
+		t.Fatalf("replacement scan = %+v, want allowed or clean", res)
+	}
+	entry, err := w.store.GetActionForConnector("skill", evt.Name, "amp")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Reason != "operator blocked this skill" {
+		t.Errorf("prior install block erased by policy release: row=%+v err=%v", entry, err)
+	}
+}
+
+// Control: ordinary clean admission does not erase an operator install block.
+func TestGAP0613ManualInstallBlockSurvivesCleanRescanWithoutPolicyHold(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{
+		Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"},
+	}
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "amp", "install", "block", "operator blocked this skill"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.SetSourcePathForConnector("skill", evt.Name, "amp", evt.Path); err != nil {
+		t.Fatal(err)
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	res := w.runAdmission(context.Background(), evt)
+	if res.Verdict == VerdictBlocked || res.Verdict == VerdictRejected || res.Verdict == VerdictScanError {
+		t.Fatalf("clean scan = %+v", res)
+	}
+	entry, err := w.store.GetActionForConnector("skill", evt.Name, "amp")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || entry.Reason != "operator blocked this skill" {
+		t.Errorf("control: operator install block not retained: row=%+v err=%v", entry, err)
+	}
+}
+
+// The same runtime-enable hole applies when the owner itself has the deny.
+func TestGAP0613OwnerDenyOverridesEarlierRuntimeEnable(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	cfg.AssetPolicy.Connectors = map[string]config.PerConnectorAssetPolicy{
+		"amp": {Skill: &config.PerConnectorAssetTypePolicy{Default: "deny"}},
+	}
+	w.SetRootConsumers(nil)
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "amp", "runtime", "enable", "operator previously enabled"); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("denial verdict = %+v, want blocked", res)
+	}
+	if _, err := os.Lstat(evt.Path); err != nil {
+		t.Fatalf("denied copy should remain after failed quarantine: %v", err)
+	}
+	disabled, err := enforce.NewPolicyEngine(w.store).IsDisabledForConnector("skill", evt.Name, "amp")
+	if err != nil || !disabled {
+		entry, _ := w.store.GetActionForConnector("skill", evt.Name, "amp")
+		t.Errorf("owner's protected skill is callable: disabled=%v err=%v row=%+v", disabled, err, entry)
+	}
+}
+
+// The committed scan-verdict control covers a block with no policy hold.
+// Exercise the adjacent lifecycle: a later policy denial must not take
+// ownership of that existing install block and erase it when policy relaxes.
+func TestGAP0613PolicyReleaseKeepsEarlierScanVerdictInstallBlock(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	w.journalFailedQuarantine(evt, "skill", os.ErrPermission)
+	if err := w.store.SetSourcePathForConnector("skill", evt.Name, "amp", evt.Path); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("policy denial = %+v, want blocked", res)
+	}
+	cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{
+		Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"},
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	res := w.runAdmission(context.Background(), evt)
+	if res.Verdict == VerdictBlocked || res.Verdict == VerdictRejected || res.Verdict == VerdictScanError {
+		t.Fatalf("replacement scan = %+v, want allowed or clean", res)
+	}
+	entry, err := w.store.GetActionForConnector("skill", evt.Name, "amp")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || !strings.HasPrefix(entry.Reason, quarantineFailedReason) {
+		t.Errorf("earlier scan-verdict install block erased by policy release: row=%+v err=%v", entry, err)
+	}
+}
+
+// A policy hold for source B must not rebind an independent runtime block
+// pinned to source A. Otherwise a later allow for B can erase A's block.
+func TestGAP0613PolicyHoldKeepsEarlierRuntimeBlockSourcePath(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	priorPath := filepath.Join(filepath.Dir(evt.Path), "earlier-location", evt.Name)
+	if err := os.MkdirAll(priorPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(priorPath, "SKILL.md"), []byte("---\nname: blocked-skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "amp", "runtime", "disable", "operator blocked earlier location"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.SetSourcePathForConnector("skill", evt.Name, "amp", priorPath); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("policy denial = %+v, want blocked", res)
+	}
+	cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{
+		Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"},
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	if res := w.runAdmission(context.Background(), evt); res.Verdict == VerdictBlocked || res.Verdict == VerdictRejected || res.Verdict == VerdictScanError {
+		t.Fatalf("replacement scan = %+v, want allowed or clean", res)
+	}
+	entry, err := w.store.GetActionForConnector("skill", evt.Name, "amp")
+	if err != nil || entry == nil || entry.Actions.Runtime != "disable" || entry.SourcePath != priorPath {
+		t.Errorf("earlier block lost its source path: row=%+v err=%v, want %q", entry, err, priorPath)
+	}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: evt.Name, SourcePathContains: []string{evt.Path}}}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictAllowed {
+		t.Fatalf("source-B allow rule = %+v, want allowed", res)
+	}
+	disabled, err := enforce.NewPolicyEngine(w.store).IsDisabledForConnector("skill", evt.Name, "amp")
+	if err != nil || !disabled {
+		t.Errorf("source-B allow erased source-A runtime block: disabled=%v err=%v", disabled, err)
+	}
+}
+
+// Control: without the intervening policy hold, B's pinned allow leaves A's
+// runtime disable in place because the journal source path is still A.
+func TestGAP0613SourcePinnedAllowKeepsDifferentRuntimeBlockControl(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	priorPath := filepath.Join(filepath.Dir(evt.Path), "earlier-location", evt.Name)
+	if err := os.MkdirAll(priorPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{
+		Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"},
+	}
+	cfg.AssetPolicy.Skill.Allowed = []config.AssetPolicyRule{{Name: evt.Name, SourcePathContains: []string{evt.Path}}}
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "amp", "runtime", "disable", "operator blocked earlier location"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.store.SetSourcePathForConnector("skill", evt.Name, "amp", priorPath); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictAllowed {
+		t.Fatalf("source-B allow rule = %+v, want allowed", res)
+	}
+	disabled, err := enforce.NewPolicyEngine(w.store).IsDisabledForConnector("skill", evt.Name, "amp")
+	if err != nil || !disabled {
+		t.Errorf("control: source-B allow erased source-A runtime block: disabled=%v err=%v", disabled, err)
+	}
+}
+
+// Benign twin: the hold that replaced an earlier runtime enable is lifted when
+// the denial goes, so relaxing the policy leaves the skill callable.
+func TestGAP0613PolicyHoldOverEarlierRuntimeEnableLiftsWithTheDenial(t *testing.T) {
+	w, cfg, evt := sharedRootDefaultDenyWatcher(t, false)
+	if err := w.store.SetActionFieldForConnector("skill", evt.Name, "codex", "runtime", "enable", "operator previously enabled"); err != nil {
+		t.Fatal(err)
+	}
+	if res := w.runAdmission(context.Background(), evt); res.Verdict != VerdictBlocked {
+		t.Fatalf("denial verdict = %+v, want blocked", res)
+	}
+	cfg.AssetPolicy.Connectors["codex"] = config.PerConnectorAssetPolicy{
+		Skill: &config.PerConnectorAssetTypePolicy{Default: "allow"},
+	}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "skill-scanner"} }
+	if res := w.runAdmission(context.Background(), evt); res.Verdict == VerdictBlocked || res.Verdict == VerdictRejected || res.Verdict == VerdictScanError {
+		t.Fatalf("replacement scan = %+v, want allowed or clean", res)
+	}
+	disabled, err := enforce.NewPolicyEngine(w.store).IsDisabledForConnector("skill", evt.Name, "codex")
+	if err != nil || disabled {
+		entry, _ := w.store.GetActionForConnector("skill", evt.Name, "codex")
+		t.Errorf("skill stays blocked after the denial went: disabled=%v err=%v row=%+v", disabled, err, entry)
+	}
+}

@@ -3304,9 +3304,10 @@ func (w *InstallWatcher) policyHoldScopes(evt InstallEvent) []string {
 // the connector whose rule denied it both get the install block and, on their
 // own row, the runtime disable. Without the runtime disable a denial by the
 // default (default_action deny) rule, which the hook evaluates only when
-// runtime_detection is on, left the surviving skill callable. A runtime
-// disable already on a row for another reason is left as it is and not
-// claimed. releasePolicyHolds lifts what the hold set when the denial goes; an
+// runtime_detection is on, left the surviving skill callable. A block already
+// on a row for another reason (install, runtime or file) is left as it is: not
+// claimed, not re-pinned to this copy, not lifted with the hold. A runtime
+// enable is no block and the hold replaces it. releasePolicyHolds lifts what the hold set when the denial goes; an
 // operator enable clears it too. A removed link, or an asset that is gone,
 // leaves nothing to run and no runtime disable.
 func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string, err error, decidedBy string) {
@@ -3359,14 +3360,29 @@ func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string
 	for _, row := range rows {
 		prev, _ := w.store.GetActionForConnector(targetType, name, row.scope)
 		owned := policyHeldFields(reasonOf(prev))
+		// A field already at its protective value that no hold of ours set is an
+		// earlier block (an operator, a scan verdict, a failed quarantine). The
+		// hold does not claim it, rebind its source path or lift it later. Any
+		// other value, a runtime enable among them, is not a block and the hold
+		// replaces it.
+		independent := func(field string) bool {
+			value := actionFieldValue(prev, field)
+			return value != "" && value == policyProtectiveValue(field) && !slices.Contains(owned, field)
+		}
+		earlier := false
+		for _, field := range []string{"install", "runtime", "file"} {
+			earlier = earlier || independent(field)
+		}
+		// An earlier block pinned to another copy keeps that path, since an
+		// allow rule for this copy would otherwise lift it. The row then holds
+		// only the runtime disable (it covers every copy of the name), and holds
+		// nothing when that disable is the earlier block.
+		pinnedElsewhere := earlier && prev.SourcePath != "" && !sameWatcherPath(prev.SourcePath, evt.Path)
 		var claim []string
-		independent := false
 		for _, field := range row.fields {
-			if field == "runtime" && actionFieldValue(prev, "runtime") != "" && !slices.Contains(owned, "runtime") {
-				independent = true
-				continue
+			if !independent(field) && (!pinnedElsewhere || field == "runtime") {
+				claim = append(claim, field)
 			}
-			claim = append(claim, field)
 		}
 		for _, field := range owned {
 			if !slices.Contains(claim, field) && actionFieldValue(prev, field) != "" {
@@ -3379,7 +3395,7 @@ func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string
 		rowReason := reason + policyDenialMark(claim)
 		if prior := policyPriorReason(reasonOf(prev)); prior != "" {
 			rowReason = prior + policyDenialSep + rowReason
-		} else if independent && owned == nil && reasonOf(prev) != "" {
+		} else if earlier && owned == nil && reasonOf(prev) != "" {
 			rowReason = prev.Reason + policyDenialSep + rowReason
 		}
 		for _, field := range claim {
@@ -3389,8 +3405,24 @@ func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string
 			}
 			_ = w.store.SetActionFieldForConnector(targetType, name, row.scope, field, value, rowReason)
 		}
-		_ = w.store.SetSourcePathForConnector(targetType, name, row.scope, evt.Path)
+		if !pinnedElsewhere {
+			_ = w.store.SetSourcePathForConnector(targetType, name, row.scope, evt.Path)
+		}
 	}
+}
+
+// policyProtectiveValue is the value of a journal action field that blocks
+// the asset, or empty for a field that holds no block.
+func policyProtectiveValue(field string) string {
+	switch field {
+	case "install":
+		return "block"
+	case "runtime":
+		return "disable"
+	case "file":
+		return "quarantine"
+	}
+	return ""
 }
 
 func reasonOf(entry *audit.ActionEntry) string {
