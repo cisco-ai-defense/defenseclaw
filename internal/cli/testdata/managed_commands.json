@@ -41,13 +41,13 @@
       "note": "Shows the guardrail profile that applies to your agents. On Windows the answer points to the administrator's policy view."
     },
     {
-      "command": "defenseclaw guardrail (every other command)",
+      "command": "defenseclaw guardrail",
       "managed_linux": "Refused",
       "managed_macos": "Refused",
       "managed_windows": "Refused",
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "guardrail status",
-      "note": "The guardrail is set in the administrator's config."
+      "note": "Every guardrail command except `profile explain`, which the row above offers. The guardrail is set in the administrator's config."
     },
     {
       "command": "defenseclaw doctor",
@@ -104,7 +104,7 @@
       "note": "Setup belongs to the per-user install."
     },
     {
-      "command": "defenseclaw config set, config unset",
+      "command": "defenseclaw config set",
       "managed_linux": "Refused",
       "managed_macos": "Refused",
       "managed_windows": "Refused",
@@ -113,13 +113,49 @@
       "note": "The configuration is changed in the administrator's config."
     },
     {
-      "command": "defenseclaw skill, mcp, plugin, tool ...",
+      "command": "defenseclaw config unset",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "config unset",
+      "note": "The configuration is changed in the administrator's config."
+    },
+    {
+      "command": "defenseclaw skill ...",
       "managed_linux": "Refused",
       "managed_macos": "Refused",
       "managed_windows": "Refused",
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "skill",
       "note": "The admission policy is set in the administrator's config; an administrator scans an asset from an elevated prompt."
+    },
+    {
+      "command": "defenseclaw mcp ...",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "mcp",
+      "note": "Same as `skill`."
+    },
+    {
+      "command": "defenseclaw plugin ...",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "plugin",
+      "note": "Same as `skill`."
+    },
+    {
+      "command": "defenseclaw tool ...",
+      "managed_linux": "Refused",
+      "managed_macos": "Refused",
+      "managed_windows": "Refused",
+      "per_user": "Linux, macOS, Windows",
+      "per_user_path": "tool",
+      "note": "Same as `skill`."
     },
     {
       "command": "defenseclaw policy show",
