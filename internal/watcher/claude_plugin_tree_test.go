@@ -228,3 +228,59 @@ func TestPathHasGitDirSegment(t *testing.T) {
 		}
 	}
 }
+
+// CodeRabbit on #1432: if Run hands queueExistingClaudePlugins a populated
+// .git directory (marketplace is not a plugin copy), walking it would queue
+// non-dot children such as "objects". Bail when dir itself is under .git.
+func TestQueueExistingClaudePluginsSkipsGitDirRoot(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	gitDir := filepath.Join(cache, "marketplace", ".git")
+	objects := filepath.Join(gitDir, "objects")
+	if err := os.MkdirAll(objects, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	w.queueExistingClaudePlugins(context.Background(), gitDir, 2)
+	if len(w.pending) != 0 {
+		t.Fatalf("queued %v from .git root, want none", w.pending)
+	}
+}
+
+func TestQueueDueIssuesClearsStagingAndGitIssues(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	staging := filepath.Join(cache, "temp_subdir_1_abc.clone")
+	gitHooks := filepath.Join(staging, ".git", "hooks")
+	if err := os.MkdirAll(gitHooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	w.state.setIssue(AdmissionIssue{
+		Type: string(InstallPlugin),
+		Name: "hooks",
+		Path: gitHooks,
+		Kind: AdmissionUnscanned,
+	})
+	// Force the retry due so queueDueIssues sees it immediately.
+	w.state.mu.Lock()
+	r := w.state.retry[gitHooks]
+	r.due = w.state.now().Add(-time.Second)
+	w.state.retry[gitHooks] = r
+	w.state.mu.Unlock()
+	if len(w.state.dueIssues(AdmissionUnscanned, AdmissionNotQuarantined)) == 0 {
+		t.Fatal("expected saved unscanned issue")
+	}
+	w.queueDueIssues()
+	if len(w.pending) != 0 {
+		t.Fatalf("pending %v, want empty", w.pending)
+	}
+	if len(w.state.dueIssues(AdmissionUnscanned, AdmissionNotQuarantined)) != 0 {
+		t.Fatal("staging/.git issue should be cleared, not only skipped")
+	}
+}

@@ -1414,7 +1414,9 @@ func (w *InstallWatcher) queueDueIssues() {
 			continue
 		}
 		// Staging clones and .git internals are never plugins; do not retry them (#1428).
+		// Clear stale saved issues so they do not linger in admission reports.
 		if w.inClaudePluginStaging(issue.Path, 0) || pathHasGitDirSegment(issue.Path) {
+			w.state.clearIssue(issue.Path)
 			continue
 		}
 		w.queuePending(issue.Path)
@@ -3635,6 +3637,11 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 		return
 	}
 	if w.inClaudePluginStaging(dir, 0) {
+		return
+	}
+	// If Run handed us a .git directory (or any path under .git), do not walk
+	// its children — objects/hooks look like plugins and can be queued as skills.
+	if pathHasGitDirSegment(dir) {
 		return
 	}
 	entries, err := os.ReadDir(dir)
