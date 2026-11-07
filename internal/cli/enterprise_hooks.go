@@ -3907,6 +3907,13 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 					if _, exclusive := priorExclusive[path]; exclusive {
 						passWrites.observe(event, priorLeft)
 					}
+					// A write that leaves the file as the last pass verified it
+					// is this pass putting it back, not a new change. Cancelling
+					// the pass for it discarded the repair the worker had just
+					// made, so nothing was reported (GAP-0754).
+					if enterpriseHookWatchOwnedFileVerified(path, priorLeft) {
+						continue
+					}
 					drop, _ := enterpriseHookWatchEventDropped(time.Now(), priorSettleUntil, event,
 						priorFailed[path], priorExclusive, priorShared, priorFound, priorLeft,
 						enterpriseHookOwnedFileFingerprint, true)
@@ -4486,6 +4493,13 @@ func enterpriseHookWatchEventDropped(
 		return true, settling
 	}
 	return false, settling
+}
+
+// enterpriseHookWatchOwnedFileVerified reports whether the owned file holds
+// exactly what the last pass left there.
+func enterpriseHookWatchOwnedFileVerified(path string, verified map[string]string) bool {
+	want, known := verified[filepath.Clean(path)]
+	return known && enterpriseHookOwnedFileFingerprint(filepath.Clean(path)) == want
 }
 
 func enterpriseHookWatchOwnedFileChangedBetweenSnapshots(path string, found, left map[string]string) bool {
