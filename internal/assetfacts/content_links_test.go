@@ -4,6 +4,7 @@
 package assetfacts
 
 import (
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,10 +80,12 @@ func TestReadContentBoundIsExplicit(t *testing.T) {
 func TestEncodeKeepsOversizedContentAsTruncated(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "np10")
 	var contents []Content
+	// Text that deflates to nothing fits a header; this does not shrink.
+	random := rand.New(rand.NewSource(2))
 	for c := 0; c < 8; c++ {
 		var files []ContentFile
 		for i := 0; i < maxContentFiles; i++ {
-			files = append(files, ContentFile{Rel: strings.Repeat("d", 980) + string(rune(0x61+c)) + string(rune(0x61+i%26)) + string(rune(0x41+i/26)) + ".md", Text: strings.Repeat("t", 700)})
+			files = append(files, ContentFile{Rel: noise(random, 980) + string(rune(0x61+c)) + string(rune(0x61+i%26)) + string(rune(0x41+i/26)) + ".md", Text: noise(random, 1500)})
 		}
 		contents = append(contents, Content{Kind: ContentSkill, Name: "np1" + string(rune(0x30+c)), Dir: dir, Files: files})
 	}

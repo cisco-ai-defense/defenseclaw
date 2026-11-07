@@ -24,11 +24,15 @@ const maxLaunchEnvironmentBytes = 1 << 20
 // environment, which can contain credentials. A failed or partial read
 // leaves coverage unverified.
 func LaunchEnvironmentForPID(pid int) (map[string]string, error) {
-	handle, parameters, width, length, err := openProcessParameters(pid)
+	handle, err := openProcessForRead(pid)
 	if err != nil {
 		return nil, err
 	}
 	defer windows.CloseHandle(handle)
+	parameters, width, length, err := processParameters(handle)
+	if err != nil {
+		return nil, err
+	}
 	// RTL_USER_PROCESS_PARAMETERS.Environment is a native layout field.
 	// Windows may change it; any unreadable or implausible pointer stays
 	// unverified.
@@ -50,24 +54,24 @@ func LaunchEnvironmentForPID(pid int) (map[string]string, error) {
 	return parseLaunchEnvironmentBlock(raw)
 }
 
-// openProcessParameters opens a process for reading its memory and returns
-// the address of its RTL_USER_PROCESS_PARAMETERS, the pointer width of the
-// process and the Length the structure states for itself. The caller closes
-// the handle.
-func openProcessParameters(pid int) (handle windows.Handle, parameters uintptr, width int, length uint32, err error) {
+// openProcessForRead opens a process for reading its memory. The caller
+// closes the handle.
+func openProcessForRead(pid int) (windows.Handle, error) {
 	if pid <= 0 || uint64(pid) > uint64(^uint32(0)) {
-		return 0, 0, 0, 0, errors.New("invalid process ID")
+		return 0, errors.New("invalid process ID")
 	}
-	handle, err = windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_VM_READ, false, uint32(pid))
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_VM_READ, false, uint32(pid))
 	if err != nil {
-		return 0, 0, 0, 0, fmt.Errorf("open process: %w", err)
+		return 0, fmt.Errorf("open process: %w", err)
 	}
-	defer func() {
-		if err != nil {
-			windows.CloseHandle(handle)
-		}
-	}()
+	return handle, nil
+}
 
+// processParameters returns the address of the RTL_USER_PROCESS_PARAMETERS of
+// the process an open handle names, the pointer width of the process and the
+// Length the structure states for itself. It leaves the handle to its owner,
+// which closes it on every return, a failed read included.
+func processParameters(handle windows.Handle) (parameters uintptr, width int, length uint32, err error) {
 	// ProcessWow64Information returns the 32-bit PEB address for a WOW64
 	// process. Otherwise ProcessBasicInformation returns the native PEB.
 	width = int(unsafe.Sizeof(uintptr(0)))
@@ -75,7 +79,7 @@ func openProcessParameters(pid int) (handle windows.Handle, parameters uintptr, 
 	if width == 8 {
 		if err = windows.NtQueryInformationProcess(handle, windows.ProcessWow64Information,
 			unsafe.Pointer(&wowPEB), uint32(width), nil); err != nil {
-			return 0, 0, 0, 0, fmt.Errorf("query WOW64 PEB: %w", err)
+			return 0, 0, 0, fmt.Errorf("query WOW64 PEB: %w", err)
 		}
 	}
 	var peb uintptr
@@ -87,13 +91,12 @@ func openProcessParameters(pid int) (handle windows.Handle, parameters uintptr, 
 		var info windows.PROCESS_BASIC_INFORMATION
 		if err = windows.NtQueryInformationProcess(handle, windows.ProcessBasicInformation,
 			unsafe.Pointer(&info), uint32(unsafe.Sizeof(info)), nil); err != nil {
-			return 0, 0, 0, 0, fmt.Errorf("query native PEB: %w", err)
+			return 0, 0, 0, fmt.Errorf("query native PEB: %w", err)
 		}
 		peb = uintptr(unsafe.Pointer(info.PebBaseAddress))
 	}
 	if peb == 0 {
-		err = errors.New("process PEB is unavailable")
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, errors.New("process PEB is unavailable")
 	}
 	// PEB.ProcessParameters is a native layout field Windows documents.
 	parametersOffset := uintptr(0x20)
@@ -102,22 +105,19 @@ func openProcessParameters(pid int) (handle windows.Handle, parameters uintptr, 
 	}
 	parameters, err = readLaunchPointer(handle, peb+parametersOffset, width)
 	if err != nil || parameters == 0 {
-		err = fmt.Errorf("read process parameters: %w", errOrUnavailable(err))
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, fmt.Errorf("read process parameters: %w", errOrUnavailable(err))
 	}
 	var header [8]byte
 	var n uintptr
 	if err = windows.ReadProcessMemory(handle, parameters, &header[0], uintptr(len(header)), &n); err != nil || n != uintptr(len(header)) {
-		err = fmt.Errorf("read process parameters header: %w", errOrUnavailable(err))
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, fmt.Errorf("read process parameters header: %w", errOrUnavailable(err))
 	}
 	maximum := binary.LittleEndian.Uint32(header[:4])
 	length = binary.LittleEndian.Uint32(header[4:])
 	if maximum < length || maximum > maxLaunchEnvironmentBytes {
-		err = errors.New("process parameters layout is unverified")
-		return 0, 0, 0, 0, err
+		return 0, 0, 0, errors.New("process parameters layout is unverified")
 	}
-	return handle, parameters, width, length, nil
+	return parameters, width, length, nil
 }
 
 // workingDirectory reads the current directory of a process of the same user
@@ -125,11 +125,15 @@ func openProcessParameters(pid int) (handle windows.Handle, parameters uintptr, 
 // a UNICODE_STRING. A failed or implausible read returns "": the caller
 // keeps its other sources.
 func workingDirectory(pid int) string {
-	handle, parameters, width, length, err := openProcessParameters(pid)
+	handle, err := openProcessForRead(pid)
 	if err != nil {
 		return ""
 	}
 	defer windows.CloseHandle(handle)
+	parameters, width, length, err := processParameters(handle)
+	if err != nil {
+		return ""
+	}
 	// CurrentDirectory.DosPath: Length (uint16) and MaximumLength (uint16),
 	// then the buffer pointer after the padding the pointer width needs.
 	currentOffset, bufferOffset := uintptr(0x38), uintptr(8)

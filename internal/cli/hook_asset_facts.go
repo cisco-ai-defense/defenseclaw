@@ -121,7 +121,7 @@ func hookSkillRoots(connector, home, cwd string) []string {
 		// skill of that name the agent does load.
 		roots = slices.DeleteFunc(roots, func(root string) bool { return root == filepath.Join(home, ".copilot", "skills") })
 	}
-	for _, root := range assetfacts.EnvSkillRoots(connector, home, cwd, hookAgentWorkingDirectory()) {
+	for _, root := range assetfacts.EnvSkillRoots(connector, home, cwd, hookAgentWorkingDirectory) {
 		if !slices.Contains(roots, root) {
 			roots = append(roots, root)
 		}
