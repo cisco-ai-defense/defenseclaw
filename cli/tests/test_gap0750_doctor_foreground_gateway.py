@@ -1,9 +1,10 @@
 """GAP-0750: Doctor, status and the gateway CLI name a foreground gateway alike.
 
 A gateway started in the foreground has no PID file. Status proves it is this
-account's own process (_foreground_gateway_status_owner). Doctor used its own
-port-holder test and called the same process foreign, telling the user to
-stop it. Doctor now asks the same proof; the token stays unsent.
+account's own process (_foreground_gateway_status_owner), on Windows, macOS
+and Linux. Doctor used its own port-holder test and called the same process
+foreign, telling the user to stop it. Doctor now asks the same proof; the
+token stays unsent.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ def _sidecar_rows(r):
     return [c for c in r.checks if c["label"] == "Sidecar API"]
 
 
-@pytest.mark.parametrize("platform", ["win32", "darwin"])
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 @pytest.mark.parametrize("probe", [(0, UNVERIFIED), (0, "connection reset"), (503, "unavailable")])
 def test_own_foreground_gateway_is_not_called_foreign(cfg, platform: str, probe) -> None:
     r = _run_sidecar(cfg, platform, probe=probe, listener_pids=(4242, 4242, 4242, 4242))
@@ -70,7 +71,7 @@ def test_own_foreground_gateway_is_not_called_foreign(cfg, platform: str, probe)
     assert r.gateway_down == "foreground"
 
 
-@pytest.mark.parametrize("platform", ["win32", "darwin"])
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 def test_doctor_row_and_status_name_the_same_process(cfg, platform: str) -> None:
     stack, _ = _proof(platform, listener_pids=(4242, 4242, 4242, 4242))
     with stack:
@@ -83,7 +84,11 @@ def test_doctor_row_and_status_name_the_same_process(cfg, platform: str) -> None
 
 @pytest.mark.parametrize(
     ("platform", "changes"),
-    [("win32", {"peer_sid": "S-1-5-21-2000"}), ("darwin", {"process_uid": 2000})],
+    [
+        ("win32", {"peer_sid": "S-1-5-21-2000"}),
+        ("darwin", {"process_uid": 2000}),
+        ("linux", {"process_uid": 2000}),
+    ],
 )
 def test_other_account_holder_stays_foreign(cfg, platform: str, changes: dict) -> None:
     r = _run_sidecar(cfg, platform, **changes)
@@ -94,7 +99,7 @@ def test_other_account_holder_stays_foreign(cfg, platform: str, changes: dict) -
     assert r.gateway_down == "foreign"
 
 
-@pytest.mark.parametrize("platform", ["win32", "darwin"])
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 def test_no_listener_is_still_a_stopped_gateway(cfg, platform: str) -> None:
     stack, _ = _proof(platform, listener_pids=(None, None, None, None))
     r = cmd_doctor._DoctorResult(quiet=True)
@@ -114,19 +119,12 @@ def test_no_listener_is_still_a_stopped_gateway(cfg, platform: str) -> None:
     assert r.gateway_down == "stopped"
 
 
-@pytest.mark.parametrize("platform", ["linux"])
-def test_proof_is_not_used_on_linux(cfg, platform: str) -> None:
-    stack, _ = _proof(platform)
-    with stack:
-        assert cmd_doctor._own_foreground_gateway(cfg) is None
-
-
 def test_failed_proof_is_not_proven(cfg) -> None:
     with patch.object(cmd_doctor, "_foreground_gateway_status_owner", side_effect=OSError("denied")):
         assert cmd_doctor._own_foreground_gateway(cfg) is None
 
 
-@pytest.mark.parametrize("platform", ["win32", "darwin"])
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 def test_policy_row_is_skipped_not_failed_for_a_foreground_gateway(cfg, platform: str) -> None:
     r = _run_sidecar(cfg, platform, listener_pids=(4242, 4242, 4242, 4242))
     with patch.object(cmd_doctor, "_doctor_secure_client", return_value=False):
@@ -136,7 +134,7 @@ def test_policy_row_is_skipped_not_failed_for_a_foreground_gateway(cfg, platform
     assert r.failed == 0
 
 
-@pytest.mark.parametrize("platform", ["win32", "darwin"])
+@pytest.mark.parametrize("platform", ["win32", "darwin", "linux"])
 def test_fix_does_not_restart_or_blame_a_foreground_gateway(cfg, platform: str) -> None:
     stack, _ = _proof(platform, listener_pids=(4242, 4242, 4242, 4242))
     with (
@@ -156,7 +154,11 @@ def test_fix_does_not_restart_or_blame_a_foreground_gateway(cfg, platform: str) 
 
 @pytest.mark.parametrize(
     ("platform", "changes"),
-    [("win32", {"peer_sid": "S-1-5-21-2000"}), ("darwin", {"process_uid": 2000})],
+    [
+        ("win32", {"peer_sid": "S-1-5-21-2000"}),
+        ("darwin", {"process_uid": 2000}),
+        ("linux", {"process_uid": 2000}),
+    ],
 )
 def test_fix_still_refuses_another_accounts_holder(cfg, platform: str, changes: dict) -> None:
     stack, _ = _proof(platform, **changes)
@@ -230,3 +232,130 @@ def test_windows_diagnostics_fail_when_no_foreground_proof_was_made(cfg) -> None
     assert rows["Gateway listener owner"]["status"] == "fail"
     assert "not by this account's gateway" in rows["Gateway listener owner"]["detail"]
     assert rows["Gateway PID identity"]["status"] == "fail"
+
+
+def test_windows_diagnostics_fail_when_the_listener_is_not_observed_now(cfg) -> None:
+    # The proof held a moment ago, but this pass cannot see the proven process
+    # on the port: the normal rows decide, as without a foreground proof.
+    for status in ("missing", "ambiguous", "denied", "unavailable"):
+        r = _run_sidecar(cfg, "win32", listener_pids=(4242, 4242, 4242, 4242))
+        _windows_pass(cfg, r, listener=ListenerEvidence(status))
+        rows = _windows_rows(r)
+        if status in {"missing", "ambiguous"}:
+            assert rows["Gateway listener owner"]["status"] == "fail", status
+            assert rows["Gateway PID identity"]["status"] == "fail", status
+        assert all("own foreground gateway" not in row["detail"] for row in rows.values()), status
+
+
+def test_windows_diagnostics_skip_when_the_listener_is_the_proven_process(cfg) -> None:
+    r = _run_sidecar(cfg, "win32", listener_pids=(4242, 4242, 4242, 4242))
+    _windows_pass(cfg, r, listener=ListenerEvidence("ok", pid=4242))
+    assert {row["status"] for row in _windows_rows(r).values()} == {"skip"}
+
+
+# Linux: the owner is read from the kernel process table (process.uid is -1).
+def _linux_owner(cfg, uids, **changes):
+    stack, _ = _proof("linux", process_uid=-1, listener_pids=(4242, 4242, 4242, 4242), **changes)
+    with stack, patch.object(cmd_doctor, "_linux_process_uids", return_value=uids):
+        return cmd_doctor._own_foreground_gateway(cfg)
+
+
+def test_linux_own_account_foreground_gateway_is_proven_from_the_process_table(cfg) -> None:
+    owner = _linux_owner(cfg, (1000, 1000, 1000, 1000))
+    assert owner is not None
+    assert owner.pid == 4242
+
+
+@pytest.mark.parametrize(
+    "uids",
+    [
+        (2000, 2000, 2000, 2000),  # another account
+        (0, 0, 0, 0),  # an administrator's gateway
+        (1000, 1000, 0, 1000),  # saved uid differs
+        (1000, 0, 1000, 1000),  # effective uid differs
+        (1000, 1000, 1000, 0),  # filesystem uid differs
+        (1000, 1000),  # malformed
+        None,  # the process table could not be read
+    ],
+)
+def test_linux_foreground_gateway_not_proven_for_any_other_owner(cfg, uids) -> None:
+    assert _linux_owner(cfg, uids) is None
+
+
+def test_linux_foreground_gateway_not_proven_when_run_as_root(cfg) -> None:
+    assert _linux_owner(cfg, (0, 0, 0, 0), own_uid=0) is None
+
+
+def test_linux_foreground_gateway_not_proven_when_the_process_generation_changed(cfg) -> None:
+    stack, _ = _proof("linux", process_uid=-1, listener_pids=(4242, 4242, 4242, 4242))
+    with stack, patch.object(cmd_doctor, "_linux_process_uids", return_value=(1000,) * 4):
+        evidence = cmd_doctor.GatewayEvidence.return_value
+        first = evidence.process.return_value
+        later = cmd_doctor.ProcessEvidence(
+            "ok", pid=4242, executable=first.executable, start_identity="generation-2", uid=-1
+        )
+        evidence.process.side_effect = [first, later]
+        assert cmd_doctor._own_foreground_gateway(cfg) is None
+
+
+def test_linux_foreground_gateway_not_proven_for_managed_or_secure_client(cfg) -> None:
+    cfg.deployment_mode = "managed_enterprise"
+    assert _linux_owner(cfg, (1000,) * 4) is None
+    cfg.deployment_mode = ""
+    with patch("defenseclaw.enforce.asset_lists.is_secure_client", return_value=True):
+        assert _linux_owner(cfg, (1000,) * 4) is None
+
+
+def _linux_sidecar_and_auth(cfg, process_uid):
+    stack, _ = _proof("linux", process_uid=process_uid, listener_pids=(4242, 4242, 4242, 4242))
+    r = cmd_doctor._DoctorResult(quiet=True)
+    with (
+        stack,
+        patch.object(cmd_doctor, "_linux_process_uids", return_value=(1000,) * 4),
+        patch.object(
+            cmd_doctor, "_trusted_gateway_listener", return_value=cmd_doctor._GatewayTrust("missing", "no PID file")
+        ),
+        patch.object(cmd_doctor, "_gateway_start_in_progress", return_value=(False, None)),
+        patch.object(cmd_doctor, "_gateway_health_probe", return_value=(0, "connection reset")),
+        patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("dummy", "", "test")),
+        patch.object(cmd_doctor, "_http_probe") as token_probe,
+    ):
+        cmd_doctor._check_sidecar(cfg, r)
+        cmd_doctor._check_gateway_auth(cfg, r)
+    return r, token_probe
+
+
+def test_linux_sidecar_and_authentication_rows_do_not_fail_the_own_gateway(cfg) -> None:
+    r, token_probe = _linux_sidecar_and_auth(cfg, -1)
+    assert [row["status"] for row in _sidecar_rows(r)] == ["warn"]
+    assert "PID 4242" in _sidecar_rows(r)[0]["detail"]
+    assert [row for row in r.checks if row["label"] == "Gateway authentication"] == []
+    assert r.failed == 0
+    token_probe.assert_not_called()
+
+
+def test_linux_other_account_listener_still_fails_sidecar_and_never_gets_the_token(cfg) -> None:
+    r, token_probe = _linux_sidecar_and_auth(cfg, 2000)
+    assert [row["status"] for row in _sidecar_rows(r)] == ["fail"]
+    assert "held by PID 4242" in _sidecar_rows(r)[0]["detail"]
+    token_probe.assert_not_called()
+
+
+def _write_status(root: Path, pid: int, uid_line: str) -> None:
+    folder = root / str(pid)
+    folder.mkdir()
+    (folder / "status").write_text(f"Name:\tdefenseclaw-gat\n{uid_line}\nGid:\t1000\t1000\t1000\t1000\n")
+
+
+def test_linux_process_uids_reads_the_kernel_status_file(tmp_path: Path) -> None:
+    _write_status(tmp_path, 7, "Uid:\t1000\t1000\t1000\t1000")
+    _write_status(tmp_path, 8, "Uid:\t1000\t0\t1000\t1000")
+    _write_status(tmp_path, 9, "Uid:\t1000\tx\t1000\t1000")
+    _write_status(tmp_path, 10, "Uid:\t1000")
+    root = str(tmp_path)
+    assert cmd_doctor._linux_process_uids(7, proc_root=root) == (1000, 1000, 1000, 1000)
+    assert cmd_doctor._linux_process_uids(8, proc_root=root) == (1000, 0, 1000, 1000)
+    assert cmd_doctor._linux_process_uids(9, proc_root=root) is None
+    assert cmd_doctor._linux_process_uids(10, proc_root=root) is None
+    assert cmd_doctor._linux_process_uids(11, proc_root=root) is None
+    assert cmd_doctor._linux_process_uids(0, proc_root=root) is None
