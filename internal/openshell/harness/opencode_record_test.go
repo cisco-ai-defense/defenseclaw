@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -60,6 +61,16 @@ func TestOpenCodePinnedVersionDisplay(t *testing.T) {
 	}
 	check := steps[0].Run[start:]
 	version := OpenCode.DefaultVersion
+	// A different but valid three-component release (the next patch). The
+	// four-component form below is rejected by the shape check alone; this
+	// sample is what proves the check compares the full pinned version.
+	parts := strings.Split(version, ".")
+	patch, err := strconv.Atoi(parts[len(parts)-1])
+	if len(parts) != 3 || err != nil {
+		t.Fatalf("pinned OpenCode version %q is not major.minor.patch", version)
+	}
+	parts[2] = strconv.Itoa(patch + 1)
+	nextPatch := strings.Join(parts, ".")
 	for _, tc := range []struct {
 		name, output string
 		allow        bool
@@ -67,7 +78,9 @@ func TestOpenCodePinnedVersionDisplay(t *testing.T) {
 		{"version with release marker", "opencode v" + version, true},
 		{"capitalized display name", "OpenCode v" + version, true},
 		{"bare version", version, true},
-		{"different version", "opencode v" + version + ".1", false},
+		{"different release", "opencode v" + nextPatch, false},
+		{"different release without marker", nextPatch, false},
+		{"four-component version", "opencode v" + version + ".1", false},
 		{"extra version text", "opencode v" + version + "-extra", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
