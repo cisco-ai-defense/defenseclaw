@@ -1220,7 +1220,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 // reportEnterpriseHookStandaloneInterruptedRepairs accounts the targets the
 // workers of an interrupted pass restored a protected element of, exactly as a
 // pass that ran to its end does: the repairs record, the audit report to the gateway
-// (on a context the interrupt did not cancel), the agent config notice the
+// (the report sender detaches from the pass context), the agent config notice the
 // worker returned and the restore entry, recorded now because the pass that
 // records them may not come soon. It returns the rewritten targets by slot key
 // (the watch loop tells the writes of the guardian from a tamper by them) and
@@ -1272,9 +1272,7 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 		}
 	}
 	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, dataDir, merged)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, audits)
+	reportEnterpriseHookGuardianRepairs(context.Background(), hookSocket, audits)
 	// A failed record is kept in memory and written by a later pass.
 	_ = recordEnterpriseHookGuardianRestores(enterpriseHookWorkerLog, dataDir, rows, restored)
 	return repairedTargets, count
