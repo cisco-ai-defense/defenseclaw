@@ -343,6 +343,12 @@ func TestGAP0675BenignNearVariantsDoNotBlockInDefault(t *testing.T) {
 		{"comment apply_patch", baseline + "\n# apply_patch"},
 		{"comment begin patch", baseline + "\n# *** Begin Patch"},
 		{"ordinary word defense", baseline + "\necho defense > ordinary/note"},
+		// Review 3: a protected name in a comment or in data the call writes
+		// elsewhere is not a protected write.
+		{"comment keys name", baseline + "\n# ~/.ssh/authorized_keys"},
+		{"comment startup name", baseline + "\n# source ~/.bashrc"},
+		{"data keys name", baseline + "\necho authorized_keys > ordinary/note"},
+		{"data startup name", baseline + "\nprintf %s .bashrc >> ordinary/note"},
 	} {
 		payload := f.payload(t, row.command)
 		header := f.clientHeader(t, payload)
@@ -378,5 +384,32 @@ func TestGAP0675BenignNearVariantsDoNotBlockInDefault(t *testing.T) {
 		if err := os.Chmod(f.homes, 0o700); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+// TestGAP0675ProtectedOperandNameReadsOperandsOnly: the name proof reads one
+// operand by its last components. A protected name in prose, a comment or a
+// data word is not an operand and never reaches it (review 3, must-fix 2);
+// ordinary look-alikes are not protected names.
+func TestGAP0675ProtectedOperandNameReadsOperandsOnly(t *testing.T) {
+	for _, operand := range []string{
+		"authorized_keys", "~/.ssh/authorized_keys", "dist/k/authorized_keys", "/home/u/.ssh/authorized_keys2",
+		".ssh", "C:\\Users\\u\\.ssh\\config", "~/.ssh/id_ed25519", "~/.bashrc", "/home/u/.zshrc", "repo/.git/hooks",
+		"repo/.git/hooks/pre-commit", "~/.config/fish/config.fish",
+	} {
+		if !protectedOperandName(operand, false) {
+			t.Errorf("%q is a protected name", operand)
+		}
+	}
+	for _, operand := range []string{
+		"", "notes.txt", "logs/g4.log", "ssh-notes.md", "authorized-users.txt", "~/.ssh/known_hosts", "bashrc.bak",
+		"# authorized_keys", "src/hooks/pre-commit", "keys/rc",
+	} {
+		if protectedOperandName(operand, false) {
+			t.Errorf("%q is not a protected name", operand)
+		}
+	}
+	if protectedOperandName("../.defenseclaw", false) || !protectedOperandName("../.defenseclaw", true) {
+		t.Error("the state folder is a protected name only as the target of a link")
 	}
 }

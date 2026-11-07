@@ -213,6 +213,10 @@ type trustedActionRequest struct {
 	// resolve (an empty map value: an unreadable folder, a link loop) and
 	// this gateway cannot resolve either (rel-1-0-2:GAP-0690).
 	unresolvedTarget *bool
+	// provenTarget, when set, is told that the authorized-keys proof found
+	// a protected path the call writes (not only a write it could not rule
+	// out): the finding keeps its block in every profile (shellFileProven).
+	provenTarget *bool
 	// evidenceCWD places a simple command whose cwd the gateway cannot see
 	// (ProtectHome) where the managed hook client keyed its evidence: the
 	// client's cwd followed through the command's static cd.

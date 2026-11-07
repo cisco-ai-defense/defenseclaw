@@ -1037,8 +1037,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	for _, path := range protectedPaths {
 		protected[canonicalSemanticPath(path)] = struct{}{}
 	}
+	// A protected path found is positive proof of the write: the finding the
+	// caller builds may keep its block in every profile (provenTarget). A
+	// fail-closed answer (an unreadable link, an omitted operand) is not.
+	provenTarget := func() {
+		if request.provenTarget != nil {
+			*request.provenTarget = true
+		}
+	}
 	isProtected := func(path string) bool {
 		_, ok := protected[canonicalSemanticPath(path)]
+		if ok {
+			provenTarget()
+		}
 		return ok
 	}
 	// The client's opaque-scope facts stand in only for the link-scope walk;
@@ -1303,6 +1314,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 			for _, path := range protectedPaths {
 				if file, err := os.Stat(path); err == nil && os.SameFile(info, file) {
+					provenTarget()
 					return true
 				}
 			}
@@ -1341,6 +1353,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		decision = request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(input.Command, input.CWD, facts.ActiveHome, input.DialectHint, globFacts)
 	}
 	if decision != "" {
+		if decision == hookpaths.ProtectedTargetDecision {
+			provenTarget()
+		}
 		return true
 	}
 	if !cannotResolveLocally && trustedPOSIXShellCall(input, facts) &&
@@ -1348,6 +1363,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		hookpaths.LoopCopyDestinationProtected(input.Command, input.CWD, facts.ActiveHome) {
 		// The per-user gateway can check the same fixed loop destination
 		// that a managed hook checks before ProtectHome hides the home.
+		provenTarget()
 		return true
 	}
 	if request.ProtectedHomeHook && clientTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
@@ -1355,6 +1371,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// the user's hook ran the same decision on the same command and
 		// found a protected target, as a per-user gateway does (GAP-2514,
 		// GAP-2515).
+		provenTarget()
 		return true
 	}
 	if hookpaths.DynamicCopyProtectedBasename(input.Command, facts.ActiveHome) {

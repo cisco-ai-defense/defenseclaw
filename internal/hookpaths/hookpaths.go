@@ -2288,8 +2288,11 @@ type shellLinks struct {
 	cdDirs []string
 	// scopedMoves: destinations of plain mv calls that land directly in an
 	// opaque scope and can only rename an entry there (scopedMoveSafe).
-	scopedMoves            map[string]bool
-	opaqueScopes           []opaqueScope
+	scopedMoves  map[string]bool
+	opaqueScopes []opaqueScope
+	// treeCopies: the recursive and link-keeping copies of the command, as
+	// read at the end (CopiedLinkTargets).
+	treeCopies             []treeCopy
 	copyDestinations       []string
 	placedCopyDestinations []string // copy destinations placed by the statement walk
 	// copyEnds: the end offset of the copy call that wrote a destination,
@@ -3261,6 +3264,7 @@ func commandLinksRead(command, cwd, home string, facts map[string]string, record
 		}
 		return true
 	})
+	links.treeCopies = treeCopies
 	links.copyScopedTrees(treeCopies)
 	if nested {
 		links.renames, links.cds, links.copyScopes = renames, cds, copyScopes
@@ -7004,4 +7008,91 @@ func stateStatementReadOnlyWithBindings(text, home string, shadowed map[string]b
 		return true
 	})
 	return seen && safe
+}
+
+// CopiedLinkTargets returns the absolute targets of the links on disk that a
+// copy of the command carries to path: path lies at or under the destination
+// of a link-keeping copy, at the name of a link at or under one of its
+// sources (the copy takes the source name itself, or keeps it under the
+// destination folder). It reads the links as CopySourceLinkTargets does
+// (facts first, else the disk). Evidence of an existing link only.
+func (l Links) CopiedLinkTargets(path string, facts map[string]string) []string {
+	var targets []string
+	for _, copied := range l.links.treeCopies {
+		rel, err := filepath.Rel(copied.destination, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		for _, source := range copied.sources {
+			names := []string{rel}
+			if base := filepath.Base(source); rel != "." {
+				if rest, ok := strings.CutPrefix(rel, base+string(filepath.Separator)); ok {
+					names = append(names, rest)
+				} else if rel == base {
+					names = append(names, ".")
+				}
+			}
+			for _, name := range names {
+				found, ok := sourceLinksOf(source, facts)
+				if !ok {
+					continue
+				}
+				for _, link := range found {
+					remainder, under := "", false
+					switch {
+					case link.rest == "" && name == ".":
+						under = true
+					case link.rest != "" && name == link.rest:
+						under = true
+					case link.rest != "" && strings.HasPrefix(name, link.rest+string(filepath.Separator)):
+						under, remainder = true, strings.TrimPrefix(name, link.rest+string(filepath.Separator))
+					case link.rest == "" && name != ".":
+						under, remainder = true, name
+					}
+					if !under {
+						continue
+					}
+					target := link.text
+					if !filepath.IsAbs(target) {
+						target = filepath.Join(filepath.Dir(filepath.Join(source, link.rest)), link.text)
+					}
+					targets = append(targets, filepath.Join(target, remainder))
+				}
+			}
+		}
+	}
+	return targets
+}
+
+// sourceLinksOf reads the links at or under source: the user-side hook own
+// reading when facts carry it, else this view of the disk.
+func sourceLinksOf(source string, facts map[string]string) ([]diskLink, bool) {
+	if !filepath.IsAbs(source) {
+		return nil, false
+	}
+	source = filepath.Clean(source)
+	if value, present := facts[SourceLinksFactPrefix+source]; present {
+		return decodeSourceLinks(value)
+	}
+	return sourceDiskLinks(source)
+}
+
+// CopySourceLinkTargets returns the absolute targets of the symbolic links at
+// or under a placed copy or move source (sourceLinksOf). A source that cannot
+// be read, or holds more links than the bound, yields none: this is evidence
+// of a link, never a guess.
+func CopySourceLinkTargets(source string, facts map[string]string) []string {
+	found, ok := sourceLinksOf(source, facts)
+	if !ok {
+		return nil
+	}
+	targets := make([]string, 0, len(found))
+	for _, link := range found {
+		target := link.text
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(filepath.Join(filepath.Clean(source), link.rest)), link.text)
+		}
+		targets = append(targets, filepath.Clean(target))
+	}
+	return targets
 }

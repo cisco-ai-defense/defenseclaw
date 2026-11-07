@@ -81,6 +81,11 @@ func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testi
 			if !split {
 				wantManaged = wantPerUser
 			}
+			// "alert" is the balanced profile answer to a finding nothing
+			// proves (rel-1-0-6:GAP-0675): the command runs with a warning.
+			if wantManaged == "alert" && strings.HasPrefix(managed, `status 200 body {"action":"alert"`) {
+				managed = "alert"
+			}
 			if perUser != wantPerUser || managed != wantManaged {
 				t.Errorf("%s %s: per-user %s, managed %s, want %s", connector, row.name, perUser, managed, row.want)
 			}

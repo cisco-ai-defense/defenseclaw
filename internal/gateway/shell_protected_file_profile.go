@@ -123,12 +123,13 @@ func markShellProtectedFileFindings(request trustedActionRequest, findings []Rul
 // shellWritesProvenProtectedFile reports a shell call that mutates a
 // protected file of the user (an authorized-keys or SSH control file, an SSH
 // private key, a shell startup profile or an active Git hook) at a target the
-// call proves, whatever the profile: a path the command structure names (a
-// literal or a value the command assigns), that path after the links on disk
-// are followed, a target the hook client resolved, or a directive target of
-// an apply_patch envelope the call runs or feeds. A word the readers cannot
-// place, a pattern, text in a comment or data, and a variable the command
-// does not set prove nothing here; such a finding stays in the class.
+// call proves, whatever the profile: a mutated path of the command structure
+// (a literal or a value the command assigns), that path after the links on
+// disk are followed, a target the hook client resolved, or a directive target
+// of an apply_patch envelope the call runs or feeds. The finding producer adds
+// its own proof (a write through an existing link, or a copy of one). A word
+// the readers cannot place, a pattern, text in a comment or data, and a value
+// that was overwritten prove nothing here; such a finding stays in the class.
 func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 	input := request.Input
 	facts := actionfacts.Analyze(input)
@@ -147,19 +148,91 @@ func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 			}
 		}
 	}
+	// A mutated operand, or the target a link of the command points at, that
+	// is itself a protected name (a link of the command to the SSH folder, a
+	// write below it after a copy, a startup profile). Only operands count,
+	// never a comment, a quoted data word or a value the command overwrites.
+	// A copy, move or link names its source operand as well: moving a file of
+	// that name into a place the command cannot read is the write.
+	for _, path := range facts.Paths {
+		command, ok := integrityCommandByID(facts, path.CommandID)
+		if !ok || !protectedOperandName(path.Value, false) && !protectedOperandName(path.Normalized, false) &&
+			!protectedOperandName(path.Resolved, false) {
+			continue
+		}
+		if integrityCommandMutatesPath(command, path) || fileMovingProgram(command.Program) {
+			return true
+		}
+	}
+	for _, command := range facts.Commands {
+		for index, word := range command.Argv {
+			if programBaseName(word) != "ln" {
+				continue
+			}
+			for _, operand := range command.Argv[index+1 : len(command.Argv)-1] {
+				if !strings.HasPrefix(operand, "-") && protectedOperandName(operand, true) {
+					return true
+				}
+			}
+			break
+		}
+	}
+	// A copy or move source that is, or holds, a link on disk that reaches a
+	// protected file: the copy carries the link, and a write through its new
+	// name is the write (the managed hook client reads the source links for a
+	// gateway that cannot see the home).
+	sourceCWD := facts.CWD
+	if !filepath.IsAbs(sourceCWD) {
+		sourceCWD = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	for _, path := range facts.Paths {
+		command, ok := integrityCommandByID(facts, path.CommandID)
+		if !ok || path.Access != actionfacts.PathAccessRead || !fileMovingProgram(command.Program) {
+			continue
+		}
+		for _, target := range hookpaths.CopySourceLinkTargets(placedPath(path, sourceCWD), request.ResolvedWriteTargets) {
+			form := target
+			if resolved, ok := request.targetMemo.ResolveWriteTarget(target); ok {
+				form = resolved
+			}
+			if protectedFilePath(facts, actionfacts.PathFact{Resolved: form, Absolute: true}) ||
+				protectedFilePath(facts, actionfacts.PathFact{Resolved: target, Absolute: true}) {
+				return true
+			}
+		}
+	}
+	// A name the command copies from a link on disk that reaches a protected
+	// file (the copy carries the link): a write through its new name is the
+	// write. The links are read as the managed hook client read them for a
+	// gateway that cannot see the home, else from the disk.
+	if command, ok := trustedBashCommandInput(input); ok {
+		cwd := facts.CWD
+		if !filepath.IsAbs(cwd) {
+			cwd = request.ResolvedWriteTargets[hookpaths.CWDKey]
+		}
+		links := hookpaths.CommandLinksWithFacts(input.Tool, command, cwd, input.ActiveHome, request.ResolvedWriteTargets)
+		operands, _, _ := hookpaths.ShellWriteOperands(command, cwd, input.ActiveHome)
+		placed, _ := hookpaths.ShellDirectoryWriteOperands(command, cwd, input.ActiveHome, request.ResolvedWriteTargets, false, request.ProtectedHomeHook)
+		for _, operand := range placed {
+			operands = append(operands, operand.Path)
+		}
+		for _, operand := range operands {
+			for _, target := range links.CopiedLinkTargets(hookpaths.OperandPath(operand, cwd), request.ResolvedWriteTargets) {
+				if protectedFilePath(facts, actionfacts.PathFact{Resolved: target, Absolute: true}) {
+					return true
+				}
+			}
+		}
+	}
+	// The managed hook client resolved the call to a protected target.
+	if request.ProtectedHomeHook && request.ResolvedWriteTargets[hookpaths.ActionDecisionKey] == hookpaths.ProtectedTargetDecision {
+		return true
+	}
 	// The path readers of hookpaths place every target of the command in the
 	// user home (links, cd, brace lists, archives and copies included); the
 	// decision is theirs, not a side reader of the gateway.
 	if command, ok := trustedBashCommandInput(input); ok &&
 		request.targetMemo.ActionCommandDecisionWithDialectAndGlobFacts(command, input.CWD, input.ActiveHome, input.DialectHint, clientGlobFacts(request)) == hookpaths.ProtectedTargetDecision {
-		return true
-	}
-	// The call names a protected file in its words (a path, a variable value,
-	// a patch directive): the finding keeps the block it had before GAP-0675.
-	// This over-matches (a comment that names the file counts); it keeps no
-	// block for a call that names none.
-	if namesProtectedFile(input.Command) || namesProtectedFile(string(input.Args)) ||
-		slices.ContainsFunc(input.Argv, namesProtectedFile) {
 		return true
 	}
 	for _, target := range request.ResolvedWriteTargets {
@@ -182,23 +255,50 @@ func shellWritesProvenProtectedFile(request trustedActionRequest) bool {
 	return false
 }
 
-// protectedFileNames are the names that make a command word a protected file
-// of the shell-command protected-file class: the SSH folder and its files,
-// the shell startup profiles and the Git hooks folder.
-var protectedFileNames = []string{
-	"authorized_keys", ".ssh", "/etc/profile", ".bashrc", ".bash_profile", ".zshrc", ".zprofile",
-	".profile", "config.fish", "profile.ps1", "powershell_profile", ".git/hooks", ".git\\hooks",
-	"hookspath",
+// fileMovingProgram reports a program that copies, moves or links a source
+// operand to a destination.
+func fileMovingProgram(program string) bool {
+	return slices.Contains([]string{"cp", "mv", "ln", "install", "rsync", "ditto"}, programBaseName(program))
 }
 
-// namesProtectedFile reports a text that holds one of protectedFileNames
-// (quotes, escapes and backticks removed, any case).
-func namesProtectedFile(text string) bool {
-	if text == "" {
+func programBaseName(word string) string {
+	return strings.ToLower(filepath.Base(strings.ReplaceAll(word, "\\", "/")))
+}
+
+// protectedOperandName reports an operand that names a protected file by its
+// last components: an authorized-keys file, the SSH folder, an SSH control
+// file or private key below it, a shell startup profile, the Git hooks
+// folder, and, with state, the DefenseClaw state folder (the target of a
+// link). It reads the operand only: a comment or a data word of the call is
+// never passed here.
+func protectedOperandName(operand string, state bool) bool {
+	operand = strings.ToLower(strings.NewReplacer("\\", "/", "\x27", "", "\"", "").Replace(operand))
+	parts := strings.FieldsFunc(operand, func(r rune) bool { return r == rune(0x2f) })
+	if len(parts) == 0 {
 		return false
 	}
-	text = strings.ToLower(strings.NewReplacer("\x27", "", "\"", "", "`", "").Replace(text))
-	return slices.ContainsFunc(protectedFileNames, func(name string) bool { return strings.Contains(text, name) })
+	base := parts[len(parts)-1]
+	parent := ""
+	if len(parts) > 1 {
+		parent = parts[len(parts)-2]
+	}
+	switch {
+	case strings.HasPrefix(base, "authorized_keys"), strings.Contains(base, "administrators_authorized_keys"):
+		return true
+	case base == ".ssh", parent == ".ssh" && (slices.Contains(hookpaths.SSHControlFiles[:], base) || strings.HasPrefix(base, "id_")):
+		return true
+	case parent == ".git" && base == "hooks", parent == "hooks" && len(parts) > 2 && parts[len(parts)-3] == ".git", base == "hookspath":
+		return true
+	case slices.Contains(shellStartupNames, base), strings.Contains(base, "powershell_profile"):
+		return true
+	}
+	return state && slices.Contains(parts, ".defenseclaw")
+}
+
+// shellStartupNames are the shell startup profiles of the user.
+var shellStartupNames = []string{
+	".bashrc", ".bash_profile", ".bash_login", ".zshrc", ".zprofile", ".zshenv", ".zlogin", ".profile",
+	"config.fish", "profile.ps1", "profile",
 }
 
 // placedPath is the absolute spelling of a path fact in cwd.
