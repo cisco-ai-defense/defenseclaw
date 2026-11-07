@@ -79,12 +79,13 @@ func (m *TargetMemo) parentProtectedReach(parent, home string, names reachNames)
 		unread = unread || ShareUnanswered(err)
 		return info, err
 	}
+	var procLinks procLinkGuard
 	readlink := func(path string) (string, error) {
-		link, err := PathReadlink(path)
+		link, err := procLinks.readlink(path)
 		unread = unread || ShareUnanswered(err)
 		return link, err
 	}
-	resolved, _, _, ok := walkWritePathMemoWithReaders("", parent, 0, false, false, nil, lstat, readlink)
+	resolved, _, _, ok := walkWritePathMemoWithReaders("", parent, 0, false, false, nil, lstat, readlink, procLinks.unproved)
 	answer := reachParentAnswer{resolved: resolved}
 	switch {
 	case reached || ok && names.hasCandidate(resolved):
@@ -245,15 +246,15 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 	names := m.protectedReachNames(home, sshOnly)
 	raw := target
 	target = filepath.Clean(raw)
-	if processRelativeLink(target) {
-		// The kernel resolves this hop for the process that opens it; the
-		// hook's own reading proves a different path.
-		return GradePossible
-	}
 	if hasDotDotStep(raw) {
 		// The cleaned spelling names a path the kernel may never open, so
 		// it is not graded before the link walk.
 		return m.dotDotReach(raw, target, home, sshOnly)
+	}
+	if unprovedProcessLink(target) {
+		// The kernel resolves this hop for the process that opens it, or the
+		// hook cannot show that its own reading reaches the same file.
+		return GradePossible
 	}
 	if names.has(target) {
 		return GradeNamed
@@ -393,14 +394,15 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 		}
 		return info, err
 	}
+	var procLinks procLinkGuard
 	readlink := func(path string) (string, error) {
-		link, err := PathReadlink(path)
+		link, err := procLinks.readlink(path)
 		if ShareUnanswered(err) {
 			unread = true
 		}
 		return link, err
 	}
-	resolved, _, _, ok := walkWritePathMemoWithReaders("", target, 0, false, false, nil, lstat, readlink)
+	resolved, _, _, ok := walkWritePathMemoWithReaders("", target, 0, false, false, nil, lstat, readlink, procLinks.unproved)
 	if reached || ok && names.has(resolved) {
 		return GradeNamed
 	}
@@ -445,7 +447,7 @@ func (m *TargetMemo) protectedReach(target, home string, sshOnly bool) Grade {
 func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 	steps := strings.Split(filepath.ToSlash(raw), "/")
 	for i, step := range steps {
-		if step == ".." && processRelativeLink(strings.Join(steps[:i], "/")) {
+		if step == ".." && unprovedProcessLink(strings.Join(steps[:i], "/")) {
 			return GradePossible
 		}
 	}
@@ -453,13 +455,18 @@ func (m *TargetMemo) dotDotReach(raw, clean, home string, sshOnly bool) Grade {
 	// hook reads its own directory there); the steps after it belong to the
 	// process that opens the path, so the walk proves nothing past it.
 	processRelative := false
-	readlink := func(path string) (string, error) {
-		if processRelativeLink(path) {
+	var procLinks procLinkGuard
+	unproved := func(path string) bool {
+		if procLinks.unproved(path) {
 			processRelative = true
 		}
-		return PathReadlink(path)
+		return processRelative
 	}
-	physical, _, _, ok := walkWritePathMemoWithReaders("", raw, 0, false, false, nil, PathLstat, readlink)
+	readlink := func(path string) (string, error) {
+		unproved(path)
+		return procLinks.readlink(path)
+	}
+	physical, _, _, ok := walkWritePathMemoWithReaders("", raw, 0, false, false, nil, PathLstat, readlink, unproved)
 	if processRelative {
 		return GradePossible
 	}
@@ -491,9 +498,10 @@ func stateTreeHardlinkReach(target, home string) Grade {
 }
 
 // processRelativeLink reports a path whose link the kernel reads for the
-// process that opens it: a /proc process entry (self, thread-self or a pid,
-// also under task/<tid>) for its cwd, root, exe, descriptors or mapped
-// files, and the /dev descriptor aliases.
+// process that opens it: a /proc/self or /proc/thread-self entry (also under
+// task/<tid>) for its cwd, root, exe, descriptors or mapped files, and the
+// /dev descriptor aliases. A numeric process id names one process whichever
+// process opens the path; fixedPIDLink handles that form.
 func processRelativeLink(path string) bool {
 	path = filepath.ToSlash(path)
 	for _, alias := range []string{"/dev/fd", "/dev/stdin", "/dev/stdout", "/dev/stderr"} {
@@ -506,23 +514,12 @@ func processRelativeLink(path string) bool {
 		return false
 	}
 	parts := strings.Split(rest, "/")
-	digits := func(s string) bool {
-		if s == "" {
-			return false
-		}
-		for _, r := range s {
-			if r < '0' || r > '9' {
-				return false
-			}
-		}
-		return true
-	}
-	if len(parts) < 2 || parts[0] != "self" && parts[0] != "thread-self" && !digits(parts[0]) {
+	if len(parts) < 2 || parts[0] != "self" && parts[0] != "thread-self" {
 		return false
 	}
 	entry := 1
 	if parts[1] == "task" {
-		if len(parts) < 4 || !digits(parts[2]) {
+		if len(parts) < 4 || !allDigits(parts[2]) {
 			return false
 		}
 		entry = 3
@@ -532,4 +529,108 @@ func processRelativeLink(path string) bool {
 		return true
 	}
 	return false
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// fixedPIDLink returns the process link a /proc/<pid> path starts with: the
+// cwd, root or exe link, one descriptor or one mapped file, also under
+// task/<tid>. The same process answers whichever process opens the link.
+func fixedPIDLink(path string) (string, bool) {
+	path = filepath.ToSlash(path)
+	rest, found := strings.CutPrefix(path, "/proc/")
+	if !found {
+		return "", false
+	}
+	parts := strings.Split(rest, "/")
+	if len(parts) < 2 || !allDigits(parts[0]) {
+		return "", false
+	}
+	entry := 1
+	if parts[1] == "task" {
+		if len(parts) < 4 || !allDigits(parts[2]) {
+			return "", false
+		}
+		entry = 3
+	}
+	end := entry + 1
+	switch parts[entry] {
+	case "cwd", "root", "exe":
+	case "fd", "map_files":
+		if len(parts) <= entry+1 || parts[entry+1] == "" {
+			return "", false
+		}
+		end = entry + 2
+	default:
+		return "", false
+	}
+	return "/proc/" + strings.Join(parts[:end], "/"), true
+}
+
+// fixedPIDLinkProved reports that the link of an explicit process id leads
+// to the file the hook reads for it. The kernel resolves the link the same
+// way for the hook and for the process that opens the path, so a reading that
+// reaches one file identity through both the link and its target text is the
+// path the opener reaches. An unreadable link, a text that is not a path, or
+// two identities that differ stay unproved.
+func fixedPIDLinkProved(link string) bool {
+	target, err := PathReadlink(link)
+	if err != nil || !filepath.IsAbs(target) {
+		return false
+	}
+	via, err := PathStat(link)
+	if err != nil {
+		return false
+	}
+	named, err := PathStat(target)
+	return err == nil && os.SameFile(via, named)
+}
+
+// procLinkGuard follows the links one reading crosses. The aliases
+// /proc/self and /proc/thread-self read as the hook's own process id, so a
+// path that goes on through that id names the hook process, not the one that
+// opens the path; the guard remembers each such id.
+type procLinkGuard struct{ aliased map[string]bool }
+
+func (g *procLinkGuard) readlink(path string) (string, error) {
+	link, err := PathReadlink(path)
+	if err == nil && (path == "/proc/self" || path == "/proc/thread-self") {
+		pid, _, _ := strings.Cut(filepath.ToSlash(link), "/")
+		if g.aliased == nil {
+			g.aliased = make(map[string]bool)
+		}
+		g.aliased[pid] = true
+	}
+	return link, err
+}
+
+// unproved reports a path that starts with a per-process link the hook cannot
+// read for the process that opens it: an opener-relative alias, a process id
+// the hook reached through such an alias, or an explicit process id whose
+// link the hook does not prove.
+func (g *procLinkGuard) unproved(path string) bool {
+	if processRelativeLink(path) {
+		return true
+	}
+	link, ok := fixedPIDLink(path)
+	if !ok {
+		return false
+	}
+	pid, _, _ := strings.Cut(strings.TrimPrefix(link, "/proc/"), "/")
+	return g.aliased[pid] || !fixedPIDLinkProved(link)
+}
+
+func unprovedProcessLink(path string) bool {
+	var g procLinkGuard
+	return g.unproved(path)
 }
