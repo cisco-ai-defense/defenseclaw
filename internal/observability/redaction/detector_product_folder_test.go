@@ -156,3 +156,43 @@ func TestProductFolderBesideDatedOrdinaryChildStaysVisible(t *testing.T) {
 		}
 	}
 }
+
+// The benign twin: an ordinary parent directory in front of a hyphenated
+// product folder does not make the prefix a candidate. The detector leaves such
+// a slash-form path alone as written, and the folder name is not what changes
+// that.
+func TestProductFolderBehindOrdinaryParentsStaysVisible(t *testing.T) {
+	t.Parallel()
+	folder := productlayout.WindowsHookRuntimeFolder
+	for _, input := range []string{
+		"C:/ProgramData/Cisco/SecureClient/Extra/" + folder,
+		"C:/ProgramData/Cisco/SecureClient/" + folder + "/x",
+		"/opt/MyService/CurrentRelease/" + folder + "/x",
+		"/Users/Example/Library/ApplicationSupport/" + folder,
+		"/srv/MyService/CurrentRelease/" + folder + "/Reports2026",
+	} {
+		if got := redactAuditTarget(t, input); got != input {
+			t.Errorf("ordinary parent redacted: %q -> %q", input, got)
+		}
+	}
+}
+
+// A token is still redacted when ordinary parents stand in front of the
+// hyphenated product folder, and the folder stays readable.
+func TestPlantedTokenBehindOrdinaryParentsStaysRedacted(t *testing.T) {
+	t.Parallel()
+	folder := productlayout.WindowsHookRuntimeFolder
+	for _, input := range []string{
+		"/opt/MyService/CurrentRelease/" + plantedPathToken + "/" + folder + "/x",
+		"/opt/MyService/CurrentRelease/" + folder + "/" + plantedPathToken,
+		"C:/ProgramData/Cisco/SecureClient/" + folder + "/" + plantedPathToken,
+	} {
+		got := redactAuditTarget(t, input)
+		if strings.Contains(got, plantedPathToken) {
+			t.Errorf("token left in path: %q -> %q", input, got)
+		}
+		if !strings.Contains(got, folder) {
+			t.Errorf("product folder lost beside a token: %q -> %q", input, got)
+		}
+	}
+}
