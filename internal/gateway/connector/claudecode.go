@@ -1710,17 +1710,21 @@ func appendClaudeCodeHookMatrix(hooks map[string]interface{}, hookCommand string
 func appendClaudeCodeHookMatrixForSetup(
 	hooks map[string]interface{}, hookCommand string, hookArgs []string, opts SetupOpts,
 ) error {
+	if err := claudeCodeChainAdmission(opts, hookCommand, hookArgs, runtime.GOOS); err != nil {
+		return err
+	}
 	groups, err := claudeCodeHookGroupsForSetup(opts)
 	if err != nil {
 		return err
 	}
-	appendClaudeCodeHookGroups(hooks, hookCommand, hookArgs, groups)
+	appendClaudeCodeHookGroups(hooks, hookCommand, hookArgs, groups, claudeCodeUnavailableOpen(opts))
 	return nil
 }
 
 func appendClaudeCodeHookGroups(
-	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup,
+	hooks map[string]interface{}, hookCommand string, hookArgs []string, groups []claudeCodeHookGroup, unavailableOpen ...bool,
 ) {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
 	fallback := false
 	if len(hookArgs) == 7 || len(hookArgs) == 9 {
 		fallback = claudeCodePerUserGuardTarget(
@@ -1729,7 +1733,7 @@ func appendClaudeCodeHookGroups(
 		)
 	}
 	for _, group := range groups {
-		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs)
+		command, args := claudeCodeHandlerInvocation(group.eventType, hookCommand, hookArgs, open)
 		handler := map[string]interface{}{
 			"type":    "command",
 			"command": command,
@@ -3194,7 +3198,7 @@ func verifyClaudeCodeHookMatrixForSetup(
 	if err != nil {
 		return err
 	}
-	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, groups)
+	return verifyClaudeCodeHookGroups(hooks, expectedCommand, expectedArgs, hooksDir, groups, claudeCodeUnavailableOpen(opts))
 }
 
 // verifyClaudeCodeHookGroups validates the exact DefenseClaw-owned effective
@@ -3208,11 +3212,13 @@ func verifyClaudeCodeHookGroups(
 	expectedArgs []string,
 	hooksDir string,
 	groups []claudeCodeHookGroup,
+	unavailableOpen ...bool,
 ) error {
+	open := len(unavailableOpen) > 0 && unavailableOpen[0]
 	expectedEvents := make(map[string]struct{}, len(groups))
 	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}
-		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs)
+		expectedCommand, expectedArgs := claudeCodeHandlerInvocation(expected.eventType, expectedCommand, expectedArgs, open)
 		locations, err := ownedClaudeCodeHookLocations(
 			hooks[expected.eventType], hooksDir, expectedCommand, expectedArgs,
 		)
