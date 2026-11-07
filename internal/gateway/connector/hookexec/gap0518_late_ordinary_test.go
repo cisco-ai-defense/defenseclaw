@@ -40,6 +40,9 @@ func lateOrdinaryProject(t *testing.T) string {
 	if err := os.Link(keys, filepath.Join(project, "hardlink")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(keys, filepath.Join(project, "-keylink")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", home)
 	return project
 }
@@ -83,6 +86,8 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"echo, open tier", "echo hi", "open", false},
 			{"build with a redirect and a filter, open tier", "go test ./... 2>&1 | tail -5", "open", false},
 			{"2000 operands, open tier", long, "open", false},
+			{"ordinary words that read like a name, open tier", "echo claw defense", "open", false},
+			{"short flags, open tier", "ls -la", "open", false},
 			{"echo, strict tier", "echo hi", "closed", true},
 			{"2000 operands, strict tier", long, "closed", true},
 			{"direct keys path, open tier", "cat ../.ssh/authorized_keys", "open", true},
@@ -90,6 +95,10 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 			{"hard link to keys, open tier", "cat hardlink", "open", true},
 			{"2000 operands with the link last, open tier", long + " keylink", "open", true},
 			{"2000 operands with the link first, open tier", "touch keylink " + strings.Join(words, " "), "open", true},
+			{"attached output option to the link, open tier", "curl -okeylink http://example.invalid/x", "open", true},
+			{"bundled attached output option, open tier", "curl -sSokeylink http://example.invalid/x", "open", true},
+			{"key=value operand to the link, open tier", "d" + "d if=plain.txt of=keylink", "open", true},
+			{"redirect to a dash-named link, open tier", "echo x > -keylink", "open", true},
 			{"known value, open tier", "cat $HOME/.ssh/authorized_keys", "open", true},
 		} {
 			t.Run(connector+"/"+tc.name, func(t *testing.T) {
