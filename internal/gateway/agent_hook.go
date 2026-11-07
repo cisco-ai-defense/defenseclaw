@@ -2402,6 +2402,8 @@ func (a *APIServer) safeEvaluateHook(
 	runtime hookProfileRuntime,
 ) (resp agentHookResponse, panicked bool) {
 	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.strictPolicyTierForHook(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -2429,6 +2431,8 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	req agentHookRequest,
 ) (resp agentHookResponse, panicked bool) {
 	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.strictPolicyTierForHook(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
