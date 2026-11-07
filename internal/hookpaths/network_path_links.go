@@ -56,10 +56,13 @@ func joinPathElement(dir, elem string) string {
 	return dir + string(filepath.Separator) + elem
 }
 
-// linkedNetworkShare is the network share a link on the local path leads
-// into ("" for none). A link as the last component is followed only with
-// followLast: lstat, readlink and a directory walk open no final link.
-func linkedNetworkShare(path string, followLast bool) string {
+// linkIntoShare is the path as a link on the local path resolves it, when
+// the link leads into a network share and the resolved path names that
+// share ("" for no such link). A link as the last component is followed
+// only with followLast: lstat, readlink and a directory walk open no final
+// link. The caller asks the share and then walks the resolved path on, so
+// a link inside the share that leads into another share is met too.
+func linkIntoShare(path string, followLast bool) string {
 	if !networkShareLinkWalk || path == "" {
 		return ""
 	}
@@ -103,8 +106,8 @@ func linkedNetworkShare(path string, followLast bool) string {
 		if hops++; hops > networkLinkHopLimit {
 			return ""
 		}
-		if root := networkShareRootOf(target); root != "" {
-			return root
+		if networkShareRootOf(target) != "" {
+			return joinPathElement(target, rest)
 		}
 		targetVol := filepath.VolumeName(target)
 		tail := target[len(targetVol):]
