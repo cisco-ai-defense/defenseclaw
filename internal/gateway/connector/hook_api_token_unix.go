@@ -267,3 +267,9 @@ func hookAPIValidateDirectoryFor(path, _ string) error {
 func mkdirHookAPITokenDir(hooksDir string) error {
 	return os.Mkdir(hooksDir, 0o700)
 }
+
+// mkdirHookAPITokenParents makes the missing directories above the hooks
+// directory, private to their owner.
+func mkdirHookAPITokenParents(dir string) error {
+	return os.MkdirAll(dir, 0o700)
+}

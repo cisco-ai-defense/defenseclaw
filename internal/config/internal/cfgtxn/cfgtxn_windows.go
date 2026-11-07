@@ -19,7 +19,7 @@ func openLockFile(path string) (*os.File, error) {
 	// A lock beside the managed config is created in the canonical
 	// protection; a file already there is left to the Guardian and to Setup
 	// repair (GAP-0766). Elsewhere this does nothing.
-	if err := managed.EnsureCanonicalLockFile(path, managed.ObjectConfigFile); err != nil {
+	if err := managed.EnsureCanonicalLockFile(path, managed.LockFileKindFor(path)); err != nil {
 		return nil, err
 	}
 	return os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)

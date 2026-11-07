@@ -712,3 +712,20 @@ func mkdirHookAPITokenDir(hooksDir string) error {
 	}
 	return managed.CreateCanonicalDirectory(hooksDir, managed.ObjectRuntimeDirectory, managed.CanonicalOptions{GatewayServiceAccount: account})
 }
+
+// mkdirHookAPITokenParents makes the missing directories above the hooks
+// directory. In the managed tree of a standalone deployment none is created:
+// the data directory above it is a RuntimeDirectory the Guardian keeps in its
+// canonical protection, and a plain mkdir would hand it the inherited one to
+// repair (GAP-0762). Setup creates it, so a missing one is reported and the
+// caller creates nothing under it. Anywhere else the directories are made as
+// before.
+func mkdirHookAPITokenParents(dir string) error {
+	if _, ok := managed.StandaloneManagedTreeAccount(dir); !ok {
+		return os.MkdirAll(dir, 0o700)
+	}
+	if _, err := os.Lstat(dir); err != nil {
+		return fmt.Errorf("managed runtime directory %s is missing; Setup creates it: %w", dir, err)
+	}
+	return nil
+}

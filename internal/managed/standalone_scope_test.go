@@ -70,3 +70,20 @@ func TestStandaloneManagedTreeAccountExcludesSecureClientAndUnmanaged(t *testing
 		t.Error("without the gateway service pin nothing can be created for it")
 	}
 }
+
+// GAP-0766: a lock beside the pinned config is judged as the config is; every
+// other lock in the tree (the .env lock, the ACP locks) as a runtime file.
+func TestLockFileKindFor(t *testing.T) {
+	home, config := pinStandaloneScope(t, ProfileStandalone)
+	if got := LockFileKindFor(config + ".lock"); got != ObjectConfigFile {
+		t.Errorf("config lock kind = %s, want %s", got, ObjectConfigFile)
+	}
+	for _, path := range []string{
+		filepath.Join(home, ".env.lock"),
+		filepath.Join(home, "acp", ".enterprise-credentials.lock"),
+	} {
+		if got := LockFileKindFor(path); got != ObjectRuntimeFile {
+			t.Errorf("%s kind = %s, want %s", path, got, ObjectRuntimeFile)
+		}
+	}
+}

@@ -29321,13 +29321,18 @@ function Get-DefenseClawLazyLockFiles {
     <#
         The product-owned lock files that are created lazily after Setup and
         sit inside the protected tree: the config writer's lock beside
-        config.yaml, and the ACP credential and enrollment locks in the
-        runtime directory. Each is stamped by repair and judged by verify
+        config.yaml, and the ACP credential and enrollment locks and the
+        .env lock in the runtime directory. Each is stamped by repair and judged by verify
         like the file it guards, so an entry an untrusted account added to
         one is removed and reported (GAP-0766). Mirrors
-        managed.ManagedInstallLayout and acp.EnterpriseLockFilePaths.
+        managed.ManagedInstallLayout and the guardian's lock list. The
+        list is the Standalone profile only: the Secure Client profile keeps
+        the objects it stamped and judged before, so it gets none.
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return @()
+    }
     $acpDirectory = Microsoft.PowerShell.Management\Join-Path ([string]$Layout.RuntimeDirectory) 'acp'
     return @(
         [pscustomobject]@{
@@ -29340,6 +29345,10 @@ function Get-DefenseClawLazyLockFiles {
         },
         [pscustomobject]@{
             Path = (Microsoft.PowerShell.Management\Join-Path $acpDirectory '.enterprise-enrollment.lock')
+            Kind = 'RuntimeFile'
+        },
+        [pscustomobject]@{
+            Path = (Microsoft.PowerShell.Management\Join-Path ([string]$Layout.RuntimeDirectory) '.env.lock')
             Kind = 'RuntimeFile'
         }
     )

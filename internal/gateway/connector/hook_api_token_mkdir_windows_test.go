@@ -124,3 +124,33 @@ func TestMkdirHookAPITokenDirUnresolvedAccountLeavesNothing(t *testing.T) {
 		t.Fatalf("no folder may be left behind: %v", err)
 	}
 }
+
+// GAP-0762: an OTLP-first start must not create the data directory above the
+// hooks folder in a standalone managed tree; the Guardian keeps it canonical,
+// and a plain mkdir would hand it the inherited protection to repair.
+func TestEnsureHookAPITokenDirStandaloneCreatesNoParent(t *testing.T) {
+	home := pinMkdirTest(t, managed.ProfileStandalone)
+	parent := filepath.Join(home, "missing-runtime")
+	err := ensureHookAPITokenDir(filepath.Join(parent, "hooks"))
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a missing managed parent must be reported, got %v", err)
+	}
+	if _, statErr := os.Lstat(parent); !os.IsNotExist(statErr) {
+		t.Fatalf("no parent may be created: %v", statErr)
+	}
+}
+
+// Benign twin: the Secure Client and per-user paths keep the ordinary
+// MkdirAll of the parent.
+func TestEnsureHookAPITokenDirOrdinaryPathsStillMakeTheParent(t *testing.T) {
+	home := pinMkdirTest(t, managed.ProfileSecureClient)
+	path := filepath.Join(home, "missing-runtime", "hooks")
+	if err := ensureHookAPITokenDir(path); err != nil {
+		t.Fatalf("Secure Client: %v", err)
+	}
+	t.Setenv(managed.DeploymentModeEnv, "")
+	perUser := filepath.Join(t.TempDir(), "a", "b", "hooks")
+	if err := ensureHookAPITokenDir(perUser); err != nil {
+		t.Fatalf("per-user: %v", err)
+	}
+}
