@@ -123,7 +123,7 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	sp, _ := specFor("claudecode")
 	w := &answerWatchdog{restart: &perUserRestartAnswer{mode: "open"}}
 	w.restartWindowContact(Options{Home: dataDir}, sp, "open", check)
-	eventually(t, "the read of the connection owner", func() bool { return check.owner.Load() != nil })
+	eventuallyWithin(t, "the read of the connection owner", time.Second, func() bool { return check.owner.Load() != nil })
 	if owner := check.owner.Load(); owner.pid != pid {
 		t.Fatalf("captured owner = %+v, want the fresh gateway", owner)
 	}
@@ -211,7 +211,7 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 		t.Fatal("a just-written gateway record is not recent")
 	}
 	// The helper accept()s the connection after the dial returns.
-	eventually(t, "the helper holding the connection", func() bool { return perUserFreshGatewayHoldsCall(dataDir, check) })
+	eventuallyWithin(t, "the helper holding the connection", 5*time.Second, func() bool { return perUserFreshGatewayHoldsCall(dataDir, check) })
 	// The limits are the product ones, read on the clock of the test: the
 	// record is recent up to the window and two seconds of slack past the
 	// modification time, and the gateway process is fresh up to 12 s.
@@ -308,7 +308,7 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	defer late.Close()
 	lateCheck := checkFor(late)
 	client, server := late.LocalAddr().(*net.TCPAddr), late.RemoteAddr().(*net.TCPAddr)
-	eventually(t, "the helper accepting the late connection", func() bool {
+	eventuallyWithin(t, "the helper accepting the late connection", 5*time.Second, func() bool {
 		owner, unique := perUserConnectedPeerPID(client, server)
 		return unique && owner == pid
 	})

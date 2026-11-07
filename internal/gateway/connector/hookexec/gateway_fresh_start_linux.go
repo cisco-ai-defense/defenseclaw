@@ -152,18 +152,25 @@ func perUserCaptureFreshGatewayOwner(check *perUserPeerCheck) {
 	if !okc || !oks {
 		return
 	}
-	go func() {
-		ctx, cancel := proofclock.WithTimeout(context.Background(), freshOwnerCaptureWait)
-		defer cancel()
-		pid, ok := perUserConnectedPeerPIDWithin(ctx, client, server)
-		if !ok {
-			return
-		}
-		identity, ok := procidentity.Of(pid)
-		if ok && identity != "" && ctx.Err() == nil {
-			check.owner.Store(&perUserPeerProcess{pid: pid, identity: identity})
-		}
-	}()
+	go captureFreshGatewayOwner(check, client, server, perUserConnectedPeerPIDWithin)
+}
+
+// captureFreshGatewayOwner reads the sole holder of the connection with scan
+// and records it when the read ends inside freshOwnerCaptureWait on the proof
+// clock. A read that ends after that wait names no owner, whatever it found.
+// scan is the process-table read; a test replaces it to end the read at a
+// moment it chooses.
+func captureFreshGatewayOwner(check *perUserPeerCheck, client, server *net.TCPAddr, scan func(context.Context, *net.TCPAddr, *net.TCPAddr) (int, bool)) {
+	ctx, cancel := proofclock.WithTimeout(context.Background(), freshOwnerCaptureWait)
+	defer cancel()
+	pid, ok := scan(ctx, client, server)
+	if !ok {
+		return
+	}
+	identity, ok := procidentity.Of(pid)
+	if ok && identity != "" && ctx.Err() == nil {
+		check.owner.Store(&perUserPeerProcess{pid: pid, identity: identity})
+	}
 }
 
 func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {
