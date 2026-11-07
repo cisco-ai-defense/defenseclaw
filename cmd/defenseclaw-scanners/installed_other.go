@@ -71,6 +71,8 @@ func runInstalled(args []string, stdout, stderr io.Writer) int {
 		script, scriptArgs = pluginScanScript, args[1:]
 	case "mcp-scan":
 		script, scriptArgs = mcpScanScript, args[1:]
+	case "plugin-manifest-entrypoints":
+		script, scriptArgs = pluginManifestEntrypointsScript, args[1:]
 	default:
 		fmt.Fprintf(stderr, "defenseclaw-scanners: unknown tool %q\n", args[0])
 		return 2

@@ -578,6 +578,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 						Type:      InstallSkill,
 						Name:      w.assetEventName(skill),
 						Path:      skill,
+						Connector: w.rescanConnectorForPath(skill),
 						Timestamp: time.Now().UTC(),
 					})
 				}
@@ -594,6 +595,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				Type:      InstallSkill,
 				Name:      e.Name(),
 				Path:      path,
+				Connector: w.rescanConnectorForPath(path),
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -654,6 +656,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 						Type:      InstallPlugin,
 						Name:      name,
 						Path:      childPath,
+						Connector: w.rescanConnectorForPath(childPath),
 						Timestamp: time.Now().UTC(),
 					})
 				}
@@ -666,6 +669,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 				Type:      InstallPlugin,
 				Name:      e.Name(),
 				Path:      path,
+				Connector: w.rescanConnectorForPath(path),
 				Timestamp: time.Now().UTC(),
 			})
 		}
@@ -695,6 +699,15 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	return targets
 }
 
+// rescanConnectorForPath pins the registered root owner on an enumerated
+// asset. Secure Client keeps its existing event shape.
+func (w *InstallWatcher) rescanConnectorForPath(path string) string {
+	if w.secureClientActive() {
+		return ""
+	}
+	return w.connectorForPath(path)
+}
+
 // skipPluginChildDir reports whether a child of a plugin root is not a
 // plugin: a dot-dir, a Python bytecode cache or an npm dependency tree.
 // Hermes' plugins folder is a Python package, so it holds __pycache__; the
@@ -707,15 +720,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 // names them the same way (GAP-2439). The user plugin root (~/.hermes/plugins)
 // keeps category/name, as "plugin list" does.
 func (w *InstallWatcher) hermesBareCategory(dir, category string) bool {
-	if category != "platforms" || w.connectorForPath(dir) != "hermes" {
-		return false
-	}
-	dir = filepath.Clean(dir)
-	if filepath.Base(dir) == "plugins" && filepath.Base(filepath.Dir(dir)) == "hermes-agent" {
-		return true
-	}
-	bundled := strings.TrimSpace(os.Getenv("HERMES_BUNDLED_PLUGINS"))
-	return bundled != "" && filepath.Clean(bundled) == dir
+	return category == "platforms" && w.connectorForPath(dir) == "hermes" && hermesBundledPluginRoot(dir)
 }
 
 func skipPluginChildDir(name string) bool {
@@ -1036,6 +1041,9 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				fmt.Fprintf(os.Stderr, "[rescan] mcp %s was configured before the upgrade; recording its baseline without install admission\n", evt.Name)
 				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path, "type=mcp reason=configured-before-upgrade")
 			}
+			if w.rescanHermesVendorPlugin(evt, currentSnap, nil, fingerprint) {
+				return rescanSkipped // vendor content, decided on this read (GAP-0645)
+			}
 			// First time we've seen this target: scan once to establish a
 			// baseline that future cycles can diff against.
 			result, scanID := w.scanAndEmit(ctx, evt)
@@ -1131,8 +1139,12 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
 	}
 
-	if reason == "content-changed" && !w.secureClientActive() {
+	if (reason == "content-changed" || w.hermesBaselineOwesAdmission(evt, baseline, currentSnap)) && !w.secureClientActive() {
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
+	}
+
+	if w.rescanHermesVendorPlugin(evt, currentSnap, baseline, fingerprint) {
+		return rescanSkipped // vendor content, decided on this read (GAP-0645)
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] scanning %s %s (%s)\n", evt.Type, evt.Name, reason)
@@ -1477,7 +1489,7 @@ func (w *InstallWatcher) scanAndEmit(ctx context.Context, evt InstallEvent) (*sc
 	w.rescanFailureMu.Lock()
 	delete(w.rescanFailureLogged, evt.Path)
 	w.rescanFailureMu.Unlock()
-	return result, w.emitRescanResult(scanCtx, result)
+	return result, w.emitRescanResult(scanCtx, evt, result)
 }
 
 // auditRescanFailure records, once per target until it scans again, that a
@@ -1521,10 +1533,12 @@ func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
 // watcher admitted with a logged scan. Without it the next gateway start
 // re-admitted the unchanged target as new, and the start after that scanned
 // it again for lack of a baseline scan: three scans and three scan-finding
-// alerts for one install (GAP-2507). A target admission moved away gets no
-// baseline.
+// alerts for one install (GAP-2507). A Hermes shipped plugin admitted as
+// vendor content has no scan; its baseline records the bytes admitted, so an
+// edit before the next rescan is an admission (GAP-0645). A target admission
+// moved away gets no baseline.
 func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetSnapshot, res AdmissionResult) {
-	if w.movedByAdmission(evt) || res.ScanID == "" {
+	if w.movedByAdmission(evt) || res.ScanID == "" && res.Reason != hermesVendorPluginReason {
 		return
 	}
 	if !w.cfg.Watch.RescanEnabled {
@@ -2135,6 +2149,9 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 		Details:   details,
 		Severity:  maxSev,
 	}
+	if !w.secureClientActive() {
+		event.Connector = w.eventConnector(evt)
+	}
 	if err := w.logger.LogEvent(event); err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] drift alert LogEvent failed for %s: %v\n", evt.Path, err)
 	}
@@ -2181,8 +2198,23 @@ func (w *InstallWatcher) snapshotForEvent(evt InstallEvent) (*TargetSnapshot, er
 		if _, err := os.Stat(path); err != nil {
 			return nil, err
 		}
-		return snapshotTarget(path, evt.Type == InstallPlugin &&
+		// A Hermes shipped plugin is hashed in the legacy scope plus the
+		// folders and links the plugin scanner audits (skippedTreeHash), so
+		// a cache write is not a change; every other plugin takes the full
+		// tree.
+		_, shipped := w.hermesShippedPlugin(evt)
+		snap, err := snapshotTarget(path, evt.Type == InstallPlugin && !shipped &&
 			(w.cfg == nil || !w.cfg.SecureClientIntegration()))
+		if err != nil {
+			return nil, err
+		}
+		if shipped {
+			if extra := skippedTreeHash(path, w.manifestLoader()); extra != "" {
+				sum := sha256.Sum256([]byte(snap.ContentHash + "\n" + extra))
+				snap.ContentHash = hex.EncodeToString(sum[:])
+			}
+		}
+		return snap, nil
 	}
 }
 
@@ -2290,13 +2322,15 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) (string, error) {
 // the snapshot's baseline reference. On emission failure (writer or
 // persistence error) returns the empty string and lets the
 // snapshot store fall back to "" so callers don't see new failure modes.
-func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.ScanResult) string {
+func (w *InstallWatcher) emitRescanResult(ctx context.Context, evt InstallEvent, result *scanner.ScanResult) string {
 	if w == nil || w.logger == nil || result == nil {
 		return ""
 	}
-	correlation := w.ownedScanCorrelation(watcherScanCorrelation(
-		ctx, rescanRunID(), watcherConnectorName(w.cfg),
-	), result)
+	connector := watcherConnectorName(w.cfg)
+	if !w.secureClientActive() {
+		connector = w.eventConnector(evt)
+	}
+	correlation := w.ownedScanCorrelation(watcherScanCorrelation(ctx, rescanRunID(), connector), result)
 	err := w.logger.LogScanWithCorrelation(ctx, result, result.Verdict, correlation)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)
