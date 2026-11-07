@@ -415,7 +415,9 @@ type enterpriseHookWorkerOpenCodePortReport struct {
 	// Previous is the port the file named before this write (0: none).
 	Previous int      `json:"previous,omitempty"`
 	Created  []string `json:"created,omitempty"`
-	Error    string   `json:"error,omitempty"`
+	// Sealed are the group-writable folders the setter made sticky.
+	Sealed []string `json:"sealed,omitempty"`
+	Error  string   `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns

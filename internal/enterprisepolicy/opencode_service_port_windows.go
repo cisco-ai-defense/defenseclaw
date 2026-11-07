@@ -15,22 +15,22 @@ import (
 // checkOpenCodeServiceConfigFolders runs the folder checks the write runs,
 // without creating anything: a reparse point on the way, or a folder another
 // account can write, is refused whether or not the port already matches.
-func checkOpenCodeServiceConfigFolders(home, path string) error {
+func checkOpenCodeServiceConfigFolders(home, path string) ([]string, error) {
 	for _, dir := range []string{filepath.Join(home, ".config"), filepath.Dir(path)} {
 		if err := safefile.RejectReparseChain(dir); err != nil {
-			return err
+			return nil, err
 		}
 		if _, err := os.Lstat(dir); err != nil {
 			if os.IsNotExist(err) {
 				continue
 			}
-			return err
+			return nil, err
 		}
 		if err := safefile.ValidatePrivateDirectoryOwnershipAllowingAdministrators(dir); err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // openCodeServiceFileShared reports a service.json whose owner or write
