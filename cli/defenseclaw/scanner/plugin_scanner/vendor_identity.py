@@ -509,6 +509,29 @@ def _resolved_copy(known: set[str], owner: str, name: str) -> str | None:
         base = base[:cut].rstrip("/") if cut > 0 else ""
 
 
+def _flat_v1(tree: object) -> dict[str, dict]:
+    """The nested ``dependencies`` tree of an npm 6 lock as lock paths.
+
+    ``a`` with a nested ``b`` becomes ``node_modules/a`` and
+    ``node_modules/a/node_modules/b``, the form later locks use, so one reading
+    serves every lock version.
+    """
+
+    flat: dict[str, dict] = {}
+    pending: list[tuple[str, object]] = [("", tree)]
+    while pending:
+        base, dependencies = pending.pop()
+        if not isinstance(dependencies, dict):
+            continue
+        for dependency, entry in dependencies.items():
+            if not isinstance(dependency, str) or not isinstance(entry, dict):
+                continue
+            path = (base + "/" if base else "") + _DEPENDENCY_DIR + "/" + dependency
+            flat[path] = entry
+            pending.append((path, entry.get("dependencies")))
+    return flat
+
+
 def _lock_records(lock: dict, name: str, key: str | None) -> list[dict] | None:
     """The entries of an npm lock that record this package, or None when a
     dependency spec that resolves to it asks for a source other than the registry.
@@ -518,14 +541,23 @@ def _lock_records(lock: dict, name: str, key: str | None) -> list[dict] | None:
     the package counts. In a lock above it only what the lock records at that
     path, and the specs that resolve to that path, describe this install; a
     copy of the same name somewhere else in the project is another install.
+    The installed path is a copy whether or not the lock lists it, so a spec
+    that Node resolves to it counts when the lock has no entry for it.
     """
 
     entries: list[dict] = []
     wanted = None if key is None else _fold(key)
+    tables: list[tuple[dict, tuple[str, ...]]] = [
+        (_flat_v1(lock.get("dependencies")), ("requires",)),
+    ]
     packages = lock.get("packages")
     if isinstance(packages, dict):
-        known = {_fold(path) for path in packages if isinstance(path, str)}
-        for path, entry in packages.items():
+        tables.append((packages, _DEPENDENCY_FIELDS))
+    for table, fields in tables:
+        known = {_fold(path) for path in table if isinstance(path, str)}
+        if wanted is not None:
+            known.add(wanted)
+        for path, entry in table.items():
             if not isinstance(path, str) or not isinstance(entry, dict):
                 continue
             if path and (
@@ -536,7 +568,7 @@ def _lock_records(lock: dict, name: str, key: str | None) -> list[dict] | None:
                 )
             ):
                 entries.append(entry)
-            for field in _DEPENDENCY_FIELDS:
+            for field in fields:
                 specs = entry.get(field)
                 if not isinstance(specs, dict) or name not in specs:
                     continue
@@ -544,27 +576,6 @@ def _lock_records(lock: dict, name: str, key: str | None) -> list[dict] | None:
                     continue
                 if not _registry_spec(specs[name], name):
                     return None
-    if wanted is None:
-        pending = [lock.get("dependencies")]
-        while pending:
-            dependencies = pending.pop()
-            if not isinstance(dependencies, dict):
-                continue
-            for dependency, entry in dependencies.items():
-                if isinstance(entry, dict):
-                    if dependency == name:
-                        entries.append(entry)
-                    pending.append(entry.get("dependencies"))
-    else:
-        node, found = lock.get("dependencies"), None
-        for segment in _key_names(key):
-            found = node.get(segment) if isinstance(node, dict) else None
-            if not isinstance(found, dict):
-                found = None
-                break
-            node = found.get("dependencies")
-        if found is not None:
-            entries.append(found)
     return entries
 
 
@@ -592,6 +603,11 @@ def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] |
             if field in ("type", "where", "name", "escapedName") or value is None or isinstance(
                 value, bool,
             ):
+                continue
+            if field == "scope":
+                # The scope is part of the name, not a place to fetch from.
+                if value != name.split("/", 1)[0]:
+                    return None
                 continue
             if not _registry_spec(value, name):
                 return None
