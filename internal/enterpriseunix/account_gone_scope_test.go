@@ -19,8 +19,9 @@ import (
 
 func stubAccountsGone(t *testing.T, gone ...string) {
 	t.Helper()
-	previous := guardianAccountConfirmedGone
-	t.Cleanup(func() { guardianAccountConfirmedGone = previous })
+	previous, previousHeld := guardianAccountConfirmedGone, guardianHomeHeldByLiveAccount
+	t.Cleanup(func() { guardianAccountConfirmedGone, guardianHomeHeldByLiveAccount = previous, previousHeld })
+	guardianHomeHeldByLiveAccount = func(string) bool { return false }
 	guardianAccountConfirmedGone = func(user string, _ int) bool {
 		for _, name := range gone {
 			if user == name {
@@ -113,8 +114,8 @@ func TestCopilotAccountScopeKeepsAHomeWithALiveAccount(t *testing.T) {
 			shared := h.env.P("/home/shared")
 
 			stubAccountsGone(t, "alice")
-			if scoped, _ := homes(); !reflect.DeepEqual(scoped, []string{shared}) {
-				t.Fatalf("a live account is at the home of a deleted one: scoped=%v", scoped)
+			if scoped, out := homes(); !reflect.DeepEqual(scoped, []string{shared}) || len(out) != 0 {
+				t.Fatalf("a live account is at the home of a deleted one: scoped=%v out=%v", scoped, out)
 			}
 			stubAccountsGone(t, "alice", "carol")
 			if scoped, out := homes(); len(scoped) != 0 || len(out) != 0 {
@@ -125,6 +126,77 @@ func TestCopilotAccountScopeKeepsAHomeWithALiveAccount(t *testing.T) {
 				t.Fatalf("every account answers: scoped=%v", scoped)
 			}
 		})
+	}
+}
+
+// A deleted account that enrollment left out does not put the home of a live
+// enrolled account at the same home out of scope: the live account's Local
+// hook is the one verify expects there, in either record order.
+func TestCopilotAccountScopeDeletedExcludedAccountLeavesALiveSharedHomeInScope(t *testing.T) {
+	for _, order := range []struct {
+		name     string
+		accounts string
+	}{
+		{"deleted account first", `{"user":"old","uid":501,"home":"/home/shared"},{"user":"live","uid":502,"home":"/home/shared"}`},
+		{"live account first", `{"user":"live","uid":502,"home":"/home/shared"},{"user":"old","uid":501,"home":"/home/shared"}`},
+	} {
+		t.Run(order.name, func(t *testing.T) {
+			h := newTestHost(t, "darwin")
+			writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+				`{"version":1,"accounts":[`+order.accounts+`]}`)
+			cfg := &config.Config{}
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+			cfg.Enterprise.Enrollment.ExcludeUsers = []string{"old"}
+			homes := func() ([]string, []string) {
+				scoped, out, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return slices.Compact(scoped), slices.Compact(out)
+			}
+			shared := h.env.P("/home/shared")
+
+			// Benign twin: both accounts answer, the excluded one conflicts.
+			stubAccountsGone(t)
+			if scoped, out := homes(); !reflect.DeepEqual(scoped, []string{shared}) || !reflect.DeepEqual(out, []string{shared}) {
+				t.Fatalf("both live: scoped=%v out=%v", scoped, out)
+			}
+			stubAccountsGone(t, "old")
+			if scoped, out := homes(); !reflect.DeepEqual(scoped, []string{shared}) || len(out) != 0 {
+				t.Fatalf("deleted excluded account: scoped=%v out=%v, want scoped=[%s] out=[]", scoped, out, shared)
+			}
+		})
+	}
+}
+
+// The eligible record can lag a replacement: the recorded uid is gone while
+// a live account holds the same home. A home a fresh read finds in use is not
+// dropped; one it finds free is.
+func TestCopilotAccountScopeKeepsAReusedHomeBeforeTheRecordRefreshes(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	writeHostFile(t, h, enterprisehooks.UnixEligibleAccountsPath(h.env.Layout.ManifestPath),
+		`{"version":1,"accounts":[{"user":"alice","uid":501,"home":"/home/alice"},{"user":"bob","uid":503,"home":"/home/bob"}]}`)
+	cfg := &config.Config{}
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"copilot": {}}
+	cfg.Enterprise.Enrollment.ExcludeUsers = []string{"bob"}
+	homes := func() ([]string, []string) {
+		scoped, out, err := (&policyManager{env: h.env}).copilotAccountHomes(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scoped, out
+	}
+	stubAccountsGone(t, "alice", "bob")
+	held := map[string]bool{}
+	guardianHomeHeldByLiveAccount = func(home string) bool { return held[home] }
+
+	if scoped, out := homes(); len(scoped) != 0 || len(out) != 0 {
+		t.Fatalf("homes no live account holds: scoped=%v out=%v", scoped, out)
+	}
+	held["/home/alice"], held["/home/bob"] = true, true
+	scoped, out := homes()
+	if !reflect.DeepEqual(scoped, []string{h.env.P("/home/alice")}) || !reflect.DeepEqual(out, []string{h.env.P("/home/bob")}) {
+		t.Fatalf("homes a live account holds keep their recorded scope: scoped=%v out=%v", scoped, out)
 	}
 }
 

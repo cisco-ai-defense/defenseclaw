@@ -166,46 +166,65 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 	for _, entry := range append(append([]string{}, enrollment.ExcludeUsers...), enrollment.ExemptUsers...) {
 		leftOut[strings.TrimSpace(entry)] = true
 	}
-	var scoped, outOfScope []string
-	seen := map[string]bool{}
+	var entries []scopeEntry
 	goneHomes := newConfirmedGoneHomes()
+	// The accounts recorded beyond the enrolled ones add a home once
+	// for the live and once for the gone, so a gone account cannot hide a
+	// live one at its home.
+	liveSeen, goneSeen := map[string]bool{}, map[string]bool{}
 	for _, account := range accounts {
-		home := env.P(account.Home)
-		if leftOut[account.User] || leftOut[strconv.Itoa(account.UID)] {
-			outOfScope = append(outOfScope, home)
+		gone := goneHomes.note(account.User, account.UID, account.Home)
+		entries = append(entries, scopeEntry{
+			home: account.Home, outOfScope: leftOut[account.User] || leftOut[strconv.Itoa(account.UID)], gone: gone,
+		})
+		if gone {
+			goneSeen[account.Home] = true
 		} else {
-			scoped = append(scoped, home)
+			liveSeen[account.Home] = true
 		}
-		seen[home] = true
 	}
-	for _, account := range eligible {
-		home := env.P(account.Home)
-		goneHomes.note(account.User, account.UID, home)
+	leftOver := func(user string, uid int, home string) {
+		gone := goneHomes.note(user, uid, home)
+		seen := liveSeen
+		if gone {
+			seen = goneSeen
+		}
 		if !seen[home] {
-			outOfScope = append(outOfScope, home)
+			entries = append(entries, scopeEntry{home: home, outOfScope: true, gone: gone})
 			seen[home] = true
 		}
+	}
+	for _, account := range eligible {
+		leftOver(account.User, account.UID, account.Home)
 	}
 	for _, recordPath := range []string{
 		filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixCopilotVSCodeAccountsFileName),
 		enterprisehooks.UnixCopilotVSCodeAccountsPath(env.Layout.ManifestPath),
 	} {
 		for _, account := range env.accountRecords(recordPath) {
-			home := env.P(account.Home)
-			goneHomes.note(account.User, account.UID, home)
-			if !seen[home] {
-				outOfScope = append(outOfScope, home)
-				seen[home] = true
-			}
+			leftOver(account.User, account.UID, account.Home)
 		}
 	}
-	// A leftover Local file in the home of an account the directory
-	// confirms gone is nothing to enroll or to report: the guardian does
-	// not write into it, and it retires the account in the same pass that
-	// verify would otherwise call it an account outside enrollment
-	// (GAP-0777).
-	scoped = slices.DeleteFunc(scoped, goneHomes.has)
-	outOfScope = slices.DeleteFunc(outOfScope, goneHomes.has)
+	// An account the directory confirms gone contributes nothing: a leftover
+	// Local file in its home is nothing to enroll or to report, and the
+	// guardian retires the account in the pass that verify would otherwise
+	// call it an account outside enrollment (GAP-0777). It contributes
+	// nothing even where a live account shares its home, so the deleted
+	// account cannot put the live one's home out of scope; and where no
+	// recorded account is live but a fresh read finds a live account at the
+	// home (the record has not caught up with a replacement), the home stays
+	// as the record scopes it.
+	var scoped, outOfScope []string
+	for _, entry := range entries {
+		if entry.gone && !goneHomes.heldByLiveAccount(entry.home) {
+			continue
+		}
+		if entry.outOfScope {
+			outOfScope = append(outOfScope, env.P(entry.home))
+		} else {
+			scoped = append(scoped, env.P(entry.home))
+		}
+	}
 	// Status and verify read no settings below a home that does not answer
 	// (GAP-1751); describeUnansweredHomes names it.
 	scoped = slices.DeleteFunc(scoped, func(home string) bool { return !env.homeAnswers(home) })
@@ -268,34 +287,35 @@ func (env *Env) accountRecords(recordPath string) []accountRecord {
 	return accounts
 }
 
-// confirmedGoneHomes tracks, per home, the accounts a fresh directory read
-// confirms gone, by the evidence the guardian retires a target on
-// (guardianAccountConfirmedGone). A home is gone only while every account
-// recorded at it is: a live account that took over the home of a deleted
-// one (a shared home, or a record that still lists the old uid first) keeps
-// it. Each account (name and uid) is asked once.
+// scopeEntry is one account's contribution to the Copilot Local homes: its
+// home as the record spells it, whether enrollment leaves it out, and whether
+// a fresh directory read confirms it gone.
+type scopeEntry struct {
+	home       string
+	outOfScope bool
+	gone       bool
+}
+
+// confirmedGoneHomes asks, once per account (name and uid), whether a fresh
+// directory read confirms it gone by the evidence the guardian retires a
+// target on (guardianAccountConfirmedGone), and tracks per home whether any
+// account recorded at it is live.
 type confirmedGoneHomes struct {
 	asked map[string]bool
-	homes map[string]*goneHome
+	live  map[string]bool
+	held  map[string]bool
 }
-
-type goneHome struct{ gone, live bool }
 
 func newConfirmedGoneHomes() *confirmedGoneHomes {
-	return &confirmedGoneHomes{asked: map[string]bool{}, homes: map[string]*goneHome{}}
+	return &confirmedGoneHomes{asked: map[string]bool{}, live: map[string]bool{}, held: map[string]bool{}}
 }
 
-// note records one account recorded at home. An account with no name is
-// never confirmed gone.
-func (g *confirmedGoneHomes) note(user string, uid int, home string) {
-	state := g.homes[home]
-	if state == nil {
-		state = &goneHome{}
-		g.homes[home] = state
-	}
+// note records one account recorded at home and returns whether it is
+// confirmed gone. An account with no name is never confirmed gone.
+func (g *confirmedGoneHomes) note(user string, uid int, home string) bool {
 	if user == "" {
-		state.live = true
-		return
+		g.live[home] = true
+		return false
 	}
 	key := user + ":" + strconv.Itoa(uid)
 	gone, asked := g.asked[key]
@@ -303,16 +323,25 @@ func (g *confirmedGoneHomes) note(user string, uid int, home string) {
 		gone = guardianAccountConfirmedGone(user, uid)
 		g.asked[key] = gone
 	}
-	if gone {
-		state.gone = true
-	} else {
-		state.live = true
+	if !gone {
+		g.live[home] = true
 	}
+	return gone
 }
 
-func (g *confirmedGoneHomes) has(home string) bool {
-	state := g.homes[home]
-	return state != nil && state.gone && !state.live
+// heldByLiveAccount is true for a home that a gone account's entry must keep
+// speaking for: no account recorded at it is live, and a fresh read of the
+// directory finds a live account there. Asked once per home.
+func (g *confirmedGoneHomes) heldByLiveAccount(home string) bool {
+	if g.live[home] {
+		return false
+	}
+	held, asked := g.held[home]
+	if !asked {
+		held = guardianHomeHeldByLiveAccount(home)
+		g.held[home] = held
+	}
+	return held
 }
 
 // guardianAccountConfirmedGone is unixidentity.AccountUIDGone for a recorded
@@ -326,6 +355,24 @@ var guardianAccountConfirmedGone = func(user string, uid int) bool {
 		return unixidentity.AccountUIDGone(ctx, user, uid)
 	}
 	return unixidentity.AccountRecordGone(ctx, user)
+}
+
+// guardianHomeHeldByLiveAccount is true when a fresh read of the local
+// directory finds an account whose home is home, and when that read does not
+// answer: a home that may be in use is never dropped. Tests replace it.
+var guardianHomeHeldByLiveAccount = func(home string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	records, err := unixidentity.LocalAccountRecords(ctx)
+	if err != nil {
+		return true
+	}
+	for _, record := range records {
+		if filepath.Clean(record.Home) == filepath.Clean(home) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *policyManager) Intended(cfg *config.Config) ([]string, error) {
