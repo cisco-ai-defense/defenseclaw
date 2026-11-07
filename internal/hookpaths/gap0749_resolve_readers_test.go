@@ -44,7 +44,8 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	}
 	fallback := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd, ActiveHome: home}
 	fallbackFacts := actionfacts.Analyze(fallback)
-	plainMoveDestinationsWithStatements(fallback, fallbackFacts)
+	simples := actionfacts.SimpleCommands(fallback, fallbackFacts)
+	plainMoveDestinationsWithStatements(fallback, fallbackFacts, simples)
 	callPastArgvBound(command)
 	ShellWriteOperands(command, cwd, home)
 	LiteralWriteOperands(command, cwd, home)
@@ -86,7 +87,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 		}
 	}
 	commandLinksWithFacts(command, cwd, home, sourceFacts, true)
-	for _, simple := range actionfacts.SimpleCommands(fallback, fallbackFacts) {
+	for _, simple := range simples {
 		if simple.EvaluationFailure == "" && simple.Text != command {
 			commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
 		}
