@@ -126,8 +126,37 @@ project's `.mcp.json`, as the user and before DefenseClaw has scanned them.
 
 | Hook tier | New server while admission is pending or unavailable | Completed failed or rejected scan |
 | --- | --- | --- |
-| Per-user default or permissive | The call runs with a warning naming the server and pending scan. The audit records `allow`, `would_block=true`, and the admission reason. | The call is blocked. |
+| Per-user default or permissive | The call runs with a warning naming the server and pending scan. The audit records `allow`, `would_block=true`, and the admission reason. | A scan that found something blocks the server. A server DefenseClaw could not scan (see below) runs with a warning that names the cause and the next step; the audit records `allow` and `would_block=true`. |
 | Per-user strict or managed standalone | The call is blocked with the server name and a retry time based on the scan timeout. | The call is blocked. |
+
+A scan that cannot run is not a malicious verdict. A server whose launcher is
+not `npx` or `uvx` (for example `python3`, `node` or a local binary), or whose
+URL is a loopback, private or link-local address, cannot be scanned. The
+first call and every later call of such a server get the same decision: in the
+per-user default and permissive tiers the call runs with a warning, and in the
+strict tier and on a managed device it is blocked. The agent is told why the
+server could not be scanned and the one next step: `defenseclaw mcp allow
+<name>` (on a managed device, ask the administrator, because the command is
+refused there), or start the server with `npx` or `uvx`, or serve it from a
+public URL. `defenseclaw mcp list` says the same.
+
+An administrator's allow rule for the server beats that block in every tier,
+the strict tier and managed profiles included. On a managed device add the
+rule to `asset_policy.mcp.allowed` in the machine policy, with the server's
+name and its URL (or its command and arguments), for example the loopback
+endpoint of a local agent gateway:
+
+```yaml
+asset_policy:
+  mcp:
+    allowed:
+      - name: gas
+        url: http://127.0.0.1:18795/mcp
+        reason: local agent gateway, reviewed
+```
+
+An explicit deny still wins over the allow rule. A server whose scan found
+something is not covered by this: allow it only after the finding is reviewed.
 
 An explicit asset-policy deny or runtime disable blocks in every tier. The
 server process itself can run until Claude Code stops it. It runs with the

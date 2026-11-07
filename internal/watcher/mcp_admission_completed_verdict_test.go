@@ -98,3 +98,45 @@ func TestMCPScanIssueNamesTheRefusedDefinition(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0778: an allow decided for a definition whose stored baseline still
+// says "failed" (the admin allowed the server and the rescan admitted it, the
+// baseline write has not landed) is the verdict from that moment: the next
+// call is not held by the old failed baseline. Once the baseline is written
+// it carries the verdict. A changed definition is pending again, and a failed
+// outcome is not lost before the baseline records it (the benign twin).
+func TestAllowedOutcomeReplacesTheFailedBaselineBeforeItsWrite(t *testing.T) {
+	h, _ := newScriptedMCPHarness(t) // strict tier: a refusal is a block
+	server := &h.servers[0]
+	server.Command, server.Args = "node", []string{"server.js"}
+	if got := h.poll(); len(got) != 1 || got[0].Verdict != VerdictBlocked {
+		t.Fatalf("admission %+v, want a block", got)
+	}
+	if status := statusOf(h, *server); !status.Failed {
+		t.Fatalf("before the allow: %+v, want failed", status)
+	}
+	evt := InstallEvent{Type: InstallMCP, Name: server.Name, Path: MCPEventPath(*server), Connector: server.Connector}
+	snap, err := h.w.snapshotForEvent(evt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.w.noteMCPAdmissionOutcome(evt, snap, AdmissionResult{Event: evt, Verdict: VerdictAllowed})
+	if status := statusOf(h, *server); status.Failed || status.Pending {
+		t.Fatalf("after the allow, before the baseline: %+v, want neither failed nor pending", status)
+	}
+	h.w.persistSnapshot(evt, snap, "", "allowed-fingerprint")
+	if status := statusOf(h, *server); status.Failed || status.Pending {
+		t.Fatalf("after the baseline write: %+v, want neither failed nor pending", status)
+	}
+	server.Args = []string{"other.js"}
+	if status := statusOf(h, *server); !status.Pending || status.Failed {
+		t.Fatalf("changed definition: %+v, want pending until its own admission", status)
+	}
+	// Twin: a failure noted for a definition with a clean baseline is
+	// reported until the baseline is written for it.
+	server.Args = []string{"server.js"}
+	h.w.noteMCPAdmissionOutcome(evt, snap, AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: scanFailureReason + "x"})
+	if status := statusOf(h, *server); !status.Failed {
+		t.Fatalf("a completed failure over a clean baseline: %+v, want failed", status)
+	}
+}

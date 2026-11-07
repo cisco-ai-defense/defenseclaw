@@ -1604,6 +1604,9 @@ func (w *InstallWatcher) persistSnapshot(evt InstallEvent, snap *TargetSnapshot,
 	); err != nil {
 		return
 	}
+	if evt.Type == InstallMCP {
+		w.noteMCPBaseline(evt.Path, snap.ContentHash, fingerprint)
+	}
 }
 
 // findingDrift diffs a freshly scanned result against the baseline's previously

@@ -263,12 +263,15 @@ type InstallWatcher struct {
 	// A slower older list read must not replace a newer completed listing.
 	mcpAdmissionReadSeq  atomic.Uint64
 	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
-	// mcpFailedOutcomes keeps, per server key, the definition hash whose
-	// admission this process completed as a scan failure, from the moment the
-	// verdict is decided. The hook reads it with the stored baseline, so a
-	// completed verdict is visible before (or without) the baseline write and
-	// is never read as pending (GAP-0775). Guarded by mcpAdmissionMu.
-	mcpFailedOutcomes map[string]string
+	// mcpOutcomes keeps, per server key, the latest admission outcome this
+	// process completed for a definition (its hash and whether it was a scan
+	// failure), from the moment the verdict is decided until the baseline
+	// that records it is written. The hook reads it with the stored baseline,
+	// so a completed verdict is visible before (or without) the baseline
+	// write: a failure is never read as pending, and an allow that replaces
+	// a failure is not held back by the old failed baseline (GAP-0775,
+	// GAP-0778). Guarded by mcpAdmissionMu.
+	mcpOutcomes map[string]mcpAdmissionOutcome
 	// admitNewMCP runs install admission for an MCP server that appears
 	// after the first rescan cycle (set with SetMCPServerSource): a managed
 	// computer has no `mcp set`, so a user adding a server to their agent is
