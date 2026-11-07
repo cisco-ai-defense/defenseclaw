@@ -1126,7 +1126,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	deltas := compareSnapshots(baseline, currentSnap)
 
 	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
-	if !scan && w.allowRuleReleases(ctx, evt) {
+	if !scan && (w.allowRuleReleases(ctx, evt) || w.policyHoldReleases(evt)) {
 		fmt.Fprintf(os.Stderr, "[rescan] %s %s is allowed by a rule and still blocked; running install admission\n", evt.Type, evt.Name)
 		w.notifyAdmission(w.runAdmission(ctx, evt))
 		return rescanScanned
