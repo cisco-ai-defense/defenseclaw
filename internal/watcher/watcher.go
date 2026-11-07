@@ -171,7 +171,7 @@ type InstallWatcher struct {
 	// plugin scanner (manifestLoader); a test may set it.
 	hermesManifests    hermesManifestLoader
 	hermesManifestOnce sync.Once
-	// hermesManifestAnswers remembers what the plugin scanner answered.
+	// hermesManifestAnswers remembers when the plugin scanner could not answer.
 	hermesManifestAnswers *hermesManifestCache
 	// markedWatchRoots caches the root markers written by this process
 	// (rescan goroutine only).
