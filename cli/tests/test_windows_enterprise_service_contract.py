@@ -6075,6 +6075,11 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     assert "[IO.FileShare]::None" in scanner
     assert scanner.index("Assert-DefenseClawNoReparsePath -Path $root") < scanner.index("Assert-DefenseClawPathAcl")
     assert scanner.index("Assert-DefenseClawPathAcl") < scanner.index("[IO.FileShare]::None")
+    # The Go step opens the lock with FILE_FLAG_OPEN_REPARSE_POINT; a FileStream
+    # follows a link and delete-on-close would delete its target, so a lock file
+    # that is a link or junction is refused before the open.
+    assert "[IO.File]::GetAttributes($lock) -band [IO.FileAttributes]::ReparsePoint" in scanner
+    assert scanner.index("[IO.FileAttributes]::ReparsePoint") < scanner.index("[IO.FileShare]::None")
     assert scanner.index("[IO.FileShare]::None") < scanner.index("Remove-DefenseClawNoFollowTree")
     assert "[IO.Directory]::Delete($root, $false)" in scanner
     assert "Remove-Item" not in scanner

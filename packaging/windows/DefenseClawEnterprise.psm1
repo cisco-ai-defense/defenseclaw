@@ -18881,8 +18881,13 @@ function Get-DefenseClawStandaloneCreatedFolderPreview {
 # lifecycle lock, this removes the runtime the way the Go step does: under
 # the scanner runtime lock (a run that holds it keeps the folder, and the Go
 # step retires it), only a real administrator-only folder, never through a
-# link (Remove-DefenseClawNoFollowTree). A folder that cannot be removed this
-# way stays for the Go step, which names it.
+# link (Remove-DefenseClawNoFollowTree), and a lock file that is itself a link
+# is refused, as the Go step opens it without following links. A folder that
+# cannot be removed this way stays for the Go step, which names it. The Go
+# certification-run guard (windowsScannerRuntimeCertificationRun) has no
+# counterpart here on purpose: this runs only when no deployment of any scope
+# is left, production roots included (Test-DefenseClawStandaloneNoDeploymentLeft),
+# so the runtime has no production owner a certification run could harm.
 function Remove-DefenseClawStandaloneScannerRuntimeLeftover {
     param([Parameter(Mandatory)][string]$LifecycleFolder)
     $stream = $null
@@ -18896,6 +18901,15 @@ function Remove-DefenseClawStandaloneScannerRuntimeLeftover {
             -Path $root `
             -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
         $lock = [IO.Path]::Combine($root, 'scanner-runtime.lock')
+        # The Go step opens the lock with FILE_FLAG_OPEN_REPARSE_POINT; a
+        # FileStream follows a link, and delete-on-close would then delete
+        # the link's target. A lock file that is a link or junction is refused
+        # and the runtime is left for the Go step, which removes the link itself.
+        if (Test-DefenseClawPathPresentNoFollow -Path $lock) {
+            if (([IO.File]::GetAttributes($lock) -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'the scanner runtime lock is a link or junction'
+            }
+        }
         $stream = [IO.FileStream]::new(
             $lock,
             [IO.FileMode]::OpenOrCreate,

@@ -692,6 +692,54 @@ $failures = & $module {
                     $srkept.Count -ne 1 -or -not ([string]$srkept[0]).Contains('DefenseClaw-ScannerRuntime')) {
                     $failures.Add("scanner runtime: a runtime whose lock another run holds was removed or the Cisco folder not named as kept: handed on '$($srdeferred -join '; ')', kept=$($srkept -join ' | ')")
                 }
+                # A scanner-runtime.lock that is a link is refused before it is
+                # opened, as the Go step opens it without following links:
+                # following it would delete the link's target when the stream
+                # closes. The runtime is left whole for the Go step. A file
+                # symbolic link and a junction are both tried; only the file
+                # link is followed (and its target deleted) without the check.
+                $srlockPath = [IO.Path]::Combine($srruntime, 'scanner-runtime.lock')
+                $srlockfile = [IO.Path]::Combine($srtarget, 'lock-target.txt')
+                [IO.File]::WriteAllText($srlockfile, 'lock-target')
+                foreach ($kind in @('SymbolicLink', 'Junction')) {
+                    $srlinkTarget = $srlockfile
+                    if ($kind -eq 'Junction') {
+                        $srlinkTarget = $srtarget
+                    }
+                    [IO.File]::Delete($srlockPath)
+                    if ([IO.Directory]::Exists($srlockPath)) {
+                        [IO.Directory]::Delete($srlockPath, $false)
+                    }
+                    [void](Microsoft.PowerShell.Management\New-Item -ItemType $kind -Path $srlockPath -Target $srlinkTarget)
+                    try {
+                        $script:DefenseClawCreatedFoldersKept.Clear()
+                        $srdeferred = @(Invoke-DefenseClawStandaloneCreatedFolderRemoval -Layout $srlayout -RecordDirectory $srrecords -Roots $srroots -SkipDeploymentCheck)
+                        $srkept = @(Get-DefenseClawCreatedFoldersKept)
+                        $srattr = [IO.File]::GetAttributes($srlockPath)
+                        if (-not [IO.File]::Exists($srlockfile) -or [IO.File]::ReadAllText($srlockfile) -cne 'lock-target') {
+                            $failures.Add("scanner runtime: a lock file that is a $kind was followed and its target changed or deleted")
+                        }
+                        if (($srattr -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                            $failures.Add("scanner runtime: a lock file that is a $kind was replaced or removed")
+                        }
+                        if (-not [IO.File]::Exists([IO.Path]::Combine($srsite, 'site.py')) -or
+                            -not [IO.File]::Exists([IO.Path]::Combine($srtarget, 'keep.txt'))) {
+                            $failures.Add("scanner runtime: a lock file that is a $kind did not leave the runtime whole")
+                        }
+                        if ($srdeferred.Count -ne 0 -or $srkept.Count -ne 1 -or -not ([string]$srkept[0]).Contains('DefenseClaw-ScannerRuntime')) {
+                            $failures.Add("scanner runtime: a lock file that is a $kind did not keep the Cisco folder as kept: handed on '$($srdeferred -join '; ')', kept=$($srkept -join ' | ')")
+                        }
+                    }
+                    finally {
+                        if ([IO.Directory]::Exists($srlockPath)) {
+                            [IO.Directory]::Delete($srlockPath, $false)
+                        }
+                        elseif ([IO.File]::Exists($srlockPath) -or (Test-DefenseClawPathPresentNoFollow -Path $srlockPath)) {
+                            [IO.File]::Delete($srlockPath)
+                        }
+                    }
+                }
+                [IO.File]::Delete($srlockfile)
                 # With the lock free, a junction inside the runtime is left
                 # as found (its target is untouched) and keeps the runtime,
                 # which the Go step then removes as a link.
