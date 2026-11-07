@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // openCodeMaxLinks bounds the links the path walk follows.
@@ -20,6 +21,13 @@ const openCodeMaxLinks = 40
 
 // openCodeOwnerPrivateGroup is the private-group proof (tests replace it).
 var openCodeOwnerPrivateGroup = connector.OwnerPrivateGroup
+
+// openCodePathACLOpen reports a path whose access control list lets another
+// principal write it. macOS grants write and append through an ACL entry
+// without changing the mode bits, so every mode check below asks this too
+// (GAP-0053 REVIEW-6 MF1). A list that cannot be read counts as open. Tests
+// replace it.
+var openCodePathACLOpen = func(path string) bool { return managed.ValidatePathACL(path) != nil }
 
 func writeOpenCodeServiceConfig(_ string, path string, data []byte) error {
 	return writePrivateUserFile(path, data)
@@ -141,9 +149,10 @@ func openCodeTrustedOwner(info os.FileInfo) bool {
 }
 
 // openCodeFolderOpenToOthers reports a folder whose owner is another account
-// or whose mode lets another account add, remove or rename entries in it.
+// or whose mode or ACL lets another account add, remove or rename entries in
+// it. An ACL entry decides whatever the mode bits and the sticky bit say.
 func openCodeFolderOpenToOthers(path string, info os.FileInfo) bool {
-	if !openCodeTrustedOwner(info) {
+	if !openCodeTrustedOwner(info) || openCodePathACLOpen(path) {
 		return true
 	}
 	if info.Mode()&os.ModeSticky != 0 {
@@ -154,17 +163,31 @@ func openCodeFolderOpenToOthers(path string, info os.FileInfo) bool {
 }
 
 // openCodeServiceFileShared reports a service.json another account can write
-// (a group or other write bit). The write replaces it with a 0600 copy, or
-// refuses a link. Where the file lives is the folder check to judge.
+// (a group or other write bit, or an ACL entry). The write replaces it with a
+// 0600 copy, or refuses a link. Where the file lives is the folder check to
+// judge.
 func openCodeServiceFileShared(path string) bool {
 	info, err := os.Lstat(path)
-	return err != nil || info.Mode().Perm()&0o022 != 0
+	return err != nil || info.Mode().Perm()&0o022 != 0 || openCodePathACLOpen(path)
 }
 
 // openCodeImportFileTrusted reports that the open service.json is owned by
-// this account or root and that no group or other account can write it. It
-// asks the open file, not the path, so what is read is what was checked.
-func openCodeImportFileTrusted(_ string, file *os.File) bool {
+// this account or root and that no group or other account can write it, by
+// mode or by ACL. The mode is read from the open file; the ACL is read from the
+// path the open file resolves to, once that path is shown to be the same file,
+// so what is read is what was checked.
+func openCodeImportFileTrusted(path string, file *os.File) bool {
 	info, err := file.Stat()
-	return err == nil && openCodeTrustedOwner(info) && info.Mode().Perm()&0o022 == 0
+	if err != nil || !openCodeTrustedOwner(info) || info.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return false
+	}
+	at, err := os.Lstat(resolved)
+	if err != nil || !os.SameFile(info, at) {
+		return false
+	}
+	return !openCodePathACLOpen(resolved)
 }

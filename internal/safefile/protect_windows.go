@@ -159,6 +159,34 @@ func ValidatePrivateHandle(handle windows.Handle) error {
 	return nil
 }
 
+// ValidatePrivateFileHandleAllowingAdministrators is
+// ValidatePrivateFileOwnershipAllowingAdministrators for an object the caller
+// already holds open: the owner and the write entries of the object the handle
+// names (the target of a final link the open followed) are judged, not the
+// path it was reached by. The caller checks that the handle is a regular file.
+func ValidatePrivateFileHandleAllowingAdministrators(handle windows.Handle) error {
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return err
+	}
+	ok, err := privateSecurityDescriptorIsWriterRepairableForSubject(sd, identity, true)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("safefile: private file handle has an owner or write entry that is not this account or the system owners")
+	}
+	return nil
+}
+
 func validatePrivateOwnership(path string, wantDirectory, trustSystemOwners bool) error {
 	if err := rejectReparseChain(path); err != nil {
 		return err
