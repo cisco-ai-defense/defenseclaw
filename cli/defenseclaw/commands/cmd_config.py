@@ -59,6 +59,7 @@ from defenseclaw.config_inspect import (
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
+from defenseclaw.guardrail_roster import check_guardrail_connector_roster, guardrail_enabled
 from defenseclaw.observability.v8_config import (
     MAX_SOURCE_BYTES,
     RETIRED_KEY_ACTION_PREFIX,
@@ -1265,100 +1266,8 @@ def _check_roster_when_guardrail_on(path: str, candidate: bytes) -> None:
     Judged only when the final file has it on, so switching it off or unsetting
     it (default off) is never refused for a roster that was already there.
     """
-    from defenseclaw import config_writer
-
-    document = config_writer._parse_config_document(candidate)
-    guardrail = document.get("guardrail") if isinstance(document, dict) else None
-    if isinstance(guardrail, dict) and guardrail.get("enabled") is True:
+    if guardrail_enabled(candidate):
         check_guardrail_connector_roster(path, candidate)
-
-
-def _file_selected_connector(document: object) -> str:
-    """The connector a config document selects, by the loader rule (no host probe).
-
-    guardrail.connector, else claw.mode when it is on the roster (or the first
-    roster entry), else claw.mode; a missing claw.mode loads as openclaw.
-    """
-    guardrail = document.get("guardrail") if isinstance(document, dict) else None
-    guardrail = guardrail if isinstance(guardrail, dict) else {}
-    claw = document.get("claw") if isinstance(document, dict) else None
-    claw = claw if isinstance(claw, dict) else {}
-    named = guardrail.get("connector")
-    if isinstance(named, str) and named.strip():
-        return normalize_connector(named)
-    mode = claw.get("mode", "openclaw")
-    mode = normalize_connector(mode) if isinstance(mode, str) and mode.strip() else ""
-    roster = guardrail.get("connectors")
-    names = (
-        sorted(normalize_connector(n) for n in roster if isinstance(n, str) and n.strip())
-        if isinstance(roster, dict) else []
-    )
-    if names:
-        return mode if mode in names else names[0]
-    return mode
-
-
-def check_guardrail_connector_roster(path: str, candidate: bytes) -> None:
-    """Refuse a final file the gateway cannot boot with its proxy connector.
-
-    A proxy connector (openclaw, zeptoclaw) needs its own proxy binding, so it
-    cannot share a gateway process with hook connectors (GAP-0588). The
-    process is the enabled roster entries plus the installed connector. The
-    gateway also chooses the shared (multi-connector) boot from the number of
-    entries listed, enabled or not (Config.GuardrailBootSet), so a proxy in the
-    process beside any second listed entry, even a disabled one, is refused:
-    a successful edit never saves a file the gateway would reject. When the final file
-    names no connector, the installed one is what the file selected before
-    the edit, so an implicit default OpenClaw (no guardrail.connector, no
-    claw.mode, no roster) counts, whether the edit adds one entry or a whole
-    map. The check reads the files, so the top-level config command, which
-    loads no config, is judged the same as a loaded one.
-    """
-    from defenseclaw import config_writer
-
-    document = config_writer._parse_config_document(candidate)
-    if config_writer.secure_client_document(document):
-        return
-    guardrail = document.get("guardrail", {}) if isinstance(document, dict) else {}
-    guardrail = guardrail if isinstance(guardrail, dict) else {}
-    roster = guardrail.get("connectors", {})
-    roster = roster if isinstance(roster, dict) else {}
-    listed = {
-        normalize_connector(name)
-        for name in roster
-        if isinstance(name, str) and name.strip() and not config_module._is_retired_connector_name(name)
-    }
-    process = {
-        normalize_connector(name)
-        for name, entry in roster.items()
-        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
-    }
-    claw = document.get("claw") if isinstance(document, dict) else None
-    claw = claw if isinstance(claw, dict) else {}
-    named = guardrail.get("connector")
-    if not (isinstance(named, str) and named.strip()):
-        named = claw.get("mode") if "mode" in claw else None
-    if not (isinstance(named, str) and named.strip()):
-        current, _, _ = config_writer._read_current(path)
-        named = _file_selected_connector(config_writer._parse_config_document(current))
-    if isinstance(named, str) and named.strip() and not config_module._is_retired_connector_name(named):
-        installed = normalize_connector(named)
-        own = next(
-            (e for n, e in roster.items() if isinstance(n, str) and normalize_connector(n) == installed),
-            None,
-        )
-        if not (isinstance(own, dict) and own.get("enabled") is False):
-            process.add(installed)
-    proxies = sorted(process & {"openclaw", "zeptoclaw"})
-    if proxies and (len(process) > 1 or len(listed) > 1):
-        proxy = proxies[0]
-        others = sorted((process | listed) - {proxy})
-        label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
-        raise config_writer.ConfigWriteError(
-            f"{proxy} needs a proxy binding and cannot share a gateway process "
-            f"with {label} ({', '.join(others)}). A disabled entry under guardrail.connectors "
-            "still counts: remove the other entries first."
-        )
 
 
 def _refuse_retired_scanner_key(key: str, parts: list) -> None:

@@ -85,7 +85,7 @@ def _reload(tmp_path: Path) -> Config:
 
 def test_levels_round_trip_and_inherit_leaves_no_key(tmp_path: Path) -> None:
     connectors = {"codex": PerConnectorGuardrailConfig(), "hermes": PerConnectorGuardrailConfig()}
-    _config(tmp_path, GuardrailConfig(enabled=True, connectors=connectors)).save()
+    _config(tmp_path, GuardrailConfig(enabled=True, connector="codex", connectors=connectors)).save()
     disk = _disk(tmp_path)
     # Unset levels are omitted (Go omitempty), so untouched configs stay as they were.
     assert "block_at" not in disk and "alert_at" not in disk["connectors"]["codex"]

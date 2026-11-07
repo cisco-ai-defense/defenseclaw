@@ -662,3 +662,101 @@ def test_config_set_guardrail_enabled_true_on_a_bootable_roster_stays_allowed(tm
     )
     assert result.exit_code == 0, result.output
     assert after != before
+
+
+def _setup_guardrail(tmp_path: Path, guardrail: str, *args: str):
+    """Run the real ``setup guardrail`` against a real config.yaml (loader, command, writer)."""
+    from defenseclaw.commands import cmd_setup
+
+    path = tmp_path / "config.yaml"
+    path.write_text(f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{guardrail}", encoding="utf-8")
+    before = path.read_bytes()
+    patches = (
+        patch.object(dcconfig, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+    )
+    with patches[0], patches[1], patches[2]:
+        cfg = dcconfig.load(data_dir=str(tmp_path))
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        patches[0], patches[1], patches[2],
+        patch.object(cmd_setup, "_check_guardrail_setup_connector_versions", return_value=True),
+    ):
+        result = CliRunner().invoke(cmd_setup.setup_guardrail, ["--non-interactive", "--no-restart", *args], obj=app)
+    return result, before, path.read_bytes()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize("hook,proxy", [("kiro", "openclaw"), ("codex", "zeptoclaw")])
+def test_setup_guardrail_refuses_the_unbootable_file_it_would_turn_on(
+    tmp_path: Path, hook: str, proxy: str, explicit: bool
+) -> None:
+    """The activation write is judged in the writer, so setup needs no check of its own."""
+    guardrail = f"  enabled: false\n  connector: {hook}\n  model: m\n  connectors:\n    {hook}: {{}}\n    {proxy}: {{}}\n"
+    result, before, after = _setup_guardrail(tmp_path, guardrail, *(["--connector", hook] if explicit else []))
+    assert result.exit_code != 0
+    assert "needs a proxy binding" in f"{result.output}{result.exception}"
+    assert after == before
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_setup_guardrail_hook_roster_and_disabled_proxy_stay_allowed(tmp_path: Path, explicit: bool) -> None:
+    """Benign twins: hook entries together, and a hook beside a disabled proxy entry, still turn on."""
+    # A disabled proxy entry makes the gateway choose multi boot, which refuses only an
+    # enabled proxy: the writer rule matches the config set rule.
+    for index, guardrail in enumerate((
+        "  enabled: false\n  connector: kiro\n  model: m\n  connectors:\n    kiro: {}\n    codex: {}\n",
+        "  enabled: false\n  connector: kiro\n  model: m\n  connectors:\n    kiro: {}\n    openclaw: {enabled: false}\n",
+    )):
+        sub = tmp_path / str(index)
+        sub.mkdir()
+        result, before, after = _setup_guardrail(sub, guardrail, *(["--connector", "kiro"] if explicit else []))
+        assert result.exit_code == 0, result.output
+        assert after != before
+        assert b"enabled: true" in after
+
+
+_ON_BAD = "  enabled: true\n  connector: kiro\n  model: m\n  connectors:\n    kiro: {}\n    openclaw: {}\n"
+
+
+def _write_through_writer(tmp_path: Path, guardrail: str, change_key: str, value: object):
+    path = tmp_path / "config.yaml"
+    path.write_text(f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{guardrail}", encoding="utf-8")
+    before = path.read_bytes()
+    with patch.object(config_writer, "_use_go_validator", return_value=False):
+        try:
+            config_writer.apply(
+                [config_writer.Change(change_key, value)], "cli:test", "test", path=path
+            )
+        except config_writer.ConfigWriteError as exc:
+            return exc, before, path.read_bytes()
+    return None, before, path.read_bytes()
+
+
+def test_the_config_writer_itself_refuses_any_write_that_turns_protection_on_unbootably(tmp_path: Path) -> None:
+    error, before, after = _write_through_writer(tmp_path, _BAD_ROSTER_OFF, "guardrail.enabled", True)
+    assert error is not None and "needs a proxy binding" in str(error)
+    assert after == before
+
+
+def test_the_config_writer_leaves_a_file_that_is_already_on_or_stays_off_alone(tmp_path: Path) -> None:
+    """Benign twins: an unrelated write to an already-on (or off) file is never judged for the roster."""
+    for index, guardrail in enumerate((_ON_BAD, _BAD_ROSTER_OFF)):
+        sub = tmp_path / str(index)
+        sub.mkdir()
+        error, before, after = _write_through_writer(sub, guardrail, "guardrail.model", "other")
+        assert error is None
+        assert after != before
+
+
+def test_a_whole_document_restore_is_not_judged_by_the_activation_rule(tmp_path: Path) -> None:
+    """Migrations and restores write the bytes they were given (as_is)."""
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 9\n", encoding="utf-8")
+    raw = f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{_ON_BAD}".encode()
+    with patch.object(config_writer, "_use_go_validator", return_value=False):
+        config_writer.replace_document(raw, "cli:test", "restore", path=path)
+    assert path.read_bytes() == raw
