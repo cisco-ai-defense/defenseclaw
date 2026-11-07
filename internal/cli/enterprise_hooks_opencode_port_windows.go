@@ -101,7 +101,8 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 	if !governed {
 		return nil, nil
 	}
-	unlock, err := enterpriseHookWindowsOpenCodePortsLock()
+	path := enterprisehooks.WindowsOpenCodeServicePortsPath(enterpriseHookManifest)
+	unlock, err := enterpriseHookWindowsOpenCodePortsLock(path)
 	if err != nil {
 		return nil, fmt.Errorf("OpenCode service ports reconcile lock: %w", err)
 	}
@@ -126,7 +127,6 @@ func enterpriseHookStandaloneOpenCodePorts(ctx context.Context, manifest enterpr
 		}
 		profiles = filtered
 	}
-	path := enterprisehooks.WindowsOpenCodeServicePortsPath(enterpriseHookManifest)
 	state, err := enterpriseHookWindowsOpenCodePortsLoad(path)
 	if err != nil {
 		_ = enterpriseHookWindowsOpenCodeWarningItemsWrite([]windowsOpenCodePortWarning{{Code: "opencode_port_record_unreadable", Message: fmt.Sprintf("OpenCode service ports record %s cannot be read (%v); repair the SYSTEM-only record before assigning new ports", path, err)}})

@@ -9,9 +9,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -177,7 +179,7 @@ func TestManagedWindowsOpenCodeClearWaitsForReconcileLock(t *testing.T) {
 	if err := WriteWindowsOpenCodeServicePortsFull(path, state); err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := LockWindowsOpenCodeServicePorts()
+	unlock, err := LockWindowsOpenCodeServicePorts(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,4 +210,156 @@ func TestManagedWindowsOpenCodeClearWaitsForReconcileLock(t *testing.T) {
 	if err != nil || len(loaded.Contested) != 0 || len(loaded.Cleared) != 1 || loaded.Ports[testLocalUserSID] != 25001 {
 		t.Fatalf("clear lost its audit or binding: %+v, %v", loaded, err)
 	}
+}
+
+// The reconcile lock must not depend on a name any account can create first.
+// An ordinary account that squats the old predictable global mutex name
+// changes nothing: the guardian pass and the administrator clear take
+// the lock inside the protected record folder.
+func TestManagedWindowsOpenCodeLockIgnoresPredictableGlobalNames(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
+	const squatted = `Global\Cisco.DefenseClaw.EnterpriseHooks.OpenCodePorts`
+	name, err := windows.UTF16PtrFromString(squatted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutex, err := windows.CreateMutex(nil, true, name)
+	if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		t.Skipf("global mutex unavailable: %v", err)
+	}
+	defer windows.CloseHandle(mutex) //nolint:errcheck
+	done := make(chan error, 1)
+	go func() {
+		unlock, lockErr := LockWindowsOpenCodeServicePorts(path)
+		if lockErr == nil {
+			unlock()
+		}
+		done <- lockErr
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("a squatted global name blocked the reconcile lock: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a squatted global name stalled the reconcile lock")
+	}
+}
+
+// A standard account (Administrators and the current user disabled in its
+// token, Users and Everyone left on) can neither create the lock file nor
+// open or hold an existing one.
+func TestManagedWindowsOpenCodeLockStandardUserCannotCreateOrHold(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
+	lockPath := filepath.Join(dir, WindowsOpenCodeReconcileLockFileName)
+	token, err := createWindowsStandardAccountToken()
+	if err != nil {
+		if errors.Is(err, windows.ERROR_PROC_NOT_FOUND) || errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+			t.Skipf("CreateRestrictedToken unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	defer token.Close() //nolint:errcheck
+	asStandard := func() error {
+		file, openErr := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+		if openErr == nil {
+			_ = file.Close()
+			return errors.New("a standard account created or opened the reconcile lock file")
+		}
+		if !errors.Is(openErr, os.ErrPermission) {
+			return openErr
+		}
+		return nil
+	}
+	if err := runWindowsManagedRuntimeRestrictedToken(token, asStandard); err != nil {
+		t.Fatalf("before the lock file exists: %v", err)
+	}
+	unlock, err := LockWindowsOpenCodeServicePorts(path)
+	if err != nil {
+		t.Fatalf("reconciliation could not create the lock beside a hostile account: %v", err)
+	}
+	if err := runWindowsManagedRuntimeRestrictedToken(token, asStandard); err != nil {
+		unlock()
+		t.Fatalf("while the lock is held: %v", err)
+	}
+	unlock()
+	if err := runWindowsManagedRuntimeRestrictedToken(token, asStandard); err != nil {
+		t.Fatalf("after the lock file exists: %v", err)
+	}
+	unlock, err = LockWindowsOpenCodeServicePorts(path)
+	if err != nil {
+		t.Fatalf("reconciliation could not reuse the lock file: %v", err)
+	}
+	unlock()
+}
+
+// A lock file that is not administrator-only (planted or drifted) is refused
+// rather than trusted.
+func TestManagedWindowsOpenCodeLockRefusesWidenedLockFile(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	path := WindowsOpenCodeServicePortsPath(filepath.Join(dir, "targets.yaml"))
+	lockPath := filepath.Join(dir, WindowsOpenCodeReconcileLockFileName)
+	unlock, err := LockWindowsOpenCodeServicePorts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;BU)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(lockPath, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if unlock, err := LockWindowsOpenCodeServicePorts(path); err == nil {
+		unlock()
+		t.Fatal("a lock file readable by ordinary accounts was accepted")
+	}
+}
+
+func createWindowsStandardAccountToken() (windows.Token, error) {
+	var process windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE, &process); err != nil {
+		return 0, err
+	}
+	defer process.Close() //nolint:errcheck
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return 0, err
+	}
+	user, err := process.GetTokenUser()
+	if err != nil {
+		return 0, err
+	}
+	disabled := [2]windows.SIDAndAttributes{{Sid: administrators}, {Sid: user.User.Sid}}
+	procedure := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
+	if err := procedure.Find(); err != nil {
+		return 0, err
+	}
+	const disableMaxPrivilege = 0x1
+	var primary windows.Token
+	result, _, callErr := procedure.Call(
+		uintptr(process), disableMaxPrivilege, uintptr(len(disabled)), uintptr(unsafe.Pointer(&disabled[0])),
+		0, 0, 0, 0, uintptr(unsafe.Pointer(&primary)),
+	)
+	runtime.KeepAlive(disabled)
+	if result == 0 {
+		if callErr != windows.ERROR_SUCCESS {
+			return 0, callErr
+		}
+		return 0, windows.ERROR_GEN_FAILURE
+	}
+	defer primary.Close() //nolint:errcheck
+	var impersonation windows.Token
+	if err := windows.DuplicateTokenEx(primary, windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE, nil, windows.SecurityImpersonation, windows.TokenImpersonation, &impersonation); err != nil {
+		return 0, err
+	}
+	return impersonation, nil
 }

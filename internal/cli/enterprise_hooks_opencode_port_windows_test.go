@@ -72,7 +72,7 @@ func newManagedWindowsOpenCodePortFixture(t *testing.T) *managedWindowsOpenCodeP
 		return enterprisepolicy.Options{}, []string{"opencode"}, true, nil
 	}
 	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return f.profiles, nil }
-	enterpriseHookWindowsOpenCodePortsLock = func() (func(), error) { return func() {}, nil }
+	enterpriseHookWindowsOpenCodePortsLock = func(string) (func(), error) { return func() {}, nil }
 	enterpriseHookWindowsOpenCodePortsLoad = func(string) (enterprisehooks.WindowsOpenCodeServicePortsState, error) {
 		copy := map[string]int{}
 		for key, port := range f.record {
