@@ -30,7 +30,8 @@ import (
 // interrupted ordinary Cursor tool calls. The guard gives that argument-free
 // start no answer. The small guard copy is kept outside the replaceable install
 // tree and the gateway repairs the current copy during its hook audit. Managed
-// and Secure Client hook registrations retain their exec form.
+// Windows hooks use the system command parent and the installed small guard;
+// Secure Client hook registrations retain their exec form.
 //
 // An older cmd.exe guard and a direct launcher guard remain recognizable for
 // supported upgrade, teardown and rollback. Setup requires a working small
@@ -92,6 +93,9 @@ func claudeCodeLauncherGuardArgs(launcher string, hookArgs []string) []string {
 // handler, including an edited guard, is not one.
 func claudeCodeLauncherGuardParts(hook map[string]interface{}) (string, []string, bool) {
 	if launcher, hookArgs, ok := claudeGuardWrapperParts(hook); ok {
+		return launcher, hookArgs, true
+	}
+	if launcher, hookArgs, ok := claudeManagedGuardWrapperParts(hook); ok {
 		return launcher, hookArgs, true
 	}
 	if launcher, hookArgs, ok := claudeCodeCmdGuardParts(hook); ok {
@@ -281,7 +285,16 @@ func claudeCodeUnavailableOpen(opts SetupOpts) bool {
 }
 
 func claudeCodeChainAdmission(opts SetupOpts, command string, args []string, goos string) error {
-	if goos != "windows" || opts.ManagedEnterprise || opts.SecureClientHookDelivery {
+	if goos != "windows" || opts.SecureClientHookDelivery {
+		return nil
+	}
+	if opts.ManagedEnterprise {
+		if len(args) != 4 || args[0] != "hook" || args[1] != "--connector" ||
+			args[2] != "claudecode" || args[3] != "--enterprise-managed" ||
+			!hookguard.AbsoluteHookExecutable(command) || !claudeWrapperSafe(command) ||
+			!claudeWrapperSafe(claudeManagedGuardPath(command)) {
+			return fmt.Errorf("the managed Claude Code hook path cannot be rendered by cmd.exe")
+		}
 		return nil
 	}
 	launcher, _, guarded := claudeCodeCmdGuardParts(map[string]interface{}{"command": command, "args": args})
@@ -359,7 +372,7 @@ const claudeCodeRollbackBackupName = "claudecode-settings.before-rollback.json"
 // it changes, and returns how many handlers it rewrote.
 func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, error) {
 	if opts.ManagedEnterprise {
-		return 0, nil // managed installs write the exec form
+		return 0, nil // managed policy is not a per-user rollback target
 	}
 	settingsPath := claudeCodeSettingsPath()
 	readPath, err := claudeCodeUserSettingsReadPath(settingsPath)
