@@ -57,56 +57,82 @@ var writeManagedApprovedSourceFile = writeFileKeepingDACL
 // other field of deployment.json, and the approved manifest digest, keep their
 // values. Both files keep deployment.json access control.
 func refreshManagedApprovedConfigSource(installDir string, installed []byte) error {
+	_, err := publishManagedApprovedConfigSource(installDir, installed, false)
+	return err
+}
+
+// healManagedApprovedConfigSource is the refresh for a lifecycle run that
+// ended compliant without publishing a config of its own: a binary-only
+// upgrade carries the earlier digest forward, so the stale approved copy an
+// older build left would survive it and a Repair after a hand edit would put
+// it back (GAP-0779). installed is the config the run accepted. It acts only
+// on a deployment that already records an approved config source and changes
+// nothing when the copy and the record already match installed; a deployment
+// that records none, or has no deployment record, is left as it is (Repair
+// refuses it and names the next step). It reports whether it changed anything.
+func healManagedApprovedConfigSource(installDir string, installed []byte) (bool, error) {
+	return publishManagedApprovedConfigSource(installDir, installed, true)
+}
+
+func publishManagedApprovedConfigSource(installDir string, installed []byte, onlyIfRecorded bool) (bool, error) {
 	if installDir == "" {
-		return errors.New("the install state folder is unknown")
+		return false, errors.New("the install state folder is unknown")
 	}
 	recordPath := filepath.Join(installDir, managedDeploymentRecordFile)
 	copyPath := filepath.Join(installDir, managedApprovedConfigFile)
 	for _, path := range []string{recordPath, copyPath} {
 		if info, statErr := os.Lstat(path); statErr == nil && !info.Mode().IsRegular() {
-			return fmt.Errorf("%s is not a regular file", path)
+			return false, fmt.Errorf("%s is not a regular file", path)
 		} else if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-			return statErr
+			return false, statErr
 		}
 	}
 	rawRecord, err := readBoundedConfigFile(recordPath, managedApprovedRecordMaxBytes)
 	if err != nil {
-		return fmt.Errorf("read the deployment record: %w", err)
+		if onlyIfRecorded && errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read the deployment record: %w", err)
 	}
 	var record map[string]json.RawMessage
-	if err := json.Unmarshal(rawRecord, &record); err != nil {
-		return fmt.Errorf("the deployment record is not a JSON object: %w", err)
+	if err := json.Unmarshal(rawRecord, &record); err != nil || record == nil {
+		// JSON null decodes into a nil map without an error.
+		return false, errors.New("the deployment record is not a JSON object")
 	}
 	if profile, ok := record["profile"]; ok {
 		var name string
 		if err := json.Unmarshal(profile, &name); err != nil || name != "standalone" {
-			return errors.New("the deployment record is not the standalone profile")
+			return false, errors.New("the deployment record is not the standalone profile")
 		}
 	}
 	sources := map[string]string{}
 	if raw, ok := record[managedApprovedSourcesKey]; ok {
-		if err := json.Unmarshal(raw, &sources); err != nil {
-			return fmt.Errorf("the deployment record has an invalid approved policy source record: %w", err)
+		if err := json.Unmarshal(raw, &sources); err != nil || sources == nil {
+			// JSON null decodes into a nil map without an error.
+			return false, errors.New("the deployment record has an invalid approved policy source record")
 		}
 		for name, digest := range sources {
 			if (name != managedApprovedConfigKey && name != "manifest") || !managedConfigSHA256Pattern.MatchString(digest) {
-				return errors.New("the deployment record has an invalid approved policy source digest")
+				return false, errors.New("the deployment record has an invalid approved policy source digest")
 			}
 		}
+	}
+	if onlyIfRecorded && sources[managedApprovedConfigKey] == "" {
+		return false, nil
 	}
 	digest := configwrite.SHA256Hex(installed)
 	previousCopy, copyErr := readBoundedConfigFile(copyPath, managedApprovedRecordMaxBytes)
 	copyExisted := copyErr == nil
 	if copyErr != nil && !errors.Is(copyErr, os.ErrNotExist) {
-		return fmt.Errorf("read the approved config source: %w", copyErr)
+		return false, fmt.Errorf("read the approved config source: %w", copyErr)
 	}
 	if sources[managedApprovedConfigKey] == digest && copyExisted && bytes.Equal(previousCopy, installed) {
-		return nil
+		return false, nil
 	}
 	sources[managedApprovedConfigKey] = digest
 	encodedSources, err := json.Marshal(sources)
 	if err != nil {
-		return err
+		return false, err
 	}
 	record[managedApprovedSourcesKey] = encodedSources
 	var out bytes.Buffer
@@ -114,11 +140,11 @@ func refreshManagedApprovedConfigSource(installDir string, installed []byte) err
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(record); err != nil {
-		return err
+		return false, err
 	}
 
 	if err := writeManagedApprovedSourceFile(copyPath, installed, recordPath); err != nil {
-		return fmt.Errorf("write the approved config source: %w", err)
+		return false, fmt.Errorf("write the approved config source: %w", err)
 	}
 	if err := writeManagedApprovedSourceFile(recordPath, out.Bytes(), recordPath); err != nil {
 		var restoreErr error
@@ -128,9 +154,9 @@ func refreshManagedApprovedConfigSource(installDir string, installed []byte) err
 			restoreErr = os.Remove(copyPath)
 		}
 		if restoreErr != nil {
-			return fmt.Errorf("write the deployment record: %w; putting the approved config source back failed too: %v", err, restoreErr)
+			return false, fmt.Errorf("write the deployment record: %w; putting the approved config source back failed too: %v", err, restoreErr)
 		}
-		return fmt.Errorf("write the deployment record: %w", err)
+		return false, fmt.Errorf("write the deployment record: %w", err)
 	}
-	return nil
+	return true, nil
 }
