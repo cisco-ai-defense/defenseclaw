@@ -552,16 +552,25 @@ func TestGAP0613ExplicitRootsCoverMachinePolicyConnectorsWithNoActiveConnector(t
 // A trusted explicit root whose only connector is named by machine policy:
 // the connector-scoped asset rule decides its admission (round 6). The twin
 // has an active connector the rule is not scoped to, and stays admitted.
+// Every consumer of a shared root applies its own rules (round 8): the rule
+// of the second machine-policy connector, or of one that is also active and
+// loads the root, rejects the skill; a rule scoped to a connector that does
+// not load the root does not.
 func TestGAP0613TrustedExplicitRootAppliesMachinePolicyConnectorAssetRule(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix ownership checks")
 	}
 	for _, tc := range []struct {
 		name, active string
+		machine      []string
+		rule         string
 		rejected     bool
 	}{
-		{"machine-policy-only-connector", "", true},
-		{"other-active-connector", "claudecode", false},
+		{"machine-policy-only-connector", "", []string{"amp"}, "amp", true},
+		{"second-machine-policy-connector", "", []string{"amp", "codex"}, "codex", true},
+		{"machine-policy-connector-beside-active-connector", "claudecode", []string{"amp"}, "amp", true},
+		{"rule-for-connector-that-does-not-load-the-root", "claudecode", []string{"amp"}, "cursor", false},
+		{"rule-for-connector-outside-machine-policy", "", []string{"amp", "codex"}, "cursor", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -579,11 +588,14 @@ func TestGAP0613TrustedExplicitRootAppliesMachinePolicyConnectorAssetRule(t *tes
 			}
 			cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
 			cfg.Enterprise.Profile = managed.ProfileStandalone
-			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"amp": {}}
+			cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{}
+			for _, name := range tc.machine {
+				cfg.Enterprise.MachinePolicy.Connectors[name] = config.EnterpriseConnectorPolicy{}
+			}
 			cfg.AssetPolicy = config.DefaultAssetPolicy()
-			cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "blocked-skill", Connector: "amp", Reason: "protected"}}
-			if got := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{TargetType: "skill", Name: "blocked-skill", Connector: "amp", RuntimeSurface: "watcher"}); got.Action != "block" {
-				t.Fatalf("Amp deny rule decision = %+v", got)
+			cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "blocked-skill", Connector: tc.rule, Reason: "protected"}}
+			if got := cfg.EvaluateAssetPolicy(config.AssetPolicyInput{TargetType: "skill", Name: "blocked-skill", Connector: tc.rule, RuntimeSurface: "watcher"}); got.Action != "block" {
+				t.Fatalf("%s deny rule decision = %+v", tc.rule, got)
 			}
 			cfg.Gateway.Watcher.Enabled = true
 			cfg.Gateway.Watcher.Skill.Enabled = true
@@ -644,7 +656,7 @@ func TestGAP0613TrustedExplicitRootAppliesMachinePolicyConnectorAssetRule(t *tes
 				select {
 				case <-end:
 					if tc.rejected {
-						t.Fatal("Amp-scoped denied skill was not rejected in a machine-policy-only root")
+						t.Fatalf("%s-scoped denied skill was not rejected in a root that connector loads", tc.rule)
 					}
 					return
 				case <-time.After(50 * time.Millisecond):
@@ -654,5 +666,60 @@ func TestGAP0613TrustedExplicitRootAppliesMachinePolicyConnectorAssetRule(t *tes
 				t.Fatal("skill was rejected by a rule scoped to a connector that does not own the root")
 			}
 		})
+	}
+}
+
+// The standalone managed Windows watcher tags enrolled users folders as event
+// owners; the explicit folders owner from the shared-root resolution must
+// join that map rather than be dropped (round 8). An enrolled folder keeps its
+// owner, and a config with active connectors (which tags no explicit folder)
+// adds nothing.
+func TestGAP0613EnrolledWatcherKeepsExplicitRootOwner(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	explicit := filepath.Join(home, "shared", "skills")
+	enrolledRoot := filepath.Join(home, "user", ".claude", "skills")
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Claw.Mode, cfg.Guardrail.Connector, cfg.Guardrail.Connectors = "", "", nil
+	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"amp": {}, "codex": {}}
+	wcfg := cfg.Gateway.Watcher
+	wcfg.Enabled = true
+	wcfg.Skill.Enabled, wcfg.Skill.Dirs = true, []string{explicit}
+	wcfg.Plugin.Enabled = false
+	_, _, roots, src, consumers := resolveWatcherDirsForConnectors(cfg, nil, wcfg)
+	enrolled := &enrolledWatchSet{
+		roots:      map[string]string{enrolledRoot: "claudecode"},
+		consumers:  []watcher.RootConsumer{{Kind: "skill", Path: enrolledRoot, Connector: "claudecode"}},
+		connectors: []string{"claudecode"},
+	}
+	owners := enrolledRootOwners(enrolled, roots, consumers, src)
+	if owners[explicit] != "amp" || owners[enrolledRoot] != "claudecode" || len(owners) != 2 {
+		t.Fatalf("owners = %v, want the explicit folder owned by amp beside the enrolled one", owners)
+	}
+	if len(enrolled.roots) != 1 {
+		t.Errorf("enrolled owner map was modified: %v", enrolled.roots)
+	}
+	// Every machine-policy connector and the enrolled one consume the folder.
+	list := enrolledRootConsumers(enrolled, consumers, src)
+	for _, name := range []string{"amp", "codex", "claudecode"} {
+		if !slices.Contains(list, watcher.RootConsumer{Kind: "skill", Path: explicit, Connector: name}) {
+			t.Errorf("explicit folder missing %s consumer: %+v", name, list)
+		}
+	}
+	// An enrolled folder that is also the explicit folder keeps its owner.
+	enrolled.roots[explicit] = "claudecode"
+	if owners := enrolledRootOwners(enrolled, roots, consumers, src); owners[explicit] != "claudecode" {
+		t.Errorf("enrolled owner replaced: %v", owners)
+	}
+	// Without an explicit owner (an active connector) nothing is added.
+	delete(enrolled.roots, explicit)
+	if owners := enrolledRootOwners(enrolled, map[string]string{}, consumers, src); len(owners) != 1 {
+		t.Errorf("owners without explicit owner = %v", owners)
+	}
+	if owners := enrolledRootOwners(&enrolledWatchSet{}, map[string]string{}, nil, src); len(owners) != 0 {
+		t.Errorf("empty enrolled set owners = %v", owners)
 	}
 }
