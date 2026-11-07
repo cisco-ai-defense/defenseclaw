@@ -634,7 +634,31 @@ var canonicalBeforeStamp = func(string) {}
 
 // canonicalOpenForStamp opens the object a standalone repair stamps; tests
 // replace it to answer as if another program held the object open.
-var canonicalOpenForStamp = openCanonicalObjectShared
+var canonicalOpenForStamp = openCanonicalObjectForStamp
+
+// openCanonicalObjectForStamp is openCanonicalObjectShared for a stamp that
+// asks for read access (standaloneHoldFor): the open is plain first. With
+// backup semantics Windows does not refuse a read open on a handle that
+// denies read sharing, so a file opened that way hides such a holder; the
+// backup open is only the fallback for a file whose access list does not let
+// the caller read it. A stamp that asks for no data access is not checked
+// against share modes at all and keeps the one open it had.
+func openCanonicalObjectForStamp(path string, access, share uint32) (windows.Handle, error) {
+	if access&windows.FILE_READ_DATA == 0 {
+		return openCanonicalObjectShared(path, access, share)
+	}
+	pointer, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	handle, err := retryTransientOpen(func() (windows.Handle, error) {
+		return windows.CreateFile(pointer, access, share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	})
+	if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		return openCanonicalObjectShared(path, access, share)
+	}
+	return handle, err
+}
 
 // heldFileRefusal starts the refusal of an in-place re-stamp of a file that
 // another program holds open (GAP-0763). The stamp is one transaction on one
@@ -670,8 +694,14 @@ func (kind ObjectKind) heldAgainstWriters() bool {
 // that ask for no data access (READ_CONTROL, WRITE_DAC) are not checked
 // against a share mode, and readers that share read do not conflict.
 func standaloneHoldFor(kind ObjectKind, share uint32) (uint32, uint32) {
-	if kind.heldAgainstWriters() {
+	switch {
+	case kind.heldAgainstWriters():
 		return windows.FILE_SHARE_READ, windows.FILE_READ_DATA
+	case kind == ObjectRuntimeFile:
+		// The gateway keeps these open for write, so they share writing; the
+		// read access is what makes a handle with delete access conflict
+		// with the repair handle's missing delete sharing.
+		return windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE, windows.FILE_READ_DATA
 	}
 	return share, 0
 }
