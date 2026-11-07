@@ -1,0 +1,94 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""GAP-0744: setup decides whether OpenClaw runs from its health probe.
+
+``openclaw gateway restart`` needs a service manager (launchd GUI domain,
+systemd --user, a Windows service). On an account without one it exits non-zero
+while a gateway started with ``openclaw gateway run`` keeps answering. Setup
+must keep the new configuration then, and still roll back when the gateway
+really is down.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import subprocess
+from unittest.mock import patch
+
+import pytest
+from click import ClickException
+from defenseclaw.commands import cmd_setup
+
+
+def _run(tmp_path, *, restart_ok: bool, answers: bool) -> str:
+    buf = io.StringIO()
+    with (
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
+        patch.object(cmd_setup, "_restart_openclaw_gateway", return_value=restart_ok) as restart,
+        patch.object(cmd_setup, "_check_openclaw_gateway", return_value=answers) as check,
+        contextlib.redirect_stdout(buf),
+    ):
+        try:
+            cmd_setup._restart_services(str(tmp_path), connector="openclaw")
+        finally:
+            restart.assert_called_once()
+            check.assert_called_once()
+    return buf.getvalue()
+
+
+def test_failed_service_restart_with_answering_gateway_keeps_the_config(tmp_path) -> None:
+    text = _run(tmp_path, restart_ok=False, answers=True)
+    assert "could not restart its gateway through a service manager" in text
+    assert "the new configuration is kept" in text
+    assert "openclaw gateway run" in text
+
+
+def test_service_restart_ok_with_answering_gateway_prints_no_note(tmp_path) -> None:
+    text = _run(tmp_path, restart_ok=True, answers=True)
+    assert "service manager" not in text
+    assert "configuration is kept" not in text
+
+
+@pytest.mark.parametrize("restart_ok", [False, True])
+def test_gateway_that_does_not_answer_still_fails_and_rolls_back(tmp_path, restart_ok: bool) -> None:
+    with pytest.raises(cmd_setup._OpenClawGatewayNotRunning):
+        _run(tmp_path, restart_ok=restart_ok, answers=False)
+
+
+def test_restart_command_failing_on_a_missing_service_manager_is_not_a_gateway_failure(tmp_path) -> None:
+    """End to end through the real restart helper: the launchd GUI-domain failure."""
+    failed = subprocess.CompletedProcess(
+        ["openclaw"],
+        1,
+        stdout="",
+        stderr="Gateway service check failed: ServiceInspectionError: The launchd GUI domain is unavailable for this account.\n",
+    )
+    buf = io.StringIO()
+    with (
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=True),
+        patch.object(cmd_setup.subprocess, "run", return_value=failed),
+        patch.object(cmd_setup, "_check_openclaw_gateway", return_value=True),
+        contextlib.redirect_stdout(buf),
+    ):
+        cmd_setup._restart_services(str(tmp_path), connector="openclaw")
+    assert "the new configuration is kept" in buf.getvalue()
+
+
+def test_defenseclaw_gateway_failure_still_fails_even_when_openclaw_answers(tmp_path) -> None:
+    with (
+        patch.object(cmd_setup, "_restart_defense_gateway", return_value=False),
+        patch.object(cmd_setup, "_restart_openclaw_gateway", return_value=False),
+        patch.object(cmd_setup, "_check_openclaw_gateway", return_value=True),
+        contextlib.redirect_stdout(io.StringIO()),
+        pytest.raises(ClickException),
+    ):
+        cmd_setup._restart_services(str(tmp_path), connector="openclaw")
