@@ -34,7 +34,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from io import StringIO
@@ -1312,6 +1312,9 @@ def discover_agents(
     # optional acceleration cache cannot be protected or written.
     if persist_cache:
         _write_cache(discovery, data_dir=data_dir)
+    # The caller gets what the cache got: a reading of an executable replaced
+    # since its probe is dropped here too, in place, so a shared copy agrees.
+    discovery.agents = {name: _current_signal(signal) for name, signal in discovery.agents.items()}
     return discovery
 
 
@@ -1602,12 +1605,16 @@ def _data_dir_holders(data_dir: str | os.PathLike[str] | None) -> frozenset[str]
 
 def _executable_identity(path: str) -> list[Any]:
     """Which file *path* is right now: where it resolves, its size, its
-    modification time and its file id; [] when it is not a regular file.
+    modification time, its file id and its change time; [] when it is not a
+    regular file.
 
     Two readings that name the same file have the same identity, and a file
     replaced (even by one of the same size and time), or a link moved to
-    another file, does not. Only the executable itself is named: nothing a
-    probe creates is part of it.
+    another file, does not. The change time moves with every write to the file
+    and cannot be set back, so a same-size update that restores the modification
+    time is told apart too (on Windows it is the creation time, which an
+    in-place write leaves alone). Only the executable itself is named: nothing
+    a probe creates is part of it.
     """
     try:
         real = os.path.realpath(path)
@@ -1616,12 +1623,12 @@ def _executable_identity(path: str) -> list[Any]:
         return []
     if not stat.S_ISREG(info.st_mode):
         return []
-    return [real, info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev]
+    return [real, info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev, info.st_ctime_ns]
 
 
 def _recorded_identity(raw: dict[str, Any]) -> list[Any]:
     recorded = raw.get("identity")
-    return list(recorded) if isinstance(recorded, list) and len(recorded) == 5 else []
+    return list(recorded) if isinstance(recorded, list) and len(recorded) == 6 else []
 
 
 def _recorded_skipped_binaries(previous: dict[str, Any]) -> tuple[str, ...]:
@@ -3468,45 +3475,65 @@ def _entry_was_read(entry: Any) -> bool:
     )
 
 
-def _entry_for_cache(signal: AgentSignal, observed_at: str) -> dict[str, Any]:
-    """The cache entry for *signal*: the version it holds only while the
-    executable at its path is still the one that answered.
+def _current_signal(signal: AgentSignal) -> AgentSignal:
+    """*signal* while the executable at its path is still the one that
+    answered; otherwise installed and not probed.
 
-    Between the probe and this write the file can be replaced, or its link
-    moved. A version read from the one that went away is not the version of the
-    one that is there now, and neither is the absence of one, so the entry
-    becomes installed and not probed: the next reader probes it again instead
-    of trusting (or refusing on) the old answer. A signal that carries no
-    identity (an older cache file, a hand-built signal) is written as it is.
+    Between the probe and the moment a result is used (written to the cache,
+    or handed back to a caller) the file can be replaced, or its link moved. A
+    version read from the one that went away is not the version of the one
+    that is there now, and neither is the absence of one, so the result is
+    dropped: the next reader probes again instead of trusting (or refusing on)
+    the old answer. A signal that carries no identity (an older cache file, a
+    hand-built signal) is returned as it is.
     """
-    entry = {**asdict(signal), _ENTRY_OBSERVED_AT: observed_at}
     if (
         signal.identity
         and signal.installed
         and signal.binary_path
         and _executable_identity(signal.binary_path) != signal.identity
     ):
-        entry.update(
+        return replace(
+            signal,
             version="",
             kiro_cli_version="",
             kiro_ide_version="",
             kiro_forms=[],
-            skipped_binaries=[],
+            skipped_binaries=(),
             identity=[],
             error=VERSION_NOT_PROBED,
         )
-    return entry
+    return signal
 
 
-def _entry_replaced_executable(entry: Any, signal: AgentSignal) -> bool:
-    """Whether *signal* installed-but-unread names another executable than the
-    cached *entry* was read from. Only then is an unread result a newer fact
-    than a version already cached: a slow answer from the same executable is
-    not."""
-    if not signal.installed or not signal.identity or not isinstance(entry, dict):
+def _entry_for_cache(signal: AgentSignal, observed_at: str) -> dict[str, Any]:
+    """The cache entry for *signal*, built at the moment it is written."""
+    return {**asdict(_current_signal(signal)), _ENTRY_OBSERVED_AT: observed_at}
+
+
+def _entry_executable_changed(entry: Any, payload: dict[str, Any]) -> bool:
+    """Whether the version a cached *entry* records belongs to an executable
+    that is no longer the one at its path.
+
+    Judged from the entry alone, so a peer scan that could not read the
+    executable (a timeout, or one that kept changing so that nothing was
+    selected) is still told apart from a slow answer of an unchanged one. An
+    entry with a recorded identity is compared with the file now; an entry
+    written before identities existed is compared by its change times against
+    the time it was read (the scan time when it says none). A file that cannot be read now is not judged changed
+    (it may be mid-update): the entry stays until a scan reads it.
+    """
+    if not isinstance(entry, dict) or not str(entry.get("version") or ""):
+        return False
+    path = str(entry.get("binary_path") or "")
+    current = _executable_identity(path) if path else []
+    if not current:
         return False
     recorded = _recorded_identity(entry)
-    return bool(recorded) and recorded != signal.identity
+    if recorded:
+        return recorded != current
+    read_at = _entry_observed_at(entry, payload)
+    return read_at is not None and max(current[2], current[5]) >= int(read_at.timestamp() * 1_000_000_000)
 
 
 def _entry_observed_at(entry: dict[str, Any], payload: dict[str, Any]) -> datetime | None:
@@ -3562,11 +3589,13 @@ def _write_cache(
     target_dir = Path(data_dir) if data_dir else default_data_path()
     path = _cache_path(data_dir=target_dir)
     try:
-        agents = {
-            name: _entry_for_cache(signal, signal.observed_at or disc.scanned_at)
-            for name, signal in disc.agents.items()
-        }
         with _cache_update(path):
+            # Built inside the lock: a writer that waited for it must not
+            # write what was true before the wait.
+            agents = {
+                name: _entry_for_cache(signal, signal.observed_at or disc.scanned_at)
+                for name, signal in disc.agents.items()
+            }
             existing = _read_cache_payload(path)
             if existing is not None:
                 for name, entry in existing["agents"].items():
@@ -3631,7 +3660,7 @@ def _publish_agent_signal(
                     if (
                         peer != name
                         and not _scan_read_version(fresh)
-                        and not _entry_replaced_executable(cached_peer, fresh)
+                        and not _entry_executable_changed(cached_peer, payload)
                     ):
                         continue
                     read_at = _signal_observed_at(fresh, disc)
