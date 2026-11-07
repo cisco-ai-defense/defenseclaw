@@ -44,11 +44,6 @@ func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) htt
 	return newManagedHookAuditFixtureFor(t, "claudecode", wrap)
 }
 
-func newManagedHookAuditFixtureInDir(t *testing.T, directory string) managedHookAuditFixture {
-	t.Helper()
-	return newManagedHookAuditFixtureForExportingToInDir(t, directory, "claudecode", nil, nil)
-}
-
 func newManagedHookAuditFixtureFor(t *testing.T, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter) managedHookAuditFixture {
 	t.Helper()
 	return newManagedHookAuditFixtureForCollectingNo(t, connectorName, wrap)
