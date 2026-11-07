@@ -51,6 +51,9 @@ _STOP_WAIT_MS = 10_000
 # A folder an elevated token creates belongs to this group, not to the user
 # (Windows Server, a "Run as administrator" install, UAC off).
 _ADMINISTRATORS_SID = "S-1-5-32-544"
+# The reparse tags of a junction (mount point) and of a symbolic link.
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+_IO_REPARSE_TAG_SYMLINK = 0xA000000C
 
 
 @dataclass(frozen=True)
@@ -102,17 +105,26 @@ def find(platform_name: str) -> LegacySetupInstall | None:
         return None
     cache = os.path.join(local, "DefenseClaw", "InstallerCache")
     hook_state = os.path.join(local, "DefenseClaw", "HookRuntime", "hook-runtime-state.json")
+    # A link at or above the program folder is named before anything is read: the
+    # state is never opened through it, and nothing is removed through it.
+    linked = _link_problem(root)
+    if linked:
+        return LegacySetupInstall(root, "", "", cache, hook_state, problem=str(linked), problem_step=linked.step)
     try:
         state = _read_state(state_path)
     except OSError as exc:
+        # A link made since the check above is still named, not "delete it yourself".
+        linked = _link_problem(root)
         return LegacySetupInstall(
             root,
             "",
             "",
             cache,
             hook_state,
-            problem=str(exc),
-            problem_step=(
+            problem=str(linked or exc),
+            problem_step=linked.step
+            if linked
+            else (
                 f"Uninstall DefenseClaw Setup from Apps & Features, or delete {root} yourself "
                 "(ask an administrator if your account cannot)."
             ),
@@ -251,8 +263,16 @@ def remove(install: LegacySetupInstall, *, edit_user_path) -> tuple[list[str], l
     if install.problem:
         return done, [Problem(f"{install.root}: {install.problem}", install.problem_step)]
     # Off first: the launcher can start the old gateway again, and so can its sign-in start.
+    launcher_link = _link_problem(install.hook_state, include_self=False)
     try:
-        if _turn_hook_launcher_off(install.hook_state, install.root):
+        if launcher_link:
+            problems.append(
+                Problem(
+                    f"could not turn the DefenseClaw Setup hook launcher off ({install.hook_state}): {launcher_link}",
+                    launcher_link.step,
+                )
+            )
+        elif _turn_hook_launcher_off(install.hook_state, install.root):
             done.append(f"turned the DefenseClaw Setup hook launcher off ({install.hook_state} removed)")
     except OSError as exc:
         problems.append(
@@ -308,6 +328,10 @@ def remove(install: LegacySetupInstall, *, edit_user_path) -> tuple[list[str], l
             )
         )
     for path in (install.root, install.cache):
+        linked = _link_problem(path, include_self=False)
+        if linked:
+            problems.append(Problem(f"could not remove {path}: {linked}", linked.step))
+            continue
         try:
             if _remove_tree(path):
                 done.append(f"removed {path}")
@@ -338,13 +362,13 @@ def _ownership_problem(root: str) -> str:
     from defenseclaw.commands.windows_uninstall_helper import _validate_root
     from defenseclaw.file_permissions import _windows_acl_snapshot, _windows_current_user_sid
 
-    if _is_reparse(root):
-        return Problem("its program folder is a link", _link_step(root))
+    linked = _link_problem(root)
+    if linked:
+        return linked
     try:
-        # A link above the folder redirects it as well as one at the folder.
         _validate_root(root, "its program folder")
     except ValueError as exc:
-        return Problem(str(exc), _link_step(root))
+        return Problem(str(exc), f"Ask an administrator to check {root}, then run the command again.")
     try:
         owner, _null_dacl, _entries = _windows_acl_snapshot(root)
         current = _windows_current_user_sid()
@@ -366,25 +390,61 @@ def _ownership_problem(root: str) -> str:
     return ""
 
 
-def _link_step(root: str) -> str:
-    """The step for a link at or above *root*: name the link found, and delete nothing else."""
-    link = ""
-    candidate = os.path.abspath(root)
-    while True:
-        if os.path.lexists(candidate) and _is_reparse(candidate):
-            link = candidate
-            break
-        parent = os.path.dirname(candidate)
-        if parent == candidate:
-            break
-        candidate = parent
-    if not link:
-        return f"Ask an administrator to check {root}, then run the command again."
-    return (
-        f"{link} is a link. If it is a stray link to the DefenseClaw folder, delete only that link "
-        "(the folder it points to is not touched) and run the command again. If it is part of how "
-        f"this profile is set up, do not delete it: ask an administrator to remove {root}."
+def _link_kind(info: os.stat_result) -> str:
+    """The kind of link an lstat result describes: junction, symlink, or link (another reparse point)."""
+    tag = getattr(info, "st_reparse_tag", 0)
+    if tag == _IO_REPARSE_TAG_MOUNT_POINT:
+        return "junction"
+    if tag == _IO_REPARSE_TAG_SYMLINK or stat.S_ISLNK(info.st_mode):
+        return "symlink"
+    return "link"
+
+
+def _links_on_path(path: str, *, include_self: bool = True) -> list[tuple[str, str]]:
+    """The links on the way to *path*, outermost first, as (link path, kind).
+
+    Every component is looked at with lstat, so a link is seen as a link and
+    never followed. *include_self* False leaves *path* itself out.
+    """
+    from pathlib import Path
+
+    full = Path(os.path.abspath(path))
+    chain = [*reversed(full.parents), full]
+    if not include_self:
+        chain.pop()
+    found: list[tuple[str, str]] = []
+    for part in chain:
+        if part == Path(part.anchor):
+            continue
+        try:
+            info = os.lstat(part)
+        except OSError:
+            continue
+        if _is_reparse(str(part)):
+            found.append((str(part), _link_kind(info)))
+    return found
+
+
+def _link_problem(path: str, *, include_self: bool = True) -> Problem | None:
+    """Why *path* is not reached: a link at or above it, named, with the safe step (None when there is none).
+
+    The link nearest the folder is the one to deal with first; one outside it
+    is named in the reason and comes up on the next run.
+    """
+    links = _links_on_path(path, include_self=include_self)
+    if not links:
+        return None
+    link, kind = links[-1]
+    text = f"{link} is a {kind}, and DefenseClaw does not read or remove a folder through a link"
+    if len(links) > 1:
+        text += "; also a link above it: " + ", ".join(f"{outer} ({outer_kind})" for outer, outer_kind in links[:-1])
+    step = (
+        f"{link} is a {kind}. DefenseClaw does not remove anything through a link. If it is a stray link, "
+        f'remove only the link with `cmd /c rmdir "{link}"` (this removes only the link, not what it points '
+        "to), or ask an administrator to, then run the command again. If it is part of how this profile is "
+        f"set up, leave it: uninstall DefenseClaw Setup from Apps & Features, or ask an administrator to check {link}."
     )
+    return Problem(text, step)
 
 
 def _account_label(sid: str) -> str:
@@ -404,6 +464,10 @@ def _path_step(error: BaseException, path: str) -> str:
     """What to do about *path*, from why its removal failed (held, denied or other)."""
     from defenseclaw.commands import windows_uninstall_helper as helper
 
+    # A link on the way to *path* is the reason, whatever the error said.
+    linked = _link_problem(path)
+    if linked:
+        return linked.step
     winerror = getattr(error, "winerror", None)
     code = getattr(error, "errno", None)
     # The error names the file inside *path* that it could not remove.
