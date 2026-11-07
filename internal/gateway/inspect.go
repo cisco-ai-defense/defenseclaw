@@ -81,7 +81,7 @@ type ToolInspectRequest struct {
 	SessionID       string          `json:"session_id,omitempty"`
 	ApprovalSurface string          `json:"approval_surface,omitempty"`
 	// ToolCallID is the OpenClaw id of the call, sent by the OpenClaw plugin so
-	// an enforced block can be tied to the result of that call (GAP-0644).
+	// an enforced block can be tied to the result message of that call (GAP-0644).
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	// Connector is an optional assertion. The authenticated server route
 	// selects the connector generation; a mismatched assertion is rejected.
@@ -161,10 +161,6 @@ type ToolInspectVerdict struct {
 	Mode              string        `json:"mode"`
 	WouldBlock        bool          `json:"would_block,omitempty"`
 	ApprovalTimeoutMS int           `json:"approval_timeout_ms,omitempty"`
-	// NoticeRef is the reference of an enforced OpenClaw block. The plugin puts
-	// it in the block reason, so the model request that carries the tool
-	// result lets the proxy show the block on the reply (GAP-0644).
-	NoticeRef string `json:"notice_ref,omitempty"`
 	// RedactionEnabled carries the cloud-controlled per-inspection
 	// redaction directive from the AID lane through the hook-side
 	// merge so the evaluate* callers can stamp it onto the request
@@ -2367,13 +2363,12 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		hookEvaluationTarget(req.Connector, req.Tool), targetType, verdict, elapsed,
 		"emit_inspect_tool")
 	a.emitInspectTraceV8(r.Context(), req.Tool, targetType, verdict, elapsed, evalCtx)
-	if strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") {
-		meta := hookDecisionMetricMeta(r.Context(), connectorName)
-		sessionID := firstNonEmpty(meta.SessionID, req.SessionID)
-		// The event router puts the decision on the tool span of the call
+	if targetType == "tool_call" && strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") {
+		// The event router puts the decision on the call's tool span
 		// (GAP-1930).
-		if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evalCtx.RuleIDs); ok && targetType == "tool_call" {
-			rememberOpenClawToolOutcome(sessionID, meta.RunID, req.Tool, req.Args, outcome,
+		if outcome, ok := hookGuardrailOutcomeFor(verdict.Action, verdict.Severity, verdict.Reason, evalCtx.RuleIDs); ok {
+			meta := hookDecisionMetricMeta(r.Context(), connectorName)
+			rememberOpenClawToolOutcome(firstNonEmpty(meta.SessionID, req.SessionID), meta.RunID, req.Tool, req.Args, outcome,
 				AgentIdentityFromContext(r.Context()))
 		}
 	}
@@ -2419,7 +2414,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if verdict.Action == "block" && verdict.Mode == "action" &&
 		strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") &&
 		openClawNoticeAllowed(a.decisionConfig(r.Context())) {
-		verdict.NoticeRef = rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, evalCtx.RuleIDs, verdict.Reason)
+		rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, evalCtx.RuleIDs, verdict.Reason)
 	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)
