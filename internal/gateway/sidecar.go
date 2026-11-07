@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -4047,20 +4048,50 @@ func protectedConnectorNames(cfg *config.Config) []string {
 	return enterprisepolicy.StandaloneConnectors(cfg)
 }
 
+// explicitRootConsumers is the consumers of the explicit gateway.watcher
+// folders, which an enrolled watcher keeps watching.
+func explicitRootConsumers(consumers []watcher.RootConsumer, src watcherDirSources) []watcher.RootConsumer {
+	var explicit []watcher.RootConsumer
+	for _, consumer := range consumers {
+		if consumer.Kind == "skill" && src.Skill == watcherDirsFromConfig ||
+			consumer.Kind == "plugin" && src.Plugin == watcherDirsFromConfig {
+			explicit = append(explicit, consumer)
+		}
+	}
+	return explicit
+}
+
+// enrolledRootOwners is the event owner of each root an enrolled watcher
+// watches: the enrolled users folders, plus the explicit gateway.watcher
+// folders that resolveWatcherDirsForConnectors gave an owner. An enrolled
+// folder keeps its owner when both name the same path.
+func enrolledRootOwners(enrolled *enrolledWatchSet, roots map[string]string, consumers []watcher.RootConsumer, src watcherDirSources) map[string]string {
+	out := maps.Clone(enrolled.roots)
+	for _, consumer := range explicitRootConsumers(consumers, src) {
+		owner := roots[consumer.Path]
+		if owner == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		if _, ok := out[consumer.Path]; !ok {
+			out[consumer.Path] = owner
+		}
+	}
+	return out
+}
+
 // enrolledRootConsumers is every connector that loads each root an enrolled
 // watcher watches: the enrolled users' folders, plus the explicit
 // gateway.watcher dirs it keeps watching, which every configured connector
 // loads. The gateway's own connector folders are not watched there.
 func enrolledRootConsumers(enrolled *enrolledWatchSet, consumers []watcher.RootConsumer, src watcherDirSources) []watcher.RootConsumer {
 	out := slices.Clone(enrolled.consumers)
-	var explicit []watcher.RootConsumer
+	explicit := explicitRootConsumers(consumers, src)
 	have := map[watcher.RootConsumer]bool{}
-	for _, consumer := range consumers {
-		if consumer.Kind == "skill" && src.Skill == watcherDirsFromConfig ||
-			consumer.Kind == "plugin" && src.Plugin == watcherDirsFromConfig {
-			explicit = append(explicit, consumer)
-			have[consumer] = true
-		}
+	for _, consumer := range explicit {
+		have[consumer] = true
 	}
 	out = append(out, explicit...)
 	// Every enrolled connector loads the explicit folders as well, whether
@@ -4493,7 +4524,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		return snapshot
 	})
 	if enrolled != nil {
-		w.SetRootConnectors(enrolled.roots)
+		w.SetRootConnectors(enrolledRootOwners(enrolled, roots, consumers, src))
 		w.SetRootConsumers(enrolledRootConsumers(enrolled, consumers, src))
 		w.SetAssetOwners(enrolled.owners)
 		publishScanAssetOwners(enrolled.owners)
