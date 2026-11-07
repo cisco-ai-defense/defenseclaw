@@ -24,13 +24,17 @@ const (
 )
 
 const (
-	maxContentAssets  = 3
 	maxContentFiles   = 64
 	maxContentFile    = 64 << 10
 	maxContentEscaped = 96 << 10
 	// maxContentTotal bounds the escaped text of every content in one fact
 	// set, so that the encoded header always fits maxHeaderBytes.
-	maxContentTotal   = 128 << 10
+	maxContentTotal = 128 << 10
+	// contentFraming is charged to maxContentTotal for each content, with
+	// its name and folder, so that the number of contents is bounded by the
+	// same budget as their text and not by a count a valid set of candidate
+	// owners could pass.
+	contentFraming    = 64
 	maxContentEntries = 512
 	maxContentDepth   = 4
 	maxRegistryBytes  = 4 << 20
@@ -304,12 +308,13 @@ const maxContentStubs = 32
 // boundedContents applies the bounds of a hook fact to claimed contents and
 // recomputes their digests. A content is never dropped for not fitting: one
 // whose folder path is too long or unusable keeps its text and loses the
-// path, and one past the count or size bounds is kept as a truncated content
-// without text, which the gateway refuses as unscanned. Dropping it would
-// let the asset run unjudged.
+// path, and one past the size budget is kept as a truncated content without
+// text, which the gateway refuses as unscanned. Dropping it would let the
+// asset run unjudged. Every content that fits the budget keeps its text,
+// however many candidate owners of one tool name there are.
 func boundedContents(in []Content) []Content {
 	var out []Content
-	total, kept, stubs := 0, 0, 0
+	total, stubs := 0, 0
 	stubbed := map[string]bool{}
 	for _, content := range in {
 		if content.Kind != ContentSkill && content.Kind != ContentPlugin {
@@ -325,7 +330,7 @@ func boundedContents(in []Content) []Content {
 			dir = filepath.Clean(dir)
 		}
 		next := Content{Kind: content.Kind, Name: name, Dir: dir, Truncated: content.Truncated}
-		if kept == maxContentAssets {
+		if total+len(name)+len(dir)+contentFraming > maxContentTotal {
 			// One failure state per asset name is enough: the gateway refuses
 			// the asset when any of its contents is truncated.
 			key := content.Kind + "\x00" + strings.ToLower(name)
@@ -337,7 +342,7 @@ func boundedContents(in []Content) []Content {
 			}
 			continue
 		}
-		kept++
+		total += len(name) + len(dir) + contentFraming
 		escaped := 0
 		for _, file := range content.Files {
 			rel := clean(file.Rel, maxFieldBytes)

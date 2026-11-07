@@ -805,9 +805,9 @@ func rulesPinEndpointForServer(rules []config.AssetPolicyRule, connector, server
 // rule may match. With them a rule is ruled out when the digest of a value it
 // compares exactly (the URL, the command's base name, an argument of its
 // prefix, the transport) differs, or when it asks for more arguments than the
-// definition has; a prefix longer than the arguments the claim holds digests
-// of (assetfacts maxPinArgs) cannot be ruled out. It checks the constraints
-// assetRuleMatches does.
+// definition has; an argument position the claim holds no digest of (past
+// assetfacts maxPinArgs plus maxTailPins) cannot be ruled out. It checks the
+// constraints assetRuleMatches does.
 func deniedRulesMayPinClaim(rules []config.AssetPolicyRule, connector, server string, pins *assetfacts.MCPPins) bool {
 	for _, rule := range rules {
 		if rule.Name != "" && !config.SameAssetName(rule.Name, server) &&
@@ -843,9 +843,17 @@ func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins) boo
 	if len(rule.ArgsPrefix) > pins.ArgCount {
 		return false
 	}
+	tail := pins.TailBytes()
 	for i, want := range rule.ArgsPrefix {
-		if i < len(pins.Args) && assetfacts.PinArgSum(want) != pins.Args[i] {
-			return false
+		switch {
+		case i < len(pins.Args):
+			if assetfacts.PinArgSum(want) != pins.Args[i] {
+				return false
+			}
+		case i-len(pins.Args) < len(tail):
+			if assetfacts.PinTailByte(want) != tail[i-len(pins.Args)] {
+				return false
+			}
 		}
 	}
 	if rule.Transport != "" {
