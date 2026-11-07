@@ -350,3 +350,87 @@ func TestSelectorAndPerUserTeardownKeepALinkedFolder(t *testing.T) {
 		t.Errorf("a created-folder record was written: %q", *g.recorded)
 	}
 }
+
+// GAP-0773 and GAP-0829: the teardown's comparison of what the manifest says is
+// enrolled with what it reads must leave a connector out when a link keeps its
+// machine folder. WindowsManagedConnectorFolderKept answers per connector.
+func TestWindowsManagedConnectorFolderKept(t *testing.T) {
+	folders := func(f keptFixture) map[string]string {
+		root := filepath.Dir(filepath.Dir(f.cursor))
+		return map[string]string{
+			"cursor":     f.cursor,
+			"claudecode": f.claudeDir,
+			"codex":      f.selectorDir,
+			"copilot":    f.perUserDir,
+			"opencode":   filepath.Join(root, "runtime", "opencode"),
+			"devin":      filepath.Join(root, "runtime", "devin"),
+		}
+	}
+	for _, connectorName := range []string{"cursor", "claudecode", "codex", "copilot", "opencode", "devin"} {
+		t.Run(connectorName, func(t *testing.T) {
+			f := useKeptFixture(t, true, nil)
+			dirs := folders(f)
+			windowsManagedRuntimeSelectorPathResolver = func(name string) (string, error) {
+				return filepath.Join(dirs[name], windowsManagedRuntimeSelectorFile), nil
+			}
+			// Absent and plain folders are not kept.
+			if kept, err := WindowsManagedConnectorFolderKept(connectorName); err != nil || kept != "" {
+				t.Fatalf("absent folder: kept=%q err=%v", kept, err)
+			}
+			if err := os.MkdirAll(dirs[connectorName], 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if kept, err := WindowsManagedConnectorFolderKept(connectorName); err != nil || kept != "" {
+				t.Fatalf("plain folder: kept=%q err=%v", kept, err)
+			}
+			if len(WindowsManagedPolicyFoldersKept()) != 0 {
+				t.Fatalf("a plain folder was named kept: %v", WindowsManagedPolicyFoldersKept())
+			}
+			// A link at the folder keeps it; the link is named once.
+			windowsReparseChainProbe = linkProbe(dirs[connectorName])
+			for i := 0; i < 2; i++ {
+				kept, err := WindowsManagedConnectorFolderKept(connectorName)
+				if err != nil || !strings.EqualFold(kept, dirs[connectorName]) {
+					t.Fatalf("link at the folder: kept=%q err=%v", kept, err)
+				}
+			}
+			if named := WindowsManagedPolicyFoldersKept(); len(named) != 1 || !strings.EqualFold(named[0], dirs[connectorName]) {
+				t.Fatalf("the link was not named exactly once: %v", named)
+			}
+			// A link on a parent keeps it too, and names the link itself.
+			parent := filepath.Dir(dirs[connectorName])
+			windowsReparseChainProbe = linkProbe(parent)
+			if kept, err := WindowsManagedConnectorFolderKept(connectorName); err != nil || !strings.EqualFold(kept, parent) {
+				t.Fatalf("link above the folder: kept=%q err=%v", kept, err)
+			}
+			// A link at another connector's folder does not keep this one.
+			for other, dir := range dirs {
+				if other == connectorName || strings.HasPrefix(strings.ToLower(dirs[connectorName]), strings.ToLower(dir)+`\`) {
+					continue
+				}
+				windowsReparseChainProbe = linkProbe(dir)
+				if kept, err := WindowsManagedConnectorFolderKept(connectorName); err != nil || kept != "" {
+					t.Fatalf("a link at %s kept %s: %q err=%v", other, connectorName, kept, err)
+				}
+			}
+		})
+	}
+	t.Run("a file where the folder belongs is kept", func(t *testing.T) {
+		f := useKeptFixture(t, true, nil)
+		plant(t, f.cursor, "not a folder")
+		windowsManagedRuntimeSelectorPathResolver = func(string) (string, error) {
+			return filepath.Join(f.cursor, windowsManagedRuntimeSelectorFile), nil
+		}
+		if kept, err := WindowsManagedConnectorFolderKept("cursor"); err != nil || !strings.EqualFold(kept, f.cursor) {
+			t.Fatalf("file at the folder: kept=%q err=%v", kept, err)
+		}
+	})
+	t.Run("Secure Client keeps its comparison", func(t *testing.T) {
+		useKeptFixture(t, false, func(f keptFixture) []string { return []string{f.cursor, f.selectorDir, f.claudeDir, f.perUserDir} })
+		for _, name := range []string{"cursor", "claudecode", "codex", "copilot"} {
+			if kept, err := WindowsManagedConnectorFolderKept(name); err != nil || kept != "" {
+				t.Fatalf("Secure Client %s: kept=%q err=%v", name, kept, err)
+			}
+		}
+	})
+}

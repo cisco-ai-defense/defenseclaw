@@ -295,19 +295,42 @@ const windowsEnterpriseCodexKeptLinkReason = windowsEnterpriseKeptLinkReason +
 // paths (Copilot, OpenCode, Devin), which an earlier step of the uninstall
 // may have kept. It only reads. Replaceable in tests.
 var windowsManagedHooksKeptLinkedFolders = func() []string {
-	const reason = windowsEnterpriseKeptLinkReason
-	var out []string
-	for _, folder := range enterprisehooks.WindowsManagedPolicyFoldersKept() {
-		out = append(out, folder+": "+reason)
-	}
-	for _, folder := range connector.WindowsCodexMachineFoldersKept() {
-		out = append(out, folder+": "+windowsEnterpriseCodexKeptLinkReason)
-	}
+	var goOwned []string
 	if layout, programFiles, programData, err := standaloneEnterprisePolicyLayout(); err == nil {
 		opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
-		for _, folder := range enterprisepolicy.WindowsGoOwnedLinkedFolders(opts) {
-			out = append(out, folder+": "+reason)
+		goOwned = enterprisepolicy.WindowsGoOwnedLinkedFolders(opts)
+	}
+	return windowsManagedHooksNameKeptLinksOnce(
+		connector.WindowsCodexMachineFoldersKept(),
+		enterprisehooks.WindowsManagedPolicyFoldersKept(),
+		goOwned,
+	)
+}
+
+// windowsManagedHooksNameKeptLinksOnce builds the kept-link entries from the
+// links the Codex walk, the vendor-folder steps and the Go-owned policy scan
+// met. A link is named once, whichever step met it: the selector step names the
+// Codex folder as well when an enrolled Codex account has a selector entry to
+// look for (GAP-0773), so the Codex entries go first and keep their wording.
+func windowsManagedHooksNameKeptLinksOnce(codex, vendor, goOwned []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(folder, text string) {
+		key := strings.ToLower(filepath.Clean(folder))
+		if seen[key] {
+			return
 		}
+		seen[key] = true
+		out = append(out, folder+": "+text)
+	}
+	for _, folder := range codex {
+		add(folder, windowsEnterpriseCodexKeptLinkReason)
+	}
+	for _, folder := range vendor {
+		add(folder, windowsEnterpriseKeptLinkReason)
+	}
+	for _, folder := range goOwned {
+		add(folder, windowsEnterpriseKeptLinkReason)
 	}
 	return out
 }
@@ -340,6 +363,13 @@ func windowsManagedHooksStandalonePerUserExpected(
 
 func validateWindowsManagedHooksStandalonePerUserEnrollment(identity windowsManagedHooksTeardownJournal) error {
 	for connectorName, want := range windowsManagedHooksStandalonePerUserExpected(identity) {
+		// A link at the connector's machine folder keeps it out of the
+		// comparison: nothing behind the link is read (GAP-0773, GAP-0829).
+		if kept, err := windowsManagedHooksTeardownConnectorKept(connectorName); err != nil {
+			return err
+		} else if kept {
+			continue
+		}
 		current, exists, err := enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets(connectorName)
 		if err != nil {
 			return err

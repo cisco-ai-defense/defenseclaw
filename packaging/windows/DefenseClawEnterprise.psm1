@@ -32339,6 +32339,70 @@ $script:AccountLinkGuardianErrors = @(
     'enterprise hooks: the account''s DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link'
 )
 
+# The guardian never writes through a link, so a row whose machine vendor folder
+# (Cursor, Codex, Claude Code or a per-user connector's) a link replaced fails
+# its reconcile for as long as the link is there. An uninstall keeps that link
+# and removes everything else (GAP-0773, GAP-0829), so such a row must not keep
+# the adoption of a republished manifest refused. The pattern matches the three
+# wordings of that refusal (the Codex machine-policy walk, the enterprise hooks
+# chain walk and this module's own) and captures the path they name.
+$script:GuardianMachineFolderLinkPattern = [regex]::new(
+    '(?i)reparse points? (?:are not allowed )?in (?:[a-z]+ )*path: (?<path>[a-z]:\\[^;]*?)\s*(?:;|$)')
+
+function Get-DefenseClawGuardianRowMachineFolderLink {
+    <#
+        Standalone manifest adoption. Returns the link that keeps a machine
+        vendor folder (under ProgramData or Program Files, never DefenseClaw's
+        own trees and never a user profile) when a failed guardian row's
+        recorded failure is the refusal to write through that link and the
+        link is still there, or '' for any other row: a stale failure, a
+        path that is no link now, an account folder or any other failure keeps
+        the adoption refused.
+    #>
+    param($Row)
+    if ($null -eq $Row) {
+        return ''
+    }
+    $property = $Row.PSObject.Properties['error']
+    $okProperty = $Row.PSObject.Properties['ok']
+    if ($null -eq $property -or ($null -ne $okProperty -and [bool]$okProperty.Value)) {
+        return ''
+    }
+    $found = $script:GuardianMachineFolderLinkPattern.Match(([string]$property.Value).Trim())
+    if (-not $found.Success) {
+        return ''
+    }
+    $path = $found.Groups['path'].Value.Replace('/', '\').TrimEnd('\')
+    $roots = @($script:DefenseClawVendorFolderRoots | Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $under = $false
+    foreach ($root in $roots) {
+        $prefix = $root.TrimEnd('\') + '\'
+        if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $under = $true
+            $relative = $path.Substring($prefix.Length)
+            $first = ($relative -split '\\')[0]
+            if ($first -ieq 'Cisco') {
+                return ''
+            }
+        }
+    }
+    if (-not $under) {
+        return ''
+    }
+    try {
+        Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
+    }
+    catch {
+        if ($_.Exception.Message -match '^reparse points are not allowed in managed path: (?<link>.+)$') {
+            return [string]$Matches['link']
+        }
+    }
+    return ''
+}
+
+# The folders a machine vendor folder lives under. A smoke points it at scratch paths.
+$script:DefenseClawVendorFolderRoots = @($env:ProgramData, $env:ProgramFiles)
+
 function Get-DefenseClawStandaloneManifestAdoption {
     <#
         Standalone only. The hook enumerator service republishes targets.yaml
@@ -32505,6 +32569,7 @@ function Get-DefenseClawStandaloneManifestAdoption {
     # could never pass because the profile was already gone (GAP-1657).
     $removedRows = [int64]0
     $accountLinkRows = [int64]0
+    $machineLinkRows = [int64]0
     foreach ($row in @(& $field $records.state 'results')) {
         if ($null -eq $row -or
             [bool](& $field $row 'ok') -or
@@ -32521,6 +32586,13 @@ function Get-DefenseClawStandaloneManifestAdoption {
         if ($script:AccountLinkGuardianErrors -ccontains [string](& $field $row 'error') -and
             $accountLinks -gt 0) {
             $accountLinkRows++
+            continue
+        }
+        # A machine vendor folder a link replaced (GAP-0773, GAP-0829): the
+        # uninstall keeps the link, so the guardian's refusal to write through
+        # it is explained and is not another failure.
+        if (-not [string]::IsNullOrEmpty((Get-DefenseClawGuardianRowMachineFolderLink -Row $row))) {
+            $machineLinkRows++
             continue
         }
         if (([string](& $field $row 'error')).Trim().StartsWith(
@@ -32587,6 +32659,9 @@ function Get-DefenseClawStandaloneManifestAdoption {
         # account's row; any other failure keeps the adoption refused.
         $excused = $folderRows + $waitingRows + $removedRows + $accountLinkRows
     }
+    # The gateway counts none of the rows a machine-folder link explains, so they
+    # are added here, beside whatever else the rows above excused.
+    $excused += $machineLinkRows
     $nextStep = ''
     if ($signedOut.Count -gt 0 -and -not $otherFailure) {
         $nextStep = (
