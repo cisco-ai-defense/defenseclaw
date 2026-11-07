@@ -1534,18 +1534,33 @@ func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir), nil
 }
 
-// readMCPServersCodexAt reads Codex's servers from the user config.toml at
+// readMCPServersCodexAt reads the Codex servers from the user config.toml at
 // userPath and the project layers of workspaceDir.
 func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
+	return readMCPServersCodexLayers(userPath, workspaceDir, false)
+}
+
+// readMCPServersCodexLayers reads the layers readMCPServersCodexAt lists.
+// With effectiveOnly, a project layer Codex does not activate (one the user
+// config does not trust) is left out, so the entries are the servers a
+// session runs rather than the ones discovery should scan.
+func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool) []MCPServerEntry {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
 	// their entries take precedence, then the user layer fills remaining names.
 	// Filesystem presence is discovery only: project entries carry
 	// TrustRequired because Codex activates them only for trusted projects.
 	cwd := strings.TrimSpace(workspaceDir)
+	var trusted codexProjectTrust
+	if effectiveOnly {
+		trusted = readCodexProjectTrust(userPath)
+	}
 
 	var entries []MCPServerEntry
 	for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
+		if effectiveOnly && !trusted.covers(layer, cwd) {
+			continue
+		}
 		projectPath := filepath.Join(layer, ".codex", "config.toml")
 		if e, err := readMCPFromCodexConfigTOML(projectPath); err == nil {
 			entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
@@ -1555,6 +1570,20 @@ func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
 		entries = append(entries, e...)
 	}
 	return dedupMCPEntries(entries)
+}
+
+// LookupEffectiveCodexMCPToolServer finds the Codex MCP server a tool call
+// names among the servers a session runs: Codex activates the .codex/config.toml
+// of a project only when the user config trusts the project, so an untrusted
+// project file does not override the server of that name in the user config
+// (GAP-0686).
+func LookupEffectiveCodexMCPToolServer(workspaceDir, name string) (MCPServerEntry, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return MCPServerEntry{}, false
+	}
+	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
+	return lookupMCPToolServer("codex", readMCPServersCodexLayers(userPath, workspaceDir, true), name)
 }
 
 func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, trustRequired bool) []MCPServerEntry {

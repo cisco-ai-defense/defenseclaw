@@ -31,19 +31,27 @@ import (
 // The gateway, a service account, may not read this home.
 func hookAssetFacts(connector string, payload []byte) string {
 	connector = strings.ToLower(strings.TrimSpace(connector))
-	if connector != "claudecode" && connector != "codex" {
+	if connector != "claudecode" && connector != "codex" && connector != "copilot" {
 		return ""
 	}
 	var event struct {
-		ToolName      string         `json:"tool_name"`
-		ToolInput     map[string]any `json:"tool_input"`
-		CWD           string         `json:"cwd"`
-		Prompt        string         `json:"prompt"`
-		MCPServerName string         `json:"mcp_server_name"`
-		CommandName   string         `json:"command_name"`
+		ToolName      string          `json:"tool_name"`
+		ToolNameCamel string          `json:"toolName"`
+		ToolInput     map[string]any  `json:"tool_input"`
+		ToolArgs      json.RawMessage `json:"toolArgs"`
+		CWD           string          `json:"cwd"`
+		Prompt        string          `json:"prompt"`
+		MCPServerName string          `json:"mcp_server_name"`
+		CommandName   string          `json:"command_name"`
 	}
 	if json.Unmarshal(payload, &event) != nil {
 		return ""
+	}
+	if event.ToolName == "" {
+		event.ToolName = event.ToolNameCamel
+	}
+	if event.ToolInput == nil {
+		event.ToolInput = hookToolArgs(event.ToolArgs)
 	}
 	home, _ := os.UserHomeDir()
 	var facts assetfacts.Facts
@@ -70,11 +78,16 @@ func hookAssetFacts(connector string, payload []byte) string {
 			}
 		}
 	}
-	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" {
+	if server := hookMCPServerName(event.ToolName, event.MCPServerName); server != "" && connector != "copilot" {
 		entry, source, ok := hookCommandLineMCPServer(connector, event.CWD, server)
 		switch {
 		case source == unprovenMCPSource:
 			facts.MCPUnproven = server
+		case !ok && connector == "codex":
+			// Codex runs a project definition only for a project its user
+			// config trusts; an untrusted project file does not override the
+			// server of that name in the user config (GAP-0686).
+			entry, ok = config.LookupEffectiveCodexMCPToolServer(event.CWD, server)
 		case !ok:
 			entry, ok = (*config.Config)(nil).LookupMCPToolServerForConnector(connector, event.CWD, server)
 		}
@@ -94,6 +107,23 @@ func hookAssetFacts(connector string, payload []byte) string {
 	}
 	facts.Contents = hookAssetContents(connector, home, event.ToolName, event.ToolInput, event.Prompt, event.CommandName, facts.SkillDirs)
 	return assetfacts.Encode(facts)
+}
+
+// hookToolArgs decodes the tool arguments of a hook that spells them toolArgs:
+// Copilot CLI sends them as a JSON object or as a string holding one.
+func hookToolArgs(raw json.RawMessage) map[string]any {
+	var args map[string]any
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	if json.Unmarshal(raw, &args) == nil {
+		return args
+	}
+	var text string
+	if json.Unmarshal(raw, &text) == nil && json.Unmarshal([]byte(text), &args) == nil {
+		return args
+	}
+	return nil
 }
 
 // hookAssetContents reads, as the user, the text of the skill folders a
@@ -205,8 +235,8 @@ func hookCommandLineMCPServer(connector, cwd, server string) (config.MCPServerEn
 	}
 }
 
-// hookInvokedSkillName is the skill a Claude Code Skill call or /name
-// prompt, or a Codex "$name" prompt, selects, when it is a plain folder name.
+// hookInvokedSkillName is the skill a Claude Code or Copilot skill call or
+// /name prompt, or a Codex "$name" prompt, selects, when it is a plain folder name.
 func hookInvokedSkillName(connector, toolName string, toolInput map[string]any, prompt string) string {
 	name := ""
 	fields := strings.Fields(prompt)
@@ -215,7 +245,7 @@ func hookInvokedSkillName(connector, toolName string, toolInput map[string]any, 
 		name, _ = toolInput["skill"].(string)
 	case len(fields) > 0 && strings.HasPrefix(fields[0], "$"):
 		name = strings.TrimPrefix(fields[0], "$")
-	case len(fields) > 0 && connector == "claudecode" && strings.HasPrefix(fields[0], "/"):
+	case len(fields) > 0 && (connector == "claudecode" || connector == "copilot") && strings.HasPrefix(fields[0], "/"):
 		name = strings.TrimPrefix(fields[0], "/")
 	}
 	name = strings.TrimSpace(name)
