@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import locale
@@ -1611,10 +1612,11 @@ def _executable_identity(path: str) -> list[Any]:
     Two readings that name the same file have the same identity, and a file
     replaced (even by one of the same size and time), or a link moved to
     another file, does not. The change time moves with every write to the file
-    and cannot be set back, so a same-size update that restores the modification
-    time is told apart too (on Windows it is the creation time, which an
-    in-place write leaves alone). Only the executable itself is named: nothing
-    a probe creates is part of it.
+    and is not set by restoring the modification time, so a same-size update
+    that restores that time is told apart too (:func:`_change_time_ns`: on
+    Windows ``st_ctime`` is the creation time, so the NTFS change time is read
+    instead). Only the executable itself is named: nothing a probe creates is
+    part of it.
     """
     try:
         real = os.path.realpath(path)
@@ -1623,7 +1625,85 @@ def _executable_identity(path: str) -> list[Any]:
         return []
     if not stat.S_ISREG(info.st_mode):
         return []
-    return [real, info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev, info.st_ctime_ns]
+    return [real, info.st_size, info.st_mtime_ns, info.st_ino, info.st_dev, _change_time_ns(real, info)]
+
+
+class _WindowsFileBasicInfo(ctypes.Structure):
+    """FILE_BASIC_INFO (FileBasicInfo of GetFileInformationByHandleEx)."""
+
+    _fields_ = [
+        ("creation_time", ctypes.c_longlong),
+        ("last_access_time", ctypes.c_longlong),
+        ("last_write_time", ctypes.c_longlong),
+        ("change_time", ctypes.c_longlong),
+        ("file_attributes", ctypes.c_ulong),
+    ]
+
+
+_WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
+_WINDOWS_FILE_SHARE_ALL = 0x00000007
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WINDOWS_FILE_BASIC_INFO_CLASS = 0
+
+
+def _windows_change_time(path: str) -> int | None:
+    """The NTFS change time of *path* in 100 ns ticks (the time of the last
+    write to the file, whatever the modification time was set back to), or None
+    when Windows does not give one."""
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        void_p = ctypes.c_void_p
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            void_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            void_p,
+        ]
+        create_file.restype = void_p
+        get_information = kernel32.GetFileInformationByHandleEx
+        get_information.argtypes = [void_p, ctypes.c_int, void_p, ctypes.c_ulong]
+        get_information.restype = ctypes.c_int
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [void_p]
+        close_handle.restype = ctypes.c_int
+        handle = create_file(
+            path,
+            _WINDOWS_FILE_READ_ATTRIBUTES,
+            _WINDOWS_FILE_SHARE_ALL,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+        if handle is None or handle == ctypes.c_void_p(-1).value:
+            return None
+        try:
+            info = _WindowsFileBasicInfo()
+            if not get_information(
+                handle, _WINDOWS_FILE_BASIC_INFO_CLASS, ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                return None
+        finally:
+            close_handle(handle)
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        return None
+    return info.change_time if info.change_time > 0 else None
+
+
+def _change_time_ns(real: str, info: os.stat_result) -> int:
+    """When the file at *real* was last written to: the Windows change time
+    there (``st_ctime`` is the creation time on Windows, which an in-place write
+    leaves alone), ``st_ctime_ns`` elsewhere."""
+    if _is_windows_host():
+        ticks = _windows_change_time(real)
+        if ticks is not None:
+            return ticks
+    return info.st_ctime_ns
 
 
 def _recorded_identity(raw: dict[str, Any]) -> list[Any]:
@@ -3536,6 +3616,28 @@ def _entry_executable_changed(entry: Any, payload: dict[str, Any]) -> bool:
     return read_at is not None and max(current[2], current[5]) >= int(read_at.timestamp() * 1_000_000_000)
 
 
+def _entry_selected_elsewhere(entry: Any, fresh: AgentSignal) -> bool:
+    """Whether a scan selected another executable than the one the version of a
+    cached *entry* was read from (the launch order moved to a new install while
+    the old file is still on disk): that version says nothing about the file
+    the scan selected, however the scan fared reading it. A scan that selected
+    nothing (the agent is not found) does not say."""
+    if not isinstance(entry, dict) or not str(entry.get("version") or ""):
+        return False
+    recorded = _recorded_identity(entry)
+    cached_path = str(recorded[0]) if recorded else _resolved_path(str(entry.get("binary_path") or ""))
+    selected_path = fresh.binary_path if fresh.installed else ""
+    selected = str(fresh.identity[0]) if fresh.identity else _resolved_path(selected_path)
+    return bool(cached_path and selected and os.path.normcase(cached_path) != os.path.normcase(selected))
+
+
+def _resolved_path(path: str) -> str:
+    try:
+        return os.path.realpath(path) if path else ""
+    except (OSError, ValueError):
+        return ""
+
+
 def _entry_observed_at(entry: dict[str, Any], payload: dict[str, Any]) -> datetime | None:
     return _parse_rfc3339(str(entry.get(_ENTRY_OBSERVED_AT) or payload.get("scanned_at") or ""))
 
@@ -3552,8 +3654,11 @@ def _cached_entry_is_newer(entry: Any, payload: dict[str, Any], read_at: datetim
     took its own. Such an entry is newer evidence and stays, whichever scan
     started first or ended last: a later unread result for an executable that
     changed is not put back to the version of the one it replaced. Equal times
-    are not proof of order, so the scan being written wins then."""
-    if read_at is None or not _entry_was_read(entry):
+    are not proof of order, so the scan being written wins then. An entry whose
+    version belongs to an executable replaced since is no evidence at all
+    (:func:`_entry_executable_changed`): it is judged here, when it would be
+    kept, so a late writer cannot restore it."""
+    if read_at is None or not _entry_was_read(entry) or _entry_executable_changed(entry, payload):
         return False
     observed = _entry_observed_at(entry, payload)
     return observed is not None and observed > read_at
@@ -3661,6 +3766,7 @@ def _publish_agent_signal(
                         peer != name
                         and not _scan_read_version(fresh)
                         and not _entry_executable_changed(cached_peer, payload)
+                        and not _entry_selected_elsewhere(cached_peer, fresh)
                     ):
                         continue
                     read_at = _signal_observed_at(fresh, disc)
