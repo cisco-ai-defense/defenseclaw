@@ -18835,12 +18835,22 @@ def _check_hook_contract_lock(
             str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
         )
     )
+    # The version the agent reports now. Doctor does not rediscover a protected
+    # agent: after an update the lock value is the old version, next to the
+    # executable mismatch (GAP-0158).
+    current_version, current_proven = (
+        ("", False) if protected_setup_agent else _agent_version_now(data_dir, connector)
+    )
     detail = f"contract={contract or '?'} status={status or '?'}"
     if raw_version:
         detail += f" {'agent_cli' if connector == 'cursor' else 'agent'}={raw_version}"
-        if protected_setup_agent:
-            # Doctor does not rediscover a protected agent: after an update this
-            # is the old version, next to the executable mismatch (GAP-0158).
+        if not (
+            current_proven
+            and stable_agent_version(connector, current_version) == stable_agent_version(connector, raw_version)
+        ):
+            # Every connector row says the same thing (GAP-0823): the lock value is
+            # unlabeled only when the agent just reported it. Otherwise it is what
+            # setup recorded, and `agent_updated=` below names a newer one.
             detail += " (recorded at setup)"
     if normalized:
         detail += f" normalized={normalized}"
@@ -18910,7 +18920,6 @@ def _check_hook_contract_lock(
         windows_protected_authority_invalid = setup_agent_lock_executable_invariant(data_dir, connector, entry)
         if windows_protected_authority_invalid:
             detail += f" exact_setup_executable_evidence=invalid:{windows_protected_authority_invalid}"
-    current_version = "" if protected_setup_agent else _discovered_agent_version(data_dir, connector)
     if protected_setup_agent:
         detail += f" agent_executable={entry['agent_executable']}"
     if connector == "cursor":
@@ -19067,8 +19076,28 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
         )
 
 
-def _discovered_agent_version(data_dir: str, connector: str) -> str:
-    return str(_discovered_agent_signal(data_dir, connector).get("version") or "").strip()
+def _agent_version_now(data_dir: str, connector: str) -> tuple[str, bool]:
+    """The agent version for a row, and whether the agent itself just reported it.
+
+    The Connector compatibility row re-reads the version with the bounded
+    ``--version`` probe, shared by every row of a Doctor run, because the
+    discovery cache and the hook contract lock keep the version from before an
+    agent update. The Hook contract row reads it the same way (GAP-0823). A probe
+    that cannot run leaves the cached version, flagged as not proven.
+    """
+
+    from defenseclaw.doctor_health import read_run_discovery, recheck_installed_versions
+
+    try:
+        checked = recheck_installed_versions(read_run_discovery(data_dir), (connector,), data_dir)
+        agents = getattr(checked.discovery, "agents", None)
+        signal = agents.get(connector) if isinstance(agents, dict) else None
+        found = str(getattr(signal, "version", "") or "").strip()
+        if found and connector not in checked.unchecked:
+            return found, True
+    except Exception:  # noqa: BLE001 - a probe problem leaves the cached version.
+        pass
+    return str(_discovered_agent_signal(data_dir, connector).get("version") or "").strip(), False
 
 
 def _discovered_agent_path(data_dir: str, connector: str) -> str:
