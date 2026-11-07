@@ -74,7 +74,7 @@ func approvedConfigDigest(record map[string]any) string {
 // every other value of the deployment record keeps its value.
 func TestRefreshManagedApprovedConfigSourceFollowsTheLastApprovedConfig(t *testing.T) {
 	dir := approvedSourceFolder(t)
-	if err := refreshManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB)); err != nil {
+	if err := refreshManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err != nil {
 		t.Fatal(err)
 	}
 	body, record := readApprovedSourceFolder(t, dir)
@@ -96,7 +96,7 @@ func TestRefreshManagedApprovedConfigSourceFollowsTheLastApprovedConfig(t *testi
 	}
 
 	// Then back to A: a later ensure of an older config is the latest approval.
-	if err := refreshManagedApprovedConfigSource(dir, []byte(approvedSourceConfigA)); err != nil {
+	if err := refreshManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigA), []byte(approvedSourceConfigA)); err != nil {
 		t.Fatal(err)
 	}
 	if body, record = readApprovedSourceFolder(t, dir); body != approvedSourceConfigA ||
@@ -119,7 +119,7 @@ func TestRefreshManagedApprovedConfigSourceLeavesCurrentAndFillsMissingSources(t
 		}
 		return restore(path, data, sibling)
 	}
-	if err := refreshManagedApprovedConfigSource(dir, []byte(approvedSourceConfigA)); err != nil {
+	if err := refreshManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigA), []byte(approvedSourceConfigA)); err != nil {
 		t.Fatal(err)
 	}
 	if writes != 0 {
@@ -130,7 +130,7 @@ func TestRefreshManagedApprovedConfigSourceLeavesCurrentAndFillsMissingSources(t
 	if err := os.WriteFile(filepath.Join(bare, managedDeploymentRecordFile), []byte(`{"schema_version":1,"installed":true,"profile":"standalone"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshManagedApprovedConfigSource(bare, []byte(approvedSourceConfigB)); err != nil {
+	if err := refreshManagedApprovedConfigSource(bare, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err != nil {
 		t.Fatal(err)
 	}
 	body, record := readApprovedSourceFolder(t, bare)
@@ -152,7 +152,7 @@ func TestRefreshManagedApprovedConfigSourceKeepsBothWhenTheRecordCannotBeWritten
 		}
 		return restore(path, data, sibling)
 	}
-	if err := refreshManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB)); err == nil {
+	if err := refreshManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil {
 		t.Fatal("a record that could not be written was reported as written")
 	}
 	body, _ := readApprovedSourceFolder(t, dir)
@@ -165,7 +165,7 @@ func TestRefreshManagedApprovedConfigSourceKeepsBothWhenTheRecordCannotBeWritten
 	if err := os.WriteFile(filepath.Join(fresh, managedDeploymentRecordFile), []byte(`{"installed":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshManagedApprovedConfigSource(fresh, []byte(approvedSourceConfigB)); err == nil {
+	if err := refreshManagedApprovedConfigSource(fresh, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil {
 		t.Fatal("a record that could not be written was reported as written")
 	}
 	if _, err := os.Stat(filepath.Join(fresh, managedApprovedConfigFile)); !errors.Is(err, os.ErrNotExist) {
@@ -191,10 +191,10 @@ func TestRefreshManagedApprovedConfigSourceRefusesWhatItCannotBind(t *testing.T)
 			if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := refreshManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB)); err == nil {
+			if err := refreshManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil {
 				t.Fatal("the refresh accepted a record it cannot bind")
 			}
-			if changed, err := healManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB)); err == nil || changed {
+			if changed, err := healManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil || changed {
 				t.Fatalf("the heal accepted a record it cannot bind: changed=%v err=%v", changed, err)
 			}
 			after, _ := os.ReadFile(path)
@@ -206,10 +206,10 @@ func TestRefreshManagedApprovedConfigSourceRefusesWhatItCannotBind(t *testing.T)
 			}
 		})
 	}
-	if err := refreshManagedApprovedConfigSource("", []byte(approvedSourceConfigB)); err == nil {
+	if err := refreshManagedApprovedConfigSource("", approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil {
 		t.Fatal("an unknown install state folder was accepted")
 	}
-	if err := refreshManagedApprovedConfigSource(t.TempDir(), []byte(approvedSourceConfigB)); err == nil {
+	if err := refreshManagedApprovedConfigSource(t.TempDir(), approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil {
 		t.Fatal("a missing deployment record was accepted")
 	}
 
@@ -225,7 +225,7 @@ func TestRefreshManagedApprovedConfigSourceRefusesWhatItCannotBind(t *testing.T)
 	if err := os.Symlink(target, copyPath); err != nil {
 		t.Skip("cannot create a link here:", err)
 	}
-	if err := refreshManagedApprovedConfigSource(linked, []byte(approvedSourceConfigB)); err == nil {
+	if err := refreshManagedApprovedConfigSource(linked, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil {
 		t.Fatal("an approved copy that is a link was written through")
 	}
 	if got, _ := os.ReadFile(target); string(got) != "x" {
@@ -255,7 +255,7 @@ func TestHealManagedApprovedConfigSourceReplacesAnOlderApprovedConfigBeforeRepai
 	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigA {
 		t.Fatalf("setup: the stale source is %q", got)
 	}
-	changed, err := healManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB))
+	changed, err := healManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB))
 	if err != nil || !changed {
 		t.Fatalf("heal: changed=%v err=%v", changed, err)
 	}
@@ -282,7 +282,7 @@ func TestHealManagedApprovedConfigSourceLeavesWhatItDoesNotOwn(t *testing.T) {
 	}
 
 	dir := approvedSourceFolder(t)
-	if changed, err := healManagedApprovedConfigSource(dir, []byte(approvedSourceConfigA)); err != nil || changed || writes != 0 {
+	if changed, err := healManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigA), []byte(approvedSourceConfigA)); err != nil || changed || writes != 0 {
 		t.Fatalf("a current source was rewritten: changed=%v err=%v writes=%d", changed, err, writes)
 	}
 
@@ -291,7 +291,7 @@ func TestHealManagedApprovedConfigSourceLeavesWhatItDoesNotOwn(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(none, managedDeploymentRecordFile), []byte(record), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if changed, err := healManagedApprovedConfigSource(none, []byte(approvedSourceConfigB)); err != nil || changed || writes != 0 {
+	if changed, err := healManagedApprovedConfigSource(none, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err != nil || changed || writes != 0 {
 		t.Fatalf("a deployment without an approved source was changed: changed=%v err=%v writes=%d", changed, err, writes)
 	}
 	if after, _ := os.ReadFile(filepath.Join(none, managedDeploymentRecordFile)); string(after) != record {
@@ -301,10 +301,10 @@ func TestHealManagedApprovedConfigSourceLeavesWhatItDoesNotOwn(t *testing.T) {
 		t.Fatalf("an approved copy was created: %v", err)
 	}
 
-	if changed, err := healManagedApprovedConfigSource(t.TempDir(), []byte(approvedSourceConfigB)); err != nil || changed {
+	if changed, err := healManagedApprovedConfigSource(t.TempDir(), approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err != nil || changed {
 		t.Fatalf("a folder without a deployment record: changed=%v err=%v", changed, err)
 	}
-	if _, err := healManagedApprovedConfigSource("", []byte(approvedSourceConfigB)); err == nil {
+	if _, err := healManagedApprovedConfigSource("", approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil {
 		t.Fatal("an unknown install state folder was accepted")
 	}
 }
@@ -313,8 +313,9 @@ func TestHealManagedApprovedConfigSourceLeavesWhatItDoesNotOwn(t *testing.T) {
 // recordedBody, with the given actor.
 func stageConfigGeneration(t *testing.T, configPath, recordedBody, actor string) {
 	t.Helper()
+	previous, _ := configwrite.ReadGenerationState(configPath) // a writer advances the counter by one
 	raw, err := json.Marshal(map[string]any{
-		"generation": 3, "config_sha256": configwrite.SHA256Hex([]byte(recordedBody)), "actor": actor, "written_at": "2026-11-07T00:00:00Z",
+		"generation": previous.Generation + 1, "config_sha256": configwrite.SHA256Hex([]byte(recordedBody)), "actor": actor, "written_at": "2026-11-07T00:00:00Z",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -322,6 +323,19 @@ func stageConfigGeneration(t *testing.T, configPath, recordedBody, actor string)
 	if err := os.WriteFile(configwrite.GenerationPath(configPath), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// approvedConfigAt stages a config.yaml holding body that config.generation.json
+// records as a lifecycle write, and returns its path: the config a lifecycle
+// run has just applied.
+func approvedConfigAt(t *testing.T, body string) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, configPath, body, "lifecycle")
+	return configPath
 }
 
 // lockProbe is the lifecycle lock of a heal: it counts how often it was taken.
@@ -583,10 +597,10 @@ func TestRepairOverAHandEditLeavesWhatDoesNotRestoreTheApprovedSource(t *testing
 func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	dir := approvedSourceFolder(t)
 	proofPath := filepath.Join(dir, managedApprovedProofFile)
-	if err := refreshManagedApprovedConfigSource(dir, []byte(approvedSourceConfigB)); err != nil {
+	if err := refreshManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err != nil {
 		t.Fatal(err)
 	}
-	if !managedApprovedConfigProven(dir) {
+	if !managedApprovedConfigProven(dir, 2) {
 		t.Fatal("a copy the ensure published is not proven")
 	}
 	// An earlier release publishes another config (copy and digest), or only
@@ -595,7 +609,7 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, managedApprovedConfigFile), []byte(other), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if managedApprovedConfigProven(dir) {
+	if managedApprovedConfigProven(dir, 2) {
 		t.Fatal("a copy changed after the proof is proven")
 	}
 	recordRaw, _ := os.ReadFile(filepath.Join(dir, managedDeploymentRecordFile))
@@ -603,7 +617,7 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, managedDeploymentRecordFile), []byte(republished), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if managedApprovedConfigProven(dir) {
+	if managedApprovedConfigProven(dir, 2) {
 		t.Fatal("a copy and digest republished without the proof are proven")
 	}
 	if err := os.Remove(proofPath); err != nil {
@@ -612,7 +626,7 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	if err := os.WriteFile(proofPath, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if managedApprovedConfigProven(dir) {
+	if managedApprovedConfigProven(dir, 2) {
 		t.Fatal("an unreadable proof is proven")
 	}
 
@@ -626,7 +640,7 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 		}
 		return restore(path, data, sibling)
 	}
-	if err := refreshManagedApprovedConfigSource(failing, []byte(approvedSourceConfigB)); err == nil {
+	if err := refreshManagedApprovedConfigSource(failing, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err == nil {
 		t.Fatal("a proof that could not be written was reported as written")
 	}
 	body, _ := readApprovedSourceFolder(t, failing)
@@ -636,6 +650,85 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(failing, managedApprovedProofFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a proof was left: %v", err)
+	}
+}
+
+// The proof names the config generation that recorded the config as applied,
+// and a hand edit may restore the copy only when it is recorded directly after
+// that generation: a config recorded in between, by a build that never wrote
+// the proof, leaves a larger gap and the proof stale (GAP-0779).
+func TestApprovedConfigSourceProofIsBoundToTheLifecycleGeneration(t *testing.T) {
+	dir := approvedSourceFolder(t)
+	configPath := approvedConfigAt(t, approvedSourceConfigB) // generation 1
+	if err := refreshManagedApprovedConfigSource(dir, configPath, []byte(approvedSourceConfigB)); err != nil {
+		t.Fatal(err)
+	}
+	for generation, want := range map[uint64]bool{0: false, 1: false, 2: true, 3: false, 9: false} {
+		if got := managedApprovedConfigProven(dir, generation); got != want {
+			t.Fatalf("hand edit recorded as generation %d after a proof of generation 1: proven=%v, want %v", generation, got, want)
+		}
+	}
+	// A proof an earlier build wrote without a generation proves nothing.
+	proofPath := filepath.Join(dir, managedApprovedProofFile)
+	if err := os.WriteFile(proofPath, []byte(`{"config_sha256":"`+configwrite.SHA256Hex([]byte(approvedSourceConfigB))+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if managedApprovedConfigProven(dir, 2) {
+		t.Fatal("a proof without a generation is proven")
+	}
+}
+
+// The reviewed variant: this release proved A, then an earlier signed build
+// of the same version ran an explicit Upgrade whose in-place ensure applied B
+// (it records installed B and its generation and knows nothing of the approved
+// source or the proof). The approved copy, its digest and the proof still name
+// A and match each other, so only the generation tells the proof is stale: the
+// hand edit of B follows that later generation, and Repair must stop instead of
+// restoring A. A heal of this release over B proves B again and then Repair
+// restores B; the benign twin is a hand edit that directly follows the proof.
+func TestRepairOverAHandEditStopsWhenALaterBuildAppliedAnotherConfig(t *testing.T) {
+	dir := approvedSourceFolder(t) // approved A
+	configPath := approvedConfigAt(t, approvedSourceConfigA)
+	if err := refreshManagedApprovedConfigSource(dir, configPath, []byte(approvedSourceConfigA)); err != nil {
+		t.Fatal(err)
+	}
+	// Benign twin: a hand edit of A directly after the proof restores A.
+	handEditAfter(t, configPath, approvedSourceConfigA)
+	if err := unprovenApprovedConfigSourceForHandEdit(dir, configPath); err != nil {
+		t.Fatalf("a hand edit directly after the proof refused: %v", err)
+	}
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigA {
+		t.Fatalf("Repair restores %q, want A", got)
+	}
+
+	// The older build applies B in place: config.yaml and its generation
+	// record, nothing else.
+	if err := os.WriteFile(configPath, []byte(approvedSourceConfigB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, configPath, approvedSourceConfigB, "lifecycle")
+	handEditAfter(t, configPath, approvedSourceConfigB)
+	if err := unprovenApprovedConfigSourceForHandEdit(dir, configPath); err == nil {
+		t.Fatal("Repair would restore the approved copy A over a hand edit of the later config B")
+	}
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigA {
+		t.Fatalf("the refusal changed the approved source to %q", got)
+	}
+
+	// A lifecycle run of this release heals the source over B and proves it.
+	if err := os.WriteFile(configPath, []byte(approvedSourceConfigB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, configPath, approvedSourceConfigB, "lifecycle")
+	if changed, err := healManagedApprovedConfigSourceBound(dir, configPath, (&lockProbe{}).acquire); err != nil || !changed {
+		t.Fatalf("heal: changed=%v err=%v", changed, err)
+	}
+	handEditAfter(t, configPath, approvedSourceConfigB)
+	if err := unprovenApprovedConfigSourceForHandEdit(dir, configPath); err != nil {
+		t.Fatalf("Repair refused the healed and proven source: %v", err)
+	}
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigB {
+		t.Fatalf("Repair restores %q, want B", got)
 	}
 }
 
@@ -665,7 +758,7 @@ func TestHealManagedApprovedConfigSourceProofIsBestEffort(t *testing.T) {
 			if changed, err := healManagedApprovedConfigSourceBound(dir, configPath, lock.acquire); err != nil || changed {
 				t.Fatalf("changed=%v err=%v", changed, err)
 			}
-			if managedApprovedConfigProven(dir) {
+			if managedApprovedConfigProven(dir, 2) {
 				t.Fatal("a copy nothing bound was proven")
 			}
 		})

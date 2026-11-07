@@ -42,11 +42,18 @@ import (
 // that config: an earlier release applied a config in place and left the copy
 // at an older one, with a matching digest. approved-config.current.json is
 // the proof. A lifecycle run writes it, next to the copy, only for a copy that
-// is the config the run applied; it names the digest of that copy, so a copy
-// or a deployment record changed by anything else no longer matches it. Setup
-// /repair over a hand edit puts the copy back only when copy, record and proof
-// agree (unprovenApprovedConfigSourceForHandEdit) and otherwise stops before
-// it changes anything.
+// is the config the run applied; it names the digest of that copy and the
+// config generation that recorded the config as applied. A copy or a
+// deployment record changed by anything else no longer matches the digest, and
+// a config applied after the proof (by a build that knows nothing of the
+// proof, or any other writer) moved the generation on, so the hand edit that
+// follows it is recorded more than one generation after the proof. Repair over
+// a hand edit puts the copy back only when copy, record and proof agree and
+// the hand edit directly follows the proven generation
+// (managedApprovedConfigProven). Setup /repair checks that in Go before it
+// starts the installer; the installer checks the same rule itself
+// (Assert-DefenseClawApprovedConfigProven), so a direct run of
+// install-enterprise.ps1 stops at the same point before it changes anything.
 const (
 	managedApprovedConfigFile     = "approved-config.yaml"
 	managedApprovedProofFile      = "approved-config.current.json"
@@ -69,8 +76,8 @@ var writeManagedApprovedSourceFile = writeFileKeepingDACL
 // bytes it cannot bind) until the next ensure publishes both again. Every
 // other field of deployment.json, and the approved manifest digest, keep their
 // values. Both files keep deployment.json access control.
-func refreshManagedApprovedConfigSource(installDir string, installed []byte) error {
-	_, err := publishManagedApprovedConfigSource(installDir, installed, approvedPublishAlways)
+func refreshManagedApprovedConfigSource(installDir, configPath string, installed []byte) error {
+	_, err := publishManagedApprovedConfigSource(installDir, configPath, installed, approvedPublishAlways)
 	return err
 }
 
@@ -83,8 +90,8 @@ func refreshManagedApprovedConfigSource(installDir string, installed []byte) err
 // nothing when the copy and the record already match installed; a deployment
 // that records none, or has no deployment record, is left as it is (Repair
 // refuses it and names the next step). It reports whether it changed anything.
-func healManagedApprovedConfigSource(installDir string, installed []byte) (bool, error) {
-	result, err := publishManagedApprovedConfigSource(installDir, installed, approvedPublishIfRecorded)
+func healManagedApprovedConfigSource(installDir, configPath string, installed []byte) (bool, error) {
+	result, err := publishManagedApprovedConfigSource(installDir, configPath, installed, approvedPublishIfRecorded)
 	return result == approvedSourceChanged, err
 }
 
@@ -136,16 +143,28 @@ func readManagedConfigBoundToGeneration(configPath string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	if _, err := managedConfigGenerationOf(configPath, raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// managedConfigGenerationOf is the generation that config.generation.json next
+// to configPath records for installed, the config bytes a lifecycle run
+// applied. It is an error when the record cannot be read, calls the bytes a
+// hand edit or names other bytes. The approved config proof binds to this
+// generation.
+func managedConfigGenerationOf(configPath string, installed []byte) (uint64, error) {
 	state, err := configwrite.ReadGenerationState(configPath)
 	switch {
 	case err != nil:
-		return nil, fmt.Errorf("the config generation record cannot be read: %w", err)
+		return 0, fmt.Errorf("the config generation record cannot be read: %w", err)
 	case configwrite.IsHandEditActor(state.Actor):
-		return nil, errors.New("the config generation record calls config.yaml a hand edit")
-	case !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)):
-		return nil, errors.New("config.yaml is not the config its generation record names")
+		return 0, errors.New("the config generation record calls config.yaml a hand edit")
+	case !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(installed)):
+		return 0, errors.New("config.yaml is not the config its generation record names")
 	}
-	return raw, nil
+	return state.Generation, nil
 }
 
 // healManagedApprovedConfigSourceBound is the one check every lifecycle exit
@@ -162,7 +181,7 @@ func healManagedApprovedConfigSourceBound(installDir, configPath string, acquire
 	if err != nil {
 		return false, fmt.Errorf("read the installed config: %w", err)
 	}
-	pending, err := publishManagedApprovedConfigSource(installDir, peek, approvedPublishCheck)
+	pending, err := publishManagedApprovedConfigSource(installDir, configPath, peek, approvedPublishCheck)
 	if err != nil || pending == approvedSourceCurrent {
 		return false, err
 	}
@@ -186,7 +205,7 @@ func healManagedApprovedConfigSourceBound(installDir, configPath string, acquire
 		}
 		return false, fmt.Errorf("the installed config cannot be approved: %w", err)
 	}
-	changed, err := healManagedApprovedConfigSource(installDir, installed)
+	changed, err := healManagedApprovedConfigSource(installDir, configPath, installed)
 	if err != nil && proofOnly {
 		return false, nil
 	}
@@ -194,29 +213,43 @@ func healManagedApprovedConfigSourceBound(installDir, configPath string, acquire
 }
 
 // managedApprovedProof is approved-config.current.json: the digest of the
-// approved copy a lifecycle run proved to be the config it applied.
+// approved copy a lifecycle run proved to be the config it applied, and the
+// config generation that recorded that config as applied. Generation is a
+// pointer so a proof an earlier build wrote without it names no generation.
 type managedApprovedProof struct {
-	ConfigSHA256 string `json:"config_sha256"`
+	ConfigSHA256 string  `json:"config_sha256"`
+	Generation   *uint64 `json:"generation"`
 }
 
-// managedApprovedProofNames reports whether the proof file at path is a
-// regular file that names digest.
-func managedApprovedProofNames(path, digest string) bool {
+// readManagedApprovedProof reads the proof file at path when it is a regular
+// file that names a digest and a generation.
+func readManagedApprovedProof(path string) (digest string, generation uint64, ok bool) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		return false
+		return "", 0, false
 	}
 	raw, err := readBoundedConfigFile(path, managedApprovedRecordMaxBytes)
 	if err != nil {
-		return false
+		return "", 0, false
 	}
 	var proof managedApprovedProof
-	return json.Unmarshal(raw, &proof) == nil && proof.ConfigSHA256 == digest
+	if json.Unmarshal(raw, &proof) != nil || proof.Generation == nil {
+		return "", 0, false
+	}
+	return proof.ConfigSHA256, *proof.Generation, true
 }
 
-// writeManagedApprovedProof records digest as the proven approved copy.
-func writeManagedApprovedProof(installDir, digest string) error {
-	raw, err := json.Marshal(managedApprovedProof{ConfigSHA256: digest})
+// managedApprovedProofNames reports whether the proof file at path names
+// digest at generation.
+func managedApprovedProofNames(path, digest string, generation uint64) bool {
+	provenDigest, provenGeneration, ok := readManagedApprovedProof(path)
+	return ok && provenDigest == digest && provenGeneration == generation
+}
+
+// writeManagedApprovedProof records digest, the approved copy a lifecycle run
+// applied at config generation generation, as the proven approved copy.
+func writeManagedApprovedProof(installDir, digest string, generation uint64) error {
+	raw, err := json.Marshal(managedApprovedProof{ConfigSHA256: digest, Generation: &generation})
 	if err != nil {
 		return err
 	}
@@ -230,15 +263,17 @@ func writeManagedApprovedProof(installDir, digest string) error {
 // edit record names no lifecycle predecessor to compare the copy with. It
 // returns nil when no approved copy would replace the config (the record is
 // not a hand edit or cannot be read: the installer answers those itself), or
-// when copy, deployment record and proof all name one digest. Otherwise the
-// copy is one nothing proves current (an earlier release applied a config in
-// place without publishing it), and the error says why.
+// when copy, deployment record and proof all name one digest and the hand edit
+// directly follows the generation the proof names. Otherwise the copy is one
+// nothing proves current (an earlier release applied a config in place without
+// publishing it, or a build that knows nothing of the proof applied another
+// config after it), and the error says why.
 func unprovenApprovedConfigSourceForHandEdit(installDir, configPath string) error {
 	state, err := configwrite.ReadGenerationState(configPath)
 	if err != nil || !configwrite.IsHandEditActor(state.Actor) {
 		return nil
 	}
-	if managedApprovedConfigProven(installDir) {
+	if managedApprovedConfigProven(installDir, state.Generation) {
 		return nil
 	}
 	return errors.New("config.yaml is recorded as a hand edit, and nothing proves that the approved config source " +
@@ -246,8 +281,13 @@ func unprovenApprovedConfigSourceForHandEdit(installDir, configPath string) erro
 }
 
 // managedApprovedConfigProven reports whether the approved copy, the digest
-// deployment.json records for it and the proof file all name one config.
-func managedApprovedConfigProven(installDir string) bool {
+// deployment.json records for it and the proof file all name one config, and
+// whether handEditGeneration, the generation that records config.yaml as a
+// hand edit, directly follows the generation the proof names. Any config
+// recorded in between (a lifecycle apply by a build that does not write the
+// proof) makes the gap larger and the proof stale. The PowerShell installer
+// makes the same check (Assert-DefenseClawApprovedConfigProven).
+func managedApprovedConfigProven(installDir string, handEditGeneration uint64) bool {
 	recordPath := filepath.Join(installDir, managedDeploymentRecordFile)
 	copyPath := filepath.Join(installDir, managedApprovedConfigFile)
 	for _, path := range []string{recordPath, copyPath} {
@@ -273,10 +313,11 @@ func managedApprovedConfigProven(installDir string) bool {
 	if err != nil || configwrite.SHA256Hex(body) != digest {
 		return false
 	}
-	return managedApprovedProofNames(filepath.Join(installDir, managedApprovedProofFile), digest)
+	provenDigest, provenGeneration, ok := readManagedApprovedProof(filepath.Join(installDir, managedApprovedProofFile))
+	return ok && provenDigest == digest && handEditGeneration > provenGeneration && handEditGeneration-provenGeneration == 1
 }
 
-func publishManagedApprovedConfigSource(installDir string, installed []byte, mode approvedPublishMode) (approvedPublishResult, error) {
+func publishManagedApprovedConfigSource(installDir, configPath string, installed []byte, mode approvedPublishMode) (approvedPublishResult, error) {
 	onlyIfRecorded := mode != approvedPublishAlways
 	if installDir == "" {
 		return approvedSourceCurrent, errors.New("the install state folder is unknown")
@@ -331,7 +372,9 @@ func publishManagedApprovedConfigSource(installDir string, installed []byte, mod
 		return approvedSourceCurrent, fmt.Errorf("read the approved config source: %w", copyErr)
 	}
 	copyCurrent := sources[managedApprovedConfigKey] == digest && copyExisted && bytes.Equal(previousCopy, installed)
-	proofCurrent := managedApprovedProofNames(proofPath, digest)
+	// The proof names the generation that recorded installed as applied.
+	generation, generationErr := managedConfigGenerationOf(configPath, installed)
+	proofCurrent := generationErr == nil && managedApprovedProofNames(proofPath, digest, generation)
 	switch {
 	case copyCurrent && proofCurrent:
 		return approvedSourceCurrent, nil
@@ -339,8 +382,10 @@ func publishManagedApprovedConfigSource(installDir string, installed []byte, mod
 		return approvedProofMissing, nil
 	case mode == approvedPublishCheck:
 		return approvedSourceChanged, nil
+	case generationErr != nil:
+		return approvedSourceCurrent, fmt.Errorf("the config generation behind the approved config source cannot be bound: %w", generationErr)
 	case copyCurrent:
-		if err := writeManagedApprovedProof(installDir, digest); err != nil {
+		if err := writeManagedApprovedProof(installDir, digest, generation); err != nil {
 			return approvedSourceCurrent, fmt.Errorf("write the approved config source proof: %w", err)
 		}
 		return approvedProofMissing, nil
@@ -376,7 +421,7 @@ func publishManagedApprovedConfigSource(installDir string, installed []byte, mod
 		}
 		return approvedSourceCurrent, fmt.Errorf("write the deployment record: %w", err)
 	}
-	if err := writeManagedApprovedProof(installDir, digest); err != nil {
+	if err := writeManagedApprovedProof(installDir, digest, generation); err != nil {
 		restoreErr := writeManagedApprovedSourceFile(recordPath, rawRecord, recordPath)
 		if restoreErr == nil {
 			restoreErr = putCopyBack()
