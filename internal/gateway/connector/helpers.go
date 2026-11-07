@@ -33,7 +33,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -369,18 +368,40 @@ func hookCommandNamesHookDir(command, hookScript string) bool {
 // many commas, colons or equals signs it holds.
 const maxHookPathLen = 4096
 
-// maxHookPathSpans bounds the spans tried (repeats included) for one command, so a command made
-// of thousands of path starts cannot stall setup or teardown. Past it the
-// command counts as naming the managed directory: the protected answer.
-const maxHookPathSpans = 1 << 14
+// maxHookPathWork bounds the work one command may cost. A span that touches
+// the file system is charged hookPathFSCost and a span compared as text
+// hookPathTextCost. Spans that share a start share their file system reads, so
+// an ordinary command of many kilobytes, such as a list of thousands of paths,
+// stays well under it; a command made of tens of thousands of path starts does
+// not, so it cannot stall setup or teardown. Only past it does the command
+// count as naming the managed directory: the protected answer.
+const (
+	maxHookPathWork  = 1 << 29
+	hookPathFSCost   = 1 << 14
+	hookPathTextCost = 1 << 8
+)
 
 // hookPathScan matches the path words in hook command text against the
 // managed hook files and directories.
 type hookPathScan struct {
 	files, dirs []string
 	fold        bool
-	budget      int
+	work        int
 	exists      map[string]bool
+}
+
+// hookPathRun is the state of the spans that share one start: the longest
+// prefix of whole path components known to exist, and, once a component is
+// missing, the resolved form of the prefix up to and including it.
+type hookPathRun struct {
+	text         string
+	start        int
+	solid        int  // index of the "/" that ends the longest existing prefix
+	dead         bool // a prefix is missing, so every longer prefix is too
+	missEnd      int  // index of the "/" that ends the first missing prefix
+	resolved     string
+	resolvedOK   bool
+	resolvedRead bool
 }
 
 // hookCommandNamesDir reports whether hook command text (as read by
@@ -392,9 +413,10 @@ type hookPathScan struct {
 // the rest of the text, and a complete name is always among them. A span that
 // exists and is not managed is one ordinary path: the starts inside it are not
 // read, so "/home/u/a,/home/u/.defenseclaw/hooks/b" stays the user's file when
-// it exists. The text is never run.
+// it exists. The first word of the command, when it is one quoted existing
+// path, is one word (see blankOrdinaryQuoted). The text is never run.
 func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) bool {
-	scan := &hookPathScan{files: files, dirs: dirs, fold: fold, budget: maxHookPathSpans, exists: map[string]bool{}}
+	scan := &hookPathScan{files: files, dirs: dirs, fold: fold, exists: map[string]bool{}}
 	text := hookCommandPathText(scan.blankOrdinaryQuoted(command, home), home, fold)
 	startOK, wordSlash, skipTo := true, false, 0
 	for i, r := range text {
@@ -422,47 +444,54 @@ func hookCommandNamesDir(command, home string, files, dirs []string, fold bool) 
 	return false
 }
 
-// blankOrdinaryQuoted returns command with each quoted word replaced by "_"
-// when the word, with a space or another shell separator in it, is one
-// existing absolute path that is not managed. Quotes make it one word to a
-// shell, so the managed path inside "/home/u/a /home/u/.defenseclaw/hooks/b"
-// is not a word of its own. A quoted command line ("sh -c '...'") is not an
-// existing path and stays.
+// blankOrdinaryQuoted returns command with its first word replaced by "_" when
+// that word is quoted and, with a space or another shell separator in it, is
+// one existing absolute path that is not managed. A shell runs that word as
+// the program, so the managed path inside "/home/u/a /home/u/.defenseclaw/hooks/b"
+// is not a word of its own. Only the program word is read this way: a quoted
+// word further on is an argument, and the program may run its text as a shell
+// line ("sh -c ..."), so it stays whether or not the same bytes name a file.
 func (s *hookPathScan) blankOrdinaryQuoted(command, home string) string {
-	var out strings.Builder
-	for i := 0; i < len(command); {
-		quote := command[i]
-		if quote != '\'' && quote != '"' {
-			out.WriteByte(quote)
-			i++
-			continue
-		}
-		end := strings.IndexByte(command[i+1:], quote)
-		if end < 0 {
-			out.WriteString(command[i:])
-			break
-		}
-		end += i + 2
-		word := hookCommandPathText(command[i+1:end-1], home, s.fold)
-		if strings.ContainsFunc(word, hookShellSeparator) && hookPathStart(word, 0, s.fold) {
-			if named, exists := s.span(word); !named && exists {
-				out.WriteByte('_')
-				i = end
-				continue
-			}
-		}
-		out.WriteString(command[i:end])
-		i = end
+	trimmed := strings.TrimLeftFunc(command, unicode.IsSpace)
+	if trimmed == "" || (trimmed[0] != '\'' && trimmed[0] != '"') {
+		return command
 	}
-	return out.String()
+	end := strings.IndexByte(trimmed[1:], trimmed[0])
+	if end < 0 {
+		return command
+	}
+	end += 2
+	for _, r := range trimmed[end:] {
+		if !hookShellSeparator(r) {
+			return command
+		}
+		break
+	}
+	word := hookCommandPathText(trimmed[1:end-1], home, s.fold)
+	if strings.ContainsFunc(word, hookShellSeparator) && hookPathStart(word, 0, s.fold) {
+		if named, exists := s.span(word); !named && exists {
+			return "_" + trimmed[end:]
+		}
+	}
+	return command
 }
 
 // start tries every span that starts at text[i]. It returns whether a span
 // names a managed path and, when none does, the length of the longest span
 // that exists as one ordinary path (a shell would read it as one word).
 func (s *hookPathScan) start(text string, i int) (claimed bool, ordinary int) {
+	first := strings.IndexByte(text[i:], '/')
+	if first < 0 {
+		return false, 0
+	}
+	run := &hookPathRun{text: text, start: i, solid: i + first}
+	last, compStart, dotted := i+first, i+first+1, false
 	try := func(end int) bool {
 		word := text[i:end]
+		if !s.parentExists(run, last) {
+			tail := text[compStart:end]
+			return s.missingSpan(run, word, dotted || tail == "." || tail == "..")
+		}
 		named, exists := s.span(word)
 		if exists && end-i > ordinary && !strings.ContainsFunc(word, hookShellSeparator) {
 			ordinary = end - i
@@ -470,17 +499,73 @@ func (s *hookPathScan) start(text string, i int) (claimed bool, ordinary int) {
 		return named
 	}
 	for j, next := range text[i+1:] {
-		if j >= maxHookPathLen {
+		k := i + 1 + j
+		if k-i >= maxHookPathLen {
 			break
 		}
-		if hookCommandPathDelimiter(next, s.fold) && try(i+1+j) {
+		if next == '/' {
+			if comp := text[compStart:k]; k > i+first && (comp == "." || comp == "..") {
+				dotted = true
+			}
+			last, compStart = k, k+1
+		} else if hookCommandPathDelimiter(next, s.fold) && try(k) {
 			return true, 0
 		}
 	}
-	if try(len(text)) {
+	if len(text)-i <= maxHookPathLen && try(len(text)) {
 		return true, 0
 	}
 	return false, ordinary
+}
+
+// parentExists reports whether the prefix of the run that ends at the "/" at
+// last exists. A prefix that is missing makes every longer one missing, so the
+// check walks the whole components once per start.
+func (s *hookPathScan) parentExists(run *hookPathRun, last int) bool {
+	if last <= run.solid {
+		return true
+	}
+	if run.dead {
+		return false
+	}
+	for p := run.solid + 1; p <= last; p++ {
+		if run.text[p] != '/' {
+			continue
+		}
+		s.work += hookPathFSCost
+		if _, err := os.Lstat(filepath.FromSlash(run.text[run.start:p])); err != nil || s.work > maxHookPathWork {
+			run.dead, run.missEnd = true, p
+			return false
+		}
+		run.solid = p
+	}
+	return true
+}
+
+// missingSpan reports whether word, whose parent directory does not exist,
+// names a managed hook file or lies in a managed hook directory. Nothing in it
+// can exist, so it is compared as text, once as written and once joined to the
+// resolved form of the run up to its first missing component, which links in
+// that prefix decide once for the whole run. A word with a "." or ".." component
+// is cleaned and resolved the long way.
+func (s *hookPathScan) missingSpan(run *hookPathRun, word string, dotted bool) bool {
+	if dotted {
+		named, _ := s.span(word)
+		return named
+	}
+	if s.work += hookPathTextCost; s.work > maxHookPathWork {
+		return true
+	}
+	word = strings.TrimSuffix(word, "/")
+	if s.names(word) {
+		return true
+	}
+	if !run.resolvedRead {
+		run.resolvedRead = true
+		resolved, ok := resolveHookPathAllowMissing(filepath.FromSlash(run.text[run.start:run.missEnd]))
+		run.resolved, run.resolvedOK = normalizeHookPath(resolved, s.fold), ok
+	}
+	return run.resolvedOK && s.namesJoined(run.resolved, word[run.missEnd-run.start:])
 }
 
 // hookShellSeparator is a character that ends a shell word when unquoted.
@@ -493,11 +578,11 @@ func hookShellSeparator(r rune) bool {
 // exists. Cleaning happens before the comparison: "<hooks>/../user.sh" and
 // "/other<hooks>/x" are not managed.
 func (s *hookPathScan) span(word string) (named, exists bool) {
-	if s.budget--; s.budget < 0 {
-		return true, false
-	}
 	if exists, seen := s.exists[word]; seen {
 		return false, exists
+	}
+	if s.work += hookPathFSCost; s.work > maxHookPathWork {
+		return true, false
 	}
 	name := filepath.FromSlash(word)
 	if s.names(normalizeHookPath(filepath.Clean(name), s.fold)) {
@@ -514,15 +599,37 @@ func (s *hookPathScan) span(word string) (named, exists bool) {
 // names reports whether form is a managed hook file or lies in a managed
 // hook directory.
 func (s *hookPathScan) names(form string) bool {
-	if slices.Contains(s.files, form) {
-		return true
+	return s.namesJoined(form, "")
+}
+
+// namesJoined is names for the form a+b, without building it.
+func (s *hookPathScan) namesJoined(a, b string) bool {
+	n := len(a) + len(b)
+	for _, managed := range s.files {
+		if n == len(managed) && joinedHasPrefix(a, b, managed) {
+			return true
+		}
 	}
 	for _, managed := range s.dirs {
-		if form == managed || strings.HasPrefix(form, managed+"/") {
+		if n < len(managed) || !joinedHasPrefix(a, b, managed) {
+			continue
+		}
+		if n == len(managed) {
+			return true
+		}
+		if len(managed) < len(a) && a[len(managed)] == '/' || len(managed) >= len(a) && b[len(managed)-len(a)] == '/' {
 			return true
 		}
 	}
 	return false
+}
+
+// joinedHasPrefix reports whether prefix starts a+b.
+func joinedHasPrefix(a, b, prefix string) bool {
+	if len(prefix) <= len(a) {
+		return a[:len(prefix)] == prefix
+	}
+	return strings.HasPrefix(prefix, a) && strings.HasPrefix(b, prefix[len(a):])
 }
 
 // hookPathStart reports whether text holds an absolute path at i.
