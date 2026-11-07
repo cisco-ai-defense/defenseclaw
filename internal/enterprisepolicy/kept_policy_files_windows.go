@@ -11,9 +11,27 @@
 package enterprisepolicy
 
 import (
+	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
+
+var keptPolicyFileSID = regexp.MustCompile(`S-1-[0-9]+(?:-[0-9]+)+`)
+
+// keptPolicyFileFix is the icacls command that takes the untrusted account's
+// entry off path (or gives the file back to Administrators when the account
+// owns it), from the account the trust check named.
+func keptPolicyFileFix(path, trustErr string) string {
+	sid := keptPolicyFileSID.FindString(trustErr)
+	switch {
+	case sid == "":
+		return fmt.Sprintf(`icacls "%s" /setowner "*S-1-5-32-544"`, path)
+	case strings.Contains(strings.ToLower(trustErr), "owner"):
+		return fmt.Sprintf(`icacls "%s" /setowner "*S-1-5-32-544"`, path)
+	}
+	return fmt.Sprintf(`icacls "%s" /remove:g "*%s"`, path, sid)
+}
 
 // StaleHookKept is the reason of a KeptUntrustedPolicyFiles entry.
 const StaleHookKept = "stale hook: "
@@ -61,7 +79,7 @@ func KeptUntrustedPolicyFiles(opts Options) []string {
 		if err != nil || !strings.Contains(strings.ToLower(string(data)), "defenseclaw") {
 			continue
 		}
-		kept = append(kept, path+": "+StaleHookKept+trustErr.Error())
+		kept = append(kept, path+": "+StaleHookKept+trustErr.Error()+". Fix: "+keptPolicyFileFix(path, trustErr.Error()))
 	}
 	return kept
 }

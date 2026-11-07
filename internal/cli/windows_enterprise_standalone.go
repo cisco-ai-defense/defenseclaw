@@ -2239,7 +2239,7 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 			"the uninstall left %d vendor policy file(s) byte for byte because another account can change them, and they may still hold "+
 				"DefenseClaw hook entries that name programs the uninstall removed; the agent runs those entries at its next tool call, "+
 				"the program is not there, and depending on the agent the call fails or is blocked until they are gone. For each file, "+
-				"remove the other account's access entry (the Fix command), check the file, then delete the entries whose command names "+
+				"run the Fix command to remove the other account's access entry, check the file, then delete the entries whose command names "+
 				"DefenseClaw's hook (defenseclaw-hook.exe), or restore the file from a backup: %s",
 			len(stale), windowsEnterpriseBoundedLabels(stale)))
 	}
