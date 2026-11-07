@@ -59,7 +59,8 @@ const (
 
 	// hermesScannerReadBytes is the largest file the plugin scanner reads
 	// from a folder it skips (analyzers.py: forced entrypoints, 2 MiB). A
-	// larger file there is known by name and size alone.
+	// larger file there is known by name and size alone, unless a manifest
+	// declares it, which binds it by content whatever its size.
 	hermesScannerReadBytes = 2 << 20
 
 	// hermesVendorPluginReason is the admission reason for a shipped plugin
@@ -384,8 +385,9 @@ func (s *hermesDeclaredSet) declares(info fs.FileInfo) bool {
 // folds this hash into its content hash: a change anywhere in the tree
 // reaches a scan, whatever was admitted before. Every
 // file the scanner can read (up to hermesScannerReadBytes) is hashed, however
-// much skipped data precedes it; a larger file is described by name and size,
-// since the scanner reads none of its bytes. A tree over
+// much skipped data precedes it, and so is a declared entrypoint of any size;
+// another larger file is described by name and size, since the scanner reads
+// none of its bytes. A tree over
 // hermesSkippedTreeMaxBytes has no stable hash. An entry that cannot be read
 // is recorded as unreadable, so it also differs from a clean read.
 func skippedTreeHash(root string, load hermesManifestLoader) string {
@@ -432,7 +434,10 @@ func skippedTreeHash(root string, load hermesManifestLoader) string {
 				return nil
 			}
 			detail := fmt.Sprintf("%d", info.Size())
-			if info.Size() <= hermesScannerReadBytes {
+			// A file the scanner reads is hashed: any file up to its read
+			// limit, and a declared entrypoint whatever its size, so a
+			// same-size edit of a declared file is a change.
+			if info.Size() <= hermesScannerReadBytes || declaredEntrypoint(path) {
 				if read += info.Size(); read > hermesSkippedTreeMaxBytes {
 					entries = append(entries, fmt.Sprintf("unbounded:%d", time.Now().UnixNano()))
 					return fs.SkipAll
