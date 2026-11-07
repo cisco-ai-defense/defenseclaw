@@ -56,3 +56,28 @@ func TestOpenLockFileUnmanagedStaysOrdinary(t *testing.T) {
 	}
 	_ = f.Close()
 }
+
+// GAP-0766: the runtime directory's .env lock is created canonical as a
+// runtime file, the kind the Guardian, Setup repair and verify judge it by,
+// not as a config file.
+func TestOpenLockFileForDotEnvIsCanonicalRuntimeFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	t.Setenv(managed.WindowsServiceAccountEnv, lockTestAccount)
+	t.Setenv("DEFENSECLAW_HOME", home)
+	t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(home, "etc", "config.yaml"))
+	lockPath := LockPath(filepath.Join(home, ".env"))
+	f, err := openLockFile(lockPath)
+	if errors.Is(err, managed.ErrCanonicalOwnerUnavailable) {
+		t.Skipf("the test token cannot own the lock as Administrators: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("openLockFile: %v", err)
+	}
+	_ = f.Close()
+	result, err := managed.AssessCanonical(lockPath, managed.ObjectRuntimeFile, managed.CanonicalOptions{GatewayServiceAccount: lockTestAccount, Quiet: true})
+	if err != nil || result.Outcome != managed.CanonicalOK {
+		t.Fatalf("the .env lock must be a canonical runtime file from creation, got %s %v: %v", result.Outcome, err, result.Drift)
+	}
+}

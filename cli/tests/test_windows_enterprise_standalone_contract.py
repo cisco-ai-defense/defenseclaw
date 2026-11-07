@@ -2747,3 +2747,23 @@ def test_bundle_repair_hint_names_the_installed_cli_without_a_bare_fallback() ->
     assert "IsNullOrWhiteSpace" not in hint
     layout = _function_body(module, "Get-DefenseClawLayout")
     assert "CLIPath = (Microsoft.PowerShell.Management\\Join-Path $bin 'defenseclaw.exe')" in layout
+
+
+def _function_body(text: str, name: str) -> str:
+    start = text.index(f"function {name} ")
+    return text[start : text.index("\nfunction ", start + 1)]
+
+
+def test_lazy_lock_files_are_standalone_only_and_name_every_product_lock() -> None:
+    # GAP-0766: Setup repair and verify stamp and judge the lazily created
+    # lock files of the standalone profile, including the runtime .env lock;
+    # the Secure Client profile keeps the objects it handled before.
+    body = _function_body(_text(MODULE), "Get-DefenseClawLazyLockFiles")
+    guard = body.index("Test-DefenseClawStandaloneProfile")
+    assert guard < body.index("pscustomobject"), "the standalone guard must come first"
+    for name in ("config.yaml.lock", ".enterprise-credentials.lock", ".enterprise-enrollment.lock", ".env.lock"):
+        assert f"{name}" in body, name
+    callers = [
+        line for line in _text(MODULE).splitlines() if "Get-DefenseClawLazyLockFiles -Layout" in line
+    ]
+    assert len(callers) == 2, "stamp (repair) and verify both read the one list"

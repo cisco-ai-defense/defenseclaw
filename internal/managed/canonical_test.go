@@ -223,6 +223,7 @@ func TestManagedDataPathsLockFilesAreRepairTargets(t *testing.T) {
 	locks := []string{
 		filepath.Join(root, "acp", ".enterprise-credentials.lock"),
 		filepath.Join(root, "acp", ".enterprise-enrollment.lock"),
+		filepath.Join(root, ".env.lock"),
 		"",
 	}
 	var got []string
@@ -234,6 +235,7 @@ func TestManagedDataPathsLockFilesAreRepairTargets(t *testing.T) {
 		"RuntimeDirectory:" + filepath.Join(root, "acp"),
 		"RuntimeFile:" + locks[0],
 		"RuntimeFile:" + locks[1],
+		"RuntimeFile:" + locks[2],
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("targets:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

@@ -43,6 +43,19 @@ func StandaloneManagedTreeAccount(path string) (string, bool) {
 	return "", false
 }
 
+// LockFileKindFor is the canonical kind of a lock file a managed process
+// creates at path: ConfigFile for a lock beside the pinned config (the config
+// writer's own), RuntimeFile for every other one in the tree (the runtime
+// directory's .env lock and the ACP locks), the kinds the Guardian, Setup
+// repair and verify judge them by.
+func LockFileKindFor(path string) ObjectKind {
+	if config := strings.TrimSpace(os.Getenv(managedConfigEnv)); config != "" &&
+		strings.EqualFold(filepath.Clean(filepath.Dir(config)), filepath.Clean(filepath.Dir(path))) {
+		return ObjectConfigFile
+	}
+	return ObjectRuntimeFile
+}
+
 // pathWithinRoot reports whether path is root or below it, by lexical
 // comparison (case-insensitive where the platform is).
 func pathWithinRoot(root, path string) bool {
