@@ -326,6 +326,12 @@ def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
     while words:
         if not isinstance(words[0], (str, os.PathLike)) or _base_name(words[0]) not in _ENV_NAMES:
             return words[0], environ, cwd
+        if not _can_start(words[0], environ, cwd):
+            # The wrapper is the program the system starts here, and it does
+            # not start: the launch fails on it, before it reaches whatever
+            # the wrapper would have run. That failure belongs in the test
+            # result, so this is not a launch of a missing PowerShell.
+            return _NO_COMMAND, environ, cwd
         words, environ, cwd = _after_env_options(words[0], words[1:], environ, cwd)
     return _NO_COMMAND, environ, cwd
 
@@ -369,9 +375,27 @@ def _is_found_in(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
         if os.path.isfile(word):
             return True
         return any(shutil.which(word, path=folder or os.curdir) for folder in os.get_exec_path(environ))
+    return any(_may_exist(path) for path in _exec_candidates(word, environ, cwd))
+
+
+def _exec_candidates(word: str, environ, cwd) -> list[str]:  # type: ignore[no-untyped-def]
+    # The paths exec tries, in order, for `word` started from `cwd`.
     if os.sep in word:
-        return _may_exist(os.path.join(cwd, word))
-    return any(_may_exist(os.path.join(cwd, folder or os.curdir, word)) for folder in os.get_exec_path(environ))
+        return [os.path.join(cwd, word)]
+    return [os.path.join(cwd, folder or os.curdir, word) for folder in os.get_exec_path(environ)]
+
+
+def _can_start(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
+    # Whether exec ends up running `word` as the system looks it up: some
+    # candidate is a file this user may execute. exec passes over a candidate
+    # that is absent or not executable and tries the next, so a later good one
+    # still runs; with none, the launch fails (not found, or permission
+    # denied). Windows resolves a program by its own rules and has no env of
+    # its own; a wrapper there is taken to start, as before.
+    if os.name == "nt":
+        return True
+    word = os.fsdecode(os.fspath(word))
+    return any(os.path.isfile(path) and os.access(path, os.X_OK) for path in _exec_candidates(word, environ, cwd))
 
 
 def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
@@ -5663,6 +5687,74 @@ def test_a_powershell_that_is_present_but_cannot_start_is_not_taken_for_a_missin
             assert gated == expected, (launch, kwargs)
     finally:
         closed.chmod(0o700)
+
+
+def test_an_env_wrapper_that_cannot_start_is_not_taken_for_a_missing_powershell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # env is the program the system starts; when it is absent or cannot be
+    # executed, the launch fails on env before PowerShell is reached, and the
+    # test has to see that failure, whether env is the outer program or one
+    # nested behind another env. A working wrapper in the same call shape is
+    # the control: it reaches the missing PowerShell and skips.
+    if os.name == "nt":
+        pytest.skip("the lookup checked here is POSIX exec")
+    env = shutil.which("env")
+    if env is None or not _env_is_gnu_coreutils(env):
+        pytest.skip("the exit codes checked here are GNU coreutils")
+    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
+        pytest.skip("PowerShell is installed")
+    monkeypatch.setenv("LC_ALL", "C")
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    missing = str(tmp_path / "missing")
+    unexecutable = tmp_path / "unexecutable"
+    unexecutable.mkdir()
+    (unexecutable / "env").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (unexecutable / "env").chmod(0o644)
+    directory = tmp_path / "directory"
+    (directory / "env").mkdir(parents=True)
+    good = os.path.dirname(env)
+    # (launch, kwargs, what the real launch does)
+    broken = [
+        (["env", "pwsh"], {"env": {"PATH": missing}}, "FileNotFoundError"),
+        (["env", "pwsh"], {"env": {"PATH": str(unexecutable)}}, "PermissionError"),
+        (["env", "pwsh"], {"env": {"PATH": str(directory)}}, "PermissionError"),
+        (["env", "pwsh"], {"cwd": unexecutable, "env": {"PATH": "."}}, "PermissionError"),
+        ([str(tmp_path / "no-such" / "env"), "pwsh"], {}, "FileNotFoundError"),
+        ([env, f"PATH={missing}", "env", "pwsh"], {}, "exit 127"),
+        ([env, f"PATH={unexecutable}", "env", "pwsh"], {}, "exit 126"),
+        ([env, f"PATH={directory}", "env", "pwsh"], {}, "exit 126"),
+        ([env, "-C", str(unexecutable), "PATH=.", "env", "pwsh"], {}, "exit 126"),
+        ([env, "-i", f"PATH={missing}", "env", "-S", "pwsh"], {}, "exit 127"),
+        ([env, f"PATH={good}", "env", f"PATH={missing}", "env", "pwsh"], {}, "exit 127"),
+    ]
+    # A wrapper the system does start reaches the missing PowerShell (127).
+    working = [
+        (["env", "pwsh"], {}),
+        (["env", "pwsh"], {"env": {"PATH": f"{unexecutable}:{missing}:{good}"}}),
+        ([env, "env", "pwsh"], {}),
+        ([env, f"PATH={unexecutable}:{good}", "env", "pwsh"], {}),
+        ([env, f"PATH={directory}:{good}", "env", "pwsh"], {}),
+        ([env, "-C", str(unexecutable), f"PATH=.:{good}", "env", "pwsh"], {}),
+    ]
+    for launch, kwargs, expected in broken:
+        with _gate_off("running the real launch"):
+            assert _launch_outcome(launch, kwargs) == expected, (launch, kwargs)
+        assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
+    for launch, kwargs in working:
+        with _gate_off("running the real launch"):
+            assert _launch_outcome(launch, kwargs) == "exit 127", (launch, kwargs)
+        assert _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
+    _skip_powershell_calls_when_missing(monkeypatch)
+    for launch, kwargs, expected in broken:
+        try:
+            gated = _launch_outcome(launch, kwargs)
+        except pytest.skip.Exception:  # a skip here would hide the broken wrapper this test is for
+            pytest.fail(f"a launch whose env wrapper cannot start was skipped as a missing PowerShell: {launch} {kwargs}")
+        assert gated == expected, (launch, kwargs)
+    for launch, kwargs in working:
+        with pytest.raises(pytest.skip.Exception):
+            subprocess.run(launch, check=False, **kwargs)
 
 
 def test_env_actions_that_run_no_powershell_still_run_where_it_is_not_installed(
