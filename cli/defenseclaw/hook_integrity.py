@@ -127,7 +127,16 @@ def _recorded_binary_digest(data_dir: str, name: str) -> str:
     return recorded
 
 
-def _recorded_match(path: str, recorded: str) -> bool | None:
+def _same_object(first: os.stat_result, second: os.stat_result) -> bool:
+    """Whether two looks at one path found the same file. No file index on either means nothing to compare."""
+
+    index_a, index_b = getattr(first, "st_ino", 0), getattr(second, "st_ino", 0)
+    if not index_a or not index_b:
+        return True
+    return index_a == index_b and getattr(first, "st_dev", 0) == getattr(second, "st_dev", 0)
+
+
+def _recorded_match(path: str, recorded: str, before: os.stat_result | None = None) -> bool | None:
     """Whether the file at *path* is the copy whose sha256 the installer *recorded*.
 
     True when the digests agree, False when they differ. A file larger than the
@@ -136,6 +145,12 @@ def _recorded_match(path: str, recorded: str) -> bool | None:
     computed: nothing recorded, or the file cannot be read (Defender or a deny
     ACE holding it), which is not a match. The hook guard treats that as no
     proof of damage; the launcher check treats it as a defect.
+
+    ``open`` follows a link and ``fstat`` then describes the link's target, so
+    the hashed bytes say nothing about the path. The path is therefore looked
+    at again after the hash (*before* is the look that preceded it): it must
+    still be a regular file that is no link, and the same file as before. A
+    path that changed under the hash is not the recorded copy.
     """
 
     if not recorded:
@@ -151,8 +166,13 @@ def _recorded_match(path: str, recorded: str) -> bool | None:
                 if read > _RECORDED_BINARY_SIZE_LIMIT:
                     return False
                 digest.update(chunk)
+        after = os.lstat(path)
     except OSError:
         return None
+    if _is_link(after) or not stat.S_ISREG(after.st_mode):
+        return False
+    if before is not None and not _same_object(before, after):
+        return False
     return digest.hexdigest() == recorded
 
 
@@ -293,7 +313,7 @@ def _launcher_health(launcher: str, data_dir: str = "") -> LauncherHealth:
         return LauncherHealth(defect="is not a regular file")
     if not recorded:
         return LauncherHealth(unverified=LAUNCHER_UNVERIFIED_SUFFIX)
-    match = _recorded_match(launcher, recorded)
+    match = _recorded_match(launcher, recorded, info)
     if match is None:
         return LauncherHealth(defect=_LAUNCHER_UNREADABLE)
     if not match:
