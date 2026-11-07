@@ -5739,7 +5739,8 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     _emit(
                         severity,
                         f"  └─ {sub}",
-                        f"admission scanning is off for {label}; {unavailable} root(s) unavailable; the gateway log names each root",
+                        f"admission scanning is off for {label}; "
+                        f"{unavailable} root(s) unavailable; the gateway log names each root",
                         r=r,
                     )
                     continue

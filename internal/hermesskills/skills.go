@@ -204,7 +204,7 @@ func discoverTrusted(root, subtree string, directoryLimit int) ([]Entry, error) 
 	}
 	relative, err := filepath.Rel(absoluteRoot, absoluteSubtree)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("Hermes subtree outside skills root: %s", subtree)
+		return nil, fmt.Errorf("hermes subtree outside skills root: %s", subtree)
 	}
 	walkSubtree := filepath.Join(walkRoot, relative)
 	entries, err := discover(walkRoot, walkSubtree, directoryLimit)
