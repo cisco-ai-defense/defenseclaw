@@ -33,7 +33,6 @@ func TestGAP0669PurgeRemovesManagedACPState(t *testing.T) {
 		"acp/zed-kiro.token",
 		"acp/zed-kiro.enrollment.json",
 		"acp/zed-kiro.contract-lock.json",
-		"acp/jetbrains-kiro.contract-lock.json.lock",
 		"acp/owned-entries.json",
 		"acp/.enterprise-credentials.lock",
 		"acp/.enterprise-enrollment.lock",
@@ -85,6 +84,9 @@ func TestGAP0669PurgeRemovesManagedLocks(t *testing.T) {
 	managed := []string{
 		".codex-lifecycle.lock",
 		".hermes-lifecycle.lock",
+		".hook-api-token-publish.lock",
+		"hook_contract_lock.json.lock",
+		"agent_selection.json.lock",
 		"hooks/.otlp-codex.token.lock",
 		"hooks/.hookcfg.lock",
 	}
@@ -100,7 +102,15 @@ func TestGAP0669PurgeRemovesManagedLocks(t *testing.T) {
 // Benign twin: a lock beside an account file or an unknown connector stays.
 func TestGAP0669PurgeKeepsLocksOfAccountFiles(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
-	keep := []string{"personal.txt.lock", ".notaconnector-lifecycle.lock", "hooks/personal.lock", "lock"}
+	// session-facts.json and the other managed files that are renamed into
+	// place have no lock: a file named like one is the account's, and so is a
+	// lock of a lock.
+	keep := []string{
+		"personal.txt.lock", ".notaconnector-lifecycle.lock", "hooks/personal.lock", "lock",
+		"session-facts.json.lock", "session-facts.json.lock.lock", "inventory.db.lock",
+		"agent_selection.json.lock.lock", "hooks/.hookcfg.lock.lock", "hooks/.otlp-codex.token.lock.lock",
+		"acp/zed-kiro.token.lock", "acp/owned-entries.json.lock", "acp/zed-kiro.contract-lock.json.lock",
+	}
 	writeG669Files(t, dataDir, keep)
 	if err := PurgeUserState(dataDir); err != nil {
 		t.Fatal(err)

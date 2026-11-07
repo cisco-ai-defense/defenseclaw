@@ -36,11 +36,6 @@ func ManagedUserStateFile(rel string) bool {
 	if rel == "." || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
 		return false
 	}
-	// A lock is created beside the file it guards (withFileLock,
-	// withOwnedFileLock): it is managed exactly when that file is.
-	if guarded, ok := strings.CutSuffix(rel, ".lock"); ok && ManagedUserStateFile(guarded) {
-		return true
-	}
 	parts := strings.Split(rel, "/")
 	if len(parts) == 1 {
 		switch rel {
@@ -85,7 +80,8 @@ func ManagedUserStateFile(rel string) bool {
 			return true
 		}
 		for _, scope := range OTLPPathTokenScopes() {
-			if name == otlpPathTokenFileName(scope) {
+			// RemoveOTLPPathToken leaves the token file's lock behind.
+			if name == otlpPathTokenFileName(scope) || name == otlpPathTokenFileName(scope)+".lock" {
 				return true
 			}
 		}
