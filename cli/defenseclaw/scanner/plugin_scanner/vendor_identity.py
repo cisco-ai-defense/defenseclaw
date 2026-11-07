@@ -109,10 +109,11 @@ def inspect_official_provider_tree(plugin_dir: str, *, data_dir: str = "") -> Pr
         return None
     if name not in _OFFICIAL_PACKAGES:
         return None
-    # The install must not come from a file, a link or an address outside the
-    # registry, whatever the bytes are (see ``_install_records``).
+    # The install must not come from a protected file or link, or from a file,
+    # a link or an address outside the registry that its own lock entry names,
+    # whatever the bytes are (see ``_install_records``).
     try:
-        records = _install_records(plugin_dir, name)
+        records = _install_records(plugin_dir, package, name, data_dir)
     except (OSError, ValueError):
         return None
     if records is None:
@@ -409,19 +410,83 @@ def _archive_package_digest(archive: bytes) -> str | None:
 
 # Where an install came from. npm writes the lock entry of every package it
 # installs into the lock of the project that holds it, with the ``resolved``
-# address and the ``integrity`` of the archive. That entry, and only that
-# entry, is the install record: the bytes can match a published release while
-# the entry says the package was taken from a file, a link or another address,
-# and such an install is judged by the ordinary scan. Install metadata in the
-# package manifest and the dependency specs of other packages are not read:
-# they are spelled in more ways than a list can follow, and they say nothing
-# about the entry npm wrote for this copy. An entry that is absent is not
-# evidence of a source, so an install that left none (OpenClaw copies the
-# package) is not held against; only an outage needs one (see
-# ``_recorded_registry_release``).
+# address and the ``integrity`` of the archive. That entry is the install
+# record: the bytes can match a published release while the entry says the
+# package was taken from a file, a link or another address, and such an install
+# is judged by the ordinary scan. An entry that is absent is not evidence of a
+# source, so an install that left none (OpenClaw copies the package) is not held
+# against; only an outage needs one (see ``_recorded_registry_release``).
+#
+# Separately, any place the install names its source (the manifest fields
+# ``_resolved``, ``_from`` and ``_requested``, the lock entry, and the spec that
+# the root of the project gives this package) must not name a protected file or
+# link. That check reads names, not the shape of the spec, so it is the same for
+# every way a source is spelled and it never holds a registry request against
+# the install. Specs of other packages are not read: they describe other copies.
 _LOCK_FILES = ("package-lock.json", "npm-shrinkwrap.json", "node_modules/.package-lock.json")
 _LOCK_MAX_BYTES = 32 * 1024 * 1024
 _RECORDED_VERSION = re.compile(r"[0-9][0-9A-Za-z.+-]*")
+_DEPENDENCY_FIELDS = (
+    "dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
+)
+_METADATA_FIELDS = ("_resolved", "_from", "_requested")
+# Folders and files that hold credentials or connector state. A source that
+# names one is a protected file or link, whatever else the install says.
+_PROTECTED_SOURCE_NAMES = _PRIVATE_INSTALL_COMPONENTS | frozenset({
+    ".codex", ".claude", ".claude.json",
+})
+_SOURCE_SCHEME = re.compile(r"(?:^|@)(?:git\+)?(?:file|link|portal):(?://)?", re.IGNORECASE)
+
+
+def _names_protected_source(value: object, data_dir: str = "") -> bool:
+    """Whether any string in ``value`` names a protected file or link.
+
+    ``value`` is install metadata or a dependency spec. Every name of a path
+    in it is judged (a relative spelling that climbs to a protected folder
+    names it as much as an absolute one), the credential file patterns of the
+    scanner apply, and an absolute location is judged again after resolution
+    and against the state folders. A registry request names none of these.
+    """
+
+    pending = [value]
+    while pending:
+        item = pending.pop()
+        if isinstance(item, dict):
+            pending.extend(v for k, v in item.items() if k != "where")
+        elif isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, str) and _text_names_protected_source(item, data_dir):
+            return True
+    return False
+
+
+def _text_names_protected_source(text: str, data_dir: str) -> bool:
+    from defenseclaw.config import default_data_path
+    from defenseclaw.scanner.plugin_scanner.rules import CREDENTIAL_PATH_PATTERNS
+
+    decoded = urllib.parse.unquote(text)
+    flat = decoded.replace("\\", "/")
+    if any(entry.pattern.search(flat) for entry in CREDENTIAL_PATH_PATTERNS):
+        return True
+    if any(
+        part.rstrip(". ").casefold() in _PROTECTED_SOURCE_NAMES
+        for part in re.split(r"[/:@\s]+", flat)
+    ):
+        return True
+    marker = _SOURCE_SCHEME.search(decoded)
+    candidate = decoded[marker.end():] if marker else decoded
+    if re.match(r"/[A-Za-z]:", candidate):
+        candidate = candidate[1:]
+    candidate = os.path.expanduser(candidate)
+    if not os.path.isabs(candidate):
+        return False
+    resolved = os.path.realpath(candidate)
+    roots = {os.path.realpath(str(default_data_path()))}
+    if data_dir:
+        roots.add(os.path.realpath(data_dir))
+    return _names_private_state(resolved) or any(
+        _path_within(root, location) for root in roots for location in (candidate, resolved)
+    )
 
 
 def _registry_archive(address: object, name: str, version: str | None = None) -> bool:
@@ -467,20 +532,46 @@ def _fold(path: str) -> str:
     return path.casefold() if os.name == "nt" else path
 
 
+def _flat_v1(tree: object) -> dict[str, dict]:
+    """The nested ``dependencies`` tree of an npm 6 lock as lock paths.
+
+    ``a`` with a nested ``b`` becomes ``node_modules/a`` and
+    ``node_modules/a/node_modules/b``, the form later locks use, so one reading
+    serves every lock version. ``requires`` is a spec of another package and is
+    not part of the entry.
+    """
+
+    flat: dict[str, dict] = {}
+    pending: list[tuple[str, object]] = [("", tree)]
+    while pending:
+        base, dependencies = pending.pop()
+        if not isinstance(dependencies, dict):
+            continue
+        for dependency, entry in dependencies.items():
+            if not isinstance(dependency, str) or not isinstance(entry, dict):
+                continue
+            path = (base + "/" if base else "") + _DEPENDENCY_DIR + "/" + dependency
+            flat[path] = entry
+            pending.append((path, entry.get("dependencies")))
+    return flat
+
+
 def _lock_records(lock: dict, name: str, key: str | None) -> list[dict]:
     """The entries of an npm lock that record this package.
 
     ``key`` is the path of the package below the folder of the lock: only the
     entry at that path describes this install. A lock that sits in the package
     folder itself has no key, and every entry that names the package counts.
+    Both the ``packages`` table and the nested ``dependencies`` tree are read.
     """
 
-    packages = lock.get("packages")
-    if not isinstance(packages, dict):
-        return []
     wanted = None if key is None else _fold(key)
+    tables = [
+        table for table in (lock.get("packages"), _flat_v1(lock.get("dependencies")))
+        if isinstance(table, dict)
+    ]
     return [
-        entry for path, entry in packages.items()
+        entry for table in tables for path, entry in table.items()
         if isinstance(path, str) and isinstance(entry, dict) and path and (
             _fold(path) == wanted if wanted is not None else (
                 path == f"{_DEPENDENCY_DIR}/{name}"
@@ -491,10 +582,34 @@ def _lock_records(lock: dict, name: str, key: str | None) -> list[dict]:
     ]
 
 
-def _install_records(plugin_dir: str, name: str) -> list[dict] | None:
-    """The lock entries that record this install, or None if one names a source
-    other than the registry. A record that cannot be read raises."""
+def _root_specs(lock: dict, name: str, key: str | None) -> list[object]:
+    """The specs that the root of the project gives this package.
 
+    The root is the lock entry with an empty path. Its dependencies resolve to
+    ``node_modules/<name>`` of the folder of the lock, so they describe this
+    install only when it is that copy; the copy is a copy whether or not the
+    lock lists it.
+    """
+
+    packages = lock.get("packages")
+    root = packages.get("") if isinstance(packages, dict) else None
+    if key is None or _fold(key) != _fold(f"{_DEPENDENCY_DIR}/{name}") or not isinstance(root, dict):
+        return []
+    return [
+        specs[name] for field in _DEPENDENCY_FIELDS
+        if isinstance(specs := root.get(field), dict) and name in specs
+    ]
+
+
+def _install_records(
+    plugin_dir: str, manifest: dict, name: str, data_dir: str = "",
+) -> list[dict] | None:
+    """The lock entries that record this install, or None if the install names
+    a protected source or its entry names a source other than the registry. A
+    record that cannot be read raises."""
+
+    if any(_names_protected_source(manifest.get(field), data_dir) for field in _METADATA_FIELDS):
+        return None
     records: list[dict] = []
     root = os.path.abspath(plugin_dir)
     for position, folder in enumerate(_lock_folders(plugin_dir)):
@@ -518,12 +633,16 @@ def _install_records(plugin_dir: str, name: str) -> list[dict] | None:
                 return None
             if not isinstance(lock, dict):
                 continue
+            if any(_names_protected_source(spec, data_dir) for spec in _root_specs(lock, name, key)):
+                return None
             for entry in _lock_records(lock, name, key):
                 version = entry.get("version")
                 if entry.get("link") or (
                     version is not None
                     and not (isinstance(version, str) and _RECORDED_VERSION.fullmatch(version))
-                ) or ("resolved" in entry and not _registry_archive(entry["resolved"], name)):
+                ) or ("resolved" in entry and not _registry_archive(entry["resolved"], name)) or (
+                    _names_protected_source(entry.get("from"), data_dir)
+                ):
                     return None
                 records.append(entry)
     return records
