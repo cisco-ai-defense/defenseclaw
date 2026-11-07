@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -31,7 +32,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -74,28 +74,20 @@ type hermesManifestAnswer struct {
 // hermesManifestCache remembers what the plugin scanner answered, by the
 // scanner that was asked and the manifest bytes.
 type hermesManifestCache struct {
-	mu          sync.Mutex
-	answers     map[string]hermesManifestAnswer
-	warned      map[string]bool
-	executables map[string]hermesExecutable
-}
-
-// hermesExecutable is the last state seen of a scanner executable and how
-// many distinct states there have been.
-type hermesExecutable struct {
-	info       os.FileInfo
-	generation int
+	mu      sync.Mutex
+	answers map[string]hermesManifestAnswer
+	warned  map[string]bool
 }
 
 func newHermesManifestCache() *hermesManifestCache {
-	return &hermesManifestCache{answers: map[string]hermesManifestAnswer{}, warned: map[string]bool{}, executables: map[string]hermesExecutable{}}
+	return &hermesManifestCache{answers: map[string]hermesManifestAnswer{}, warned: map[string]bool{}}
 }
 
 // executableStamp names the state of the executable ps runs: the path it
-// resolves to and a count that moves whenever the file at that path is
-// another file or has another size or modification time, the same test the
-// scanner fingerprint applies (scannerBinaryVersion). An answer is therefore
-// never reused after the executable at the configured path was replaced.
+// resolves to and the digest of its bytes. File metadata cannot name the
+// state: a file rewritten in place keeps its identity, and a writer can keep
+// its size and modification time as well, so an answer is reused only for the
+// same bytes. The launcher is a small shim, so reading it is cheap.
 func (c *hermesManifestCache) executableStamp(ps *scanner.PluginScanner) string {
 	binary := strings.TrimSpace(ps.BinaryPath)
 	if binary == "" {
@@ -105,18 +97,16 @@ func (c *hermesManifestCache) executableStamp(ps *scanner.PluginScanner) string 
 	if err != nil {
 		return binary + ":unresolved"
 	}
-	info, err := pathidentity.StatPinned(resolved)
+	file, err := os.Open(resolved)
 	if err != nil {
 		return resolved + ":unreadable"
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	seen, ok := c.executables[resolved]
-	if !ok || !os.SameFile(seen.info, info) || seen.info.Size() != info.Size() || !seen.info.ModTime().Equal(info.ModTime()) {
-		seen = hermesExecutable{info: info, generation: seen.generation + 1}
-		c.executables[resolved] = seen
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return resolved + ":unreadable"
 	}
-	return fmt.Sprintf("%s:%d", resolved, seen.generation)
+	return resolved + ":" + hex.EncodeToString(digest.Sum(nil))
 }
 
 // loader asks ps, once per distinct scanner and set of manifest bytes: the

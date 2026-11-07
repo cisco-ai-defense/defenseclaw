@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -654,5 +655,293 @@ func TestHermesManifestNullListElementIsNotAnAnswer(t *testing.T) {
 	load := cache.byPolicy(cache.loader(ps), func() bool { return false })
 	if skippedTreeHash(dir, load) == "" {
 		t.Error("the closed fallback left a declared cache file unhashed after an invalid reply")
+	}
+}
+
+// While the reader cannot answer, the candidates hold the whole name a
+// manifest declares, whatever punctuation the name holds and however the
+// value is written. Each row declares the entrypoint in the last column.
+func TestHermesManifestOutageCandidatesKeepPunctuationOfDeclaredNames(t *testing.T) {
+	for _, tc := range []struct{ name, manifest, text, entry string }{
+		{"yaml double quoted brackets", "plugin.yaml", "name: p\nmain: \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
+		{"yaml single quoted comma", "plugin.yaml", "name: p\nmain: '__pycache__/run,1.pyc'\n", "__pycache__/run,1.pyc"},
+		{"yaml single quoted doubled quote", "plugin.yaml", "main: '__pycache__/it''s.pyc'\n", "__pycache__/it's.pyc"},
+		{"yaml plain comma", "plugin.yaml", "main: __pycache__/run,1.pyc\n", "__pycache__/run,1.pyc"},
+		{"yaml flow list quoted comma", "plugin.yaml", "entrypoints: [lib/a.js, \"__pycache__/run,1.pyc\"]\n", "__pycache__/run,1.pyc"},
+		{"yaml bin map braces", "plugin.yaml", "bin: {a: lib/a.js, b: '__pycache__/run{1}.pyc'}\n", "__pycache__/run{1}.pyc"},
+		{"yaml bin block map comma", "plugin.yaml", "bin:\n  a: lib/a.js\n  b: \"__pycache__/r,un.pyc\"\n", "__pycache__/r,un.pyc"},
+		{"yaml quoted key", "plugin.yaml", "\"main\": \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
+		{"yaml escaped key", "plugin.yaml", "\"m\\u0061in\": \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
+		{"yaml explicit key", "plugin.yaml", "? main\n: \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
+		{"yaml alias of a punctuated value", "plugin.yaml", "note: &entry '__pycache__/run,1.pyc'\nmain: *entry\n", "__pycache__/run,1.pyc"},
+		{"yaml merge key", "plugin.yaml", "base: &base\n  main: \"__pycache__/run[1].pyc\"\n<<: *base\n", "__pycache__/run[1].pyc"},
+		{"yaml value on the next line", "plugin.yaml", "main:\n  \"__pycache__/run[1].pyc\"\n", "__pycache__/run[1].pyc"},
+		{"json braces", "package.json", `{"name":"p","main":"__pycache__/run{1}.pyc"}`, "__pycache__/run{1}.pyc"},
+		{"json bin map brackets", "package.json", `{"bin":{"a":"lib/a.js","b":"__pycache__/run[1].pyc"}}`, "__pycache__/run[1].pyc"},
+		{"json value on the next line", "package.json", "{\n\"main\":\n\"__pycache__/run,1.pyc\"}", "__pycache__/run,1.pyc"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			candidates := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)})
+			if !slices.Contains(candidates, tc.entry) {
+				t.Errorf("candidates omit the declared entrypoint %q: %q", tc.entry, candidates)
+			}
+		})
+	}
+}
+
+// Prose is not an entrypoint: a cache path named under any key the scanner
+// does not read as code (a description, a title, a keyword list, a block
+// scalar) binds nothing during an outage, so the ordinary cache write that
+// matches it is neither bound by the tree hash nor scanned nor admitted. The
+// declared entrypoint of the same manifest stays bound.
+func TestHermesManifestOutageProseNamingCachePathBindsNothing(t *testing.T) {
+	for _, tc := range []struct{ name, manifest, text string }{
+		{"description", "plugin.yaml", "name: p\nmain: lib/run.js\ndescription: __pycache__/generated.pyc\n"},
+		{"quoted description", "plugin.yaml", "name: p\nmain: lib/run.js\ndescription: \"writes __pycache__/generated.pyc, sometimes\"\n"},
+		{"title and keywords", "plugin.yaml", "main: lib/run.js\ntitle: __pycache__/generated.pyc\nkeywords: [a, __pycache__/generated.pyc]\n"},
+		{"block scalar description", "plugin.yaml", "main: lib/run.js\ndescription: |\n  see\n  __pycache__/generated.pyc\nversion: 1\n"},
+		{"json description", "package.json", `{"main":"lib/run.js","description":"__pycache__/generated.pyc","keywords":["__pycache__/generated.pyc"]}`},
+		{"comment", "plugin.yaml", "main: lib/run.js # __pycache__/generated.pyc\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if candidates := hermesManifestCandidates(map[string][]byte{tc.manifest: []byte(tc.text)}); slices.Contains(candidates, "__pycache__/generated.pyc") {
+				t.Errorf("prose is among the candidates: %q", candidates)
+			}
+			dir := t.TempDir()
+			writePluginFile(t, filepath.Join(dir, tc.manifest), tc.text)
+			writePluginFile(t, filepath.Join(dir, "lib", "run.js"), "safe()\n")
+			cache := filepath.Join(dir, "__pycache__", "generated.pyc")
+			writePluginFile(t, cache, "one")
+			load := func(map[string][]byte) ([]string, error) {
+				return nil, fmt.Errorf("%w: reader unavailable", errHermesManifestFailOpen)
+			}
+			first := skippedTreeHash(dir, load)
+			writePluginFile(t, cache, "two")
+			if second := skippedTreeHash(dir, load); first != "" || second != "" {
+				t.Errorf("an ordinary cache file is bound by prose (hash %q then %q)", first, second)
+			}
+
+			f := newHermesPluginFixture(t)
+			path := f.plugin(f.bundledRoot, "web/ddgs")
+			writePluginFile(t, filepath.Join(path, tc.manifest), tc.text)
+			writePluginFile(t, filepath.Join(path, "lib", "run.js"), "safe()\n")
+			f.pinVendor("web/ddgs", path)
+			f.w.runRescanCycle(context.Background())
+			f.unscannedVendor(path)
+			admitted := len(f.admitted[path])
+			f.w.hermesManifests = failingManifestLoader
+			writePluginFile(t, filepath.Join(path, "__pycache__", "generated.pyc"), "ordinary cache")
+			f.w.runRescanCycle(context.Background())
+			if got := f.scan.scans(path); got != 0 {
+				t.Errorf("a cache write named only in prose caused %d scans", got)
+			}
+			if got := len(f.admitted[path]); got != admitted {
+				t.Errorf("a cache write named only in prose caused %d admissions", got-admitted)
+			}
+		})
+	}
+}
+
+// A protected cache entrypoint whose name holds punctuation is bound through
+// the watcher during an outage: a baseline made while the reader is down
+// still sees the edit as a change that reaches a scan.
+func TestHermesManifestOutageEditOfPunctuatedEntrypointReachesScan(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: \"__pycache__/run[1].pyc\"\n")
+	entry := filepath.Join(path, "__pycache__", "run[1].pyc")
+	writePluginFile(t, entry, "safe()\n")
+	f.pinVendor("web/ddgs", path)
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	f.w.hermesManifests = failingManifestLoader
+	findings := f.scan.findings[path]
+	f.scan.findings[path] = nil
+	f.w.runRescanCycle(context.Background()) // a baseline while the reader is down
+	firstScans := f.scan.scans(path)
+	f.scan.findings[path] = findings
+	writePluginFile(t, entry, "exec()\n")
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got != firstScans+1 {
+		t.Errorf("an edit of the protected entrypoint caused %d additional scans during the outage, want 1", got-firstScans)
+	}
+}
+
+// hermesEntrypointKeys is the scanner list of keys that start code.
+func TestHermesEntrypointKeysMatchScanner(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "cli", "defenseclaw", "scanner", "plugin_scanner", "scanner.py"))
+	if err != nil {
+		t.Skipf("plugin scanner: %v", err)
+	}
+	block := regexp.MustCompile(`(?s)_EXECUTABLE_MANIFEST_KEYS\s*=\s*frozenset\(\{(.*?)\}\)`).FindSubmatch(src)
+	if block == nil {
+		t.Fatal("_EXECUTABLE_MANIFEST_KEYS not found in the plugin scanner")
+	}
+	var scanned []string
+	for _, m := range regexp.MustCompile(`"([^"]+)"`).FindAllSubmatch(block[1], -1) {
+		scanned = append(scanned, string(m[1]))
+	}
+	ours := slices.Clone(hermesEntrypointKeys)
+	slices.Sort(scanned)
+	slices.Sort(ours)
+	if len(scanned) == 0 || !slices.Equal(scanned, ours) {
+		t.Fatalf("entrypoint keys = %q, scanner lists %q", ours, scanned)
+	}
+	// declared_entrypoints reads these four keys, all of which must be listed.
+	for _, key := range []string{"main", "bin", "entry", "entrypoint"} {
+		if !slices.Contains(ours, key) {
+			t.Errorf("declared entrypoint key %q is not listed", key)
+		}
+	}
+}
+
+// An executable rewritten in place keeps its inode, size and modification
+// time when the writer restores them; the answer still follows the bytes.
+func TestHermesManifestAnswerFollowsRewriteThatKeepsExecutableMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	script := filepath.Join(t.TempDir(), "defenseclaw")
+	body := func(entry string) []byte {
+		return []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.0.9\\n'; exit 0; fi\ncat >/dev/null\nprintf '%s' '{\"entrypoints\":[\"" + entry + "\"]}'\n")
+	}
+	first, second := body("__pycache__/a.pyc"), body("__pycache__/b.pyc")
+	if len(first) != len(second) {
+		t.Fatal("test scripts differ in size")
+	}
+	if err := os.WriteFile(script, first, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\n")}
+	load := newHermesManifestCache().loader(&scanner.PluginScanner{BinaryPath: script})
+	if got, err := load(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/a.pyc"}) {
+		t.Fatalf("first answer = %q, %v", got, err)
+	}
+	// A benign twin: nothing changed, the answer is the same.
+	if got, err := load(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/a.pyc"}) {
+		t.Fatalf("repeated answer = %q, %v", got, err)
+	}
+	old, err := os.Stat(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, second, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(script, old.ModTime(), old.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	now, err := os.Stat(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(old, now) || old.Size() != now.Size() || !old.ModTime().Equal(now.ModTime()) {
+		t.Fatal("rewrite did not preserve inode, size and mtime")
+	}
+	if got, err := load(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/b.pyc"}) {
+		t.Errorf("after a rewrite that kept the metadata the watcher answers %q, %v", got, err)
+	}
+}
+
+// The same rewrite, through the watcher: the cache entrypoint that only the
+// new scanner declares is scanned when it appears.
+func TestHermesManifestRewriteThatKeepsExecutableMetadataReachesTheRescan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: __pycache__/b.pyc\n")
+	f.pinVendor("web/ddgs", path)
+	script := filepath.Join(t.TempDir(), "defenseclaw")
+	body := func(entry string) []byte {
+		return []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '1.0.9\\n'; exit 0; fi\ncat >/dev/null\nprintf '%s' '{\"entrypoints\":[\"" + entry + "\"]}'\n")
+	}
+	if err := os.WriteFile(script, body("__pycache__/a.pyc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.w.hermesManifests = nil
+	f.cfg.Scanners.PluginScanner = script
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	// The old scanner's answer for this manifest is the one remembered.
+	manifests := map[string][]byte{"plugin.yaml": []byte("name: p\nmain: __pycache__/b.pyc\n")}
+	if got, err := f.w.manifestLoader()(manifests); err != nil || !slices.Equal(got, []string{"__pycache__/a.pyc"}) {
+		t.Fatalf("old scanner answer = %q, %v", got, err)
+	}
+	old, err := os.Stat(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(script, body("__pycache__/b.pyc"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(script, old.ModTime(), old.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	writePluginFile(t, filepath.Join(path, "__pycache__", "b.pyc"), "exec()\n")
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got != 1 {
+		t.Errorf("a cache entrypoint declared by the rewritten scanner caused %d scans, want 1", got)
+	}
+}
+
+// A declared entrypoint above the size the scanner reads from a skipped
+// folder is bound by content: a same-size edit of it is a change, while the
+// same edit of a large cache file that no manifest declares is not.
+func TestHermesLargeDeclaredEntrypointIsBoundByContent(t *testing.T) {
+	big := func(first string) string { return first + strings.Repeat("x", hermesScannerReadBytes) }
+	dir := t.TempDir()
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: p\nmain: __pycache__/large.pyc\n")
+	declared := filepath.Join(dir, "__pycache__", "large.pyc")
+	ordinary := filepath.Join(dir, "__pycache__", "other.pyc")
+	nodeModules := filepath.Join(dir, "node_modules", "dep", "index.js")
+	writePluginFile(t, declared, big("A"))
+	writePluginFile(t, ordinary, big("A"))
+	writePluginFile(t, nodeModules, big("A"))
+	load := hermesScannerLoader(t)
+	before := skippedTreeHash(dir, load)
+	writePluginFile(t, ordinary, big("B"))
+	if after := skippedTreeHash(dir, load); after != before {
+		t.Errorf("an edit of an undeclared large cache file changed the hash")
+	}
+	writePluginFile(t, declared, big("B"))
+	if after := skippedTreeHash(dir, load); after == before {
+		t.Errorf("a same-size edit of the declared large entrypoint left the hash unchanged")
+	}
+
+	writePluginFile(t, filepath.Join(dir, "plugin.yaml"), "name: p\nmain: node_modules/dep/index.js\n")
+	before = skippedTreeHash(dir, load)
+	writePluginFile(t, nodeModules, big("B"))
+	if after := skippedTreeHash(dir, load); after == before {
+		t.Errorf("a same-size edit of a large declared entrypoint in node_modules left the hash unchanged")
+	}
+}
+
+// Through the watcher: after a clean admission, a same-size edit of the large
+// declared cache entrypoint reaches a scan.
+func TestHermesLargeDeclaredEntrypointEditReachesAdmission(t *testing.T) {
+	f := newHermesPluginFixture(t)
+	path := f.plugin(f.bundledRoot, "web/ddgs")
+	writePluginFile(t, filepath.Join(path, "plugin.yaml"), "name: p\nmain: __pycache__/large.pyc\n")
+	entry := filepath.Join(path, "__pycache__", "large.pyc")
+	big := func(first string) string { return first + strings.Repeat("x", hermesScannerReadBytes) }
+	writePluginFile(t, entry, big("A"))
+	f.pinVendor("web/ddgs", path)
+	f.w.runRescanCycle(context.Background())
+	f.unscannedVendor(path)
+	findings := f.scan.findings[path]
+	f.scan.findings[path] = nil
+	writePluginFile(t, filepath.Join(path, "provider.py"), "VENDOR = False\n")
+	f.w.runRescanCycle(context.Background())
+	firstScans := f.scan.scans(path)
+	if firstScans != 1 {
+		t.Fatalf("benign admission caused %d scans, want 1", firstScans)
+	}
+	f.scan.findings[path] = findings
+	writePluginFile(t, entry, big("B"))
+	f.w.runRescanCycle(context.Background())
+	if got := f.scan.scans(path); got != firstScans+1 {
+		t.Errorf("a same-size edit of the large declared entrypoint caused %d additional scans, want 1", got-firstScans)
 	}
 }

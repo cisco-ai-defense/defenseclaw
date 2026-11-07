@@ -17,6 +17,7 @@
 package watcher
 
 import (
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,19 +25,44 @@ import (
 	"unicode/utf8"
 )
 
-// hermesManifestCandidates returns every string that manifests may hold as a
-// file name. It is the answer used while the plugin scanner, the one reader
-// of the manifest grammar, cannot be asked and the policy lets ordinary
-// activity continue (the per-user default and permissive tiers). It does not
-// read the grammar: it takes each quoted string, each plain word, each line
-// and each value after a key, in the text as written and with the backslash
-// escapes of JSON and YAML double-quoted strings decoded, and leaves it to the
-// caller to resolve each one as a path under the plugin. That is a superset
-// of what the scanner reads, so a file a manifest names stays bound however it
-// spells the name (an escape, an alias of an escaped value, dot segments, a
-// link); a file that no string resolves to is not declared, so an ordinary
-// generated cache file is not rejected because its base name appears in
-// prose or as an entrypoint in another folder.
+// hermesEntrypointKeys are the manifest keys that name code to run
+// (_EXECUTABLE_MANIFEST_KEYS in plugin_scanner/scanner.py;
+// TestHermesEntrypointKeysMatchScanner keeps them equal). The four keys whose
+// values the scanner declares as entrypoints (main, bin, entry, entrypoint)
+// are among them. Text under any other key (a description, a title, a
+// keyword) is prose: the scanner does not read a file from it.
+var hermesEntrypointKeys = []string{
+	"hooks", "mcpServers", "lspServers", "main", "bin", "scripts", "exports", "module", "browser",
+	"entry", "entrypoint", "entrypoints", "command", "extensions", "runtime",
+}
+
+// hermesEntrypointKeyPattern finds a mapping key of hermesEntrypointKeys in
+// the text of a manifest, plain or quoted, up to and including its colon. A
+// name that only ends in one of the keys (submain) is not a match.
+var hermesEntrypointKeyPattern = func() *regexp.Regexp {
+	keys := strings.Join(hermesEntrypointKeys, "|")
+	return regexp.MustCompile(`(?:^|[^\w$./\\-])(?:"(?:` + keys + `)"|'(?:` + keys + `)'|(?:` + keys + `))[ \t\r\n]*:`)
+}()
+
+// hermesAnchorPattern finds a YAML anchor definition.
+var hermesAnchorPattern = regexp.MustCompile(`&([^\s,\[\]{}&*]+)`)
+
+// hermesManifestCandidates returns the strings that manifests hold as the
+// value of an entrypoint key. It is the answer used while the plugin scanner,
+// the one reader of the manifest grammar, cannot be asked and the policy lets
+// ordinary activity continue (the per-user default and permissive tiers). It
+// does not read the grammar: it finds each entrypoint key in the text as
+// written and with the backslash escapes of JSON and YAML double-quoted
+// strings decoded, and takes every string of the value that follows it (a
+// quoted string whole, whatever punctuation it holds; the items of a flow
+// collection; the lines of a block; the value an alias points to), leaving it
+// to the caller to resolve each one as a path under the plugin. That is a
+// superset of what the scanner reads, so a file a manifest names stays bound
+// however it spells the name (an escape, an alias of an escaped value, dot
+// segments, a link, a comma or bracket in the name); a file that no such
+// string resolves to is not declared, so an ordinary generated cache file is
+// not rejected because its name appears in prose, such as a description, or
+// as an entrypoint in another folder.
 func hermesManifestCandidates(manifests map[string][]byte) []string {
 	names := make([]string, 0, len(manifests))
 	for name := range manifests {
@@ -54,17 +80,255 @@ func hermesManifestCandidates(manifests map[string][]byte) []string {
 	for _, name := range names {
 		text := string(manifests[name])
 		for _, variant := range []string{text, hermesUnescapeManifest(text)} {
-			hermesManifestStrings(variant, add)
+			newHermesManifestReader(variant, add).entrypointValues()
 		}
 	}
 	return out
 }
 
-// hermesManifestStrings calls add for each string of text that may be a name.
-func hermesManifestStrings(text string, add func(string)) {
+// hermesManifestReader takes the values of the entrypoint keys out of one
+// spelling of a manifest.
+type hermesManifestReader struct {
+	text    string
+	add     func(string)
+	anchors map[string][]int // anchor name -> offsets just after its definition
+	aliases map[string]bool  // aliases already followed, so a cycle ends
+}
+
+func newHermesManifestReader(text string, add func(string)) *hermesManifestReader {
+	r := &hermesManifestReader{text: text, add: add, anchors: map[string][]int{}, aliases: map[string]bool{}}
+	for _, m := range hermesAnchorPattern.FindAllStringSubmatchIndex(text, -1) {
+		name := text[m[2]:m[3]]
+		r.anchors[name] = append(r.anchors[name], m[1])
+	}
+	return r
+}
+
+// entrypointValues adds the value of every entrypoint key. A key inside a
+// value already taken is skipped: its text is part of that value.
+func (r *hermesManifestReader) entrypointValues() {
+	covered := 0
+	for _, m := range hermesEntrypointKeyPattern.FindAllStringIndex(r.text, -1) {
+		if m[0] < covered {
+			continue
+		}
+		covered = max(covered, r.value(m[1], r.indent(m[1])))
+	}
+}
+
+// indent is the indentation of the line holding offset i, counting the "- "
+// of a sequence item as indentation.
+func (r *hermesManifestReader) indent(i int) int {
+	start := strings.LastIndexByte(r.text[:i], '\n') + 1
+	n := 0
+	for start+n < len(r.text) && strings.IndexByte(" \t-", r.text[start+n]) >= 0 {
+		n++
+	}
+	return n
+}
+
+// value reads the value that starts at offset i, adds its strings, and
+// returns the offset where it ends.
+func (r *hermesManifestReader) value(i, indent int) int {
+	for {
+		for i < len(r.text) && (r.text[i] == ' ' || r.text[i] == '\t') {
+			i++
+		}
+		if i >= len(r.text) {
+			return len(r.text)
+		}
+		c := r.text[i]
+		switch c {
+		case '&', '!':
+			// an anchor or a tag in front of the value
+			for i < len(r.text) && r.text[i] != ' ' && r.text[i] != '\t' && r.text[i] != '\n' && r.text[i] != '\r' {
+				i++
+			}
+		case '*':
+			end := i + 1
+			for end < len(r.text) && strings.IndexByte(" \t\r\n,]}", r.text[end]) < 0 {
+				end++
+			}
+			r.alias(r.text[i+1 : end])
+			return end
+		case '"', '\'':
+			content, end := hermesQuoted(r.text, i)
+			r.addQuoted(content, c)
+			return end
+		case '[', '{':
+			end := r.flowEnd(i)
+			r.span(r.text[i:end])
+			return end
+		default:
+			return r.block(i, indent)
+		}
+	}
+}
+
+// block reads the rest of the line at i and the lines under it: those
+// indented deeper than the key, and sequence items at its indentation. A
+// quoted string or flow collection on a later line is read where it stands,
+// as JSON may place the value of a key on the next line at any indentation.
+func (r *hermesManifestReader) block(i, indent int) int {
+	end := strings.IndexByte(r.text[i:], '\n')
+	if end < 0 {
+		r.span(r.text[i:])
+		return len(r.text)
+	}
+	end += i
+	last := end
+	for pos := end; pos < len(r.text); {
+		start := pos + 1
+		next := strings.IndexByte(r.text[start:], '\n')
+		stop := len(r.text)
+		if next >= 0 {
+			stop = start + next
+		}
+		line := r.text[min(start, len(r.text)):stop]
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.TrimSpace(line) == "" {
+			pos = stop
+			continue
+		}
+		depth := len(line) - len(trimmed)
+		if depth > indent || (depth == indent && strings.HasPrefix(trimmed, "- ")) {
+			last, pos = stop, stop
+			continue
+		}
+		if last == end && (trimmed[0] == '"' || trimmed[0] == '\'' || trimmed[0] == '[' || trimmed[0] == '{') && strings.TrimSpace(r.text[i:end]) == "" {
+			return r.value(start+depth, indent)
+		}
+		break
+	}
+	r.span(r.text[i:last])
+	return last
+}
+
+// flowEnd returns the offset after the bracket that closes the flow
+// collection opened at i, skipping quoted strings; the end of the text when
+// it never closes.
+func (r *hermesManifestReader) flowEnd(i int) int {
+	depth := 0
+	prev := byte(' ')
+	for j := i; j < len(r.text); j++ {
+		c := r.text[j]
+		switch {
+		case hermesOpensQuote(c, prev):
+			_, j = hermesQuoted(r.text, j)
+			j--
+			prev = '"'
+			continue
+		case c == '[' || c == '{':
+			depth++
+		case c == ']' || c == '}':
+			if depth--; depth == 0 {
+				return j + 1
+			}
+		}
+		if c == '\n' {
+			prev = ' '
+		} else if c != ' ' && c != '\t' && c != '\r' {
+			prev = c
+		}
+	}
+	return len(r.text)
+}
+
+// hermesOpensQuote reports whether the quote character c, after the last
+// significant byte prev, begins a quoted string and not an apostrophe inside
+// a plain word.
+func hermesOpensQuote(c, prev byte) bool {
+	return (c == '"' || c == '\'') && strings.IndexByte(" [{,:-?", prev) >= 0
+}
+
+// hermesQuoted reads the quoted string that opens at text[i] and returns its
+// content as written (escapes not decoded) and the offset after it. A string
+// that never closes ends at the end of its line.
+func hermesQuoted(text string, i int) (string, int) {
+	quote := text[i]
+	for j := i + 1; j < len(text); j++ {
+		switch {
+		case quote == '"' && text[j] == '\\':
+			j++
+		case quote == '\'' && text[j] == '\'' && j+1 < len(text) && text[j+1] == '\'':
+			j++
+		case text[j] == quote:
+			return text[i+1 : j], j + 1
+		}
+	}
+	rest := text[i+1:]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		return rest[:nl], i + 1 + nl
+	}
+	return rest, len(text)
+}
+
+// addQuoted adds a quoted string as written and with its escapes decoded.
+func (r *hermesManifestReader) addQuoted(content string, quote byte) {
+	if quote == '\'' {
+		r.add(strings.ReplaceAll(content, "''", "'"))
+		return
+	}
+	r.add(content)
+	r.add(hermesUnescapeManifest(content))
+}
+
+// alias adds the value each definition of the anchor holds.
+func (r *hermesManifestReader) alias(name string) {
+	if r.aliases[name] {
+		return
+	}
+	r.aliases[name] = true
+	for _, at := range r.anchors[name] {
+		r.value(at, r.indent(at))
+	}
+}
+
+// span adds the strings of a value: each quoted string whole, then, from what
+// is left, each line, each piece of a line that a comma, bracket or ": "
+// separates, and each word, so a plain name that holds punctuation is taken
+// both whole and in pieces. Comments are dropped. The words that are aliases
+// add what they point to.
+func (r *hermesManifestReader) span(text string) {
+	var rest strings.Builder
+	prev := byte(' ')
+	for i := 0; i < len(text); {
+		c := text[i]
+		if hermesOpensQuote(c, prev) {
+			content, end := hermesQuoted(text, i)
+			r.addQuoted(content, c)
+			rest.WriteByte('\n')
+			i, prev = end, '"'
+			continue
+		}
+		rest.WriteByte(c)
+		switch c {
+		case '\n':
+			prev = ' '
+		case ' ', '\t', '\r':
+		default:
+			prev = c
+		}
+		i++
+	}
+	var plain []string
+	for _, line := range strings.Split(rest.String(), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if cut := strings.Index(line, " #"); cut >= 0 {
+			line = line[:cut]
+		}
+		plain = append(plain, line)
+	}
+	r.plainStrings(strings.Join(plain, "\n"))
+}
+
+// plainStrings calls add for each string of unquoted text that may be a name.
+func (r *hermesManifestReader) plainStrings(text string) {
 	addValue := func(value string) {
 		value = strings.TrimSpace(value)
-		add(value)
+		r.add(value)
 		for {
 			switch {
 			case strings.HasPrefix(value, "- "):
@@ -81,16 +345,22 @@ func hermesManifestStrings(text string, add func(string)) {
 			default:
 				return
 			}
-			add(value)
+			r.add(value)
 		}
 	}
-	for _, segment := range strings.FieldsFunc(text, func(r rune) bool { return strings.ContainsRune("\n\r\"',[]{}", r) }) {
+	for _, line := range strings.Split(text, "\n") {
+		addValue(line)
+	}
+	for _, segment := range strings.FieldsFunc(text, func(c rune) bool { return strings.ContainsRune("\n\r,[]{}", c) }) {
 		addValue(segment)
 		for _, piece := range strings.Split(segment, ": ") {
 			addValue(piece)
 		}
 		for _, word := range strings.Fields(segment) {
 			addValue(word)
+			if strings.HasPrefix(word, "*") && len(word) > 1 {
+				r.alias(word[1:])
+			}
 		}
 	}
 }
