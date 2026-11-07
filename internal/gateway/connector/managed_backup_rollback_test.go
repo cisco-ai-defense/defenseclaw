@@ -60,3 +60,32 @@ func TestRestoreManagedFileBackupsForRollbackUsesConnectorWideRecords(t *testing
 		})
 	}
 }
+
+func TestVerifyManagedFileBackupsCountsOnlyUsableRecords(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	path := filepath.Join(home, ".agent", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	saved := filepath.Join(root, "saved-data")
+	if n, err := VerifyManagedFileBackups(saved); n != 0 || err != nil {
+		t.Fatalf("missing folder = %d, %v; want 0, nil", n, err)
+	}
+	if err := captureManagedFileBackup(saved, "newer-connector", "hooks.json", path); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := VerifyManagedFileBackups(saved); n != 1 || err != nil {
+		t.Fatalf("one record = %d, %v; want 1, nil", n, err)
+	}
+	record := managedFileBackupPath(saved, "newer-connector", "hooks.json")
+	if err := os.WriteFile(record, []byte("{invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyManagedFileBackups(saved); err == nil {
+		t.Fatal("a record that does not parse was accepted")
+	}
+}

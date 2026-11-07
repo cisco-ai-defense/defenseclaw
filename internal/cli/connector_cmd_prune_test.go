@@ -632,3 +632,106 @@ func TestConnectorPruneOrphansWithoutConfigStillGuessesNothing(t *testing.T) {
 		registered(t, path)
 	})
 }
+
+// Rollback evidence for a missing config.yaml is the connector backup records
+// of the saved newer install, not a folder of that name: an empty folder, one
+// with only unrelated files, or one with a record that is rejected (it does not
+// parse, or does not match its saved digest) removes nothing (GAP-0697).
+func TestConnectorPruneOrphansWithoutConfigNeedsVerifiedBackupRecords(t *testing.T) {
+	pristine := []byte("{\n  \"operator\": \"keep\"\n}\n")
+	eachRecord := func(t *testing.T, saved string, fn func(path string)) {
+		t.Helper()
+		found := false
+		err := filepath.Walk(filepath.Join(saved, "connector_backups"), func(p string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !info.IsDir() && strings.HasSuffix(p, ".json") {
+				found = true
+				fn(p)
+			}
+			return nil
+		})
+		if err != nil || !found {
+			t.Fatalf("no backup record to change: found=%v err=%v", found, err)
+		}
+	}
+	resetRoot := func(t *testing.T, saved string) string {
+		t.Helper()
+		root := filepath.Join(saved, "connector_backups")
+		if err := os.RemoveAll(root); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, saved string)
+	}{
+		{"empty connector_backups folder", func(t *testing.T, saved string) {
+			resetRoot(t, saved)
+		}},
+		{"connector_backups holds only unrelated text", func(t *testing.T, saved string) {
+			root := resetRoot(t, saved)
+			if err := os.WriteFile(filepath.Join(root, "readme.txt"), []byte("no backup records"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"a connector folder holds no record", func(t *testing.T, saved string) {
+			eachRecord(t, saved, func(p string) {
+				if err := os.Rename(p, strings.TrimSuffix(p, ".json")+".txt"); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}},
+		{"a record does not parse", func(t *testing.T, saved string) {
+			eachRecord(t, saved, func(p string) {
+				if err := os.WriteFile(p, []byte("{invalid backup record"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}},
+		{"a record does not match its saved digest", func(t *testing.T, saved string) {
+			eachRecord(t, saved, func(p string) {
+				var rec map[string]any
+				data, err := os.ReadFile(p)
+				if err != nil || json.Unmarshal(data, &rec) != nil {
+					t.Fatalf("read record: %v", err)
+				}
+				rec["pristine_sha256"] = strings.Repeat("0", 64)
+				data, err = json.Marshal(rec)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(p, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+			defer withConnectorState(t, dataDir, "codex")()
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(before, []byte("defenseclaw-antigravity-")) {
+				t.Fatalf("setup made no owned registration: %q", before)
+			}
+			tc.change(t, saved)
+			cfg = nil
+			_, stderr, _ := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", saved)
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(stderr, "config.yaml is not loaded; nothing was removed") || !bytes.Equal(after, before) {
+				t.Fatalf("unproven saved folder allowed cleanup: stderr=%q after-matches-before=%v", stderr, bytes.Equal(after, before))
+			}
+		})
+	}
+}
