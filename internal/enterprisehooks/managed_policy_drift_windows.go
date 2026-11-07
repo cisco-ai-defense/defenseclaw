@@ -144,7 +144,8 @@ func requireWindowsClaudeRecordedHookExecutable(record windowsClaudeManagedPolic
 	}
 	if !sameWindowsEnterprisePath(record.HookExecutable, hookExecutable) {
 		return fmt.Errorf("enterprise hooks: the Claude Code managed policy ownership record names hook executable %s, "+
-			"not this install's %s, so the changed drop-in is left as it is; run Setup /ensure", record.HookExecutable, hookExecutable)
+			"not this install's %s, so the changed drop-in is left as it is; run `%s`. %s", record.HookExecutable, hookExecutable,
+			managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)
 	}
 	return nil
 }

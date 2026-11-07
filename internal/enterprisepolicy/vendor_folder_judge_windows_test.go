@@ -312,7 +312,7 @@ func TestInspectRecordedVendorFoldersPassesAFreshInstallOnTheInheritedDefaults(t
 	}
 }
 
-// Devin and Windsurf read only hooks.json, so the inherited default (Users
+// Devin reads only hooks.json, in both of its folders;, so the inherited default (Users
 // may add files) leaves the recorded file protected: the inspection reports
 // nothing, as the publish leaves the folder as it is.
 func TestInspectRecordedVendorFoldersLeavesAnAddOnlyFolderOfASingleFileVendor(t *testing.T) {

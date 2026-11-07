@@ -23,6 +23,12 @@ $begin = $source.IndexOf('function Get-DefenseClawLazyLockFiles {', [StringCompa
 $end = $source.IndexOf("`nfunction ", $begin, [StringComparison]::Ordinal)
 if ($begin -lt 0 -or $end -le $begin) { throw 'lazy lock file function was not found' }
 Invoke-Expression $source.Substring($begin, $end - $begin)
+# GAP-0650: the managed ACL pass also stamps the Codex state copy the hook
+# reads; slice the real resolver of that copy from the module as well.
+$begin = $source.IndexOf('function Resolve-DefenseClawCodexManagedHooksStateCopy {', [StringComparison]::Ordinal)
+$end = $source.IndexOf("`nfunction ", $begin, [StringComparison]::Ordinal)
+if ($begin -lt 0 -or $end -le $begin) { throw 'Codex state copy resolver was not found' }
+Invoke-Expression $source.Substring($begin, $end - $begin)
 $script:AdministratorsSID = 'S-1-5-32-544'
 
 function Get-DefenseClawServiceSID { 'S-1-5-80-1-2-3-4-5' }
@@ -74,6 +80,7 @@ try {
         MetadataPath = $missing
         CodexRequirementsOwnershipPath = $missing
         CodexRequirementsAclBackupPath = $missing
+        CodexManagedHooksStatePath = $missing
         AgentApplicationControlAttestationPath = $missing
         ManagedHooksTeardownJournalPath = $missing
         ManagedIPCDirectory = $missing

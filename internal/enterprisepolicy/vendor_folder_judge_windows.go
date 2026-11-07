@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
 
@@ -50,7 +51,7 @@ type vendorFolderVerdict struct {
 // the folder (the ancestor rule), and, in the folder that holds the policy
 // file, while no other account can add a file the vendor loads beside it
 // (Copilot's policy.d, OpenCode's opencode.jsonc: g582 review 7 M1). A vendor
-// that reads one file name (Devin and Windsurf: hooks.json) is not opened by
+// that reads one file name (Devin, in both of its folders: hooks.json) is not opened by
 // an added file, so the inherited ProgramData default (Users may create
 // files) passes there.
 func judgeRecordedVendorFolder(recorded *recordedPolicyPaths, cur string, last bool, use policyFolderUse, trustErr error) vendorFolderVerdict {
@@ -320,7 +321,7 @@ func displaceAddedDuringReprotect(opts Options, recorded *recordedPolicyPaths, c
 		if err != nil {
 			return notes, fmt.Errorf("%s appeared in %s while DefenseClaw put the folder back to its protected form, and "+
 				"DefenseClaw could not move it aside (%v); the vendor would load it beside DefenseClaw's file: check it and "+
-				"remove it, then run Setup /ensure", path, cur, err)
+				"remove it, then run `%s`. %s", path, cur, err, managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)
 		}
 		notes = append(notes, note)
 	}
@@ -396,7 +397,7 @@ func weakVendorFolders(opts Options, connectors []string) (*recordedPolicyPaths,
 
 // InspectRecordedVendorFolders judges, without writing, the vendor folders of
 // the Go-owned Windows machine policy targets among connectors (Copilot,
-// OpenCode, and Devin with its Windsurf companion) with the verdict a
+// OpenCode, and Devin with its pre-rename companion folder) with the verdict a
 // publish, a repair and the removal reach. It returns one problem per folder
 // that is case c and does not protect DefenseClaw's recorded file, and says
 // whether the safe transaction would put it right. It reports nothing off the
@@ -420,8 +421,8 @@ func InspectRecordedVendorFolders(opts Options, connectors []string) []VendorFol
 			tx.close()
 			problem.Reprotectable = true
 			problem.Message = fmt.Sprintf("%s; DefenseClaw did not create this folder and will put it back to its protected form at the next "+
-				"reconcile (the guardian pass, or Setup /ensure): nothing holds it open, DefenseClaw's recorded files in it match "+
-				"their records and it holds nothing else DefenseClaw did not account for", folder.refused.reason())
+				"reconcile (the guardian pass, or `%s`): nothing holds it open, DefenseClaw's recorded files in it match "+
+				"their records and it holds nothing else DefenseClaw did not account for", folder.refused.reason(), managed.WindowsSetupCommand("/ensure"))
 		} else {
 			problem.Blocker = err.Error()
 			blocked := *folder.refused

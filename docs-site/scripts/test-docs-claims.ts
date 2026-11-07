@@ -673,12 +673,12 @@ describe('setup and rollback recovery guides', () => {
   it('shows package refusal results and a matching reinstall (GAP-0086)', () => {
     const lifecycle = page('enterprise/lifecycle.mdx');
     const troubleshooting = page('enterprise/troubleshooting.mdx');
-    assert.match(lifecycle, /RPM `%prein` \(also Debian `preinst`\) \| `defenseclaw-enterprise: refusing to install 1\.0\.5: the signed policy bundle needs DefenseClaw 1\.0\.8 or later/);
+    assert.match(lifecycle, /RPM `%prein` \(also Debian `preinst` and the apt hook\) \| `defenseclaw-enterprise: product_floor_refused: refusing to install 1\.0\.5: the signed policy bundle needs DefenseClaw 1\.0\.8 or later/);
     assert.match(lifecycle, /macOS pkg `preinstall` \| `installer` reports an error running package scripts/);
-    assert.match(lifecycle, /\/var\/log\/install\.log` contains `Refusing to install DefenseClaw 1\.0\.5: the signed policy bundle needs DefenseClaw 1\.0\.8 or later/);
+    assert.match(lifecycle, /\/var\/log\/install\.log` contains `product_floor_refused: Refusing to install DefenseClaw 1\.0\.5: the signed policy bundle needs DefenseClaw 1\.0\.8 or later/);
     assert.match(lifecycle, /Windows Setup 1\.0\.7 \| Setup returns `1603`; with `JSON=1`, `errors\[\]\.code` is `product_floor_refused`/);
     assert.match(lifecycle, /\/opt\/cisco\/defenseclaw\/lifecycle\/last-package-result\.json`/);
-    assert.match(lifecycle, /preinstall text does not name `product_floor_refused` or update `\/var\/lib\/defenseclaw-enterprise\/last-package-result\.json`/);
+    assert.match(lifecycle, /Packages before 1\.0\.9 print the same text without `product_floor_refused:`\. The preinstall does not update `\/var\/lib\/defenseclaw-enterprise\/last-package-result\.json`/);
     assert.match(lifecycle, /reinstall at the floor is allowed by this check, including 1\.0\.8 over 1\.0\.8 with a confirmed 1\.0\.8 floor/);
     assert.match(troubleshooting, /Check `bundle status` for `current\.min_product_version` and install a release that meets the floor/);
     assert.match(troubleshooting, /contact your administrator/);
