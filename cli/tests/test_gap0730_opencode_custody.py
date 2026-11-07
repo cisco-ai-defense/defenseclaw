@@ -78,7 +78,7 @@ def _problems(unsafe, path: Path) -> tuple[str, ...]:
 
 
 # Review 1: the diagnosis asks the gateway's other per-element questions too.
-@pytest.mark.skipif(os.geteuid() == 0, reason="root-owned folders are trusted")
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root-owned folders are trusted")
 def test_a_foreign_owned_readable_folder_is_named_with_an_owner_repair(tmp_path: Path, monkeypatch) -> None:
     config, opencode, plugin = _tree(tmp_path, 0o755, 0o755)
     monkeypatch.setattr(file_permissions, "_plugin_trusted_owner", lambda uid: uid == 0)
