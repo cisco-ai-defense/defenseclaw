@@ -203,7 +203,7 @@ def test_a_repair_past_the_limit_is_left_out_and_said_so() -> None:
 
 # Review 2: the macOS rule is the gateway's, not a stricter one.
 def _darwin(monkeypatch, listing: str, *, standalone: bool = False, mode: str = "drwxr-xr-x+") -> None:
-    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path: (mode, listing))
+    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path, **_kw: (mode, listing))
     monkeypatch.setattr(file_permissions, "_plugin_standalone_scope", lambda: standalone)
 
 
@@ -277,6 +277,11 @@ class _Listing:
     stdout = "drwxr-xr-x+ 3 me staff 96 Nov  6 12:00 /x\n 0: user:other allow list,search\n"
 
 
+class _CleanListing:
+    returncode = 0
+    stdout = "drwx------ 3 me staff 96 Nov  6 12:00 /x\n"
+
+
 def _ls(monkeypatch, outcomes: list) -> list[float]:
     # Run _darwin_acl_output with /bin/ls replaced by the outcomes; return the timeouts it used.
     import subprocess
@@ -300,7 +305,11 @@ def test_one_slow_acl_inspection_is_retried_like_the_gateway_does(monkeypatch) -
     import subprocess
 
     timeouts = _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 5.0), _Listing()])
-    mode, acl = file_permissions._darwin_acl_output("/x")
+    mode, acl = file_permissions._darwin_acl_output(
+        "/x",
+        timeout=file_permissions._PLUGIN_ACL_INSPECTION_TIMEOUT,
+        attempts=file_permissions._PLUGIN_ACL_INSPECTION_ATTEMPTS,
+    )
     assert mode == "drwxr-xr-x+" and "user:other allow list,search" in acl
     # The gateway bound is five seconds (hookAPIACLInspectionTimeout), once more.
     assert timeouts == [5.0, 5.0]
@@ -314,7 +323,7 @@ def test_a_second_acl_inspection_timeout_is_the_verdict(monkeypatch) -> None:
     import subprocess
 
     timeouts = _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 5.0), subprocess.TimeoutExpired("ls", 5.0)])
-    assert file_permissions._darwin_acl_output("/x") == ("", "")
+    assert file_permissions._plugin_darwin_acl_refused("/x") is True
     assert timeouts == [5.0, 5.0]
     _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 5.0), subprocess.TimeoutExpired("ls", 5.0)])
     assert file_permissions._plugin_darwin_acl_refused("/x") is True
@@ -322,16 +331,16 @@ def test_a_second_acl_inspection_timeout_is_the_verdict(monkeypatch) -> None:
 
 def test_a_failed_acl_inspection_that_is_not_a_timeout_is_not_retried(monkeypatch) -> None:
     timeouts = _ls(monkeypatch, [FileNotFoundError("ls")])
-    assert file_permissions._darwin_acl_output("/x") == ("", "")
+    assert file_permissions._plugin_darwin_acl_refused("/x") is True
     assert timeouts == [5.0]
 
 
 def test_a_macos_acl_that_cannot_be_read_is_refused(monkeypatch) -> None:
-    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path: ("", ""))
+    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path, **_kw: ("", ""))
     assert file_permissions._plugin_darwin_acl_refused("/x") is True
-    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path: ("drwxr-xr-x+", ""))
+    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path, **_kw: ("drwxr-xr-x+", ""))
     assert file_permissions._plugin_darwin_acl_refused("/x") is True
-    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path: ("drwxr-xr-x", ""))
+    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path, **_kw: ("drwxr-xr-x", ""))
     assert file_permissions._plugin_darwin_acl_refused("/x") is False
 
 
@@ -386,3 +395,19 @@ def test_a_link_the_gateway_accepts_does_not_hide_an_open_target(tmp_path: Path,
     # A link the gateway refuses stays structural: its target is not judged.
     monkeypatch.setattr(file_permissions, "plugin_link_refused", real_check)
     assert [str(found) for found in connector_paths.opencode_unsafe_plugin_paths([str(plugin)])][-1] == str(link)
+
+
+# Review 4: the retry belongs to the plugin-folder check; every other caller (device-identity
+# validation in init, Secure Client included) keeps its single 2-second inspection that refuses on a timeout.
+def test_other_acl_callers_keep_one_two_second_inspection(monkeypatch) -> None:
+    import subprocess
+
+    timeouts = _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 2.0), _Listing()])
+    assert file_permissions.darwin_acl_write_error("/x") == "extended ACL could not be inspected"
+    assert timeouts == [2.0]
+    timeouts = _ls(monkeypatch, [subprocess.TimeoutExpired("ls", 2.0), _Listing()])
+    assert file_permissions.darwin_acl_confidentiality_error("/x") == "extended ACL could not be inspected"
+    assert timeouts == [2.0]
+    # Benign twin: a prompt clean listing is still accepted.
+    _ls(monkeypatch, [_CleanListing()])
+    assert file_permissions.darwin_acl_write_error("/x") is None
