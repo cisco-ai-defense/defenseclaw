@@ -71,6 +71,15 @@ type LimiterConfig struct {
 	Now func() time.Time
 }
 
+// DefaultMaxInFlight bounds the hook, notify and inspect requests one binding
+// holds open: the 25/s hook rate for the 3.5 s answer window of a managed hook
+// is 88 requests, so the bound is above what the rate admits in that window
+// and a request is refused for its rate, not for how long the requests
+// before it take (rel-1-0-6 GAP-0490: with 32, a sandbox at 22 calls/s was
+// refused 429 once the answers took over 1.4 s). Each pending request holds
+// only its bounded body.
+const DefaultMaxInFlight = 128
+
 // DefaultLimiterConfig returns the production defaults.
 func DefaultLimiterConfig() LimiterConfig {
 	return LimiterConfig{
@@ -78,7 +87,7 @@ func DefaultLimiterConfig() LimiterConfig {
 		HookBurst:            100,
 		OTLPRPS:              10,
 		OTLPBurst:            50,
-		MaxInFlight:          32,
+		MaxInFlight:          DefaultMaxInFlight,
 		OTLPMaxInFlight:      4,
 		OTLPMaxInFlightTotal: 16,
 		IdleTTL:              10 * time.Minute,

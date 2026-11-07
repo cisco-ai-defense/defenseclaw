@@ -315,6 +315,9 @@ type Store struct {
 	// callGroup groups the flushes of concurrent hook calls' write batches
 	// into one transaction (CallWriteBatch).
 	callGroup writeGroup
+	// durableGroup groups the commits of concurrent writes to the synchronous=FULL
+	// connection into one transaction and one flush (durableGrouped).
+	durableGroup writeGroup
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
