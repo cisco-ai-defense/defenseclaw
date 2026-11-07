@@ -9480,6 +9480,7 @@ def _capture_setup_applied_runtime(
     last_error: Exception | None = None
     last_error_site: str | None = None
     last_difference: str | None = None
+    refusal: _SetupRuntimeCustodyRefusedError | None = None
     started = time.monotonic()
     for attempt in range(_SETUP_RUNTIME_SNAPSHOT_ATTEMPTS):
         try:
@@ -9492,7 +9493,12 @@ def _capture_setup_applied_runtime(
             # bounded loop still fails closed without two equal successes.
             last_error = exc
             last_error_site = _setup_runtime_error_site(exc)
+            # A custody refusal is deterministic: when the last attempt ends in
+            # one, it is reported with its file and repair even after an
+            # earlier complete sample.
+            refusal = exc if isinstance(exc, _SetupRuntimeCustodyRefusedError) else None
         else:
+            refusal = None
             if previous == current:
                 return current
             if previous is not None:
@@ -9502,8 +9508,8 @@ def _capture_setup_applied_runtime(
             time.sleep(_SETUP_RUNTIME_SNAPSHOT_RETRY_SECONDS)
     if last_difference is None and isinstance(last_error, _SetupGatewayNoAnswerError):
         raise _SetupGatewayNoAnswerError(last_error.pid, time.monotonic() - started) from None
-    if previous is None and isinstance(last_error, _SetupRuntimeCustodyRefusedError):
-        raise last_error from None
+    if refusal is not None:
+        raise refusal from None
     if last_difference is not None:
         reference = f"diff={last_difference}"
     elif last_error is not None:

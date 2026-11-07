@@ -172,6 +172,48 @@ def test_the_applied_runtime_capture_keeps_the_refusal_instead_of_the_stabilize_
     assert f"/remove:g \"{_OTHER_ACCOUNT}\"" in next_step
 
 
+def test_a_refusal_after_one_complete_snapshot_is_still_named_with_its_repair(tmp_path, monkeypatch):
+    plugin = _plugin_file(tmp_path)
+    monkeypatch.setattr(cmd_setup, "_SETUP_RUNTIME_SNAPSHOT_RETRY_SECONDS", 0)
+    calls = {"n": 0}
+
+    def once(_cfg, _required=()):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return object()  # one complete sample, then another account gains write access
+        return _capture(plugin)
+
+    monkeypatch.setattr(cmd_setup, "_capture_setup_applied_runtime_once", once)
+    with (
+        patch.object(cmd_setup, "os", _WindowsOs()),
+        _refused_by_writer(),
+        patch.object(claw_inventory, "_windows_account_name_for_sid", return_value=_OTHER_ACCOUNT),
+        pytest.raises(cmd_setup._SetupRuntimeCustodyRefusedError) as raised,
+    ):
+        cmd_setup._capture_setup_applied_runtime(SimpleNamespace())
+
+    assert calls["n"] == cmd_setup._SETUP_RUNTIME_SNAPSHOT_ATTEMPTS
+    reason, next_step = cmd_setup._setup_rollback_point_failure(raised.value)
+    assert _OTHER_ACCOUNT in reason and str(plugin) in reason
+    assert f"/remove:g \"{_OTHER_ACCOUNT}\"" in next_step
+
+
+def test_a_transient_read_error_after_one_complete_snapshot_keeps_the_generic_retry_text(monkeypatch):
+    monkeypatch.setattr(cmd_setup, "_SETUP_RUNTIME_SNAPSHOT_RETRY_SECONDS", 0)
+    calls = {"n": 0}
+
+    def once(_cfg, _required=()):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return object()
+        raise OSError("sharing violation")
+
+    monkeypatch.setattr(cmd_setup, "_capture_setup_applied_runtime_once", once)
+    with pytest.raises(OSError, match="applied runtime evidence did not stabilize") as raised:
+        cmd_setup._capture_setup_applied_runtime(SimpleNamespace())
+    assert not isinstance(raised.value, cmd_setup._SetupRuntimeCustodyRefusedError)
+
+
 def test_an_unreadable_runtime_file_keeps_the_generic_retry_text(tmp_path, monkeypatch):
     # The benign twin: only a custody refusal changes the message; a read failure is still a retried reference.
     missing_parent = Path(os.path.realpath(tmp_path)) / "no-such-folder" / "defenseclaw.js"
