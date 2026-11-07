@@ -102,9 +102,9 @@ func TestLateOrdinaryCallLinkHops(t *testing.T) {
 
 // TestLateOrdinaryCallHardLinks: a hard link is protected only when it is the
 // same file as a protected one. An ordinary file with a second name is
-// ordinary; a second name of a keys file, of a file in a DefenseClaw or
-// OpenClaw folder, and any hard link when the protected folders are too big
-// to index, are not.
+// ordinary, also when the protected folders are too big to index; a second
+// name of a keys file and of a file in a DefenseClaw or OpenClaw folder are
+// not.
 func TestLateOrdinaryCallHardLinks(t *testing.T) {
 	f := newLateFixture(t)
 	lateWrite(t, filepath.Join(f.project, "src", "other.txt"), "x\n")
@@ -201,6 +201,36 @@ func TestLateOrdinaryCallHomeAndSubtreeBudget(t *testing.T) {
 		{"hard link of an ordinary file in a home over the bound", "cat hardplain", true},
 		{"ordinary link in a home over the bound", "cat plainlink", true},
 		{"link to the keys in a home over the bound", "cat keylink", false},
+	})
+}
+
+// TestLateOrdinaryCallUnreadableKeysFolder: a keys folder the scan cannot read
+// does not make every link or hard link non-ordinary. An ordinary alias stays
+// ordinary (it is not found among the protected files); the keys path named
+// directly, and a link to it, still are not.
+func TestLateOrdinaryCallUnreadableKeysFolder(t *testing.T) {
+	f := newLateFixture(t)
+	if err := os.Link(filepath.Join(f.project, "plain.txt"), filepath.Join(f.project, "hardplain")); err != nil {
+		t.Fatal(err)
+	}
+	lateSymlink(t, filepath.Join(f.project, "plain.txt"), filepath.Join(f.project, "plainlink"))
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a folder with mode 0")
+	}
+	ssh := filepath.Join(f.home, ".ssh")
+	if err := os.Chmod(ssh, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(ssh, 0o700) })
+	lateAssertOrdinary(t, f.project, []struct {
+		name, command string
+		want          bool
+	}{
+		{"ordinary link beside an unreadable keys folder", "cat plainlink", true},
+		{"hard link of an ordinary file beside an unreadable keys folder", "cat hardplain", true},
+		{"file with one name beside an unreadable keys folder", "cat plain.txt", true},
+		{"direct keys path beside an unreadable keys folder", "cat ../.ssh/authorized_keys", false},
+		{"link to the keys beside an unreadable keys folder", "cat keylink", false},
 	})
 }
 
