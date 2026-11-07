@@ -1232,7 +1232,7 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
-    check_candidate = _connector_roster_check(app, [parts])
+    check_candidate = _connector_roster_check([parts])
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
 
 
@@ -1244,30 +1244,55 @@ def _selects_connectors(parts: list) -> bool:
     )
 
 
-def _connector_roster_check(app: AppContext, parts_list: list[list]):
+def _connector_roster_check(parts_list: list[list]):
     """The final-file check for a set or unset that can change the process.
 
     One rule for every selection key (guardrail.connector, claw.mode, an entry
-    under guardrail.connectors): judge the written file, not the key. The
-    installed connector comes from the file, else from the config that was
-    loaded before the edit, so an implicit default OpenClaw counts too.
+    under guardrail.connectors, or a whole map): judge the written file, not
+    the key.
     """
     if not any(_selects_connectors(parts) for parts in parts_list):
         return None
-    try:
-        implicit = app.cfg.active_connector() if app.cfg is not None else ""
-    except Exception:
-        implicit = ""
-    return lambda path, candidate: _check_guardrail_connector_roster(path, candidate, implicit=implicit)
+    return _check_guardrail_connector_roster
 
 
-def _check_guardrail_connector_roster(_path: str, candidate: bytes, *, implicit: str = "") -> None:
+def _file_selected_connector(document: object) -> str:
+    """The connector a config document selects, by the loader rule (no host probe).
+
+    guardrail.connector, else claw.mode when it is on the roster (or the first
+    roster entry), else claw.mode; a missing claw.mode loads as openclaw.
+    """
+    guardrail = document.get("guardrail") if isinstance(document, dict) else None
+    guardrail = guardrail if isinstance(guardrail, dict) else {}
+    claw = document.get("claw") if isinstance(document, dict) else None
+    claw = claw if isinstance(claw, dict) else {}
+    named = guardrail.get("connector")
+    if isinstance(named, str) and named.strip():
+        return normalize_connector(named)
+    mode = claw.get("mode", "openclaw")
+    mode = normalize_connector(mode) if isinstance(mode, str) and mode.strip() else ""
+    roster = guardrail.get("connectors")
+    names = (
+        sorted(normalize_connector(n) for n in roster if isinstance(n, str) and n.strip())
+        if isinstance(roster, dict) else []
+    )
+    if names:
+        return mode if mode in names else names[0]
+    return mode
+
+
+def _check_guardrail_connector_roster(path: str, candidate: bytes) -> None:
     """Refuse a final file that puts a proxy connector beside another enabled one.
 
     A proxy connector (openclaw, zeptoclaw) needs its own proxy binding, so it
     cannot share a gateway process with hook connectors (GAP-0588). The
-    process is the enabled roster entries plus the installed connector;
-    an entry that is explicitly disabled is not part of it.
+    process is the enabled roster entries plus the installed connector; an
+    entry that is explicitly disabled is not part of it. When the final file
+    names no connector, the installed one is what the file selected before
+    the edit, so an implicit default OpenClaw (no guardrail.connector, no
+    claw.mode, no roster) counts, whether the edit adds one entry or a whole
+    map. The check reads the files, so the top-level config command, which
+    loads no config, is judged the same as a loaded one.
     """
     from defenseclaw import config_writer
 
@@ -1287,7 +1312,10 @@ def _check_guardrail_connector_roster(_path: str, candidate: bytes, *, implicit:
     claw = claw if isinstance(claw, dict) else {}
     named = guardrail.get("connector")
     if not (isinstance(named, str) and named.strip()):
-        named = claw.get("mode") if "mode" in claw else implicit
+        named = claw.get("mode") if "mode" in claw else None
+    if not (isinstance(named, str) and named.strip()):
+        current, _, _ = config_writer._read_current(path)
+        named = _file_selected_connector(config_writer._parse_config_document(current))
     if isinstance(named, str) and named.strip() and not config_module._is_retired_connector_name(named):
         installed = normalize_connector(named)
         own = next(
@@ -1357,7 +1385,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         )
         for key, parts in parsed
     ]
-    check_candidate = _connector_roster_check(app, [parts for _key, parts in parsed])
+    check_candidate = _connector_roster_check([parts for _key, parts in parsed])
     if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)

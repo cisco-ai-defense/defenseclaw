@@ -372,7 +372,7 @@ def test_config_set_first_entry_beside_claw_mode_hook_connector_stays_allowed(tm
 def test_config_set_refuses_implicit_and_primary_selector_proxy_mix(
     tmp_path: Path, installed: str, roster: str, key: str, value: str, message: str
 ) -> None:
-    app = _app(tmp_path, [installed])
+    app = AppContext()  # cfg is None, as under the root config command
     result, before, after = _set_in_file(tmp_path, app, roster, key, value)
     assert result.exit_code != 0
     assert "needs a proxy binding" in result.output
@@ -413,7 +413,7 @@ _DISABLED_KIRO = "  connector: openclaw\n  connectors:\n    kiro:\n      enabled
         # Hook beside hook and the proxy's own entry stay ordinary settings.
         ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connector", "codex"),
         ("openclaw", "  connector: openclaw\n", "guardrail.connector", "openclaw"),
-        ("kiro", "  enabled: true\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
+        ("kiro", "  connector: kiro\n  enabled: true\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
     ],
 )
 def test_config_set_disabled_entry_and_same_kind_selection_stay_allowed(
@@ -431,3 +431,60 @@ def test_config_unset_of_disabled_entry_setting_stays_allowed(tmp_path: Path, ke
     result, before, after = _unset_in_file(tmp_path, app, roster, key)
     assert result.exit_code == 0, result.output
     assert after != before
+
+
+_IMPLICIT_OPENCLAW = "  enabled: true\n"
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "as_json"),
+    [
+        ("guardrail.connectors.kiro.hook_fail_mode", "closed", False),
+        ("guardrail.connectors.codex.rule_pack", "default", False),
+        ("guardrail.connectors.kiro.enabled", "true", False),
+        ("guardrail.connectors", "{\"kiro\": {}}", True),
+        ("guardrail", "{\"enabled\": true, \"connectors\": {\"kiro\": {}}}", True),
+    ],
+)
+def test_root_config_command_refuses_first_entry_beside_implicit_openclaw(
+    tmp_path: Path, key: str, value: str, as_json: bool
+) -> None:
+    """The top-level config command loads no config (app.cfg is None); the file decides."""
+    from defenseclaw.main import cli
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{_IMPLICIT_OPENCLAW}", encoding="utf-8"
+    )
+    before = path.read_bytes()
+    with (
+        patch.object(dcconfig, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "_refresh_stopped_gateway_hooks", return_value=[]),
+    ):
+        result = CliRunner().invoke(cli, ["config", "set", key, value, *(["--json"] if as_json else [])])
+    assert result.exit_code != 0
+    assert "openclaw needs a proxy binding" in result.output
+    assert path.read_bytes() == before
+
+
+def test_root_config_command_hook_roster_without_primary_stays_editable(tmp_path: Path) -> None:
+    """Benign twin: a hook-only roster that names no primary keeps its ordinary edits."""
+    from defenseclaw.main import cli
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n  connectors:\n    kiro: {{}}\n    codex: {{}}\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+    with (
+        patch.object(dcconfig, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "_refresh_stopped_gateway_hooks", return_value=[]),
+    ):
+        result = CliRunner().invoke(cli, ["config", "set", "guardrail.connectors.codex.hook_fail_mode", "closed"])
+    assert result.exit_code == 0, result.output
+    assert path.read_bytes() != before
