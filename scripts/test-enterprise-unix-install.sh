@@ -470,28 +470,81 @@ sandbox_files_gone() {
     echo "no sandbox launcher or user service definition is left"
 }
 
-# launcher_offers_only_sandbox: an unprivileged account that runs the launcher
-# is told the computer is managed, sees only its own protection state in
-# `defenseclaw status` (cowork-1-0-8 GAP-0053), sees the sandbox tree and that
-# status in its help, and is refused every administrator command.
+# launcher_refusal_text: the sentence the launcher prints for a command it
+# does not offer on this platform. It is read from the fixture that
+# TestLauncherRefusalGoldenMatchesTheLauncher keeps equal to launcherRefusalFor
+# and that the docs gate (docs-site/scripts/test-docs-claims.ts) reads, so this
+# lane holds no copy of the wording.
+launcher_refusal_text() {
+    "$python" -c "import json, sys; sys.stdout.write(json.load(open(sys.argv[1]))[sys.argv[2]])" \
+        "$repo/internal/cli/testdata/launcher_refusal.json" "$platform"
+}
+
+# own_status_roster_check TEXT JSON [CONNECTOR...]: the standard user status
+# (TEXT) and status --json (JSON) show the account own protection state: an
+# account row, a Cowork row and one row per ENROLLED connector (cowork-1-0-8
+# GAP-0053, rel-1-0-9 GAP-0635). The roster is the connectors the installed
+# config enrolls, not a fixed one. Every CONNECTOR must be on the roster with a
+# protection state; with none given the roster must not be empty. The text
+# shows exactly the roster rows.
+own_status_roster_check() {
+    local text=$1 answer=$2
+    shift 2
+    DC_OWN_TEXT=$text DC_OWN_JSON=$answer "$python" - "$@" <<\PYCHECK
+import json, os, re, sys
+
+text, answer = os.environ["DC_OWN_TEXT"], json.loads(os.environ["DC_OWN_JSON"])
+roster = answer.get("connectors")
+problems = []
+if not isinstance(roster, dict) or not roster:
+    problems.append("the JSON answer has no enrolled connector")
+    roster = {}
+for name in sys.argv[1:]:
+    row = roster.get(name)
+    if not isinstance(row, dict) or not isinstance(row.get("protected"), bool) or not row.get("state"):
+        problems.append("enrolled connector %s has no protection state in the JSON answer" % name)
+lines = text.splitlines()
+first = next((i for i, line in enumerate(lines) if re.match(r"  Account +\S", line)), None)
+last = next((i for i, line in enumerate(lines) if re.match(r"  Cowork +\S", line)), None)
+if first is None or last is None or last < first:
+    problems.append("the text has no Account row followed by a Cowork row")
+else:
+    rows = [line for line in lines[first + 1:last] if re.match(r"  \S.* \S", line)]
+    if len(rows) != len(roster):
+        problems.append("the text shows %d connector rows, the JSON roster has %d (%s)" % (len(rows), len(roster), ", ".join(sorted(roster))))
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+PYCHECK
+}
+
+# launcher_offers_only_sandbox [CONNECTOR...]: an unprivileged account that
+# runs the launcher is told the computer is managed, sees only its own
+# protection state in `defenseclaw status` (cowork-1-0-8 GAP-0053), sees the
+# sandbox tree and that status in its help, and is refused every administrator
+# command with the sentence the launcher builds for this platform. CONNECTOR
+# names the connectors the config in force enrolls (admin_connectors once
+# write_admin_config has applied it); before any administrator config the
+# roster is the package default and only its presence is checked.
 launcher_offers_only_sandbox() {
-    local output rc=0 text="This computer is managed; use \`defenseclaw status\` for your protection state, \`defenseclaw sandbox status\` for your sandboxes and \`defenseclaw sandbox policy explain\` for your policy. Other commands require an administrator."
+    local output answer check rc=0 text
+    text=$(launcher_refusal_text) || die "cannot read the launcher refusal for $platform from internal/cli/testdata/launcher_refusal.json"
     output=$(as_standard_user "$launcher" status 2>&1) || rc=$?
-    [ "$rc" = 0 ] || die "defenseclaw status exited $rc as a standard user, want 0 (the user's own status): $output"
+    [ "$rc" = 0 ] || die "defenseclaw status exited $rc as a standard user, want 0 (the own status of the user): $output"
     [ "$(head -n 1 <<<"$output")" = "This computer is managed by your organization." ] ||
         die "defenseclaw status as a standard user does not say the computer is managed: $output"
-    grep -Eq '^  Account +' <<<"$output" && grep -Eq '^  Claude Code +(protected|not protected)$' <<<"$output" &&
-        grep -Eq '^  Cowork +' <<<"$output" ||
-        die "defenseclaw status as a standard user does not show its own protection state: $output"
+    answer=$(as_standard_user "$launcher" status --json 2>&1) || die "defenseclaw status --json failed as a standard user: $answer"
+    check=$(own_status_roster_check "$output" "$answer" "$@" 2>&1) ||
+        die "defenseclaw status as a standard user does not show its own protection state ($check): $output"
     rc=0
     output=$(as_standard_user "$launcher" setup 2>&1) || rc=$?
     [ "$rc" = 2 ] || die "defenseclaw setup exited $rc as a standard user, want 2: $output"
     [ "$output" = "$text" ] || die "defenseclaw setup printed '$output', want '$text'"
     output=$(as_standard_user "$launcher" --help 2>&1) || die "defenseclaw --help failed as a standard user: $output"
     grep -Fq "defenseclaw sandbox" <<<"$output" || die "the launcher help does not offer the sandbox commands: $output"
-    grep -Eq '^[[:space:]]+status[[:space:]]' <<<"$output" || die "the launcher help does not offer the user's own status: $output"
+    grep -Eq '^[[:space:]]+status[[:space:]]' <<<"$output" || die "the launcher help does not offer the own status of the user: $output"
     ! grep -Eq '^[[:space:]]+(enterprise|setup)[[:space:]]' <<<"$output" || die "the launcher help lists gateway commands: $output"
-    echo "defenseclaw offers only the sandbox commands and the user's own status to a standard user"
+    echo "defenseclaw offers only the sandbox commands and the own status of the user to a standard user"
 }
 
 policy_entries() {
@@ -636,7 +689,17 @@ admin_config_version() {
     fi
 }
 
+# admin_connectors: the connectors the administrator config enrolls. The config
+# and the roster a standard user must see once it is applied both come from
+# this list (launcher_offers_only_sandbox).
+admin_connectors=(claudecode codex)
+
 write_admin_config() {
+    local connector_lines="" connector
+    for connector in "${admin_connectors[@]}"; do
+        connector_lines+="    $connector: {enabled: true}"$'\n'
+    done
+    connector_lines=${connector_lines%$'\n'}
     local config_version=9 rule_pack='  rule_pack: default'
     if [ -n "$upgrade_from" ]; then
         config_version=$(admin_config_version "$previous_version")
@@ -659,8 +722,7 @@ guardrail:
   mode: observe
 $rule_pack
   connectors:
-    claudecode: {enabled: true}
-    codex: {enabled: true}
+$connector_lines
 EOF
     chmod 0600 "$stage/config.yaml"
 }
@@ -802,7 +864,7 @@ upgrade_lane() {
         --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" ${kernel_views[@]+"${kernel_views[@]}"} \
         --policy-applied --config-generation-above "$generation_floor"
     sandbox_files_present
-    launcher_offers_only_sandbox
+    launcher_offers_only_sandbox "${admin_connectors[@]}"
     if [ "$config_version" = 8 ]; then
         [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
         [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"

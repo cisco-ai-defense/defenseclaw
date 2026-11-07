@@ -157,11 +157,14 @@ func TestManagedOwnStatusReportsConfiguredConnectorProof(t *testing.T) {
 
 	// Per-user connectors use the guardian's current account target. Strict
 	// machine policy also requires the same caller's enrollment; a different
-	// account's target cannot make this caller appear protected.
+	// account's target cannot make this caller appear protected. The target
+	// carries a SID because the guardian ledger keys Windows rows by SID
+	// (managedGuardianTargetKey) and rejects a row without one; the caller is
+	// still matched by UID and user name.
 	ownStatusGuardianAuthorization = func(string) (*managedGuardianAuthorization, string) {
 		return &managedGuardianAuthorization{
 			TargetCount: 1, SuccessCount: 1,
-			ProtectedTargets: []managedGuardianAuthorizationTarget{{User: "alice", UID: 5001, Connector: "hermes", OK: true}},
+			ProtectedTargets: []managedGuardianAuthorizationTarget{{User: "alice", UID: 5001, SID: "S-1-5-21-1-2-3-5001", Connector: "hermes", OK: true}},
 		}, ""
 	}
 	cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledDeny
