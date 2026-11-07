@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
+	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // perUserConnectedPeerPID is the one process of this account holding the
 // accepted end of the connected tuple.
 func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := proofclock.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	owners, err := darwinSocketOwnerPIDs(ctx, server, client, darwinTCPEstablished)
 	if err != nil || len(owners) != 1 {

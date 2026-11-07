@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // answerWatchdogLogWait bounds the hook-failure log line the watchdog writes
@@ -664,15 +666,15 @@ func (w *answerWatchdog) restartWindowProven() (string, bool) {
 func provenWithin(proof func() restartProofResult, wait time.Duration) restartProofResult {
 	proven := make(chan restartProofResult, 1)
 	go func() { proven <- proof() }()
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	expired, stop := proofclock.NewTimer(wait)
+	defer stop()
 	select {
 	case ok := <-proven:
 		if !ok.ok && ok.reason == "" {
 			ok.reason = "proof_rejected"
 		}
 		return ok
-	case <-timer.C:
+	case <-expired:
 		return restartProofResult{reason: "proof_timeout"}
 	}
 }

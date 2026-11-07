@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 const lateLockPeerHelperEnv = "DC_TEST_LATE_LOCK_PEER_HELPER"
@@ -49,7 +51,7 @@ func TestLateLockPeerHelper(t *testing.T) {
 // the read deferred to the proof (c68e763cc9) the exited holder was no
 // longer named and the restart went unproven.
 func TestRestartProofNamesThePeerReadAtConnect(t *testing.T) {
-	unhurriedRestartProof(t)
+	clock := proofclocktest.Install(t)
 	reservation, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -80,12 +82,9 @@ func TestRestartProofNamesThePeerReadAtConnect(t *testing.T) {
 	}
 	record := NewPerUserPeerRecord()
 	record.capture(client.LocalAddr(), client.RemoteAddr())
-	// The read runs in the background from capture; the call goes on.
-	select {
-	case <-record.done:
-	case <-time.After(3 * time.Second):
-		t.Fatal("the peer read did not finish while the connection was open")
-	}
+	// The read runs in the background from capture; the call goes on. It ends
+	// on its own result: a stuck read ends the test at the go test timeout.
+	<-record.done
 	if got, ok := record.wait(time.Second); !ok || got.pid != cmd.Process.Pid {
 		t.Fatalf("recorded peer = %+v %v, want the helper %d", got, ok, cmd.Process.Pid)
 	}
@@ -98,4 +97,5 @@ func TestRestartProofNamesThePeerReadAtConnect(t *testing.T) {
 	if !PerUserGatewayRestartProvenDuringCall(dir, record, false) {
 		t.Fatal("a held start lock and an exited connected gateway gave no restart proof")
 	}
+	requireRestartProofBudgets(t, clock)
 }
