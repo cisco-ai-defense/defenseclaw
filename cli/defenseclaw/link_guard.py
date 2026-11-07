@@ -54,7 +54,7 @@ def is_reparse(path: str | os.PathLike[str]) -> bool:
     isjunction = getattr(os.path, "isjunction", None)
     if isjunction and isjunction(path):
         return True
-    with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError, ValueError):
         attributes = getattr(os.lstat(path), "st_file_attributes", 0)
         return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
     return False
@@ -133,6 +133,10 @@ def _drive_kind(drive: str) -> tuple[str, str]:
             size = ctypes.c_ulong(len(remote))
             if ctypes.windll.mpr.WNetGetConnectionW(drive, remote, ctypes.byref(size)) == 0:  # type: ignore[attr-defined]
                 return ("network", remote.value)
+            if target.startswith("\\??\\"):
+                # A raw \??\UNC\ target that the network provider does not know is a DefineDosDevice
+                # substitution, not a mapped drive.
+                return ("subst", "")
             return ("network", "")
         if target.startswith("\\??\\"):
             return ("subst", "")
@@ -143,6 +147,20 @@ def _key(path: str) -> str:
     return os.path.normcase(path).rstrip("\\/")
 
 
+_UNKNOWN = "its real location cannot be determined"
+
+
+def _exists(path: str) -> bool:
+    """Whether *path* itself is there (never followed). A folder that cannot be read is still there."""
+    try:
+        os.lstat(path)
+    except PermissionError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _resolution(path: str, *, include_self: bool = True) -> tuple[str, str]:
     """(real path, what the path goes through) when *path* is not where it is written; ("", "") otherwise.
 
@@ -150,14 +168,24 @@ def _resolution(path: str, *, include_self: bool = True) -> tuple[str, str]:
     short name of a part that does not exist, while ``realpath`` expands the
     existing part, so the missing tail (the same on both sides) is left out.
     A drive mapped to a share is the same place as its UNC root; a subst drive is not.
+    When the real path cannot be determined at all (an error from the system), the
+    answer is "refuse": the path as written and ``its real location cannot be
+    determined (<error class>)``.
     """
     if not _windows():
         return ("", "")
+    try:
+        return _resolve(path, include_self)
+    except Exception as exc:  # noqa: BLE001 - fail closed: a path that cannot be placed is not safe to remove
+        return (path, f"{_UNKNOWN} ({type(exc).__name__})")
+
+
+def _resolve(path: str, include_self: bool) -> tuple[str, str]:
     written = os.path.abspath(path)
     if not include_self:
         written = os.path.dirname(written)
     existing, tail = written, ""
-    while not os.path.lexists(existing):
+    while not _exists(existing):
         parent, name = os.path.split(existing)
         if parent == existing or not name:
             break
@@ -219,11 +247,21 @@ def link_problem(path: str, *, include_self: bool = True, setup: bool = False) -
     check that the real path is the path written refuses what the component look
     cannot name (see resolves_elsewhere).
     """
-    links = links_on_path(path, include_self=include_self)
+    try:
+        links = links_on_path(path, include_self=include_self)
+    except (OSError, ValueError) as exc:
+        links, real, what = [], path, f"{_UNKNOWN} ({type(exc).__name__})"
+    else:
+        real, what = _resolution(path, include_self=include_self) if not links else ("", "")
     if not links:
-        real, what = _resolution(path, include_self=include_self)
         if not real:
             return None
+        if what.startswith(_UNKNOWN):
+            return Problem(
+                f"{path} cannot be checked: {what}",
+                f"DefenseClaw does not remove anything it cannot place. Ask an administrator to check {path}, "
+                "then run the command again.",
+            )
         if what.endswith("(subst)"):
             drive = os.path.splitdrive(os.path.abspath(path))[0]
             return Problem(
@@ -257,8 +295,12 @@ def dangling_link_problem(path: str, *, above: bool = True) -> Problem | None:
     target cannot be read for another reason (access denied, an offline file) is
     not reported. *above* False looks at *path* itself only.
     """
-    here = os.path.normcase(os.path.abspath(path))
-    for link, kind in links_on_path(path):
+    try:
+        here = os.path.normcase(os.path.abspath(path))
+        links = links_on_path(path)
+    except (OSError, ValueError):
+        return None  # link_problem is the gate: it names a path that cannot be placed
+    for link, kind in links:
         if not above and os.path.normcase(os.path.abspath(link)) != here:
             continue
         try:
@@ -277,6 +319,6 @@ def dangling_link_problem(path: str, *, above: bool = True) -> Problem | None:
             else:
                 step = f"{lost}. Ask an administrator to check {link}, then run the command again."
             return Problem(f"{link} is a {kind} whose target cannot be found", step)
-        except OSError:
+        except (OSError, ValueError):
             continue
     return None
