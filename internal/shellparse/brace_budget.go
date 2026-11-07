@@ -187,7 +187,7 @@ func braceRange(word string, open int) (float64, int, bool) {
 		}
 		return span/step + 1, close + 1, true
 	}
-	if len(parts[0]) == 1 && len(parts[1]) == 1 {
+	if asciiLetter(parts[0]) && asciiLetter(parts[1]) {
 		span := float64(parts[1][0]) - float64(parts[0][0])
 		if span < 0 {
 			span = -span
@@ -195,6 +195,12 @@ func braceRange(word string, open int) (float64, int, bool) {
 		return span/step + 1, close + 1, true
 	}
 	return 0, 0, false
+}
+
+// asciiLetter reports whether s is one ASCII letter, the only single-character
+// end of a range the expander reads. A mixed range such as {a..1} stays text.
+func asciiLetter(s string) bool {
+	return len(s) == 1 && (s[0] >= 'a' && s[0] <= 'z' || s[0] >= 'A' && s[0] <= 'Z')
 }
 
 // splitDots splits a range body at "..".

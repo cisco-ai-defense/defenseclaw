@@ -18,8 +18,8 @@ import (
 
 // gap0625HermesRun puts the command build returns into the Hermes config next
 // to the user's own hook, then runs VerifyClean and Teardown. It returns the
-// VerifyClean error, the commands left, the entry and the user's hook.
-func gap0625HermesRun(t *testing.T, build func(home, hooks string) string) (error, []string, string, string) {
+// commands left, the entry, the user's hook and the VerifyClean error.
+func gap0625HermesRun(t *testing.T, build func(home, hooks string) string) ([]string, string, string, error) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("needs POSIX links and file names")
@@ -35,7 +35,7 @@ func gap0625HermesRun(t *testing.T, build func(home, hooks string) string) (erro
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
-	return verifyErr, gap0625PreToolCommands(t, configPath), entry, userHook
+	return gap0625PreToolCommands(t, configPath), entry, userHook, verifyErr
 }
 
 func gap0625WriteExecutable(t *testing.T, name string) string {
@@ -84,7 +84,7 @@ func gap0625ExpectOrdinary(t *testing.T, verifyErr error, commands []string, ent
 // the link. The same command shape beside an ordinary directory stays.
 func TestGAP0625PathScanParentStepAfterLink(t *testing.T) {
 	t.Run("protected through outside link", func(t *testing.T) {
-		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 			if err := os.MkdirAll(filepath.Join(hooks, "sub"), 0o700); err != nil {
 				t.Fatal(err)
@@ -101,7 +101,7 @@ func TestGAP0625PathScanParentStepAfterLink(t *testing.T) {
 		gap0625ExpectProtected(t, verifyErr, commands, userHook)
 	})
 	t.Run("protected through two links", func(t *testing.T) {
-		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 			if err := os.MkdirAll(filepath.Join(hooks, "a", "b"), 0o700); err != nil {
 				t.Fatal(err)
@@ -113,7 +113,7 @@ func TestGAP0625PathScanParentStepAfterLink(t *testing.T) {
 		gap0625ExpectProtected(t, verifyErr, commands, userHook)
 	})
 	t.Run("ordinary beside outside link", func(t *testing.T) {
-		verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			gap0625WriteExecutable(t, filepath.Join(home, "tools", "owned-file"))
 			if err := os.MkdirAll(filepath.Join(home, "tools", "sub"), 0o700); err != nil {
 				t.Fatal(err)
@@ -133,14 +133,14 @@ func TestGAP0625PathScanLongPunctuatedLink(t *testing.T) {
 		for _, count := range []int{31, 33, 100, 120} {
 			name := strings.Repeat(form.unit, count) + "owned"
 			t.Run(fmt.Sprintf("protected %s %d", form.name, count), func(t *testing.T) {
-				verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 					owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 					return gap0625Link(t, owned, filepath.Join(home, name)) + " --event pre_tool_call"
 				})
 				gap0625ExpectProtected(t, verifyErr, commands, userHook)
 			})
 			t.Run(fmt.Sprintf("ordinary %s %d", form.name, count), func(t *testing.T) {
-				verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 					tool := gap0625WriteExecutable(t, filepath.Join(home, "tools", "tool"))
 					return gap0625Link(t, tool, filepath.Join(home, name)) + " --event pre_tool_call"
 				})
@@ -156,7 +156,7 @@ func TestGAP0625PathScanLongPunctuatedLink(t *testing.T) {
 func TestGAP0625PathScanOrdinaryPathWithListPunctuation(t *testing.T) {
 	for _, separator := range []string{",", ":", "="} {
 		t.Run("existing "+separator, func(t *testing.T) {
-			verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 				return gap0625WriteExecutable(t, filepath.Join(home, "ordinary"+separator+hooks, "user-hook.sh"))
 			})
 			gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
@@ -164,13 +164,13 @@ func TestGAP0625PathScanOrdinaryPathWithListPunctuation(t *testing.T) {
 	}
 	for _, separator := range []string{",", ":"} {
 		t.Run("missing "+separator, func(t *testing.T) {
-			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 				return filepath.Join(home, "ordinary"+separator+hooks, "user-hook.sh")
 			})
 			gap0625ExpectProtected(t, verifyErr, commands, userHook)
 		})
 		t.Run("list "+separator, func(t *testing.T) {
-			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 				tool := gap0625WriteExecutable(t, filepath.Join(home, "tools", "tool"))
 				return tool + separator + filepath.Join(hooks, "hookX")
 			})
@@ -178,25 +178,25 @@ func TestGAP0625PathScanOrdinaryPathWithListPunctuation(t *testing.T) {
 		})
 	}
 	t.Run("quoted existing path with space", func(t *testing.T) {
-		verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			return shellWord(gap0625WriteExecutable(t, filepath.Join(home, "ordinary ", hooks, "user-hook.sh")))
 		})
 		gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
 	})
 	t.Run("quoted command line", func(t *testing.T) {
-		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			return "sh -c " + shellWord("/bin/true "+filepath.Join(hooks, "hookX"))
 		})
 		gap0625ExpectProtected(t, verifyErr, commands, userHook)
 	})
 	t.Run("quoted missing path with space", func(t *testing.T) {
-		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			return shellWord(filepath.Join(home, "ordinary ", hooks, "user-hook.sh"))
 		})
 		gap0625ExpectProtected(t, verifyErr, commands, userHook)
 	})
 	t.Run("unquoted space", func(t *testing.T) {
-		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			return gap0625WriteExecutable(t, filepath.Join(home, "ordinary ", hooks, "user-hook.sh"))
 		})
 		gap0625ExpectProtected(t, verifyErr, commands, userHook)
@@ -208,7 +208,7 @@ func TestGAP0625PathScanOrdinaryPathWithListPunctuation(t *testing.T) {
 // semicolon. Only a quoted program word is one path.
 func TestGAP0625PathScanQuotedShellProgram(t *testing.T) {
 	t.Run("sh -c program that is also a file name", func(t *testing.T) {
-		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 			program := gap0625WriteExecutable(t, filepath.Join(home, "ordinary; "+owned))
 			return "sh -c " + shellWord(program)
@@ -216,7 +216,7 @@ func TestGAP0625PathScanQuotedShellProgram(t *testing.T) {
 		gap0625ExpectProtected(t, verifyErr, commands, userHook)
 	})
 	t.Run("quoted argument that is also a file name", func(t *testing.T) {
-		verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 			argument := gap0625WriteExecutable(t, filepath.Join(home, "ordinary; "+owned))
 			tool := gap0625WriteExecutable(t, filepath.Join(home, "tools", "tool"))
@@ -225,14 +225,14 @@ func TestGAP0625PathScanQuotedShellProgram(t *testing.T) {
 		gap0625ExpectProtected(t, verifyErr, commands, userHook)
 	})
 	t.Run("quoted program that is also a file name", func(t *testing.T) {
-		verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 			return shellWord(gap0625WriteExecutable(t, filepath.Join(home, "ordinary; "+owned))) + " --event pre_tool_call"
 		})
 		gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
 	})
 	t.Run("sh -c ordinary program", func(t *testing.T) {
-		verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+		commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 			return "sh -c " + shellWord(gap0625WriteExecutable(t, filepath.Join(home, "ordinary ", "tool")))
 		})
 		gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
@@ -252,19 +252,19 @@ func TestGAP0625PathScanLongPathList(t *testing.T) {
 			return strings.Join(paths, ",")
 		}
 		t.Run(fmt.Sprintf("ordinary %d", count), func(t *testing.T) {
-			verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 				return gap0625WriteExecutable(t, filepath.Join(home, "tools", "user-tool")) + " --paths=" + list(home)
 			})
 			gap0625ExpectOrdinary(t, verifyErr, commands, entry, userHook)
 		})
 		t.Run(fmt.Sprintf("managed at the end %d", count), func(t *testing.T) {
-			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 				return gap0625WriteExecutable(t, filepath.Join(home, "tools", "user-tool")) + " --paths=" + list(home) + "," + filepath.Join(hooks, "hookX")
 			})
 			gap0625ExpectProtected(t, verifyErr, commands, userHook)
 		})
 		t.Run(fmt.Sprintf("link at the end %d", count), func(t *testing.T) {
-			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 				owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 				link := gap0625Link(t, owned, filepath.Join(home, "outside", "link"))
 				return gap0625WriteExecutable(t, filepath.Join(home, "tools", "user-tool")) + " --paths=" + list(home) + "," + link
@@ -272,7 +272,7 @@ func TestGAP0625PathScanLongPathList(t *testing.T) {
 			gap0625ExpectProtected(t, verifyErr, commands, userHook)
 		})
 		t.Run(fmt.Sprintf("link then missing file %d", count), func(t *testing.T) {
-			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 				gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 				link := gap0625Link(t, hooks, filepath.Join(home, "outside", "dirlink"))
 				return gap0625WriteExecutable(t, filepath.Join(home, "tools", "user-tool")) + " --paths=" + list(home) + "," + link + "/gone/file"
@@ -329,7 +329,7 @@ func TestGAP0625PathScanProgramWordTokens(t *testing.T) {
 			for _, shape := range shapes {
 				name := fmt.Sprintf("%s|%s|%s", strings.TrimSpace(prefix), quoting.name, shape.name)
 				t.Run(name, func(t *testing.T) {
-					verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+					commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 						owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 						program := gap0625WriteExecutable(t, shape.file(home, owned))
 						return prefix + quoting.word(program) + " --event pre_tool_call"
@@ -351,7 +351,7 @@ func TestGAP0625PathScanProgramWordTokens(t *testing.T) {
 func TestGAP0625PathScanProgramWordUnknownPrefix(t *testing.T) {
 	for _, prefix := range []string{"env -S ", "sh -c ", "sudo ", "command -v ", "env -u "} {
 		t.Run(strings.TrimSpace(prefix), func(t *testing.T) {
-			verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+			commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 				owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 				program := gap0625WriteExecutable(t, filepath.Join(home, "ordinary; "+owned))
 				return prefix + shellWord(program) + " --event pre_tool_call"
@@ -438,7 +438,7 @@ func TestGAP0625PathScanProgramWordEscapesAndAdjacentParts(t *testing.T) {
 	for _, prefix := range prefixes {
 		for _, tc := range cases {
 			t.Run(strings.TrimSpace(prefix)+"|"+tc.name, func(t *testing.T) {
-				verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 					owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 					program := gap0625WriteExecutable(t, tc.file(home, owned))
 					return prefix + tc.word(program) + " --event pre_tool_call"
@@ -465,7 +465,7 @@ func TestGAP0625PathScanAnsiCQuotedManagedHook(t *testing.T) {
 	for _, prefix := range []string{"", "env ", "command "} {
 		for name, word := range words {
 			t.Run(strings.TrimSpace(prefix)+"|"+name, func(t *testing.T) {
-				verifyErr, commands, _, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				commands, _, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 					owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned-file"))
 					return prefix + word(owned) + " --event pre_tool_call"
 				})
@@ -512,7 +512,7 @@ func TestGAP0625PathScanApostropheNamedProgram(t *testing.T) {
 			{"ordinary file quoted", func(home, owned string) string { return filepath.Join(home, "it's; "+owned) }, quoted, false},
 		} {
 			t.Run(strings.TrimSpace(prefix)+"|"+tc.name, func(t *testing.T) {
-				verifyErr, commands, entry, userHook := gap0625HermesRun(t, func(home, hooks string) string {
+				commands, entry, userHook, verifyErr := gap0625HermesRun(t, func(home, hooks string) string {
 					owned := gap0625WriteExecutable(t, filepath.Join(hooks, "owned'file"))
 					program := tc.program(home, owned)
 					if strings.Contains(tc.name, "link") {
@@ -564,7 +564,17 @@ func TestGAP0625LiteralWordTable(t *testing.T) {
 		{`/a/{1..}`, "/a/{1..}", true},
 		{`/a/{..2}`, "/a/{..2}", true},
 		{`/a/{1..2..x}`, "/a/{1..2..x}", true},
-		{`/a/{1..2..3..4}`, "/a/{1..2..3..4}", true},
+		{`/a/{1..2..3..4}`, "", false}, // Bash keeps it as text; the expander reads three parts, so it is unknown
+		{`/a/{1..a}`, "/a/{1..a}", true},
+		{`/a/{a..1}`, "/a/{a..1}", true},
+		{`/a/{1..a..2}`, "/a/{1..a..2}", true},
+		{`/a/{1..1}`, "/a/1", true},
+		{`/a/{A..z}`, "", false},
+		{`$'%d'`, "%d", true},
+		{`'$HOME/x'`, "$HOME/x", true},
+		{`$'$HOME/x'`, "$HOME/x", true},
+		{`'~/x'`, "~/x", true},
+		{`"~/x"`, "~/x", true},
 		{`/a/{a..c}`, "", false},
 		{`/a/{-1..9..2}`, "", false},
 		{`/a/{1..3..-2}`, "", false},
