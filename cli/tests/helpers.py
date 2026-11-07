@@ -21,6 +21,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -29,6 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
 from click.testing import CliRunner
 from defenseclaw.agent_selection import SELECTION_LIFETIME, SetupAgentSelection
 from defenseclaw.config import (
@@ -46,6 +49,22 @@ from defenseclaw.context import AppContext
 from defenseclaw.db import Store
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.models import Event, ScanResult
+
+# The PowerShell the tests launch, found once. None where it is not installed.
+POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
+
+
+def run_powershell(arguments, **kwargs) -> subprocess.CompletedProcess:
+    """The one place a test starts PowerShell.
+
+    A host without PowerShell skips the test here instead of failing it with a
+    TypeError from launching None. Tests pass the arguments after the
+    interpreter; test_powershell_launch_hygiene.py keeps every other launch out
+    of the test files.
+    """
+    if POWERSHELL is None:
+        pytest.skip("PowerShell is not installed")
+    return subprocess.run([POWERSHELL, *arguments], **kwargs)
 
 
 def record_test_setup_agent_selections(data_dir, connectors):
