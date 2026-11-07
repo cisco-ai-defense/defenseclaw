@@ -114,11 +114,17 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 	}
 	restoresScript := mode == "hang-after-write" || mode == "exit-after-write" || mode == "fail-after-write"
+	// A partial install puts the script back, then stops: the target's
+	// configuration stays broken (GAP-0754).
+	partialInstall := mode == "exit-after-partial-write" || mode == "fail-after-partial-write"
 	enterpriseHookWorkerInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
 		if mode == "fail" {
 			return enterprisehooks.InstallResult{}, errors.New("install refused")
 		}
-		if restoresScript {
+		if mode == "exit-before-write" {
+			os.Exit(17) // the install ends before it writes anything
+		}
+		if restoresScript || partialInstall {
 			// The install puts the Hermes script back, then does not return
 			// normally (GAP-0754): it outlives the worker, exits abruptly or
 			// fails after it published.
@@ -130,10 +136,12 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 				return enterprisehooks.InstallResult{}, err
 			}
 			switch mode {
-			case "exit-after-write":
+			case "exit-after-write", "exit-after-partial-write":
 				os.Exit(17)
 			case "fail-after-write":
 				return enterprisehooks.InstallResult{}, errors.New("install failed after it published")
+			case "fail-after-partial-write":
+				return enterprisehooks.InstallResult{}, errors.New("install failed after it wrote the script")
 			}
 			time.Sleep(time.Minute)
 		}
@@ -172,7 +180,7 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			}
 			return result(opts), nil
 		}
-		if mode == "drift" || mode == "fail" || mode == "slow-repair" || (mode == "slow-second" && opts.ConnectorName == "hermes") {
+		if mode == "drift" || mode == "fail" || mode == "slow-repair" || partialInstall || mode == "exit-before-write" || (mode == "slow-second" && opts.ConnectorName == "hermes") {
 			return enterprisehooks.InstallResult{}, errors.New("hook config drifted")
 		}
 		return result(opts), nil

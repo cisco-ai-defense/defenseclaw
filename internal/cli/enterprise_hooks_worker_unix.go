@@ -1709,17 +1709,21 @@ func runEnterpriseHookWorker(
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
 	}
+	restoreFiles := snapshotEnterpriseHookWorkerRestoreFiles(request)
 	abandoned, runErr := runEnterpriseHookWorkerProcess(ctx, cmd, account.UID)
 	stopFence()
 	// A worker that ends without its answer still tells what it put back
 	// when the parent asked for progress (GAP-0754): the targets it repaired
-	// come back with the error, and the caller accounts them.
+	// come back with the error, and the caller accounts them. A target whose
+	// repair began and did not end is failed, with the restore its files
+	// show (withRestores), never healthy.
 	withoutAnswer := func(err error) (enterpriseHookWorkerResponse, error) {
 		if !request.Progress {
 			return enterpriseHookWorkerResponse{}, err
 		}
+		output := parseEnterpriseHookWorkerOutput(stdout.snapshot())
 		return enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion,
-			Targets: parseEnterpriseHookWorkerOutput(stdout.snapshot()).repaired}, err
+			Targets: restoreFiles.withRestores(output.repaired, output.restoring, err)}, err
 	}
 	if abandoned {
 		return withoutAnswer(fmt.Errorf("worker for uid %d timed out: %w: it was killed but did not exit (a file system call in the account's home may be stuck)", account.UID, ctx.Err()))
@@ -1742,6 +1746,9 @@ func runEnterpriseHookWorker(
 	if response.Version != enterpriseHookWorkerProtocolVersion {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d speaks protocol %d", account.UID, response.Version)
 	}
+	// A target whose install failed after it wrote part of its files is
+	// still failed, and the files it put back are a restore (GAP-0754).
+	response.Targets = restoreFiles.withRestores(response.Targets, output.restoring, nil)
 	if response.Error != "" {
 		return response, fmt.Errorf("worker for uid %d: %s", account.UID, response.Error)
 	}

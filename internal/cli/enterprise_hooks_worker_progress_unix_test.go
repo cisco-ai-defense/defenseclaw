@@ -7,7 +7,10 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -20,8 +23,8 @@ func TestParseEnterpriseHookWorkerOutputReadsProgressThenAnswer(t *testing.T) {
 	writer.end(enterpriseHookWorkerTargetResult{Index: 4, OK: true, Repaired: true})
 	writer.begin(enterpriseHookWorkerTarget{Index: 5}, true)
 	got := parseEnterpriseHookWorkerOutput(out.Bytes())
-	if got.answered || got.repairing != 1 || len(got.repaired) != 2 || got.repaired[0].Index != 4 || got.repaired[1].Index != 5 {
-		t.Fatalf("output = %+v, want one repair under way and targets 4 and 5 kept", got)
+	if got.answered || got.repairing != 1 || len(got.repaired) != 1 || got.repaired[0].Index != 4 || !got.restoring[5] {
+		t.Fatalf("output = %+v, want one repair under way and target 4 kept", got)
 	}
 	writer.end(enterpriseHookWorkerTargetResult{Index: 5, OK: true}) // verified, not repaired: nothing to keep
 	fmt.Fprintf(&out, `{"version":%d,"targets":[{"index":4,"ok":true,"repaired":true}]}`+"\n", enterpriseHookWorkerProtocolVersion)
@@ -39,14 +42,16 @@ func TestParseEnterpriseHookWorkerOutputIgnoresACutLine(t *testing.T) {
 	cut := out.Len()
 	writer.begin(enterpriseHookWorkerTarget{Index: 3}, true)
 	got := parseEnterpriseHookWorkerOutput(out.Bytes()[:out.Len()-3])
-	if got.repairing != 0 || len(got.repaired) != 1 || got.repaired[0].Index != 2 || got.err == nil {
+	if got.repairing != 0 || len(got.repaired) != 1 || got.repaired[0].Index != 2 || got.restoring[3] || got.err == nil {
 		t.Fatalf("output cut at %d = %+v, want the complete lines only", cut, got)
 	}
 }
 
-// A repair that began and has no end line is a restore, unless the install
-// only changes configuration or it ended without one.
-func TestParseEnterpriseHookWorkerOutputKeepsAnUnfinishedRestoreOnly(t *testing.T) {
+// A repair that began and has no end line is a target under repair, never a
+// healthy one: the parse keeps only what the worker ended, and names the
+// targets whose repair rewrites hook files (a configuration-only repair has
+// no restore to look for).
+func TestParseEnterpriseHookWorkerOutputNamesUnfinishedRestoresWithoutKeepingThem(t *testing.T) {
 	var out bytes.Buffer
 	writer := &enterpriseHookWorkerProgressWriter{out: &out}
 	writer.begin(enterpriseHookWorkerTarget{Index: 1}, false) // configuration only
@@ -54,8 +59,38 @@ func TestParseEnterpriseHookWorkerOutputKeepsAnUnfinishedRestoreOnly(t *testing.
 	writer.end(enterpriseHookWorkerTargetResult{Index: 2, Error: "failed"}) // ended without a restore
 	writer.begin(enterpriseHookWorkerTarget{Index: 3}, true)
 	got := parseEnterpriseHookWorkerOutput(out.Bytes())
-	if got.repairing != 2 || len(got.repaired) != 1 || got.repaired[0].Index != 3 || !got.repaired[0].Repaired || got.repaired[0].Result == nil {
-		t.Fatalf("output = %+v, want only target 3 kept", got)
+	if got.repairing != 2 || len(got.repaired) != 0 || got.restoring[1] || !got.restoring[2] || !got.restoring[3] {
+		t.Fatalf("output = %+v, want two repairs under way, none kept, restores named for 2 and 3", got)
+	}
+}
+
+// The restore evidence is the owned files: an unchanged file is no restore, a
+// changed one is, and a healthy answer keeps what its worker said.
+func TestRestoreFilesMarkOnlyTargetsWhoseFilesChanged(t *testing.T) {
+	dir := t.TempDir()
+	tampered, same, healthy := filepath.Join(dir, "a"), filepath.Join(dir, "b"), filepath.Join(dir, "c")
+	for _, path := range []string{tampered, same, healthy} {
+		if err := os.WriteFile(path, []byte("before"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := enterpriseHookWorkerRestoreFiles{
+		1: {tampered: enterpriseHookOwnedFileFingerprint(tampered)},
+		2: {same: enterpriseHookOwnedFileFingerprint(same)},
+		3: {healthy: enterpriseHookOwnedFileFingerprint(healthy)},
+	}
+	for _, path := range []string{tampered, healthy} {
+		if err := os.WriteFile(path, []byte("restored"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	restoring := map[int]bool{1: true, 2: true, 3: true}
+	got := files.withRestores([]enterpriseHookWorkerTargetResult{{Index: 2, Error: "failed"}, {Index: 3, OK: true}}, restoring, errors.New("worker ended"))
+	if len(got) != 3 ||
+		got[0].Index != 1 || !got[0].Repaired || got[0].OK || got[0].Error != "worker ended" ||
+		got[1].Index != 2 || got[1].Repaired || got[1].OK ||
+		got[2].Index != 3 || got[2].Repaired || !got[2].OK {
+		t.Fatalf("results = %+v, want 1 restored but failed, 2 untouched, 3 as the worker said", got)
 	}
 }
 
