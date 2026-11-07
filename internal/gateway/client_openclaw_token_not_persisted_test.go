@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,8 +48,8 @@ func rejectionClient(t *testing.T, home string) *Client {
 	return client
 }
 
-// OpenClaw without a persisted gateway.auth.token issues a new random token at
-// every start, so a token rejection cannot be fixed by re-reading
+// OpenClaw without a persisted gateway.auth.token takes its token from a source
+// DefenseClaw cannot read, so a token rejection cannot be fixed by re-reading
 // openclaw.json. The operator step must say so.
 func TestTokenRejectionWithoutPersistedOpenClawTokenNamesTheCause(t *testing.T) {
 	for name, body := range map[string]string{
@@ -57,6 +58,8 @@ func TestTokenRejectionWithoutPersistedOpenClawTokenNamesTheCause(t *testing.T) 
 		"null token":                 `{"gateway":{"auth":{"token":null}}}`,
 		"empty token":                `{"gateway":{"auth":{"token":""}}}`,
 		"json5 with comments, bare keys and trailing commas": "{ // OpenClaw accepts JSON5\n gateway: {auth: {mode: 'token',},},}\n",
+		"json5 hexadecimal port":                             "{gateway: {port: 0x4971, auth: {mode: 'token'}}}",
+		"json5 signed and unusual numbers elsewhere":         "{gateway: {auth: {mode: 'token'}}, limits: {a: +1, b: .5, c: Infinity, d: NaN, e: -0x10}}",
 	} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
@@ -247,5 +250,55 @@ func TestPersistedTokenAppearedWakesOnTheSameToken(t *testing.T) {
 	writeOpenClawJSON(t, home, `{gateway: {auth: {mode: 'token', token: 'same-token',},},}`)
 	if !client.persistedTokenAppeared() {
 		t.Fatal("the persisted token equal to the current one did not end the wait")
+	}
+}
+
+// The same unusual JSON5 around a persisted token must not hide it: the token
+// is adopted and the file-token step applies.
+func TestPersistedOpenClawTokenSurvivesUnrelatedJSON5(t *testing.T) {
+	for name, body := range map[string]string{
+		"hexadecimal port":      "{gateway: {port: 0x4971, auth: {mode: 'token', token: 'persisted-json5-token'}}}",
+		"signed and odd values": "{skills: {a: +1, b: .5, c: Infinity, d: NaN}, gateway: {auth: {token: 'persisted-json5-token'}}}",
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			writeOpenClawJSON(t, home, body)
+			token, ok, err := readOpenClawGatewayToken(home)
+			if err != nil || !ok || token != "persisted-json5-token" {
+				t.Fatalf("token=%q ok=%v err=%v, want the persisted token", token, ok, err)
+			}
+			client := rejectionClient(t, home)
+			if hint := client.handleConnectRejection(errors.New(tokenMismatchRejection)); hint == openClawTokenNotPersistedHint {
+				t.Errorf("a persisted token was diagnosed as missing: %q", hint)
+			}
+			if client.cfg.Token != "persisted-json5-token" {
+				t.Errorf("token = %q, want the persisted token adopted", client.cfg.Token)
+			}
+		})
+	}
+}
+
+// OpenClaw also loads its own .env file and service environment, which the
+// sidecar does not see. With no token in openclaw.json and none in the
+// sidecar's environment, the hint must not claim OpenClaw made a random
+// runtime token: its own .env may hold a stable one.
+func TestTokenRejectionWithoutPersistedTokenDoesNotAssumeARuntimeToken(t *testing.T) {
+	home := t.TempDir()
+	writeOpenClawJSON(t, home, `{"gateway":{"auth":{"mode":"token"}}}`)
+	envFile := filepath.Join(home, ".openclaw", ".env")
+	if err := os.WriteFile(envFile, []byte("OPENCLAW_GATEWAY_TOKEN=openclaw-private-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := rejectionClient(t, home)
+	hint := client.handleConnectRejection(errors.New(tokenMismatchRejection))
+	for _, claim := range []string{"generates a new runtime token", "random"} {
+		if strings.Contains(hint, claim) {
+			t.Errorf("hint asserts a cause it cannot prove (%q): %s", claim, hint)
+		}
+	}
+	for _, step := range []string{"OPENCLAW_GATEWAY_TOKEN", "gateway.auth.token", "defenseclaw setup openclaw"} {
+		if !strings.Contains(hint, step) {
+			t.Errorf("hint lacks the operator step %q: %s", step, hint)
+		}
 	}
 }
