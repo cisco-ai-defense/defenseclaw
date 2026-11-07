@@ -160,6 +160,10 @@ func withHermesHiddenTargets(tool string, views []HermesWriteView, args json.Raw
 		if slices.Contains(reviewed, key) {
 			continue
 		}
+		var text string
+		if json.Unmarshal(fields[key], &text) == nil && actionfacts.DescriptiveArgumentKey(key) {
+			continue
+		}
 		targets, overflow := actionfacts.PathShapedArgumentValues(fields[key])
 		possible = possible || overflow
 		for _, target := range targets {

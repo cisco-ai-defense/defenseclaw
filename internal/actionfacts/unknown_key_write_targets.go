@@ -179,6 +179,9 @@ func UnknownKeyTwins(input Input, facts Facts) ([]UnknownKeyTwin, bool) {
 		}
 	}
 	for _, key := range unknown {
+		if _, isString := object[key].(string); isString && DescriptiveArgumentKey(key) {
+			continue
+		}
 		collect(object[key])
 	}
 	if len(candidates) > maxUnknownKeyTargets {
@@ -382,9 +385,80 @@ func appendPathShapedStrings(out *[]string, value any, depth int, overflow *bool
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
+			if _, isString := value[key].(string); isString && DescriptiveArgumentKey(key) {
+				continue
+			}
 			appendPathShapedStrings(out, value[key], depth+1, overflow)
 		}
 	}
+}
+
+// descriptiveKeyWords are the words of an argument key that names prose
+// about the call: what it is for, a note or a comment. The harness reads
+// such a key as text, never as a place to write.
+var descriptiveKeyWords = map[string]bool{
+	"description": true, "desc": true, "descr": true, "note": true, "notes": true,
+	"detail": true, "details": true, "annotation": true, "annotations": true,
+	"comment": true, "comments": true, "context": true, "info": true, "information": true,
+	"reason": true, "rationale": true, "summary": true, "explanation": true, "title": true,
+	"label": true, "purpose": true, "message": true, "msg": true, "remark": true,
+	"remarks": true, "memo": true, "hint": true, "caption": true, "justification": true,
+	"intent": true, "doc": true, "docs": true, "documentation": true,
+}
+
+// targetKeyWords are the words that make a key a place a tool can write or
+// read, whatever else the key says: description_file or note_path is judged
+// as a target.
+var targetKeyWords = map[string]bool{
+	"path": true, "paths": true, "file": true, "files": true, "filename": true, "filepath": true,
+	"dir": true, "dirs": true, "directory": true, "folder": true, "target": true, "targets": true,
+	"dest": true, "destination": true, "destinations": true, "output": true, "out": true,
+	"to": true, "into": true, "location": true, "uri": true, "url": true, "root": true,
+	"cwd": true, "home": true, "source": true, "src": true, "from": true, "name": true,
+	"save": true, "write": true,
+}
+
+// DescriptiveArgumentKey reports an argument key whose words are prose about
+// the call (description, note, details, context, ...) and none of whose
+// words names a place (path, file, destination, ...). A string under such a
+// key is text: the value is not a target of the tool, whatever it spells
+// (rel-1-0-6:GAP-0729 review 9 M1). Any other unknown key keeps being
+// judged, and so does a descriptive key that holds an object or an array.
+func DescriptiveArgumentKey(key string) bool {
+	descriptive := false
+	for _, word := range argumentKeyWords(key) {
+		if targetKeyWords[word] {
+			return false
+		}
+		descriptive = descriptive || descriptiveKeyWords[word]
+	}
+	return descriptive
+}
+
+// argumentKeyWords splits a key into lower-case words at separators
+// and camel-case humps (fileDescription, extra_note, Annotation-text).
+func argumentKeyWords(key string) []string {
+	var words []string
+	start := 0
+	for i := 1; i <= len(key); i++ {
+		if i < len(key) {
+			prev, cur := key[i-1], key[i]
+			boundary := !isASCIIAlphanumeric(cur) || !isASCIIAlphanumeric(prev) ||
+				(prev >= 'a' && prev <= 'z' && cur >= 'A' && cur <= 'Z')
+			if !boundary {
+				continue
+			}
+		}
+		if word := strings.ToLower(strings.Trim(key[start:i], "_-. ")); word != "" {
+			words = append(words, word)
+		}
+		start = i
+	}
+	return words
+}
+
+func isASCIIAlphanumeric(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
 
 // pathShapedArgumentValue reports a string that can name a file: bounded,

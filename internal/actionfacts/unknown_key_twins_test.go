@@ -153,3 +153,42 @@ func TestUnknownKeyTwinsJoinTheHomeInTheConnectorDialect(t *testing.T) {
 		})
 	}
 }
+
+// A string under a key that is prose about the call is text, not a target;
+// a key that also names a place, a non-prose key and a prose key holding a
+// structure are judged as before (rel-1-0-6:GAP-0729 review 9 M1).
+func TestUnknownKeyTwinsSkipProseKeys(t *testing.T) {
+	const state = "/sandbox/.defenseclaw/config.yaml"
+	for key, want := range map[string]bool{
+		"description": false, "note": false, "details": false, "annotation": false,
+		"context": false, "information": false, "reason": false, "summary": false,
+		"extra_note": false, "taskDescription": false, "Comment": false,
+		"description_file": true, "notePath": true, "destination": true, "target": true,
+		"file": true, "output": true, "payload": true, "x": true,
+	} {
+		raw := fmt.Sprintf(`{"file_path":"/sandbox/work/notes.txt","content":"x",%q:%q}`, key, state)
+		twins, _ := UnknownKeyTwins(Input{Tool: "Write", Args: json.RawMessage(raw)}, Facts{})
+		got := false
+		for _, twin := range twins {
+			for _, p := range twin.Facts.Paths {
+				got = got || p.Value == state
+			}
+		}
+		if got != want {
+			t.Errorf("key %q: state path judged = %t, want %t", key, got, want)
+		}
+	}
+	nested := `{"file_path":"/sandbox/work/notes.txt","content":"x","description":["` + state + `"],"meta":{"note":"` + state + `","dest":"` + state + `"}}`
+	twins, _ := UnknownKeyTwins(Input{Tool: "Write", Args: json.RawMessage(nested)}, Facts{})
+	judged := 0
+	for _, twin := range twins {
+		for _, p := range twin.Facts.Paths {
+			if p.Value == state {
+				judged++
+			}
+		}
+	}
+	if judged == 0 {
+		t.Errorf("a prose key holding an array, or a place key beside a prose key, must still be judged")
+	}
+}
