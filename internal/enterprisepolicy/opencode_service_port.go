@@ -126,10 +126,9 @@ func SetOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult, e
 		return result, fmt.Errorf("opencode service port: %d is not a port", port)
 	}
 	path := OpenCodeServiceConfigPath(home)
-	// A port that already matches is not accepted through a path the writer
-	// would refuse unless the file it leads to is private to the account.
-	linked, err := checkOpenCodeServiceConfigFolders(home, path)
-	if err != nil {
+	// A port that already matches is not accepted through a path another
+	// account could replace, any more than a write is.
+	if err := checkOpenCodeServiceConfigFolders(home, path); err != nil {
 		return result, fmt.Errorf("opencode service port: %s: %w", path, err)
 	}
 	current, exists, regular, err := readUserFile(path, openCodeServiceConfigLimit)
@@ -150,7 +149,7 @@ func SetOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult, e
 			_ = json.Unmarshal(raw, &result.Previous)
 			// A matching file that another account could write is not
 			// accepted as it stands: it is rewritten as a private copy.
-			if result.Previous == port && !openCodeServiceFileShared(path, linked) {
+			if result.Previous == port && !openCodeServiceFileShared(path) {
 				result.Port = port
 				return result, nil
 			}
