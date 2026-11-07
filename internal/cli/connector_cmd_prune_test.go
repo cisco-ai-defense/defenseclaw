@@ -520,6 +520,35 @@ func TestConnectorPruneOrphansWithoutConfigStillGuessesNothing(t *testing.T) {
 		}
 		registered(t, path)
 	})
+	// A config.yaml link whose target is missing is a present config that does
+	// not load, not an absent one: even with an operator edit in the vendor
+	// file (kept by the exact-hash restore) no registration is removed.
+	t.Run("config.yaml is a dangling link", func(t *testing.T) {
+		path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+		defer withConnectorState(t, dataDir, "codex")()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		edited := bytes.Replace(data, []byte("\"operator\": \"keep\""), []byte("\"operator\": \"edited\""), 1)
+		if bytes.Equal(edited, data) {
+			t.Fatalf("operator field not found in %q", data)
+		}
+		if err := os.WriteFile(path, edited, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("temporarily-missing.yaml", filepath.Join(dataDir, "config.yaml")); err != nil {
+			t.Skipf("config symlink not available: %v", err)
+		}
+		cfg = nil
+		_, stderr, _ := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", saved)
+		if !strings.Contains(stderr, "config.yaml is not loaded; nothing was removed") {
+			t.Fatalf("stderr = %q", stderr)
+		}
+		if after, err := os.ReadFile(path); err != nil || !bytes.Equal(after, edited) {
+			t.Fatalf("a dangling config link caused cleanup: %q, %v", after, err)
+		}
+	})
 	t.Run("connector still named by the older install", func(t *testing.T) {
 		path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
 		defer withConnectorState(t, dataDir, "codex")()
