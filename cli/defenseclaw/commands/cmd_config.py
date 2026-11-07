@@ -1248,12 +1248,29 @@ def _connector_roster_check(parts_list: list[list]):
     """The final-file check for a set or unset that can change the process.
 
     One rule for every selection key (guardrail.connector, claw.mode, an entry
-    under guardrail.connectors, or a whole map): judge the written file, not
-    the key.
+    under guardrail.connectors, or a whole map) and for guardrail.enabled
+    turning on: judge the written file, not the key. The guardrail enable
+    commands pass the same check to ``Config.save``.
     """
-    if not any(_selects_connectors(parts) for parts in parts_list):
-        return None
-    return _check_guardrail_connector_roster
+    if any(_selects_connectors(parts) for parts in parts_list):
+        return check_guardrail_connector_roster
+    if any(parts == ["guardrail", "enabled"] for parts in parts_list):
+        return _check_roster_when_guardrail_on
+    return None
+
+
+def _check_roster_when_guardrail_on(path: str, candidate: bytes) -> None:
+    """Turning the guardrail on activates whatever roster the file already holds.
+
+    Judged only when the final file has it on, so switching it off or unsetting
+    it (default off) is never refused for a roster that was already there.
+    """
+    from defenseclaw import config_writer
+
+    document = config_writer._parse_config_document(candidate)
+    guardrail = document.get("guardrail") if isinstance(document, dict) else None
+    if isinstance(guardrail, dict) and guardrail.get("enabled") is True:
+        check_guardrail_connector_roster(path, candidate)
 
 
 def _file_selected_connector(document: object) -> str:
@@ -1281,7 +1298,7 @@ def _file_selected_connector(document: object) -> str:
     return mode
 
 
-def _check_guardrail_connector_roster(path: str, candidate: bytes) -> None:
+def check_guardrail_connector_roster(path: str, candidate: bytes) -> None:
     """Refuse a final file the gateway cannot boot with its proxy connector.
 
     A proxy connector (openclaw, zeptoclaw) needs its own proxy binding, so it
