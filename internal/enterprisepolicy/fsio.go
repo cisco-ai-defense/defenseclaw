@@ -150,7 +150,9 @@ func readPolicyFileWith(opts Options, path string, validate func(Options, string
 	if errors.As(err, &untrusted) {
 		return nil, false, err
 	}
-	if errors.Is(err, os.ErrNotExist) && (opts.goos() == "windows" || !seen) {
+	// A checked policy that disappears before open is an uncertain read,
+	// not evidence that no policy was installed.
+	if errors.Is(err, os.ErrNotExist) && !seen {
 		forgetPolicyFileRead(path)
 		if !opts.SkipTrustChecks {
 			if err := validateTrustedAncestors(opts, path); err != nil {
