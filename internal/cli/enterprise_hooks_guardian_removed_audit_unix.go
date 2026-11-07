@@ -51,20 +51,24 @@ func reportEnterpriseHookGuardianRemoved(ctx context.Context, socket string, rem
 		if err != nil {
 			continue
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		reportCtx, cancel := guardianAuditReportContext(ctx)
+		request, err := http.NewRequestWithContext(reportCtx, http.MethodPost,
 			"http://defenseclaw-hook"+enterpriseHookGuardianRemovedAuditPath, bytes.NewReader(body))
 		if err != nil {
+			cancel()
 			continue
 		}
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-DefenseClaw-Client", "hook-guardian")
 		response, err := client.Do(request)
 		if err != nil {
+			cancel()
 			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: report account removal for %s to audit: %v\n", row.Connector, err)
 			continue
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		_ = response.Body.Close()
+		cancel()
 		if response.StatusCode != http.StatusNoContent {
 			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] warn: report account removal for %s to audit: HTTP %d\n", row.Connector, response.StatusCode)
 		}
