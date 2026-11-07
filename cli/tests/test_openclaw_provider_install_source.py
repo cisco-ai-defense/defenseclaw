@@ -203,12 +203,21 @@ def test_install_records_that_name_the_registry_keep_the_identity(tmp_path, monk
         _resolved=_archive_address(VERSION), _from=PROVIDER + "@" + VERSION,
         _requested={
             "type": "version", "registry": True, "where": "/home/user/project",
-            "raw": PROVIDER + "@" + VERSION, "name": PROVIDER,
+            "raw": PROVIDER + "@" + VERSION, "name": PROVIDER, "scope": "@openclaw",
             "escapedName": "@openclaw%2famazon-bedrock-provider",
             "rawSpec": VERSION, "saveSpec": None, "fetchSpec": VERSION,
         },
     ))
     assert vendor_identity.inspect_official_provider_tree(str(root / PACKAGE_KEY)) is not None
+
+    # The scope names the package; another scope or an address in it is not the registry.
+    for label, scope in {"other-scope": "@other", "address": "file:../provider", "number": 7}.items():
+        root = tmp_path / "case" / ("scope-" + label)
+        shutil.copytree(project, root, symlinks=True)
+        _edit_manifest(root / PACKAGE_KEY, lambda m, scope=scope: m.update(
+            _requested={"type": "version", "scope": scope, "rawSpec": VERSION},
+        ))
+        assert vendor_identity.inspect_official_provider_tree(str(root / PACKAGE_KEY)) is None, label
 
 
 REGISTRY_RECORD = {"version": VERSION, "resolved": _archive_address(VERSION), "integrity": INTEGRITY}
@@ -510,3 +519,98 @@ def test_pinned_release_is_verified_without_the_registry(tmp_path, monkeypatch) 
     identity = vendor_identity.inspect_official_provider_tree(str(installed))
     assert identity is not None and not identity.unverified
     assert "VENDOR-REGISTRY-UNVERIFIED" not in _rules(installed, "default")
+
+
+PROTECTED_SOURCE = "file:/home/user/.ssh/provider.tgz"
+
+
+@requires_symlink_privilege
+def test_dependency_spec_in_a_v1_lock_that_asks_for_another_source_gives_no_identity(
+    tmp_path, monkeypatch,
+) -> None:
+    """A package that requires this one from a local source is resolved to the top-level copy."""
+
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    registry = {"version": VERSION, "resolved": _archive_address(VERSION)}
+
+    def v1_lock(requires, nested=None) -> None:
+        sibling = {"version": "1.0.0", "requires": {PROVIDER: requires}}
+        if nested is not None:
+            sibling["dependencies"] = {PROVIDER: nested}
+        _write(project / "package-lock.json", json.dumps({
+            "lockfileVersion": 1, "requires": True,
+            "dependencies": {PROVIDER: registry, "sibling": sibling},
+        }))
+
+    v1_lock(PROTECTED_SOURCE)
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is None
+    for profile in ("default", "permissive", "strict"):
+        assert "SRC-EXEC" in _high(installed, profile), profile
+
+    # The same package asking the registry keeps the identity.
+    for spec in (VERSION, "^2026.10.0", "latest"):
+        v1_lock(spec)
+        assert vendor_identity.inspect_official_provider_tree(str(installed)) is not None, spec
+        for profile in ("default", "permissive"):
+            assert _high(installed, profile) == set(), f"{spec} {profile}"
+
+    # A sibling with its own nested copy is served by that copy, not by this one.
+    v1_lock(PROTECTED_SOURCE, nested={"version": VERSION, "resolved": _archive_address(VERSION)})
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is not None
+
+
+@requires_symlink_privilege
+def test_dependency_spec_for_a_copy_the_lock_does_not_list_still_counts(tmp_path, monkeypatch) -> None:
+    """The installed path is a copy whether or not the lock has an entry for it."""
+
+    project, installed = _pinned_npm_install(tmp_path, monkeypatch)
+    for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        _write(project / "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+            "": {field: {PROVIDER: PROTECTED_SOURCE}},
+        }}))
+        assert vendor_identity.inspect_official_provider_tree(str(installed)) is None, field
+        for profile in ("default", "permissive", "strict"):
+            assert "SRC-EXEC" in _high(installed, profile), f"{field} {profile}"
+
+    # A package that asks the registry for it, with no entry for the copy.
+    _write(project / "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"dependencies": {PROVIDER: VERSION}},
+        "node_modules/sibling": {"version": "1.0.0", "dependencies": {PROVIDER: "^2026.10.0"}},
+    }}))
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is not None
+    for profile in ("default", "permissive"):
+        assert _high(installed, profile) == set(), profile
+
+    # A package with its own nested copy is served by that copy.
+    _write(project / "package-lock.json", json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"dependencies": {PROVIDER: VERSION, "sibling": "1.0.0"}},
+        "node_modules/sibling": {"version": "1.0.0", "dependencies": {PROVIDER: PROTECTED_SOURCE}},
+        "node_modules/sibling/node_modules/" + PROVIDER: {"version": VERSION, "resolved": PROTECTED_SOURCE},
+    }}))
+    assert vendor_identity.inspect_official_provider_tree(str(installed)) is not None
+
+
+@requires_symlink_privilege
+@pytest.mark.parametrize("read", sorted(PROTECTED_READS))
+def test_registry_outage_does_not_admit_edited_extensionless_entrypoint_that_names_a_protected_file(
+    tmp_path, monkeypatch, read,
+) -> None:
+    """The manifest declares the file that runs; the check reads it whatever its name."""
+
+    version = "2026.99.4"
+    _, target = _unpinned_npm_install(tmp_path, version, REGISTRY_ENTRY)
+    monkeypatch.setattr(vendor_identity, "_registry_get", _registry_outage(OSError("offline")))
+    _edit_manifest(target, lambda m: m.update(main="bin/runner"))
+    runner = target / "bin" / "runner"
+
+    # Benign twin: an ordinary launcher is admitted with the warning.
+    _write(runner, "module.exports = 1;\n")
+    assert vendor_identity.inspect_official_provider_tree(str(target)).unverified
+    for profile in ("default", "permissive"):
+        assert _high(target, profile) == set(), profile
+        assert "VENDOR-REGISTRY-UNVERIFIED" in _rules(target, profile), profile
+
+    _write(runner, PROTECTED_READS[read] + "\n")
+    for profile in ("default", "permissive", "strict"):
+        assert "CRED-CODEX-AUTH" in _high(target, profile), profile
+        assert "VENDOR-REGISTRY-UNVERIFIED" not in _rules(target, profile), profile
