@@ -229,8 +229,7 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 		// a folder whose SKILL.md is a hard link or a link to the source
 		// manifest, or the source itself, is selected whichever folder the
 		// source names.
-		if manifest := projectSkillEntryManifest(dir); manifest != nil &&
-			slices.ContainsFunc(identities, func(id os.FileInfo) bool { return os.SameFile(id, manifest) }) {
+		if projectSkillIdentityMatches(home, dir, identities) {
 			return []string{dir}
 		}
 		path := dir
@@ -257,22 +256,34 @@ func projectSkillSourceFolders(root, name, source, home, cwd string) []string {
 	return nil
 }
 
+// projectSkillIdentities holds the file identities a resolved source names.
+// any matches a project folder whose manifest reaches the file by a link or a
+// hard link. placed matches only a manifest that is a regular file placed in a
+// project folder the caller does not hold privately: a hard link to the file
+// in a refused root is that file, while a link from a project folder to a
+// caller private file is only a pointer to the user own selection.
+type projectSkillIdentities struct {
+	any, placed []os.FileInfo
+}
+
 // projectSkillSourceIdentities returns the file identities a resolved source
 // names: the source itself when it is a file, and the manifest of the nearest
 // skill folder holding it. A caller private skill is the user own selection,
-// so a project link to it claims nothing; any other owner, one outside the
-// profile or one another user can change, still counts. File identity is the
-// one comparison that holds for a link, a hard link and an alias alike, and
-// it tells those apart from a distinct copy with the same bytes.
-func projectSkillSourceIdentities(home, source string) []os.FileInfo {
+// so a project link to its manifest claims nothing; a regular project
+// manifest that is a hard link to a file inside it is still that file, as is
+// the source named directly. Any other owner, one outside the profile or one
+// another user can change, claims the whole skill. File identity is the one
+// comparison that holds for a link, a hard link and an alias alike, and it
+// tells those apart from a distinct copy with the same bytes.
+func projectSkillSourceIdentities(home, source string) projectSkillIdentities {
+	var ids projectSkillIdentities
 	info, err := os.Stat(source)
 	if err != nil {
-		return nil
+		return ids
 	}
-	var identities []os.FileInfo
 	dir := source
 	if info.Mode().IsRegular() {
-		identities = append(identities, info)
+		ids.any = append(ids.any, info)
 	}
 	if !info.IsDir() {
 		dir = filepath.Dir(source)
@@ -280,30 +291,44 @@ func projectSkillSourceIdentities(home, source string) []os.FileInfo {
 	for {
 		if manifest, err := os.Stat(filepath.Join(dir, "SKILL.md")); err == nil && manifest.Mode().IsRegular() {
 			if projectSkillPrivateOwner(home, dir) {
-				return nil
+				ids.placed, ids.any = ids.any, nil
+				return ids
 			}
-			return append(identities, manifest)
+			ids.any = append(ids.any, manifest)
+			return ids
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			return identities
+			return ids
 		}
 		dir = parent
 	}
 }
 
-// projectSkillEntryManifest returns the manifest file of a project skill
-// entry: the file the entry links to, or the SKILL.md in the folder it is or
-// links to. It is nil when there is none.
-func projectSkillEntryManifest(entry string) os.FileInfo {
-	info, err := os.Stat(entry)
-	if err == nil && info.IsDir() {
-		info, err = os.Stat(filepath.Join(entry, "SKILL.md"))
+// projectSkillIdentityMatches reports whether a project skill folder, or a
+// link to one, holds a SKILL.md that is one of the identities. An entry that
+// is not a folder is no skill folder, whatever it links to.
+func projectSkillIdentityMatches(home, entry string, ids projectSkillIdentities) bool {
+	dir, err := os.Stat(entry)
+	if err != nil || !dir.IsDir() {
+		return false
 	}
-	if err != nil || !info.Mode().IsRegular() {
-		return nil
+	manifest, err := os.Stat(filepath.Join(entry, "SKILL.md"))
+	if err != nil || !manifest.Mode().IsRegular() {
+		return false
 	}
-	return info
+	if slices.ContainsFunc(ids.any, func(id os.FileInfo) bool { return os.SameFile(id, manifest) }) {
+		return true
+	}
+	if len(ids.placed) == 0 || !slices.ContainsFunc(ids.placed, func(id os.FileInfo) bool { return os.SameFile(id, manifest) }) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(entry)
+	if err != nil || projectSkillPrivateFolder(home, resolved) {
+		return false
+	}
+	placed, err := os.Lstat(filepath.Join(resolved, "SKILL.md"))
+	return err == nil && placed.Mode().IsRegular()
 }
 
 // projectSkillSourceSelects reports whether a resolved source selects the
