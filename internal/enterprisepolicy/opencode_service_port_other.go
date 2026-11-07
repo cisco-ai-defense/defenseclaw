@@ -18,6 +18,9 @@ import (
 // openCodeMaxLinks bounds the links the path walk follows.
 const openCodeMaxLinks = 40
 
+// openCodeOwnerPrivateGroup is the private-group proof (tests replace it).
+var openCodeOwnerPrivateGroup = connector.OwnerPrivateGroup
+
 func writeOpenCodeServiceConfig(_ string, path string, data []byte) error {
 	return writePrivateUserFile(path, data)
 }
@@ -104,7 +107,7 @@ func openCodeFolderOpenToOthers(path string, info os.FileInfo) bool {
 		return false
 	}
 	perm := info.Mode().Perm()
-	return perm&0o002 != 0 || (perm&0o020 != 0 && !connector.OwnerPrivateGroup(path, info))
+	return perm&0o002 != 0 || (perm&0o020 != 0 && !openCodeOwnerPrivateGroup(path, info))
 }
 
 // openCodeServiceFileShared reports a service.json another account can write
