@@ -139,7 +139,7 @@ func parseDSCLHomeRecords(output []byte) ([]dsclHomeRecord, error) {
 	unclear := errors.New("unixidentity: unclear account record answer")
 	decoder := xml.NewDecoder(strings.NewReader(string(output)))
 	var root plistNode
-	if err := decoder.Decode(&root); err != nil || root.XMLName.Local != "plist" {
+	if !decodePlistRoot(decoder, &root) || root.XMLName.Local != "plist" {
 		return nil, unclear
 	}
 	for {
@@ -172,6 +172,34 @@ func parseDSCLHomeRecords(output []byte) ([]dsclHomeRecord, error) {
 		records = append(records, record)
 	}
 	return records, nil
+}
+
+// decodePlistRoot reads the root element into root. Before it only white
+// space, comments, the XML declaration and a doctype are allowed: any other
+// text or markup ahead of the document (a warning line from the directory
+// tool, say) means the answer is not one complete plist.
+func decodePlistRoot(decoder *xml.Decoder, root *plistNode) bool {
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		switch t := token.(type) {
+		case xml.StartElement:
+			return decoder.DecodeElement(root, &t) == nil
+		case xml.Comment, xml.Directive:
+		case xml.ProcInst:
+			if t.Target != "xml" {
+				return false
+			}
+		case xml.CharData:
+			if strings.TrimSpace(string(t)) != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
 }
 
 // dsclHomeRecordOf reads one <dict> record.

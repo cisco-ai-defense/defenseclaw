@@ -237,9 +237,11 @@ func (m *policyManager) copilotAccountScope(cfg *config.Config) (copilotHomeScop
 	// the record does not already name as live is scoped by its own name and
 	// uid, never by the deleted account, since enrollment may leave out the
 	// one and not the other. A read that does not answer, or whose answer is
-	// not a complete one, makes the home unclear: it is in neither list, so
-	// no hook file in it is called drift, and the caller reports it pending,
-	// since a home that may be in use is never called free.
+	// not a complete one, makes the home unclear, always, even where a
+	// recorded account is live there: that account stays judged by its own
+	// entry, and the caller reports the home pending, since a home that may
+	// have another holder is never called free. A home with no live account
+	// is in neither list, so no hook file in it is called drift.
 	var scoped, outOfScope, unclear []string
 	add := func(home string, out bool) {
 		if out {
@@ -260,12 +262,11 @@ func (m *policyManager) copilotAccountScope(cfg *config.Config) (copilotHomeScop
 		judged[entry.home] = true
 		holders, err := goneHomes.accountsAt(entry.home)
 		if err != nil {
-			// A home a recorded live account holds is already judged by that
-			// account. Any other home whose holders the directory did not
-			// clearly answer is unclear: neither free nor judged.
-			if !goneHomes.live[entry.home] {
-				unclear = append(unclear, env.P(entry.home))
-			}
+			// A home whose holders the directory did not clearly answer is
+			// unclear, even where a recorded account is live: that account
+			// is still judged by its own entry, but it does not prove the
+			// home has no other holder, so the home is reported pending.
+			unclear = append(unclear, env.P(entry.home))
 			continue
 		}
 		for _, holder := range holders {
@@ -349,11 +350,10 @@ type scopeEntry struct {
 
 // confirmedGoneHomes asks, once per account (name and uid), whether a fresh
 // directory read confirms it gone by the evidence the guardian retires a
-// target on (guardianAccountConfirmedGone), and tracks per home whether any
-// account recorded at it is live.
+// target on (guardianAccountConfirmedGone), and tracks per home the accounts
+// recorded at it that are live.
 type confirmedGoneHomes struct {
 	asked map[string]bool
-	live  map[string]bool
 	held  map[string]homeAccounts
 	// liveAt is the named accounts recorded live at each home (name:uid).
 	liveAt map[string]map[string]bool
@@ -366,14 +366,13 @@ type homeAccounts struct {
 }
 
 func newConfirmedGoneHomes() *confirmedGoneHomes {
-	return &confirmedGoneHomes{asked: map[string]bool{}, live: map[string]bool{}, held: map[string]homeAccounts{}, liveAt: map[string]map[string]bool{}}
+	return &confirmedGoneHomes{asked: map[string]bool{}, held: map[string]homeAccounts{}, liveAt: map[string]map[string]bool{}}
 }
 
 // note records one account recorded at home and returns whether it is
 // confirmed gone. An account with no name is never confirmed gone.
 func (g *confirmedGoneHomes) note(user string, uid int, home string) bool {
 	if user == "" {
-		g.live[home] = true
 		return false
 	}
 	key := user + ":" + strconv.Itoa(uid)
@@ -383,7 +382,6 @@ func (g *confirmedGoneHomes) note(user string, uid int, home string) bool {
 		g.asked[key] = gone
 	}
 	if !gone {
-		g.live[home] = true
 		if g.liveAt[home] == nil {
 			g.liveAt[home] = map[string]bool{}
 		}
