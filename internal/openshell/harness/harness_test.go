@@ -60,6 +60,17 @@ func shParses(t *testing.T, what, script string) {
 	}
 }
 
+// requirePOSIXShell skips a test that runs an image-build shell fragment.
+// The fragments run in the Linux sandbox image, never on the host, and a
+// Windows host has no /bin/sh: without this guard the process fails to start
+// and every case reads as a refusal.
+func requirePOSIXShell(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		t.Skip("/bin/sh is required")
+	}
+}
+
 func TestRegistry(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("OpenShell sandbox artifacts are not rendered on Windows hosts")
@@ -668,6 +679,7 @@ func TestProbeVersionPatterns(t *testing.T) {
 }
 
 func TestHarnessImageVersionChecksUsePinnedRelease(t *testing.T) {
+	requirePOSIXShell(t)
 	for _, tc := range []struct {
 		spec    *Spec
 		display string
