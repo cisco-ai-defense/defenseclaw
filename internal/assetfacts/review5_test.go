@@ -143,10 +143,10 @@ func containsRoot(roots []string, want string) bool {
 }
 
 // A relative COPILOT_SKILLS_DIRS entry is rooted at the folder the agent runs
-// in when that folder is the event folder or above it, and only there. An
-// agent folder anywhere else is still a root, first, and the event folder and
-// the outermost root follow it: a protected skill of the agent folder is never
-// left out.
+// in, and only there, whatever the event folder is (the same, below, above,
+// beside, unrelated or absent): a skill of any other folder is not loaded, so
+// it never decides the selection. Without the agent folder the roots are the
+// event folder and the outermost repository root.
 func TestLaunchWorkspacesPreferTheAgentFolder(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
@@ -162,10 +162,13 @@ func TestLaunchWorkspacesPreferTheAgentFolder(t *testing.T) {
 		"event folder":        {sub, sub, []string{sub}},
 		"intermediate folder": {sub, module, []string{module}},
 		"repository root":     {sub, root, []string{root}},
-		"unrelated folder":    {sub, unrelated, []string{unrelated, sub, root}},
-		"folder below":        {module, sub, []string{sub, module, root}},
+		"unrelated folder":    {sub, unrelated, []string{unrelated}},
+		"folder below":        {module, sub, []string{sub}},
+		"event folder absent": {"", module, []string{module}},
+		"relative event":      {"sub", module, []string{module}},
 		"relative":            {sub, "module", []string{sub, root}},
 		"unreported":          {sub, "", []string{sub, root}},
+		"nothing known":       {"", "", nil},
 	} {
 		if got := launchWorkspaces(t.TempDir(), tc.cwd, tc.launch); !slices.Equal(got, tc.want) {
 			t.Errorf("%s: launchWorkspaces = %v, want %v", name, got, tc.want)

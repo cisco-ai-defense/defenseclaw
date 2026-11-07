@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -95,12 +96,8 @@ func TestMostPluginCandidateOwnersOfOneToolNameAllow(t *testing.T) {
 		if i > 0 {
 			name += "_a"
 		}
-		var doc strings.Builder
-		for line := 0; line < 450; line++ {
-			fmt.Fprintf(&doc, "Section %d.%d: ordinary documentation of option %d of the notes tool.\n", i, line, line*7)
-		}
 		contents = append(contents, assetfacts.Content{Kind: assetfacts.ContentPlugin, Name: name,
-			Dir: filepath.Join(t.TempDir(), name), Files: []assetfacts.ContentFile{{Rel: "SKILL.md", Text: doc.String()}}})
+			Dir: filepath.Join(t.TempDir(), name), Files: []assetfacts.ContentFile{{Rel: "SKILL.md", Text: referenceTable(i, 56640)}}})
 	}
 	tool := "mcp__plugin_" + name + "_z__run"
 	req := claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: tool, MCPServerName: "plugin_" + name + "_z"}
@@ -114,4 +111,21 @@ func TestMostPluginCandidateOwnersOfOneToolNameAllow(t *testing.T) {
 	if action, reason := gap0699Claude(t, gap0699Config("claudecode"), req, assetfacts.Facts{Contents: contents}); action != "block" {
 		t.Errorf("harmful last candidate allowed: action=%q reason=%q", action, reason)
 	}
+}
+
+// referenceTable is an ordinary reference document of about size bytes whose
+// rows are random letters, so it hardly shrinks when deflated: the claim of
+// the most candidate owners one tool name can have must carry it whole.
+func referenceTable(owner, size int) string {
+	random := rand.New(rand.NewSource(int64(owner) + 1))
+	letters := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	var doc strings.Builder
+	for row := 0; doc.Len() < size-64; row++ {
+		line := make([]byte, 40)
+		for i := range line {
+			line[i] = letters[random.Intn(len(letters))]
+		}
+		fmt.Fprintf(&doc, "Row %d.%d: %s\n", owner, row, line)
+	}
+	return doc.String()
 }

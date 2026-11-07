@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -1542,6 +1543,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		Handler:     handler,
 		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
+		// A standalone hook sends the asset facts of its request in a header
+		// (assetfacts.Header) that can pass the net/http default of 1 MiB.
+		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,
 	}
 
 	// Bind with a short retry instead of a bare ListenAndServe. During

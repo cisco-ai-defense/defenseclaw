@@ -64,11 +64,11 @@ func TestMCPPinsTailCoversArgumentsPastTheFullDigests(t *testing.T) {
 			t.Fatalf("pins = %d count, %d digests, %d tail bytes", pins.ArgCount, len(pins.Args), len(tail))
 		}
 		for _, i := range []int{maxPinArgs, maxPinArgs + 1, maxPinArgs + maxTailPins - 1} {
-			if !bytes.Equal(pins.TailDigest(i-maxPinArgs), PinTailDigest(args[i])) {
+			if !bytes.Equal(TailDigestAt(tail, i-maxPinArgs), PinTailDigest(args[i])) {
 				t.Errorf("tail digest %d does not digest %q", i, args[i])
 			}
 		}
-		if pins.TailDigest(maxTailPins) != nil || pins.TailDigest(-1) != nil {
+		if TailDigestAt(tail, maxTailPins) != nil || TailDigestAt(tail, -1) != nil {
 			t.Error("a tail digest was returned past the ones the claim holds")
 		}
 	}

@@ -6,8 +6,10 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -250,20 +252,41 @@ func TestCopilotRelativeSkillRootFollowsTheAgentWorkingDirectory(t *testing.T) {
 			t.Errorf("protected skill of the intermediate launch folder omitted: %+v", got)
 		}
 	})
-	t.Run("an agent folder that is not above the event folder is read and the guessed roots stay", func(t *testing.T) {
+	t.Run("an agent folder that is not above the event folder is the only root", func(t *testing.T) {
 		workspace, _, sub := setup(t)
 		review5Write(t, filepath.Join(workspace, "relative-skills", "selected", "SKILL.md"), selectedAssetHarmful)
-		stubHookAgentWorkingDirectory(t, t.TempDir())
+		launch := t.TempDir()
+		stubHookAgentWorkingDirectory(t, launch)
+		if got := sent(t, sub); len(got) != 0 {
+			t.Errorf("a skill of a folder the agent does not run in was sent: %+v", got)
+		}
+		review5Write(t, filepath.Join(launch, "relative-skills", "selected", "SKILL.md"), selectedAssetHarmful)
 		got := sent(t, sub)
-		if len(got) != 1 || got[0].Dir != filepath.Join(workspace, "relative-skills", "selected") {
-			t.Errorf("the guessed repository root was dropped for an unrelated agent folder: %+v", got)
+		if len(got) != 1 || got[0].Dir != filepath.Join(launch, "relative-skills", "selected") || len(got[0].Files) == 0 {
+			t.Errorf("protected skill of the agent folder omitted: %+v", got)
+		}
+	})
+	t.Run("no event folder: the agent folder decides", func(t *testing.T) {
+		_, module, _ := setup(t)
+		selected := filepath.Join(module, "relative-skills", "selected")
+		review5Write(t, filepath.Join(selected, "SKILL.md"), selectedAssetHarmful)
+		stubHookAgentWorkingDirectory(t, module)
+		got := sent(t, "")
+		if len(got) != 1 || got[0].Dir != selected || len(got[0].Files) == 0 {
+			t.Errorf("protected selected skill omitted without an event folder: %+v", got)
+		}
+		review5Write(t, filepath.Join(selected, "SKILL.md"), review5Skill)
+		got = sent(t, "")
+		if len(got) != 1 || got[0].Truncated || len(got[0].Files) == 0 {
+			t.Errorf("ordinary selected skill without an event folder = %+v", got)
 		}
 	})
 }
 
-// A known agent folder that is a sibling of the event folder is still a root:
-// the protected selected skill of a relative COPILOT_SKILLS_DIRS entry there is
-// sent, and the ordinary one is not mixed with it.
+// A known agent folder that is a sibling of the event folder is the root: the
+// protected selected skill of a relative COPILOT_SKILLS_DIRS entry there is
+// sent, and a copy of the same name in the event folder, which the agent does
+// not load, is not mixed with it (an ordinary selection is not decided on it).
 func TestCopilotAgentFolderOutsideTheEventFolderIsStillARoot(t *testing.T) {
 	review5Home(t, t.TempDir())
 	root := t.TempDir()
@@ -283,11 +306,18 @@ func TestCopilotAgentFolderOutsideTheEventFolderIsStillARoot(t *testing.T) {
 	if len(got) != 1 || got[0].Dir != selected || len(got[0].Files) == 0 {
 		t.Errorf("protected selected skill of the known agent folder omitted: %+v", got)
 	}
-	// The benign twin: an ordinary skill of that folder is sent, complete.
+	// The benign twin: an ordinary skill of that folder is sent, complete, and
+	// the harmful copy of the same name in the event folder is not.
 	review5Write(t, filepath.Join(selected, "SKILL.md"), review5Skill)
+	inactive := filepath.Join(event, "relative-skills", "selected")
+	review5Write(t, filepath.Join(inactive, "SKILL.md"), selectedAssetHarmful)
 	facts, _ = assetfacts.Decode(hookAssetFacts("copilot", selectedAssetCopilotEvent(t, event, "selected")))
-	if got := facts.ContentsFor(assetfacts.ContentSkill, "selected"); len(got) != 1 || got[0].Truncated || len(got[0].Files) == 0 {
+	got = facts.ContentsFor(assetfacts.ContentSkill, "selected")
+	if len(got) != 1 || got[0].Dir != selected || got[0].Truncated || len(got[0].Files) == 0 {
 		t.Errorf("ordinary selected skill of the known agent folder = %+v", got)
+	}
+	if slices.Contains(facts.SkillDirs, inactive) {
+		t.Errorf("the inactive copy %q was sent as a candidate: %v", inactive, facts.SkillDirs)
 	}
 }
 
@@ -340,7 +370,7 @@ func TestHookReadsTheAgentFolderOnlyForARelativeCopilotSkillRoot(t *testing.T) {
 
 // The most registered plugins one Claude Code tool name can have as owners
 // (a tool name is at most 64 characters) all keep their complete text, each an
-// ordinary document of tens of KiB, so a call that every one of them leaves
+// ordinary reference table of 56 KiB that does not shrink, so a call that every one of them leaves
 // allowed is not refused for the size of the claim.
 func TestHookSendsTheTextOfEveryPossiblePluginOwnerOfOneToolName(t *testing.T) {
 	claudeDir := t.TempDir()
@@ -352,12 +382,8 @@ func TestHookSendsTheTextOfEveryPossiblePluginOwnerOfOneToolName(t *testing.T) {
 		if i > 0 {
 			name += "_a"
 		}
-		var doc strings.Builder
-		for line := 0; line < 450; line++ {
-			fmt.Fprintf(&doc, "Section %d.%d: ordinary documentation of option %d of the notes tool.\n", i, line, line*7)
-		}
 		dir := filepath.Join(t.TempDir(), name)
-		review5Write(t, filepath.Join(dir, "skills", "notes", "SKILL.md"), doc.String())
+		review5Write(t, filepath.Join(dir, "skills", "notes", "SKILL.md"), referenceTable(i, 56640))
 		registry[name+"@local"] = []map[string]string{{"installPath": dir}}
 	}
 	data, err := json.Marshal(map[string]any{"plugins": registry})
@@ -378,4 +404,21 @@ func TestHookSendsTheTextOfEveryPossiblePluginOwnerOfOneToolName(t *testing.T) {
 			t.Errorf("candidate owner %q lost its text: truncated=%v files=%d", content.Name, content.Truncated, len(content.Files))
 		}
 	}
+}
+
+// referenceTable is an ordinary reference document of about size bytes whose
+// rows are random letters, so it hardly shrinks when deflated: the claim of
+// the most candidate owners one tool name can have must carry it whole.
+func referenceTable(owner, size int) string {
+	random := rand.New(rand.NewSource(int64(owner) + 1))
+	letters := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	var doc strings.Builder
+	for row := 0; doc.Len() < size-64; row++ {
+		line := make([]byte, 40)
+		for i := range line {
+			line[i] = letters[random.Intn(len(letters))]
+		}
+		fmt.Fprintf(&doc, "Row %d.%d: %s\n", owner, row, line)
+	}
+	return doc.String()
 }

@@ -844,6 +844,11 @@ func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins) boo
 	if len(rule.ArgsPrefix) > pins.ArgCount {
 		return false
 	}
+	var tail []byte
+	if len(rule.ArgsPrefix) > len(pins.Args) {
+		// Decoded once for the whole prefix, not once per argument.
+		tail = pins.TailBytes()
+	}
 	for i, want := range rule.ArgsPrefix {
 		switch {
 		case i < len(pins.Args):
@@ -851,7 +856,7 @@ func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins) boo
 				return false
 			}
 		default:
-			if held := pins.TailDigest(i - len(pins.Args)); held != nil && !bytes.Equal(assetfacts.PinTailDigest(want), held) {
+			if held := assetfacts.TailDigestAt(tail, i-len(pins.Args)); held != nil && !bytes.Equal(assetfacts.PinTailDigest(want), held) {
 				return false
 			}
 		}
