@@ -18,16 +18,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// GAP-0754: a tampered managed hook file was put back within a second, but
-// the guardian recorded no repair (repairs=0, no connector-hook-repaired
-// audit row). The repair rewrites the owned file while its pass is still
-// running, and that write was taken for a new change: the watch loop
-// cancelled the pass, so the repair the worker had just made was never
-// accounted, and the next pass found the file already in order. A write that
-// leaves an owned file as the last pass verified it is the pass finishing its
-// own repair; only a file that differs from that still interrupts the pass.
+// GAP-0754 guards on the guardian watch loop, driven with a stand-in
+// reconcile. The repair accounting itself (a worker write never cancels its
+// own pass) is covered through the production worker path in
+// enterprise_hooks_watch_repair_real_unix_test.go.
 type gap0754Guardian struct {
 	script     string
+	holdClean  bool
 	inPass     chan struct{}
 	repaired   chan struct{}
 	cancelled  chan struct{}
@@ -83,6 +80,18 @@ func startGAP0754Guardian(t *testing.T, g *gap0754Guardian) {
 		}
 		body, _ := os.ReadFile(g.script)
 		if string(body) == gap0754Verified {
+			if g.holdClean && calls == 2 {
+				g.inPass <- struct{}{}
+				if g.onRepair != nil {
+					g.onRepair()
+				}
+				select {
+				case <-ctx.Done():
+					g.cancelled <- struct{}{}
+					return run, ctx.Err()
+				case <-time.After(g.repairHold):
+				}
+			}
 			g.cleanPass.Add(1)
 			return run, nil
 		}
@@ -130,46 +139,6 @@ func startGAP0754Guardian(t *testing.T, g *gap0754Guardian) {
 	time.Sleep(600 * time.Millisecond)
 }
 
-func TestGAP0754RepairWriteDoesNotCancelTheRepairingPass(t *testing.T) {
-	g := &gap0754Guardian{repairHold: 400 * time.Millisecond}
-	startGAP0754Guardian(t, g)
-	if err := os.WriteFile(g.script, []byte(gap0754Verified+"#\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-g.repaired:
-	case <-g.cancelled:
-		t.Fatal("the pass that put the hook script back was cancelled by its own write, so its repair was never reported (GAP-0754)")
-	case <-time.After(5 * time.Second):
-		t.Fatal("the tampered hook script was not repaired")
-	}
-}
-
-// A change that leaves the file different from what the pass verified still
-// interrupts it: the running worker may already have checked the file.
-func TestGAP0754ANewChangeStillInterruptsTheRunningPass(t *testing.T) {
-	g := &gap0754Guardian{repairHold: 2 * time.Second}
-	g.onRepair = func() {
-		// A second tamper lands while the first repair is running.
-		_ = os.WriteFile(g.script, []byte("#!/bin/sh\nexit 0\n"), 0o700)
-	}
-	startGAP0754Guardian(t, g)
-	if err := os.WriteFile(g.script, []byte(gap0754Verified+"#\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-g.cancelled:
-	case <-time.After(5 * time.Second):
-		t.Fatal("a second change to the hook script did not interrupt the running pass")
-	}
-	g.onRepair = nil
-	select {
-	case <-g.repaired:
-	case <-time.After(6 * time.Second):
-		t.Fatal("the second change was not repaired afterwards")
-	}
-}
-
 // Nothing changed, nothing is reported: a pass over an intact script repairs
 // and reports nothing.
 func TestGAP0754AnUnchangedScriptReportsNoRepair(t *testing.T) {
@@ -182,5 +151,73 @@ func TestGAP0754AnUnchangedScriptReportsNoRepair(t *testing.T) {
 	case <-g.repaired:
 		t.Fatal("a rewrite with the verified bytes was reported as a repair")
 	case <-time.After(1500 * time.Millisecond):
+	}
+}
+
+// A clean interval pass has no self-write to mask a protected replacement.
+// Even if its metadata matches the prior snapshot, the rename needs a replay.
+func TestGAP0754SameMetadataReplacementDuringCleanPassReplays(t *testing.T) {
+	ticks := make(chan time.Time, 1)
+	previousTicker := enterpriseHookWatchIntervalTicker
+	enterpriseHookWatchIntervalTicker = func(time.Duration) (<-chan time.Time, func()) {
+		return ticks, func() {}
+	}
+	t.Cleanup(func() { enterpriseHookWatchIntervalTicker = previousTicker })
+	g := &gap0754Guardian{holdClean: true, repairHold: 1500 * time.Millisecond}
+	previousFingerprint := enterpriseHookOwnedFileFingerprint
+	enterpriseHookOwnedFileFingerprint = func(path string) string {
+		if path == g.script {
+			return "meta:same-size-time-mode"
+		}
+		return previousFingerprint(path)
+	}
+	t.Cleanup(func() { enterpriseHookOwnedFileFingerprint = previousFingerprint })
+	replaced := make(chan struct{})
+	var replacedOnce atomic.Bool
+	g.onRepair = func() {
+		if replacedOnce.Swap(true) {
+			return
+		}
+		defer close(replaced)
+		info, err := os.Stat(g.script)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		malicious := []byte(gap0754Verified)
+		malicious[len(malicious)-2] = 'x'
+		tmp := g.script + ".replacement"
+		if err := os.WriteFile(tmp, malicious, 0o700); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Chtimes(tmp, info.ModTime(), info.ModTime()); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(tmp, g.script); err != nil {
+			t.Error(err)
+		}
+	}
+	startGAP0754Guardian(t, g)
+	ticks <- time.Now()
+	select {
+	case <-replaced:
+	case <-time.After(4 * time.Second):
+		t.Fatal("the clean pass did not see the replacement")
+	}
+	deadline := time.After(3 * time.Second)
+	poll := time.NewTicker(25 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		body, err := os.ReadFile(g.script)
+		if err == nil && string(body) == gap0754Verified {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("same-metadata replacement stayed in the protected hook script: %v", err)
+		case <-poll.C:
+		}
 	}
 }
