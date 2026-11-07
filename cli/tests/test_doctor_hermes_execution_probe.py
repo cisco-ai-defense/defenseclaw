@@ -578,8 +578,13 @@ def test_windows_hermes_probe_has_hard_deadline_if_job_cannot_end(tmp_path, monk
     assert jobs[0].closed
 
 
-def _emulate_windows_probe(monkeypatch, *, fail: str = ""):
-    """Run the probe's Windows branch on POSIX; return the Popen kwargs and jobs."""
+def _emulate_windows_probe(monkeypatch, *, fail: str = "", started=None):
+    """Run the probe's Windows branch on POSIX; return the Popen kwargs and jobs.
+
+    ``started`` is a file the launcher creates first; the launch returns once
+    it exists, so the probe ends the launcher after that file is created and
+    before the launcher can have finished writing it.
+    """
     import subprocess
 
     real_popen = subprocess.Popen
@@ -587,10 +592,16 @@ def _emulate_windows_probe(monkeypatch, *, fail: str = ""):
     jobs: list[_EmulatedWindowsJob] = []
 
     def popen(argv, **kwargs):
-        launches.append(dict(kwargs))
-        return real_popen(
+        proc = real_popen(
             argv, stdin=kwargs["stdin"], stdout=kwargs["stdout"], stderr=kwargs["stderr"], start_new_session=True,
         )
+        # The launched process, known without the stub having to write it down.
+        launches.append({**kwargs, "pid": proc.pid})
+        if started is not None:
+            deadline = time.monotonic() + 10
+            while not started.exists() and time.monotonic() < deadline:
+                time.sleep(0.005)
+        return proc
 
     def job(pid, *, allow_breakaway=True):
         created = _EmulatedWindowsJob(pid, allow_breakaway=allow_breakaway, fail=fail)
@@ -628,25 +639,38 @@ def test_windows_hermes_doctor_probe_ends_its_job(tmp_path, monkeypatch, case):
     assert job.closed
 
 
+# What the stub's first line has left in root.pid when the probe ends it: the
+# finished write, or only the empty file the redirection creates just before
+# it. The probe ends the launcher at any point, so the test cannot rely on
+# either; it checks the launched process, not the file.
+_ROOT_PID_WRITES = {"written": "echo $$ > '{path}'", "empty": ": > '{path}'"}
+
+
 @pytest.mark.skipif(os.name == "nt", reason="emulates the Windows branch on a POSIX shell stub")
+@pytest.mark.parametrize("pid_file", list(_ROOT_PID_WRITES))
 @pytest.mark.parametrize("fail", ["create", "terminate", "linger"])
-def test_windows_hermes_doctor_probe_fails_closed_without_job_cleanup(tmp_path, monkeypatch, fail):
+def test_windows_hermes_doctor_probe_fails_closed_without_job_cleanup(tmp_path, monkeypatch, fail, pid_file):
     # The hard deadline, not the probe's own bound, ends this run.
     monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_TIMEOUT", 3.0)
     monkeypatch.setattr(cmd_doctor, "_HERMES_EXECUTION_PROBE_PIPE_WAIT", 0.5)
     root_pid_file = tmp_path / "root.pid"
-    target = _probe_stub(tmp_path, f"echo $$ > '{root_pid_file}'\n" + _PROOF + "exec sleep 60\n")
-    _emulate_windows_probe(monkeypatch, fail=fail)
+    first = _ROOT_PID_WRITES[pid_file].format(path=root_pid_file)
+    target = _probe_stub(tmp_path, first + "\n" + _PROOF + "exec sleep 60\n")
+    launches, _jobs = _emulate_windows_probe(monkeypatch, fail=fail, started=root_pid_file)
     start = time.monotonic()
     returncode, _ = cmd_doctor._run_hermes_execution_probe([str(target)])
     assert returncode is None, "a probe whose job could not be ended must not pass"
     assert time.monotonic() - start < 10
-    if root_pid_file.exists():
-        root = _read_pid(root_pid_file)
-        try:
-            assert _process_gone(root), f"uncontained probe root {root} still runs"
-        finally:
-            _kill_quietly(root)
+    (launch,) = launches
+    root = launch["pid"]
+    gone = _process_gone(root)
+    if not gone:
+        _kill_quietly(root)
+    assert gone, f"uncontained probe root {root} still runs"
+    # Whatever the stub wrote is the launched process, never another one.
+    written = root_pid_file.read_text(encoding="utf-8").strip() if root_pid_file.exists() else ""
+    if written:
+        assert int(written) == root
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real Windows Job Object")
