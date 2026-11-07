@@ -728,17 +728,17 @@ admin_config_version() {
     fi
 }
 
-# admin_connectors: the connectors the administrator config enrolls. The config
-# and the roster a standard user must see once it is applied both come from
-# this list (launcher_offers_only_sandbox).
-admin_connectors=(claudecode codex)
-
 # package_default_connectors: the roster of a package install before any
 # administrator config, which is the product default connector. A change of
 # that default turns the status check red here on purpose.
 package_default_connectors=(openclaw)
 
+# write_admin_config: stage the administrator config. It sets admin_connectors,
+# the connectors that config enrolls, in the same step that writes them, so the
+# config and the roster a standard user must see once it is applied
+# (launcher_offers_only_sandbox) come from one list that cannot be left empty.
 write_admin_config() {
+    admin_connectors=(claudecode codex)
     local connector_lines="" connector
     for connector in "${admin_connectors[@]}"; do
         connector_lines+="    $connector: {enabled: true}"$'\n'
