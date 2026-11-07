@@ -50,24 +50,14 @@ func artifactsFor(t *testing.T, spec *Spec) connector.SandboxArtifacts {
 // shParses reports a script /bin/sh cannot parse.
 func shParses(t *testing.T, what, script string) {
 	t.Helper()
-	if _, err := os.Stat("/bin/sh"); err != nil {
+	sh := maybeBinSh()
+	if sh == "" {
 		return
 	}
-	cmd := exec.Command("/bin/sh", "-n")
+	cmd := exec.Command(sh, "-n")
 	cmd.Stdin = strings.NewReader(script)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Errorf("%s does not parse: %v\n%s", what, err, out)
-	}
-}
-
-// requirePOSIXShell skips a test that runs an image-build shell fragment.
-// The fragments run in the Linux sandbox image, never on the host, and a
-// Windows host has no /bin/sh: without this guard the process fails to start
-// and every case reads as a refusal.
-func requirePOSIXShell(t *testing.T) {
-	t.Helper()
-	if _, err := os.Stat("/bin/sh"); err != nil {
-		t.Skip("/bin/sh is required")
 	}
 }
 
@@ -306,7 +296,8 @@ func TestNpmPinnedInstallChecksDigests(t *testing.T) {
 // the native executable it installs has the pinned sha256.
 func TestNpmPinnedInstallVerifiesTheTarball(t *testing.T) {
 	// The install runs with PATH=<fake npm>:/usr/bin:/bin.
-	for _, tool := range []string{"/bin/sh", "/usr/bin/sha512sum", "/usr/bin/sha256sum"} {
+	sh := binSh(t)
+	for _, tool := range []string{"/usr/bin/sha512sum", "/usr/bin/sha256sum"} {
 		if _, err := os.Stat(tool); err != nil {
 			t.Skipf("%s is required", tool)
 		}
@@ -355,7 +346,7 @@ func TestNpmPinnedInstallVerifiesTheTarball(t *testing.T) {
 				"esac\n")
 			script := strings.NewReplacer("root='/opt/x'", "root="+shellQuote(filepath.Join(dir, "root")), "install -d -o root -g root -m 0755", "install -d -m 0755",
 				"/usr/local/bin/dctool", filepath.Join(dir, "dctool")).Replace(run)
-			cmd := exec.Command("/bin/sh", "-c", script)
+			cmd := exec.Command(sh, "-c", script)
 			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "TMPDIR=" + dir}
 			out, err := cmd.CombinedOutput()
 			args, _ := os.ReadFile(filepath.Join(dir, "install-args"))
@@ -679,7 +670,7 @@ func TestProbeVersionPatterns(t *testing.T) {
 }
 
 func TestHarnessImageVersionChecksUsePinnedRelease(t *testing.T) {
-	requirePOSIXShell(t)
+	sh := binSh(t)
 	for _, tc := range []struct {
 		spec    *Spec
 		display string
@@ -712,7 +703,7 @@ func TestHarnessImageVersionChecksUsePinnedRelease(t *testing.T) {
 				{tc.spec.DefaultVersion + ".1", false},
 				{"vv" + tc.spec.DefaultVersion, false},
 			} {
-				cmd := exec.Command("/bin/sh", "-c", `got="$VERSION_REPLY"; `+check)
+				cmd := exec.Command(sh, "-c", `got="$VERSION_REPLY"; `+check)
 				cmd.Env = append(os.Environ(), "VERSION_REPLY="+sample.value)
 				out, err := cmd.CombinedOutput()
 				if (err == nil) != sample.allow {
