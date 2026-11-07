@@ -3400,12 +3400,14 @@ func policyCopyKey(path string) string {
 }
 
 // livePolicyCopies are the copies of a tag other than skip whose folder is
-// still there; a copy that is gone leaves nothing to run and holds nothing.
+// not absent; a copy that is gone leaves nothing to run and holds nothing. A
+// copy this process cannot look at (a private parent folder) is present,
+// unknown, and stays.
 func livePolicyCopies(copies []string, skip string) []string {
 	var live []string
 	for _, key := range copies {
 		raw, err := base64.RawURLEncoding.DecodeString(key)
-		if key != skip && err == nil && assetStillThere(string(raw)) && !slices.Contains(live, key) {
+		if key != skip && err == nil && !policyCopyGone(string(raw)) && !slices.Contains(live, key) {
 			live = append(live, key)
 		}
 	}
@@ -3462,9 +3464,12 @@ func (w *InstallWatcher) policyHoldScopes(evt InstallEvent) []string {
 // journalPolicyDenied records, after enforceBlockWith (err is its result) on
 // an asset an asset_policy rule denied, that the asset is still in its
 // folder: because the quarantine failed (err), or because the files of an
-// operator restore are kept while the install block stands. The owner and
-// every connector in denying (each one whose rule denied the copy, as each
-// loads it) get the install block and, on their own row, the runtime disable.
+// operator restore are kept while the install block stands. Every connector
+// in denying (each one whose rule denied the copy, as each loads it) gets the
+// install block and, on its own row, the runtime disable. A root owner whose
+// own rules allow the copy is not held for another connector denial in the
+// balanced and permissive tiers, where it runs the ordinary skill; the strict
+// tier and a managed deployment hold it too.
 // Without the runtime disable a denial by the
 // default (default_action deny) rule, which the hook evaluates only when
 // runtime_detection is on, left the surviving skill callable. A block already
@@ -3503,7 +3508,11 @@ func (w *InstallWatcher) journalPolicyDenied(evt InstallEvent, targetType string
 		}
 		rows = append(rows, holdRow{scope, []string{field}})
 	}
-	connectors := []string{w.eventConnector(evt)}
+	owner := w.eventConnector(evt)
+	var connectors []string
+	if len(denying) == 0 || PolicyHoldStrict(w.cfg, owner) {
+		connectors = []string{owner}
+	}
 	for _, connector := range denying {
 		if connector != "" && !containsFold(connectors, connector) {
 			connectors = append(connectors, connector)
@@ -3601,6 +3610,13 @@ func reasonOf(entry *audit.ActionEntry) string {
 func assetStillThere(path string) bool {
 	_, err := os.Lstat(path)
 	return err == nil
+}
+
+// policyCopyGone reports a held copy whose folder is absent, as opposed to
+// one this process cannot look at.
+func policyCopyGone(path string) bool {
+	_, err := os.Lstat(path)
+	return pathAbsent(err)
 }
 
 // policyHeldScopes are the journal rows of the owner and of every consumer of
