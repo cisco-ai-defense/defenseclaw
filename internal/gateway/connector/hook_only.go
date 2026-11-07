@@ -1090,7 +1090,7 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 }
 
 // hermesSetupWarningOutput receives Setup's warning about a Hermes release
-// whose TUI runs tools without the hooks (the gateway's log), and teardown's notices about hook entries it removed or kept.
+// whose TUI runs tools without the hooks (the gateway's log), and teardown's warning about a kept hook entry that mentions DefenseClaw.
 var hermesSetupWarningOutput io.Writer = os.Stderr
 
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
@@ -4992,12 +4992,13 @@ const hermesHookScriptName = "hermes-hook.sh"
 
 // hermesHookEntryOwned is the one ownership predicate Setup, repair, teardown
 // and verification share for a Hermes hook entry. An entry is DefenseClaw owned
-// when its command is one DefenseClaw writes (the recognized commands), the
-// generated script at an edited path (GAP-0906), or a command whose text names
-// a file in this account DefenseClaw hooks directory, whatever the file is
-// called and whether or not it still exists (GAP-0625). The decision reads the
-// command text only: it never runs or interprets a shell, so a user command
-// that reaches a managed hook some other way belongs to the user and stays.
+// only by identity: its command is one of the strings DefenseClaw writes (the
+// recognized commands: the current command and the historical and native
+// launcher forms, compared byte for byte), or it is the generated script at an
+// edited path (GAP-0906). A command is never cleaned, unquoted or searched for
+// a directory, so a user command that mentions or reaches a managed file in
+// some other way belongs to the user: teardown keeps it and warns
+// (hermesKeptDefenseClawEvents).
 func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedCommands map[string]struct{}) bool {
 	if containsHookScript(entry, hookScript) ||
 		editedDefenseClawHookEntry(entry, hookScriptBaseName(hookScript)) {
@@ -5007,10 +5008,8 @@ func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedComman
 	if !ok {
 		return false
 	}
-	if _, recognized := recognizedCommands[command]; recognized {
-		return true
-	}
-	return hookCommandNamesHookDir(command, hookScript)
+	_, recognized := recognizedCommands[command]
+	return recognized
 }
 
 func hermesRecognizedHookCommands(current string) map[string]struct{} {
@@ -5128,7 +5127,6 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 	if !ok {
 		return nil
 	}
-	named := hermesDirNamedEntryCount(hooks, hookScript)
 	for event, raw := range hooks {
 		hooks[event] = removeOwnedFlatHooks(raw, hookScript)
 	}
@@ -5155,19 +5153,8 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 			return err
 		}
 	}
-	current, readErr := os.ReadFile(path)
-	if readErr == nil && bytes.Equal(current, data) {
+	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
 		return nil
-	}
-	if named > 0 && readErr == nil {
-		// An entry that only names the hooks directory is removed as
-		// DefenseClaw (GAP-0625); the file as it was is kept next to it and
-		// the removal is reported once.
-		copyPath, err := keepHermesEditedHooksCopy(path, current)
-		if err != nil {
-			return fmt.Errorf("keep a copy of %s before removing edited DefenseClaw hook entries: %w", path, err)
-		}
-		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes teardown: removed %d edited DefenseClaw hook entries from %s; the previous file is at %s\n", named, path, copyPath)
 	}
 	return atomicWriteFile(path, data, 0o600)
 }
