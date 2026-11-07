@@ -308,7 +308,7 @@ func openNoFollow(path string) (*os.File, error) {
 			if err != nil {
 				return err
 			}
-			return fmt.Errorf("%s changed identity before open", path)
+			return fmt.Errorf("%s changed identity before open: %w", path, safefile.ErrReadIdentityChanged)
 		}
 		return nil
 	})

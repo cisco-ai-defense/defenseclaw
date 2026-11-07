@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // policyFileLimit bounds every vendor policy read. Real files are a few KiB.
@@ -129,8 +130,27 @@ func readPolicyFile(opts Options, path string) ([]byte, bool, error) {
 // itself supplied by the caller (the managed OpenCode plugin has its own).
 func readPolicyFileWith(opts Options, path string, validate func(Options, string) error) ([]byte, bool, error) {
 	path = platformPath(opts, path)
-	info, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) {
+	var data []byte
+	var seen bool
+	read := func() error {
+		var err error
+		data, err = readPolicyFileOnce(opts, path, validate, &seen)
+		return err
+	}
+	var err error
+	if opts.goos() == "windows" {
+		err = safefile.RetryTransientRead(read)
+		if seen && safefile.IsTransientReadError(err) {
+			err = safefile.RetryPublishedRead(read)
+		}
+	} else {
+		err = read()
+	}
+	var untrusted *untrustedPolicyFileError
+	if errors.As(err, &untrusted) {
+		return nil, false, err
+	}
+	if errors.Is(err, os.ErrNotExist) && (opts.goos() == "windows" || !seen) {
 		forgetPolicyFileRead(path)
 		if !opts.SkipTrustChecks {
 			if err := validateTrustedAncestors(opts, path); err != nil {
@@ -142,32 +162,55 @@ func readPolicyFileWith(opts Options, path string, validate func(Options, string
 	if err != nil {
 		return nil, false, err
 	}
+	return data, true, nil
+}
+
+// Each attempt rechecks the file's name, protection, and opened identity.
+// A publication change is returned to the caller for a whole-read retry.
+func readPolicyFileOnce(opts Options, path string, validate func(Options, string) error, seen *bool) ([]byte, error) {
+	info, err := pathidentity.LstatPinned(path)
+	if err != nil {
+		return nil, err
+	}
+	*seen = true
 	if !info.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("%s is not a regular file", path)
+		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
 	if !opts.SkipTrustChecks {
 		if err := validate(opts, path); err != nil {
-			return nil, false, &untrustedPolicyFileError{path: path, err: err}
+			return nil, &untrustedPolicyFileError{path: path, err: err}
 		}
 	}
 	file, err := openNoFollow(path)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	defer file.Close()
 	stat, err := file.Stat()
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	if !os.SameFile(info, stat) {
-		return nil, false, fmt.Errorf("%s changed while it was opened", path)
+		return nil, fmt.Errorf("%s changed while it was opened: %w", path, safefile.ErrReadIdentityChanged)
 	}
 	data, err := readBounded(file, policyFileLimit)
 	if err != nil {
-		return nil, false, err
+		return nil, err
+	}
+	if opts.goos() == "windows" {
+		final, err := pathidentity.LstatPinned(path)
+		if err != nil {
+			return nil, err
+		}
+		if !final.Mode().IsRegular() {
+			return nil, fmt.Errorf("%s is not a regular file", path)
+		}
+		if !os.SameFile(stat, final) || final.Size() != int64(len(data)) {
+			return nil, fmt.Errorf("%s changed while it was read: %w", path, safefile.ErrReadIdentityChanged)
+		}
 	}
 	notePolicyFileRead(path, file, data)
-	return data, true, nil
+	return data, nil
 }
 
 // writePolicyFile atomically replaces path with data, creating missing
