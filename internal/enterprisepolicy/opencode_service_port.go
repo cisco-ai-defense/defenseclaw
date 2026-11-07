@@ -45,54 +45,84 @@ func OpenCodeAccountPort(id uint64) int {
 	return OpenCodeAccountPortBase + int(id%OpenCodeAccountPortSpan)
 }
 
-// ReadOpenCodeServicePortAsUser is the port the service.json under home names
+// ReadOpenCodeServicePortAsUser is ReadOpenCodeServicePortSealed without the
+// list of folders it sealed (the Windows guardian seals none).
+func ReadOpenCodeServicePortAsUser(home string) (int, error) {
+	port, _, err := ReadOpenCodeServicePortSealed(home)
+	return port, err
+}
+
+// ReadOpenCodeServicePortSealed is the port the service.json under home names
 // as the account sees it (its worker: links in the path resolve, a
 // root-squashed home reads): 0 with no file or no port; an error when the
 // file is there but cannot be read or is not a JSON object.
-func ReadOpenCodeServicePortAsUser(home string) (int, error) {
+//
+// This read is the one-time import that can bind a port into the protected
+// record, so it trusts only what no other account controls (GAP-0053
+// REVIEW-5 MF1): it walks the same path the setter walks before it opens
+// anything, which refuses a folder or entry of another account and makes a
+// folder the group can write sticky (nobody but the owner of an entry can then
+// rename it), and it reads a file only while the file it holds open is owned
+// by the account or root and no group or other account can write it. A file
+// that fails the second test names no port: it is not imported and the
+// account gets a fresh one, which the setter then writes into a private copy.
+// The folders it sealed are returned so the guardian can report them.
+func ReadOpenCodeServicePortSealed(home string) (int, []string, error) {
 	home = strings.TrimSpace(home)
 	if home == "" || !filepath.IsAbs(home) {
-		return 0, fmt.Errorf("opencode service port: home %q is not absolute", home)
+		return 0, nil, fmt.Errorf("opencode service port: home %q is not absolute", home)
 	}
 	path := OpenCodeServiceConfigPath(filepath.Clean(home))
+	sealed, err := checkOpenCodeServiceConfigFolders(filepath.Clean(home), path)
+	if err != nil {
+		return 0, sealed, fmt.Errorf("read %s: %w", path, err)
+	}
 	// This read runs under the account identity. Follow a final file link so
 	// its existing port participates in the one-time import; the privileged
 	// writer below still refuses a final link.
 	file, err := os.Open(path)
 	if os.IsNotExist(err) {
-		return 0, nil
+		return 0, sealed, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", path, err)
+		return 0, sealed, fmt.Errorf("read %s: %w", path, err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		return 0, fmt.Errorf("%s is not a regular file: %v", path, err)
+		return 0, sealed, fmt.Errorf("%s is not a regular file: %v", path, err)
+	}
+	if !openCodeImportFileTrusted(path, file) {
+		return 0, sealed, nil
 	}
 	data, err := io.ReadAll(io.LimitReader(file, openCodeServiceConfigLimit+1))
 	if err != nil {
-		return 0, fmt.Errorf("read %s: %w", path, err)
+		return 0, sealed, fmt.Errorf("read %s: %w", path, err)
+	}
+	// The file was private when it was opened; it must still be when it has
+	// been read, or what was read is not an input of this account.
+	if !openCodeImportFileTrusted(path, file) {
+		return 0, sealed, nil
 	}
 	if len(data) > openCodeServiceConfigLimit {
-		return 0, fmt.Errorf("%s exceeds the service file limit", path)
+		return 0, sealed, fmt.Errorf("%s exceeds the service file limit", path)
 	}
 	var doc map[string]json.RawMessage
 	if len(strings.TrimSpace(string(data))) == 0 {
-		return 0, nil
+		return 0, sealed, nil
 	}
 	if err := json.Unmarshal(data, &doc); err != nil || doc == nil {
-		return 0, fmt.Errorf("%s is not a JSON object", path)
+		return 0, sealed, fmt.Errorf("%s is not a JSON object", path)
 	}
 	raw, ok := doc["port"]
 	if !ok {
-		return 0, nil
+		return 0, sealed, nil
 	}
 	var port int
 	if err := json.Unmarshal(raw, &port); err != nil || port <= 0 || port > 65535 {
-		return 0, fmt.Errorf("%s names a port that is not a number", path)
+		return 0, sealed, fmt.Errorf("%s names a port that is not a number", path)
 	}
-	return port, nil
+	return port, sealed, nil
 }
 
 // OpenCodeServicePortResult is what SetOpenCodeServicePort found or did.
