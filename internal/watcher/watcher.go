@@ -164,6 +164,15 @@ type InstallWatcher struct {
 	// audited, so a scanner that stays down writes one row per target.
 	rescanFailureMu     sync.Mutex
 	rescanFailureLogged map[string]bool
+	// hermesVendorNoted holds the shipped Hermes plugins already reported as
+	// vendor content in this process, so a rescan cycle reports each once.
+	hermesVendorNoted sync.Map
+	// hermesManifests reads shipped Hermes plugin manifests through the
+	// plugin scanner (manifestLoader); a test may set it.
+	hermesManifests    hermesManifestLoader
+	hermesManifestOnce sync.Once
+	// hermesManifestAnswers remembers what the plugin scanner answered.
+	hermesManifestAnswers *hermesManifestCache
 	// markedWatchRoots caches the root markers written by this process
 	// (rescan goroutine only).
 	markedWatchRoots map[string]bool
@@ -2220,6 +2229,15 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		return res
 	}
 	// verdict == "scan" → proceed to scanning below
+
+	// A Hermes shipped plugin whose bytes match their pinned digest is not
+	// scanned: the block, deny and allow decisions above still apply.
+	if w.hermesVendorPlugin(evt) {
+		w.logHermesVendorPlugin(evt, targetType)
+		w.recordAdmission(ctx, "allowed", targetType)
+		res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: hermesVendorPluginReason}
+		return res
+	}
 
 	// Phase 2: Scan.
 	s := w.newScanner(evt)
