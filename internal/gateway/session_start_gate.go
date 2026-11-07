@@ -64,6 +64,10 @@ type sessionStartTicket struct {
 	key   string
 	entry *sessionStartEntry
 	once  sync.Once
+	// window keeps the identity refusals issued while this start is judged
+	// trusted until finish pins the one the start ends with
+	// (openStartWindow).
+	window uint64
 }
 
 const (
@@ -169,7 +173,7 @@ func (g *sessionStartGate) beginLocked(key string) *sessionStartTicket {
 	g.dropLocked(key)
 	g.entries[key] = entry
 	g.seenLocked(key, entry.at)
-	return &sessionStartTicket{gate: g, key: key, entry: entry}
+	return &sessionStartTicket{gate: g, key: key, entry: entry, window: openStartWindow()}
 }
 
 // evictLocked drops expired blocks, then the oldest finished ones until the
@@ -247,6 +251,7 @@ func (t *sessionStartTicket) finish(blocked bool, reason string) {
 				t.entry.pinned = reason
 			}
 		}
+		closeStartWindow(t.window)
 		g.mu.Unlock()
 		close(t.entry.done)
 	})

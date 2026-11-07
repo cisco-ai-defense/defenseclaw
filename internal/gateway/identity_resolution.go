@@ -747,14 +747,26 @@ func (set *guardrailProfileSet) profileCommandConnector(name string) bool {
 const profileConnectorPlaceholder = "<connector>"
 
 // profileCommandConnectorArgument is the value of --connector for a name
-// that passed profileCommandConnector: the name, or the placeholder when
-// the detectors DefenseClaw masks secrets with (a known key prefix, a
-// secret-named or key-shaped argument) would mask it.
+// that passed profileCommandConnector. A built-in connector name is ship
+// text. A configured name is administrator text: it is written as it is
+// only when the reason scrub behind every agent, notification and
+// compatibility display (redaction.ForSinkReason, which redacts whether or
+// not a display reveals) leaves it unchanged, else the placeholder stands
+// for it. The check is that scrub itself, not a list of what it masks, so a
+// short name it masks (a key prefix, a secret-looking word) never rides in
+// text shown as written; the credential and command-line detectors stay as
+// a second check.
 func profileCommandConnectorArgument(name string) string {
+	if connector.IsKnownBuiltinConnector(name) {
+		return name
+	}
 	if redaction.AssertNoCredentials(name) != nil {
 		return profileConnectorPlaceholder
 	}
 	if words := redaction.CommandArgs([]string{name}); len(words) != 1 || words[0] != name {
+		return profileConnectorPlaceholder
+	}
+	if redaction.ForSinkReason(name) != name {
 		return profileConnectorPlaceholder
 	}
 	return name
