@@ -64,11 +64,11 @@ func TestG622b9UnlistableStateDirectoryBlocksNativePatches(t *testing.T) {
 	}
 }
 
-// Links in the project that lead to no state stay allowed in balanced, for
-// both patch tools: a hard link between two project files, a link to a project
-// file and a link to a link, each next to a state tree the patch tool can
-// read (round-8 review items 2 and 3).
-func TestG622b9OrdinaryProjectLinksAllowInBalanced(t *testing.T) {
+// Links in the project that lead to no state, in balanced, next to a state
+// tree the patch tool can read: OpenCode allows a hard link, a link to a
+// project file and a link to a link; Hermes allows the hard link and keeps a
+// symlink blocked, as the managed gateway cannot read it again (round-9 review).
+func TestG622b9ProjectLinksInBalanced(t *testing.T) {
 	for _, connector := range []string{"hermes", "opencode"} {
 		t.Run(connector, func(t *testing.T) {
 			home, project := hermesPatchHome(t)
@@ -93,8 +93,17 @@ func TestG622b9OrdinaryProjectLinksAllowInBalanced(t *testing.T) {
 				}
 			}
 			for _, name := range []string{"hard-link.txt", "soft-link.txt", "soft-to-soft.txt"} {
-				if got := g622b9PatchOutcome(t, connector, home, project, name, ""); got.action != "allow" {
-					t.Errorf("%s: ordinary project link blocked in balanced: %s", name, got)
+				// The managed gateway cannot read a Hermes V4A symlink again, so
+				// it cannot tell a header from the ordinary link from one
+				// replayed after a retarget (TestCFRRealClientHermesLinkChanged
+				// AfterProofMustBlock): the symlink stays blocked in every
+				// profile, a hard link (resolved to itself) is proved ordinary.
+				want := "allow"
+				if connector == "hermes" && name != "hard-link.txt" {
+					want = "block"
+				}
+				if got := g622b9PatchOutcome(t, connector, home, project, name, ""); got.action != want {
+					t.Errorf("%s: balanced outcome %s, want %s", name, got, want)
 				}
 			}
 		})
