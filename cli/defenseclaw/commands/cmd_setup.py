@@ -17116,8 +17116,9 @@ def _agent_not_on_path_hint(connector: str) -> str:
     )
 
 
-def _connector_not_started_detail(connector: str, reason: str) -> str:
-    detail = f"the gateway did not start it: {_bounded_gateway_reason(reason)}"
+def _connector_not_started_detail(connector: str, reason: str, repair: str = "") -> str:
+    # The repair arrives apart from the reason and is shown as recorded (GAP-0731).
+    detail = f"the gateway did not start it: {_bounded_gateway_reason(reason)}{repair}"
     if missing := _agent_not_on_path_hint(connector):
         detail = f"{missing}; {detail}"
     return detail
@@ -17361,10 +17362,15 @@ def _wait_for_connector_runtime(
     last_failure = _ConnectorRuntimeReadiness(False, invariant="snapshot", detail="runtime files are not ready")
     agent_settings_refused: dict[str, str] = {}
     not_started_reasons: dict[str, str] = {}
-    from defenseclaw.commands.cmd_status import _connectors_not_started_reasons, _connectors_refused_by_agent_settings
+    not_started_repairs: dict[str, str] = {}
+    from defenseclaw.commands.cmd_status import (
+        _connectors_not_started_reasons,
+        _connectors_not_started_repairs,
+        _connectors_refused_by_agent_settings,
+    )
 
     def gateway_ready(deadline: float) -> tuple[bool, str | None, _ConnectorRuntimeReadiness]:
-        nonlocal gateway_generation, agent_settings_refused, not_started_reasons
+        nonlocal gateway_generation, agent_settings_refused, not_started_reasons, not_started_repairs
         if not require_gateway_health and gateway_generation is None:
             return True, gateway_generation, _ConnectorRuntimeReadiness(True)
         remaining = deadline - time.monotonic()
@@ -17406,6 +17412,7 @@ def _wait_for_connector_runtime(
         guardrail = health.get("guardrail")
         agent_settings_refused = _connectors_refused_by_agent_settings(health)
         not_started_reasons = _connectors_not_started_reasons(health)
+        not_started_repairs = _connectors_not_started_repairs(health)
         state = guardrail.get("state") if isinstance(guardrail, dict) else None
         if isinstance(state, str) and state.strip().lower() in {"error", "stopped"}:
             detail = f"restarted gateway guardrail is {state.strip().lower()}"
@@ -17566,7 +17573,8 @@ def _wait_for_connector_runtime(
         if not_started:
             name = not_started[0]
             return _ConnectorRuntimeReadiness(
-                False, name, "not-started", _connector_not_started_detail(name, not_started_reasons[name])
+                False, name, "not-started",
+                _connector_not_started_detail(name, not_started_reasons[name], not_started_repairs.get(name, "")),
             )
         if settings_refused:
             for name in sorted(settings_refused):
@@ -17613,9 +17621,10 @@ def _wait_for_connector_runtime(
                         ux.warn(f"skipping {name}: {_lock_contract_failure_detail(name, None, 'roster')}")
                     else:
                         reason = not_started_reasons.get(name)
+                        repair = not_started_repairs.get(name, "")
                         ux.warn(
                             f"skipping {name}: the restarted gateway did not activate it "
-                            + (f"({_connector_not_started_detail(name, reason)})" if reason
+                            + (f"({_connector_not_started_detail(name, reason, repair)})" if reason
                                else "(gateway.log names the reason)")
                             + ", so it is not guarded now"
                         )

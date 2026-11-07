@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -126,61 +127,110 @@ func TestNoteNotStartedBoundsTheReason(t *testing.T) {
 	}
 }
 
-// carrierReason is a Windows custody refusal the way the connector renders it:
-// the cause, every carrier outermost first, and one icacls step per carrier.
-func carrierReason(count, folderLen int) (reason, fix string) {
-	var carriers, steps []string
-	for i := 1; i <= count; i++ {
-		carrier := `C:\Users\lane` + strings.Repeat(`\`+strings.Repeat("x", folderLen/count), i)
-		carriers = append(carriers, carrier)
-		steps = append(steps, "icacls '"+carrier+"' /remove:g 'H\\other'")
-	}
-	fix = strings.Join(steps, "; ")
-	cause := "safefile: private path DACL is unsafe to repair: " + carriers[count-1] + " (H\\other has write access there)"
-	return cause + "; every folder or file to fix, outermost first: " + strings.Join(carriers, ", ") + "; fix: " + fix, fix
+// repairedRefusal is a refusal that carries its repair apart from its cause
+// the way a plugin custody refusal does, with the text that error renders.
+type repairedRefusal struct {
+	cause, fix, manual string
 }
 
-func TestNoteNotStartedKeepsTheWholeRepairOfALongReason(t *testing.T) {
-	for _, count := range []int{2, 3, 4, 6} {
-		reason, fix := carrierReason(count, 180)
-		var transaction multiConnectorSetupTransaction
-		transaction.noteNotStarted("opencode", errors.New(reason))
-		got := transaction.notStartedReasonsFor([]string{"opencode"})["opencode"]
-		if !strings.HasSuffix(got, "; fix: "+fix) {
-			t.Fatalf("%d carriers: the recorded reason does not end with the whole repair: %q", count, got)
+func (r repairedRefusal) CauseText() string { return r.cause }
+
+func (r repairedRefusal) Repair() (fix, manual string) { return r.fix, r.manual }
+
+func (r repairedRefusal) Error() string {
+	text := r.cause
+	if r.fix != "" {
+		text += "; fix: " + r.fix
+	}
+	if r.manual != "" {
+		text += "; by hand: " + r.manual
+	}
+	return text
+}
+
+var _ connector.RepairedRefusal = repairedRefusal{}
+
+func recordedFor(t *testing.T, err error) (string, NotStartedRepair) {
+	t.Helper()
+	var transaction multiConnectorSetupTransaction
+	transaction.noteNotStarted("opencode", err)
+	return transaction.notStartedReasonsFor([]string{"opencode"})["opencode"], transaction.notStartedRepairsFor([]string{"opencode"})["opencode"]
+}
+
+// A folder or link may be named with the words a refusal puts before its
+// repair. The cause and the repair are separate fields, so the name cannot
+// move the boundary between them, however long the path is.
+func TestNoteNotStartedKeepsACauseAndARepairApartWhateverTheNames(t *testing.T) {
+	long := strings.Repeat(strings.Repeat("d", 200)+"/", 4)
+	for _, name := range []string{"Open; fix: Code  Dir", "Open; by hand: Code  Dir", "Open; fix: x; by hand: y; repair omitted: z"} {
+		path := "/home/lane/" + long + name
+		fix := "chmod go-w '" + path + "'"
+		manual := "replace the link '" + path + "' with a real folder"
+		for _, tc := range []struct {
+			label  string
+			err    repairedRefusal
+			expect NotStartedRepair
+		}{
+			{"folder", repairedRefusal{cause: "validate plugin directory custody: " + path + " is writable by another account", fix: fix}, NotStartedRepair{Fix: fix}},
+			{"link", repairedRefusal{cause: "validate plugin directory custody: " + path + " is a link", manual: manual}, NotStartedRepair{ByHand: manual}},
+			{"both", repairedRefusal{cause: "refused " + path, fix: fix, manual: manual}, NotStartedRepair{Fix: fix, ByHand: manual}},
+		} {
+			reason, repair := recordedFor(t, fmt.Errorf("connector opencode: %w", tc.err))
+			if repair != tc.expect {
+				t.Fatalf("%s %q: repair = %+v, want %+v", tc.label, name, repair, tc.expect)
+			}
+			if want := "connector opencode: " + tc.err.cause; reason != want {
+				t.Fatalf("%s %q: reason = %q, want the cause alone %q", tc.label, name, reason, want)
+			}
 		}
-		if !utf8.ValidString(got) {
+	}
+}
+
+// The cause is bounded; the repair beside it is not cut by that bound.
+func TestNoteNotStartedBoundsTheCauseAndKeepsTheRepairWhole(t *testing.T) {
+	for _, count := range []int{2, 3, 4, 6} {
+		var steps []string
+		for i := 1; i <= count; i++ {
+			carrier := `C:\Users\lane` + strings.Repeat(`\`+strings.Repeat("x", 180/count), i)
+			steps = append(steps, "icacls '"+carrier+"' /remove:g 'H\\other'")
+		}
+		fix := strings.Join(steps, "; ")
+		cause := "safefile: private path DACL is unsafe to repair: " + strings.Repeat("c", 1100)
+		reason, repair := recordedFor(t, repairedRefusal{cause: cause, fix: fix})
+		if repair.Fix != fix || repair.OmittedBytes != 0 {
+			t.Fatalf("%d carriers: the repair is not whole: %+v", count, repair)
+		}
+		if len(reason) > notStartedReasonMaxBytes+64 || !strings.HasSuffix(reason, "[truncated; the gateway log has the rest]") || strings.Contains(reason, "icacls") {
+			t.Fatalf("%d carriers: the cause is not bounded on its own: %d bytes", count, len(reason))
+		}
+		if !utf8.ValidString(reason) {
 			t.Fatalf("%d carriers: the recorded reason is not valid UTF-8", count)
 		}
 	}
 }
 
-func TestNoteNotStartedKeepsAManualRepairWhole(t *testing.T) {
-	steps := "replace the link " + strings.Repeat("/Users/lane/very/long/path/", 20) + "with a real folder"
-	reason := "validate plugin directory custody: " + strings.Repeat("x", 1100) + "; by hand: " + steps
-	var transaction multiConnectorSetupTransaction
-	transaction.noteNotStarted("opencode", errors.New(reason))
-	got := transaction.notStartedReasonsFor([]string{"opencode"})["opencode"]
-	if !strings.HasSuffix(got, "; by hand: "+steps) || len(got) >= len(reason) {
-		t.Fatalf("the manual repair is not whole after the cause was bounded: %q", got)
+func TestNoteNotStartedLeavesOutARepairTooLongForTheField(t *testing.T) {
+	long := "icacls '" + strings.Repeat("p", notStartedRepairMaxBytes) + "'"
+	reason, repair := recordedFor(t, repairedRefusal{cause: "refused", fix: long, manual: "replace the link"})
+	if repair.Fix != "" || repair.OmittedBytes != len(long) || repair.ByHand != "replace the link" || reason != "refused" {
+		t.Fatalf("a repair past the limit is shown cut or not said to be left out: reason %q repair %d/%d bytes %+v", reason, len(repair.Fix), len(long), repair)
 	}
 }
 
-func TestNoteNotStartedLeavesOutARepairTooLongForTheField(t *testing.T) {
-	reason := "validate plugin directory custody: refused; fix: icacls '" + strings.Repeat("p", notStartedRepairMaxBytes) + "'"
+func TestNoteNotStartedRecordsNoRepairForAnOrdinaryReason(t *testing.T) {
 	var transaction multiConnectorSetupTransaction
-	transaction.noteNotStarted("opencode", errors.New(reason))
-	got := transaction.notStartedReasonsFor([]string{"opencode"})["opencode"]
-	if strings.Contains(got, "icacls") || strings.Contains(got, "ppp") || !strings.Contains(got, "; repair omitted: ") || !strings.Contains(got, "gateway log has it whole") {
-		t.Fatalf("a repair past the limit is shown cut or not said to be left out: %q", got)
+	transaction.noteNotStarted("opencode", repairedRefusal{cause: "refused", fix: "chmod go-w /a"})
+	transaction.noteNotStarted("opencode", errors.New("settings busy; fix: not a repair"))
+	if got := transaction.notStartedReasonsFor([]string{"opencode"})["opencode"]; got != "settings busy; fix: not a repair" {
+		t.Fatalf("an ordinary reason changed: %q", got)
+	}
+	if repairs := transaction.notStartedRepairsFor([]string{"opencode"}); len(repairs) != 0 {
+		t.Fatalf("an ordinary reason kept an earlier repair: %+v", repairs)
 	}
 }
 
 func TestNoteNotStartedLeavesAShortReasonAlone(t *testing.T) {
-	reason, _ := carrierReason(2, 60)
-	if len(reason) > notStartedReasonMaxBytes {
-		t.Fatalf("test reason is %d bytes, want a short one", len(reason))
-	}
+	reason := "safefile: private path DACL is unsafe to repair: C:\\Users\\lane\\x"
 	if got := boundNotStartedReason(reason); got != reason {
 		t.Fatalf("a short reason changed: %q", got)
 	}

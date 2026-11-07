@@ -28,11 +28,25 @@ type pluginCustodyError struct {
 	manual  string
 }
 
-func (e *pluginCustodyError) Error() string {
+func (e *pluginCustodyError) Error() string { return e.CauseText() + e.repairText() }
+
+// CauseText is the refusal without its repair: the cause and every element the
+// walk refuses.
+func (e *pluginCustodyError) CauseText() string {
 	text := fmt.Sprintf("%v", e.cause)
 	if len(e.failing) > 1 {
 		text += "; every folder or file to fix, outermost first: " + strings.Join(e.failing, ", ")
 	}
+	return text
+}
+
+// Repair is the command that repairs what a command can repair and the steps
+// only a person can take, either of which may be empty.
+func (e *pluginCustodyError) Repair() (fix, manual string) { return e.fix, e.manual }
+
+// repairText is what Error appends to CauseText.
+func (e *pluginCustodyError) repairText() string {
+	var text string
 	if e.fix != "" {
 		text += "; fix: " + e.fix
 	}
@@ -44,6 +58,16 @@ func (e *pluginCustodyError) Error() string {
 		}
 	}
 	return text
+}
+
+// RepairedRefusal is an error that carries its repair apart from its cause, so
+// a caller that shows the two in separate fields never has to find the repair
+// in the error text: a folder or link may be named with any text, including
+// the words the text puts before the repair.
+type RepairedRefusal interface {
+	error
+	CauseText() string
+	Repair() (fix, manual string)
 }
 
 func (e *pluginCustodyError) Unwrap() []error { return []error{e.cause, ErrPluginFolderCustody} }

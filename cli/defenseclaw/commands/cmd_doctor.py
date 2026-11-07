@@ -11928,37 +11928,20 @@ def _amp_non_defenseclaw_direct_plugins(cfg) -> list[str]:
 
 
 _RECORDED_REASON_CAUSE_LIMIT = 400
-#: A repair longer than this (dozens of deep folders) is left out, said so, instead of being cut mid-command.
-_RECORDED_REASON_FIX_LIMIT = 8192
 
 
-def _bounded_recorded_reason(reason: object) -> str:
-    """Bound the gateway's recorded reason: its cause, never its repair, and never the repair's bytes.
+def _bounded_recorded_reason(reason: object, repair: str = "") -> str:
+    """The gateway's recorded reason, bounded, followed by its repair as recorded.
 
-    The gateway ends a custody refusal with ``; fix: <command>`` (or, when only
-    a person can repair it, ``; by hand: <steps>``; or, when the repair did not
-    fit the health field, ``; repair omitted: ...``). The cause is prose: its
-    whitespace is collapsed and it is bounded. The tail holds paths and
-    accounts inside quotes, where a run of spaces is part of the argument, so it
-    is shown exactly as recorded. A tail past the (large) limit is not shown
-    cut: the row says it was left out and where the whole text is.
+    The reason is prose: its whitespace is collapsed and it is bounded. The
+    repair arrives as fields of its own (``_connectors_not_started_repairs``),
+    never found inside the reason, and holds paths and accounts inside quotes,
+    where a run of spaces is part of the argument, so it is shown exactly.
     """
-    text = str(reason)
-    start = -1
-    for marker in ("; fix: ", "; by hand: ", "; repair omitted: "):
-        start = text.rfind(marker)
-        if start >= 0:
-            break
-    if start < 0:
-        text = " ".join(text.split())
-        return text if len(text) <= _RECORDED_REASON_CAUSE_LIMIT else text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
-    head = " ".join(text[:start].split())
-    tail = text[start:]
-    if len(head) > _RECORDED_REASON_CAUSE_LIMIT:
-        head = head[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
-    if len(tail) > _RECORDED_REASON_FIX_LIMIT:
-        return f"{head}; the repair is {len(tail)} characters, too long for this row: gateway.log has it whole"
-    return head + tail
+    text = " ".join(str(reason).split())
+    if len(text) > _RECORDED_REASON_CAUSE_LIMIT:
+        text = text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
+    return text + repair
 
 
 def _check_connector_skipped_at_start(connector: str, live_health: dict | None, r: _DoctorResult) -> None:
@@ -11970,6 +11953,7 @@ def _check_connector_skipped_at_start(connector: str, live_health: dict | None, 
     from defenseclaw.commands.cmd_status import (
         _connectors_not_started,
         _connectors_not_started_reasons,
+        _connectors_not_started_repairs,
         _connectors_refused_by_agent_settings,
     )
 
@@ -11989,7 +11973,10 @@ def _check_connector_skipped_at_start(connector: str, live_health: dict | None, 
         return
     # The gateway recorded why it skipped the connector; quote it (bounded)
     # instead of sending the user to gateway.log (GAP-0731).
-    recorded = _bounded_recorded_reason(_connectors_not_started_reasons(live_health).get(connector, ""))
+    recorded = _bounded_recorded_reason(
+        _connectors_not_started_reasons(live_health).get(connector, ""),
+        _connectors_not_started_repairs(live_health).get(connector, ""),
+    )
     label = _CONNECTOR_LABELS.get(connector, connector)
     _emit(
         "warn",
