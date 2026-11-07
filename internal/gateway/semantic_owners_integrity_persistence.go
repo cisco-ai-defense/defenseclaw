@@ -2789,7 +2789,10 @@ func matchesActiveDefenseClawStateInLine(
 	}
 	relative = strings.TrimRight(relative, "/")
 	if !ok || relative != ".defenseclaw" && !strings.HasPrefix(relative, ".defenseclaw/") {
-		return findAncestorStartChangesState(facts, candidate, lineStaysOff, clientTargets)
+		// The machine install and state of a managed deployment are
+		// protected like ~/.defenseclaw (rel-1-0-6:GAP-0796).
+		return matchesDefenseClawMachineLayout(facts, candidate) ||
+			findAncestorStartChangesState(facts, candidate, lineStaysOff, clientTargets)
 	}
 	state := strings.TrimPrefix(strings.TrimPrefix(relative, ".defenseclaw"), "/")
 	switch {
