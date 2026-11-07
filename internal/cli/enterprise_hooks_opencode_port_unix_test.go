@@ -201,7 +201,7 @@ func openCodePortGuardianWith(t *testing.T, governed bool, uids ...int) (map[int
 		if request.OpenCodeServicePort > 0 && openCodeCrashed.Load() {
 			return response, errors.New("the guardian crashed")
 		}
-		if request.OpenCodeServicePort > 0 && openCodeUserCannotRead[account.UID] {
+		if request.OpenCodeServicePort > 0 && openCodeUserCannotReadNow(account.UID) {
 			response.OpenCodeServicePort = &enterpriseHookWorkerOpenCodePortReport{Error: "permission denied"}
 			return response, nil
 		}
@@ -244,6 +244,33 @@ var (
 	openCodeUserCannotRead, openCodeReadFails map[int]bool
 	openCodeReadHangs                         map[int]chan struct{}
 )
+
+// The fault maps are shared with read workers the pass abandoned at their
+// deadline, so every change and every read of an entry goes through these
+// functions and takes openCodeFaultMu.
+func setOpenCodeReadHang(uid int) {
+	openCodeFaultMu.Lock()
+	defer openCodeFaultMu.Unlock()
+	openCodeReadHangs[uid] = make(chan struct{})
+}
+
+func setOpenCodeReadFails(uid int, fails bool) {
+	openCodeFaultMu.Lock()
+	defer openCodeFaultMu.Unlock()
+	openCodeReadFails[uid] = fails
+}
+
+func setOpenCodeUserCannotRead(uid int, cannot bool) {
+	openCodeFaultMu.Lock()
+	defer openCodeFaultMu.Unlock()
+	openCodeUserCannotRead[uid] = cannot
+}
+
+func openCodeUserCannotReadNow(uid int) bool {
+	openCodeFaultMu.Lock()
+	defer openCodeFaultMu.Unlock()
+	return openCodeUserCannotRead[uid]
+}
 
 func openCodePortIn(t *testing.T, home string) int {
 	t.Helper()
@@ -616,7 +643,7 @@ func TestManagedGuardianOpenCodeFileUnreadableEvenAsTheUser(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	runOpenCodePortPass(t)
 	held := (*record)[1001]
-	openCodeUserCannotRead[1001] = true
+	setOpenCodeUserCannotRead(1001, true)
 	setEligible(nil, 1001, 9001) // 9001 starts on 1001's port
 	log := runOpenCodePortPass(t)
 	if got := openCodePortIn(t, homes[9001]); got == 0 || got == held {
@@ -681,14 +708,14 @@ func linkOpenCodeConfig(t *testing.T, home string, port int) {
 func TestManagedGuardianOpenCodeReadWorkerFails(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	linkOpenCodeConfig(t, homes[1001], 25002)
-	openCodeReadFails[1001] = true
+	setOpenCodeReadFails(1001, true)
 	setEligible(nil, 1001, 1002)
 	log := runOpenCodePortPass(t)
 	bob := openCodePortIn(t, homes[1002])
 	if bob == 0 || !strings.Contains(log, "ent1001's OpenCode service port is unknown this pass") || !strings.Contains(log, "To clear it:") {
 		t.Fatalf("pass 1: bob %d\n%s", bob, log)
 	}
-	openCodeReadFails[1001] = false
+	setOpenCodeReadFails(1001, false)
 	for pass := 2; pass <= 4; pass++ {
 		log = runOpenCodePortPass(t)
 		if got := openCodePortIn(t, homes[1002]); got != bob || (*record)[1002] != bob {
@@ -709,10 +736,10 @@ func TestManagedGuardianOpenCodeReadWorkerFails(t *testing.T) {
 func TestManagedGuardianOpenCodeLinkedBlindThenRecover(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	linkOpenCodeConfig(t, homes[1001], 25002)
-	openCodeReadFails[1001] = true
+	setOpenCodeReadFails(1001, true)
 	setEligible(nil, 1001, 1002)
 	runOpenCodePortPass(t)
-	openCodeReadFails[1001] = false
+	setOpenCodeReadFails(1001, false)
 	bob := (*record)[1002]
 	for pass := 2; pass <= 4; pass++ {
 		log := runOpenCodePortPass(t)
@@ -752,7 +779,7 @@ func TestManagedGuardianOpenCodeReadWorkerTimesOut(t *testing.T) {
 	homes, _, setEligible := openCodePortGuardianWith(t, true, 1001)
 	writeOpenCodePortFile(t, homes[1001], 25002)
 	enterpriseHookOpenCodeReadTimeout = 200 * time.Millisecond
-	openCodeReadHangs[1001] = make(chan struct{})
+	setOpenCodeReadHang(1001)
 	setEligible(nil, 1001, 1002)
 	done := make(chan string, 1)
 	go func() { done <- runOpenCodePortPass(t) }()
@@ -770,12 +797,47 @@ func TestManagedGuardianOpenCodeReadWorkerTimesOut(t *testing.T) {
 	}
 }
 
+// REVIEW-11 MF1: a read worker that only starts after the pass gave up on it
+// reads its fault settings while the test already changes them for the next
+// step; the two share nothing unguarded, so go test -race stays quiet.
+func TestManagedGuardianOpenCodeLateReadWorkerSharesNoFaultState(t *testing.T) {
+	homes, _, setEligible := openCodePortGuardianWith(t, true, 1001)
+	writeOpenCodePortFile(t, homes[1001], 25002)
+	enterpriseHookOpenCodeReadTimeout = 200 * time.Millisecond
+	inner := enterpriseHookWorkerRunner
+	gate, finished := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		if request.Operation == enterpriseHookWorkerOpOpenCodePortRead && account.UID == 1001 {
+			<-gate // the worker starts late, after the pass returned
+			defer once.Do(func() { close(finished) })
+		}
+		return inner(ctx, account, request)
+	}
+	setEligible(nil, 1001, 1002)
+	log := runOpenCodePortPass(t)
+	if got := openCodePortIn(t, homes[1002]); got == 0 {
+		t.Fatalf("bob got no port while alices read had not started\n%s", log)
+	}
+	// The late worker starts reading its fault settings while the next step
+	// of the test changes them, with nothing ordering the two.
+	close(gate)
+	setOpenCodeReadFails(1001, true)
+	setOpenCodeUserCannotRead(1002, true)
+	setOpenCodeReadFails(1002, false)
+	select {
+	case <-finished:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the late read worker never finished")
+	}
+}
+
 // A hung account does not stop the next one: carol (healthy) is read and
 // recorded in the same pass; nobody shares a port.
 func TestManagedGuardianOpenCodeHungAccountThenHealthyOne(t *testing.T) {
 	homes, record, setEligible := openCodePortGuardianWith(t, true, 1001)
 	enterpriseHookOpenCodeReadTimeout = 200 * time.Millisecond
-	openCodeReadHangs[1001] = make(chan struct{})
+	setOpenCodeReadHang(1001)
 	setEligible(nil, 1001, 1003)
 	writeOpenCodePortFile(t, homes[1003], 25010)
 	done := make(chan string, 1)
@@ -1067,9 +1129,9 @@ func TestManagedGuardianOpenCodeAttackerSkipsTheImportPass(t *testing.T) {
 			writeOpenCodePortFile(t, homes[1002], victim.port) // the victim's file
 			writeOpenCodePortFile(t, homes[1003], victim.port) // another account names it too: a contest
 			writeOpenCodePortFile(t, homes[1001], victim.port) // mallory's copy
-			openCodeReadFails[1001] = true                     // linked, chmod 000, or a hung read
+			setOpenCodeReadFails(1001, true)                   // linked, chmod 000, or a hung read
 			runOpenCodePortPass(t)
-			openCodeReadFails[1001] = false
+			setOpenCodeReadFails(1001, false)
 			for pass := 2; pass <= 4; pass++ {
 				log := runOpenCodePortPass(t)
 				for uid, port := range *record {
@@ -1090,9 +1152,9 @@ func TestManagedGuardianOpenCodeAttackerSkipsTheImportPass(t *testing.T) {
 func TestManagedGuardianOpenCodeUnreadableInTheImportPassGetsAFreshPort(t *testing.T) {
 	homes, record, _ := openCodePortGuardianWith(t, true, 1001)
 	writeOpenCodePortFile(t, homes[1001], 26600)
-	openCodeReadFails[1001] = true
+	setOpenCodeReadFails(1001, true)
 	runOpenCodePortPass(t)
-	openCodeReadFails[1001] = false
+	setOpenCodeReadFails(1001, false)
 	runOpenCodePortPass(t)
 	if got := (*record)[1001]; got == 26600 || got == 0 || openCodePortIn(t, homes[1001]) != got {
 		t.Fatalf("record %v, file %d", *record, openCodePortIn(t, homes[1001]))
