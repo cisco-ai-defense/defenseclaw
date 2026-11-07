@@ -50,7 +50,7 @@ These pages are runbooks written to an AI agent. Pick the task, copy its prompt 
 
 1. Observe first. The agent does not switch to action mode, change a fail mode, disable a connector, unblock a site or edit `config.yaml` by hand without your yes to that exact change.
 2. The agent never prints a key or token.
-3. On a managed computer the agent stops. A command that prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means your administrator owns DefenseClaw there.
+3. On a managed computer the agent stops. A command that prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means your administrator owns DefenseClaw there ([Managed command availability](/docs/enterprise/managed-commands)).
 4. The agent reports in a fixed format: what it ran, what it saw, what it changed, what is left for you.
 
 <Callout title="Hand this page to your agent">
@@ -77,7 +77,7 @@ You are an AI agent. Find out why DefenseClaw is not working, map each failure t
 
 1. Observe first. Do not switch to action mode, change a fail mode, disable a connector, unblock a site or edit `config.yaml` by hand without the user's yes to that exact change.
 2. Never print a key, token, `.env`, `hooks/` or `device.key`. Redact them from anything you quote.
-3. Stop on a managed computer: a command that prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means the administrator owns DefenseClaw. Tell the user to contact them.
+3. Stop on a managed computer: a command that prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`, means the administrator owns DefenseClaw ([Managed command availability](/docs/enterprise/managed-commands)). Tell the user to contact them.
 4. Do not open `audit.db` or attach it to a report.
 
 #### Steps

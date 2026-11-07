@@ -52,8 +52,9 @@ PowerShell 7, which must be installed; you can start the CLI from any shell by i
 full path.
 
 On managed Linux and macOS, the packaged `defenseclaw` launcher gives each
-account its own connector status and sandbox views. It does not offer `doctor`,
-`alerts` or `tui`, even when root invokes that launcher. Administrators use
+account its own connector status and sandbox views. It runs only the commands in
+[Managed command availability](/docs/enterprise/managed-commands), and refuses `doctor`,
+`alerts` and `tui` even when root invokes that launcher. Administrators use
 the installed gateway's `enterprise linux status` or `enterprise macos status`,
 `verify`, and `audit export` commands shown here for deployment health and
 events.

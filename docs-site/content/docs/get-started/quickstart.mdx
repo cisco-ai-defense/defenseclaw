@@ -193,7 +193,7 @@ You are an AI agent. Install DefenseClaw for the current user and set up the cod
 
 1. Observe first. Never switch an agent to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes to that exact change.
 2. Never print a key, token or the contents of `.env`.
-3. Stop on a managed computer: if a command prints `This computer is managed` or `This device is managed` (exit `2` or `3`), or `defenseclaw status --json` shows `"deployment_mode": "managed_enterprise"`, tell the user to contact their administrator.
+3. Stop on a managed computer: if a command prints `This computer is managed` or `This device is managed` (exit `2` or `3`; see [Managed command availability](/docs/enterprise/managed-commands)), or `defenseclaw status --json` shows `"deployment_mode": "managed_enterprise"`, tell the user to contact their administrator.
 
 ### Steps
 
