@@ -230,6 +230,11 @@ def test_config_unset_checks_final_roster_for_batch(tmp_path: Path) -> None:
         ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors", '{"kiro": {}, "openclaw": {}}', True),
         ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail", '{"connector": "kiro", "connectors": {"kiro": {}, "openclaw": {}}}', True),
         ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n    openclaw:\n      enabled: false\n", "guardrail.connectors.openclaw.enabled", "true", False),
+        # A single install and a first entry for another connector (GAP-0588).
+        ("openclaw", "  connector: openclaw\n", "guardrail.connectors.kiro.hook_fail_mode", "closed", False),
+        ("kiro", "  connector: kiro\n", "guardrail.connectors.openclaw.hook_fail_mode", "closed", False),
+        ("openclaw", "  connector: openclaw\n", "guardrail.connectors", '{"kiro": {}}', True),
+        ("openclaw", "  connector: openclaw\n", "guardrail", '{"connector": "openclaw", "connectors": {"kiro": {}}}', True),
     ],
 )
 def test_config_set_refuses_enabled_proxy_in_final_multi_roster(
@@ -248,6 +253,10 @@ def test_config_set_refuses_enabled_proxy_in_final_multi_roster(
     [
         ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.kiro.hook_fail_mode", "closed"),
         ("openclaw", "  connector: openclaw\n  connectors:\n    openclaw: {}\n", "guardrail.connectors.openclaw.hook_fail_mode", "closed"),
+        # Hook connectors beside each other stay ordinary settings (ruling r7).
+        ("kiro", "  connector: kiro\n", "guardrail.connectors.codex.hook_fail_mode", "closed"),
+        ("claudecode", "  connector: claudecode\n", "guardrail.connectors.codex.hook_fail_mode", "open"),
+        ("openclaw", "  connector: openclaw\n", "guardrail.connectors.openclaw.hook_fail_mode", "closed"),
         ("kiro", "  connector: kiro\n  connectors:\n    kiro: {}\n", "guardrail.connectors.openclaw.enabled", "false"),
         ("openclaw", "  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n", "guardrail.connectors.kiro.hook_fail_mode", "closed"),
     ],
@@ -313,3 +322,38 @@ def test_secure_client_roster_check_keeps_existing_scope(tmp_path: Path) -> None
         b"  connectors:\n    kiro: {}\n    openclaw: {}\n"
     )
     cmd_config._check_guardrail_connector_roster(str(tmp_path / "config.yaml"), candidate)
+
+
+def _set_with_claw_mode(tmp_path: Path, mode: str, key: str, value: str) -> tuple[object, bytes, bytes]:
+    app = _app(tmp_path, [mode])
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        f"config_version: 9\ndata_dir: {tmp_path}\nclaw:\n  mode: {mode}\nguardrail: {{}}\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=path),
+        patch.object(config_writer, "_use_go_validator", return_value=False),
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "_refresh_stopped_gateway_hooks", return_value=[]),
+    ):
+        result = CliRunner().invoke(cmd_config.config_set, [key, value], obj=app)
+    return result, before, path.read_bytes()
+
+
+def test_config_set_refuses_first_entry_beside_claw_mode_proxy(tmp_path: Path) -> None:
+    result, before, after = _set_with_claw_mode(
+        tmp_path, "openclaw", "guardrail.connectors.kiro.hook_fail_mode", "closed"
+    )
+    assert result.exit_code != 0
+    assert "openclaw needs a proxy binding" in result.output
+    assert after == before
+
+
+def test_config_set_first_entry_beside_claw_mode_hook_connector_stays_allowed(tmp_path: Path) -> None:
+    result, before, after = _set_with_claw_mode(
+        tmp_path, "kiro", "guardrail.connectors.codex.hook_fail_mode", "closed"
+    )
+    assert result.exit_code == 0, result.output
+    assert after != before

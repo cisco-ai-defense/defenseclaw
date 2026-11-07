@@ -89,3 +89,27 @@ func nonNil(names []string) []string {
 	}
 	return names
 }
+
+// A Secure Client config keeps the first sorted roster key as its primary even
+// when claw.mode lists another; the same roster outside Secure Client boots
+// the connector claw.mode names (GAP-0707).
+func TestMigrateConnectorSelectionLeavesSecureClientPrimaryUnchanged(t *testing.T) {
+	build := func() *Config {
+		cfg := DefaultConfig()
+		cfg.Claw.Mode = ClawMode("kiro")
+		cfg.Guardrail.Connector = ""
+		cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {}, "kiro": {}}
+		return cfg
+	}
+	// The load passes resolvesToSecureClient(cfg, pin) as the second argument.
+	sc := build()
+	migrateConnectorSelection(sc, true)
+	if got := sc.activeConnector(); got != "codex" {
+		t.Errorf("Secure Client primary = %q, want codex (unchanged)", got)
+	}
+	oss := build()
+	migrateConnectorSelection(oss, false)
+	if got := oss.activeConnector(); got != "kiro" {
+		t.Errorf("standalone primary = %q, want kiro (claw.mode is listed)", got)
+	}
+}

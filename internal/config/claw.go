@@ -175,6 +175,24 @@ func rosterPrimary(roster []string, mode ClawMode) string {
 	return roster[0]
 }
 
+// migrateConnectorSelection settles the connector fields a load reads from. A
+// roster with no guardrail.connector boots the connector claw.mode names when
+// the roster lists it (rosterPrimary), as the Python CLI does (GAP-0707).
+// until 1.1: a retired singular connector, and every Secure Client config,
+// keep the first sorted roster key that dropRetiredConnectorSettings picks;
+// Secure Client selection does not change.
+func migrateConnectorSelection(cfg *Config, secureClient bool) {
+	unnamed := strings.TrimSpace(cfg.Guardrail.Connector) == ""
+	migrateLegacyConnectorIDs(cfg)
+	dropRetiredConnectorSettings(cfg)
+	if unnamed && !secureClient {
+		if roster := cfg.rosterConnectorNames(); len(roster) > 0 {
+			cfg.Guardrail.Connector = rosterPrimary(roster, cfg.Claw.Mode)
+		}
+	}
+	canonicalizeConnectorSelection(cfg)
+}
+
 // activeConnectors returns the configured connector roster for this config, in
 // deterministic (sorted) order. Unlike activeConnector(), this plural list is
 // a roster surface: an unconfigured install returns an empty slice.

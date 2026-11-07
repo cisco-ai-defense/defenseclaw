@@ -128,6 +128,33 @@
       ]
     },
     {
+      "name": "retired_primary_keeps_first_sorted_key",
+      "config": "claw:\n  mode: kiro\nguardrail:\n  connector: openhands\n  connectors:\n    codex: {}\n    kiro: {}\n",
+      "primary": "codex",
+      "roster": [
+        "codex",
+        "kiro"
+      ],
+      "policy": [
+        "codex",
+        "kiro"
+      ],
+      "note": "until 1.1: a retired singular connector is replaced by the first sorted roster key on both sides, even when claw.mode lists another"
+    },
+    {
+      "name": "retired_mode_without_primary_first_sorted_key",
+      "config": "claw:\n  mode: omnigent\nguardrail:\n  connectors:\n    kiro: {}\n    codex: {}\n",
+      "primary": "codex",
+      "roster": [
+        "codex",
+        "kiro"
+      ],
+      "policy": [
+        "codex",
+        "kiro"
+      ]
+    },
+    {
       "name": "openshell_harness_joins_policy_only",
       "config": "guardrail:\n  connector: codex\nopenshell:\n  harnesses: [kiro]\n",
       "primary": "codex",
