@@ -977,7 +977,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 
 func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo,
 	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
-	procLink func(string) bool,
+	procLink func(path string, below bool) bool, tail bool,
 ) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
@@ -1035,7 +1035,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 		}
 		return "", nil, linkDepth, false
 	}
-	for _, part := range parts[start:] {
+	for i, part := range parts[start:] {
 		if memo != nil {
 			key += "\x00" + part
 		}
@@ -1065,8 +1065,10 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 			unknown := os.IsNotExist(err)
 			if err == nil && (info.Mode()&os.ModeSymlink != 0 || windowsMountPointLink(candidate, info)) {
 				// A process link the hook reads for another process than the
-				// one opening the operand would prove a different path.
-				if procLink(candidate) {
+				// one opening the operand would prove a different path. below
+				// tells whether the path goes on below the link.
+				below := tail || stepFollows(parts[start+i+1:])
+				if procLink(candidate, below) {
 					return fail()
 				}
 				link, err := readlink(candidate)
@@ -1082,7 +1084,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 				var extra []string
 				var nextDepth int
 				var ok bool
-				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink, procLink)
+				current, extra, nextDepth, ok = walkWritePathMemoWithReaders(current, link, linkDepth+1, collect, patchTarget, nil, lstat, readlink, procLink, below)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()
 				}
@@ -7826,4 +7828,15 @@ func stateStatementReadOnlyWithBindings(text, home string, shadowed map[string]b
 		return true
 	})
 	return seen && safe
+}
+
+// stepFollows reports that a path goes on with a name or a dot-dot step after
+// the current component. Empty and dot components name the same directory.
+func stepFollows(parts []string) bool {
+	for _, part := range parts {
+		if part != "" && part != "." {
+			return true
+		}
+	}
+	return false
 }
