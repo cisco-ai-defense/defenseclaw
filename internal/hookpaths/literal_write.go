@@ -154,6 +154,9 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 	}
 	var knownValues map[*syntax.Word]string
 	knownValuesRead := false
+	if include != nil {
+		knownNeutralizeShadowed(file, home)
+	}
 	for _, root := range file.Stmts {
 		candidates := append([]actionValues{values}, kept...)
 		if initial != nil && len(kept) > 0 {
@@ -166,18 +169,26 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 		if include != nil && depth < 4 && knownReachedCompound(root) {
 			// A compound command with known values is read in the order the
 			// shell runs it, so a target only an unreached statement names is
-			// not a write. Past the reader bounds, the whole statement is
-			// read below as if every part may run.
-			if writes, complete, continues := knownReachedWrites(root, file, candidates, cwd, home, depth, include); complete {
-				for _, name := range writes {
-					add(name)
-				}
+			// not a write. Past a reader bound other than the reading count,
+			// the whole statement is read below as if every part may run.
+			writes, after, complete, continues := knownReachedWrites(root, file, candidates, cwd, home, depth, include)
+			for _, name := range writes {
+				add(name)
+			}
+			if complete {
 				if !continues {
 					break
 				}
 				actionUpdateValues(root, values, cwd, home)
 				if trackKept {
-					kept = actionUpdateValuesKept(root, kept, cwd, home, &steps)
+					// The reader followed every statement, so its states are the
+					// ones a later statement sees; the whole-statement tracker
+					// forgets a value at a call of a function the command defines.
+					if len(after) != 0 && !actionKeptSaturated(after) {
+						kept = after
+					} else {
+						kept = actionUpdateValuesKept(root, kept, cwd, home, &steps)
+					}
 				}
 				continue
 			}
@@ -443,7 +454,11 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 		}
 		actionUpdateValues(root, values, cwd, home)
 		if trackKept {
-			kept = actionUpdateValuesKept(root, kept, cwd, home, &steps)
+			next := actionUpdateValuesKept(root, kept, cwd, home, &steps)
+			if include != nil {
+				next = actionKeepAcrossFunctionCall(root, kept, next, home)
+			}
+			kept = next
 		}
 	}
 	operands = append(operands, literalPipelineOperands(file, called, cwd, home, depth)...)

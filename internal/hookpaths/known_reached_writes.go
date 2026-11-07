@@ -10,26 +10,93 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// knownReachedMaxReads bounds the statement readings of one compound
-// command. Past it the reader reports an incomplete reading and the caller
-// reads the whole statement as if every part may run.
+// knownReachedMaxReads bounds the full statement readings of one compound
+// command. Past it the reader keeps following the shell but reads each
+// statement by the words it expands (knownReached.assume), which closes on
+// every protected value that reaches a statement instead of losing it.
 const knownReachedMaxReads = 256
 
 // knownReached reads a compound command of a tool call with known values in
 // the order the shell runs it. Each statement is read with the value states
 // that reach it, and a fixed for list body once for each item it reaches,
 // with the item bound. A statement after an exit, a break or continue, or in
-// a branch a static condition skips, is not read. A form it does not follow is read
-// as if it may run. Only targets include accepts are kept.
+// a branch a static condition skips, is not read. A form it does not follow
+// is read as if it may run. Only targets include accepts are kept.
+//
+// The flow it follows rests on the meaning of exit, break, continue, true,
+// false and ":". A command that can redefine one of them has them renamed
+// first (knownNeutralizeShadowed), so the reader sees an unknown command and
+// reads every statement as if it may run.
 type knownReached struct {
-	cwd, home  string
-	depth      int
-	include    func(string) bool
-	prelude    string
-	steps      int
-	reads      int
-	incomplete bool
-	writes     []string
+	cwd, home   string
+	depth       int
+	include     func(string) bool
+	prelude     string
+	functions   []*syntax.FuncDecl
+	ifsAssigned bool
+	loops       int
+	inexact     bool
+	steps       int
+	reads       int
+	incomplete  bool
+	writes      []string
+}
+
+// knownShadowable names the builtins whose result the reader reads from the
+// command word alone.
+var knownShadowable = map[string]bool{"exit": true, "break": true, "continue": true, "true": true, "false": true, ":": true}
+
+// knownNeutralizeShadowed renames the builtins the reader relies on, in the
+// definitions and in the command words of a command that can redefine them,
+// to a name with no meaning to the reader. The parsed command is changed in
+// place; only the known-value reader, which parses its own copy, calls it.
+func knownNeutralizeShadowed(file *syntax.File, home string) {
+	if !knownFlowShadowed(file, home) {
+		return
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			if node.Name != nil && knownShadowable[node.Name.Value] {
+				node.Name.Value = "shadowed-" + node.Name.Value
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) != 0 {
+				if name, known := StaticWord(node.Args[0], home); known && knownShadowable[name] {
+					node.Args[0].Parts = []syntax.WordPart{&syntax.Lit{Value: "shadowed-" + name}}
+				}
+			}
+		}
+		return true
+	})
+}
+
+// knownFlowShadowed reports a command that may give one of the builtins the
+// reader relies on another meaning: a function of that name, or a command
+// that defines or enables names at run time. The static flow of such a
+// command is not known, so its reading must not skip a statement.
+func knownFlowShadowed(file *syntax.File, home string) bool {
+	shadowed := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			if node.Name != nil && knownShadowable[node.Name.Value] {
+				shadowed = true
+			}
+		case *syntax.CallExpr:
+			if len(node.Args) != 0 {
+				switch name, known := StaticWord(node.Args[0], home); {
+				case !known:
+					// The command word is computed: it may be eval or alias.
+					shadowed = shadowed || wordExpandsParameter(node.Args[0])
+				case name == "eval" || name == "alias" || name == "enable" || name == "source" || name == ".":
+					shadowed = true
+				}
+			}
+		}
+		return !shadowed
+	})
+	return shadowed
 }
 
 // knownReachedCompound reports a statement form the reader follows itself.
@@ -47,32 +114,52 @@ func knownReachedCompound(stmt *syntax.Stmt) bool {
 }
 
 // knownReachedWrites returns the targets root writes or changes on the
-// paths the shell can take through it. complete is false when the reading
-// passed its bounds; continues is false when every path through root
-// leaves the shell.
-func knownReachedWrites(root *syntax.Stmt, file *syntax.File, states []actionValues, cwd, home string, depth int, include func(string) bool) (writes []string, complete, continues bool) {
+// paths the shell can take through it, and the value states that follow it.
+// complete is false when the reading passed its bounds; continues is false
+// when every path through root leaves the shell.
+func knownReachedWrites(root *syntax.Stmt, file *syntax.File, states []actionValues, cwd, home string, depth int, include func(string) bool) (writes []string, after []actionValues, complete, continues bool) {
 	reader := &knownReached{cwd: cwd, home: home, depth: depth, include: include}
-	// A call in a body reaches the function definitions of the command.
-	var functions []*syntax.Stmt
-	for _, stmt := range file.Stmts {
-		if _, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
-			functions = append(functions, stmt)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if assign, ok := node.(*syntax.Assign); ok && assign.Name != nil && assign.Name.Value == "IFS" {
+			reader.ifsAssigned = true
 		}
-	}
+		return !reader.ifsAssigned
+	})
+	// A call in a body reaches the function definitions of the command,
+	// wherever it makes them.
+	var functions []*syntax.Stmt
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if stmt, ok := node.(*syntax.Stmt); ok {
+			if function, ok := stmt.Cmd.(*syntax.FuncDecl); ok {
+				functions = append(functions, stmt)
+				reader.functions = append(reader.functions, function)
+				return false
+			}
+		}
+		return true
+	})
 	if len(functions) > 0 {
 		var source strings.Builder
 		if syntax.NewPrinter().Print(&source, &syntax.File{Stmts: functions}) != nil {
-			return nil, false, true
+			return nil, nil, false, true
 		}
 		reader.prelude = source.String() + "\n"
 	}
 	flow := reader.statement(root, states)
+	if reader.incomplete {
+		for _, state := range states {
+			reader.close(root, state)
+		}
+	}
 	// A loop control outside a loop does not stop the shell.
 	continues = len(flow.ended) != 0 || len(flow.continued) != 0 || len(flow.broken) != 0
 	for _, beyond := range flow.beyond {
 		continues = continues || len(beyond) != 0
 	}
-	return reader.writes, !reader.incomplete, continues
+	if reader.inexact {
+		return reader.writes, nil, !reader.incomplete, continues
+	}
+	return reader.writes, flow.ended, !reader.incomplete, continues
 }
 
 // knownExitStatement reports a plain exit, after which the shell runs no
@@ -97,8 +184,8 @@ func (r *knownReached) read(stmt *syntax.Stmt, states []actionValues) {
 	text := r.prelude + source.String()
 	for _, state := range states {
 		if r.reads++; r.reads > knownReachedMaxReads {
-			r.incomplete = true
-			return
+			r.assume(stmt, state)
+			continue
 		}
 		found, _ := literalWriteOperandsWithParsedKnown(text, r.cwd, r.home, r.depth+1, nil, state, r.include)
 		for _, target := range found {
@@ -107,6 +194,56 @@ func (r *knownReached) read(stmt *syntax.Stmt, states []actionValues) {
 			}
 		}
 	}
+}
+
+// assume reads a statement past the reading bound by the words it expands:
+// a word that expands to a protected target, in the statement or in a
+// function it may call, counts as written. It reads more than the writers do
+// (an echo of a protected path counts), but it never loses a protected value
+// that reaches the statement.
+func (r *knownReached) assume(stmt *syntax.Stmt, state actionValues) {
+	check := func(root syntax.Node) {
+		syntax.Walk(root, func(node syntax.Node) bool {
+			if word, ok := node.(*syntax.Word); ok {
+				if value, known := actionWordValue(word, state, r.cwd, r.home); known && r.include(OperandPath(value, r.cwd)) {
+					r.writes = append(r.writes, value)
+				}
+			}
+			return true
+		})
+	}
+	check(stmt)
+	for _, function := range r.functions {
+		check(function)
+	}
+}
+
+// close records the protected values a root the reader could not follow to
+// its end may reach: a value in scope when it starts, or one its assignments
+// build from those. Which statement uses one is not known, so the value
+// counts as written; this blocks a long command that merely holds a protected
+// value, which the reading could not clear.
+func (r *knownReached) close(root *syntax.Stmt, state actionValues) {
+	env := maps.Clone(state)
+	check := func(value string) {
+		if r.include(OperandPath(value, r.cwd)) {
+			r.writes = append(r.writes, value)
+		}
+	}
+	for name, value := range env {
+		if !strings.HasPrefix(name, "\x00") {
+			check(value)
+		}
+	}
+	syntax.Walk(root, func(node syntax.Node) bool {
+		if assign, ok := node.(*syntax.Assign); ok && assign.Name != nil && assign.Value != nil {
+			if value, known := actionWordValue(assign.Value, env, r.cwd, r.home); known {
+				env[assign.Name.Value] = value
+				check(value)
+			}
+		}
+		return true
+	})
 }
 
 // redirects records the known output targets of a compound statement.
@@ -126,7 +263,7 @@ func (r *knownReached) redirects(stmt *syntax.Stmt, states []actionValues) {
 }
 
 func (r *knownReached) update(stmt *syntax.Stmt, states []actionValues) []actionValues {
-	next := actionUpdateValuesKept(stmt, states, r.cwd, r.home, &r.steps)
+	next := actionKeepAcrossFunctionCall(stmt, states, actionUpdateValuesKept(stmt, states, r.cwd, r.home, &r.steps), r.home)
 	if actionKeptSaturated(next) {
 		r.incomplete = true
 	}
@@ -167,8 +304,12 @@ func (r *knownReached) statement(stmt *syntax.Stmt, states []actionValues) actio
 		if knownExitStatement(stmt, r.home) {
 			return actionLoopFlow{}
 		}
-		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Coprocess && !stmt.Negated {
-			switch control, count := actionLoopControlCall(call, r.home); {
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && r.loops > 0 && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Coprocess && !stmt.Negated {
+			// A break or continue with no loop to leave does not stop the
+			// shell, and a count past the loops it is in names the outermost.
+			control, count := actionLoopControlCall(call, r.home)
+			count = min(count, r.loops)
+			switch {
 			case control == "break" && count == 1:
 				return actionLoopFlow{broken: r.merge(nil, states)}
 			case control == "break":
@@ -179,7 +320,9 @@ func (r *knownReached) statement(stmt *syntax.Stmt, states []actionValues) actio
 				return actionLoopFlow{continued: r.merge(nil, states)}
 			case control == "continue":
 				// A counted continue leaves this loop for an enclosing one;
-				// read on as if each outcome may follow.
+				// read on as if each outcome may follow. The states after
+				// the statement are then not the ones the shell reaches.
+				r.inexact = true
 				return actionLoopFlow{ended: states, continued: states, broken: states}
 			}
 		}
@@ -254,8 +397,12 @@ func (r *knownReached) compound(stmt *syntax.Stmt, states []actionValues) action
 		}
 		return flow
 	case *syntax.ForClause:
+		r.loops++
+		defer func() { r.loops-- }()
 		return r.forClause(command, states)
 	case *syntax.WhileClause:
+		r.loops++
+		defer func() { r.loops-- }()
 		return r.whileClause(command, states)
 	}
 	r.incomplete = true
@@ -303,13 +450,26 @@ func (r *knownReached) forClause(clause *syntax.ForClause, states []actionValues
 	var flow actionLoopFlow
 	for _, state := range states {
 		name, items, fixed := actionFixedForItems(clause, state, r.cwd, r.home)
+		if _, set := state["IFS"]; fixed && !set && r.ifsAssigned {
+			// An IFS the reader lost track of splits the list at unknown places.
+			fixed = false
+		}
 		if !fixed {
-			// The body may run any number of times with any item.
+			// The body may run any number of times with any item. An item
+			// may be a whole listed value, which a field separator that
+			// does not occur in it leaves as it is.
 			current := []actionValues{state}
 			if loop, ok := clause.Loop.(*syntax.WordIter); ok && loop.Name != nil {
 				unbound := maps.Clone(state)
 				delete(unbound, loop.Name.Value)
 				current = []actionValues{unbound}
+				for _, word := range loop.Items {
+					if value, known := actionWordValue(word, state, r.cwd, r.home); known && len(current) < 17 {
+						bound := maps.Clone(state)
+						bound[loop.Name.Value] = value
+						current = r.merge(current, []actionValues{bound})
+					}
+				}
 			}
 			flow.ended = r.merge(flow.ended, []actionValues{state})
 			r.passes(&flow, clause.Do, current)
