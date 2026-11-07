@@ -431,13 +431,14 @@ _RECORDED_VERSION = re.compile(r"[0-9][0-9A-Za-z.+-]*")
 _DEPENDENCY_FIELDS = (
     "dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
 )
-_METADATA_FIELDS = ("_resolved", "_from", "_requested")
+_METADATA_FIELDS = ("_resolved", "_from", "_requested", "_spec")
 # A version, a range or a tag: letters, digits and range operators, with at
 # least one letter, digit or ``*``. A path separator, a colon or an ``@`` make a
 # different kind of spec, and a name that ends like an archive is a file.
 _REGISTRY_SPEC = re.compile(r"(?=.*[0-9A-Za-z*])[0-9A-Za-z.^~*<>=| +-]{0,128}")
 _ARCHIVE_NAME = re.compile(r"\.(?:tgz|tar|tar\.gz)$", re.IGNORECASE)
 _REQUEST_FIELDS = ("raw", "rawSpec", "saveSpec", "fetchSpec")
+_REQUESTED_MEMBERS = frozenset(("type", "registry", "name", "escapedName", "scope") + _REQUEST_FIELDS)
 
 
 def _registry_request(value: object, name: str) -> bool:
@@ -456,17 +457,25 @@ def _registry_request(value: object, name: str) -> bool:
 
 
 def _registry_metadata(field: str, value: object, name: str) -> bool:
-    """Whether a manifest install field (``_resolved``, ``_from``, ``_requested``) is the registry."""
+    """Whether a manifest install field (``_resolved``, ``_from``, ``_requested``, ``_spec``) is the registry."""
 
     if field == "_resolved":
         return _registry_archive(value, name)
     if field != "_requested" or not isinstance(value, dict):
         return _registry_request(value, name)
-    # npm 6 records the request as an object: its kind and the spellings of
-    # the request. The other members (the folder it was run from, the name) say
-    # nothing about the source.
-    return value.get("type", "version") in ("version", "range", "tag") and all(
-        value.get(key) is None or _registry_request(value[key], name) for key in _REQUEST_FIELDS
+    # npm 6 records the request as an object. Every member is named and
+    # judged; a member this rule does not know (a path, a resolved address, a
+    # source of any kind under any spelling) gives no identity, so no member
+    # can carry a source past the rule.
+    if set(value) - _REQUESTED_MEMBERS or value.get("type") not in ("version", "range", "tag"):
+        return False
+    escaped = name.replace("/", "%2f")
+    return (
+        value.get("registry", True) is True
+        and value.get("name", name) == name
+        and value.get("scope") in (None, name.split("/", 1)[0] if name.startswith("@") else None)
+        and str(value.get("escapedName", escaped)).lower() == escaped
+        and all(value.get(key) is None or _registry_request(value[key], name) for key in _REQUEST_FIELDS)
     )
 
 
@@ -563,39 +572,57 @@ def _lock_records(lock: dict, name: str, key: str | None) -> list[dict]:
     ]
 
 
-def _owner_specs(lock: dict, name: str, key: str | None) -> list[object]:
+def _installed_as(key: str | None) -> tuple[str, str] | None:
+    """The owner path and the dependency name of a copy at ``.../node_modules/<dep>``.
+
+    The dependency name is the folder name the owner's spec is filed under: it
+    is the package name for an ordinary install and the alias for an aliased
+    one. ``None`` when the copy is not in a ``node_modules`` folder.
+    """
+
+    if key is None:
+        return None
+    parts = key.split("/")
+    size = 2 if len(parts) > 2 and parts[-2].startswith("@") else 1
+    if len(parts) <= size or parts[-size - 1] != _DEPENDENCY_DIR:
+        return None
+    return "/".join(parts[:-size - 1]), "/".join(parts[-size:])
+
+
+def _owner_specs(lock: dict, key: str | None) -> list[object]:
     """The specs that the package owning this install gives it.
 
-    A copy at ``node_modules/<name>`` is the one the root of the project asks
-    for (the lock entry with an empty path); a copy at
-    ``node_modules/a/node_modules/<name>`` is the one ``a`` asks for. The spec
+    A copy at ``node_modules/<dep>`` is the one the root of the project asks
+    for (the lock entry with an empty path) under the name ``<dep>``; a copy at
+    ``node_modules/a/node_modules/<dep>`` is the one ``a`` asks for. The spec
     describes this install only when it is that copy, and the copy is a copy
     whether or not the lock lists it. A lock of npm 6 gives the same spec in
     ``requires``.
     """
 
-    suffix = f"{_DEPENDENCY_DIR}/{name}"
-    if key is None or not (_fold(key) == _fold(suffix) or _fold(key).endswith("/" + _fold(suffix))):
+    placed = _installed_as(key)
+    if placed is None:
         return []
-    owner = _fold(key[:len(key) - len(suffix)].rstrip("/"))
+    owner, dependency = _fold(placed[0]), placed[1]
     # The ``dependencies`` of an npm 6 entry are the nested packages, not specs.
     tables = [
         (lock.get("packages"), _DEPENDENCY_FIELDS),
         (_flat_v1(lock.get("dependencies")), ("requires",)),
     ]
     return [
-        specs[name] for table, fields in tables if isinstance(table, dict)
+        specs[dependency] for table, fields in tables if isinstance(table, dict)
         for path, entry in table.items()
         if isinstance(path, str) and isinstance(entry, dict) and _fold(path) == owner
         for field in fields
-        if isinstance(specs := entry.get(field), dict) and name in specs
+        if isinstance(specs := entry.get(field), dict) and dependency in specs
     ]
 
 
 def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] | None:
     """The lock entries that record this install, or None if any place the
-    install names its source does not say the registry. A record that cannot be
-    read raises."""
+    install names its source does not say the registry, the copy is installed
+    under another name than the package's (an alias), or a lock that is present
+    cannot be read as an install record."""
 
     if not all(
         field not in manifest or _registry_metadata(field, manifest[field], name)
@@ -606,6 +633,9 @@ def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] |
     root = os.path.abspath(plugin_dir)
     for position, folder in enumerate(_lock_folders(plugin_dir)):
         key = None if position == 0 else os.path.relpath(root, folder).replace(os.sep, "/")
+        placed = _installed_as(key)
+        if placed is not None and _fold(placed[1]) != _fold(name):
+            return None
         for relative in _LOCK_FILES:
             path = os.path.join(folder, *relative.split("/"))
             try:
@@ -619,13 +649,11 @@ def _install_records(plugin_dir: str, manifest: dict, name: str) -> list[dict] |
                 return None
             try:
                 lock = json.loads(payload)
-            except (UnicodeDecodeError, ValueError):
-                continue
-            except RecursionError:
+            except (UnicodeDecodeError, ValueError, RecursionError):
                 return None
             if not isinstance(lock, dict):
-                continue
-            if not all(_registry_request(spec, name) for spec in _owner_specs(lock, name, key)):
+                return None
+            if not all(_registry_request(spec, name) for spec in _owner_specs(lock, key)):
                 return None
             for entry in _lock_records(lock, name, key):
                 version = entry.get("version")
