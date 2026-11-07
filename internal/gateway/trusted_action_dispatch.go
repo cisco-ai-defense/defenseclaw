@@ -560,6 +560,9 @@ func dispatchTrustedActionWith(
 					// before a write does not hide the write.
 					child.Input.CWD = request.Input.CWD
 				}
+				if simple.LoginGuess && !loginGuessReadingMayProveStateWrite(request, simple.Text, child.Input.CWD) {
+					continue
+				}
 				if simple.UnboundUser {
 					// A name a read, loop or eval binds is not the login the
 					// home spells. The child keeps the spelling of the path
@@ -4500,6 +4503,21 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 // reading without the guess.
 func loginGuessProvedFinding(finding RuleFinding) bool {
 	return trustedActionFindingKey(finding.RuleID) == canonicalTrustedRuleID("tamper.detector_state_write")
+}
+
+// loginGuessReadingMayProveStateWrite reports whether a LoginGuess reading of
+// a simple command is worth its full judgment. The reading only proves a
+// write to DefenseClaw state (loginGuessProvedFinding), and every lane that
+// proves one starts from a command that may name the state folder however it
+// is spelled (hookpaths.MayNameState) or whose operands the mention scan
+// resolves into the state, through a link on disk too
+// (ActionStateTargetMention, the scan withActiveStateTargetMention opens
+// with). A reading that does neither would add only its cost to a command
+// that merely names USER or LOGNAME. A managed hook proves the write from
+// the client evidence instead, so its readings are all judged.
+func loginGuessReadingMayProveStateWrite(request trustedActionRequest, text, cwd string) bool {
+	return request.ProtectedHomeHook || hookpaths.MayNameState(text) ||
+		request.targetMemo.ActionStateTargetMention(text, cwd, request.Input.ActiveHome)
 }
 
 // withSimpleCommandFindings adds each command's ordinary standalone result
