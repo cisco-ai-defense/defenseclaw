@@ -213,6 +213,28 @@ async function loadCopy() {
   return { createFetchInterceptor, setProof: proof._setListenerProofForTest };
 }
 
+/**
+ * An older build patches the node http layers along with fetch and puts all of
+ * them back in the same stop (bound copies of what it found, as 1.0.8 does).
+ */
+function patchHttpLayersLikeAnOlderBuild(): () => void {
+  const putBack = {
+    httpsRequest: https.request.bind(https),
+    httpRequest: http.request.bind(http),
+    httpGet: http.get.bind(http),
+  };
+  https.request = ((...args: Parameters<typeof https.request>) =>
+    putBack.httpsRequest(...args)) as typeof https.request;
+  http.request = ((...args: Parameters<typeof http.request>) =>
+    putBack.httpRequest(...args)) as typeof http.request;
+  http.get = ((...args: Parameters<typeof http.get>) => putBack.httpGet(...args)) as typeof http.get;
+  return () => {
+    https.request = putBack.httpsRequest;
+    http.request = putBack.httpRequest;
+    http.get = putBack.httpGet;
+  };
+}
+
 const modelCalls = (seen: string[]) => seen.filter((url) => url.endsWith("/v1/chat/completions"));
 
 /**
@@ -231,10 +253,12 @@ function startOlderBuildCopy(port: number, nativeFetch: typeof fetch) {
   (globalThis as Record<symbol, unknown>)[STATE_KEY] = state;
   const olderWrapper = (async () => new Response("older")) as typeof fetch;
   globalThis.fetch = olderWrapper;
+  const putHttpLayersBack = patchHttpLayersLikeAnOlderBuild();
   return {
     olderWrapper,
     stop: () => {
       globalThis.fetch = nativeFetch;
+      putHttpLayersBack();
       state.installed = false;
       state.guardrailPort = null;
     },
@@ -256,6 +280,7 @@ function olderBuildCopy(port: number) {
     guardrailPort: null as number | null,
   }) as { installed: boolean; guardrailPort: number | null };
   let original: typeof fetch | null = null;
+  let putHttpLayersBack: (() => void) | null = null;
   return {
     start: () => {
       if (state.installed) return;
@@ -263,11 +288,14 @@ function olderBuildCopy(port: number) {
       state.guardrailPort = port;
       original = globalThis.fetch;
       globalThis.fetch = (async () => new Response(`older:${port}`)) as typeof fetch;
+      putHttpLayersBack = patchHttpLayersLikeAnOlderBuild();
     },
     stop: () => {
       if (original) {
         globalThis.fetch = original;
         original = null;
+        putHttpLayersBack?.();
+        putHttpLayersBack = null;
       }
       state.installed = false;
       state.guardrailPort = null;
@@ -278,6 +306,7 @@ function olderBuildCopy(port: number) {
 
 describe("module copies that share the transport, with a live copy of an older build", () => {
   const realFetch = globalThis.fetch;
+  const realHttpLayers = { httpsRequest: https.request, httpRequest: http.request, httpGet: http.get };
   let seen: string[];
   let baseFetch: typeof fetch;
 
@@ -295,6 +324,9 @@ describe("module copies that share the transport, with a live copy of an older b
 
   afterEach(() => {
     globalThis.fetch = realFetch;
+    https.request = realHttpLayers.httpsRequest;
+    http.request = realHttpLayers.httpRequest;
+    http.get = realHttpLayers.httpGet;
     delete (globalThis as Record<symbol, unknown>)[STATE_KEY];
     vi.restoreAllMocks();
   });
@@ -429,7 +461,17 @@ describe("module copies that share the transport, with a live copy of an older b
     return wrapped;
   }
 
-  it("another component wrapped fetch, a copy that never held the transport stops first, then the holder stops: the patch is back, no model call goes direct", async () => {
+  /** The same for the node http layers: wrappers that delegate to what they found. */
+  function wrapNodeHttpLayersLikeAnotherComponent(): void {
+    const httpsRequest = https.request;
+    const httpRequest = http.request;
+    const httpGet = http.get;
+    https.request = ((...args: Parameters<typeof https.request>) => httpsRequest(...args)) as typeof https.request;
+    http.request = ((...args: Parameters<typeof http.request>) => httpRequest(...args)) as typeof http.request;
+    http.get = ((...args: Parameters<typeof http.get>) => httpGet(...args)) as typeof http.get;
+  }
+
+  it("another component wrapped every layer, a copy that never held the transport stops first, then the holder stops: the patch is back, no model call goes direct", async () => {
     const holder = olderBuildCopy(PORT);
     holder.start();
     const bystander = olderBuildCopy(PORT + 5);
@@ -438,6 +480,7 @@ describe("module copies that share the transport, with a live copy of an older b
     const fresh = createFetchInterceptor(PORT + 1);
     fresh.start();
     const wrapped = wrapFetchLikeAnotherComponent();
+    wrapNodeHttpLayersLikeAnotherComponent();
 
     bystander.stop();
     await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
@@ -470,6 +513,106 @@ describe("module copies that share the transport, with a live copy of an older b
     expect(globalThis.fetch).toBe(afterTakeover);
     await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
     expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 1}/v1/chat/completions`]);
+    fresh.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  it("another component wraps fetch after the hand-over, then a copy that never held the transport stops: nothing is patched again, and the stop of the current copy leaves the native transport for the next copy", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+
+    holder.stop();
+    expect(fresh.describeLayers().fetch).toBe(true);
+    wrapFetchLikeAnotherComponent();
+    const wrappedFetch = globalThis.fetch;
+    bystander.stop();
+
+    expect(globalThis.fetch).toBe(wrappedFetch);
+    fresh.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+    expect(http.request.name).not.toContain("patched");
+
+    const later = createFetchInterceptor(PORT + 2);
+    later.start();
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 2}/v1/chat/completions`]);
+    later.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  it("another component wraps fetch and a node http layer after the hand-over, then a copy that never held the transport stops: nothing is patched again", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    holder.stop();
+    const patchedHttps = https.request;
+    https.request = ((...args: Parameters<typeof https.request>) =>
+      patchedHttps(...args)) as typeof https.request;
+    wrapFetchLikeAnotherComponent();
+    const wrappedFetch = globalThis.fetch;
+    const wrappedHttps = https.request;
+
+    bystander.stop();
+
+    expect(globalThis.fetch).toBe(wrappedFetch);
+    expect(https.request).toBe(wrappedHttps);
+    fresh.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+    expect(https.request.name).not.toContain("patched");
+  });
+
+  it("another component wraps every layer after the hand-over, then a copy that never held the transport stops: the patch is still reachable, so nothing is patched again", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    holder.stop();
+    wrapFetchLikeAnotherComponent();
+    wrapNodeHttpLayersLikeAnotherComponent();
+    const wrappedFetch = globalThis.fetch;
+
+    bystander.stop();
+
+    expect(globalThis.fetch).toBe(wrappedFetch);
+    fresh.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+
+    const later = createFetchInterceptor(PORT + 2);
+    later.start();
+    await globalThis.fetch("https://api.openai.com/v1/chat/completions", { method: "POST", body: "{}" });
+    expect(modelCalls(seen)).toEqual([`http://127.0.0.1:${PORT + 2}/v1/chat/completions`]);
+    later.stop();
+    expect(globalThis.fetch).toBe(baseFetch);
+  });
+
+  it("another component wraps only fetch while the older holder still holds the transport: a copy that never held it stops, and the new copy does not take over early", async () => {
+    const holder = olderBuildCopy(PORT);
+    holder.start();
+    const bystander = olderBuildCopy(PORT + 5);
+    bystander.start();
+    const { createFetchInterceptor } = await loadCopy();
+    const fresh = createFetchInterceptor(PORT + 1);
+    fresh.start();
+    wrapFetchLikeAnotherComponent();
+
+    bystander.stop();
+
+    expect(fresh.describeLayers().fetch).toBe(false);
+    expect((globalThis as Record<symbol, { installed: boolean }>)[STATE_KEY].installed).toBe(true);
+    holder.stop();
+    expect(fresh.describeLayers().fetch).toBe(true);
     fresh.stop();
     expect(globalThis.fetch).toBe(baseFetch);
   });
