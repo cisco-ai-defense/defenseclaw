@@ -896,6 +896,11 @@ describe('docs claim CI coverage', () => {
   it('runs when any product source read by these checks changes', () => {
     const testSource = readFileSync(fileURLToPath(import.meta.url), 'utf8');
     const dependencies = [...testSource.matchAll(/join\(repo,\s*'([^']+)'/g)].map((match) => match[1]);
+    // The launcher refusal pages are checked against a fixture the Go launcher
+    // test writes (launcherRefusalText), from the launcher source and the
+    // standalone layout that supplies its paths. A change to any of the three
+    // must run this gate.
+    dependencies.push('internal/cli/launcher.go', 'internal/cli/testdata/launcher_refusal.json', 'internal/managed/standalone_layout.go');
     assert.ok(dependencies.includes('scripts/install.ps1'));
     assert.ok(dependencies.includes('cli/defenseclaw/commands/cmd_setup.py'));
     const workflow = readFileSync(join(repo, '.github/workflows/docs-site.yml'), 'utf8');

@@ -210,6 +210,11 @@ func TestLauncherTUIPointsToTheManagedDailyView(t *testing.T) {
 }
 
 func TestLauncherRefusalNamesAdministratorViews(t *testing.T) {
+	// Windows has no managed launcher: launcherRefusalFor("windows") is the
+	// shared sentence only (the administrator command is defenseclaw.exe).
+	if runtime.GOOS == "windows" {
+		t.Skip("no managed launcher on Windows")
+	}
 	for _, args := range [][]string{{"doctor"}, {"alerts"}, {"tui"}} {
 		var ran []string
 		root := launcherTestRoot(&ran)
