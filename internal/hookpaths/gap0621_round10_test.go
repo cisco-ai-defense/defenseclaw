@@ -222,3 +222,62 @@ func TestGAP0621R10SiblingManifestSelection(t *testing.T) {
 		})
 	}
 }
+
+// REVIEW-12: a Skill folder whose own SKILL.md is a hard link to the linked
+// manifest is the same file under another spelling, so every spelling that
+// names that folder or its manifest binds the project skill. A distinct
+// sibling manifest stays allowed (TestGAP0621R10SiblingManifestSelection).
+func TestGAP0621R10HardLinkedManifestSelection(t *testing.T) {
+	home := t.TempDir()
+	project := filepath.Join(home, "project")
+	root := filepath.Join(project, ".claude", "skills")
+	if err := os.MkdirAll(filepath.Dir(root), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), root); err != nil {
+		t.Skipf("root link unavailable: %v", err)
+	}
+	projectSkill := filepath.Join(root, "sample")
+	if err := os.MkdirAll(projectSkill, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "sample")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(outside, "linked.md")
+	if err := os.WriteFile(linked, []byte("---\nname: sample\n---\nlinked\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(linked, filepath.Join(outside, "SKILL.md")); err != nil {
+		t.Skipf("hard link unavailable: %v", err)
+	}
+	if err := os.Symlink(linked, filepath.Join(projectSkill, "SKILL.md")); err != nil {
+		t.Skipf("manifest link unavailable: %v", err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(outside, alias); err != nil {
+		t.Skipf("alias unavailable: %v", err)
+	}
+	relative, err := filepath.Rel(project, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, source := range map[string]string{
+		"hard-linked folder":   outside,
+		"hard-linked manifest": filepath.Join(outside, "SKILL.md"),
+		"alias folder":         alias,
+		"alias manifest":       filepath.Join(alias, "SKILL.md"),
+		"relative folder":      relative,
+		"relative manifest":    filepath.Join(relative, "SKILL.md"),
+		"linked target":        linked,
+		"project link":         filepath.Join(projectSkill, "SKILL.md"),
+	} {
+		t.Run(label, func(t *testing.T) {
+			got := round6Selected(round9Facts(root, home, project, source))
+			if len(got) != 1 || got[0] != projectSkill {
+				t.Errorf("source %s did not bind the project folder: %v", source, got)
+			}
+		})
+	}
+}
