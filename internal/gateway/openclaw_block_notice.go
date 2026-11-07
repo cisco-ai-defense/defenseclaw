@@ -174,23 +174,15 @@ func openClawBlockNoticesPending() bool {
 // a user message, an assistant message, a system prompt or any other part of
 // the request takes nothing.
 func takeOpenClawBlockNotices(body []byte) []openClawBlockNotice {
-	if !bytes.Contains(body, []byte(openClawBlockRefPrefix)) {
+	// The body is decoded before any reference is looked for: JSON allows the
+	// same string to be spelled with escapes, which a raw byte search misses.
+	results := toolResultTexts(body, openClawBlockRefPrefix)
+	if len(results) == 0 {
 		return nil
 	}
 	openClawBlockNotices.mu.Lock()
 	defer openClawBlockNotices.mu.Unlock()
 	openClawBlockNotices.entries = pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
-	named := false
-	for _, e := range openClawBlockNotices.entries {
-		if bytes.Contains(body, []byte(e.ref)) {
-			named = true
-			break
-		}
-	}
-	if !named {
-		return nil
-	}
-	results := toolResultTexts(body, openClawBlockRefPrefix)
 	var taken []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(openClawBlockNotices.entries))
 	for _, e := range openClawBlockNotices.entries {
