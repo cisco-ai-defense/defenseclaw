@@ -1684,7 +1684,13 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     # whether it is an override or inherited from the global default.
     if mode is None:
         click.echo()
-        if upstream_fail_open(app.cfg, key):
+        # The same on/off rule as the unscoped view: a disabled connector has
+        # no hooks, so it has no fail mode and no hook drift (GAP-0824, GAP-1648).
+        enforcing = gc.enabled and (gc.effective_enabled(key) if hasattr(gc, "effective_enabled") else True)
+        proxy = _is_proxy_connector(key)
+        if not enforcing:
+            runtime_value = "disabled (no hooks)"
+        elif upstream_fail_open(app.cfg, key):
             # Copilot CLI, Antigravity and (under Secure Client) Hermes fail
             # open upstream whatever is saved, as the unscoped view, status and
             # doctor say (GAP-0336).
@@ -1692,7 +1698,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
                 f"open ({label} upstream; failures cannot be made fail-closed;"
                 f" configured provenance: {configured_mode})"
             )
-        elif _is_proxy_connector(key):
+        elif proxy:
             # No hooks: the model requests follow the outage mode the unscoped
             # view and status print, resolved by the one shared helper (GAP-0824).
             runtime_value = proxy_outage_summary(proxy_model_outage_mode(app.cfg, key))
@@ -1708,15 +1714,30 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         else:
             runtime_value = runtime_state.runtime or "unknown"
         click.echo(f"  {ux.bold(f'{label} ({key}) hook_fail_mode:')} {ux.accent(runtime_value)}")
-        if has_override:
+        global_saved = saved_hook_fail_mode_scope(gc, "") == "global"
+        if proxy and not global_saved:
+            # An unsaved global value is only the schema default: the policy
+            # tier decides the outage mode, so do not call it inherited (GAP-0824).
+            if has_override:
+                ux.subhead("per-connector override.", indent="  ")
+            else:
+                ux.subhead(
+                    f"from the policy tier ({gc.hook_policy_tier(key)} tier); no fail mode is saved.", indent="  "
+                )
+        elif has_override:
             ux.subhead(f"per-connector override (global default: {global_fm}).", indent="  ")
         else:
             ux.subhead(f"inherited from global default ({global_fm}).", indent="  ")
-        if runtime_state.drift:
-            ux.warn(
-                f"Runtime drift (desired {runtime_state.desired}): " + ", ".join(runtime_state.drift),
-                indent="  ",
-            )
+        if proxy:
+            # Hooks do not exist for a proxy-backed connector: only a foreign or
+            # unguarded registration is drift, as the unscoped report says.
+            drift = list(registration_integrity_drift(app.cfg, key)) if enforcing else []
+            desired = proxy_model_outage_mode(app.cfg, key)
+        else:
+            drift = list(runtime_state.drift) if enforcing else []
+            desired = runtime_state.desired
+        if drift:
+            ux.warn(f"Runtime drift (desired {desired}): " + ", ".join(drift), indent="  ")
         click.echo()
         return
 

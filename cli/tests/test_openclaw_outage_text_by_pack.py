@@ -132,3 +132,59 @@ def test_the_scoped_fail_mode_view_matches_the_unscoped_view_for_a_proxy_connect
     assert (_CONTINUES in out) is (want == "open")
     assert (_BLOCKED in out) is (want == "closed")
     assert f"{want} (proxy-backed, no hooks:" in _words(unscoped.output)
+
+
+def _two_connector_config(tmp_path: Path, *, global_off: bool = False, openclaw_off: bool = False, saved: str = ""):
+    from defenseclaw.config import PerConnectorGuardrailConfig, default_config
+
+    cfg = default_config()
+    cfg.data_dir = str(tmp_path)
+    cfg.guardrail.enabled = not global_off
+    cfg.guardrail.rule_pack = "default"
+    cfg.guardrail.connectors = {
+        "codex": PerConnectorGuardrailConfig(),
+        "openclaw": PerConnectorGuardrailConfig(enabled=False if openclaw_off else None),
+    }
+    if saved:
+        cfg.guardrail.hook_fail_mode = saved
+        cfg.guardrail._hook_fail_mode_saved = True
+    return cfg
+
+
+@pytest.mark.parametrize(
+    ("global_off", "openclaw_off", "want"),
+    [
+        (False, False, "open (proxy-backed, no hooks:"),
+        (True, False, "disabled (no hooks)"),
+        (False, True, "disabled (no hooks)"),
+    ],
+)
+def test_the_scoped_proxy_view_matches_the_unscoped_view_for_an_unsaved_default_and_both_disabled_forms(
+    tmp_path: Path, global_off: bool, openclaw_off: bool, want: str
+) -> None:
+    cfg = _two_connector_config(tmp_path, global_off=global_off, openclaw_off=openclaw_off)
+    unscoped = _words(CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=_app(cfg)).output)
+    scoped_run = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--connector", "openclaw"], obj=_app(cfg))
+    assert scoped_run.exit_code == 0, scoped_run.output
+    scoped = _words(scoped_run.output)
+    assert f"OpenClaw (openclaw): {want}" in unscoped
+    assert f"hook_fail_mode: {want}" in scoped
+    # Nothing is saved: the schema default (closed) is not an inherited value, and a proxy-backed
+    # connector has no hook script to be missing.
+    assert "inherited from global default" not in scoped
+    assert "Runtime drift" not in scoped
+    assert "hook-script-missing" not in scoped
+    if want.startswith("open"):
+        assert _CONTINUES in scoped
+    else:
+        assert _CONTINUES not in scoped
+
+
+def test_a_saved_global_closed_is_still_shown_as_inherited_by_the_scoped_proxy_view(tmp_path: Path) -> None:
+    cfg = _two_connector_config(tmp_path, saved="closed")
+    scoped = _words(
+        CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--connector", "openclaw"], obj=_app(cfg)).output
+    )
+    assert "closed (proxy-backed, no hooks:" in scoped
+    assert "inherited from global default (closed)" in scoped
+    assert "Runtime drift" not in scoped
