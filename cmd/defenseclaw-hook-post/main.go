@@ -19,7 +19,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +29,11 @@ import (
 )
 
 const maxInput = hookexec.MaxPerUserPluginRequest
+
+// peerRefusalOutput is the root-gateway diagnosis printed after a refused
+// listener (a seam for tests: the listener a real refusal needs belongs to
+// another account).
+var peerRefusalOutput = hookexec.PerUserPeerRefusalOutput
 
 const userGuardCapability = "defenseclaw-hook-post guard-user-hook v1\n"
 
@@ -260,7 +267,12 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		return hookexec.PerUserPostOutageExit
 	case hookexec.PerUserPostPeerUnverified(err):
 		// Nothing of the call was sent: the one failure the OpenCode and
-		// Amp plugins send again (GAP-2083).
+		// Amp plugins send again (GAP-2083). The shell hook reads the
+		// root-gateway diagnosis from stdout, as it does from the gateway
+		// CLI hook-post (rel-1-0-6 GAP-0712).
+		if slices.Contains(args, "--curl-output") {
+			_, _ = io.WriteString(output, peerRefusalOutput(err, flagValue(args, "--api-addr"), dataDir))
+		}
 		return hookexec.PerUserPostPeerUnverifiedExit
 	case hookexec.PerUserPostNoAnswer(err):
 		// A local deadline before the verified connection is not an
@@ -293,6 +305,20 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		return hookexec.PerUserPostNoAnswerExit
 	}
 	return 1
+}
+
+// flagValue is the value of a name value or name=value argument, or empty
+// when args has none.
+func flagValue(args []string, name string) string {
+	for i, arg := range args {
+		if arg == name && i+1 < len(args) {
+			return args[i+1]
+		}
+		if value, ok := strings.CutPrefix(arg, name+"="); ok {
+			return value
+		}
+	}
+	return ""
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {
