@@ -356,6 +356,13 @@ func provedHighWriteFindings(
 		}
 	}
 	judgePaths(facts)
+	// A native write call with a key outside its reviewed schema stays
+	// partial and names no path; each file it may write is judged as the
+	// reviewed call that writes it (actionfacts.UnknownKeyWriteTargetViews,
+	// the readings dispatchTrustedAction judges as twins).
+	for _, view := range actionfacts.UnknownKeyWriteTargetViews(request.Input, facts) {
+		judgePaths(view)
+	}
 	// `powershell -Command "Add-Content CLAUDE.md x"` from a POSIX shell
 	// (Git Bash, Claude Code's Bash tool on Windows): the outer shell call
 	// names no path, the PowerShell body does. Its writes are judged like
