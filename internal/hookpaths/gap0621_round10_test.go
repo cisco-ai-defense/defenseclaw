@@ -105,3 +105,59 @@ func TestGAP0621R10PlainFolderManifestLinkBinds(t *testing.T) {
 		t.Errorf("unrelated source claimed: %v", got)
 	}
 }
+
+// REVIEW-10: a plain project skill folder whose manifest links to a file
+// outside the profile is selected by any explicit spelling of the folder
+// holding that file (direct, alias, relative) as well as of the file. The
+// same shape with a manifest link to another private skill in the profile
+// stays the caller own skill, and an unrelated source is not claimed.
+func TestGAP0621R10PlainFolderManifestLinkFolderSource(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		bound bool
+	}{{"manifest outside profile", true}, {"manifest in private profile skill", false}} {
+		t.Run(tc.label, func(t *testing.T) {
+			home := t.TempDir()
+			project := filepath.Join(home, "project")
+			root := filepath.Join(project, ".claude", "skills")
+			projectSkill := filepath.Join(root, "sample")
+			if err := os.MkdirAll(projectSkill, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(t.TempDir(), "sample")
+			if !tc.bound {
+				target = filepath.Join(home, "notes", "sample")
+			}
+			round6Skill(t, target, "sample")
+			if err := os.Symlink(filepath.Join(target, "SKILL.md"), filepath.Join(projectSkill, "SKILL.md")); err != nil {
+				t.Skipf("manifest link unavailable: %v", err)
+			}
+			alias := filepath.Join(t.TempDir(), "alias")
+			if err := os.Symlink(target, alias); err != nil {
+				t.Skipf("alias unavailable: %v", err)
+			}
+			relative, err := filepath.Rel(project, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, source := range []string{
+				target, filepath.Join(target, "SKILL.md"),
+				alias, filepath.Join(alias, "SKILL.md"),
+				relative, filepath.Join(relative, "SKILL.md"),
+			} {
+				got := round6Selected(round9Facts(root, home, project, source))
+				if tc.bound && (len(got) != 1 || got[0] != projectSkill) {
+					t.Errorf("source %s did not bind the project folder: %v", source, got)
+				}
+				if !tc.bound && len(got) != 0 {
+					t.Errorf("private source %s claimed as project skill: %v", source, got)
+				}
+			}
+			unrelated := filepath.Join(t.TempDir(), "other")
+			round6Skill(t, unrelated, "other")
+			if got := round6Selected(round9Facts(root, home, project, unrelated)); len(got) != 0 {
+				t.Errorf("unrelated source claimed: %v", got)
+			}
+		})
+	}
+}
