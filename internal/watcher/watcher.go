@@ -4017,13 +4017,23 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	if w != nil && !w.secureClientActive() && !errors.Is(err, enforce.ErrQuarantineRemovalDeferred) {
 		w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotQuarantined, Detail: err.Error()})
 	}
+	// A rejected asset with a link inside is blocked and disabled, and its files
+	// stay where they are because quarantine does not follow links. That is
+	// stated as it is, at a lower severity than a move that failed (GAP-0826).
+	severity, alertTitle := "HIGH", "Quarantine failed; inspect the source and quarantine copy"
+	auditDetail := fmt.Sprintf("type=%s quarantine failed; inspect the source and quarantine copy: %v", evt.Type, err)
+	if errors.Is(err, enforce.ErrLinkedAssetContent) {
+		severity = "MEDIUM"
+		alertTitle = "Rejected " + evt.Type.String() + " is blocked and disabled but not quarantined: its files contain a link, which quarantine does not follow"
+		auditDetail = fmt.Sprintf("type=%s blocked and disabled; not quarantined, its files contain a link and stay in place: %v", evt.Type, err)
+	}
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
 		if !w.secureClientActive() {
 			envelope := audit.EnvelopeFromContext(ctx)
 			envelope.Connector = w.eventConnector(evt)
 			alertCtx := audit.ContextWithEnvelope(ctx, envelope)
-			_ = w.logger.LogAlertCtx(alertCtx, "watcher", "HIGH", "Quarantine failed; inspect the source and quarantine copy", map[string]any{
+			_ = w.logger.LogAlertCtx(alertCtx, "watcher", severity, alertTitle, map[string]any{
 				"asset_type": evt.Type.String(), "asset_name": evt.Name,
 				"path": evt.Path, "error": err.Error(), "connector": w.eventConnector(evt),
 			})
@@ -4032,8 +4042,8 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 			Action:   string(audit.ActionWatcherBlock),
 			Target:   evt.Path,
 			Actor:    "defenseclaw",
-			Details:  fmt.Sprintf("type=%s quarantine failed; inspect the source and quarantine copy: %v", evt.Type, err),
-			Severity: "HIGH",
+			Details:  auditDetail,
+			Severity: severity,
 		})
 	}
 	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", evt.Path, err)

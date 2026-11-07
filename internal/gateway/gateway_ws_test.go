@@ -1722,3 +1722,58 @@ func TestNotificationSubjectLabelMCP(t *testing.T) {
 		t.Fatalf("notificationSubjectLabel(\"mcp\") = %q, want \"MCP Server\"", got)
 	}
 }
+
+// slowPatchLoop answers config.get at once, holds the config.patch reply for
+// patchDelay as OpenClaw does while it applies the change, and shows the applied
+// state to a config.get that follows the patch.
+func slowPatchLoop(patchDelay time.Duration, applies bool) func(*testing.T, *websocket.Conn) {
+	return func(t *testing.T, conn *websocket.Conn) {
+		patched := false
+		for {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var req RequestFrame
+			if json.Unmarshal(raw, &req) != nil {
+				continue
+			}
+			payload := json.RawMessage(`{}`)
+			switch req.Method {
+			case "config.get":
+				payload = json.RawMessage(`{"hash":"h","config":{"plugins":{"allow":["amazon-bedrock","other"],"entries":{"amazon-bedrock":{"enabled":true}}}}}`)
+				if patched {
+					payload = json.RawMessage(`{"hash":"h2","config":{"plugins":{"allow":["other"],"entries":{"amazon-bedrock":{"enabled":false}}}}}`)
+				}
+			case "config.patch":
+				patched = applies
+				time.Sleep(patchDelay)
+			}
+			resp, _ := json.Marshal(ResponseFrame{Type: "res", ID: req.ID, OK: true, Payload: payload})
+			conn.WriteMessage(websocket.TextMessage, resp)
+		}
+	}
+}
+
+// GAP-0826: a disable that OpenClaw applied after the caller deadline is not
+// reported as failed.
+func TestDisablePluginAppliedAfterDeadlineIsNotAFailure(t *testing.T) {
+	srv := startMockGW(t, slowPatchLoop(600*time.Millisecond, true))
+	client := connectToMockGW(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := client.DisablePlugin(ctx, "amazon-bedrock"); err != nil {
+		t.Fatalf("DisablePlugin after an applied patch: %v", err)
+	}
+}
+
+// The twin: a patch that was not applied still fails at the deadline.
+func TestDisablePluginNotAppliedAtDeadlineFails(t *testing.T) {
+	srv := startMockGW(t, slowPatchLoop(600*time.Millisecond, false))
+	client := connectToMockGW(t, srv)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if err := client.DisablePlugin(ctx, "amazon-bedrock"); err == nil {
+		t.Fatal("DisablePlugin reported success though the config still enables the plugin")
+	}
+}

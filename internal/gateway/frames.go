@@ -334,7 +334,12 @@ type configGetInner struct {
 }
 
 type configPlugins struct {
-	Allow []string `json:"allow,omitempty"`
+	Allow   []string                     `json:"allow,omitempty"`
+	Entries map[string]configPluginEntry `json:"entries,omitempty"`
+}
+
+type configPluginEntry struct {
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // RawFrame is used for initial JSON parsing to determine frame type.
