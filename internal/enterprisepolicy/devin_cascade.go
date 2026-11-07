@@ -149,7 +149,9 @@ type devinCascadeFile struct {
 	path, record string
 	current      []byte
 	exists       bool
-	untrusted    bool
+	// untrusted is why an unprivileged principal controls the file; current
+	// and exists then hold the file as it is, read without the trust rules.
+	untrusted error
 }
 
 func devinCascadeFiles(opts Options) ([]devinCascadeFile, error) {
@@ -161,15 +163,21 @@ func devinCascadeFiles(opts Options) ([]devinCascadeFile, error) {
 }
 
 // read loads the file. A file an unprivileged principal controls is neither
-// DefenseClaw's nor the administrator's; it is left alone, as DefenseClaw
-// publishes nothing there.
+// DefenseClaw's nor the administrator's, so DefenseClaw does not edit it. Its
+// content is read as it is, only to report whether it still carries the
+// refusal an earlier release wrote.
 func (f *devinCascadeFile) read(opts Options, state *State) error {
 	current, exists, err := readPolicyFile(opts, f.path)
 	var untrusted *untrustedPolicyFileError
 	if errors.As(err, &untrusted) {
-		f.current, f.exists, f.untrusted = nil, false, true
-		state.detail("left %s alone: %v", f.path, untrusted.err)
-		return nil
+		f.untrusted = untrusted.err
+		current, exists, err = readPolicyFileWith(opts, f.path, func(Options, string) error { return nil })
+		if err != nil {
+			// The file cannot be inspected at all; inspect reports it.
+			current, exists, err = nil, false, nil
+		}
+	} else {
+		f.untrusted = nil
 	}
 	f.current, f.exists = current, exists
 	return err
@@ -216,7 +224,7 @@ func withdrawDevinCascade(opts Options, files []devinCascadeFile, state *State) 
 	strip := stripDevinCascadeHooks(opts)
 	for index := range files {
 		file := &files[index]
-		if file.untrusted {
+		if file.untrusted != nil {
 			continue
 		}
 		if err := restoreOrStrip(opts, file.record, file.path, strip, false, state); err != nil {
@@ -260,15 +268,28 @@ func countDevinCascadeEntries(opts Options, hooks *object) int {
 // Devin Local, and one in the Devin file is inert.
 func inspectDevinCascade(opts Options, files []devinCascadeFile, state *State) {
 	for _, file := range files {
-		if !file.exists {
+		if !file.exists && file.untrusted == nil {
 			continue
 		}
 		doc, err := decodeOrderedObject(file.current)
 		if err != nil {
+			if file.untrusted != nil {
+				state.conflict("%s is not administrator-controlled (%v) and DefenseClaw cannot read it, so it cannot tell whether a Cascade refusal from an earlier release is still in it; an administrator must restore its owner and mode, or remove it", file.path, file.untrusted)
+				continue
+			}
 			state.detail("%s is not valid JSON: %v", file.path, err)
 			continue
 		}
 		owned := countDevinCascadeEntries(opts, devinCascadeHooks(doc))
+		if file.untrusted != nil {
+			if owned > 0 {
+				state.OwnedEntries += owned
+				state.conflict("%s still carries DefenseClaw Cascade refusals an earlier release wrote and is not administrator-controlled (%v), so DefenseClaw will not edit it; the Devin CLI and Devin Desktop engine can import it, so they can refuse current Devin; an administrator must restore its owner and mode and run ensure, or remove the file", file.path, file.untrusted)
+			} else {
+				state.detail("%s is not administrator-controlled (%v); it carries no Cascade refusal from an earlier release, and DefenseClaw publishes nothing to it", file.path, file.untrusted)
+			}
+			continue
+		}
 		if owned == 0 {
 			continue
 		}
