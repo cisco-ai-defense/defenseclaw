@@ -375,6 +375,11 @@ def test_public_docs_expose_devin_and_no_retired_desktop_setup_surface() -> None
     devin_page = (docs_root / "content/docs/connectors/devin.mdx").read_text(encoding="utf-8")
     assert "**Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation**" in devin_page
     assert "before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile**" in devin_page
+    # The refusal goes only into the Devin hooks file: the pre-rename (Windsurf)
+    # file is imported by the Devin CLI as Devin Local hooks, so nothing is
+    # written there (GAP-0787).
+    assert "Writes nothing. A refusal here would block current Devin Local" in devin_page
+    assert "Adds the refusal entries. Current clients never run them." in devin_page
 
 
 def test_codex_compatibility_docs_list_current_versioned_contracts() -> None:
