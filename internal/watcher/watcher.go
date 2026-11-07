@@ -1413,6 +1413,10 @@ func (w *InstallWatcher) queueDueIssues() {
 		if !slices.ContainsFunc(roots, func(root string) bool { return watcherPathAtOrBelow(issue.Path, root) }) {
 			continue
 		}
+		// Staging clones and .git internals are never plugins; do not retry them (#1428).
+		if w.inClaudePluginStaging(issue.Path, 0) || pathHasGitDirSegment(issue.Path) {
+			continue
+		}
 		w.queuePending(issue.Path)
 	}
 }
@@ -3698,6 +3702,11 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 		if !isPluginStagingFolder(first) {
 			return false
 		}
+		// Update clones are never installed plugins; skip them on rescan
+		// regardless of age so a leftover clone is not quarantined (#1428).
+		if isClaudePluginUpdateClone(first) {
+			return true
+		}
 		if grace <= 0 {
 			return true
 		}
@@ -3712,17 +3721,33 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 // update), and the .dclaw-stage-<name>-<random> folder that
 // "defenseclaw plugin install" copies a plugin into, scans and decides
 // itself before it moves the copy to cache/<name> (GAP-0017, #1428).
+// Marketplace folders such as temp_subdir_tools are not staging: update
+// clones always end with ".clone".
 func isPluginStagingFolder(name string) bool {
 	lower := strings.ToLower(name)
-	for _, prefix := range []string{"temp_local_", "temp_subdir_", ".dclaw-stage-"} {
-		if strings.HasPrefix(lower, prefix) && len(lower) > len(prefix) {
-			return true
-		}
+	if strings.HasPrefix(lower, "temp_local_") && len(lower) > len("temp_local_") {
+		return true
+	}
+	if isClaudePluginUpdateClone(lower) {
+		return true
+	}
+	if strings.HasPrefix(lower, ".dclaw-stage-") && len(lower) > len(".dclaw-stage-") {
+		return true
 	}
 	return false
 }
 
-// pathHasGitDirSegment reports whether any path component is named ".git".
+// isClaudePluginUpdateClone names Claude Code's plugin-update staging
+// directory: cache/temp_subdir_<n>_<rand>.clone (#1428).
+func isClaudePluginUpdateClone(name string) bool {
+	lower := strings.ToLower(name)
+	const prefix, suffix = "temp_subdir_", ".clone"
+	return strings.HasPrefix(lower, prefix) && strings.HasSuffix(lower, suffix) &&
+		len(lower) > len(prefix)+len(suffix)
+}
+
+// pathHasGitDirSegment reports whether any path component is named ".git"
+// (case-insensitive so Windows aliases such as .GIT are excluded too).
 // Claude Code's plugin-update staging clone exposes .git/objects, .git/hooks
 // and similar as <marketplace>/<plugin>/<version> folders; those are git
 // internals, not plugins (#1428).
@@ -3730,7 +3755,7 @@ func pathHasGitDirSegment(path string) bool {
 	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
 		return r == '/' || r == '\\'
 	}) {
-		if part == ".git" {
+		if strings.EqualFold(part, ".git") {
 			return true
 		}
 	}

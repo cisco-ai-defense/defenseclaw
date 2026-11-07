@@ -162,8 +162,9 @@ func TestClaudePluginUpdateStagingCloneIsNotAPlugin(t *testing.T) {
 	staging := filepath.Join(cache, "temp_subdir_1793946491108_t2ymk0.clone")
 	gitHooks := filepath.Join(staging, ".git", "hooks")
 	gitObjects := filepath.Join(staging, ".git", "objects")
+	stagingSkill := filepath.Join(staging, "skills", "example")
 	final := filepath.Join(cache, "epa-market", "epa-plug-ok", "1.0.0")
-	for _, dir := range []string{gitHooks, gitObjects, final} {
+	for _, dir := range []string{gitHooks, gitObjects, stagingSkill, final} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -173,8 +174,12 @@ func TestClaudePluginUpdateStagingCloneIsNotAPlugin(t *testing.T) {
 	if !isPluginStagingFolder(filepath.Base(staging)) {
 		t.Fatal("temp_subdir_*.clone is not a staging folder")
 	}
-	if isPluginStagingFolder("epa-market") || isPluginStagingFolder("temp_subdir") {
+	if isPluginStagingFolder("epa-market") || isPluginStagingFolder("temp_subdir") ||
+		isPluginStagingFolder("temp_subdir_tools") {
 		t.Fatal("marketplace names must not look like staging")
+	}
+	if !isPluginStagingFolder("temp_subdir_1793946491108_t2ymk0.clone") {
+		t.Fatal("temp_subdir_*.clone must be staging")
 	}
 	for _, path := range []string{staging, gitHooks, gitObjects} {
 		if !w.inClaudePluginStaging(path, 0) {
