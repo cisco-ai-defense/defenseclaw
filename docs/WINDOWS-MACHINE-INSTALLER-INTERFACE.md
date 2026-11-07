@@ -55,7 +55,11 @@ refuses them, and the standalone profile refuses `--broker-binary`:
 `--hook-guard-binary` (standalone profile only), `--sensor-helper-binary` and `--cli-binary` from the installer script's own
 directory, which is how the standalone Setup and an extracted MDM package lay
 out the payload. Installing or upgrading through `ensure` needs the gateway,
-ACP, hook and sensor-helper sources; the CLI source is optional. A first
+ACP, hook and sensor-helper sources, and on the standalone profile the hook
+guard source too (the managed Claude Code hooks start through it); a folder
+without `defenseclaw-hook-guard.exe` is refused before anything changes, and so
+is a direct `install` or `upgrade` that names no `--hook-guard-binary`. The CLI
+source is optional. A first
 install also needs `--config` (or `--mode`/`--connector` together with
 `--manifest`); without `--manifest`, `ensure` builds the first guardian
 manifest from `--config`.
