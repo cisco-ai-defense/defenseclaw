@@ -4052,6 +4052,9 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
     ):
         start = module.index(f"\nfunction {helper} ") + 1
         helpers += module[start : module.index("\nfunction ", start) + 1]
+    # Get-DefenseClawKeptFileDrift reads the module's SID constants, which
+    # only the module load sets (rel-1-0-6 GAP-0656 CI).
+    sid_constants = _module_sid_constants(module)
     # Standalone swaps the file with the native SwapLaunchableFile (GAP-0240),
     # so the probe compiles the module's own native helper.
     native_security = _module_function(module, "Initialize-DefenseClawNativeSecurity")
@@ -4081,6 +4084,7 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "}\n"
         "$script:DefenseClawNativeSecurityType = $null\n"
         "$script:WindowsDirectory = [Environment]::GetFolderPath('Windows')\n"
+        + sid_constants
         + native_security
         + "\n"
         + profile_check
@@ -6628,6 +6632,27 @@ def _module_function(module: str, name: str) -> str:
     start = module.index(f"function {name} {{")
     end = module.find("\nfunction ", start + 1)
     return module[start : end if end != -1 else len(module)]
+
+
+def _module_sid_constants(module: str) -> str:
+    """The module top-level well-known SID constants, verbatim.
+
+    The module sets $script:SystemSID and its siblings once, when it loads. A
+    probe that cuts functions out of the module never runs that load, and under
+    StrictMode a function that reads one of them (Get-DefenseClawKeptFileDrift
+    reads three) fails with "The variable cannot be retrieved because it has
+    not been set". A probe whose extracted functions read a SID constant
+    prepends this block, so it runs the module own values and not a copy.
+    """
+
+    constants = re.findall(r"(?m)^\$script:\w+SID = \x27S-1-[0-9-]+\x27$", module)
+    names = {line.split(" = ", 1)[0] for line in constants}
+    assert {
+        "$script:SystemSID",
+        "$script:AdministratorsSID",
+        "$script:TrustedInstallerSID",
+    } <= names, "the module no longer sets its SID constants at the top level"
+    return "\n".join(constants) + "\n"
 
 
 def test_gateway_service_logs_on_as_local_system() -> None:
