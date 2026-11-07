@@ -100,6 +100,14 @@ func TestG235bWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 		`C:\ProgramData\Cursor\hooks.json`,
 		`C:\ProgramData\GitHub\Copilot\policy.d\90-defenseclaw.json`,
 		`C:\ProgramData\opencode\opencode.json`,
+		// The local administrative share and the 8.3 names of the same files.
+		`\\localhost\C$\Program Files\ClaudeCode\managed-settings.json`,
+		`\\127.0.0.1\C$\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`,
+		`\\?\UNC\localhost\C$\ProgramData\OpenAI\Codex\requirements.toml`,
+		`\\[::1]\C$\Program Files\ClaudeCode\managed-settings.json`,
+		`C:\PROGRA~1\ClaudeCode\managed-settings.json`,
+		`C:\PROGRA~1\CLAUDE~1\managed-settings.json`,
+		`C:\PROGRA~3\OpenAI\Codex\requirements.toml`,
 	}
 	allowed := []string{
 		home + `\proj\ClaudeCode\managed-settings.json`,
@@ -107,6 +115,10 @@ func TestG235bWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 		`C:\ProgramData\OpenAI\Codex2\requirements.toml`,
 		`C:\ProgramData\Cursor2\hooks.json`,
 		`C:\Program Files\Other\managed-settings.json`,
+		`\\localhost\C$\Users\vn\proj\ClaudeCode\managed-settings.json`,
+		`\\otherhost\C$\Program Files\ClaudeCode\managed-settings.json`,
+		`\\localhost\C$\Program Files\Other\managed-settings.json`,
+		`C:\PROGRA~1\Other\managed-settings.json`,
 	}
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "strict", "permissive"} {
