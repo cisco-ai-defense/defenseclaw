@@ -45,14 +45,14 @@
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 17047,
-      "sha256": "4c827f79665494c4a59b3beb2939b9785f78eea2396bc713d29039ce51f576e4"
+      "size": 16728,
+      "sha256": "6244a2b11d246c85b3c029a8e97c803850f2c778d51e02357dff256b0607fdb7"
     },
     "/usr/local/lib/defenseclaw/hooks/codex-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 15190,
-      "sha256": "504d2ded245d3b43119bf9efd07bd41b5bfba2e0294b73c8645750f26309fd1a"
+      "size": 15453,
+      "sha256": "68816164cee8f2437caf6a0d9b1f7830d3bc266b83918568692678a14a6287ec"
     },
     "/usr/local/lib/defenseclaw/hooks/codex-notify.sh": {
       "mode": "-rwxr-xr-x",

@@ -761,6 +761,12 @@ func TestSandboxIngressLimiterAndInFlight(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("third hook: %d", rec.Code)
 	}
+	// The refusal names this sandbox's own rate, not the account budget.
+	var refusal struct{ Error, Reason, Message string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &refusal); err != nil || refusal.Reason != sandboxReasonBindingRate ||
+		refusal.Error != "rate_limited" || strings.Contains(refusal.Message, "one user") {
+		t.Fatalf("third hook refusal = %q (%v), want the binding rate reason", rec.Body.String(), err)
+	}
 	// Telemetry has its own bucket; another binding is unaffected.
 	if rec := f.do(t, http.MethodPost, "/v1/logs", f.claudeTok, `{}`); rec.Code == http.StatusTooManyRequests {
 		t.Fatal("otlp throttled by hook budget")
