@@ -35,69 +35,62 @@ import (
 // TestHermesFallbackEntrypointsMatchScanner keeps this equal to the scanner.
 var hermesEntrypointKeys = []string{"main", "bin", "entry", "entrypoint"}
 
-// hermesYAMLTags are the tags PyYAML's safe loader constructs. A document
-// with any other tag is refused as a whole, as in a scan.
-var hermesYAMLTags = map[string]bool{
-	"!!str": true, "!!int": true, "!!float": true, "!!bool": true, "!!null": true,
-	"!!binary": true, "!!timestamp": true, "!!seq": true, "!!map": true,
-	"!!set": true, "!!omap": true, "!!pairs": true,
-}
-
-const (
-	// hermesYAMLMaxDepth bounds the nesting the fallback follows (aliases
-	// included), so a recursive anchor ends.
-	hermesYAMLMaxDepth = 64
-	// hermesYAMLMaxNodes bounds the nodes visited in one document.
-	hermesYAMLMaxNodes = 200000
-)
-
 // hermesManifestCandidates returns the entrypoint paths that manifests
-// declare, read here from the effective top-level mapping of each manifest:
-// the value of main, bin, entry and entrypoint as the scanner reads them
-// (_manifest_entrypoints), after last-key-wins, anchors, aliases (as a value
-// and as a key), merge keys and the escapes of JSON and YAML strings. It is
-// the answer used only while the plugin scanner, the reader of the manifest
-// grammar, cannot be asked and the policy lets ordinary activity continue (the
-// per-user default and permissive tiers). The caller resolves each string
-// under the plugin by file identity, exactly as for a scanner answer.
+// declare, read the way the scanner reads them (_parse_manifest_text and
+// _manifest_entrypoints): the manifest is decoded as UTF-8 text with
+// universal newlines, a .yaml or .yml manifest is loaded by PyYAML's safe
+// loader (see hermes_pyyaml.go) and any other manifest by Python's json, and
+// the value of main, bin, entry and entrypoint is read from the top-level
+// dictionary when it is a string (a bin dictionary contributes each string
+// it holds). It is the answer used only while the plugin scanner, the reader
+// of the manifest grammar, cannot be asked and the policy lets ordinary
+// activity continue (the per-user default and permissive tiers). The caller
+// resolves each string under the plugin by file identity, exactly as for a
+// scanner answer.
 //
-// It reads a parsed tree, not text, so a name in prose, a comment, a nested
-// mapping, a shadowed duplicate or another key declares nothing, and a name
-// spelled through an alias or escape declares what it spells. A manifest the
-// parser refuses declares nothing, as in a scan. A value the scanner would
-// not read as a string (a number, a null) may still be offered when it
-// resolves to a file of that name; that is a superset, never a miss.
-func hermesManifestCandidates(manifests map[string][]byte) []string {
+// A name in prose, a comment, a nested mapping, a shadowed duplicate, a value
+// that is not a string or another key declares nothing, and a name spelled
+// through an alias, an escape or an equivalent key declares what it spells. A
+// manifest the loader refuses declares nothing, as in a scan. decided is
+// false only when a manifest is too large or too deeply nested to read within
+// the reader's bounds: the answer is then unknown, and the caller must treat
+// every cache file as declared.
+func hermesManifestCandidates(manifests map[string][]byte) (entrypoints []string, decided bool) {
 	names := make([]string, 0, len(manifests))
 	for name := range manifests {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	seen := map[string]bool{}
-	var out []string
 	for _, name := range names {
-		if !utf8.Valid(manifests[name]) {
+		data := manifests[name]
+		if !utf8.Valid(data) {
 			continue
 		}
+		data = bytes.ReplaceAll(bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n")), []byte("\r"), []byte("\n"))
 		var values []string
+		var undecided bool
 		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-			values, _ = hermesYAMLEntrypoints(manifests[name])
+			values, _, undecided = hermesYAMLEntrypoints(data)
 		} else {
 			var ok bool
-			if values, ok = hermesJSONEntrypoints(manifests[name]); !ok {
+			if values, ok = hermesJSONEntrypoints(data); !ok {
 				// JSON the strict reader refuses but the scanner accepts
 				// (NaN, Infinity) is read as YAML, which holds JSON.
-				values, _ = hermesYAMLEntrypoints(manifests[name])
+				values, _, undecided = hermesYAMLEntrypoints(data)
 			}
+		}
+		if undecided {
+			return nil, false
 		}
 		for _, value := range values {
 			if !seen[value] {
 				seen[value] = true
-				out = append(out, value)
+				entrypoints = append(entrypoints, value)
 			}
 		}
 	}
-	return out
+	return entrypoints, true
 }
 
 // hermesJSONObject reads one JSON object, keeping the last value of a
@@ -129,7 +122,7 @@ func hermesJSONObject(dec *json.Decoder) (map[string]json.RawMessage, bool) {
 // is not blank.
 func hermesJSONPath(raw json.RawMessage) (string, bool) {
 	var value string
-	if json.Unmarshal(raw, &value) != nil || strings.TrimSpace(value) == "" {
+	if json.Unmarshal(raw, &value) != nil || pyBlank(value) {
 		return "", false
 	}
 	return value, true
@@ -176,188 +169,57 @@ func hermesJSONEntrypoints(data []byte) (values []string, ok bool) {
 	return values, true
 }
 
-// hermesYAMLPair is one key and value of an effective YAML mapping.
-type hermesYAMLPair struct {
-	key   *yaml.Node
-	value *yaml.Node
-}
-
-// hermesYAMLReader walks a parsed YAML document the way PyYAML's safe loader
-// builds it.
-type hermesYAMLReader struct {
-	nodes int
-}
-
-// resolve follows aliases to the node they stand for.
-func (r *hermesYAMLReader) resolve(n *yaml.Node) *yaml.Node {
-	for depth := 0; n != nil && n.Kind == yaml.AliasNode; depth++ {
-		if depth >= hermesYAMLMaxDepth {
-			return nil
-		}
-		n = n.Alias
+// hermesYAMLEntrypoints reads the entrypoints of a YAML manifest as the
+// scanner's loader does. ok is false when the loader refuses the text: not one
+// document, a character the reader rejects, a tag or value a constructor
+// raises on, a key that cannot be hashed, or a root that is not a mapping.
+// Such a manifest declares nothing. undecided is true when the text exceeds
+// the reader's bounds, which is not a refusal.
+func hermesYAMLEntrypoints(data []byte) (values []string, ok, undecided bool) {
+	if !pyYAMLPrintable(string(data)) {
+		return nil, false, false
 	}
-	return n
-}
-
-// mapping returns the effective pairs of a mapping node, in the order PyYAML
-// builds the dictionary (a later pair wins): the pairs of every merge key
-// first, then the pairs written in the mapping itself. Of a merged sequence
-// of mappings the first wins. ok is false where PyYAML refuses: a key that is
-// not a scalar (unhashable), or a merge of something other than mappings.
-func (r *hermesYAMLReader) mapping(n *yaml.Node, depth int) (pairs []hermesYAMLPair, ok bool) {
-	if r.nodes++; depth > hermesYAMLMaxDepth || r.nodes > hermesYAMLMaxNodes {
-		return nil, false
-	}
-	var merged, explicit []hermesYAMLPair
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		key, value := r.resolve(n.Content[i]), r.resolve(n.Content[i+1])
-		if key == nil || value == nil || key.Kind != yaml.ScalarNode {
-			return nil, false
-		}
-		if key.ShortTag() != "!!merge" {
-			explicit = append(explicit, hermesYAMLPair{key, value})
-			continue
-		}
-		switch value.Kind {
-		case yaml.MappingNode:
-			sub, ok := r.mapping(value, depth+1)
-			if !ok {
-				return nil, false
-			}
-			merged = append(merged, sub...)
-		case yaml.SequenceNode:
-			var subs [][]hermesYAMLPair
-			for _, item := range value.Content {
-				item = r.resolve(item)
-				if item == nil || item.Kind != yaml.MappingNode {
-					return nil, false
-				}
-				sub, ok := r.mapping(item, depth+1)
-				if !ok {
-					return nil, false
-				}
-				subs = append(subs, sub)
-			}
-			for i := len(subs) - 1; i >= 0; i-- {
-				merged = append(merged, subs[i]...)
-			}
-		default:
-			return nil, false
-		}
-	}
-	return append(merged, explicit...), true
-}
-
-// valid reports whether PyYAML's safe loader would construct the whole
-// document: every tag is one it knows, every key hashable, every merge a
-// mapping. A loader error anywhere refuses the manifest as a whole.
-func (r *hermesYAMLReader) valid(n *yaml.Node, seen map[*yaml.Node]bool, depth int) bool {
-	n = r.resolve(n)
-	if n == nil || depth > hermesYAMLMaxDepth {
-		return false
-	}
-	if r.nodes++; r.nodes > hermesYAMLMaxNodes {
-		return false
-	}
-	switch n.Kind {
-	case yaml.ScalarNode:
-		return hermesYAMLTags[n.ShortTag()]
-	case yaml.SequenceNode, yaml.MappingNode:
-		if seen[n] {
-			return true
-		}
-		seen[n] = true
-		if n.Kind == yaml.MappingNode {
-			if _, ok := r.mapping(n, 0); !ok {
-				return false
-			}
-		}
-		for i, child := range n.Content {
-			if n.Kind == yaml.MappingNode && i%2 == 0 {
-				if key := r.resolve(child); key != nil && key.Kind == yaml.ScalarNode && key.ShortTag() == "!!merge" {
-					continue
-				}
-			}
-			if !r.valid(child, seen, depth+1) {
-				return false
-			}
-		}
-		return true
-	}
-	return false
-}
-
-// path returns the string a scalar value holds, if it holds one that is not
-// blank. A null declares nothing.
-func (r *hermesYAMLReader) path(n *yaml.Node) (string, bool) {
-	if n == nil || n.Kind != yaml.ScalarNode || n.ShortTag() == "!!null" || strings.TrimSpace(n.Value) == "" {
-		return "", false
-	}
-	return n.Value, true
-}
-
-// hermesYAMLEntrypoints reads the entrypoints of a YAML manifest. ok is false
-// when the text is not one document the safe loader would construct as a
-// mapping; such a manifest declares nothing.
-func hermesYAMLEntrypoints(data []byte) (values []string, ok bool) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	var doc yaml.Node
 	if dec.Decode(&doc) != nil {
-		return nil, false
+		return nil, false, false
 	}
 	var extra yaml.Node
 	if err := dec.Decode(&extra); err != io.EOF {
-		return nil, false
+		return nil, false, false
 	}
 	if doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
-		return nil, false
+		return nil, false, false
 	}
-	r := &hermesYAMLReader{}
-	root := r.resolve(doc.Content[0])
-	if root == nil || root.Kind != yaml.MappingNode || !r.valid(root, map[*yaml.Node]bool{}, 0) {
-		return nil, false
+	loader := newPyLoader()
+	root, composed := loader.compose(doc.Content[0], 0)
+	if !composed {
+		return nil, false, loader.over
 	}
-	pairs, ok := r.mapping(root, 0)
-	if !ok {
-		return nil, false
+	top, constructed := loader.construct(root)
+	if !constructed {
+		return nil, false, loader.over
 	}
-	top := map[string]*yaml.Node{}
-	for _, pair := range pairs {
-		if pair.key.ShortTag() == "!!str" {
-			top[pair.key.Value] = pair.value
-		}
+	if top.kind != pyDict {
+		return nil, false, false
 	}
 	for _, key := range hermesEntrypointKeys {
-		value, present := top[key]
-		if !present {
+		value := top.lookup("s" + key)
+		if value == nil {
 			continue
 		}
-		if text, isPath := r.path(value); isPath {
-			values = append(values, text)
+		if value.kind == pyStr && !pyBlank(value.text) {
+			values = append(values, value.text)
 			continue
 		}
-		if key != "bin" || value.Kind != yaml.MappingNode {
+		if key != "bin" || value.kind != pyDict {
 			continue
 		}
-		bin, ok := r.mapping(value, 0)
-		if !ok {
-			continue
-		}
-		// A repeated name keeps its last value, as in a dictionary.
-		byName := map[string]*yaml.Node{}
-		var order []string
-		for _, pair := range bin {
-			identity := pair.key.ShortTag() + "\x00" + pair.key.Value
-			if _, dup := byName[identity]; !dup {
-				order = append(order, identity)
-			}
-			byName[identity] = pair.value
-		}
-		for _, identity := range order {
-			if text, isPath := r.path(byName[identity]); isPath {
-				values = append(values, text)
+		for _, entry := range value.entries {
+			if entry.value.kind == pyStr && !pyBlank(entry.value.text) {
+				values = append(values, entry.value.text)
 			}
 		}
 	}
-	return values, true
+	return values, true, false
 }
