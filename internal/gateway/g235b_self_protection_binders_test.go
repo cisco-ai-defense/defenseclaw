@@ -6,7 +6,6 @@ package gateway
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -23,38 +22,8 @@ import (
 // sibling or a project file stays allowed (default and permissive packs)
 // and a file it reaches only through a link on disk is not named.
 func TestG235bBinderClassKnownValues(t *testing.T) {
-	home, project := dynamicWordParityProject(t)
-	active := filepath.Base(home)
-	t.Setenv("USER", active)
-	t.Setenv("LOGNAME", active)
-	state := filepath.Join(home, ".defenseclaw", "config.yaml")
-	if err := os.MkdirAll(filepath.Dir(state), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(state, []byte("marker\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(state, filepath.Join(home, "statealias")); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(filepath.Dir(state), filepath.Join(home, "aliasdir")); err != nil {
-		t.Fatal(err)
-	}
-	other := filepath.Join(filepath.Dir(home), "ordinary")
-	if err := os.MkdirAll(filepath.Join(other, "aliasdir"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(other, "statealias"), []byte("ordinary\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(home), "statealias"), []byte("ordinary\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(other, "aliasdir", "config.yaml"), []byte("ordinary\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	home, project, parent := g235bBinderFixture(t)
 	const sq = "\x27"
-	parent := filepath.Dir(home) + "/"
 	type row struct {
 		name, command string
 		protected     bool
