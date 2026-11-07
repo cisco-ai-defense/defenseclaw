@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"maps"
+	"slices"
 	"strings"
 
 	"mvdan.cc/sh/v3/syntax"
@@ -82,35 +83,62 @@ func knownUnshadowed(name string) string {
 // source, a computed command word, or eval of text it cannot read). An eval
 // of fixed text redefines only the names that text defines. Each name it
 // finds is renamed once, in the definitions and in the command words of the
-// parsed command, to a name with no meaning to the reader. The parsed command
-// is changed in place; only the known-value reader, which parses its own
-// copy, uses it.
+// parsed command and of the eval texts it read, to a name with no meaning to
+// the reader. The parsed command is changed in place; only the known-value
+// reader, which parses its own copy, uses it.
+//
+// A call of a function scans the body of the definitions the shell can have
+// made when it reaches the call (current): a definition the scan has not
+// reached, one in a branch a static condition skips, and one a later
+// definition at the top of the command has replaced, are not scanned, and the
+// statements of a body are followed the way the reader follows the command.
 type knownShadow struct {
-	file      *syntax.File
-	home      string
-	shadowed  map[string]bool
-	functions map[string][]*syntax.FuncDecl
-	scanned   map[*syntax.FuncDecl]bool
-	version   int
-	depth     int
+	trees      []*syntax.File
+	home       string
+	shadowed   map[string]bool
+	top        map[*syntax.FuncDecl]bool
+	current    map[string][]*syntax.FuncDecl
+	scanned    map[*syntax.FuncDecl]int
+	generation int
+	opaque     bool
+	bodies     int
+	version    int
+	depth      int
 }
 
+// knownShadowMaxBodies bounds the function bodies one command scans; past it
+// every builtin counts as redefined.
+const knownShadowMaxBodies = 512
+
 func newKnownShadow(file *syntax.File, home string) *knownShadow {
-	s := &knownShadow{file: file, home: home, shadowed: map[string]bool{},
-		functions: map[string][]*syntax.FuncDecl{}, scanned: map[*syntax.FuncDecl]bool{}}
-	s.collect(file)
+	s := &knownShadow{home: home, shadowed: map[string]bool{}, top: map[*syntax.FuncDecl]bool{},
+		current: map[string][]*syntax.FuncDecl{}, scanned: map[*syntax.FuncDecl]int{}}
+	s.trees = append(s.trees, file)
+	for _, stmt := range file.Stmts {
+		if function, ok := stmt.Cmd.(*syntax.FuncDecl); ok && !stmt.Background && !stmt.Coprocess {
+			// A definition at the top of the command replaces the ones before it.
+			s.top[function] = true
+		}
+	}
 	return s
 }
 
-// collect records the functions node defines by name, so that a call of one
-// scans its body.
-func (s *knownShadow) collect(node syntax.Node) {
-	syntax.Walk(node, func(node syntax.Node) bool {
-		if function, ok := node.(*syntax.FuncDecl); ok && function.Name != nil {
-			s.functions[function.Name.Value] = append(s.functions[function.Name.Value], function)
+// reach records a definition the scan has reached: a call may run it from now
+// on, and a definition at the top of the command replaces the earlier ones.
+func (s *knownShadow) reach(function *syntax.FuncDecl) {
+	name := knownUnshadowed(function.Name.Value)
+	known := s.current[name]
+	if s.top[function] {
+		if len(known) == 1 && known[0] == function {
+			return
 		}
-		return true
-	})
+		s.current[name] = []*syntax.FuncDecl{function}
+	} else if slices.Contains(known, function) {
+		return
+	} else {
+		s.current[name] = append(known, function)
+	}
+	s.generation++
 }
 
 // stamp changes whenever a rename changes the printed source of the command.
@@ -130,8 +158,11 @@ func (s *knownShadow) scan(node syntax.Node) {
 	syntax.Walk(node, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
-			if node.Name != nil && knownShadowable[node.Name.Value] && !s.keepsOutcome(node) {
-				s.rename(node.Name.Value)
+			if node.Name != nil {
+				if knownShadowable[node.Name.Value] && !s.keepsOutcome(node) {
+					s.rename(node.Name.Value)
+				}
+				s.reach(node)
 			}
 			return false
 		case *syntax.CallExpr:
@@ -139,6 +170,125 @@ func (s *knownShadow) scan(node syntax.Node) {
 		}
 		return len(s.shadowed) != len(knownShadowable)
 	})
+}
+
+// scanStmts scans a list the shell runs in order: a branch a static condition
+// skips is not scanned, and nothing after a return or exit is. It reports
+// whether the shell can run on past the list.
+func (s *knownShadow) scanStmts(stmts []*syntax.Stmt) bool {
+	for _, stmt := range stmts {
+		if !s.scanStmt(stmt) {
+			return false
+		}
+	}
+	return true
+}
+
+// scanStmt scans one statement the way scanStmts does. Where it is not sure
+// that the shell leaves, it reports that the shell goes on.
+func (s *knownShadow) scanStmt(stmt *syntax.Stmt) bool {
+	if stmt == nil || len(s.shadowed) == len(knownShadowable) {
+		return true
+	}
+	for _, redirect := range stmt.Redirs {
+		s.scan(redirect)
+	}
+	switch command := stmt.Cmd.(type) {
+	case *syntax.Block:
+		return s.scanStmts(command.Stmts)
+	case *syntax.Subshell:
+		s.scanStmts(command.Stmts)
+	case *syntax.IfClause:
+		return s.scanIf(command)
+	case *syntax.WhileClause:
+		if !s.scanStmts(command.Cond) {
+			return false
+		}
+		truth := 0
+		if len(command.Cond) > 0 {
+			truth = actionStaticCondition(command.Cond[len(command.Cond)-1], s.home)
+		}
+		if command.Until {
+			truth = -truth
+		}
+		if truth >= 0 {
+			s.passes(func() { s.scanStmts(command.Do); s.scanStmts(command.Cond) })
+		}
+	case *syntax.ForClause:
+		s.scan(command.Loop)
+		s.passes(func() { s.scanStmts(command.Do) })
+	case *syntax.CaseClause:
+		s.scan(command.Word)
+		for _, item := range command.Items {
+			s.scanStmts(item.Stmts)
+		}
+	case *syntax.TimeClause:
+		return s.scanStmt(command.Stmt)
+	case *syntax.BinaryCmd:
+		if command.Op != syntax.AndStmt && command.Op != syntax.OrStmt {
+			s.scan(stmt)
+			return true
+		}
+		if !s.scanStmt(command.X) {
+			return false
+		}
+		truth := actionStaticCondition(command.X, s.home)
+		and := command.Op == syntax.AndStmt
+		skipped := truth == 0 || and && truth < 0 || !and && truth > 0
+		if truth == 0 || and && truth > 0 || !and && truth < 0 {
+			return s.scanStmt(command.Y) || skipped
+		}
+	default:
+		s.scan(stmt)
+		return !s.leaves(stmt)
+	}
+	return true
+}
+
+// passes scans a loop body again while a pass has redefined something, as a
+// later pass of the loop reaches what an earlier statement of the body
+// redefines before its first statement.
+func (s *knownShadow) passes(body func()) {
+	for pass := 0; ; pass++ {
+		generation := s.generation
+		body()
+		if s.generation == generation {
+			return
+		}
+		if pass == 4 {
+			s.renameAll()
+			return
+		}
+	}
+}
+
+// leaves reports a statement that is a plain return or exit, after which the
+// shell runs no further statement of the list it is in.
+func (s *knownShadow) leaves(stmt *syntax.Stmt) bool {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Coprocess || len(call.Args) == 0 || s.opaque {
+		return false
+	}
+	name, known := StaticWord(call.Args[0], s.home)
+	return known && (name == "exit" || name == "return" && len(s.current[name]) == 0)
+}
+
+func (s *knownShadow) scanIf(clause *syntax.IfClause) bool {
+	if len(clause.Cond) == 0 { // else
+		return s.scanStmts(clause.Then)
+	}
+	if !s.scanStmts(clause.Cond) {
+		return false
+	}
+	truth := actionStaticCondition(clause.Cond[len(clause.Cond)-1], s.home)
+	continues := false
+	if truth >= 0 {
+		continues = s.scanStmts(clause.Then)
+	}
+	if truth <= 0 {
+		continues = clause.Else == nil || s.scanIf(clause.Else) || continues
+	}
+	return continues
 }
 
 // keepsOutcome reports a function of true, false or ":" that only runs the
@@ -169,9 +319,11 @@ func (s *knownShadow) keepsOutcome(function *syntax.FuncDecl) bool {
 	return name == "false" && truth < 0 || name != "false" && truth > 0
 }
 
-// call applies one command: the program word, through command and builtin.
+// call applies one command: the program word, through command and builtin,
+// which skip a function of the name they are given.
 func (s *knownShadow) call(call *syntax.CallExpr) {
 	args := call.Args
+	skipsFunctions := false
 	for len(args) > 0 {
 		name, known := StaticWord(args[0], s.home)
 		if !known {
@@ -183,6 +335,7 @@ func (s *knownShadow) call(call *syntax.CallExpr) {
 		}
 		switch name {
 		case "command", "builtin":
+			skipsFunctions = true
 			args = args[1:]
 			for len(args) > 0 {
 				option, fixed := StaticWord(args[0], s.home)
@@ -197,25 +350,36 @@ func (s *knownShadow) call(call *syntax.CallExpr) {
 			}
 			continue
 		case "eval":
-			s.functionBodies(name)
+			if !skipsFunctions {
+				s.functionBodies(name)
+			}
 			s.eval(args[1:])
 		case "alias", "enable", "source", ".":
 			s.renameAll()
 		default:
-			s.functionBodies(name)
+			if !skipsFunctions {
+				s.functionBodies(name)
+			}
 		}
 		return
 	}
 }
 
-// functionBodies applies what the functions of a name redefine, once: a
-// rename stays, so a body scanned again changes nothing.
+// functionBodies applies what the definitions of a function a call can run
+// redefine. The name may be the one a rename gave the function. A body is
+// read again only after the scan has reached another definition or renamed
+// another builtin, which can change what it reaches.
 func (s *knownShadow) functionBodies(name string) {
-	for _, function := range s.functions[name] {
-		if !s.scanned[function] {
-			s.scanned[function] = true
-			s.scan(function.Body)
+	for _, function := range slices.Clone(s.current[knownUnshadowed(name)]) {
+		if s.scanned[function] == s.generation+1 {
+			continue
 		}
+		if s.bodies++; s.bodies > knownShadowMaxBodies {
+			s.renameAll()
+			return
+		}
+		s.scanned[function] = s.generation + 1
+		s.scanStmt(function.Body)
 	}
 }
 
@@ -249,13 +413,17 @@ func (s *knownShadow) eval(args []*syntax.Word) {
 		s.renameAll()
 		return
 	}
-	s.collect(parsed)
+	// The text reads the names renamed so far as the command does.
+	s.trees = append(s.trees, parsed)
+	s.renameTree(parsed, s.shadowed)
 	s.depth++
-	s.scan(parsed)
+	s.scanStmts(parsed.Stmts)
 	s.depth--
 }
 
 func (s *knownShadow) renameAll() {
+	// A name the reader does not rely on, such as return, may be redefined too.
+	s.opaque = true
 	var names []string
 	for name := range knownShadowable {
 		names = append(names, name)
@@ -275,15 +443,26 @@ func (s *knownShadow) rename(names ...string) {
 		return
 	}
 	s.version++
-	syntax.Walk(s.file, func(node syntax.Node) bool {
+	s.generation++
+	for _, tree := range s.trees {
+		s.renameTree(tree, fresh)
+	}
+}
+
+// renameTree renames the definitions and the command words of names in tree.
+func (s *knownShadow) renameTree(tree *syntax.File, names map[string]bool) {
+	if len(names) == 0 {
+		return
+	}
+	syntax.Walk(tree, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
-			if node.Name != nil && fresh[node.Name.Value] {
+			if node.Name != nil && names[node.Name.Value] {
 				node.Name.Value = knownShadowPrefix + node.Name.Value
 			}
 		case *syntax.CallExpr:
 			if len(node.Args) != 0 {
-				if name, known := StaticWord(node.Args[0], s.home); known && fresh[name] {
+				if name, known := StaticWord(node.Args[0], s.home); known && names[name] {
 					node.Args[0].Parts = []syntax.WordPart{&syntax.Lit{Value: knownShadowPrefix + name}}
 				}
 			}
