@@ -534,8 +534,9 @@ namespace DefenseClaw.Windows.Tests
         )) {
         throw "Win32 native security helper did not use a generated type: $nativeSecurityType"
     }
-    # GAP-0655: a refused changed-content publication keeps the old name and
-    # stage; the same staged body publishes after the reader releases it.
+    # GAP-0655: changed-content publication preserves a held reader's old
+    # body. A supported volume may publish immediately; a refusal leaves the
+    # old name and stage available for a retry after the reader releases it.
     $renameRoot = Join-Path ([IO.Path]::GetTempPath()) `
         ('defenseclaw-rename-smoke-' + [Guid]::NewGuid().ToString('N'))
     try {
@@ -546,20 +547,39 @@ namespace DefenseClaw.Windows.Tests
         [IO.File]::WriteAllText($renameDestination, 'old')
         $held = [IO.File]::Open($renameDestination, [IO.FileMode]::Open,
             [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        $publishedWhileHeld = $false
         try {
-            $refused = [string]$nativeSecurityType::RenameNonImageFile(
+            $firstResult = [string]$nativeSecurityType::RenameNonImageFile(
                 $renameSource, $renameDestination)
-            if ($refused -notmatch '^rename:(5|32|33)$' -or
-                [IO.File]::ReadAllText($renameDestination) -cne 'old' -or
-                [IO.File]::ReadAllText($renameSource) -cne 'new') {
-                throw "refused data publication changed a file: $refused"
+            if ($firstResult -ceq '' -or $firstResult -ceq 'classic') {
+                $publishedWhileHeld = $true
+                $held.Position = 0
+                $heldBytes = [byte[]]::new(3)
+                $heldLength = $held.Read($heldBytes, 0, $heldBytes.Length)
+                if ($heldLength -ne 3 -or
+                    [Text.Encoding]::UTF8.GetString($heldBytes) -cne 'old' -or
+                    [IO.File]::Exists($renameSource) -or
+                    [IO.File]::ReadAllText($renameDestination) -cne 'new') {
+                    throw 'published data did not preserve the held reader'
+                }
+            }
+            elseif ($firstResult -match '^rename:(5|32|33)$') {
+                if ([IO.File]::ReadAllText($renameDestination) -cne 'old' -or
+                    [IO.File]::ReadAllText($renameSource) -cne 'new') {
+                    throw "refused data publication changed a file: $firstResult"
+                }
+            }
+            else {
+                throw "data publication returned an unexpected result: $firstResult"
             }
         }
         finally { $held.Dispose() }
-        $published = [string]$nativeSecurityType::RenameNonImageFile(
-            $renameSource, $renameDestination)
-        if ($published -cne '' -and $published -cne 'classic') {
-            throw "data publication failed after release: $published"
+        if (-not $publishedWhileHeld) {
+            $published = [string]$nativeSecurityType::RenameNonImageFile(
+                $renameSource, $renameDestination)
+            if ($published -cne '' -and $published -cne 'classic') {
+                throw "data publication failed after release: $published"
+            }
         }
         if ([IO.File]::Exists($renameSource) -or
             [IO.File]::ReadAllText($renameDestination) -cne 'new') {

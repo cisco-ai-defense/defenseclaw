@@ -469,8 +469,43 @@ try {
 
             if ($canRewrite) {
                 $script:TestAclWrites.Clear()
-                if (-not (Invoke-TestSync)) {
+                # The manifest rebind changes the metadata body and must use
+                # the same protected publication path as other metadata writes.
+                $script:TestMetadataPath = $layout.MetadataPath
+                $script:TestMetadataPublicationCalls = 0
+                $script:TestMetadataPublicationBytes = $null
+                $beforePublication = Get-TestMetadataText
+                $script:TestOriginalMetadataWriter = (
+                    Microsoft.PowerShell.Core\Get-Command `
+                        -Name Write-DefenseClawDeploymentMetadataBytes `
+                        -CommandType Function
+                ).ScriptBlock
+                function Write-DefenseClawDeploymentMetadataBytes {
+                    param([string]$Path, [byte[]]$Bytes)
+                    if ($Path -cne $script:TestMetadataPath) {
+                        throw 'manifest rebind selected another metadata path'
+                    }
+                    $script:TestMetadataPublicationCalls++
+                    $script:TestMetadataPublicationBytes = [byte[]]$Bytes.Clone()
+                    & $script:TestOriginalMetadataWriter -Path $Path -Bytes $Bytes
+                }
+                try {
+                    $didRebind = Invoke-TestSync
+                }
+                finally {
+                    Microsoft.PowerShell.Management\Set-Item `
+                        -Path Function:\Write-DefenseClawDeploymentMetadataBytes `
+                        -Value $script:TestOriginalMetadataWriter
+                }
+                if (-not $didRebind) {
                     $failures.Add('guardian-activated republication was not rebound')
+                }
+                if ($script:TestMetadataPublicationCalls -ne 1 -or
+                    $null -eq $script:TestMetadataPublicationBytes -or
+                    $beforePublication -ceq (Get-TestMetadataText) -or
+                    [Text.Encoding]::UTF8.GetString($script:TestMetadataPublicationBytes) -cne
+                        (Get-TestMetadataText)) {
+                    $failures.Add('manifest rebind did not publish its changed metadata through the protected writer')
                 }
                 $rebound = Get-DefenseClawDeploymentMetadata -Layout $layout -Required
                 $record = $rebound.managed_hooks_activation
