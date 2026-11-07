@@ -2771,6 +2771,18 @@ var activeDefenseClawStateNames = []string{
 	"quarantine", "receipts", "registries",
 }
 
+// managedAgentSettingsCandidate reports a path of the machine policy files
+// DefenseClaw publishes for an agent, in either path syntax.
+func managedAgentSettingsCandidate(candidate actionfacts.PathFact) bool {
+	switch candidate.Flavor {
+	case actionfacts.PathFlavorPOSIX:
+		return actionfacts.ManagedAgentSettingsPath(exactSemanticPathValue(candidate))
+	case actionfacts.PathFlavorWindows:
+		return actionfacts.WindowsManagedAgentSettingsPath(exactSemanticPathValue(candidate))
+	}
+	return false
+}
+
 func matchesActiveDefenseClawState(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
@@ -2787,7 +2799,7 @@ func matchesActiveDefenseClawStateInLine(
 	lineStaysOff func() bool,
 	clientTargets map[string]string,
 ) bool {
-	if candidate.Flavor == actionfacts.PathFlavorPOSIX && actionfacts.ManagedAgentSettingsPath(exactSemanticPathValue(candidate)) {
+	if managedAgentSettingsCandidate(candidate) {
 		// The machine policy files DefenseClaw publishes for an agent are
 		// protected like its own state, whoever the active user is
 		// (rel-1-0-6:GAP-0734).
