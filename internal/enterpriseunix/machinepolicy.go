@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // Machine policy codes in the lifecycle result.
@@ -166,6 +168,7 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 	}
 	var scoped, outOfScope []string
 	seen := map[string]bool{}
+	goneHomes := confirmedGoneHomes{}
 	for _, account := range accounts {
 		home := env.P(account.Home)
 		if leftOut[account.User] || leftOut[strconv.Itoa(account.UID)] {
@@ -177,6 +180,7 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 	}
 	for _, account := range eligible {
 		home := env.P(account.Home)
+		goneHomes.note(account.User, account.UID, home)
 		if !seen[home] {
 			outOfScope = append(outOfScope, home)
 			seen[home] = true
@@ -186,13 +190,22 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 		filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixCopilotVSCodeAccountsFileName),
 		enterprisehooks.UnixCopilotVSCodeAccountsPath(env.Layout.ManifestPath),
 	} {
-		for _, home := range env.accountHomes(recordPath) {
+		for _, account := range env.accountRecords(recordPath) {
+			home := env.P(account.Home)
+			goneHomes.note(account.User, account.UID, home)
 			if !seen[home] {
 				outOfScope = append(outOfScope, home)
 				seen[home] = true
 			}
 		}
 	}
+	// A leftover Local file in the home of an account the directory
+	// confirms gone is nothing to enroll or to report: the guardian does
+	// not write into it, and it retires the account in the same pass that
+	// verify would otherwise call it an account outside enrollment
+	// (GAP-0777).
+	scoped = slices.DeleteFunc(scoped, goneHomes.has)
+	outOfScope = slices.DeleteFunc(outOfScope, goneHomes.has)
 	// Status and verify read no settings below a home that does not answer
 	// (GAP-1751); describeUnansweredHomes names it.
 	scoped = slices.DeleteFunc(scoped, func(home string) bool { return !env.homeAnswers(home) })
@@ -214,25 +227,72 @@ func (env *Env) accountHomes(recordPath string) []string {
 // canonicalAccountHomes is the homes of the accounts an eligible-accounts
 // record names, as the record spells them.
 func (env *Env) canonicalAccountHomes(recordPath string) []string {
+	var homes []string
+	for _, account := range env.accountRecords(recordPath) {
+		homes = append(homes, account.Home)
+	}
+	return homes
+}
+
+// accountRecord is one account of an eligible-accounts record: the name and
+// uid it was enrolled under, and its home as the record spells it.
+type accountRecord struct {
+	User string
+	UID  int
+	Home string
+}
+
+// accountRecords are the accounts of a root-only record in the
+// eligible-accounts format that name a home. An unreadable record has none.
+func (env *Env) accountRecords(recordPath string) []accountRecord {
 	data, err := readBounded(env.P(recordPath), maxInputBytes)
 	if err != nil {
 		return nil
 	}
 	var record struct {
 		Accounts []struct {
+			User string `json:"user"`
+			UID  int    `json:"uid"`
 			Home string `json:"home"`
 		} `json:"accounts"`
 	}
 	if json.Unmarshal(data, &record) != nil {
 		return nil
 	}
-	var homes []string
+	var accounts []accountRecord
 	for _, account := range record.Accounts {
 		if home := strings.TrimSpace(account.Home); home != "" {
-			homes = append(homes, home)
+			accounts = append(accounts, accountRecord{User: strings.TrimSpace(account.User), UID: account.UID, Home: home})
 		}
 	}
-	return homes
+	return accounts
+}
+
+// confirmedGoneHomes are the homes of accounts a fresh directory read
+// confirms gone, by the evidence the guardian retires a target on
+// (guardianAccountConfirmedGone). Each account is asked once.
+type confirmedGoneHomes map[string]bool
+
+func (g confirmedGoneHomes) note(user string, uid int, home string) {
+	if _, asked := g[home]; asked || user == "" {
+		return
+	}
+	g[home] = guardianAccountConfirmedGone(user, uid)
+}
+
+func (g confirmedGoneHomes) has(home string) bool { return g[home] }
+
+// guardianAccountConfirmedGone is unixidentity.AccountUIDGone for a recorded
+// uid and AccountRecordGone for a name alone: a directory that does not
+// answer, a live account and every platform other than macOS are false.
+// Tests replace it.
+var guardianAccountConfirmedGone = func(user string, uid int) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if uid > 0 {
+		return unixidentity.AccountUIDGone(ctx, user, uid)
+	}
+	return unixidentity.AccountRecordGone(ctx, user)
 }
 
 func (m *policyManager) Intended(cfg *config.Config) ([]string, error) {

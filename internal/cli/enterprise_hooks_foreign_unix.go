@@ -169,6 +169,56 @@ func copilotVSCodeScopedAccounts(ctx context.Context, accounts []enterprisehooks
 	return scoped
 }
 
+// enterpriseHookForeignGoneTTL is how long one account removal answer is
+// reused: the cleanup runs after every reconcile, and the answer is a fresh
+// directory read in its own process.
+const enterpriseHookForeignGoneTTL = 15 * time.Second
+
+var enterpriseHookForeignGone struct {
+	sync.Mutex
+	checked map[string]enterpriseHookForeignGoneAnswer
+}
+
+type enterpriseHookForeignGoneAnswer struct {
+	at   time.Time
+	gone bool
+}
+
+// enterpriseHookForeignAccountsPresent drops the accounts whose removal the
+// guardian reconcile confirms for a manifest target, by the same evidence
+// (enterpriseHookGuardianTargetRemoved). The eligible-accounts record keeps
+// naming a deleted account until the enumerator third miss, and a leftover
+// home can outlive it: without this, the cleanup wrote the Copilot Local
+// hook into that home after the delete and removed it again minutes later,
+// and verify reported the file as an account outside enrollment in between
+// (GAP-0777). A dropped account with a recorded Local hook file goes through
+// the stale-account removal below.
+func enterpriseHookForeignAccountsPresent(ctx context.Context, now time.Time, accounts []enterprisehooks.UnixEligibleAccount) []enterprisehooks.UnixEligibleAccount {
+	present := make([]enterprisehooks.UnixEligibleAccount, 0, len(accounts))
+	for _, account := range accounts {
+		key := account.User + ":" + strconv.Itoa(account.UID)
+		enterpriseHookForeignGone.Lock()
+		answer, known := enterpriseHookForeignGone.checked[key]
+		enterpriseHookForeignGone.Unlock()
+		if !known || now.Sub(answer.at) >= enterpriseHookForeignGoneTTL || now.Before(answer.at) {
+			uid := account.UID
+			answer = enterpriseHookForeignGoneAnswer{at: now, gone: enterpriseHookGuardianTargetRemoved(ctx,
+				enterprisehooks.ManifestTarget{User: account.User, UID: &uid},
+				enterpriseHookReconcileRow{User: account.User, UID: uid}, nil)}
+			enterpriseHookForeignGone.Lock()
+			if enterpriseHookForeignGone.checked == nil {
+				enterpriseHookForeignGone.checked = map[string]enterpriseHookForeignGoneAnswer{}
+			}
+			enterpriseHookForeignGone.checked[key] = answer
+			enterpriseHookForeignGone.Unlock()
+		}
+		if !answer.gone {
+			present = append(present, account)
+		}
+	}
+	return present
+}
+
 // runEnterpriseHookStandaloneForeignCleanup is called at the end of every
 // standalone reconcile; it does the work at most once per interval unless
 // the eligible accounts or policies changed. Cleanup is best effort: the
@@ -192,6 +242,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if enterpriseHookManifestEnrollment() {
 		accounts = enterprisehooks.ManifestEnrolledAccounts(accounts, manifest)
 	}
+	accounts = enterpriseHookForeignAccountsPresent(ctx, now, accounts)
 	var vscodeAccounts []enterprisehooks.UnixEligibleAccount
 	if vscode != nil && (vscode.HookFile || vscode.Plugin) {
 		vscodeAccounts = copilotVSCodeScopedAccounts(ctx, accounts, manifest)
