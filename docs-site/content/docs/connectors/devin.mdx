@@ -22,7 +22,7 @@ Use `devin` for both Devin CLI and Devin Desktop.
 | --- | --- | --- |
 | Devin CLI | **Yes** | DefenseClaw registers the `devin-hooks-v1` contract in the Devin CLI hook config. |
 | Devin Desktop 3.9.19 or later, **Devin Local** agent (the default for new tabs) | **Yes, per vendor documentation** | [Devin Local](https://docs.devin.ai/desktop/devin-local) shares the agent harness, config file and hooks with Devin CLI. DefenseClaw has not recorded a live Devin Desktop validation run. |
-| Devin Desktop before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile** | Devin Desktop 3.9.19 [removed Cascade](https://docs.devin.ai/desktop/changelog). Cascade used a separate hook contract DefenseClaw does not inspect. See [Cascade on older builds](#cascade-on-older-builds). |
+| Devin Desktop before 3.9.19, legacy **Cascade** agent | **No; turned off under the standalone enterprise profile** (builds that read only the pre-rename hooks file are not reached) | Devin Desktop 3.9.19 [removed Cascade](https://docs.devin.ai/desktop/changelog). Cascade used a separate hook contract DefenseClaw does not inspect. See [Cascade on older builds](#cascade-on-older-builds). |
 | Cloud Devin sessions | **No** | Cloud execution does not run local hooks. |
 
 On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/fail-modes).
@@ -100,7 +100,15 @@ Builds before 3.9.19 still run Cascade, which reads a machine-level hooks file a
 | macOS | `/Library/Application Support/Devin/hooks.json` |
 | Windows | `%ProgramData%\Devin\hooks.json` |
 
-Devin Desktop reads the pre-rename machine hooks file only when the Devin file is absent, and pre-rename apps read only the pre-rename file. DefenseClaw writes into each of the two files that exists, and creates only the Devin file when neither exists. Builds from 3.9.19 on have no Cascade and ignore the entries. Other Cascade hooks (cloud, user, workspace) still run, but a hook can only add a block, so none undoes the refusal. Also turn Cascade off in your Devin team settings. Set `enterprise.machine_policy.connectors.devincascade.ownership` to `verify_only` when your MDM owns the file (deploy the output of `/opt/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector devincascade`, or `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS), or `"off"` to leave Cascade running.
+Which client reads which machine file (from the Devin CLI 3000.12.17 and Devin Desktop 3.12.17 binaries; no signed-in run has confirmed it):
+
+| File | Read by | What DefenseClaw does |
+| --- | --- | --- |
+| Devin `hooks.json` | Desktop builds that run Cascade; Desktop 3.12.17 reads it only for `post_setup_worktree` hooks. The Devin CLI and the Desktop engine never open it. | Adds the refusal entries. Current clients never run them. |
+| Pre-rename (Windsurf) `hooks.json` | Pre-rename apps; Desktop as the fallback when the Devin file is absent; the Devin CLI and the Desktop engine import it as Devin Local hooks. | Writes nothing. A refusal here would block current Devin Local, so entries an earlier release (1.0.5 to 1.0.8) wrote there are removed on the next `ensure`. |
+| Devin `system.json` | The Devin CLI and the Desktop engine, as enterprise policy. | Not touched. |
+
+DefenseClaw creates the Devin file when neither hooks file exists and adds to it when it exists. When only the pre-rename file exists, Desktop falls back to it, so DefenseClaw creates no Devin file (it would hide your hooks) and publishes nothing; builds that read only the pre-rename file are not reached, and Devin Local stays protected by the `devin` connector. Builds from 3.9.19 on have no Cascade and never run the entries. Other Cascade hooks (cloud, user, workspace) still run, but a hook can only add a block, so none undoes the refusal. Also turn Cascade off in your Devin team settings. Set `enterprise.machine_policy.connectors.devincascade.ownership` to `verify_only` when your MDM owns the file (deploy the output of `/opt/defenseclaw/bin/defenseclaw-gateway enterprise policy export --connector devincascade`, or `/opt/cisco/defenseclaw/bin/defenseclaw-gateway` on macOS), or `"off"` to leave Cascade running.
 
 ## Lifecycle and enforcement
 
