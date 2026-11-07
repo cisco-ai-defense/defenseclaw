@@ -126,3 +126,86 @@ func TestGAP0679LinkBeforeDotDotStaysClosedInTheManagedAdminOpenOutage(t *testin
 		})
 	}
 }
+
+// GAP-0641 / GAP-0679 review 9: the same protected link reached with a
+// leading dot-dot step from a working directory that is itself a link.
+func TestGAP0641LeadingParentFromLinkedWorkingDirectory(t *testing.T) {
+	home, project := dotDotLinkFixture(t)
+	cwd := filepath.Join(project, "jump")
+	t.Chdir(cwd)
+	for _, row := range []struct {
+		command  string
+		ordinary bool
+	}{
+		{"cat ../status", false},
+		{"cat ./../status", false},
+		{"cat " + cwd + "/../status", false},
+		{"cat status", true},
+	} {
+		if got := ordinaryNoAnswerPayloadInHome(gap0641Payload(cwd, row.command), home); got != row.ordinary {
+			t.Errorf("payload ordinary %q=%v, want %v", row.command, got, row.ordinary)
+		}
+	}
+}
+
+func TestGAP0641LeadingParentStaysClosedAtTheOSSDeadline(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
+	addr := hungGateway(t)
+	_, project := dotDotLinkFixture(t)
+	cwd := filepath.Join(project, "jump")
+	t.Chdir(cwd)
+	for _, row := range []struct {
+		command string
+		blocked bool
+	}{
+		{"cat ../status", true},
+		{"cat status", false},
+	} {
+		t.Run(row.command, func(t *testing.T) {
+			result, _ := runAgainstGateway(t, "claudecode", addr, func(opts *Options) {
+				opts.FailMode = "open"
+				opts.OutageFailModeNow = func() string { return "open" }
+				opts.Stdin = strings.NewReader(string(gap0641Payload(cwd, row.command)))
+			})
+			if got := nativeOutageBlocked(result); got != row.blocked {
+				t.Fatalf("blocked=%v, want %v: code=%d stdout=%q stderr=%q", got, row.blocked, result.code, result.stdout, result.stderr)
+			}
+		})
+	}
+}
+
+func TestGAP0679LeadingParentStaysClosedInTheManagedAdminOpenOutage(t *testing.T) {
+	shortAnswerBudget(t, 550*time.Millisecond)
+	fastRestartRetries(t)
+	_, project := dotDotLinkFixture(t)
+	cwd := filepath.Join(project, "jump")
+	t.Chdir(cwd)
+	for _, row := range []struct {
+		command string
+		blocked bool
+	}{
+		{"cat ../status", true},
+		{"cat status", false},
+	} {
+		t.Run(row.command, func(t *testing.T) {
+			rt := &stubRT{onRequest: func(rt *stubRT, req *http.Request) (*http.Response, error) {
+				if rt.requests == 1 {
+					return nil, fakeStoppedSCM()
+				}
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			}}
+			result := run(t, "codex", rt, func(opts *Options) {
+				managedCodex(opts)
+				opts.FailMode = "open"
+				opts.ExplainUnenrolledAccount = true
+				opts.StartedAt = time.Now()
+				opts.FailureLogHome = userLogHome(opts.Home)
+				opts.Stdin = strings.NewReader(fmt.Sprintf(`{"hook_event_name":"PreToolUse","tool_name":"exec_command","cwd":%q,"tool_input":{"cmd":%q}}`, cwd, row.command))
+			})
+			if got := blocked(result); got != row.blocked {
+				t.Fatalf("blocked=%v, want %v: code=%d stdout=%q stderr=%q", got, row.blocked, result.code, result.stdout, result.stderr)
+			}
+		})
+	}
+}
