@@ -774,14 +774,28 @@ def test_the_data_folder_removal_refuses_a_path_that_resolves_elsewhere(profile)
 
 
 @contextlib.contextmanager
-def _nt(*, exists=(), real=None):
-    """link_guard seen on Windows with ntpath: *exists* are the paths that exist, *real* maps a path to its real path."""
+def _nt(*, exists=(), real=None, denied=()):
+    """link_guard seen on Windows with ntpath: *exists* are the paths that exist, *real* maps a path to its real path.
+
+    *denied* are paths whose lstat is refused (access denied): they are there, but cannot be read.
+    """
     import ntpath
 
+    def key(p: str) -> str:
+        return ntpath.normcase(p).rstrip("\\")
+
+    there, refused = {key(e) for e in exists}, {key(d) for d in denied}
+
+    def lstat(p: str):
+        if key(p) in refused:
+            raise PermissionError(13, "access denied", p)
+        if key(p) not in there:
+            raise FileNotFoundError(2, "no such file", p)
+        return SimpleNamespace(st_mode=0o040000)
+
     names = {name: getattr(ntpath, name) for name in dir(ntpath) if not name.startswith("__")}
-    names["lexists"] = lambda p: ntpath.normcase(p).rstrip("\\") in {ntpath.normcase(e).rstrip("\\") for e in exists}
     names["realpath"] = real or (lambda p: p)
-    fake = SimpleNamespace(path=SimpleNamespace(**names), name="nt")
+    fake = SimpleNamespace(path=SimpleNamespace(**names), name="nt", lstat=lstat)
     # The component look (lstat on every folder) is not what these tests are about: no link is on the way.
     with patch.object(link_guard, "os", fake), patch.object(link_guard, "links_on_path", return_value=[]):
         yield
@@ -838,6 +852,124 @@ def test_a_subst_drive_is_refused_and_named() -> None:
     assert r"C:\real\data\.defenseclaw" in problem
 
 
+def test_a_component_that_cannot_be_read_is_compared_not_skipped() -> None:
+    # os.path.lexists turns "access denied" into "missing"; the part is then left out of the real-path check.
+    written = r"C:\u\denied\child\x.json"
+    exists = [r"C:\u\denied", r"C:\u", "C:\\"]
+    denied = [r"C:\u\denied\child"]
+    with patch.object(link_guard, "_windows", return_value=True), patch.object(link_guard, "_long_name", lambda p: p):
+        with _nt(exists=exists, denied=denied, real=lambda p: p.replace("child", "other")):
+            problem = link_guard.link_problem(written)
+        with _nt(exists=exists, denied=denied):
+            same = link_guard.link_problem(written)
+    assert problem is not None and "a link" in problem and r"C:\u\denied\other\x.json" in problem
+    assert same is None
+
+
+def _boom(error: BaseException):
+    def raiser(*_args, **_kwargs):
+        raise error
+
+    return raiser
+
+
+@pytest.mark.parametrize(
+    ("what", "error"),
+    [
+        ("realpath", OSError(1920, "The file cannot be accessed by the system")),
+        ("realpath", ValueError("embedded null character")),
+        ("realpath", RuntimeError("Symlink loop")),
+        ("_long_name", OSError(5, "access denied")),
+        ("_drive_kind", OSError(5, "access denied")),
+    ],
+)
+@pytest.mark.parametrize("include_self", [True, False])
+def test_a_real_path_that_cannot_be_determined_is_refused_and_named(what: str, error, include_self: bool) -> None:
+    path = r"Z:\users\vn\.defenseclaw"
+    exists = [r"Z:\users\vn", r"Z:\users", "Z:\\"]
+    helpers = {"_long_name": lambda p: p, "_drive_kind": lambda d: ("network", r"\\srv\share")}
+    if what != "realpath":
+        helpers[what] = _boom(error)
+    with patch.object(link_guard, "_windows", return_value=True):
+        with _nt(exists=exists, real=_boom(error) if what == "realpath" else None):
+            with patch.multiple(link_guard, **helpers):
+                problem = link_guard.link_problem(path, include_self=include_self)
+                elsewhere = link_guard.resolves_elsewhere(path, include_self=include_self)
+    assert problem is not None, "a path whose real location is unknown must be refused, not accepted"
+    assert f"its real location cannot be determined ({type(error).__name__})" in problem
+    assert path in problem and "Ask an administrator" in problem.step
+    assert "rmdir" not in problem.step and "subst" not in problem.step
+    assert elsewhere, "resolves_elsewhere must be non-empty so that no caller removes the path"
+
+
+def test_a_path_that_cannot_be_checked_never_raises_from_the_component_look() -> None:
+    path = "C:\\users\\vn\\.defenseclaw"
+    with patch.object(link_guard, "_windows", return_value=True):
+        with patch.object(link_guard, "links_on_path", side_effect=ValueError("embedded null character")):
+            problem = link_guard.link_problem(path)
+            dangling = link_guard.dangling_link_problem(path)
+    assert problem is not None and "its real location cannot be determined (ValueError)" in problem
+    assert "Ask an administrator" in problem.step
+    assert dangling is None, "the dangling-link note is only a note; link_problem is the gate"
+
+
+def test_a_target_that_cannot_be_read_is_not_a_traceback_for_the_dangling_note(tmp_path: Path) -> None:
+    target = tmp_path / "t"
+    target.mkdir()
+    link = tmp_path / "l"
+    with contextlib.suppress(OSError):
+        link.symlink_to(target, target_is_directory=True)
+    if not link.is_symlink():
+        pytest.skip("cannot make a symlink here")
+    with patch.object(link_guard.os, "stat", side_effect=ValueError("embedded null character")):
+        assert link_guard.dangling_link_problem(str(link / "x")) is None
+
+
+def _fake_ctypes(device: str, *, wnet: int, remote: str = ""):
+    """A ctypes stand-in whose QueryDosDevice says *device* and whose WNetGetConnection returns *wnet*."""
+
+    class Buffer:
+        value = ""
+
+        def __len__(self) -> int:
+            return 1024
+
+    def query(_drive, buffer, _size):
+        buffer.value = device
+        return 1
+
+    def wnet_connection(_drive, buffer, _size):
+        buffer.value = remote
+        return wnet
+
+    return SimpleNamespace(
+        create_unicode_buffer=lambda _n: Buffer(),
+        c_ulong=lambda n: n,
+        byref=lambda x: x,
+        windll=SimpleNamespace(
+            kernel32=SimpleNamespace(QueryDosDeviceW=query), mpr=SimpleNamespace(WNetGetConnectionW=wnet_connection)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("device", "wnet", "expected"),
+    [
+        (r"\Device\LanmanRedirector\;Z:0\srv\share", 0, ("network", r"\\srv\share")),
+        (r"\Device\LanmanRedirector\;Z:0\srv\share", 1222, ("network", "")),
+        (r"\Device\Mup\srv\share", 1222, ("network", "")),
+        (r"\??\UNC\srv\share", 0, ("network", r"\\srv\share")),
+        # A raw \??\UNC\ target the network provider does not know is a substitution, not a mapped drive.
+        (r"\??\UNC\srv\share", 1222, ("subst", "")),
+        (r"\??\C:\Users", 1222, ("subst", "")),
+    ],
+)
+def test_the_drive_kind_trusts_a_share_only_when_the_network_provider_knows_it(device, wnet, expected) -> None:
+    ctypes_stub = _fake_ctypes(device, wnet=wnet, remote=r"\\srv\share")
+    with patch.object(link_guard, "_windows", return_value=True), patch.dict(sys.modules, {"ctypes": ctypes_stub}):
+        assert link_guard._drive_kind("Z:") == expected
+
+
 def _free_letter() -> str:
     return next(letter for letter in "ZYXWVUTSR" if not os.path.exists(f"{letter}:\\"))
 
@@ -892,5 +1024,41 @@ def test_a_real_subst_drive_is_refused_and_a_mapped_admin_share_is_not(tmp_path:
     try:
         assert link_guard.link_problem(f"{letter}:{rest}\\data\\.defenseclaw") is None
         assert link_guard.link_problem(f"{letter}:{rest}\\data") is None
+    finally:
+        subprocess.run(["net", "use", f"{letter}:", "/delete", "/y"], capture_output=True, timeout=60)
+
+
+@windows_only
+def test_a_real_junction_under_a_mapped_network_drive_stays_refused_and_named(tmp_path: Path) -> None:
+    base = tmp_path.resolve()
+    (base / "data").mkdir()
+    (base / "elsewhere").mkdir()
+    drive, rest = os.path.splitdrive(str(base))
+    if len(drive) != 2:
+        pytest.skip("the test folder is not on a lettered drive")
+    letter = _free_letter()
+    share = rf"\\localhost\{drive[0]}$"
+    mapped = subprocess.run(["net", "use", f"{letter}:", share], capture_output=True, timeout=60)
+    if mapped.returncode != 0:
+        pytest.skip(f"cannot map {share} here (net use rc {mapped.returncode}: administrator rights are needed)")
+    try:
+        home = f"{letter}:{rest}\\data"
+        assert link_guard.link_problem(home + "\\.defenseclaw") is None, "the clean mapped path is accepted"
+        junction = f"{home}\\linked"
+        made = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", junction, str(base / "elsewhere")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if made.returncode != 0:  # the share refuses a junction made through it: make the same one on the server side
+            _junction(base / "data" / "linked", base / "elsewhere")
+        for written in (junction, junction + "\\.defenseclaw", junction + "\\missing\\x.json"):
+            found = link_guard.link_problem(written)
+            assert found is not None, written
+            assert "is a junction" in found and os.path.normcase(junction) in os.path.normcase(found), found
+            assert "rmdir" in found.step
+        # The clean sibling under the same mapped drive is still accepted.
+        assert link_guard.link_problem(home + "\\.defenseclaw") is None
     finally:
         subprocess.run(["net", "use", f"{letter}:", "/delete", "/y"], capture_output=True, timeout=60)
