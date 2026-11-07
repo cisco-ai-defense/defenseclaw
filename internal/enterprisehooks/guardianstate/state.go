@@ -119,7 +119,11 @@ func ReadState(path string) string {
 }
 
 func readStateOnce(path string) (string, error) {
-	if !readStatePathTrusted(path) {
+	trusted, err := readStatePathTrusted(path)
+	if err != nil {
+		return StateUnknown, err
+	}
+	if !trusted {
 		return StateUnknown, nil
 	}
 	f, err := winpath.OpenReadShared(path) // #nosec G304 — path derives from install-time layout, not user input.

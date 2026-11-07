@@ -26,7 +26,7 @@ func pathForDataDir(dataDir string) string {
 	return filepath.Join(dataDir, StateDirName, FileName)
 }
 
-func readStatePathTrusted(path string) bool {
+func readStatePathTrusted(path string) (bool, error) {
 	info, err := os.Lstat(path)
-	return err != nil || info.Mode()&os.ModeSymlink == 0
+	return err != nil || info.Mode()&os.ModeSymlink == 0, nil
 }
