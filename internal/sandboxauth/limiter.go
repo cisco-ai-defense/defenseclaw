@@ -71,20 +71,32 @@ type LimiterConfig struct {
 	Now func() time.Time
 }
 
-// DefaultMaxInFlight bounds the hook, notify and inspect requests one binding
-// holds open: the 25/s hook rate for the 3.5 s answer window of a managed hook
-// is 88 requests, so the bound is above what the rate admits in that window
-// and a request is refused for its rate, not for how long the requests
-// before it take (rel-1-0-6 GAP-0490: with 32, a sandbox at 22 calls/s was
-// refused 429 once the answers took over 1.4 s). Each pending request holds
-// only its bounded body.
-const DefaultMaxInFlight = 128
+const (
+	// DefaultHookRPS and DefaultHookBurst are the per-binding hook (and
+	// receipt) rate: 25 a second with a burst of 100.
+	DefaultHookRPS   = 25
+	DefaultHookBurst = 100
+	// MaxRequestLifetimeSeconds is the longest one admitted request stays
+	// open: the gateway receipt window (15 s), which is longer than the
+	// longest rendered hook attempt (12 s). The gateway pins both values to
+	// this one in a test.
+	MaxRequestLifetimeSeconds = 15
+	// DefaultMaxInFlight bounds the hook, notify and inspect requests one
+	// binding holds open. It is the most the rate limit can admit while the
+	// first of them is still open: the whole burst, plus the rate for the
+	// longest request lifetime (100 + 25 x 15 = 475). Below that bound a
+	// request is refused for its rate only, never for how long the requests
+	// before it take (rel-1-0-6 GAP-0490: 32, then 128, refused a valid
+	// call that the rate admitted). Each pending request holds only its
+	// bounded body, and the account in-flight caps stay in force.
+	DefaultMaxInFlight = DefaultHookBurst + DefaultHookRPS*MaxRequestLifetimeSeconds
+)
 
 // DefaultLimiterConfig returns the production defaults.
 func DefaultLimiterConfig() LimiterConfig {
 	return LimiterConfig{
-		HookRPS:              25,
-		HookBurst:            100,
+		HookRPS:              DefaultHookRPS,
+		HookBurst:            DefaultHookBurst,
 		OTLPRPS:              10,
 		OTLPBurst:            50,
 		MaxInFlight:          DefaultMaxInFlight,
