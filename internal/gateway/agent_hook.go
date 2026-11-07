@@ -3601,7 +3601,6 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
 			ResolvedWriteTargets:    resolvedWritesFromContext(ctx),
 			patchTarget:             hermesV4APatch,
-			strictPatchLinks:        hermesV4APatch && a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			SandboxGuestCWD:         sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			windowsShellDialect:     dialectHint,
 			record:                  toolChainRecorder(ctx, req.ConnectorName, req.toolChain),

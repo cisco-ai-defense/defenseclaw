@@ -197,10 +197,6 @@ type trustedActionRequest struct {
 	// a line break as another file directive. Its write views require the
 	// narrower patch-target proof, including in guest-directory views.
 	patchTarget bool
-	// strictPatchLinks is set for a patch target judged in the strict policy
-	// tier: a target the managed hook resolved through a link is not trusted
-	// there (hermesClientPatchTarget).
-	strictPatchLinks bool
 	// Sandbox absolute targets are guest names; their host-directory views
 	// carry the filesystem proof.
 	patchHostView   bool
