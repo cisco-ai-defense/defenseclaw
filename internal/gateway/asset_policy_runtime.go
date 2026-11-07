@@ -806,7 +806,8 @@ func rulesPinEndpointForServer(rules []config.AssetPolicyRule, connector, server
 // compares exactly (the URL, the command's base name, an argument of its
 // prefix, the transport) differs, or when it asks for more arguments than the
 // definition has; a prefix longer than the arguments the claim holds digests
-// of cannot be ruled out. It checks the constraints assetRuleMatches does.
+// of (assetfacts maxPinArgs) cannot be ruled out. It checks the constraints
+// assetRuleMatches does.
 func deniedRulesMayPinClaim(rules []config.AssetPolicyRule, connector, server string, pins *assetfacts.MCPPins) bool {
 	for _, rule := range rules {
 		if rule.Name != "" && !config.SameAssetName(rule.Name, server) &&
@@ -817,6 +818,12 @@ func deniedRulesMayPinClaim(rules []config.AssetPolicyRule, connector, server st
 			continue
 		}
 		if !rulesPinEndpoint([]config.AssetPolicyRule{rule}) {
+			continue
+		}
+		if len(rule.SourcePathContains) > 0 {
+			// The input an MCP call is judged on carries no source path, so
+			// a rule that requires one never matches it, whatever the
+			// definition (assetRuleMatches).
 			continue
 		}
 		if pins == nil || ruleMayMatchPins(rule, pins) {
@@ -837,7 +844,7 @@ func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins) boo
 		return false
 	}
 	for i, want := range rule.ArgsPrefix {
-		if i < len(pins.Args) && assetfacts.PinSum(want) != pins.Args[i] {
+		if i < len(pins.Args) && assetfacts.PinArgSum(want) != pins.Args[i] {
 			return false
 		}
 	}
