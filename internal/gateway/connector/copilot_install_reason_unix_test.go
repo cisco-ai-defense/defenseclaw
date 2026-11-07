@@ -75,7 +75,10 @@ func TestRefreshedReleasedCopilotHookNamesTheInstallWhileTheLockIsHeld(t *testin
 				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+dataDir, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 				out, err := cmd.Output()
 				if code := exitCodeOf(err); code != 0 {
-					t.Fatalf("%s: exit %d stdout=%q", event, code, out)
+					// exitCodeOf reports -1 both for a hook killed by a signal
+					// and for a hook that never started; the error tells them
+					// apart from a hook that really exited non-zero.
+					t.Fatalf("%s: exit %d (%v) stdout=%q", event, code, err, out)
 				}
 				var answer map[string]any
 				if err := json.Unmarshal(bytes.TrimSpace(out), &answer); err != nil {
