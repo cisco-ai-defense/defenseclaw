@@ -6,6 +6,8 @@
 package hookexec
 
 import (
+	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,14 +43,15 @@ func dateGatewayRecord(t *testing.T, dataDir string, at time.Time) {
 	}
 }
 
-// eventually waits for cond, which a real process makes true in its own
-// time. It ends on the result: a condition that never comes ends the test at
-// the go test timeout, or here after two minutes.
-func eventually(t *testing.T, what string, cond func() bool) {
+// eventuallyWithin waits up to limit of real time for cond, which a real
+// process makes true in its own time. The limit is the wall-clock guard each
+// test had before the proof clock; the proof clock decides what the product
+// does, and the guard still fails a read the host makes slower than that.
+func eventuallyWithin(t *testing.T, what string, limit time.Duration, cond func() bool) {
 	t.Helper()
-	for end := time.Now().Add(2 * time.Minute); !cond(); time.Sleep(10 * time.Millisecond) {
+	for end := time.Now().Add(limit); !cond(); time.Sleep(10 * time.Millisecond) {
 		if time.Now().After(end) {
-			t.Fatalf("%s never happened", what)
+			t.Fatalf("%s did not happen within %v", what, limit)
 		}
 	}
 }
@@ -58,5 +61,56 @@ func eventually(t *testing.T, what string, cond func() bool) {
 func TestFreshGatewayWindowsKeepTheirProductValues(t *testing.T) {
 	if perUserFreshGatewayWindow != 12*time.Second || freshOwnerCaptureWait != time.Second {
 		t.Fatalf("window %v, owner read %v, want 12s and 1s", perUserFreshGatewayWindow, freshOwnerCaptureWait)
+	}
+}
+
+// TestFreshOwnerReadPastItsWaitNamesNoOwner holds the process-table read of
+// the connection owner and ends it at a moment the test chooses on the proof
+// clock: a read that ends inside the product wait names the owner, and a read
+// that ends once the clock has reached that wait names none, however
+// the host paced it.
+func TestFreshOwnerReadPastItsWaitNamesNoOwner(t *testing.T) {
+	client := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40001}
+	server := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 40002}
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration // how far the clock stands when the read ends
+		named   bool
+	}{
+		{"read ends inside the wait", freshOwnerCaptureWait - time.Nanosecond, true},
+		{"read ends at the wait", freshOwnerCaptureWait, false},
+		{"read ends past the wait", 5 * freshOwnerCaptureWait, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := proofclocktest.Install(t)
+			started := clock.Now()
+			release := make(chan struct{})
+			scanning := make(chan struct{})
+			scan := func(ctx context.Context, _, _ *net.TCPAddr) (int, bool) {
+				close(scanning)
+				<-release
+				if !tc.named {
+					// The timer ends the context on its own goroutine.
+					<-ctx.Done()
+				}
+				return os.Getpid(), true
+			}
+			check := &perUserPeerCheck{}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				captureFreshGatewayOwner(check, client, server, scan)
+			}()
+			<-scanning
+			if got := clock.Requested(); len(got) != 1 || got[0] != freshOwnerCaptureWait {
+				t.Fatalf("owner read timers = %v, want one of %v", got, freshOwnerCaptureWait)
+			}
+			clock.Set(started.Add(tc.elapsed))
+			close(release)
+			<-done
+			if got := check.owner.Load() != nil; got != tc.named {
+				t.Fatalf("owner named = %v after a read that ended %v into the wait, want %v", got, tc.elapsed, tc.named)
+			}
+		})
 	}
 }

@@ -82,9 +82,12 @@ func TestRestartProofNamesThePeerReadAtConnect(t *testing.T) {
 	}
 	record := NewPerUserPeerRecord()
 	record.capture(client.LocalAddr(), client.RemoteAddr())
-	// The read runs in the background from capture; the call goes on. It ends
-	// on its own result: a stuck read ends the test at the go test timeout.
-	<-record.done
+	// The read runs in the background from capture; the call goes on.
+	select {
+	case <-record.done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the peer read did not finish while the connection was open")
+	}
 	if got, ok := record.wait(time.Second); !ok || got.pid != cmd.Process.Pid {
 		t.Fatalf("recorded peer = %+v %v, want the helper %d", got, ok, cmd.Process.Pid)
 	}
