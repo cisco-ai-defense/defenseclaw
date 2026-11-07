@@ -25,6 +25,8 @@ import (
 	"testing"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 // treeDigest describes everything below root without following a link: each
@@ -218,20 +220,20 @@ func TestWindowsGoOwnedRemovalKeepsOrClearsALinkAndCreatesNothing(t *testing.T) 
 }
 
 // GAP-0758 review S2: Devin Cascade has two policy files in two folders
-// (ProgramData\Devin and the legacy ProgramData\Windsurf). An administrator
+// (ProgramData\Devin and the pre-rename folder, legacyconnector.CascadeMachineFolder). An administrator
 // link at one of them keeps that folder alone: nothing is read through the link
 // and its target is unchanged, while DefenseClaw's entry in the other folder
 // is still removed, so a Cascade registration does not keep refusing after the
 // uninstall.
 func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
-	for _, linked := range []string{"Devin", "Windsurf"} {
+	for _, linked := range []string{"Devin", legacyconnector.CascadeMachineFolder} {
 		t.Run(linked+" linked", func(t *testing.T) {
 			opts := windowsOpenCodeTestOptions(t)
 			devinPath, err := DevinSystemHooksPath(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			windsurfPath, err := devinCascadeLegacyHooksPath(opts)
+			legacyPath, err := devinCascadeLegacyHooksPath(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -239,7 +241,7 @@ func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
 			// (a pre-rename app reads only it), and into the Devin file only
 			// when it exists or the legacy one does not, so an administrator's
 			// file is in both folders first.
-			for _, path := range []string{devinPath, windsurfPath} {
+			for _, path := range []string{devinPath, legacyPath} {
 				if err := createProtectedDir(filepath.Dir(path)); err != nil {
 					t.Fatal(err)
 				}
@@ -265,12 +267,12 @@ func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
 				}
 				return has
 			}
-			if !owned(devinPath) || !owned(windsurfPath) {
-				t.Fatalf("test setup: DefenseClaw's entry is missing (Devin %t, Windsurf %t)", owned(devinPath), owned(windsurfPath))
+			if !owned(devinPath) || !owned(legacyPath) {
+				t.Fatalf("test setup: DefenseClaw's entry is missing (Devin %t, legacy %t)", owned(devinPath), owned(legacyPath))
 			}
-			linkedPath, otherPath := devinPath, windsurfPath
-			if linked == "Windsurf" {
-				linkedPath, otherPath = windsurfPath, devinPath
+			linkedPath, otherPath := devinPath, legacyPath
+			if linked == legacyconnector.CascadeMachineFolder {
+				linkedPath, otherPath = legacyPath, devinPath
 			}
 			linkFolder := filepath.Dir(linkedPath)
 			content, err := os.ReadFile(linkedPath)

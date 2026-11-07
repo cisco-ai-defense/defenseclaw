@@ -981,8 +981,8 @@ had recorded the folder), never as a file the uninstall could not remove, and th
 machine policy folders DefenseClaw writes itself for GitHub Copilot, OpenCode and Devin under
 `C:\ProgramData` are the one difference: a link a standard user made there is removed, the link only, and
 nothing is created in its place (what it points to is untouched), while a link an administrator made stays and
-is named. Each path is decided on its own: a link at one of Devin's two folders (`Devin` or the older
-`Windsurf` folder) keeps that folder, and DefenseClaw's entry in the other one is still removed.
+is named. Each path is decided on its own: a link at one of Devin's two folders (`Devin`, or the folder the app used before it was renamed;
+see [Renamed and removed connectors](/docs/get-started/upgrade#renamed-and-removed-connectors)) keeps that folder, and DefenseClaw's entry in the other one is still removed.
 Only the uninstall keeps a link at the Codex folder, and it reports it as kept and not verified: because
 nothing behind the link is read, a Codex requirement there may still name the DefenseClaw hook program
 that the uninstall removes, so check the policy behind a link you made. Install, ensure, repair, the reconcile that
