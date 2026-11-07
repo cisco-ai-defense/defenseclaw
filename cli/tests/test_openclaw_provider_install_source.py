@@ -1011,6 +1011,19 @@ MALFORMED_LOCKS = {
         PROVIDER: {"version": VERSION, "resolved": _archive_address(VERSION), "requires": "file:../.ssh/x"},
     }},
     "v1-version-is-a-list": {"lockfileVersion": 1, "dependencies": {PROVIDER: {"version": [VERSION]}}},
+    "packages-is-null": {"lockfileVersion": 3, "packages": None},
+    "dependencies-is-null": {"lockfileVersion": 1, "dependencies": None},
+    "nested-dependencies-is-null": {"lockfileVersion": 1, "dependencies": {
+        PROVIDER: {"version": VERSION, "resolved": _archive_address(VERSION), "dependencies": None},
+    }},
+    "lockfile-version-is-null": {"lockfileVersion": None, "packages": {}},
+    "lockfile-version-is-text": {"lockfileVersion": "3", "packages": {}},
+    "entry-dependencies-is-null": {"lockfileVersion": 3, "packages": {
+        PACKAGE_KEY: {"version": VERSION, "resolved": _archive_address(VERSION), "dependencies": None},
+    }},
+    "entry-link-is-null": {"lockfileVersion": 3, "packages": {
+        PACKAGE_KEY: {"version": VERSION, "resolved": _archive_address(VERSION), "link": None},
+    }},
     "v2-valid-packages-malformed-dependencies": {
         "lockfileVersion": 2,
         "packages": {PACKAGE_KEY: {"version": VERSION, "resolved": _archive_address(VERSION)}},
