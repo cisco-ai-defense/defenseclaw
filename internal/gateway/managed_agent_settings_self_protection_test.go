@@ -6,6 +6,7 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -187,9 +188,10 @@ func TestWindowsManagedAgentSettingsAreSelfProtection(t *testing.T) {
 // rel-1-0-6:GAP-0734 round 11: the managed settings files are matched by the
 // semantics of the file system they sit on. macOS ignores case and reads /etc
 // as /private/etc, so a case variant or the /private spelling is the file;
-// a managed hook peer whose home is under /Users is such a host. The same
-// names under a Linux home are ordinary files (Linux tells them apart).
+// the gateway of such a host is a darwin one. The same names on a Linux host
+// are ordinary files (Linux tells them apart).
 func TestManagedAgentSettingsOnMacOSIgnoreCase(t *testing.T) {
+	withMacOSPlatform(t, true)
 	const macHome = "/Users/vn"
 	for _, file := range []string{
 		"/etc/claude-code/MANAGED-SETTINGS.JSON",
@@ -205,6 +207,7 @@ func TestManagedAgentSettingsOnMacOSIgnoreCase(t *testing.T) {
 			}
 		}
 	}
+	withMacOSPlatform(t, false)
 	home, project := dynamicWordParityProject(t)
 	for _, file := range []string{
 		"/etc/claude-code/MANAGED-SETTINGS.JSON",
@@ -217,6 +220,78 @@ func TestManagedAgentSettingsOnMacOSIgnoreCase(t *testing.T) {
 				input := map[string]any{"file_path": file, "content": "x"}
 				if _, got := postFileToolCell(t, home, project, "Write", input, managed, pack); strings.HasPrefix(got, fileToolBlockPrefix) {
 					t.Errorf("Linux home managed=%t pack=%s %s = %.160s, want allow (distinct file)", managed, pack, file, got)
+				}
+			}
+		}
+	}
+}
+
+// withMacOSPlatform makes the managed settings match as a macOS host does
+// (case folded, /etc read as /private/etc) for one test.
+func withMacOSPlatform(t *testing.T, macOS bool) {
+	t.Helper()
+	saved := managedSettingsCaseFold
+	t.Cleanup(func() { managedSettingsCaseFold = saved })
+	managedSettingsCaseFold = func() bool { return macOS }
+}
+
+// rel-1-0-6:GAP-0734 review 11 M2: the platform decides whether case folds,
+// not the home. On a Linux host whose managed home sits under /Users, a case
+// variant of a managed settings file is another file and stays allowed; the
+// exact name is still protected.
+func TestManagedAgentSettingsLinuxHomeUnderUsersKeepsExactCase(t *testing.T) {
+	withMacOSPlatform(t, false)
+	const home = "/Users/vn"
+	for _, managed := range []bool{false, true} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			for _, file := range []string{"/etc/codex/requirements.toml", "/etc/claude-code/managed-settings.json"} {
+				input := map[string]any{"file_path": file, "content": "x"}
+				if block, got := postFileToolCell(t, home, home+"/proj", "Write", input, managed, pack); !block {
+					t.Errorf("managed=%t pack=%s %s = %.160s, want protected block", managed, pack, file, got)
+				}
+			}
+			for _, file := range []string{"/etc/codex/REQUIREMENTS.TOML", "/etc/claude-code/MANAGED-SETTINGS.JSON", "/private/etc/codex/requirements.toml"} {
+				input := map[string]any{"file_path": file, "content": "x"}
+				if pack == "strict" {
+					continue
+				}
+				if _, got := postFileToolCell(t, home, home+"/proj", "Write", input, managed, pack); strings.HasPrefix(got, fileToolBlockPrefix) {
+					t.Errorf("managed=%t pack=%s %s = %.160s, want allow (distinct file on Linux)", managed, pack, file, got)
+				}
+			}
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0734 review 11 M1: an administrative share is this machine
+// only when the whole server name is one of its names. A server that shares
+// the first label of the host name with another DNS domain is another
+// machine; the host name as the system gives it, and localhost, are this one.
+func TestWindowsAdminShareNeedsWholeHostName(t *testing.T) {
+	const home = `C:\Users\vn`
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		t.Skip("host has no name")
+	}
+	short, _, _ := strings.Cut(host, ".")
+	const tail = `\C$\Program Files\ClaudeCode\managed-settings.json`
+	local := []string{`\\` + host + tail, `\\` + strings.ToUpper(short) + tail}
+	remote := []string{
+		`\\` + short + `.unrelated.invalid` + tail,
+		`\\` + host + `.unrelated.invalid` + tail,
+		`\\` + short + `x` + tail,
+		`\\x` + short + tail,
+	}
+	for _, managed := range []bool{false, true} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			for _, file := range local {
+				if block, got := postFileToolCell(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); !block {
+					t.Errorf("managed=%t pack=%s %s = %.160s, want protected block (this host)", managed, pack, file, got)
+				}
+			}
+			for _, file := range remote {
+				if _, got := postFileToolCell(t, home, home+`\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, fileToolBlockPrefix) {
+					t.Errorf("managed=%t pack=%s %s = %.160s, want allow (another machine)", managed, pack, file, got)
 				}
 			}
 		}
