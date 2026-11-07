@@ -2228,7 +2228,7 @@ func windowsCodexRequirementsWriter() safefile.SharedFileWriter {
 // ordinary users cannot read is published even when candidate is its
 // content, so that it gets the read back.
 func publishWindowsCodexRequirements(base safefile.SharedFile, candidate []byte, remove bool) error {
-	if tx := windowsCodexActiveManagedState; tx != nil {
+	if tx := windowsCodexActiveManagedState; tx != nil && windowsCodexRequirementsPublishChanges(base, candidate, remove) {
 		tx.requirementsTouched = true
 	}
 	_, err := windowsCodexRequirementsWriter().Update(base, func(current safefile.SharedFile) (safefile.SharedEdit, error) {
@@ -2238,6 +2238,19 @@ func publishWindowsCodexRequirements(base safefile.SharedFile, candidate []byte,
 		}, nil
 	})
 	return windowsCodexRequirementsHeldFailure(base.Path, err)
+}
+
+// windowsCodexRequirementsPublishChanges reports whether publishing candidate
+// over base writes requirements.toml: a removal of a file that exists, a new
+// file, other bytes, or the read an unreadable file lacks. A publish that
+// would leave the file as it is does not count as a change of the pair the
+// hook reads, so the transaction keeps its hook copy and counter (g582
+// round 11, GAP-0764).
+func windowsCodexRequirementsPublishChanges(base safefile.SharedFile, candidate []byte, remove bool) bool {
+	if remove {
+		return base.Exists
+	}
+	return !base.Exists || !bytes.Equal(base.Data, candidate) || windowsCodexRequirementsUnreadable(base)
 }
 
 // windowsCodexRequirementsUnreadable reports a requirements.toml that is

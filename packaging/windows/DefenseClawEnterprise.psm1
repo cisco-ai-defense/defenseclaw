@@ -17532,6 +17532,13 @@ function New-DefenseClawTransaction {
             -Source $EarlyHookSource `
             -PriorDeploymentActive:$PriorDeploymentActive
     }
+    if ((Test-DefenseClawStandaloneProfile) -and -not $SkipRedactionKeySnapshot) {
+        # GAP-0765: the Codex managed-hooks state of 1.0.8 is read twice, by
+        # the snapshot below and by the first Codex transaction of this
+        # release. A user who holds it open without sharing fails both; it is
+        # found, waited for and named before anything is stopped.
+        Assert-DefenseClawCodexStateNotHeld -Layout $Layout
+    }
     $id = [Guid]::NewGuid().ToString('N')
     $directory = Assert-DefenseClawDescendant `
         -Path (Microsoft.PowerShell.Management\Join-Path $Layout.TransactionsDirectory $id) `
@@ -26595,6 +26602,65 @@ function Assert-DefenseClawHookNotHeld {
             else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
         })
     throw ("hook_in_use: {0} has {1} open, so Setup could not replace it; this run stopped and replaced nothing. Next step: close that program (for example an antivirus scan or an editor), then {2} (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $Layout.HookPath, (Format-DefenseClawRerunStep -SameSetupCommand))
+}
+
+function Assert-DefenseClawCodexStateNotHeld {
+    <#
+        GAP-0765: waits, up to TimeoutSeconds, until no program has the
+        Codex managed-hooks state at its fixed name open without read
+        sharing. 1.0.8 wrote that file where every standard user can read it,
+        so a user can open it with FileShare.None. The upgrade must read it
+        (the snapshot, then the first Codex transaction of this release),
+        and an unread state is never taken for an absent one. A holder still
+        there at the end defers the run with the retryable codex_state_held
+        (exit 1618) before the transaction stopped or replaced anything; the
+        state file is left as it was. A query that cannot name the holder
+        still defers the run. Only the standalone profile calls this: Secure
+        Client keeps the state at its fixed name and its behavior as it was.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [int]$TimeoutSeconds = 30
+    )
+    $path = [string]$Layout.CodexManagedHooksStatePath
+    if ([string]::IsNullOrWhiteSpace($path) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+        return
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while (Test-DefenseClawFileReadBlocked -Path $path) {
+        if ([DateTime]::UtcNow -ge $deadline) {
+            $excluded = [Collections.Generic.HashSet[int]]::new()
+            [void]$excluded.Add([int]$PID)
+            $holders = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($path) -Excluded $excluded).Values)
+            $named = @($holders | Microsoft.PowerShell.Core\ForEach-Object {
+                    if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
+                    else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
+                })
+            if ($named.Count -eq 0) {
+                $named = @('a program')
+            }
+            throw ("codex_state_held: {0} has {1}, the Codex managed-hooks state of the installed release, open without sharing, so Setup could not read it to carry it into this release; this run stopped and changed nothing, and the state file is as it was. Next step: close that program, then run the same Setup command again (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $path)
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 1
+    }
+}
+
+function Test-DefenseClawFileReadBlocked {
+    <#
+        GAP-0765: whether another handle keeps Path from being opened for
+        read. An open for read with every sharing mode allowed fails with
+        a sharing or lock violation exactly then. Any other refusal or a
+        failed probe answers $false: the read that follows reports it.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $native = Initialize-DefenseClawNativeSecurity
+        return ([int]$native::GetDirectoryOpenError($Path, [uint32]2147483648) -in @(32, 33))
+    }
+    catch {
+        return $false
+    }
 }
 
 function Test-DefenseClawHookSharesDelete {
