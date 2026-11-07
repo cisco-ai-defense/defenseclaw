@@ -314,6 +314,77 @@ try {
                     error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
                 }) -AccountLinkFailures 1
             Assert-TestSyncRefuses 'foreign link next to another failure' 'failure-free reconcile'
+            # GAP-0773, GAP-0829: a machine vendor folder (Codex, Cursor, Claude
+            # Code, a per-user connector's) that a link replaced fails its
+            # enrolled targets' reconcile for as long as the link is there. The
+            # uninstall keeps that link, so only that refusal, only for a link
+            # that is still there under a vendor root, is explained.
+            $vendorRoot = [IO.Path]::Combine($Root, 'vendor')
+            $vendorTarget = [IO.Path]::Combine($Root, 'vendor-target')
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendorRoot, 'OpenAI'))
+            [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($vendorRoot, 'Cisco', 'DefenseClaw'))
+            [void][IO.Directory]::CreateDirectory($vendorTarget)
+            $codexLink = [IO.Path]::Combine($vendorRoot, 'OpenAI', 'Codex')
+            $cursorLink = [IO.Path]::Combine($vendorRoot, 'Cursor')
+            $ciscoLink = [IO.Path]::Combine($vendorRoot, 'Cisco', 'DefenseClaw', 'etc')
+            foreach ($link in @($codexLink, $cursorLink, $ciscoLink)) {
+                & cmd.exe /c mklink /J "$link" "$vendorTarget" | Out-Null
+            }
+            $previousVendorRoots = $script:DefenseClawVendorFolderRoots
+            $script:DefenseClawVendorFolderRoots = @($vendorRoot)
+            try {
+                $codexRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reconcile Codex machine requirements: reparse points are not allowed in Codex machine path: $codexLink"
+                }
+                $cursorRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                    error = "enterprise hooks: prepare Cursor enterprise directory: enterprise hooks: reparse point in path: $cursorLink"
+                }
+                $otherFailure = [pscustomobject]@{
+                    user = 'carol'; sid = 'S-1-5-21-1-2-3-1019'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: write managed Claude Code hook runtime: access is denied'
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $codexRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok -or [int64]$adoption.target_count -ne 2) {
+                    $failures.Add("a Codex folder link refused adoption: $($adoption.reason)")
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $cursorRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok) {
+                    $failures.Add("a Cursor folder link refused adoption: $($adoption.reason)")
+                }
+                Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $codexRow, $otherFailure)
+                Assert-TestSyncRefuses 'machine folder link next to another failure' 'failure-free reconcile'
+                # The same refusal for a path that is no link now is a stale failure.
+                & cmd.exe /c rmdir "$codexLink" | Out-Null
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $codexRow)
+                Assert-TestSyncRefuses 'machine folder refusal with no link there' 'failure-free reconcile'
+                # DefenseClaw's own trees and paths outside the vendor roots are never explained by a link.
+                $ciscoRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $ciscoLink"
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $ciscoRow)
+                Assert-TestSyncRefuses 'a link in the DefenseClaw tree' 'failure-free reconcile'
+                $profileRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = 'enterprise hooks: reparse point in path: C:\Users\alice\.defenseclaw'
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $profileRow)
+                Assert-TestSyncRefuses 'a link outside the vendor roots' 'failure-free reconcile'
+            }
+            finally {
+                $script:DefenseClawVendorFolderRoots = $previousVendorRoots
+                foreach ($link in @($cursorLink, $ciscoLink)) {
+                    & cmd.exe /c rmdir "$link" | Out-Null
+                }
+            }
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $accountLink)
             Assert-TestSyncRefuses 'account link without trusted count' 'failure-free reconcile'
             Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, [pscustomobject]@{

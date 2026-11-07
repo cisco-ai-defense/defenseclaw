@@ -153,3 +153,34 @@ func windowsManagedPolicyLinkKept(folder string) (bool, error) {
 	state, err := windowsManagedPolicyTeardownState(folder)
 	return err == nil && state == windowsManagedPolicyDirKept, err
 }
+
+// WindowsManagedConnectorFolderKept names the link that keeps a connector's
+// machine folder, or returns "" when the folder is absent or plain (GAP-0773,
+// GAP-0829). The folder is the one that holds the connector's runtime selector
+// and, for a per-user connector, its enrollment: ProgramData\Cursor,
+// ProgramData\OpenAI\Codex, Program Files\ClaudeCode\managed-settings.d and the
+// per-user connector folders. A teardown that compares what the manifest and
+// the activation record say is enrolled with what it reads there must leave
+// that connector out of the comparison when a link sits at the folder: nothing
+// behind the link is read, so nothing there can be compared, and the link is
+// kept and named (once). Standalone only; Secure Client always returns "" and
+// keeps its comparison.
+func WindowsManagedConnectorFolderKept(connectorName string) (string, error) {
+	if !windowsEnterpriseStandaloneProcess() {
+		return "", nil
+	}
+	path, err := windowsManagedRuntimeSelectorPath(connectorName)
+	if err != nil {
+		return "", err
+	}
+	folder := filepath.Dir(path)
+	state, kept, err := inspectWindowsManagedPolicyDirectoryNoFollow(folder)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks: inspect %s machine folder: %w", connectorName, err)
+	}
+	if state != windowsManagedPolicyDirKept {
+		return "", nil
+	}
+	noteWindowsManagedPolicyFolderKept(folder, kept)
+	return kept, nil
+}

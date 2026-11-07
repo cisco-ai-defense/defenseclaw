@@ -1295,6 +1295,44 @@ var (
 	windowsManagedHooksCodexPublisher  = connector.PublishWindowsCodexManagedRuntimeTargets
 )
 
+// windowsManagedHooksConnectorFolderKept names the link that keeps a
+// connector's machine folder (the folder of its runtime selector and, for a
+// per-user connector, its enrollment), or "" when there is none (GAP-0773,
+// GAP-0829). Replaceable in tests. The Codex folder is named by the Codex
+// machine-policy walk, with its own wording.
+var windowsManagedHooksConnectorFolderKept = func(connectorName string) (string, error) {
+	if connectorName == "codex" {
+		return windowsManagedHooksCodexFolderKept()
+	}
+	return enterprisehooks.WindowsManagedConnectorFolderKept(connectorName)
+}
+
+// windowsManagedHooksTeardownConnectorKept reports whether a link keeps the
+// machine folder of a connector. The teardown reads nothing behind the link, so
+// the activation-binding checks leave that connector's machine state out of
+// their comparison with the manifest: the mismatch is the link, not a change.
+// A mismatch no kept link explains still refuses.
+func windowsManagedHooksTeardownConnectorKept(connectorName string) (bool, error) {
+	kept, err := windowsManagedHooksConnectorFolderKept(connectorName)
+	return kept != "", err
+}
+
+// windowsManagedHooksTeardownSelectorExpectedLive is
+// windowsManagedHooksTeardownSelectorExpected for the machine as it is now: a
+// selector entry lives in the connector's machine folder, and behind a kept
+// link nothing is read, so no entry is expected there.
+func windowsManagedHooksTeardownSelectorExpectedLive(
+	target windowsManagedHooksTeardownTarget,
+	pendingTargets []windowsManagedHooksTeardownTarget,
+	activationState string,
+) (bool, error) {
+	if !windowsManagedHooksTeardownSelectorExpected(target, pendingTargets, activationState) {
+		return false, nil
+	}
+	kept, err := windowsManagedHooksTeardownConnectorKept(target.Connector)
+	return !kept, err
+}
+
 // captureWindowsManagedHooksTeardownCodexPolicy journals the Codex policy bit
 // a zero-target prepare finds. Configuration expects a configured connector's
 // guard to be active, but a 1.0.2 or 1.0.3 deployment with no enrolled account
@@ -1909,11 +1947,14 @@ func captureWindowsManagedHooksRuntimeSelectors(
 				err,
 			)
 		}
-		expectedPresent := windowsManagedHooksTeardownSelectorExpected(
+		expectedPresent, err := windowsManagedHooksTeardownSelectorExpectedLive(
 			target,
 			pendingTargets,
 			activationState,
 		)
+		if err != nil {
+			return nil, err
+		}
 		if windowsManagedHooksTeardownTargetIn(target, failedTargets) {
 			// A failed target may or may not have been wired before it failed;
 			// capture whichever state it is in, as long as it is consistent.
@@ -2360,11 +2401,14 @@ func verifyWindowsManagedHooksTeardownInstalled(
 			if !ok {
 				return errors.New("managed runtime selector snapshot does not match the teardown manifest")
 			}
-			expectedPresent := windowsManagedHooksTeardownSelectorExpected(
+			expectedPresent, err := windowsManagedHooksTeardownSelectorExpectedLive(
 				target,
 				identity.PendingTargets,
 				identity.ActivationState,
 			)
+			if err != nil {
+				return err
+			}
 			if windowsManagedHooksTeardownTargetIn(target, identity.FailedTargets) {
 				expectedPresent = expected.Existed
 			}
@@ -2404,8 +2448,14 @@ func validateWindowsManagedHooksTeardownEnrollment(
 	currentCursor []enterprisehooks.WindowsCursorManagedRuntimeTarget,
 	cursorActive bool,
 ) error {
-	if (len(identity.ClaudeTargetSIDs) != 0 && !claudeActive) ||
-		!equalWindowsEnterpriseStringSet(currentClaude, identity.ClaudeTargetSIDs) {
+	// A connector whose machine folder a link keeps has nothing readable to
+	// compare (GAP-0773, GAP-0829): the reads above returned empty for it.
+	claudeKept, err := windowsManagedHooksTeardownConnectorKept("claudecode")
+	if err != nil {
+		return err
+	}
+	if !claudeKept && ((len(identity.ClaudeTargetSIDs) != 0 && !claudeActive) ||
+		!equalWindowsEnterpriseStringSet(currentClaude, identity.ClaudeTargetSIDs)) {
 		return errors.New("Claude machine enrollment does not match the authenticated activation state")
 	}
 	if currentCodex.Kept != "" {
@@ -2435,6 +2485,13 @@ func validateWindowsManagedHooksTeardownEnrollment(
 			) {
 			return errors.New("Codex machine enrollment does not match the authenticated activation state")
 		}
+	}
+	cursorKept, err := windowsManagedHooksTeardownConnectorKept("cursor")
+	if err != nil {
+		return err
+	}
+	if cursorKept {
+		return nil
 	}
 	if (len(identity.CursorTargets) != 0 && !cursorActive) ||
 		len(currentCursor) != len(identity.CursorTargets) {
@@ -2809,11 +2866,14 @@ func validateWindowsManagedHooksTeardownJournal(
 			snapshot.TargetSID != target.SID {
 			return errors.New("managed-hook teardown journal contains an invalid selector snapshot")
 		}
-		expectedPresent := windowsManagedHooksTeardownSelectorExpected(
+		expectedPresent, err := windowsManagedHooksTeardownSelectorExpectedLive(
 			target,
 			journal.PendingTargets,
 			journal.ActivationState,
 		)
+		if err != nil {
+			return err
+		}
 		if windowsManagedHooksTeardownTargetIn(target, journal.FailedTargets) {
 			// Validate a failed target's snapshot in whichever shape it was
 			// captured: an exact enrollment, or an exact absence.
@@ -2860,10 +2920,20 @@ func validateWindowsManagedHooksTeardownJournal(
 		(len(allowedCodexTargets) != 0 && !identity.CodexPolicyActive) {
 		return errors.New("never-activated teardown journal contains an invalid machine enrollment")
 	}
+	// A snapshot taken behind a kept link is empty: nothing was read there
+	// (GAP-0773, GAP-0829), so an empty snapshot is valid for that connector.
+	claudeSnapshotKept, err := windowsManagedHooksTeardownConnectorKept("claudecode")
+	if err != nil {
+		return err
+	}
+	cursorSnapshotKept, err := windowsManagedHooksTeardownConnectorKept("cursor")
+	if err != nil {
+		return err
+	}
 	if journal.Claude.PolicyExisted != journal.Claude.StateExisted ||
 		len(journal.Claude.Policy) > windowsManagedHooksTeardownJournalMax ||
 		len(journal.Claude.State) > windowsManagedHooksTeardownJournalMax ||
-		(len(journal.ClaudeTargetSIDs) != 0 && !journal.Claude.PolicyExisted) {
+		(len(journal.ClaudeTargetSIDs) != 0 && !journal.Claude.PolicyExisted && !claudeSnapshotKept) {
 		return errors.New("managed-hook teardown journal contains an invalid Claude snapshot")
 	}
 	allowedCursorTargets := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(identity.Targets))
@@ -2893,7 +2963,7 @@ func validateWindowsManagedHooksTeardownJournal(
 		(journal.Cursor.AdapterExisted != (journal.Cursor.AdapterSecurityDescriptor != "" && journal.Cursor.AdapterAttributes != 0)) ||
 		(journal.Cursor.StateExisted != (journal.Cursor.StateSecurityDescriptor != "" && journal.Cursor.StateAttributes != 0)) ||
 		(journal.Cursor.ReceiptExisted != (journal.Cursor.ReceiptSecurityDescriptor != "" && journal.Cursor.ReceiptAttributes != 0)) ||
-		(len(journal.CursorTargets) != 0 && !cursorSnapshotActive) {
+		(len(journal.CursorTargets) != 0 && !cursorSnapshotActive && !cursorSnapshotKept) {
 		return errors.New("managed-hook teardown journal contains an invalid Cursor snapshot")
 	}
 	return nil
