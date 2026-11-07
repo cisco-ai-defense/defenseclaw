@@ -189,7 +189,7 @@ _ENV_BASELINE_SHORT = "i0vuCS"
 _ENV_PROBE_VALUES = {"u": "X", "unset": "X", "a": "x", "argv0": "x", "C": ".", "chdir": ".", "S": "true", "split-string": "true"}
 
 
-def _after_env_options(env_word, words, environ) -> tuple:  # type: ignore[no-untyped-def]
+def _after_env_options(env_word, words, environ, cwd) -> tuple:  # type: ignore[no-untyped-def]
     # The words env(1) goes on to run, given its own name and the words that
     # follow it: its options and NAME=VALUE assignments skipped, and the
     # string of -S / --split-string split into words that are read as more env
@@ -199,14 +199,23 @@ def _after_env_options(env_word, words, environ) -> tuple:  # type: ignore[no-un
     # environment env runs them in: the one it started with (which is where
     # ${NAME} in a split string is read), cleared by -i / --ignore-environment
     # / "-", minus every -u NAME, plus every NAME=VALUE, which is what the
-    # next env in a chain starts with.
+    # next env in a chain starts with, and the directory it runs them in: `cwd`
+    # (where env itself starts) or the one -C / --chdir names, relative to it
+    # (env changes directory once, to the last one given, just before it runs
+    # the command; a directory it cannot enter is a refusal).
     words, i, options = list(words), 0, True
     env_word = str(os.fspath(env_word))
-    cleared, null, unset, assigned = False, False, [], {}
+    cleared, null, unset, assigned, newdir = False, False, [], {}, None
 
     def child_environment():  # type: ignore[no-untyped-def]
         kept = {} if cleared else {k: v for k, v in environ.items() if k not in unset}
         return {**kept, **assigned}
+
+    def run_in():  # type: ignore[no-untyped-def]
+        if newdir is None:
+            return cwd
+        target = os.path.realpath(os.path.join(cwd, newdir))
+        return target if newdir and os.path.isdir(target) else None
 
     while i < len(words) and isinstance(words[i], str):
         word = words[i]
@@ -217,23 +226,25 @@ def _after_env_options(env_word, words, environ) -> tuple:  # type: ignore[no-un
             name, has_value, value = word[2:].partition("=")
             named = [n for n in _ENV_LONG if n == name] or [n for n in _ENV_LONG if n.startswith(name)]
             if len(named) != 1 or named[0] in _ENV_LONG_THAT_RUN_NOTHING:
-                return [], environ
+                return [], environ, cwd
             if not _env_has_option(env_word, "--" + named[0], _ENV_PROBE_VALUES.get(named[0], "")):
-                return [], environ
+                return [], environ, cwd
             if named[0] in _ENV_LONG_WITH_A_VALUE:
                 if not has_value:
                     if i >= len(words) or not isinstance(words[i], str):
-                        return [], environ
+                        return [], environ, cwd
                     value, i = words[i], i + 1
                 if named[0] == "split-string":
                     parts = _env_split_string(value, environ)
                     if parts is None:
-                        return [], environ
+                        return [], environ, cwd
                     words[i:i] = parts
                 elif named[0] == "unset":
                     if not value or "=" in value:
-                        return [], environ
+                        return [], environ, cwd
                     unset.append(value)
+                elif named[0] == "chdir":
+                    newdir = value
             elif named[0] == "ignore-environment":
                 cleared = True
             elif named[0] == "null":
@@ -244,11 +255,11 @@ def _after_env_options(env_word, words, environ) -> tuple:  # type: ignore[no-un
             letters = word[1:]
             for position, letter in enumerate(letters):
                 if letter not in _ENV_SHORT_FLAGS:
-                    return [], environ
+                    return [], environ, cwd
                 if letter not in _ENV_BASELINE_SHORT and not _env_has_option(
                     env_word, "-" + letter, _ENV_PROBE_VALUES.get(letter, "")
                 ):
-                    return [], environ
+                    return [], environ, cwd
                 if letter == "i":
                     cleared = True
                 elif letter == "0":
@@ -257,18 +268,20 @@ def _after_env_options(env_word, words, environ) -> tuple:  # type: ignore[no-un
                     value = letters[position + 1 :]
                     if not value:
                         if i >= len(words) or not isinstance(words[i], str):
-                            return [], environ
+                            return [], environ, cwd
                         value, i = words[i], i + 1
                     if letter == "S":
                         parts = _env_split_string(value, environ)
                         if parts is None:
-                            return [], environ
+                            return [], environ, cwd
                         words[i:i] = parts
                     elif letter == "u":
                         # unsetenv refuses an empty name and one holding "=".
                         if not value or "=" in value:
-                            return [], environ
+                            return [], environ, cwd
                         unset.append(value)
+                    elif letter == "C":
+                        newdir = value
                     break
         elif "=" in word[1:]:
             # env reads options only up to the first NAME=VALUE: a later word
@@ -279,8 +292,10 @@ def _after_env_options(env_word, words, environ) -> tuple:  # type: ignore[no-un
         else:
             # -0 ends each line of the environment with a NUL, which has no
             # place in front of a command: env refuses it.
-            return ([], environ) if null else (words[i - 1 :], child_environment())
-    return words[i:], child_environment()
+            directory = run_in()
+            return ([], environ, cwd) if null or directory is None else (words[i - 1 :], child_environment(), directory)
+    directory = run_in()
+    return (words[i:], child_environment(), directory) if directory is not None else ([], environ, cwd)
 
 
 def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
@@ -288,7 +303,9 @@ def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
     # or the first word of the argv or shell string, looking through `env`
     # wrappers, which hand the command word to the operating system unchanged
     # and look it up on the PATH of the environment they leave. _NO_COMMAND
-    # when nothing is run.
+    # when nothing is run. With them comes the directory the command is looked
+    # up and run from: the launch's cwd (this process's directory when it names
+    # none) and every directory an env wrapper changes to on the way.
     if isinstance(args, str):
         words = args.split()
     elif isinstance(args, (list, tuple)):
@@ -301,21 +318,31 @@ def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
     # small: an empty mapping is a real, empty environment. Each env in a chain
     # hands the next the environment its own options and assignments left.
     environ = kwargs["env"] if kwargs.get("env") is not None else os.environ
+    cwd = os.fsdecode(os.fspath(kwargs["cwd"])) if kwargs.get("cwd") is not None else os.curdir
     while words:
         if not isinstance(words[0], (str, os.PathLike)) or _base_name(words[0]) not in _ENV_NAMES:
-            return words[0], environ
-        words, environ = _after_env_options(words[0], words[1:], environ)
-    return _NO_COMMAND, environ
+            return words[0], environ, cwd
+        words, environ, cwd = _after_env_options(words[0], words[1:], environ, cwd)
+    return _NO_COMMAND, environ, cwd
 
 
-def _is_found_in(word, environ) -> bool:  # type: ignore[no-untyped-def]
-    # Whether the operating system finds `word` the way exec does: as a path,
-    # or on the PATH of the environment the command starts in (the default
-    # path where that environment has none; an empty entry is the current
-    # directory), not the PATH of this process.
-    if os.path.isfile(word):
-        return True
-    return any(shutil.which(word, path=folder or os.curdir) for folder in os.get_exec_path(environ))
+def _is_found_in(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
+    # Whether the operating system finds `word` the way exec does, from `cwd`,
+    # the directory the command starts in: a word with a separator is a path;
+    # a bare name is looked for on the PATH of the environment the command
+    # starts in (the default path where that environment has none; an empty
+    # entry is the current directory), not the PATH of this process, and not
+    # in the directory this process happens to be in. A relative path and a
+    # relative PATH entry both start at `cwd`. Windows searches by its own
+    # rules, from this process's directory.
+    word = os.fsdecode(os.fspath(word))
+    if os.name == "nt":
+        if os.path.isfile(word):
+            return True
+        return any(shutil.which(word, path=folder or os.curdir) for folder in os.get_exec_path(environ))
+    if os.sep in word:
+        return os.path.isfile(os.path.join(cwd, word))
+    return any(shutil.which(word, path=os.path.join(cwd, folder or os.curdir)) for folder in os.get_exec_path(environ))
 
 
 def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
@@ -327,14 +354,14 @@ def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-unt
     # A launch that runs some other command, or none (`env --help`), is not.
     if POWERSHELL is not None or _GATE_OFF:
         return False
-    word, environ = _command_word(args, kwargs)
+    word, environ, cwd = _command_word(args, kwargs)
     if word is _NO_COMMAND:
         return False
     if word is None or str(word) == "None":
         return True
     if not isinstance(word, (str, os.PathLike)):
         return False
-    return _base_name(word) in _POWERSHELL_NAMES and not _is_found_in(word, environ)
+    return _base_name(word) in _POWERSHELL_NAMES and not _is_found_in(word, environ, cwd)
 
 
 def _skip_powershell_calls_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5399,6 +5426,146 @@ def test_a_program_found_only_on_the_child_path_still_runs_where_powershell_is_n
         assert subprocess.run(launch, capture_output=True, check=False).returncode == 0, launch
     with pytest.raises(pytest.skip.Exception):
         subprocess.run([env, "PATH=/dc-no-such-folder", "pwsh"], check=False)
+
+
+def _relative_launches(env: str, root: Path) -> tuple[list, list]:
+    # Launches that name PowerShell by a path or a PATH entry relative to a
+    # directory, with the directory the launch starts in set by Popen's cwd,
+    # by env -C / --chdir, or by both. root/child/pwsh and root/child/bin/pwsh
+    # run; nothing runs from root itself. Returns (runs, missing) as
+    # (launch, keyword arguments).
+    child = root / "child"
+    for folder in (child, child / "bin"):
+        folder.mkdir(parents=True, exist_ok=True)
+        program = folder / "pwsh"
+        program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        program.chmod(0o755)
+    inside, nowhere = {"cwd": child}, {"cwd": root}
+    runs = [
+        (["pwsh"], {"cwd": child, "env": {"PATH": "bin"}}),
+        (["bin/pwsh"], inside),
+        (["./pwsh"], inside),
+        (["pwsh"], {"cwd": child, "env": {"PATH": "."}}),
+        (["pwsh"], {"cwd": child, "env": {"PATH": ""}}),
+        (["pwsh"], {"cwd": child, "env": {"PATH": f"/dc-no-such-folder{os.pathsep}bin"}}),
+        ([env, "PATH=bin", "pwsh"], inside),
+        ([env, "PATH=.", "pwsh"], inside),
+        ([env, "PATH=", "pwsh"], inside),
+        ([env, "PATH=bin", env, "-S", "pwsh"], inside),
+        ([env, "PATH=bin", env, "PATH=bin", "pwsh"], inside),
+        ([env, "-C", str(child), "PATH=bin", "pwsh"], {}),
+        ([env, f"--chdir={child}", "PATH=bin", "pwsh"], {}),
+        ([env, "-C", "child", "PATH=bin", "pwsh"], nowhere),
+        ([env, "-C", ".", "-C", str(child), "PATH=bin", "pwsh"], nowhere),
+        ([env, "-C", str(child), env, "-C", "bin", "PATH=.", "pwsh"], {}),
+        ([env, "-C", str(child), env, "-S", "-C bin PATH=. pwsh"], {}),
+        ([env, "-C", str(child), "bin/pwsh"], nowhere),
+    ]
+    missing = [
+        (["pwsh"], {"cwd": root, "env": {"PATH": "bin"}}),
+        (["bin/pwsh"], nowhere),
+        (["pwsh"], {"cwd": root, "env": {"PATH": "."}}),
+        (["pwsh"], {"cwd": root, "env": {"PATH": ""}}),
+        (["pwsh"], {"cwd": child, "env": {"PATH": "elsewhere"}}),
+        ([env, "PATH=bin", "pwsh"], nowhere),
+        ([env, "PATH=.", "pwsh"], nowhere),
+        ([env, "PATH=bin", env, "-S", "pwsh"], nowhere),
+        ([env, "-C", str(root), "PATH=bin", "pwsh"], inside),
+        ([env, "-C", str(child), "-C", str(root), "PATH=bin", "pwsh"], inside),
+        ([env, "-C", str(child), env, "-C", str(root), "PATH=bin", "pwsh"], {}),
+        ([env, "-C", str(root), "bin/pwsh"], inside),
+    ]
+    return runs, missing
+
+
+def _env_is_gnu_coreutils(env) -> bool:  # type: ignore[no-untyped-def]
+    version = subprocess.run([env, "--version"], capture_output=True, text=True, check=False).stdout if env else ""
+    return "coreutils" in version
+
+
+def _really_missing(launch: list, kwargs: dict) -> bool:
+    # What the operating system says: the launch did not find PowerShell. A
+    # direct launch raises; env says so with status 127 and names it.
+    with _gate_off("running the real launch"):
+        try:
+            done = subprocess.run(launch, capture_output=True, text=True, check=False, **kwargs)
+        except FileNotFoundError:
+            return True
+    tried = _ENV_NOT_FOUND.search(done.stderr)
+    return bool(done.returncode == 127 and tried and _base_name(tried["name"]) in _POWERSHELL_NAMES)
+
+
+def test_a_relative_path_is_looked_up_from_the_directory_the_launch_runs_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # exec looks a relative executable path, and a relative or empty PATH
+    # entry, up from the directory the command runs in: Popen's cwd, then each
+    # env -C / --chdir. The gate must ask the same directory, not this
+    # process's, in both directions: a runnable program under a relative PATH
+    # is not a missing PowerShell, and a file in this process's directory that
+    # the child's search path does not reach is not found.
+    if os.name == "nt":
+        pytest.skip("the lookup checked here is POSIX exec")
+    env = shutil.which("env")
+    if env is None or not _env_is_gnu_coreutils(env):
+        pytest.skip("the -C and -S grammar checked here is GNU coreutils")
+    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
+        pytest.skip("PowerShell is installed")
+    monkeypatch.setenv("LC_ALL", "C")  # env quotes the missing name with plain quotes
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    runs, missing = _relative_launches(env, tmp_path)
+    # A file in the directory this process runs in, which no child search path reaches.
+    stray = tmp_path / "parent"
+    stray.mkdir()
+    (stray / "pwsh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (stray / "pwsh").chmod(0o755)
+    monkeypatch.chdir(stray)
+    missing += [
+        (["pwsh"], {"env": {"PATH": "/dc-no-such-folder"}}),
+        ([env, "PATH=/dc-no-such-folder", "pwsh"], {}),
+    ]
+    runs += [
+        (["./pwsh"], {}),
+        (["pwsh"], {"env": {"PATH": "."}}),
+        ([env, "PATH=.", "pwsh"], {}),
+    ]
+    for launch, kwargs in runs:
+        assert not _really_missing(launch, kwargs), (launch, kwargs)
+        assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
+    for launch, kwargs in missing:
+        assert _really_missing(launch, kwargs), (launch, kwargs)
+        assert _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
+
+
+def test_a_relative_path_still_runs_where_powershell_is_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The gate installed, the real launch: a program the operating system finds
+    # from the launch's directory runs; one it does not find skips the test.
+    if os.name == "nt":
+        pytest.skip("the lookup checked here is POSIX exec")
+    env = shutil.which("env")
+    if env is None or not _env_is_gnu_coreutils(env):
+        pytest.skip("the -C and -S grammar checked here is GNU coreutils")
+    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
+        pytest.skip("PowerShell is installed")
+    runs, missing = _relative_launches(env, tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    _skip_powershell_calls_when_missing(monkeypatch)
+    for launch, kwargs in runs:
+        try:
+            returncode = subprocess.run(launch, capture_output=True, check=False, **kwargs).returncode
+        except pytest.skip.Exception:  # a skip here would hide the false skip this test is for
+            pytest.fail(f"a program the system finds was taken for a missing PowerShell: {launch} {kwargs}")
+        assert returncode == 0, (launch, kwargs)
+    for launch, kwargs in missing:
+        with pytest.raises(pytest.skip.Exception):
+            subprocess.run(launch, check=False, **kwargs)
+    # env refuses a directory it cannot enter before it runs anything, so the
+    # launch is not one of a missing PowerShell: it runs, and env says why it did not.
+    for refused in (str(tmp_path / "no-such-folder"), ""):
+        done = subprocess.run([env, "-C", refused, "pwsh"], capture_output=True, check=False)
+        assert done.returncode == 125
 
 
 def test_env_actions_that_run_no_powershell_still_run_where_it_is_not_installed(
