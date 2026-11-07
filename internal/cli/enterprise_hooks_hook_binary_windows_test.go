@@ -333,13 +333,16 @@ func startWindowsExclusiveHolder(t *testing.T, shell, path string) (release func
 		}
 		close(lines)
 	}()
+	// A 32-bit PowerShell on a loaded runner can take a long time to start.
+	started := time.Now()
 	select {
 	case line := <-lines:
 		if line != "ready" {
 			_ = cmd.Process.Kill()
 			t.Fatalf("holder said %q", line)
 		}
-	case <-time.After(30 * time.Second):
+		t.Logf("the holder opened the file after %s", time.Since(started).Round(time.Millisecond))
+	case <-time.After(2 * time.Minute):
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		t.Fatalf("the holder did not open the file (holder error output %q)", holderErrors.String())
