@@ -5,16 +5,17 @@ managed launcher reads. This test checks three structural facts:
 
 1. the page is current and is in the enterprise navigation;
 2. every page that quotes the launcher refusal links to it;
-3. every paragraph that names a command of the table next to a managed
-   computer links to it.
+3. every paragraph or table row that names a command of the table in the same
+   sentence as a managed computer links to it.
 
 The commands for (3) come from the table itself, so a new row widens the check
 with no edit here. The rule is structural: a sentence that puts a managed
 computer and a table command together needs the link, whatever verb it uses
 (works, unavailable, returns exit code 3, ...). The test does not decide whether
-the sentence is true, the table does. Only the bare launcher name and the
-administrator commands, which the table does not list, also need a claim word,
-because docs mention them in many other ways.
+the sentence is true, the table does. "Managed" counts only before a computer,
+host, operating system or launcher noun, so "managed by" and "managed connector
+state" in per-user prose never need the link. The bare launcher name and the
+administrator commands the refusal text names count like table commands.
 """
 
 from __future__ import annotations
@@ -33,25 +34,29 @@ PAGE = DOCS / "enterprise" / "managed-commands.mdx"
 LINK = "/docs/enterprise/managed-commands"
 TABLE = REPO_ROOT / "internal" / "cli" / "testdata" / "managed_commands.json"
 
-# A sentence or table row that talks about a managed computer, ...
+# A sentence or table row that says "managed" about a computer: the word is
+# followed by an operating system, host or launcher noun. "Managed by" and
+# "managed connector state" are about something else and do not count.
 MANAGED = re.compile(
-    r"(?<![\w-])managed(?![\w-])|standalone enterprise|enterprise packages?"
-    r"|\b(?:sandbox|packaged|installed) launcher\b|`defenseclaw` launcher|packaged `defenseclaw`",
+    r"(?<![\w-])managed[\s-]+(?:linux|macos|mac|windows|hosts?|computers?|machines?|devices?|endpoints?"
+    r"|workstations?|laptops?|systems?|install\w*|launchers?)(?![\w-])"
+    r"|standalone enterprise|enterprise packages?|\b(?:sandbox|packaged|installed) launcher\b",
     re.IGNORECASE,
 )
-# ... and names a command of the table (structural, no verb needed) ...
-CODE_SPAN = re.compile(r"`[^`]*`")
-SENTENCE_BREAK = re.compile(r"(?<=[.;:!?])\s+|\n(?=\||- )")
-# ... or names the bare launcher or an administrator command and says something
-# about running, offering or refusing.
-CLAIM = re.compile(
-    r"\b(?:runs?|offers?|accepts?|refus\w*|available|exits?\s+`?\d|elevat\w*|standard (?:user|account))\b",
-    re.IGNORECASE,
-)
+# The generated environment-variable table labels each row "Managed host: `allow`".
+# That is a policy value, not a sentence about a managed computer.
+POLICY_LABEL = re.compile(r"Managed host: `[a-z_]+`")
+# A sentence ends at . ! ? and a list item is its own sentence; a table row is its own unit (see units).
+# ":" and ";" do not end one: "On managed Linux, the launcher allows: `x`" is one claim.
+SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n(?=- )")
 
 
-def command_patterns(table: dict) -> tuple[re.Pattern[str], re.Pattern[str]]:
-    """Return (table commands, bare launcher and administrator commands)."""
+def command_patterns(table: dict) -> re.Pattern[str]:
+    """Return the commands of the table: the launcher commands, the bare launcher and the administrator commands.
+
+    A command is the same with or without backticks. Case matters: `defenseclaw` is the
+    command, DefenseClaw is the product.
+    """
     verbs: set[str] = set()
     for row in table["commands"]:
         for part in row["command"].split(","):
@@ -64,32 +69,52 @@ def command_patterns(table: dict) -> tuple[re.Pattern[str], re.Pattern[str]]:
         for text in table["refusal"].values()
         for match in re.findall(r"enterprise (?:linux|macos|windows) [a-z-]+", text)
     }
-    commands = re.compile(r"`defenseclaw (?:%s)(?:\s[^`]*)?`" % "|".join(re.escape(v) for v in sorted(verbs)))
-    others = [r"`defenseclaw`"]
-    others += [r"`[^`]*%s[^`]*`" % re.escape(command) for command in sorted(admin)]
-    return commands, re.compile("|".join(others))
+    parts = [r"(?<![\w.-])defenseclaw\s+(?:%s)(?![\w-])" % "|".join(re.escape(v) for v in sorted(verbs))]
+    parts.append(r"`defenseclaw`")
+    parts += [r"(?<![\w-])%s(?![\w-])" % re.escape(command) for command in sorted(admin)]
+    return re.compile("|".join(parts))
+
+
+def units(block: str) -> list[str]:
+    """Split a block into table rows (one unit each) and the prose lines around them."""
+    found: list[str] = []
+    prose: list[str] = []
+    for line in block.split("\n"):
+        if line.lstrip().startswith("|"):
+            if prose:
+                found.append("\n".join(prose))
+                prose = []
+            found.append(line)
+        else:
+            prose.append(line)
+    if prose:
+        found.append("\n".join(prose))
+    return found
 
 
 def pages_with_unlinked_claims(docs: Path, table: dict) -> list[str]:
-    """Return "page: sentence" for every sentence that puts a managed computer and a command together without the link in its paragraph."""
-    commands, others = command_patterns(table)
+    """Return "page: sentence" for every sentence that puts a managed computer and a command together without the link.
+
+    The link must be in the same table row, or in the same paragraph for prose: a link in
+    another row of the table does not cover this row.
+    """
+    commands = command_patterns(table)
     page = docs / "enterprise" / "managed-commands.mdx"
     found = []
     for path in sorted(docs.rglob("*.mdx")):
         if path == page:
             continue
         for block in re.split(r"\n\s*\n", path.read_text(encoding="utf-8")):
-            if LINK in block:
-                continue
-            for sentence in SENTENCE_BREAK.split(block):
-                if sentence.lstrip().startswith("#"):
-                    continue  # a heading names a topic and says nothing about it
-                if not MANAGED.search(sentence):
+            for unit in units(block):
+                if LINK in unit:
                     continue
-                prose = CODE_SPAN.sub("", sentence)  # words inside code are not a claim
-                if commands.search(sentence) or (others.search(sentence) and CLAIM.search(prose)):
-                    found.append("%s: %s" % (path.relative_to(docs), " ".join(sentence.split())[:120]))
-                    break
+                for sentence in SENTENCE_BREAK.split(unit):
+                    if sentence.lstrip().startswith("#"):
+                        continue  # a heading names a topic and says nothing about it
+                    text = POLICY_LABEL.sub("", sentence)
+                    if MANAGED.search(text) and commands.search(text):
+                        found.append("%s: %s" % (path.relative_to(docs), " ".join(sentence.split())[:120]))
+                        break
     return found
 
 
@@ -161,6 +186,21 @@ class AvailabilityClaimGateTests(unittest.TestCase):
             "On managed Linux, `defenseclaw status` returns exit code 3.\n",
             "On managed Linux, `defenseclaw status --json` prints a table of connectors.\n",
             "A managed Mac cannot use `defenseclaw tui`.\n",
+            # The command without backticks.
+            "On managed Linux, defenseclaw policy show works.\n",
+            "On managed Linux, defenseclaw status is unavailable.\n",
+            "On managed Linux, enterprise linux status works without sudo.\n",
+            # A colon or semicolon between the managed computer and the command is the same sentence.
+            "On managed Linux, the launcher allows: `defenseclaw policy show`.\n",
+            "On managed macOS, this command is unavailable: `defenseclaw status`.\n",
+            "On managed Linux, the launcher offers status; `defenseclaw policy show` works too.\n",
+            # The bare launcher and an administrator command, with any verb.
+            "On managed Linux, `defenseclaw` works as a full per-user CLI.\n",
+            "On managed Linux, `enterprise linux status` works without sudo.\n",
+            "On managed macOS, `defenseclaw` is the same program as on a per-user install.\n",
+            # A table row needs the link in the row; a link in another row does not cover it.
+            "| Managed Linux | `defenseclaw policy show` works. |\n| Managed Windows | [Command availability](%s) |\n" % LINK,
+            "| Managed Linux | `defenseclaw policy show` works. |\n\n[table](%s)\n" % LINK,
         ):
             with self.subTest(text=text):
                 self.assertEqual(len(self.check(text)), 1)
@@ -173,8 +213,20 @@ class AvailabilityClaimGateTests(unittest.TestCase):
             "On managed Linux the gateway restarts after `enterprise linux ensure`.\n",
             "On a per-user Linux install, `defenseclaw status` works.\n",
             "On managed Linux, the user sees a table of connectors.\n",
-            "A managed host has no `defenseclaw` Python CLI.\n",
+            "On managed Linux, `policy show` works.\n",
+            "On managed Linux, policy show works.\n",
             "On managed Linux, `defenseclaw status` is unavailable.\nSee [the table](%s).\n" % LINK,
+            "| Managed Linux | `defenseclaw policy show` works ([table](%s)). |\n| Managed Windows | `defenseclaw status` works ([table](%s)). |\n" % (LINK, LINK),
+            # Per-user prose that says "managed" about something else.
+            "This overlay is managed by `defenseclaw setup codex` on a per-user installation.\n",
+            "The per-user `defenseclaw status` command displays managed connector state.\n",
+            "A rule pack is managed by the product; `defenseclaw status` shows it.\n",
+            # The product name is not the command, and a path is not a command.
+            "On managed Linux, DefenseClaw runs the gateway as a service.\n",
+            "On managed Linux, the state is in `/var/lib/defenseclaw/state`.\n",
+            # The generated environment-variable table labels each row with a policy value.
+            "| `EXAMPLE_VAR`<br/>Managed host: `allow` | Set by `defenseclaw setup`. |\n",
+            "## Managed Linux and `defenseclaw status`\n",
         ):
             with self.subTest(text=text):
                 self.assertEqual(self.check(text), [])
