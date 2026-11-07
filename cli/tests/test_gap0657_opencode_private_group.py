@@ -56,7 +56,7 @@ def test_gap0657_private_group_775_ancestors_allow_opencode_setup(monkeypatch: p
     plugins.parent.chmod(0o775)
     plugins.chmod(0o775)
 
-    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == ""
+    assert connector_paths.opencode_unsafe_plugin_paths([str(plugin)]) == []
     cmd_setup._preflight_opencode_plugin_folder()
     missing = bootstrap._connector_readiness(default_config(), "opencode")
     assert missing.next_command == "defenseclaw setup opencode"
@@ -72,7 +72,7 @@ def test_gap0657_owner_private_755_stays_allowed(monkeypatch: pytest.MonkeyPatch
     plugins.parent.chmod(0o755)
     plugins.chmod(0o755)
 
-    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == ""
+    assert connector_paths.opencode_unsafe_plugin_paths([str(plugin)]) == []
     cmd_setup._preflight_opencode_plugin_folder()
 
 
@@ -85,7 +85,7 @@ def test_gap0657_sticky_ancestor_stays_allowed(monkeypatch: pytest.MonkeyPatch, 
     plugin.parent.mkdir(mode=0o700)
     monkeypatch.setenv("HOME", str(sticky))
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path))
-    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == ""
+    assert connector_paths.opencode_unsafe_plugin_paths([str(plugin)]) == []
     cmd_setup._preflight_opencode_plugin_folder()
 
 
@@ -98,7 +98,7 @@ def test_gap0657_custom_config_root_names_unsafe_ancestor(monkeypatch: pytest.Mo
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(external))
     plugin = connector_paths.connector_config_files("opencode")[0]
-    assert connector_paths.opencode_writable_plugin_folder([plugin]) == str(external)
+    assert connector_paths.opencode_unsafe_plugin_paths([plugin])[:1] == [str(external)]
     with pytest.raises(click.ClickException) as caught:
         cmd_setup._preflight_opencode_plugin_folder()
     assert f"chmod go-w {external}" in str(caught.value)
@@ -152,7 +152,7 @@ def test_gap0657_first_unsafe_ancestor_is_named(
     plugins.parent.chmod(mode)
     plugins.chmod(mode)
 
-    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == str(config)
+    assert connector_paths.opencode_unsafe_plugin_paths([str(plugin)])[:1] == [str(config)]
     with pytest.raises(click.ClickException) as caught:
         cmd_setup._preflight_opencode_plugin_folder()
     assert f"chmod go-w {config}" in str(caught.value)
@@ -162,7 +162,7 @@ def test_gap0657_group_member_keeps_folder_untrusted(monkeypatch: pytest.MonkeyP
     config, _, plugin = _folder_tree(monkeypatch, tmp_path)
     _account_records(monkeypatch, tmp_path, config.stat().st_gid, shared=True)
     config.chmod(0o775)
-    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == str(config)
+    assert connector_paths.opencode_unsafe_plugin_paths([str(plugin)])[:1] == [str(config)]
 
 
 def test_gap0657_duplicate_login_name_keeps_folder_untrusted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -172,4 +172,4 @@ def test_gap0657_duplicate_login_name_keeps_folder_untrusted(monkeypatch: pytest
     passwd = Path(file_permissions._PASSWD_FILE)
     passwd.write_text(passwd.read_text(encoding="utf-8") + f"me:x:{os.geteuid() + 1}:{gid}::/home/other:/bin/sh\n", encoding="utf-8")
     config.chmod(0o775)
-    assert connector_paths.opencode_writable_plugin_folder([str(plugin)]) == str(config)
+    assert connector_paths.opencode_unsafe_plugin_paths([str(plugin)])[:1] == [str(config)]
