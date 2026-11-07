@@ -2262,7 +2262,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 				// denied asset failed, as they do for a scan verdict;
 				// they said quarantined (GAP-0133). The connector whose
 				// rule denied it is told too when it is not the owner.
-				w.journalFailedQuarantine(evt, targetType, err, assetConnector)
+				w.journalFailedPolicyQuarantine(evt, targetType, err, assetConnector)
 			}
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
@@ -2444,8 +2444,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
 			scanID := w.logScanID(ctx, evt, result, "blocked")
-			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && decidedBy != connector && !w.secureClientActive() {
-				w.journalFailedQuarantine(evt, targetType, err, decidedBy)
+			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && !w.secureClientActive() {
+				w.journalFailedPolicyQuarantine(evt, targetType, err, decidedBy)
 			}
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{
@@ -3232,6 +3232,33 @@ func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType st
 	}
 	for _, scope := range scopes {
 		_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "install", "block", reason)
+	}
+}
+
+// journalFailedPolicyQuarantine is journalFailedQuarantine for an asset an
+// asset_policy rule denied: the asset stays in its folder, so the owner and
+// the connector whose rule denied it also get the runtime disable. Without
+// it a denial by the default (default_action deny) rule, which the hook
+// evaluates only when runtime_detection is on, left the surviving skill
+// callable. An operator "enable" or an allow rule clears both fields
+// (releaseAllowListed).
+func (w *InstallWatcher) journalFailedPolicyQuarantine(evt InstallEvent, targetType string, err error, decidedBy string) {
+	if w.store == nil {
+		return
+	}
+	w.journalFailedQuarantine(evt, targetType, err, decidedBy)
+	if errors.Is(err, errLinkRemoved) {
+		// The link is gone: nothing is left to run.
+		return
+	}
+	reason := quarantineFailedReason + err.Error()
+	scopes := []string{w.journalScope(w.eventConnector(evt))}
+	if scope := w.journalScope(decidedBy); !slices.Contains(scopes, scope) {
+		scopes = append(scopes, scope)
+	}
+	for _, scope := range scopes {
+		_ = w.store.SetActionFieldForConnector(targetType, journalName(evt), scope, "runtime", "disable", reason)
+		_ = w.store.SetSourcePathForConnector(targetType, journalName(evt), scope, evt.Path)
 	}
 }
 
