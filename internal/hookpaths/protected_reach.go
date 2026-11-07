@@ -4,6 +4,8 @@
 package hookpaths
 
 import (
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -577,13 +579,81 @@ func fixedPIDLink(path string) (string, bool) {
 	return "/proc/" + strings.Join(parts[:end], "/"), true
 }
 
+// procMountView is what the hook reads of the mount tree of a process or task
+// directory: the identity of its mount namespace and its mount table, which
+// lists only the mounts below the root of that process.
+type procMountView struct {
+	namespace os.FileInfo
+	table     string
+}
+
+const maxProcMountTable = 4 << 20
+
+// readProcMountView is a variable so a test can present a mount tree the hook
+// does not share.
+var readProcMountView = func(dir string) (procMountView, error) {
+	ns, err := PathStat(dir + "/ns/mnt")
+	if err != nil {
+		return procMountView{}, err
+	}
+	f, err := os.Open(dir + "/mountinfo")
+	if err != nil {
+		return procMountView{}, err
+	}
+	defer f.Close()
+	table, err := io.ReadAll(io.LimitReader(f, maxProcMountTable+1))
+	if err != nil {
+		return procMountView{}, err
+	}
+	if len(table) > maxProcMountTable {
+		return procMountView{}, errProcMountTableTooLarge
+	}
+	return procMountView{namespace: ns, table: string(table)}, nil
+}
+
+var errProcMountTableTooLarge = errors.New("mount table too large to compare")
+
+// fixedPIDProcDir returns the process (or task) directory the link that
+// fixedPIDLink returned lives in.
+func fixedPIDProcDir(link string) string {
+	parts := strings.Split(strings.TrimPrefix(link, "/proc/"), "/")
+	n := 1
+	if len(parts) > 1 && parts[1] == "task" {
+		n = 3
+	}
+	if len(parts) <= n {
+		return ""
+	}
+	return "/proc/" + strings.Join(parts[:n], "/")
+}
+
+// sharesMountTree reports that the process directory sees the mount tree the
+// hook sees: the same mount namespace and the same mount table. A matching
+// root directory identity is not enough, because a private mount below an
+// unchanged directory, or a root that omits a submount, changes what a path
+// below the link names. An unreadable or oversized view is not shared.
+func sharesMountTree(dir string) bool {
+	theirs, err := readProcMountView(dir)
+	if err != nil {
+		return false
+	}
+	ours, err := readProcMountView("/proc/thread-self")
+	return err == nil && os.SameFile(ours.namespace, theirs.namespace) && ours.table == theirs.table
+}
+
 // fixedPIDLinkProved reports that the link of an explicit process id leads
 // to the file the hook reads for it. The kernel resolves the link the same
-// way for the hook and for the process that opens the path, so a reading that
-// reaches one file identity through both the link and its target text is the
-// path the opener reaches. An unreadable link, a text that is not a path, or
-// two identities that differ stay unproved.
+// way for the hook and for the process that opens the path, but a path that
+// goes on below the link is resolved in the mount tree of the process the
+// link names. The proof needs that tree to be the hook tree and then a
+// reading that reaches one file identity through both the link and its target
+// text. An unreadable link, a text that is not a path, or two identities that
+// differ stay unproved.
 func fixedPIDLinkProved(link string) bool {
+	dir := fixedPIDProcDir(link)
+	if dir == "" || !sharesMountTree(dir) {
+		return false
+	}
 	target, err := PathReadlink(link)
 	if err != nil || !filepath.IsAbs(target) {
 		return false
