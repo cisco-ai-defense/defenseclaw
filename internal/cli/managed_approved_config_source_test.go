@@ -17,6 +17,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -314,9 +315,13 @@ func TestHealManagedApprovedConfigSourceLeavesWhatItDoesNotOwn(t *testing.T) {
 func stageConfigGeneration(t *testing.T, configPath, recordedBody, actor string) {
 	t.Helper()
 	previous, _ := configwrite.ReadGenerationState(configPath) // a writer advances the counter by one
-	raw, err := json.Marshal(map[string]any{
+	record := map[string]any{
 		"generation": previous.Generation + 1, "config_sha256": configwrite.SHA256Hex([]byte(recordedBody)), "actor": actor, "written_at": "2026-11-07T00:00:00Z",
-	})
+	}
+	if previous.ConfigSHA256 != "" { // the digest a writer finds in the record it replaces
+		record["previous_config_sha256"] = previous.ConfigSHA256
+	}
+	raw, err := json.Marshal(record)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +605,7 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	if err := refreshManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err != nil {
 		t.Fatal(err)
 	}
-	if !managedApprovedConfigProven(dir, 2) {
+	if !managedApprovedConfigProven(dir, handEditRecord(2, approvedSourceConfigB)) {
 		t.Fatal("a copy the ensure published is not proven")
 	}
 	// An earlier release publishes another config (copy and digest), or only
@@ -609,7 +614,7 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, managedApprovedConfigFile), []byte(other), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if managedApprovedConfigProven(dir, 2) {
+	if managedApprovedConfigProven(dir, handEditRecord(2, approvedSourceConfigB)) {
 		t.Fatal("a copy changed after the proof is proven")
 	}
 	recordRaw, _ := os.ReadFile(filepath.Join(dir, managedDeploymentRecordFile))
@@ -617,7 +622,7 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, managedDeploymentRecordFile), []byte(republished), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if managedApprovedConfigProven(dir, 2) {
+	if managedApprovedConfigProven(dir, handEditRecord(2, approvedSourceConfigB)) {
 		t.Fatal("a copy and digest republished without the proof are proven")
 	}
 	if err := os.Remove(proofPath); err != nil {
@@ -626,7 +631,7 @@ func TestApprovedConfigSourceProofFollowsTheCopy(t *testing.T) {
 	if err := os.WriteFile(proofPath, []byte("not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if managedApprovedConfigProven(dir, 2) {
+	if managedApprovedConfigProven(dir, handEditRecord(2, approvedSourceConfigB)) {
 		t.Fatal("an unreadable proof is proven")
 	}
 
@@ -664,7 +669,7 @@ func TestApprovedConfigSourceProofIsBoundToTheLifecycleGeneration(t *testing.T) 
 		t.Fatal(err)
 	}
 	for generation, want := range map[uint64]bool{0: false, 1: false, 2: true, 3: false, 9: false} {
-		if got := managedApprovedConfigProven(dir, generation); got != want {
+		if got := managedApprovedConfigProven(dir, handEditRecord(generation, approvedSourceConfigB)); got != want {
 			t.Fatalf("hand edit recorded as generation %d after a proof of generation 1: proven=%v, want %v", generation, got, want)
 		}
 	}
@@ -673,7 +678,7 @@ func TestApprovedConfigSourceProofIsBoundToTheLifecycleGeneration(t *testing.T) 
 	if err := os.WriteFile(proofPath, []byte(`{"config_sha256":"`+configwrite.SHA256Hex([]byte(approvedSourceConfigB))+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if managedApprovedConfigProven(dir, 2) {
+	if managedApprovedConfigProven(dir, handEditRecord(2, approvedSourceConfigB)) {
 		t.Fatal("a proof without a generation is proven")
 	}
 }
@@ -758,9 +763,120 @@ func TestHealManagedApprovedConfigSourceProofIsBestEffort(t *testing.T) {
 			if changed, err := healManagedApprovedConfigSourceBound(dir, configPath, lock.acquire); err != nil || changed {
 				t.Fatalf("changed=%v err=%v", changed, err)
 			}
-			if managedApprovedConfigProven(dir, 2) {
+			if managedApprovedConfigProven(dir, handEditRecord(2, approvedSourceConfigA)) {
 				t.Fatal("a copy nothing bound was proven")
 			}
 		})
+	}
+}
+
+// handEditRecord is the generation record a hand edit of the config that
+// previousBody names leaves: the next number, a hand-edit actor and the digest
+// of the record it replaced.
+func handEditRecord(generation uint64, previousBody string) configwrite.GenerationState {
+	return configwrite.GenerationState{
+		Generation:           generation,
+		Actor:                configwrite.ActorUnattributedHandEdit,
+		PreviousConfigSHA256: configwrite.SHA256Hex([]byte(previousBody)),
+	}
+}
+
+// The number alone does not tie a hand edit to the proof: the hand edit must
+// also have replaced the config the proof covers.
+func TestApprovedConfigSourceProofNamesTheConfigTheHandEditReplaced(t *testing.T) {
+	dir := approvedSourceFolder(t)
+	if err := refreshManagedApprovedConfigSource(dir, approvedConfigAt(t, approvedSourceConfigB), []byte(approvedSourceConfigB)); err != nil {
+		t.Fatal(err)
+	}
+	digest := configwrite.SHA256Hex([]byte(approvedSourceConfigB))
+	for name, tc := range map[string]struct {
+		previous string
+		want     bool
+	}{
+		"the covered config":           {digest, true},
+		"the covered config, prefixed": {"sha256:" + strings.ToUpper(digest), true},
+		"another config":               {configwrite.SHA256Hex([]byte(approvedSourceConfigA)), false},
+		"no predecessor":               {"", false},
+	} {
+		record := handEditRecord(2, approvedSourceConfigB)
+		record.PreviousConfigSHA256 = tc.previous
+		if got := managedApprovedConfigProven(dir, record); got != tc.want {
+			t.Fatalf("%s: proven=%v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+// The reviewed reset variant (round 5): this release proved A at generation 1,
+// then config.generation.json was lost and an earlier signed build applied B in
+// place (the record restarts at 1 with the reset marker), then B was hand
+// edited and the guardian recorded it as generation 2. The numbers read as
+// directly after the proof, but the edit replaced B, not A, so Repair must
+// stop instead of restoring A. Real writers throughout. Benign twin: the same
+// sequence without the lost record restores A.
+func TestRepairOverAHandEditStopsWhenTheGenerationRecordRestartedAfterTheProof(t *testing.T) {
+	ctx := context.Background()
+	handEdit := func(t *testing.T, configPath, body string) {
+		t.Helper()
+		if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		recorded, err := configwrite.RecordUnrecorded(ctx, configPath, []byte(body), configwrite.Options{
+			Actor: configwrite.ActorUnattributedHandEdit, Reason: "edited outside the lifecycle",
+		})
+		if err != nil || !recorded {
+			t.Fatalf("hand edit record: recorded=%t err=%v", recorded, err)
+		}
+	}
+	prove := func(t *testing.T) (dir, configPath string) {
+		t.Helper()
+		dir = approvedSourceFolder(t)
+		configPath = filepath.Join(t.TempDir(), "config.yaml")
+		if _, err := configwrite.ReplaceDocument(ctx, configPath, []byte(approvedSourceConfigA), configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "ensure"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := refreshManagedApprovedConfigSource(dir, configPath, []byte(approvedSourceConfigA)); err != nil {
+			t.Fatal(err)
+		}
+		return dir, configPath
+	}
+
+	// Benign twin: the hand edit directly follows the proof.
+	dir, configPath := prove(t)
+	handEdit(t, configPath, approvedSourceConfigA+"# edit\n")
+	if err := unprovenApprovedConfigSourceForHandEdit(dir, configPath); err != nil {
+		t.Fatalf("a hand edit directly after the proof refused: %v", err)
+	}
+
+	// The record is lost, the earlier build applies B, B is hand edited.
+	dir, configPath = prove(t)
+	if err := os.Remove(configwrite.GenerationPath(configPath)); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := configwrite.ReplaceDocument(ctx, configPath, []byte(approvedSourceConfigB), configwrite.Options{
+		Actor: configwrite.ActorLifecycle, Reason: "earlier build in-place ensure",
+		ExpectSHA256: configwrite.SHA256Hex([]byte(approvedSourceConfigA)),
+	})
+	if err != nil || applied.Generation != 1 {
+		t.Fatalf("the restarted record: generation=%d err=%v", applied.Generation, err)
+	}
+	handEdit(t, configPath, approvedSourceConfigB+"# edit\n")
+	if state, err := configwrite.ReadGenerationState(configPath); err != nil || state.Generation != 2 {
+		t.Fatalf("hand edit record: %+v err=%v", state, err)
+	}
+	if err := unprovenApprovedConfigSourceForHandEdit(dir, configPath); err == nil {
+		t.Fatal("Repair would restore the approved copy A over a hand edit of the later config B")
+	}
+	if got := approvedRepairRestores(t, dir); got != approvedSourceConfigA {
+		t.Fatalf("the refusal changed the approved source to %q", got)
+	}
+
+	// A record that is lost right before the hand edit leaves no predecessor.
+	dir, configPath = prove(t)
+	if err := os.Remove(configwrite.GenerationPath(configPath)); err != nil {
+		t.Fatal(err)
+	}
+	handEdit(t, configPath, approvedSourceConfigA+"# edit\n")
+	if err := unprovenApprovedConfigSourceForHandEdit(dir, configPath); err == nil {
+		t.Fatal("Repair trusted a proof after the record it names was lost")
 	}
 }

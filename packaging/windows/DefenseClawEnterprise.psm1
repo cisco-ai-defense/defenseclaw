@@ -33773,11 +33773,14 @@ function Get-DefenseClawRecordedConfigGeneration {
     $actorProperty = $generation.PSObject.Properties['actor']
     $actor = if ($null -eq $actorProperty) { '' } else { [string]$actorProperty.Value }
     $generationProperty = $generation.PSObject.Properties['generation']
+    $previousProperty = $generation.PSObject.Properties['previous_config_sha256']
+    $previousHash = if ($null -eq $previousProperty) { '' } else { ([string]$previousProperty.Value -replace '^sha256:', '').ToLowerInvariant() }
     return [pscustomobject]@{
-        hash       = $activeHash
-        actor      = $actor
-        hand_edit  = [bool]($actor -clike 'hand-edit:*')
-        generation = if ($null -eq $generationProperty) { $null } else { ConvertTo-DefenseClawConfigGenerationNumber -Value $generationProperty.Value }
+        hash          = $activeHash
+        previous_hash = $previousHash
+        actor         = $actor
+        hand_edit     = [bool]($actor -clike 'hand-edit:*')
+        generation    = if ($null -eq $generationProperty) { $null } else { ConvertTo-DefenseClawConfigGenerationNumber -Value $generationProperty.Value }
     }
 }
 
@@ -33855,8 +33858,10 @@ function Assert-DefenseClawApprovedConfigProven {
         config. approved-config.current.json, written by the Go lifecycle next
         to the copy, names the copy digest and the config generation that
         recorded the config as applied. The copy is current only when the hand
-        edit directly follows that generation; a config recorded after the
-        proof (by a build that does not write the proof) leaves a larger gap.
+        edit directly follows that generation and replaced that config (the
+        record names the digest it replaced); a config recorded after the
+        proof (by a build that does not write the proof) leaves a larger gap,
+        and one written after the record was lost replaced another digest.
         This is the one place that restores the copy over a hand edit, so
         Setup Repair, a direct run of install-enterprise.ps1 and the rollback
         all stop here, before anything is changed. Nothing is changed here.
@@ -33899,6 +33904,13 @@ function Assert-DefenseClawApprovedConfigProven {
     $proven = ConvertTo-DefenseClawConfigGenerationNumber -Value $generationProperty.Value
     if ($null -eq $proven -or $null -eq $Generation.generation -or
         $Generation.generation -le $proven -or ($Generation.generation - $proven) -ne 1) {
+        throw $refusal
+    }
+    # The number alone is not a link: a generation record that was lost starts
+    # its counter over, so a later config written after the reset can carry
+    # the number that follows the proof. The hand edit must also have replaced
+    # the config the proof covers (previous_config_sha256).
+    if ([string]$Generation.previous_hash -cne [string]$digestProperty.Value) {
         throw $refusal
     }
 }
