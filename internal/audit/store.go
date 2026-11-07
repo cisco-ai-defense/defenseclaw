@@ -318,6 +318,13 @@ type Store struct {
 	// durableGroup groups the commits of concurrent writes to the synchronous=FULL
 	// connection into one transaction and one flush (durableGrouped).
 	durableGroup writeGroup
+	// writeBaton orders the transactions of the pool connection and the
+	// durable connection (writeBaton).
+	writeBaton writeBaton
+	// dirSyncedWAL is the write-ahead log file whose directory entry the last
+	// folder flush of the durable connection covered (syncDurableDir).
+	dirSyncMu    sync.Mutex
+	dirSyncedWAL os.FileInfo
 
 	sqliteBusyMu       sync.RWMutex
 	sqliteBusyObserver SQLiteBusyObservabilityV8
