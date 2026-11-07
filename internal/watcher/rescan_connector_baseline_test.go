@@ -863,36 +863,43 @@ func TestSkippedTreeHashBounds(t *testing.T) {
 // stands for the folder the declared run.js is in; also is a second manifest
 // that declares nothing, which must not shadow the first.
 var hermesDeclaredEntrypointForms = map[string]struct{ file, body, alsoFile, alsoBody string }{
-	"main":                 {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"DIR/run.js"}`},
-	"main-dotdir":          {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"./DIR/run.js"}`},
-	"main-lead":            {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"/DIR/run.js"}`},
-	"main-dotdot":          {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"lib/../DIR/run.js"}`},
-	"main-space":           {file: "package.json", body: `{"name":"p","main":"  DIR/run.js "}`},
-	"bin-string":           {file: "package.json", body: `{"name":"p","version":"1.0.0","bin":"DIR/run.js"}`},
-	"bin-map":              {file: "package.json", body: `{"name":"p","version":"1.0.0","bin":{"p":"DIR/run.js"}}`},
-	"bin-map-many":         {file: "package.json", body: `{"name":"p","bin":{"a":"lib/a.js","p":"DIR/run.js"}}`},
-	"entrypoint":           {file: "package.json", body: `{"name":"p","entrypoint":"DIR/run.js"}`},
-	"entry":                {file: "plugin.json", body: `{"name":"p","entry":"DIR/run.js"}`},
-	"manifest-json":        {file: "manifest.json", body: `{"name":"p","main":"DIR/run.js"}`},
-	"openclaw":             {file: "openclaw.plugin.json", body: `{"id":"p","entrypoint":"DIR/run.js"}`},
-	"claude-dir":           {file: ".claude-plugin/plugin.json", body: `{"name":"p","entrypoint":"DIR/run.js"}`},
-	"codex-dir":            {file: ".codex-plugin/plugin.json", body: `{"name":"p","entry":"DIR/run.js"}`},
-	"cursor-dir":           {file: ".cursor-plugin/plugin.json", body: `{"name":"p","main":"DIR/run.js"}`},
-	"yaml":                 {file: "plugin.yaml", body: "name: p\nentrypoint: DIR/run.js\n"},
-	"yaml-entry":           {file: "plugin.yaml", body: "name: p\nentry: \"DIR/run.js\"\n"},
-	"yaml-main":            {file: "plugin.yml", body: "name: p\nmain: DIR/run.js\n"},
-	"yaml-bin":             {file: "plugin.yaml", body: "name: p\nbin:\n  p: DIR/run.js\n"},
-	"yaml-merge-key":       {file: "plugin.yaml", body: "name: p\nbase: &b\n  entrypoint: DIR/run.js\n<<: *b\n"},
-	"yaml-bin-numeric-key": {file: "plugin.yaml", body: "name: p\nbin:\n  7: DIR/run.js\n"},
-	"yaml-bin-bool-key":    {file: "plugin.yaml", body: "name: p\nbin:\n  true: DIR/run.js\n"},
-	"yaml-bin-null-key":    {file: "plugin.yaml", body: "name: p\nbin:\n  null: DIR/run.js\n"},
-	"yaml-bin-quoted-key":  {file: "plugin.yaml", body: "name: p\nbin:\n  \"7\": DIR/run.js\n"},
-	"yaml-bin-complex-key": {file: "plugin.yaml", body: "name: p\nbin:\n  ? [a, b]\n  : DIR/run.js\n"},
-	"yaml-bin-merge":       {file: "plugin.yaml", body: "name: p\nshared: &s\n  tool: DIR/run.js\nbin:\n  <<: *s\n"},
-	"yaml-duplicate-keys":  {file: "plugin.yaml", body: "name: p\nname: q\nmain: lib/a.js\nmain: DIR/run.js\n"},
-	"yaml-alias":           {file: "plugin.yaml", body: "name: p\nsrc: &s DIR/run.js\nmain: *s\n"},
-	"yaml-merge-sequence":  {file: "plugin.yaml", body: "o: &o\n  name: p\nb: &b\n  bin:\n    7: DIR/run.js\n<<: [*o, *b]\n"},
-	"json-nan":             {file: "package.json", body: `{"name":"p","version":NaN,"main":"DIR/run.js"}`},
+	"main":                      {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"DIR/run.js"}`},
+	"main-dotdir":               {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"./DIR/run.js"}`},
+	"main-lead":                 {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"/DIR/run.js"}`},
+	"main-dotdot":               {file: "package.json", body: `{"name":"p","version":"1.0.0","main":"lib/../DIR/run.js"}`},
+	"main-space":                {file: "package.json", body: `{"name":"p","main":"  DIR/run.js "}`},
+	"bin-string":                {file: "package.json", body: `{"name":"p","version":"1.0.0","bin":"DIR/run.js"}`},
+	"bin-map":                   {file: "package.json", body: `{"name":"p","version":"1.0.0","bin":{"p":"DIR/run.js"}}`},
+	"bin-map-many":              {file: "package.json", body: `{"name":"p","bin":{"a":"lib/a.js","p":"DIR/run.js"}}`},
+	"entrypoint":                {file: "package.json", body: `{"name":"p","entrypoint":"DIR/run.js"}`},
+	"entry":                     {file: "plugin.json", body: `{"name":"p","entry":"DIR/run.js"}`},
+	"manifest-json":             {file: "manifest.json", body: `{"name":"p","main":"DIR/run.js"}`},
+	"openclaw":                  {file: "openclaw.plugin.json", body: `{"id":"p","entrypoint":"DIR/run.js"}`},
+	"claude-dir":                {file: ".claude-plugin/plugin.json", body: `{"name":"p","entrypoint":"DIR/run.js"}`},
+	"codex-dir":                 {file: ".codex-plugin/plugin.json", body: `{"name":"p","entry":"DIR/run.js"}`},
+	"cursor-dir":                {file: ".cursor-plugin/plugin.json", body: `{"name":"p","main":"DIR/run.js"}`},
+	"yaml":                      {file: "plugin.yaml", body: "name: p\nentrypoint: DIR/run.js\n"},
+	"yaml-entry":                {file: "plugin.yaml", body: "name: p\nentry: \"DIR/run.js\"\n"},
+	"yaml-main":                 {file: "plugin.yml", body: "name: p\nmain: DIR/run.js\n"},
+	"yaml-bin":                  {file: "plugin.yaml", body: "name: p\nbin:\n  p: DIR/run.js\n"},
+	"yaml-merge-key":            {file: "plugin.yaml", body: "name: p\nbase: &b\n  entrypoint: DIR/run.js\n<<: *b\n"},
+	"yaml-bin-numeric-key":      {file: "plugin.yaml", body: "name: p\nbin:\n  7: DIR/run.js\n"},
+	"yaml-bin-bool-key":         {file: "plugin.yaml", body: "name: p\nbin:\n  true: DIR/run.js\n"},
+	"yaml-bin-null-key":         {file: "plugin.yaml", body: "name: p\nbin:\n  null: DIR/run.js\n"},
+	"yaml-bin-quoted-key":       {file: "plugin.yaml", body: "name: p\nbin:\n  \"7\": DIR/run.js\n"},
+	"yaml-bin-complex-key":      {file: "plugin.yaml", body: "name: p\nbin:\n  ? [a, b]\n  : DIR/run.js\n"},
+	"yaml-bin-merge":            {file: "plugin.yaml", body: "name: p\nshared: &s\n  tool: DIR/run.js\nbin:\n  <<: *s\n"},
+	"yaml-duplicate-keys":       {file: "plugin.yaml", body: "name: p\nname: q\nmain: lib/a.js\nmain: DIR/run.js\n"},
+	"yaml-alias":                {file: "plugin.yaml", body: "name: p\nsrc: &s DIR/run.js\nmain: *s\n"},
+	"yaml-merge-sequence":       {file: "plugin.yaml", body: "o: &o\n  name: p\nb: &b\n  bin:\n    7: DIR/run.js\n<<: [*o, *b]\n"},
+	"yaml-bin-duplicate-key":    {file: "plugin.yaml", body: "name: p\nbin:\n  p: lib/a.js\n  p: DIR/run.js\n"},
+	"yaml-bin-same-number-key":  {file: "plugin.yaml", body: "name: p\nbin:\n  1: lib/a.js\n  true: DIR/run.js\n"},
+	"yaml-bin-merge-explicit":   {file: "plugin.yaml", body: "name: p\nbin:\n  <<: {p: lib/a.js}\n  p: DIR/run.js\n"},
+	"yaml-merge-explicit-first": {file: "plugin.yaml", body: "name: p\nmain: DIR/run.js\n<<: {main: lib/a.js}\n"},
+	"yaml-merge-list-first":     {file: "plugin.yaml", body: "name: p\n<<: [{main: DIR/run.js}, {main: lib/a.js}]\n"},
+	"yaml-merge-key-last":       {file: "plugin.yaml", body: "name: p\n<<: {main: lib/a.js}\n<<: {main: DIR/run.js}\n"},
+	"yaml-merge-nested":         {file: "plugin.yaml", body: "i: &i\n  main: lib/a.js\nm: &m\n  <<: *i\n  main: DIR/run.js\n<<: *m\n"},
+	"json-nan":                  {file: "package.json", body: `{"name":"p","version":NaN,"main":"DIR/run.js"}`},
 	"shadowed": {file: "plugin.yaml", body: "name: p\nentrypoint: DIR/run.js\n",
 		alsoFile: "package.json", alsoBody: `{"name":"p","main":"lib/other.js"}`},
 }
@@ -1073,6 +1080,24 @@ func TestHermesDeclaredEntrypointIsBoundByVendorDigest(t *testing.T) {
 	}
 }
 
+// hermesShadowedEntrypointForms are YAML manifests that name a generated
+// cache file as an entrypoint in a pair PyYAML replaces: a later duplicate
+// key, an explicit pair over a merged one, a merge key beneath a later one.
+// The plugin scanner reads only lib/run.js from each, so a write to the cache
+// file is not a change (GAP-0645 review 14).
+var hermesShadowedEntrypointForms = map[string]string{
+	"duplicate-main":        "name: p\nmain: DIR/provider.cpython-312.pyc\nmain: lib/run.js\n",
+	"duplicate-bin-key":     "name: p\nbin:\n  p: DIR/provider.cpython-312.pyc\n  p: lib/run.js\n",
+	"same-number-bin-key":   "name: p\nbin:\n  1: DIR/provider.cpython-312.pyc\n  true: lib/run.js\n",
+	"merge-overridden-main": "name: p\n<<: {main: DIR/provider.cpython-312.pyc}\nmain: lib/run.js\n",
+	"merge-after-explicit":  "name: p\nmain: lib/run.js\n<<: {main: DIR/provider.cpython-312.pyc}\n",
+	"merge-overridden-bin":  "name: p\nbin:\n  <<: {p: DIR/provider.cpython-312.pyc}\n  p: lib/run.js\n",
+	"merge-list-later":      "name: p\n<<: [{main: lib/run.js}, {main: DIR/provider.cpython-312.pyc}]\n",
+	"merge-key-earlier":     "name: p\n<<: {main: DIR/provider.cpython-312.pyc}\n<<: {main: lib/run.js}\n",
+	"merge-nested-lost":     "name: p\ni: &i\n  main: DIR/provider.cpython-312.pyc\nm: &m\n  <<: *i\n  main: lib/run.js\n<<: *m\n",
+	"alias-lost":            "name: p\nold: &o DIR/provider.cpython-312.pyc\nmain: *o\nmain: lib/run.js\n",
+}
+
 // Benign twin: text in a manifest that is not an entrypoint field, such as a
 // description that names a generated cache file, declares nothing, so the
 // cache Hermes writes is neither hashed into the vendor digest nor a change.
@@ -1093,6 +1118,9 @@ func TestHermesManifestProseDeclaresNothing(t *testing.T) {
 		"yaml-bin-merge-prose": {"plugin.yaml", "name: p\nshared: &s\n  note: DIR/provider.cpython-312.pyc\nprovides:\n  <<: *s\n"},
 		"json-nan":             {"package.json", `{"name":"p","version":NaN}`},
 		"yaml-nested-main":     {"plugin.yaml", "name: p\nprovides:\n  main: DIR/provider.cpython-312.pyc\n"},
+	}
+	for name, body := range hermesShadowedEntrypointForms {
+		prose["yaml-shadowed-"+name] = struct{ file, body string }{"plugin.yaml", body}
 	}
 	for _, dir := range []string{"__pycache__", "lib/__pycache__"} {
 		for name, manifest := range prose {
@@ -1162,11 +1190,11 @@ func TestHermesManifestEntrypointKeysMatchScanner(t *testing.T) {
 	}
 }
 
-// GAP-0645 review 13: the entrypoints the watcher binds are a superset of
-// what the plugin scanner reads from the same manifest text, so a manifest
-// the scanner accepts is never read as less here. The scanner is run on each
-// manifest form; the case skips where Python or PyYAML is absent.
-func TestHermesManifestEntrypointsCoverScanner(t *testing.T) {
+// hermesScannerEntrypointReader returns a function that loads the plugin in a
+// directory with the real plugin scanner and returns the entrypoints it
+// declares. The test skips where Python or the scanner is absent.
+func hermesScannerEntrypointReader(t *testing.T) func(dir string) ([]string, error) {
+	t.Helper()
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Skip("python3 not found")
@@ -1193,6 +1221,52 @@ print(json.dumps(m.entrypoints if m else []))`
 	if _, err := run(t.TempDir()); err != nil {
 		t.Skipf("plugin scanner not importable: %v", err)
 	}
+	return run
+}
+
+// GAP-0645 review 14: for YAML manifests whose pairs are replaced by a later
+// key or by a merge precedence, the watcher binds exactly the entrypoints the
+// plugin scanner reads: not a replaced one (a false block on an ordinary
+// cache write) and not less than the winning one (a protected allow).
+func TestHermesYAMLEntrypointsMatchScannerPrecedence(t *testing.T) {
+	run := hermesScannerEntrypointReader(t)
+	forms := map[string]string{}
+	for name, body := range hermesShadowedEntrypointForms {
+		forms["shadowed/"+name] = body
+	}
+	for name, form := range hermesDeclaredEntrypointForms {
+		if strings.HasPrefix(name, "yaml-") && form.alsoFile == "" && form.file == "plugin.yaml" && !strings.Contains(name, "complex") {
+			forms[name] = form.body
+		}
+	}
+	for name, body := range forms {
+		t.Run(name, func(t *testing.T) {
+			body = strings.ReplaceAll(body, "DIR", "__pycache__")
+			dir := t.TempDir()
+			writePluginFile(t, filepath.Join(dir, "plugin.yaml"), body)
+			read, err := run(dir)
+			if err != nil {
+				t.Fatalf("scanner: %v", err)
+			}
+			ours, ok := hermesManifestEntrypoints("plugin.yaml", []byte(body))
+			if !ok {
+				t.Fatal("watcher cannot parse a manifest the scanner reads")
+			}
+			slices.Sort(read)
+			slices.Sort(ours)
+			if read, ours = slices.Compact(read), slices.Compact(ours); !slices.Equal(read, ours) {
+				t.Fatalf("scanner reads %q, watcher binds %q", read, ours)
+			}
+		})
+	}
+}
+
+// GAP-0645 review 13: the entrypoints the watcher binds are a superset of
+// what the plugin scanner reads from the same manifest text, so a manifest
+// the scanner accepts is never read as less here. The scanner is run on each
+// manifest form; the case skips where Python or PyYAML is absent.
+func TestHermesManifestEntrypointsCoverScanner(t *testing.T) {
+	run := hermesScannerEntrypointReader(t)
 	manifests := map[string]struct{ file, body string }{}
 	for name, form := range hermesDeclaredEntrypointForms {
 		manifests["form/"+name] = struct{ file, body string }{form.file, form.body}

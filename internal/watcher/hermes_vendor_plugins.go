@@ -324,15 +324,18 @@ func hermesJSONEntrypoints(doc any) []string {
 }
 
 // hermesYAMLEntrypoints lists the entrypoint strings of one YAML manifest.
-// The plugin scanner loads YAML with PyYAML, which accepts a duplicate key,
-// a key that is not a string (a number, a Boolean, null) and a merge key, and
-// reads every value of a bin map whatever its key. The manifest is therefore
-// walked as a node tree, not decoded into a Go map, which rejects duplicate
-// keys and drops keys that are not strings: every pair named by an entrypoint
-// key is read, a duplicate included, a merged mapping is read like the pairs
-// beside it, and a scalar is taken as written whatever type YAML gives it, so
-// the result is a superset of what the scanner reads. ok is false when the
-// text is not YAML or the walk is over budget.
+// The plugin scanner loads YAML with PyYAML, which builds one dict from the
+// mapping: a later pair replaces an earlier pair with an equal key, a merge
+// key (<<) contributes the pairs of the mapping it names beneath the
+// mapping's own pairs, a later merge key beneath an earlier one and the first
+// mapping of a merge list beneath the rest, and a key may be a number, a
+// Boolean or null. The manifest is therefore walked as a node tree and the
+// effective mapping is built the same way (a Go map decode rejects duplicate
+// keys and drops keys that are not strings), so a value the scanner never
+// sees, because a later key or an explicit pair replaced it, declares nothing.
+// A scalar is taken as written whatever type YAML gives it, so the result is a
+// superset of what the scanner reads. ok is false when the text is not YAML
+// or the walk is over budget.
 func hermesYAMLEntrypoints(data []byte) (out []string, ok bool) {
 	var doc yaml.Node
 	if err := yaml.Unmarshal(data, &doc); err != nil {
@@ -355,45 +358,67 @@ func hermesYAMLEntrypoints(data []byte) (out []string, ok bool) {
 		}
 		return n
 	}
-	// pairs calls fn for each key and value of a mapping, reading the
-	// mappings a merge key names as if their pairs were written in place.
-	var pairs func(n *yaml.Node, fn func(key, value *yaml.Node))
-	pairs = func(n *yaml.Node, fn func(key, value *yaml.Node)) {
+	type pair struct{ key, value *yaml.Node }
+	// pairs lists the pairs of a mapping in the order PyYAML applies them:
+	// the pairs of its merge keys first, then its own.
+	var pairs func(n *yaml.Node) []pair
+	pairs = func(n *yaml.Node) []pair {
 		if n = resolve(n); n == nil || n.Kind != yaml.MappingNode {
-			return
+			return nil
 		}
+		var merged, own []pair
 		for i := 0; i+1 < len(n.Content); i += 2 {
 			if budget--; budget < 0 {
-				return
+				return nil
 			}
 			key, value := resolve(n.Content[i]), n.Content[i+1]
 			if key != nil && key.Kind == yaml.ScalarNode && key.ShortTag() == "!!merge" {
-				if merged := resolve(value); merged != nil && merged.Kind == yaml.SequenceNode {
-					for _, item := range merged.Content {
-						pairs(item, fn)
+				if list := resolve(value); list != nil && list.Kind == yaml.SequenceNode {
+					for j := len(list.Content) - 1; j >= 0; j-- {
+						merged = append(merged, pairs(list.Content[j])...)
 					}
 				} else {
-					pairs(merged, fn)
+					merged = append(merged, pairs(list)...)
 				}
 				continue
 			}
-			fn(key, value)
+			own = append(own, pair{key, value})
 		}
+		return append(merged, own...)
+	}
+	// effective is the dict PyYAML builds from a mapping: the last value for
+	// each key, keyed by key identity, in order of first appearance.
+	effective := func(n *yaml.Node) (keys []string, byKey map[string]pair) {
+		byKey = map[string]pair{}
+		for _, p := range pairs(n) {
+			id := hermesYAMLKeyIdentity(p.key)
+			if _, seen := byKey[id]; !seen {
+				keys = append(keys, id)
+			}
+			byKey[id] = p
+		}
+		return keys, byKey
 	}
 	scalar := func(n *yaml.Node) {
 		if n = resolve(n); n != nil && n.Kind == yaml.ScalarNode {
 			out = append(out, n.Value)
 		}
 	}
-	pairs(&doc, func(key, value *yaml.Node) {
-		if key == nil || key.Kind != yaml.ScalarNode || !slices.Contains(hermesManifestEntrypointKeys, key.Value) {
-			return
+	keys, top := effective(&doc)
+	for _, id := range keys {
+		name, isString := strings.CutPrefix(id, "str:")
+		if !isString || !slices.Contains(hermesManifestEntrypointKeys, name) {
+			continue
 		}
+		value := top[id].value
 		scalar(value)
-		if key.Value == "bin" {
-			pairs(value, func(_, binValue *yaml.Node) { scalar(binValue) })
+		if name == "bin" {
+			binKeys, bin := effective(value)
+			for _, binID := range binKeys {
+				scalar(bin[binID].value)
+			}
 		}
-	})
+	}
 	return out, budget >= 0
 }
 
