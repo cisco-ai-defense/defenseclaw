@@ -146,6 +146,47 @@ def owner_private_group(path: str, info: os.stat_result) -> bool:
     return account.pw_name == name and account.pw_gid == gid and group.gr_name == name and set(group.gr_mem) <= {name}
 
 
+_POSIX_ACL_XATTR = "system.posix_acl_access"
+_POSIX_ACL_USER = 0x02
+_POSIX_ACL_GROUP = 0x08
+_POSIX_ACL_MASK = 0x10
+_POSIX_ACL_WRITE = 0x02
+
+
+def acl_xattr_grants_write(data: bytes, trusted_uids: frozenset[int]) -> bool:
+    """Whether a POSIX access ACL gives a named user or group effective write.
+
+    ``data`` is the ``system.posix_acl_access`` value. A named user in
+    ``trusted_uids`` (root, this account) does not count. An ACL that cannot
+    be read as a whole counts as unsafe, as the gateway judges it.
+    """
+    if len(data) < 4 or (len(data) - 4) % 8 or struct.unpack("<I", data[:4])[0] != 2:
+        return True
+    entries = [struct.unpack("<HHI", data[offset : offset + 8]) for offset in range(4, len(data), 8)]
+    mask_write = True
+    for tag, perm, _ident in entries:
+        if tag == _POSIX_ACL_MASK:
+            mask_write = bool(perm & _POSIX_ACL_WRITE)
+    for tag, perm, ident in entries:
+        if tag not in (_POSIX_ACL_USER, _POSIX_ACL_GROUP) or not perm & _POSIX_ACL_WRITE or not mask_write:
+            continue
+        if tag == _POSIX_ACL_USER and ident in trusted_uids:
+            continue
+        return True
+    return False
+
+
+def posix_acl_grants_write(path: str) -> bool:
+    """Whether a named user or group has effective write through a POSIX ACL on ``path`` (Linux)."""
+    if sys.platform != "linux":
+        return False
+    try:
+        data = os.getxattr(path, _POSIX_ACL_XATTR, follow_symlinks=False)
+    except OSError:
+        return False
+    return acl_xattr_grants_write(data, frozenset({0, os.geteuid(), os.getuid()}))
+
+
 def other_accounts_can_write(path: str, info: os.stat_result) -> bool:
     """Check other-write and group-write after proving a private group."""
     mode = stat.S_IMODE(info.st_mode)

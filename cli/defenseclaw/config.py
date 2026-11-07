@@ -575,7 +575,7 @@ def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> 
 GATEWAY_PID_FILE_NAME = "gateway.pid"
 
 # (path, st_dev, st_ino, st_size, st_mtime_ns) -> (configured data_dir, managed mode).
-_home_config_cache: dict[tuple[str, int, int, int, int], tuple[str | None, bool]] = {}
+_home_config_cache: dict[tuple[str, str, int, int, int, int], tuple[str | None, bool]] = {}
 
 
 def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
@@ -602,7 +602,11 @@ def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
     except (OSError, KeyError, NotImplementedError):
         return own
     active_config = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
-    configured, managed = _home_config_binding(active_config)
+    if not os.path.isabs(active_config):
+        # The gateway starts in the install home, so it reads a relative
+        # config path from there, whatever folder this process runs in.
+        active_config = os.path.join(home, active_config)
+    configured, managed = _home_config_binding(active_config, home)
     if managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)):
         return own
     if configured and _same_folder(configured, own):
@@ -615,13 +619,18 @@ def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
     return os.path.join(gateway_home_for_data_dir(data_dir), GATEWAY_PID_FILE_NAME)
 
 
-def _home_config_binding(path: str) -> tuple[str | None, bool]:
-    """Return the config's resolved store and whether it declares managed mode."""
+def _home_config_binding(path: str, home: str) -> tuple[str | None, bool]:
+    """Return the config's resolved store and whether it declares managed mode.
+
+    The gateway starts in the install home ``home``, so it makes a relative
+    data_dir absolute from there, not from the folder of the config or the one
+    this process runs in.
+    """
     try:
         st = os.stat(path)
     except OSError:
         return None, False
-    key = (path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    key = (path, home, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
     if key in _home_config_cache:
         return _home_config_cache[key]
     resolved: str | None = None
@@ -634,7 +643,7 @@ def _home_config_binding(path: str) -> tuple[str | None, bool]:
         managed = _is_managed_enterprise_mode(str(raw.get("deployment_mode") or ""))
         configured = raw.get("data_dir")
         if isinstance(configured, str) and configured.strip():
-            resolved = _configured_data_dir(raw, os.path.dirname(path))
+            resolved = os.path.abspath(os.path.join(home, _expand_store_home(configured.strip())))
     if len(_home_config_cache) > 32:
         _home_config_cache.clear()
     _home_config_cache[key] = (resolved, managed)

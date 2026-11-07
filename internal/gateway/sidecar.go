@@ -8514,6 +8514,10 @@ func refreshRefusalNextStep(err error) string {
 		return "; the agent answered too slowly (a cold first start or a busy host): start it once from this account and let it finish, then run: defenseclaw upgrade"
 	case errors.Is(err, connector.ErrAgentInstallNotTrusted):
 		return "; the agent is installed where another account can write: install it where only administrators or this account can write, or remove that write access, then run: defenseclaw upgrade"
+	case errors.Is(err, connector.ErrAgentFolderCustody):
+		// A folder another account can write is fixed by the command the error
+		// names; closing the agent or upgrading changes nothing (GAP-0730).
+		return "; then run: defenseclaw-gateway restart"
 	default:
 		return "; close the agent holding its settings, then run: defenseclaw upgrade"
 	}

@@ -48,36 +48,40 @@ func RootGatewayListenerRemedy(dataDir string) string {
 // leaves root-owned files in the home, so an account start fails until they
 // are returned: the Unix remedy is one sequence that stops the root gateway,
 // returns the home and starts it as the account (GAP-0711, GAP-0713).
-// DefenseClawMac exists only on macOS.
+// DefenseClawMac exists only on macOS. The shell command is always the last
+// thing in the text and holds nothing but the command, so it can be copied
+// whole; a note about it comes before it.
 func rootGatewayRemedyFor(goos, dataDir string) string {
-	switch goos {
-	case "windows":
+	if goos == "windows" {
 		return "Stop it from an administrator prompt (defenseclaw-gateway stop), then start it as yourself (defenseclaw-gateway start)"
-	case "darwin":
-		return "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with administrator approval, " +
-			"returns its files to you and starts the gateway as you. Without the app, run: " + rootGatewayRecoveryCommand(dataDir)
 	}
-	return "Stop it, return its files to your account and start it as yourself with: " + rootGatewayRecoveryCommand(dataDir)
+	command, note := rootGatewayRecoverySteps(dataDir)
+	if goos == "darwin" {
+		return note + "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with administrator approval, " +
+			"returns its files to you and starts the gateway as you. Without the app, run: " + command
+	}
+	return note + "Stop it, return its files to your account and start it as yourself with: " + command
 }
 
-// rootGatewayRecoveryCommand stops the root gateway, returns the install home
-// and the moved store to the calling account and starts the gateway as that
-// account. The root run leaves root-owned files in both (GAP-0711, GAP-0713).
-// When the home's configuration exists but cannot say where the store is, the
-// sequence names the install home only and says so, instead of presenting
-// itself as complete.
-func rootGatewayRecoveryCommand(dataDir string) string {
+// rootGatewayRecoverySteps returns the shell command that stops the root
+// gateway, returns the install home and the moved store to the calling account
+// and starts the gateway as that account (the root run leaves root-owned files
+// in both, GAP-0711, GAP-0713), and the sentence to read before it. When the
+// home's configuration exists but cannot say where the store is, the command
+// names the install home only and the note says so, so the sequence is never
+// presented as complete. The note is empty otherwise.
+func rootGatewayRecoverySteps(dataDir string) (command, note string) {
 	dirs, configFile, storeErr := rootGatewayRecoveryDirs(dataDir)
 	for i, dir := range dirs {
 		dirs[i] = shellQuote(dir)
 	}
-	command := rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ") +
+	command = rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + strings.Join(dirs, " ") +
 		" && defenseclaw-gateway start"
 	if storeErr != nil {
-		command += " (the configuration " + shellQuote(configFile) + " could not be read here, so a data_dir it sets is " +
-			"not in the chown above: return that folder to your account too)"
+		note = "The configuration " + configFile + " could not be read here, so a data_dir it sets is " +
+			"not in the chown command below: return that folder to your account too. "
 	}
-	return command
+	return command, note
 }
 
 // rootGatewayRecoveryDirs are the directories a root-run gateway for the

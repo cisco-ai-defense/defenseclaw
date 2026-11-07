@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -140,15 +141,26 @@ func TestGAP0711RootGatewayRemedyResolvesTheStoreLikeTheGateway(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// chowned returns the folders the printed chain returns and the note that
+	// comes before the chain. The chain is the end of the remedy and nothing
+	// else follows it, so it can be copied whole and run by a shell.
 	chowned := func() (string, string) {
 		t.Helper()
 		remedy := rootGatewayRemedyFor("linux", home)
-		_, rest, ok := strings.Cut(remedy, `sudo chown -R "$(id -un)" `)
+		command, note := rootGatewayRecoverySteps(home)
+		if !strings.HasSuffix(remedy, command) || !strings.HasPrefix(remedy, note) {
+			t.Fatalf("remedy does not end with its command: %q", remedy)
+		}
+		requireShellSyntax(t, command)
+		_, rest, ok := strings.Cut(command, `sudo chown -R "$(id -un)" `)
 		if !ok {
 			t.Fatalf("remedy returns no files: %q", remedy)
 		}
 		dirs, tail, _ := strings.Cut(rest, " && defenseclaw-gateway start")
-		return dirs, tail
+		if tail != "" {
+			t.Fatalf("text follows the chain: %q", tail)
+		}
+		return dirs, note
 	}
 	write := func(path, body string) {
 		t.Helper()
@@ -213,6 +225,9 @@ func TestGAP0711RootGatewayRemedyResolvesTheStoreLikeTheGateway(t *testing.T) {
 		if got != shellQuote(home) || !strings.Contains(tail, "could not be read here") {
 			t.Fatalf("%s config: chown targets %q, note %q", name, got, tail)
 		}
+		if strings.Contains(rootGatewayRemedyFor("darwin", home), "(the configuration") {
+			t.Fatalf("%s config: the note is inside the command", name)
+		}
 	}
 
 	// Benign twins: no config, and a config that sets no data_dir, are complete.
@@ -223,5 +238,18 @@ func TestGAP0711RootGatewayRemedyResolvesTheStoreLikeTheGateway(t *testing.T) {
 	write(filepath.Join(home, "config.yaml"), "gateway:\n  api_port: 18970\n")
 	if got, tail := chowned(); got != shellQuote(home) || tail != "" {
 		t.Fatalf("config without data_dir: chown targets %q (note %q)", got, tail)
+	}
+}
+
+// requireShellSyntax fails when command is not one valid shell command line
+// (the review pasted the printed chain into a shell and got a syntax error).
+func requireShellSyntax(t *testing.T, command string) {
+	t.Helper()
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is not available")
+	}
+	if out, err := exec.Command(bash, "-n", "-c", command).CombinedOutput(); err != nil {
+		t.Fatalf("the printed command is not valid shell: %v: %s\n%s", err, out, command)
 	}
 }

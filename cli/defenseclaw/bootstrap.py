@@ -34,7 +34,6 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
@@ -49,6 +48,7 @@ from defenseclaw.connector_paths import (
     connector_config_files,
     connector_hook_config_paths,
     hermes_config_path,
+    opencode_custody_fix,
     opencode_writable_plugin_folder,
 )
 from defenseclaw.inventory import agent_discovery
@@ -2342,7 +2342,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
                 "warn",
                 f"{loose} can be written by other accounts, so the gateway does not install the "
                 "OpenCode plugin there; fix its mode, then run `defenseclaw-gateway restart`",
-                f"chmod go-w {shlex.quote(loose)}",
+                opencode_custody_fix(loose),
             )
         return StepResult(
             "Connector",

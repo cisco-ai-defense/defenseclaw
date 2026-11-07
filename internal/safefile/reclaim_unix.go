@@ -150,19 +150,61 @@ func openReclaimDirectory(dir string) (directory *os.File, dirInfo os.FileInfo, 
 // write into dir: the same one ReclaimToDirectoryOwner would refuse on after
 // the write. A refused root start otherwise leaves root-owned files the
 // account's own start cannot open (GAP-0714). It does nothing for a non-root
-// process or a directory that does not exist yet.
+// process.
+//
+// A directory that does not exist yet has no owner to prove, and a root run
+// would create it (and the log and PID record in it) owned by root. That is
+// right only where root is the owner: below a root-owned folder. Below a folder
+// another account owns, the root run would strand that account behind a
+// root-owned 0700 home, so it is refused before anything is created and no
+// state needs rolling back.
 func PreflightReclaimDirectory(dir string) error {
 	if effectiveUID() != 0 {
 		return nil
 	}
 	if _, err := os.Lstat(dir); os.IsNotExist(err) {
-		return nil
+		return preflightMissingDirectory(dir)
 	}
 	directory, _, _, _, err := openReclaimDirectory(dir)
 	if err != nil {
 		return err
 	}
 	return directory.Close()
+}
+
+// preflightMissingDirectory refuses a missing dir whose nearest existing
+// ancestor is owned by an account other than root.
+func preflightMissingDirectory(dir string) error {
+	for ancestor := filepath.Dir(dir); ; ancestor = filepath.Dir(ancestor) {
+		uid, err := pathOwnerUID(ancestor)
+		if err == nil {
+			if uid == 0 {
+				return nil
+			}
+			return fmt.Errorf("safefile: private directory %s does not exist and root would create it inside a folder owned by uid %d: start the gateway as that account, or create the directory as that account first", dir, uid)
+		}
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("safefile: inspect the folder that would hold private directory %s: %w", dir, err)
+		}
+		if next := filepath.Dir(ancestor); next == ancestor {
+			return nil
+		}
+	}
+}
+
+// pathOwnerUID is the owner of the existing path (links followed, as a
+// create would). A variable so a test can stand in for a root-owned folder it
+// cannot make.
+var pathOwnerUID = func(path string) (uint32, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("ownership is unavailable: %s", path)
+	}
+	return stat.Uid, nil
 }
 
 func verifyOpenedPath(path string, opened os.FileInfo) error {

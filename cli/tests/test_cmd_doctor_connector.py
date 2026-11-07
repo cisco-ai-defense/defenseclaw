@@ -2587,6 +2587,70 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn(f"chmod go-w {os.path.realpath(plugins)}", r.checks[-1]["detail"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX folder modes")
+    def test_opencode_installed_plugin_in_unsafe_folder_fails_doctor_before_the_next_start(self) -> None:
+        # GAP-0730: the plugin is installed and the gateway runs (it passed the
+        # check at its last start), but the next start refuses. Doctor names the
+        # outermost unsafe folder and the one command, and the benign twin
+        # (private folders) stays clean.
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}), patch(
+            "defenseclaw.file_permissions.owner_private_group", return_value=False
+        ):
+            config = Path(tmp) / ".config"
+            plugins = config / "opencode" / "plugins"
+            plugins.mkdir(parents=True)
+            plugin = plugins / "defenseclaw.js"
+            plugin.write_text("// defenseclaw managed plugin\n")
+            for folder in (config, config / "opencode", plugins):
+                folder.chmod(0o700)
+            cfg = self._cfg(tmp, "opencode", [str(plugin)])
+
+            clean = _DoctorResult()
+            _check_hook_health(cfg, "opencode", clean)
+            self.assertNotIn("can be written by other accounts", clean.checks[-1]["detail"])
+
+            (config / "opencode").chmod(0o777)
+            config.chmod(0o775)
+            r = _DoctorResult()
+            _check_hook_health(cfg, "opencode", r)
+
+            self.assertEqual(r.checks[-1]["status"], "fail")
+            self.assertIn(f"chmod go-w {os.path.realpath(config)}`", r.checks[-1]["detail"])
+            self.assertNotIn(os.path.realpath(config / "opencode"), r.checks[-1]["detail"])
+
+            config.chmod(0o700)
+            (config / "opencode").chmod(0o700)
+            plugin.chmod(0o620)
+            r = _DoctorResult()
+            _check_hook_health(cfg, "opencode", r)
+            self.assertEqual(r.checks[-1]["status"], "fail")
+            self.assertIn(f"chmod go-w {os.path.realpath(plugin)}`", r.checks[-1]["detail"])
+
+    def test_posix_acl_write_is_named_with_setfacl(self) -> None:
+        import struct
+
+        from defenseclaw import file_permissions
+
+        def acl(entries):
+            return struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in entries)
+
+        base = [(1, 6, 0xFFFFFFFF), (4, 0, 0xFFFFFFFF), (0x20, 0, 0xFFFFFFFF)]
+        other_user = acl([*base, (2, 2, 4242), (0x10, 7, 0xFFFFFFFF)])
+        masked = acl([*base, (2, 2, 4242), (0x10, 5, 0xFFFFFFFF)])
+        mine = acl([*base, (2, 2, 1000), (0x10, 7, 0xFFFFFFFF)])
+        trusted = frozenset({0, 1000})
+        self.assertTrue(file_permissions.acl_xattr_grants_write(other_user, trusted))
+        self.assertFalse(file_permissions.acl_xattr_grants_write(masked, trusted))
+        self.assertFalse(file_permissions.acl_xattr_grants_write(mine, trusted))
+        self.assertTrue(file_permissions.acl_xattr_grants_write(b"junk", trusted))
+
+        from defenseclaw.connector_paths import opencode_custody_fix
+
+        with patch("defenseclaw.file_permissions.posix_acl_grants_write", return_value=True):
+            self.assertEqual(opencode_custody_fix("/h/.config/opencode"), "setfacl -b /h/.config/opencode")
+        with patch("defenseclaw.file_permissions.posix_acl_grants_write", return_value=False):
+            self.assertEqual(opencode_custody_fix("/h/.config/opencode"), "chmod go-w /h/.config/opencode")
+
     def test_opencode_missing_load_heartbeat_is_unverified_without_guessing_pure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hook = Path(tmp) / "defenseclaw.js"

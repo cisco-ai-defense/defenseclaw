@@ -8,6 +8,7 @@ package safefile
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -64,9 +65,15 @@ func TestGAP0714PreflightLetsOrdinaryHomesThrough(t *testing.T) {
 	if err := PreflightReclaimDirectory(private); err != nil {
 		t.Fatalf("a private home owned by this account was refused: %v", err)
 	}
-	if err := PreflightReclaimDirectory(filepath.Join(private, "not yet")); err != nil {
-		t.Fatalf("a home that does not exist yet was refused: %v", err)
+	// A home that does not exist yet is created by root, so it is let through
+	// only below a root-owned folder (root is its owner there).
+	oldOwner := pathOwnerUID
+	t.Cleanup(func() { pathOwnerUID = oldOwner })
+	pathOwnerUID = func(string) (uint32, error) { return 0, nil }
+	if err := PreflightReclaimDirectory(filepath.Join(private, "not yet", "deeper")); err != nil {
+		t.Fatalf("a home below a root-owned folder was refused: %v", err)
 	}
+	pathOwnerUID = oldOwner
 
 	open := filepath.Join(t.TempDir(), "open home")
 	if err := os.Mkdir(open, 0o700); err != nil {
@@ -78,5 +85,41 @@ func TestGAP0714PreflightLetsOrdinaryHomesThrough(t *testing.T) {
 	effectiveUID = func() int { return 1000 }
 	if err := PreflightReclaimDirectory(open); err != nil {
 		t.Fatalf("a non-root run was refused: %v", err)
+	}
+}
+
+// GAP-0714 (review 5): a root run would create a missing home, its log and its
+// PID record owned by root, and a 0700 root-owned home strands the account the
+// home is for. A missing home below a folder another account owns is refused
+// before anything is created.
+func TestGAP0714PreflightRefusesToCreateAHomeInsideAnotherAccountsFolder(t *testing.T) {
+	old := effectiveUID
+	t.Cleanup(func() { effectiveUID = old })
+	effectiveUID = func() int { return 0 }
+
+	account := t.TempDir() // owned by the account running the test, not root
+	home := filepath.Join(account, ".defenseclaw")
+	err := PreflightReclaimDirectory(home)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("a missing home inside another account's folder was not refused: %v", err)
+	}
+	// Further levels of missing folders do not hide the owner.
+	if err := PreflightReclaimDirectory(filepath.Join(account, "a", "b", ".defenseclaw")); err == nil {
+		t.Fatal("a deeper missing home inside another account's folder was not refused")
+	}
+	if _, statErr := os.Lstat(home); !os.IsNotExist(statErr) {
+		t.Fatalf("the preflight created the home: %v", statErr)
+	}
+	// Benign twins: the account's own start and the same path once it exists.
+	effectiveUID = func() int { return 1000 }
+	if err := PreflightReclaimDirectory(home); err != nil {
+		t.Fatalf("a non-root run was refused: %v", err)
+	}
+	effectiveUID = func() int { return 0 }
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := PreflightReclaimDirectory(home); err != nil {
+		t.Fatalf("an existing private home owned by this account was refused: %v", err)
 	}
 }
