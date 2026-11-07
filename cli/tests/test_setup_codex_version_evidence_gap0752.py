@@ -18,12 +18,35 @@
 
 from __future__ import annotations
 
+import atexit
+import shutil
+import tempfile
 from datetime import timedelta
+from pathlib import Path
 from unittest import mock
 
 import pytest
 from defenseclaw.commands import cmd_setup
 from defenseclaw.inventory import agent_discovery as ad
+
+
+#: A cached peer version belongs to an executable that is there: a real file.
+_PEERS = Path(tempfile.mkdtemp(prefix="g752-setup-peers-"))
+atexit.register(shutil.rmtree, _PEERS, ignore_errors=True)
+_CURSOR = str(_PEERS / "cursor")
+Path(_CURSOR).write_text("cursor", encoding="utf-8")
+
+
+def _cursor(version: str) -> ad.AgentSignal:
+    return ad.AgentSignal(
+        name="cursor",
+        installed=True,
+        config_path="",
+        binary_path=_CURSOR,
+        version=version,
+        error="",
+        identity=ad._executable_identity(_CURSOR),
+    )
 
 
 def _disc() -> ad.AgentDiscovery:
@@ -84,9 +107,7 @@ def test_windows_setup_keeps_a_peer_version_the_fresh_scan_missed(tmp_path) -> N
         name: ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
         for name in ad.DISCOVERABLE_CONNECTORS
     }
-    peers["cursor"] = ad.AgentSignal(
-        name="cursor", installed=True, config_path="", binary_path="/opt/cursor/bin/cursor", version="3.19.13", error=""
-    )
+    peers["cursor"] = _cursor("3.19.13")
     scanned = ad._format_rfc3339(ad._now_utc())
     assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=peers, cache_hit=False), data_dir=tmp_path)
 
@@ -114,20 +135,11 @@ def test_windows_setup_replaces_a_peer_version_the_fresh_scan_read(tmp_path) -> 
             name: ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
             for name in ad.DISCOVERABLE_CONNECTORS
         }
-        agents["cursor"] = ad.AgentSignal(
-            name="cursor", installed=True, config_path="", binary_path="/opt/cursor/bin/cursor", version=previous, error=""
-        )
+        agents["cursor"] = _cursor(previous)
         assert ad._write_cache(ad.AgentDiscovery(scanned_at=scanned, agents=agents, cache_hit=False), data_dir=data)
         disc = _disc()
         disc.scanned_at = ad._format_rfc3339(ad._now_utc())
-        disc.agents["cursor"] = ad.AgentSignal(
-            name="cursor",
-            installed=True,
-            config_path="",
-            binary_path="/opt/cursor/bin/cursor",
-            version=fresh_version,
-            error="",
-        )
+        disc.agents["cursor"] = _cursor(fresh_version)
 
         with (
             mock.patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
@@ -151,16 +163,12 @@ def test_windows_setup_keeps_a_peer_version_a_newer_scan_cached(tmp_path) -> Non
             name: ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
             for name in ad.DISCOVERABLE_CONNECTORS
         }
-        agents["cursor"] = ad.AgentSignal(
-            name="cursor", installed=True, config_path="", binary_path="/opt/cursor/bin/cursor", version=newer, error=""
-        )
+        agents["cursor"] = _cursor(newer)
         cached_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=1))
         assert ad._write_cache(ad.AgentDiscovery(scanned_at=cached_at, agents=agents, cache_hit=False), data_dir=data)
         disc = _disc()
         disc.scanned_at = ad._format_rfc3339(ad._now_utc() - timedelta(seconds=3))
-        disc.agents["cursor"] = ad.AgentSignal(
-            name="cursor", installed=True, config_path="", binary_path="/opt/cursor/bin/cursor", version=older, error=""
-        )
+        disc.agents["cursor"] = _cursor(older)
 
         with (
             mock.patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
