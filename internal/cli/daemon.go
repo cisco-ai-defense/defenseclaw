@@ -247,6 +247,10 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 	return err == nil && enabled
 }
 
+// refuseStartInUntrustedHome is daemon.RefuseStartInUntrustedHome. A variable
+// so a test can stand in for the root run it cannot be.
+var refuseStartInUntrustedHome = daemon.RefuseStartInUntrustedHome
+
 func runStart(cmd *cobra.Command, args []string) error {
 	coldStart := cmd != nil && hookColdStartRequested(cmd.Flags())
 	if coldStart && !hookColdStartSupported() {
@@ -256,6 +260,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	dataDir := config.DefaultDataPath()
+	// Before the login path, the start lock or any other write into the home.
+	if err := refuseStartInUntrustedHome(dataDir); err != nil {
+		return err
+	}
 	if coldStart {
 		if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
 			return fmt.Errorf("hook cold start skipped: %w", err)
@@ -803,6 +811,9 @@ func waitForRunningDaemonReadiness(
 
 func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
+		return err
+	}
+	if err := refuseStartInUntrustedHome(config.DefaultDataPath()); err != nil {
 		return err
 	}
 	release, err := acquireGatewayStartLock(config.DefaultDataPath(), gatewayStartLockWait)

@@ -9,3 +9,8 @@ package safefile
 func ReclaimToDirectoryOwner(string) error {
 	return nil
 }
+
+// PreflightReclaimDirectory is a Unix sudo-home check.
+func PreflightReclaimDirectory(string) error {
+	return nil
+}
