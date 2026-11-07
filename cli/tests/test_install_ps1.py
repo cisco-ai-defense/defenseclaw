@@ -16,6 +16,7 @@ scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -69,20 +70,125 @@ def _base_name(word) -> str:  # type: ignore[no-untyped-def]
     return re.split(r"[\\/]", str(os.fspath(word)))[-1].lower()
 
 
-def _split_words(text: str) -> list[str]:
+_ENV_SPLIT_SPACE = " \t\n\v\f\r"
+_ENV_SPLIT_CONTROL = {"f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+_ENV_SPLIT_UNQUOTED_ESCAPES = "\\$\"'#"
+_ENV_SPLIT_QUOTED_ESCAPES = "\\$\""
+_ENV_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _env_split_string(text: str, environ) -> list[str] | None:  # type: ignore[no-untyped-def]
+    # The words env(1) makes of the string of -S / --split-string, following
+    # the grammar coreutils documents: blanks separate words, '...' and "..."
+    # quote, a backslash starts one of a fixed set of escapes (\c ends the
+    # string, \_ is a separator outside quotes and a blank inside), ${NAME}
+    # takes NAME from the environment env itself started with, and a '#' that
+    # opens a word starts a comment. None when env refuses the string (an
+    # unknown escape, an unbraced $NAME, an unclosed quote), in which case it
+    # runs nothing.
+    words: list[str] = []
+    word: list[str] = []
+    open_word, quote, i = False, "", 0
+
+    def end_word() -> None:
+        nonlocal word, open_word
+        if open_word:
+            words.append("".join(word))
+        word, open_word = [], False
+
+    while i < len(text):
+        char, i = text[i], i + 1
+        if char == "\\":
+            if i == len(text):
+                return None
+            char, i = text[i], i + 1
+            if char == "c":
+                if quote == '"':
+                    return None
+                break
+            if quote == "'":
+                word.append(char if char in "\\'" else "\\" + char)
+            elif char == "_":
+                if quote:
+                    word.append(" ")
+                else:
+                    end_word()
+                    continue
+            elif char in _ENV_SPLIT_CONTROL:
+                word.append(_ENV_SPLIT_CONTROL[char])
+            elif char in (_ENV_SPLIT_QUOTED_ESCAPES if quote else _ENV_SPLIT_UNQUOTED_ESCAPES):
+                word.append(char)
+            else:
+                return None
+            open_word = True
+        elif quote and char == quote:
+            quote = ""
+        elif quote == "'":
+            word.append(char)
+        elif char == "$":
+            if text[i : i + 1] != "{" or text.find("}", i) < 0:
+                return None
+            name = text[i + 1 : text.index("}", i)]
+            if not _ENV_VARIABLE.fullmatch(name):
+                return None
+            word.append(environ.get(name, ""))
+            open_word, i = True, text.index("}", i) + 1
+        elif quote:
+            word.append(char)
+        elif char in _ENV_SPLIT_SPACE:
+            end_word()
+        elif char == "#" and not open_word:
+            break
+        elif char in "'\"":
+            quote, open_word = char, True
+        else:
+            word.append(char)
+            open_word = True
+    if quote:
+        return None
+    end_word()
+    return words
+
+
+# Set while env is being asked about an option, so that launch passes the gate.
+_PROBING_ENV: list[str] = []
+
+
+@functools.cache
+def _env_has_option(env_word: str, option: str, value: str) -> bool:
+    # Ask the env that will be launched whether it has an option: the set
+    # differs between releases (-a / --argv0 came with coreutils 9.5) and from
+    # BSD, and a launch that names an option env lacks runs nothing (status
+    # 125). Where env cannot be probed the option counts as known.
+    _PROBING_ENV.append(env_word)
     try:
-        return shlex.split(text)
-    except ValueError:
-        return text.split()
+        probe = subprocess.run(
+            [env_word, option, *([value] if value else []), "true"],
+            capture_output=True,
+            check=False,
+            timeout=30,
+            env={"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    finally:
+        _PROBING_ENV.pop()
+    return probe.returncode != 125
 
 
-def _after_env_options(words) -> list:  # type: ignore[no-untyped-def]
-    # The words env(1) goes on to run, given the words that follow its own
-    # name: its options and NAME=VALUE assignments skipped, and the string of
-    # -S / --split-string split into words that are read as more env
+_ENV_BASELINE_SHORT = "i0vuCS"
+_ENV_PROBE_VALUES = {"u": "X", "unset": "X", "a": "x", "argv0": "x", "C": ".", "chdir": ".", "S": "true", "split-string": "true"}
+
+
+def _after_env_options(env_word, words, environ) -> list:  # type: ignore[no-untyped-def]
+    # The words env(1) goes on to run, given its own name and the words that
+    # follow it: its options and NAME=VALUE assignments skipped, and the
+    # string of -S / --split-string split into words that are read as more env
     # arguments. Empty when env runs nothing (no command, --help, --version,
-    # an unknown option, an option without its value).
+    # an option this env lacks or an option without its value, a split string
+    # env refuses).
     words, i, options = list(words), 0, True
+    env_word = str(os.fspath(env_word))
     while i < len(words) and isinstance(words[i], str):
         word = words[i]
         i += 1
@@ -93,17 +199,26 @@ def _after_env_options(words) -> list:  # type: ignore[no-untyped-def]
             named = [n for n in _ENV_LONG if n == name] or [n for n in _ENV_LONG if n.startswith(name)]
             if len(named) != 1 or named[0] in _ENV_LONG_THAT_RUN_NOTHING:
                 return []
+            if not _env_has_option(env_word, "--" + named[0], _ENV_PROBE_VALUES.get(named[0], "")):
+                return []
             if named[0] in _ENV_LONG_WITH_A_VALUE:
                 if not has_value:
                     if i >= len(words) or not isinstance(words[i], str):
                         return []
                     value, i = words[i], i + 1
                 if named[0] == "split-string":
-                    words[i:i] = _split_words(value)
+                    parts = _env_split_string(value, environ)
+                    if parts is None:
+                        return []
+                    words[i:i] = parts
         elif options and word.startswith("-"):
             letters = word[1:]
             for position, letter in enumerate(letters):
                 if letter not in _ENV_SHORT_FLAGS:
+                    return []
+                if letter not in _ENV_BASELINE_SHORT and not _env_has_option(
+                    env_word, "-" + letter, _ENV_PROBE_VALUES.get(letter, "")
+                ):
                     return []
                 if letter in _ENV_SHORT_WITH_A_VALUE:
                     value = letters[position + 1 :]
@@ -112,7 +227,10 @@ def _after_env_options(words) -> list:  # type: ignore[no-untyped-def]
                             return []
                         value, i = words[i], i + 1
                     if letter == "S":
-                        words[i:i] = _split_words(value)
+                        parts = _env_split_string(value, environ)
+                        if parts is None:
+                            return []
+                        words[i:i] = parts
                     break
         elif "=" in word[1:]:
             continue
@@ -133,10 +251,11 @@ def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
         words = [args]
     if kwargs.get("executable") is not None and not kwargs.get("shell"):
         words = [kwargs["executable"], *words[1:]]
+    environ = kwargs.get("env") or os.environ
     while words:
         if not isinstance(words[0], (str, os.PathLike)) or _base_name(words[0]) not in _ENV_NAMES:
             return words[0]
-        words = _after_env_options(words[1:])
+        words = _after_env_options(words[0], words[1:], environ)
     return _NO_COMMAND
 
 
@@ -147,7 +266,7 @@ def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-unt
     # names the interpreter directly ("pwsh", "powershell.exe") launches a
     # program that is not there. All three are the same missing interpreter.
     # A launch that runs some other command, or none (`env --help`), is not.
-    if POWERSHELL is not None:
+    if POWERSHELL is not None or _PROBING_ENV:
         return False
     word = _command_word(args, kwargs)
     if word is _NO_COMMAND:
@@ -4890,6 +5009,23 @@ _ORDINARY_ENV_LAUNCHES = [
     ["/usr/bin/env", "--unset=HOME", "--chdir=/tmp", "python3"],
     ["env", "python3", "pwsh", "None"],
     ["env", "-S", 'python3 -c "print(1)" None pwsh'],
+    ["env", "-S", "python3 #pwsh"],
+    ["env", "-S", "python3 'p\\wsh'"],
+    ["env", "-S", "python3 \\c pwsh"],
+    ["env", "-S", "${DC_PROBE_UNSET} python3"],
+]
+# env refuses these before it launches anything (status 125), so no PowerShell
+# is started; a test that launches one fails on its own terms.
+_ENV_LAUNCHES_THAT_RUN_NOTHING = [
+    ["env", "-S", "p\\wsh"],
+    ["env", "-S", "pwsh\\"],
+    ["env", "-S", "$DC_PROBE"],
+    ["env", "-S", "${DC_PROBE"],
+    ["env", "-S", "'pwsh"],
+    ["env", "-S", 'pwsh "x\\cy"'],
+    ["env", "--no-such-option", "pwsh"],
+    ["env", "-Z", "pwsh"],
+    ["env", "-S", "# pwsh"],
 ]
 _MISSING_POWERSHELL_ENV_LAUNCHES = [
     ["env", "pwsh"],
@@ -4907,6 +5043,13 @@ _MISSING_POWERSHELL_ENV_LAUNCHES = [
     ["env", None],
     ["env", "-i", "None"],
     ["env", "-S", "None -NoProfile"],
+    ["env", "-S", "pwsh\\c"],
+    ["env", "-S", "pwsh\\c -x ignored"],
+    ["env", "-S", "${DC_PROBE}"],
+    ["env", "-S", "${DC_PROBE} -NoProfile"],
+    ["env", "-S", "'pwsh' -c x"],
+    ["env", "-S", '"pwsh" -c x'],
+    ["env", "-S", "pwsh\\_-c\\_x"],
 ]
 
 
@@ -4916,6 +5059,7 @@ def test_an_ordinary_env_launch_is_not_taken_for_a_missing_powershell(
 ) -> None:
     monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
     monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    monkeypatch.setenv("DC_PROBE", "pwsh")
     assert not _launches_a_missing_powershell(argv, {})
 
 
@@ -4929,7 +5073,45 @@ def test_an_env_launch_of_a_missing_powershell_is_recognized_in_every_form(
 ) -> None:
     monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
     monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    monkeypatch.setenv("DC_PROBE", "pwsh")
     assert _launches_a_missing_powershell(argv, {})
+
+
+@pytest.mark.parametrize(
+    "argv",
+    _ENV_LAUNCHES_THAT_RUN_NOTHING,
+    ids=[" ".join(map(str, a)) for a in _ENV_LAUNCHES_THAT_RUN_NOTHING],
+)
+def test_an_env_launch_that_env_refuses_is_not_taken_for_a_missing_powershell(
+    monkeypatch: pytest.MonkeyPatch, argv: list
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    monkeypatch.setenv("DC_PROBE", "pwsh")
+    assert not _launches_a_missing_powershell(argv, {})
+
+
+def test_the_gate_agrees_with_what_the_real_env_does_with_a_missing_powershell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The gate predicts the launch; env decides it. Where PowerShell is not
+    # there env ends a launch that reaches the name with status 127 and one it
+    # refuses with 125, so the prediction must equal "status 127" for every
+    # form, including those only this host's env understands (-a / --argv0).
+    env = shutil.which("env")
+    version = subprocess.run([env, "--version"], capture_output=True, text=True, check=False).stdout if env else ""
+    if "coreutils" not in version:
+        pytest.skip("the -S grammar checked here is GNU coreutils")
+    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
+        pytest.skip("PowerShell is installed")
+    monkeypatch.setenv("DC_PROBE", "pwsh")
+    forms = [argv for argv in _MISSING_POWERSHELL_ENV_LAUNCHES + _ENV_LAUNCHES_THAT_RUN_NOTHING if None not in argv]
+    forms += [["env", "-a", "alias", "pwsh"], ["env", "--argv0=alias", "pwsh"], ["env", "-S", "-a alias pwsh"]]
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
+    for argv in forms:
+        returncode = _RUN_BOUND_AT_IMPORT(argv, capture_output=True, check=False).returncode
+        assert _launches_a_missing_powershell(argv, {}) == (returncode == 127), (argv, returncode)
 
 
 def test_env_actions_that_run_no_powershell_still_run_where_it_is_not_installed(
