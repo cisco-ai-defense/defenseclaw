@@ -806,7 +806,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// Strip /c/<connector>/ prefix so connector-routed traffic
 	// (ANTHROPIC_BASE_URL=http://proxy/c/claudecode) hits the same
 	// handlers as fetch-interceptor traffic.
-	stripped := connectorPrefixStripper(mux, p.registry)
+	stripped := connectorPrefixStripper(openClawBlockNoticeMiddleware(mux), p.registry)
 	scoped := p.thresholdScopeMiddleware(stripped)
 	limited := p.rateLimitMiddleware(scoped)
 	logged := p.requestLogger(limited)
@@ -5327,7 +5327,7 @@ func launderChatCompletionsHistory(raw json.RawMessage) (json.RawMessage, int, e
 				case '[':
 					text = responsesTextFromContent(contentTrim)
 				}
-				if strings.HasPrefix(text, defenseClawBlockBanner) {
+				if isDefenseClawBlockTurn(text) {
 					stripped++
 					continue
 				}
@@ -5391,7 +5391,7 @@ func launderResponsesHistory(raw json.RawMessage) (json.RawMessage, int, error) 
 				stripped++
 				continue
 			}
-			if strings.HasPrefix(responsesTextFromContent(probe.Content), defenseClawBlockBanner) {
+			if isDefenseClawBlockTurn(responsesTextFromContent(probe.Content)) {
 				stripped++
 				continue
 			}

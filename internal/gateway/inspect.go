@@ -84,6 +84,10 @@ type ToolInspectRequest struct {
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
+	// ToolCallID is the id the OpenClaw plugin hook names for the call. An
+	// enforced block is keyed by it so the proxy can put the block notice on
+	// the reply that follows (GAP-0644).
+	ToolCallID string `json:"tool_call_id,omitempty"`
 	// BoundedPrefixReview is set by the per-user shell inspect hooks on the
 	// bounded review of a call over their size cap (markOversizeUninspected).
 	BoundedPrefixReview bool `json:"bounded_prefix_review,omitempty"`
@@ -2355,6 +2359,9 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 			meta := hookDecisionMetricMeta(r.Context(), connectorName)
 			rememberOpenClawToolOutcome(firstNonEmpty(meta.SessionID, req.SessionID), meta.RunID, req.Tool, req.Args, outcome,
 				AgentIdentityFromContext(r.Context()))
+			if verdict.Action == "block" && verdict.Mode == "action" {
+				rememberOpenClawBlockNotice(req.ToolCallID, req.Tool, evalCtx.RuleIDs, verdict.Reason)
+			}
 		}
 	}
 
