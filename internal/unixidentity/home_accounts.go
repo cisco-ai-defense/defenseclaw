@@ -14,8 +14,11 @@ package unixidentity
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
 	"strings"
 )
 
@@ -33,9 +36,9 @@ const homeAccountsLimit = 32
 // home folder, in a fresh process. It is how a caller learns who holds the
 // home of an account that has gone: a replacement may be a local account or a
 // directory account, and its name and uid are its own. No account is an empty
-// list and no error; a directory that does not answer, an unclear answer and
-// every platform other than macOS are an error, so a caller never takes them
-// for a free home.
+// list and no error; a directory that does not answer, an answer that is not
+// a complete property list and every platform other than macOS are an error,
+// so a caller never takes them for a free home.
 func AccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -46,68 +49,156 @@ func AccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
 	return platformAccountsAtHome(ctx, home)
 }
 
-// dsclHomeAccounts decides AccountsAtHome from dscl answers: search runs
-// `dscl /Search -search /Users NFSHomeDirectory <home>` and read runs
-// `dscl /Search -read /Users/<name> UniqueID`. It is shared so it can be
-// tested on every platform.
-func dsclHomeAccounts(search func() (commandResult, error), read func(name string) (commandResult, error)) ([]HomeAccount, error) {
-	found, err := search()
+// dsclHomeAccounts decides AccountsAtHome from the structured answer of
+// `dscl -plist /Search -readall /Users UniqueID NFSHomeDirectory RecordName`.
+// It is shared so it can be tested on every platform. The answer must be one
+// complete property list in which every record carries the three fields; any
+// other answer (truncated, odd, a record missing a field) is an error, never
+// an empty list.
+func dsclHomeAccounts(home string, readall func() (commandResult, error)) ([]HomeAccount, error) {
+	result, err := readall()
 	if err != nil {
 		return nil, err
 	}
-	if found.exitCode != 0 {
-		return nil, fmt.Errorf("unixidentity: dscl exited %d", found.exitCode)
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
 	}
-	names, ok := dsclSearchRecordNames(string(found.stdout))
-	if !ok {
-		// A successful answer this reader cannot interpret is not an empty
-		// one: only an empty answer proves that no account holds the home.
-		return nil, errors.New("unixidentity: unclear search answer")
+	records, err := parseDSCLHomeRecords(result.stdout)
+	if err != nil {
+		return nil, err
 	}
 	var accounts []HomeAccount
-	for _, name := range names {
+	for _, record := range records {
+		if !record.holds(home) {
+			continue
+		}
 		if len(accounts) >= homeAccountsLimit {
 			return nil, errors.New("unixidentity: too many accounts at one home")
 		}
-		if validName(name) != nil {
-			return nil, fmt.Errorf("unixidentity: unclear account name in the search answer")
-		}
-		result, err := read(name)
-		if dsclRecordNotFound(result, err) {
-			// Gone between the two reads: it holds nothing.
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if result.exitCode != 0 {
-			return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
-		}
-		uid, ok := dsclReadUniqueID(string(result.stdout))
-		if !ok {
-			return nil, errors.New("unixidentity: unclear uid in the directory answer")
-		}
-		accounts = append(accounts, HomeAccount{Name: name, UID: uid})
+		accounts = append(accounts, HomeAccount{Name: record.name, UID: record.uid})
 	}
 	return accounts, nil
 }
 
-// dsclSearchRecordNames are the record names of a `dscl -search` answer: each
-// line that starts in column zero must read "name <tab><tab>NFSHomeDirectory =
-// (", and is followed by indented value lines and a closing ")". Any other
-// nonblank line makes the answer unclear (ok false), whatever its shape, so an
-// answer that is not understood is never taken for an empty one.
-func dsclSearchRecordNames(output string) (names []string, ok bool) {
-	for _, line := range strings.Split(output, "\n") {
-		if strings.TrimSpace(line) == "" || strings.ContainsRune(" \t)", rune(line[0])) {
-			continue
+// dsclHomeRecord is one account record of the plist answer.
+type dsclHomeRecord struct {
+	name  string
+	uid   int
+	homes []string
+}
+
+// holds reports whether home is one of the home folders of the record.
+func (r dsclHomeRecord) holds(home string) bool {
+	want := comparableHome(home)
+	for _, candidate := range r.homes {
+		if comparableHome(candidate) == want {
+			return true
 		}
-		name, attribute, found := strings.Cut(line, "\t")
-		name = strings.TrimSpace(name)
-		if !found || name == "" || !strings.HasPrefix(strings.TrimSpace(attribute), "NFSHomeDirectory") {
-			return nil, false
-		}
-		names = append(names, name)
 	}
-	return names, true
+	return false
+}
+
+// comparableHome is a home path in the one spelling used to compare two:
+// cleaned, with the /private prefix of the firmlinked /var, /etc and /tmp
+// dropped.
+func comparableHome(path string) string {
+	path = filepath.Clean(path)
+	for _, link := range []string{"/var", "/etc", "/tmp"} {
+		if rest, ok := strings.CutPrefix(path, "/private"+link); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+			return link + rest
+		}
+	}
+	return path
+}
+
+// plistNode is an XML element with its text and child elements.
+type plistNode struct {
+	XMLName  xml.Name
+	Text     string      `xml:",chardata"`
+	Children []plistNode `xml:",any"`
+}
+
+const (
+	dsclHomeKeyUID  = "dsAttrTypeStandard:UniqueID"
+	dsclHomeKeyHome = "dsAttrTypeStandard:NFSHomeDirectory"
+	dsclHomeKeyName = "dsAttrTypeStandard:RecordName"
+)
+
+// parseDSCLHomeRecords reads the plist answer: one <plist> holding one
+// <array> of <dict> records, each with the UniqueID, NFSHomeDirectory and
+// RecordName fields as non-empty arrays of strings (UniqueID exactly one). A
+// document that does not end where it should, an element that is not where
+// the format puts it and a record missing a field are errors.
+func parseDSCLHomeRecords(output []byte) ([]dsclHomeRecord, error) {
+	unclear := errors.New("unixidentity: unclear account record answer")
+	decoder := xml.NewDecoder(strings.NewReader(string(output)))
+	var root plistNode
+	if err := decoder.Decode(&root); err != nil || root.XMLName.Local != "plist" {
+		return nil, unclear
+	}
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, unclear
+		}
+		switch t := token.(type) {
+		case xml.Comment:
+		case xml.CharData:
+			if strings.TrimSpace(string(t)) != "" {
+				return nil, unclear
+			}
+		default:
+			return nil, unclear
+		}
+	}
+	if len(root.Children) != 1 || root.Children[0].XMLName.Local != "array" {
+		return nil, unclear
+	}
+	var records []dsclHomeRecord
+	for _, dict := range root.Children[0].Children {
+		record, ok := dsclHomeRecordOf(dict)
+		if !ok {
+			return nil, unclear
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
+// dsclHomeRecordOf reads one <dict> record.
+func dsclHomeRecordOf(dict plistNode) (dsclHomeRecord, bool) {
+	if dict.XMLName.Local != "dict" || len(dict.Children)%2 != 0 {
+		return dsclHomeRecord{}, false
+	}
+	fields := map[string][]string{}
+	for i := 0; i < len(dict.Children); i += 2 {
+		key, value := dict.Children[i], dict.Children[i+1]
+		if key.XMLName.Local != "key" || value.XMLName.Local != "array" {
+			return dsclHomeRecord{}, false
+		}
+		name := strings.TrimSpace(key.Text)
+		if _, repeated := fields[name]; repeated {
+			return dsclHomeRecord{}, false
+		}
+		var values []string
+		for _, item := range value.Children {
+			if item.XMLName.Local != "string" || len(item.Children) != 0 || strings.TrimSpace(item.Text) == "" {
+				return dsclHomeRecord{}, false
+			}
+			values = append(values, strings.TrimSpace(item.Text))
+		}
+		fields[name] = values
+	}
+	uids, homes, names := fields[dsclHomeKeyUID], fields[dsclHomeKeyHome], fields[dsclHomeKeyName]
+	if len(uids) != 1 || len(homes) == 0 || len(names) == 0 || validName(names[0]) != nil {
+		return dsclHomeRecord{}, false
+	}
+	uid, err := parseSignedDSCLID(uids[0])
+	if err != nil {
+		return dsclHomeRecord{}, false
+	}
+	return dsclHomeRecord{name: names[0], uid: uid, homes: homes}, true
 }

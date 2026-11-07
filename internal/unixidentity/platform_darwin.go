@@ -235,19 +235,23 @@ func platformAccountUIDGone(ctx context.Context, name string, uid int) bool {
 		func() bool { return OpenDirectoryOffline(ctx) })
 }
 
-// platformAccountsAtHome asks Open Directory in fresh dscl processes, across
-// the search policy, which accounts have home as their home folder.
+// homeAccountsOutputLimit bounds the plist of every account record of the
+// search policy, which is larger than the default command bound on a Mac
+// with many directory accounts. Past it the answer is an error, not a
+// shorter list.
+const homeAccountsOutputLimit = 4 << 20
+
+// platformAccountsAtHome asks Open Directory in a fresh dscl process, across
+// the search policy, for every account record as a property list and keeps
+// those with home as a home folder.
 func platformAccountsAtHome(ctx context.Context, home string) ([]HomeAccount, error) {
 	if err := validateTrustedTool(darwinDSCL); err != nil {
 		return nil, err
 	}
-	return dsclHomeAccounts(
-		func() (commandResult, error) {
-			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-search", "/Users", "NFSHomeDirectory", home})
-		},
-		func(name string) (commandResult, error) {
-			return runTrustedCommand(ctx, darwinDSCL, []string{"/Search", "-read", "/Users/" + name, "UniqueID"})
-		})
+	return dsclHomeAccounts(home, func() (commandResult, error) {
+		return runTrustedCommandLimit(ctx, darwinDSCL,
+			[]string{"-plist", "/Search", "-readall", "/Users", "UniqueID", "NFSHomeDirectory", "RecordName"}, homeAccountsOutputLimit)
+	})
 }
 
 // platformLoginShell reads the UserShell of the account through the Open
