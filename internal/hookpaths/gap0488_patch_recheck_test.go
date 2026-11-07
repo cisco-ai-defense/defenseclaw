@@ -12,60 +12,113 @@ import (
 	"testing"
 )
 
-// GAP-0488, GAP-0073: PatchEvidenceChanged is true only for a patch the hook
-// attested complete whose targets read differently a second time.
-func TestGAP0488PatchEvidenceChangedFollowsTheTargets(t *testing.T) {
-	home := t.TempDir()
-	project := filepath.Join(home, "proj")
-	for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	keys := filepath.Join(home, ".ssh", "authorized_keys")
-	target := filepath.Join(project, "swap.txt")
-	for path, content := range map[string]string{keys: "k\n", target: "x\n"} {
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("HOME", home)
-	patch := "*** Begin Patch\n*** Update File: swap.txt\n@@\n x\n+y\n*** End Patch\n"
-	hermes, _ := json.Marshal(map[string]any{"hook_event_name": "pre_tool_call", "tool_name": "patch",
-		"tool_input": map[string]any{"mode": "patch", "patch": patch}, "cwd": project})
-	opencode, _ := json.Marshal(map[string]any{"hook_event_name": "tool.execute.before", "tool_name": "patch",
-		"tool_input": map[string]any{"patchText": patch}, "cwd": project})
-	write, _ := json.Marshal(map[string]any{"hook_event_name": "tool.execute.before", "tool_name": "write",
-		"tool_input": map[string]any{"filePath": target, "content": "y"}, "cwd": project})
+// GAP-0488, GAP-0073: PatchTargetsChanged is true only for a patch the hook
+// attested complete whose targets lead somewhere else, or to a protected key
+// file, a second time. The identity of the file at an unchanged path is not
+// compared: an editor save of the same ordinary file is not a change.
+func TestGAP0488PatchTargetsChangedFollowsWhereTargetsLead(t *testing.T) {
 	type call struct {
 		connector, event string
-		body             []byte
 		patch            bool
 	}
 	calls := map[string]call{
-		"hermes v4a":     {"hermes", "pre_tool_call", hermes, true},
-		"opencode patch": {"opencode", "tool.execute.before", opencode, true},
-		"opencode write": {"opencode", "tool.execute.before", write, false},
+		"hermes v4a":     {"hermes", "pre_tool_call", true},
+		"opencode patch": {"opencode", "tool.execute.before", true},
+		"opencode write": {"opencode", "tool.execute.before", false},
 	}
-	evidence := map[string]string{}
+	patch := "*** Begin Patch\n*** Update File: swap.txt\n@@\n x\n+y\n*** Update File: other.txt\n@@\n x\n+y\n*** End Patch\n"
 	for name, c := range calls {
-		evidence[name] = ResolveConnector(c.connector, "", c.event, c.body)
-		if PatchEvidenceChanged(c.connector, "", c.event, c.body, evidence[name]) {
-			t.Errorf("%s: unchanged target read as changed", name)
+		for _, change := range []struct {
+			name string
+			// mutate changes the project; the result reports a protected or moved target.
+			mutate func(t *testing.T, project, keys string)
+			want   bool
+		}{
+			{"nothing", func(*testing.T, string, string) {}, false},
+			{"atomic save of the same ordinary file", func(t *testing.T, project, _ string) {
+				saved := filepath.Join(project, "swap.txt.tmp")
+				mustWrite(t, saved, "x\n")
+				if err := os.Rename(saved, filepath.Join(project, "swap.txt")); err != nil {
+					t.Fatal(err)
+				}
+			}, false},
+			{"rewritten in place", func(t *testing.T, project, _ string) {
+				mustWrite(t, filepath.Join(project, "swap.txt"), "changed\n")
+			}, false},
+			{"symlink to the keys file", func(t *testing.T, project, keys string) {
+				replaceWith(t, filepath.Join(project, "swap.txt"), func(p string) error { return os.Symlink(keys, p) })
+			}, true},
+			{"hard link to the keys file", func(t *testing.T, project, keys string) {
+				replaceWith(t, filepath.Join(project, "swap.txt"), func(p string) error { return os.Link(keys, p) })
+			}, true},
+			{"second target linked to the keys file", func(t *testing.T, project, keys string) {
+				replaceWith(t, filepath.Join(project, "other.txt"), func(p string) error { return os.Symlink(keys, p) })
+			}, true},
+			{"symlink to another ordinary file", func(t *testing.T, project, _ string) {
+				replaceWith(t, filepath.Join(project, "swap.txt"), func(p string) error {
+					return os.Symlink(filepath.Join(project, "other.txt"), p)
+				})
+			}, true},
+		} {
+			t.Run(name+" "+change.name, func(t *testing.T) {
+				home, err := filepath.EvalSymlinks(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+				project := filepath.Join(home, "proj")
+				for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+					if err := os.MkdirAll(dir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				keys := filepath.Join(home, ".ssh", "authorized_keys")
+				mustWrite(t, keys, "k\n")
+				mustWrite(t, filepath.Join(project, "swap.txt"), "x\n")
+				mustWrite(t, filepath.Join(project, "other.txt"), "x\n")
+				t.Setenv("HOME", home)
+				var body []byte
+				switch name {
+				case "hermes v4a":
+					body, _ = json.Marshal(map[string]any{"hook_event_name": c.event, "tool_name": "patch",
+						"tool_input": map[string]any{"mode": "patch", "patch": patch}, "cwd": project})
+				case "opencode patch":
+					body, _ = json.Marshal(map[string]any{"hook_event_name": c.event, "tool_name": "patch",
+						"tool_input": map[string]any{"patchText": patch}, "cwd": project})
+				default:
+					body, _ = json.Marshal(map[string]any{"hook_event_name": c.event, "tool_name": "write",
+						"tool_input": map[string]any{"filePath": filepath.Join(project, "swap.txt"), "content": "y"}, "cwd": project})
+				}
+				evidence := ResolveConnector(c.connector, "", c.event, body)
+				if PatchTargetsChanged(evidence) {
+					t.Fatal("unchanged targets read as changed")
+				}
+				change.mutate(t, project, keys)
+				want := change.want && c.patch
+				if got := PatchTargetsChanged(evidence); got != want {
+					t.Errorf("changed = %v, want %v", got, want)
+				}
+			})
 		}
 	}
-	if err := os.Remove(target); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(keys, target); err != nil {
-		t.Fatal(err)
-	}
-	for name, c := range calls {
-		if got := PatchEvidenceChanged(c.connector, "", c.event, c.body, evidence[name]); got != c.patch {
-			t.Errorf("%s: changed = %v after the target became a link to the keys file, want %v", name, got, c.patch)
-		}
-	}
-	if PatchEvidenceChanged("hermes", "", "pre_tool_call", hermes, "") {
+	if PatchTargetsChanged("") {
 		t.Error("no evidence read as changed")
+	}
+}
+
+func mustWrite(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// replaceWith removes path and makes it again with create.
+func replaceWith(t *testing.T, path string, create func(string) error) {
+	t.Helper()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := create(path); err != nil {
+		t.Fatal(err)
 	}
 }
