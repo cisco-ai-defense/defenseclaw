@@ -15,17 +15,16 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-import shutil
-import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 
 import pytest
 
+from tests.helpers import POWERSHELL, run_powershell
+
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLER = ROOT / "scripts" / "install.ps1"
-POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shutil.which("pwsh")
 WINDOWS_POWERSHELL = pytest.mark.skipif(
     os.name != "nt" or POWERSHELL is None, reason="requires native Windows directory ACLs and PowerShell"
 )
@@ -137,8 +136,8 @@ exit 0
     with tempfile.TemporaryDirectory(prefix="dc-cas-test-") as case:
         script_path = Path(case) / "case.ps1"
         script_path.write_text(script, encoding="utf-8-sig")
-        result = subprocess.run(
-            [POWERSHELL, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
+        result = run_powershell(
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script_path)],
             capture_output=True,
             text=True,
             check=False,
