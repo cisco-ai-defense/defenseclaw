@@ -2349,15 +2349,14 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	}
 	// Every effect of this admission (a block, a disable, a release of an
 	// earlier block) belongs to one definition: the one the caller
-	// snapshotted, or the one found now when it did not snapshot. The check
-	// repeats once the scan is done, since the scan can run long.
+	// snapshotted, or the one found now when it did not snapshot. Each
+	// decision is checked against it right before it is enforced or returned:
+	// after the policy evaluation, which reads the live policy and the
+	// definition on its own, and after the scan, which can run long.
 	if evt.Type == InstallMCP && !w.secureClientActive() && evt.definitionHash == "" {
 		if hash, err := w.mcpDefinitionHashOf(evt); err == nil {
 			evt.definitionHash = hash
 		}
-	}
-	if w.mcpDefinitionMoved(evt) {
-		return w.mcpMovedAdmission(evt)
 	}
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
 	decisionPolicy := w.admissionPolicySnapshot()
@@ -2384,6 +2383,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	assetDecision, assetConnector, assetDenying := w.rootAssetPolicy(cfg, evt, connector)
 	if assetDecision.Enabled && assetDecision.RawAction == "block" {
 		if assetDecision.Action == "block" {
+			if w.mcpDefinitionMoved(evt) {
+				return w.mcpMovedAdmission(evt)
+			}
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
 			// skill list and skill info say the quarantine of a denied
@@ -2407,6 +2409,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// transfers to another on-disk asset with the same name (F-2867).
 	input := w.admissionInputFor(cfg, evt, targetType, connector)
 	out := w.evaluateAdmissionSnapshot(ctx, input, decisionPolicy)
+	if w.mcpDefinitionMoved(evt) {
+		return w.mcpMovedAdmission(evt)
+	}
 	switch out.Verdict {
 	case "blocked":
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
