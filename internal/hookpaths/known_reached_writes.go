@@ -29,7 +29,12 @@ const knownReachedMaxReads = 256
 // sees an unknown command from then on and reads every statement as if it
 // may run. A function body is read only when a state that reaches the call
 // has the definition, so a definition in a branch the shell skips, or made
-// after the call, is not a call target.
+// after the call, is not a call target. A function body is scanned for
+// redefinitions only where the command calls the function. The body of a for
+// loop over a list the command fixes is scanned statement by statement in the
+// order the shell runs it, so a definition the shell does not reach before a
+// guard changes nothing for it; a loop that may run any number of times is
+// scanned whole before its first pass.
 type knownReached struct {
 	cwd, home   string
 	depth       int
@@ -58,6 +63,19 @@ type knownFunction struct {
 // command word alone.
 var knownShadowable = map[string]bool{"exit": true, "break": true, "continue": true, "true": true, "false": true, ":": true}
 
+// knownShadowPrefix starts the name a renamed builtin or function has in the
+// parsed command.
+const knownShadowPrefix = "shadowed-"
+
+// knownUnshadowed returns the name a function had before a rename, which the
+// tables built from the command before the reading are keyed by.
+func knownUnshadowed(name string) string {
+	if original := strings.TrimPrefix(name, knownShadowPrefix); knownShadowable[original] {
+		return original
+	}
+	return name
+}
+
 // knownShadow follows the commands that can give one of those builtins
 // another meaning, in the order the shell reaches them: a function of that
 // name, or a command that defines or enables names at run time (alias, enable,
@@ -68,15 +86,31 @@ var knownShadowable = map[string]bool{"exit": true, "break": true, "continue": t
 // is changed in place; only the known-value reader, which parses its own
 // copy, uses it.
 type knownShadow struct {
-	file     *syntax.File
-	home     string
-	shadowed map[string]bool
-	version  int
-	depth    int
+	file      *syntax.File
+	home      string
+	shadowed  map[string]bool
+	functions map[string][]*syntax.FuncDecl
+	scanned   map[*syntax.FuncDecl]bool
+	version   int
+	depth     int
 }
 
 func newKnownShadow(file *syntax.File, home string) *knownShadow {
-	return &knownShadow{file: file, home: home, shadowed: map[string]bool{}}
+	s := &knownShadow{file: file, home: home, shadowed: map[string]bool{},
+		functions: map[string][]*syntax.FuncDecl{}, scanned: map[*syntax.FuncDecl]bool{}}
+	s.collect(file)
+	return s
+}
+
+// collect records the functions node defines by name, so that a call of one
+// scans its body.
+func (s *knownShadow) collect(node syntax.Node) {
+	syntax.Walk(node, func(node syntax.Node) bool {
+		if function, ok := node.(*syntax.FuncDecl); ok && function.Name != nil {
+			s.functions[function.Name.Value] = append(s.functions[function.Name.Value], function)
+		}
+		return true
+	})
 }
 
 // stamp changes whenever a rename changes the printed source of the command.
@@ -87,7 +121,8 @@ func (s *knownShadow) stamp() int {
 	return s.version
 }
 
-// scan applies what every command inside node can redefine.
+// scan applies what every command inside node can redefine. The body of a
+// function declared inside node runs only where a command calls it.
 func (s *knownShadow) scan(node syntax.Node) {
 	if s == nil || node == nil {
 		return
@@ -95,14 +130,43 @@ func (s *knownShadow) scan(node syntax.Node) {
 	syntax.Walk(node, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
-			if node.Name != nil && knownShadowable[node.Name.Value] {
+			if node.Name != nil && knownShadowable[node.Name.Value] && !s.keepsOutcome(node) {
 				s.rename(node.Name.Value)
 			}
+			return false
 		case *syntax.CallExpr:
 			s.call(node)
 		}
 		return len(s.shadowed) != len(knownShadowable)
 	})
+}
+
+// keepsOutcome reports a function of true, false or ":" that only runs the
+// no-op builtins and ends with the outcome the builtin of that name has, so
+// the reader's reading of a call by its word stays right. Its body is read
+// where it is called like any other function.
+func (s *knownShadow) keepsOutcome(function *syntax.FuncDecl) bool {
+	name := function.Name.Value
+	if name != "true" && name != "false" && name != ":" || function.Body == nil || function.Body.Background ||
+		function.Body.Negated || function.Body.Coprocess || len(function.Body.Redirs) != 0 {
+		return false
+	}
+	block, ok := function.Body.Cmd.(*syntax.Block)
+	if !ok || len(block.Stmts) == 0 {
+		return false
+	}
+	for _, stmt := range block.Stmts {
+		call, ok := stmt.Cmd.(*syntax.CallExpr)
+		if !ok || stmt.Background || stmt.Coprocess || len(call.Assigns) != 0 || len(call.Args) == 0 {
+			return false
+		}
+		if program, known := StaticWord(call.Args[0], s.home); !known || program != "true" && program != "false" && program != ":" {
+			return false
+		}
+	}
+	last := block.Stmts[len(block.Stmts)-1]
+	truth := actionStaticCondition(last, s.home)
+	return name == "false" && truth < 0 || name != "false" && truth > 0
 }
 
 // call applies one command: the program word, through command and builtin.
@@ -121,18 +185,37 @@ func (s *knownShadow) call(call *syntax.CallExpr) {
 		case "command", "builtin":
 			args = args[1:]
 			for len(args) > 0 {
-				if option, fixed := StaticWord(args[0], s.home); !fixed || !strings.HasPrefix(option, "-") {
+				option, fixed := StaticWord(args[0], s.home)
+				if !fixed || !strings.HasPrefix(option, "-") {
 					break
+				}
+				if name == "command" && option != "--" && strings.ContainsAny(option, "vV") {
+					// command -v and command -V only describe the next word.
+					return
 				}
 				args = args[1:]
 			}
 			continue
 		case "eval":
+			s.functionBodies(name)
 			s.eval(args[1:])
 		case "alias", "enable", "source", ".":
 			s.renameAll()
+		default:
+			s.functionBodies(name)
 		}
 		return
+	}
+}
+
+// functionBodies applies what the functions of a name redefine, once: a
+// rename stays, so a body scanned again changes nothing.
+func (s *knownShadow) functionBodies(name string) {
+	for _, function := range s.functions[name] {
+		if !s.scanned[function] {
+			s.scanned[function] = true
+			s.scan(function.Body)
+		}
 	}
 }
 
@@ -166,6 +249,7 @@ func (s *knownShadow) eval(args []*syntax.Word) {
 		s.renameAll()
 		return
 	}
+	s.collect(parsed)
 	s.depth++
 	s.scan(parsed)
 	s.depth--
@@ -195,12 +279,12 @@ func (s *knownShadow) rename(names ...string) {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
 			if node.Name != nil && fresh[node.Name.Value] {
-				node.Name.Value = "shadowed-" + node.Name.Value
+				node.Name.Value = knownShadowPrefix + node.Name.Value
 			}
 		case *syntax.CallExpr:
 			if len(node.Args) != 0 {
 				if name, known := StaticWord(node.Args[0], s.home); known && fresh[name] {
-					node.Args[0].Parts = []syntax.WordPart{&syntax.Lit{Value: "shadowed-" + name}}
+					node.Args[0].Parts = []syntax.WordPart{&syntax.Lit{Value: knownShadowPrefix + name}}
 				}
 			}
 		}
@@ -542,14 +626,10 @@ func (r *knownReached) compound(stmt *syntax.Stmt, states []actionValues) action
 		}
 		return flow
 	case *syntax.ForClause:
-		// A later pass reaches what the body redefines before its first
-		// statement.
-		r.shadow.scan(command)
 		r.loops++
 		defer func() { r.loops-- }()
 		return r.forClause(command, states)
 	case *syntax.WhileClause:
-		r.shadow.scan(command)
 		r.loops++
 		defer func() { r.loops-- }()
 		return r.whileClause(command, states)
@@ -621,6 +701,9 @@ func (r *knownReached) forClause(clause *syntax.ForClause, states []actionValues
 				}
 			}
 			flow.ended = r.merge(flow.ended, []actionValues{state})
+			// A later pass reaches what the body redefines before its first
+			// statement.
+			r.shadow.scan(clause)
 			r.passes(&flow, clause.Do, current)
 			continue
 		}
@@ -690,6 +773,9 @@ func (r *knownReached) whileClause(clause *syntax.WhileClause, states []actionVa
 	if truth < 0 {
 		return flow
 	}
+	// A later pass reaches what the body redefines before its first
+	// statement.
+	r.shadow.scan(clause)
 	var seen []actionValues
 	current := entered.ended
 	for pass := 0; len(current) != 0 && !r.incomplete; pass++ {
