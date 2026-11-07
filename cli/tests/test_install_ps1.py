@@ -4671,25 +4671,225 @@ def test_hook_fail_mode_refresh_runs_without_json_sidecar(tmp_path: Path) -> Non
         installed.unlink()
 
 
-def test_every_test_that_runs_powershell_says_so_where_it_is_not_installed() -> None:
-    # GAP-0733: a test that launches PowerShell declares that dependency (a
-    # skipif on POWERSHELL or _POWERSHELLS, or a POWERSHELL check that skips in
-    # its body). Without it a host with no PowerShell fails the test with a
-    # TypeError from launching None, instead of skipping it. The check reads the
-    # test source, so it never guesses from how a launch ended.
-    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    uses = re.compile(r"\bPOWERSHELL\b|\b_POWERSHELLS\b|\b_run_powershell\(")
-    undeclared = []
+_POWERSHELL_NAMES = frozenset({"POWERSHELL", "_POWERSHELLS"})
+
+
+def _true_when_powershell_is_missing(condition: ast.expr) -> bool:
+    # True only for a condition that holds on every host with no PowerShell,
+    # whatever else it tests: `not X`, `POWERSHELL is None`, an `or` where one
+    # side is such a condition, an `and` where both sides are.
+    if isinstance(condition, ast.UnaryOp) and isinstance(condition.op, ast.Not):
+        return isinstance(condition.operand, ast.Name) and condition.operand.id in _POWERSHELL_NAMES
+    if isinstance(condition, ast.Compare) and len(condition.ops) == 1 and isinstance(condition.ops[0], ast.Is):
+        left, right = condition.left, condition.comparators[0]
+        return (
+            isinstance(left, ast.Name)
+            and left.id == "POWERSHELL"
+            and isinstance(right, ast.Constant)
+            and right.value is None
+        )
+    if isinstance(condition, ast.BoolOp):
+        combine = any if isinstance(condition.op, ast.Or) else all
+        return combine(_true_when_powershell_is_missing(value) for value in condition.values)
+    return False
+
+
+def _skips_when_powershell_is_missing(decorator: ast.expr) -> bool:
+    if not (isinstance(decorator, ast.Call) and ast.unparse(decorator.func) == "pytest.mark.skipif"):
+        return False
+    keyword = next((k.value for k in decorator.keywords if k.arg == "condition"), None)
+    condition = decorator.args[0] if decorator.args else keyword
+    return condition is not None and _true_when_powershell_is_missing(condition)
+
+
+def _skip_guard(statement: ast.stmt) -> bool:
+    # `if <true when PowerShell is missing>: pytest.skip(...)`. A bare return or
+    # a partial condition does not count: the first would report a pass, the
+    # second would still launch None on a host the condition does not cover.
+    return (
+        isinstance(statement, ast.If)
+        and _true_when_powershell_is_missing(statement.test)
+        and any(
+            isinstance(inner, ast.Expr)
+            and isinstance(inner.value, ast.Call)
+            and ast.unparse(inner.value.func) == "pytest.skip"
+            for inner in statement.body
+        )
+    )
+
+
+def _powershell_tests_without_a_skip(source: str) -> list[str]:
+    # GAP-0733: every test that reaches PowerShell, by name, by a parameter, or
+    # through a helper that does, must skip when PowerShell is missing. Without
+    # that a host with none fails the test with a TypeError from launching None.
+    # The check reads the test source, so it never guesses from how a launch ended.
+    tree = ast.parse(source)
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    helpers: set[str] = set()
+    grown = True
+    while grown:
+        grown = False
+        for function in functions:
+            if function.name.startswith("test_") or function.name in helpers:
+                continue
+            reached = _POWERSHELL_NAMES | helpers
+            if any(isinstance(n, ast.Name) and n.id in reached for n in ast.walk(function)):
+                helpers.add(function.name)
+                grown = True
+    reached = _POWERSHELL_NAMES | helpers
+
+    def runs_powershell(node: ast.AST) -> bool:
+        return any(isinstance(n, ast.Name) and n.id in reached for n in ast.walk(node))
+
     for node in tree.body:
-        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("test_")):
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in node.targets):
+            marks = node.value.elts if isinstance(node.value, (ast.List, ast.Tuple)) else [node.value]
+            if any(_skips_when_powershell_is_missing(mark) for mark in marks):
+                return []
+
+    tests: list[tuple[ast.FunctionDef, list[ast.expr]]] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+            tests.append((node, []))
+        elif isinstance(node, ast.ClassDef):
+            tests.extend(
+                (member, node.decorator_list)
+                for member in node.body
+                if isinstance(member, ast.FunctionDef) and member.name.startswith("test_")
+            )
+
+    undeclared = []
+    for function, inherited in tests:
+        decorators = [*inherited, *function.decorator_list]
+        if any(_skips_when_powershell_is_missing(decorator) for decorator in decorators):
             continue
-        if node.name == "test_every_test_that_runs_powershell_says_so_where_it_is_not_installed":
-            continue
-        declared = any(uses.search(ast.unparse(decorator)) for decorator in node.decorator_list)
-        body = "\n".join(ast.unparse(statement) for statement in node.body)
-        if uses.search(body) and not declared and "not POWERSHELL" not in body:
-            undeclared.append(node.name)
+        guarded = False
+        reaches = any(runs_powershell(decorator) for decorator in decorators)
+        for statement in function.body:
+            if _skip_guard(statement):
+                guarded = True
+            elif not guarded and runs_powershell(statement):
+                reaches = True
+        if reaches:
+            undeclared.append(function.name)
+    return undeclared
+
+
+def test_every_test_that_runs_powershell_says_so_where_it_is_not_installed() -> None:
+    undeclared = _powershell_tests_without_a_skip(Path(__file__).read_text(encoding="utf-8"))
     assert not undeclared, undeclared
+
+
+_POWERSHELL_SKIP_CASES = {
+    # Each source runs PowerShell without skipping where it is missing.
+    "parameter": """
+@pytest.mark.parametrize("shell", [POWERSHELL])
+def test_a(shell):
+    subprocess.run([shell, "-NoProfile"])
+""",
+    "method": """
+class TestA:
+    def test_b(self):
+        _run_powershell("exit 0")
+
+def _run_powershell(script):
+    return subprocess.run([POWERSHELL, "-Command", script])
+""",
+    "partial-check": """
+def test_c():
+    if not POWERSHELL and sys.platform == "win32":
+        pytest.skip("no PowerShell")
+    subprocess.run([POWERSHELL, "-NoProfile"])
+""",
+    "helper-chain": """
+def _launch():
+    return _run_powershell("exit 0")
+
+def _run_powershell(script):
+    return subprocess.run([POWERSHELL, "-Command", script])
+
+def test_d():
+    _launch()
+""",
+    "return-instead-of-skip": """
+def test_e():
+    if not POWERSHELL:
+        return
+    subprocess.run([POWERSHELL, "-NoProfile"])
+""",
+    "skip-after-launch": """
+def test_f():
+    subprocess.run([POWERSHELL, "-NoProfile"])
+    if not POWERSHELL:
+        pytest.skip("no PowerShell")
+""",
+    "skipif-that-does-not-cover": """
+@pytest.mark.skipif(sys.platform != "win32" and POWERSHELL is None, reason="x")
+def test_g():
+    subprocess.run([POWERSHELL, "-NoProfile"])
+""",
+    "class-without-skip": """
+@pytest.mark.parametrize("shell", [POWERSHELL])
+class TestH:
+    def test_h(self, shell):
+        pass
+""",
+}
+
+_POWERSHELL_SKIP_BENIGN_CASES = {
+    # Each source declares the dependency, or does not use PowerShell.
+    "skipif": """
+@pytest.mark.skipif(POWERSHELL is None, reason="x")
+def test_a():
+    subprocess.run([POWERSHELL, "-NoProfile"])
+""",
+    "skipif-or": """
+@pytest.mark.skipif(sys.platform != "win32" or POWERSHELL is None, reason="x")
+def test_b():
+    subprocess.run([POWERSHELL, "-NoProfile"])
+""",
+    "skipif-not-list": """
+@pytest.mark.skipif(not _POWERSHELLS, reason="x")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+def test_c(shell):
+    subprocess.run([shell, "-NoProfile"])
+""",
+    "body-skip": """
+def test_d():
+    if not POWERSHELL:
+        pytest.skip("no PowerShell")
+    subprocess.run([POWERSHELL, "-NoProfile"])
+""",
+    "method-with-class-skipif": """
+@pytest.mark.skipif(POWERSHELL is None, reason="x")
+class TestE:
+    def test_e(self):
+        _run_powershell("exit 0")
+
+def _run_powershell(script):
+    return subprocess.run([POWERSHELL, "-Command", script])
+""",
+    "module-skipif": """
+pytestmark = [pytest.mark.skipif(POWERSHELL is None, reason="x")]
+
+def test_f():
+    subprocess.run([POWERSHELL, "-NoProfile"])
+""",
+    "no-powershell": """
+def test_g():
+    assert subprocess.run(["true"]).returncode == 0
+""",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_POWERSHELL_SKIP_CASES))
+def test_the_powershell_skip_check_rejects_a_test_that_would_launch_none(name: str) -> None:
+    assert _powershell_tests_without_a_skip(_POWERSHELL_SKIP_CASES[name]), name
+
+
+@pytest.mark.parametrize("name", sorted(_POWERSHELL_SKIP_BENIGN_CASES))
+def test_the_powershell_skip_check_accepts_a_test_that_skips_without_it(name: str) -> None:
+    assert _powershell_tests_without_a_skip(_POWERSHELL_SKIP_BENIGN_CASES[name]) == [], name
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
