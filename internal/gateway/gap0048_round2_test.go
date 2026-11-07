@@ -45,6 +45,12 @@ func TestGAP0048Round2RegistryAndDocuments(t *testing.T) {
 
 func TestGAP0048Round2Variants(t *testing.T) {
 	h := newGAP0048Home(t)
+	if err := os.MkdirAll(filepath.Join(h.project, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.project, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	h.links(t)
 	user := h.userSettings
 	project := filepath.Join(h.project, ".claude", "settings.json")
