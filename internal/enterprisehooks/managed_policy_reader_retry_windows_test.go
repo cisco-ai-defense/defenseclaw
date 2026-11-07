@@ -100,6 +100,36 @@ func TestReadTrustedWindowsManagedPolicySurvivesReplacementBurst(t *testing.T) {
 	}
 }
 
+func TestReadTrustedWindowsManagedPolicySurvivesMissingNameAfterFirstLookup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "90-defenseclaw.json")
+	body := []byte(`{"managed":true}`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousTrust := windowsManagedPolicyFileTrustCheck
+	checks := 0
+	windowsManagedPolicyFileTrustCheck = func(string) error {
+		checks++
+		if checks == 1 {
+			return os.Remove(path)
+		}
+		return nil
+	}
+	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = previousTrust })
+	waits := 0
+	var publishErr error
+	t.Cleanup(safefile.SetTransientRetrySleepForTest(func(time.Duration) {
+		waits++
+		if waits == 40 {
+			publishErr = os.WriteFile(path, body, 0o600)
+		}
+	}))
+	data, present, err := readTrustedWindowsManagedPolicyFile(path)
+	if publishErr != nil || err != nil || !present || string(data) != string(body) || waits < 40 {
+		t.Fatalf("body=%q present=%v waits=%d err=%v publishErr=%v", data, present, waits, err, publishErr)
+	}
+}
+
 func TestWindowsManagedPolicyWriterKeepsMatchingFileAfterFirstMiss(t *testing.T) {
 	paths := withWindowsCursorStandaloneSeamsForTest(t)
 	path := paths.Adapter

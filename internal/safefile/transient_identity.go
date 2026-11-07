@@ -14,6 +14,10 @@ var ErrReadIdentityChanged = errors.New("file identity changed during read")
 
 var transientRetrySleep = time.Sleep
 
+// IsTransientReadError reports the short-lived name, sharing, or identity
+// results that can occur while a validated file is being replaced.
+func IsTransientReadError(err error) bool { return transientReadError(err) }
+
 // RetryTransientRead repeats a validated read after a transient name or
 // identity change. Platform-specific errors are selected by transientReadError.
 func RetryTransientRead(read func() error) error {
