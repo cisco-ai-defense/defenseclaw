@@ -1923,6 +1923,24 @@ def atomic_write_private_bytes(
     )
 
 
+_WINDOWS_UNTRUSTED_WRITER = "ACL grants write access to untrusted SID "
+
+
+def windows_untrusted_writer_problem(sid: str) -> str:
+    """The custody problem text for an untrusted SID that can write a path."""
+    return f"{_WINDOWS_UNTRUSTED_WRITER}{sid or '<unknown>'}"
+
+
+def windows_untrusted_writer_sid(problem: str | None) -> str | None:
+    """The SID in a :func:`windows_untrusted_writer_problem` text, or ``None`` for any other problem."""
+    if not problem or not problem.startswith(_WINDOWS_UNTRUSTED_WRITER):
+        return None
+    sid = problem[len(_WINDOWS_UNTRUSTED_WRITER) :]
+    if sid.startswith("S-1-") and all(char in "0123456789-" for char in sid[4:]) and len(sid) > 4:
+        return sid
+    return None
+
+
 def windows_acl_write_error(
     path: str | os.PathLike[str],
     *,
@@ -1966,7 +1984,7 @@ def windows_acl_write_error(
             continue
         if sid == "S-1-3-0" and inheritance & 0x08:
             continue
-        return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+        return windows_untrusted_writer_problem(sid)
     return None
 
 
@@ -2033,7 +2051,7 @@ def windows_acl_custody_write_error(
             continue
         if sid == "S-1-3-0" and inheritance & 0x08:
             continue
-        return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+        return windows_untrusted_writer_problem(sid)
     return None
 
 
