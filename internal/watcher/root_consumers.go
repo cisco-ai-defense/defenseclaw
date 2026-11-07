@@ -52,7 +52,7 @@ func containsFold(list []string, name string) bool {
 
 // rootAssetPolicy is evaluateRootAssetPolicy for the asset-policy input the
 // watcher builds for evt.
-func (w *InstallWatcher) rootAssetPolicy(cfg *config.Config, evt InstallEvent, owner string) (config.AssetPolicyDecision, string) {
+func (w *InstallWatcher) rootAssetPolicy(cfg *config.Config, evt InstallEvent, owner string) (config.AssetPolicyDecision, string, []string) {
 	return w.evaluateRootAssetPolicy(cfg, evt, owner, func(c string) config.AssetPolicyInput {
 		return w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
 			TargetType:     string(evt.Type),
@@ -68,23 +68,28 @@ func (w *InstallWatcher) rootAssetPolicy(cfg *config.Config, evt InstallEvent, o
 // evaluateRootAssetPolicy is the asset-policy decision for an install event
 // across every connector that loads its root: the first connector whose rules
 // block it, else the first whose rules would block it (observe mode), else
-// the owner decision. It returns the connector the decision belongs to.
-func (w *InstallWatcher) evaluateRootAssetPolicy(cfg *config.Config, evt InstallEvent, owner string, input func(connector string) config.AssetPolicyInput) (config.AssetPolicyDecision, string) {
+// the owner decision. It returns the connector the decision belongs to and
+// every connector whose rules enforce a block of it, owner first: a copy that
+// stays in its folder after a failed quarantine is loadable by each of them,
+// so each needs the hold.
+func (w *InstallWatcher) evaluateRootAssetPolicy(cfg *config.Config, evt InstallEvent, owner string, input func(connector string) config.AssetPolicyInput) (config.AssetPolicyDecision, string, []string) {
 	best := cfg.EvaluateAssetPolicy(input(owner))
 	bestConnector, bestRank := owner, assetBlockRank(best)
+	var denying []string
 	if bestRank == 2 {
-		return best, bestConnector
+		denying = append(denying, owner)
 	}
 	for _, connector := range w.rootConsumersOf(evt, owner)[1:] {
 		decision := cfg.EvaluateAssetPolicy(input(connector))
-		if rank := assetBlockRank(decision); rank > bestRank {
+		rank := assetBlockRank(decision)
+		if rank == 2 {
+			denying = append(denying, connector)
+		}
+		if rank > bestRank {
 			best, bestConnector, bestRank = decision, connector, rank
-			if rank == 2 {
-				break
-			}
 		}
 	}
-	return best, bestConnector
+	return best, bestConnector, denying
 }
 
 // assetBlockRank is 2 for an enforced block, 1 for one that only would
