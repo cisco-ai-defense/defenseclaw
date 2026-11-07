@@ -22934,10 +22934,28 @@ function Restore-DefenseClawTransaction {
         if ([bool]$file.existed) {
             $backup = [string]$file.backup
             Assert-DefenseClawDescendant -Path $backup -Root $Layout.StateRoot -Label 'transaction backup' | Microsoft.PowerShell.Core\Out-Null
-            Install-DefenseClawFileAtomic `
-                -Source $backup `
-                -Destination $destination `
-                -SkipIfContentMatches
+            try {
+                Install-DefenseClawFileAtomic `
+                    -Source $backup `
+                    -Destination $destination `
+                    -SkipIfContentMatches
+            }
+            catch {
+                # GAP-0803: a program that holds a Codex file open without
+                # delete sharing, arrived after the pre-stop gate, stops the
+                # put-back. The replace waits at most 30 seconds; then the
+                # run ends with the retryable code and the holder's name, the
+                # transaction stays pending and the next run finishes it.
+                if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile) -and
+                    ([string]$_.Exception.Message -match 'another program holds' -or
+                        (Test-DefenseClawFileDeleteBlocked -Path $destination))) {
+                    throw (New-DefenseClawCodexFileHeldMessage `
+                        -Layout $Layout `
+                        -Path $destination `
+                        -Why 'open without delete sharing, so the rollback could not put it back')
+                }
+                throw
+            }
             if ($configSidecars -contains $destination.TrimEnd('\')) {
                 # The temp file inherited the directory's access, which
                 # leaves the gateway service unable to read its own record.
@@ -22959,7 +22977,12 @@ function Restore-DefenseClawTransaction {
                 # The restored file is held while its recorded access list
                 # is written back; a program that holds it open stops the
                 # restore before anything on it changes (GAP-0763).
-                $restoreHold = Open-DefenseClawRestampHold -Path $destination
+                $restoreHold = if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile)) {
+                    Open-DefenseClawCodexRollbackHold -Layout $Layout -Path $destination
+                }
+                else {
+                    Open-DefenseClawRestampHold -Path $destination
+                }
                 try {
                     try {
                         Microsoft.PowerShell.Security\Set-Acl `
@@ -23004,9 +23027,21 @@ function Restore-DefenseClawTransaction {
             }
         }
         elseif (Microsoft.PowerShell.Management\Test-Path -LiteralPath $destination -PathType Leaf) {
-            Remove-DefenseClawTransactionCreatedFile `
-                -Path $destination `
-                -InFreshInstallRoot:($inInstall -and $freshStandaloneInstallRoot)
+            try {
+                Remove-DefenseClawTransactionCreatedFile `
+                    -Path $destination `
+                    -InFreshInstallRoot:($inInstall -and $freshStandaloneInstallRoot)
+            }
+            catch {
+                if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile) -and
+                    (Test-DefenseClawFileDeleteBlocked -Path $destination)) {
+                    throw (New-DefenseClawCodexFileHeldMessage `
+                        -Layout $Layout `
+                        -Path $destination `
+                        -Why 'open without delete sharing, so the rollback could not remove it')
+                }
+                throw
+            }
         }
     }
     $codexIncludedProperty = $snapshot.PSObject.Properties['codex_machine_state_included']
@@ -23361,6 +23396,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -TransitionHookSHA256 (Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_sha256') `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
         -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
+        -RepairRecoveredCodexRequirements:(Test-DefenseClawStandaloneProfile) `
         -ExpectedGatewayAccount @(
             Get-DefenseClawTransactionGatewayAccount -Snapshot $Snapshot
         )
@@ -35140,6 +35176,271 @@ function Assert-DefenseClawInstalledArtifacts {
     }
 }
 
+function New-DefenseClawCodexFileHeldMessage {
+    <#
+        g582 round 11e (GAP-0803): the retryable refusal of a rollback that
+        cannot put a Codex machine-policy file back because a program holds
+        it open in the way (it arrived after the pre-stop gate). Same shape as
+        the gate's codex_state_held and codex_requirements_held: the stable
+        code first, the holder by name where Windows can tell, the file and
+        what was refused. The Setup exit code is 1618.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Why
+    )
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $isRequirements = [string]::Equals(
+        $full,
+        [IO.Path]::GetFullPath([string]$Layout.CodexMachinePolicyPath).TrimEnd('\'),
+        [StringComparison]::OrdinalIgnoreCase
+    )
+    $code = if ($isRequirements) { 'codex_requirements_held' } else { 'codex_state_held' }
+    $what = if ($isRequirements) { 'the Codex machine requirements' } else { 'the Codex managed-hooks state' }
+    $named = @()
+    try {
+        $excluded = [Collections.Generic.HashSet[int]]::new()
+        [void]$excluded.Add([int]$PID)
+        $named = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($full) -Excluded $excluded).Values |
+                Microsoft.PowerShell.Core\ForEach-Object {
+                    if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
+                    else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
+                })
+    }
+    catch {
+        $named = @()
+    }
+    if ($named.Count -eq 0) {
+        $named = @('a program')
+    }
+    return ('{0}: {1} has {2}, {3}, {4}; the rollback stopped before it finished and the transaction is still pending. Next step: close that program, then run Setup /ensure or /repair again (an MDM retries exit 1618 on its own); it completes the rollback' -f $code, ($named -join ', '), $full, $what, $Why)
+}
+
+function Open-DefenseClawCodexRollbackHold {
+    <#
+        g582 round 11e (GAP-0803): holds a restored Codex file for the write
+        of its recorded access list, waiting at most TimeoutSeconds for a
+        program that holds it in the way (Open-DefenseClawRestampHold). Past
+        the bound the rollback ends with the named, retryable refusal.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateRange(0, 120)][int]$TimeoutSeconds = 30
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $handle = Open-DefenseClawRestampHold -Path $Path -TolerateHeld
+        if ($null -ne $handle) {
+            return $handle
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw (New-DefenseClawCodexFileHeldMessage `
+                -Layout $Layout `
+                -Path $Path `
+                -Why 'open with write or delete access, or without read sharing, so the rollback could not put its access list back')
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
+    }
+}
+
+function Get-DefenseClawRecordedCodexRequirementsPreimage {
+    <#
+        g582 round 11e (GAP-0802): the requirements.toml DefenseClaw recorded
+        before it first changed the file (its ownership record), as bytes: the
+        administrator's own policy without DefenseClaw's groups. The record is
+        used only when it names this file and its stored bytes match the
+        recorded SHA-256; anything else gives an empty document, so the
+        managed policy alone is published. Only a file Administrators and
+        SYSTEM can write is read; a standard user cannot supply content.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $empty = , ([byte[]]@())
+    $ownership = [string]$Layout.CodexRequirementsOwnershipPath
+    if ([string]::IsNullOrWhiteSpace($ownership) -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ownership -PathType Leaf)) {
+        return $empty
+    }
+    try {
+        Assert-DefenseClawNoReparsePath -Path $ownership
+        $record = Microsoft.PowerShell.Management\Get-Content -LiteralPath $ownership -Raw |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        if ($null -eq $record.PSObject.Properties['preimage_existed'] -or
+            $record.preimage_existed -isnot [bool] -or
+            -not [bool]$record.preimage_existed -or
+            $null -eq $record.PSObject.Properties['preimage'] -or
+            $null -eq $record.PSObject.Properties['preimage_sha256'] -or
+            $null -eq $record.PSObject.Properties['requirements_path']) {
+            return $empty
+        }
+        if (-not [string]::Equals(
+                [IO.Path]::GetFullPath([string]$record.requirements_path).TrimEnd('\'),
+                [IO.Path]::GetFullPath([string]$Layout.CodexMachinePolicyPath).TrimEnd('\'),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            return $empty
+        }
+        $bytes = [Convert]::FromBase64String([string]$record.preimage)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha.Dispose()
+        }
+        if ($digest -cne ([string]$record.preimage_sha256).ToLowerInvariant()) {
+            return $empty
+        }
+        return , $bytes
+    }
+    catch {
+        return $empty
+    }
+}
+
+function Repair-DefenseClawRecoveredCodexRequirements {
+    <#
+        g582 round 11e (GAP-0802). A rollback puts back the requirements.toml
+        its transaction recorded. When an administrator had edited the managed
+        policy in that file before the transaction (a managed hook group
+        removed, an isolation control turned off, a managed directory changed),
+        the restored file failed the Codex verify of the readiness check, the
+        recovery stopped there for good, and only a forced uninstall cleared
+        it, even for LocalSystem.
+
+        The restored file is verified first. When it passes nothing changes.
+        When it fails: the file's bytes are saved, byte for byte, in a named
+        backup beside the install state (recovered-policy); the managed policy
+        is merged into it (the Codex reconcile, the same step the guardian
+        and every lifecycle run take), and when the hand edit cannot be
+        merged, the file is rebuilt from the preimage DefenseClaw recorded
+        (the administrator's own policy before DefenseClaw, trusted only when
+        its SHA-256 matches) and reconciled again. The content that is
+        published comes only from DefenseClaw's own record and rendering,
+        never from the edited bytes alone. The event names what was replaced
+        and where the hand-edited file is kept. A file a program holds open
+        ends the recovery with the retryable codex_requirements_held, as the
+        gate does. Only the standalone profile calls this (Secure Client
+        keeps its recovery as it was); recovery runs elevated.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $path = [string]$Layout.CodexMachinePolicyPath
+    try {
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action verify)
+        return
+    }
+    catch {
+        $verifyError = [string]$_.Exception.Message
+    }
+    $exists = Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf
+    if ($exists) {
+        Assert-DefenseClawNoReparsePath -Path $path
+        if ((Test-DefenseClawFileReadBlocked -Path $path) -or
+            (Test-DefenseClawFileDeleteBlocked -Path $path)) {
+            throw (New-DefenseClawCodexFileHeldMessage `
+                -Layout $Layout `
+                -Path $path `
+                -Why 'open in a way that keeps Setup from reading or replacing it, so the recovery could not republish the managed policy')
+        }
+    }
+    $backupPath = ''
+    $editedSHA256 = ''
+    $editedLength = 0
+    $directory = Microsoft.PowerShell.Management\Join-Path ([string]$Layout.InstallStateDirectory) 'recovered-policy'
+    [void](New-DefenseClawProtectedDirectory -Path $directory)
+    if ($exists) {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force
+        if ([int64]$item.Length -gt 4194304) {
+            throw "Codex requirements exceed the 4194304-byte recovery limit: $path"
+        }
+        $edited = [IO.File]::ReadAllBytes($path)
+        $editedLength = $edited.Length
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $editedSHA256 = ([BitConverter]::ToString($sha.ComputeHash($edited)) -replace '-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha.Dispose()
+        }
+        $backupPath = Microsoft.PowerShell.Management\Join-Path $directory (
+            'requirements.toml.hand-edited.{0}.{1}.bak' -f
+            [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ', [Globalization.CultureInfo]::InvariantCulture),
+            $editedSHA256.Substring(0, 12)
+        )
+        $stream = [IO.File]::Open($backupPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $stream.Write($edited, 0, $edited.Length)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    $mode = 'the managed groups were merged back into it'
+    try {
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action reconcile)
+    }
+    catch {
+        $mergeError = [string]$_.Exception.Message
+        if ($exists -and ((Test-DefenseClawFileReadBlocked -Path $path) -or
+                (Test-DefenseClawFileDeleteBlocked -Path $path))) {
+            throw (New-DefenseClawCodexFileHeldMessage `
+                -Layout $Layout `
+                -Path $path `
+                -Why 'open in a way that keeps Setup from replacing it, so the recovery could not republish the managed policy')
+        }
+        $base = Get-DefenseClawRecordedCodexRequirementsPreimage -Layout $Layout
+        $mode = 'it was rebuilt from the preimage DefenseClaw recorded'
+        if ($base.Length -eq 0) {
+            $mode = 'it was rebuilt as the managed policy alone (DefenseClaw recorded no preimage for it)'
+        }
+        $staged = Microsoft.PowerShell.Management\Join-Path $directory ('base.{0}.tmp' -f [Guid]::NewGuid().ToString('N'))
+        try {
+            [IO.File]::WriteAllBytes($staged, $base)
+            Install-DefenseClawFileAtomic -Source $staged -Destination $path
+            [void](Invoke-DefenseClawCodexRequirementsCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action reconcile)
+        }
+        catch {
+            throw ("Codex requirements recovery could not republish the managed policy: merge: $mergeError; rebuild: " + [string]$_.Exception.Message + $(if ($backupPath) { "; the file as it was is kept at $backupPath" } else { '' }))
+        }
+        finally {
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $staged) {
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    $fields = @{
+        path   = $path
+        reason = ('recovery found Codex machine requirements that failed verification (' +
+            (ConvertTo-DefenseClawBoundedDiagnostic -Value $verifyError -MaxLength 200) +
+            ') and published the managed policy again: ' + $mode)
+    }
+    if ($backupPath) {
+        $fields['edited_sha256'] = $editedSHA256
+        $fields['edited_bytes'] = [string]$editedLength
+        $fields['backup'] = $backupPath
+    }
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_recover -Fields $fields
+    $script:DefenseClawRecoveredCodexRequirementsNotes += (
+        ('{0} was replaced by the managed policy ({1}); ' -f $path, $mode) +
+        $(if ($backupPath) { "the hand-edited file ($editedLength bytes, sha256 $editedSHA256) is kept at $backupPath" } else { 'there was no file to keep' })
+    )
+}
+
 function Assert-DefenseClawEnterpriseDeployment {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -35153,6 +35454,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         # Broker or Enumerator. Ordinary callers keep the full service set.
         [switch]$AllowTransactionRecordedBrokerAbsence,
         [switch]$AllowTransactionRecordedEnumeratorAbsence,
+        # Restore-only (standalone, GAP-0802): the Codex requirements a
+        # rollback restored may carry an administrator's hand edit of the
+        # managed policy; the recovery replaces it instead of stopping.
+        [switch]$RepairRecoveredCodexRequirements,
         # Defaults to every supported gateway account; rollback narrows it to
         # the account recorded in the transaction preimage.
         [string[]]$ExpectedGatewayAccount,
@@ -36067,6 +36372,15 @@ function Assert-DefenseClawEnterpriseDeployment {
             -ExpectedStartMode $expectedServiceStartMode
     }
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
+    if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
+        $codexTargetEnabled -and (Test-DefenseClawStandaloneProfile)) {
+        # GAP-0802: the file a rollback restored may carry an administrator's
+        # hand edit of the managed policy; it is replaced by the managed
+        # policy (and kept in a named backup) instead of stopping recovery.
+        Repair-DefenseClawRecoveredCodexRequirements `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+    }
     [void](Invoke-DefenseClawCodexRequirementsCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
@@ -37298,6 +37612,9 @@ function Get-DefenseClawLifecycleStatus {
         }
         if (@($script:DefenseClawSquattedRootNotes).Count -gt 0) {
             $status['squatted_root_notes'] = [string[]]@($script:DefenseClawSquattedRootNotes)
+        }
+        if (@($script:DefenseClawRecoveredCodexRequirementsNotes).Count -gt 0) {
+            $status['recovered_codex_requirements'] = [string[]]@($script:DefenseClawRecoveredCodexRequirementsNotes)
         }
         if (@($script:DefenseClawTerminatedServiceProcesses).Count -gt 0) {
             $status['terminated_service_processes'] = [string[]]@($script:DefenseClawTerminatedServiceProcesses)
@@ -50533,6 +50850,9 @@ function Move-DefenseClawStandaloneSquattedRoots {
 # What Install did with each squatted root, for the result.
 $script:DefenseClawSquattedRootNotes = @()
 
+# What a recovery replaced in the Codex requirements.toml (GAP-0802), for the result.
+$script:DefenseClawRecoveredCodexRequirementsNotes = @()
+
 function Format-DefenseClawSquattedRootCause {
     # Why a squatted root is refused, naming the account that created it
     # (Get-DefenseClawSquattedRootPlanter) rather than a bare SID or a
@@ -51451,6 +51771,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
     $script:DefenseClawQuarantinedRoots = @()
     $script:DefenseClawSquattedRootNotes = @()
+    $script:DefenseClawRecoveredCodexRequirementsNotes = @()
     $script:DefenseClawTerminatedServiceProcesses = @()
     $script:DefenseClawSkippedRuntimeFiles = @()
     Set-DefenseClawRecoveryGatewayCandidate `

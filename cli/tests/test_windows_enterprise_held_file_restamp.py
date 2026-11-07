@@ -104,8 +104,13 @@ def test_every_path_based_restamp_of_a_recorded_file_holds_it_first(function: st
 
 def test_the_transaction_rollback_holds_the_file_before_restoring_its_recorded_acl() -> None:
     text = _text()
-    start = text.index("$restoreHold = Open-DefenseClawRestampHold -Path $destination")
+    # A shared Codex file waits at most 30 seconds for a late holder and then
+    # ends with the retryable held code (GAP-0803); every other file is held
+    # at once, as before.
+    start = text.index("$restoreHold = if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile)) {")
     block = text[start : start + 2500]
+    assert "Open-DefenseClawCodexRollbackHold -Layout $Layout -Path $destination" in block[:300]
+    assert "Open-DefenseClawRestampHold -Path $destination" in block[:400]
     assert block.index("Set-Acl") > 0
     assert "Close-DefenseClawRestampHold -Handle $restoreHold" in text[start : start + 4000]
 
