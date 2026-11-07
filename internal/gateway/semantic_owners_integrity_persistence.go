@@ -2781,13 +2781,10 @@ var activeDefenseClawStateNames = []string{
 // managedAgentSettingsCandidate reports a path of the machine policy files
 // DefenseClaw publishes for an agent, in either path syntax.
 func managedAgentSettingsCandidate(candidate actionfacts.PathFact) bool {
-	switch candidate.Flavor {
-	case actionfacts.PathFlavorPOSIX:
-		return actionfacts.ManagedAgentSettingsPath(exactSemanticPathValue(candidate))
-	case actionfacts.PathFlavorWindows:
-		return actionfacts.WindowsManagedAgentSettingsPath(exactSemanticPathValue(candidate))
-	}
-	return false
+	value := exactSemanticPathValue(candidate)
+	// A //host/C$/... spelling of the local volume is read as a POSIX path.
+	return candidate.Flavor == actionfacts.PathFlavorPOSIX && actionfacts.ManagedAgentSettingsPath(value) ||
+		actionfacts.WindowsManagedAgentSettingsPath(value)
 }
 
 func matchesActiveDefenseClawState(

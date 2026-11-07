@@ -4,7 +4,10 @@
 package actionfacts
 
 import (
+	"cmp"
 	"encoding/json"
+	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -58,5 +61,88 @@ func TestUnknownKeyWriteTargetViews(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// rel-1-0-6:GAP-0729 review 7: a native write call with keys outside the
+// schema yields a protected-state call for each target that can reach
+// DefenseClaw state or a machine policy file, however many keys come first
+// and whether the path is rooted, relative, or an administrative-share
+// alias. A key that describes the call or holds the text it writes yields
+// none, and a call whose targets are all ordinary files costs no second
+// evaluation.
+func TestUnknownKeyProtectedStateCalls(t *testing.T) {
+	const state = "/sandbox/.defenseclaw/config.yaml"
+	many := func(final string) string {
+		raw := `{"file_path":"/sandbox/work/app/a.txt","content":"x"`
+		for i := 0; i < 12; i++ {
+			raw += fmt.Sprintf(`,"a%02d":"/sandbox/work/app/o%d.txt"`, i, i)
+		}
+		return raw + final + `}`
+	}
+	for _, test := range []struct {
+		name, tool, raw string
+		targets         []string
+	}{
+		{name: "ordinary extras cost nothing", tool: "write", raw: many(``)},
+		{name: "a protected key after twelve ordinary ones", tool: "write", raw: many(`,"z":"` + state + `"`), targets: []string{state}},
+		{name: "relative key", tool: "write", raw: `{"file_path":"/sandbox/work/app/a.txt","content":"x","f":"../../.defenseclaw/config.yaml"}`, targets: []string{"/sandbox/work/app/../../.defenseclaw/config.yaml"}},
+		{name: "reviewed key naming the state", tool: "edit", raw: `{"filePath":"` + state + `","oldString":"a","newString":"b","x":1}`, targets: []string{state}},
+		{name: "description mention", tool: "write", raw: `{"file_path":"/sandbox/work/app/a.txt","content":"x","description":"` + state + `"}`},
+		{name: "content mention", tool: "write", raw: `{"file_path":"/sandbox/work/app/a.txt","content":"` + state + `","x":1}`},
+		{name: "directory key", tool: "write", raw: `{"file_path":"/sandbox/work/app/a.txt","content":"x","cwd":"/sandbox/.defenseclaw"}`},
+		{name: "tilde user", tool: "write", raw: `{"file_path":"/sandbox/work/app/a.txt","content":"x","f":"~vn/config.yaml"}`, targets: []string{"~vn/config.yaml"}},
+		{name: "managed policy file", tool: "write", raw: `{"file_path":"/sandbox/work/app/a.txt","content":"x","f":"/etc/claude-code/managed-settings.json"}`, targets: []string{"/etc/claude-code/managed-settings.json"}},
+		{name: "windows administrative share", tool: "write", raw: `{"file_path":"/sandbox/work/app/a.txt","content":"x","f":"\\\\localhost\\C$\\Program Files\\ClaudeCode\\managed-settings.json"}`, targets: []string{`\\localhost\C$\Program Files\ClaudeCode\managed-settings.json`}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := Input{Tool: test.tool, Args: json.RawMessage(test.raw), CWD: "/sandbox/work/app", ActiveHome: "/sandbox"}
+			calls := UnknownKeyProtectedStateCalls(input, Analyze(input))
+			var got []string
+			for _, call := range calls {
+				var args map[string]string
+				if err := json.Unmarshal(call, &args); err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, cmp.Or(args["file_path"], args["path"]))
+			}
+			if !slices.Equal(got, test.targets) {
+				t.Fatalf("protected-state targets = %q, want %q", got, test.targets)
+			}
+		})
+	}
+}
+
+// rel-1-0-6:GAP-0729, GAP-0734: every name of a file on the local volume
+// is the drive path.
+func TestWindowsLocalDrivePath(t *testing.T) {
+	for value, want := range map[string]string{
+		`C:\Users\vn`:                  "C:/Users/vn",
+		`c:/users/vn`:                  "C:/users/vn",
+		`\\?\C:\Users\vn`:              "C:/Users/vn",
+		`\\.\C:\Users\vn`:              "C:/Users/vn",
+		`\\localhost\C$\Users\vn`:      "C:/Users/vn",
+		`\\LOCALHOST\c$`:               "C:/",
+		`\\127.0.0.1\D$\a\b`:           "D:/a/b",
+		`\\127.1.2.3\C$\a`:             "C:/a",
+		`\\[::1]\C$\a`:                 "C:/a",
+		`\\::1\C$\a`:                   "C:/a",
+		`\\?\UNC\localhost\C$\a`:       "C:/a",
+		`//./UNC/127.0.0.1/C$/a`:       "C:/a",
+		`\\otherhost\C$\a`:             "",
+		`\\localhost\share\a`:          "",
+		`\\localhost\ADMIN$\a`:         "",
+		`\\10.0.0.5\C$\a`:              "",
+		`relative\a`:                   "",
+		`/etc/codex/requirements.toml`: "",
+		`\\localhost`:                  "",
+		`\\?\Volume{1234}\a`:           "",
+		`\\.\pipe\name`:                "",
+		`C:`:                           "",
+	} {
+		got, ok := WindowsLocalDrivePath(value)
+		if (want == "") == ok || got != want && want != "" {
+			t.Errorf("WindowsLocalDrivePath(%q) = %q, %t, want %q", value, got, ok, want)
+		}
 	}
 }

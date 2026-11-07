@@ -13,12 +13,14 @@ import (
 // unknownKeyWriteTwinRequests are the requests of a native file-write call
 // that carries a key outside the tool's reviewed schema: such a call stays
 // partial and names no path, so no rule saw the file it writes. Each target
-// the call names (the reviewed key, or any other key holding a rooted path;
-// actionfacts.UnknownKeyWriteTargetCalls) is judged as the reviewed call
-// that writes that one file (rel-1-0-6:GAP-0729 review 6).
+// that can reach DefenseClaw's state or the machine policy files it
+// publishes (the reviewed key, or any other key naming such a path;
+// actionfacts.UnknownKeyProtectedStateCalls) is judged as the reviewed call
+// that writes that one file. A call whose targets are ordinary files has no
+// twin (rel-1-0-6:GAP-0729).
 func unknownKeyWriteTwinRequests(request trustedActionRequest, facts actionfacts.Facts) []trustedActionRequest {
 	var twins []trustedActionRequest
-	for _, args := range actionfacts.UnknownKeyWriteTargetCalls(request.Input, facts) {
+	for _, args := range actionfacts.UnknownKeyProtectedStateCalls(request.Input, facts) {
 		twin := request
 		twin.Input.Args = args
 		twin.LegacyText = string(args)
@@ -29,20 +31,19 @@ func unknownKeyWriteTwinRequests(request trustedActionRequest, facts actionfacts
 	return twins
 }
 
-// withUnknownKeyStateWrites adds the proven mutation of DefenseClaw's own
-// state that a twin found. Only that finding counts: the call's other keys
-// are not files the harness writes, so no other rule's match on them is a
-// block of this call.
-func withUnknownKeyStateWrites(findings, twin []RuleFinding) []RuleFinding {
-	return withTwinProvenBlocks(findings, slices.DeleteFunc(twin, func(f RuleFinding) bool {
-		return f.RuleID != "tamper.detector_state_write"
-	}))
-}
-
-// dispatchUnknownKeyWriteTwins judges each twin of the call.
+// dispatchUnknownKeyWriteTwins judges each twin of the call until one proves
+// a write of the state. Only that finding counts: the call's other keys are
+// not files the harness writes, so no other rule's match on them is a block
+// of this call.
 func dispatchUnknownKeyWriteTwins(parent context.Context, findings []RuleFinding, twins []trustedActionRequest) []RuleFinding {
 	for _, twin := range twins {
-		findings = withUnknownKeyStateWrites(findings, dispatchTrustedAction(parent, twin))
+		proven := slices.DeleteFunc(dispatchTrustedAction(parent, twin), func(f RuleFinding) bool {
+			return f.RuleID != "tamper.detector_state_write"
+		})
+		findings = withTwinProvenBlocks(findings, proven)
+		if slices.ContainsFunc(proven, RuleFinding.contributesToEnforcement) {
+			break
+		}
 	}
 	return findings
 }

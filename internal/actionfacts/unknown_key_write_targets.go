@@ -5,6 +5,8 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"path"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -17,9 +19,9 @@ import (
 // reviewed ones, and the harness writes the file it names, so each target
 // key the call names (filePath, file_path or path) is analyzed as the
 // target of the same tool in its reviewed shape, with one-byte text. A key
-// outside the schema whose value is a rooted path is read the same way
-// (unknownKeyTargetKeys). Each returned view is complete and names one
-// written path.
+// outside the schema that holds a path that can reach DefenseClaw's
+// protected files is read the same way (unknownKeyTargets). Each returned
+// view is complete and names one written path.
 //
 // A view proves only which file the call writes: callers count a rule match
 // on it and never a non-match. It reports nothing for any other call: a
@@ -27,9 +29,9 @@ import (
 // a target that is not a bounded, non-empty string.
 func UnknownKeyWriteTargetViews(input Input, facts Facts) []Facts {
 	var views []Facts
-	for _, reviewed := range UnknownKeyWriteTargetCalls(input, facts) {
+	for _, call := range unknownKeyTargets(input, facts, false) {
 		reduced := input
-		reduced.Args = reviewed
+		reduced.Args = call
 		view := Analyze(reduced)
 		if view.Authoritative() && factsWriteAPath(view) {
 			views = append(views, view)
@@ -38,11 +40,28 @@ func UnknownKeyWriteTargetViews(input Input, facts Facts) []Facts {
 	return views
 }
 
-// UnknownKeyWriteTargetCalls returns, for a call UnknownKeyWriteTargetViews
-// reads, the reviewed arguments of the same tool for each target the call
-// names: one object per target key, with one-byte text. A caller judges each
-// as the call that writes that one file.
-func UnknownKeyWriteTargetCalls(input Input, facts Facts) []json.RawMessage {
+// UnknownKeyProtectedStateCalls returns, for a call UnknownKeyWriteTargetViews
+// reads, the reviewed arguments of the same tool for each target that can
+// reach DefenseClaw's own state or the machine policy files it publishes
+// (protectedStateReach): one object per target key, with one-byte text. A
+// caller judges each as the call that writes that one file and counts its
+// state-write verdict only. A call whose targets are all ordinary files
+// returns nothing, so it costs no second evaluation.
+func UnknownKeyProtectedStateCalls(input Input, facts Facts) []json.RawMessage {
+	return unknownKeyTargets(input, facts, true)
+}
+
+// unknownKeyTargets lists the reviewed arguments of a native write call
+// with keys outside the tool's schema, one per target: the reviewed target
+// keys (filePath, file_path, path) and, after them in key order, any other
+// key whose string value can reach protected state, except the keys that
+// carry a directory, a description or the text the call writes
+// (unknownKeyPayloadKey). The harness writes only the file its reviewed key
+// names, but a key the walk does not know that names protected state is read
+// as another target, so a call cannot carry that file in a key of its own
+// choosing (rel-1-0-6:GAP-0729). With stateOnly the reviewed keys are listed
+// only when they can reach protected state as well.
+func unknownKeyTargets(input Input, facts Facts, stateOnly bool) []json.RawMessage {
 	if facts.Parse.Status != StatusPartial || len(facts.Parse.Issues) == 0 ||
 		input.Command != "" || len(input.Argv) != 0 {
 		return nil
@@ -60,54 +79,119 @@ func UnknownKeyWriteTargetCalls(input Input, facts Facts) []json.RawMessage {
 	if problem.status != "" {
 		return nil
 	}
+	keys := []string{"filePath", "file_path", "path"}
+	reviewed := len(keys)
+	var extra []string
+	for key, value := range object {
+		if _, isText := value.(string); isText && !slices.Contains(keys, key) && !unknownKeyPayloadKey(key) {
+			extra = append(extra, key)
+		}
+	}
+	sort.Strings(extra)
+	reach := protectedStateReach{cwd: input.CWD, linked: map[string]bool{}}
+	seen := map[string]bool{}
 	var calls []json.RawMessage
-	for _, key := range unknownKeyTargetKeys(object) {
+	for i, key := range append(keys, extra...) {
 		target, ok := object[key].(string)
 		if !ok || strings.TrimSpace(target) == "" || strings.IndexByte(target, 0) >= 0 ||
-			validateScalar(target, maxScalarBytes) != "" {
+			validateScalar(target, maxScalarBytes) != "" || seen[target] {
 			continue
 		}
-		reviewed, err := json.Marshal(shape(target))
+		// A relative path of another key is read from the working directory.
+		resolved := reach.absolute(target)
+		if (stateOnly || i >= reviewed) && !reach.mayReach(resolved) {
+			continue
+		}
+		seen[target] = true
+		if i >= reviewed {
+			target = resolved
+		}
+		call, err := json.Marshal(shape(target))
 		if err != nil {
 			continue
 		}
-		calls = append(calls, reviewed)
+		calls = append(calls, call)
 	}
 	return calls
 }
 
-// maxUnknownKeyPathTargets bounds the unreviewed keys of one call that are
-// read as a path.
-const maxUnknownKeyPathTargets = 8
-
-// unknownKeyDirectoryKeys are the argument names that carry a directory to
-// run in or search, not a file to write.
-var unknownKeyDirectoryKeys = map[string]bool{
-	"cwd": true, "workdir": true, "work_dir": true, "workingdirectory": true,
-	"working_directory": true, "root": true, "directory": true, "dir": true,
-	"basedir": true, "base_dir": true, "base_path": true, "basepath": true,
+// unknownKeyPayloadKey reports an argument name that carries a directory to
+// run in or search, a description, or the text a call writes or looks for,
+// none of which is a file the harness writes: a file whose text, or whose
+// description, mentions a path is an ordinary write.
+func unknownKeyPayloadKey(key string) bool {
+	name := strings.NewReplacer("_", "", "-", "").Replace(strings.ToLower(key))
+	return unknownKeyPayloadNames[name]
 }
 
-// unknownKeyTargetKeys lists the keys of a native write call that name a
-// file it may write: the reviewed target keys (filePath, file_path, path)
-// and, after them in key order, any other key whose string value is a
-// rooted path (absolute, home, drive, UNC or device-namespace) other than
-// the directory keys. The harness writes only the file its reviewed key
-// names, but a key outside the schema that names a file is read as another
-// target, so a call cannot carry the file it writes in a key the walk does
-// not know (rel-1-0-6:GAP-0729 review 6).
-func unknownKeyTargetKeys(object map[string]any) []string {
-	keys := []string{"filePath", "file_path", "path"}
-	var extra []string
-	for key, value := range object {
-		text, ok := value.(string)
-		if !ok || slices.Contains(keys, key) || unknownKeyDirectoryKeys[strings.ToLower(key)] || !rootedPathText(text) {
-			continue
-		}
-		extra = append(extra, key)
+var unknownKeyPayloadNames = map[string]bool{
+	// directories
+	"cwd": true, "workdir": true, "workingdirectory": true, "root": true, "directory": true,
+	"dir": true, "basedir": true, "basepath": true,
+	// descriptions
+	"description": true, "desc": true, "note": true, "notes": true, "comment": true, "comments": true,
+	"title": true, "summary": true, "message": true, "msg": true, "reason": true, "label": true,
+	"explanation": true, "rationale": true, "instructions": true, "instruction": true,
+	"prompt": true, "purpose": true,
+	// written or searched text
+	"content": true, "contents": true, "text": true, "filetext": true, "newstring": true,
+	"oldstring": true, "newstr": true, "oldstr": true, "data": true, "body": true, "patch": true,
+	"diff": true, "query": true, "pattern": true, "replacement": true,
+}
+
+// protectedStateReach decides, from the text of a path and a bounded look
+// at the links on it, whether a native write call's target can reach
+// DefenseClaw's state tree or a machine policy file of an agent. It keeps an
+// ordinary file from costing a second evaluation.
+type protectedStateReach struct {
+	cwd    string
+	linked map[string]bool
+}
+
+// mayReach reports a target whose spelling names the state tree
+// (defenseclaw, in any case or separator, through ~, $HOME or %USERPROFILE%),
+// a machine policy directory (Windows administrative shares and 8.3 names
+// included), a tilde-prefix or 8.3 name that can spell either, a relative
+// path under a directory that does, or a path with a link on it that may
+// lead there.
+func (r *protectedStateReach) mayReach(text string) bool {
+	slashed := strings.ReplaceAll(text, `\`, "/")
+	lower := strings.ToLower(slashed)
+	if strings.Contains(lower, "defenseclaw") || strings.Contains(strings.TrimPrefix(lower, "~/"), "~") ||
+		ManagedAgentSettingsPath(path.Clean(slashed)) || WindowsManagedAgentSettingsPath(text) {
+		return true
 	}
-	sort.Strings(extra)
-	return append(keys, extra[:min(len(extra), maxUnknownKeyPathTargets)]...)
+	return strings.HasPrefix(slashed, "/") && r.linkOnPath(path.Clean(slashed))
+}
+
+// absolute joins a relative path to the working directory, with the
+// separator of the directory's own syntax.
+func (r *protectedStateReach) absolute(target string) string {
+	text := strings.TrimSpace(target)
+	if rootedPathText(text) || strings.HasPrefix(text, "~") || r.cwd == "" {
+		return text
+	}
+	if rootedPathText(r.cwd) && !strings.HasPrefix(r.cwd, "/") {
+		return strings.TrimRight(r.cwd, `/\`) + `\` + text
+	}
+	return strings.TrimRight(r.cwd, "/") + "/" + text
+}
+
+// linkOnPath reports a link on the path, or on the nearest part of it that
+// exists, once per directory of a call.
+func (r *protectedStateReach) linkOnPath(clean string) bool {
+	for current := clean; ; current = path.Dir(current) {
+		if linked, seen := r.linked[current]; seen {
+			return linked
+		}
+		if real, err := filepath.EvalSymlinks(current); err == nil {
+			r.linked[current] = real != current
+			return r.linked[current]
+		}
+		if current == "/" || current == "." {
+			return false
+		}
+	}
 }
 
 // rootedPathText reports text that starts as an absolute path of either
