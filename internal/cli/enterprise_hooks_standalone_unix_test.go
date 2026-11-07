@@ -117,6 +117,13 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		if mode == "fail" {
 			return enterprisehooks.InstallResult{}, errors.New("install refused")
 		}
+		if mode == "slow-repair" {
+			// The repair is under way: say so, then take a while to answer.
+			if err := os.WriteFile(filepath.Join(opts.UserHome, "repair-started"), nil, 0o600); err != nil {
+				return enterprisehooks.InstallResult{}, err
+			}
+			time.Sleep(700 * time.Millisecond)
+		}
 		return result(opts), nil
 	}
 	enterpriseHookWorkerVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
@@ -129,7 +136,7 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 			}
 			return enterprisehooks.InstallResult{Connector: opts.ConnectorName, AgentVersion: value}, nil
 		}
-		if mode == "drift" || mode == "fail" {
+		if mode == "drift" || mode == "fail" || mode == "slow-repair" {
 			return enterprisehooks.InstallResult{}, errors.New("hook config drifted")
 		}
 		return result(opts), nil
