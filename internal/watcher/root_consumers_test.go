@@ -43,7 +43,7 @@ func TestGAP0613RootConsumersApplyTheirOwnAssetRules(t *testing.T) {
 			w := &InstallWatcher{}
 			w.SetRootConsumers(tc.consumers)
 			evt := InstallEvent{Type: InstallSkill, Name: "blocked-skill", Path: tc.path}
-			decision, by := w.evaluateRootAssetPolicy(&cfg, evt, "amp", input)
+			decision, by, _ := w.evaluateRootAssetPolicy(&cfg, evt, "amp", input)
 			if got := decision.Enabled && decision.RawAction == "block" && decision.Action == "block"; got != tc.blocked {
 				t.Fatalf("blocked = %v (decision %+v), want %v", got, decision, tc.blocked)
 			}
@@ -95,7 +95,7 @@ func TestGAP0613NestedRootIgnoresOuterRootConsumerRules(t *testing.T) {
 			w := &InstallWatcher{}
 			w.SetRootConsumers([]RootConsumer{{"skill", outer, "amp"}, {"skill", inner, "codex"}})
 			evt := InstallEvent{Type: InstallSkill, Name: "blocked-skill", Path: tc.path}
-			decision, _ := w.evaluateRootAssetPolicy(&cfg, evt, tc.owner, input)
+			decision, _, _ := w.evaluateRootAssetPolicy(&cfg, evt, tc.owner, input)
 			if got := decision.Enabled && decision.RawAction == "block" && decision.Action == "block"; got != tc.blocked {
 				t.Fatalf("blocked = %v (decision %+v), want %v", got, decision, tc.blocked)
 			}
@@ -124,7 +124,7 @@ func TestGAP0613SecureClientKeepsTheOwnerDecisionOnASharedRoot(t *testing.T) {
 			w := &InstallWatcher{cfg: cfg}
 			w.SetRootConsumers([]RootConsumer{{"skill", root, "amp"}, {"skill", root, "codex"}})
 			evt := InstallEvent{Type: InstallSkill, Name: "blocked-skill", Path: filepath.Join(root, "blocked-skill")}
-			decision, _ := w.evaluateRootAssetPolicy(cfg, evt, "amp", func(connector string) config.AssetPolicyInput {
+			decision, _, _ := w.evaluateRootAssetPolicy(cfg, evt, "amp", func(connector string) config.AssetPolicyInput {
 				return config.AssetPolicyInput{TargetType: "skill", Name: "blocked-skill", Connector: connector, RuntimeSurface: "watcher"}
 			})
 			if got := decision.Enabled && decision.RawAction == "block" && decision.Action == "block"; got != tc.blocked {

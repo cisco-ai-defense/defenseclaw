@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
 type mcpRuntimeProbe struct {
@@ -697,7 +698,11 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 			"runtime-provenance-error",
 		), true
 	}
-	if decision, disabled := a.runtimeAssetDisableDecision(targetType, probe.SkillName, connector, runtimeSurface); disabled {
+	paths := []string{probe.SourcePath}
+	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
+		paths = probe.SourcePaths
+	}
+	if decision, disabled := a.runtimeAssetDisableDecision(targetType, probe.SkillName, connector, runtimeSurface, paths); disabled {
 		return decision, true
 	}
 	if probe.RuntimeDisableOnly {
@@ -708,14 +713,10 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		return config.AssetPolicyDecision{}, false
 	}
 	if targetType == "plugin" && !cfg.SecureClientIntegration() {
-		if decision, blocked := a.pluginJournalBlockDecision(probe.SkillName, connector, runtimeSurface); blocked {
+		if decision, blocked := a.pluginJournalBlockDecision(probe.SkillName, connector, runtimeSurface, paths); blocked {
 			return decision, true
 		}
 		probe.DeclaredNames = append(probe.DeclaredNames, deniedPluginMarketplaceNames(cfg, probe.SkillName)...)
-	}
-	paths := []string{probe.SourcePath}
-	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
-		paths = probe.SourcePaths
 	}
 	if decision, unavailable := a.unavailableRootDecision(cfg, targetType, connector, runtimeSurface, probe.SkillName, paths); unavailable {
 		return decision, true
@@ -728,7 +729,7 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		// declares the name) answers to that folder's runtime disable.
 		for _, path := range probe.SourcePaths {
 			if folder := filepath.Base(path); !config.SameAssetName(folder, probe.SkillName) {
-				if decision, disabled := a.runtimeAssetDisableDecision(targetType, folder, connector, runtimeSurface); disabled {
+				if decision, disabled := a.runtimeAssetDisableDecision(targetType, folder, connector, runtimeSurface, []string{path}); disabled {
 					return decision, true
 				}
 			}
@@ -976,7 +977,7 @@ func runtimeSkillAssetTargetType(probe skillRuntimeProbe) string {
 	}
 }
 
-func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, runtimeSurface string) (config.AssetPolicyDecision, bool) {
+func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, runtimeSurface string, paths []string) (config.AssetPolicyDecision, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return config.AssetPolicyDecision{}, false
@@ -993,6 +994,15 @@ func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, run
 	}
 	if !disabled {
 		return config.AssetPolicyDecision{}, false
+	}
+	if a != nil && a.store != nil && connector != "" && len(paths) > 0 {
+		// A policy hold sits on the row of the asset name but was written for
+		// the copies still denied; a path outside all of them is another copy
+		// of the name that an allow rule admitted.
+		if entry, err := a.store.GetActionForConnector(targetType, name, connector); err == nil &&
+			entry != nil && entry.Actions.Runtime == "disable" && watcher.PolicyHoldIgnores(entry, "runtime", paths) {
+			return config.AssetPolicyDecision{}, false
+		}
 	}
 	return runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface,
 		fmt.Sprintf("%s %q is runtime-disabled for connector %q", targetType, name, connector),
@@ -1167,7 +1177,7 @@ func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHoo
 // marketplace folder, so `plugin quarantine` alone left /plugin:command
 // running (GAP-0270). `plugin restore` clears the file action, which lifts
 // this refusal.
-func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface string) (config.AssetPolicyDecision, bool) {
+func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface string, paths []string) (config.AssetPolicyDecision, bool) {
 	if a == nil || a.store == nil || strings.TrimSpace(name) == "" {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -1185,9 +1195,11 @@ func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface s
 			continue
 		}
 		reason, source := fmt.Sprintf("plugin %q is blocked by install admission", entry.TargetName), "install-block"
+		ignored := watcher.PolicyHoldIgnoredFields(&entry, paths)
 		switch {
-		case entry.Actions.Install == "block" || entry.Actions.Runtime == "disable":
-		case entry.Actions.File == "quarantine":
+		case entry.Actions.Install == "block" && !slices.Contains(ignored, "install") ||
+			entry.Actions.Runtime == "disable" && !slices.Contains(ignored, "runtime"):
+		case entry.Actions.File == "quarantine" && !slices.Contains(ignored, "file"):
 			// Worded as a disabled plugin for the agent (runtime-disable,
 			// agentAssetPolicySubject); the audit reason says quarantined.
 			reason, source = fmt.Sprintf("plugin %q is quarantined", entry.TargetName), "runtime-disable"
