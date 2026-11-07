@@ -143,7 +143,7 @@ func validEventName(event string) bool {
 		return false
 	}
 	for _, ch := range event {
-		if !('A' <= ch && ch <= 'Z' || 'a' <= ch && ch <= 'z' || '0' <= ch && ch <= '9') {
+		if (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') {
 			return false
 		}
 	}
