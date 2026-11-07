@@ -224,7 +224,7 @@ func TestWindowsManagedPolicySelfHealStandaloneNeverRestampsAnUntrustedWriterInP
 				if tc.readOnly && !gap633ReadOnly(t, path) {
 					t.Fatal("the guardian cleared the attributes of a refused file")
 				}
-				for _, want := range []string{path, "does not repair this file in place", "/remove:g", "/setowner *S-1-5-32-544", "Setup /ensure"} {
+				for _, want := range []string{path, "does not repair this file in place", "/remove:g", "/setowner *S-1-5-32-544", "/ensure"} {
 					if !strings.Contains(reported, want) {
 						t.Fatalf("boundary finding %q does not name %q", reported, want)
 					}

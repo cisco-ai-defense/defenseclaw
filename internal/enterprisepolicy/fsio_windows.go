@@ -1364,7 +1364,7 @@ func (e *recordedVendorFolderError) Error() string {
 	}
 	return fmt.Sprintf("%s; DefenseClaw did not create this folder, so a standalone install does not take it over%s, "+
 		"and this connector is not protected until an administrator fixes the folder: from an elevated prompt run %s, "+
-		"then run Setup /ensure", e.reason(), because, e.fix())
+		"then run `%s`. %s", e.reason(), because, e.fix(), managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)
 }
 
 func (e *recordedVendorFolderError) Unwrap() error { return e.err }

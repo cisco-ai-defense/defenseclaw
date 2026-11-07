@@ -225,6 +225,7 @@ func windowsStandaloneBundleStoreHoldsVersions(layout managed.StandaloneLayout) 
 	}
 	return len(entries) > 0
 }
+
 // Seams for the approved-source rewrite (GAP-0590). Tests replace them.
 var (
 	// windowsEnterpriseInstalledLeafDrift is the standalone verdict on a
