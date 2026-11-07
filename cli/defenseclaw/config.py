@@ -4820,7 +4820,13 @@ class Config:
         """
         self.__dict__.setdefault("_decided_paths", []).extend(paths)
 
-    def save(self, *, actor: str | None = None, reason: str = "") -> Any:
+    def save(
+        self,
+        *,
+        actor: str | None = None,
+        reason: str = "",
+        check_candidate: Callable[[str, bytes], None] | None = None,
+    ) -> Any:
         """Persist this :class:`Config` through the single config writer.
 
         Only modeled values that changed since load are applied to the file
@@ -4830,11 +4836,12 @@ class Config:
         The writer locks ``config.yaml.lock``, validates the candidate with
         the canonical validator, replaces the file durably and advances
         ``config.generation.json``. ``actor`` defaults to ``cli:<os user>``.
-        Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
+        ``check_candidate`` inspects the final bytes under the writer lock and
+        may refuse the write. Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
         """
         path = str(config_path_for_data_dir(self.data_dir))
         try:
-            return self._write(path, actor=actor, reason=reason)
+            return self._write(path, actor=actor, reason=reason, check_candidate=check_candidate)
         except ConfigSaveError:
             raise
         except OSError as exc:
@@ -4872,6 +4879,7 @@ class Config:
         actor: str | None = None,
         reason: str = "",
         verify: Callable[[str], None] | None = None,
+        check_candidate: Callable[[str, bytes], None] | None = None,
     ) -> Any:
         from defenseclaw import config_writer
 
@@ -4894,6 +4902,7 @@ class Config:
             path=path,
             verify=verify,
             decided=decided,
+            check_candidate=check_candidate,
         )
         # The admission pins the writer added (GAP-1488) go into this Config
         # too, so it reads as the file it wrote.

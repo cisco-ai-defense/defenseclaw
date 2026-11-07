@@ -321,7 +321,7 @@ def test_secure_client_roster_check_keeps_existing_scope(tmp_path: Path) -> None
         b"enterprise:\n  profile: secure_client\nguardrail:\n"
         b"  connectors:\n    kiro: {}\n    openclaw: {}\n"
     )
-    cmd_config._check_guardrail_connector_roster(str(tmp_path / "config.yaml"), candidate)
+    cmd_config.check_guardrail_connector_roster(str(tmp_path / "config.yaml"), candidate)
 
 
 def _set_with_claw_mode(tmp_path: Path, mode: str, key: str, value: str) -> tuple[object, bytes, bytes]:
@@ -546,6 +546,119 @@ def test_root_config_command_hook_primary_with_disabled_proxy_entry_stays_editab
         tmp_path,
         "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n    openclaw:\n      enabled: false\n",
         *args,
+    )
+    assert result.exit_code == 0, result.output
+    assert after != before
+
+
+def _enable_command(tmp_path: Path, guardrail: str, *args: str):
+    """Run the real ``guardrail enable`` against a real config.yaml (loader, checks, save)."""
+    from unittest.mock import patch as _patch
+
+    path = tmp_path / "config.yaml"
+    path.write_text(f"config_version: 9\ndata_dir: {tmp_path}\nguardrail:\n{guardrail}", encoding="utf-8")
+    before = path.read_bytes()
+    with (
+        _patch.object(dcconfig, "config_path", return_value=path),
+        _patch.object(config_writer, "_use_go_validator", return_value=False),
+        _patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+    ):
+        cfg = dcconfig.load(data_dir=str(tmp_path))
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    with (
+        _patch.object(dcconfig, "config_path", return_value=path),
+        _patch.object(config_writer, "_use_go_validator", return_value=False),
+        _patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        _patch.object(cmd_guardrail, "_gateway_running", return_value=False),
+        _patch.object(cmd_guardrail, "_log_guardrail_action"),
+        _patch.object(cmd_guardrail, "_note_running_agent_restart"),
+        _patch("defenseclaw.commands.cmd_setup._agent_settings_refusal", return_value=""),
+    ):
+        result = CliRunner().invoke(cmd_guardrail.enable_cmd, [*args, "--no-restart", "--yes"], obj=app)
+    return result, before, path.read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("hook", "proxy"), [("kiro", "openclaw"), ("codex", "zeptoclaw"), ("claudecode", "openclaw")]
+)
+def test_guardrail_enable_connector_refuses_proxy_beside_a_listed_hook_entry(
+    tmp_path: Path, hook: str, proxy: str
+) -> None:
+    """REVIEW-11: a disabled proxy entry is editable beside a hook primary, enabling it is not."""
+    result, before, after = _enable_command(
+        tmp_path,
+        f"  enabled: true\n  connector: {hook}\n  connectors:\n    {hook}: {{}}\n    {proxy}:\n      enabled: false\n",
+        "--connector", proxy,
+    )
+    assert result.exit_code != 0
+    assert "needs a proxy binding" in result.output
+    assert "Nothing was changed" in result.output
+    assert after == before
+
+
+def test_guardrail_enable_connector_hook_beside_hook_stays_allowed(tmp_path: Path) -> None:
+    """Benign twin: re-enabling a disabled hook connector beside a hook primary saves the flag."""
+    result, before, after = _enable_command(
+        tmp_path,
+        "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n    codex:\n      enabled: false\n",
+        "--connector", "codex",
+    )
+    assert result.exit_code == 0, result.output
+    assert after != before
+
+
+def test_guardrail_enable_connector_proxy_alone_stays_allowed(tmp_path: Path) -> None:
+    """Benign twin: a proxy with only its own disabled entry is enabled as before."""
+    result, before, after = _enable_command(
+        tmp_path,
+        "  enabled: true\n  connector: openclaw\n  connectors:\n    openclaw:\n      enabled: false\n",
+        "--connector", "openclaw",
+    )
+    assert result.exit_code == 0, result.output
+    assert after != before
+
+
+_BAD_ROSTER_OFF = "  enabled: false\n  model: test-model\n  connector: kiro\n  connectors:\n    kiro: {}\n    openclaw: {}\n"
+
+
+def test_global_guardrail_enable_refuses_a_proxy_beside_a_listed_hook_entry(tmp_path: Path) -> None:
+    result, before, after = _enable_command(tmp_path, _BAD_ROSTER_OFF)
+    assert result.exit_code != 0
+    assert "needs a proxy binding" in result.output
+    assert after == before
+
+
+def test_global_guardrail_enable_hook_roster_stays_allowed(tmp_path: Path) -> None:
+    result, before, after = _enable_command(
+        tmp_path, "  enabled: false\n  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert after != before
+
+
+def test_config_set_guardrail_enabled_true_refuses_the_same_unbootable_file(tmp_path: Path) -> None:
+    result, before, after = _root_config(tmp_path, _BAD_ROSTER_OFF, "set", "guardrail.enabled", "true")
+    assert result.exit_code != 0
+    assert "needs a proxy binding" in result.output
+    assert after == before
+
+
+@pytest.mark.parametrize("args", [["set", "guardrail.enabled", "false"], ["unset", "guardrail.enabled"]])
+def test_config_turning_the_guardrail_off_is_never_refused_for_the_roster(tmp_path: Path, args: list[str]) -> None:
+    """Benign twin: switching off (or back to the default) stays possible on a roster that was already there."""
+    result, before, after = _root_config(
+        tmp_path, "  enabled: true\n  connector: kiro\n  connectors:\n    kiro: {}\n    openclaw: {}\n", *args
+    )
+    assert result.exit_code == 0, result.output
+    assert after != before
+
+
+def test_config_set_guardrail_enabled_true_on_a_bootable_roster_stays_allowed(tmp_path: Path) -> None:
+    result, before, after = _root_config(
+        tmp_path, "  enabled: false\n  connector: kiro\n  connectors:\n    kiro: {}\n    codex: {}\n",
+        "set", "guardrail.enabled", "true",
     )
     assert result.exit_code == 0, result.output
     assert after != before

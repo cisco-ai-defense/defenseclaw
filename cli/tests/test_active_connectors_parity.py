@@ -49,7 +49,7 @@ def test_config_set_check_agrees_with_the_gateway_boot(case: dict, tmp_path: Pat
     path.write_bytes(candidate)
     refused = False
     try:
-        cmd_config._check_guardrail_connector_roster(str(path), candidate)
+        cmd_config.check_guardrail_connector_roster(str(path), candidate)
     except config_writer.ConfigWriteError:
         refused = True
     assert refused == (case["config_set"] == "refused")
