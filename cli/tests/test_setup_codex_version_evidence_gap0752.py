@@ -29,7 +29,6 @@ import pytest
 from defenseclaw.commands import cmd_setup
 from defenseclaw.inventory import agent_discovery as ad
 
-
 #: A cached peer version belongs to an executable that is there: a real file.
 _PEERS = Path(tempfile.mkdtemp(prefix="g752-setup-peers-"))
 atexit.register(shutil.rmtree, _PEERS, ignore_errors=True)
