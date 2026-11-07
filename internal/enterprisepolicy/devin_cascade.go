@@ -391,6 +391,11 @@ func (t devinCascadeTarget) RemoveOwned(opts Options) (State, error) {
 	state := State{Connector: ConnectorDevinCascade, Route: RouteMachinePolicy, Paths: []string{files[0].path, files[1].path}}
 	var errs []error
 	for _, file := range files {
+		if opts.linkKept(file.path) {
+			// A link sits on this file's folder (GAP-0758): nothing is read
+			// through it. The other folder's entry is removed as usual.
+			continue
+		}
 		errs = append(errs, restoreOrStrip(opts, file.record, file.path, stripDevinCascadeHooks(opts), false, &state))
 	}
 	return state, errors.Join(errs...)

@@ -216,3 +216,90 @@ func TestWindowsGoOwnedRemovalKeepsOrClearsALinkAndCreatesNothing(t *testing.T) 
 		}
 	}
 }
+
+// GAP-0758 review S2: Devin Cascade has two policy files in two folders
+// (ProgramData\Devin and the legacy ProgramData\Windsurf). An administrator
+// link at one of them keeps that folder alone: nothing is read through the link
+// and its target is unchanged, while DefenseClaw's entry in the other folder
+// is still removed, so a Cascade registration does not keep refusing after the
+// uninstall.
+func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
+	for _, linked := range []string{"Devin", "Windsurf"} {
+		t.Run(linked+" linked", func(t *testing.T) {
+			opts := windowsOpenCodeTestOptions(t)
+			if _, err := (devinCascadeTarget{}).Reconcile(opts); err != nil {
+				t.Fatalf("publish DefenseClaw's Cascade entries: %v", err)
+			}
+			devinPath, err := DevinSystemHooksPath(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			windsurfPath, err := devinCascadeLegacyHooksPath(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			owned := func(path string) bool {
+				t.Helper()
+				data, err := os.ReadFile(path)
+				if os.IsNotExist(err) {
+					return false
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, has, err := stripDevinCascadeHooks(opts)(data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return has
+			}
+			if !owned(devinPath) || !owned(windsurfPath) {
+				t.Fatalf("test setup: DefenseClaw's entry is missing (Devin %t, Windsurf %t)", owned(devinPath), owned(windsurfPath))
+			}
+			linkedPath, otherPath := devinPath, windsurfPath
+			if linked == "Windsurf" {
+				linkedPath, otherPath = windsurfPath, devinPath
+			}
+			linkFolder := filepath.Dir(linkedPath)
+			content, err := os.ReadFile(linkedPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The folder becomes an administrator junction to a target that
+			// holds a file with DefenseClaw's own entry.
+			if err := os.Rename(linkFolder, linkFolder+".moved"); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(filepath.Dir(opts.WindowsProgramData), "devin-link-target")
+			userCreatedDir(t, target)
+			if err := os.WriteFile(filepath.Join(target, "hooks.json"), content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if out, err := exec.Command("cmd", "/c", "mklink", "/J", linkFolder, target).CombinedOutput(); err != nil {
+				t.Skipf("mklink /J unavailable: %v %s", err, out)
+			}
+			ownAs(t, linkFolder, wellKnownSID(t, windows.WinBuiltinAdministratorsSid))
+			before := treeDigest(t, target)
+
+			result, err := RemoveWindowsGoOwned(opts)
+			if err != nil {
+				t.Fatalf("a link at %s must not fail the removal: %v", linkFolder, err)
+			}
+			if owned(otherPath) {
+				t.Fatalf("DefenseClaw's entry at %s was left behind a link at %s", otherPath, linkFolder)
+			}
+			if _, err := os.Lstat(linkFolder); err != nil {
+				t.Fatalf("the administrator link must stay: %v", err)
+			}
+			if after := treeDigest(t, target); after != before {
+				t.Fatalf("the link target changed:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+			if kept := WindowsGoOwnedLinkedFolders(opts); len(kept) != 1 || !strings.EqualFold(kept[0], linkFolder) {
+				t.Fatalf("the kept link must be named once: %v", kept)
+			}
+			if len(result.States) == 0 {
+				t.Fatal("the removal must say what it did")
+			}
+		})
+	}
+}

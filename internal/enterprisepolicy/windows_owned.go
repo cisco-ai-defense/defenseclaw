@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -161,7 +162,7 @@ func RemoveWindowsSecureClientCopilot(opts Options) (State, error) {
 // file a standard user left in Copilot's policy.d is moved aside too.
 func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) error {
 	paths, err := target.Paths(opts)
-	if err != nil || len(paths) == 0 {
+	if err != nil || len(paths) == 0 || opts.linkKept(paths[0]) {
 		return nil
 	}
 	var state State
@@ -174,20 +175,25 @@ func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) error {
 	return nil
 }
 
-// keepLinkedGoOwnedForRemoval clears a link a standard user planted on the
-// policy paths of target (the link only; what it points at is untouched) and
-// reports true, with the reason in the details, when a link an administrator
-// owns, or one it could not remove, stays: the removal then reads nothing
-// through it, and the path is named (WindowsGoOwnedLinkedFolders).
-func keepLinkedGoOwnedForRemoval(opts Options, target Target) (bool, State) {
-	state := State{Connector: target.Name(), Route: RouteMachinePolicy}
+// keepLinkedGoOwnedForRemoval looks at every policy path of target. It clears
+// a link a standard user planted (the link only; what it points at is
+// untouched), and returns the paths on which a link an administrator owns, or
+// one it could not remove, stays, with the reason in the state's details:
+// the removal then reads nothing through those paths, and they are named
+// (WindowsGoOwnedLinkedFolders). Each path is decided on its own, so a link
+// at one of Devin's two folders keeps that folder alone. cleared reports that
+// a planted link was removed.
+func keepLinkedGoOwnedForRemoval(opts Options, target Target) (kept map[string]bool, cleared bool, state State) {
+	state = State{Connector: target.Name(), Route: RouteMachinePolicy}
 	paths, err := target.Paths(opts)
 	if err != nil {
-		return false, state
+		return nil, false, state
 	}
 	for _, path := range paths {
+		before := len(state.Details)
 		link, why := clearOrKeepLinkedPolicyPath(opts, platformPath(opts, path), &state)
 		if link == "" {
+			cleared = cleared || len(state.Details) > before
 			continue
 		}
 		state.detail("kept %s: %s", link, why)
@@ -195,9 +201,21 @@ func keepLinkedGoOwnedForRemoval(opts Options, target Target) (bool, State) {
 			"path":   link,
 			"reason": why,
 		})
-		return true, state
+		if kept == nil {
+			kept = map[string]bool{}
+		}
+		kept[keptLinkKey(opts, path)] = true
 	}
-	return false, state
+	return kept, cleared, state
+}
+
+func keptLinkKey(opts Options, path string) string {
+	return strings.ToLower(platformPath(opts, path))
+}
+
+// linkKept reports whether RemoveWindowsGoOwned kept a link on path.
+func (o Options) linkKept(path string) bool {
+	return o.keptLinks[keptLinkKey(o, path)]
 }
 
 // WindowsGoOwnedLinkedFolders lists, sorted, the paths on the Go-owned
@@ -245,19 +263,23 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 		// A link on the target path is cleared or kept before anything is
 		// taken back, created or read (GAP-0758): the removal never fails on
 		// it and never creates a folder in its place.
-		if kept, linkState := keepLinkedGoOwnedForRemoval(opts, target); kept {
+		// Each path is decided on its own: a link at one path keeps that path
+		// only, and the target's entry at its other paths is still removed.
+		kept, cleared, linkState := keepLinkedGoOwnedForRemoval(opts, target)
+		if len(linkState.Details) > 0 {
 			result.States = append(result.States, linkState)
-			result.Changed = result.Changed || linkState.Changed
-			continue
-		} else if len(linkState.Details) > 0 {
-			result.States = append(result.States, linkState)
-			result.Changed = true
+			result.Changed = result.Changed || linkState.Changed || cleared
 		}
-		if err := takeBackWindowsGoOwnedForRemoval(opts, target); err != nil {
+		if paths, err := target.Paths(opts); err == nil && len(kept) != 0 && len(kept) == len(paths) {
+			continue
+		}
+		targetOpts := opts
+		targetOpts.keptLinks = kept
+		if err := takeBackWindowsGoOwnedForRemoval(targetOpts, target); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		state, err := removeTargetOwned(target, opts)
+		state, err := removeTargetOwned(target, targetOpts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		} else if name == ConnectorOpenCode {
