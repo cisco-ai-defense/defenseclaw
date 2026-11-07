@@ -165,7 +165,7 @@ def test_no_acl_and_an_nfs4_acl(monkeypatch) -> None:
     assert file_permissions.plugin_acl_refused("/x") is True
 
 
-# Review 1: a long recorded reason keeps the repair.
+# Review 1 and 2: a long recorded reason keeps the repair, whole or said to be left out.
 def test_a_long_recorded_reason_keeps_its_repair_whole() -> None:
     fix = 'icacls "C:\\Users\\lane\\.config\\opencode" /remove:g "HOST\\other"'
     reason = "validate plugin directory custody: " + "x" * 520 + f" (HOST\\other has write access there); fix: {fix}"
@@ -175,3 +175,123 @@ def test_a_long_recorded_reason_keeps_its_repair_whole() -> None:
     assert cmd_doctor._bounded_recorded_reason("short   reason\nhere") == "short reason here"
     long_without_fix = cmd_doctor._bounded_recorded_reason("y " * 400)
     assert len(long_without_fix) <= 401 and long_without_fix.endswith("…")
+
+
+def test_a_repair_of_a_dozen_deep_folders_is_not_cut() -> None:
+    steps = [f'icacls "C:\\Users\\lane\\{"deep-folder-" * 6}{n}" /remove:g "HOST\\other"' for n in range(12)]
+    fix = "; ".join(steps)
+    assert len(fix) > 1200
+    bounded = cmd_doctor._bounded_recorded_reason(f"validate plugin directory custody: refused; fix: {fix}")
+    assert bounded.endswith(f"; fix: {fix}")
+
+
+def test_a_repair_past_the_limit_is_left_out_and_said_so() -> None:
+    fix = "icacls " + "p" * 9000
+    bounded = cmd_doctor._bounded_recorded_reason(f"refused; fix: {fix}")
+    assert fix[:50] not in bounded and "too long for this row" in bounded and "gateway.log" in bounded
+
+
+# Review 2: the macOS rule is the gateway's, not a stricter one.
+def _darwin(monkeypatch, listing: str, *, standalone: bool = False, mode: str = "drwxr-xr-x+") -> None:
+    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path: (mode, listing))
+    monkeypatch.setattr(file_permissions, "_plugin_standalone_scope", lambda: standalone)
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        " 0: group:admin allow list,add_file,search,add_subdirectory,delete_child",
+        " 0: user:root allow write,append",
+        " 0: group:wheel allow delete_child",
+        " 0: user:other allow list,search,readattr",
+        " 0: user:other deny write,append",
+        " 0: user:other allow add_file,file_inherit,only_inherit",
+    ],
+)
+def test_macos_entries_the_gateway_accepts_are_not_refused(monkeypatch, listing: str) -> None:
+    _darwin(monkeypatch, listing)
+    assert file_permissions._plugin_darwin_acl_refused("/x") is False
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        " 0: user:other allow list,add_file,search",
+        " 0: group:everyone allow write",
+        " 0: user:root allow read\n 1: user:other allow delete_child",
+        " 0: user:other allow",
+    ],
+)
+def test_macos_write_entries_for_other_principals_are_refused(monkeypatch, listing: str) -> None:
+    _darwin(monkeypatch, listing)
+    assert file_permissions._plugin_darwin_acl_refused("/x") is True
+
+
+def test_the_standalone_profile_keeps_the_strict_macos_rule(monkeypatch) -> None:
+    listing = " 0: group:admin allow add_file,only_inherit"
+    _darwin(monkeypatch, listing, standalone=True)
+    assert file_permissions._plugin_darwin_acl_refused("/x") is True
+    _darwin(monkeypatch, listing, standalone=False)
+    assert file_permissions._plugin_darwin_acl_refused("/x") is False
+
+
+def test_a_macos_acl_that_cannot_be_read_is_refused(monkeypatch) -> None:
+    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path: ("", ""))
+    assert file_permissions._plugin_darwin_acl_refused("/x") is True
+    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path: ("drwxr-xr-x+", ""))
+    assert file_permissions._plugin_darwin_acl_refused("/x") is True
+    monkeypatch.setattr(file_permissions, "_darwin_acl_output", lambda _path: ("drwxr-xr-x", ""))
+    assert file_permissions._plugin_darwin_acl_refused("/x") is False
+
+
+# Review 2: every refused element gets its repair, and prose is never in the command.
+def test_a_link_below_an_open_folder_gets_the_chmod_and_the_replacement(tmp_path: Path) -> None:
+    config, opencode, _ = _tree(tmp_path, 0o777, 0o700)
+    link = config / "linked"
+    link.symlink_to(opencode)
+    unsafe = connector_paths.opencode_unsafe_plugin_paths([str(link / "plugins" / "defenseclaw.js")])
+    assert [str(found) for found in unsafe] == [os.path.realpath(config), str(link)]
+    assert _problems(unsafe, link) == ("link",) and "mode" in _problems(unsafe, Path(os.path.realpath(config)))
+    advice = connector_paths.opencode_custody_text(unsafe)
+    assert advice.command == f"chmod go-w {unsafe[0]}"
+    assert advice.manual.startswith(f"replace {link}")
+    assert advice.action == f"run `{advice.command}`, then {advice.manual}"
+    assert advice.remedy == advice.action
+
+
+def test_a_mode_repair_and_an_owner_repair_are_not_joined(tmp_path: Path, monkeypatch) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root-owned folders are trusted")
+    config, opencode, plugin = _tree(tmp_path, 0o775, 0o775)
+    monkeypatch.setattr(file_permissions, "_plugin_trusted_owner", lambda uid: uid == 0)
+    advice = connector_paths.opencode_custody_text(connector_paths.opencode_unsafe_plugin_paths([str(plugin)]))
+    assert advice.command.startswith("chmod go-w ") and "administrator" not in advice.command
+    assert "&&" not in advice.command and advice.manual.startswith("have an administrator give ")
+    assert advice.remedy == advice.action
+
+
+def test_a_command_alone_is_the_remedy(tmp_path: Path) -> None:
+    _, _, plugin = _tree(tmp_path, 0o775, 0o755)
+    advice = connector_paths.opencode_custody_text(connector_paths.opencode_unsafe_plugin_paths([str(plugin)]))
+    assert advice.manual == "" and advice.remedy == advice.command
+
+
+def test_a_link_the_gateway_accepts_does_not_hide_an_open_target(tmp_path: Path, monkeypatch) -> None:
+    real = tmp_path / "real"
+    (real / "opencode" / "plugins").mkdir(parents=True)
+    (real / "opencode").chmod(0o700)
+    (real / "opencode" / "plugins").chmod(0o700)
+    real.chmod(0o777)
+    link = tmp_path / "sys"
+    link.symlink_to(real)
+    plugin = link / "opencode" / "plugins" / "defenseclaw.js"
+    real_check = file_permissions.plugin_link_refused
+    monkeypatch.setattr(
+        file_permissions, "plugin_link_refused", lambda path, info, *, leaf: False if path == str(link) else real_check(path, info, leaf=leaf)
+    )
+    unsafe = connector_paths.opencode_unsafe_plugin_paths([str(plugin)])
+    assert [str(found) for found in unsafe] == [os.path.realpath(real)]
+    assert connector_paths.opencode_custody_text(unsafe).command == f"chmod go-w {os.path.realpath(real)}"
+    # A link the gateway refuses stays structural: its target is not judged.
+    monkeypatch.setattr(file_permissions, "plugin_link_refused", real_check)
+    assert [str(found) for found in connector_paths.opencode_unsafe_plugin_paths([str(plugin)])][-1] == str(link)

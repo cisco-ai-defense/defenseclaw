@@ -18,18 +18,32 @@ import (
 var ErrPluginFolderCustody = errors.New("plugin folder is writable by another account")
 
 // pluginCustodyError is cause (the first refusal the directory walk met) plus
-// every element the same walk refuses and the command that fixes them all.
+// every element the same walk refuses. fix is the shell command that repairs
+// what a command can repair (and nothing else); manual is what only a person
+// can do, as prose: replace a link, give a path back to this account.
 type pluginCustodyError struct {
 	cause   error
 	failing []string
 	fix     string
+	manual  string
 }
 
 func (e *pluginCustodyError) Error() string {
+	text := fmt.Sprintf("%v", e.cause)
 	if len(e.failing) > 1 {
-		return fmt.Sprintf("%v; every folder or file to fix, outermost first: %s; fix: %s", e.cause, strings.Join(e.failing, ", "), e.fix)
+		text += "; every folder or file to fix, outermost first: " + strings.Join(e.failing, ", ")
 	}
-	return fmt.Sprintf("%v; fix: %s", e.cause, e.fix)
+	if e.fix != "" {
+		text += "; fix: " + e.fix
+	}
+	if e.manual != "" {
+		if e.fix != "" {
+			text += "; then by hand: " + e.manual
+		} else {
+			text += "; by hand: " + e.manual
+		}
+	}
+	return text
 }
 
 func (e *pluginCustodyError) Unwrap() []error { return []error{e.cause, ErrPluginFolderCustody} }

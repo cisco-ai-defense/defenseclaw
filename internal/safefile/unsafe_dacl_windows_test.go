@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -107,10 +108,10 @@ func TestUnsafePrivateDACLErrorNamesTheFolderThatCarriesTheEntry(t *testing.T) {
 	if !errors.As(err, &refusal) {
 		t.Fatalf("err=%v, want an UnsafePrivateDACLError", err)
 	}
-	if refusal.Path != child || refusal.Carrier != parent || refusal.Deny || !strings.Contains(refusal.Trustee, "Everyone") {
+	if refusal.Path != child || !slices.Equal(refusal.Carriers, []string{parent}) || refusal.Deny || !strings.Contains(refusal.Trustee, "Everyone") {
 		t.Fatalf("refusal=%+v, want the entry of Everyone carried by %s", refusal, parent)
 	}
-	if !strings.Contains(err.Error(), "private path DACL is unsafe to repair: "+child) || !strings.Contains(err.Error(), parent) {
+	if !strings.Contains(err.Error(), "private path DACL is unsafe to repair: "+child) || !strings.Contains(err.Error(), "inherited from "+parent) {
 		t.Fatalf("message lost the refused path or the carrier: %v", err)
 	}
 
@@ -134,58 +135,106 @@ func TestUnsafePrivateDACLCarrierFollowsTheRefusedEntryNotAnyEntryOfTheAccount(t
 		t.Fatal(err)
 	}
 	ownWindowsTestPath(t, top)
-	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	grant := func(path string, access windows.ACCESS_MASK, protected bool) {
-		t.Helper()
-		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-		if err != nil {
-			t.Fatal(err)
-		}
-		old, _, err := sd.DACL()
-		if err != nil {
-			t.Fatal(err)
-		}
-		acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
-			AccessPermissions: access,
-			AccessMode:        windows.GRANT_ACCESS,
-			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-			Trustee: windows.TRUSTEE{
-				TrusteeForm:  windows.TRUSTEE_IS_SID,
-				TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
-				TrusteeValue: windows.TrusteeValueFromSID(everyone),
-			},
-		}}, old)
-		if err != nil {
-			t.Fatal(err)
-		}
-		info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
-		if protected {
-			info = windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
-		}
-		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, acl, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	grant(top, windows.GENERIC_ALL, true)
+	grantEveryone(t, top, windows.GENERIC_ALL, true)
 	middle := filepath.Join(top, "middle")
 	if err := os.Mkdir(middle, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	grant(middle, windows.FILE_GENERIC_READ, false)
+	grantEveryone(t, middle, windows.FILE_GENERIC_READ, false)
 	child := filepath.Join(middle, "plugins")
 	if err := os.Mkdir(child, 0o700); err != nil {
 		t.Fatal(err)
 	}
 
-	err = ValidatePrivateDirectoryOwnershipAllowingAdministrators(child)
+	err := ValidatePrivateDirectoryOwnershipAllowingAdministrators(child)
 	var refusal *UnsafePrivateDACLError
 	if !errors.As(err, &refusal) {
 		t.Fatalf("err=%v, want an UnsafePrivateDACLError", err)
 	}
-	if refusal.Carrier != top {
-		t.Fatalf("carrier=%q, want %q (the folder holding the write entry itself)", refusal.Carrier, top)
+	if !slices.Equal(refusal.Carriers, []string{top}) {
+		t.Fatalf("carriers=%q, want %q (the folder holding the write entry itself)", refusal.Carriers, []string{top})
+	}
+}
+
+// Two folders can each grant the same account inheritable write: the child
+// inherits both, so naming the nearer one alone leaves the refusal in place
+// (review 2 of GAP-0731). Every folder that holds an entry of its own for the
+// account is named, outermost first.
+func TestUnsafePrivateDACLCarriersNameEveryFolderThatGrantsTheEntry(t *testing.T) {
+	top := filepath.Join(t.TempDir(), "top")
+	if err := os.Mkdir(top, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ownWindowsTestPath(t, top)
+	grantEveryone(t, top, windows.GENERIC_ALL, true)
+	middle := filepath.Join(top, "middle")
+	if err := os.Mkdir(middle, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	grantEveryone(t, middle, windows.GENERIC_ALL, false)
+	child := filepath.Join(middle, "plugins")
+	if err := os.Mkdir(child, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ValidatePrivateDirectoryOwnershipAllowingAdministrators(child)
+	var refusal *UnsafePrivateDACLError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("err=%v, want an UnsafePrivateDACLError", err)
+	}
+	if len(refusal.Carriers) == 0 || refusal.Carriers[0] != top {
+		t.Fatalf("carriers=%q, want the outermost grant %q first", refusal.Carriers, top)
+	}
+	// The set is exactly the folders that hold the refused entry as their own.
+	why := &daclRefusal{sid: mustWorldSID(t), inherited: true}
+	for _, folder := range []string{top, middle} {
+		explicit, _ := daclRefusedEntryOf(folder, why, 0)
+		if explicit != slices.Contains(refusal.Carriers, folder) {
+			t.Fatalf("folder %s: holds an entry of its own=%v, named=%v (carriers %q)", folder, explicit, slices.Contains(refusal.Carriers, folder), refusal.Carriers)
+		}
+	}
+}
+
+func mustWorldSID(t *testing.T) *windows.SID {
+	t.Helper()
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return everyone
+}
+
+// grantEveryone adds an allow entry for Everyone on path that folders and files
+// below inherit. A protected DACL stops inheriting from the parent.
+func grantEveryone(t *testing.T, path string, access windows.ACCESS_MASK, protected bool) {
+	t.Helper()
+	everyone := mustWorldSID(t)
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+		AccessPermissions: access,
+		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+			TrusteeValue: windows.TrusteeValueFromSID(everyone),
+		},
+	}}, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
+	if protected {
+		info = windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
 	}
 }
