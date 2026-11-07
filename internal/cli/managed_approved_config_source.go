@@ -273,7 +273,7 @@ func unprovenApprovedConfigSourceForHandEdit(installDir, configPath string) erro
 	if err != nil || !configwrite.IsHandEditActor(state.Actor) {
 		return nil
 	}
-	if managedApprovedConfigProven(installDir, state.Generation) {
+	if managedApprovedConfigProven(installDir, state) {
 		return nil
 	}
 	return errors.New("config.yaml is recorded as a hand edit, and nothing proves that the approved config source " +
@@ -282,12 +282,18 @@ func unprovenApprovedConfigSourceForHandEdit(installDir, configPath string) erro
 
 // managedApprovedConfigProven reports whether the approved copy, the digest
 // deployment.json records for it and the proof file all name one config, and
-// whether handEditGeneration, the generation that records config.yaml as a
-// hand edit, directly follows the generation the proof names. Any config
-// recorded in between (a lifecycle apply by a build that does not write the
-// proof) makes the gap larger and the proof stale. The PowerShell installer
-// makes the same check (Assert-DefenseClawApprovedConfigProven).
-func managedApprovedConfigProven(installDir string, handEditGeneration uint64) bool {
+// whether handEdit, the generation record that calls config.yaml a hand edit,
+// directly follows the generation the proof names and replaced
+// the very config the proof covers. Any config recorded in between (a
+// lifecycle apply by a build that does not write the proof) makes the gap
+// larger. The number alone is not enough: a generation record that was lost
+// starts its counter over, so a later config written after the reset can
+// carry the number that looks like the proof is current. The record links
+// each generation to the config digest it replaced (previous_config_sha256);
+// a hand edit that replaced another config, or a record with no readable
+// predecessor, leaves the proof stale. The PowerShell installer makes the
+// same check (Assert-DefenseClawApprovedConfigProven).
+func managedApprovedConfigProven(installDir string, handEdit configwrite.GenerationState) bool {
 	recordPath := filepath.Join(installDir, managedDeploymentRecordFile)
 	copyPath := filepath.Join(installDir, managedApprovedConfigFile)
 	for _, path := range []string{recordPath, copyPath} {
@@ -314,7 +320,9 @@ func managedApprovedConfigProven(installDir string, handEditGeneration uint64) b
 		return false
 	}
 	provenDigest, provenGeneration, ok := readManagedApprovedProof(filepath.Join(installDir, managedApprovedProofFile))
-	return ok && provenDigest == digest && handEditGeneration > provenGeneration && handEditGeneration-provenGeneration == 1
+	return ok && provenDigest == digest &&
+		handEdit.Generation > provenGeneration && handEdit.Generation-provenGeneration == 1 &&
+		strings.EqualFold(strings.TrimPrefix(handEdit.PreviousConfigSHA256, "sha256:"), digest)
 }
 
 func publishManagedApprovedConfigSource(installDir, configPath string, installed []byte, mode approvedPublishMode) (approvedPublishResult, error) {

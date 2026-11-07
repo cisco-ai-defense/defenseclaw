@@ -295,11 +295,15 @@ try {
         [IO.File]::WriteAllText($proofFile, $Json)
     }
     function Set-HandEditRecord {
-        param([string]$Text, [string]$Actor = 'hand-edit:unattributed', [string]$Proof = 'default')
+        param([string]$Text, [string]$Actor = 'hand-edit:unattributed', [string]$Proof = 'default', [string]$Previous = 'default')
         [IO.File]::WriteAllText($script:Layout.ConfigPath, $Text)
         $hash = (Get-FileHash -LiteralPath $script:Layout.ConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        # A record names the digest of the config it replaced (the approved
+        # config unless a case says otherwise; 'none' leaves the field out).
+        $link = if ($Previous -ceq 'none') { '' }
+        else { ',"previous_config_sha256":"' + $(if ($Previous -ceq 'default') { $record.config } else { $Previous }) + '"' }
         [IO.File]::WriteAllText($generationFile,
-            ('{"generation":7,"config_sha256":"' + $hash + '","actor":"' + $Actor + '"}'))
+            ('{"generation":7,"config_sha256":"' + $hash + '","actor":"' + $Actor + '"' + $link + '}'))
         if ($Proof -ceq 'default') {
             Set-ApprovedProof ('{"config_sha256":"' + $record.config + '","generation":6}')
         }
@@ -440,6 +444,35 @@ try {
         if ($script:Copies -ne $copiesBefore -or
             [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "config_version: 9`n# edited by hand`n") {
             throw "rollback restored the approved copy over a hand edit with $name"
+        }
+    }
+    # A generation record that restarted after the proof (it was lost, and a
+    # build that knows nothing of the proof applied another config) numbers the
+    # hand edit as directly after the proof, but the edit replaced another
+    # config, or no readable record: Repair and the rollback stop the same way.
+    $brokenLinks = [ordered]@{
+        'a hand edit that replaced another config' = ('0' * 64)
+        'a hand edit with no recorded predecessor' = 'none'
+        'a predecessor that is not a digest'      = 'not-a-digest'
+    }
+    foreach ($name in $brokenLinks.Keys) {
+        Set-HandEditRecord -Text "config_version: 9`n# edited by hand`n" -Previous $brokenLinks[$name]
+        $copiesBefore = $script:Copies
+        $refusal = ''
+        try {
+            Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+                -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig @{}
+        }
+        catch { $refusal = $_.Exception.Message }
+        if ($refusal -notlike ("*" + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>') + "*") -or
+            $script:Copies -ne $copiesBefore -or
+            [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "config_version: 9`n# edited by hand`n") {
+            throw "Repair restored the approved copy over $name"
+        }
+        Restore-DefenseClawApprovedConfigOverHandEdit -Layout $script:Layout -GatewayServiceName 'gateway'
+        if ($script:Copies -ne $copiesBefore -or
+            [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "config_version: 9`n# edited by hand`n") {
+            throw "rollback restored the approved copy over $name"
         }
     }
     # Benign twin: the proof of the generation directly before the hand edit
