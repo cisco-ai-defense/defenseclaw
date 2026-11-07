@@ -132,8 +132,14 @@ var hp3r3PreExisting = map[string]string{
 	"r3-allow-if-else-src":       "managed",
 }
 
+// hp3r3LimitOnly are rows past the statement cap whose protected target is a
+// variable the reader does not prove: the verdict is the evaluation limit
+// alone, an alert outside strict and a block in strict.
+var hp3r3LimitOnly = map[string]bool{"r3-cap-keylink-before-tee": true, "r3-cap-static-tee-after": true}
+
 func TestReviewHP3R3FourCell(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
+	strictFixture := f.strict(t)
 	if err := os.Symlink("../.ssh", filepath.Join(f.project, "sshlink")); err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +168,17 @@ func TestReviewHP3R3FourCell(t *testing.T) {
 			}
 			call.verdict, call.body = f.serve(call)
 			t.Logf("HP3R3ROW %s | %s | want %s", call.name, call.verdict, row.want)
+			if hp3r3LimitOnly[row.name] {
+				if call.verdict != "alert" {
+					t.Errorf("%s: verdict %s, want alert; body %.200s", call.name, call.verdict, call.body)
+				}
+				strictCall := *call
+				strictCall.verdict, strictCall.body = strictFixture.serve(&strictCall)
+				if strictCall.verdict != row.want {
+					t.Errorf("%s strict: verdict %s, want %s; body %.200s", call.name, strictCall.verdict, row.want, strictCall.body)
+				}
+				continue
+			}
 			if pre := hp3r3PreExisting[row.name]; pre == "all" || pre == "managed" && call.managed || pre == "peruser" && !call.managed {
 				if call.verdict != row.want {
 					t.Logf("HP3R3ROW %s: pre-existing (base 18d0d88333), logged", call.name)

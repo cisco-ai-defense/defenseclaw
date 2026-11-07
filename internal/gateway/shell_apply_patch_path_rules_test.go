@@ -67,7 +67,10 @@ func TestShellHeredocApplyPatchPathRules(t *testing.T) {
 					name, target, rule           string
 					strict, balanced, permissive string
 				}{
-					{"shell profile", "{H}/.zshrc", "persistence.shell_profile_write", "block", "alert", "allow"},
+					// rel-1-0-6:GAP-0675: a shell call that runs apply_patch is a shell
+					// command, so its startup file write is at least an alert in every
+					// pack (the permissive pack used to allow it without a trace).
+					{"shell profile", "{H}/.zshrc", "persistence.shell_profile_write", "block", "alert", "alert"},
 					{"sudoers", "/etc/sudoers", "PATH-ETC-SUDOERS", "block", "alert", "alert"},
 					{"project file", "{P}/src/main.go", "", "allow", "allow", "allow"},
 				} {
