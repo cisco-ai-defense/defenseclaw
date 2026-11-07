@@ -363,3 +363,120 @@ func TestConnectorPruneOrphansKeepsAConfiguredOrForeignOpenCodePlugin(t *testing
 		})
 	}
 }
+
+// setUpAntigravityRollbackFromNewer sets Antigravity up over pristine on a
+// newer install, moves that install aside as the saved data folder, and leaves
+// an empty data folder: the older install, rolled back without ever having
+// been initialized (no config.yaml, no connector state). It returns the
+// vendor file, the saved folder and the data folder.
+func setUpAntigravityRollbackFromNewer(t *testing.T, pristine []byte) (path, saved, dataDir string) {
+	t.Helper()
+	root := testenv.PrivateTempDir(t)
+	t.Setenv("HOME", root)
+	t.Setenv("USERPROFILE", root)
+	dataDir = filepath.Join(root, ".defenseclaw")
+	path = filepath.Join(root, ".gemini", "config", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := connector.AntigravityHooksPathOverride
+	connector.AntigravityHooksPathOverride = path
+	t.Cleanup(func() { connector.AntigravityHooksPathOverride = previous })
+	if err := os.WriteFile(path, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := connector.SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	if err := connector.NewAntigravityConnector().Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if installed, err := os.ReadFile(path); err != nil || !bytes.Contains(installed, []byte("defenseclaw-antigravity-")) {
+		t.Fatalf("setup file = %q, %v", installed, err)
+	}
+	saved = filepath.Join(root, "saved-newer-data")
+	if err := os.Rename(dataDir, saved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path, saved, dataDir
+}
+
+// A supported older install can be upgraded before it is initialized, so the
+// rolled-back data folder has no config.yaml. The saved newer install's
+// backup records still prove the exact vendor bytes: they are restored (GAP-0697).
+func TestConnectorPruneOrphansRestoresBackupWhenRolledBackInstallHasNoConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		pristine []byte
+		state    []string
+	}{
+		{"operator content, no state", []byte("{\n  \"operator\": \"keep\"\n}\n"), nil},
+		{"operator content, other connector active", []byte("{\n  \"operator\": \"keep\"\n}\n"), []string{"codex"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, tc.pristine)
+			defer withConnectorState(t, dataDir, "codex")()
+			if tc.state != nil {
+				if err := connector.SaveActiveConnectors(dataDir, tc.state); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg = nil
+			_, stderr, exitCode := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", saved)
+			after, err := os.ReadFile(path)
+			if err != nil || exitCode != 0 || !bytes.Equal(after, tc.pristine) {
+				t.Fatalf("rollback exit=%d stderr=%q vendor file=%q, read=%v; want %q", exitCode, stderr, after, err, tc.pristine)
+			}
+		})
+	}
+}
+
+// The benign twins: with no saved backup folder, or when the older install has
+// a config.yaml that does not load, nothing is removed on a guess; and an
+// Antigravity the older install still names keeps its registrations.
+func TestConnectorPruneOrphansWithoutConfigStillGuessesNothing(t *testing.T) {
+	pristine := []byte("{\n  \"operator\": \"keep\"\n}\n")
+	registered := func(t *testing.T, path string) {
+		t.Helper()
+		if data, err := os.ReadFile(path); err != nil || !bytes.Contains(data, []byte("defenseclaw-antigravity-")) {
+			t.Fatalf("registrations were touched: %q, %v", data, err)
+		}
+	}
+	t.Run("no saved backup folder", func(t *testing.T) {
+		path, _, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+		defer withConnectorState(t, dataDir, "codex")()
+		cfg = nil
+		_, stderr, _ := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir)
+		if !strings.Contains(stderr, "config.yaml is not loaded; nothing was removed") {
+			t.Fatalf("stderr = %q", stderr)
+		}
+		registered(t, path)
+	})
+	t.Run("config.yaml present but not loaded", func(t *testing.T) {
+		path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+		defer withConnectorState(t, dataDir, "codex")()
+		if err := os.WriteFile(filepath.Join(dataDir, "config.yaml"), []byte("::: not yaml\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg = nil
+		_, stderr, _ := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", saved)
+		if !strings.Contains(stderr, "config.yaml is not loaded; nothing was removed") {
+			t.Fatalf("stderr = %q", stderr)
+		}
+		registered(t, path)
+	})
+	t.Run("connector still named by the older install", func(t *testing.T) {
+		path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
+		defer withConnectorState(t, dataDir, "codex")()
+		if err := connector.SaveActiveConnectors(dataDir, []string{"antigravity"}); err != nil {
+			t.Fatal(err)
+		}
+		cfg = nil
+		_, stderr, exitCode := runConnectorCmd(t, "prune-orphans", "--data-dir", dataDir, "--rollback-backups-dir", saved)
+		if exitCode != 0 {
+			t.Fatalf("exit=%d stderr=%q", exitCode, stderr)
+		}
+		registered(t, path)
+	})
+}
