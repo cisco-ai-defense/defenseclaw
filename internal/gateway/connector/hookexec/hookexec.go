@@ -1396,10 +1396,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
-	if hookpaths.PatchEvidenceChanged(opts.Connector, hookDialect(opts), opts.Event, payload, opts.requestFacts.evidence()) {
+	if delivery == nil {
+		// The answer is complete: release the connection before the targets
+		// are read again, so the reading is the last step before the answer.
+		_ = resp.Body.Close()
+	}
+	if hookpaths.PatchTargetsChanged(opts.requestFacts.evidence()) {
 		// The gateway judged the patch targets the hook read before the
-		// request; one has changed since. Behind ProtectHome only this hook can
-		// read it again (GAP-0488, GAP-0073).
+		// request; one leads elsewhere now. Behind ProtectHome only this hook
+		// can read it again (GAP-0488, GAP-0073).
 		return failResponse(opts, sp, "closed", "a patch target changed after DefenseClaw reviewed it")
 	}
 	code := sp.decide(opts, body)
