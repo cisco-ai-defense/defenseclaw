@@ -626,6 +626,9 @@ export default function (api: DefenseClawPluginHost) {
       {
         tool: event.toolName,
         args: event.params,
+        // The gateway keys a block notice by this id, so the proxy can show
+        // the block on the model reply that follows it (GAP-0644).
+        tool_call_id: (event as { toolCallId?: string }).toolCallId,
       },
       ctx,
     );
