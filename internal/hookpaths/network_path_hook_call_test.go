@@ -217,8 +217,9 @@ func TestOneHookCallAnsweringShareAloneIsReadWithoutProtectedWrite(t *testing.T)
 }
 
 // The bound of a call holds: shares that do not answer cost it no more than
-// the full waits and the tail, and the share asked after that reads as
-// unknown at once.
+// two answer waits and the slack of a loaded test host (the full waits and the
+// tail of half a wait are inside it), and a share asked after that reads as
+// unknown at once. The bound is the one of review 1 and is not raised.
 func TestOneHookCallWaitIsBoundedAcrossDeadShares(t *testing.T) {
 	const shares = 6
 	release := make(chan struct{})
@@ -240,7 +241,7 @@ func TestOneHookCallWaitIsBoundedAcrossDeadShares(t *testing.T) {
 			t.Fatal("the share that does not answer answered")
 		}
 	}
-	bound := (networkShareCallShares*200+100)*time.Millisecond + 150*time.Millisecond
+	bound := networkShareCallShares*200*time.Millisecond + 150*time.Millisecond
 	if took := time.Since(start); took > bound {
 		t.Fatalf("%d shares that do not answer held the call %v, want at most %v", shares, took, bound)
 	}
