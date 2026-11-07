@@ -16,13 +16,10 @@ scripts/test-install-lifecycle.ps1. These checks pin what other code relies on.
 
 from __future__ import annotations
 
-import contextlib
-import functools
 import hashlib
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -43,486 +40,101 @@ POWERSHELL = shutil.which("powershell.exe") or shutil.which("pwsh.exe") or shuti
 _RUN_BOUND_AT_IMPORT = subprocess.run
 _POPEN_BOUND_AT_IMPORT = subprocess.Popen
 
-
 _POWERSHELL_NAMES = frozenset({"powershell", "powershell.exe", "pwsh", "pwsh.exe"})
-_ENV_NAMES = frozenset({"env", "env.exe"})
-# The options of env(1). A long option may be shortened to any unambiguous
-# prefix; --help and --version run no command.
-_ENV_SHORT_FLAGS = "i0vuCSa"
-_ENV_SHORT_WITH_A_VALUE = "uCSa"
-_ENV_LONG_WITH_A_VALUE = ("unset", "chdir", "split-string", "argv0")
-_ENV_LONG_WITHOUT_A_VALUE = (
-    "ignore-environment",
-    "null",
-    "debug",
-    "block-signal",
-    "default-signal",
-    "ignore-signal",
-    "list-signal-handling",
-)
-_ENV_LONG_THAT_RUN_NOTHING = ("help", "version")
-_ENV_LONG = _ENV_LONG_WITH_A_VALUE + _ENV_LONG_WITHOUT_A_VALUE + _ENV_LONG_THAT_RUN_NOTHING
-# No word left to run: told apart from a word that is the None object, which
-# is what a test launches when it builds [POWERSHELL, ...] without PowerShell.
-_NO_COMMAND = object()
-# A shell command string that is only words: names, paths, options and
-# NAME=VALUE, separated by blanks. No quote, escape, expansion, redirection,
-# list, pipe, grouping or comment: the shell has nothing to do but run it.
-_SHELL_PLAIN_COMMAND = re.compile(r"[A-Za-z0-9_./:@+=,-]+(?:[ \t]+[A-Za-z0-9_./:@+=,-]+)*")
+# The status a shell, env and exec(3) wrappers report for a command they cannot find.
+_COMMAND_NOT_FOUND = 127
 
 
-def _base_name(word) -> str:  # type: ignore[no-untyped-def]
-    return re.split(r"[\\/]", str(os.fspath(word)))[-1].lower()
-
-
-_ENV_SPLIT_SPACE = " \t\n\v\f\r"
-_ENV_SPLIT_CONTROL = {"f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
-_ENV_SPLIT_UNQUOTED_ESCAPES = "\\$\"'#"
-_ENV_SPLIT_QUOTED_ESCAPES = "\\$\""
-_ENV_VARIABLE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
-
-def _env_split_string(text: str, environ) -> list[str] | None:  # type: ignore[no-untyped-def]
-    # The words env(1) makes of the string of -S / --split-string, following
-    # the grammar coreutils documents: blanks separate words, '...' and "..."
-    # quote, a backslash starts one of a fixed set of escapes (\c ends the
-    # string, \_ is a separator outside quotes and a blank inside), ${NAME}
-    # takes NAME from the environment env itself started with, and a '#' that
-    # opens a word starts a comment. None when env refuses the string (an
-    # unknown escape, an unbraced $NAME, an unclosed quote), in which case it
-    # runs nothing.
-    words: list[str] = []
-    word: list[str] = []
-    open_word, quote, i = False, "", 0
-
-    def end_word() -> None:
-        nonlocal word, open_word
-        if open_word:
-            words.append("".join(word))
-        word, open_word = [], False
-
-    while i < len(text):
-        char, i = text[i], i + 1
-        if char == "\\":
-            if i == len(text):
-                return None
-            char, i = text[i], i + 1
-            if char == "c":
-                if quote == '"':
-                    return None
-                break
-            if quote == "'":
-                word.append(char if char in "\\'" else "\\" + char)
-            elif char == "_":
-                if quote:
-                    word.append(" ")
-                else:
-                    end_word()
-                    continue
-            elif char in _ENV_SPLIT_CONTROL:
-                word.append(_ENV_SPLIT_CONTROL[char])
-            elif char in (_ENV_SPLIT_QUOTED_ESCAPES if quote else _ENV_SPLIT_UNQUOTED_ESCAPES):
-                word.append(char)
-            else:
-                return None
-            open_word = True
-        elif quote and char == quote:
-            quote = ""
-        elif quote == "'":
-            word.append(char)
-        elif char == "$":
-            if text[i : i + 1] != "{" or text.find("}", i) < 0:
-                return None
-            name = text[i + 1 : text.index("}", i)]
-            if not _ENV_VARIABLE.fullmatch(name):
-                return None
-            word.append(environ.get(name, ""))
-            open_word, i = True, text.index("}", i) + 1
-        elif quote:
-            word.append(char)
-        elif char in _ENV_SPLIT_SPACE:
-            end_word()
-        elif char == "#" and not open_word:
-            break
-        elif char in "'\"":
-            quote, open_word = char, True
-        else:
-            word.append(char)
-            open_word = True
-    if quote:
-        return None
-    end_word()
-    return words
-
-
-# Non-empty while a launch is meant to reach the operating system unjudged: env
-# being asked about an option, or the differential test running the real env.
-_GATE_OFF: list[str] = []
-
-
-@contextlib.contextmanager
-def _gate_off(reason: str):  # type: ignore[no-untyped-def]
-    _GATE_OFF.append(reason)
-    try:
-        yield
-    finally:
-        _GATE_OFF.pop()
-
-
-@functools.cache
-def _env_has_option(env_word: str, option: str, value: str) -> bool:
-    # Ask the env that will be launched whether it has an option: the set
-    # differs between releases (-a / --argv0 came with coreutils 9.5) and from
-    # BSD, and a launch that names an option env lacks runs nothing (status
-    # 125). Where env cannot be probed the option counts as known.
-    try:
-        with _gate_off("probing env"):
-            probe = subprocess.run(
-                [env_word, option, *([value] if value else []), "true"],
-                capture_output=True,
-                check=False,
-                timeout=30,
-                env={"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"},
-            )
-    except (OSError, subprocess.SubprocessError):
-        return True
-    return probe.returncode != 125
-
-
-_ENV_BASELINE_SHORT = "i0vuCS"
-_ENV_PROBE_VALUES = {"u": "X", "unset": "X", "a": "x", "argv0": "x", "C": ".", "chdir": ".", "S": "true", "split-string": "true"}
-
-
-def _after_env_options(env_word, words, environ, cwd) -> tuple:  # type: ignore[no-untyped-def]
-    # The words env(1) goes on to run, given its own name and the words that
-    # follow it: its options and NAME=VALUE assignments skipped, and the
-    # string of -S / --split-string split into words that are read as more env
-    # arguments. Empty when env runs nothing (no command, --help, --version,
-    # an option this env lacks or an option without its value, a split string
-    # env refuses, a name -u cannot unset, -0 given with a command). Returned with them is the
-    # environment env runs them in: the one it started with (which is where
-    # ${NAME} in a split string is read), cleared by -i / --ignore-environment
-    # / "-", minus every -u NAME, plus every NAME=VALUE, which is what the
-    # next env in a chain starts with, and the directory it runs them in: `cwd`
-    # (where env itself starts) or the one -C / --chdir names, relative to it
-    # (env changes directory once, to the last one given, just before it runs
-    # the command; a directory it cannot enter is a refusal).
-    words, i, options = list(words), 0, True
-    env_word = str(os.fspath(env_word))
-    cleared, null, unset, assigned, newdir = False, False, [], {}, None
-
-    def child_environment():  # type: ignore[no-untyped-def]
-        kept = {} if cleared else {k: v for k, v in environ.items() if k not in unset}
-        return {**kept, **assigned}
-
-    def run_in():  # type: ignore[no-untyped-def]
-        if newdir is None:
-            return cwd
-        target = os.path.realpath(os.path.join(cwd, newdir))
-        return target if newdir and _can_enter(target) else None
-
-    while i < len(words) and isinstance(words[i], str):
-        word = words[i]
-        i += 1
-        if options and word == "--":
-            options = False
-        elif options and word.startswith("--"):
-            name, has_value, value = word[2:].partition("=")
-            named = [n for n in _ENV_LONG if n == name] or [n for n in _ENV_LONG if n.startswith(name)]
-            if len(named) != 1 or named[0] in _ENV_LONG_THAT_RUN_NOTHING:
-                return [], environ, cwd
-            if not _env_has_option(env_word, "--" + named[0], _ENV_PROBE_VALUES.get(named[0], "")):
-                return [], environ, cwd
-            if named[0] in _ENV_LONG_WITH_A_VALUE:
-                if not has_value:
-                    if i >= len(words) or not isinstance(words[i], str):
-                        return [], environ, cwd
-                    value, i = words[i], i + 1
-                if named[0] == "split-string":
-                    parts = _env_split_string(value, environ)
-                    if parts is None:
-                        return [], environ, cwd
-                    words[i:i] = parts
-                elif named[0] == "unset":
-                    if not value or "=" in value:
-                        return [], environ, cwd
-                    unset.append(value)
-                elif named[0] == "chdir":
-                    newdir = value
-            elif named[0] == "ignore-environment":
-                cleared = True
-            elif named[0] == "null":
-                null = True
-        elif options and word == "-":
-            cleared = True
-        elif options and word.startswith("-"):
-            letters = word[1:]
-            for position, letter in enumerate(letters):
-                if letter not in _ENV_SHORT_FLAGS:
-                    return [], environ, cwd
-                if letter not in _ENV_BASELINE_SHORT and not _env_has_option(
-                    env_word, "-" + letter, _ENV_PROBE_VALUES.get(letter, "")
-                ):
-                    return [], environ, cwd
-                if letter == "i":
-                    cleared = True
-                elif letter == "0":
-                    null = True
-                if letter in _ENV_SHORT_WITH_A_VALUE:
-                    value = letters[position + 1 :]
-                    if not value:
-                        if i >= len(words) or not isinstance(words[i], str):
-                            return [], environ, cwd
-                        value, i = words[i], i + 1
-                    if letter == "S":
-                        parts = _env_split_string(value, environ)
-                        if parts is None:
-                            return [], environ, cwd
-                        words[i:i] = parts
-                    elif letter == "u":
-                        # unsetenv refuses an empty name and one holding "=".
-                        if not value or "=" in value:
-                            return [], environ, cwd
-                        unset.append(value)
-                    elif letter == "C":
-                        newdir = value
-                    break
-        elif "=" in word[1:]:
-            # env reads options only up to the first NAME=VALUE: a later word
-            # that looks like an option is the command it tries to run.
-            options = False
-            name, _, value = word.partition("=")
-            assigned[name] = value
-        else:
-            # -0 ends each line of the environment with a NUL, which has no
-            # place in front of a command: env refuses it.
-            directory = run_in()
-            return ([], environ, cwd) if null or directory is None else (words[i - 1 :], child_environment(), directory)
-    directory = run_in()
-    return (words[i:], child_environment(), directory) if directory is not None else ([], environ, cwd)
-
-
-def _command_word(args, kwargs):  # type: ignore[no-untyped-def]
-    # The word a launch runs, with the environment it runs in: the executable,
-    # or the first word of the argv or shell string, looking through `env`
-    # wrappers, which hand the command word to the operating system unchanged
-    # and look it up on the PATH of the environment they leave. _NO_COMMAND
-    # when nothing is run. With them comes the directory the command is looked
-    # up and run from: the launch's cwd (this process's directory when it names
-    # none) and every directory an env wrapper changes to on the way.
-    if isinstance(args, str) and kwargs.get("shell"):
-        # A shell runs the whole string, not its first words: `env pwsh ||
-        # exit 42` ends with the exit 42 and `pwsh || true` with the true. The
-        # outcome is established only for a plain command, words and nothing
-        # the shell reads; anything else is a launch of its own and its result
-        # is the test result.
-        # The shell is the one the launch names (executable) or /bin/sh; a plain
-        # string says nothing about what another shell does with it, so only the
-        # system shell is modelled.
-        shell = kwargs.get("executable")
-        if not _SHELL_PLAIN_COMMAND.fullmatch(args) or (
-            shell is not None
-            and not (os.name != "nt" and os.path.isabs(shell) and _is_system_program(shell, _SYSTEM_SHELL))
-        ):
-            return _NO_COMMAND, kwargs.get("env") or os.environ, os.curdir
-        words = args.split()
-    elif isinstance(args, str):
-        words = args.split()
+def _launch_words(args, kwargs) -> list:  # type: ignore[no-untyped-def]
+    # Every word a launch hands to the system: the executable, the argv, or the
+    # words of a shell string. Not a parse: the words are only looked at after
+    # the system has said the command was not found.
+    if isinstance(args, str):
+        words: list = [word for word in re.split(r"[\s;&|()<>\x27\"]+", args) if word]
     elif isinstance(args, (list, tuple)):
         words = list(args)
     else:
         words = [args]
-    if kwargs.get("executable") is not None and not kwargs.get("shell"):
-        words = [kwargs["executable"], *words[1:]]
-    # The environment env starts with is the one the launch passes, however
-    # small: an empty mapping is a real, empty environment. Each env in a chain
-    # hands the next the environment its own options and assignments left.
-    environ = kwargs["env"] if kwargs.get("env") is not None else os.environ
-    cwd = os.fsdecode(os.fspath(kwargs["cwd"])) if kwargs.get("cwd") is not None else os.curdir
-    if not _can_enter(cwd):
-        # Popen changes into cwd before it looks the program up and raises
-        # when it cannot: that is the launch failing, not the program missing.
-        return _NO_COMMAND, environ, cwd
-    while words:
-        if not isinstance(words[0], (str, os.PathLike)) or _base_name(words[0]) not in _ENV_NAMES:
-            return words[0], environ, cwd
-        if not _can_start(words[0], environ, cwd):
-            # The wrapper is the program the system starts here, and it does
-            # not start: the launch fails on it, before it reaches whatever
-            # the wrapper would have run. That failure belongs in the test
-            # result, so this is not a launch of a missing PowerShell.
-            return _NO_COMMAND, environ, cwd
-        words, environ, cwd = _after_env_options(words[0], words[1:], environ, cwd)
-    return _NO_COMMAND, environ, cwd
+    if kwargs.get("executable") is not None:
+        words.append(kwargs["executable"])
+    return words
 
 
-def _can_enter(directory) -> bool:  # type: ignore[no-untyped-def]
-    # Whether a process can change into `directory`: a directory that exists
-    # and can be searched. One that is missing, not a directory or closed to
-    # this user is a launch that fails, whatever program it names.
-    return os.path.isdir(directory) and os.access(directory, os.X_OK)
-
-
-def _may_exist(path: str) -> bool:
-    # Whether `path` is there for exec to try. Only the no-such-file answer
-    # (ENOENT, or ENOTDIR for a parent that is a file) means absent; exec skips
-    # those candidates and reports the program missing. A file that is not
-    # executable, a directory, a dangling link or a parent this user may not
-    # search are all present: starting them fails (EACCES, ELOOP), and that
-    # failure belongs in the test result, not in a skip that says PowerShell
-    # is not installed.
-    try:
-        os.lstat(path)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    except OSError:
-        return True
-    return True
-
-
-def _is_found_in(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
-    # Whether the operating system has `word` to try the way exec looks, from
-    # `cwd`, the directory the command starts in: a word with a separator is a
-    # path; a bare name is looked for on the PATH of the environment the
-    # command starts in (the default path where that environment has none; an
-    # empty entry is the current directory), not the PATH of this process, and
-    # not in the directory this process happens to be in. A relative path and
-    # a relative PATH entry both start at `cwd`. Present means present, not
-    # runnable (see _may_exist). Windows searches by its own rules, from this
-    # process directory.
-    word = os.fsdecode(os.fspath(word))
-    if os.name == "nt":
-        if os.path.isfile(word):
-            return True
-        return any(shutil.which(word, path=folder or os.curdir) for folder in os.get_exec_path(environ))
-    return any(_may_exist(path) for path in _exec_candidates(word, environ, cwd))
-
-
-def _exec_candidates(word: str, environ, cwd) -> list[str]:  # type: ignore[no-untyped-def]
-    # The paths exec tries, in order, for `word` started from `cwd`.
-    if os.sep in word:
-        return [os.path.join(cwd, word)]
-    return [os.path.join(cwd, folder or os.curdir, word) for folder in os.get_exec_path(environ)]
-
-
-# What starting a wrapper file did, by identity of the file: one spawn per file.
-_WRAPPER_RUNS: dict[tuple, str] = {}
-_WRAPPER_NOT_EXECUTED = "not executed"
-_WRAPPER_RAN = "ran the command"
-_WRAPPER_DID_NOT_RUN = "started, did not run the command"
-
-
-def _wrapper_start(path: str) -> str:
-    # What happens when the file at `path` is started as env and given a command
-    # to run. A mode bit proves nothing: the kernel refuses an executable script
-    # whose interpreter is absent and a file that is no executable image
-    # (_WRAPPER_NOT_EXECUTED, exec goes on to the next candidate), and a program
-    # named env may be started and exit before it reaches the command
-    # (_WRAPPER_DID_NOT_RUN, the one exec ran). Ask it to run a command that
-    # prints a marker, and take the marker as the proof it got there.
-    status = os.stat(path)
-    identity = (path, status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size, status.st_mode)
-    if identity not in _WRAPPER_RUNS:
-        marker = "wrapper-ran-the-command"
-        try:
-            with _gate_off("probing env"):
-                probe = subprocess.run(
-                    [path, sys.executable, "-c", f"print({marker!r})"],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=30,
-                    env={"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"},
-                )
-            ran = probe.returncode == 0 and probe.stdout.strip() == marker
-            _WRAPPER_RUNS[identity] = _WRAPPER_RAN if ran else _WRAPPER_DID_NOT_RUN
-        except OSError:
-            _WRAPPER_RUNS[identity] = _WRAPPER_NOT_EXECUTED
-        except subprocess.SubprocessError:
-            _WRAPPER_RUNS[identity] = _WRAPPER_DID_NOT_RUN
-    return _WRAPPER_RUNS[identity]
-
-
-# The files the gate models: the system env and the system shell. A program is
-# one of them by being the same file (same device and inode, through any link or
-# hard link), not by its name, its owner, the look of its image or what it
-# answers to a probe: a link named env that leads to another program (nice, for
-# one) is that program, and it is the test result.
-_SYSTEM_ENV = ("/usr/bin/env", "/bin/env")
-_SYSTEM_SHELL = ("/bin/sh",)
-
-
-def _is_system_program(path, system_paths) -> bool:  # type: ignore[no-untyped-def]
-    # Whether `path` is one of `system_paths`, the same file. Any other program,
-    # a script or a binary a test or a user put on the PATH, is a program of its
-    # own: what it does with the environment, the options or the command word
-    # is its own, the gate cannot predict it, and whatever it does is the test
-    # result.
-    for system in system_paths:
-        try:
-            if os.path.samefile(path, system):
-                return True
-        except OSError:
-            continue
-    return False
-
-
-def _can_start(word, environ, cwd) -> bool:  # type: ignore[no-untyped-def]
-    # Whether exec ends up running `word` as the system looks it up, as an env
-    # that reaches the command it is given. exec passes over a candidate that is
-    # absent, not executable or cannot be executed (an interpreter that is
-    # missing, no executable image) and tries the next, so a later good one
-    # still runs; the first candidate it can execute is the program that runs.
-    # That program is judged only when it is the system env and reaches the
-    # command; any other wrapper (a script, or a program that exits before the
-    # command) is not modelled, and whatever it does is the test result. With
-    # none, the launch fails (not found, permission denied, exec format
-    # error). Windows resolves a program by its own rules and has no env of its
-    # own; a wrapper there is taken to start, as before.
-    if os.name == "nt":
-        return True
-    word = os.fsdecode(os.fspath(word))
-    for path in _exec_candidates(word, environ, cwd):
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            result = _wrapper_start(path)
-            if result != _WRAPPER_NOT_EXECUTED:
-                return result == _WRAPPER_RAN and _is_system_program(path, _SYSTEM_ENV)
-    return False
-
-
-def _launches_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
+def _is_powershell_word(word) -> bool:  # type: ignore[no-untyped-def]
     # Where PowerShell is not installed POWERSHELL is None, so a test that
-    # builds [POWERSHELL, ...] launches None, and [str(POWERSHELL), ...]
-    # launches "None"; either may sit behind an `env` wrapper. A test that
-    # names the interpreter directly ("pwsh", "powershell.exe") launches a
-    # program that is not there. All three are the same missing interpreter.
-    # A launch that runs some other command, or none (`env --help`), is not.
-    if POWERSHELL is not None or _GATE_OFF:
-        return False
-    word, environ, cwd = _command_word(args, kwargs)
-    if word is _NO_COMMAND:
-        return False
-    if word is None or str(word) == "None":
+    # builds [POWERSHELL, ...] launches None and [str(POWERSHELL), ...] or an
+    # f-string launches "None". A test that names the interpreter directly
+    # ("pwsh", "powershell.exe") launches a program that is not there.
+    if word is None or word == "None":
         return True
     if not isinstance(word, (str, os.PathLike)):
         return False
-    return _base_name(word) in _POWERSHELL_NAMES and not _is_found_in(word, environ, cwd)
+    return re.split(r"[\\/]", os.fsdecode(os.fspath(word)))[-1].lower() in _POWERSHELL_NAMES
+
+
+def _is_present(word, folders: list[str], cwd: str) -> bool:
+    # Whether a runnable file named `word` is there: a path from the launch
+    # directory, or a bare name in one of the PATH folders.
+    word = os.fsdecode(os.fspath(word))
+    names = [word] if os.sep in word else [os.path.join(folder or os.curdir, word) for folder in folders]
+    return any(os.access(path, os.X_OK) and os.path.isfile(path) for path in (os.path.join(cwd, n) for n in names))
+
+
+def _names_a_missing_powershell(args, kwargs) -> bool:  # type: ignore[no-untyped-def]
+    # Whether the launch names PowerShell and no PowerShell is there to run: not
+    # on the PATH of the environment the launch passes, not in a PATH an env
+    # wrapper assigns, not at a path it gives. That is a diagnosis made after
+    # the system reports the command not found, never a prediction of what a
+    # launch does: a launch that runs, or fails some other way, is the result.
+    words = [word for word in _launch_words(args, kwargs) if _is_powershell_word(word)]
+    if not words:
+        return False
+    environ = kwargs["env"] if kwargs.get("env") is not None else os.environ
+    cwd = os.fsdecode(os.fspath(kwargs["cwd"])) if kwargs.get("cwd") is not None else os.curdir
+    folders = list(os.get_exec_path(environ))
+    for word in _launch_words(args, kwargs):
+        if isinstance(word, str) and word.startswith("PATH="):
+            folders += word[len("PATH=") :].split(os.pathsep)
+    return not any(word is not None and _is_present(word, folders, cwd) for word in words)
 
 
 def _skip_powershell_calls_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Gate the one place every launch passes through: subprocess.Popen
-    # construction. subprocess.run, check_output, check_call, a name bound to
-    # any of them before this runs, `from subprocess import Popen` and a Popen
-    # subclass all end in Popen.__init__, so none of those call shapes can
-    # reach a missing PowerShell and fail with a TypeError instead of skipping.
+    # Where PowerShell is not installed, skip a test at the moment its launch
+    # reaches PowerShell, and only then. Every launch passes through
+    # subprocess.Popen, so subprocess.run, check_output, check_call, a name
+    # bound to any of them before this runs, `from subprocess import Popen`
+    # and a Popen subclass are all covered. The launch is never predicted: it
+    # runs as the test wrote it, and its own result stands unless the system
+    # says the PowerShell program was not found (FileNotFoundError naming it,
+    # a TypeError for the None path, or exit 127 from env or a shell that
+    # could not find it). A launch that runs something else, is changed by its
+    # environment, exits some other way or names a shell of its own reaches
+    # the test with its real result.
     real_init = subprocess.Popen.__init__
 
     def init(self, args, *rest, **kwargs):  # type: ignore[no-untyped-def]
-        if _launches_a_missing_powershell(args, kwargs):
-            pytest.skip("PowerShell is not installed")
-        real_init(self, args, *rest, **kwargs)
+        self._dc_missing_powershell = _names_a_missing_powershell(args, kwargs)
+        try:
+            real_init(self, args, *rest, **kwargs)
+        except FileNotFoundError as error:
+            if _is_powershell_word(error.filename):
+                pytest.skip("PowerShell is not installed")
+            raise
+        except TypeError:
+            if args is None or (isinstance(args, (list, tuple)) and any(word is None for word in args)):
+                pytest.skip("PowerShell is not installed")
+            raise
 
     monkeypatch.setattr(subprocess.Popen, "__init__", init)
+    for name in ("wait", "poll", "communicate"):
+
+        def method(self, *rest, _real=getattr(subprocess.Popen, name), **kwargs):  # type: ignore[no-untyped-def]
+            result = _real(self, *rest, **kwargs)
+            if getattr(self, "_dc_missing_powershell", False) and self.returncode == _COMMAND_NOT_FOUND:
+                pytest.skip("PowerShell is not installed")
+            return result
+
+        monkeypatch.setattr(subprocess.Popen, name, method)
 
 
 @pytest.fixture(autouse=True)
@@ -5165,941 +4777,184 @@ def test_hook_fail_mode_refresh_runs_without_json_sidecar(tmp_path: Path) -> Non
         installed.unlink()
 
 
+_POSIX_LAUNCHES = pytest.mark.skipif(os.name == "nt", reason="env and sh launches are POSIX")
+
+
+def _without_powershell(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The gate as it runs where PowerShell is not installed, on any host.
+    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
+    _skip_powershell_calls_when_missing(monkeypatch)
+
+
+def _executable(path: Path, body: str) -> str:
+    path.write_text("#!/bin/sh\n" + body + "\n", encoding="utf-8")
+    path.chmod(0o755)
+    return str(path)
+
+
 def test_a_test_that_runs_powershell_is_skipped_where_it_is_not_installed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # GAP-0733: one test called the runner without the skipif its siblings
     # carry, so a host without PowerShell failed with a TypeError (the
     # interpreter path was None) instead of skipping. The gate is the runtime
-    # fixture above on Popen construction, so it covers every way a test can
-    # reach PowerShell: the runner, an alias of subprocess.run bound before the
+    # fixture above on Popen, so it covers every way a test can reach
+    # PowerShell: the runner, an alias of subprocess.run bound before the
     # fixture, subprocess.Popen directly or by alias, and the check_* helpers.
-    module = sys.modules[__name__]
-    env = shutil.which("env") or "/usr/bin/env"
-    monkeypatch.setattr(module, "POWERSHELL", None)
-    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
-    _skip_powershell_calls_when_missing(monkeypatch)
-    alias = _run_powershell
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    env = shutil.which("env")
+    _without_powershell(monkeypatch)
+    alone = {"env": {"PATH": str(empty)}}
     ps_args = ["-NoProfile", "-Command", "exit 0"]
-    for reach in (
+    reaches = [
         lambda: _run_powershell("exit 0"),
-        lambda: alias("exit 0"),
         lambda: subprocess.run([POWERSHELL, *ps_args], check=False),
-        lambda: subprocess.run([str(POWERSHELL), *ps_args], check=False),
+        lambda: subprocess.run([str(POWERSHELL), *ps_args], check=False, **alone),
         lambda: _RUN_BOUND_AT_IMPORT([POWERSHELL, *ps_args], check=False),
-        lambda: _RUN_BOUND_AT_IMPORT([str(POWERSHELL), *ps_args], check=False),
+        lambda: _RUN_BOUND_AT_IMPORT([str(POWERSHELL), *ps_args], check=False, **alone),
         lambda: subprocess.Popen([POWERSHELL, *ps_args]),
-        lambda: _POPEN_BOUND_AT_IMPORT([str(POWERSHELL), *ps_args]),
+        lambda: _POPEN_BOUND_AT_IMPORT([str(POWERSHELL), *ps_args], **alone),
         lambda: subprocess.check_output([POWERSHELL, *ps_args]),
-        lambda: subprocess.check_call([str(POWERSHELL), *ps_args]),
-        lambda: subprocess.run(f"{POWERSHELL} -NoProfile -Command exit", shell=True, check=False),
-        # The same missing interpreter behind an `env` wrapper, or named directly.
-        lambda: subprocess.run([env, POWERSHELL, *ps_args], check=False),
-        lambda: subprocess.run([env, str(POWERSHELL), *ps_args], check=False),
-        lambda: subprocess.run([env, "-i", "PATH=/usr/bin", POWERSHELL, *ps_args], check=False),
-        lambda: subprocess.run(["env", "-u", "HOME", POWERSHELL, *ps_args], check=False),
-        lambda: subprocess.run(["pwsh", *ps_args], check=False),
-        lambda: subprocess.run(["powershell.exe", *ps_args], check=False),
-        lambda: subprocess.Popen(["PWSH.EXE", *ps_args]),
-        lambda: subprocess.run("pwsh -NoProfile -Command exit", shell=True, check=False),
-    ):
+        lambda: subprocess.check_call([str(POWERSHELL), *ps_args], **alone),
+        lambda: subprocess.run(["pwsh", *ps_args], check=False, **alone),
+        lambda: subprocess.run(["powershell.exe", *ps_args], check=False, **alone),
+        lambda: subprocess.Popen(["PWSH.EXE", *ps_args], **alone),
+    ]
+    if os.name != "nt":
+        reaches += [
+            lambda: subprocess.run("pwsh -NoProfile -Command exit", shell=True, check=False, **alone),
+            lambda: subprocess.run(f"{POWERSHELL} -NoProfile -Command exit", shell=True, check=False, **alone),
+            lambda: subprocess.run("env pwsh", shell=True, check=False, **alone),
+        ]
+    if env:
+        # The same missing interpreter behind an `env` wrapper, or two of them.
+        reaches += [
+            lambda: subprocess.run([env, POWERSHELL, *ps_args], check=False),
+            lambda: subprocess.run([env, "pwsh", *ps_args], check=False, **alone),
+            lambda: subprocess.run([env, "-i", "PATH=/dc-no-such-folder", "pwsh"], check=False, **alone),
+            lambda: subprocess.run([env, env, "pwsh"], check=False, **alone),
+            lambda: subprocess.Popen([env, "pwsh"], **alone).wait(),
+            lambda: subprocess.Popen([env, "pwsh"], **alone).poll() or subprocess.Popen([env, "pwsh"], **alone).wait(),
+        ]
+    for reach in reaches:
         with pytest.raises(pytest.skip.Exception):
             reach()
-    # Benign twins: a command that is not PowerShell still runs through every
-    # one of those shapes.
+
+
+def test_a_launch_that_does_not_reach_a_missing_powershell_is_not_skipped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Benign twins of the skip above: a launch that is not the missing
+    # interpreter runs through every one of the same shapes, and a failure that
+    # is not a command-not-found is the test result.
+    _without_powershell(monkeypatch)
     python = [sys.executable, "-c", "pass"]
     assert subprocess.run(python, check=False).returncode == 0
     assert _RUN_BOUND_AT_IMPORT(python, check=False).returncode == 0
     assert _POPEN_BOUND_AT_IMPORT(python).wait() == 0
     assert subprocess.check_call(python) == 0
-    assert subprocess.check_output([sys.executable, "-c", "print('ok')"], text=True).strip() == "ok"
-    # ... including behind an `env` wrapper, and a word that merely contains
-    # a PowerShell name or the text "None" as an argument.
-    if os.path.isfile(env):
+    assert subprocess.check_output([sys.executable, "-c", "print(1)"], text=True).strip() == "1"
+    # A word that merely is a PowerShell name or the text "None", handed to a program that runs.
+    arg_twin = [sys.executable, "-c", "import sys; sys.exit(sys.argv[1:] != [\"None\", \"pwsh\"])", "None", "pwsh"]
+    assert subprocess.run(arg_twin, check=False).returncode == 0
+    # Exit 127 from a program that is not looking for PowerShell is a result.
+    assert subprocess.run([sys.executable, "-c", "raise SystemExit(127)"], check=False).returncode == 127
+    # A TypeError that is not the None interpreter path is a real error.
+    with pytest.raises(TypeError):
+        subprocess.run([sys.executable, 3], check=False)
+    # A program that does not exist, and a launch directory that does not, fail as they do.
+    with pytest.raises(FileNotFoundError):
+        subprocess.run([str(tmp_path / "no-such-program")], check=False)
+    with pytest.raises(FileNotFoundError):
+        subprocess.run(python, cwd=str(tmp_path / "no-such-folder"), check=False)
+    env = shutil.which("env")
+    if env:
         assert subprocess.run([env, sys.executable, "-c", "pass"], check=False).returncode == 0
         assert subprocess.run([env, "A=1", sys.executable, "-c", "pass"], check=False).returncode == 0
-    arg_twin = [sys.executable, "-c", "import sys; sys.exit(sys.argv[1:] != ['None', 'pwsh'])", "None", "pwsh"]
-    assert subprocess.run(arg_twin, check=False).returncode == 0
+        assert subprocess.run([env, "--help"], capture_output=True, check=False).returncode == 0
+        assert subprocess.run([env, "-i"], capture_output=True, check=False).returncode == 0
 
 
-_ORDINARY_ENV_LAUNCHES = [
-    ["env"],
-    ["env", "--help"],
-    ["env", "--version"],
-    ["env", "-i"],
-    ["env", "-0"],
-    ["env", "-"],
-    ["env", "A=1", "python3", "-c", "pass"],
-    ["env", "-u", "HOME", "python3"],
-    ["env", "--", "python3"],
-    ["env", "-S", "python3 -c pass"],
-    ["env", "-iS", "python3 -c pass"],
-    ["env", "--split-string=python3 -c pass"],
-    ["env", "--split=python3 -c pass"],
-    ["env", "-S", "env -i python3 -c pass"],
-    ["/usr/bin/env", "--unset=HOME", "--chdir=/tmp", "python3"],
-    ["env", "python3", "pwsh", "None"],
-    ["env", "-S", 'python3 -c "print(1)" None pwsh'],
-    ["env", "-S", "python3 #pwsh"],
-    ["env", "-S", "python3 'p\\wsh'"],
-    ["env", "-S", "python3 \\c pwsh"],
-    ["env", "-S", "${DC_PROBE_UNSET} python3"],
-    # An outer env that clears, unsets or overrides the variable hands the inner
-    # env an environment in which ${DC_PROBE} is not PowerShell.
-    ["env", "-i", "env", "-S", "${DC_PROBE}"],
-    ["env", "-", "env", "-S", "${DC_PROBE}"],
-    ["env", "--ignore-environment", "env", "-S", "${DC_PROBE}"],
-    ["env", "-u", "DC_PROBE", "env", "-S", "${DC_PROBE}"],
-    ["env", "-uDC_PROBE", "env", "-S", "${DC_PROBE}"],
-    ["env", "--unset=DC_PROBE", "env", "-S", "${DC_PROBE}"],
-    ["env", "DC_PROBE=true", "env", "-S", "${DC_PROBE}"],
-    ["env", "-S", "-i env -S \\${DC_PROBE}"],
-    ["env", "-i", "DC_PROBE=pwsh", "env", "-u", "DC_PROBE", "env", "-S", "${DC_PROBE}"],
-    ["env", "DC_PROBE=pwsh", "env", "-i", "env", "-S", "${DC_PROBE}"],
-]
-# env refuses these before it launches anything (status 125), so no PowerShell
-# is started; a test that launches one fails on its own terms.
-_ENV_LAUNCHES_THAT_RUN_NOTHING = [
-    ["env", "-S", "p\\wsh"],
-    ["env", "-S", "pwsh\\"],
-    ["env", "-S", "$DC_PROBE"],
-    ["env", "-S", "${DC_PROBE"],
-    ["env", "-S", "'pwsh"],
-    ["env", "-S", 'pwsh "x\\cy"'],
-    ["env", "--no-such-option", "pwsh"],
-    ["env", "-Z", "pwsh"],
-    ["env", "-S", "# pwsh"],
-    ["env", "-u", "A=B", "pwsh"],
-    ["env", "-u", "", "pwsh"],
-    ["env", "--unset=A=B", "pwsh"],
-    ["env", "-0", "pwsh"],
-    ["env", "--null", "pwsh"],
-    ["env", "-i0", "pwsh"],
-    ["env", "-0", "A=1", "pwsh"],
-    ["env", "-0", "env", "pwsh"],
-]
-_MISSING_POWERSHELL_ENV_LAUNCHES = [
-    ["env", "pwsh"],
-    ["env", "-i", "PATH=/usr/bin", "pwsh.exe"],
-    ["env", "-S", "pwsh -NoProfile"],
-    ["env", "--split-string=pwsh -NoProfile"],
-    ["env", "--split=pwsh -NoProfile"],
-    ["env", "-iS", "powershell.exe -NoProfile"],
-    ["env", "-S", "A=1 pwsh -c x"],
-    ["env", "-S", "-u HOME pwsh"],
-    ["env", "-S", "env -i pwsh"],
-    ["env", "-uHOME", "pwsh"],
-    ["env", "--", "pwsh"],
-    ["/usr/bin/env", "env", "-i", "pwsh"],
-    ["env", None],
-    ["env", "-i", "None"],
-    ["env", "-S", "None -NoProfile"],
-    ["env", "-S", "pwsh\\c"],
-    ["env", "-S", "pwsh\\c -x ignored"],
-    ["env", "-S", "${DC_PROBE}"],
-    ["env", "-S", "${DC_PROBE} -NoProfile"],
-    ["env", "-S", "'pwsh' -c x"],
-    ["env", "-S", '"pwsh" -c x'],
-    ["env", "-S", "pwsh\\_-c\\_x"],
-    # The environment an outer env passes on decides what ${DC_PROBE} is.
-    ["env", "DC_PROBE=pwsh", "env", "-S", "${DC_PROBE}"],
-    ["env", "-i", "DC_PROBE=pwsh", "env", "-S", "${DC_PROBE}"],
-    ["env", "-u", "HOME", "env", "-S", "${DC_PROBE}"],
-    ["env", "-S", "DC_PROBE=pwsh env -S ${DC_PROBE}"],
-    ["env", "-S", "-i env -S ${DC_PROBE}"],
-    ["env", "-i", "env", "DC_PROBE=pwsh", "env", "-S", "${DC_PROBE}"],
-    ["env", "DC_PROBE=true", "env", "-u", "DC_PROBE", "DC_PROBE=pwsh", "env", "-S", "${DC_PROBE}"],
-]
-
-
-@pytest.mark.parametrize("argv", _ORDINARY_ENV_LAUNCHES, ids=[" ".join(map(str, a)) for a in _ORDINARY_ENV_LAUNCHES])
-def test_an_ordinary_env_launch_is_not_taken_for_a_missing_powershell(
-    monkeypatch: pytest.MonkeyPatch, argv: list
+@_POSIX_LAUNCHES
+def test_a_runnable_powershell_on_the_launch_path_is_the_test_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
-    monkeypatch.setenv("DC_PROBE", "pwsh")
-    assert not _launches_a_missing_powershell(argv, {})
-
-
-@pytest.mark.parametrize(
-    "argv",
-    _MISSING_POWERSHELL_ENV_LAUNCHES,
-    ids=[" ".join(map(str, a)) for a in _MISSING_POWERSHELL_ENV_LAUNCHES],
-)
-def test_an_env_launch_of_a_missing_powershell_is_recognized_in_every_form(
-    monkeypatch: pytest.MonkeyPatch, argv: list
-) -> None:
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
-    monkeypatch.setenv("DC_PROBE", "pwsh")
-    assert _launches_a_missing_powershell(argv, {})
-
-
-@pytest.mark.parametrize(
-    "argv",
-    _ENV_LAUNCHES_THAT_RUN_NOTHING,
-    ids=[" ".join(map(str, a)) for a in _ENV_LAUNCHES_THAT_RUN_NOTHING],
-)
-def test_an_env_launch_that_env_refuses_is_not_taken_for_a_missing_powershell(
-    monkeypatch: pytest.MonkeyPatch, argv: list
-) -> None:
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
-    monkeypatch.setenv("DC_PROBE", "pwsh")
-    assert not _launches_a_missing_powershell(argv, {})
-
-
-_ENV_NOT_FOUND = re.compile(r"^(?:\S*/)?env: '(?P<name>[^']*)': No such file or directory$", re.MULTILINE)
-# Forms where status 127 belongs to a different missing command, an option-like
-# word env takes for the command, and the environments the child starts with.
-_OTHER_COMMAND_ENV_LAUNCHES = [
-    ["env", "dc-no-such-command"],
-    ["env", "-S", "dc-no-such-command pwsh"],
-    ["env", "-i", "A=1", "dc-no-such-command", "pwsh", "None"],
-    ["env", "DC_PROBE=true", "-S", "${DC_PROBE}"],
-    ["env", "A=1", "-u", "HOME", "pwsh"],
-    ["env", "A=1", "--", "pwsh"],
-    ["env", "-i", "env", "-S", "${DC_PROBE}"],
-    ["env", "-", "env", "-S", "${DC_PROBE}"],
-    ["env", "--ignore-environment", "env", "-S", "${DC_PROBE}"],
-    ["env", "-u", "DC_PROBE", "env", "-S", "${DC_PROBE}"],
-    ["env", "-uDC_PROBE", "env", "-S", "${DC_PROBE}"],
-    ["env", "--unset=DC_PROBE", "env", "-S", "${DC_PROBE}"],
-    ["env", "DC_PROBE=true", "env", "-S", "${DC_PROBE}"],
-    ["env", "-S", "-i env -S \\${DC_PROBE}"],
-    ["env", "-S", "-i env -S ${DC_PROBE}"],
-    ["env", "-i", "DC_PROBE=pwsh", "env", "-u", "DC_PROBE", "env", "-S", "${DC_PROBE}"],
-    ["env", "DC_PROBE=pwsh", "env", "-i", "env", "-S", "${DC_PROBE}"],
-    ["env", "-0", "env", "-S", "${DC_PROBE}"],
-    ["env", "-0"],
-    ["env", "-0", "A=1"],
-]
-_CHILD_ENVIRONMENTS = [
-    {},
-    {"DC_PROBE": "pwsh"},
-    {"DC_PROBE": "dc-no-such-command"},
-    {"PATH": "/usr/bin:/bin", "DC_PROBE": "pwsh", "LC_ALL": "C"},
-]
-
-
-def test_the_gate_agrees_with_what_the_real_env_does_with_a_missing_powershell(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The gate predicts the launch; env decides it. Run the real env on every
-    # form, under each environment the child can start with (the explicit empty
-    # one included; no locale is set, so env speaks C), with the gate off, and read which command env says it
-    # could not find. The prediction must equal "that command is PowerShell":
-    # status 127 alone also fits a different missing command.
-    env = shutil.which("env")
-    version = subprocess.run([env, "--version"], capture_output=True, text=True, check=False).stdout if env else ""
-    if "coreutils" not in version:
-        pytest.skip("the -S grammar checked here is GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    # The parent names PowerShell in DC_PROBE; only a child that is given it
-    # may see it.
-    monkeypatch.setenv("DC_PROBE", "pwsh")
-    forms = [argv for argv in _MISSING_POWERSHELL_ENV_LAUNCHES + _ENV_LAUNCHES_THAT_RUN_NOTHING if None not in argv]
-    forms += _OTHER_COMMAND_ENV_LAUNCHES
-    forms += [["env", "-a", "alias", "pwsh"], ["env", "--argv0=alias", "pwsh"], ["env", "-S", "-a alias pwsh"]]
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
-    compared = {True: 0, False: 0}
-    for argv in forms:
-        for child in _CHILD_ENVIRONMENTS:
-            launch = [env, *argv[1:]]
-            with _gate_off("running the real env"):
-                done = subprocess.run(launch, capture_output=True, text=True, check=False, env=child)
-            missing = _ENV_NOT_FOUND.search(done.stderr)
-            tried_powershell = bool(
-                done.returncode == 127
-                and missing
-                and (_base_name(missing["name"]) in _POWERSHELL_NAMES or missing["name"] == "None")
-            )
-            assert _launches_a_missing_powershell(launch, {"env": child}) == tried_powershell, (
-                argv,
-                child,
-                done.returncode,
-                done.stderr,
-            )
-            compared[tried_powershell] += 1
-    # Both outcomes were actually compared, so the test cannot pass by skipping
-    # or by an empty loop.
-    assert compared[True] >= 20 and compared[False] >= 20, compared
-
-
-def test_the_gate_reads_the_environment_the_launch_passes_not_the_parents(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    monkeypatch.setattr(shutil, "which", lambda *args, **kwargs: None)
-    monkeypatch.setenv("DC_PROBE", "pwsh")
-    split = ["env", "-S", "${DC_PROBE}"]
-    assert not _launches_a_missing_powershell(split, {"env": {}})
-    assert not _launches_a_missing_powershell(split, {"env": {"DC_PROBE": "dc-no-such-command"}})
-    assert _launches_a_missing_powershell(split, {"env": {"DC_PROBE": "pwsh"}})
-    assert _launches_a_missing_powershell(split, {"env": None})
-    assert _launches_a_missing_powershell(split, {})
-    monkeypatch.delenv("DC_PROBE")
-    assert not _launches_a_missing_powershell(split, {})
-    assert _launches_a_missing_powershell(split, {"env": {"DC_PROBE": "pwsh"}})
-
-
-def test_ordinary_env_launches_that_read_the_environment_or_an_assignment_still_run(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The gate installed, the real env: the two launches the review of the
-    # previous gate showed it wrongly skipping run, with the status env gives.
+    # GAP-0733: a PowerShell the launch can find is not a missing one, however
+    # it is named and whatever it exits with: here a fake one that exits 127
+    # and one that exits 42 stand for the real thing failing.
     env = shutil.which("env")
     if env is None:
         pytest.skip("env is not installed")
-    monkeypatch.setenv("DC_PROBE", "pwsh")
-    launches = [
-        ([env, "-S", "${DC_PROBE}"], {"env": {}}),
-        ([env, "DC_PROBE=true", "-S", "${DC_PROBE}"], {"env": {"PATH": os.environ.get("PATH", "")}}),
-    ]
-    # Nested env: the outer one clears, unsets or overrides the variable the
-    # inner one reads, so the inner one runs `env` itself and exits 0.
-    nested = [
-        ([env, "-i", env, "-S", "${DC_PROBE}"], {}),
-        ([env, "-u", "DC_PROBE", env, "-S", "${DC_PROBE}"], {}),
-        ([env, "DC_PROBE=true", env, "-S", "${DC_PROBE}"], {}),
-        ([env, "-", env, "-S", "${DC_PROBE}"], {}),
-    ]
-    launches += nested
-    expected = [subprocess.run(argv, capture_output=True, check=False, **kw).returncode for argv, kw in launches]
-    assert expected[-len(nested) :] == [0] * len(nested)
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    _skip_powershell_calls_when_missing(monkeypatch)
-    for (argv, kw), returncode in zip(launches, expected):
-        assert subprocess.run(argv, capture_output=True, check=False, **kw).returncode == returncode
-    # The same nesting, with an outer env that hands the inner one PowerShell's
-    # name, is a launch of the missing PowerShell and skips.
-    with pytest.raises(pytest.skip.Exception):
-        subprocess.run([env, "DC_PROBE=pwsh", env, "-S", "${DC_PROBE}"], check=False)
-
-
-def _fake_powershell_folder(tmp_path: Path) -> str:
-    # A folder holding a runnable program named pwsh, the PowerShell a child
-    # finds only on the PATH it is given.
-    folder = tmp_path / "child-bin"
+    folder = tmp_path / "bin"
     folder.mkdir()
-    program = folder / "pwsh"
-    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    program.chmod(0o755)
-    return str(folder)
-
-
-def _child_path_launches(env: str, folder: str) -> list:
-    return [
-        [env, f"PATH={folder}", "pwsh"],
-        [env, f"PATH={folder}", "DC_PROBE=pwsh", env, "-S", "${DC_PROBE}"],
-        [env, f"PATH={folder}", env, "-S", "pwsh"],
-        [env, "-S", f"PATH={folder} pwsh"],
-        [env, "-i", f"PATH={folder}", "pwsh"],
-        [env, "-i", f"PATH={folder}", "DC_PROBE=pwsh", env, "-S", "${DC_PROBE}"],
-        [env, f"PATH={folder}", env, f"PATH={os.defpath}", "pwsh"],
-        [env, "PATH=/dc-no-such-folder", "pwsh"],
-        [env, "-i", "pwsh"],
-        [env, f"PATH={folder}", "-u", "PATH", "pwsh"],
-        [env, f"PATH={folder}", env, "-i", "pwsh"],
-        [env, f"PATH={folder}", env, "-u", "PATH", "pwsh"],
-        [env, f"PATH={folder}", env, "-i", f"PATH={os.defpath}", "pwsh"],
-    ]
-
-
-def test_a_program_found_only_on_the_child_path_is_not_taken_for_a_missing_powershell(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The gate looks the command up on the PATH the launch runs it with, as
-    # exec does, not on this process's PATH: a runnable pwsh that only the
-    # child's PATH names runs, and a pwsh only this process's PATH names is not
-    # found by a child whose PATH lacks it.
-    env = shutil.which("env")
-    version = subprocess.run([env, "--version"], capture_output=True, text=True, check=False).stdout if env else ""
-    if "coreutils" not in version:
-        pytest.skip("the -S grammar checked here is GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    folder = _fake_powershell_folder(tmp_path)
-    monkeypatch.setenv("DC_PROBE", "pwsh")
-    monkeypatch.setenv("LC_ALL", "C")  # env quotes the missing name with plain quotes
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    # The real lookup: this is the one test that must not stub it.
-    launches = _child_path_launches(env, folder)
-    ran, missing = [], []
-    for launch in launches:
-        with _gate_off("running the real env"):
-            done = subprocess.run(launch, capture_output=True, text=True, check=False)
-        tried = _ENV_NOT_FOUND.search(done.stderr)
-        tried_powershell = bool(done.returncode == 127 and tried and _base_name(tried["name"]) in _POWERSHELL_NAMES)
-        assert _launches_a_missing_powershell(launch, {}) == tried_powershell, (launch, done.returncode, done.stderr)
-        (missing if tried_powershell else ran).append(launch)
-    assert len(ran) >= 6 and len(missing) >= 4, (ran, missing)
-    # A direct launch, with the PATH in the launch's own environment.
-    assert not _launches_a_missing_powershell(["pwsh"], {"env": {"PATH": folder}})
-    assert not _launches_a_missing_powershell(["pwsh"], {"env": {"PATH": f"/dc-no-such-folder{os.pathsep}{folder}"}})
-    assert _launches_a_missing_powershell(["pwsh"], {"env": {"PATH": "/dc-no-such-folder"}})
-    assert _launches_a_missing_powershell(["pwsh"], {"env": {}})
-    monkeypatch.setenv("PATH", folder)
-    assert not _launches_a_missing_powershell(["pwsh"], {})
-    assert _launches_a_missing_powershell(["pwsh"], {"env": {"PATH": "/dc-no-such-folder"}})
-    assert _launches_a_missing_powershell([env, "-i", "pwsh"], {})
-
-
-def test_a_program_found_only_on_the_child_path_still_runs_where_powershell_is_not_installed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The gate installed, the real env, the form the review of the previous
-    # gate showed it wrongly skipping: PATH supplied only to the child.
-    env = shutil.which("env")
-    version = subprocess.run([env, "--version"], capture_output=True, text=True, check=False).stdout if env else ""
-    if "coreutils" not in version:
-        pytest.skip("the -S grammar checked here is GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    folder = _fake_powershell_folder(tmp_path)
-    runs = [
-        [env, f"PATH={folder}", "DC_PROBE=pwsh", env, "-S", "${DC_PROBE}"],
-        [env, f"PATH={folder}", "pwsh"],
-        [env, "-S", f"PATH={folder} pwsh"],
-    ]
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    _skip_powershell_calls_when_missing(monkeypatch)
-    for launch in runs:
-        assert subprocess.run(launch, capture_output=True, check=False).returncode == 0, launch
-    with pytest.raises(pytest.skip.Exception):
-        subprocess.run([env, "PATH=/dc-no-such-folder", "pwsh"], check=False)
-
-
-def _relative_launches(env: str, root: Path) -> tuple[list, list]:
-    # Launches that name PowerShell by a path or a PATH entry relative to a
-    # directory, with the directory the launch starts in set by Popen's cwd,
-    # by env -C / --chdir, or by both. root/child/pwsh and root/child/bin/pwsh
-    # run; nothing runs from root itself. Returns (runs, missing) as
-    # (launch, keyword arguments).
-    child = root / "child"
-    for folder in (child, child / "bin"):
-        folder.mkdir(parents=True, exist_ok=True)
-        program = folder / "pwsh"
-        program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        program.chmod(0o755)
-    inside, nowhere = {"cwd": child}, {"cwd": root}
-    runs = [
-        (["pwsh"], {"cwd": child, "env": {"PATH": "bin"}}),
-        (["bin/pwsh"], inside),
-        (["./pwsh"], inside),
-        (["pwsh"], {"cwd": child, "env": {"PATH": "."}}),
-        (["pwsh"], {"cwd": child, "env": {"PATH": ""}}),
-        (["pwsh"], {"cwd": child, "env": {"PATH": f"/dc-no-such-folder{os.pathsep}bin"}}),
-        ([env, "PATH=bin", "pwsh"], inside),
-        ([env, "PATH=.", "pwsh"], inside),
-        ([env, "PATH=", "pwsh"], inside),
-        ([env, "PATH=bin", env, "-S", "pwsh"], inside),
-        ([env, "PATH=bin", env, "PATH=bin", "pwsh"], inside),
-        ([env, "-C", str(child), "PATH=bin", "pwsh"], {}),
-        ([env, f"--chdir={child}", "PATH=bin", "pwsh"], {}),
-        ([env, "-C", "child", "PATH=bin", "pwsh"], nowhere),
-        ([env, "-C", ".", "-C", str(child), "PATH=bin", "pwsh"], nowhere),
-        ([env, "-C", str(child), env, "-C", "bin", "PATH=.", "pwsh"], {}),
-        ([env, "-C", str(child), env, "-S", "-C bin PATH=. pwsh"], {}),
-        ([env, "-C", str(child), "bin/pwsh"], nowhere),
-    ]
-    missing = [
-        (["pwsh"], {"cwd": root, "env": {"PATH": "bin"}}),
-        (["bin/pwsh"], nowhere),
-        (["pwsh"], {"cwd": root, "env": {"PATH": "."}}),
-        (["pwsh"], {"cwd": root, "env": {"PATH": ""}}),
-        (["pwsh"], {"cwd": child, "env": {"PATH": "elsewhere"}}),
-        ([env, "PATH=bin", "pwsh"], nowhere),
-        ([env, "PATH=.", "pwsh"], nowhere),
-        ([env, "PATH=bin", env, "-S", "pwsh"], nowhere),
-        ([env, "-C", str(root), "PATH=bin", "pwsh"], inside),
-        ([env, "-C", str(child), "-C", str(root), "PATH=bin", "pwsh"], inside),
-        ([env, "-C", str(child), env, "-C", str(root), "PATH=bin", "pwsh"], {}),
-        ([env, "-C", str(root), "bin/pwsh"], inside),
-    ]
-    return runs, missing
-
-
-def _env_is_gnu_coreutils(env) -> bool:  # type: ignore[no-untyped-def]
-    version = subprocess.run([env, "--version"], capture_output=True, text=True, check=False).stdout if env else ""
-    return "coreutils" in version
-
-
-def _really_missing(launch: list, kwargs: dict) -> bool:
-    # What the operating system says: the launch did not find PowerShell. A
-    # direct launch raises; env says so with status 127 and names it.
-    with _gate_off("running the real launch"):
-        try:
-            done = subprocess.run(launch, capture_output=True, text=True, check=False, **kwargs)
-        except FileNotFoundError:
-            return True
-    tried = _ENV_NOT_FOUND.search(done.stderr)
-    return bool(done.returncode == 127 and tried and _base_name(tried["name"]) in _POWERSHELL_NAMES)
-
-
-def test_a_relative_path_is_looked_up_from_the_directory_the_launch_runs_in(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # exec looks a relative executable path, and a relative or empty PATH
-    # entry, up from the directory the command runs in: Popen's cwd, then each
-    # env -C / --chdir. The gate must ask the same directory, not this
-    # process's, in both directions: a runnable program under a relative PATH
-    # is not a missing PowerShell, and a file in this process's directory that
-    # the child's search path does not reach is not found.
-    if os.name == "nt":
-        pytest.skip("the lookup checked here is POSIX exec")
-    env = shutil.which("env")
-    if env is None or not _env_is_gnu_coreutils(env):
-        pytest.skip("the -C and -S grammar checked here is GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    monkeypatch.setenv("LC_ALL", "C")  # env quotes the missing name with plain quotes
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    runs, missing = _relative_launches(env, tmp_path)
-    # A file in the directory this process runs in, which no child search path reaches.
-    stray = tmp_path / "parent"
-    stray.mkdir()
-    (stray / "pwsh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (stray / "pwsh").chmod(0o755)
-    monkeypatch.chdir(stray)
-    missing += [
-        (["pwsh"], {"env": {"PATH": "/dc-no-such-folder"}}),
-        ([env, "PATH=/dc-no-such-folder", "pwsh"], {}),
-    ]
-    runs += [
-        (["./pwsh"], {}),
-        (["pwsh"], {"env": {"PATH": "."}}),
-        ([env, "PATH=.", "pwsh"], {}),
-    ]
-    for launch, kwargs in runs:
-        assert not _really_missing(launch, kwargs), (launch, kwargs)
-        assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
-    for launch, kwargs in missing:
-        assert _really_missing(launch, kwargs), (launch, kwargs)
-        assert _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
-
-
-def test_a_relative_path_still_runs_where_powershell_is_not_installed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The gate installed, the real launch: a program the operating system finds
-    # from the launch's directory runs; one it does not find skips the test.
-    if os.name == "nt":
-        pytest.skip("the lookup checked here is POSIX exec")
-    env = shutil.which("env")
-    if env is None or not _env_is_gnu_coreutils(env):
-        pytest.skip("the -C and -S grammar checked here is GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    runs, missing = _relative_launches(env, tmp_path)
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    _skip_powershell_calls_when_missing(monkeypatch)
-    for launch, kwargs in runs:
-        try:
-            returncode = subprocess.run(launch, capture_output=True, check=False, **kwargs).returncode
-        except pytest.skip.Exception:  # a skip here would hide the false skip this test is for
-            pytest.fail(f"a program the system finds was taken for a missing PowerShell: {launch} {kwargs}")
-        assert returncode == 0, (launch, kwargs)
-    for launch, kwargs in missing:
-        with pytest.raises(pytest.skip.Exception):
-            subprocess.run(launch, check=False, **kwargs)
-    # env refuses a directory it cannot enter before it runs anything, so the
-    # launch is not one of a missing PowerShell: it runs, and env says why it did not.
-    for refused in (str(tmp_path / "no-such-folder"), ""):
-        done = subprocess.run([env, "-C", refused, "pwsh"], capture_output=True, check=False)
-        assert done.returncode == 125
-
-
-def _launch_outcome(launch: list, kwargs: dict) -> str:
-    try:
-        return f"exit {subprocess.run(launch, capture_output=True, check=False, **kwargs).returncode}"
-    except OSError as error:
-        return type(error).__name__
-
-
-def test_a_powershell_that_is_present_but_cannot_start_is_not_taken_for_a_missing_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The gate skips a test only where the operating system finds no PowerShell.
-    # A program that is there but cannot be started (not executable, a
-    # directory) and a launch directory that cannot be entered fail the launch
-    # for another reason, and that failure has to reach the test, directly and
-    # behind env and env -C, as it does for the real launch.
-    if os.name == "nt":
-        pytest.skip("the lookup checked here is POSIX exec")
-    env = shutil.which("env")
-    if env is None or not _env_is_gnu_coreutils(env):
-        pytest.skip("the -C grammar checked here is GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    monkeypatch.setenv("LC_ALL", "C")
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    child = tmp_path / "child"
-    (child / "bin").mkdir(parents=True)
-    program = child / "bin" / "pwsh"
-    program.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (child / "directory" / "pwsh").mkdir(parents=True)
-    closed = tmp_path / "closed"
-    closed.mkdir()
-    closed.chmod(0)
-    try:
-        # (launch, kwargs, what the real launch does)
-        cases = [
-            (["pwsh"], {"cwd": child, "env": {"PATH": "bin"}}, "PermissionError"),
-            ([env, "PATH=bin", "pwsh"], {"cwd": child}, "exit 126"),
-            ([env, "-C", str(child), "PATH=bin", "pwsh"], {}, "exit 126"),
-            (["directory/pwsh"], {"cwd": child}, "PermissionError"),
-            ([env, "-C", str(child), "directory/pwsh"], {}, "exit 126"),
-            (["pwsh"], {"cwd": tmp_path / "no-such-folder", "env": {"PATH": "bin"}}, "FileNotFoundError"),
-            (["pwsh"], {"cwd": program, "env": {"PATH": "bin"}}, "NotADirectoryError"),
-        ]
-        if not os.access(closed, os.X_OK):  # a user the mode does not bind (root) can enter it
-            cases += [
-                ([env, "-C", str(closed), "pwsh"], {}, "exit 125"),
-                (["pwsh"], {"cwd": closed, "env": {"PATH": "bin"}}, "PermissionError"),
-            ]
-        # A present program that does run is the control: same call shapes, mode 0755.
-        program.chmod(0o755)
-        for launch, kwargs in [cases[0][:2], cases[1][:2], cases[2][:2]]:
-            assert _launch_outcome(launch, kwargs) == "exit 0", (launch, kwargs)
-            assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
-        program.chmod(0o644)
-        _skip_powershell_calls_when_missing(monkeypatch)
-        for launch, kwargs, expected in cases:
-            with _gate_off("running the real launch"):
-                assert _launch_outcome(launch, kwargs) == expected, (launch, kwargs)
-            assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
-            try:
-                gated = _launch_outcome(launch, kwargs)
-            except pytest.skip.Exception:  # a skip here would hide the broken target this test is for
-                pytest.fail(f"a launch that fails for another reason was skipped as a missing PowerShell: {launch} {kwargs}")
-            assert gated == expected, (launch, kwargs)
-    finally:
-        closed.chmod(0o700)
-
-
-def test_an_env_wrapper_that_cannot_start_is_not_taken_for_a_missing_powershell(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # env is the program the system starts; when it is absent or cannot be
-    # executed, the launch fails on env before PowerShell is reached, and the
-    # test has to see that failure, whether env is the outer program or one
-    # nested behind another env. A working wrapper in the same call shape is
-    # the control: it reaches the missing PowerShell and skips.
-    if os.name == "nt":
-        pytest.skip("the lookup checked here is POSIX exec")
-    env = shutil.which("env")
-    if env is None or not _env_is_gnu_coreutils(env):
-        pytest.skip("the exit codes checked here are GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    monkeypatch.setenv("LC_ALL", "C")
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    missing = str(tmp_path / "missing")
-    unexecutable = tmp_path / "unexecutable"
-    unexecutable.mkdir()
-    (unexecutable / "env").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    (unexecutable / "env").chmod(0o644)
-    directory = tmp_path / "directory"
-    (directory / "env").mkdir(parents=True)
-    # Executable wrappers that do not get to the command: the interpreter of a
-    # script is absent, the file is no executable image, or a program named
-    # env exits before it reaches the command.
-    nointerpreter, badimage, early = (tmp_path / name for name in ("nointerpreter", "badimage", "early"))
-    for folder, body in (
-        (nointerpreter, b"#!/nonexistent/interpreter\n"),
-        (badimage, b"\x7fELF\x00\x01 not an executable image\n"),
-        (early, b"#!/bin/sh\nexit 42\n"),
+    _without_powershell(monkeypatch)
+    _executable(folder / "pwsh", "exit 127")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    for launch, kwargs in (
+        ([env, "pwsh"], {"env": {"PATH": str(folder)}}),
+        ([env, "pwsh"], {"env": {"PATH": "bin"}, "cwd": str(tmp_path)}),
+        ([env, "-i", f"PATH={folder}", "pwsh"], {"env": {"PATH": str(empty)}}),
+        ([str(folder / "pwsh")], {}),
+        ("pwsh", {"shell": True, "env": {"PATH": str(folder)}}),
+        ("env pwsh", {"shell": True, "env": {"PATH": f"{folder}{os.pathsep}{os.path.dirname(env)}"}}),
     ):
-        folder.mkdir()
-        (folder / "env").write_bytes(body)
-        (folder / "env").chmod(0o755)
-    good = os.path.dirname(env)
-    # (launch, kwargs, what the real launch does)
-    broken = [
-        (["env", "pwsh"], {"env": {"PATH": str(nointerpreter)}}, "FileNotFoundError"),
-        (["env", "pwsh"], {"env": {"PATH": str(badimage)}}, "OSError"),
-        (["env", "pwsh"], {"env": {"PATH": str(early)}}, "exit 42"),
-        (["env", "pwsh"], {"env": {"PATH": f"{early}:{good}"}}, "exit 42"),
-        ([env, f"PATH={nointerpreter}", "env", "pwsh"], {}, "exit 127"),
-        ([env, f"PATH={badimage}", "env", "pwsh"], {}, "exit 127"),
-        ([env, f"PATH={early}", "env", "pwsh"], {}, "exit 42"),
-        ([env, f"PATH={early}:{good}", "env", "pwsh"], {}, "exit 42"),
-        (["env", "pwsh"], {"env": {"PATH": missing}}, "FileNotFoundError"),
-        (["env", "pwsh"], {"env": {"PATH": str(unexecutable)}}, "PermissionError"),
-        (["env", "pwsh"], {"env": {"PATH": str(directory)}}, "PermissionError"),
-        (["env", "pwsh"], {"cwd": unexecutable, "env": {"PATH": "."}}, "PermissionError"),
-        ([str(tmp_path / "no-such" / "env"), "pwsh"], {}, "FileNotFoundError"),
-        ([env, f"PATH={missing}", "env", "pwsh"], {}, "exit 127"),
-        ([env, f"PATH={unexecutable}", "env", "pwsh"], {}, "exit 126"),
-        ([env, f"PATH={directory}", "env", "pwsh"], {}, "exit 126"),
-        ([env, "-C", str(unexecutable), "PATH=.", "env", "pwsh"], {}, "exit 126"),
-        ([env, "-i", f"PATH={missing}", "env", "-S", "pwsh"], {}, "exit 127"),
-        ([env, f"PATH={good}", "env", f"PATH={missing}", "env", "pwsh"], {}, "exit 127"),
-    ]
-    # A wrapper the system does start reaches the missing PowerShell (127).
-    working = [
-        (["env", "pwsh"], {}),
-        (["env", "pwsh"], {"env": {"PATH": f"{unexecutable}:{missing}:{good}"}}),
-        ([env, "env", "pwsh"], {}),
-        ([env, f"PATH={unexecutable}:{good}", "env", "pwsh"], {}),
-        ([env, f"PATH={directory}:{good}", "env", "pwsh"], {}),
-        ([env, "-C", str(unexecutable), f"PATH=.:{good}", "env", "pwsh"], {}),
-        # exec passes over a wrapper it cannot execute and runs the next one.
-        (["env", "pwsh"], {"env": {"PATH": f"{nointerpreter}:{badimage}:{good}"}}),
-        ([env, f"PATH={nointerpreter}:{good}", "env", "pwsh"], {}),
-    ]
-    for launch, kwargs, expected in broken:
-        with _gate_off("running the real launch"):
-            assert _launch_outcome(launch, kwargs) == expected, (launch, kwargs)
-        assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
-    for launch, kwargs in working:
-        with _gate_off("running the real launch"):
-            assert _launch_outcome(launch, kwargs) == "exit 127", (launch, kwargs)
-        assert _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
-    _skip_powershell_calls_when_missing(monkeypatch)
-    for launch, kwargs, expected in broken:
-        try:
-            gated = _launch_outcome(launch, kwargs)
-        except pytest.skip.Exception:  # a skip here would hide the broken wrapper this test is for
-            pytest.fail(f"a launch whose env wrapper cannot start was skipped as a missing PowerShell: {launch} {kwargs}")
-        assert gated == expected, (launch, kwargs)
-    for launch, kwargs in working:
-        with pytest.raises(pytest.skip.Exception):
-            subprocess.run(launch, check=False, **kwargs)
+        assert subprocess.run(launch, check=False, **kwargs).returncode == 127, (launch, kwargs)
+    _executable(folder / "pwsh", "exit 42")
+    assert subprocess.run([env, "pwsh"], check=False, env={"PATH": str(folder)}).returncode == 42
+    # A missing PowerShell followed by something else is that something else.
+    assert subprocess.run("env pwsh || exit 42", shell=True, check=False, env={"PATH": f"{empty}:/usr/bin:/bin"}).returncode == 42
 
 
-def test_a_script_named_env_is_never_judged_so_its_own_failures_reach_the_test(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@_POSIX_LAUNCHES
+def test_the_result_of_a_launch_is_never_predicted_from_its_environment_or_programs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # A wrapper that is a script runs its own logic before (or instead of)
-    # the real env: it may refuse on an environment variable, on the command
-    # word or on an option. The gate models only the system env, so no run
-    # of the script with other arguments or another environment can stand in
-    # for the real launch. Each of these exits before it reaches PowerShell,
-    # and that exit is the test result, not a skipped PowerShell.
-    if os.name == "nt":
-        pytest.skip("the lookup checked here is POSIX exec")
+    # GAP-0733: the gate used to model what a launch would do, and a launch
+    # that the model did not describe (an environment that stops env, a shell
+    # named by a relative path or on the PATH, a program named env that is
+    # another program) was skipped as a missing PowerShell or failed without
+    # the skip. The launch now runs as written and only a command-not-found
+    # for PowerShell is skipped.
     env = shutil.which("env")
-    if env is None or not _env_is_gnu_coreutils(env):
-        pytest.skip("the exit codes checked here are GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    monkeypatch.setenv("LC_ALL", "C")
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    good = os.path.dirname(env)
-    bodies = {
-        "by-environment": "if [ \"$WRAPPER_MODE\" = block ]; then exit 42; fi\n",
-        "by-command-word": "case \"$1\" in pwsh) exit 42;; esac\n",
-        "by-option": "case \"$1\" in -i) exit 42;; esac\n",
-        "passes-everything-on": "",
-    }
-    search = {}
-    for name, body in bodies.items():
-        folder = tmp_path / name
-        folder.mkdir()
-        (folder / "env").write_text(f"#!/bin/sh\n{body}exec {env} \"$@\"\n", encoding="utf-8")
-        (folder / "env").chmod(0o755)
-        search[name] = f"{folder}:{good}"
-    by_word, by_option = search["by-command-word"], search["by-option"]
-    # (launch, kwargs, what the real launch does)
-    launches = [
-        (["env", "pwsh"], {"env": {"PATH": search["by-environment"], "WRAPPER_MODE": "block"}}, "exit 42"),
-        (["env", "pwsh"], {"env": {"PATH": search["by-command-word"]}}, "exit 42"),
-        (["env", "-i", "pwsh"], {"env": {"PATH": search["by-option"]}}, "exit 42"),
-        ([env, f"PATH={by_word}", "env", "pwsh"], {}, "exit 42"),
-        ([env, f"PATH={by_option}", "env", "-i", "pwsh"], {}, "exit 42"),
-        # The same wrapper that refuses nothing is still a script: the gate does not
-        # speak for it, so the real exit of the missing program is the result.
-        (["env", "pwsh"], {"env": {"PATH": search["passes-everything-on"]}}, "exit 127"),
-    ]
-    for launch, kwargs, expected in launches:
-        with _gate_off("running the real launch"):
-            assert _launch_outcome(launch, kwargs) == expected, (launch, kwargs)
-        assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
-    _skip_powershell_calls_when_missing(monkeypatch)
-    for launch, kwargs, expected in launches:
-        try:
-            gated = _launch_outcome(launch, kwargs)
-        except pytest.skip.Exception:  # a skip here would hide the failure this test is for
-            pytest.fail(f"a launch through a script named env was skipped as a missing PowerShell: {launch} {kwargs}")
-        assert gated == expected, (launch, kwargs)
-    # The system env in the same call shapes is the control: it is modelled and skips.
-    for launch, kwargs in [(["env", "pwsh"], {}), (["env", "-i", "pwsh"], {"env": {"PATH": good}})]:
+    shell = "/bin/sh"
+    if env is None or not os.path.exists(shell):
+        pytest.skip("env and sh are not installed")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    _without_powershell(monkeypatch)
+    alone = {"PATH": str(empty)}
+    # An alternate shell: its own result.
+    failing = _executable(tmp_path / "failing-shell", "exit 42")
+    assert subprocess.run("pwsh", shell=True, executable=failing, check=False, env=alone).returncode == 42
+    # The system shell named by a relative path, and by a bare name on the child PATH, is
+    # the system shell: PowerShell is not found there, exactly as for "/bin/sh".
+    (tmp_path / "sh").symlink_to(shell)
+    for kwargs in (
+        {"executable": "./sh", "cwd": str(tmp_path), "env": alone},
+        {"executable": "sh", "env": {"PATH": str(tmp_path)}},
+        {"executable": shell, "env": alone},
+    ):
         with pytest.raises(pytest.skip.Exception):
-            subprocess.run(launch, check=False, **kwargs)
-
-
-def test_a_program_named_env_that_is_not_the_system_env_is_never_judged(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A compiled program named env passes any probe the gate can run (same
-    # image, same marker) and still refuses the real launch on its environment,
-    # its command word or an option, and a link named env can lead to another
-    # system program (nice) that is compiled, root-owned and in a root-only
-    # folder. Image, owner and folder are therefore not enough: only the system
-    # env itself, the same file, is modelled. A copy of the real env, a
-    # compiled wrapper that refuses and a link that leads elsewhere are programs
-    # of their own: the launch result is the test result.
-    if os.name == "nt":
-        pytest.skip("the lookup checked here is POSIX exec")
-    env = shutil.which("env")
-    if env is None or not _env_is_gnu_coreutils(env):
-        pytest.skip("the exit codes checked here are GNU coreutils")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    monkeypatch.setenv("LC_ALL", "C")
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    good = os.path.dirname(env)
-    copy = tmp_path / "copy"
-    copy.mkdir()
-    shutil.copy2(env, copy / "env")
-    searches = {"copy": f"{copy}:{good}"}
+            subprocess.run("pwsh", shell=True, check=False, **kwargs)
+    # A program named env that is another program is that program.
     nice = shutil.which("nice")
-    if nice and _env_is_gnu_coreutils(nice):
-        elsewhere = tmp_path / "link-to-nice"
-        elsewhere.mkdir()
-        (elsewhere / "env").symlink_to(nice)
-        searches["link-to-nice"] = f"{elsewhere}:{good}"
-    same = tmp_path / "link-to-env"
-    same.mkdir()
-    (same / "env").symlink_to(env)
-    compiler = shutil.which("cc") or shutil.which("gcc")
-    if compiler:
-        folder = tmp_path / "refusing"
-        folder.mkdir()
-        source = tmp_path / "env.c"
-        source.write_text(
-            "#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n"
-            "int main(int argc, char **argv) {\n"
-            "  const char *mode = getenv(\"WRAPPER_MODE\");\n"
-            "  if (mode && strcmp(mode, \"block\") == 0) return 42;\n"
-            "  if (argc < 2) return 0;\n"
-            "  if (strcmp(argv[1], \"pwsh\") == 0 || strcmp(argv[1], \"-i\") == 0) return 42;\n"
-            "  execvp(argv[1], argv + 1);\n  return 127;\n}\n",
-            encoding="utf-8",
-        )
-        built = subprocess.run([compiler, "-o", str(folder / "env"), str(source)], capture_output=True, check=False)
-        if built.returncode == 0:
-            searches["refusing"] = f"{folder}:{good}"
-    # (launch, kwargs, what the real launch does)
-    launches = [(["env", "pwsh"], {"env": {"PATH": searches["copy"]}}, "exit 127")]
-    if "link-to-nice" in searches:
-        launches.append((["env", "-i", "pwsh"], {"env": {"PATH": searches["link-to-nice"]}}, "exit 125"))
-    if "refusing" in searches:
-        refusing = searches["refusing"]
-        launches += [
-            (["env", "pwsh"], {"env": {"PATH": refusing, "WRAPPER_MODE": "block"}}, "exit 42"),
-            (["env", "pwsh"], {"env": {"PATH": refusing}}, "exit 42"),
-            (["env", "-i", "pwsh"], {"env": {"PATH": refusing}}, "exit 42"),
-        ]
-    for launch, kwargs, expected in launches:
-        with _gate_off("running the real launch"):
-            assert _launch_outcome(launch, kwargs) == expected, (launch, kwargs)
-        assert not _launches_a_missing_powershell(launch, kwargs), (launch, kwargs)
-    _skip_powershell_calls_when_missing(monkeypatch)
-    for launch, kwargs, expected in launches:
-        try:
-            gated = _launch_outcome(launch, kwargs)
-        except pytest.skip.Exception:  # a skip here would hide the failure this test is for
-            pytest.fail(f"a launch through a program named env was skipped as a missing PowerShell: {launch} {kwargs}")
-        assert gated == expected, (launch, kwargs)
-    # The system env is the control, by its own path and through a link that
-    # leads to it: modelled, and its missing PowerShell skips.
-    for folder in (good, str(same)):
-        with pytest.raises(pytest.skip.Exception):
-            subprocess.run(["env", "pwsh"], env={"PATH": folder}, check=False)
-
-
-def test_a_shell_string_is_judged_by_its_whole_outcome_not_its_first_words(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # A shell runs the whole string. `env pwsh || exit 42` ends with the exit
-    # 42 and `env pwsh || true` with the true, whatever the first words did,
-    # so a missing PowerShell in front of them is not the outcome. Only a
-    # plain command (words, nothing the shell reads) is the missing program,
-    # and only when the shell is the system shell: a plain string does not say
-    # what another shell (executable=) does with it.
-    if os.name == "nt":
-        pytest.skip("the shell checked here is POSIX sh")
-    if any(shutil.which(name) for name in ("pwsh", "powershell", "pwsh.exe", "powershell.exe")):
-        pytest.skip("PowerShell is installed")
-    monkeypatch.setenv("LC_ALL", "C")
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    compound = [
-        ("env pwsh || exit 42", "exit 42"),
-        ("env pwsh || true", "exit 0"),
-        ("pwsh || exit 42", "exit 42"),
-        ("pwsh; exit 7", "exit 7"),
-        ("env pwsh; exit 7", "exit 7"),
-        ("env pwsh && exit 3", "exit 127"),
-        ("env pwsh 2>/dev/null || exit 9", "exit 9"),
-        ("env 'pwsh' || exit 42", "exit 42"),
-    ]
-    for command, expected in compound:
-        with _gate_off("running the real launch"):
-            assert _launch_outcome(command, {"shell": True}) == expected, command
-        assert not _launches_a_missing_powershell(command, {"shell": True}), command
-    _skip_powershell_calls_when_missing(monkeypatch)
-    for command, expected in compound:
-        try:
-            gated = _launch_outcome(command, {"shell": True})
-        except pytest.skip.Exception:  # a skip here would hide the result this test is for
-            pytest.fail(f"a compound shell command was skipped as a missing PowerShell: {command}")
-        assert gated == expected, command
-    # The same plain command under another shell is that shell's result.
-    refusing = tmp_path / "shell"
-    refusing.write_text("#!/bin/sh\nexit 42\n", encoding="utf-8")
-    refusing.chmod(0o755)
-    other = [(str(refusing), "exit 42")]
-    true = shutil.which("true")
-    if true:
-        other.append((true, "exit 0"))
-    for shell, expected in other:
-        kwargs = {"shell": True, "executable": shell}
-        with _gate_off("running the real launch"):
-            assert _launch_outcome("env pwsh", kwargs) == expected, shell
-        assert not _launches_a_missing_powershell("env pwsh", kwargs), shell
-        try:
-            gated = _launch_outcome("env pwsh", kwargs)
-        except pytest.skip.Exception:  # a skip here would hide the result of the shell this test is for
-            pytest.fail(f"a plain command under another shell was skipped as a missing PowerShell: {shell}")
-        assert gated == expected, shell
-    # The plain commands are the control: a missing PowerShell, skipped as before,
-    # also when the system shell is named.
-    for command in ("env pwsh", "pwsh -NoProfile -Command exit", "None -NoProfile -Command exit"):
-        with pytest.raises(pytest.skip.Exception):
-            subprocess.run(command, shell=True, check=False)
-    if os.path.exists("/bin/sh"):
-        with pytest.raises(pytest.skip.Exception):
-            subprocess.run("env pwsh", shell=True, executable="/bin/sh", check=False)
-
-
-def test_env_actions_that_run_no_powershell_still_run_where_it_is_not_installed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    env = shutil.which("env")
-    if env is None:
-        pytest.skip("env is not installed")
-    quoted = shlex.quote(sys.executable)
-    launches = [
-        [env, "--help"],
-        [env, "-i"],
-        [env, "-S", f"{quoted} -c pass"],
-        [env, f"--split-string={quoted} -c pass"],
-    ]
-    # What each launch does with the gate absent; the gate must leave it alone.
-    expected = [subprocess.run(argv, capture_output=True, check=False).returncode for argv in launches]
-    monkeypatch.setattr(sys.modules[__name__], "POWERSHELL", None)
-    _skip_powershell_calls_when_missing(monkeypatch)
-    for argv, returncode in zip(launches, expected):
-        assert subprocess.run(argv, capture_output=True, check=False).returncode == returncode
-    if expected[2] == 0:
-        with pytest.raises(pytest.skip.Exception):
-            subprocess.run([env, "-S", "pwsh -NoProfile -Command exit"], check=False)
+    if nice and sys.platform.startswith("linux"):
+        (tmp_path / "env").symlink_to(nice)
+        assert subprocess.run([str(tmp_path / "env"), "-i", "pwsh"], capture_output=True, check=False, env=alone).returncode == 125
+    # A child environment that stops the system programs before they look for PowerShell.
+    compiler = shutil.which("cc")
+    if compiler and sys.platform.startswith("linux"):
+        source = tmp_path / "stop.c"
+        source.write_text("#include <unistd.h>\n__attribute__((constructor)) static void stop(void) { _exit(42); }\n", encoding="utf-8")
+        library = tmp_path / "stop.so"
+        build = subprocess.run([compiler, "-shared", "-fPIC", "-o", str(library), str(source)], capture_output=True, check=False)
+        if build.returncode == 0:
+            loaded = {**alone, "LD_PRELOAD": str(library)}
+            assert subprocess.run([env, "pwsh"], check=False, env=loaded).returncode == 42
+            assert subprocess.run("env pwsh", shell=True, check=False, env=loaded).returncode == 42
+            assert subprocess.run("pwsh", shell=True, executable=shell, check=False, env=loaded).returncode == 42
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
