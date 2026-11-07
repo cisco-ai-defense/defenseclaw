@@ -674,7 +674,7 @@ $failures = & $module {
                 [IO.File]::WriteAllText([IO.Path]::Combine($srtarget, 'keep.txt'), 'keep')
                 [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path ([IO.Path]::Combine($srsite, 'out')) -Target $srtarget)
                 $junctions.Add([IO.Path]::Combine($srsite, 'out'))
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($srvendor) -RecordDirectory $srrecords -Roots $srroots
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($srvendor) -RecordDirectory $srrecords -Roots $srroots
                 $srlayout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($srlife, ('self-uninstall-' + ('4' * 64) + '.json')) }
                 # A run that holds the scanner runtime lock keeps the runtime,
                 # and with it the Cisco folder, which is named as kept.
