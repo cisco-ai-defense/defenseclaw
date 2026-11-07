@@ -312,8 +312,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		chargeBudget := func(receipt bool) bool {
 			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
-				w.Header().Set("Retry-After", "1")
-				a.writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error()})
+				writeHookRateLimited(w, err.Error(), sandboxHookBudgetMessage())
 				return false
 			}
 			return true
