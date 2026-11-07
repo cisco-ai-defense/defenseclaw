@@ -1409,6 +1409,26 @@ def _scan_options_for_connector(app: AppContext, connector: str, options: dict) 
     return options
 
 
+@plugin.command("manifest-entrypoints", hidden=True)
+def manifest_entrypoints() -> None:
+    """Print the entrypoints the plugin scanner reads from manifests on stdin.
+
+    Internal: the gateway watcher sends {"manifests": {path: base64 bytes}} and
+    gets {"entrypoints": [...]}, so one loader decides what a manifest declares.
+    """
+    import base64
+    import sys
+
+    from defenseclaw.scanner.plugin_scanner.scanner import declared_entrypoints
+
+    request = json.load(sys.stdin)
+    manifests = {
+        str(name): base64.b64decode(value, validate=True)
+        for name, value in request["manifests"].items()
+    }
+    click.echo(json.dumps({"entrypoints": declared_entrypoints(manifests)}))
+
+
 @plugin.command()
 @click.argument("name_or_path")
 @click.option("--force", is_flag=True, help="Force install (overwrites existing)")
