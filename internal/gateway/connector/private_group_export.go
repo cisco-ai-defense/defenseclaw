@@ -13,8 +13,11 @@ import "os"
 // OpenCode service port setter uses to tell whether another account can write
 // a folder. It is stricter than the plugin destination check: it also asks the
 // name service for members a directory service adds, as the CLI preflight does
-// (GAP-0053 REVIEW-3 MF1). False off Linux, and for anything unreadable or
-// ambiguous.
+// (GAP-0053 REVIEW-3 MF1). The caller must already have judged every named
+// entry of the access ACL of path (managed.ValidatePathACLForAccount) and read
+// the group bits as the group object (managed.ModeWithoutACLMask); an ACL on
+// the path does not rule the private group out here. False off Linux, and for
+// anything unreadable or ambiguous.
 func OwnerPrivateGroup(path string, info os.FileInfo) bool {
-	return ownerPrivateGroupStrict(path, info)
+	return ownerPrivateGroupStrictAfterACL(path, info)
 }

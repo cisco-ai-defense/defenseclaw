@@ -6,6 +6,7 @@
 package enterprisepolicy
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -45,5 +46,42 @@ func TestOpenCodeServicePortRefusesAFolderWithAnEveryoneACLEntry(t *testing.T) {
 	}
 	if _, err := SetOpenCodeServicePort(home, 25001); err == nil {
 		t.Fatal("a folder with an everyone entry was accepted by the setter")
+	}
+}
+
+// On macOS an ACL entry grants another account write access without changing
+// the mode bits (REVIEW-6 MF1). The real file ACL, not the mode, must keep the
+// file from naming a port, and the setter must replace the writable file
+// (restored: GAP-0053 round 9 MF2).
+func TestReadOpenCodeServicePortDoesNotImportAFileWithARealWriteACL(t *testing.T) {
+	home := t.TempDir()
+	path := writeACLTestService(t, home, "25001")
+	if port, err := ReadOpenCodeServicePortAsUser(home); err != nil || port != 25001 {
+		t.Fatalf("an ACL-free file was not imported: port=%d err=%v", port, err)
+	}
+	addNativeACL(t, path, "everyone allow write,append")
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("the ACL changed the mode bits: %v %v", info, err)
+	}
+	if port, err := ReadOpenCodeServicePortAsUser(home); err != nil || port != 0 {
+		t.Fatalf("a file with a write ACL was imported: port=%d err=%v", port, err)
+	}
+	if result, err := SetOpenCodeServicePort(home, 25001); err != nil || !result.Changed {
+		t.Fatalf("a matching file with a write ACL was accepted as it stands: %+v %v", result, err)
+	}
+}
+
+// Benign twin on the same real reader: an entry for root on the file adds no
+// authority, so the port is imported and a matching file is left alone.
+func TestOpenCodeServicePortKeepsAFileWithARootACLEntry(t *testing.T) {
+	home := t.TempDir()
+	path := writeACLTestService(t, home, "25001")
+	addNativeACL(t, path, "user:root allow write,append")
+	if port, err := ReadOpenCodeServicePortAsUser(home); err != nil || port != 25001 {
+		t.Fatalf("a file with a root entry was not imported: port=%d err=%v", port, err)
+	}
+	result, err := SetOpenCodeServicePort(home, 25001)
+	if err != nil || result.Changed || result.Port != 25001 {
+		t.Fatalf("a file with a root entry was rewritten: %+v %v", result, err)
 	}
 }
