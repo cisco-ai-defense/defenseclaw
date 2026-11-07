@@ -24,6 +24,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import link_guard  # noqa: E402
 from defenseclaw.commands import cmd_uninstall, legacy_setup_install  # noqa: E402
 
 from tests.test_uninstall_legacy_setup_install import _install, _uninstall, _winerror  # noqa: E402
@@ -162,7 +163,7 @@ def test_with_two_links_the_one_nearest_the_folder_comes_first(profile) -> None:
 
 def test_no_link_keeps_the_ordinary_steps(profile) -> None:
     root = _install(profile.local)
-    assert legacy_setup_install._link_problem(str(root)) is None
+    assert link_guard.link_problem(str(root)) is None
     with patch.object(legacy_setup_install, "_read_state", side_effect=OSError("it is not valid JSON")):
         found = legacy_setup_install.find("win32")
     assert found is not None and found.problem == "it is not valid JSON"
@@ -243,4 +244,4 @@ def test_the_cache_and_the_launcher_state_behind_a_link_are_not_touched(profile)
     ],
 )
 def test_the_kind_of_link_comes_from_the_reparse_tag(mode: int, tag: int, expected: str) -> None:
-    assert legacy_setup_install._link_kind(SimpleNamespace(st_mode=mode, st_reparse_tag=tag)) == expected
+    assert link_guard.link_kind(SimpleNamespace(st_mode=mode, st_reparse_tag=tag)) == expected
