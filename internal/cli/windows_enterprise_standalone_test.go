@@ -2388,6 +2388,19 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		!strings.Contains(codex[0].Message, "may still name the DefenseClaw hook binary") {
 		t.Fatalf("the Codex kept link: %+v", codex)
 	}
+	// The same link met first by a psm1 purge step (the short reason) is still
+	// named with the longer Codex reason.
+	for _, link := range []string{`C:\\ProgramData\\OpenAI\\Codex`, `C:\\ProgramData\\OpenAI`} {
+		short := warnings(base + `,"machine_state_remaining":["` + link + keptLink + `"]}`)
+		if len(short) != 1 || short[0].Code != "machine_state_kept" ||
+			!strings.Contains(short[0].Message, "may still name the DefenseClaw hook binary") {
+			t.Fatalf("the Codex link %s met by a purge step: %+v", link, short)
+		}
+	}
+	other := warnings(base + `,"machine_state_remaining":["C:\\ProgramData\\Cursor` + keptLink + `"]}`)
+	if len(other) != 1 || strings.Contains(other[0].Message, "hook binary") {
+		t.Fatalf("a non-Codex kept link got the Codex reason: %+v", other)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}

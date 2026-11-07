@@ -2052,6 +2052,11 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 		}
 		seen[key] = true
 		if strings.HasPrefix(reason, "kept: ") {
+			if strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason) && windowsEnterpriseCodexLinkPath(path) {
+				// A link at the Codex folder is named with what it cannot
+				// promise, whichever step met it first (GAP-0773).
+				entry = path + ": " + windowsEnterpriseCodexKeptLinkReason
+			}
 			kept = append(kept, entry)
 		} else {
 			failed = append(failed, entry)
@@ -2070,6 +2075,14 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 			len(kept), windowsEnterpriseBoundedLabels(kept),
 		))
 	}
+}
+
+// windowsEnterpriseCodexLinkPath reports whether path is the Codex
+// machine-policy folder or its vendor folder (a link above it is kept as the
+// vendor folder).
+func windowsEnterpriseCodexLinkPath(path string) bool {
+	folded := strings.TrimRight(strings.ToLower(path), `\`)
+	return strings.HasSuffix(folded, `\programdata\openai\codex`) || strings.HasSuffix(folded, `\programdata\openai`)
 }
 
 // windowsEnterprisePathBehindKeptLink reports whether path is below one of the
