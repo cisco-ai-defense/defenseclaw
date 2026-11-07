@@ -11,13 +11,15 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
-	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // perUserConnectedPeerPID is the one process of this account holding the
-// accepted end of the connected tuple.
+// accepted end of the connected tuple. It runs when the call connects, long
+// before any deadline: the 2 s is a cap on the work of this one read, on the
+// system clock, and not one of the post-deadline proof budgets that the proof
+// clock decides (internal/proofclock).
 func perUserConnectedPeerPID(client, server *net.TCPAddr) (int, bool) {
-	ctx, cancel := proofclock.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	owners, err := darwinSocketOwnerPIDs(ctx, server, client, darwinTCPEstablished)
 	if err != nil || len(owners) != 1 {
