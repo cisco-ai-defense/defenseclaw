@@ -5,21 +5,26 @@
 package connector
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
 
-// hermesKeptDefenseClawEvents lists the events that still hold an entry whose
-// command mentions DefenseClaw after teardown removed the owned ones. Such an
-// entry is not one DefenseClaw wrote (its command is not a string Setup
-// records), so teardown keeps it as the user's and says so.
-func hermesKeptDefenseClawEvents(hooks map[string]interface{}) []string {
+// hermesKeptHookEvents lists the hook events Setup registers that still hold an
+// entry DefenseClaw does not own (hermesHookEntryOwned). Such an entry is the
+// user content Setup, repair and teardown keep. Nothing is read from its
+// command: whether it runs a DefenseClaw hook cannot be told from the text, so
+// every kept entry on these events is listed and the user decides.
+func hermesKeptHookEvents(hooks map[string]interface{}, hookScript string, recognizedCommands map[string]struct{}) []string {
+	required := hermesHookEventSet()
 	var events []string
 	for event, raw := range hooks {
+		if _, ok := required[event]; !ok {
+			continue
+		}
 		entries, _ := hermesHookList(raw)
 		for _, entry := range entries {
-			command, _ := hermesHookEntryCommand(entry)
-			if strings.Contains(strings.ToLower(command), "defenseclaw") {
+			if _, hasCommand := hermesHookEntryCommand(entry); hasCommand && !hermesHookEntryOwned(entry, hookScript, recognizedCommands) {
 				events = append(events, event)
 				break
 			}
@@ -27,4 +32,12 @@ func hermesKeptDefenseClawEvents(hooks map[string]interface{}) []string {
 	}
 	sort.Strings(events)
 	return events
+}
+
+// warnHermesKeptHookEntries says once, after Setup or teardown (operation),
+// which events keep hook entries DefenseClaw did not write.
+func warnHermesKeptHookEntries(operation, path string, hooks map[string]interface{}, hookScript string, recognizedCommands map[string]struct{}) {
+	if kept := hermesKeptHookEvents(hooks, hookScript, recognizedCommands); len(kept) > 0 {
+		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes %s: kept hook entries in %s (events: %s) that DefenseClaw did not write; remove any that runs a DefenseClaw hook by hand\n", operation, path, strings.Join(kept, ", "))
+	}
 }

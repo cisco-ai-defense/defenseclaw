@@ -114,8 +114,10 @@ func TestHermesTeardownRemovesTheCommandsSetupWroteWhateverTheHomeIsCalled(t *te
 			if err := conn.VerifyClean(opts); err != nil {
 				t.Fatalf("VerifyClean after teardown: %v", err)
 			}
-			if notice.Len() != 0 {
-				t.Fatalf("notice for an entry Setup wrote: %q", notice.String())
+			// The one notice lists the user hook that stays; the entry Setup wrote
+			// is gone and is not what it is about.
+			if strings.Count(notice.String(), "\n") != 1 || !strings.Contains(notice.String(), "(events: pre_tool_call)") {
+				t.Fatalf("notice = %q; want one line for the kept user hook", notice.String())
 			}
 			if matches, _ := filepath.Glob(configPath + ".*"); len(matches) != 0 {
 				t.Fatalf("teardown wrote extra files next to the config: %q", matches)
@@ -147,34 +149,33 @@ func TestHermesTeardownRemovesTheGeneratedScriptAtAnEditedPath(t *testing.T) {
 // account home inside double quotes; a path with a space that steps out of the
 // hooks directory to an ordinary user script) and the spellings of earlier
 // reviews. Teardown keeps each entry, VerifyClean accepts the file, and the
-// user's script is untouched. Only the ones that mention DefenseClaw are warned
-// about, once.
+// user's script is untouched. Teardown and repair each warn once, whatever the
+// command says.
 func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T) {
 	forms := map[string]struct {
 		home    string
 		command func(dataDir, home string) string
-		warned  bool
 	}{
-		"apostrophe in account home, double quoted": {"o'brien", func(d, _ string) string { return "bash \"" + filepath.Join(d, "hooks", "hookX") + "\"" }, true},
+		"apostrophe in account home, double quoted": {"o'brien", func(d, _ string) string { return "bash \"" + filepath.Join(d, "hooks", "hookX") + "\"" }},
 		"space and dotdot out to a user script": {"", func(d, _ string) string {
 			return "bash \"" + d + "/hooks/folder with space/../../../user-hook.sh\""
-		}, true},
-		"renamed hook, absolute":        {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") }, true},
-		"renamed hook, tilde":           {"", func(_, _ string) string { return "~/.defenseclaw/hooks/hookX" }, true},
-		"renamed hook, home var":        {"", func(_, _ string) string { return "$HOME/.defenseclaw/hooks/hookX" }, true},
-		"renamed hook, arguments":       {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") + " --event pre_tool_call" }, true},
-		"renamed hook, after bash":      {"", func(d, _ string) string { return "bash " + filepath.Join(d, "hooks", "hookX") }, true},
-		"adjacent directory":            {"", func(d, _ string) string { return d + "-hooks/hookX" }, true},
-		"relative word":                 {"", func(_, _ string) string { return "cd .defenseclaw/hooks && bash ./hookX" }, true},
-		"setup command, leading space":  {"", func(d, _ string) string { return " " + hermesSetupCommandIn(d) }, true},
-		"setup command, trailing space": {"", func(d, _ string) string { return hermesSetupCommandIn(d) + " " }, true},
-		"setup command, trailing tab":   {"", func(d, _ string) string { return hermesSetupCommandIn(d) + "\t" }, true},
+		}},
+		"renamed hook, absolute":        {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") }},
+		"renamed hook, tilde":           {"", func(_, _ string) string { return "~/.defenseclaw/hooks/hookX" }},
+		"renamed hook, home var":        {"", func(_, _ string) string { return "$HOME/.defenseclaw/hooks/hookX" }},
+		"renamed hook, arguments":       {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") + " --event pre_tool_call" }},
+		"renamed hook, after bash":      {"", func(d, _ string) string { return "bash " + filepath.Join(d, "hooks", "hookX") }},
+		"adjacent directory":            {"", func(d, _ string) string { return d + "-hooks/hookX" }},
+		"relative word":                 {"", func(_, _ string) string { return "cd .defenseclaw/hooks && bash ./hookX" }},
+		"setup command, leading space":  {"", func(d, _ string) string { return " " + hermesSetupCommandIn(d) }},
+		"setup command, trailing space": {"", func(d, _ string) string { return hermesSetupCommandIn(d) + " " }},
+		"setup command, trailing tab":   {"", func(d, _ string) string { return hermesSetupCommandIn(d) + "\t" }},
 		"edited path script, padded": {"", func(d, _ string) string {
 			return " " + filepath.Join(d, "hooks", "hermes-hook.sh.off") + " --event pre_tool_call"
-		}, true},
-		"echo of the script name":   {"", func(_, _ string) string { return "echo hermes-hook.sh" }, false},
-		"user script":               {"", func(_, home string) string { return filepath.Join(home, "user-hooks", "hookX") }, false},
-		"user script in spaced dir": {"operator with space", func(_, home string) string { return "'" + filepath.Join(home, "my hooks", "hookX") + "'" }, false},
+		}},
+		"echo of the script name":   {"", func(_, _ string) string { return "echo hermes-hook.sh" }},
+		"user script":               {"", func(_, home string) string { return filepath.Join(home, "user-hooks", "hookX") }},
+		"user script in spaced dir": {"operator with space", func(_, home string) string { return "'" + filepath.Join(home, "my hooks", "hookX") + "'" }},
 	}
 	for name, form := range forms {
 		t.Run(name, func(t *testing.T) {
@@ -203,9 +204,20 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T)
 			if _, err := os.Stat(userScript); err != nil {
 				t.Fatalf("user script: %v", err)
 			}
-			warned := strings.Contains(notice.String(), "kept hook entries") && strings.Contains(notice.String(), "pre_tool_call")
-			if warned != form.warned || strings.Count(notice.String(), "\n") > 1 {
-				t.Fatalf("notice = %q; warned want %v", notice.String(), form.warned)
+			if !strings.Contains(notice.String(), "kept hook entries") || !strings.Contains(notice.String(), "pre_tool_call") || strings.Count(notice.String(), "\n") != 1 {
+				t.Fatalf("notice = %q; want one line naming pre_tool_call", notice.String())
+			}
+			// Repair applies the same predicate: it adds the current entry,
+			// keeps the user entry and warns, and never refuses.
+			notice.Reset()
+			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+				t.Fatalf("repair refused a user entry: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); len(got) != 2 || got[0] != command || got[1] != hermesConfiguredHookCommand(conn.hookCommand(opts), "") {
+				t.Fatalf("repaired commands = %q; want the user entry %q then the current one", got, command)
+			}
+			if !strings.Contains(notice.String(), "kept hook entries") || !strings.Contains(notice.String(), "pre_tool_call") || strings.Count(notice.String(), "\n") != 1 {
+				t.Fatalf("repair notice = %q; want one line naming pre_tool_call", notice.String())
 			}
 			if matches, _ := filepath.Glob(configPath + ".*"); len(matches) != 0 {
 				t.Fatalf("teardown wrote extra files next to the config: %q", matches)
@@ -265,5 +277,41 @@ func TestHermesVerifyCleanIgnoresACommentThatNamesTheScript(t *testing.T) {
 	})
 	if err := conn.VerifyClean(opts); err == nil {
 		t.Fatal("VerifyClean accepted a file with an entry Setup wrote")
+	}
+}
+
+// The kept-entry notice does not depend on how the data directory is spelled: an
+// account whose data directory is not called defenseclaw still gets the notice
+// for a hand-edited or padded entry, from teardown and from repair.
+func TestHermesKeptEntryNoticeIgnoresTheDataDirectoryName(t *testing.T) {
+	for name, edit := range map[string]func(dataDir string) string{
+		"edited script name": func(d string) string { return "bash " + filepath.Join(d, "hooks", "hookX") },
+		"padded command":     func(d string) string { return " " + hermesSetupCommandIn(d) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			conn, opts, configPath, home := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
+			opts.DataDir = filepath.Join(home, "state")
+			command := edit(opts.DataDir)
+			writeHermesPreToolEntries(t, configPath, []interface{}{
+				map[string]interface{}{"command": command, "fail_closed": true, "matcher": ".*", "timeout": 30},
+			})
+			notice := captureHermesNotices(t)
+			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+				t.Fatalf("repair: %v", err)
+			}
+			if !strings.Contains(notice.String(), "pre_tool_call") {
+				t.Fatalf("repair notice = %q; want pre_tool_call listed", notice.String())
+			}
+			notice.Reset()
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); len(got) != 1 || got[0] != command {
+				t.Fatalf("remaining commands = %q; want the user entry %q kept", got, command)
+			}
+			if !strings.Contains(notice.String(), "pre_tool_call") {
+				t.Fatalf("teardown notice = %q; want pre_tool_call listed", notice.String())
+			}
+		})
 	}
 }

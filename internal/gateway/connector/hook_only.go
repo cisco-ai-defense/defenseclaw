@@ -4826,6 +4826,7 @@ func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpt
 			hooks[event] = reconciled
 		}
 	}
+	warnHermesKeptHookEntries("setup", path, hooks, hookScript, recognizedCommands)
 	data, err := marshalTopLevelYAMLFieldPreservingOtherBytes(path, "hooks", hooks)
 	if err != nil {
 		return err
@@ -5000,8 +5001,8 @@ const hermesHookScriptName = "hermes-hook.sh"
 // launcher forms, compared byte for byte), or it is the generated script at an
 // edited path (GAP-0906). A command is never cleaned, unquoted or searched for
 // a directory, so a user command that mentions or reaches a managed file in
-// some other way belongs to the user: teardown keeps it and warns
-// (hermesKeptDefenseClawEvents).
+// some other way belongs to the user: Setup, repair and teardown keep it and
+// warn (warnHermesKeptHookEntries).
 func hermesHookEntryOwned(entry interface{}, hookScript string, recognizedCommands map[string]struct{}) bool {
 	command, ok := hermesHookEntryCommand(entry)
 	if !ok {
@@ -5042,11 +5043,6 @@ func hermesHookEntryCommand(raw interface{}) (string, bool) {
 	return command, ok
 }
 
-func hermesCommandClaimsDefenseClaw(command string) bool {
-	command = strings.ToLower(strings.TrimSpace(command))
-	return strings.Contains(command, "--connector hermes") || strings.Contains(command, "hermes-hook.sh")
-}
-
 func hermesHookList(raw interface{}) ([]interface{}, error) {
 	switch value := raw.(type) {
 	case nil:
@@ -5074,16 +5070,12 @@ func reconcileHermesHookEntries(
 	out := make([]interface{}, 0, len(list)+1)
 	replaced := false
 	for _, item := range list {
-		command, hasCommand := hermesHookEntryCommand(item)
 		if hermesHookEntryOwned(item, hookScript, recognizedCommands) {
 			if !replaced {
 				out = append(out, expected)
 				replaced = true
 			}
 			continue
-		}
-		if hasCommand && hermesCommandClaimsDefenseClaw(command) {
-			return nil, fmt.Errorf("handler has a tampered DefenseClaw command; refusing non-exact repair")
 		}
 		out = append(out, item)
 	}
@@ -5104,12 +5096,8 @@ func removeStaleHermesHookEntries(
 	}
 	out := make([]interface{}, 0, len(list))
 	for _, item := range list {
-		command, hasCommand := hermesHookEntryCommand(item)
 		if hermesHookEntryOwned(item, hookScript, recognizedCommands) {
 			continue
-		}
-		if hasCommand && hermesCommandClaimsDefenseClaw(command) {
-			return nil, fmt.Errorf("handler has a tampered DefenseClaw command; refusing non-exact repair")
 		}
 		out = append(out, item)
 	}
@@ -5139,9 +5127,7 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 		hooks[event] = removeOwnedFlatHooks(raw, hookScript)
 	}
 	pruneEmptyMapArrays(hooks)
-	if kept := hermesKeptDefenseClawEvents(hooks); len(kept) > 0 {
-		fmt.Fprintf(hermesSetupWarningOutput, "[connector] hermes teardown: kept hook entries in %s (events: %s) whose command mentions DefenseClaw but is not an entry DefenseClaw wrote; remove them by hand if they run a DefenseClaw hook\n", path, strings.Join(kept, ", "))
-	}
+	warnHermesKeptHookEntries("teardown", path, hooks, hookScript, hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, "")))
 	// DefenseClaw owns entries in the hooks mapping only: every other byte of
 	// config.yaml (Hermes' commented template, the user's settings and their
 	// order and quoting) stays as it is. A hooks field that Setup added to a

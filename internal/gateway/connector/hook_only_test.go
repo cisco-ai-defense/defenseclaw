@@ -1735,9 +1735,20 @@ func TestHermesHookRepairReplacesEditedHookPath(t *testing.T) {
 	if err := os.WriteFile(path, foreign, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := patchHermesHooks(path, hookScript, ""); err == nil ||
-		!strings.Contains(err.Error(), "tampered DefenseClaw command") {
-		t.Fatalf("repair error = %v, want the ambiguous-command refusal", err)
+	// A command that is not one Setup writes is the user content: repair keeps
+	// it beside the current entry and does not refuse (LEAD 15:58, one ownership
+	// predicate for Setup, repair and teardown).
+	if err := patchHermesHooks(path, hookScript, ""); err != nil {
+		t.Fatalf("repair refused a user entry: %v", err)
+	}
+	cfg, err := readYAMLObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	preTool, _ := hooks["pre_tool_call"].([]interface{})
+	if len(preTool) != 2 || preTool[0].(map[string]interface{})["command"] != "/opt/wrapper --connector hermes" {
+		t.Fatalf("pre_tool_call after repair = %#v, want the user entry kept then the DefenseClaw entry", preTool)
 	}
 }
 
