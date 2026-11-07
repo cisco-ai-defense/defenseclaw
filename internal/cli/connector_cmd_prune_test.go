@@ -253,8 +253,7 @@ const operatorOpenCodePlugin = "export const Operator = async () => ({});\n"
 func setUpOpenCodeNextToOperatorPlugin(t *testing.T, dataDir string) string {
 	t.Helper()
 	home := testenv.PrivateTempDir(t)
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	testenv.SetHome(t, home)
 	configDir := filepath.Join(home, ".config", "opencode")
 	t.Setenv("OPENCODE_CONFIG_DIR", configDir)
 	pluginDir := filepath.Join(configDir, "plugins")
@@ -372,8 +371,10 @@ func TestConnectorPruneOrphansKeepsAConfiguredOrForeignOpenCodePlugin(t *testing
 func setUpAntigravityRollbackFromNewer(t *testing.T, pristine []byte) (path, saved, dataDir string) {
 	t.Helper()
 	root := testenv.PrivateTempDir(t)
-	t.Setenv("HOME", root)
-	t.Setenv("USERPROFILE", root)
+	// Every per-OS config root (XDG, APPDATA, LOCALAPPDATA) moves with the
+	// home, so a connector that resolves its folder from one of them cannot
+	// reach the account that runs the tests.
+	testenv.SetHome(t, root)
 	dataDir = filepath.Join(root, ".defenseclaw")
 	path = filepath.Join(root, ".gemini", "config", "hooks.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -761,6 +762,22 @@ func TestConnectorPruneOrphansWithoutConfigNeedsVerifiedBackupRecords(t *testing
 	}
 }
 
+// The rollback fixture's home covers every config root a connector reads. A
+// runner that sets XDG_CONFIG_HOME or APPDATA (Windows) outside the fixture
+// must not leak into the Devin config path the prune tests write through.
+func TestRollbackFixtureHomeCoversConnectorConfigRoots(t *testing.T) {
+	foreign := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", foreign)
+	t.Setenv("APPDATA", foreign)
+	t.Setenv("LOCALAPPDATA", foreign)
+	_, _, dataDir := setUpAntigravityRollbackFromNewer(t, []byte("{}\n"))
+	devinPath := connector.DevinHooksConfigPath(connector.SetupOpts{DataDir: dataDir})
+	home := filepath.Dir(dataDir)
+	if rel, err := filepath.Rel(home, devinPath); err != nil || strings.HasPrefix(rel, "..") {
+		t.Fatalf("Devin config path %q is outside the fixture home %q", devinPath, home)
+	}
+}
+
 // A connector whose config root the operator moved outside the account home
 // (Devin with an absolute XDG_CONFIG_HOME) leaves a valid backup record that
 // the restore skips. It must not stop the rollback from restoring and
@@ -770,7 +787,9 @@ func TestConnectorPruneOrphansRollbackIgnoresBackupOutsideAccountHome(t *testing
 	path, saved, dataDir := setUpAntigravityRollbackFromNewer(t, pristine)
 	defer withConnectorState(t, dataDir, "codex")()
 	externalConfigRoot := t.TempDir()
+	// Devin reads XDG_CONFIG_HOME on macOS and Linux and %APPDATA% on Windows.
 	t.Setenv("XDG_CONFIG_HOME", externalConfigRoot)
+	t.Setenv("APPDATA", externalConfigRoot)
 	// Run Devin Setup against the newer data folder, then swap the folders the
 	// way the real rollback does.
 	if err := os.Remove(dataDir); err != nil {
@@ -780,6 +799,12 @@ func TestConnectorPruneOrphansRollbackIgnoresBackupOutsideAccountHome(t *testing
 		t.Fatal(err)
 	}
 	opts := connector.SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970", APIToken: "test-token"}
+	// Check where Setup will write before it writes: a path outside the
+	// temporary root would be the runner account's own Devin config.
+	devinPath := connector.DevinHooksConfigPath(opts)
+	if devinPath != filepath.Join(externalConfigRoot, "devin", "config.json") {
+		t.Fatalf("Devin config path = %q, want the custom config root", devinPath)
+	}
 	if err := connector.NewDevinConnector().Setup(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
@@ -788,10 +813,6 @@ func TestConnectorPruneOrphansRollbackIgnoresBackupOutsideAccountHome(t *testing
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)
-	}
-	devinPath := connector.DevinHooksConfigPath(opts)
-	if devinPath != filepath.Join(externalConfigRoot, "devin", "config.json") {
-		t.Fatalf("Devin config path = %q, want the custom config root", devinPath)
 	}
 	if _, err := os.Stat(filepath.Join(saved, "connector_backups", "devin", "config.json")); err != nil {
 		t.Fatalf("Devin setup made no backup record: %v", err)
