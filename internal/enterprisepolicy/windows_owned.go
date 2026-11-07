@@ -13,6 +13,9 @@ package enterprisepolicy
 import (
 	"errors"
 	"fmt"
+	"sort"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // connectorAmp has no machine policy target; on Windows the guardian holds
@@ -171,6 +174,59 @@ func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) error {
 	return nil
 }
 
+// keepLinkedGoOwnedForRemoval clears a link a standard user planted on the
+// policy paths of target (the link only; what it points at is untouched) and
+// reports true, with the reason in the details, when a link an administrator
+// owns, or one it could not remove, stays: the removal then reads nothing
+// through it, and the path is named (WindowsGoOwnedLinkedFolders).
+func keepLinkedGoOwnedForRemoval(opts Options, target Target) (bool, State) {
+	state := State{Connector: target.Name(), Route: RouteMachinePolicy}
+	paths, err := target.Paths(opts)
+	if err != nil {
+		return false, state
+	}
+	for _, path := range paths {
+		link, why := clearOrKeepLinkedPolicyPath(opts, platformPath(opts, path), &state)
+		if link == "" {
+			continue
+		}
+		state.detail("kept %s: %s", link, why)
+		managed.EmitResilienceEvent(managed.MarkerBoundary, map[string]string{
+			"path":   link,
+			"reason": why,
+		})
+		return true, state
+	}
+	return false, state
+}
+
+// WindowsGoOwnedLinkedFolders lists, sorted, the paths on the Go-owned
+// policy paths (Copilot, OpenCode, Devin) that are links now. It is
+// read-only. A teardown that kept one names it in machine_state_remaining
+// (path: kept: reason).
+func WindowsGoOwnedLinkedFolders(opts Options) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, name := range windowsGoOwnedNames {
+		target, ok := TargetFor(name)
+		if !ok {
+			continue
+		}
+		paths, err := target.Paths(opts)
+		if err != nil {
+			continue
+		}
+		for _, path := range paths {
+			if link := linkedPolicyComponent(opts, platformPath(opts, path)); link != "" && !seen[link] {
+				seen[link] = true
+				out = append(out, link)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // RemoveWindowsGoOwned removes the DefenseClaw entries of the Go-owned
 // Windows targets, the public summary and the managed OpenCode plugin.
 // Administrator files are left byte-identical.
@@ -185,6 +241,17 @@ func RemoveWindowsGoOwned(opts Options) (Result, error) {
 		target, ok := TargetFor(name)
 		if !ok {
 			continue
+		}
+		// A link on the target path is cleared or kept before anything is
+		// taken back, created or read (GAP-0758): the removal never fails on
+		// it and never creates a folder in its place.
+		if kept, linkState := keepLinkedGoOwnedForRemoval(opts, target); kept {
+			result.States = append(result.States, linkState)
+			result.Changed = result.Changed || linkState.Changed
+			continue
+		} else if len(linkState.Details) > 0 {
+			result.States = append(result.States, linkState)
+			result.Changed = true
 		}
 		if err := takeBackWindowsGoOwnedForRemoval(opts, target); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))

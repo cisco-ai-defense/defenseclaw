@@ -157,6 +157,9 @@ func completeWindowsManagedHooksTeardownUserCleanup(
 	if err := windowsManagedClaudeTransactionLeftoverRemover(); err != nil {
 		report.MachineStateRemaining = append(report.MachineStateRemaining, boundedEnterpriseHookUserCleanupText(err.Error()))
 	}
+	// A link at a vendor folder stays (GAP-0758): name it, so the uninstall
+	// result says so instead of leaving it unmentioned.
+	report.MachineStateRemaining = append(report.MachineStateRemaining, windowsManagedHooksKeptLinkedFolders()...)
 	report.UserRegistrationsRemoved = len(cleanup.Removed)
 	report.UserRegistrationsPending = cleanup.Pending
 	report.UserRegistrationsFailed = cleanup.Failed

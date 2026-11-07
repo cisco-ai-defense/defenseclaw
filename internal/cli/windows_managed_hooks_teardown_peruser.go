@@ -275,6 +275,27 @@ var windowsManagedClaudeCurrentUserSID = func() (string, error) {
 // removeWindowsManagedHooksStandalonePerUserRegistrations); Secure Client
 // writes none. Per-user runtime files stay, like every other connector.
 
+// windowsManagedHooksKeptLinkedFolders names, as machine_state_remaining
+// entries (path: kept: reason), each vendor folder a teardown kept because a
+// link sits there: the ones the Cursor, Claude Code, selector and per-user
+// teardown steps of this process met, and the ones on the Go-owned policy
+// paths (Copilot, OpenCode, Devin), which an earlier step of the uninstall
+// may have kept. It only reads. Replaceable in tests.
+var windowsManagedHooksKeptLinkedFolders = func() []string {
+	const reason = "kept: a link sits here; DefenseClaw does not follow, change or remove it"
+	var out []string
+	for _, folder := range enterprisehooks.WindowsManagedPolicyFoldersKept() {
+		out = append(out, folder+": "+reason)
+	}
+	if layout, programFiles, programData, err := standaloneEnterprisePolicyLayout(); err == nil {
+		opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
+		for _, folder := range enterprisepolicy.WindowsGoOwnedLinkedFolders(opts) {
+			out = append(out, folder+": "+reason)
+		}
+	}
+	return out
+}
+
 func windowsManagedHooksStandalonePerUserTarget(connectorName string) bool {
 	return enterprisehooks.IsWindowsProfilePerUserConnector(connectorName)
 }

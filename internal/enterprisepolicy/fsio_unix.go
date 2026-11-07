@@ -939,3 +939,9 @@ func adminOwnedLink(info os.FileInfo) bool {
 func openGuardAppend(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 }
+
+// A link on a vendor policy path is a Windows ProgramData matter: no unix
+// ancestor is writable by an unprivileged user.
+func linkedPolicyComponent(Options, string) string { return "" }
+
+func clearOrKeepLinkedPolicyPath(Options, string, *State) (string, string) { return "", "" }
