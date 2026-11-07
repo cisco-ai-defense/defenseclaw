@@ -826,25 +826,51 @@ var (
 	enterpriseHookReconcileStageDeferredPolicies    = stageEnterpriseHookDeferredManagedPolicies
 	enterpriseHookReconcileSyncEnrollments          = syncEnterpriseHookManagedEnrollments
 	enterpriseHookAccountOwnedDataDirLink           = enterpriseHookAccountOwnedDataDirLinkPlatform
+	// enterpriseHookForeignDataDirLink reports a link at the account's
+	// canonical folder that the account does not own (GAP-0585). Tests
+	// replace it.
+	enterpriseHookForeignDataDirLink = enterpriseHookForeignDataDirLinkPlatform
 )
 
 const enterpriseHookAccountLinkFailure = "enterprise hooks: the account's own DefenseClaw folder link is pending repair"
 
-func enterpriseHookTargetAccountLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
+// enterpriseHookAccountForeignLinkFailure is the guardian error of an account
+// whose canonical DefenseClaw folder is a link another principal owns, such as
+// an administrator (GAP-0585). The link is never followed, repaired or moved
+// aside, so the account has no protection until an administrator removes it.
+// Like enterpriseHookAccountLinkFailure it fails only that account's rows:
+// status, verify and the administrator lifecycle go on for every other
+// account and name this one.
+const enterpriseHookAccountForeignLinkFailure = "enterprise hooks: the account's DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link"
+
+// enterpriseHookStandaloneCanonicalDataDir reports, on a standalone
+// deployment only, whether target's data directory is the canonical
+// <home>\.defenseclaw folder of the account.
+func enterpriseHookStandaloneCanonicalDataDir(target enterprisehooks.ManifestTarget, home, sid string) bool {
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() ||
 		strings.TrimSpace(home) == "" || strings.TrimSpace(sid) == "" {
 		return false
 	}
 	dataDir := strings.TrimSpace(target.DataDir)
-	if dataDir == "" || !sameEnterpriseHookPath(dataDir, filepath.Join(home, ".defenseclaw")) {
-		return false
-	}
-	return enterpriseHookAccountOwnedDataDirLink(home, sid)
+	return dataDir != "" && sameEnterpriseHookPath(dataDir, filepath.Join(home, ".defenseclaw"))
 }
 
+func enterpriseHookTargetAccountLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
+	return enterpriseHookStandaloneCanonicalDataDir(target, home, sid) &&
+		enterpriseHookAccountOwnedDataDirLink(home, sid)
+}
+
+func enterpriseHookTargetForeignLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
+	return enterpriseHookStandaloneCanonicalDataDir(target, home, sid) &&
+		enterpriseHookForeignDataDirLink(home, sid)
+}
+
+// enterpriseHookAccountLinkRow reports a failed standalone row that status,
+// verify and the lifecycle excuse because the account's own folder link or a
+// link another principal owns keeps that one account unprotected.
 func enterpriseHookAccountLinkRow(row enterpriseHookReconcileRow) bool {
 	return cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() &&
-		enterpriseHookAccountLinkRowStandalone(row)
+		(enterpriseHookAccountLinkRowStandalone(row) || enterpriseHookAccountForeignLinkRow(row))
 }
 
 func enterpriseHookAccountLinkRowStandalone(row enterpriseHookReconcileRow) bool {
@@ -852,6 +878,16 @@ func enterpriseHookAccountLinkRowStandalone(row enterpriseHookReconcileRow) bool
 		row.Error == enterpriseHookAccountLinkFailure &&
 		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
 		enterpriseHookAccountOwnedDataDirLink(row.UserHome, row.SID)
+}
+
+// enterpriseHookAccountForeignLinkRow is enterpriseHookAccountLinkRowStandalone
+// for a link the account does not own (GAP-0585). It rechecks the link now, so
+// a stale record never excuses an account whose folder was fixed or replaced.
+func enterpriseHookAccountForeignLinkRow(row enterpriseHookReconcileRow) bool {
+	return !row.OK && !row.Pending && row.Result == nil &&
+		row.Error == enterpriseHookAccountForeignLinkFailure &&
+		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
+		enterpriseHookForeignDataDirLink(row.UserHome, row.SID)
 }
 
 // enterpriseHookAwaitingSignInPrefix starts the guardian error of a target
@@ -2018,6 +2054,9 @@ func enterpriseHookVerifyExcusedNote(run enterpriseHookVerifyRun, row enterprise
 	if row.Error == enterpriseHookAccountLinkFailure {
 		return " (the account remains pending until its DefenseClaw folder link is repaired)"
 	}
+	if row.Error == enterpriseHookAccountForeignLinkFailure {
+		return " (the account stays unprotected until an administrator removes the link at its DefenseClaw folder)"
+	}
 	return enterpriseHookRemovedAccountNote
 }
 
@@ -2535,6 +2574,9 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				target.Connector,
 			)
 		}
+		if targetErr == nil && enterpriseHookTargetForeignLink(target, resolved.home, resolved.sid) {
+			targetErr = errors.New(enterpriseHookAccountForeignLinkFailure)
+		}
 		if targetErr == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
 			var pending bool
@@ -2661,6 +2703,10 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			if excused > 0 && row.Error == enterpriseHookAccountLinkFailure &&
 				enterpriseHookAccountLinkRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
 				enterpriseHookTargetAccountLink(target, row.UserHome, row.SID) {
+				run.Excused = append(run.Excused, row)
+			} else if excused > 0 && row.Error == enterpriseHookAccountForeignLinkFailure &&
+				enterpriseHookAccountForeignLinkRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
+				enterpriseHookTargetForeignLink(target, row.UserHome, row.SID) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
@@ -3072,6 +3118,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			// A row of a connector the loaded config no longer enables is
 			// stale: the enumerator has not dropped it yet (GAP-2373).
 			err = enterpriseHookReconcileConnectorEnabled(target.Connector)
+		}
+		if err == nil && enterpriseHookTargetForeignLink(target, resolved.home, resolved.sid) {
+			// A link another principal owns at the account's folder is never
+			// followed, repaired or moved aside. Fail only this account's
+			// rows, by name, so the other accounts keep their protection and
+			// the administrator lifecycle goes on (GAP-0585).
+			err = errors.New(enterpriseHookAccountForeignLinkFailure)
 		}
 		if err == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {

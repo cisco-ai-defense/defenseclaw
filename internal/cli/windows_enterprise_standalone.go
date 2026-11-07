@@ -2617,12 +2617,14 @@ type windowsEnterpriseManifestAccount struct {
 // windowsEnterpriseAccountCreatedDataDir reports an account-created data
 // folder, windowsEnterpriseAccountOwnedDataDirLink a link the account made at
 // that folder or its hooks folder, and windowsEnterpriseAccountDeleted a local
-// account SID that no longer names an account. Tests replace them.
+// account SID that no longer names an account; windowsEnterpriseAccountForeignDataDirLink
+// reports a link at that folder that another principal owns (GAP-0585). Tests replace them.
 var (
-	windowsEnterpriseManifestAccounts        = readWindowsEnterpriseManifestAccounts
-	windowsEnterpriseAccountCreatedDataDir   = enterprisehooks.WindowsAccountCreatedDataDir
-	windowsEnterpriseAccountOwnedDataDirLink = enterprisehooks.WindowsAccountOwnedDataDirLink
-	windowsEnterpriseAccountDeleted          = func(sid string) bool {
+	windowsEnterpriseManifestAccounts          = readWindowsEnterpriseManifestAccounts
+	windowsEnterpriseAccountCreatedDataDir     = enterprisehooks.WindowsAccountCreatedDataDir
+	windowsEnterpriseAccountOwnedDataDirLink   = enterprisehooks.WindowsAccountOwnedDataDirLink
+	windowsEnterpriseAccountForeignDataDirLink = enterprisehooks.WindowsForeignOwnedDataDirLink
+	windowsEnterpriseAccountDeleted            = func(sid string) bool {
 		// A domain or Entra account's lookup also fails while its directory
 		// is unreachable; never tell the administrator to remove that
 		// profile.
@@ -2712,6 +2714,13 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 				"the account %s made %s (or its hooks folder) a link or junction itself, so it is not protected yet; DefenseClaw "+
 					"never follows that link, moves it aside and enrolls the account when it next signs in, and Upgrade and Repair "+
 					"leave this account pending until then",
+				label, filepath.Join(account.Home, ".defenseclaw")))
+		case windowsEnterpriseAccountForeignDataDirLink(account.Home, account.SID):
+			result.AddWarning("enrollment_skipped_account_link", fmt.Sprintf(
+				"the account %s has a link or junction at %s (or its hooks folder) that the account does not own, such as one an "+
+					"administrator made, so it is not protected; DefenseClaw never follows that link and leaves this account out so "+
+					"Setup, Upgrade and Repair finish for the other accounts. Remove the link (rmdir on a junction removes only the "+
+					"link) and run Setup /ensure again",
 				label, filepath.Join(account.Home, ".defenseclaw")))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
 			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(

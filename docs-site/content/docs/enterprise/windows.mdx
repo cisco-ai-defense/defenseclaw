@@ -934,7 +934,10 @@ protected: status names it in `enrollment_pending_account_link`, and Upgrade and
 Repair leave it pending and finish for the other accounts. A first install still
 stops before it changes anything, naming the link. Releases before 1.0.6 refuse
 that account instead, and every later Setup run on the computer stops with
-`lifecycle_error` naming the link. In both cases remove the link (`rmdir` on a
+`lifecycle_error` naming the link. A link at that folder that the account does not
+own, such as one an administrator made, is never followed or moved aside: Setup
+leaves that one account out, finishes for the others, and status names it in
+`enrollment_skipped_account_link` until an administrator removes the link. In every case remove the link (`rmdir` on a
 junction removes only the link) and run Setup again. A running per-user gateway holds the API port, and Setup names it
 in `api_port_held`. See
 [Uninstall and preserved state](/docs/get-started/windows).
