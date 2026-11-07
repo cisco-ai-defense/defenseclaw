@@ -174,3 +174,33 @@ func TestSecureClientCodexStateStaysDirectForTheRound11bRules(t *testing.T) {
 		t.Fatalf("held state file: err = %v; want the plain failure of 1.0.8, no named holder", err)
 	}
 }
+
+// g582 round 11c (L2, S1). The new republish rule and the requirements mark
+// are standalone only: a Secure Client transaction never marks
+// requirements.toml as touched (it has no hook copy to keep or republish), so
+// the code path is the one of the base release.
+func TestSecureClientRequirementsPublishDoesNotMarkTheTransaction(t *testing.T) {
+	row := windowsCodexRemovalRowsForTest[0]
+	opts := newWindowsCodexMachineGuardFixtureForTest(t, row.requirements)
+	opts.SecureClient = true
+	if report, err := ReconcileWindowsCodexMachineRequirements(opts); err != nil || !report.OK {
+		t.Fatalf("Secure Client reconcile: %+v, %v", report, err)
+	}
+	var marked bool
+	if err := withWindowsCodexMachineMutation(opts, func() error {
+		base, err := readWindowsCodexSharedRequirements(opts.RequirementsPath)
+		if err != nil {
+			return err
+		}
+		if err := publishWindowsCodexRequirements(base, []byte("# changed by the test\n"+string(base.Data)), false); err != nil {
+			return err
+		}
+		marked = windowsCodexActiveManagedState != nil && windowsCodexActiveManagedState.requirementsTouched
+		return nil
+	}); err != nil {
+		t.Fatalf("Secure Client publish: %v", err)
+	}
+	if marked {
+		t.Fatal("a Secure Client transaction marked requirements.toml as touched")
+	}
+}

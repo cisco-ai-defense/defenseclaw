@@ -127,9 +127,14 @@ var (
 	windowsCodexHeldRetrySleep = time.Sleep
 )
 
-// windowsCodexFileHeldAgainstDelete opens path for delete access, sharing
-// everything: the open fails with a sharing violation exactly while another
-// handle refuses delete sharing, which is what keeps a replace from landing.
+// windowsCodexFileHeldAgainstDelete opens path for delete and read access,
+// sharing everything: the open fails with a sharing violation exactly while
+// another handle refuses delete sharing, which is what keeps a replace from
+// landing, or refuses read sharing, which keeps a read from landing. The read
+// access is what makes the second kind visible: an open with no data access
+// is not checked against a holder's share mode, so a holder that denies read
+// sharing was never found and the failed read came back unnamed and unwaited
+// (g582 round 11c, the r11 residual).
 func windowsCodexFileHeldAgainstDelete(path string) bool {
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -141,7 +146,7 @@ func windowsCodexFileHeldAgainstDelete(path string) bool {
 	}
 	handle, err := windows.CreateFile(
 		name,
-		windows.DELETE|windows.FILE_READ_ATTRIBUTES,
+		windows.DELETE|windows.FILE_READ_DATA|windows.FILE_READ_ATTRIBUTES,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
