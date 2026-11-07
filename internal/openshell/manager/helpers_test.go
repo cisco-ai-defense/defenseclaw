@@ -711,6 +711,7 @@ func (p *fakeProxy) swaps() int {
 // harnessEnv is a fixture tying a manager to the fake gateway.
 type harnessEnv struct {
 	t        *testing.T
+	clock    *harnessClock
 	fake     *openshelltest.Fake
 	client   openshell.Client
 	cfg      *config.Config
@@ -872,6 +873,8 @@ func (e *harnessEnv) setConfig(edit func(*config.Config)) {
 
 func (e *harnessEnv) newManager() *Manager {
 	e.t.Helper()
+	clock := &harnessClock{}
+	e.clock = clock
 	m, err := New(Options{
 		DataDir: e.dataDir, Owner: e.owner, Config: e.config,
 		Connect: func(context.Context) (*Gateway, error) {
@@ -885,7 +888,7 @@ func (e *harnessEnv) newManager() *Manager {
 		IngressPort: e.ingressPort, EgressPort: e.egressPort, APIPort: e.apiPort,
 		HostUser: &HostUser{UID: 1000, GID: 1000, Name: "dev"}, Watch: e.watch.watch, Resolver: e.dns,
 		Guard: e.guard.run, GuardGitlinks: func(context.Context, string) ([]string, error) { return nil, nil },
-		DefenseClawVersion: "1.2.3", SettleDelay: -1,
+		DefenseClawVersion: "1.2.3", SettleDelay: -1, Now: clock.now,
 		Logf: func(format string, args ...any) { e.t.Logf("[manager] "+format, args...) },
 	})
 	if err != nil {
@@ -927,12 +930,34 @@ func (e *harnessEnv) restartDaemon() {
 	})
 }
 
-// fakeClock makes the manager's clock start and returns how to move it.
+// harnessClock is the clock a harness manager is built with. It reads the
+// wall clock until a test fixes it with fakeClock, and every read and move
+// goes through one lock, so a test can move it while the goroutines of the
+// manager (the guard loop, the sinks) read it. A test never replaces the
+// clock fields of a running manager: they are plain fields those goroutines
+// read without a lock.
+type harnessClock struct {
+	mu    sync.Mutex
+	fixed bool
+	at    time.Time
+}
+
+func (c *harnessClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.fixed {
+		return time.Now()
+	}
+	return c.at
+}
+
+// fakeClock fixes the clock of the manager at start and returns how to move it.
 func (e *harnessEnv) fakeClock(start time.Time) (now func() time.Time, advance func(time.Duration)) {
-	var mu sync.Mutex
-	now = func() time.Time { mu.Lock(); defer mu.Unlock(); return start }
-	e.m.opts.Now, e.m.now = now, now
-	return now, func(d time.Duration) { mu.Lock(); start = start.Add(d); mu.Unlock() }
+	c := e.clock
+	c.mu.Lock()
+	c.fixed, c.at = true, start
+	c.mu.Unlock()
+	return c.now, func(d time.Duration) { c.mu.Lock(); c.at = c.at.Add(d); c.mu.Unlock() }
 }
 
 // tryCreate is Create with the harness and project filled in.
