@@ -907,6 +907,17 @@ func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, er
 	return ParseMCPFromJSONCPaths(data, paths...)
 }
 
+// ReadMCPFromOpenClawConfig reads the MCP servers of one openclaw.json, a
+// JSON5 file (GAP-0907). AI discovery and the gateway inventory use it so a
+// file OpenClaw runs on lists the same servers here.
+func ReadMCPFromOpenClawConfig(path string) ([]MCPServerEntry, error) {
+	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
+	if err != nil {
+		return nil, err
+	}
+	return ParseMCPFromOpenClawConfig(data)
+}
+
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
 // Codex `~/.codex/config.toml` reader for callers that need to
 // enumerate mcp_servers entries out of a TOML file.

@@ -79,6 +79,8 @@ func parseMCPConfigBytesForNames(shape, source string, data []byte, limit int) (
 		entries, err = config.ParseMCPFromOpenCodeConfig(source, data)
 	case mcpShapeClaudeDesktop:
 		entries, err = config.ParseMCPFromJSONCPaths(data, []string{"mcpServers"})
+	case mcpShapeOpenClaw:
+		entries, err = config.ParseMCPFromOpenClawConfig(data)
 	case mcpShapeNestedServers:
 		entries, err = config.ParseMCPFromJSONCPaths(data, []string{"mcp", "servers"})
 	case mcpShapeDotMCP:

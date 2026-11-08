@@ -43,6 +43,9 @@ func TestUnmarshalJSON5PlacesASyntaxErrorInTheOriginalText(t *testing.T) {
 		"text after the document":                {"{a: 1}\n]", 2, 1, "]"},
 		"document ends early":                    {"{a: [1, 2", 1, 10, ""},
 		"after a byte order mark":                {"\xef\xbb\xbf{a: 1,, }", 1, 9, "}"},
+		"after a line separator U+2028":          {"{a:1,\u2028b: !}", 2, 4, "!}"},
+		"after a paragraph separator U+2029":     {"{a:1,\u2029b: !}", 2, 4, "!}"},
+		"text at fault ends at a U+2028":         {"{a: !\u2028b: 1}", 1, 5, "!"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var v any
