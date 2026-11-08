@@ -45,6 +45,10 @@ type managedFileBackup struct {
 	Mode           uint32 `json:"mode,omitempty"`
 	PristineSHA256 string `json:"pristine_sha256"`
 	PostSHA256     string `json:"post_sha256,omitempty"`
+	// LaterSetupOpen is set while a setup that found this record is still
+	// running: the target held the committed bytes when it began, and the
+	// read-back update must find them unchanged or retire the exact restore.
+	LaterSetupOpen bool   `json:"later_setup_open,omitempty"`
 	PristineBytes  []byte `json:"pristine_bytes,omitempty"`
 	CapturedAt     string `json:"captured_at"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
@@ -192,24 +196,40 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 }
 
 // retireManagedFileBackupExactRestore runs when a setup finds a record from an
-// earlier setup. A target that no longer holds the bytes DefenseClaw last
-// committed was changed by someone else (the operator saving the file again,
-// the agent itself). The setup that follows merges over those bytes and
-// records the result as its own, which would make teardown restore the
-// pre-setup copy over the change. The record is marked instead, so only the
-// DefenseClaw entries are ever removed from that file. A record without a
-// post hash, a target that is missing or not a regular file, and a target
-// that still matches change nothing.
+// earlier setup. A target that does not hold the bytes DefenseClaw last
+// committed (the post hash, or the pre-setup bytes while no post hash was
+// published) was changed by someone else: the operator saving the file again,
+// the agent itself, or an earlier setup that stopped before it recorded its
+// output. The setup that follows merges over those bytes, and recording the
+// result as its own would make teardown restore the pre-setup copy over the
+// change. The record is marked instead, so only the DefenseClaw entries are
+// ever removed from that file. A target that still matches keeps the exact
+// restore, but only on condition: the record stays open until the read-back
+// update (see updateManagedFileBackupPostHash). A target that is missing or
+// not a regular file changes nothing.
 func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup, targetPath string) error {
-	if b.PostSHA256 == "" || b.PostSHA256 == managedBackupDriftedHash {
+	if b.PostSHA256 == managedBackupDriftedHash {
 		return nil
+	}
+	expected := b.PostSHA256
+	if expected == "" {
+		expected = b.PristineSHA256
 	}
 	data, err := readHookConfigFile(targetPath)
-	if err != nil || sha256Hex(data) == b.PostSHA256 {
+	if err != nil {
 		return nil
 	}
-	b.PostSHA256 = managedBackupDriftedHash
-	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	if sha256Hex(data) != expected {
+		b.PostSHA256 = managedBackupDriftedHash
+		b.LaterSetupOpen = false
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	} else if b.PostSHA256 != "" {
+		// Not a change of custody: UpdatedAt stays, so a setup that rewrites
+		// nothing leaves the record byte-identical once it closes it again.
+		b.LaterSetupOpen = true
+	} else {
+		return nil
+	}
 	return writeManagedFileBackup(backupPath, b)
 }
 
@@ -239,6 +259,18 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	if info != nil {
 		nextHash = managedFileSnapshotHash(data, true)
 	}
+	if b.LaterSetupOpen {
+		// A later setup began on the committed bytes. Bytes it left
+		// unchanged are still ours. Anything else was merged over a base
+		// this read cannot vouch for (an edit may have landed between the
+		// capture and the merge), so it is never recorded as ours.
+		if nextHash != b.PostSHA256 {
+			b.PostSHA256 = managedBackupDriftedHash
+			b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+		b.LaterSetupOpen = false
+		return writeManagedFileBackup(backupPath, b)
+	}
 	return updateManagedFileBackupPostHashValue(dataDir, connectorName, logicalName, boundPath, nextHash)
 }
 
@@ -264,9 +296,14 @@ func updateManagedFileBackupPostHashValue(
 		return fmt.Errorf("managed backup post hash is empty")
 	}
 	if b.PostSHA256 == nextHash {
-		return nil
+		if !b.LaterSetupOpen {
+			return nil
+		}
+		b.LaterSetupOpen = false
+		return writeManagedFileBackup(backupPath, b)
 	}
 	b.PostSHA256 = nextHash
+	b.LaterSetupOpen = false
 	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return writeManagedFileBackup(backupPath, b)
 }
