@@ -16,3 +16,9 @@ import (
 func openHookConfigForRead(path string) (*os.File, error) {
 	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 }
+
+// openManagedTargetForRead opens a managed target for reading without
+// blocking on a named pipe.
+func openManagedTargetForRead(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+}

@@ -41,3 +41,9 @@ func openHookConfigForRead(path string) (*os.File, error) {
 	}
 	return os.NewFile(uintptr(handle), path), nil
 }
+
+// openManagedTargetForRead opens a managed target for reading. A Windows named
+// pipe is not reachable through a file path, so the plain open cannot block.
+func openManagedTargetForRead(path string) (*os.File, error) {
+	return os.Open(path)
+}
