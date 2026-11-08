@@ -116,6 +116,11 @@ type Facts struct {
 	// that exist in the skill folders of its agent, found as the user. The
 	// gateway takes only folders it would look at itself (GAP-1212).
 	SkillDirs []string `json:"skill_dirs,omitempty"`
+	// SkillLinks lists the skill folders a path in the request reaches
+	// through a link, resolved as the user: a gateway that may not read the
+	// profile cannot follow the link itself and so would judge only the
+	// spelling of the path.
+	SkillLinks []string `json:"skill_links,omitempty"`
 	// SkillsTruncated says Skills holds only the first maxSkills claims: a
 	// folder the request reaches into may declare a name no claim names, so
 	// a gateway that cannot read it cannot prove it is not a denied skill
@@ -217,7 +222,7 @@ func TailDigestAt(tail []byte, i int) []byte {
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && !facts.SkillsTruncated && len(facts.Contents) == 0 {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && len(facts.SkillLinks) == 0 && !facts.SkillsTruncated && len(facts.Contents) == 0 {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -298,7 +303,7 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || facts.SkillsTruncated || len(facts.Contents) > 0
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || len(facts.SkillLinks) > 0 || facts.SkillsTruncated || len(facts.Contents) > 0
 }
 
 // DeclaredFor returns the names the facts say folder declares.
@@ -333,6 +338,13 @@ func bounded(facts Facts) Facts {
 		}
 	}
 	facts.SkillDirs = dirs
+	var links []string
+	for _, dir := range facts.SkillLinks {
+		if dir = clean(dir, maxFieldBytes); filepath.IsAbs(dir) && len(links) < maxSkills {
+			links = append(links, filepath.Clean(dir))
+		}
+	}
+	facts.SkillLinks = links
 	facts.Contents = boundedContents(facts.Contents)
 	if server := facts.MCP; server != nil {
 		out := MCPServer{
@@ -788,6 +800,9 @@ type FolderRef struct {
 	// ExplicitDirectory means a leading static cd fixed the directory for
 	// this reference, so a missing folder must not be resolved in other roots.
 	ExplicitDirectory bool
+	// Linked is set when the folder is the target of a link the call's path
+	// goes through, not the spelling of the path.
+	Linked bool
 }
 
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
@@ -1079,6 +1094,19 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 		dir = filepath.Join(cwd, dir)
 	}
 	dir = filepath.Clean(dir)
+	refs := skillFolderRefsIn(dir, false)
+	// A link anywhere on the path leads into a skill folder the spelling
+	// does not show. The folder it ends in is judged as the direct path is.
+	// A path that cannot be followed (a missing folder, one the caller may
+	// not enter) stays as written.
+	if real := ResolveLinks(dir); real != dir {
+		refs = append(refs, skillFolderRefsIn(real, true)...)
+	}
+	return refs
+}
+
+// skillFolderRefsIn lists the skills/<name> pairs of the cleaned path dir.
+func skillFolderRefsIn(dir string, linked bool) []FolderRef {
 	parts := strings.Split(filepath.ToSlash(dir), "/")
 	var refs []FolderRef
 	for i := 0; i+1 < len(parts); i++ {
@@ -1091,7 +1119,52 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 		}
 		skillDir := filepath.FromSlash(strings.Join(parts[:i+2], "/"))
 		manifest := i+2 < len(parts) && strings.EqualFold(parts[i+2], "SKILL.md")
-		refs = append(refs, FolderRef{Dir: skillDir, Name: name, Manifest: manifest})
+		refs = append(refs, FolderRef{Dir: skillDir, Name: name, Manifest: manifest, Linked: linked})
 	}
 	return refs
+}
+
+// maxLinkHops bounds the links ResolveLinks follows by hand when a path ends
+// in a link whose target is missing.
+const maxLinkHops = 40
+
+// ResolveLinks follows every link (symlink, junction or reparse point) in
+// path. Where the path does not exist the part that does is resolved and the
+// rest is kept as written, and a link whose target is missing is read and
+// followed by hand, so a link placed before its target exists leads the same
+// way once it does. A part that cannot be examined at all (a folder the
+// caller may not enter) is kept as written: the spelling is then the only
+// evidence there is.
+func ResolveLinks(path string) string {
+	path = filepath.Clean(path)
+	for hop := 0; hop < maxLinkHops; hop++ {
+		if real, err := filepath.EvalSymlinks(path); err == nil {
+			return real
+		}
+		head, tail := path, ""
+		next := ""
+		for parent := filepath.Dir(head); parent != head; parent = filepath.Dir(head) {
+			tail = filepath.Join(filepath.Base(head), tail)
+			head = parent
+			real, err := filepath.EvalSymlinks(head)
+			if err != nil {
+				continue
+			}
+			first, rest, _ := strings.Cut(tail, string(filepath.Separator))
+			target, err := os.Readlink(filepath.Join(real, first))
+			if err != nil {
+				return filepath.Join(real, tail)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(real, target)
+			}
+			next = filepath.Join(target, rest)
+			break
+		}
+		if next == "" {
+			return path
+		}
+		path = next
+	}
+	return path
 }

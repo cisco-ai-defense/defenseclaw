@@ -73,6 +73,11 @@ func hookAssetFacts(connector string, payload []byte) string {
 	}
 	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {
 		addSkill(ref.Name, ref.Dir)
+		if ref.Linked {
+			// The gateway may not follow the link in this home; say where it
+			// leads.
+			facts.SkillLinks = append(facts.SkillLinks, ref.Dir)
+		}
 		if _, err := os.Lstat(ref.Dir); errors.Is(err, os.ErrNotExist) {
 			for _, root := range hookSkillRoots(connector, home, event.CWD) {
 				addSkill(ref.Name, filepath.Join(root, ref.Name))

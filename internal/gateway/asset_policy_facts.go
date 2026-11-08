@@ -337,12 +337,23 @@ func (a *APIServer) skillFolderAccessDecision(
 	} else {
 		refs = assetfacts.SkillFolderRefs(toolInput, home, cwd, caller)
 	}
+	roots := assetfacts.SkillRoots(connector, home, cwd)
+	refs = appendReportedSkillLinks(refs, facts.SkillLinks, roots)
 	if len(refs) == 0 {
 		return config.AssetPolicyDecision{}, false
 	}
-	roots := assetfacts.SkillRoots(connector, home, cwd)
+	// A folder a link leads to is spelled as the link resolves, which a root
+	// reached through a link itself (a home on another mount) is not.
+	skillRoots := slices.Clone(roots)
+	if slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked }) {
+		for _, root := range roots {
+			if real := assetfacts.ResolveLinks(root); real != filepath.Clean(root) {
+				skillRoots = append(skillRoots, real)
+			}
+		}
+	}
 	for _, ref := range refs {
-		if !skillFolderRefIsSkill(ref, roots, len(facts.DeclaredFor(ref.Name)) > 0) {
+		if !skillFolderRefIsSkill(ref, skillRoots, len(facts.DeclaredFor(ref.Name)) > 0) {
 			continue
 		}
 		// A skill admission blocked and disabled (one whose quarantine
@@ -407,6 +418,23 @@ func (a *APIServer) skillFolderAccessDecision(
 		}
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// appendReportedSkillLinks adds the skill folders the standalone hook found
+// a path of the call to lead into through a link, which this gateway cannot
+// follow in a profile it may not read. Only a folder directly in a skill root
+// of the connector counts: the claim names where a link ends, not a new place
+// to look.
+func appendReportedSkillLinks(refs []assetfacts.FolderRef, links, roots []string) []assetfacts.FolderRef {
+	for _, dir := range links {
+		parent := filepath.Dir(dir)
+		if !slices.ContainsFunc(roots, func(root string) bool { return sameCleanPath(root, parent) }) ||
+			slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return sameCleanPath(ref.Dir, dir) }) {
+			continue
+		}
+		refs = append(refs, assetfacts.FolderRef{Dir: dir, Name: filepath.Base(dir), Linked: true})
+	}
+	return refs
 }
 
 // skillFolderRefIsSkill reports whether ref, a skills/<name> path a tool
