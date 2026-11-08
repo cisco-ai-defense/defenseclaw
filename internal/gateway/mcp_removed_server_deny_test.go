@@ -312,7 +312,7 @@ func TestResolvedMCPDefinitionMemoryExpiresAndIsBounded(t *testing.T) {
 	var memory mcpResolvedDefinitions
 	now := time.Now()
 	entry := config.MCPServerEntry{Name: "notes", URL: removedDeniedURL}
-	memory.remember("claudecode", "/home/a", "s1", "/work", "notes", entry, false, now)
+	memory.remember("claudecode", "/home/a", "s1", "/work", "notes", entry, false, nil, now)
 	if got, ok := memory.recall("claudecode", "/home/a", "s1", "/work", "notes", now.Add(mcpResolvedTTL-time.Minute)); !ok || got.URL != removedDeniedURL {
 		t.Fatalf("recall within the TTL = %+v, %v", got, ok)
 	}
@@ -322,14 +322,14 @@ func TestResolvedMCPDefinitionMemoryExpiresAndIsBounded(t *testing.T) {
 	if _, ok := memory.recall("codex", "/home/a", "s1", "/work", "notes", now); ok {
 		t.Fatal("a definition was recalled for another connector")
 	}
-	memory.remember("claudecode", "/home/a", "s1", "/work", "notes", entry, false, now)
+	memory.remember("claudecode", "/home/a", "s1", "/work", "notes", entry, false, nil, now)
 	if _, ok := memory.recall("claudecode", "/home/a", "s2", "/work", "notes", now); ok {
 		t.Fatal("a definition was recalled for another session")
 	}
 	for i := 0; i < mcpResolvedPerHome+10; i++ {
-		memory.remember("claudecode", "/home/flood", "s1", "/work", fmt.Sprintf("made-up-%d", i), entry, false, now)
+		memory.remember("claudecode", "/home/flood", "s1", "/work", fmt.Sprintf("made-up-%d", i), entry, false, nil, now)
 	}
-	memory.remember("claudecode", "/home/b", "s1", "/work", "notes", entry, false, now)
+	memory.remember("claudecode", "/home/b", "s1", "/work", "notes", entry, false, nil, now)
 	if _, ok := memory.recall("claudecode", "/home/b", "s1", "/work", "notes", now); !ok {
 		t.Fatal("one account filling its share pushed out another account")
 	}
@@ -338,10 +338,10 @@ func TestResolvedMCPDefinitionMemoryExpiresAndIsBounded(t *testing.T) {
 	}
 	// A denied definition has room of its own, and a later benign one does
 	// not replace it.
-	if !memory.remember("claudecode", "/home/flood", "s1", "/work", "wiki", entry, true, now) {
+	if !memory.remember("claudecode", "/home/flood", "s1", "/work", "wiki", entry, true, nil, now) {
 		t.Fatal("a denied definition was refused room because ordinary ones filled the memory")
 	}
-	memory.remember("claudecode", "/home/flood", "s1", "/work", "wiki", config.MCPServerEntry{Name: "wiki", URL: removedOtherURL}, false, now)
+	memory.remember("claudecode", "/home/flood", "s1", "/work", "wiki", config.MCPServerEntry{Name: "wiki", URL: removedOtherURL}, false, nil, now)
 	if got, ok := memory.recall("claudecode", "/home/flood", "s1", "/work", "wiki", now); !ok || got.URL != removedDeniedURL {
 		t.Fatalf("a benign definition replaced the denied one: %+v, %v", got, ok)
 	}
@@ -466,83 +466,136 @@ func TestDeniedMCPServerPastTheMemoryLimitStaysDenied(t *testing.T) {
 	}
 }
 
-// The record of a lost denied definition is made per name, belongs to its
-// session, expires with the TTL, is dropped when the session starts again, and
-// stays bounded without ever answering no for a name it holds.
+// The record of a lost denied definition is made per name and per denied
+// rule, belongs to its session, expires with the TTL, is dropped when the
+// session starts again, and counts only while the rule that matched is still
+// in the denied list.
 func TestResolvedMCPMemoryRecordsTheNamesOfLostDeniedDefinitions(t *testing.T) {
 	var memory mcpResolvedDefinitions
 	now := time.Now()
 	entry := config.MCPServerEntry{Name: "notes", URL: removedDeniedURL}
+	rule := config.AssetPolicyRule{URL: removedDeniedURL}
+	by := func() string { return mcpRuleID(rule) }
+	denied := []config.AssetPolicyRule{rule}
+	lost := func(connector, home, session, cwd, name string, denied []config.AssetPolicyRule, at time.Time) bool {
+		held, _ := memory.lostDenied(connector, home, session, cwd, name, denied, at)
+		return held
+	}
 	for i := 0; i < mcpResolvedDeniedPerHome; i++ {
-		if !memory.remember("claudecode", "/home/a", "s1", "/work", fmt.Sprintf("denied%d", i), entry, true, now) {
+		if !memory.remember("claudecode", "/home/a", "s1", "/work", fmt.Sprintf("denied%d", i), entry, true, by, now) {
 			t.Fatalf("denied definition %d refused below the limit", i)
 		}
 	}
-	if memory.lostDenied("claudecode", "/home/a", "s1", "/work", "one-too-many", now) {
+	if lost("claudecode", "/home/a", "s1", "/work", "one-too-many", denied, now) {
 		t.Fatal("a session within the limit was marked")
 	}
-	if memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, now) {
+	if memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, by, now) {
 		t.Fatal("a denied definition past the limit was kept")
 	}
-	if !memory.lostDenied("claudecode", "/home/a", "s1", "/work", "one-too-many", now) {
+	if !lost("claudecode", "/home/a", "s1", "/work", "one-too-many", denied, now) {
 		t.Fatal("the name of the lost denied definition was not recorded")
 	}
-	if memory.lostDenied("claudecode", "/home/a", "s1", "/work", "never-lost", now) {
+	if lost("claudecode", "/home/a", "s1", "/work", "never-lost", denied, now) {
 		t.Fatal("a name that was not lost was reported")
 	}
-	if memory.lostDenied("claudecode", "/home/a", "s2", "/work", "one-too-many", now) ||
-		memory.lostDenied("codex", "/home/a", "s1", "/work", "one-too-many", now) ||
-		memory.lostDenied("claudecode", "/home/b", "s1", "/work", "one-too-many", now) ||
-		memory.lostDenied("claudecode", "/home/a", "s1", "/other", "one-too-many", now) {
+	if lost("claudecode", "/home/a", "s2", "/work", "one-too-many", denied, now) ||
+		lost("codex", "/home/a", "s1", "/work", "one-too-many", denied, now) ||
+		lost("claudecode", "/home/b", "s1", "/work", "one-too-many", denied, now) ||
+		lost("claudecode", "/home/a", "s1", "/other", "one-too-many", denied, now) {
 		t.Fatal("the record leaked to another session, connector, account or directory")
 	}
-	if memory.lostDenied("claudecode", "/home/a", "s1", "/work", "one-too-many", now.Add(2*mcpResolvedTTL)) {
+	// The policy in force decides: a rule reworded still holds, a list that
+	// no longer has the rule that matched releases the name.
+	reworded := []config.AssetPolicyRule{{URL: removedDeniedURL, Reason: "reworded"}, {URL: removedOtherURL}}
+	if !lost("claudecode", "/home/a", "s1", "/work", "one-too-many", reworded, now) {
+		t.Fatal("rewording the rule that matched released the name")
+	}
+	replaced := []config.AssetPolicyRule{{URL: removedOtherURL}}
+	if lost("claudecode", "/home/a", "s1", "/work", "one-too-many", replaced, now) {
+		t.Fatal("a denied list without the rule that matched still held the name")
+	}
+	if lost("claudecode", "/home/a", "s1", "/work", "one-too-many", denied, now.Add(2*mcpResolvedTTL)) {
 		t.Fatal("the record outlived the TTL")
 	}
-	memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, now)
+	memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, by, now)
 	memory.forgetSession("claudecode", "/home/a", "s1")
-	if memory.lostDenied("claudecode", "/home/a", "s1", "/work", "one-too-many", now) {
+	if lost("claudecode", "/home/a", "s1", "/work", "one-too-many", denied, now) {
 		t.Fatal("a session that started again kept its record")
 	}
 }
 
-// More sessions with a lost denied definition than there are filters share
-// one: no name is forgotten, and the filters stay bounded.
-func TestResolvedMCPMemoryKeepsLostNamesOfSessionsPastTheFilterLimit(t *testing.T) {
+// The records are exact: no number of names makes an unrecorded one answer
+// yes, and every session keeps its own, however many sessions there are, so a
+// session that starts again drops its record whatever the others hold.
+func TestResolvedMCPMemoryLostRecordsAreExactPerSession(t *testing.T) {
 	var memory mcpResolvedDefinitions
 	now := time.Now()
-	total := mcpResolvedLostLimit + 10
-	for i := 0; i < total; i++ {
-		memory.mu.Lock()
-		key := mcpResolvedKey("claudecode", "/home/a", fmt.Sprintf("flood%d", i), "/work", "wiki")
-		memory.markLostLocked("claudecode", "/home/a", fmt.Sprintf("flood%d", i), key, now)
-		memory.mu.Unlock()
+	rule := config.AssetPolicyRule{URL: removedDeniedURL}
+	denied := []config.AssetPolicyRule{rule}
+	sessions := mcpResolvedDeniedPerHome + 100
+	memory.mu.Lock()
+	for i := 0; i < sessions; i++ {
+		session := fmt.Sprintf("flood%d", i)
+		memory.markLostLocked("claudecode", "/home/a", session, mcpResolvedKey("claudecode", "/home/a", session, "/work", "wiki"), mcpRuleID(rule), now)
 	}
-	if len(memory.lost) > mcpResolvedLostLimit {
-		t.Fatalf("%d filters kept, want at most %d", len(memory.lost), mcpResolvedLostLimit)
+	for i := 0; i < 20000; i++ {
+		memory.markLostLocked("claudecode", "/home/a", "big", mcpResolvedKey("claudecode", "/home/a", "big", "/work", fmt.Sprintf("lost%d", i)), mcpRuleID(rule), now)
 	}
-	for i := 0; i < total; i++ {
-		if !memory.lostDenied("claudecode", "/home/a", fmt.Sprintf("flood%d", i), "/work", "wiki", now) {
-			t.Fatalf("session %d lost its record", i)
+	memory.mu.Unlock()
+	for i := 0; i < sessions; i++ {
+		if held, over := memory.lostDenied("claudecode", "/home/a", fmt.Sprintf("flood%d", i), "/work", "wiki", denied, now); !held || over {
+			t.Fatalf("session %d: held=%v overflow=%v, want its record", i, held, over)
 		}
 	}
-	// Benign twin: a name nobody lost, in a session that lost another one.
-	if memory.lostDenied("claudecode", "/home/a", "flood0", "/work", "ordinary", now) {
-		t.Fatal("an ordinary name was reported lost")
+	for i := 0; i < 20000; i++ {
+		if held, _ := memory.lostDenied("claudecode", "/home/a", "big", "/work", fmt.Sprintf("lost%d", i), denied, now); !held {
+			t.Fatalf("lost%d was recorded and not found", i)
+		}
+		if held, over := memory.lostDenied("claudecode", "/home/a", "big", "/work", fmt.Sprintf("ordinary%d", i), denied, now); held || over {
+			t.Fatalf("ordinary%d: held=%v overflow=%v, want neither", i, held, over)
+		}
+	}
+	memory.forgetSession("claudecode", "/home/a", "flood0")
+	if held, over := memory.lostDenied("claudecode", "/home/a", "flood0", "/work", "wiki", denied, now); held || over {
+		t.Fatal("a session that started again kept its record")
+	}
+	if held, _ := memory.lostDenied("claudecode", "/home/a", "flood1", "/work", "wiki", denied, now); !held {
+		t.Fatal("restarting one session dropped the record of another")
 	}
 }
 
-// A filter that is full of names answers yes, never no, so the bound makes the
-// memory refuse more.
-func TestLostMCPNameFilterSaturatesTowardRefusing(t *testing.T) {
-	var set mcpLostSet
-	for i := 0; i < 50000; i++ {
-		set.add(fmt.Sprintf("name%d", i))
+// A session that cannot record a lost denied definition (the records are
+// full, or the rule that matched is not known) is marked: a name a denied rule
+// covers is refused there, and the mark is dropped with the session.
+func TestResolvedMCPMemoryMarksASessionThatCannotRecordMore(t *testing.T) {
+	var memory mcpResolvedDefinitions
+	now := time.Now()
+	rule := config.AssetPolicyRule{URL: removedDeniedURL}
+	denied := []config.AssetPolicyRule{rule}
+	memory.mu.Lock()
+	memory.markLostLocked("claudecode", "/home/a", "unknown-rule", mcpResolvedKey("claudecode", "/home/a", "unknown-rule", "/work", "wiki"), "", now)
+	for i := 0; i < mcpResolvedLostLimit; i++ {
+		memory.markLostLocked("claudecode", "/home/a", "full", mcpResolvedKey("claudecode", "/home/a", "full", "/work", fmt.Sprintf("lost%d", i)), mcpRuleID(rule), now)
 	}
-	for i := 0; i < 50000; i += 7 {
-		if !set.has(fmt.Sprintf("name%d", i)) {
-			t.Fatalf("name%d added and not found", i)
+	if memory.lostCountLocked() != mcpResolvedLostLimit {
+		t.Fatalf("%d records kept, want %d", memory.lostCountLocked(), mcpResolvedLostLimit)
+	}
+	memory.markLostLocked("claudecode", "/home/a", "late", mcpResolvedKey("claudecode", "/home/a", "late", "/work", "wiki"), mcpRuleID(rule), now)
+	memory.mu.Unlock()
+	for _, session := range []string{"unknown-rule", "late"} {
+		if _, over := memory.lostDenied("claudecode", "/home/a", session, "/work", "wiki", denied, now); !over {
+			t.Fatalf("%s: a definition that could not be recorded left the session unmarked", session)
 		}
+	}
+	if held, over := memory.lostDenied("claudecode", "/home/a", "full", "/work", "ordinary", denied, now); held || over {
+		t.Fatal("a session that filled the records was marked without losing one")
+	}
+	if _, over := memory.lostDenied("claudecode", "/home/a", "late", "/work", "wiki", denied, now.Add(2*mcpResolvedTTL)); over {
+		t.Fatal("the mark outlived the TTL")
+	}
+	memory.forgetSession("claudecode", "/home/a", "late")
+	if _, over := memory.lostDenied("claudecode", "/home/a", "late", "/work", "wiki", denied, now); over {
+		t.Fatal("a session that started again kept its mark")
 	}
 }
 
@@ -703,4 +756,101 @@ func TestRenamedCodexServerKeepsTheDenyOfItsOldName(t *testing.T) {
 			wantNotBlocked(t, "new session after the rename", decision, matched)
 		})
 	}
+}
+
+// fillDeniedMCPPartition makes a session resolve and be denied on as many
+// servers as one account keeps, so the next denied definition does not fit.
+func fillDeniedMCPPartition(t *testing.T, api *APIServer, ctx context.Context, project string, servers map[string]any, write func()) {
+	t.Helper()
+	for i := 0; i < mcpResolvedDeniedPerHome; i++ {
+		servers[fmt.Sprintf("filler%d", i)] = map[string]any{"type": "http", "url": removedDeniedURL}
+	}
+	servers["wiki"] = map[string]any{"type": "http", "url": removedDeniedURL}
+	write()
+	for i := 0; i < mcpResolvedDeniedPerHome; i++ {
+		decision, matched := claudeMCPCall(api, ctx, project, "s1", fmt.Sprintf("mcp__filler%d__count_words", i))
+		wantDenyBlock(t, fmt.Sprintf("filler %d", i), decision, matched)
+	}
+	decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+	wantDenyBlock(t, "denied server that does not fit", decision, matched)
+}
+
+// A denied definition the memory could not keep is judged on the policy in
+// force now: while the rule that matched it is in the denied list (reworded,
+// or beside others) the live connection stays denied, and once the rule is
+// replaced by one for another endpoint the server is ordinary, in every
+// profile.
+func TestLostDeniedMCPDefinitionFollowsTheDeniedListInForce(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  func() *config.Config
+	}{
+		{"default", deniedURLConfig},
+		{"managed", managedURLDenyConfig},
+		{"strict", func() *config.Config {
+			cfg := deniedURLConfig()
+			cfg.Guardrail.RulePack = "strict"
+			return cfg
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg()
+			api := &APIServer{scannerCfg: cfg}
+			home, project := t.TempDir(), t.TempDir()
+			ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+			servers := map[string]any{}
+			write := func() {
+				t.Helper()
+				data, err := json.Marshal(map[string]any{"projects": map[string]any{filepath.ToSlash(project): map[string]any{"mcpServers": servers}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(home, ".claude.json"), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fillDeniedMCPPartition(t, api, ctx, project, servers, write)
+			// The entry leaves the config. The rule is reworded and joined by
+			// another: the connection is still the denied one.
+			delete(servers, "wiki")
+			write()
+			cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: "http://127.0.0.1:28773/mcp"}, {URL: removedDeniedURL, Reason: "reworded"}}
+			decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+			if !matched || decision.Action != "block" || decision.Source != "mcp-definition-unproven" {
+				t.Fatalf("rule reworded: matched=%v decision=%+v, want a block", matched, decision)
+			}
+			// The rule is replaced by one for another endpoint and the server
+			// is configured on an ordinary endpoint: nothing denies it now.
+			cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: "http://127.0.0.1:28773/mcp"}}
+			servers["wiki"] = map[string]any{"type": "http", "url": removedOtherURL}
+			write()
+			decision, matched = claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+			wantNotBlocked(t, "ordinary server after the rule was replaced", decision, matched)
+		})
+	}
+}
+
+// A session that starts again drops the record of a denied definition that
+// did not fit, however many other sessions hold one, so a fresh connection to
+// an ordinary server of the same name is allowed.
+func TestRestartedSessionDropsItsLostDeniedRecordAmongManySessions(t *testing.T) {
+	api := &APIServer{scannerCfg: deniedURLConfig()}
+	home, project := t.TempDir(), t.TempDir()
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	rule := config.AssetPolicyRule{URL: removedDeniedURL}
+	api.mcpResolved.mu.Lock()
+	for i := 0; i < 2*mcpResolvedDeniedPerHome; i++ {
+		session := fmt.Sprintf("flood%d", i)
+		api.mcpResolved.markLostLocked("claudecode", home, session, mcpResolvedKey("claudecode", home, session, project, "lost"), mcpRuleID(rule), time.Now())
+	}
+	api.mcpResolved.markLostLocked("claudecode", home, "s1", mcpResolvedKey("claudecode", home, "s1", project, "wiki"), mcpRuleID(rule), time.Now())
+	api.mcpResolved.mu.Unlock()
+	writeClaudeServers(t, home, project, `{"wiki":{"type":"http","url":"`+removedOtherURL+`"}}`)
+	decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+	if !matched || decision.Action != "block" {
+		t.Fatalf("before the restart: matched=%v decision=%+v, want the lost denied definition refused", matched, decision)
+	}
+	api.mcpSessionStarted(ctx, "claudecode", "s1", "SessionStart", "resume")
+	decision, matched = claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+	wantNotBlocked(t, "ordinary server after the session restarted", decision, matched)
 }

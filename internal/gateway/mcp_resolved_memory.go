@@ -6,7 +6,6 @@ package gateway
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"slices"
 	"strings"
 	"sync"
@@ -30,56 +29,51 @@ const mcpResolvedTTL = 24 * time.Hour
 // its entry was gone. Only a definition read from an agent config is
 // remembered, so the bounds follow the size of the configs, not the number of
 // names a tool call can make up. A denied definition that still does not fit
-// is not forgotten: the name it was kept under goes into a fixed-size filter
-// of its session (mcpLostSet), which answers yes for every name added and may
-// answer yes for others, so a bound can only make the memory refuse more.
-// mcpResolvedLostLimit sessions have a filter of their own; the sessions past
-// that share one.
+// is not forgotten: a short record of its name and of the denied rule that
+// matched it goes into the lost set of its session (mcpLostSet). The records
+// are exact and bounded by mcpResolvedLostLimit in all; a session that cannot
+// record one more is marked instead and refuses what a denied rule covers by
+// name.
 const (
 	mcpResolvedLimit         = 2048
 	mcpResolvedPerHome       = 256
 	mcpResolvedDeniedLimit   = 4096
 	mcpResolvedDeniedPerHome = 1024
-	mcpResolvedLostLimit     = 1024
+	mcpResolvedLostLimit     = 65536
 )
 
-// mcpLostBloomWords sizes the filter of lost names: 16384 bits, three probes
-// per name, so a few thousand lost names keep false answers to a few percent
-// and a flood of them saturates toward refusing, never toward allowing.
-const (
-	mcpLostBloomWords  = 256
-	mcpLostBloomProbes = 3
-)
+// mcpLostID identifies a lost denied definition: the key it was kept under
+// (connector, account, session, directory, name) and the denied rule that
+// matched it, as a truncated digest, so two records are equal only when both
+// are.
+type mcpLostID [16]byte
 
-// mcpLostSet is a Bloom filter of the keys (mcpResolvedKey) of denied
-// definitions that did not fit in the memory, with the time of its last use.
+func newMCPLostID(key, rule string) mcpLostID {
+	sum := sha256.Sum256([]byte(key + "\x00" + rule))
+	return mcpLostID(sum[:16])
+}
+
+// mcpRuleID is the identity of a rule of asset_policy.mcp.denied: what it
+// matches on. The reason does not take part, so rewording a rule does not
+// release the connections it denied.
+func mcpRuleID(rule config.AssetPolicyRule) string {
+	return strings.Join([]string{
+		rule.Name, rule.Connector, rule.URL, rule.Command, rule.Transport,
+		strings.Join(rule.ArgsPrefix, "\x01"), strings.Join(rule.SourcePathContains, "\x01"),
+	}, "\x00")
+}
+
+// mcpLostSet holds the denied definitions of one session that did not fit in
+// the memory, with the time of its last use. A record counts only while the
+// rule that matched the definition is still in the denied list: the live
+// connection is judged on the policy in force now, as a remembered definition
+// is.
 type mcpLostSet struct {
-	bits [mcpLostBloomWords]uint64
-	at   time.Time
-}
-
-func (s *mcpLostSet) probes(key string) [mcpLostBloomProbes]uint32 {
-	sum := sha256.Sum256([]byte(key))
-	var at [mcpLostBloomProbes]uint32
-	for i := range at {
-		at[i] = binary.BigEndian.Uint32(sum[i*4:]) % (mcpLostBloomWords * 64)
-	}
-	return at
-}
-
-func (s *mcpLostSet) add(key string) {
-	for _, bit := range s.probes(key) {
-		s.bits[bit/64] |= 1 << (bit % 64)
-	}
-}
-
-func (s *mcpLostSet) has(key string) bool {
-	for _, bit := range s.probes(key) {
-		if s.bits[bit/64]&(1<<(bit%64)) == 0 {
-			return false
-		}
-	}
-	return true
+	ids map[mcpLostID]struct{}
+	// overflow is set when a record could not be made, because the lost
+	// records were full or the rule that matched is not known.
+	overflow bool
+	at       time.Time
 }
 
 // mcpResolvedDefinitions remembers, per connector, account home, agent
@@ -96,11 +90,9 @@ type mcpResolvedDefinitions struct {
 	mu      sync.Mutex
 	entries map[string]mcpResolvedDefinition
 	// lost holds, per session (connector, account and session id), the
-	// names of the denied definitions of that session that did not fit.
+	// denied definitions of that session that did not fit. A session that
+	// starts again drops its set.
 	lost map[string]*mcpLostSet
-	// spill takes them for the sessions past mcpResolvedLostLimit. It is not
-	// cleared when one of those sessions starts again; it expires with the TTL.
-	spill *mcpLostSet
 }
 
 type mcpResolvedDefinition struct {
@@ -123,8 +115,10 @@ func mcpResolvedKey(connector, home, session, cwd, name string) string {
 }
 
 // remember records entry, the definition just read for name, and whether a
-// denied rule matched it. It reports whether the definition is kept.
-func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name string, entry config.MCPServerEntry, denied bool, now time.Time) bool {
+// denied rule matched it. It reports whether the definition is kept. When a
+// denied definition does not fit, deniedBy names the rule that matched it
+// (mcpRuleID), for the record of the session.
+func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name string, entry config.MCPServerEntry, denied bool, deniedBy func() string, now time.Time) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
@@ -147,7 +141,7 @@ func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name st
 	}
 	if (!known || denied && !kept.denied) && !m.hasRoomLocked(home, denied, key) {
 		if denied {
-			m.markLostLocked(connector, home, session, key, now)
+			m.markLostLocked(connector, home, session, key, deniedBy(), now)
 		}
 		return false
 	}
@@ -161,43 +155,64 @@ func mcpLostKey(connector, home, session string) string {
 	return strings.ToLower(connector) + "\x00" + home + "\x00" + session
 }
 
-// markLostLocked records that the denied definition kept under key could not
-// be kept. When the session has no filter and the filters are all in use, the
-// shared one takes the name.
-func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key string, now time.Time) {
+// markLostLocked records that the denied definition kept under key, matched
+// by the denied rule rule, could not be kept. A rule that is not known, or no
+// room for another record, marks the session.
+func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key, rule string, now time.Time) {
 	if m.lost == nil {
 		m.lost = map[string]*mcpLostSet{}
 	}
 	lostKey := mcpLostKey(connector, home, session)
 	set, ok := m.lost[lostKey]
-	switch {
-	case ok && now.Sub(set.at) > mcpResolvedTTL, !ok && len(m.lost) < mcpResolvedLostLimit:
+	if !ok || now.Sub(set.at) > mcpResolvedTTL {
 		set = &mcpLostSet{}
 		m.lost[lostKey] = set
-	case !ok:
-		if m.spill == nil || now.Sub(m.spill.at) > mcpResolvedTTL {
-			m.spill = &mcpLostSet{}
-		}
-		set = m.spill
 	}
-	set.add(key)
 	set.at = now
+	id := newMCPLostID(key, rule)
+	if _, held := set.ids[id]; held {
+		return
+	}
+	if rule == "" || m.lostCountLocked() >= mcpResolvedLostLimit {
+		set.overflow = true
+		return
+	}
+	if set.ids == nil {
+		set.ids = map[mcpLostID]struct{}{}
+	}
+	set.ids[id] = struct{}{}
 }
 
-// lostDenied reports whether the denied definition kept under the name of the
-// call did not fit in the memory within the TTL, and renews the filter that
-// holds it.
-func (m *mcpResolvedDefinitions) lostDenied(connector, home, session, cwd, name string, now time.Time) bool {
-	key := mcpResolvedKey(connector, home, session, cwd, name)
+func (m *mcpResolvedDefinitions) lostCountLocked() int {
+	var n int
+	for _, set := range m.lost {
+		n += len(set.ids)
+	}
+	return n
+}
+
+// lostDenied reports, within the TTL, whether the denied definition kept under
+// the name of the call did not fit in the memory and a rule of denied that
+// matched it is still in force (held), and whether the session could not
+// record every denied definition (overflow). A set that answers renews itself.
+func (m *mcpResolvedDefinitions) lostDenied(connector, home, session, cwd, name string, denied []config.AssetPolicyRule, now time.Time) (held, overflow bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, set := range []*mcpLostSet{m.lost[mcpLostKey(connector, home, session)], m.spill} {
-		if set != nil && now.Sub(set.at) <= mcpResolvedTTL && set.has(key) {
-			set.at = now
-			return true
+	set := m.lost[mcpLostKey(connector, home, session)]
+	if set == nil || now.Sub(set.at) > mcpResolvedTTL {
+		return false, false
+	}
+	key := mcpResolvedKey(connector, home, session, cwd, name)
+	for _, rule := range denied {
+		if _, ok := set.ids[newMCPLostID(key, mcpRuleID(rule))]; ok {
+			held = true
+			break
 		}
 	}
-	return false
+	if held || set.overflow {
+		set.at = now
+	}
+	return held, set.overflow
 }
 
 // hasRoomLocked reports whether the definition under key, of the kind denied
