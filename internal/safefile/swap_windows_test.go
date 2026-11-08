@@ -376,9 +376,9 @@ func TestCompareAndSwapFileTransactsNonImagePublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := writeSwapSourceForTest(t, dir, "new")
-	previous := swapTransactedRename
-	defer func() { swapTransactedRename = previous }()
-	transacted := 0
+	previous, previousPlain := swapTransactedRename, swapRenameReplace
+	defer func() { swapTransactedRename, swapRenameReplace = previous, previousPlain }()
+	transacted, plain := 0, 0
 	swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
 		transacted++
 		if tx == 0 || tx == windows.InvalidHandle {
@@ -386,12 +386,16 @@ func TestCompareAndSwapFileTransactsNonImagePublication(t *testing.T) {
 		}
 		return renameTransacted(from, to, flags, tx)
 	}
+	swapRenameReplace = func(from, to string, class, flags uint32) error {
+		plain++
+		return renameReplace(from, to, class, flags)
+	}
 	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped {
 		t.Fatalf("CAS publication: result=%+v err=%v", result, err)
 	}
-	if transacted != 1 {
-		t.Fatal("policy publication did not run in a file transaction")
+	if transacted != 1 || plain != 0 {
+		t.Fatalf("policy publication calls: transacted=%d plain=%d", transacted, plain)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
 }
