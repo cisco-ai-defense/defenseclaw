@@ -1137,6 +1137,25 @@ func enterpriseHookRepairAfterVerifyFailure(
 						&enterprisehooks.WindowsTargetSessionUnavailableError{SID: strings.TrimSpace(target.SID)},
 					)
 				}
+			} else if cfg != nil && cfg.StandaloneEnterprise() {
+				// A roster change took this target out of its connector's
+				// machine runtime selection (a connector removed, or a change
+				// undone after the guardian had already revoked it), and only
+				// the account's own Windows session can select a runtime for
+				// it again. With no runtime selected for it (the pending
+				// proof) it holds nothing protected and its hooks fail
+				// closed, so it is pending until the account signs in, like
+				// an account DefenseClaw never protected. As a failure it
+				// made every ensure and repair refuse until that account
+				// signed in (GAP-0909). Any target that still has a runtime
+				// selected, and every non-deferred target, keeps the failure.
+				if available, pendingErr := enterpriseHookReconcileDeferredSessionAvailable(target); pendingErr == nil && !available {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w (verification: %v): %w",
+						errEnterpriseHookProtectionRetired, verifyErr,
+						&enterprisehooks.WindowsTargetSessionUnavailableError{SID: strings.TrimSpace(target.SID)},
+					)
+				}
 			}
 			if locked, wanted, modeErr := enterpriseHookReconcileTargetFailModeChange(opts); modeErr == nil &&
 				locked != "" && locked != wanted {
