@@ -249,6 +249,10 @@ func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
 				if err := os.WriteFile(path, []byte(planted), 0o644); err != nil {
 					t.Fatal(err)
 				}
+				// DefenseClaw's own writer left these files owned by the
+				// Administrators group; the withdrawal refuses a file whose
+				// owner is not trusted, so the planted file carries that owner.
+				ownAs(t, path, wellKnownSID(t, windows.WinBuiltinAdministratorsSid))
 			}
 			owned := func(path string) bool {
 				t.Helper()
