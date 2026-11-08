@@ -466,3 +466,24 @@ func TestRootLeftoversRemedyRestoresOwnerAccessOnWhatItReturns(t *testing.T) {
 		t.Fatalf("the chain without named files lacks the owner restore: %q", plain)
 	}
 }
+
+// The agent config files a root run wrote in the account home are returned by
+// the same chain (GAP-0848); a home with none keeps the chain unchanged.
+func TestRootLeftoversRemedyReturnsRootOwnedAgentConfigFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_CONFIG", "")
+	old := rootOwnedAgentConfigsOf
+	t.Cleanup(func() { rootOwnedAgentConfigsOf = old })
+	rootOwnedAgentConfigsOf = func(string) []string { return nil }
+	plain := RootLeftoversRemedy(home, nil)
+	if strings.Contains(plain, "chmod u+rw") {
+		t.Fatalf("chain names agent config files where root owns none: %q", plain)
+	}
+	files := []string{"/Users/a b/.claude/settings.json", "/Users/a b/.codex/config.toml"}
+	rootOwnedAgentConfigsOf = func(string) []string { return files }
+	remedy := RootLeftoversRemedy(home, nil)
+	quoted := shellQuote(files[0]) + " " + shellQuote(files[1])
+	if !strings.Contains(remedy, ` && sudo chown "$(id -un)" `+quoted+" && chmod u+rw "+quoted+" && defenseclaw-gateway start") {
+		t.Fatalf("chain does not return the agent config files before the start: %q", remedy)
+	}
+}

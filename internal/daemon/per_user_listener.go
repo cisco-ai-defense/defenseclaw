@@ -110,12 +110,18 @@ func rootGatewayRecoverySteps(dataDir string) (command, note string) {
 // other bits untouched) before the loosening step and the start.
 func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command, note string) {
 	dirs, configFile, storeErr := rootGatewayRecoveryDirs(dataDir)
+	agentConfigs := rootOwnedAgentConfigs(dirs[len(dirs)-1])
 	for i, dir := range dirs {
 		dirs[i] = shellQuote(dir)
 	}
 	owned := strings.Join(dirs, " ")
 	command = rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + owned +
 		" && chmod -R u+rwX " + owned
+	if len(agentConfigs) > 0 {
+		// The agent config files in the account home that a root run wrote
+		// (GAP-0848): the owner return above does not reach them.
+		command += " && sudo chown \"$(id -un)\" " + agentConfigs + " && chmod u+rw " + agentConfigs
+	}
 	if step := rootGatewayLoosenStep(loosen); step != "" {
 		command += " && " + step
 	}
@@ -125,6 +131,29 @@ func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command
 			"not in the chown command below: return that folder to your account too. "
 	}
 	return command, note
+}
+
+// rootOwnedAgentConfigsOf lists the agent config files in the account home that
+// root owns. The connector package imports this one, so it registers the
+// scan (RegisterRootOwnedAgentConfigFiles) instead of being imported here.
+var rootOwnedAgentConfigsOf func(dataDir string) []string
+
+// RegisterRootOwnedAgentConfigFiles sets the scan the recovery chain uses to
+// name the root-owned agent config files (connector.RootOwnedAgentConfigFiles).
+func RegisterRootOwnedAgentConfigFiles(scan func(dataDir string) []string) {
+	rootOwnedAgentConfigsOf = scan
+}
+
+// rootOwnedAgentConfigs is the quoted, space-separated list of those files.
+func rootOwnedAgentConfigs(dataDir string) string {
+	if rootOwnedAgentConfigsOf == nil {
+		return ""
+	}
+	var quoted []string
+	for _, path := range rootOwnedAgentConfigsOf(dataDir) {
+		quoted = append(quoted, shellQuote(path))
+	}
+	return strings.Join(quoted, " ")
 }
 
 // rootGatewayLoosenStep takes group and other access away from the root-owned
