@@ -172,17 +172,22 @@ const ReadingTargetPrefix = "\x00reading-target:"
 // before any operand.
 const BudgetKey = "\x00budget"
 
-// maxWriteTargetLinkDepth is the number of links the system follows in one
-// path resolution before it fails the path: 40 on Linux (MAXSYMLINKS) and 63
-// on Windows (the reparse attempt limit). Every followed link counts, also in
-// parent components, so a link loop ends here and reports an unresolvable
-// target. The bound is the system one, not a lower one: a chain that Windows
-// opens but the walk called unresolvable would be read as an ordinary spelling
-// by the managed Windows location rule, and a write through it would be
-// allowed (rel-1-0-9:GAP-0910).
-func maxWriteTargetLinkDepth() int {
-	if runtime.GOOS == "windows" {
+// SystemLinkLimit is the number of links the system follows in one path
+// resolution before it fails the path: 32 on macOS (MAXSYMLINKS), 40 on Linux
+// and 63 on Windows (the reparse attempt limit). It is the one place the limit
+// is named. Every followed link counts, also in parent components, so a link
+// loop ends here and reports an unresolvable target. The bound is the system
+// one, neither lower nor higher: a chain that Windows opens but the walk called
+// unresolvable would be read as an ordinary spelling by the managed Windows
+// location rule, and a write through it would be allowed (rel-1-0-9:GAP-0910);
+// a chain that macOS refuses is a path no read or write can go through, so the
+// walk reports it unresolvable and the share walk reports it unread.
+func SystemLinkLimit() int {
+	switch runtime.GOOS {
+	case "windows":
 		return 63
+	case "darwin":
+		return 32
 	}
 	return 40
 }
@@ -851,7 +856,7 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 // prefix depends only on that prefix and the file system, so a memo walk
 // answers exactly what a fresh walk answers while the files stay as they are.
 func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo) (string, []string, int, bool) {
-	if linkDepth > maxWriteTargetLinkDepth() {
+	if linkDepth > SystemLinkLimit() {
 		return "", nil, linkDepth, false
 	}
 	if base != "" && runtime.GOOS == "windows" {
