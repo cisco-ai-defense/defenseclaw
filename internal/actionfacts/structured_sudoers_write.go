@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"path"
+	"path/filepath"
 	"strings"
 )
 
@@ -62,18 +63,37 @@ func resolvesToSudoersTarget(resolved map[string]string) bool {
 
 // clientResolvedSudoersTarget reports whether the hook client, resolving the
 // write target as the user, placed it on /etc/sudoers or a direct child of
-// /etc/sudoers.d: a link of any name to such a file is that file.
+// /etc/sudoers.d: a link of any name to such a file is that file. The client
+// keys its answer by OperandPath, so a ./ or doubled-slash spelling is asked
+// by the cleaned path while a dot-dot spelling keeps its raw form.
 func clientResolvedSudoersTarget(target, cwd string, resolved map[string]string) bool {
 	if len(resolved) == 0 || target == "" {
 		return false
 	}
-	if physical, found := resolved[target]; found {
+	if physical, found := resolved[OperandPath(target, cwd)]; found {
 		return exactSudoersWriteTarget(physical)
 	}
-	if !strings.HasPrefix(target, "/") && strings.HasPrefix(cwd, "/") {
-		return exactSudoersWriteTarget(resolved[cwd+"/"+target])
+	return exactSudoersWriteTarget(resolved[target])
+}
+
+// OperandPath is the key the hook client gives a file operand in its path
+// answers. It preserves dot-dot until link resolution, because filepath.Join
+// would erase a directory link before the following dot-dot, and cleans every
+// other spelling (./, doubled slashes, a trailing slash).
+func OperandPath(name, cwd string) string {
+	// Keep the canonical spelling for ordinary operands. Only dot-dot needs a
+	// raw spelling until the component walk has followed links.
+	if !strings.Contains(filepath.ToSlash(name), "/../") &&
+		!strings.HasSuffix(filepath.ToSlash(name), "/..") {
+		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
+			return filepath.Join(cwd, name)
+		}
+		return filepath.Clean(name)
 	}
-	return false
+	if filepath.IsAbs(name) || !filepath.IsAbs(cwd) {
+		return name
+	}
+	return cwd + string(filepath.Separator) + name
 }
 
 // mayNameSudoers is the cheap test that keeps an ordinary file-tool call from
