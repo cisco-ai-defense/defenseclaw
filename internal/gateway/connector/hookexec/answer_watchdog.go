@@ -842,12 +842,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	}
 	if w.failureLogged {
 		if w.failureLogDone != nil {
-			timer := time.NewTimer(answerWatchdogLogWait)
-			select {
-			case <-w.failureLogDone:
-			case <-timer.C:
-			}
-			timer.Stop()
+			waitForLog(w.failureLogDone)
 		}
 		w.exit(w.fallbackCode)
 		return
@@ -858,12 +853,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		defer close(logged)
 		logFailure()
 	}()
-	timer := time.NewTimer(answerWatchdogLogWait)
-	select {
-	case <-logged:
-	case <-timer.C:
-	}
-	timer.Stop()
+	waitForLog(logged)
 	// Production exits here; the lock is never released, so the call's own
 	// output cannot follow the answer.
 	w.exit(w.fallbackCode)
@@ -905,6 +895,20 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 	w.visibleOutage = nil
 }
 
+// waitForLog waits for the watchdog's hook-failures row (done) for at most
+// answerWatchdogLogWait. The bound runs on the proof clock like the other
+// post-deadline bounds of a call, so a test decides whether it is spent
+// instead of racing the host for a file append (GAP-0859); a release build
+// runs the system clock.
+func waitForLog(done <-chan struct{}) {
+	expired, stop := proofclock.NewTimer(answerWatchdogLogWait)
+	defer stop()
+	select {
+	case <-done:
+	case <-expired:
+	}
+}
+
 // installLockHeldWithin is installLockHeld bounded by wait: a look that
 // takes longer counts as a held lock.
 func installLockHeldWithin(home string, wait time.Duration) bool {
@@ -919,12 +923,12 @@ func installLockHeldWithin(home string, wait time.Duration) bool {
 func heldWithin(check func() bool, wait time.Duration) bool {
 	held := make(chan bool, 1)
 	go func() { held <- check() }()
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	expired, stop := proofclock.NewTimer(wait)
+	defer stop()
 	select {
 	case h := <-held:
 		return h
-	case <-timer.C:
+	case <-expired:
 		return true
 	}
 }
@@ -1083,12 +1087,7 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 		logged = done
 	}
 	if logged != nil {
-		timer := time.NewTimer(answerWatchdogLogWait)
-		select {
-		case <-logged:
-		case <-timer.C:
-		}
-		timer.Stop()
+		waitForLog(logged)
 	}
 	if w.deliveryReceipt != nil {
 		w.deliveryReceipt(false, true)
