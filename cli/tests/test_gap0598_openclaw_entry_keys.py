@@ -27,7 +27,6 @@ import json
 import os
 import tempfile
 import unittest
-from types import SimpleNamespace
 
 from defenseclaw.openclaw_guardrail import (
     _unregister_plugin_from_config,
@@ -189,12 +188,12 @@ class TestRevertOpenclawPythonFallback(unittest.TestCase):
     """The uninstall/reset fallback when the Go teardown failed and there is no pristine backup."""
 
     def _revert(self, d: str, config: dict, remove_plugin: bool) -> dict:
-        from defenseclaw.commands.cmd_uninstall import _revert_openclaw_python
+        from defenseclaw.commands.cmd_uninstall import UninstallPlan, _revert_openclaw_python
 
         data_dir = os.path.join(d, "dc-data")
         os.makedirs(data_dir)
         path = _write(d, config)
-        plan = SimpleNamespace(openclaw_config_file=path, data_dir=data_dir, remove_plugin=remove_plugin)
+        plan = UninstallPlan(openclaw_config_file=path, data_dir=data_dir, remove_plugin=remove_plugin)
         _revert_openclaw_python(plan)
         return _read(path)
 
