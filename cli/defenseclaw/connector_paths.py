@@ -5155,7 +5155,11 @@ def _read_mcp_servers_from_openclaw_json(
         return []
     if not isinstance(data, dict):
         return []
-    servers = data.get("mcp", {}).get("servers")
+    mcp = data.get("mcp")
+    if mcp is not None and not isinstance(mcp, dict):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return []
+    servers = (mcp or {}).get("servers")
     if not isinstance(servers, dict):
         return []
     return _parse_mcp_servers_dict(servers)

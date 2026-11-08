@@ -204,3 +204,43 @@ def test_model_detection_reads_a_json5_file(tmp_path: Path) -> None:
     assert detect_current_model(str(config_file)) == ("anthropic/claude-sonnet", "anthropic")
     config_file.write_text(json.dumps({"agents": {"defaults": {"model": {"primary": "openai/gpt"}}}}), encoding="utf-8")
     assert detect_current_model(str(config_file)) == ("openai/gpt", "openai")
+
+
+def test_large_strict_json_is_still_read(tmp_path: Path) -> None:
+    # A valid JSON file stays readable at any size; only the JSON5 rewrite has a cap.
+    pad = " " * (openclaw_json5.MAX_JSON5_CHARS + 1)
+    text = "{\"gateway\": {\"auth\": {\"token\": \"big-file-token\"}}}" + pad
+    assert openclaw_json5.loads(text)["gateway"]["auth"]["token"] == "big-file-token"
+    config_file = _installed(tmp_path, text)
+    assert openclaw_plugin_config_issue(str(config_file), str(tmp_path)) is None
+    assert _doctor_result(config_file).failed == 0
+
+
+def test_oversized_json5_fails_with_a_location_not_a_crash() -> None:
+    text = "{a: 1, // c\n}" + " " * openclaw_json5.MAX_JSON5_CHARS
+    with pytest.raises(openclaw_json5.OpenClawConfigSyntaxError) as raised:
+        openclaw_json5.loads(text)
+    assert "too large to read as JSON5" in str(raised.value)
+    assert raised.value.line == 1
+
+
+@pytest.mark.parametrize("mcp_value", ["null", "[]", "\x27off\x27", "42"])
+def test_mcp_listing_survives_a_wrong_shaped_mcp_value(tmp_path: Path, mcp_value: str) -> None:
+    from defenseclaw.connector_paths import _read_mcp_servers_from_openclaw_json
+
+    config_file = tmp_path / "openclaw.json"
+    config_file.write_text("{ // c\n  mcp: " + mcp_value + ",\n}\n", encoding="utf-8")
+    sink: list = []
+    assert _read_mcp_servers_from_openclaw_json(str(config_file), diagnostic_sink=sink) == []
+    strict = {"null": None, "[]": [], "\x27off\x27": "off", "42": 42}[mcp_value]
+    config_file.write_text(json.dumps({"mcp": strict}), encoding="utf-8")
+    assert _read_mcp_servers_from_openclaw_json(str(config_file), diagnostic_sink=sink) == []
+
+
+def test_mcp_listing_reads_servers_from_a_json5_file(tmp_path: Path) -> None:
+    from defenseclaw.connector_paths import _read_mcp_servers_from_openclaw_json
+
+    config_file = tmp_path / "openclaw.json"
+    config_file.write_text("{\n  // c\n  mcp: { servers: { demo: { command: \x27npx\x27, }, }, },\n}\n", encoding="utf-8")
+    entries = _read_mcp_servers_from_openclaw_json(str(config_file))
+    assert [(e.name, e.command) for e in entries] == [("demo", "npx")]

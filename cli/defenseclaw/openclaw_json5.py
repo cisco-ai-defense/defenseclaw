@@ -24,8 +24,10 @@ import json
 import unicodedata
 from typing import Any
 
-# Files larger than this are not read; openclaw.json is a few KiB.
-MAX_BYTES = 4 * 1024 * 1024
+# The JSON5 rewrite (the slow path, a Python loop per character) is skipped for text
+# larger than this; openclaw.json is a few KiB. Strict JSON is parsed at any size, as
+# before JSON5 support, and as the gateway sidecar does.
+MAX_JSON5_CHARS = 4 * 1024 * 1024
 
 _HEX = frozenset("0123456789abcdefABCDEF")
 _DIGITS = frozenset("0123456789")
@@ -348,6 +350,12 @@ def loads(text: str) -> Any:
         strict_error = strict
     except RecursionError as exc:
         raise OpenClawConfigSyntaxError("nested too deeply", 1, 1) from exc
+    if len(text) > MAX_JSON5_CHARS:
+        raise OpenClawConfigSyntaxError(
+            f"{strict_error.msg}; file is too large to read as JSON5",
+            strict_error.lineno,
+            strict_error.colno,
+        ) from None
     rewriter = _Rewriter(text)
     rewritten, origin = _strip_trailing_commas(rewriter.run())
     try:
@@ -367,7 +375,5 @@ def loads(text: str) -> Any:
 def load_file(path: str) -> Any:
     """Read and parse a JSON/JSON5 file. ``OSError``/``UnicodeError`` pass through."""
     with open(path, "rb") as handle:
-        raw = handle.read(MAX_BYTES + 1)
-    if len(raw) > MAX_BYTES:
-        raise OpenClawConfigSyntaxError("file is larger than the size limit", 1, 1)
+        raw = handle.read()
     return loads(raw.decode("utf-8"))
