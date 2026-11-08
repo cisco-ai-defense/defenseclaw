@@ -121,6 +121,7 @@ func TestHookReadsBackTheRecordTheGatewayWrote(t *testing.T) {
 // of a different process, and against a record whose process was replaced,
 // stays refused.
 func TestFrozenGatewayTheDaemonStartedFollowsTheOutageMode(t *testing.T) {
+	requireFrozenGatewayJob(t)
 	addr, dataDir, pid := startRealGateway(t)
 	freezeProcess(t, pid)
 	assertFrozenGatewayFollowsOutageMode(t, addr, dataDir)

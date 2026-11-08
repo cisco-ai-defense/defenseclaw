@@ -275,6 +275,7 @@ func TestFrozenListenerIsOwnOnlyWhenItIsTheRecordedGateway(t *testing.T) {
 // ends, the strict tier blocks them with the outage text, and a tool call
 // that names a protected file stays blocked in every tier.
 func TestFrozenOwnGatewayFollowsTheOutageMode(t *testing.T) {
+	requireFrozenGatewayJob(t)
 	addr, dataDir := recordedFrozenGateway(t)
 	assertFrozenGatewayFollowsOutageMode(t, addr, dataDir)
 }
