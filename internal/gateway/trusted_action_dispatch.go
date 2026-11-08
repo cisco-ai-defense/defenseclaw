@@ -1000,14 +1000,9 @@ func dispatchTrustedActionWith(
 	)
 
 	options.excludedRuleIDs = excluded
-	legacyText := request.LegacyText
-	if trustedFixtureSourceInspectionAction(request.Input, facts) {
-		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
-	}
-	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
 	scanned := scanRuleGeneration(
 		generation,
-		legacyText,
+		trustedRuleScanText(request, facts),
 		request.Input.Tool,
 		options,
 	)
@@ -6103,6 +6098,18 @@ func noRecoverableCommandFacts(facts actionfacts.Facts) bool {
 	return true
 }
 
+// trustedRuleScanText is the text the legacy rule scan reads for request:
+// the call text without known fixture data and secret-store values, with the
+// active home spelled as the path rules read it.
+func trustedRuleScanText(request trustedActionRequest, facts actionfacts.Facts) string {
+	text := request.LegacyText
+	if trustedFixtureSourceInspectionAction(request.Input, facts) {
+		text = neutralizeKnownFixtureDataLiterals(text)
+	}
+	text = neutralizeTrustedSecretStoreValue(request.Input, text)
+	return activeHomeAsTilde(text, request.Input.ActiveHome)
+}
+
 // dispatchTrustedFallback judges a call with the legacy scan and the
 // recovery lanes only. A write tool call over the argument limit whose
 // over-limit view cannot be projected, or one judged by a generation with no
@@ -6114,14 +6121,9 @@ func dispatchTrustedFallback(
 	facts actionfacts.Facts,
 	options ruleScanOptions,
 ) ([]RuleFinding, trustedActionTelemetry) {
-	legacyText := request.LegacyText
-	if trustedFixtureSourceInspectionAction(request.Input, facts) {
-		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
-	}
-	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
 	scanned := scanRuleGeneration(
 		generation,
-		legacyText,
+		trustedRuleScanText(request, facts),
 		request.Input.Tool,
 		options,
 	)
@@ -10450,8 +10452,11 @@ func trustedLegacyPathRuleMatches(
 		mutation := path.Access == actionfacts.PathAccessWrite ||
 			path.Access == actionfacts.PathAccessAppend ||
 			path.Access == actionfacts.PathAccessDelete
-		seenValues := make(map[string]struct{}, 3)
-		for _, value := range []string{path.Value, path.Normalized, path.Resolved} {
+		seenValues := make(map[string]struct{}, 4)
+		for _, value := range []string{
+			path.Value, path.Normalized, path.Resolved,
+			activeHomeAsTilde(path.Resolved, input.ActiveHome),
+		} {
 			if strings.TrimSpace(value) == "" {
 				continue
 			}
