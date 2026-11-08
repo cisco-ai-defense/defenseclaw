@@ -283,7 +283,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -303,7 +303,7 @@ jobs:
         timeout-minutes: 18
         env:
           GO_PACKAGE_SHARD: ${{ matrix.shard }}
-          GO_PACKAGE_SHARDS: 12
+          GO_PACKAGE_SHARDS: 16
         run: |
           set -euo pipefail
           go list ./... > "$RUNNER_TEMP/go-packages.txt"
