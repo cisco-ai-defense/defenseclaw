@@ -32574,7 +32574,10 @@ function Get-DefenseClawGuardianRowMachineFolderLink {
         the adoption refused.
     #>
     param($Row)
-    if ($null -eq $Row) {
+    # Only an uninstall keeps a link, so only an uninstall explains the row. An
+    # Upgrade, Repair, Reconcile or Ensure still refuses the link, and a failed
+    # guardian row on it keeps the adoption refused (rel-1-0-9 g758b review S2).
+    if ($null -eq $Row -or -not $script:DefenseClawVendorLinkExcuse) {
         return ''
     }
     $property = $Row.PSObject.Properties['error']
@@ -32617,6 +32620,11 @@ function Get-DefenseClawGuardianRowMachineFolderLink {
 # The folders a machine vendor folder lives under: the trusted machine roots
 # (never the process environment). A smoke points it at scratch paths.
 $script:DefenseClawVendorFolderRoots = @($script:ProgramData, $script:ProgramFiles)
+
+# True for the length of a standalone Uninstall (set at the entry of
+# Invoke-DefenseClawEnterpriseLifecycle for every action). The adoption gate
+# explains a guardian row that failed on a vendor-folder link only then.
+$script:DefenseClawVendorLinkExcuse = $false
 
 function Get-DefenseClawStandaloneManifestAdoption {
     <#
@@ -49172,6 +49180,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $script:DefenseClawPurgeBundleLock = $null
     $script:DefenseClawUninstallPurgeUserState = (
         $Action -eq 'Uninstall' -and [bool]$Purge -and (Test-DefenseClawStandaloneProfile)
+    )
+    $script:DefenseClawVendorLinkExcuse = (
+        $Action -eq 'Uninstall' -and (Test-DefenseClawStandaloneProfile)
     )
     # A standalone uninstall also removes the machine state under StateRoot
     # (owner decision 2026-10-01, GAP-1277); -Purge adds each enrolled
