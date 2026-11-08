@@ -318,12 +318,13 @@ func TestSetOpenCodeServicePortRefusesASharedGroupFolder(t *testing.T) {
 	}
 }
 
-// reachableHome returns a new home directly beneath the shared scratch root,
-// so every folder above it is searchable by another account (a t.TempDir
-// parent is mode 0700 and would hide the folders the test opens).
+// reachableHome returns a new home directly beneath /tmp, so every folder
+// above it is searchable by another account (a t.TempDir parent is mode 0700,
+// and so is the per-user TMPDIR of macOS, and would hide the folders the test
+// opens).
 func reachableHome(t *testing.T) string {
 	t.Helper()
-	home, err := os.MkdirTemp(os.TempDir(), "opencode-port-home-")
+	home, err := os.MkdirTemp("/tmp", "opencode-port-home-")
 	if err != nil {
 		t.Fatal(err)
 	}

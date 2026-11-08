@@ -42,6 +42,21 @@ func sealTestFile(t *testing.T, dir string) {
 	}
 }
 
+// resolvedFolders spells the folders the way the walk reports them, with every
+// link resolved (a macOS temporary folder is /private/var behind /var).
+func resolvedFolders(t *testing.T, folders []string) []string {
+	t.Helper()
+	resolved := make([]string, len(folders))
+	for i, folder := range folders {
+		real, err := filepath.EvalSymlinks(folder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved[i] = real
+	}
+	return resolved
+}
+
 func openCodeSealLayouts() []openCodeSealLayout {
 	return []openCodeSealLayout{
 		{"opencode folder open to the group", false, func(t *testing.T, home string) []string {
@@ -99,7 +114,7 @@ func TestSetOpenCodeServicePortSealsAGroupWritableFolderItAccepts(t *testing.T) 
 				if err := os.Chmod(home, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				open := layout.build(t, home)
+				open := resolvedFolders(t, layout.build(t, home))
 				result, err := SetOpenCodeServicePort(home, port)
 				if layout.linked && port != 25001 {
 					if err == nil {
@@ -176,6 +191,29 @@ func TestOpenCodeSealSharedFolderRefusesALink(t *testing.T) {
 	}
 }
 
+// macOS reports a link as mode 0755 where Linux reports 0777, so the refusal
+// of a link must not depend on the group-write bit the platform shows for it.
+type macLinkInfo struct{ os.FileInfo }
+
+func (macLinkInfo) Mode() os.FileMode { return os.ModeSymlink | 0o755 }
+
+func TestOpenCodeSealSharedFolderRefusesALinkWhateverModeTheSystemReportsForIt(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	sealTestMkdir(t, real, 0o775)
+	info, err := os.Lstat(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed, err := openCodeSealSharedFolder(real, macLinkInfo{info}); err == nil || sealed {
+		t.Fatalf("a link reported as 0755 was sealed: %v %v", sealed, err)
+	}
+	// Benign twin: the same folder, reported as the folder it is, is sealed.
+	if sealed, err := openCodeSealSharedFolder(real, info); err != nil || !sealed {
+		t.Fatalf("a group-writable folder was not sealed: %v %v", sealed, err)
+	}
+}
+
 // otherAccountRenames runs, as an unprivileged account that holds gid either as
 // a supplementary or as its primary group, the one operation that matters: it
 // renames path. It reports whether the rename succeeded. Skips where root
@@ -193,7 +231,7 @@ func otherAccountRenames(t *testing.T, path string, primary bool) bool {
 	}
 	const script = `import os, sys
 path, gid, primary = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
-os.setgroups([] if primary else [gid])
+os.setgroups([] if primary else [65534, gid])
 os.setgid(gid if primary else 65534)
 os.setuid(65534)
 os.rename(path, path + ".moved")
