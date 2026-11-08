@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -359,6 +360,15 @@ type VendorFolderProblem struct {
 	// account can change and that the publish cannot move aside, so it cannot
 	// publish through it (GAP-0930). Dir is the folder that holds it.
 	UnrecordedFile bool
+	// PendingMoveAside is set for such a file that a standard user owns: the
+	// next reconcile (the guardian pass, or Setup /ensure) moves it aside to a
+	// hidden name, so nothing blocks the action, but the connector is not
+	// covered until it has (machine-policy verify says the same).
+	PendingMoveAside bool
+	// Conflict marks a machine-policy verify conflict that is neither of the
+	// above (an administrator's file that is not valid JSON, a missing
+	// managed plugin): Message is the conflict text.
+	Conflict bool
 }
 
 // goOwnedVendorTarget is one Go-owned Windows machine policy target among the
@@ -490,11 +500,18 @@ func policyFileWouldBeMovedAside(path string) (bool, error) {
 }
 
 // unrecordedPolicyFileProblems returns, for each Go-owned target among
-// connectors, each vendor policy file in its folder that DefenseClaw has no
-// record of, that an account other than SYSTEM, Administrators and
-// TrustedInstaller can change, and that the publish therefore cannot use or
-// move aside. A trusted file (administrator-only), a file a standard user
-// owns (the publish moves it aside), DefenseClaw's own drop-in name and an
+// connectors, each vendor policy file (or other entry) in its folder that
+// DefenseClaw has no record of and that the publish cannot use:
+//   - a regular file that an account other than SYSTEM, Administrators and
+//     TrustedInstaller can change, and that an administrator owns (the
+//     publish never moves such a file aside, and never reads it);
+//   - the same file owned by a standard user: the publish moves it aside, so
+//     it is PendingMoveAside under ownership merge, and a plain problem under
+//     verify_only, where nothing moves it;
+//   - a link or other entry that is not a regular file (the publish removes
+//     one a standard user owns, and fails on one an administrator owns).
+//
+// A trusted file (administrator-only), DefenseClaw's own drop-in name and an
 // empty folder give none, as before. It writes nothing.
 func unrecordedPolicyFileProblems(opts Options, connectors []string) []VendorFolderProblem {
 	if !vendorFolderInspectable(opts) {
@@ -508,37 +525,77 @@ func unrecordedPolicyFileProblems(opts Options, connectors []string) []VendorFol
 			continue
 		}
 		dir, files, use := unrecordedPolicyFileCandidates(opts, target.name, target.paths[0])
+		// A link on the folder itself is the folder walk's matter (the
+		// publish replaces it), not a file's.
+		if len(files) == 0 || programDataPathHasLink(opts, dir) {
+			continue
+		}
+		merge := opts.PolicyFor(target.name).Ownership == config.MachinePolicyOwnershipMerge
 		for _, file := range files {
 			key := strings.ToLower(file)
-			if seen[key] || recorded.namesFileIn(dir, filepath.Base(file)) || programDataPathHasLink(opts, file) {
+			if seen[key] || recorded.namesFileIn(dir, filepath.Base(file)) {
 				continue
 			}
 			info, err := os.Lstat(file)
-			if err != nil || !info.Mode().IsRegular() {
+			if err != nil {
 				continue
 			}
-			trustErr := validateTrustedFileItself(file)
-			if trustErr == nil {
-				continue
+			var trustErr error
+			if info.Mode().IsRegular() {
+				if trustErr = validateTrustedFileItself(file); trustErr == nil {
+					continue
+				}
+			} else {
+				trustErr = fmt.Errorf("%s is not a regular file", file)
 			}
-			movedAside, ownerErr := policyFileWouldBeMovedAside(file)
-			if movedAside && ownerErr == nil {
-				continue
+			userOwned, ownerErr := policyFileWouldBeMovedAside(file)
+			problem := VendorFolderProblem{
+				Connector: target.name, Dir: dir, File: file, Blocker: trustErr.Error(), UnrecordedFile: true,
+				PendingMoveAside: userOwned && ownerErr == nil && merge,
 			}
+			problem.Message = unrecordedPolicyFileMessage(file, info.Mode().IsRegular(), trustErr, ownerErr, userOwned && ownerErr == nil, problem.PendingMoveAside, use)
 			seen[key] = true
-			problems = append(problems, VendorFolderProblem{
-				Connector: target.name, Dir: dir, File: file, Message: unrecordedPolicyFileMessage(file, trustErr, ownerErr, use),
-				Blocker: trustErr.Error(), UnrecordedFile: true,
-			})
+			problems = append(problems, problem)
 		}
 	}
 	return problems
 }
 
+// UnrecordedPolicyFileProblems is the unrecorded-file part of
+// InspectRecordedVendorFolders, for the guardian pass to alert on once its
+// publish has had its chance to move a file aside.
+func UnrecordedPolicyFileProblems(opts Options, connectors []string) []VendorFolderProblem {
+	return unrecordedPolicyFileProblems(opts, connectors)
+}
+
+// unrecordedFileFix is the one recovery that works for every cause of an
+// untrusted policy file: an explicit or an inherited entry, any number of
+// accounts, a null access list, an entry type the check does not understand,
+// a file a standard user owns. It gives the file to Administrators, replaces
+// its access list with the inherited default, then replaces that with the
+// access list DefenseClaw gives its own vendor policy files (SYSTEM and
+// Administrators full control, Users read and execute). A link or other
+// entry that is not a regular file is moved aside instead.
+func unrecordedFileFix(path string, regular bool) string {
+	if !regular {
+		return `Move-Item -LiteralPath "` + path + `" -Destination "` + path + `.moved-aside"`
+	}
+	commands := [][]string{
+		{"icacls", path, "/setowner", "*" + adminOwnerSIDStr},
+		{"icacls", path, "/reset"},
+		{"icacls", path, "/inheritance:r", "/grant:r", "*" + systemSIDStr + ":F", "*" + adminOwnerSIDStr + ":F", "*" + usersSIDStr + ":RX"},
+	}
+	rendered := make([]string, 0, len(commands))
+	for _, command := range commands {
+		rendered = append(rendered, renderWindowsCommand(command))
+	}
+	return strings.Join(rendered, ", then ")
+}
+
 // unrecordedPolicyFileMessage names the file, why DefenseClaw cannot publish
 // through it and the administrator's recovery, in the words of the vendor
 // folder refusal (recordedVendorFolderError) and the purge's kept-file warning.
-func unrecordedPolicyFileMessage(file string, trustErr, ownerErr error, use policyFolderUse) string {
+func unrecordedPolicyFileMessage(file string, regular bool, trustErr, ownerErr error, userOwned, pending bool, use policyFolderUse) string {
 	loads := ""
 	if use.siblings != "" {
 		loads = ", and " + use.siblings
@@ -547,11 +604,83 @@ func unrecordedPolicyFileMessage(file string, trustErr, ownerErr error, use poli
 	if ownerErr != nil {
 		owner = fmt.Sprintf(" (DefenseClaw could not read who owns it either: %v)", ownerErr)
 	}
-	return fmt.Sprintf("%s is not covered: DefenseClaw has no record of writing it and an account other than SYSTEM, Administrators and "+
-		"TrustedInstaller can change it (%v)%s%s, so DefenseClaw cannot publish its hooks through it and does not move aside or replace a file "+
-		"an administrator owns; this connector is not protected until an administrator fixes the file: from an elevated prompt run %s, check "+
-		"the file, then run `%s`. %s",
-		file, trustErr, owner, loads, keptPolicyFileFix(file, trustErr.Error()), managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)
+	if pending {
+		return fmt.Sprintf("%s is not covered yet: DefenseClaw has no record of writing it and a standard account owns it and can change it (%v)%s%s; "+
+			"DefenseClaw moves such a file aside to a hidden name at its next reconcile (the guardian pass, or `%s`), and this connector is covered once it has. %s",
+			file, trustErr, owner, loads, managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)
+	}
+	why := "an administrator owns it, so DefenseClaw cannot read it, merge into it or move it aside"
+	if userOwned {
+		why = "ownership: verify_only keeps DefenseClaw from moving a standard account's file aside"
+	}
+	if !regular {
+		why = "DefenseClaw does not remove or replace an entry an administrator owns"
+		if userOwned {
+			why = "ownership: verify_only keeps DefenseClaw from removing a standard account's entry"
+		}
+	}
+	return fmt.Sprintf("%s is not covered: DefenseClaw has no record of writing it and %v%s%s; %s, so it cannot publish its hooks through it; "+
+		"this connector is not protected until an administrator fixes the file: from an elevated PowerShell prompt run %s, check the file, then run `%s`. %s",
+		file, unrecordedCause(regular, trustErr), owner, loads, why, unrecordedFileFix(file, regular), managed.WindowsSetupCommand("/ensure"), managed.WindowsSetupSource)
+}
+
+func unrecordedCause(regular bool, trustErr error) string {
+	if regular {
+		return fmt.Sprintf("an account other than SYSTEM, Administrators and TrustedInstaller can change it (%v)", trustErr)
+	}
+	return "it is a link or other entry, not a regular file"
+}
+
+// GoOwnedPolicyProblems is what Setup's status and verify say about the
+// Go-owned Windows machine policy (Copilot's policy.d, OpenCode's managed
+// config, Devin's withdrawn files): the vendor folder and unrecorded file
+// problems of InspectRecordedVendorFolders, then every other conflict or
+// error that machine-policy verify raises for those connectors, from the
+// same function (verifyConnector), so status never claims coverage that
+// machine-policy verify denies (GAP-0930). A connector on the per-user route
+// or with ownership off has none. Standalone Windows only.
+func GoOwnedPolicyProblems(opts Options, connectors []string) []VendorFolderProblem {
+	if !vendorFolderInspectable(opts) || opts.Validate() != nil {
+		return nil
+	}
+	problems := InspectRecordedVendorFolders(opts, connectors)
+	known := map[string]bool{}
+	var mentioned []string
+	for _, problem := range problems {
+		known[problem.Message] = true
+		for _, name := range []string{problem.File, problem.Dir} {
+			if name != "" {
+				mentioned = append(mentioned, strings.ToLower(name))
+			}
+		}
+	}
+	covered := func(text string) bool {
+		text = strings.ToLower(text)
+		for _, name := range mentioned {
+			if strings.Contains(text, name) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, target := range goOwnedVendorTargets(opts, connectors) {
+		state, err := verifyConnector(opts, target.name)
+		if state.Route != RouteMachinePolicy {
+			continue
+		}
+		texts := slices.Clone(state.Conflicts)
+		if err != nil {
+			texts = append(texts, err.Error())
+		}
+		for _, text := range texts {
+			if known[text] || covered(text) {
+				continue
+			}
+			known[text] = true
+			problems = append(problems, VendorFolderProblem{Connector: target.name, Message: text, Conflict: true})
+		}
+	}
+	return problems
 }
 
 // InspectRecordedVendorFolders judges, without writing, the vendor folders of
@@ -654,7 +783,14 @@ func ReprotectRecordedVendorFolders(opts Options, connectors []string) ([]Reprot
 	}
 	// An unrecorded file another account can change is not something the safe
 	// transaction heals: it is refused with the administrator's recovery.
-	return healed, append(append(stuck, blocked...), unrecordedPolicyFileProblems(opts, connectors)...)
+	// A file a standard user owns is moved aside by the publish that follows,
+	// so it blocks nothing.
+	for _, problem := range unrecordedPolicyFileProblems(opts, connectors) {
+		if !problem.PendingMoveAside {
+			blocked = append(blocked, problem)
+		}
+	}
+	return healed, append(stuck, blocked...)
 }
 
 // VendorFolderRefusal is one vendor folder a publish refused because it does

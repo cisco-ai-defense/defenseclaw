@@ -91,8 +91,10 @@ func requireUnrecordedProblem(t *testing.T, problems []VendorFolderProblem, tc u
 		t.Fatalf("problem = %+v; want an unrecorded-file problem of %s for %s", problem, tc.connector, file)
 	}
 	for _, want := range []string{
-		file + " is not covered", "no record of writing it", "S-1-5-32-545",
-		`icacls "` + file + `" /remove:g "*S-1-5-32-545"`, "Setup", "/ensure",
+		file + " is not covered", "no record of writing it", "S-1-5-32-545", "Setup", "/ensure",
+		// One recovery for every cause: owner, default access list, protected access list.
+		`icacls "` + file + `" /setowner "*S-1-5-32-544", then icacls "` + file + `" /reset, then icacls "` + file +
+			`" /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" "*S-1-5-32-545:RX"`,
 	} {
 		if !strings.Contains(problem.Message, want) {
 			t.Fatalf("message %q lacks %q", problem.Message, want)
@@ -190,18 +192,51 @@ func TestInspectPassesAVendorFolderWithNoFile(t *testing.T) {
 	}
 }
 
-// A file a standard user owns is moved aside by the publish, as before; it is
-// not a problem for Setup. The inherited-defaults folder is the normal case.
-func TestInspectLeavesAnUnrecordedPolicyFileAStandardUserOwns(t *testing.T) {
+// A file a standard user owns is moved aside by the publish, as before, so it
+// blocks nothing; but until it has been, Setup says the connector is not
+// covered, as machine-policy verify does (pending, named). Under verify_only
+// nothing ever moves it, so it is a plain problem with the recovery.
+func TestInspectNamesAnUnrecordedPolicyFileAStandardUserOwnsAsPending(t *testing.T) {
 	for _, tc := range unrecordedCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			opts, _, file := plantUnrecorded(t, tc, unrecordedUsersModifyDACL)
+			opts, folder, file := plantUnrecorded(t, tc, unrecordedUsersModifyDACL)
 			ownAs(t, file, wellKnownSID(t, windows.WinBuiltinUsersSid))
-			if problems := InspectRecordedVendorFolders(opts, []string{tc.request}); len(problems) != 0 {
-				t.Fatalf("a file a standard user owns is reported: %+v", problems)
+
+			problems := InspectRecordedVendorFolders(opts, []string{tc.request})
+			if len(problems) != 1 || !problems[0].UnrecordedFile || !problems[0].PendingMoveAside || !strings.EqualFold(problems[0].File, file) ||
+				!strings.Contains(problems[0].Message, "not covered yet") || !strings.Contains(problems[0].Message, "moves such a file aside") {
+				t.Fatalf("problems = %+v; want %s pending its move aside", problems, file)
+			}
+			verify, _ := VerifyAll(opts, []string{tc.request})
+			if state, ok := stateNamed(verify, tc.connector); !ok || state.Covered || len(state.Conflicts) == 0 || state.Conflicts[0] != problems[0].Message {
+				t.Fatalf("verify state = %+v, %v; want uncovered with the same message first", state, ok)
+			}
+			if healed, blocked := ReprotectRecordedVendorFolders(opts, []string{tc.request}); len(healed) != 0 || len(blocked) != 0 {
+				t.Fatalf("a pending file blocks the gate: %+v %+v", healed, blocked)
 			}
 			if state, err := publishVendorCase(t, tc.vendorFolderCase, opts); err != nil || !state.Covered {
 				t.Fatalf("publish: %+v, %v; want the file moved aside and the connector covered", state, err)
+			}
+			if problems := InspectRecordedVendorFolders(opts, []string{tc.request}); len(problems) != 0 {
+				t.Fatalf("after the move aside: %+v", problems)
+			}
+			verify, _ = VerifyAll(opts, []string{tc.request})
+			if state, ok := stateNamed(verify, tc.connector); ok && strings.Contains(strings.Join(state.Conflicts, " "), "not covered") {
+				t.Fatalf("verify still names the file: %+v", state.Conflicts)
+			}
+			_ = folder
+		})
+		t.Run(tc.name+" verify_only", func(t *testing.T) {
+			opts, _, file := plantUnrecorded(t, tc, unrecordedUsersModifyDACL)
+			ownAs(t, file, wellKnownSID(t, windows.WinBuiltinUsersSid))
+			opts = withPolicy(opts, tc.connector, func(p *config.EnterpriseConnectorPolicy) { p.Ownership = config.MachinePolicyOwnershipVerifyOnly })
+			problems := InspectRecordedVendorFolders(opts, []string{tc.request})
+			if len(problems) != 1 || problems[0].PendingMoveAside || !strings.Contains(problems[0].Message, "verify_only") ||
+				!strings.Contains(problems[0].Message, "/setowner") {
+				t.Fatalf("problems = %+v; want a plain problem with the recovery under verify_only", problems)
+			}
+			if _, blocked := ReprotectRecordedVendorFolders(opts, []string{tc.request}); len(blocked) != 1 {
+				t.Fatalf("blocked = %+v; want the gate to name it", blocked)
 			}
 		})
 	}
@@ -284,6 +319,106 @@ func TestInspectNamesEachOpenCodeConfigAnotherAccountCanChange(t *testing.T) {
 		problems := InspectRecordedVendorFolders(opts, []string{tc.request})
 		if len(problems) != 2 || !strings.EqualFold(problems[0].File, jsonc) || !strings.EqualFold(problems[1].File, file) {
 			t.Fatalf("problems = %+v; want opencode.jsonc then opencode.json", problems)
+		}
+	}
+}
+
+// A link or other entry that is not a regular file, which an administrator
+// owns, is a problem the publish fails on (it removes only a standard user's):
+// reported with the move-aside recovery, not skipped.
+func TestInspectReportsAnUnrecordedLinkAnAdministratorOwns(t *testing.T) {
+	for _, tc := range unrecordedCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			opts, folder, file := plantUnrecorded(t, tc, unrecordedAdminOnlyDACL)
+			target := filepath.Join(t.TempDir(), "elsewhere.json")
+			if err := os.WriteFile(target, []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(file); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, file); err != nil {
+				t.Skipf("creating a symbolic link needs the privilege: %v", err)
+			}
+			problems := InspectRecordedVendorFolders(opts, []string{tc.request})
+			if len(problems) != 1 || !problems[0].UnrecordedFile || problems[0].PendingMoveAside || !strings.EqualFold(problems[0].File, file) ||
+				!strings.EqualFold(problems[0].Dir, folder) || !strings.Contains(problems[0].Message, "not a regular file") ||
+				!strings.Contains(problems[0].Message, `Move-Item -LiteralPath "`+file+`"`) {
+				t.Fatalf("problems = %+v; want the link named with the move-aside recovery", problems)
+			}
+		})
+	}
+}
+
+// Machine-policy verify and Setup are fed by one function: another conflict
+// the target raises (an administrator's sibling that is not valid JSON) shows
+// in Setup's problems too, and a healthy folder shows none.
+func TestGoOwnedPolicyProblemsCarryEveryMachinePolicyConflict(t *testing.T) {
+	for _, tc := range unrecordedCases() {
+		if tc.connector != ConnectorCopilot {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			opts, folder, file := plantUnrecorded(t, tc, unrecordedAdminOnlyDACL)
+			if err := os.WriteFile(file, []byte("{not json"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := applySDDL(file, unrecordedAdminOnlyDACL); err != nil {
+				t.Fatal(err)
+			}
+			if state, err := publishVendorCase(t, tc.vendorFolderCase, opts); err != nil || state.Covered {
+				t.Fatalf("publish beside an invalid sibling: %+v, %v; want not covered (verify says so)", state, err)
+			}
+			verify, _ := VerifyAll(opts, []string{tc.request})
+			state, ok := stateNamed(verify, tc.connector)
+			if !ok || state.Covered || len(state.Conflicts) == 0 {
+				t.Fatalf("verify state = %+v, %v; want a conflict", state, ok)
+			}
+			problems := GoOwnedPolicyProblems(opts, []string{tc.request})
+			found := false
+			for _, problem := range problems {
+				if problem.Conflict && problem.Connector == tc.connector && strings.Contains(problem.Message, "not valid JSON") && strings.Contains(problem.Message, file) {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("problems = %+v; want the conflict machine-policy verify raises (%q)", problems, state.Conflicts)
+			}
+			if err := os.Remove(file); err != nil {
+				t.Fatal(err)
+			}
+			_ = folder
+			// The host may lack the hook executable; only the sibling matters here.
+			for _, problem := range GoOwnedPolicyProblems(opts, []string{tc.request}) {
+				if strings.Contains(problem.Message, "not valid JSON") || strings.Contains(problem.Message, file) {
+					t.Fatalf("the removed sibling is still reported: %+v", problem)
+				}
+			}
+		})
+	}
+}
+
+// Copilot's own conflict about the same file is replaced by the new message,
+// not listed beside it.
+func TestVerifyListsAnUnrecordedCopilotFileOnce(t *testing.T) {
+	for _, tc := range unrecordedCases() {
+		if tc.connector != ConnectorCopilot {
+			continue
+		}
+		opts, _, file := plantUnrecorded(t, tc, unrecordedUsersModifyDACL)
+		if _, err := publishVendorCase(t, tc.vendorFolderCase, opts); err == nil {
+			// the publish writes the drop-in; the leftover stays
+		}
+		verify, _ := VerifyAll(opts, []string{tc.request})
+		state, _ := stateNamed(verify, tc.connector)
+		count := 0
+		for _, conflict := range state.Conflicts {
+			if strings.Contains(strings.ToLower(conflict), strings.ToLower(file)) {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatalf("conflicts = %q; want the file named once", state.Conflicts)
 		}
 	}
 }

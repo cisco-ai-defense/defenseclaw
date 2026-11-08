@@ -266,33 +266,9 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	result := Result{}
 	var errs []error
 	for _, name := range connectors {
-		route := opts.Route(name)
-		if route != RouteMachinePolicy {
-			state := State{Connector: name, Route: route, ForeignHooks: opts.PolicyFor(name).ForeignHooks}
-			if name == "kiro" {
-				kiroRouteDetail(route, &state)
-			}
-			if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
-				// Say why OpenCode is not on its machine policy route.
-				openCodePerUserFallback(opts, opts.PolicyFor(name), &state)
-			}
-			if name == connectorAmp && opts.goos() == "windows" {
-				state.Conflicts = append(state.Conflicts, InspectWindowsAmpMachineFolder(opts)...)
-			}
-			result.States = append(result.States, state)
-			continue
-		}
-		target, _ := TargetFor(name)
-		state, err := target.Verify(opts)
+		state, err := verifyConnector(opts, name)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
-		} else if state.Route == RouteMachinePolicy {
-			verifyPublishedFiles(opts, name, &state)
-			noteVerifyOnlyExport(opts, &state)
-		}
-		if state.Route == RouteMachinePolicy {
-			// Also when the target's own read failed on the same folder.
-			noteVendorFolderProblem(opts, name, &state)
 		}
 		result.States = append(result.States, state)
 	}
@@ -309,6 +285,38 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 	return result, errors.Join(errs...)
 }
 
+// verifyConnector is one connector's share of VerifyAll: machine-policy
+// verify and Setup's status and verify (GoOwnedPolicyProblems) both ask it, so
+// they cannot disagree about a connector's conflicts (GAP-0930).
+func verifyConnector(opts Options, name string) (State, error) {
+	route := opts.Route(name)
+	if route != RouteMachinePolicy {
+		state := State{Connector: name, Route: route, ForeignHooks: opts.PolicyFor(name).ForeignHooks}
+		if name == "kiro" {
+			kiroRouteDetail(route, &state)
+		}
+		if name == ConnectorOpenCode && opts.OpenCodePluginPath != "" {
+			// Say why OpenCode is not on its machine policy route.
+			openCodePerUserFallback(opts, opts.PolicyFor(name), &state)
+		}
+		if name == connectorAmp && opts.goos() == "windows" {
+			state.Conflicts = append(state.Conflicts, InspectWindowsAmpMachineFolder(opts)...)
+		}
+		return state, nil
+	}
+	target, _ := TargetFor(name)
+	state, err := target.Verify(opts)
+	if err == nil && state.Route == RouteMachinePolicy {
+		verifyPublishedFiles(opts, name, &state)
+		noteVerifyOnlyExport(opts, &state)
+	}
+	if state.Route == RouteMachinePolicy {
+		// Also when the target's own read failed on the same folder.
+		noteVendorFolderProblem(opts, name, &state)
+	}
+	return state, err
+}
+
 // noteVendorFolderProblem makes machine-policy verify say what the publish,
 // the repair and Setup's lifecycle say about the same vendor folder: a folder
 // DefenseClaw did not create that holds its recorded file and lets another
@@ -316,10 +324,18 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 // in it, add one) leaves the connector uncovered, with the folder, the unsafe
 // entry and the fix named (GAP-0756, GAP-0760). So does a vendor policy file
 // DefenseClaw has no record of that another account can change and the publish
-// cannot move aside (GAP-0930). Standalone Windows only.
+// cannot move aside (GAP-0930). The target's own conflict about the same file
+// (Copilot's "remove it") is replaced by that message, not listed beside it.
+// Standalone Windows only.
 func noteVendorFolderProblem(opts Options, name string, state *State) {
 	var prepend []string
 	for _, problem := range InspectRecordedVendorFolders(opts, []string{name}) {
+		if problem.UnrecordedFile {
+			file := strings.ToLower(problem.File)
+			state.Conflicts = slices.DeleteFunc(state.Conflicts, func(conflict string) bool {
+				return conflict != problem.Message && strings.Contains(strings.ToLower(conflict), file)
+			})
+		}
 		if !slices.Contains(state.Conflicts, problem.Message) && !slices.Contains(prepend, problem.Message) {
 			prepend = append(prepend, problem.Message)
 		}

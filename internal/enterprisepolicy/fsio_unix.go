@@ -965,10 +965,18 @@ type VendorFolderProblem struct {
 	Blocker       string
 	// UnrecordedFile marks a problem that is a file, not a folder (windows).
 	UnrecordedFile bool
+	// PendingMoveAside: the next reconcile moves the file aside (windows).
+	PendingMoveAside bool
+	// Conflict marks a machine-policy verify conflict that is not a vendor
+	// folder or file problem (windows).
+	Conflict bool
 }
 
 // InspectRecordedVendorFolders reports nothing off Windows.
 func InspectRecordedVendorFolders(Options, []string) []VendorFolderProblem { return nil }
+
+// GoOwnedPolicyProblems reports nothing off Windows.
+func GoOwnedPolicyProblems(Options, []string) []VendorFolderProblem { return nil }
 
 // ReprotectRecordedVendorFolders does nothing off Windows.
 func ReprotectRecordedVendorFolders(Options, []string) ([]ReprotectedFolder, []VendorFolderProblem) {
