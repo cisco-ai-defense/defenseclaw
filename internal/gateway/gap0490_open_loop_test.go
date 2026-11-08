@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,6 +133,7 @@ type openLoopResult struct {
 	latencies []time.Duration
 	problems  map[string]int
 	refused   int // calls whose proposal or receipt got HTTP 429
+	failed    int // calls the gateway answered with an explicit failure: a status other than 200 or 429, or a proposal that did not allow
 }
 
 // achievedRate is the calls a second the launcher really issued on its
@@ -215,7 +218,7 @@ func performOpenLoopCall(parent context.Context, post openLoopPost, token, sessi
 		ack, _ := json.Marshal(map[string]string{"delivery_receipt": answer.DeliveryReceipt, "result": "ack"})
 		status, out, err = post(ctx, token, ack, true)
 	} else if err == nil && status == http.StatusOK {
-		err = fmt.Errorf("proposal %s", out)
+		err = fmt.Errorf("%w: %s", errOpenLoopProposal, out)
 	}
 	elapsed = time.Since(issued)
 	if err == nil && status == http.StatusOK && elapsed > openLoopWait {
@@ -224,10 +227,22 @@ func performOpenLoopCall(parent context.Context, post openLoopPost, token, sessi
 	return issued, elapsed, status, out, err
 }
 
-// record files the outcome of one call: refused, a problem, or answered.
+// errOpenLoopProposal is a proposal the gateway answered with 200 and without
+// an allow and a delivery receipt.
+var errOpenLoopProposal = errors.New("proposal did not allow")
+
+// record files the outcome of one call: refused, failed, a problem, or
+// answered. A call left without its answer inside the window (a transport
+// error, the deadline) is timing and counts only against the answered share.
+// A call the gateway answered with a refusal or an explicit failure (a receipt
+// 503, say) is a statement about the gateway, whatever share of the calls it
+// is, and is counted on its own.
 func (r *openLoopResult) record(elapsed time.Duration, status int, out []byte, err error) {
-	if status == http.StatusTooManyRequests {
+	switch {
+	case status == http.StatusTooManyRequests:
 		r.refused++
+	case status != 0 && (status != http.StatusOK || errors.Is(err, errOpenLoopProposal)):
+		r.failed++
 	}
 	if err != nil || status != http.StatusOK {
 		r.problems[fmt.Sprintf("%d %.80s %v", status, out, err)]++
@@ -369,7 +384,7 @@ func openLoopQueueingFactor(rho float64) float64 {
 
 // openLoopVerdict is the judgement of one stream.
 type openLoopVerdict struct {
-	kind   string // "ok", "inconclusive", "refused", "unanswered" or "slow"
+	kind   string // "ok", "inconclusive", "refused", "failed", "unanswered" or "slow"
 	detail string
 }
 
@@ -377,6 +392,9 @@ type openLoopVerdict struct {
 // can carry the plan at all. It returns an INCONCLUSIVE verdict naming the
 // measured baseline when it cannot, and nil when it can.
 func judgeOpenLoopBaseline(plan openLoopPlan, base openLoopResult) *openLoopVerdict {
+	if base.failed != 0 {
+		return &openLoopVerdict{"failed", fmt.Sprintf("the single-stream baseline of the real path had %d of %d calls answered with an explicit failure: %v", base.failed, base.offered, base.problems)}
+	}
 	rho := openLoopUtilisation(plan, base)
 	if len(base.latencies) == base.offered && rho <= openLoopMaxUtilisation {
 		return nil
@@ -388,8 +406,9 @@ func judgeOpenLoopBaseline(plan openLoopPlan, base openLoopResult) *openLoopVerd
 
 // judgeOpenLoopStream decides what the offered stream shows about the limit:
 // first whether it issued the required rate on its absolute schedule, then
-// whether any call was refused by a rate limit. It returns nil when neither
-// settles the run.
+// whether any call was refused by a rate limit or answered with an explicit
+// failure. Neither is a timing matter, so the 95% answered share below never
+// absorbs them. It returns nil when none settles the run.
 func judgeOpenLoopStream(plan openLoopPlan, got openLoopResult) *openLoopVerdict {
 	required := plan.required()
 	sandboxes := len(plan.tokens)
@@ -401,6 +420,10 @@ func judgeOpenLoopStream(plan openLoopPlan, got openLoopResult) *openLoopVerdict
 	if got.refused != 0 {
 		return &openLoopVerdict{"refused", fmt.Sprintf("%d sandboxes at %d calls/s (issued %.1f calls/s on schedule): %d of %d calls were refused with HTTP 429 (a rate limit, not load): %v",
 			sandboxes, plan.perSecond, got.achievedRate(), got.refused, got.offered, got.problems)}
+	}
+	if got.failed != 0 {
+		return &openLoopVerdict{"failed", fmt.Sprintf("%d sandboxes at %d calls/s (issued %.1f calls/s on schedule): %d of %d calls were answered with an explicit failure (not a missing answer): %v",
+			sandboxes, plan.perSecond, got.achievedRate(), got.failed, got.offered, got.problems)}
 	}
 	return nil
 }
@@ -525,6 +548,25 @@ func openLoopCapStub(t *testing.T, callsPerSecond float64) *httptest.Server {
 	return srv
 }
 
+// openLoopReceiptStub stands in for a relay that answers every proposal with an
+// allow and every receipt with an empty answer, except that it refuses every
+// nth receipt with the 503 the field showed ("receipt expired or closed"). An
+// n of 0 never fails.
+func openLoopReceiptStub(t *testing.T, every int) *httptest.Server {
+	t.Helper()
+	var receipts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if every > 0 && r.Header.Get(sandboxrelay.HookReceiptHeader) != "" && receipts.Add(1)%int64(every) == 0 {
+			_, _ = io.Copy(io.Discard, r.Body)
+			http.Error(w, "receipt expired or closed", http.StatusServiceUnavailable)
+			return
+		}
+		openLoopAnswerer(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 func openLoopStubPlan(sandboxes, perSecond int, duration, stall time.Duration) openLoopPlan {
 	tokens := make([]string, sandboxes)
 	for i := range tokens {
@@ -538,7 +580,12 @@ func openLoopStubPlan(sandboxes, perSecond int, duration, stall time.Duration) o
 // refusal settles the run.
 func runOpenLoopStub(t *testing.T, plan openLoopPlan, capPerSecond float64) (openLoopVerdict, openLoopResult) {
 	t.Helper()
-	relay := openLoopCapStub(t, capPerSecond)
+	return runOpenLoopAgainst(t, plan, openLoopCapStub(t, capPerSecond))
+}
+
+// runOpenLoopAgainst drives the plan against the given stand-in relay.
+func runOpenLoopAgainst(t *testing.T, plan openLoopPlan, relay *httptest.Server) (openLoopVerdict, openLoopResult) {
+	t.Helper()
 	got := driveOpenLoop(t.Context(), newOpenLoopPost(relay.URL), plan)
 	if v := judgeOpenLoopStream(plan, got); v != nil {
 		return *v, got
@@ -655,6 +702,12 @@ func TestGAP0490OpenLoopJudgementFollowsTheBaseline(t *testing.T) {
 	oneUnanswered.problems["0  context deadline exceeded"] = 1
 	refused := openLoopRecorded(440, 440, 185*time.Millisecond, 415*time.Millisecond, 44)
 	refused.refused = 5
+	failedShare := openLoopRecorded(440, 429, 185*time.Millisecond, 415*time.Millisecond, 44)
+	failedShare.failed = 11
+	failedShare.problems["503 receipt expired or closed <nil>"] = 11
+	failedBase := openLoopRecorded(30, 29, 37*time.Millisecond, 44*time.Millisecond, 1)
+	failedBase.failed = 1
+	failedBase.problems["503 receipt expired or closed <nil>"] = 1
 	for _, tc := range []struct {
 		name string
 		got  openLoopResult
@@ -669,6 +722,9 @@ func TestGAP0490OpenLoopJudgementFollowsTheBaseline(t *testing.T) {
 		{"the same stream on an overloaded box is inconclusive and names the baseline", openLoopRecorded(440, 199, 400*time.Millisecond, 3400*time.Millisecond, 44), loaded, "inconclusive", "mean 105ms"},
 		{"a baseline call left unanswered is inconclusive", openLoopRecorded(440, 440, 185*time.Millisecond, 415*time.Millisecond, 44), oneUnanswered, "inconclusive", "29 of 30"},
 		{"a refusal fails on a quiet box", refused, quiet, "refused", "5 of 440"},
+		{"11 explicit failures of 440 calls (share 0.975) fail", failedShare, quiet, "failed", "11 of 440"},
+		{"11 of 440 calls left unanswered stay inside the 95% allowance", openLoopRecorded(440, 429, 185*time.Millisecond, 415*time.Millisecond, 44), quiet, "ok", "p95 budget"},
+		{"an explicit failure in the baseline fails", openLoopRecorded(440, 440, 185*time.Millisecond, 415*time.Millisecond, 44), failedBase, "failed", "baseline"},
 		{"a launcher below 95% of the required rate is inconclusive", openLoopRecorded(440, 440, 185*time.Millisecond, 415*time.Millisecond, 30), quiet, "inconclusive", "30.0 calls/s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -709,5 +765,23 @@ func TestGAP0490OpenLoopQueueingBudgetFollowsUtilisation(t *testing.T) {
 	tooBusy := openLoopRecorded(30, 30, 61*time.Millisecond, 70*time.Millisecond, 1)
 	if judgeOpenLoopBaseline(plan, tooBusy) == nil {
 		t.Fatalf("a baseline of 61 ms (utilisation %.2f) must be inconclusive", openLoopUtilisation(plan, tooBusy))
+	}
+}
+
+// Every 25th receipt answered 503 is 4% of the calls: inside the 95% answered
+// share, but not a missing answer. The stream through the real call path
+// (performOpenLoopCall, record, judgeOpenLoopStream) fails on it, and the same
+// stream with no failing receipt is the benign twin that passes.
+func TestGAP0490OpenLoopCadenceExplicitReceiptFailureFailsBelowTheAllowance(t *testing.T) {
+	plan := openLoopStubPlan(2, 22, 4*time.Second, 0)
+	verdict, got := runOpenLoopAgainst(t, plan, openLoopReceiptStub(t, 25))
+	if verdict.kind != "failed" {
+		t.Fatalf("every 25th receipt answered 503 was judged %s, want failed (answered share %.3f): %s", verdict.kind, got.answeredShare(), verdict.detail)
+	}
+	if got.failed == 0 || got.answeredShare() < openLoopMinAnswered || !strings.Contains(verdict.detail, "receipt expired or closed") {
+		t.Fatalf("the failure must be explicit, inside the answered share, and named: %d failed, share %.3f: %s", got.failed, got.answeredShare(), verdict.detail)
+	}
+	if verdict, _ := runOpenLoopAgainst(t, plan, openLoopReceiptStub(t, 0)); verdict.kind != "ok" {
+		t.Fatalf("a relay whose receipts all succeed was judged %s: %s", verdict.kind, verdict.detail)
 	}
 }
