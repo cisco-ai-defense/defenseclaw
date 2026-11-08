@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_acp, cmd_config, cmd_uninstall
+from defenseclaw.config import CURRENT_CONFIG_VERSION
 
 from tests.helpers import cleanup_app, make_app_context
 from tests.test_cmd_acp import _binary, _isolate_client_config, _zed_settings
@@ -138,3 +139,85 @@ def test_uninstall_removes_the_acp_editor_entry_written_before_data_dir_moved(tm
         assert not cmd_acp._owned_entry_records(str(home))
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def _setup_zed_opencode(app, tmp_path):
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "opencode")
+    with patch("defenseclaw.commands.cmd_acp._agent_version", return_value="v"):
+        result = CliRunner().invoke(
+            cmd_acp.acp_cmd,
+            ["setup", "--client", "zed", "--agent", "opencode", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+    assert result.exit_code == 0, result.output
+
+
+def _two_data_dir_moves(tmp_path):
+    """Install home, then setup in a first store, then a second move: the records stay in the first store."""
+    home = tmp_path / ".defenseclaw"
+    home.mkdir()
+    first = tmp_path / "state-one"
+    first.mkdir()
+    second = tmp_path / "state-two"
+    second.mkdir()
+    (home / "config.yaml").write_text(
+        f"config_version: {CURRENT_CONFIG_VERSION}\ndata_dir: {home}\nguardrail:\n  connector: hermes\n"
+    )
+    app_home, _, _ = make_app_context(str(home))
+    app_first = None
+    try:
+        result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(first)], obj=app_home)
+        assert result.exit_code == 0, result.output
+        app_first, first_dir, _ = make_app_context(str(first))
+        _setup_zed_opencode(app_first, tmp_path)
+        lock = cmd_acp._contract_lock_path(first_dir, "zed", "opencode")
+        assert lock.is_file()
+        result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(second)], obj=app_first)
+        assert result.exit_code == 0, result.output
+    finally:
+        app_home.store.close()
+        if app_first is not None:
+            app_first.store.close()
+    return home, first, second, lock
+
+
+def test_uninstall_removes_the_acp_editor_entry_written_two_data_dir_moves_ago(tmp_path, monkeypatch):
+    # GAP-0874 review 3: the records of a setup stay in the folder it ran in, so a
+    # second `config set data_dir` leaves them in a folder that is neither the
+    # current one nor the install home. The install home lists that folder.
+    _isolate_client_config(monkeypatch, tmp_path)
+    home, first, second, lock = _two_data_dir_moves(tmp_path)
+    settings = _zed_settings(tmp_path)
+    document = json.loads(settings.read_text())
+    document["agent_servers"]["Foreign"] = {"command": "other"}
+    settings.write_text(json.dumps(document))
+
+    with patch("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", return_value=str(home)):
+        plan = cmd_uninstall._build_plan(wipe_data=False, binaries=False, revert_openclaw=True, remove_plugin=True)
+    assert plan.record_dirs == (str(second), str(first), str(home))
+    assert plan.acp_entries == (("zed", "opencode", str(cmd_acp._client_path("zed"))),)
+    cmd_uninstall._remove_acp_editor_entries(plan)
+
+    assert json.loads(settings.read_text())["agent_servers"] == {"Foreign": {"command": "other"}}
+    assert not lock.exists()
+    assert not cmd_acp._owned_entry_records(str(first))
+
+
+def test_uninstall_keeps_an_edited_acp_editor_entry_in_an_earlier_data_dir(tmp_path, monkeypatch):
+    # The list of earlier folders only says where to look: the ownership proof in
+    # that folder still decides, so an entry the user changed stays.
+    _isolate_client_config(monkeypatch, tmp_path)
+    home, first, _second, lock = _two_data_dir_moves(tmp_path)
+    settings = _zed_settings(tmp_path)
+    document = json.loads(settings.read_text())
+    (name,) = document["agent_servers"]
+    document["agent_servers"][name]["command"] = "edited-by-the-user"
+    settings.write_text(json.dumps(document))
+
+    with patch("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", return_value=str(home)):
+        plan = cmd_uninstall._build_plan(wipe_data=False, binaries=False, revert_openclaw=True, remove_plugin=True)
+    assert plan.acp_entries == ()
+    cmd_uninstall._remove_acp_editor_entries(plan)
+    assert json.loads(settings.read_text())["agent_servers"][name]["command"] == "edited-by-the-user"
+    assert lock.is_file()
