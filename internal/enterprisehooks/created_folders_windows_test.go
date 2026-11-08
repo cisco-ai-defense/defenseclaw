@@ -414,3 +414,70 @@ func TestRemoveWindowsCreatedFolderIfEmptyTakesTheRecordWithTheFolder(t *testing
 		}
 	})
 }
+
+// GAP-0758 round 2 (the g091 record-only rule): a purge removes Claude Code's
+// managed-settings.d and ClaudeCode folders only when the created-folder
+// record names them, an origin:upgrade record included, and never by name.
+// The CLI used to remove both by name once they were empty; it now relies on
+// this record lookup and its reparse-safe removal alone.
+func TestRemoveWindowsCreatedFolderIfEmptyKeepsAnUnrecordedClaudeCodeFolder(t *testing.T) {
+	previousFileTrust := windowsManagedPolicyFileTrustCheck
+	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = previousFileTrust })
+	windowsManagedPolicyFileTrustCheck = trustAll
+	fixture := useCreatedFolderFixture(t, true, trustAll)
+	root := filepath.Join(fixture.programFiles, "ClaudeCode")
+	dropIns := filepath.Join(root, "managed-settings.d")
+	if err := os.MkdirAll(dropIns, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exists := func(path string) bool {
+		_, err := os.Lstat(path)
+		return err == nil
+	}
+	remove := func() {
+		for _, folder := range []string{dropIns, root} {
+			if _, err := RemoveWindowsCreatedFolderIfEmpty(folder); err != nil {
+				t.Fatalf("%s: %v", folder, err)
+			}
+		}
+	}
+
+	// Made by an administrator before the install: no record, so both stay.
+	remove()
+	if !exists(dropIns) || !exists(root) {
+		t.Fatalf("unrecorded empty ClaudeCode folders were removed: drop-ins=%v root=%v", exists(dropIns), exists(root))
+	}
+
+	// Recorded by the install (managed-settings.d) and back-filled by the
+	// upgrade (ClaudeCode, origin upgrade): both go, and so do their records.
+	if err := recordWindowsCreatedFolders([]string{dropIns}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(windowsCreatedFolderRecord{SchemaVersion: 1, Path: root, Origin: "upgrade"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootRecord := filepath.Join(fixture.records, windowsCreatedFolderRecordName(root))
+	if err := os.WriteFile(rootRecord, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	remove()
+	if exists(dropIns) || exists(root) || exists(rootRecord) || exists(filepath.Join(fixture.records, windowsCreatedFolderRecordName(dropIns))) {
+		t.Fatalf("recorded ClaudeCode folders stayed: drop-ins=%v root=%v", exists(dropIns), exists(root))
+	}
+
+	// A recorded ClaudeCode folder that holds the administrator's own file stays.
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := recordWindowsCreatedFolders([]string{root}); err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(root, "managed-settings.json")
+	if err := os.WriteFile(keep, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if removed, err := RemoveWindowsCreatedFolderIfEmpty(root); err != nil || removed || !exists(keep) {
+		t.Fatalf("recorded ClaudeCode folder holding a file: removed=%v err=%v kept file=%v", removed, err, exists(keep))
+	}
+}

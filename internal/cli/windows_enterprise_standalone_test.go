@@ -2362,6 +2362,45 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		only[0].Code != "machine_state_kept" || strings.Contains(only[0].Message, "could not remove") {
 		t.Fatalf("a kept selector alone: %+v", only)
 	}
+	// A link a purge kept is named once, and only as kept (GAP-0773): the files
+	// behind it are not "could not remove", and a kept folder below it is not
+	// named again. A failure elsewhere is still reported.
+	const keptLink = `: kept: a link sits here; DefenseClaw does not follow, change or remove it`
+	linked := warnings(base + `,"machine_state_remaining":[` +
+		`"C:\\Program Files\\ClaudeCode\\managed-settings.d\\90-defenseclaw.json: reparse points are not allowed in managed path: C:\\Program Files\\ClaudeCode",` +
+		`"C:\\Program Files\\ClaudeCode\\managed-settings.d` + keptLink + `",` +
+		`"C:\\Program Files\\ClaudeCode` + keptLink + `",` +
+		`"C:\\Program Files\\ClaudeCode\\managed-settings.d\\.defenseclaw-managed-hooks.state: reparse points are not allowed in managed path: C:\\Program Files\\ClaudeCode",` +
+		`"C:\\ProgramData\\OpenAI\\Codex` + keptLink + `",` +
+		`"C:\\ProgramData\\DefenseClaw-PowerShell-x: access denied"]}`)
+	if len(linked) != 2 || linked[0].Code != "machine_state_remaining" || linked[1].Code != "machine_state_kept" ||
+		strings.Contains(linked[0].Message, "ClaudeCode") || strings.Contains(linked[0].Message, "Codex") ||
+		!strings.Contains(linked[0].Message, "could not remove 1 DefenseClaw machine folder(s)") ||
+		!strings.Contains(linked[1].Message, "kept 2 DefenseClaw machine file(s) or folder(s) on purpose") ||
+		strings.Count(linked[1].Message, `ClaudeCode`) != 1 || strings.Contains(linked[1].Message, "managed-settings.d") ||
+		strings.Count(linked[1].Message, `OpenAI\Codex`) != 1 {
+		t.Fatalf("a kept link listed twice, or as a failure: %+v", linked)
+	}
+	// The Codex entry carries the longer reason (the policy behind the link
+	// was not checked) and is still one kept item.
+	codex := warnings(base + `,"machine_state_remaining":["C:\\ProgramData\\OpenAI\\Codex: ` + windowsEnterpriseCodexKeptLinkReason + `"]}`)
+	if len(codex) != 1 || codex[0].Code != "machine_state_kept" ||
+		!strings.Contains(codex[0].Message, "may still name the DefenseClaw hook binary") {
+		t.Fatalf("the Codex kept link: %+v", codex)
+	}
+	// The same link met first by a psm1 purge step (the short reason) is still
+	// named with the longer Codex reason.
+	for _, link := range []string{`C:\\ProgramData\\OpenAI\\Codex`, `C:\\ProgramData\\OpenAI`} {
+		short := warnings(base + `,"machine_state_remaining":["` + link + keptLink + `"]}`)
+		if len(short) != 1 || short[0].Code != "machine_state_kept" ||
+			!strings.Contains(short[0].Message, "may still name the DefenseClaw hook binary") {
+			t.Fatalf("the Codex link %s met by a purge step: %+v", link, short)
+		}
+	}
+	other := warnings(base + `,"machine_state_remaining":["C:\\ProgramData\\Cursor` + keptLink + `"]}`)
+	if len(other) != 1 || strings.Contains(other[0].Message, "hook binary") {
+		t.Fatalf("a non-Codex kept link got the Codex reason: %+v", other)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}

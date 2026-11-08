@@ -674,7 +674,7 @@ $failures = & $module {
                 [IO.File]::WriteAllText([IO.Path]::Combine($srtarget, 'keep.txt'), 'keep')
                 [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path ([IO.Path]::Combine($srsite, 'out')) -Target $srtarget)
                 $junctions.Add([IO.Path]::Combine($srsite, 'out'))
-                Add-DefenseClawStandaloneCreatedFolderRecord -Path @($srvendor) -RecordDirectory $srrecords -Roots $srroots
+                $null = Add-DefenseClawStandaloneCreatedFolderRecord -Path @($srvendor) -RecordDirectory $srrecords -Roots $srroots
                 $srlayout = @{ SelfUninstallReceiptPath = [IO.Path]::Combine($srlife, ('self-uninstall-' + ('4' * 64) + '.json')) }
                 # A run that holds the scanner runtime lock keeps the runtime,
                 # and with it the Cisco folder, which is named as kept.
@@ -1289,6 +1289,339 @@ $failures = & $module {
                 if (-not $gone) {
                     $failures.Add('GAP-0704 review 5 M1: Remove-DefenseClawAgentFolderBackfillMarker still exists')
                 }
+
+                # GAP-0758 review S2: the runtime selector purge neither tests,
+                # opens, creates nor reads behind a link at its folder, and names
+                # the folder.
+                $s2 = [IO.Path]::Combine($ag, 'g0758s2')
+                $s2Target = [IO.Path]::Combine($s2, 'target')
+                $s2Link = [IO.Path]::Combine($s2, 'link')
+                [void][IO.Directory]::CreateDirectory($s2Target)
+                Set-G091AdministratorsOwner -Path @($s2, $s2Target)
+                foreach ($name in @('.defenseclaw-managed-runtime-selector.state', '.defenseclaw-managed-hooks.state', '90-defenseclaw.json')) {
+                    [IO.File]::WriteAllText([IO.Path]::Combine($s2Target, $name), "decoy $name")
+                }
+                $s2Listing = {
+                    (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $s2Target -Force | Microsoft.PowerShell.Utility\Sort-Object Name |
+                        Microsoft.PowerShell.Core\ForEach-Object { $_.Name + '=' + [IO.File]::ReadAllText($_.FullName) })) -join '|'
+                }
+                $s2Before = & $s2Listing
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $s2Link -Target $s2Target)
+                $junctions.Add($s2Link)
+                $s2Out = @(Remove-DefenseClawOwnRuntimeSelector -Directory $s2Link -OwnHook 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe')
+                if (@($s2Out | Microsoft.PowerShell.Core\Where-Object { ([string]$_).StartsWith("${s2Link}: kept: a link sits here") }).Count -ne 1) {
+                    $failures.Add("GAP-0758 review S2: the selector purge did not name the linked folder once: $($s2Out -join ' | ')")
+                }
+                if ((& $s2Listing) -cne $s2Before) {
+                    $failures.Add("GAP-0758 review S2: the selector purge changed the folder behind the link: $(& $s2Listing)")
+                }
+                # A failure of the link check that is not a link keeps its own message
+                # (GAP-0758 review L1): it is not labelled as a link, and a purge goes on.
+                $l1Drive = @('Q', 'R', 'S', 'T', 'U') | Microsoft.PowerShell.Core\Where-Object { -not [IO.Directory]::Exists("${_}:\") } | Microsoft.PowerShell.Utility\Select-Object -First 1
+                if ($null -ne $l1Drive) {
+                    $l1Directory = "${l1Drive}:\no\such\folder"
+                    $l1Out = @(Remove-DefenseClawOwnRuntimeSelector -Directory $l1Directory -OwnHook 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe')
+                    if ($l1Out.Count -ne 1 -or -not ([string]$l1Out[0]).StartsWith("${l1Directory}: cannot resolve existing ancestor") -or ([string]$l1Out[0]) -match 'a link sits') {
+                        $failures.Add("GAP-0758 review L1: the selector purge labelled a failure that is not a link: $($l1Out -join ' | ')")
+                    }
+                    $l1Threw = $false
+                    try {
+                        Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout @{ ClaudeManagedHooksLockPath = [IO.Path]::Combine($l1Directory, '.defenseclaw-managed-hooks.lock') }
+                    }
+                    catch {
+                        $l1Threw = ([string]$_.Exception.Message) -match 'cannot resolve existing ancestor'
+                    }
+                    if (-not $l1Threw -or @(Get-DefenseClawCreatedFoldersKept).Count -ne 0) {
+                        $failures.Add('GAP-0758 review L1: the committed lock removal kept a failure that is not a link as a kept link')
+                    }
+                    $script:DefenseClawCreatedFoldersKept.Clear()
+                }
+                # The committed-uninstall lock removal meets the same link: it
+                # neither throws (a 1603 over a link) nor touches the lock behind it.
+                $s2Lock = [IO.Path]::Combine($s2Target, '.defenseclaw-managed-hooks.lock')
+                [IO.File]::WriteAllText($s2Lock, 'decoy lock')
+                $s2LockBefore = & $s2Listing
+                $script:DefenseClawCreatedFoldersKept.Clear()
+                try {
+                    Remove-DefenseClawCommittedManagedHooksSerializationLocks -Layout @{ ClaudeManagedHooksLockPath = [IO.Path]::Combine($s2Link, '.defenseclaw-managed-hooks.lock') }
+                }
+                catch {
+                    $failures.Add("GAP-0758 review S2: the committed lock removal threw over a link: $($_.Exception.Message)")
+                }
+                if ((& $s2Listing) -cne $s2LockBefore) {
+                    $failures.Add("GAP-0758 review S2: the committed lock removal changed the folder behind the link: $(& $s2Listing)")
+                }
+                if (@(Get-DefenseClawCreatedFoldersKept | Microsoft.PowerShell.Core\Where-Object { ([string]$_).StartsWith("${s2Link}: kept: a link sits on its path") }).Count -ne 1) {
+                    $failures.Add("GAP-0758 review S2: the committed lock removal did not name the linked folder once: $((Get-DefenseClawCreatedFoldersKept) -join ' | ')")
+                }
+                $script:DefenseClawCreatedFoldersKept.Clear()
+
+                # GAP-0773: a link at the Codex machine-policy folder. A purge step
+                # that meets it writes a kept entry at the link, not "path: could not
+                # remove" for a file behind it; the Codex folder link is found without
+                # following it (standalone only); and the Codex removal report that
+                # says the link was kept is accepted, not refused as unexplained.
+                $g773 = [IO.Path]::Combine($ag, 'g0773')
+                $g773Target = [IO.Path]::Combine($g773, 'target')
+                $g773Link = [IO.Path]::Combine($g773, 'Codex')
+                $g773Plain = [IO.Path]::Combine($g773, 'plain')
+                [void][IO.Directory]::CreateDirectory($g773Target)
+                [void][IO.Directory]::CreateDirectory($g773Plain)
+                Set-G091AdministratorsOwner -Path @($g773, $g773Target, $g773Plain)
+                foreach ($name in @('requirements.toml', '.defenseclaw-managed-hooks.state', '.defenseclaw-managed-hooks.writer.lock')) {
+                    [IO.File]::WriteAllText([IO.Path]::Combine($g773Target, $name), "decoy $name")
+                }
+                $g773Listing = {
+                    (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $g773Target -Force | Microsoft.PowerShell.Utility\Sort-Object Name |
+                        Microsoft.PowerShell.Core\ForEach-Object { $_.Name + '=' + [IO.File]::ReadAllText($_.FullName) })) -join '|'
+                }
+                $g773Before = & $g773Listing
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $g773Link -Target $g773Target)
+                $junctions.Add($g773Link)
+                $keptEntry = "${g773Link}: kept: a link sits here; DefenseClaw does not follow, change or remove it"
+                $g773Entry = Get-DefenseClawMachineStateFailureEntry -Path ([IO.Path]::Combine($g773Link, 'requirements.toml')) `
+                    -Message "reparse points are not allowed in managed path: $g773Link"
+                if ($g773Entry -cne $keptEntry) {
+                    $failures.Add("GAP-0773: a link failure was not turned into a kept entry at the link: $g773Entry")
+                }
+                $g773Plain1 = Get-DefenseClawMachineStateFailureEntry -Path 'C:\x\y' -Message 'access denied'
+                if ($g773Plain1 -cne 'C:\x\y: access denied') {
+                    $failures.Add("GAP-0773: a plain failure lost its path and reason: $g773Plain1")
+                }
+                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Link }) -ne $g773Link) {
+                    $failures.Add('GAP-0773: the Codex folder link was not found')
+                }
+                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = [IO.Path]::Combine($g773Link, 'sub') }) -ne $g773Link) {
+                    $failures.Add('GAP-0773: a folder below the Codex link was not reported as behind the link')
+                }
+                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Plain }) -ne '' -or
+                    (Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = [IO.Path]::Combine($g773Plain, 'absent') }) -ne '') {
+                    $failures.Add('GAP-0773: a plain or absent Codex folder was reported as a link')
+                }
+                $g773SecureClient = 'unset'
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                try {
+                    $g773SecureClient = Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Link }
+                }
+                finally {
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                }
+                if ($g773SecureClient -cne '') {
+                    $failures.Add("GAP-0773: Secure Client kept a Codex link: '$g773SecureClient'")
+                }
+                # The uninstall's removal reports a kept link as kept and not
+                # verified (no safe_to_remove_binary), and only the uninstall
+                # (-Teardown) accepts that report.
+                $g773Report = [pscustomobject]@{
+                    safe_to_remove_binary = $false; managed_state_existed = $false; managed_state_removed = $false
+                    managed_state_removed_or_absent = $false; surviving_owned_path_references = 0; disposition = 'link_kept'
+                    link_kept = $g773Link
+                }
+                try {
+                    Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report -Teardown
+                }
+                catch {
+                    $failures.Add("GAP-0773: the uninstall's Codex removal that kept a link was refused: $($_.Exception.Message)")
+                }
+                $g773Refused = $false
+                try { Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report } catch { $g773Refused = $true }
+                if (-not $g773Refused) {
+                    $failures.Add('GAP-0773: a Codex removal that is not the uninstall''s accepted a kept link')
+                }
+                $g773Report.link_kept = ''
+                $g773Refused = $false
+                try { Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report -Teardown } catch { $g773Refused = $true }
+                if (-not $g773Refused) {
+                    $failures.Add('GAP-0773: link_kept without a named link was accepted')
+                }
+                $g773Report.link_kept = $g773Link
+                $g773Report.safe_to_remove_binary = $true
+                $g773Report.managed_state_removed_or_absent = $true
+                $g773Report.disposition = 'bogus'
+                $g773Refused = $false
+                try { Complete-DefenseClawCodexRequirementsRemoval -Layout @{} -GatewayServiceName 'DefenseClawGateway' -Report $g773Report -Teardown } catch { $g773Refused = $true }
+                if (-not $g773Refused) {
+                    $failures.Add('GAP-0773: an unexplained Codex removal disposition was accepted')
+                }
+                if ((& $g773Listing) -cne $g773Before) {
+                    $failures.Add("GAP-0773: a step changed the folder behind the Codex link: $(& $g773Listing)")
+                }
+
+                # GAP-0773, review M1: the uninstall asks the installed gateway before it
+                # passes --uninstall to "codex-requirements remove". A gateway older than
+                # this build (1.0.3 has no capabilities command; 1.0.8 has one without the
+                # field) defines only --json, answers "unknown flag" to --uninstall with no
+                # JSON line, and gets the plain removal; a gateway that reports the field
+                # gets --uninstall. Any other call to the gateway fails the row.
+                & {
+                    $m1Layout = @{
+                        CodexMachinePolicyPath = 'C:\m1\requirements.toml'
+                        CodexRequirementsOwnershipPath = 'C:\m1\ownership.json'
+                        CodexManagedHooksStatePath = 'C:\m1\state'
+                        CodexManagedHooksDirectory = 'C:\m1\managed'
+                        HookPath = 'C:\m1\hook.exe'
+                    }
+                    function Assert-DefenseClawAdministrator { }
+                    function Invoke-DefenseClawGatewayCommand {
+                        param($Layout, $GatewayServiceName, [string[]]$Arguments, [switch]$Capture,
+                            [switch]$AllowFailure, [int]$TimeoutSeconds)
+                        $verb = ($Arguments -join ' ')
+                        $script:M1Calls.Add($verb)
+                        if ($verb -ceq 'enterprise windows teardown-managed-hooks capabilities --json') {
+                            return [pscustomobject]@{ exit_code = $script:M1CapabilityCode; output = $script:M1CapabilityOutput }
+                        }
+                        $accepts = $verb -ceq 'enterprise windows codex-requirements remove --json --uninstall' -and $script:M1Gateway -ceq 'new'
+                        if ($verb -ceq 'enterprise windows codex-requirements remove --json' -or $accepts) {
+                            $report = [ordered]@{
+                                schema_version = 2; action = 'remove'; ok = $true; disposition = 'ownership_absent'
+                                requirements_path = $m1Layout.CodexMachinePolicyPath
+                                ownership_path = $m1Layout.CodexRequirementsOwnershipPath
+                                managed_state_path = $m1Layout.CodexManagedHooksStatePath
+                                managed_dir = $m1Layout.CodexManagedHooksDirectory
+                                hook_binary = $m1Layout.HookPath
+                            }
+                            return [pscustomobject]@{ exit_code = 0; output = @(($report | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress)) }
+                        }
+                        return [pscustomobject]@{ exit_code = 1; output = @('Error: unknown flag: --uninstall') }
+                    }
+                    $script:M1Calls = [Collections.Generic.List[string]]::new()
+                    $goodOld = '{"schema_version":4,"action":"capabilities","ok":true,"committed_standalone_prepare":true,"precommit_check":true}'
+                    $goodNew = '{"schema_version":4,"action":"capabilities","ok":true,"committed_standalone_prepare":true,"precommit_check":true,"codex_requirements_uninstall":true}'
+                    foreach ($case in @(
+                        @{ name = '1.0.3: no capabilities command'; gateway = 'old'; code = 1; output = @('Error: unknown command "capabilities"'); flag = $false },
+                        @{ name = '1.0.8: report without the field'; gateway = 'old'; code = 0; output = @($goodOld); flag = $false },
+                        @{ name = 'field false'; gateway = 'old'; code = 0; output = @($goodNew.Replace('"codex_requirements_uninstall":true', '"codex_requirements_uninstall":false')); flag = $false },
+                        @{ name = 'this build'; gateway = 'new'; code = 0; output = @($goodNew); flag = $true }
+                    )) {
+                        $script:M1Gateway = $case.gateway
+                        $script:M1CapabilityCode = $case.code
+                        $script:M1CapabilityOutput = $case.output
+                        $script:M1Calls.Clear()
+                        try {
+                            [void](Invoke-DefenseClawCodexRequirementsCommand -Layout $m1Layout -GatewayServiceName DefenseClawGateway -Action remove -Teardown)
+                        }
+                        catch {
+                            $failures.Add("GAP-0773 M1, $($case.name): the uninstall removal failed: $($_.Exception.Message)")
+                            continue
+                        }
+                        $sent = @($script:M1Calls | Microsoft.PowerShell.Core\Where-Object { $_ -match 'codex-requirements' })
+                        if ($sent.Count -ne 1 -or (($sent[0] -match '--uninstall') -ne $case.flag)) {
+                            $failures.Add("GAP-0773 M1, $($case.name): --uninstall sent = $(($sent[0] -match '--uninstall')), want $($case.flag): $($sent -join ' | ')")
+                        }
+                    }
+                    # A removal that is not the uninstall never sends the flag and does not ask the gateway.
+                    $script:M1Gateway = 'new'; $script:M1CapabilityCode = 0; $script:M1CapabilityOutput = @($goodNew)
+                    $script:M1Calls.Clear()
+                    [void](Invoke-DefenseClawCodexRequirementsCommand -Layout $m1Layout -GatewayServiceName DefenseClawGateway -Action remove)
+                    if (($script:M1Calls -join ' | ') -cne 'enterprise windows codex-requirements remove --json') {
+                        $failures.Add("GAP-0773 M1: a removal that is not the uninstall called the gateway as: $($script:M1Calls -join ' | ')")
+                    }
+                }
+
+                # GAP-0767: C:\ProgramData\ampcode. The 1.0.2 policy writer
+                # created it empty, with the descriptor above and no marker; a
+                # 1.0.9 upgrade back-fills it (origin upgrade) under the same three
+                # proofs, in the same one-shot, and a purge then removes it. A
+                # folder that fails a proof, or holds a foreign file, stays and is
+                # named once.
+                $am = [IO.Path]::Combine($ag, 'g0767')
+                $amPd = [IO.Path]::Combine($am, 'ProgramData')
+                $amPf = [IO.Path]::Combine($am, 'Program Files')
+                $amVendor = [IO.Path]::Combine($amPd, 'Cisco')
+                $amState = [IO.Path]::Combine($amVendor, 'DefenseClaw')
+                $amLife = [IO.Path]::Combine($amVendor, 'DefenseClaw-Lifecycle')
+                $amRecords = [IO.Path]::Combine($amLife, 'created-folders')
+                $amDir = [IO.Path]::Combine($amPd, 'ampcode')
+                $amArgs = @{ RecordDirectory = $amRecords; Roots = @($amPd, $amPf); StateRoot = $amState; ProgramData = $amPd; ProgramFiles = $amPf
+                    ProgramDataVendorFolder = $amVendor; ProgramFilesVendorFolder = [IO.Path]::Combine($amPf, 'Cisco') }
+                foreach ($folder in @($am, $amPd, $amPf, $amVendor, $amState)) {
+                    [void][IO.Directory]::CreateDirectory($folder)
+                }
+                Set-G091AdministratorsOwner -Path @($am, $amPd, $amPf, $amVendor, $amState)
+                [void]$native::CreateDirectorySecure($amLife, $adminOnly)
+                [IO.File]::WriteAllText([IO.Path]::Combine($amLife, 'lifecycle.lock'), '')
+                $amStateBorn = [IO.Directory]::GetCreationTimeUtc($amState)
+                $amRecordFile = [IO.Path]::Combine($amRecords, (Get-DefenseClawCreatedFolderRecordName -Path $amDir))
+                $amMarker = [IO.Path]::Combine($amRecords, 'agent-folder-backfill.done')
+                $amFresh = {
+                    # A computer that has not run the back-fill: no record, no marker.
+                    foreach ($leftover in @($amRecordFile, $amMarker)) {
+                        if ([IO.File]::Exists($leftover)) {
+                            [IO.File]::Delete($leftover)
+                        }
+                    }
+                    if ([IO.Directory]::Exists($amDir)) {
+                        foreach ($entry in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $amDir -Force)) {
+                            [IO.File]::Delete($entry.FullName)
+                        }
+                        [IO.Directory]::Delete($amDir, $false)
+                    }
+                }
+                # An empty folder in the 1.0.2 descriptor, born after StateRoot.
+                & $amFresh
+                [void]$native::CreateDirectorySecure($amDir, $agentSddl)
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @amArgs
+                if (-not [IO.File]::Exists($amRecordFile)) {
+                    $failures.Add('GAP-0767: an empty ampcode in the 1.0.2 descriptor, created after StateRoot, was not back-filled')
+                }
+                elseif (([IO.File]::ReadAllText($amRecordFile) | Microsoft.PowerShell.Utility\ConvertFrom-Json).origin -cne 'upgrade') {
+                    $failures.Add('GAP-0767: the ampcode record is not origin:upgrade')
+                }
+                if (-not [IO.File]::Exists($amMarker)) {
+                    $failures.Add('GAP-0767: the back-fill that judged ampcode left no one-shot marker')
+                }
+                # The purge removes it, and its record.
+                if (-not [string]::IsNullOrEmpty((Remove-DefenseClawStandaloneCreatedFolder -Path $amDir -Roots @($amPd, $amPf))) -or [IO.Directory]::Exists($amDir)) {
+                    $failures.Add('GAP-0767: a purge did not remove the back-filled empty ampcode')
+                }
+                # The one-shot: the marker is there, so a folder that appears
+                # later is not judged.
+                [void]$native::CreateDirectorySecure($amDir, $agentSddl)
+                [IO.File]::Delete($amRecordFile)
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @amArgs
+                if ([IO.File]::Exists($amRecordFile)) {
+                    $failures.Add('GAP-0767: a second back-fill recorded ampcode')
+                }
+                # (a) born before StateRoot, (b) another descriptor, (c) a foreign file.
+                & $amFresh
+                [void]$native::CreateDirectorySecure($amDir, $agentSddl)
+                [IO.Directory]::SetCreationTimeUtc($amDir, $amStateBorn.AddMinutes(-5))
+                $amWhy = [string](Get-DefenseClawAgentFolderBackfillRefusal -Path $amDir -Kind Amp -StateRoot $amState -RecordDirectory $amRecords)
+                if (-not $amWhy.Contains('before DefenseClaw')) {
+                    $failures.Add("GAP-0767 (a): an ampcode born before StateRoot was not refused for it: '$amWhy'")
+                }
+                & $amFresh
+                [void][IO.Directory]::CreateDirectory($amDir)
+                $amWhy = [string](Get-DefenseClawAgentFolderBackfillRefusal -Path $amDir -Kind Amp -StateRoot $amState -RecordDirectory $amRecords)
+                if ([string]::IsNullOrEmpty($amWhy)) {
+                    $failures.Add('GAP-0767 (b): an ampcode with an inherited descriptor was not refused')
+                }
+                $amTouched = @(Get-DefenseClawTouchedUnrecordedVendorFolders -RecordDirectory $amRecords -ProgramData $amPd -ProgramFiles $amPf)
+                if (@($amTouched | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $amDir }).Count -ne 0) {
+                    $failures.Add('GAP-0767: an ampcode without DefenseClaw descriptor was named as touched')
+                }
+                & $amFresh
+                [void]$native::CreateDirectorySecure($amDir, $agentSddl)
+                [IO.File]::WriteAllText([IO.Path]::Combine($amDir, 'managed-settings.json'), '{}')
+                Add-DefenseClawStandaloneUpgradeVendorFolderRecords @amArgs
+                if ([IO.File]::Exists($amRecordFile)) {
+                    $failures.Add('GAP-0767 (c): an ampcode holding a foreign file was back-filled')
+                }
+                if (-not [IO.File]::Exists($amMarker)) {
+                    $failures.Add('GAP-0767 (c): a refusal by a proof is final, so the back-fill is done and leaves the marker')
+                }
+                $amTouched = @(Get-DefenseClawTouchedUnrecordedVendorFolders -RecordDirectory $amRecords -ProgramData $amPd -ProgramFiles $amPf)
+                $amUnproven = @(Get-DefenseClawUnprovenVendorFolders -Touched $amTouched -RecordDirectory $amRecords)
+                if (@($amUnproven | Microsoft.PowerShell.Core\Where-Object { $_ -ceq $amDir }).Count -ne 1) {
+                    $failures.Add("GAP-0767 (c): an ampcode holding a foreign file is not listed once as not provably created: $($amUnproven -join '; ')")
+                }
+                if (-not [string]::IsNullOrEmpty((Remove-DefenseClawStandaloneCreatedFolder -Path $amDir -Roots @($amPd, $amPf))) -eq $false) {
+                    $failures.Add('GAP-0767 (c): removal of a folder holding a foreign file reported it gone')
+                }
+                if (-not [IO.File]::Exists([IO.Path]::Combine($amDir, 'managed-settings.json'))) {
+                    $failures.Add('GAP-0767 (c): the foreign file in ampcode is gone')
+                }
+                & $amFresh
 
                 # Rule (ii): Secure Client.
                 $scCisco = [IO.Path]::Combine($ag, 'sc', 'ProgramData', 'Cisco')

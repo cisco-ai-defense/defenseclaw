@@ -89,7 +89,8 @@ from defenseclaw.connector_paths import (
     hermes_profile_unsupported_reason,
     managed_plugin_path,
     normalize,
-    opencode_writable_plugin_folder,
+    opencode_custody_text,
+    opencode_unsafe_plugin_paths,
     rule_paths,
 )
 from defenseclaw.context import AppContext, pass_ctx
@@ -130,6 +131,7 @@ from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
+    SUDO_RUNTIME_LEFTOVER_NAMES,
     atomic_write_private_bytes,
     darwin_acl_confidentiality_error,
     darwin_acl_write_error,
@@ -137,6 +139,7 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_valid,
     read_regular_file_no_follow,
     root_owned_private_regular_file,
+    root_owned_start_blockers,
     sudo_runtime_leftover_relpaths,
     trusted_system_subprocess_env,
 )
@@ -1660,6 +1663,47 @@ def _managed_install_scan_pending() -> tuple[str, str]:
     )
 
 
+_OPENCODE_PORT_RECORD_CODES = (
+    "opencode_port_record_unreadable",
+    "opencode_port_record_unchecked",
+    "opencode_port_account_unknown",
+    "opencode_port_contested",
+)
+
+
+def _managed_opencode_port_record_problem() -> tuple[str, str]:
+    """The managed status warning about the guardian's OpenCode ports record
+    and its remedy, or ("", "") (gas-ux-r1 GAP-0053, REVIEW-gx053-5 MF2).
+
+    Doctor asks the managed lifecycle's own status, so a root and a non-root
+    run see what status says: the record cannot be read (no account gets a
+    new OpenCode port), or this account cannot check it.
+    """
+    from defenseclaw.upgrade_shim import managed_lifecycle_command
+
+    command = managed_lifecycle_command()
+    if not command:
+        return "", ""
+    try:
+        report = subprocess.run(
+            [*command.split(), "status", "--json"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        status = json.loads(report.stdout) if report.stdout and len(report.stdout) < 4 << 20 else {}
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return "", ""
+    for warning in (status.get("warnings") or []) if isinstance(status, dict) else []:
+        if isinstance(warning, dict) and warning.get("code") in _OPENCODE_PORT_RECORD_CODES:
+            message = str(warning.get("message") or "")
+            remedy = message.rsplit(": ", 1)[-1] if ": sudo " in message else f"sudo {command} status"
+            return f"{warning['code']}: {message}", remedy
+    return "", ""
+
+
 def _report_uninitialized_install(
     cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool, leftover: str = ""
 ) -> int:
@@ -1710,6 +1754,17 @@ def _report_uninitialized_install(
                 check_id="doctor.managed.install-scan",
                 reason_code="scan-pending",
                 remediation=remedy,
+            )
+        record_problem, record_remedy = _managed_opencode_port_record_problem()
+        if record_problem:
+            _emit(
+                "warn",
+                "OpenCode ports record",
+                record_problem,
+                r=r,
+                check_id="doctor.managed.opencode-port-record",
+                reason_code="opencode-port-record",
+                remediation=record_remedy,
             )
     else:
         _emit(
@@ -1776,7 +1831,10 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
 
     if os.name == "nt":
         return
-    data_dir = _configured_gateway_data_dir(cfg)
+    if _gateway_store_unknown(cfg):
+        _emit_gateway_store_unknown("Sudo leftovers", r)
+        return
+    data_dir = _gateway_store_dir(cfg)
     if not data_dir:
         return
     leftovers = sudo_runtime_leftover_relpaths(data_dir)
@@ -1812,16 +1870,21 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
             check_id="doctor.state.sudo-leftovers",
         )
         return
-    remediation = (
-        "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
-        "from the owning account so verified descriptor-bound ownership repair can run"
-    )
+    if _root_leftovers_account_can_repair(cfg):
+        remediation = _root_leftovers_remedy(cfg)
+        guidance = "; give them back to this account"
+    else:
+        remediation = (
+            "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
+            "from the owning account so verified descriptor-bound ownership repair can run"
+        )
+        guidance = "; use the guided ownership repair"
     _emit(
         "fail",
         "Sudo leftovers",
         "root-owned from a sudo-started gateway: "
         + ", ".join(leftovers)
-        + "; use the guided ownership repair",
+        + guidance,
         r=r,
         check_id="doctor.state.sudo-leftovers",
         reason_code="sudo-runtime-leftovers",
@@ -1880,14 +1943,17 @@ def _root_gateway_remedy_for(platform_name: str, cfg) -> str:
             f"Stop it from an elevated PowerShell prompt ({stop}), "
             f"then start it as yourself from a normal PowerShell prompt ({start})"
         )
+    note = _root_gateway_recovery_note(cfg)
     if platform_name == "darwin":
         return (
-            "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
+            note
+            + "Open DefenseClawMac and choose Start Gateway: it stops the root gateway with "
             "administrator approval, returns its files to you and starts the gateway as you. "
             "Without the app, run: " + _root_gateway_recovery_command(cfg)
         )
     return (
-        "Stop it, return its files to your account and start it as yourself with: "
+        note
+        + "Stop it, return its files to your account and start it as yourself with: "
         + _root_gateway_recovery_command(cfg)
     )
 
@@ -1906,25 +1972,261 @@ def _root_gateway_windows_executable() -> str:
     return "defenseclaw-gateway.exe"
 
 
-def _root_gateway_recovery_command(cfg) -> str:
+def _root_gateway_recovery_command(cfg, loosen: tuple[str, ...] = ()) -> str:
     """Stop the root gateway, return the home and the store, start as this account."""
-    data_dir = _configured_gateway_data_dir(cfg)
-    homes = [_root_gateway_install_home(cfg)]
-    if data_dir and data_dir not in homes:
-        homes.append(data_dir)
+    return _root_gateway_stop_command(cfg) + " && " + _root_gateway_return_and_start_command(cfg, loosen)
+
+
+def _root_gateway_return_and_start_command(cfg, loosen: tuple[str, ...] = ()) -> str:
+    """Give the install home and the moved store back to this account, then start.
+
+    The owner change alone leaves a root-owned file of mode 000 or 044, or a
+    folder without owner access, unusable to its new owner, so the owner bits
+    are restored (``chmod -R u+rwX``, group and other bits untouched) before
+    ``loosen`` files lose their group and other access and the gateway starts.
+    Go renders the same chain in ``rootGatewayRecoveryStepsLoosening``.
+    """
+    home = _root_gateway_install_home(cfg)
+    store = _root_gateway_moved_store()[0]
+    homes = [home]
+    if store and store not in homes:
+        homes.append(store)
+    owned = " ".join(shlex.quote(item) for item in homes)
     return (
-        _root_gateway_stop_command(cfg)
-        + ' && sudo chown -R "$(id -un)" '
-        + " ".join(shlex.quote(home) for home in homes)
+        f'sudo chown -R "$(id -un)" {owned} && chmod -R u+rwX {owned}'
+        + "".join(" && " + step for step in _root_gateway_loosen_steps(loosen))
         + " && defenseclaw-gateway start"
     )
 
 
+def _root_gateway_loosen_steps(loosen: tuple[str, ...]) -> list[str]:
+    """Take group and other access away from the files the owner return leaves loose.
+
+    A path that ends in a separator is a folder whose files could not be seen
+    (a root-owned 0700 store): a ``find`` over it takes the access away from
+    the runtime files it holds. Go renders the same steps in
+    ``rootGatewayLoosenStep``.
+    """
+    files = [item for item in loosen if not item.endswith(os.sep)]
+    folders = [item for item in loosen if item.endswith(os.sep)]
+    steps: list[str] = []
+    if files:
+        steps.append("chmod go-rwx " + " ".join(shlex.quote(item) for item in files))
+    if folders:
+        tests = [f"-name {name}" for name in SUDO_RUNTIME_LEFTOVER_NAMES] + ["-path '*/hooks/.hook-*.token'"]
+        steps.append(
+            "find "
+            + " ".join(shlex.quote(item) for item in folders)
+            + " -maxdepth 2 -type f \\( "
+            + " -o ".join(tests)
+            + " \\) -exec chmod go-rwx {} +"
+        )
+    return steps
+
+
+def _root_gateway_moved_store() -> tuple[str, str, bool]:
+    """The folder the gateway's config moved the store to, as the gateway reads it.
+
+    Returns ``(store, config_file, unreadable)``. The gateway starts with the
+    install home as its working directory, so a relative ``DEFENSECLAW_CONFIG``
+    and a relative ``data_dir`` are both taken from there, not from the folder
+    doctor was run in (GAP-0711, GAP-0713). The config is read from that
+    place and from nowhere else: the data_dir this process loaded may come from
+    a different file of the same relative name in the folder doctor runs in, so
+    it never stands in. A config that does not exist moves nothing (the gateway
+    uses the install home); ``unreadable`` reports one that exists but cannot
+    be read, whose store is unknown, so the caller says the folder list may be
+    incomplete.
+    """
+    import yaml
+
+    from defenseclaw.config import (
+        CONFIG_FILE_NAME,
+        CONFIG_PATH_ENV,
+        default_data_path,
+        parse_config_yaml,
+        read_config_text,
+    )
+
+    home = os.path.abspath(os.fspath(default_data_path()))
+    config_file = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
+    if not os.path.isabs(config_file):
+        config_file = os.path.join(home, config_file)
+    config_file = os.path.normpath(config_file)
+    try:
+        raw = parse_config_yaml(read_config_text(config_file))
+    except (FileNotFoundError, NotADirectoryError):
+        return "", config_file, False
+    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        return "", config_file, True
+    configured = raw.get("data_dir") if isinstance(raw, dict) else None
+    if not isinstance(configured, str) or not configured.strip():
+        return "", config_file, False
+    return os.path.abspath(os.path.join(home, configured.strip())), config_file, False
+
+
+def _install_home_store(cfg) -> str:
+    """The store the gateway reads when ``cfg`` was loaded from another folder, else "".
+
+    A relative ``DEFENSECLAW_CONFIG`` names a file in the folder this process
+    runs in, but the gateway starts in the install home and reads it there
+    (GAP-0711, GAP-0713). ``cfg`` then came from a different file of the same
+    name, so a check of the store the gateway owns reads the install home's one,
+    the store the printed recovery command names. With an absolute or no
+    ``DEFENSECLAW_CONFIG`` both readers see the same file and ``cfg`` stands. A
+    config that exists but cannot be read leaves the store unknown: "" again.
+    """
+    from defenseclaw.config import CONFIG_PATH_ENV, default_data_path
+
+    configured = os.environ.get(CONFIG_PATH_ENV)
+    if not configured or os.path.isabs(configured):
+        return ""
+    store, _config_file, unreadable = _root_gateway_moved_store()
+    if store or unreadable:
+        return store
+    return os.path.abspath(os.fspath(default_data_path()))
+
+
+def _gateway_store_unknown(cfg) -> bool:
+    """Whether the gateway reads a config doctor cannot read, so its store is unknown.
+
+    A relative ``DEFENSECLAW_CONFIG`` names a file in the install home for the
+    gateway. When that file exists but cannot be read here, nothing doctor
+    loaded from another folder says where the gateway keeps its store, so no
+    check may stand a different folder in for it (GAP-0711, GAP-0713).
+    """
+    from defenseclaw.config import CONFIG_PATH_ENV
+
+    configured = os.environ.get(CONFIG_PATH_ENV)
+    if not configured or os.path.isabs(configured):
+        return False
+    return _root_gateway_moved_store()[2]
+
+
+def _gateway_store_dir(cfg) -> str:
+    """The folder the gateway reads and writes its store in, as a checked path.
+
+    The one rule for every check of the gateway store: the install-home
+    config store when ``cfg`` was loaded from another folder, else ``cfg``
+    ``data_dir`` made absolute from the install home, the gateway working
+    directory (GAP-0711, GAP-0713). "" when no store is configured or the store
+    is unknown (``_gateway_store_unknown``), never another folder.
+    """
+    if _gateway_store_unknown(cfg):
+        return ""
+    return _install_home_store(cfg) or _configured_gateway_data_dir(cfg)
+
+
+def _emit_gateway_store_unknown(label: str, r: _DoctorResult) -> None:
+    """Report a check that could not run because the gateway store is unknown."""
+    config_file = _root_gateway_moved_store()[1]
+    _emit(
+        "warn",
+        label,
+        f"not checked: the configuration {config_file} the gateway reads could not be read "
+        "here, so the folder it keeps its store in is unknown",
+        r=r,
+    )
+
+
+def _root_gateway_recovery_note(cfg) -> str:
+    """A sentence to read before the recovery command, or "".
+
+    The command itself stays one pasteable line. When the config exists but
+    cannot be read here, the moved store is unknown and the chown does not
+    cover it.
+    """
+    _store, config_file, unreadable = _root_gateway_moved_store()
+    if not unreadable:
+        return ""
+    return (
+        f"The configuration {config_file} could not be read here, so a data_dir it sets is "
+        "not in the chown command below: return that folder to your account too. "
+    )
+
+
+def _root_leftovers_account_can_repair(cfg) -> bool:
+    """Whether root-owned runtime files are this account's to take back.
+
+    A managed install keeps its runtime root-owned by design, and a Secure
+    Client host is unchanged, so both keep their own guidance.
+    """
+    if os.name == "nt" or _doctor_managed(cfg):
+        return False
+    from defenseclaw.enforce import asset_lists
+
+    return not asset_lists.is_secure_client(cfg)
+
+
+def _root_leftovers_remedy(cfg, loosen: tuple[str, ...] = ()) -> str:
+    """The one repair for root-owned files a sudo-started gateway left behind.
+
+    The gateway refuses to run as root over an account's files, so asking for
+    another sudo run cannot repair them (GAP-0711, GAP-0713). The same
+    stop, return, start sequence as ``_root_gateway_remedy``, in that order:
+    a root gateway that is still alive keeps writing, and the stop of one that
+    is already stopped succeeds, so the sequence reads the same either way.
+    ``loosen`` names root-owned files that also grant group or others access,
+    which the gateway refuses after the owner is returned: the chain takes
+    that access away before the start.
+    """
+    note = _root_gateway_recovery_note(cfg)
+    return (
+        (note + "Then stop" if note else "stop")
+        + " the gateway if it runs as root, give its files back to this account and start it as yourself: "
+        + _root_gateway_recovery_command(cfg, loosen)
+    )
+
+
+def _root_leftover_start_blocker(cfg) -> tuple[list[str], str]:
+    """Root-owned state that stops the gateway of this account from starting (GAP-0788).
+
+    Returns ``(names, remedy)``, or ``([], "")`` when nothing blocks the start.
+    It reads the same store as the Sudo leftovers row and gives the same remedy
+    chain, so the Sidecar API row and ``doctor --fix`` never send the user to a
+    start the gateway refuses over files only root can change. Beyond that row
+    it names a root-owned file of any mode (the chain then also takes the group
+    and other access away), a root-owned store this account cannot use, a
+    root-owned PID record in the install home, and AI discovery state only when
+    discovery is enabled. A managed install and a Secure Client host keep their
+    own guidance, as the Sudo leftovers row does.
+    """
+    if os.name == "nt" or _gateway_store_unknown(cfg) or not _root_leftovers_account_can_repair(cfg):
+        return [], ""
+    data_dir = _gateway_store_dir(cfg)
+    if not data_dir:
+        return [], ""
+    names, loose = root_owned_start_blockers(
+        data_dir,
+        ai_discovery_enabled=bool(getattr(getattr(cfg, "ai_discovery", None), "enabled", False)),
+        pid_dir=_root_gateway_install_home(cfg),
+    )
+    if not names:
+        return [], ""
+    return names, _root_leftovers_remedy(cfg, tuple(loose))
+
+
+def _stopped_gateway_start_advice(cfg) -> tuple[str, str]:
+    """The Sidecar API row's ``(detail suffix, remediation)`` for a stopped gateway.
+
+    A start cannot work while root-owned runtime files remain, so the row names
+    them and the chain instead of advising a start that fails (GAP-0788).
+    """
+    names, remedy = _root_leftover_start_blocker(cfg)
+    if names:
+        return f"it cannot start while these files are root-owned: {', '.join(names)}; {remedy}", remedy
+    start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+    return start, start
+
+
 def _root_gateway_install_home(cfg) -> str:
     """The PID-record home that the root gateway was started for."""
-    from defenseclaw.config import default_data_path
+    from defenseclaw.config import default_data_path, install_home_for_bound_store
 
-    data_dir = _configured_gateway_data_dir(cfg) or os.fspath(default_data_path())
+    store = _root_gateway_moved_store()[0]
+    if store:
+        return install_home_for_bound_store(store)
+    data_dir = os.fspath(default_data_path())
     try:
         return gateway_home_for_data_dir(data_dir)
     except (OSError, TypeError, ValueError):
@@ -2205,6 +2507,12 @@ def _configured_gateway_data_dir(cfg) -> str:
     if not raw_data_dir.strip():
         return ""
     try:
+        if not os.path.isabs(raw_data_dir):
+            # The gateway makes a relative data_dir absolute from its working
+            # directory, the install home, never from where doctor runs.
+            from defenseclaw.config import default_data_path
+
+            raw_data_dir = os.path.join(os.fspath(default_data_path()), raw_data_dir)
         return os.path.abspath(raw_data_dir)
     except (OSError, ValueError):
         return ""
@@ -5577,13 +5885,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             )
             r.gateway_down = "foreign"
         elif trust.code == "missing":
-            start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+            start, remediation = _stopped_gateway_start_advice(cfg)
             _emit(
                 "fail",
                 "Sidecar API",
                 f"the gateway is not running (no verified listener on {bind}:{cfg.gateway.api_port}); {start}",
                 r=r,
-                remediation=start,
+                remediation=remediation,
             )
             r.gateway_down = "stopped"
         else:
@@ -5603,13 +5911,13 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         )
         r.gateway_down = "foreign"
     elif code == 0 and "refused" in body.lower():
-        start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+        start, remediation = _stopped_gateway_start_advice(cfg)
         _emit(
             "fail",
             "Sidecar API",
             f"the gateway is not running (nothing listens on {bind}:{cfg.gateway.api_port}); {start}",
             r=r,
-            remediation=start,
+            remediation=remediation,
         )
         r.gateway_down = "stopped"
     else:
@@ -5620,7 +5928,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
             r=r,
             remediation=(
                 "run 'defenseclaw-gateway restart', then 'defenseclaw doctor'; "
-                f"if it still fails, read {os.path.join(cfg.data_dir, 'gateway.log')}"
+                f"if it still fails, read {os.path.join(gateway_home_for_data_dir(cfg.data_dir), 'gateway.log')}"
             ),
         )
     return None
@@ -7282,8 +7590,12 @@ def _inspect_windows_watchdog_runtime(cfg, evidence: GatewayEvidence) -> tuple[s
     from unsafe or live-foreign identity evidence. Only the former may be
     handed to the gateway's own lifecycle repair path.
     """
-    pid_path = os.path.join(cfg.data_dir, "watchdog.pid")
-    ownership_path = os.path.join(cfg.data_dir, ".watchdog.lock")
+    # The watchdog keeps its PID, ownership lock and state beside gateway.pid
+    # in the install home, which is not the data_dir once config set data_dir
+    # has moved the store (GAP-0801).
+    home = gateway_home_for_data_dir(cfg.data_dir)
+    pid_path = os.path.join(home, "watchdog.pid")
+    ownership_path = os.path.join(home, ".watchdog.lock")
     record = evidence.watchdog_pid_record(pid_path)
     if record.status == "malformed":
         reason = record.reason or "canonical PID file is invalid"
@@ -7366,7 +7678,7 @@ def _inspect_windows_watchdog_runtime(cfg, evidence: GatewayEvidence) -> tuple[s
             None,
         )
 
-    state_path = os.path.join(cfg.data_dir, "watchdog.state")
+    state_path = os.path.join(home, "watchdog.state")
     return (
         "running",
         f"PID {record.pid} executable/start identity match and {ownership_label} ownership is held",
@@ -11544,15 +11856,16 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                 remediation="run 'defenseclaw setup hermes --yes --restart' for the current HERMES_HOME",
             )
             return
-        if connector == "opencode" and (loose := opencode_writable_plugin_folder(candidates)):
+        if connector == "opencode" and (unsafe := opencode_unsafe_plugin_paths(candidates)):
             # The gateway refuses to publish the plugin into a folder other
             # accounts can write, and stops; the other rows only showed the
             # gateway down.
+            advice = opencode_custody_text(unsafe)
             _emit(
                 "fail",
                 label,
-                f"{loose} can be written by other accounts, so the gateway refuses to install the "
-                f"OpenCode plugin there and does not start. Run `chmod go-w {shlex.quote(loose)}`, "
+                f"{advice.named} {advice.why}, so the gateway refuses to install the "
+                f"OpenCode plugin there and does not start. {advice.action[:1].upper()}{advice.action[1:]}, "
                 "then `defenseclaw-gateway restart`",
                 r=r,
             )
@@ -11573,6 +11886,17 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
             _emit("fail", label, unguarded, r=r, remediation=unguarded.repair)
             return
         if registered:
+            # Per-user Windows: a hook that names a launcher the agent cannot
+            # start is blocked on every call, so the row cannot pass on the
+            # registration alone. The launcher is looked at once and both the
+            # FAIL and the unverified WARN come from that result
+            # (rel-1-0-6 GAP-0810).
+            launcher, unverified = _hook_launcher_report(cfg, connector)
+            if launcher:
+                from defenseclaw.hook_integrity import repair_command
+
+                _emit("fail", label, launcher, r=r, remediation=repair_command(connector, launcher))
+                return
             if connector == "cursor":
                 _check_cursor_configured_runtime(
                     cfg,
@@ -11586,6 +11910,19 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     _emit("fail", label, v1, r=r, remediation=_OPENCODE_V1_REMEDY)
                 elif drift := _managed_plugin_drift(cfg, path):
                     _emit("fail", label, drift, r=r)
+                elif unsafe := opencode_unsafe_plugin_paths([path]):
+                    # The running gateway installed the plugin before another
+                    # account could write there; its next start refuses to
+                    # (GAP-0730), so name the fix while it still runs.
+                    advice = opencode_custody_text(unsafe)
+                    _emit(
+                        "warn",
+                        label,
+                        f"plugin installed at {path}, but {advice.named} {advice.why}, "
+                        "so the next gateway start refuses to load OpenCode",
+                        r=r,
+                        remediation=f"{advice.remedy}, then defenseclaw-gateway restart",
+                    )
                 else:
                     status, runtime_detail = _opencode_load_heartbeat_status(cfg)
                     if status == "warn" and "no authenticated load heartbeat" in runtime_detail:
@@ -11658,6 +11995,10 @@ def _check_hook_health(cfg, connector: str, r: _DoctorResult) -> None:
                     "and complete lifecycle capture",
                     r=r,
                 )
+            elif unverified:
+                from defenseclaw.hook_integrity import LAUNCHER_REINSTALL_STEP
+
+                _emit("warn", label, f"reachable at {path}; {unverified}", r=r, remediation=LAUNCHER_REINSTALL_STEP)
             else:
                 _emit("pass", label, f"reachable at {path}", r=r)
             return
@@ -11912,13 +12253,35 @@ def _amp_non_defenseclaw_direct_plugins(cfg) -> list[str]:
     return discovered
 
 
+_RECORDED_REASON_CAUSE_LIMIT = 400
+
+
+def _bounded_recorded_reason(reason: object, repair: str = "") -> str:
+    """The gateway's recorded reason, bounded, followed by its repair as recorded.
+
+    The reason is prose: its whitespace is collapsed and it is bounded. The
+    repair arrives as fields of its own (``_connectors_not_started_repairs``),
+    never found inside the reason, and holds paths and accounts inside quotes,
+    where a run of spaces is part of the argument, so it is shown exactly.
+    """
+    text = " ".join(str(reason).split())
+    if len(text) > _RECORDED_REASON_CAUSE_LIMIT:
+        text = text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
+    return text + repair
+
+
 def _check_connector_skipped_at_start(connector: str, live_health: dict | None, r: _DoctorResult) -> None:
     """Warn when the running gateway skipped *connector* at start.
 
     The gateway can skip a connector whose setup it refused while its
     old hook file still passes the hook row, so name the fix here.
     """
-    from defenseclaw.commands.cmd_status import _connectors_not_started, _connectors_refused_by_agent_settings
+    from defenseclaw.commands.cmd_status import (
+        _connectors_not_started,
+        _connectors_not_started_reasons,
+        _connectors_not_started_repairs,
+        _connectors_refused_by_agent_settings,
+    )
 
     if connector not in _connectors_not_started(live_health):
         return
@@ -11934,11 +12297,19 @@ def _check_connector_skipped_at_start(connector: str, live_health: dict | None, 
             r=r,
         )
         return
+    # The gateway recorded why it skipped the connector; quote it (bounded)
+    # instead of sending the user to gateway.log (GAP-0731).
+    recorded = _bounded_recorded_reason(
+        _connectors_not_started_reasons(live_health).get(connector, ""),
+        _connectors_not_started_repairs(live_health).get(connector, ""),
+    )
+    label = _CONNECTOR_LABELS.get(connector, connector)
     _emit(
         "warn",
         "Connector setup",
-        f"{_CONNECTOR_LABELS.get(connector, connector)} was skipped when the gateway started, so it is not "
-        "enforced; gateway.log has the reason",
+        f"{label} was skipped when the gateway started, so it is not enforced: {recorded}"
+        if recorded
+        else f"{label} was skipped when the gateway started, so it is not enforced; gateway.log has the reason",
         r=r,
         remediation=f"defenseclaw setup {connector}",
     )
@@ -12418,8 +12789,8 @@ def _openclaw_plugin_host_is_loopback(host: str) -> bool:
 
 def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
     """GAP-0594: the OpenClaw plugin sends its token only to a loopback
-    gateway.host. With any other host every tool check follows the plugin's
-    outage mode and every model call fails, so say it here."""
+    gateway.host. With any other host every tool check is blocked and every
+    model call fails, so say it here."""
     if "openclaw" not in _doctor_active_connectors(cfg) or not _connector_enabled(cfg, "openclaw"):
         return
     host = str(getattr(getattr(cfg, "gateway", None), "host", "") or "127.0.0.1")
@@ -12429,7 +12800,7 @@ def _check_openclaw_gateway_host(cfg, r: _DoctorResult) -> None:
         "fail",
         "OpenClaw gateway.host",
         f"{host} is not a loopback address: the OpenClaw plugin sends nothing to it, so tool checks "
-        "follow the outage mode and model calls fail",
+        "are blocked and model calls fail",
         r=r,
         remediation=(
             "defenseclaw config set gateway.host 127.0.0.1, then defenseclaw-gateway restart and restart OpenClaw"
@@ -12969,7 +13340,8 @@ def _check_private_upstream_refusals(cfg, r: _DoctorResult) -> None:
     """
     if not cfg.guardrail.enabled:
         return
-    log_path = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "gateway.log")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    log_path = os.path.join(gateway_home_for_data_dir(data_dir) if data_dir else "", "gateway.log")
     try:
         with open(log_path, "rb") as fh:
             fh.seek(0, os.SEEK_END)
@@ -17771,6 +18143,41 @@ class _UnexpectedRulePackValidatorFailure:
         )
 
 
+def _emit_custom_pack_config_error(gc: object, cfg: object, connector: str, r: object) -> None:
+    """Name the config error of the ``guardrail.custom_packs`` entry a connector selects.
+
+    The gateway, the hook and status read one verdict on the entry; a broken one
+    is a config error, the selection runs its built-in fallback pack, and the
+    hook's outage mode follows the strict tier (Go ``CustomRulePackError``).
+    """
+    from defenseclaw import policy_catalog
+
+    try:
+        name = gc.effective_rule_pack(connector)  # type: ignore[attr-defined]
+        problem = policy_catalog.custom_pack_problem(cfg, name) if isinstance(name, str) and name else ""
+        mode = gc.effective_hook_outage_fail_mode(connector)  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - doctor must still report the rest.
+        return
+    if not problem:
+        return
+    if isinstance(problem, policy_catalog.StalePinProblem):
+        consequence = "the gateway refuses the pack until the pin matches the files"
+    else:
+        fallback = policy_catalog.builtin_rule_pack_fallback(name)
+        consequence = f"the connector enforces the built-in {fallback} pack"
+    _emit(
+        "fail",
+        "Rule pack",
+        f"config error: {problem}; {consequence}, "
+        f"and its hooks fail {mode} while the gateway is down",
+        r=r,
+        remediation=(
+            f"defenseclaw config set guardrail.custom_packs.{name}.path <folder> "
+            "(and .digest, from defenseclaw guardrail validate-pack)"
+        ),
+    )
+
+
 def _selected_rule_pack(gc: object, connector: str) -> tuple[str, str]:
     """The ``guardrail.rule_pack`` name a connector uses and, for a custom pack, its pinned digest.
 
@@ -17967,7 +18374,7 @@ def _emit_rule_pack_row(
             "Rule pack",
             f"{kind} {shown_path}: the pack files no longer match guardrail.custom_packs.{pack_name}.digest "
             f"(pinned {pinned.lower().removeprefix('sha256:')[:12]}, files {files_digest[:12]}); "
-            "the gateway keeps enforcing the pack it loaded before the edit",
+            "the gateway treats the entry as a config error and enforces the built-in pack of that name instead",
             r=r,
             remediation=(
                 f"defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
@@ -18274,6 +18681,7 @@ def _check_connector_inventory(
             rule_pack_dir = (gc.effective_rule_pack_dir(connector) or "").strip()
         except Exception:  # noqa: BLE001
             rule_pack_dir = ""
+        _emit_custom_pack_config_error(gc, cfg, connector, r)
         if rule_pack_dir:
             pack = _selected_rule_pack(gc, connector)
             _emit_rule_pack_row(
@@ -18383,7 +18791,10 @@ def _check_hook_contract_lock(
             r=r,
         )
         return
-    data_dir = getattr(cfg, "data_dir", "") or ""
+    if _gateway_store_unknown(cfg):
+        _emit_gateway_store_unknown("Hook contract", r)
+        return
+    data_dir = _gateway_store_dir(cfg)
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")
     try:
         with open(lock_path, encoding="utf-8") as fh:
@@ -18427,6 +18838,15 @@ def _check_hook_contract_lock(
         return
     except PermissionError:
         if root_owned_private_regular_file(lock_path):
+            if _root_leftovers_account_can_repair(cfg):
+                _emit(
+                    "fail",
+                    "Hook contract",
+                    "hook_contract_lock.json is root-owned from a sudo-started gateway",
+                    r=r,
+                    remediation=_root_leftovers_remedy(cfg),
+                )
+                return
             _emit(
                 "fail",
                 "Hook contract",
@@ -18665,6 +19085,17 @@ def _check_hook_contract_lock(
             _emit("pass", "Hook contract", detail, r=r)
     else:
         _emit("warn", "Hook contract", detail, r=r)
+
+
+def _hook_launcher_report(cfg, connector: str) -> tuple[str, str]:
+    """The first launcher or guard problem and the first unverified launcher of ``connector`` (GAP-0810)."""
+    from defenseclaw.hook_integrity import hook_launcher_report
+
+    try:
+        report = hook_launcher_report(cfg, connector)
+    except Exception:  # noqa: BLE001 - the hook rows still report what they can read.
+        return "", ""
+    return (report.problems[0] if report.problems else ""), report.unverified
 
 
 def _hook_runtime_file_problems(cfg, connector: str) -> list[str]:
@@ -20004,8 +20435,9 @@ def _repair_gateway_lifecycle(cfg, *, start_if_stopped: bool) -> tuple[bool, str
     if not repaired and not reason and "opencode" in _doctor_active_connectors(cfg):
         # The gateway stops when OpenCode's plugin folder is writable by
         # other accounts; name the folder instead of a generic readiness line.
-        if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
-            reason = f"{loose} can be written by other accounts; run `chmod go-w {shlex.quote(loose)}`"
+        if unsafe := opencode_unsafe_plugin_paths(connector_config_files("opencode")[:1]):
+            advice = opencode_custody_text(unsafe)
+            reason = f"{advice.named} {advice.why}; {advice.action}"
     if not repaired and not reason:
         reason = (
             "managed lifecycle did not reach verified readiness; run `defenseclaw-gateway start` to see why"
@@ -20473,6 +20905,16 @@ def _fix_gateway_service(
     if pid and not inspected_fingerprint:
         return ("fail", "gateway PID record changed or is unsafe; refusing lifecycle mutation")
     action = "restart" if pid else "start"
+    # A start or restart the gateway will refuse over files only root can
+    # change is not tried: it would fail, and a restart would leave a running
+    # gateway stopped. Say so and print the chain instead (GAP-0788).
+    blocked_by, chain = _root_leftover_start_blocker(cfg)
+    if blocked_by:
+        return (
+            "fail",
+            f"cannot {action} the gateway: {', '.join(blocked_by)} are root-owned and doctor cannot "
+            f"repair root-owned files as this account, so the {action} was not tried; {chain}",
+        )
     if plan_only:
         return (
             "plan",

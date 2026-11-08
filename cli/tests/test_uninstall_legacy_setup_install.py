@@ -479,7 +479,9 @@ def test_real_program_folder_owned_by_another_account_is_refused(real_local: Pat
     assert _windows_current_user_sid() != system
     found = legacy_setup_install.find("win32")
     assert found is not None
-    assert found.problem.startswith(f"its program folder belongs to another account ({system})")
+    # Windows names the account as well as the SID (NT AUTHORITY\SYSTEM, S-1-5-18).
+    assert found.problem.startswith("its program folder belongs to another account (")
+    assert f"{system})" in found.problem.split(";")[0]
     assert "delete the folder yourself" in found.problem
     done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: True)
     assert done == [] and problems
@@ -559,3 +561,152 @@ def test_real_processes_stop_only_when_their_program_is_inside_the_folder(tmp_pa
             if process.poll() is None:
                 process.kill()
                 process.wait(timeout=15)
+
+
+# --- GAP-0098: the closing advice follows why each part stayed -------------------------------------------
+
+
+def _real_ownership(tmp_path: Path, owner: str, current: str = "S-1-5-21-1-2-3-1001"):
+    local = tmp_path.resolve() / "LocalAppData"
+    local.mkdir()
+    _install(local)
+    with (
+        patch.object(legacy_setup_install, "local_app_data", return_value=str(local)),
+        patch("defenseclaw.file_permissions._windows_acl_snapshot", return_value=(owner, False, [])),
+        patch("defenseclaw.file_permissions._windows_current_user_sid", return_value=current),
+    ):
+        return legacy_setup_install.find("win32")
+
+
+def test_a_folder_of_another_account_stays_with_a_step_for_an_administrator(tmp_path: Path) -> None:
+    found = _real_ownership(tmp_path, "S-1-5-18")
+    assert found is not None
+    # Windows names the account too (NT AUTHORITY\SYSTEM, S-1-5-18); elsewhere the SID stands alone.
+    assert "belongs to another account (" in found.problem and "S-1-5-18)" in found.problem
+    assert found.problem_step.startswith("Ask an administrator, or the account that owns it (")
+    assert "S-1-5-18), to remove " in found.problem_step
+    assert found.root in found.problem_step
+    assert "close" not in found.problem_step.lower()
+    _done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: False)
+    assert [p.step for p in problems] == [found.problem_step]
+
+
+def test_a_state_naming_another_folder_is_told_to_use_apps_and_features(local: Path) -> None:
+    _install(local, install_root="C:\\Other\\DefenseClaw")
+    found = legacy_setup_install.find("win32")
+    assert found is not None and "Apps & Features" in found.problem_step
+
+
+def test_a_command_run_from_the_old_install_is_told_to_use_another_defenseclaw(local: Path) -> None:
+    root = _install(local)
+    with patch.object(legacy_setup_install.sys, "executable", str(root / "runtime" / "python" / "python.exe")):
+        found = legacy_setup_install.find("win32")
+    assert found is not None
+    assert "outside" in found.problem_step and "where.exe defenseclaw" in found.problem_step
+
+
+def _winerror(code: int) -> OSError:
+    error = OSError(code, "x")
+    error.winerror = code
+    return error
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (32, "Close the program that holds "),
+        (33, "Close the program that holds "),
+        (5, "Your account cannot remove "),
+        (1, "Remove "),
+    ],
+)
+def test_a_path_that_cannot_be_removed_gets_the_step_for_its_reason(code: int, expected: str) -> None:
+    step = legacy_setup_install._path_step(_winerror(code), "C:\\x")
+    assert step.startswith(expected) and "C:\\x" in step
+
+
+def test_several_reasons_give_one_step_each(local: Path) -> None:
+    root = _install(local)
+    found = legacy_setup_install.find("win32")
+    assert found is not None
+    cache = local / "DefenseClaw" / "InstallerCache"
+
+    def remove_tree(path: str) -> bool:
+        raise _winerror(32 if path == str(root) else 5)
+
+    with (
+        patch.object(legacy_setup_install, "_stop_processes_under", side_effect=OSError("could not stop PID 7")),
+        patch.object(legacy_setup_install, "_remove_run_values", return_value=[]),
+        patch.object(legacy_setup_install, "_remove_uninstall_entry", return_value=False),
+        patch.object(legacy_setup_install, "_remove_tree", side_effect=remove_tree),
+    ):
+        _done, problems = legacy_setup_install.remove(found, edit_user_path=lambda _path: False)
+    steps = [p.step for p in problems]
+    assert len(steps) == 3
+    assert steps[0].startswith("End the DefenseClaw programs running from ")
+    assert steps[1] == f"Close the program that holds {root}, then run the command again."
+    assert steps[2].startswith(f"Your account cannot remove {cache}")
+
+
+def test_the_closing_lines_follow_the_stay_reason_not_a_generic_program_hint(local: Path) -> None:
+    _install(local)
+    found = legacy_setup_install.find("win32")
+    steps = ("Ask an administrator, or the account that owns it (S-1-5-18), to remove C:\\x.",)
+    result = cmd_uninstall.ExecutionResult(
+        (cmd_uninstall.ExecutionPhaseResult("DefenseClaw Setup 0.8.x removal", "failed", "C:\\x: belongs", steps),)
+    )
+    code, output = _uninstall(found, result)
+    assert code == 1
+    assert "- Ask an administrator, or the account that owns it (S-1-5-18), to remove C:\\x." in output
+    assert "close a program" not in output.lower()
+
+
+def test_each_distinct_reason_prints_one_line(local: Path) -> None:
+    _install(local)
+    found = legacy_setup_install.find("win32")
+    steps = ("Close the program that holds C:\\a, then run the command again.", "Ask an administrator to remove C:\\b.")
+    result = cmd_uninstall.ExecutionResult(
+        (cmd_uninstall.ExecutionPhaseResult("DefenseClaw Setup 0.8.x removal", "failed", "two things", steps),)
+    )
+    _code, output = _uninstall(found, result)
+    assert output.count("- Close the program that holds C:\\a") == 1
+    assert output.count("- Ask an administrator to remove C:\\b.") == 1
+
+
+def test_a_failure_without_steps_says_nothing_about_programs(local: Path) -> None:
+    _install(local)
+    found = legacy_setup_install.find("win32")
+    result = cmd_uninstall.ExecutionResult(
+        (cmd_uninstall.ExecutionPhaseResult("DefenseClaw Setup 0.8.x removal", "failed", "could not remove X: in use"),)
+    )
+    _code, output = _uninstall(found, result)
+    assert "Fix what is named above, then run the command again." in output
+    assert "close a program" not in output.lower()
+
+
+def test_execute_plan_carries_one_step_per_distinct_reason(local: Path) -> None:
+    _install(local)
+    found = legacy_setup_install.find("win32")
+    plan = cmd_uninstall.UninstallPlan(platform_name="win32", legacy_setup=found)
+    problems = [
+        legacy_setup_install.Problem("a", "step one"),
+        legacy_setup_install.Problem("b", "step one"),
+        legacy_setup_install.Problem("c", "step two"),
+    ]
+    with (
+        patch.object(cmd_uninstall, "_validate_plan"),
+        patch.object(cmd_uninstall, "_remove_legacy_setup_install", return_value=problems),
+        patch.object(cmd_uninstall, "_print_removed_connector_leftovers"),
+        patch.object(cmd_uninstall, "_render_execution_result"),
+    ):
+        result = cmd_uninstall._execute_plan(plan)
+    phase = next(p for p in result.phases if p.name == "DefenseClaw Setup 0.8.x removal")
+    assert phase.status == "failed" and phase.detail == "a; b; c"
+    assert phase.next_steps == ("step one", "step two")
+
+
+def test_the_step_names_the_file_the_error_names() -> None:
+    error = _winerror(32)
+    error.filename = "C:\\x\\bin\\held.dll"
+    step = legacy_setup_install._path_step(error, "C:\\x")
+    assert step == "Close the program that holds C:\\x\\bin\\held.dll, then run the command again."

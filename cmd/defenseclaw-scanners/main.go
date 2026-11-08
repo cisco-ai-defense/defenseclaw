@@ -16,6 +16,7 @@
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
 //	defenseclaw-scanners mcp-scan --input-stdin <url>
 //	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self] [--disable-vendor-identity]
+//	defenseclaw-scanners plugin-manifest-entrypoints   (manifests as JSON on stdin)
 //	defenseclaw-scanners versions | --version | prepare | prune
 package main
 
@@ -133,6 +134,14 @@ if o.include_self or not is_first_party_self_target(t,trusted_paths=o.trusted_se
         result["findings"].append(item)
 print(json.dumps(result))`
 
+	// pluginManifestEntrypointsScript prints the entrypoints the plugin
+	// scanner reads from the manifest bytes on stdin, so the gateway watcher
+	// asks the scanner what a manifest declares instead of parsing it again.
+	pluginManifestEntrypointsScript = `import base64,json,sys
+from defenseclaw.scanner.plugin_scanner.scanner import declared_entrypoints
+r=json.load(sys.stdin)
+print(json.dumps({"entrypoints":declared_entrypoints({str(k):base64.b64decode(v,validate=True) for k,v in r["manifests"].items()})}))`
+
 	// mcpScanScript reads the config-derived scan input from stdin. Large
 	// pinned rule sets never enter either Windows process command line.
 	// The entry's cwd is the folder the gateway checked for the server's
@@ -181,7 +190,7 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: defenseclaw-scanners skill-scanner|mcp-scan|plugin-scan|versions|prepare [arguments]")
+		fmt.Fprintln(stderr, "usage: defenseclaw-scanners skill-scanner|mcp-scan|plugin-scan|plugin-manifest-entrypoints|versions|prepare [arguments]")
 		return 2
 	}
 	if runtime.GOOS != "windows" {
@@ -245,6 +254,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		script, scriptArgs = pluginScanScript, args[1:]
 	case "mcp-scan":
 		script, scriptArgs = mcpScanScript, args[1:]
+	case "plugin-manifest-entrypoints":
+		script, scriptArgs = pluginManifestEntrypointsScript, args[1:]
 	default:
 		fmt.Fprintf(stderr, "defenseclaw-scanners: unknown tool %q\n", args[0])
 		return 2

@@ -714,22 +714,19 @@ func toolChainProjectionForPolicyPosture(
 	connectorName string,
 	projection guardrail.ToolChainProjection,
 ) guardrail.ToolChainProjection {
-	rulePackDir := ""
+	posture := ""
 	if cfg != nil {
-		rulePackDir = cfg.EffectiveRulePackDirForConnector(connectorName)
+		ref := cfg.EffectiveRulePackRefForConnector(connectorName)
+		posture = packPostureFor(cfg, ref, cfg.ResolveRulePackDir(ref))
 	}
-	return toolChainProjectionForNamedPosture(rulePackDir, projection)
+	return toolChainProjectionForNamedPosture(posture, projection)
 }
 
 func toolChainProjectionForNamedPosture(
 	posture string,
 	projection guardrail.ToolChainProjection,
 ) guardrail.ToolChainProjection {
-	normalized := strings.TrimRight(
-		strings.ReplaceAll(strings.TrimSpace(posture), `\`, "/"),
-		"/",
-	)
-	if normalized == "strict" || strings.HasSuffix(normalized, "/strict") {
+	if posture == "strict" {
 		return projection
 	}
 

@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // A config-only ensure used to run the whole upgrade transaction: it stops
@@ -91,7 +92,116 @@ var (
 	// windowsEnterpriseHotConfigFailClosed stops the gateway after an undo
 	// that could not be proven, once its hooks are durably closed.
 	windowsEnterpriseHotConfigFailClosed = stopWindowsStandaloneGatewayFailClosed
+	// windowsEnterpriseHotConfigApproveSource makes the config this ensure
+	// applied the approved config source Repair restores (GAP-0779).
+	windowsEnterpriseHotConfigApproveSource = approveWindowsStandaloneConfigSource
 )
+
+// approveWindowsStandaloneConfigSource records the installed config.yaml as
+// the approved config source of the layout, in the protected install state
+// folder (refreshManagedApprovedConfigSource).
+func approveWindowsStandaloneConfigSource(layout managed.StandaloneLayout) error {
+	installed, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes)
+	if err != nil {
+		return fmt.Errorf("read the installed config: %w", err)
+	}
+	return refreshManagedApprovedConfigSource(layout.LifecycleDir, layout.ConfigPath, installed)
+}
+
+// windowsEnterpriseHealApprovedSource is the check at the end of a lifecycle
+// run that an approved config source an earlier build left stale does not
+// outlive it (GAP-0779); tests replace it.
+var windowsEnterpriseHealApprovedSource = healWindowsStandaloneApprovedConfigSource
+
+// healWindowsStandaloneApprovedConfigSource puts the config a finished
+// lifecycle run accepted into the approved config source when the deployment
+// records one that differs: a binary-only upgrade, a repeat of the installed
+// CONFIG= or a repair publishes none, so an older approved copy would
+// otherwise survive and a Repair after a hand edit would restore it. It
+// publishes only bytes config.generation.json binds to a lifecycle write, and
+// the caller runs it last, after every proof of the run, so a run that fails
+// later never changed the source. A signed-bundle deployment is left alone
+// (Repair refuses it, and Setup approved copy is not proof of the bundle
+// bytes). A source that is stale and cannot be refreshed fails the run: it
+// must not report success while Repair could restore an older config.
+func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) {
+	if !windowsEnterpriseIsElevated() {
+		return
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil || layout.LifecycleDir == "" {
+		return
+	}
+	// Only a deployment that records an approved config source has one to
+	// heal; check before taking the lock so a host without one is untouched.
+	if _, err := os.Stat(filepath.Join(layout.LifecycleDir, managedDeploymentRecordFile)); err != nil {
+		return
+	}
+	if windowsStandaloneBundleStoreHoldsVersions(layout) {
+		return
+	}
+	changed, err := healManagedApprovedConfigSourceBound(layout.LifecycleDir, layout.ConfigPath, func() (func(), error) {
+		release, err := windowsEnterpriseHotConfigLock(filepath.Join(layout.LifecycleDir, "lifecycle.lock"))
+		if windowsLifecycleLockBusy(err) {
+			return nil, errManagedApprovedSourceBusy
+		}
+		return release, err
+	})
+	switch {
+	case errors.Is(err, errManagedApprovedSourceBusy):
+		result.AddError("lifecycle_busy", "another DefenseClaw lifecycle run holds lifecycle.lock, so the approved config source, which differs from the installed config, was not refreshed and "+
+			windowsEnterpriseSetupCommand("/repair", "JSON=1")+" after a hand edit could restore an older config; the run can be retried."+windowsEnterpriseSetupSourceNote)
+	case err != nil:
+		result.AddError("approved_config_source_stale", "the approved config source differs from the installed config and could not be refreshed ("+
+			windowsEnterpriseBoundedDiagnostic(err.Error())+"); "+windowsEnterpriseSetupCommand("/repair", "JSON=1")+" after a hand edit could restore an older config. Next step: run "+
+			windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1")+" from an elevated PowerShell prompt."+windowsEnterpriseSetupSourceNote)
+	case changed:
+		result.Changes = append(result.Changes, "refreshed the approved config source to the installed config, which an earlier release had left at an older config")
+	}
+}
+
+// refuseWindowsEnterpriseRepairOverUnprovenApprovedSource stops a Repair that
+// would put the approved config source over a hand-edited config.yaml when
+// nothing proves that source is the config the last lifecycle run applied. The
+// installer restores it before any Go code runs again, and a release that
+// applied configs in place left the copy at an older config with a matching
+// digest, so the check has to come first (GAP-0779). It acts only on a
+// standalone repair of an installed deployment that supplies no config of its
+// own, has stored no signed bundle (the installer refuses those and names the
+// CLI repair) and has no recovery pending; everything else is left to the
+// installer. The first ensure, upgrade, install or repair of this release
+// writes the proof, so the refusal names an ensure.
+func refuseWindowsEnterpriseRepairOverUnprovenApprovedSource(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if action != "repair" || !windowsEnterpriseStandalone(opts) || strings.TrimSpace(opts.configPath) != "" ||
+		strings.TrimSpace(opts.stateRoot) != "" || opts.bundle != nil {
+		return nil
+	}
+	deployment, err := windowsEnterpriseTargetDeployment(opts)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || windowsEnterpriseStandaloneRecoveryPending(opts) {
+		return nil
+	}
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil || layout.LifecycleDir == "" || windowsStandaloneBundleStoreHoldsVersions(layout) {
+		return nil
+	}
+	if err := unprovenApprovedConfigSourceForHandEdit(layout.LifecycleDir, layout.ConfigPath); err != nil {
+		return windowsEnterpriseInvalidArguments("%s; the earlier approved config may be older than the one now installed. Next step: run %s "+
+			"from an elevated PowerShell prompt with the approved config (nothing was changed)%s",
+			err.Error(), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<approved absolute config path>", "JSON=1"), windowsEnterpriseSetupSourceNote)
+	}
+	return nil
+}
+
+// windowsStandaloneBundleStoreHoldsVersions is whether the deployment ever
+// stored a signed policy bundle (a non-empty etc\bundles folder, as the
+// installer checks). An unreadable folder counts as holding versions.
+func windowsStandaloneBundleStoreHoldsVersions(layout managed.StandaloneLayout) bool {
+	entries, err := os.ReadDir(filepath.Join(layout.ConfigDir, "bundles"))
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	return len(entries) > 0
+}
 
 // reloadWindowsStandaloneBundlePolicy asks the installed gateway to load the
 // config now. A Windows directory notification can be lost during an atomic
@@ -837,6 +947,20 @@ func windowsEnterpriseHotConfigApply(
 		}
 		failBundle("bundle_post_verify_failed", message)
 		return false, nil
+	}
+	if !bundleChange && !payloadlessRollback {
+		// The approved source is what Repair puts back over a hand edit, so
+		// the config this ensure applied has to become it: otherwise a
+		// repair restores the config of an earlier ensure. The config stays
+		// applied only with its approved source; any failure puts the
+		// previous config back and leaves the change to the upgrade
+		// transaction, which publishes both (GAP-0779).
+		if err := windowsEnterpriseHotConfigApproveSource(layout); err != nil {
+			noteWindowsEnterpriseEnsure(cmd, opts, "[ensure] the applied config could not be recorded as the approved config source ("+
+				windowsEnterpriseBoundedDiagnostic(err.Error())+"); the previous config goes back and the upgrade transaction applies the change")
+			undo()
+			return false, nil
+		}
 	}
 	accepted := *verifyReport
 	accepted.OK = true

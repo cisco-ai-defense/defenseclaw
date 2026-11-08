@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // R108-COWORK-3: the Linux source pins a client image with the rest of the
@@ -33,7 +35,7 @@ import (
 // not read as the image that ran.
 func TestLinuxSourceHashesTheRunningClientImage(t *testing.T) {
 	useHasher(t, newImageHasher())
-	sleep, err := os.ReadFile("/bin/sleep")
+	sleep, err := os.ReadFile(testenv.NativeSleep(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +229,7 @@ func TestClientForkThatExitsMidReadKeepsNoCommandLine(t *testing.T) {
 // first exec, so that exec (and its first fork) is already identified.
 func TestInstalledClientImagesArePrewarmed(t *testing.T) {
 	useHasher(t, newImageHasher())
-	sleep, err := os.ReadFile("/bin/sleep")
+	sleep, err := os.ReadFile(testenv.NativeSleep(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +266,7 @@ func TestSlowClientImageReadDoesNotStopExecDelivery(t *testing.T) {
 		return "slow", nil
 	}
 	useHasher(t, hasher)
-	sleep, err := os.ReadFile("/bin/sleep")
+	sleep, err := os.ReadFile(testenv.NativeSleep(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -470,7 +472,7 @@ func TestClientImageDigestIsDroppedWhenTheFileChangesDuringTheRead(t *testing.T)
 // followed up (the exec has an event of its own), so it takes no waiter.
 func TestForkEventIsFlaggedAndNotFollowedUp(t *testing.T) {
 	useHasher(t, newImageHasher())
-	sleep, err := os.ReadFile("/bin/sleep")
+	sleep, err := os.ReadFile(testenv.NativeSleep(t))
 	if err != nil {
 		t.Fatal(err)
 	}

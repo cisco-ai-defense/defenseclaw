@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import unittest
 from unittest.mock import patch
 
 import pytest
@@ -493,3 +494,62 @@ def test_hilt_preview_refuses_what_it_cannot_trust() -> None:
     ):
         config_inspect.connector_hilt_preview("claudecode", enabled=False, min_severity="HIGH", config_path="c")
     run.assert_not_called()
+
+
+class OlderGatewayNoteTests(unittest.TestCase):
+    """GAP-0099: name an older gateway that judged this release's config."""
+
+    def _note(self, version_output: str, cli_version: str = "1.0.9") -> str:
+        done = subprocess.CompletedProcess([], 0, stdout=version_output, stderr="")
+        with (
+            patch.object(config_inspect, "run_pinned_executable", return_value=done),
+            patch("defenseclaw.__version__", cli_version),
+        ):
+            return config_inspect._older_gateway_note("C:\\old\\defenseclaw-gateway.exe")
+
+    def test_a_0_8_gateway_is_named_with_the_uninstall_step(self):
+        note = self._note("defenseclaw-gateway version 0.8.10 (commit=abc, built=x)")
+        self.assertIn("DefenseClaw 0.8.10, at C:\\old\\defenseclaw-gateway.exe", note)
+        self.assertIn("older release than this defenseclaw (1.0.9)", note)
+        self.assertIn("DEFENSECLAW_GATEWAY_BIN", note)
+        self.assertIn("defenseclaw uninstall", note)
+
+    def test_an_older_1_x_gateway_gets_no_uninstall_step(self):
+        note = self._note("defenseclaw-gateway version 1.0.4 (commit=abc)")
+        self.assertIn("DefenseClaw 1.0.4", note)
+        self.assertNotIn("defenseclaw uninstall", note)
+
+    def test_the_same_or_a_newer_gateway_adds_nothing(self):
+        self.assertEqual(self._note("defenseclaw-gateway version 1.0.9 (commit=abc)"), "")
+        self.assertEqual(self._note("defenseclaw-gateway version 1.1.0"), "")
+        self.assertEqual(self._note("no version here"), "")
+
+    def test_a_gateway_that_cannot_be_asked_adds_nothing(self):
+        with patch.object(config_inspect, "run_pinned_executable", side_effect=OSError("gone")):
+            self.assertEqual(config_inspect._older_gateway_note("x"), "")
+
+    def test_a_failed_check_carries_the_note(self):
+        stderr = "Error: config_version: newer than the supported v8 contract"
+        failed = subprocess.CompletedProcess([], 1, stdout="", stderr=stderr)
+        with (
+            patch.object(config_inspect, "_run", return_value=failed),
+            patch.object(config_inspect, "_helper_argv", return_value=["gw.exe", "config-v8", "validate"]),
+            patch.object(config_inspect, "_older_gateway_note", return_value=" [older gateway]"),
+        ):
+            with self.assertRaises(config_inspect.ConfigInspectError) as caught:
+                config_inspect.inspect_v8_config("validate", config_path="c.yaml")
+        self.assertTrue(str(caught.exception).endswith("supported v8 contract [older gateway]"))
+
+    def test_the_note_survives_the_plain_words_rewrite(self):
+        from defenseclaw.config_writer import ConfigWriteError, plain_error
+
+        error = config_inspect.ConfigInspectError(
+            "candidate field=config_version; reason=newer [older gateway]",
+            field_path="config_version",
+            reason="this configuration version is newer than the supported v8 contract",
+            note=" [older gateway]",
+        )
+        wrapped = ConfigWriteError("config.yaml change rejected")
+        wrapped.__cause__ = error
+        self.assertTrue(plain_error(wrapped).endswith(" [older gateway]"))
+        self.assertEqual(plain_error(wrapped).count("[older gateway]"), 1)

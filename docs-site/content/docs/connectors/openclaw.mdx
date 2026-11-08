@@ -31,7 +31,7 @@ defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
 ```
 
-The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings; a gateway outage still stops proxied requests. Action enforces policy. Run `defenseclaw doctor` to check the result.
+The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings. During a gateway outage, the saved outage mode decides whether a model request continues directly to its configured provider with a warning. Action enforces policy. Run `defenseclaw doctor` to check the result.
 
 ### Check it
 
@@ -57,7 +57,7 @@ Use one OS account for each DefenseClaw and OpenClaw pair. On a shared machine, 
 DefenseClaw checks the listener before it sends a token. This protects against a process of another account that takes a port while a gateway restarts:
 
 - The plugin sends the DefenseClaw token and provider keys only to a loopback `gateway.host`. `localhost` means `127.0.0.1`. With any other host the plugin sends nothing, and `defenseclaw doctor` fails the **OpenClaw gateway.host** row.
-- The listener must prove it holds the same token (`/api/v1/hook-listener-proof`). The gateway answers that proof only to its own OS account. When the proof fails, nothing is sent: a tool check follows the plugin's outage mode, and a model call fails as in a gateway outage.
+- The listener must prove it holds the same token (`/api/v1/hook-listener-proof`). The gateway answers that proof only to its own OS account. When the proof fails, nothing is sent. A listener that answers without the proof is not an outage: in every policy a tool check is blocked and a model call fails as in a closed-mode gateway outage. A proof that finds nothing listening, or times out, is an outage and follows the saved outage mode.
 - Tool checks and the plugin's other gateway calls prove the very connection that carries the token. Model calls, health checks and telemetry prove the listener right before each request. A process that takes the port in the gap between that proof and the request, well under a millisecond on loopback, could still receive that one request.
 - Before it connects to a loopback OpenClaw gateway port, the DefenseClaw gateway checks who owns the listener. On Linux it must be the same account or root; on macOS, the same account. Otherwise it sends nothing, keeps retrying, and `defenseclaw doctor` names the step.
 
@@ -101,7 +101,7 @@ DefenseClaw asks OpenClaw for these scopes:
 | Detection strategy | `regex_judge` if the judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | off | `--human-approval` plus `--hilt-min-severity` |
 | HITL minimum severity | `HIGH` when `--human-approval` is on | `--hilt-min-severity low\|medium\|high\|critical` |
-| Gateway outage | `closed`: no hooks, see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage); `status`, the setup summary and `guardrail fail-mode` all show it | not configurable (`guardrail.hook_fail_mode` does not apply) |
+| Gateway outage | The saved outage mode, see the [gateway outage table](/docs/connectors/capability-matrix#gateway-outage): per-user default and permissive continue with a warning, strict and managed `closed`; `status`, the setup summary and `guardrail fail-mode` all show it | `defenseclaw guardrail fail-mode open\|closed --connector openclaw` on default and permissive; strict and managed stay `closed` |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (built-in copy) | `--block-message "<text>"` |
 | Redaction | v8 bucket and profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles` ([Redaction](/docs/observability/redaction)) |
@@ -227,9 +227,11 @@ The gateway answers allow, alert, confirm or block. In action mode a block stops
 
 ### Fail mode
 
-OpenClaw is a proxy connector with no hooks. While the gateway is down, requests are blocked ([gateway outage table](/docs/connectors/capability-matrix#gateway-outage)). `guardrail fail-mode` lists it as `closed (proxy-backed, no hooks ...)`. See [Fail modes](/docs/reference/fail-modes).
+OpenClaw model requests use the proxy while the gateway is running. On a classified proxy outage (nothing listens on the gateway port, or the connection times out), the per-user default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block. The plugin's tool-inspection call follows the same saved mode: a default or permissive outage lets an ordinary tool run with a warning in its result, while strict and managed block. Direct protected targets remain blocked. A listener that answers without proving it is the account's gateway is not an outage: the plugin sends it nothing and blocks model requests and tool checks in every policy. `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` is ignored by the 1.0.9 plugin. See [Fail modes](/docs/reference/fail-modes).
 
 When the gateway cannot write the audit record of a tool check or a prompt, for example on a full disk, the strict policy blocks the call. The default and permissive policies allow it and say that DefenseClaw audit is degraded. Tool results and model responses keep their verdict.
+
+On OpenClaw 2026.4.24 and later, Setup grants the DefenseClaw prompt hook access so the model outage warning reaches the agent, unless the operator already set `plugins.entries.defenseclaw.hooks.allowConversationAccess`. If an operator disables prompt injection hooks, the warning still appears in the OpenClaw log.
 
 ## Subprocess policy
 

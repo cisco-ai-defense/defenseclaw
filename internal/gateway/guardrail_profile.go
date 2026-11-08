@@ -843,9 +843,9 @@ func profileSubjectFromVerified(s VerifiedSubject, lookupAttempted bool) profile
 	switch {
 	case !lookupAttempted || !windowsToken:
 	case s.Directory.GroupsPartial:
-		tokenGroupsCause = "the account has no desktop session, so its sign-in token groups are unknown until it signs in at the desktop again"
+		tokenGroupsCause = tokenGroupsCauseNoDesktopSession
 	case awaitingSpool(s.Directory):
-		tokenGroupsCause = "the guardian has no identity record for this account yet; a desktop sign-in (console or Remote Desktop) writes it"
+		tokenGroupsCause = tokenGroupsCauseNoGuardianRecord
 	}
 	accountDomain := s.Directory.AccountDomain
 	if accountDomain == "" && runtime.GOOS == "windows" {
@@ -977,7 +977,7 @@ func lookupDirectoryProfileSubject(name string) (profileSubject, error) {
 		return profileSubjectLookupFailed(id, userName, err), nil
 	}
 	if facts.ResolvedAt.IsZero() {
-		if local, localErr := lookupLocalProfileSubject(name); localErr == nil {
+		if local, localErr := lookupLocalProfileSubject(profileExplainLocalKey(name, id)); localErr == nil {
 			if !identityLookupBlocking.Load() {
 				local.LookupFailed = false
 			}

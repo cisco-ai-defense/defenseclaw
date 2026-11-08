@@ -4052,6 +4052,9 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
     ):
         start = module.index(f"\nfunction {helper} ") + 1
         helpers += module[start : module.index("\nfunction ", start) + 1]
+    # Get-DefenseClawKeptFileDrift reads the module's SID constants, which
+    # only the module load sets (rel-1-0-6 GAP-0656 CI).
+    sid_constants = _module_sid_constants(module)
     # Standalone swaps the file with the native SwapLaunchableFile (GAP-0240),
     # so the probe compiles the module's own native helper.
     native_security = _module_function(module, "Initialize-DefenseClawNativeSecurity")
@@ -4081,6 +4084,7 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         "}\n"
         "$script:DefenseClawNativeSecurityType = $null\n"
         "$script:WindowsDirectory = [Environment]::GetFolderPath('Windows')\n"
+        + sid_constants
         + native_security
         + "\n"
         + profile_check
@@ -5632,8 +5636,12 @@ def test_certification_cleanup_handles_partial_profiles_and_empty_parents() -> N
             "function Register-CertificationSecretFile"
         )
     ]
-    assert "$script:ProgramDataStagingRoot" in parent_cleanup
-    assert "$script:ProgramDataWorkRoot" in parent_cleanup
+    # The allowlist is the one list the recorded states are built from.
+    assert "@($script:CertificationParentRootPaths)" in parent_cleanup
+    shared = harness[harness.index("$script:CertificationParentRootPaths = @(\n    $script:") :]
+    shared = shared[: shared.index("\n)\n")]
+    assert "$script:ProgramDataStagingRoot" in shared
+    assert "$script:ProgramDataWorkRoot" in shared
     assert "existed_before" in parent_cleanup
     assert "[IO.FileAttributes]::ReparsePoint" in parent_cleanup
     assert "$children = @(" in parent_cleanup
@@ -6197,7 +6205,29 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
     agent = _psm1_function(module, "Get-DefenseClawAgentFolderBackfillRefusal")
     assert "if ($created -lt $stateCreated) {" in agent
     assert "[IO.Directory]::GetCreationTimeUtc($StateRoot)" in agent
-    assert "$dacl.Count -ne 3" in agent and "$ace.AceFlags -ne $inherit" in agent
+    descriptor = _psm1_function(module, "Get-DefenseClawAgentFolderDescriptorRefusal")
+    assert "Get-DefenseClawAgentFolderDescriptorRefusal -Path $Path" in agent
+    assert "$dacl.Count -ne 3" in descriptor and "$ace.AceFlags -ne $inherit" in descriptor
+    # GAP-0767: ProgramData\ampcode (empty, 1.0.2 descriptor) joins the same
+    # one-shot back-fill under the same three proofs, and a purge names it
+    # once when it stays, whatever it holds, while it carries that descriptor.
+    folders = _psm1_function(module, "Get-DefenseClawAgentFolders")
+    assert "[IO.Path]::Combine($ProgramData, 'ampcode'); Kind = 'Amp'" in folders
+    assert "Parent', 'Amp')" in agent and "if ($Kind -ceq 'Amp') {" in agent
+    assert "$children.Count -ne 0" in agent
+    touched_amp = _psm1_function(module, "Get-DefenseClawTouchedUnrecordedVendorFolders")
+    assert "[string]$agent.Kind -ceq 'Amp'" in touched_amp and "Get-DefenseClawAgentFolderDescriptorRefusal -Path $folder" in touched_amp
+    # GAP-0758 review S2: the selector purge never opens, creates or reads
+    # behind a link at the folder.
+    selector = _psm1_function(module, "Remove-DefenseClawOwnRuntimeSelector")
+    assert selector.index("Assert-DefenseClawNoReparsePath -Path $Directory -AllowMissingLeaf") < selector.index("Test-Path -LiteralPath $state")
+    committed = _psm1_function(module, "Remove-DefenseClawCommittedManagedHooksSerializationLocks")
+    assert committed.index("Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($full)) -AllowMissingLeaf") < committed.index(
+        "Remove-DefenseClawManagedHooksSerializationLock"
+    )
+    assert "Add-DefenseClawCreatedFolderKept -Folder ([IO.Path]::GetDirectoryName($full))" in committed
+    lock = _psm1_function(module, "Open-DefenseClawRuntimeSelectorLock")
+    assert lock.index("Assert-DefenseClawNoReparsePath -Path ([IO.Path]::GetDirectoryName($Path))") < lock.index("[IO.FileMode]::CreateNew")
     assert "[bool]$ownership.preimage_existed" in agent and "[bool]$receipt.config_preexisting" in agent
     assert "$document['origin'] = $Origin" in _psm1_function(module, "Add-DefenseClawStandaloneCreatedFolderRecord")
     report = _psm1_function(module, "Write-DefenseClawUninstallCreatedFolderReport")
@@ -6257,6 +6287,80 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
         "Remove-DefenseClawEmptyStandaloneInstallParent",
     ):
         assert retired not in module
+    # GAP-0758 round 2: the CLI's Go twin of the by-name removal is gone too, so
+    # the record is the only way a purge removes the ClaudeCode folders.
+    for go_file in (ROOT / "internal" / "cli").glob("windows_managed_hooks_teardown*.go"):
+        assert "removeEmptyWindowsClaudeManagedSettingsFolders" not in read(go_file), go_file.name
+
+
+def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
+    """GAP-0773 / GAP-0758 round 4: only the uninstall keeps a link at the Codex
+    machine-policy folder. The snapshot skip, the removal option and the kept
+    disposition are each pinned to the uninstall; install, ensure, repair and
+    the disabled-Codex reconcile keep the earlier refusal."""
+    module = read(MODULE)
+
+    # The uninstall's transaction alone skips the Codex files behind a link.
+    assert module.count("-SkipLinkedCodexMachineState") == 1
+    uninstall = _psm1_function(module, "Invoke-DefenseClawUninstallLifecycle")
+    assert uninstall.count("-SkipLinkedCodexMachineState `") == 1
+    transaction = _psm1_function(module, "New-DefenseClawTransaction")
+    assert "[switch]$SkipLinkedCodexMachineState" in transaction
+    assert "if ($SkipLinkedCodexMachineState) {" in transaction
+    assert "$codexFolderLink = Get-DefenseClawCodexMachineFolderLink -Layout $Layout" in transaction
+    # The loop skips only a destination that sits directly in the linked folder,
+    # and still snapshots the others (the ownership and ACL-backup files).
+    skip = transaction[transaction.index("if ($codexFolderLink -ne '' -and [string]::Equals("):]
+    skip = skip[: skip.index("$destinations.Add([string]$destination)")]
+    assert "[IO.Path]::GetDirectoryName([IO.Path]::GetFullPath([string]$destination))" in skip
+    assert "[IO.Path]::GetFullPath([string]$Layout.CodexMachinePolicyDirectory)" in skip
+    assert "continue" in skip and "[StringComparison]::OrdinalIgnoreCase" in skip
+
+    # Only the uninstall's three removal call sites pass -Teardown, to the
+    # command (which adds --uninstall to the remove action) and to the check
+    # that accepts a kept link; the reconcile that turns Codex off passes none.
+    invoke = _psm1_function(module, "Invoke-DefenseClawCodexRequirementsCommand")
+    assert "[switch]$Teardown" in invoke and "$codexRequirementsArguments += '--uninstall'" in invoke
+    assert "$Teardown -and $Action -cne 'remove'" in invoke
+    # An installed gateway older than this build (1.0.3 and 1.0.8 define only
+    # --json) refuses --uninstall with no JSON line, which would fail and roll
+    # back the uninstall: the flag goes only to a gateway whose capabilities
+    # report it, and it is the only new gateway argument of the branch.
+    assert module.count("'--uninstall'") == 1
+    guard = invoke[invoke.index("if ($Teardown -and (Test-DefenseClawManagedHooksCommittedTeardownSupported"):]
+    guard = guard[: guard.index("$probe = Invoke-DefenseClawGatewayCommand")]
+    assert "-Capability codex_requirements_uninstall" in guard
+    assert guard.index("-Capability codex_requirements_uninstall") < guard.index("+= '--uninstall'")
+    probe = _psm1_function(module, "Test-DefenseClawManagedHooksCommittedTeardownSupported")
+    assert "'codex_requirements_uninstall'" in probe.split("param(")[1]
+    complete = _psm1_function(module, "Complete-DefenseClawCodexRequirementsRemoval")
+    assert "if ($Teardown -and $disposition -ceq 'link_kept'" in complete
+    assert complete.index("link_kept") < complete.index("did not prove managed runtime state")
+    assert len(re.findall(r"-Action remove `\n +-Teardown\n", module)) == 3
+    assert module.count("-Action remove") == 3
+    assert module.count("-Report $codexRemoval `\n") == 3
+    assert len(re.findall(r"-Report \$codexRemoval `\n +-Teardown\n", module)) == 3
+    reconcile_removal = module[module.index("-Action reconcile\n            Complete-DefenseClawCodexRequirementsRemoval"):]
+    reconcile_removal = reconcile_removal[: reconcile_removal.index("# Secure Client keeps")]
+    assert "-Teardown" not in reconcile_removal
+
+    # Go: the plain removal is strict; the option reaches the connector from the
+    # hidden --uninstall flag and the teardown caller only.
+    connector_go = read(ROOT / "internal" / "gateway" / "connector" / "codex_machine_requirements_windows.go")
+    assert "return removeWindowsCodexMachineRequirements(opts, false)" in connector_go
+    assert "return removeWindowsCodexMachineRequirements(opts, true)" in connector_go
+    assert connector_go.count("if keepLink {") == 1
+    cli_go = read(ROOT / "internal" / "cli" / "windows_codex_requirements.go")
+    assert 'if action == "remove" {' in cli_go and 'BoolVar(&uninstall, "uninstall"' in cli_go
+    assert "windowsCodexRequirementsTeardownRemover(opts)" in cli_go
+    teardown_go = read(ROOT / "internal" / "cli" / "windows_managed_hooks_teardown.go")
+    assert "removeReport, err := windowsManagedHooksTeardownCodexRemover(opts)" in teardown_go
+    assert "if !windowsManagedHooksTeardownCodexRemovalClean(removeReport) {" in teardown_go
+    assert 'json:"codex_requirements_uninstall"' in teardown_go
+    assert "CodexRequirementsUninstall: true," in teardown_go
+    assert "RemoveWindowsCodexMachineRequirementsForTeardown" not in read(
+        ROOT / "internal" / "cli" / "enterprise_hooks_platform_windows.go"
+    )
 
 
 def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
@@ -6528,6 +6632,27 @@ def _module_function(module: str, name: str) -> str:
     start = module.index(f"function {name} {{")
     end = module.find("\nfunction ", start + 1)
     return module[start : end if end != -1 else len(module)]
+
+
+def _module_sid_constants(module: str) -> str:
+    """The module top-level well-known SID constants, verbatim.
+
+    The module sets $script:SystemSID and its siblings once, when it loads. A
+    probe that cuts functions out of the module never runs that load, and under
+    StrictMode a function that reads one of them (Get-DefenseClawKeptFileDrift
+    reads three) fails with "The variable cannot be retrieved because it has
+    not been set". A probe whose extracted functions read a SID constant
+    prepends this block, so it runs the module own values and not a copy.
+    """
+
+    constants = re.findall(r"(?m)^\$script:\w+SID = \x27S-1-[0-9-]+\x27$", module)
+    names = {line.split(" = ", 1)[0] for line in constants}
+    assert {
+        "$script:SystemSID",
+        "$script:AdministratorsSID",
+        "$script:TrustedInstallerSID",
+    } <= names, "the module no longer sets its SID constants at the top level"
+    return "\n".join(constants) + "\n"
 
 
 def test_gateway_service_logs_on_as_local_system() -> None:
@@ -7102,3 +7227,91 @@ def test_a_pinned_staged_source_is_admitted_once_per_lifecycle_run() -> None:
     cached = current.index("$current = Get-DefenseClawPinnedSourceDescriptor -Source $Source")
     fallback = current.index("$current = Get-DefenseClawSourceDescriptor `")
     assert cached < fallback < current.index("foreach ($field in @('path', 'label', 'sha256'))")
+
+
+def test_module_smoke_removes_the_certification_folders_it_creates() -> None:
+    # GAP-0780: the elevated lifecycle-lock block makes smoke roots under
+    # <root>\Cisco\Cisco Secure Client\DefenseClaw-Cert\<token>; its own cleanup
+    # removes only the token folder, so the parents it created stayed on the host.
+    # The smoke records which parents already exist, then removes only the empty
+    # ones it created, in a finally that wraps the block. Nothing else may be
+    # removed: no -Recurse, no pre-existing folder, no reparse point.
+    smoke = read(MODULE_SMOKE)
+
+    record = smoke.index("$certificationLayoutParents = @(")
+    function = smoke.index("function Remove-CertificationLayoutParentsCreatedBySmoke {")
+    block = smoke.index("if ($elevated) {")
+    assert record < function < block
+    recorded = smoke[record:function]
+    for segment in ("'Cisco'", "'Cisco Secure Client'", "'DefenseClaw-Cert'"):
+        assert segment in recorded
+    assert "Existed = (Test-Path -LiteralPath $parent)" in recorded
+    assert "$programFiles, $programData" in recorded
+
+    cleanup = smoke[function : smoke.index("$tokens = $null", function)]
+    assert "if ($entry.Existed) {" in cleanup
+    assert "[IO.FileAttributes]::ReparsePoint" in cleanup
+    assert "Select-Object -First 1" in cleanup
+    # An atomic delete of an empty folder: no prompt, no recursion.
+    assert "[IO.Directory]::Delete($entry.Path, $false)" in cleanup
+    assert "Remove-Item" not in cleanup
+    assert "-Recurse" not in cleanup
+    # A created parent that is left because it is not empty is named once.
+    assert "left the folder this smoke created because it is not empty: $($entry.Path)" in cleanup
+    assert "$coveredByChild" in cleanup
+    assert "$index--" in cleanup  # deepest parent first
+
+    assert "try {\n    if ($elevated) {" in smoke
+    final = "finally {\n    Remove-CertificationLayoutParentsCreatedBySmoke\n}\n"
+    assert final in smoke
+    # The finally closes the block that holds the lock test and its else branch.
+    assert smoke.index("Remove-DefenseClawManagedTree", block) < smoke.index(final)
+
+
+def test_hardening_harness_removes_the_cisco_folders_it_creates() -> None:
+    # GAP-0780: the harness recorded and removed the DefenseClaw-Cert parents but
+    # not the Cisco Secure Client and Cisco folders above them, so a host without
+    # Secure Client kept an empty "Cisco Secure Client" after a run. Both roots are
+    # recorded before anything is created, deepest first, and the cleanup accepts
+    # only those paths and removes them only when empty, real and not pre-existing.
+    harness = read(HARNESS)
+
+    names = (
+        "$script:ProgramFilesSecureClientRoot",
+        "$script:ProgramFilesCiscoRoot",
+        "$script:ProgramDataSecureClientRoot",
+        "$script:ProgramDataCiscoRoot",
+    )
+    for name in names:
+        assert f"{name} = ConvertTo-CanonicalPath (" in harness
+    assert "Join-Path $script:KnownProgramFiles 'Cisco\\Cisco Secure Client'" in harness
+    assert "Join-Path $script:KnownProgramData 'Cisco\\Cisco Secure Client'" in harness
+    assert "Join-Path $script:KnownProgramFiles 'Cisco'\n" in harness
+    assert "Join-Path $script:KnownProgramData 'Cisco'\n" in harness
+
+    record = harness.index("$script:CertificationParentRootPaths = @(\n    $script:")
+    recorded = harness[record : harness.index("$script:FixtureRoot =", record)]
+    assert "foreach ($parentRoot in $script:CertificationParentRootPaths)" in recorded
+    assert "existed_before = Test-Path -LiteralPath $parentRoot" in recorded
+    positions = [
+        recorded.index(name)
+        for name in (
+            "$script:ProgramFilesCertificationRoot",
+            "$script:ProgramDataWorkRoot",
+            *names,
+        )
+    ]
+    assert positions == sorted(positions)  # each parent is listed after its children
+    assert recorded.index(names[2]) < recorded.index(names[3])
+    assert recorded.index(names[0]) < recorded.index(names[1])
+
+    start = harness.index("function Remove-EmptyCertificationParentRoot(")
+    cleanup = harness[start : harness.index("function Invoke-CertificationFailureInjection", start)]
+    # The allowlist is the shared list, not a second copy of the eight paths.
+    assert "@($script:CertificationParentRootPaths)" in cleanup
+    for name in names:
+        assert name not in cleanup
+    assert "if ([bool]$State.existed_before" in cleanup
+    assert "[IO.FileAttributes]::ReparsePoint" in cleanup
+    assert "$children.Count -ne 0" in cleanup
+    assert "-Recurse" not in cleanup

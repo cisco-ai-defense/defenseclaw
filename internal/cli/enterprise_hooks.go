@@ -840,25 +840,53 @@ var (
 	enterpriseHookReconcileStageDeferredPolicies    = stageEnterpriseHookDeferredManagedPolicies
 	enterpriseHookReconcileSyncEnrollments          = syncEnterpriseHookManagedEnrollments
 	enterpriseHookAccountOwnedDataDirLink           = enterpriseHookAccountOwnedDataDirLinkPlatform
+	// enterpriseHookForeignDataDirLink reports a link at the account's
+	// canonical folder that the account does not own (GAP-0585). Tests
+	// replace it.
+	enterpriseHookForeignDataDirLink = enterpriseHookForeignDataDirLinkPlatform
 )
 
 const enterpriseHookAccountLinkFailure = "enterprise hooks: the account's own DefenseClaw folder link is pending repair"
 
-func enterpriseHookTargetAccountLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
+// enterpriseHookAccountForeignLinkFailure is the guardian error of an account
+// whose canonical DefenseClaw folder is a link another principal owns, such as
+// an administrator (GAP-0585). The link is never followed, repaired or moved
+// aside, so the account has no protection until an administrator removes it.
+// Like enterpriseHookAccountLinkFailure it fails only that account's rows:
+// status, verify and the administrator lifecycle go on for every other
+// account and name this one.
+const enterpriseHookAccountForeignLinkFailure = "enterprise hooks: the account's DefenseClaw folder is a link its account does not own; it was left untouched and the account is not protected until an administrator removes the link"
+
+// enterpriseHookStandaloneCanonicalDataDir reports, on a standalone
+// deployment only, whether target's effective data directory is the
+// canonical <home>\.defenseclaw folder of the account. A manifest target
+// that omits data_dir is valid: the Windows runtime resolves it to that same
+// folder, so a blank value is the canonical folder, not a missing one.
+func enterpriseHookStandaloneCanonicalDataDir(target enterprisehooks.ManifestTarget, home, sid string) bool {
 	if cfg == nil || !cfg.StandaloneEnterprise() || cfg.SecureClientIntegration() ||
 		strings.TrimSpace(home) == "" || strings.TrimSpace(sid) == "" {
 		return false
 	}
 	dataDir := strings.TrimSpace(target.DataDir)
-	if dataDir == "" || !sameEnterpriseHookPath(dataDir, filepath.Join(home, ".defenseclaw")) {
-		return false
-	}
-	return enterpriseHookAccountOwnedDataDirLink(home, sid)
+	return dataDir == "" || sameEnterpriseHookPath(dataDir, filepath.Join(home, ".defenseclaw"))
 }
 
+func enterpriseHookTargetAccountLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
+	return enterpriseHookStandaloneCanonicalDataDir(target, home, sid) &&
+		enterpriseHookAccountOwnedDataDirLink(home, sid)
+}
+
+func enterpriseHookTargetForeignLink(target enterprisehooks.ManifestTarget, home, sid string) bool {
+	return enterpriseHookStandaloneCanonicalDataDir(target, home, sid) &&
+		enterpriseHookForeignDataDirLink(home, sid)
+}
+
+// enterpriseHookAccountLinkRow reports a failed standalone row that status,
+// verify and the lifecycle excuse because the account's own folder link or a
+// link another principal owns keeps that one account unprotected.
 func enterpriseHookAccountLinkRow(row enterpriseHookReconcileRow) bool {
 	return cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration() &&
-		enterpriseHookAccountLinkRowStandalone(row)
+		(enterpriseHookAccountLinkRowStandalone(row) || enterpriseHookAccountForeignLinkRow(row))
 }
 
 func enterpriseHookAccountLinkRowStandalone(row enterpriseHookReconcileRow) bool {
@@ -866,6 +894,16 @@ func enterpriseHookAccountLinkRowStandalone(row enterpriseHookReconcileRow) bool
 		row.Error == enterpriseHookAccountLinkFailure &&
 		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
 		enterpriseHookAccountOwnedDataDirLink(row.UserHome, row.SID)
+}
+
+// enterpriseHookAccountForeignLinkRow is enterpriseHookAccountLinkRowStandalone
+// for a link the account does not own (GAP-0585). It rechecks the link now, so
+// a stale record never excuses an account whose folder was fixed or replaced.
+func enterpriseHookAccountForeignLinkRow(row enterpriseHookReconcileRow) bool {
+	return !row.OK && !row.Pending && row.Result == nil &&
+		row.Error == enterpriseHookAccountForeignLinkFailure &&
+		strings.TrimSpace(row.UserHome) != "" && strings.TrimSpace(row.SID) != "" &&
+		enterpriseHookForeignDataDirLink(row.UserHome, row.SID)
 }
 
 // enterpriseHookAwaitingSignInPrefix starts the guardian error of a target
@@ -2035,6 +2073,9 @@ func enterpriseHookVerifyExcusedNote(run enterpriseHookVerifyRun, row enterprise
 	if row.Error == enterpriseHookAccountLinkFailure {
 		return " (the account remains pending until its DefenseClaw folder link is repaired)"
 	}
+	if row.Error == enterpriseHookAccountForeignLinkFailure {
+		return " (the account stays unprotected until an administrator removes the link at its DefenseClaw folder)"
+	}
 	return enterpriseHookRemovedAccountNote
 }
 
@@ -2408,15 +2449,19 @@ func enterpriseHookLiveTargetVerifier(ctx context.Context, opts enterprisehooks.
 	return enterpriseHookLivePublicVerifier(ctx, opts)
 }
 
+// enterpriseHookManagedEnrollmentVerifier compares the protected enrollment set
+// the Guardian published with the one verify expects.
+var enterpriseHookManagedEnrollmentVerifier = verifyEnterpriseHookManagedEnrollments
+
 func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOnly bool) (enterpriseHookVerifyRun, error) {
-	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
-		return run, fmt.Errorf("enterprise hooks verify: config is not loaded")
+		return enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}, fmt.Errorf("enterprise hooks verify: config is not loaded")
 	}
 	if enterpriseHooksStandaloneUnixActive() {
 		return runEnterpriseHookVerifyAttemptStandaloneUnix(ctx, registrationOnly)
 	}
-	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := enterpriseHookManifestFileTrustCheck(enterpriseHookManifest); err != nil {
 			return run, fmt.Errorf("enterprise hooks verify: manifest trust check failed: %w", err)
 		}
@@ -2424,6 +2469,14 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			return run, err
 		}
 	}
+	return runEnterpriseHookVerifyAttemptRows(ctx, registrationOnly)
+}
+
+// runEnterpriseHookVerifyAttemptRows verifies every manifest row of a
+// deployment whose manifest and runtime were already found trusted, then the
+// exact protected enrollment set. cfg is loaded.
+func runEnterpriseHookVerifyAttemptRows(ctx context.Context, registrationOnly bool) (enterpriseHookVerifyRun, error) {
+	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	manifest, manifestSHA256, err := enterprisehooks.LoadManifestWithSHA256(enterpriseHookManifest)
 	if err != nil {
 		return run, err
@@ -2511,17 +2564,11 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 	if proxyAddr == "" {
 		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
-	if err := verifyEnterpriseHookManagedEnrollments(manifest, apiAddr); err != nil {
-		if run.AuthorizationErr == nil {
-			run.AuthorizationErr = fmt.Errorf("protected enrollment set is not exact: %w", err)
-		} else {
-			run.AuthorizationErr = fmt.Errorf(
-				"%v; protected enrollment set is not exact: %w",
-				run.AuthorizationErr,
-				err,
-			)
-		}
-	}
+	// The targets the Guardian leaves out of the protected enrollment set it
+	// publishes (a failed target that was never protected, a removed account).
+	// Verify compares the published set with the enabled manifest minus
+	// exactly these, after the rows below say which they are.
+	unenrolled := map[string]struct{}{}
 	registry := newEnterpriseHooksConnectorRegistry()
 	claudeMachineContract := enterpriseHookMachinePolicyContract(manifest)
 	for _, target := range manifest.Targets {
@@ -2548,6 +2595,7 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 			run.Failures++
 			if prior, ok := recorded[enterpriseHookProtectedTargetKey(row)]; ok && enterpriseHookRemovedAccountRow(prior) {
 				run.Excused = append(run.Excused, row)
+				unenrolled[enterpriseHookEnrollmentUnit(target)] = struct{}{}
 			}
 			run.Rows = append(run.Rows, row)
 			continue
@@ -2561,6 +2609,9 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				resolved.sid,
 				target.Connector,
 			)
+		}
+		if targetErr == nil && enterpriseHookTargetForeignLink(target, resolved.home, resolved.sid) {
+			targetErr = errors.New(enterpriseHookAccountForeignLinkFailure)
 		}
 		if targetErr == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
@@ -2685,9 +2736,14 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				}
 				run.RecordedProtected[enterpriseHookProtectedTargetKey(row)] = true
 			}
+			excusedBefore := len(run.Excused)
 			if excused > 0 && row.Error == enterpriseHookAccountLinkFailure &&
 				enterpriseHookAccountLinkRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
 				enterpriseHookTargetAccountLink(target, row.UserHome, row.SID) {
+				run.Excused = append(run.Excused, row)
+			} else if excused > 0 && row.Error == enterpriseHookAccountForeignLinkFailure &&
+				enterpriseHookAccountForeignLinkRow(recorded[enterpriseHookProtectedTargetKey(row)]) &&
+				enterpriseHookTargetForeignLink(target, row.UserHome, row.SID) {
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookRemovedAccountRow(row) {
 				run.Excused = append(run.Excused, row)
@@ -2698,8 +2754,22 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 				}
 				run.AwaitingSignIn[enterpriseHookProtectedTargetKey(row)] = awaitingSignIn[enterpriseHookProtectedTargetKey(row)]
 			}
+			if len(run.Excused) > excusedBefore {
+				enterpriseHookNoteExcusedUnenrolled(unenrolled, target, previousProtection.PreviouslyProtected)
+			}
 		}
 		run.Rows = append(run.Rows, row)
+	}
+	if err := enterpriseHookManagedEnrollmentVerifier(enterpriseHookEnrollmentManifest(manifest, unenrolled), apiAddr); err != nil {
+		if run.AuthorizationErr == nil {
+			run.AuthorizationErr = fmt.Errorf("protected enrollment set is not exact: %w", err)
+		} else {
+			run.AuthorizationErr = fmt.Errorf(
+				"%v; protected enrollment set is not exact: %w",
+				run.AuthorizationErr,
+				err,
+			)
+		}
 	}
 	if run.AuthorizationErr == nil && exists && activationExists {
 		proof := enterpriseHookRecordedProtectionProof(run)
@@ -3035,6 +3105,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
 	enterpriseHookStandalonePlatformPrepare(os.Stderr)
+	openCodePorts, openCodePortsErr := enterpriseHookStandaloneOpenCodePorts(ctx, manifest)
+	if openCodePortsErr != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: %v\n", openCodePortsErr)
+	}
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
@@ -3113,6 +3187,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			// stale: the enumerator has not dropped it yet (GAP-2373).
 			err = enterpriseHookReconcileConnectorEnabled(target.Connector)
 		}
+		if err == nil && enterpriseHookTargetForeignLink(target, resolved.home, resolved.sid) {
+			// A link another principal owns at the account's folder is never
+			// followed, repaired or moved aside. Fail only this account's
+			// rows, by name, so the other accounts keep their protection and
+			// the administrator lifecycle goes on (GAP-0585).
+			err = errors.New(enterpriseHookAccountForeignLinkFailure)
+		}
 		if err == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
 			var available bool
@@ -3158,9 +3239,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 				WindowsDeferredFirstEnrollment:     enterpriseHookDeferredFirstEnrollment(target, previousProtection),
 				// Standalone Amp and OpenCode only; empty on Secure Client.
-				ForeignHookGuardBinary:  standaloneForeignHookGuardBinary(target.Connector),
-				ManagedHookBinary:       standaloneManagedHookBinary(),
-				MachinePolicyContractID: enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
+				ForeignHookGuardBinary:      standaloneForeignHookGuardBinary(target.Connector),
+				ManagedHookBinary:           standaloneManagedHookBinary(),
+				MachinePolicyContractID:     enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract),
+				OpenCodeServicePort:         openCodePorts[strings.ToUpper(resolved.sid)],
+				OpenCodeServicePortRequired: runtime.GOOS == "windows" && cfg.StandaloneEnterprise() && strings.EqualFold(target.Connector, "opencode"),
 			}
 			// Repair the user's objects as root before anything validates them.
 			err = repairEnterpriseHookUserTargetPlatform(target, opts)
@@ -3360,7 +3443,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	// release published. A failed target that was never protected, and a
 	// non-deferred pending target, are left out of the published set until a
 	// later tick succeeds for them.
-	enrollmentManifest := enterpriseHookEnrollmentManifest(manifest, rows, unenrolled)
+	enrollmentManifest := enterpriseHookEnrollmentManifest(manifest, unenrolled)
 	enrollmentErr := enterpriseHookReconcileStageDeferredPolicies(
 		enrollmentManifest,
 		pendingTargets,
@@ -3389,6 +3472,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if stateErr == nil && restoreErr != nil {
 		stateErr = fmt.Errorf("record the restored targets: %w", restoreErr)
 	}
+	stateErr = errors.Join(stateErr, openCodePortsErr)
 	enterpriseHookStandalonePlatformFinish(ctx, os.Stderr, rows, time.Now())
 	run.Rows = rows
 	run.Failures = failures

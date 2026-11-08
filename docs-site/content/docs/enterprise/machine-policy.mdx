@@ -64,7 +64,7 @@ What each route does during a gateway outage is in the [gateway outage table](/d
 | GitHub Copilot CLI (`copilot`) | Machine policy, with the foreign-hook guard | Same |
 | OpenCode (`opencode`) | Machine policy through the [managed OpenCode plugin](#managed-opencode-plugin), with the foreign-hook guard | Same |
 | Amp (`amp`) | Per user, with the gateway-backed foreign-hook guard | Per user (in-agent plugin), with a local foreign-hook session record; the plugin itself blocks gateway outages |
-| Devin (`devin`) | Per user, with the foreign-hook guard; Cascade in builds before 3.9.19 is turned off through machine policy (`devincascade`) | Per user (hook binary), with the guard; Cascade as on Linux and macOS |
+| Devin (`devin`) | Per user, with the foreign-hook guard; builds before 3.9.19 that still run Cascade are not covered | Per user (hook binary), with the guard; Cascade as on Linux and macOS |
 | Hermes (`hermes`) | Per user, with the foreign-hook guard | Per user (hook binary) |
 | Antigravity (`antigravity`) | Per user | Per user (hook binary) |
 | Kiro (`kiro`) | Per user: the user's global `~/.kiro/hooks/defenseclaw.json` plus the CLI 2.x `defenseclaw` agent | Per user: `%USERPROFILE%\.kiro\hooks\defenseclaw.json` plus the CLI 2.x `defenseclaw` agent, through the hook binary |
@@ -88,7 +88,7 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `/etc/cursor/hooks.json` |
 | Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
 | OpenCode | `/etc/opencode/opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `/etc/devin/hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `/etc/devin/hooks.json` |
 
   </Tab>
   <Tab value="macOS">
@@ -100,7 +100,7 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `/Library/Application Support/Cursor/hooks.json` |
 | Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
 | OpenCode | `/Library/Application Support/opencode/opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `/Library/Application Support/Devin/hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `/Library/Application Support/Devin/hooks.json` |
 
   </Tab>
   <Tab value="Windows">
@@ -112,14 +112,14 @@ Per-user registrations differ by OS. On Windows every one runs the same hook bin
 | Cursor | `%ProgramData%\Cursor\hooks.json` |
 | Copilot | `%ProgramData%\GitHub\Copilot\policy.d\90-defenseclaw.json` |
 | OpenCode | `%ProgramData%\opencode\opencode.json` |
-| Devin Desktop Cascade (`devincascade`) | `%ProgramData%\Devin\hooks.json` |
+| Devin Desktop Cascade (`devincascade`, withdraws an earlier release's refusal only) | `%ProgramData%\Devin\hooks.json` |
 
   </Tab>
 </Tabs>
 
 On Linux and macOS, only root may write the folders that hold these files. `verify` and `status` report a folder above them that another account can write (group or other write in the mode, or a POSIX or macOS ACL entry that grants write), and the connector does not count as covered. `ensure`, `repair` and the guardian remove those ACL entries and the write bits; read-only entries stay.
 
-For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. The Cascade refusal goes into the pre-rename Cascade hooks file when only that file exists; see [Cascade on older builds](/docs/connectors/devin). Cascade is published while `devin` is protected and is not a connector of its own: it enrolls no user.
+For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. DefenseClaw publishes no Cascade refusal: the pre-rename Cascade hooks file is imported by the Devin CLI as Devin Local hooks, and no evidence shows that a Devin build running Cascade reads the Devin hooks file. `ensure` removes the refusal releases 1.0.5 to 1.0.8 wrote into either file, and builds before 3.9.19 are reported as not covered; see [Cascade on older builds](/docs/connectors/devin). `devincascade` is not a connector of its own: it enrolls no user.
 
 ## Who writes machine policy
 
@@ -336,7 +336,7 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy export --c
 | `cursor` | `json`: the enterprise `hooks.json` |
 | `copilot` | `json`: the `policy.d` drop-in |
 | `opencode` | `json`: a managed OpenCode config that loads `<install root>/share/opencode/index.js`. Deploy it only where that plugin is installed. |
-| `devincascade` | `json`: the Cascade `hooks.json` that turns Cascade off |
+| `devincascade` | None: DefenseClaw publishes no Cascade entry, so export returns an error |
 | `wsl` | Windows. `reg` (default), `json`, `intune`: the Claude Desktop `disableWslSessions` gate and, with `platform: disable`, `AllowWSL=0`. See [Agent sessions in WSL](/docs/enterprise/windows#agent-sessions-in-wsl) |
 
 - **`verify`** checks coverage and exits 1 when any machine-policy connector is not covered, or when `--user` finds a foreign hook that would be blocked.
@@ -365,7 +365,7 @@ The other agent-specific limits are:
 - **Older Claude Code releases (Linux and macOS).** Releases that do not read `managed-settings.d` (for example 1.0.128, 2.0.0 and 2.0.77) ignore both DefenseClaw drop-ins. A standard user can run one from a private `npm --prefix` install without a hook decision or tool-call audit. The enumerator reports a copy in a known npm root or any npm prefix below the user's home, and a Claude Code extension or desktop engine below that floor, by version and path, makes managed completeness false and audits the coverage finding. That audit reports the gap; it cannot reconstruct the uninspected tool call. Renamed, copied and self-built clients, or clients started and removed between scans, need application control. Allow only approved Claude Code versions at or above 2.1.154. Tracked in [#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920).
 - **Older Copilot CLI releases.** A Copilot CLI below its 1.0.18 floor can skip machine policy: 1.0.15, installed under a home and run with `--no-auto-update`, does not load `/etc/github-copilot/policy.d`, and its tool calls run with no audit record.
 - **Copilot.** The vendor hook reference says a timed-out `preToolUse` command hook is non-blocking, including policy hooks. A later `PermissionRequest` hook may still deny: Copilot CLI 1.0.91 denied the managed Linux stop drill ("hook errored"), while earlier releases ran the call. Re-check each release. On Windows, Copilot also loads policy hooks from `HKLM\Software\Policies\GitHub\Copilot`; those run beside DefenseClaw's drop-in.
-- **OpenCode.** The order in which OpenCode runs plugins is not a documented contract, so the foreign-hook guard stays on. OpenCode pure mode (`opencode --pure` or a true `OPENCODE_PURE` value) loads no plugins, and `OPENCODE_TEST_MANAGED_CONFIG_DIR` can replace the managed config directory with another path. A session started either way never calls DefenseClaw's hooks, so its tool calls are not inspected. `OPENCODE_PURE=0/false` does not enable pure mode. `OPENCODE_CONFIG_DIR` adds another config directory and does not remove the enrolled managed plugin. Managed `status` and `verify` scan running OpenCode processes on Linux, macOS and Windows: they report the process and mark coverage incomplete when they find a bypass or cannot establish its launch environment. The observation is written to the gateway audit; Windows also records the coverage code in the enterprise event log and the process detail in its protected lifecycle log. An audit delivery failure is reported. `policy show` describes the installed registration; it cannot prove how a running client was launched. A session that ends before a process scan cannot be observed by that scan. Use application control to prevent pure-mode launches where inspection is required. `OPENCODE_CONFIG_CONTENT` and `OPENCODE_DISABLE_DEFAULT_PLUGINS` do not remove the managed plugin.
+- **OpenCode.** The order in which OpenCode runs plugins is not a documented contract, so the foreign-hook guard stays on. OpenCode 2.2.5 has no pure mode (no `--pure` flag) and does not read `OPENCODE_PURE` or `OPENCODE_TEST_MANAGED_CONFIG_DIR`, the two ways OpenCode V1 skipped the managed plugin. It loads that plugin from `/etc/opencode` on Linux and `/Library/Application Support/opencode` on macOS. On Windows it uses `%ProgramData%\opencode` as the process environment names `ProgramData`, so a session started with another `ProgramData` runs without DefenseClaw's hooks. `OPENCODE_CONFIG_DIR` adds another config directory and does not remove the enrolled managed plugin. Managed `status` and `verify` scan running OpenCode processes on Linux, macOS and Windows: they report the process and mark coverage incomplete when its `ProgramData` was moved (Windows), when it was started with `OPENCODE_PURE` or `OPENCODE_TEST_MANAGED_CONFIG_DIR` (in case a later release reads them again), or when they cannot establish its launch environment. The observation is written to the gateway audit; Windows also records the coverage code in the enterprise event log and the process detail in its protected lifecycle log. An audit delivery failure is reported. `policy show` describes the installed registration; it cannot prove how a running client was launched. A session that ends before a process scan cannot be observed by that scan. Use application control to prevent launches with a moved `ProgramData` where inspection is required. `OPENCODE_CONFIG_CONTENT` and `OPENCODE_DISABLE_DEFAULT_PLUGINS` do not remove the managed plugin.
 - **Per-user connectors.** Amp has no machine-wide plugin location. A changed `HOME`, `USERPROFILE` (Windows) or `XDG_CONFIG_HOME` can move Amp, Devin, Antigravity or Hermes away from the config the guardian repairs. On Windows, redirected `APPDATA` can move Devin's config and redirected `LOCALAPPDATA` can move Hermes' config. `devin --config` selects another file; Hermes `--safe-mode` or `HERMES_SAFE_MODE` skips its user hooks, and `HERMES_HOME` or `HERMES_MANAGED_DIR` can move them. Kiro CLI can select another agent with `--agent`, start a cloud session with `--cloud`, resume a session of unverified placement with `--resume-id`, or move its agent files with `KIRO_HOME`, `KIRO_AGENT_CONFIG_DIR` or `KIRO_TEST_AGENTS_DIR`. Managed `status` and `verify` inspect selected launch variables and report bypasses or unreadable process environments as incomplete coverage. On Windows, the elevated CLI reads these variables from the process and resolves its profile through the owner SID; a process it cannot read stays unverified. A value Hermes reads from a `.env` file after process start, or a session that ends before a scan, may not be recoverable from the process table; use application control where those launches must be prohibited.
 - **Hermes.** Reviewed Hermes 0.21 supports `fail_closed: true` on `pre_tool_call`. Setup and guardian reconciliation now write it; `verify` rejects an entry missing it, and existing Hermes sessions must restart to load the repaired registration. Hermes 0.19/0.20 do not support it and can run a tool after hook process failure. Hermes 0.21 still treats a killed hook (non-2 exit with empty stdout) as no decision, so status and verify keep `hook_process_fail_open` for it.
 - **Devin.** A killed pre-tool hook may let the call run.

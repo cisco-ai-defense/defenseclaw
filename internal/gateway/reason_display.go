@@ -126,7 +126,8 @@ func trustedRefusalReason(reason string) bool {
 	return trustedBuiltInMatchReason(reason) || trustedCodeGuardHookReason(reason) ||
 		trustedUnparsedToolCallReason(reason) || trustedStrictInstallWindowReason(reason) ||
 		trustedHookSideRefusalReason(reason) || trustedCodexStartRegistrationRefusal(reason) ||
-		trustedDecisionModelReason(reason)
+		trustedDecisionModelReason(reason) ||
+		trustedIdentityRefusalReason(reason)
 }
 
 // decisionModelReason is the whole of a block or confirmation reason the

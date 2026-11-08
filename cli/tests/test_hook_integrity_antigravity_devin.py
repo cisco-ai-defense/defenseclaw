@@ -107,6 +107,9 @@ def test_the_posix_file_setup_writes_is_registered(tmp_path, monkeypatch, name):
 def test_the_windows_file_setup_writes_is_registered(tmp_path, monkeypatch, name):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    # The golden bridge names a launcher of another host; the launcher file
+    # check has its own tests (test_hook_launcher_encoded_bridge.py).
+    monkeypatch.setattr(hook_integrity, "_launcher_health", lambda launcher, data_dir="": hook_integrity.LauncherHealth())
     cfg, _, connector = _install(tmp_path, name, "healthy")
     assert hook_registration_problems(cfg, connector) == []
     assert _status_and_quickstart(cfg, connector) == ("", None)

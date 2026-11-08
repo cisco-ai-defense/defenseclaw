@@ -1474,6 +1474,15 @@ func TestWindowsManagedHooksTeardownReportsCommittedStandalonePrepare(t *testing
 	if report["precommit_check"] != true {
 		t.Fatalf("capabilities report does not offer the precommit check: %v", report)
 	}
+	// GAP-0773: Setup passes --uninstall to "codex-requirements remove" only
+	// when this report offers it, and the command it names has the flag.
+	if report["codex_requirements_uninstall"] != true {
+		t.Fatalf("capabilities report does not offer the Codex requirements uninstall removal: %v", report)
+	}
+	if remove, _, err := newWindowsCodexRequirementsCommand().Find([]string{"remove"}); err != nil ||
+		remove == nil || remove.Flags().Lookup("uninstall") == nil {
+		t.Fatalf("codex-requirements remove has no --uninstall flag: %v", err)
+	}
 	if child, _, err := command.Find([]string{"check"}); err != nil || child == nil || child.Name() != "check" {
 		t.Fatalf("teardown-managed-hooks has no check action: %v", err)
 	}
@@ -1497,5 +1506,125 @@ func TestWindowsManagedHooksOwnerRightsRestoreRefusesOutsideStandalone(t *testin
 	if err == nil || report.OK || report.Action != "restore-owner-rights" ||
 		!strings.Contains(err.Error(), "standalone profile") {
 		t.Fatalf("restore outside standalone: report=%+v err=%v", report, err)
+	}
+}
+
+// The rollback of a teardown (restoreWindowsCodexManagedHooks) and its clean
+// check (verifyWindowsManagedHooksCodexClean) read nothing behind a kept link:
+// the verifier, reconciler and publisher are never called, and both succeed.
+// Without the link they do call them (GAP-0773).
+func TestWindowsManagedHooksTeardownRollbackAndCleanCheckSkipAKeptLink(t *testing.T) {
+	savedKept, savedVerifier := windowsManagedHooksCodexFolderKept, windowsManagedHooksCodexVerifier
+	savedReconciler, savedPublisher := windowsManagedHooksCodexReconciler, windowsManagedHooksCodexPublisher
+	t.Cleanup(func() {
+		windowsManagedHooksCodexFolderKept, windowsManagedHooksCodexVerifier = savedKept, savedVerifier
+		windowsManagedHooksCodexReconciler, windowsManagedHooksCodexPublisher = savedReconciler, savedPublisher
+	})
+	var calls []string
+	windowsManagedHooksCodexVerifier = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+		calls = append(calls, "verify")
+		return connector.WindowsCodexMachineRequirementsReport{OK: true, SafeToRemoveBinary: true}, nil
+	}
+	windowsManagedHooksCodexReconciler = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+		calls = append(calls, "reconcile")
+		return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+	}
+	windowsManagedHooksCodexPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+		calls = append(calls, "publish")
+		return nil
+	}
+	opts := connector.WindowsCodexMachineRequirementsOptions{}
+	targets := []connector.WindowsCodexManagedRuntimeTarget{{SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`}}
+
+	windowsManagedHooksCodexFolderKept = func() (string, error) { return `C:\ProgramData\OpenAI\Codex`, nil }
+	for _, active := range []bool{true, false} {
+		if err := restoreWindowsCodexManagedHooks(opts, active, nil); err != nil {
+			t.Fatalf("rollback over a kept link (policy active %t): %v", active, err)
+		}
+	}
+	if surviving, err := verifyWindowsManagedHooksCodexClean(opts); err != nil || surviving != 0 {
+		t.Fatalf("clean check over a kept link: %d, %v", surviving, err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("a Codex read ran behind a kept link: %v", calls)
+	}
+
+	windowsManagedHooksCodexFolderKept = func() (string, error) { return "", nil }
+	if err := restoreWindowsCodexManagedHooks(opts, true, targets); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreWindowsCodexManagedHooks(opts, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifyWindowsManagedHooksCodexClean(opts); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(calls, ",") != "reconcile,publish,verify,verify,verify" {
+		t.Fatalf("without a link the rollback and clean check ran %v", calls)
+	}
+}
+
+// The Codex kept entry says what a kept link cannot promise, and the warning
+// still names it once as kept (GAP-0773).
+func TestWindowsCodexKeptLinkEntryNamesTheUnverifiedPolicy(t *testing.T) {
+	if !strings.HasPrefix(windowsEnterpriseCodexKeptLinkReason, windowsEnterpriseKeptLinkReason) ||
+		!strings.Contains(windowsEnterpriseCodexKeptLinkReason, "may still name the DefenseClaw hook binary") {
+		t.Fatalf("Codex kept-link reason = %q", windowsEnterpriseCodexKeptLinkReason)
+	}
+}
+
+// A link at the Codex machine-policy folder is kept and not read through
+// (GAP-0773). The teardown registry read then reports it in Kept and nothing
+// else; prepare keeps the expected policy bit, and the installed-state check
+// has no Codex enrollment to compare, whether Codex is configured with no
+// account, or has an enrolled account the manifest lists.
+func TestWindowsManagedHooksTeardownKeepsALinkAtTheCodexFolder(t *testing.T) {
+	previous := windowsManagedHooksTeardownCodexRegistryReader
+	t.Cleanup(func() { windowsManagedHooksTeardownCodexRegistryReader = previous })
+	const hook = `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+	const link = `C:\ProgramData\OpenAI\Codex`
+	alice := connector.WindowsCodexManagedRuntimeTarget{
+		SID: "S-1-5-21-111-222-333-1001", DataDir: `C:\Users\alice\.defenseclaw`,
+	}
+	windowsManagedHooksTeardownCodexRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+		return connector.WindowsCodexManagedRuntimeRegistry{Kept: link}, nil
+	}
+	for name, targets := range map[string][]connector.WindowsCodexManagedRuntimeTarget{
+		"configured, no account": nil,
+		"enrolled account":       {alice},
+	} {
+		t.Run(name, func(t *testing.T) {
+			claude, active, codex, cursor := windowsManagedHooksTeardownExpectedEnrollment(
+				windowsManagedHooksActivated, true, nil, targets, nil,
+			)
+			identity := windowsManagedHooksTeardownJournal{
+				HookBinary:        hook,
+				ClaudeTargetSIDs:  claude,
+				CodexPolicyActive: active,
+				CodexTargets:      codex,
+				CursorTargets:     cursor,
+			}
+			if !identity.CodexPolicyActive {
+				t.Fatal("fixture: Codex must expect an active guard")
+			}
+			prepared := identity
+			if err := captureWindowsManagedHooksTeardownCodexPolicy(&prepared); err != nil {
+				t.Fatalf("prepare failed on a kept link: %v", err)
+			}
+			if prepared.CodexPolicyActive != identity.CodexPolicyActive || len(prepared.CodexTargets) != len(identity.CodexTargets) {
+				t.Fatalf("prepare changed the expected Codex enrollment over a link: %+v", prepared)
+			}
+			kept := connector.WindowsCodexManagedRuntimeRegistry{Kept: link}
+			if err := validateWindowsManagedHooksTeardownEnrollment(identity, nil, false, kept, nil, false); err != nil {
+				t.Fatalf("the installed-state check failed on a kept link: %v", err)
+			}
+			// Without the link the same registry is a mismatch: the
+			// exemption is the kept link, nothing else.
+			if err := validateWindowsManagedHooksTeardownEnrollment(
+				identity, nil, false, connector.WindowsCodexManagedRuntimeRegistry{}, nil, false,
+			); err == nil {
+				t.Fatal("an empty registry without a link matched an active Codex guard")
+			}
+		})
 	}
 }

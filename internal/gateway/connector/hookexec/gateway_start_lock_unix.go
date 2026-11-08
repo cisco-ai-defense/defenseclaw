@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
+	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // perUserGatewayStartLockName is the per-data-directory lock that a
@@ -89,7 +90,7 @@ func PerUserGatewayRestartProven(dataDir string, peer *PerUserPeerRecord) bool {
 // released by the time the unanswered request reaches its deadline. A changed
 // peer is still required; a gateway that remains up and slow stays closed.
 func PerUserGatewayRestartProvenDuringCall(dataDir string, peer *PerUserPeerRecord, startObserved bool) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), perUserRestartProofBudget)
+	ctx, cancel := proofclock.WithTimeout(context.Background(), perUserRestartProofBudget)
 	defer cancel()
 	proven := make(chan bool, 1)
 	// Read now: a proof past its budget leaves the goroutine running
@@ -112,8 +113,8 @@ func perUserGatewayRestartProof(ctx context.Context, open func(string) (*os.File
 		return false
 	}
 	wait := perUserPeerReadWait
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < wait {
-		wait = time.Until(deadline)
+	if deadline, ok := ctx.Deadline(); ok && proofclock.Until(deadline) < wait {
+		wait = proofclock.Until(deadline)
 	}
 	before, ok := peer.wait(wait)
 	if !ok {

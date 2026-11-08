@@ -47,7 +47,7 @@ Exact version ranges are on [Hook contracts](/docs/connectors/compatibility).
 
 **Not offered** in the enterprise columns means the feature is a per-user
 command. The enterprise packages don't install the per-user `defenseclaw`
-CLI, and a managed computer refuses per-user commands. The administrator
+CLI, and a managed computer offers a standard user only the commands in [Managed command availability](/docs/enterprise/managed-commands). The administrator
 configures the managed gateway through its
 [config](/docs/enterprise/configuration) instead.
 
@@ -80,7 +80,7 @@ Enterprise managed mode supports ACP editors through enrollment: an administrato
 
 | Capability | Open source (per user) | Enterprise (standalone) | Status |
 | --- | --- | --- | --- |
-| Prompt and tool-call hooks | `defenseclaw setup cowork` and an account plugin | The Claude Code machine policy drop-in | Measured on managed macOS and Windows: Cowork's hook calls reach the gateway with surface `cowork`, and an administrator deny rule blocks `mcp__workspace__bash`. Cowork was not run on Linux |
+| Prompt and tool-call hooks | `defenseclaw setup cowork` ([per-user only](/docs/enterprise/managed-commands)) and an account plugin | The Claude Code machine policy drop-in | Measured on managed macOS and Windows: Cowork's hook calls reach the gateway with surface `cowork`, and an administrator deny rule blocks `mcp__workspace__bash`. Cowork was not run on Linux |
 | Shell and fetch mapping | Yes | Yes | Replay-tested against the `Bash` verdicts. The `save_skill` input was captured live. `suggest_plugin_install` was not called, and the browser tools are not offered in the tested third-party build |
 | `allowManagedHooksOnly` | Not applicable | On by default, set with `managed_hooks_only` | Measured on managed macOS: under `enforce` an organization plugin's hooks did not run, under `preserve` they did, and DefenseClaw's hooks ran under both. Windows not measured yet |
 | AI Discovery of Claude Desktop and Cowork | Yes | Yes | The macOS folders and the Windows MSIX folders were measured on Claude Desktop 4.16336.0. Some Windows and Linux folders are unmeasured, see [AI Discovery](/docs/ai-discovery) |

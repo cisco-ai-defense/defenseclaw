@@ -56,7 +56,7 @@ Paths are under `/opt/cisco/defenseclaw` unless shown in full.
 | Hook socket | `run/hook.sock` | Directory `_defenseclaw`, `0755` |
 | Logs | `/Library/Logs/Cisco/DefenseClaw`, gateway logs in `gateway/` | `root`, `0755`; `gateway/` is `_defenseclaw`, `0750` |
 | LaunchDaemons | `/Library/LaunchDaemons/com.cisco.defenseclaw.*.plist` | `root`, `0644` |
-| Sandbox launcher | `/usr/local/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
+| Sandbox launcher | `/usr/local/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the commands in [Managed command availability](/docs/enterprise/managed-commands) | `root`, `0755` |
 | Sandbox LaunchAgents | `/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.<tag>.plist` and `com.cisco.defenseclaw.openshell-gateway.<tag>.plist`, run as each signed-in user. `<tag>` is the first 12 digits of the gateway binary's SHA-256, so each upgrade installs both agents under new labels and removes the plists of the earlier labels; releases before 1.0.4 used the labels without a tag ([Sandboxes](/docs/enterprise/sandboxes)) | `root`, `0644` |
 | Sandbox state | `runtime/sandbox/`, and `etc/openshell/gateway.toml` when `enterprise.openshell` is set | `_defenseclaw`, `0600` files; `root` |
 
@@ -307,8 +307,8 @@ A `guardrail.profile_assignments` group this Mac does not know selects nobody, s
 its members get the default profile; `status` and `verify` warn
 `profile_assignment_unmatched`, with the same list `enterprise macos profile-explain
 --user <account> --connector <connector>` shows. The gateway log is
-`/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`. The managed Mac has no
-`defenseclaw guardrail profile` commands. Monitoring is in
+`/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`. The managed launcher offers only
+`defenseclaw guardrail profile explain` ([Managed command availability](/docs/enterprise/managed-commands)). Monitoring is in
 [Status and verify](/docs/enterprise/operations).
 
 ## Claude Cowork
@@ -342,8 +342,8 @@ recipes are in [Sandboxes on managed computers](/docs/enterprise/sandboxes).
 
 On a Mac with `/opt/cisco/defenseclaw/etc/managed-runtime.json` the per-user
 product refuses to run: the current `install.sh` (the one-line installer) refuses
-and changes nothing, even when the managed `defenseclaw` launcher is on the user's
-`PATH`; `defenseclaw upgrade` refuses; and the per-user gateway refuses to start.
+and changes nothing, even when the managed launcher is on the user's
+`PATH`; `defenseclaw upgrade` refuses ([Managed command availability](/docs/enterprise/managed-commands)); and the per-user gateway refuses to start.
 
 Installers from 0.8.x predate the managed marker and do not check for it, so a
 user can still run one after you deploy. It installs a per-user copy, but the
@@ -362,7 +362,7 @@ Nothing migrates a per-user install. Before you deploy, have each user run
 
 A `config.yaml` a per-user install left in `~/.defenseclaw` is not the policy the
 device enforces. The installed managed `defenseclaw` launcher shows the account's
-own connectors with `status`, and offers sandbox and guardrail profile views.
+own connectors with `status`, and offers sandbox and guardrail profile views; the full list is in [Managed command availability](/docs/enterprise/managed-commands).
 It refuses `doctor`, `alerts`, `tui` and per-user configuration commands with exit
 `2`, naming the installed administrator status, verify and audit export commands.
 A separate per-user CLI, if present, exits `3` for per-user commands and its

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // hookAnswerBudget is how long a bounded hook waits for its gateway's
@@ -325,6 +327,22 @@ func noAnswerFailMode(opts Options, failMode string) string {
 		return failMode
 	}
 	return "closed"
+}
+
+// lateOrdinaryCheck is the scan of a per-user tool call that the verified
+// gateway takes and does not answer by the deadline: it reports a call that
+// plainly names nothing a protected file could be reached through
+// (hookpaths.LateOrdinaryCall). Such a call follows the account's outage mode
+// instead of the closed no-answer answer, since a gateway that is up but slow
+// under a burst is not a reason to deny ordinary work. nil for managed,
+// socket and Secure Client calls and for events that are not a tool gate.
+func lateOrdinaryCheck(opts Options, payload []byte) func() bool {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient ||
+		!toolGateEvent(opts.Connector, opts.Event) {
+		return nil
+	}
+	connector := opts.Connector
+	return func() bool { return hookpaths.LateOrdinaryCall(connector, payload) }
 }
 
 func failNoAnswer(opts Options, sp spec, failMode string) int {

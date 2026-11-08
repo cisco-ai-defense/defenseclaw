@@ -223,12 +223,25 @@ describe('Observe mode policy findings and gateway outages', () => {
 
   it('qualifies proxy connector claims for OpenClaw and ZeptoClaw', () => {
     assert.match(source('internal/gateway/proxy.go'), /verdict.Action == "block" && mode == "action"/);
-    for (const connector of ['openclaw', 'zeptoclaw']) {
-      const setup = page(`connectors/${connector}.mdx`).split('## Setup')[1]?.split('## Check it')[0] ?? '';
-      assert.match(setup, /Observe records policy findings without blocking on those findings/i, connector);
-      assert.match(setup, /gateway outage still stops proxied requests/i, connector);
-      assert.match(page(`connectors/${connector}.mdx`), /While the gateway is down, requests are blocked/i, connector);
-    }
+    const interceptor = source('extensions/defenseclaw/src/fetch-interceptor.ts');
+    assert.match(interceptor, /if \(getOutageMode\(\) !== "open"\) return false;/);
+    assert.match(interceptor, /onOutageWarning\?\.\(MODEL_OUTAGE_WARNING\)/);
+    const openclaw = page('connectors/openclaw.mdx');
+    const openclawSetup = openclaw.split('## Setup')[1]?.split('## Check it')[0] ?? '';
+    assert.match(openclawSetup, /Observe records policy findings without blocking on those findings/i);
+    assert.match(openclawSetup, /During a gateway outage, the saved outage mode decides whether a model request continues directly to its configured provider with a warning/i);
+    assert.match(openclaw, /On a classified proxy outage.{0,200}default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block/i);
+    assert.ok(!/While the gateway is down, requests are blocked/i.test(openclaw));
+    const outageRow = openclaw.split('| Gateway outage |')[1]?.split('| Proxy port |')[0] ?? '';
+    assert.ok(outageRow !== '', 'OpenClaw setup table lost its Gateway outage row');
+    assert.match(outageRow, /saved outage mode.*default and permissive continue with a warning, strict and managed `closed`/i);
+    assert.match(outageRow, /guardrail fail-mode open\\\|closed --connector openclaw/);
+    assert.ok(!/not configurable|does not apply|no hooks/i.test(outageRow), 'OpenClaw setup table must not call the gateway outage mode fixed or unconfigurable');
+    const zeptoclaw = page('connectors/zeptoclaw.mdx');
+    const zeptoclawSetup = zeptoclaw.split('## Setup')[1]?.split('## Check it')[0] ?? '';
+    assert.match(zeptoclawSetup, /Observe records policy findings without blocking on those findings/i);
+    assert.match(zeptoclawSetup, /gateway outage still stops proxied requests/i);
+    assert.match(zeptoclaw, /While the gateway is down, requests are blocked/i);
   });
 
   it('scopes general guardrail observe guidance to policy findings', () => {
@@ -1616,6 +1629,12 @@ const r105Rows: DocRow[] = [
   { gap: "1.0.4 known issues fixed in 1.0.5", page: "support-matrix.mdx", section: "Known issues", lacks: ["These are bugs in 1.0.4.", "**Changing the fail mode with Setup `/ensure`:**", "hot-config-undo-closed", "**No skill, MCP or plugin scanner:**"] },
   { gap: "GAP-2329, GAP-0956, GAP-2285", page: "support-matrix.mdx", section: "Known issues", has: ["**Ordinary work blocked:**", "`alias ll=ls`", "`defenseclaw guardrail mode observe --connector NAME`"] },
   { gap: "GAP-2001", page: "enterprise/troubleshooting.mdx", has: ["the run stops with `hook_in_use` and exit `1618` before it replaces anything"] },
+  // GAP-0656 (rel-1-0-6 r109): the upgrade-window measurement and the recovery from a refused hook replacement.
+  { gap: "GAP-0656", page: "enterprise/windows.mdx", section: "Upgrades and downgrades", has: ["They made 222,039 hook starts and none failed.", "That hit about 3% of upgrades.", "No start storm ran during `/repair` or the purge", "not real agent calls by a standard user", "(the length of that hold was not measured in place; the hit rate is the measure)"], lacks: ["for about 23 ms", "within one check"] },
+  // GAP-0755 (rel-1-0-6 r109): the bounds of the guardian's close of another program's handle on the hook.
+  { gap: "GAP-0755", page: "enterprise/windows.mdx", section: "Upgrades and downgrades", has: ["closing that one handle in the process that owns it", "It waits for the second or third check.", "It never closes a handle in a protected process, in a process that runs as LocalSystem, LocalService, NetworkService or another service account, or in session 0.", "writes a HIGH `connector-hook-tampered` audit row", "A holder that takes the handle again is closed again after 10 seconds, then 20, doubling to 5 minutes", "Secure Client is unchanged", "if that user has other handles on the hook, in the same process or another, on the same file object or another, the guardian can close one that was not the cause (a read handle that shares deletion) before it reaches the one that was", "closes no more than it needs to start the hook", "A single read shorter than about 5 seconds is not closed", "Several short reads in a row are closed only when the same program keeps the hook blocked across two checks, or the same user across three", "with a handle of the same program on both: the same process, or the same file object", "waits for a third check", "the guardian closes no user's handle either", "once per streak, one file object at a time, to rule the program out", "can write or append, or if it is the only file object open on the hook", "A handle that its owner protected from being closed is named and skipped", "HTTP 400, 413, 415 or 422", "`closed` set to `false`", "It watches the files a hook start reads, not only the hook", "The guardian does not walk the folder.", "A lock file (`.defenseclaw-enrollment.lock`, `.defenseclaw-managed-runtime-selector.lock`), a `.defenseclaw-policy-*.tmp` temp file, a setup record or any other name is never watched", "at most 4 held runtime files", "cannot delay the binary; the other held files are handled at most 4 per check", "up to ceil(N/4) checks for its pass", "the one with a handle that can write or append first", "A file anywhere else is not watched", "A standard user cannot make such a hold, as measured on Windows Server 2025", "0 of 12 tries with the file read-only for Users, 12 of 12 with Users allowed to modify it", "other Windows builds were not measured", "so a gateway that is down delays the row, never the close", "is audited when it finishes", "may have been closed", "dropped after 5 tries", "closes at most 64 handles in one check", "more than about 2,000 file handles", "A user who keeps 24 such calls blocked"], lacks: ["cannot delay the binary or the others", "with Defender on", "is never closed", "Any account may open the hook", "does not stop the guardian from closing a signed-in user's handles", "whatever the handle value or the process"] },
+  { gap: "GAP-0656", page: "enterprise/troubleshooting.mdx", has: ["#### Setup refuses to replace the installed hook", "Do not copy `defenseclaw-hook.exe` out of the release zip by hand"] },
+  { gap: "GAP-0755", page: "enterprise/troubleshooting.mdx", has: ["#### A program holds the hook open and no agent can start it", "It never closes a handle in a protected process, in a service account's process (LocalSystem, LocalService, NetworkService and the others) or in session 0", "closes handles only in the processes of a signed-in user", "has the hook open and may be what refuses its starts", "if that user has other handles on the hook, in the same process or another, on the same file object or another, the guardian can close one that was not the cause before it reaches the one that was", "it closes no user's handle either", "closes that user's handles once per streak, to rule the program out", "a handle its owner protected from closing is skipped", "at most 64 handles in one check", "is audited when it finishes", "the hook runtime file ... is held open by another program, so the hook cannot read it", "On Windows Server 2025 a standard user cannot make such a hold, as measured", "has `closed` set to `false`"], lacks: ["holds it with no sharing", "Any account may open the hook"] },
   { gap: "GAP-2049", page: "policies/deterministic-detection.mdx", section: "Action-mode rule details", has: ["The permissive pack keeps it at HIGH and reports it."] },
   { gap: "GAP-1519", page: "connectors/index.mdx", section: "Pick yours", has: ["| [GitHub Copilot CLI](/docs/connectors/copilot) | Hook | Tool calls | No: a confirmation blocks |", "Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept; Copilot CLI blocks it instead."], lacks: ["| Tool calls | `preToolUse` |"] },
   { gap: "GAP-1537", page: "enterprise/mdm/intune-linux.mdx", has: ["The wrapper itself makes up to three attempts on exit `75` (busy): the first run and two retries, 10 seconds apart."], lacks: ["retries exit `75` (busy) up to three times"] },
@@ -2430,6 +2449,29 @@ describe('1.0.5 docs rows', () => {
       for (const phrase of row.lacks ?? []) assert.ok(!text.includes(phrase), `${row.page} still says: ${phrase}`);
     });
   }
+});
+
+// GAP-0755 (rel-1-0-6 r109): the release note carries the bounds of the guardian's handle close, the collateral caveat and the audit-row delivery.
+describe('the CHANGELOG states the guardian hook-handle close (GAP-0755)', () => {
+  it('names the collateral caveat, the rule for a brief read and the row delivery', () => {
+    const changelog = repoText('CHANGELOG.md');
+    for (const phrase of [
+      "when a user has several separate handles on the hook, in one process or several, on one file object or several, the guardian can close one that was not the cause before it reaches the one that was",
+      'a read shorter than about 5 seconds is closed only if the same program keeps the hook blocked across two checks or the same user across three',
+      'with a handle of the same program on both (the same process or the same file object)',
+      'closes at most 64 handles in one check',
+      'so a gateway that is down delays the row and never the close',
+      '(`closed` false), and while one has the hook open in a way that could refuse the start (it can write, or it is the only file object open on the hook) the guardian closes no user\'s handle either',
+      'so the hook stays unavailable until that program lets go, except that after about 30 seconds of one user\'s hold the guardian closes that user\'s handles once per streak to rule it out',
+      'is audited when it finishes',
+      'the same close, per file, to the machine files a hook start reads besides the binary',
+      'never DefenseClaw\'s own lock files',
+      'the hook binary is checked first and at most 4 held files get a pass in one check',
+      'on Windows Server 2025 a standard user cannot make such a hold, as measured',
+      'A hook that a program holds open',
+    ]) assert.ok(changelog.includes(phrase), `CHANGELOG lacks: ${phrase}`);
+    assert.ok(!changelog.includes('A hook that any account holds open'), 'CHANGELOG still says any account can hold the hook');
+  });
 });
 
 // GH #1101 (p0 GAP-0677, GAP-0765): the limit messages the configuration pages quote.

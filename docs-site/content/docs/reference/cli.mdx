@@ -59,7 +59,7 @@ DefenseClaw ships three binaries. Each row below is on the Python CLI unless it 
 
 | Command | Use it for |
 | --- | --- |
-| `defenseclaw init` | Interactive first-run wizard. On a TTY it pre-selects installed hook connectors and lets you choose observe or action for each. Scripted multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. |
+| `defenseclaw init` | Interactive first-run wizard. On a TTY it pre-selects installed hook connectors and lets you choose observe or action for each. Scripted multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. `--api-port` and `--proxy-port` set the gateway API and guardrail proxy ports of a new configuration. |
 | `defenseclaw quickstart` | Zero-prompt first run for one connector with safe defaults. Pass `--connector <name>` when more than one is configured or detected. See [init and quickstart](/docs/get-started/first-run). |
 | `defenseclaw doctor` | Health and repair check. See [Doctor](#doctor). |
 | `defenseclaw status` | Gateway state, the Policy line, and one block per active connector. The Policy line names the generation and the first 12 hex characters of the effective policy digest ([below](#policy-generation-and-digest)). `--json` adds a `policy` object. Secure Client has neither the Policy line nor the `policy` object. A connector whose hook files or registration drifted, or whose agent's own settings turn its hooks off (for example `disableAllHooks`), shows `DEGRADED` with the first problem and the step that fixes it. |
@@ -1170,9 +1170,9 @@ installed, `config get`, `config show`, `config validate` and `status` still
 work.
 
 A standard user on a Linux or macOS computer with the standalone enterprise
-package does not get the Python CLI. The `defenseclaw` command there offers
-only `sandbox` commands, `help` and `--version`. Every other command, readers
-included (`status`, `doctor`, `config get`, `skill list`), prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy." followed, on Linux and macOS, by the administrator views of that computer (the installed gateway's `enterprise linux status` or `enterprise macos status`, `verify` and `audit export --since 2h`)
+package does not get the Python CLI. The `defenseclaw` command there runs
+only the commands in [Managed command availability](/docs/enterprise/managed-commands). Every other command, readers
+included (`doctor`, `config get`, `skill list`), prints "This computer is managed; use `defenseclaw status` for your protection state, `defenseclaw sandbox status` for your sandboxes and `defenseclaw sandbox policy explain` for your policy." followed, on Linux and macOS, by the administrator views of that computer (the installed gateway's `enterprise linux status` or `enterprise macos status`, `verify` and `audit export --since 2h`)
 and exits `2`, not `3`. `defenseclaw-gateway` is not on that user's `PATH`.
 The administrator runs it by its packaged path, as root
 (`/opt/defenseclaw/bin` on Linux, `/opt/cisco/defenseclaw/bin` on macOS).
@@ -1263,6 +1263,10 @@ The moved keys, sample output and the way back are in [Migrate to config version
 | `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. Like `uninstall`, it prints the Cowork removal step when `setup cowork` built a plugin. |
 
 On Windows, `uninstall` also removes a DefenseClaw Setup 0.8.x install that the installer left in place because its data is in another folder (`DEFENSECLAW_HOME`). It stops that install, removes its program folder, cached Setup, Apps & Features entry, sign-in start and `PATH` entry, and turns its hook launcher off. It never runs that install's programs and keeps its data folder.
+
+If part of that removal stays, `uninstall` exits 1 and prints one next step for each reason: close the program that holds a file, ask an administrator to remove what your account cannot, or sign in as the account that owns the folder. The step names the path, and for a link it names the link found and tells you to delete only that link, and only if it is stray.
+
+After it stops the gateway, `uninstall` removes this account's port claim files (`defenseclaw-api-port-<port>` and `defenseclaw-guardrail-port-<port>`): in `C:\ProgramData` on Windows, in `/var/tmp` on Linux and macOS. The gateway leaves them so that init on another account does not take its ports. Only the ports of the gateway that was stopped, and only files that belong to this account, are removed; the next gateway start claims its ports again.
 
 `uninstall` and `reset` cannot remove the Claude Cowork plugin that `defenseclaw setup cowork` adds to your Claude account, and they say so when one was built. In Claude Desktop, open **Customize > Plugins**, then the **...** menu on DefenseClaw, and choose **Remove**. Until you remove the plugin, Cowork tool calls are blocked. `uninstall --dry-run` lists the step. See [Remove the Cowork plugin](/docs/connectors/cowork#remove).
 

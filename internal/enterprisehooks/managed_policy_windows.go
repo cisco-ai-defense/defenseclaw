@@ -116,7 +116,10 @@ func CaptureWindowsClaudeManagedPolicySnapshot(
 	if err != nil {
 		return result, err
 	}
-	err = windowsClaudeManagedPolicyTransaction(func() error {
+	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+		return result, keptErr
+	}
+	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -262,6 +265,9 @@ func readWindowsClaudeManagedPolicyTargetsForHook(expectedHook string) ([]string
 	if err != nil {
 		return nil, false, err
 	}
+	if kept, keptErr := windowsManagedPolicyLinkKept(filepath.Dir(path)); keptErr != nil || kept {
+		return nil, false, keptErr
+	}
 	statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
 	policyInfo, policyErr := os.Lstat(path)
 	stateInfo, stateErr := os.Lstat(statePath)
@@ -292,7 +298,7 @@ func readWindowsClaudeManagedPolicyTargetsForHook(expectedHook string) ([]string
 
 	var targets []string
 	active := false
-	err = windowsClaudeManagedPolicyTransaction(func() error {
+	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		policy, err := snapshotWindowsManagedFile(path)
 		if err != nil {
 			return err
@@ -337,7 +343,15 @@ func PublishWindowsClaudeManagedPolicyTargets(rawTargets []string) error {
 			return err
 		}
 	}
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+		if keptErr == nil && len(targets) != 0 {
+			return errors.New(
+				"enterprise hooks: refusing to enroll Claude targets without an existing verified managed policy",
+			)
+		}
+		return keptErr
+	}
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -454,7 +468,7 @@ func DeactivateWindowsClaudeManagedPolicy() error {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -508,7 +522,13 @@ func PrepareWindowsClaudeManagedPolicyTeardown(
 	if err != nil {
 		return result, err
 	}
-	err = windowsClaudeManagedPolicyTransaction(func() error {
+	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+		if keptErr != nil {
+			return result, keptErr
+		}
+		return result, persistJournal(result)
+	}
+	err = withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -597,7 +617,7 @@ func VerifyWindowsClaudeManagedPolicyTeardown() error {
 	if err := requireWindowsClaudeTeardownAdministrator(); err != nil {
 		return err
 	}
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -742,7 +762,12 @@ func RestoreWindowsClaudeManagedPolicySnapshot(
 		return err
 	}
 
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	if !snapshot.PolicyExisted && !snapshot.StateExisted {
+		if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+			return keptErr
+		}
+	}
+	return windowsClaudeManagedPolicyTransactionFor(snapshot)(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -1446,6 +1471,75 @@ func WithWindowsClaudeManagedPolicyTransaction(fn func(policyDir string) error) 
 	})
 }
 
+// windowsClaudeManagedPolicyLinkKept reports, on the standalone profile, that a
+// link or a non-folder sits at the managed-settings.d folder or on its path
+// (GAP-0758). A teardown or a read then treats the Claude machine policy as
+// absent: nothing behind the link is read, changed or removed.
+func windowsClaudeManagedPolicyLinkKept() (bool, error) {
+	path, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return false, err
+	}
+	return windowsManagedPolicyLinkKept(filepath.Dir(path))
+}
+
+// WindowsClaudeManagedPolicyFolderKept reports (standalone only) that a link
+// or a non-folder sits at the Claude Code managed-settings.d folder or on its
+// path, and names it. The version-floor teardown in the policy package keeps it
+// and drops only DefenseClaw's own record (GAP-0758).
+func WindowsClaudeManagedPolicyFolderKept() (bool, error) {
+	return windowsClaudeManagedPolicyLinkKept()
+}
+
+// windowsClaudeManagedPolicyDirPlain reports whether the managed-settings.d
+// folder exists as a real folder. The guardian's every-pass helpers (the drift
+// restore, the hooks-only lock) have nothing to restore or lock without one, so
+// they must not create it, and a link kept there is named and left (GAP-0758).
+// Secure Client reports true and keeps its earlier preparation.
+func windowsClaudeManagedPolicyDirPlain() (bool, error) {
+	path, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return false, err
+	}
+	state, err := windowsManagedPolicyTeardownState(filepath.Dir(path))
+	return err == nil && state == windowsManagedPolicyDirPlain, err
+}
+
+// withWindowsClaudeManagedPolicyTeardownTransaction is the transaction of a
+// teardown, a read and the publication of an enrollment: it creates no folder
+// (an absent folder holds no policy, so fn runs without a lock) and skips fn
+// when a link is kept at the folder. A real folder takes the usual
+// transaction. Secure Client always takes the usual transaction.
+func withWindowsClaudeManagedPolicyTeardownTransaction(fn func() error) error {
+	path, err := windowsClaudeManagedPolicyPath()
+	if err != nil {
+		return err
+	}
+	state, err := windowsManagedPolicyTeardownState(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect Claude Code managed policy directory: %w", err)
+	}
+	switch state {
+	case windowsManagedPolicyDirKept:
+		return nil
+	case windowsManagedPolicyDirAbsent:
+		return fn()
+	}
+	return windowsClaudeManagedPolicyTransaction(fn)
+}
+
+// windowsClaudeManagedPolicyTransactionFor picks the transaction that restores
+// snapshot: an empty snapshot puts nothing back, so it must not create the
+// folder; one that held the policy writes it.
+func windowsClaudeManagedPolicyTransactionFor(
+	snapshot WindowsClaudeManagedPolicyTeardownSnapshot,
+) func(func() error) error {
+	if !snapshot.PolicyExisted && !snapshot.StateExisted {
+		return withWindowsClaudeManagedPolicyTeardownTransaction
+	}
+	return windowsClaudeManagedPolicyTransaction
+}
+
 func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 	policyPath, err := windowsClaudeManagedPolicyPath()
 	if err != nil {
@@ -1722,7 +1816,7 @@ func installWindowsClaudeManagedPolicyUnlocked(
 }
 
 func removeWindowsClaudeManagedPolicyTarget(targetSID *windows.SID) error {
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		return removeWindowsClaudeManagedPolicyTargetUnlocked(targetSID)
 	})
 }

@@ -53,7 +53,7 @@ Take a 30-second inventory of the AI on a machine.
 
 `agent discover` and `aibom scan` need no gateway. `agent usage`, `agent ide-plugins` and the TUI panel read the gateway's continuous scan, so start the gateway and turn it on first.
 
-This tour is for a per-user install. On a managed (standalone enterprise) Linux or macOS computer every command in it refuses, for enrolled users and for root alike, with `This computer is managed` and a pointer to `defenseclaw sandbox status` and `defenseclaw sandbox policy explain`. There the administrator turns discovery on with `ai_discovery.enabled: true` in the managed config and reads the inventory as root with `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery` and `enterprise linux ide-plugins` (on a Mac `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos discovery`). On a managed Windows computer run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows discovery` from an elevated PowerShell prompt. See [Per-user scans in standalone enterprise](#per-user-scans-in-standalone-enterprise).
+This tour is for a per-user install. On a managed (standalone enterprise) Linux or macOS computer every command in it refuses, for enrolled users and for root alike ([Managed command availability](/docs/enterprise/managed-commands)), with `This computer is managed` and a pointer to `defenseclaw sandbox status` and `defenseclaw sandbox policy explain`. There the administrator turns discovery on with `ai_discovery.enabled: true` in the managed config and reads the inventory as root with `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux discovery` and `enterprise linux ide-plugins` (on a Mac `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos discovery`). On a managed Windows computer run `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows discovery` from an elevated PowerShell prompt. See [Per-user scans in standalone enterprise](#per-user-scans-in-standalone-enterprise).
 
 ### Steps
 
@@ -798,7 +798,7 @@ older Windsurf profiles can be found by that name. The footer line reports the c
 select. Without AI discovery enabled, the command tells you to run
 `defenseclaw agent discovery enable`.
 
-A managed install has no `defenseclaw` Python CLI. As root on a managed Linux
+A managed install has no `defenseclaw` Python CLI ([Managed command availability](/docs/enterprise/managed-commands)). As root on a managed Linux
 or macOS host, `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux
 ide-plugins` (on a Mac, `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway
 enterprise macos ide-plugins`) prints the managed gateway's inventory as
@@ -1460,7 +1460,7 @@ root-only and grants control of kernel policy. `defenseclaw doctor` and
 Tetragon serves its API on a TCP port.
 
 Only a managed Linux gateway reports a Tetragon backend, and the managed Linux
-packages ship no TUI, and their `defenseclaw` runs only `sandbox` commands (the
+packages ship no TUI, and their `defenseclaw` runs only the commands in [Managed command availability](/docs/enterprise/managed-commands) (the
 per-user installer refuses to run on a managed computer). So the TUI Runtime
 panel, `agent discovery runtime status` and `defenseclaw doctor` have no
 managed Tetragon lines. The administrator's surfaces are the Go commands

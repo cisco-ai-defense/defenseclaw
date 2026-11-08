@@ -58,6 +58,9 @@ const MaxOwnStatusBytes = 16 << 10
 const (
 	ReasonSIDUnregistered   = "enterprise_managed_sid_unregistered"
 	ReasonEnrollmentPending = "enterprise_managed_enrollment_pending"
+	// ReasonCredentialPending is a call the gateway answered 401 in the
+	// first minutes of a new account (hookexec managedCredentialPendingReason).
+	ReasonCredentialPending = "enterprise_managed_credential_pending"
 	// ReasonManagedDevice and ReasonElevationRequired are the reasons of a
 	// command report: a write the managed device takes only from the admin
 	// config, and a lifecycle command a standard account may not run.
@@ -105,7 +108,7 @@ func (r Report) Normalize() (Report, bool) {
 	}
 	r.Connector = strings.ToLower(strings.TrimSpace(r.Connector))
 	r.Reason = strings.TrimSpace(r.Reason)
-	if !connectors[r.Connector] || (r.Reason != ReasonSIDUnregistered && r.Reason != ReasonEnrollmentPending) {
+	if !connectors[r.Connector] || (r.Reason != ReasonSIDUnregistered && r.Reason != ReasonEnrollmentPending && r.Reason != ReasonCredentialPending) {
 		return Report{}, false
 	}
 	r.Event = label(r.Event, 64)

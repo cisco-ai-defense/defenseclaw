@@ -310,6 +310,9 @@ func contextWithCancelGrace(parent context.Context, grace time.Duration) (contex
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The request is one hook call: its reads wait for network shares
+		// one answer wait in all, its own (rel-1-0-6:GAP-0482).
+		defer hookpaths.HookCall()()
 		chargeBudget := func(receipt bool) bool {
 			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
 				w.Header().Set("Retry-After", "1")
@@ -689,6 +692,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		startVerdictBlocked, startVerdictReason := true, sessionStartUnfinishedReason
 		if canonicalHookLifecycleEvent(req.HookEventName) == "session_start" {
 			startTicket = a.sessionStartGate.begin(startGateKey)
+			// The refusal this request was resolved to was issued before the
+			// start began; the start is expected to end with it.
+			startTicket.adopt(profileRefusal(r.Context()))
 			defer func() { startTicket.finish(startVerdictBlocked, startVerdictReason) }()
 		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
@@ -2395,6 +2401,9 @@ func (a *APIServer) safeEvaluateHook(
 	payload map[string]interface{},
 	runtime hookProfileRuntime,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -2421,6 +2430,9 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	connectorName string,
 	req agentHookRequest,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -3954,8 +3966,9 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 // belong at this server-owned boundary, without trusting a payload-supplied
 // dialect hint or changing the recorded tool identity.
 func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
-	if strings.EqualFold(strings.TrimSpace(connectorName), "opencode") && toolName == "patch" {
-		return "apply_patch"
+	// The hook client describes the call under the same name (GAP-0073).
+	if mapped := hookpaths.ConnectorActionTool(connectorName, toolName); mapped != toolName {
+		return mapped
 	}
 	if strings.EqualFold(strings.TrimSpace(platformName), "windows") {
 		connectorName = strings.TrimSpace(connectorName)

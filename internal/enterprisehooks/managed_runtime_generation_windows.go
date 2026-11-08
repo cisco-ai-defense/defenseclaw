@@ -500,7 +500,7 @@ func removeWindowsManagedRuntimeGenerationEnrollmentPlatform(
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 		return receipt, err
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(opts.Connector, func() error {
+	err = withWindowsManagedRuntimeSelectorTeardownTransaction(opts.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, true)
 		if err != nil {
 			return err
@@ -654,7 +654,7 @@ func captureWindowsManagedRuntimeSelectorTargetPlatform(
 		TargetSID:     opts.TargetSID,
 		CAS:           WindowsManagedRuntimeSelectorTargetCAS{},
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(opts.Connector, func() error {
+	err = withWindowsManagedRuntimeSelectorTeardownTransaction(opts.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(opts.Connector, true)
 		if err != nil {
 			return err
@@ -891,7 +891,7 @@ func restoreWindowsManagedRuntimeSelectorTargetCASPlatform(
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 		return err
 	}
-	return withWindowsManagedRuntimeSelectorTransaction(snapshot.Connector, func() error {
+	return windowsManagedRuntimeSelectorTransactionFor(restoredTarget == nil)(snapshot.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(snapshot.Connector, true)
 		if err != nil {
 			return err
@@ -947,7 +947,7 @@ func captureWindowsManagedRuntimeSelectorPlatform(
 		Connector:     connectorName,
 		CAS:           WindowsManagedRuntimeSelectorCAS{},
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(connectorName, func() error {
+	err = withWindowsManagedRuntimeSelectorTeardownTransaction(connectorName, func() error {
 		_, data, exists, err := readWindowsManagedRuntimeSelector(connectorName, true)
 		if err != nil {
 			return err
@@ -1005,7 +1005,7 @@ func restoreWindowsManagedRuntimeSelectorCASPlatform(
 	if err := windowsManagedRuntimeSelectorMutationAuthorize(); err != nil {
 		return published, err
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(snapshot.Connector, func() error {
+	err = windowsManagedRuntimeSelectorTransactionFor(restored == nil)(snapshot.Connector, func() error {
 		_, currentData, currentExists, err := readWindowsManagedRuntimeSelector(
 			snapshot.Connector,
 			true,
@@ -1249,7 +1249,7 @@ func collectWindowsManagedRuntimeGenerations(
 			return 0, fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 	}
-	err = withWindowsManagedRuntimeSelectorTransaction(validated.Connector, func() error {
+	err = withWindowsManagedRuntimeSelectorTeardownTransaction(validated.Connector, func() error {
 		selector, _, exists, err := readWindowsManagedRuntimeSelector(validated.Connector, true)
 		if err != nil {
 			return err
@@ -2863,6 +2863,46 @@ func publishOrRemoveWindowsManagedRuntimeSelector(
 		return errors.New("enterprise hooks: empty managed runtime selector survived removal")
 	}
 	return nil
+}
+
+// withWindowsManagedRuntimeSelectorTeardownTransaction is the selector
+// transaction of a removal, a snapshot and a collection (GAP-0758). It creates
+// no machine-policy folder: an absent folder holds no selector, so fn runs
+// without a lock and finds none; a link kept at the folder (a stale vendor
+// path a user later made a junction) is not followed, and fn is skipped, which
+// is what a missing selector gives each caller. A real folder takes the usual
+// transaction, and so does Secure Client.
+func withWindowsManagedRuntimeSelectorTeardownTransaction(
+	connectorName string,
+	fn func() error,
+) error {
+	path, err := windowsManagedRuntimeSelectorPath(connectorName)
+	if err != nil {
+		return err
+	}
+	state, err := windowsManagedPolicyTeardownState(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: inspect managed runtime selector directory: %w", err)
+	}
+	switch state {
+	case windowsManagedPolicyDirKept:
+		return nil
+	case windowsManagedPolicyDirAbsent:
+		return fn()
+	}
+	return withWindowsManagedRuntimeSelectorTransaction(connectorName, fn)
+}
+
+// windowsManagedRuntimeSelectorTransactionFor picks the transaction that
+// restores a selector snapshot: one that held no selector puts nothing back,
+// so it must not create or take over the folder, or refuse a link at it (a
+// capture over a kept link read as empty); one that held a selector writes it
+// and keeps the refusing, creating transaction (GAP-0758).
+func windowsManagedRuntimeSelectorTransactionFor(snapshotAbsent bool) func(string, func() error) error {
+	if snapshotAbsent {
+		return withWindowsManagedRuntimeSelectorTeardownTransaction
+	}
+	return withWindowsManagedRuntimeSelectorTransaction
 }
 
 func withWindowsManagedRuntimeSelectorTransaction(

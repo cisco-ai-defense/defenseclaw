@@ -2170,7 +2170,7 @@ func matchesGlobalLDPreload(
 	_ actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	return canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/ld.so.preload" &&
+	return actionfacts.EtcSpelling(canonicalSemanticPath(semanticPathValue(candidate))) == "/etc/ld.so.preload" &&
 		(candidate.Access == actionfacts.PathAccessWrite ||
 			candidate.Access == actionfacts.PathAccessAppend)
 }

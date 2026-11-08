@@ -71,11 +71,12 @@ from defenseclaw import config as config_module
 
 # Imported here, not where it is used: by then the data removal has deleted
 # the virtual environment this CLI runs from (GAP-1397).
-from defenseclaw.bootstrap import remove_own_api_port_claims
+from defenseclaw.bootstrap import _DEFAULT_GUARDRAIL_PORT, remove_own_api_port_claims
 from defenseclaw.commands import legacy_setup_install, windows_uninstall_helper
 from defenseclaw.commands.cmd_doctor import _codex_otel_marked_kept
 from defenseclaw.connector_paths import claude_settings_paths, codex_home
 from defenseclaw.file_lock import tui_lock_held
+from defenseclaw.gateway import path_gateway
 from defenseclaw.winquote import (
     powershell_literal,
     powershell_literal_before_typographic_quotes,
@@ -301,6 +302,8 @@ class ExecutionPhaseResult:
     name: str
     status: str
     detail: str = ""
+    # What the user does about each distinct reason a phase failed (one line each).
+    next_steps: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -420,7 +423,7 @@ def uninstall_cmd(
     if cowork_plugin and not cowork_problem:
         ux.warn(f"DefenseClaw cannot remove its Cowork plugin from your Claude account: {_COWORK_REMOVAL_STEP}")
     _render_kept_and_next_steps(plan)
-    legacy_left = _legacy_setup_left(result) if plan.legacy_setup is not None else ""
+    legacy_left = _legacy_setup_left(result) if plan.legacy_setup is not None else None
     if cowork_problem:
         if legacy_left:
             _print_legacy_setup_left(legacy_left)
@@ -433,17 +436,22 @@ def uninstall_cmd(
 _LEGACY_SETUP_PHASE = "DefenseClaw Setup 0.8.x removal"
 
 
-def _legacy_setup_left(result: ExecutionResult) -> str:
-    """What the removal of a DefenseClaw Setup 0.8.x install could not do ("" when all of it went)."""
+def _legacy_setup_left(result: ExecutionResult) -> ExecutionPhaseResult | None:
+    """The removal of a DefenseClaw Setup 0.8.x install, when it could not do all of it (None when it did)."""
     for phase in result.phases:
         if phase.name == _LEGACY_SETUP_PHASE and phase.status == "failed":
-            return phase.detail
-    return ""
+            return phase
+    return None
 
 
-def _print_legacy_setup_left(detail: str) -> None:
-    ux.err(f"DefenseClaw Setup 0.8.x was not removed completely: {detail}")
-    ux.err("Fix what is named above (close a program that holds a file, for example), then run the command again.")
+def _print_legacy_setup_left(phase: ExecutionPhaseResult) -> None:
+    """Say what stayed, then one next step for each distinct reason it stayed."""
+    ux.err(f"DefenseClaw Setup 0.8.x was not removed completely: {phase.detail}")
+    if not phase.next_steps:
+        ux.err("Fix what is named above, then run the command again.")
+        return
+    for step in phase.next_steps:
+        ux.err(f"  - {step}")
 
 
 # The one reminder that always reaches the user: the in-chat notice after an
@@ -653,6 +661,25 @@ def _configured_gateway_ports() -> frozenset[int]:
     except Exception:  # noqa: BLE001 - an unreadable config falls back to the default port.
         pass
     return frozenset({_DEFAULT_GATEWAY_API_PORT})
+
+
+def _configured_claim_ports() -> frozenset[int]:
+    """The API and guardrail ports this account's config.yaml names (the defaults when it cannot be read).
+
+    These are the ports a gateway stop releases; their claim files in the shared
+    claim folder are this account's to drop (cowork-1-0-8 GAP-0102).
+    """
+    ports = set(_configured_gateway_ports())
+    guardrail = _DEFAULT_GUARDRAIL_PORT
+    try:
+        data_dir = str(config_module.default_data_path())
+        if config_module.config_path_for_data_dir(data_dir).is_file():
+            guardrail = int(config_module.load().guardrail.port)
+    except Exception:  # noqa: BLE001 - an unreadable config falls back to the default port.
+        pass
+    if 0 < guardrail < 65536:
+        ports.add(guardrail)
+    return frozenset(ports)
 
 
 def _codex_gateway_exporters(otel, ports: frozenset[int]) -> list[tuple[str, str]]:
@@ -1124,7 +1151,7 @@ def _build_plan(
         gateway_path=(
             os.path.join(install_root, "defenseclaw-gateway.exe")
             if platform_name == "win32"
-            else (shutil.which("defenseclaw-gateway") or os.path.join(install_root, "defenseclaw-gateway"))
+            else (path_gateway(honor_override=False) or os.path.join(install_root, "defenseclaw-gateway"))
         ),
         binary_targets=binary_targets,
         data_bound_launchers=data_bound_launchers,
@@ -2679,8 +2706,11 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.sandbox_teardown:
         # Before the sidecar stops: the daemon deletes its own sandboxes.
         run_phase("sandbox teardown", lambda: _sandbox_teardown(plan))
+    # Read before the data goes: the ports of the gateway this run stops.
+    claim_ports = _configured_claim_ports() if plan.stop_gateway else frozenset()
+    gateway_stopped: list[bool] = []
     if plan.stop_gateway:
-        run_phase("gateway stop", lambda: _stop_gateway(plan))
+        run_phase("gateway stop", lambda: gateway_stopped.append(bool(_stop_gateway(plan))))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
         if not plan.remove_data_dir:
@@ -2724,8 +2754,11 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         # After connector teardown; before the leftovers and the data, which
         # the old gateway may hold open when both use one data folder.
         problems = _remove_legacy_setup_install(plan.legacy_setup)
+        steps = tuple(dict.fromkeys(step for step in (getattr(item, "step", "") for item in problems) if step))
         phases.append(
-            ExecutionPhaseResult(_LEGACY_SETUP_PHASE, "failed" if problems else "succeeded", "; ".join(problems))
+            ExecutionPhaseResult(
+                _LEGACY_SETUP_PHASE, "failed" if problems else "succeeded", "; ".join(problems), steps
+            )
         )
         # What is left on disk now decides, not the plan.
         setup_leftovers = _windows_setup_leftovers(plan.platform_name) if plan.remove_binaries else ()
@@ -2785,7 +2818,13 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
             run_phase("launcher removal", lambda: _remove_data_bound_launchers(plan))
     if plan.remove_data_dir and not plan.preserve_data_entries:
         _remove_empty_plugin_cache()
-        remove_own_api_port_claims()
+    if gateway_stopped and gateway_stopped[0]:
+        # The gateway start leaves this account's port claims where every
+        # account's init reads them (%ProgramData% on Windows, /var/tmp). With
+        # the gateway stopped its claims are stale, and the next gateway start
+        # claims its ports again (cowork-1-0-8 GAP-0102). Only the ports this
+        # stop released, and only after it worked.
+        remove_own_api_port_claims(claim_ports)
     if plan.remove_binaries and not deferred:
         run_phase("binary removal", lambda: _remove_binaries(plan))
     elif plan.remove_binaries:
@@ -3787,16 +3826,17 @@ def _pid_file_names_a_live_process(path: str) -> bool:
     return True
 
 
-def _stop_gateway(plan: UninstallPlan | None = None) -> None:
-    gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
+def _stop_gateway(plan: UninstallPlan | None = None) -> bool:
+    """Stop the sidecar: True when `stop` worked, False when there was nothing to stop."""
+    gw = plan.gateway_path if plan is not None else path_gateway(honor_override=False)
     if gw is None:
         ux.subhead("sidecar not on PATH — nothing to stop")
-        return
+        return False
     waiters: list[_WindowsProcessWaiter] = []
     try:
         if plan is not None and not os.path.isfile(gw):
             ux.subhead("owned sidecar is not installed — nothing to stop")
-            return
+            return False
         if plan is not None and plan.platform_name == "win32":
             waiters = _capture_managed_processes(plan)
         watchdog = subprocess.run(
@@ -3821,7 +3861,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
             # gateway is not running (and it cannot run there), so there is
             # nothing of this install to stop; the teardown continues.
             ux.subhead("no per-user sidecar runs for this account on this managed host — nothing to stop")
-            return
+            return False
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout or "unknown error").strip()
             raise click.ClickException(f"could not stop sidecar: {detail}")
@@ -3829,6 +3869,7 @@ def _stop_gateway(plan: UninstallPlan | None = None) -> None:
         _close_process_waiters(waiters)
         waiters = []
         ux.ok("sidecar stopped")
+        return True
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
         raise click.ClickException(f"could not stop sidecar: {exc}") from exc
     finally:
@@ -4190,7 +4231,7 @@ def _gateway_supports_connector_teardown(gateway_path: str | None = None) -> boo
     by asking for ``--help`` on the ``connector`` subcommand — which is
     a non-destructive probe — and checking exit code + output.
     """
-    gw = gateway_path or shutil.which("defenseclaw-gateway")
+    gw = gateway_path or path_gateway(honor_override=False)
     if gw is None:
         return False
     try:
@@ -4280,7 +4321,7 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
     gateway, a launch failure, or residue all return False so the caller keeps
     its fail-closed abort.
     """
-    gw = plan.gateway_path if plan is not None and plan.gateway_path else shutil.which("defenseclaw-gateway")
+    gw = plan.gateway_path if plan is not None and plan.gateway_path else path_gateway(honor_override=False)
     if gw is None:
         return False
     try:
@@ -4329,7 +4370,7 @@ def _run_gateway_connector_teardown(
                 return lines[-1]
         return ""
 
-    gw = plan.gateway_path if plan is not None else shutil.which("defenseclaw-gateway")
+    gw = plan.gateway_path if plan is not None else path_gateway(honor_override=False)
     if gw is None:
         return False
     ux.subhead(f"tearing down {connector} (on a busy host this can take a few minutes)...")

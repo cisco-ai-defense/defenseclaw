@@ -348,9 +348,13 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; the next cycle publishes again
 		publishEnterpriseWindowsIDEAppData(cfg, manifest, stderr)
 		unprotected = append(unprotected, ownerUnknown...)
-		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
+		if recordErr := replaceEnterpriseHookUnprotectedAgentsRecord(cfg.DataDir, func() error {
+			_, writeErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected)
+			return writeErr
+		}); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
 		}
+		publishEnterpriseWindowsGatewayUnprotectedAgents(cfg, stderr, manifestPath)
 		for _, agent := range unprotected {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 		}
@@ -448,9 +452,13 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 		agents = enterprisehooks.WindowsManifestScanIncomplete(opts.ManifestSubjects, opts.ExcludeUsers, agents, err)
 	}
 	agents = append(agents, ownerUnknown...)
-	if _, err := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents); err != nil {
+	if err := replaceEnterpriseHookUnprotectedAgentsRecord(cfg.DataDir, func() error {
+		_, writeErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents)
+		return writeErr
+	}); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %s\n", enumeratorErrorText(err))
 	}
+	publishEnterpriseWindowsGatewayUnprotectedAgents(cfg, stderr, manifestPath)
 	for _, agent := range agents {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 	}
@@ -962,6 +970,9 @@ var (
 	enterpriseWindowsIDEAppDataSpoolWriter       = enterprisehooks.WriteWindowsIDEAppDataSpool
 	enterpriseWindowsManifestGroupCacheRefresher = enterprisehooks.RefreshWindowsManifestIdentityGroups
 	enterpriseWindowsEnumerateUnprotectedWriter  = enterprisehooks.WriteWindowsUnprotectedAgents
+	// enterpriseWindowsEnumerateGatewayAgents is the gateway's copy of that
+	// record: the gateway service cannot read the protected one.
+	enterpriseWindowsEnumerateGatewayAgents = mirrorEnterpriseHookGatewayUnprotectedAgents
 	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory
 	// ACEs from the profiles a cycle stopped enrolling.
 	enterpriseWindowsInventoryReadRevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
@@ -1026,4 +1037,15 @@ func standaloneWindowsEnumerateIdleReason(cfg *config.Config) string {
 		return "enterprise.enrollment.mode is manifest; the administrator publishes targets"
 	}
 	return ""
+}
+
+// publishEnterpriseWindowsGatewayUnprotectedAgents mirrors the unprotected-
+// agents record as it stands after the cycle where the gateway service can
+// read it, so a standard account own status never says protected for an agent
+// the administrator status lists as unprotected (rel-1-0-6 GAP-0789). The
+// Windows record is not stamped with a config generation.
+func publishEnterpriseWindowsGatewayUnprotectedAgents(cfg *config.Config, stderr io.Writer, manifestPath string) {
+	if err := enterpriseWindowsEnumerateGatewayAgents(cfg.DataDir, enterprisehooks.UnprotectedAgentsPath(manifestPath)); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents for the gateway: %s\n", enumeratorErrorText(err))
+	}
 }

@@ -760,7 +760,7 @@ def test_windows_registration_freshness_retries_access_denied_without_accepting_
     assert validate.call_count == attempts
     assert len(waits) == attempts - 1 and sum(waits) <= 2
     if expected:
-        monkeypatch.setattr("defenseclaw.fail_mode.shutil.which", lambda _name: str(tmp_path / "gateway.exe"))
+        monkeypatch.setattr("defenseclaw.fail_mode.path_gateway", lambda **_kwargs: str(tmp_path / "gateway.exe"))
         monkeypatch.setattr(
             "defenseclaw.fail_mode.subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0)
         )
@@ -2554,7 +2554,7 @@ def test_windows_codex_reconcile_waits_for_a_transient_registration_read(tmp_pat
     cfg = SimpleNamespace(data_dir=str(tmp_path))
     with (
         patch.object(fail_mode_runtime, "_is_windows", return_value=True),
-        patch.object(fail_mode_runtime.shutil, "which", return_value="C:/bin/defenseclaw-gateway.exe"),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="C:/bin/defenseclaw-gateway.exe"),
         patch.object(fail_mode_runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
         patch.object(fail_mode_runtime, "resolve_connector_fail_mode", side_effect=(unread, current)) as check,
     ):
@@ -2567,7 +2567,7 @@ def test_windows_codex_reconcile_refuses_persistent_registration_read_denial(tmp
     cfg = SimpleNamespace(data_dir=str(tmp_path))
     with (
         patch.object(fail_mode_runtime, "_is_windows", return_value=True),
-        patch.object(fail_mode_runtime.shutil, "which", return_value="C:/bin/defenseclaw-gateway.exe"),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="C:/bin/defenseclaw-gateway.exe"),
         patch.object(fail_mode_runtime.subprocess, "run", return_value=SimpleNamespace(returncode=0)),
         patch.object(fail_mode_runtime, "resolve_connector_fail_mode", return_value=unread) as check,
     ):
@@ -3335,7 +3335,7 @@ def test_fail_mode_change_applies_and_verifies_on_a_native_claude_registration(
     cfg, home, app = _claude_native_runtime(monkeypatch, tmp_path, start)
     calls: list[list[str]] = []
     with (
-        patch.object(fail_mode_runtime.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="/usr/bin/defenseclaw-gateway"),
         patch.object(fail_mode_runtime.subprocess, "run", side_effect=_claude_fake_reconcile(cfg, mode, calls)),
     ):
         result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [mode, *scope, "--yes"], obj=app)
@@ -3361,7 +3361,7 @@ def test_fail_mode_change_rolls_back_over_a_stale_claude_shell_entry(
     before = (settings.read_bytes(), script.read_bytes())
     calls: list[list[str]] = []
     with (
-        patch.object(fail_mode_runtime.shutil, "which", return_value="/usr/bin/defenseclaw-gateway"),
+        patch.object(fail_mode_runtime, "path_gateway", return_value="/usr/bin/defenseclaw-gateway"),
         patch.object(fail_mode_runtime.subprocess, "run", side_effect=_claude_fake_reconcile(cfg, "closed", calls)),
     ):
         result = CliRunner().invoke(

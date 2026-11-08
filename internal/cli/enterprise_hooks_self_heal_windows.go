@@ -150,7 +150,7 @@ func repairEnterpriseHookManagedInstallPlatform() {
 	); ok {
 		// The state root's folders and records are DefenseClaw's own, so a
 		// foreign owner there is adopted; the install tree keeps the refusal.
-		stateLayout := managed.ManagedInstallLayout{StateRoot: layout.StateRoot}
+		stateLayout := managed.ManagedInstallLayout{StateRoot: layout.StateRoot, Standalone: managed.WindowsStandaloneTrustScope()}
 		layout.StateRoot = ""
 		_ = enterpriseWindowsManagedInstallRepair(layout, managed.CanonicalOptions{})
 		_ = enterpriseWindowsManagedInstallRepair(stateLayout, managed.CanonicalOptions{

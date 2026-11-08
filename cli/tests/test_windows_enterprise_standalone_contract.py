@@ -471,6 +471,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
     "enterprise-standalone-guardian-readiness-older-gateway-smoke.ps1",
     "enterprise-standalone-guardian-state-identity-smoke.ps1",
+    "enterprise-standalone-hook-keep-smoke.ps1",
     "enterprise-standalone-hook-swap-launch-smoke.ps1",
     "enterprise-standalone-install-tree-smoke.ps1",
     "enterprise-standalone-machine-leftovers-purge-smoke.ps1",
@@ -1424,7 +1425,7 @@ function New-DefenseClawDirectory { param($Path) [void][IO.Directory]::CreateDir
 function Remove-DefenseClawStaleReplacementBackups {}
 function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($Path); return $true }
 # A volume that refuses the one-step swap (GAP-0240) keeps File.Replace.
-function Invoke-DefenseClawLaunchableFileSwap { return $false }
+function Invoke-DefenseClawLaunchableFileSwap { param($Temporary, $Destination, $Backup, [switch]$KeepReplacementAccess) return $false }
 function ConvertTo-DefenseClawBoundedDiagnostic { param($Value, $MaxLength) return $Value }
 $script:attempts = 0
 function Invoke-TestMappedImageReplace {
@@ -1618,7 +1619,7 @@ function Remove-DefenseClawReplacementBackup { param($Path) [IO.File]::Delete($P
 function ConvertTo-DefenseClawBoundedDiagnostic { param($Value, $MaxLength) return $Value }
 $script:swaps = 0
 function Invoke-DefenseClawLaunchableFileSwap {
-    param($Temporary, $Destination, $Backup)
+    param($Temporary, $Destination, $Backup, [switch]$KeepReplacementAccess)
     $script:swaps++
     if (-not $Backup.StartsWith("$Destination.backup.")) { throw "unexpected backup name $Backup" }
     [IO.File]::Copy($Destination, $Backup)
@@ -1707,6 +1708,14 @@ def test_launchable_swap_links_the_old_file_before_one_posix_rename() -> None:
         assert needle in swap, needle
     assert swap.index("SetSecurityInfo(file") < swap.index("CreateHardLinkNative(") < swap.index(
         "SetFileInformationByHandleNative(file, FileRenameInfoEx"
+    )
+    # GAP-0656 review M2: a drifted destination's access list is not copied
+    # onto the fresh object; the link and the rename are the same steps.
+    keeping = swap[swap.index("public static string SwapLaunchableFileKeepingAccess(") :]
+    assert "return SwapLaunchableFileCore(replacement, destination, backup, false);" in keeping
+    core = swap[swap.index("private static string SwapLaunchableFileCore(") :]
+    assert core.index("if (!copyDestinationAccess)") < core.index("return LinkBackupAndRename(own, destination, backup);") < core.index(
+        "GetSecurityInfo(current, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION"
     )
     atomic = _function_body(module, "Install-DefenseClawFileAtomic")
     gate = atomic.index("if (Test-DefenseClawStandaloneProfile) {\n                    $swapped = Invoke-DefenseClawLaunchableFileSwap")
@@ -2747,3 +2756,23 @@ def test_bundle_repair_hint_names_the_installed_cli_without_a_bare_fallback() ->
     assert "IsNullOrWhiteSpace" not in hint
     layout = _function_body(module, "Get-DefenseClawLayout")
     assert "CLIPath = (Microsoft.PowerShell.Management\\Join-Path $bin 'defenseclaw.exe')" in layout
+
+
+def _function_body(text: str, name: str) -> str:
+    start = text.index(f"function {name} ")
+    return text[start : text.index("\nfunction ", start + 1)]
+
+
+def test_lazy_lock_files_are_standalone_only_and_name_every_product_lock() -> None:
+    # GAP-0766: Setup repair and verify stamp and judge the lazily created
+    # lock files of the standalone profile, including the runtime .env lock;
+    # the Secure Client profile keeps the objects it handled before.
+    body = _function_body(_text(MODULE), "Get-DefenseClawLazyLockFiles")
+    guard = body.index("Test-DefenseClawStandaloneProfile")
+    assert guard < body.index("pscustomobject"), "the standalone guard must come first"
+    for name in ("config.yaml.lock", ".enterprise-credentials.lock", ".enterprise-enrollment.lock", ".env.lock"):
+        assert f"{name}" in body, name
+    callers = [
+        line for line in _text(MODULE).splitlines() if "Get-DefenseClawLazyLockFiles -Layout" in line
+    ]
+    assert len(callers) == 2, "stamp (repair) and verify both read the one list"

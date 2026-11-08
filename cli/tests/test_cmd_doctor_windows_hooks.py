@@ -2246,10 +2246,11 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertIn("entries=8", check.detail)
         self.assertEqual(check.command, self._devin_bash(runtime))
         self.assertTrue(doctor_hooks._managed_hook_command(guarded, "devin"))
-        self.assertEqual(
-            doctor_hooks._command_target(guarded, "devin"),
-            (str(runtime), ["hook", "--connector", "devin"], "direct"),
-        )
+        # The guarded start names the launcher in Devin's forward-slash bash
+        # word; compare it as a path, as the other Devin target tests do.
+        target, args, kind = doctor_hooks._command_target(guarded, "devin")
+        self.assertEqual(os.path.normcase(target), os.path.normcase(str(runtime)))
+        self.assertEqual((args, kind), (["hook", "--connector", "devin"], "direct"))
 
     def test_devin_guarded_matrix_refuses_other_events_tokens_folders_and_launchers(self) -> None:
         other = self.install / "Other"

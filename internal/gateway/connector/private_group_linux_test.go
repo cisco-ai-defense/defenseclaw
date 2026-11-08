@@ -197,3 +197,148 @@ func dropInheritedACLs(t *testing.T, root string) {
 		}
 	}
 }
+
+// REVIEW-3 MF1 (GAP-0053): the local files can show a private group while the
+// name service gives it a member (SSSD, LDAP, NIS). The managed setter proof
+// asks getent too and refuses unless the group lists nobody but its owner, the
+// account answers with the same uid and gid, and getent answers cleanly. The
+// local proof the hook paths use is unchanged and starts no process.
+func TestOwnerPrivateGroupStrictAsksTheNameService(t *testing.T) {
+	me := &user.User{Username: "me", Uid: fmt.Sprint(os.Geteuid())}
+	root := t.TempDir()
+	dir := filepath.Join(root, ".config")
+	if err := os.MkdirAll(filepath.Join(dir, "opencode", "plugins"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	dropInheritedACLs(t, root)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gid := fmt.Sprint(info.Sys().(*syscall.Stat_t).Gid)
+	oldUser, oldLookupGroup := privateGroupLookupUser, privateGroupLookupGroup
+	privateGroupLookupUser = func(string) (*user.User, error) {
+		return &user.User{Username: me.Username, Uid: me.Uid, Gid: gid}, nil
+	}
+	privateGroupLookupGroup = func(string) (*user.Group, error) { return &user.Group{Gid: gid, Name: me.Username}, nil }
+	files := t.TempDir()
+	passwd, groupFile := filepath.Join(files, "passwd"), filepath.Join(files, "group")
+	if err := os.WriteFile(passwd, []byte(fmt.Sprintf("%s:x:%s:%s::/home/x:/bin/sh\n", me.Username, me.Uid, gid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(groupFile, []byte(fmt.Sprintf("%s:x:%s:\n", me.Username, gid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldPasswd, oldGroup, oldGetent := privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent
+	privateGroupPasswdFile, privateGroupGroupFile = passwd, groupFile
+	t.Cleanup(func() {
+		privateGroupLookupUser, privateGroupLookupGroup = oldUser, oldLookupGroup
+		privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent = oldPasswd, oldGroup, oldGetent
+	})
+	calls := 0
+	for _, tc := range []struct {
+		name, group, account string
+		fail                 bool
+		want                 bool
+	}{
+		{name: "private group, no member", group: "%[1]s:x:%[2]s:\n", want: true},
+		{name: "owner listed as its own member", group: "%[1]s:x:%[2]s:%[1]s\n", want: true},
+		{name: "member added by the name service", group: "%[1]s:x:%[2]s:%[1]s,bob\n"},
+		{name: "member only the name service lists", group: "%[1]s:x:%[2]s:bob\n"},
+		{name: "group answered under another name", group: "devs:x:%[2]s:\n"},
+		{name: "group answered under another gid", group: "%[1]s:x:4242:\n"},
+		{name: "group not found", group: ""},
+		{name: "two records", group: "%[1]s:x:%[2]s:\n%[1]s:x:%[2]s:bob\n"},
+		{name: "getent fails", group: "%[1]s:x:%[2]s:\n", fail: true},
+		{name: "account has another uid", group: "%[1]s:x:%[2]s:\n", account: "%[1]s:x:4242:%[2]s::/h:/bin/sh\n"},
+		{name: "account has another primary group", group: "%[1]s:x:%[2]s:\n", account: "%[1]s:x:%[3]s:4242::/h:/bin/sh\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			privateGroupGetent = func(database, key string) (string, bool) {
+				calls++
+				if tc.fail {
+					return "", false
+				}
+				switch database {
+				case "group":
+					return fmt.Sprintf(tc.group, me.Username, gid), true
+				case "passwd":
+					if tc.account != "" {
+						return fmt.Sprintf(tc.account, me.Username, gid, me.Uid), true
+					}
+					return fmt.Sprintf("%s:x:%s:%s::/home/x:/bin/sh\n", me.Username, me.Uid, gid), true
+				}
+				return "", false
+			}
+			if got := ownerPrivateGroupStrict(dir, info); got != tc.want {
+				t.Fatalf("strict proof=%v, want %v", got, tc.want)
+			}
+			// The local proof says private in every case, and starts nothing.
+			calls = 0
+			if !ownerPrivateGroup(dir, info) || calls != 0 {
+				t.Fatalf("local proof changed: getent calls=%d", calls)
+			}
+		})
+	}
+}
+
+// A folder of the private group of its owner, with a named POSIX ACL entry for
+// root: the local and strict proofs rule it out (the mode bits are the mask),
+// the proof for a caller that judged the ACL first does not (GAP-0053 round 9).
+func TestOwnerPrivateGroupAfterACLAcceptsARootOnlyACL(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".config")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	acl := make([]byte, 4+8*5)
+	binary.LittleEndian.PutUint32(acl, 2)
+	for i, e := range [][3]uint32{{0x01, 7, 0}, {0x02, 7, 0}, {0x04, 7, 0}, {0x10, 7, 0}, {0x20, 5, 0}} {
+		binary.LittleEndian.PutUint16(acl[4+8*i:], uint16(e[0]))
+		binary.LittleEndian.PutUint16(acl[6+8*i:], uint16(e[1]))
+		binary.LittleEndian.PutUint32(acl[8+8*i:], e[2])
+	}
+	if err := unix.Setxattr(dir, "system.posix_acl_access", acl, 0); err != nil {
+		t.Skipf("this file system has no POSIX ACLs: %v", err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	me := &user.User{Username: "me", Uid: fmt.Sprint(os.Geteuid())}
+	gid := fmt.Sprint(info.Sys().(*syscall.Stat_t).Gid)
+	oldUser, oldLookupGroup := privateGroupLookupUser, privateGroupLookupGroup
+	privateGroupLookupUser = func(string) (*user.User, error) {
+		return &user.User{Username: me.Username, Uid: me.Uid, Gid: gid}, nil
+	}
+	privateGroupLookupGroup = func(string) (*user.Group, error) { return &user.Group{Gid: gid, Name: me.Username}, nil }
+	files := t.TempDir()
+	passwd, groupFile := filepath.Join(files, "passwd"), filepath.Join(files, "group")
+	if err := os.WriteFile(passwd, []byte(fmt.Sprintf("%s:x:%s:%s::/home/x:/bin/sh\n", me.Username, me.Uid, gid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(groupFile, []byte(fmt.Sprintf("%s:x:%s:\n", me.Username, gid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldPasswd, oldGroup, oldGetent := privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent
+	privateGroupPasswdFile, privateGroupGroupFile = passwd, groupFile
+	privateGroupGetent = func(database, key string) (string, bool) {
+		if database == "group" {
+			return fmt.Sprintf("%s:x:%s:\n", me.Username, gid), true
+		}
+		return fmt.Sprintf("%s:x:%s:%s::/home/x:/bin/sh\n", me.Username, me.Uid, gid), true
+	}
+	t.Cleanup(func() {
+		privateGroupLookupUser, privateGroupLookupGroup = oldUser, oldLookupGroup
+		privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent = oldPasswd, oldGroup, oldGetent
+	})
+	if ownerPrivateGroup(dir, info) || ownerPrivateGroupStrict(dir, info) {
+		t.Fatal("the local and strict proofs accepted a folder with an access ACL")
+	}
+	if !ownerPrivateGroupStrictAfterACL(dir, info) {
+		t.Fatal("the proof for a caller that judged the ACL refused the account private group")
+	}
+}

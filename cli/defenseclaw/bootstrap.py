@@ -34,10 +34,11 @@ import io
 import json
 import os
 import re
-import shlex
 import shutil
 import stat
 import subprocess
+import sys
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -49,10 +50,12 @@ from defenseclaw.connector_paths import (
     connector_config_files,
     connector_hook_config_paths,
     hermes_config_path,
-    opencode_writable_plugin_folder,
+    opencode_custody_text,
+    opencode_unsafe_plugin_paths,
 )
+from defenseclaw.gateway_path import path_gateway
 from defenseclaw.inventory import agent_discovery
-from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY
+from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
 
 if TYPE_CHECKING:
     from defenseclaw.config import Config, PerConnectorGuardrailConfig
@@ -179,6 +182,9 @@ class FirstRunOptions:
     # the trust decision into the final v8 transaction instead of treating it
     # as transient discovery input. None keeps non-init callers unchanged.
     trusted_binary_prefixes: tuple[str, ...] | None = None
+    # init --api-port / --proxy-port (GAP-0053): 0 lets a new config choose.
+    api_port: int = 0
+    proxy_port: int = 0
 
 
 @dataclass
@@ -264,6 +270,9 @@ _API_PORT_CLAIM_PREFIX = "defenseclaw-api-port-"
 # init claims a guardrail proxy port the same way, so two accounts that run
 # init at the same time don't both pick it (GAP-2198). Only init writes these.
 _GUARDRAIL_PORT_CLAIM_PREFIX = "defenseclaw-guardrail-port-"
+# setup claims the OpenCode V2 background-server port it gives an account
+# (opencode_service.PORT_CLAIM_PREFIX, GAP-0053).
+_OPENCODE_PORT_CLAIM_PREFIX = "defenseclaw-opencode-port-"
 _WINDOWS_CLAIM_SID = re.compile(r"S-1-[0-9]+(?:-[0-9]+)+")
 
 
@@ -318,8 +327,12 @@ def _api_port_claimed_by_other_account(port: int, prefix: str = _API_PORT_CLAIM_
     return stat.S_ISREG(info.st_mode) and info.st_uid != os.getuid()
 
 
-def remove_own_api_port_claims() -> None:
-    """Drop this account's port claims (``uninstall --all``). Best effort."""
+def remove_own_api_port_claims(ports: Collection[int] | None = None) -> None:
+    """Drop this account's port claims. Best effort.
+
+    *ports* limits it to the claims of those ports (the ones a stopped gateway
+    held); None drops every claim of this account.
+    """
     windows = _windows_port_claims()
     if os.name == "nt" and not windows:
         return
@@ -330,8 +343,20 @@ def remove_own_api_port_claims() -> None:
         return
     own = _windows_own_sid() if windows else ""
     for name in names:
-        if not name.startswith((_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX)):
+        prefix = next(
+            (
+                p
+                for p in (_API_PORT_CLAIM_PREFIX, _GUARDRAIL_PORT_CLAIM_PREFIX, _OPENCODE_PORT_CLAIM_PREFIX)
+                if name.startswith(p)
+            ),
+            "",
+        )
+        if not prefix:
             continue
+        if ports is not None:
+            number = name[len(prefix) :]
+            if not (number.isascii() and number.isdigit() and int(number) in ports):
+                continue
         path = os.path.join(claim_dir, name)
         if windows:
             sid = _windows_claim_sid(path)
@@ -396,7 +421,7 @@ def suggest_free_api_port(host: str, port: int) -> int:
     return 0
 
 
-def choose_first_run_api_port(cfg: Config) -> str:
+def choose_first_run_api_port(cfg: Config, avoid: frozenset[int] = frozenset()) -> str:
     """Move a new config off the default API port when something holds it.
 
     Per-user installs of several accounts on one host all default to 18970.
@@ -413,11 +438,17 @@ def choose_first_run_api_port(cfg: Config) -> str:
     if host in {"", "localhost"}:
         host = "127.0.0.1"
     host = host.strip("[]")
-    if _api_port_available(host, _DEFAULT_API_PORT) and _reserve_api_port(_DEFAULT_API_PORT):
+    # avoid: ports init was given for something else (--proxy-port, GAP-0053);
+    # the API port and the two sandbox ports after it stay clear of them.
+    def clear(port: int) -> bool:
+        return not ({port, port + 1, port + 2} & avoid)
+
+    default = _DEFAULT_API_PORT
+    if clear(default) and _api_port_available(host, default) and _reserve_api_port(default):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_API_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _api_port_available(host, port) and _reserve_api_port(port):
+        if clear(port) and _api_port_available(host, port) and _reserve_api_port(port):
             cfg.gateway.api_port = port
             return (
                 f"{host}:{_DEFAULT_API_PORT} is in use or configured by another account's DefenseClaw gateway, "
@@ -442,7 +473,7 @@ def _guardrail_port_available(host: str, port: int) -> bool:
     )
 
 
-def choose_first_run_guardrail_port(cfg: Config) -> str:
+def choose_first_run_guardrail_port(cfg: Config, avoid: frozenset[int] = frozenset()) -> str:
     """Move a new config's guardrail proxy port off 4000 when something holds it.
 
     Like the API port: a second account's proxy (OpenClaw) on the same host
@@ -457,11 +488,11 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
     host = str(getattr(gc, "host", "") or "").strip().strip("[]")
     if host.lower() in {"", "localhost", "::1"}:
         host = "127.0.0.1"
-    if _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
+    if _DEFAULT_GUARDRAIL_PORT not in avoid and _guardrail_port_available(host, _DEFAULT_GUARDRAIL_PORT):
         return ""
     for step in range(1, _FIRST_RUN_API_PORT_TRIES + 1):
         port = _DEFAULT_GUARDRAIL_PORT + step * _FIRST_RUN_API_PORT_STEP
-        if _guardrail_port_available(host, port):
+        if port not in avoid and _guardrail_port_available(host, port):
             gc.port = port
             return (
                 # A claim by another account's init has no listener yet, so
@@ -474,6 +505,131 @@ def choose_first_run_guardrail_port(cfg: Config) -> str:
         "claimed by other accounts; choose a free guardrail proxy port with "
         "`defenseclaw setup guardrail --port <free port> --non-interactive`"
     )
+
+
+# OpenClaw's own gateway port (gateway.port); DefenseClaw's ports stay off it.
+_DEFAULT_OPENCLAW_GATEWAY_PORT = 18789
+
+
+def port_layout_conflict(api_port: int, proxy_port: int, openclaw_port: int = 0) -> str:
+    """Why these ports cannot all listen on one account, or "" (GAP-0053).
+
+    The gateway API listens on api_port and its two sandbox ports after it;
+    the guardrail proxy on proxy_port; OpenClaw's gateway on openclaw_port.
+    """
+    api_ports = {api_port, api_port + 1, api_port + 2} if api_port else set()
+    sandbox = f"({api_port + 1}, {api_port + 2})"
+    if api_port and api_port + 2 > 65535:
+        return f"API port {api_port} leaves no room for its two sandbox ports {sandbox}; use 65533 or lower"
+    if proxy_port and proxy_port in api_ports:
+        return (
+            f"guardrail proxy port {proxy_port} is the gateway API port {api_port} or one of its "
+            f"sandbox ports {sandbox}; choose another"
+        )
+    if openclaw_port and openclaw_port in api_ports:
+        return (
+            f"API port {api_port} or a sandbox port after it is OpenClaw's gateway port {openclaw_port}; "
+            "choose another"
+        )
+    if openclaw_port and proxy_port == openclaw_port:
+        return f"guardrail proxy port {proxy_port} is OpenClaw's gateway port; choose another"
+    return ""
+
+
+def first_run_port_flags_conflict(api_port: int, proxy_port: int) -> str:
+    """Why init --api-port / --proxy-port cannot be used, or "".
+
+    A flag is checked against the other flag, or against the default the
+    other port takes when it was not given, and against OpenClaw's gateway
+    port. The automatic pick avoids a given flag too (api_port_avoid).
+    """
+    if not api_port and not proxy_port:
+        return ""
+    conflict = port_layout_conflict(
+        api_port or _DEFAULT_API_PORT, proxy_port or _DEFAULT_GUARDRAIL_PORT, _DEFAULT_OPENCLAW_GATEWAY_PORT
+    )
+    if not conflict:
+        return ""
+    flags = " and ".join(name for name, value in (("--api-port", api_port), ("--proxy-port", proxy_port)) if value)
+    return f"{flags}: {conflict}"
+
+
+def api_port_avoid(cfg: Config, proxy_port: int = 0) -> frozenset[int]:
+    """Ports the automatic API pick keeps its three ports off."""
+    proxy = proxy_port or int(getattr(cfg.guardrail, "port", 0) or 0)
+    return frozenset(p for p in (proxy, _DEFAULT_OPENCLAW_GATEWAY_PORT) if p)
+
+
+def proxy_port_avoid(cfg: Config) -> frozenset[int]:
+    """Ports the automatic proxy pick stays off: the API port and its sandbox ports."""
+    api = int(getattr(cfg.gateway, "api_port", 0) or 0)
+    ports = {api, api + 1, api + 2} if api else set()
+    return frozenset(ports | {_DEFAULT_OPENCLAW_GATEWAY_PORT})
+
+
+def apply_first_run_ports(cfg: Config, api_port: int, proxy_port: int, *, new_config: bool) -> list[StepResult]:
+    """Use the ports given to init with --api-port and --proxy-port (GAP-0053).
+
+    A new config takes them instead of the automatic choice, and they are
+    claimed like a chosen port. An existing config keeps its ports: moving
+    them re-registers every connector, which ``setup gateway --api-port`` and
+    ``setup guardrail --port`` do, so the row names that command.
+    """
+    from defenseclaw.config import api_bind_host
+
+    steps: list[StepResult] = []
+    if api_port:
+        current = int(getattr(cfg.gateway, "api_port", 0) or 0)
+        host = (api_bind_host(cfg) or "127.0.0.1").strip("[]")
+        if host == "localhost":
+            host = "127.0.0.1"
+        if not new_config:
+            if api_port != current:
+                steps.append(StepResult(
+                    "Gateway API port", "warn",
+                    f"this configuration keeps API port {current}; init sets ports only in a new configuration",
+                    f"defenseclaw setup gateway --api-port {api_port} --non-interactive",
+                ))
+        else:
+            cfg.gateway.api_port = api_port
+            if _api_port_available(host, api_port) and _reserve_api_port(api_port):
+                steps.append(
+                    StepResult("Gateway API port", "pass", f"this account's gateway uses port {api_port} (--api-port)")
+                )
+            else:
+                steps.append(StepResult(
+                    "Gateway API port", "warn",
+                    f"{host}:{api_port} (--api-port) is in use or claimed by another account; "
+                    "the gateway cannot listen there until it is free",
+                    "defenseclaw setup gateway --api-port <free port> --non-interactive",
+                ))
+    if proxy_port:
+        gc = cfg.guardrail
+        current = int(getattr(gc, "port", 0) or 0)
+        host = str(getattr(gc, "host", "") or "").strip().strip("[]")
+        if host.lower() in {"", "localhost", "::1"}:
+            host = "127.0.0.1"
+        if not new_config:
+            if proxy_port != current:
+                steps.append(StepResult(
+                    "Guardrail proxy port", "warn",
+                    f"this configuration keeps guardrail proxy port {current}; "
+                    "init sets ports only in a new configuration",
+                    f"defenseclaw setup guardrail --port {proxy_port} --non-interactive",
+                ))
+        else:
+            gc.port = proxy_port
+            if _guardrail_port_available(host, proxy_port):
+                detail = f"this account's guardrail proxy uses port {proxy_port} (--proxy-port)"
+                steps.append(StepResult("Guardrail proxy port", "pass", detail))
+            else:
+                steps.append(StepResult(
+                    "Guardrail proxy port", "warn",
+                    f"{host}:{proxy_port} (--proxy-port) is in use or claimed by another account; "
+                    "the guardrail proxy cannot listen there until it is free",
+                    "defenseclaw setup guardrail --port <free port> --non-interactive",
+                ))
+    return steps
 
 
 def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> None:
@@ -724,12 +880,33 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
 
+    # First step after the config loads, before anything is set aside, written or
+    # started: hooks of a DefenseClaw Setup 0.8.x install in the agent's settings
+    # (GAP-0101). Init names that install and the next step instead of starting
+    # the sidecar and rolling back over the two disagreeing registrations.
+    roster = _first_run_connector_roster(options, connector)
+    legacy_hooks = _first_run_legacy_hook_refusal(roster, options.rerun_command)
+    if legacy_hooks:
+        setup.append(StepResult("Older install", "fail", legacy_hooks, "defenseclaw uninstall"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw uninstall", options.rerun_command],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+
+    setup.extend(apply_first_run_ports(cfg, options.api_port, options.proxy_port, new_config=new_config))
     if new_config:
-        port_note = choose_first_run_api_port(cfg)
+        avoid = api_port_avoid(cfg, options.proxy_port)
+        port_note = "" if options.api_port else choose_first_run_api_port(cfg, avoid)
         if port_note:
             status = "pass" if cfg.gateway.api_port != _DEFAULT_API_PORT else "warn"
             setup.append(StepResult("Gateway API port", status, port_note))
-        proxy_note = choose_first_run_guardrail_port(cfg)
+        proxy_note = "" if options.proxy_port else choose_first_run_guardrail_port(cfg, proxy_port_avoid(cfg))
         if proxy_note:
             status = "pass" if cfg.guardrail.port != _DEFAULT_GUARDRAIL_PORT else "warn"
             setup.append(StepResult("Guardrail proxy port", status, proxy_note))
@@ -1274,19 +1451,35 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     else:
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 
-    if shutil.which("defenseclaw-gateway") is None:
+    gateway_binary = path_gateway()
+    if gateway_binary is None:
         steps.append(
             StepResult(
                 "Gateway binary",
                 "warn",
-                "defenseclaw-gateway not on PATH",
+                "defenseclaw-gateway not found next to this defenseclaw or on PATH",
                 "make gateway-install",
             )
         )
+    elif _gateway_override_missing(gateway_binary):
+        steps.append(
+            StepResult(
+                "Gateway binary",
+                "warn",
+                f"set by DEFENSECLAW_GATEWAY_BIN, not found: {gateway_binary}",
+                "unset DEFENSECLAW_GATEWAY_BIN, or point it at defenseclaw-gateway",
+            )
+        )
     else:
-        steps.append(StepResult("Gateway binary", "pass", "found on PATH"))
+        steps.append(StepResult("Gateway binary", "pass", f"found at {gateway_binary}"))
 
     return steps
+
+
+def _gateway_override_missing(gateway_binary: str) -> bool:
+    """True when ``gateway_binary`` came from DEFENSECLAW_GATEWAY_BIN and is not a file."""
+    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
+    return bool(override) and gateway_binary == override and not os.path.isfile(override)
 
 
 def _normalize_connector(raw: str | None) -> str:
@@ -1382,6 +1575,28 @@ def _preflight_first_run_agent_selections(
     except OSError as exc:
         return None, f"could not bind selected agent executables to the protected receipt: {exc}"
     return verified, ""
+
+
+def _first_run_legacy_hook_refusal(connectors: tuple[str, ...], rerun: str) -> str:
+    """Say which DefenseClaw Setup 0.8.x install has hooks in the roster's agent settings, or "".
+
+    until the 0.8 bridge retires: only a Windows per-user Setup 0.8.x install
+    leaves hooks of its own in an agent's settings.
+    """
+    from contextlib import suppress
+
+    from defenseclaw.commands import legacy_setup_install
+
+    install = legacy_setup_install.find(sys.platform)
+    if install is None:
+        return ""
+    files: list[str] = []
+    for name in connectors:
+        if name and name != "none":
+            with suppress(Exception):
+                files.extend(connector_config_files(name))
+    files = legacy_setup_install.hook_entries(install, list(dict.fromkeys(files)))
+    return legacy_setup_install.hook_refusal(install, files, rerun) if files else ""
 
 
 def _first_run_setup_refusal(connector: str, data_dir, rerun: str = "defenseclaw init") -> str:
@@ -1792,7 +2007,9 @@ def _scanner_availability(cfg: Config) -> list[StepResult]:
     ]
     out: list[StepResult] = []
     for label, binary, next_command in scanners:
-        path = shutil.which(binary)
+        # This install's own scanner first: a DefenseClaw Setup 0.8.x folder listed
+        # first on PATH must not be reported as this release's scanner (GAP-0100).
+        path = resolve_scanner_binary(binary)
         if path:
             out.append(StepResult(label, "pass", path))
         else:
@@ -2054,9 +2271,14 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
     :func:`_running_connector_from_state_file` for the I-don't-know
     sentinel rule.
     """
-    gw = shutil.which("defenseclaw-gateway")
+    gw = path_gateway(honor_override=False)
     if not gw:
-        return StepResult("Sidecar", "warn", "defenseclaw-gateway not on PATH", "make gateway-install")
+        return StepResult(
+            "Sidecar",
+            "warn",
+            "defenseclaw-gateway not found next to this defenseclaw or on PATH",
+            "make gateway-install",
+        )
     pid_file = gateway_pid_path(cfg.data_dir)
     if _pid_file_running(pid_file):
         # Compare what the live sidecar booted with against what
@@ -2334,15 +2556,16 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
-        if loose := opencode_writable_plugin_folder([path]):
+        if unsafe := opencode_unsafe_plugin_paths([path]):
             # The gateway will not install its plugin there and does not
             # start; `setup opencode` would fail the same way.
+            advice = opencode_custody_text(unsafe)
             return StepResult(
                 "Connector",
                 "warn",
-                f"{loose} can be written by other accounts, so the gateway does not install the "
-                "OpenCode plugin there; fix its mode, then run `defenseclaw-gateway restart`",
-                f"chmod go-w {shlex.quote(loose)}",
+                f"{advice.named} {advice.why}, so the gateway does not install the OpenCode plugin there; "
+                f"{advice.action}, then run `defenseclaw-gateway restart`",
+                advice.remedy,
             )
         return StepResult(
             "Connector",

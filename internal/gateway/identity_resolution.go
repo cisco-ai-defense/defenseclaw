@@ -11,7 +11,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -579,30 +581,21 @@ func orderedFacts(facts []string) []string {
 func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName, agent string) string {
 	why := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		switch fact {
-		case "account:failed":
-			why = append(why, "the account holder is ambiguous")
-		case "account:ambiguous_short_name":
-			why = append(why, "a bare users entry may name accounts in more than one trusted domain; use a qualified name or uid")
-		case "account:unknown":
-			why = append(why, "the account holder is unconfirmed")
-		case "upn:unknown":
-			why = append(why, "this account's UPN is unconfirmed")
-		case "groups:unknown":
-			why = append(why, "group membership is unconfirmed")
-		case "agent:unknown":
-			why = append(why, "ownership of a pre-upgrade agent identity is unconfirmed")
-		case factAssignmentGroupSID:
-			why = append(why, "an assignment group SID is unconfirmed")
-		default:
-			why = append(why, "identity fact "+fact+" is unconfirmed")
-		}
+		why = append(why, identityFactClause(fact))
 	}
 	if subject != nil && subject.tokenGroupsCause != "" {
 		why = append(why, subject.tokenGroupsCause)
 	}
-	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + " to inspect the identity decision"
+	command := set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown"))
+	// The hint follows the command as printed: a command without the
+	// placeholder (the OSS profile list of an account without a verified ID,
+	// a built-in connector) has nothing to substitute.
+	hint := ""
+	if strings.Contains(command, " --connector "+profileConnectorPlaceholder) {
+		hint = identityRefusalConnectorHint
+	}
+	return issueIdentityRefusal(identityRefusalPrefix + strings.Join(why, "; ") +
+		"; run `" + command + "`" + set.profileExplainPrompt() + identityRefusalTail + hint)
 }
 
 // explainOnRequestPaths is explain's decision for connectorName's requests:
@@ -671,7 +664,7 @@ func sandboxRefusedWarning(connectorName, reason string) string {
 // GAP-0076).
 func (set *guardrailProfileSet) profileExplainPrompt() string {
 	if runtime.GOOS == "windows" && set.base != nil && set.base.StandaloneEnterprise() {
-		return " from an elevated PowerShell prompt"
+		return identityRefusalElevatedPrompt
 	}
 	return ""
 }
@@ -684,40 +677,96 @@ func (set *guardrailProfileSet) profileExplainPrompt() string {
 // commands do not run there (GAP-1692).
 func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName, agent string, agentNeeded bool) string {
 	user := ""
-	if subject != nil && subject.UserID == strings.TrimSpace(subject.UserID) && useridentity.KindForID(subject.UserID) != "" {
+	if subject != nil && profileCommandUser(subject.UserID) {
 		user = subject.UserID
 	}
 	standalone := set.base != nil && set.base.StandaloneEnterprise()
 	if user == "" {
 		if !standalone {
-			return "defenseclaw guardrail profile list"
+			return profileExplainList
 		}
-		user = "<user>"
+		user = profileExplainUserPlaceholder
 	}
-	command := "defenseclaw guardrail profile explain --user " + user
+	command := profileExplainOSS + " --user " + user
 	if standalone {
 		switch runtime.GOOS {
 		case "linux":
-			command = "sudo " + managed.StandaloneGatewayPath("linux") + " enterprise linux profile-explain --user " + user
+			command = profileExplainLinux + " --user " + user
 		case "darwin":
-			command = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos profile-explain --user " + user
+			command = profileExplainDarwin + " --user " + user
 		case "windows":
 			// The installed CLI under the registered Program Files, with
 			// the user quoted for PowerShell (cowork-1-0-8 GAP-0076).
 			command = managed.WindowsAdminCommand("enterprise", "windows", "profile-explain", "--user", user)
 		}
 	}
-	if profileCommandToken(connectorName) {
-		command += " --connector " + connectorName
+	return command + set.profileCommandSuffix(connectorName, agent, agentNeeded)
+}
+
+// The explain command of each platform up to its --user argument, and the
+// placeholder for an account without a verified ID.
+const (
+	profileExplainList            = "defenseclaw guardrail profile list"
+	profileExplainOSS             = "defenseclaw guardrail profile explain"
+	profileExplainUserPlaceholder = "<user>"
+)
+
+// The installed administrator commands name the gateway binary through the
+// one standalone layout helper, so a layout change moves the producer and
+// the display recognizer together.
+var (
+	profileExplainLinux  = "sudo " + managed.StandaloneGatewayPath("linux") + " enterprise linux profile-explain"
+	profileExplainDarwin = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos profile-explain"
+)
+
+// profileCommandSuffix is the --connector and --agent arguments of an
+// explain command: a connector the build ships or the configuration names
+// (explain without it cannot check the hook and inspect paths of that
+// connector) and the verified agent ID, never another value.
+func (set *guardrailProfileSet) profileCommandSuffix(connectorName, agent string, agentNeeded bool) string {
+	suffix := ""
+	if set.profileCommandConnector(connectorName) {
+		suffix += " --connector " + profileCommandConnectorArgument(connectorName)
 	}
-	if agentNeeded && profileCommandToken(agent) {
-		command += " --agent " + agent
+	if agentNeeded && profileCommandAgent(agent) {
+		suffix += " --agent " + agent
 	}
-	return command
+	return suffix
+}
+
+// profileCommandUser reports a verified account ID: a SID or a decimal uid.
+func profileCommandUser(id string) bool {
+	return id == strings.TrimSpace(id) && useridentity.KindForID(id) != ""
+}
+
+// profileCommandConnector reports a connector name the build ships or the
+// configuration lists, spelled as a plain token of any length the
+// configuration accepts.
+func (set *guardrailProfileSet) profileCommandConnector(name string) bool {
+	return profileCommandToken(name) && (connector.IsKnownBuiltinConnector(name) || set.knownConnector(name))
+}
+
+// profileConnectorPlaceholder stands for the name of a connector the
+// administrator configured. The refusal is shown as written, and an
+// administrator-chosen value cannot be told from a credential by any check
+// of the name alone (and what the display scrub masks depends on the text
+// around it), so no configured name rides in the reason: the flag stays so
+// the command still checks that connector, and the reason says to substitute
+// the name.
+const profileConnectorPlaceholder = "<connector>"
+
+// profileCommandConnectorArgument is the value of --connector for a name
+// that passed profileCommandConnector: a built-in connector name is ship
+// text; any other is the placeholder.
+func profileCommandConnectorArgument(name string) string {
+	if connector.IsKnownBuiltinConnector(name) {
+		return name
+	}
+	return profileConnectorPlaceholder
 }
 
 func profileCommandToken(value string) bool {
-	if value == "" || len(value) > 64 {
+	if value == "" {
 		return false
 	}
 	for _, r := range value {
@@ -725,6 +774,21 @@ func profileCommandToken(value string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// profileCommandAgent reports an agent ID as agentidentity derives it:
+// the prefix and 16 lower-case hex digits.
+func profileCommandAgent(id string) bool {
+	digits, ok := strings.CutPrefix(id, agentidentity.AgentIDPrefix)
+	if !ok || len(digits) != 16 {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' && r < 'a' || r > 'f' {
+			return false
+		}
 	}
 	return true
 }

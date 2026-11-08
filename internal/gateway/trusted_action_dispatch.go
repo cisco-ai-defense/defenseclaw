@@ -176,8 +176,8 @@ type trustedActionRequest struct {
 	// A sandbox action may execute in a filesystem the gateway cannot see.
 	SkipLocalFilesystemResolution bool
 	// CopilotSharedLocalFile marks an exact file call decoded from a Local
-	// body in the per-user CLI document. Its link target and direct protected
-	// read have the same file-action authority as its lexical path.
+	// body in the per-user CLI document. Its direct protected read has the same
+	// file-action authority as its lexical path.
 	CopilotSharedLocalFile bool
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
@@ -297,6 +297,15 @@ func dispatchTrustedAction(
 	if ManagedEnterpriseActive() {
 		return nil
 	}
+	// A script body the hook call kept unread because its network share
+	// budget was spent is not a body that writes nothing: the strict tier
+	// judges the call as one past the evaluation limit, the others alert
+	// (shareBodyUnreadFindings, rel-1-0-6:GAP-0482).
+	defer func() {
+		if hookpaths.ShareBodyUnread() {
+			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable)
+		}
+	}()
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
@@ -419,7 +428,7 @@ func dispatchTrustedAction(
 		facts = actionfacts.Analyze(request.Input)
 		analyzed = true
 	}
-	facts = copilotSharedLocalFileFacts(facts, request)
+	facts = fileToolLinkTargetFacts(facts, request)
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
 	// a text mention or an inactive .sample path needs no second reading.
@@ -506,7 +515,7 @@ func dispatchTrustedActionWith(
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
 	defer func() {
-		findings = withActiveStateTargetMention(generation, request, facts, findings)
+		findings = withActiveStateTargetMention(request, facts, findings)
 	}()
 	if !request.simpleCommandPass {
 		defer func() {
@@ -964,7 +973,7 @@ func dispatchTrustedActionWith(
 		request.Input.Tool,
 		options,
 	)
-	scanned = append(scanned, copilotSharedLocalPathFindings(generation, request, facts, options)...)
+	scanned = append(scanned, fileToolLinkTargetFindings(generation, request, facts, options)...)
 	fallbackLanes := func(
 		legacyFindings []RuleFinding,
 		facts actionfacts.Facts,
@@ -1021,11 +1030,16 @@ func dispatchTrustedActionWith(
 // find candidates, then requires the executing operand's mutation role and
 // physical target before adding a finding. Keep it separate from SSH keys.
 func withActiveStateTargetMention(
-	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
+	// The bounded view of a large structured write keeps its complete target
+	// facts. Use that same view for the gateway-owned state proof as the pack
+	// rules use for their path decisions.
+	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+		facts = view
+	}
 	// A pattern, brace list, rsync or git clean that expands onto the
 	// state names no path fact, so it is proved from the shell words
 	// (GAP-2047); so is an archive extraction into it (GAP-2415).
@@ -1057,6 +1071,11 @@ func withActiveStateTargetMention(
 		return check(facts, request) || placed && check(linkFacts, linkRequest) ||
 			driven && check(driveFacts, driveRequest)
 	}
+	// Structured write tools have no shell command to scan. Their complete
+	// path facts still prove the same mutation, independently of pack rules.
+	if actionfacts.StructuredWriteTool(request.Input.Tool) && throughLink(provenStateMutationPath) {
+		return withProvenActiveStateMutation(request, findings)
+	}
 	// A write through a link the command makes to active state is proven by
 	// the link reading: the mention scan and the whole-action proof do not
 	// follow the new link (GAP-2522), nor read sed -i --follow-symlinks
@@ -1081,7 +1100,8 @@ func withActiveStateTargetMention(
 			// followed into the state tree through a link the gateway cannot
 			// read (GAP-2549: rm /dev/shm/x/y/config.yaml, y -> ~/.defenseclaw).
 			if !request.ProtectedHomeHook ||
-				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) {
+				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) &&
+					!provenStaticRedirectStateMutation(facts, request) {
 				// The mention scan places files below the state directory; a
 				// cmd /c body that removes or moves the directory itself (cmd
 				// /c rd /s /q %USERPROFILE%\.defenseclaw) names none, while the
@@ -1092,35 +1112,49 @@ func withActiveStateTargetMention(
 					return findings
 				}
 			}
-		} else if !throughLink(provenStateMutationPath) && !provenBashAggregateStateWrite(request) &&
+		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
+			!provenBashAggregateStateWrite(request) &&
 			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
 			!provenPowerShellStateWrite(request) {
 			return findings
 		}
 	}
-	return withProvenActiveStateMutation(generation, request, findings)
+	return withProvenActiveStateMutation(request, findings)
+}
+
+// provenStaticRedirectStateMutation keeps an independently proved state
+// operand when an unrelated redirect target is expanded by the shell. Both
+// complete readings of the redirect reduction must prove that operand.
+func provenStaticRedirectStateMutation(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if facts.Authoritative() {
+		return false
+	}
+	view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts)
+	return ok && provenStateMutationPath(view, request) && provenStateMutationPath(twin, request)
 }
 
 // withProvenActiveStateMutation adds (or upgrades) the
 // tamper.detector_state_write finding of a proven mutation of the active
 // state: the one finding observe mode still blocks on
 // (provenActiveStateMutation).
-func withProvenActiveStateMutation(generation *compiledRulePackCategories, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+func withProvenActiveStateMutation(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
-	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
-	if !ok {
-		return findings
-	}
+	// This protection belongs to the gateway. A selected pack may omit or
+	// relabel the rule, but a proved mutation of active state still blocks.
 	index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
-	finding := RuleFinding{
-		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
-		Confidence: rule.Confidence, Tags: append([]string(nil), rule.Tags...),
+	canonical := RuleFinding{
+		RuleID: ruleID, Title: "DefenseClaw security state mutation", Severity: "CRITICAL",
+		Confidence: 0.98, Tags: []string{"cognitive-tampering", "tampering", "security-state"},
 		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
 	}
+	finding := canonical
 	if index >= 0 && findings[index].contributesToEnforcement() && findings[index].proof.authorizes(ruleID) &&
 		(findings[index].proof.kind == findingProofActionFactsSemantic ||
 			findings[index].proof.kind == findingProofActionFactsSubgraph) {
 		// Keep the stronger ActionFacts proof of an actual state mutation.
+		findings[index].Severity = "CRITICAL"
+		findings[index].Title = canonical.Title
+		findings[index].Tags = canonical.Tags
 		return findings
 	}
 	if index >= 0 && findings[index].disposition == findingDispositionUnspecified &&
@@ -1131,6 +1165,11 @@ func withProvenActiveStateMutation(generation *compiledRulePackCategories, reque
 		// by the rule itself: the mutation is proven ($CMD > ~/f, GAP-2225).
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
+	// The selected pack's posture and severity may differ, but a proved
+	// mutation of DefenseClaw state has one enforcement level in every pack.
+	finding.Severity = "CRITICAL"
+	finding.Title = canonical.Title
+	finding.Tags = canonical.Tags
 	finding.enforcement = findingEnforcementDetectionOnly
 	if request.EnforcementCapable {
 		finding.enforcement = findingEnforcementAllowed
@@ -4217,7 +4256,7 @@ func stateDirectoryEntryTarget(
 		return "", false
 	}
 	entry := filepath.Join(parent, path.Base(filepath.ToSlash(value)))
-	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
+	if info, err := hookpaths.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
 	}
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
@@ -8843,12 +8882,12 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 	if hasTwin {
 		twinFacts = actionfacts.Analyze(twin.Input)
 	}
-	state := func(member *compiledRulePackCategories, findings []RuleFinding) []RuleFinding {
-		findings = withActiveStateTargetMention(member, request, facts, findings)
+	state := func(findings []RuleFinding) []RuleFinding {
+		findings = withActiveStateTargetMention(request, facts, findings)
 		if !hasTwin || slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "tamper.detector_state_write" }) {
 			return findings
 		}
-		for _, finding := range withActiveStateTargetMention(member, twin, twinFacts, nil) {
+		for _, finding := range withActiveStateTargetMention(twin, twinFacts, nil) {
 			if finding.RuleID == "tamper.detector_state_write" {
 				findings = append(findings, finding)
 			}
@@ -8856,10 +8895,10 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 		return findings
 	}
 	if generation == nil || len(generation.members) == 0 {
-		findings = state(generation, findings)
+		findings = state(findings)
 	} else {
-		for i, member := range generation.members {
-			found := state(member, nil)
+		for i := range generation.members {
+			found := state(nil)
 			if i < len(generation.memberNames) {
 				for j := range found {
 					found[j].profile = generation.memberNames[i]
@@ -8908,7 +8947,7 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 					}
 				}
 				proved := false
-				add := func(member *compiledRulePackCategories, profile string) {
+				add := func(profile string) {
 					// Prefer the exact child reading; one proven state finding
 					// completes this rule for the current profile.
 					for i := len(readings) - 1; i >= 0; i-- {
@@ -8919,10 +8958,10 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 						}
 						var candidateFindings []RuleFinding
 						if candidate.ProtectedHomeHook && staticFunctionLiteralStateMutation(candidateFacts) {
-							candidateFindings = withProvenActiveStateMutation(member, candidate, nil)
+							candidateFindings = withProvenActiveStateMutation(candidate, nil)
 						}
 						if len(candidateFindings) == 0 {
-							candidateFindings = withActiveStateTargetMention(member, candidate, candidateFacts, nil)
+							candidateFindings = withActiveStateTargetMention(candidate, candidateFacts, nil)
 						}
 						for _, finding := range candidateFindings {
 							if finding.RuleID != "tamper.detector_state_write" {
@@ -8938,14 +8977,14 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 					}
 				}
 				if generation == nil || len(generation.members) == 0 {
-					add(generation, "")
+					add("")
 				} else {
-					for i, member := range generation.members {
+					for i := range generation.members {
 						profile := ""
 						if i < len(generation.memberNames) {
 							profile = generation.memberNames[i]
 						}
-						add(member, profile)
+						add(profile)
 					}
 				}
 				if !proved {
@@ -9006,11 +9045,7 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 		// sent no description (review r3 finding 3, r4 finding 2). Behind
 		// ProtectHome the gateway cannot read the home to prove or rule
 		// out a state write among them, so the call is held as one.
-		generation := request.generation
-		if generation == nil {
-			generation = snapshotRulePackGenerationFor(parent, request.Connector)
-		}
-		return withProvenActiveStateMutation(generation, request, findings)
+		return withProvenActiveStateMutation(request, findings)
 	}
 	if reduced == "" || reduced == command {
 		return findings

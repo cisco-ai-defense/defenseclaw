@@ -292,6 +292,19 @@ func isApplyPatchToolName(tool string) bool {
 	return false
 }
 
+// ConnectorActionTool is the action-parser name of a connector native tool,
+// shared by the hook client (ResolveConnector) and the gateway
+// (agentHookTrustedActionTool) so both read the call as the same tool.
+// OpenCode V2 names its native patch tool "patch" and sends the reviewed
+// apply_patch envelope in patchText (GAP-0073). Any other name is returned
+// unchanged.
+func ConnectorActionTool(connector, tool string) string {
+	if strings.EqualFold(strings.TrimSpace(connector), "opencode") && tool == "patch" {
+		return "apply_patch"
+	}
+	return tool
+}
+
 // patchTextField reads a string field, or an argv array (["apply_patch",
 // "<envelope>"], ["bash", "-lc", "<script>"]) joined by newlines.
 func patchTextField(raw json.RawMessage) string {

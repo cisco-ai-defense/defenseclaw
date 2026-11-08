@@ -74,6 +74,9 @@ const (
 	// enterpriseHookWorkerOpAIDiscovery runs the static AI discovery scan
 	// of the user's own home (standalone profile).
 	enterpriseHookWorkerOpAIDiscovery = "ai_discovery"
+	// enterpriseHookWorkerOpOpenCodePortRead reads, as the user, the port the
+	// user's OpenCode service.json names, changing nothing (GAP-0053).
+	enterpriseHookWorkerOpOpenCodePortRead = "opencode_port_read"
 
 	enterpriseHookWorkerModeInstall        = "install"
 	enterpriseHookWorkerModeVerify         = "verify"
@@ -271,6 +274,11 @@ type enterpriseHookWorkerRequest struct {
 	// foreign_cleanup worker does either; remove-all's apply worker only
 	// removes).
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCode `json:"copilot_vscode,omitempty"`
+	// OpenCodeServicePort is the account's recorded OpenCode service port:
+	// the foreign_cleanup worker writes it into the account's service.json,
+	// whatever the file named (gas-ux-r1 GAP-0053, the record is the only
+	// authority; enterprisepolicy.SetOpenCodeServicePort).
+	OpenCodeServicePort int `json:"opencode_service_port,omitempty"`
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
@@ -365,8 +373,7 @@ type enterpriseHookWorkerTargetResult struct {
 	// Hermes or Devin config put back or recreated, GAP-0564). It is kept
 	// out of the result, which the guardian state stores.
 	AgentConfig string `json:"agent_config,omitempty"`
-	// Purged is what a purge target found and removed (booleans only, so
-	// nothing the account controls reaches the administrator's output).
+	// Purged is what a purge target found, removed and kept.
 	Purged *enterpriseHookPurgeDetail `json:"purged,omitempty"`
 	// Remove reports are produced as the account, before and after teardown.
 	// Presence distinguishes an empty path set from an older worker response.
@@ -382,11 +389,12 @@ type enterpriseHookWorkerTargetResult struct {
 // Kept says ~/.defenseclaw holds the account's own per-user install, which
 // the purge left as it is (GAP-0727).
 type enterpriseHookPurgeDetail struct {
-	Data     bool `json:"data,omitempty"`
-	Kept     bool `json:"kept,omitempty"`
-	Binaries bool `json:"binaries,omitempty"`
-	Gateway  bool `json:"gateway,omitempty"`
-	UVCache  bool `json:"uv_cache,omitempty"`
+	Data        bool     `json:"data,omitempty"`
+	Kept        bool     `json:"kept,omitempty"`
+	KeptEntries []string `json:"kept_entries,omitempty"`
+	Binaries    bool     `json:"binaries,omitempty"`
+	Gateway     bool     `json:"gateway,omitempty"`
+	UVCache     bool     `json:"uv_cache,omitempty"`
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to, comma separated (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups,omitempty"`
@@ -420,7 +428,22 @@ type enterpriseHookWorkerResponse struct {
 	AIDiscovery *inventory.AIDiscoveryReport `json:"ai_discovery,omitempty"`
 	// CopilotVSCode reports the VS Code Local hook file and plugin.
 	CopilotVSCode *enterpriseHookWorkerCopilotVSCodeReport `json:"copilot_vscode,omitempty"`
-	Error         string                                   `json:"error,omitempty"`
+	// OpenCodeServicePort reports the account's OpenCode service port.
+	OpenCodeServicePort *enterpriseHookWorkerOpenCodePortReport `json:"opencode_service_port,omitempty"`
+	Error               string                                  `json:"error,omitempty"`
+}
+
+// enterpriseHookWorkerOpenCodePortReport is the worker's account of the
+// OpenCode service port (user-influenced: the parent bounds the port).
+type enterpriseHookWorkerOpenCodePortReport struct {
+	Port    int  `json:"port,omitempty"`
+	Changed bool `json:"changed,omitempty"`
+	// Previous is the port the file named before this write (0: none).
+	Previous int      `json:"previous,omitempty"`
+	Created  []string `json:"created,omitempty"`
+	// Sealed are the group-writable folders the setter made sticky.
+	Sealed []string `json:"sealed,omitempty"`
+	Error  string   `json:"error,omitempty"`
 }
 
 // enterpriseHookWorkerAccount is the resolved target the parent spawns
@@ -577,6 +600,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		if request.CopilotVSCode != nil {
 			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
 		}
+		if request.OpenCodeServicePort > 0 {
+			response.OpenCodeServicePort = runEnterpriseHookWorkerOpenCodePort(request)
+		}
 		if len(request.Targets) > 0 {
 			response.Targets = runEnterpriseHookWorkerApply(ctx, request).Targets
 		} else {
@@ -590,6 +616,13 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		return respond(response, 0)
 	case enterpriseHookWorkerOpNativeOTLPCheck:
 		return respond(runEnterpriseHookWorkerNativeOTLPCheck(request), 0)
+	case enterpriseHookWorkerOpOpenCodePortRead:
+		port, sealed, err := enterprisepolicy.ReadOpenCodeServicePortSealed(filepath.Clean(request.Home))
+		report := &enterpriseHookWorkerOpenCodePortReport{Port: port, Sealed: sealed}
+		if err != nil {
+			report.Error = err.Error()
+		}
+		return respond(enterpriseHookWorkerResponse{OpenCodeServicePort: report}, 0)
 	case enterpriseHookWorkerOpAIDiscovery:
 		if request.AIDiscovery == nil {
 			return respond(enterpriseHookWorkerResponse{Error: "the ai_discovery operation needs its scan settings"}, 3)
@@ -862,7 +895,7 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			}
 			var summary enterprisehooks.PurgeSummary
 			if summary, err = enterpriseHookWorkerPurger(ctx, opts); err == nil {
-				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
+				outcome.Purged = &enterpriseHookPurgeDetail{Data: summary.Data, Kept: summary.Kept, KeptEntries: summary.KeptEntries, Binaries: summary.Binaries, Gateway: stopped, UVCache: summary.UVCache, RemovedConnectorBackups: strings.Join(summary.KeptRemovedConnectorBackups, ", "), UnrestorableConnectorBackups: strings.Join(summary.KeptUnrestorableConnectorBackups, ", ")}
 			}
 		case enterpriseHookWorkerModeProbeElements:
 			var after enterprisehooks.HookElements

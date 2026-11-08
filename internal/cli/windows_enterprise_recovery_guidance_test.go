@@ -58,7 +58,7 @@ func TestWindowsEnterpriseConfigRecoveryGuidance(t *testing.T) {
 		bundle                  bool
 		want                    string
 	}{
-		{name: "signed bundle", profile: "standalone", platform: "windows", bundle: true, want: "/repair JSON=1"},
+		{name: "signed bundle", profile: "standalone", platform: "windows", bundle: true, want: "enterprise windows repair"},
 		{name: "standalone config", profile: "standalone", platform: "windows", want: "/ensure 'CONFIG="},
 		{name: "secure client", profile: "secure_client", platform: "windows", bundle: true, want: "/ensure CONFIG="},
 	} {
@@ -78,8 +78,11 @@ func TestWindowsEnterpriseConfigRecoveryGuidance(t *testing.T) {
 			if tc.profile == "secure_client" && result.Errors[0].Message != input {
 				t.Fatalf("Secure Client text changed: %q", result.Errors[0].Message)
 			}
-			if tc.bundle && tc.profile == "standalone" && !strings.Contains(result.Errors[0].Message, managed.WindowsSetupSource) {
-				t.Fatalf("bundle recovery does not say where Setup comes from: %q", result.Errors[0].Message)
+			// Setup /repair names the installed CLI repair for a deployment that
+			// stored a bundle, so the CLI text must not send the operator back
+			// to it (the two named each other and neither recovered).
+			if tc.bundle && tc.profile == "standalone" && (strings.Contains(result.Errors[0].Message, "/repair") || strings.Contains(result.Errors[0].Message, "Setup")) {
+				t.Fatalf("bundle recovery names Setup again: %q", result.Errors[0].Message)
 			}
 		})
 	}

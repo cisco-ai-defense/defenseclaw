@@ -102,12 +102,16 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	var connectors map[string]any
 	if idKey == "uid" && cfg != nil {
 		connectors = a.ownConnectorStates(cfg, self, name)
+	} else if idKey == "sid" && cfg != nil {
+		connectors = a.ownWindowsConnectorStates(cfg, self, name)
+	}
+	if connectors != nil {
+		// Claude Code and Cowork follow the Claude Code row: configured, and
+		// not listed unprotected for this caller by the enumerator's scan.
 		claudeCode = false
 		if row, ok := connectors[enterprisepolicy.ConnectorClaudeCode].(map[string]any); ok {
 			claudeCode, _ = row["protected"].(bool)
 		}
-	} else if idKey == "sid" && cfg != nil {
-		connectors = ownWindowsConnectorStates(cfg, claudeCode)
 	}
 	cowork := map[string]any{}
 	if last, found := ownLastCoworkEvent(ctx, auditDB, self, name); found {
@@ -143,13 +147,19 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 
 // ownWindowsConnectorStates keeps the Windows status roster aligned with the
 // managed configuration. The own-status pipe proves the caller's SID, but it
-// does not carry per-connector hook proof. Keep the existing Claude Code
-// status and report the other configured connectors as unconfirmed.
-func ownWindowsConnectorStates(cfg *config.Config, claudeCode bool) map[string]any {
+// does not carry per-connector hook proof, so the only protected row is
+// Claude Code, configured and not listed unprotected for the caller by the
+// enumerator's last completed scan (the record the administrator's status
+// reads, copied where the service can read it). The other configured
+// connectors, and every row while that scan is unknown, are unconfirmed.
+func (a *APIServer) ownWindowsConnectorStates(cfg *config.Config, sid, name string) map[string]any {
+	scan := a.ownUnprotectedAgents(cfg, ownStatusCaller{sid: sid, name: name})
 	states := make(map[string]any)
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
 		state := map[string]any{"protected": false, "state": "not confirmed"}
-		if connector == enterprisepolicy.ConnectorClaudeCode && claudeCode {
+		if decided, ok := scan.state(connector); ok {
+			state = decided
+		} else if connector == enterprisepolicy.ConnectorClaudeCode {
 			state["protected"] = true
 			state["state"] = "protected"
 		}
@@ -177,6 +187,11 @@ func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map
 	if err != nil {
 		return states
 	}
+	// Agents the enumerator cannot protect for this caller: the administrator's
+	// status lists them, so the caller's own status never says protected for
+	// them. An unreadable record, or an entry that may be the caller but
+	// cannot be matched, confirms nothing.
+	scan := a.ownUnprotectedAgents(cfg, ownStatusCaller{uid: &callerUID, name: name})
 	peer := managedHookPeer{UID: callerUID, Name: name}
 	strictExempt := strict && len(cfg.Enterprise.Enrollment.ExemptUsers) > 0 &&
 		(&managedHookAuthorizer{enrollment: cfg.Enterprise.Enrollment}).hostRunExempt(peer)
@@ -197,6 +212,10 @@ func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map
 	}
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
 		state := map[string]any{"protected": false, "state": "not confirmed"}
+		if decided, ok := scan.state(connector); ok {
+			states[connector] = decided
+			continue
+		}
 		if view != nil && (view.admitted == nil || view.admitted[connector]) {
 			if proof, ok := view.connectors[connector]; ok {
 				protected := !rootDenied && !proof.shared && !proof.allAccounts && !proof.accounts[name] &&

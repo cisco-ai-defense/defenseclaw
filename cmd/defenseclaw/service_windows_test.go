@@ -821,7 +821,6 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 		"codex-requirements-ownership.json",
 		"codex-requirements-acl-backup.json",
 		"agent-application-control-attestation.json",
-		"'enterprise',\n            'windows',\n            'codex-requirements',",
 		"safe_to_remove_binary",
 		"managed_state_removed_or_absent",
 		"restored_preimage",
@@ -831,6 +830,13 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 		if !strings.Contains(module, contract) {
 			t.Fatalf("Windows Codex machine-policy lifecycle missing %q", contract)
 		}
+	}
+
+	// The gateway argument tokens and their order are the contract; the
+	// indentation of the array in the module is not (GAP-0773 re-indented it).
+	codexRequirementsArguments := regexp.MustCompile(`'enterprise',\s+'windows',\s+'codex-requirements',`)
+	if !codexRequirementsArguments.MatchString(module) {
+		t.Fatal("Windows Codex machine-policy lifecycle missing the enterprise, windows, codex-requirements gateway arguments in order")
 	}
 
 	transaction := windowsPowerShellFunction(t, module, "New-DefenseClawTransaction")

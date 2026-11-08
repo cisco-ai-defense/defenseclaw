@@ -4687,10 +4687,13 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 		l.perUserStateKept[user] = true
 		r.AddWarning(codePerUserState, fmt.Sprintf("the DefenseClaw per-user data and binaries of user %s were not removed: %s; fix the cause and rerun %s", user, reason, rerun))
 	}
-	// A purge deletes data an account created before the install; name each
-	// account, instead of a bare "done".
+	// Name both removed DefenseClaw entries and account entries that remain.
 	for _, user := range report.Purged {
-		r.Changes = append(r.Changes, purgedUserChange(user, report.PurgedDetail[user]))
+		detail := report.PurgedDetail[user]
+		r.Changes = append(r.Changes, purgedUserChange(user, detail))
+		if len(detail.KeptEntries) > 0 {
+			r.AddWarning(codePerUserState, fmt.Sprintf("kept account entries in ~/.defenseclaw of user %s: %s", user, strings.Join(detail.KeptEntries, ", ")))
+		}
 	}
 	// The enrollment had replaced the account's own Claude Code hook script
 	// with a blocker; the uninstall removed it, and the account's own hook
@@ -4718,11 +4721,12 @@ func (l *lifecycle) removePerUserRegistrations(ctx context.Context) bool {
 
 // purgedUserDetail is what the purge found and removed for one account.
 type purgedUserDetail struct {
-	Data     bool `json:"data"`
-	Kept     bool `json:"kept"`
-	Binaries bool `json:"binaries"`
-	Gateway  bool `json:"gateway"`
-	UVCache  bool `json:"uv_cache"`
+	Data        bool     `json:"data"`
+	Kept        bool     `json:"kept"`
+	KeptEntries []string `json:"kept_entries"`
+	Binaries    bool     `json:"binaries"`
+	Gateway     bool     `json:"gateway"`
+	UVCache     bool     `json:"uv_cache"`
 	// RemovedConnectorBackups names the folders the OpenHands/OmniGent
 	// backups were moved to instead of being deleted (GAP-2015).
 	RemovedConnectorBackups string `json:"removed_connector_backups"`
@@ -4736,7 +4740,10 @@ type purgedUserDetail struct {
 // have lost per-user binaries and a gateway (GAP-1444), and where the data
 // of the account's own per-user install went (#1299).
 func purgedUserChange(user string, detail purgedUserDetail) string {
-	const data = "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
+	data := "all DefenseClaw per-user data of user %s (~/.defenseclaw, including its hook scripts and the foreign-hooks-backup folder)"
+	if len(detail.KeptEntries) > 0 {
+		data = "DefenseClaw-owned per-user entries of user %s in ~/.defenseclaw"
+	}
 	var text string
 	if detail.Kept {
 		// A machine uninstall never deletes or moves an account's own
@@ -4768,6 +4775,9 @@ func purgedUserChange(user string, detail purgedUserDetail) string {
 	}
 	if detail.UnrestorableConnectorBackups != "" {
 		text += "; connector backup records that name no file DefenseClaw can put back (an earlier failed install, say) were kept in " + detail.UnrestorableConnectorBackups + " (delete them when nothing in them is needed)"
+	}
+	if len(detail.KeptEntries) > 0 {
+		text += "; kept account entries in ~/.defenseclaw: " + strings.Join(detail.KeptEntries, ", ")
 	}
 	return text
 }

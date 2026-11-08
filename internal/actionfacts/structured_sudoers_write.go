@@ -55,6 +55,7 @@ func projectPOSIXUnrestrictedSudoersGrantWrites(
 }
 
 func exactSudoersWriteTarget(value string) bool {
+	value = EtcSpelling(value)
 	if value == "/etc/sudoers" {
 		return true
 	}

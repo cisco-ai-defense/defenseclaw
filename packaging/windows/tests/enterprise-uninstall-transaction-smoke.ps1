@@ -1613,6 +1613,11 @@ targets:
                 # install that delivers Cowork snapshots its host artifacts.
                 # This harness delivers no Cowork; the stub only accepts it.
                 [switch]$CoworkRequested,
+                # The production function's uninstall-only switch (GAP-0773):
+                # a kept link at the Codex machine-policy folder leaves the
+                # Codex machine state out of the snapshot. This harness has no
+                # such link; the stub only accepts it.
+                [switch]$SkipLinkedCodexMachineState,
                 # The production function's replacement hook, published
                 # before the services stop (GAP-0993). Production types it
                 # [hashtable]; this harness's sources are plain strings, so
@@ -2869,7 +2874,11 @@ targets:
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$Action
+                [Parameter(Mandatory)][string]$Action,
+                # The uninstall's removal passes -Teardown (GAP-0773); this
+                # harness has no Codex machine-policy folder link, so the stub
+                # only accepts it.
+                [switch]$Teardown
             )
             if ($script:HarnessState.ContainsKey(
                     'require_inactive_tombstone_adoption'

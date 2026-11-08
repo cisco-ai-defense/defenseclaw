@@ -52,8 +52,9 @@ PowerShell 7, which must be installed; you can start the CLI from any shell by i
 full path.
 
 On managed Linux and macOS, the packaged `defenseclaw` launcher gives each
-account its own connector status and sandbox views. It does not offer `doctor`,
-`alerts` or `tui`, even when root invokes that launcher. Administrators use
+account its own connector status and sandbox views. It runs only the commands in
+[Managed command availability](/docs/enterprise/managed-commands), and refuses `doctor`,
+`alerts` and `tui` even when root invokes that launcher. Administrators use
 the installed gateway's `enterprise linux status` or `enterprise macos status`,
 `verify`, and `audit export` commands shown here for deployment health and
 events.
@@ -68,7 +69,7 @@ On Windows, a misspelled flag (such as `--bogus`) on an `enterprise windows` lif
 
 On Linux and macOS, `verify` skips its checks and exits `75` with `lifecycle_busy` while another lifecycle run is in progress; run it again. On Windows it fails (`1603`) while another run's transaction is pending. `verify` also runs on a schedule: daily on Linux (`defenseclaw-enterprise-verify.timer`) and macOS (`com.cisco.defenseclaw.verify`), and from your MDM on Windows (for example `detect.ps1 -RequireHealthy`).
 
-A pending agent install scan is a warning, not a failure: when the enumerator's record of unprotected agents is missing or more than 16 minutes old (for example right after a fresh install or an upgrade), `status` and `verify` show one `agent_install_scan_incomplete` warning that starts `NOT COVERED (scan pending)` and gives the record's age, and set `coverage_complete` and `security_complete` to `false`. The warning alone does not fail `verify`; every other failure, including an agent the old record lists that fails `verify`, still does. The scan runs every five minutes; to run one now, restart the enumerator (`sudo systemctl restart defenseclaw-hook-enumerator.service`, `sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator`, or `Restart-Service DefenseClawHookEnumerator`).
+A pending agent install scan is a warning, not a failure: when the enumerator's record of unprotected agents is missing, more than 16 minutes old, or (on Linux and macOS) from a different configuration generation, `status` and `verify` show one `agent_install_scan_incomplete` warning that starts `NOT COVERED (scan pending)` and set `coverage_complete` and `security_complete` to `false`. This can follow a fresh install, upgrade, or connector change. The warning alone does not fail `verify`; every other failure, including an agent the old record lists that fails `verify`, still does. The scan runs every five minutes; to run one now, restart the enumerator (`sudo systemctl restart defenseclaw-hook-enumerator.service`, `sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator`, or `Restart-Service DefenseClawHookEnumerator`).
 
 ### Verify waits and schedules
 

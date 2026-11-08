@@ -55,8 +55,11 @@ func windowsEnterpriseConfigRecoveryGuidance(result *enterprisestatus.Result, bu
 		return
 	}
 	const ordinary = "; run ensure with the intended config to put the managed config back"
-	bundle := "; run " + windowsEnterpriseSetupCommand("/repair", "JSON=1") + " from an elevated PowerShell prompt to restore the confirmed policy bundle (" +
-		managed.WindowsSetupSource + ")"
+	// The installed CLI, not Setup: it re-applies the confirmed bundle from
+	// the bundle store and records its generation again, which Setup /repair
+	// refuses to do for a deployment that stored a bundle and names this
+	// command instead.
+	bundle := "; run " + windowsEnterpriseAdminCommand("repair", "--json") + " from an elevated PowerShell prompt to restore the confirmed policy bundle"
 	for i := range result.Warnings {
 		if result.Warnings[i].Code == "config_edited_outside_lifecycle" {
 			result.Warnings[i].Message = strings.Replace(result.Warnings[i].Message, ordinary, bundle, 1)

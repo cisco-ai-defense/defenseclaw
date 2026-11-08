@@ -108,6 +108,9 @@ type hookOnlyConnector struct {
 	scriptName  string
 	configPath  func(SetupOpts) string
 	capability  func(SetupOpts) HookCapability
+	// Some hosts identify registrations by an owned top-level key, even
+	// when a later release changes the command stored below it.
+	ownedRegistrationKeyPrefixes []string
 
 	// pluginArtifact connectors are governed by a host-agent plugin FILE
 	// that DefenseClaw writes (and the agent auto-loads) rather than a
@@ -400,11 +403,12 @@ func NewCopilotConnector() *hookOnlyConnector {
 // registration is deterministic and is not duplicated per workspace.
 func NewAntigravityConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
-		name:        "antigravity",
-		description: "Antigravity (agy) lifecycle hooks with synchronous PreToolUse ask/deny decisions",
-		apiPath:     "/api/v1/antigravity/hook",
-		scriptName:  "antigravity-hook.sh",
-		configPath:  antigravityHooksPath,
+		name:                         "antigravity",
+		description:                  "Antigravity (agy) lifecycle hooks with synchronous PreToolUse ask/deny decisions",
+		apiPath:                      "/api/v1/antigravity/hook",
+		scriptName:                   "antigravity-hook.sh",
+		configPath:                   antigravityHooksPath,
+		ownedRegistrationKeyPrefixes: []string{antigravityOwnedHookKeyPrefix},
 		capability: func(opts SetupOpts) HookCapability {
 			return HookCapability{
 				CanBlock:           true,
@@ -417,6 +421,10 @@ func NewAntigravityConnector() *hookOnlyConnector {
 			}
 		},
 	}
+}
+
+func (c *hookOnlyConnector) orphanedRegistrationKeyPrefixes() []string {
+	return c.ownedRegistrationKeyPrefixes
 }
 
 func (c *hookOnlyConnector) Name() string        { return c.name }
@@ -1129,7 +1137,7 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
-		return withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
+		return withOwnedFileLock(filepath.Join(opts.DataDir, hermesLifecycleLockName), func() error {
 			// The home an earlier Setup bound the receipts to is released
 			// first, or capturing the configured home fails on a target
 			// mismatch (an upgrade from 1.0.3 on Windows, GAP-0499).
@@ -1733,6 +1741,13 @@ func validatePluginArtifactDestination(path string) error {
 // validatePluginArtifactDestinationFor also trusts trustedOwnerSID, the
 // per-user target a Windows guardian verifies without that user's token.
 func validatePluginArtifactDestinationFor(path, trustedOwnerSID string) error {
+	// A refusal names what to fix: every refused folder and the one command
+	// (GAP-0730, GAP-0731), not just the first element the walk met.
+	return explainPluginArtifactRefusal(path, checkPluginArtifactDestination(path, trustedOwnerSID))
+}
+
+// checkPluginArtifactDestination is the custody check itself.
+func checkPluginArtifactDestination(path, trustedOwnerSID string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("plugin path must be absolute: %q", path)
 	}
@@ -1814,7 +1829,7 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 		if err := prepareHermesLifecycleDataDir(opts); err != nil {
 			return fmt.Errorf("prepare Hermes lifecycle state: %w", err)
 		}
-		if err := withOwnedFileLock(filepath.Join(opts.DataDir, ".hermes-lifecycle.lock"), func() error {
+		if err := withOwnedFileLock(filepath.Join(opts.DataDir, hermesLifecycleLockName), func() error {
 			return c.teardown(ctx, opts, configPath)
 		}); err != nil {
 			return err
@@ -2508,7 +2523,7 @@ func verifyHermesCleanup(opts SetupOpts, configPath, command string) error {
 			// therefore has no disabled state to prove. The lifecycle lock is a
 			// persistent marker: once Setup or Teardown has run, a missing state
 			// remains a cleanup failure instead of being mistaken for fresh state.
-			lockPath := filepath.Join(opts.DataDir, ".hermes-lifecycle.lock")
+			lockPath := filepath.Join(opts.DataDir, hermesLifecycleLockName)
 			if _, lockErr := os.Lstat(lockPath); os.IsNotExist(lockErr) {
 				return nil
 			} else if lockErr != nil {

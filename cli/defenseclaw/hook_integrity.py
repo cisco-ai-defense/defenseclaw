@@ -38,7 +38,7 @@ import stat
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from defenseclaw import codex_toml
 from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS, unguarded_tool_events
@@ -54,7 +54,18 @@ LAUNCHER_REINSTALL_STEP = (
     "setup cannot recreate the launcher"
 )
 _LAUNCHER_PROBLEM_PREFIX = "the DefenseClaw hook launcher "
-_WINDOWS_LAUNCHER = re.compile(r"([A-Za-z]:[\\/][^\"'&|<>\r\n]*?defenseclaw-hook\.exe)", re.IGNORECASE)
+# A launcher path a plain command names: inside double quotes it may hold an
+# apostrophe or an ampersand; unquoted it ends at a shell separator. The
+# launcher inside a PowerShell bridge is read from its quoted literal instead
+# (_powershell_literals), so a path like C:/Users/O'Neil is not cut short.
+_WINDOWS_LAUNCHER = re.compile(
+    r'"([A-Za-z]:[\\/][^"\r\n]*?defenseclaw-hook\.exe)"|([A-Za-z]:[\\/][^"\'&|<>\r\n]*?defenseclaw-hook\.exe)',
+    re.IGNORECASE,
+)
+_LAUNCHER_LITERAL = re.compile(r"[A-Za-z]:[\\/].*defenseclaw-hook\.exe", re.IGNORECASE | re.DOTALL)
+# PowerShell reads the apostrophe and U+2018 to U+201B as single quotes, and
+# the renderers double each of them inside a literal (managed.PowerShellLiteral).
+_POWERSHELL_QUOTES = "'\u2018\u2019\u201a\u201b"
 
 # Per-user Windows Codex and Devin start this guard program instead of the
 # launcher on the events they can block; it starts the defenseclaw-hook.exe
@@ -62,6 +73,7 @@ _WINDOWS_LAUNCHER = re.compile(r"([A-Za-z]:[\\/][^\"'&|<>\r\n]*?defenseclaw-hook
 # GAP-0676). A missing or damaged guard lets those calls run uninspected, so
 # doctor and status check the guard itself.
 HOOK_GUARD_NAME = "defenseclaw-hook-guard.exe"
+LAUNCHER_NAME = "defenseclaw-hook.exe"
 _HOOK_GUARD_AGENTS = {"codex": "Codex", "devin": "Devin"}
 _HOOK_GUARD_COMMANDS = {
     # windowsCodexGuardedHookCommand: <system>\cmd.exe /d /v:off /c "<guard>" launcher-guard-sibling hook ...
@@ -78,7 +90,7 @@ _HOOK_GUARD_COMMANDS = {
 # install.ps1 Save-HelperRecoveryCopy records "<sha256>  <name>" lines here.
 _BINARY_DIGESTS = ("installer", "binaries.sha256")
 _BINARY_DIGESTS_LIMIT = 64 * 1024
-_HOOK_GUARD_SIZE_LIMIT = 512 * 1024 * 1024
+_RECORDED_BINARY_SIZE_LIMIT = 512 * 1024 * 1024
 _SHA256_HEX = re.compile(r"[0-9a-fA-F]{64}")
 
 
@@ -115,19 +127,59 @@ def _recorded_binary_digest(data_dir: str, name: str) -> str:
     return recorded
 
 
-def _file_sha256(path: str) -> str:
+def _same_object(first: os.stat_result, second: os.stat_result) -> bool:
+    """Whether two looks at one path found the same file. No file index on either means nothing to compare."""
+
+    index_a, index_b = getattr(first, "st_ino", 0), getattr(second, "st_ino", 0)
+    if not index_a or not index_b:
+        return True
+    return index_a == index_b and getattr(first, "st_dev", 0) == getattr(second, "st_dev", 0)
+
+
+def _recorded_match(path: str, recorded: str, before: os.stat_result | None = None) -> bool | None:
+    """Whether the file at *path* is the copy whose sha256 the installer *recorded*.
+
+    True when the digests agree, False when they differ. A file larger than the
+    installer ever records cannot be that copy, so a size over the limit is a
+    mismatch, not a digest that went unchecked. None when no digest can be
+    computed: nothing recorded, or the file cannot be read (Defender or a deny
+    ACE holding it), which is not a match. The hook guard treats that as no
+    proof of damage; the launcher check treats it as a defect.
+
+    ``open`` follows a link and ``fstat`` then describes the link's target, so
+    the hashed bytes say nothing about the path. The path is therefore looked
+    at again after the hash (*before* is the look that preceded it): it must
+    still be a regular file that is no link, and the same file as before. A
+    path that changed under the hash is not the recorded copy.
+    """
+
+    if not recorded:
+        return None
     digest = hashlib.sha256()
     read = 0
     try:
         with open(path, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return False  # whatever was opened is not a regular file, so not the recorded copy
             while chunk := stream.read(1024 * 1024):
                 read += len(chunk)
-                if read > _HOOK_GUARD_SIZE_LIMIT:
-                    return ""
+                if read > _RECORDED_BINARY_SIZE_LIMIT:
+                    return False
                 digest.update(chunk)
+        after = os.lstat(path)
     except OSError:
-        return ""
-    return digest.hexdigest()
+        return None
+    if _is_link(after) or not stat.S_ISREG(after.st_mode):
+        return False
+    if before is not None and not _same_object(before, after):
+        return False
+    return digest.hexdigest() == recorded
+
+
+def _differs_from_recorded(path: str, recorded: str) -> bool:
+    """True when the file at *path* is provably not the copy the installer *recorded*."""
+
+    return _recorded_match(path, recorded) is False
 
 
 def hook_guard_problem(data_dir: str, connector: str, guard: str) -> HookProblem | None:
@@ -159,8 +211,7 @@ def hook_guard_problem(data_dir: str, connector: str, guard: str) -> HookProblem
             blocking=True,
         )
     recorded = _recorded_binary_digest(data_dir, HOOK_GUARD_NAME)
-    actual = _file_sha256(guard) if recorded else ""
-    if recorded and actual and actual != recorded:
+    if _differs_from_recorded(guard, recorded):
         return HookProblem(
             f"{subject} does not match the copy the installer recorded, "
             f"so {agent} prompts and tool calls may run without DefenseClaw",
@@ -208,19 +259,120 @@ def _strings(value: Any) -> list[str]:
     return []
 
 
-def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
-    """Report a Windows hook registration whose native launcher file is gone.
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000  # symbolic links and junctions; not WOF or cloud placeholders
+LAUNCHER_UNVERIFIED_SUFFIX = "is not verified: the installer recorded no copy of it to compare with"
+_LAUNCHER_UNREADABLE = "cannot be read here, so it cannot be checked against the installer record"
 
-    An antivirus quarantine or a cleanup tool can remove
-    ``defenseclaw-hook.exe``; every hook call then fails while status showed
-    the connector as running (GAP-0378). A Codex or Devin entry that starts
-    the hook guard is reported when the guard is missing, not a regular file
-    or not the copy the installer recorded (rel-1-0-6 GAP-0676).
+
+def _is_link(info: os.stat_result) -> bool:
+    """Whether *info* describes a link: a symbolic link, or a Windows name-surrogate reparse point.
+
+    A regular Windows file can carry a reparse tag that is not a link (a
+    compressed executable, a cloud placeholder); it is still the installed file
+    when its digest agrees, so only a name surrogate counts as a link.
     """
+
+    if stat.S_ISLNK(info.st_mode):
+        return True
+    reparse = getattr(info, "st_file_attributes", 0) & _FILE_ATTRIBUTE_REPARSE_POINT
+    return bool(reparse and getattr(info, "st_reparse_tag", 0) & _REPARSE_TAG_NAME_SURROGATE)
+
+
+class LauncherHealth(NamedTuple):
+    """What one look at a launcher file found: a defect (FAIL), or why it was not verified (WARN)."""
+
+    defect: str = ""
+    unverified: str = ""
+
+
+def _launcher_health(launcher: str, data_dir: str = "") -> LauncherHealth:
+    """Look at the launcher file at *launcher* once and say whether it can be the installed one.
+
+    One rule decides it: the launcher is a regular file (not missing, not a
+    folder, not a link) whose sha256 is the one the installer recorded for it
+    (``installer/binaries.sha256``, next to the guard's). Another program
+    under its name, or a truncated copy, differs from the record; nothing
+    inside the file is parsed. A file that cannot be inspected or hashed is a
+    defect, never a pass: its state is not known, and the same result is
+    reported by every caller, so a file that changes between two looks cannot
+    be shown as healthy by one of them. Only a launcher with nothing recorded
+    to compare with is merely unverified.
+    """
+
+    recorded = _recorded_binary_digest(data_dir, LAUNCHER_NAME)
+    try:
+        info = os.lstat(launcher)
+    except (FileNotFoundError, NotADirectoryError):
+        return LauncherHealth(defect="is missing")
+    except OSError:
+        return LauncherHealth(defect=_LAUNCHER_UNREADABLE)
+    if _is_link(info):
+        return LauncherHealth(defect="is a link, not the installed file")
+    if not stat.S_ISREG(info.st_mode):
+        return LauncherHealth(defect="is not a regular file")
+    if not recorded:
+        return LauncherHealth(unverified=LAUNCHER_UNVERIFIED_SUFFIX)
+    match = _recorded_match(launcher, recorded, info)
+    if match is None:
+        return LauncherHealth(defect=_LAUNCHER_UNREADABLE)
+    if not match:
+        return LauncherHealth(defect="does not match the copy the installer recorded")
+    return LauncherHealth()
+
+
+def _powershell_literals(script: str) -> list[str]:
+    """The values of the single-quoted literals of the PowerShell *script*.
+
+    A doubled quote character inside a literal is one character of its
+    value, as ``managed.PowerShellLiteralValue`` reads it back.
+    """
+
+    values: list[str] = []
+    index, end = 0, len(script)
+    while index < end:
+        if script[index] not in _POWERSHELL_QUOTES:
+            index += 1
+            continue
+        index += 1
+        value: list[str] = []
+        closed = False
+        while index < end:
+            char = script[index]
+            if char in _POWERSHELL_QUOTES:
+                if index + 1 < end and script[index + 1] == char:
+                    value.append(char)
+                    index += 2
+                    continue
+                closed = True
+                index += 1
+                break
+            value.append(char)
+            index += 1
+        if closed:
+            values.append("".join(value))
+    return values
+
+
+def _launcher_paths(command: str) -> list[str]:
+    """The launcher paths *command* starts: named in it, or in the literals of its encoded script."""
+
+    paths = [match.group(1) or match.group(2) for match in _WINDOWS_LAUNCHER.finditer(command)]
+    paths += [
+        literal
+        for literal in _powershell_literals(_encoded_script(command))
+        if _LAUNCHER_LITERAL.fullmatch(literal)
+    ]
+    return list(dict.fromkeys(paths))
+
+
+def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[str]]:
+    """The launcher files and hook guards the recorded hook files of *connector* start (per-user Windows)."""
 
     if not _is_windows() or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         # Managed installs (Secure Client included) keep their own status.
-        return []
+        return [], []
+    launchers: list[str] = []
     guards: list[str] = []
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -230,19 +382,61 @@ def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
         except (OSError, ValueError):
             continue
         for value in _strings(document):
-            for match in _WINDOWS_LAUNCHER.finditer(value):
-                launcher = match.group(1)
-                if not os.path.isfile(launcher):
-                    return [f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} is missing, so every hook call fails"]
+            launchers += [launcher for launcher in _launcher_paths(value) if launcher not in launchers]
             guard = hook_guard_program(connector, value)
             if guard and guard not in guards:
                 guards.append(guard)
+    return launchers, guards
+
+
+class LauncherReport(NamedTuple):
+    """The launcher and guard findings of one connector: problems (FAIL), else the first unverified launcher."""
+
+    problems: list[str]
+    unverified: str = ""
+
+
+def hook_launcher_report(cfg: Any, connector: str) -> LauncherReport:
+    """Report a Windows hook registration whose native launcher file cannot start.
+
+    An antivirus quarantine or a cleanup tool can remove
+    ``defenseclaw-hook.exe``, or a folder, a link or another program can take
+    its place; every hook call then fails while status showed the connector
+    as running (GAP-0378, GAP-0810). The launcher is read from every string
+    of the recorded hook files and from the script of a PowerShell
+    -EncodedCommand in it, so the bridges Kiro, Antigravity and the Codex
+    fallback register are covered the same as a plain launcher path. Each
+    launcher is looked at once (:func:`_launcher_health`) and doctor derives
+    its FAIL, WARN and PASS from that one result. A Codex or Devin entry that
+    starts the hook guard is reported when the guard is missing, not a
+    regular file or not the copy the installer recorded (rel-1-0-6
+    GAP-0676).
+
+    A launcher with no recorded digest (an install from before the installer
+    recorded it) is not compared: ``unverified`` names it so doctor warns and
+    never passes it; the installer again records the digest (GAP-0810).
+    """
+
+    launchers, guards = _windows_hook_programs(cfg, connector)
     data_dir = str(getattr(cfg, "data_dir", "") or "")
+    unverified = ""
+    for launcher in launchers:
+        health = _launcher_health(launcher, data_dir)
+        if health.defect:
+            return LauncherReport([f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {health.defect}, so every hook call fails"])
+        if health.unverified and not unverified:
+            unverified = f"{_LAUNCHER_PROBLEM_PREFIX}{launcher} {health.unverified}"
     for guard in guards:
         problem = hook_guard_problem(data_dir, connector, guard)
         if problem is not None:
-            return [problem]
-    return []
+            return LauncherReport([problem])
+    return LauncherReport([], unverified)
+
+
+def hook_launcher_problems(cfg: Any, connector: str) -> list[str]:
+    """The launcher or guard problems of the registered hooks of *connector* (:func:`hook_launcher_report`)."""
+
+    return hook_launcher_report(cfg, connector).problems
 
 
 def setup_command(connector: str) -> str:
@@ -763,17 +957,23 @@ def _hook_command_lines(value: Any, connector: str) -> list[str]:
     return found
 
 
-def _decoded_command(command: str) -> str:
-    """*command*, followed by the script of a PowerShell -EncodedCommand in it."""
+def _encoded_script(command: str) -> str:
+    """The script of a PowerShell -EncodedCommand in *command*, else ""."""
 
     match = _ENCODED_SCRIPT.search(command)
     if not match:
-        return command
+        return ""
     try:
-        script = base64.b64decode(match.group(1), validate=True).decode("utf-16-le")
+        return base64.b64decode(match.group(1), validate=True).decode("utf-16-le")
     except (ValueError, UnicodeDecodeError):
-        return command
-    return command + "\n" + script
+        return ""
+
+
+def _decoded_command(command: str) -> str:
+    """*command*, followed by the script of a PowerShell -EncodedCommand in it."""
+
+    script = _encoded_script(command)
+    return command + "\n" + script if script else command
 
 
 def _defenseclaw_hook_command(cfg: Any, connector: str, command: str, *, strict: bool) -> bool:

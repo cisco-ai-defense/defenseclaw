@@ -414,6 +414,14 @@ func parseShell(command string) (*syntax.File, bool) {
 // escapes, a leading ~/ and $HOME. Anything whose value depends on the
 // runtime (another parameter, a substitution, a glob, ~user) is not static.
 func staticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (string, bool) {
+	if value, ok := plainLiteralWord(word); ok {
+		return value, true
+	}
+	return expandStaticShellWord(word, env, haveHome)
+}
+
+// expandStaticShellWord is staticShellWord by the full check and expansion.
+func expandStaticShellWord(word *syntax.Word, env expand.Environ, haveHome bool) (string, bool) {
 	for i, part := range word.Parts {
 		switch part := part.(type) {
 		case *syntax.Lit:
@@ -464,7 +472,36 @@ func StaticWord(word *syntax.Word, home string) (string, bool) {
 	if word == nil {
 		return "", false
 	}
+	if value, ok := plainLiteralWord(word); ok {
+		return value, true
+	}
 	return staticShellWord(word, expand.ListEnviron("HOME="+strings.TrimRight(home, "/")), home != "")
+}
+
+// plainLiteralWord is the value of a word that is one literal of plain path
+// characters. Expansion leaves such a word as it is: it holds no quote,
+// escape, brace, tilde, parameter or glob, so the one field is the literal
+// itself and the expansion (an environment and a field list per word) is
+// skipped. A long list of operands pays that cost once per word per pass.
+func plainLiteralWord(word *syntax.Word) (string, bool) {
+	if len(word.Parts) != 1 {
+		return "", false
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	if !ok || lit.Value == "" {
+		return "", false
+	}
+	for i := 0; i < len(lit.Value); i++ {
+		c := lit.Value[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '_', c == '.', c == '/', c == '-', c == ',', c == ':', c == '@',
+			c == '%', c == '+', c == '=':
+		default:
+			return "", false
+		}
+	}
+	return lit.Value, true
 }
 
 func homeParam(param *syntax.ParamExp, haveHome bool) bool {
@@ -922,6 +959,7 @@ func hookShellDialect(connector, tool string) actionfacts.Dialect {
 // so the map lists that call's targets and the limit alone does not make it
 // incomplete. Any other reason still does.
 func ResolveConnector(connector, surface, event string, payload []byte) string {
+	defer HookCall()()
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
 	}
@@ -1023,6 +1061,8 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if copilot {
 		tool = copilotargs.LocalActionTool(tool)
 	}
+	// Describe the call under the tool name the gateway judges it as.
+	tool = ConnectorActionTool(connector, tool)
 	if len(args) == 0 && !toolConflict && !argsConflict {
 		return ""
 	}
@@ -4829,7 +4869,7 @@ func (c *linkCopy) readDiskLinks(facts map[string]string, record bool) bool {
 // the disk. ok is false when path cannot be read, the walk fails or is over
 // its bounds, or a link names a missing entry or another link.
 func sourceDiskLinks(path string) ([]diskLink, bool) {
-	info, err := os.Lstat(path)
+	info, err := pathLstat(path)
 	if err != nil {
 		// The disk-link check read this source as one that may hold a
 		// link; a gateway behind ProtectHome sees ENOENT for it.
@@ -4837,7 +4877,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 	}
 	var found []diskLink
 	add := func(name, rest string) bool {
-		text, err := os.Readlink(name)
+		text, err := pathReadlink(name)
 		if err != nil || text == "" || len(found) >= maxSourceLinks {
 			return false
 		}
@@ -4845,7 +4885,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(name), text)
 		}
-		if hop, err := os.Lstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
+		if hop, err := pathLstat(target); err != nil || hop.Mode()&os.ModeSymlink != 0 {
 			return false
 		}
 		found = append(found, diskLink{rest: rest, text: text})
@@ -4858,7 +4898,7 @@ func sourceDiskLinks(path string) ([]diskLink, bool) {
 		return nil, true
 	}
 	seen, ok := 0, true
-	err = filepath.WalkDir(path, func(name string, entry fs.DirEntry, err error) error {
+	err = pathWalkDir(path, func(name string, entry fs.DirEntry, err error) error {
 		seen++
 		if err != nil || seen > 4096 {
 			ok = false
@@ -5109,7 +5149,7 @@ func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[str
 		return true
 	}
 	for _, source := range parsed.sources {
-		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
+		if diskSourceMayLink(source, cwd, home, facts, record, pathLstat) {
 			return true
 		}
 	}
@@ -5140,7 +5180,7 @@ func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd,
 			// materialize a link at any name in the destination tree.
 			return true
 		}
-		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
+		if diskSourceMayLink(source, cwd, home, facts, record, pathLstat) {
 			return true
 		}
 	}
@@ -5173,7 +5213,7 @@ func diskSourceMayLink(source, cwd, home string, facts map[string]string, record
 		return linked
 	}
 	if record {
-		if os.IsNotExist(err) {
+		if NotExist(err) {
 			facts[key] = "0"
 			return false
 		}
@@ -5185,7 +5225,7 @@ func diskSourceMayLink(source, cwd, home string, facts map[string]string, record
 	// home or temporary tree: a source missing from a directory the gateway
 	// can see is missing, so cd build; cp -r ../src out read where the shell
 	// stood when the cd fails is a plain copy (GAP-2574 checker R01).
-	if os.IsNotExist(err) && visibleSourceDirectory(filepath.Dir(path), lstat) {
+	if NotExist(err) && visibleSourceDirectory(filepath.Dir(path), lstat) {
 		return false
 	}
 	return runtime.GOOS == "linux" &&
@@ -5211,7 +5251,7 @@ func visibleSourceDirectory(dir string, lstat func(string) (os.FileInfo, error))
 // A tree that cannot be read or is larger than the bound counts as one.
 func treeHasSymlink(root string) bool {
 	seen, found := 0, false
-	err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
+	err := pathWalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
 		seen++
 		if err != nil || seen > 4096 || entry.Type()&fs.ModeSymlink != 0 {
 			found = true

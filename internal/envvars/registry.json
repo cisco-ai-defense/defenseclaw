@@ -1563,8 +1563,8 @@
     {
       "name": "DEFENSECLAW_GATEWAY_BIN",
       "category": "runtime_path",
-      "purpose": "Override path to the defenseclaw-gateway binary. Used by CI / packagers when the binary isn't on PATH.",
-      "default": "(discovered via PATH lookup)",
+      "purpose": "Override path to the defenseclaw-gateway binary, for CI and packagers. The gateway resolver, the readiness report and the connected verifier (after its custody check) follow it. Uninstall, init, hook registration and the sidecar start ignore it and use the gateway of this install.",
+      "default": "(the gateway of this install, then PATH)",
       "accepted_values": [
         "any-absolute-path"
       ],
@@ -3609,7 +3609,7 @@
     {
       "name": "DEFENSECLAW_NO_SANDBOX",
       "category": "security_opt_out",
-      "purpose": "Set to 1 to run a harness natively for one command when `defenseclaw sandbox enable <harness>` has wrapped it in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`), where your organization allows a host run: on a managed computer whose policy lists the agent in `required_for` the host run is still refused unless the account is in `enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account and the effective `when_unavailable` setting is `alert`. The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
+      "purpose": "Set to 1 to run a harness natively for one command when it has been wrapped for the sandbox in your shell (for example `DEFENSECLAW_NO_SANDBOX=1 claude`), where your organization allows a host run: on a managed computer whose policy lists the agent in `required_for` the host run is still refused unless the account is in `enterprise.enrollment.exempt_users`, or sandboxes are unavailable to the account and the effective `when_unavailable` setting is `alert`; a per-user gateway does not read `required_for`. The wrapper then calls the real harness instead of `defenseclaw sandbox run`.",
       "default": "unset",
       "accepted_values": [
         "1",
@@ -6045,8 +6045,8 @@
     {
       "name": "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
       "category": "security_opt_out",
-      "purpose": "Make the plugin-side tool-inspect hook fail-open (allow tool) when the gateway is unreachable. Default is fail-closed (block).",
-      "default": "unset (fail-closed)",
+      "purpose": "Legacy OpenClaw tool-inspection outage override through 1.0.8. The 1.0.9 plugin ignores it and reads the saved guardrail tier instead.",
+      "default": "ignored by 1.0.9",
       "accepted_values": [
         "1",
         "true",
@@ -6057,8 +6057,8 @@
       "managed": "ignore",
       "consumers": [
         {
-          "location": "extensions/defenseclaw/src/index.ts",
-          "description": "OpenClaw plugin tool-inspect handler"
+          "location": "extensions/defenseclaw/src/__tests__/index.test.ts",
+          "description": "Regression check that the 1.0.9 plugin ignores the legacy override"
         }
       ],
       "since": "0.4.0"

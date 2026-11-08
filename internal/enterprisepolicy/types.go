@@ -145,6 +145,12 @@ type Options struct {
 	CursorFailOpen bool
 	// SkipTrustChecks disables ancestor ownership checks; only tests set it.
 	SkipTrustChecks bool
+
+	// keptLinks are the policy paths on which RemoveWindowsGoOwned kept a link
+	// (lower-cased): the removal of the target skips those paths alone and
+	// still removes DefenseClaw's entry at its other paths (GAP-0758). Set
+	// only by RemoveWindowsGoOwned.
+	keptLinks map[string]bool
 }
 
 func runtimeGOOS() string { return runtime.GOOS }

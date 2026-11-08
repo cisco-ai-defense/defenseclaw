@@ -62,27 +62,66 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	if managedInstall {
 		return HookOutageFailMode(true, c.EffectiveHookFailModeForConnector(connector), "")
 	}
+	// OpenClaw's plugin tool inspection is an in-process check. Its strict
+	// policy stays closed even when an older saved hook setting says open.
+	if strings.EqualFold(strings.TrimSpace(connector), "openclaw") &&
+		c.HookPolicyTierForConnector(connector) == HookPolicyTierStrict {
+		return "closed"
+	}
 	return HookOutageFailMode(false, c.configuredHookFailModeForConnector(connector), c.HookPolicyTierForConnector(connector))
 }
 
 // HookPolicyTierForConnector is the policy tier of connector's guardrail rule
 // pack, as the gateway reads its posture (internal/gateway packPosture): the
-// pack manifest's posture, else a built-in pack's own name, else the folder
-// name (strict and permissive keep theirs, anything else is default).
+// generation's pinned manifest posture, else the legacy folder-name table.
+// A config-only caller without a loaded generation reads the manifest itself.
+// A real built-in selection keeps its tier when no policy directory has been
+// resolved; a custom pack may use the same name and takes its own posture.
+// A selected custom_packs entry that fails CustomRulePackError is strict.
 func (c *Config) HookPolicyTierForConnector(connector string) string {
 	if c == nil {
 		return HookPolicyTierDefault
 	}
 	ref := c.EffectiveRulePackRefForConnector(connector)
+	if c.brokenCustomRulePackSelected(ref) {
+		// A broken custom_packs entry is a config error, whatever its name:
+		// the gateway loads its built-in fallback and status names the
+		// error, but it is no evidence of a posture that opens an outage.
+		return HookPolicyTierStrict
+	}
 	dir := strings.TrimSpace(c.ResolveRulePackDir(ref))
 	if dir == "" {
 		dir = strings.TrimSpace(ref.Dir)
 	}
+	if posture, pinned := c.PinnedRulePackPosture(dir); pinned {
+		if posture != "" {
+			return normalizeHookPolicyTier(posture)
+		}
+		return packFolderPosture(dir)
+	}
+	if custom, selected := c.UsableCustomRulePack(ref.Name); selected {
+		// A standalone hook has no rule generation. Its posture comes from
+		// the one config-load verdict: a pack the rule loader accepted whose
+		// files hash to the selected pin. A binary without the loader cannot
+		// prove a pinned pack, so its posture never sets an outage tier.
+		checked, _ := c.customRulePackCheck(ref.Name)
+		if checked.validated {
+			if checked.posture != "" {
+				return checked.posture
+			}
+			return packFolderPosture(dir)
+		}
+		if strings.TrimSpace(custom.Digest) != "" {
+			return HookPolicyTierStrict
+		}
+	}
 	if posture := packManifestPosture(dir); posture != "" {
 		return posture
 	}
-	if ref.Name != "" && IsBuiltinRulePack(ref.Name) {
-		return ref.Name
+	if dir == "" && IsBuiltinRulePack(ref.Name) {
+		if _, custom := c.Guardrail.CustomPacks[ref.Name]; !custom {
+			return ref.Name
+		}
 	}
 	return packFolderPosture(dir)
 }

@@ -127,7 +127,7 @@ func ensureHookAPITokenFileLocked(dataDir, tokenPath string) (string, error) {
 		if err := hookAPIValidateDirectory(dataDir); err != nil {
 			return "", fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		if err := os.Mkdir(hooksDir, 0o700); err == nil {
+		if err := mkdirHookAPITokenDir(hooksDir); err == nil {
 			hooksDirCreated = true
 		} else if !errors.Is(err, os.ErrExist) {
 			return "", fmt.Errorf("create hook API token dir: %w", err)
@@ -310,7 +310,7 @@ func publishHookAPITokenLocked(dataDir, tokenPath, token string) (returnErr erro
 		if err := hookAPIValidateDirectory(dataDir); err != nil {
 			return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
 		}
-		if err := os.Mkdir(hooksDir, 0o700); err == nil {
+		if err := mkdirHookAPITokenDir(hooksDir); err == nil {
 			hooksDirCreated = true
 		} else if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("create hook API token dir: %w", err)
@@ -887,6 +887,28 @@ func validateHookAPITokenLocationWith(
 	}
 	if err := validateDirectory(hooksDir); err != nil {
 		return fmt.Errorf("hook API token directory %s is not trusted: %w", hooksDir, err)
+	}
+	return nil
+}
+
+// ensureHookAPITokenDir makes sure the hooks directory exists, creating a
+// missing one through mkdirHookAPITokenDir like the hook token does, so the
+// OTLP token paths never create it first with an ordinary mkdir. A missing
+// data directory above it is made first, except inside the managed tree of a
+// standalone deployment, where a missing parent is the installer's to create
+// (mkdirHookAPITokenParents); an existing directory is left for the caller
+// trust check.
+func ensureHookAPITokenDir(hooksDir string) error {
+	if _, err := os.Lstat(hooksDir); err == nil {
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := mkdirHookAPITokenParents(filepath.Dir(hooksDir)); err != nil {
+		return err
+	}
+	if err := mkdirHookAPITokenDir(hooksDir); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
 	}
 	return nil
 }

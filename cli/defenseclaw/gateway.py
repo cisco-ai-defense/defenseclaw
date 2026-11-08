@@ -45,6 +45,16 @@ import requests
 from urllib3.connection import HTTPConnection
 from urllib3.connectionpool import HTTPConnectionPool
 
+from defenseclaw.gateway_path import (  # noqa: F401  (re-exported: callers and tests reach them here)
+    _CANONICAL_INSTALL_DIR,
+    GATEWAY_BIN_NAME,
+    _installer_venv_gateway,
+    _is_runnable_file,
+    _launcher_sibling_gateway,
+    canonical_install_path,
+    path_gateway,
+)
+
 PLUGIN_MUTATION_TIMEOUT = 90
 ALERT_DISPOSITION_MIN_TIMEOUT_SECONDS = 30
 ALERT_DISPOSITION_MAX_TIMEOUT_SECONDS = 300
@@ -822,10 +832,12 @@ def _per_user_connected_verifier() -> str:
     if packaged_windows_install_root():
         candidates = [packaged_windows_gateway_path() or ""]
     else:
+        # env, this install's own layout, PATH, canonical: a sibling that
+        # fails the custody check still lets a trusted PATH gateway be tried.
         candidates = [
             os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip(),
-            shutil.which(GATEWAY_BIN_NAME) or "",
             _launcher_sibling_gateway() or "",
+            shutil.which(GATEWAY_BIN_NAME) or "",
             canonical_install_path(),
         ]
     for candidate in dict.fromkeys(candidates):
@@ -1775,19 +1787,9 @@ class OrchestratorClient:
 # CLI stays usable in the very same shell that ran ``make all``.
 
 
-GATEWAY_BIN_NAME = "defenseclaw-gateway"
-
-_CANONICAL_INSTALL_DIR = os.path.join(os.path.expanduser("~"), ".local", "bin")
 
 
-def canonical_install_path() -> str:
-    """Return the canonical install path written by the installers.
 
-    Exposed so error messages can reference the exact same path instead of
-    each hard-coding the string.
-    """
-    name = GATEWAY_BIN_NAME + (".exe" if os.name == "nt" else "")
-    return os.path.join(_CANONICAL_INSTALL_DIR, name)
 
 
 def resolve_gateway_binary() -> str | None:
@@ -1806,16 +1808,19 @@ def resolve_gateway_binary() -> str | None:
        binary somewhere non-standard.  Returned verbatim (even when the
        file is missing) so the real ``exec`` error surfaces to the
        caller rather than a generic "not found" from here.
-    3. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
+    3. The directory of the ``defenseclaw`` launcher this process runs as,
+       where the installers put the gateway too. It comes before ``PATH``
+       because a shell opened before the install can still list an older
+       DefenseClaw (a 0.8.x Setup install, say) first, and that gateway
+       rejects this release's config (GAP-0099). A CI job with a bare
+       ``PATH`` and its own ``HOME`` finds it too.
+    4. ``shutil.which(GATEWAY_BIN_NAME)`` — honours ``PATH``.  The
        happy path for installed releases and for users whose shell has
        already sourced the updated rc file.
-    4. The directory of the ``defenseclaw`` launcher this process runs as,
-       where the installers put the gateway too: a CI job with a bare
-       ``PATH`` and its own ``HOME`` still finds it.
     5. :func:`canonical_install_path` — the ``~/.local/bin`` fallback
        that keeps ``defenseclaw tui`` working in the same shell that
        just ran ``make all``.
-    5. The enterprise package's gateway on a managed Linux or macOS host.
+    6. The enterprise package's gateway on a managed Linux or macOS host.
 
     ``None`` only if every option above fails to resolve to a runnable
     file on disk.  Callers own the user-facing error message.
@@ -1826,20 +1831,14 @@ def resolve_gateway_binary() -> str | None:
         # never fall through to a working-directory/PATH shadow.
         return packaged_windows_gateway_path()
 
-    override = os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip()
-    if override:
-        return override
-
-    via_path = shutil.which(GATEWAY_BIN_NAME)
+    # The installers put both binaries in one directory: the gateway next to
+    # this launcher is this release's own, so it wins over a PATH that lists
+    # an older install first (GAP-0099), and a CI job that runs
+    # ~/.local/bin/defenseclaw with a bare PATH (and its own HOME) still
+    # finds it (GAP-0253).
+    via_path = path_gateway()
     if via_path:
         return via_path
-
-    # The installers put both binaries in one directory: a CI job that runs
-    # ~/.local/bin/defenseclaw with a bare PATH (and its own HOME) still
-    # finds the gateway next to it (GAP-0253).
-    sibling = _launcher_sibling_gateway()
-    if sibling:
-        return sibling
 
     canonical = canonical_install_path()
     if _is_runnable_file(canonical):
@@ -1877,15 +1876,10 @@ GATEWAY_NOT_FOUND_MESSAGE = (
 )
 
 
-def _launcher_sibling_gateway() -> str | None:
-    """The gateway next to the ``defenseclaw`` launcher this process runs as, or None."""
 
-    launcher = sys.argv[0] if sys.argv else ""
-    name = os.path.basename(launcher).lower().removesuffix(".exe")
-    if name != "defenseclaw":
-        return None
-    candidate = os.path.join(os.path.dirname(os.path.abspath(launcher)), os.path.basename(canonical_install_path()))
-    return candidate if _is_runnable_file(candidate) else None
+
+
+
 
 
 def resolve_trusted_gateway_binary() -> str | None:
@@ -1958,11 +1952,6 @@ def packaged_windows_install_root() -> str | None:
     return root
 
 
-def _is_runnable_file(path: str) -> bool:
-    try:
-        return os.path.isfile(path) and os.access(path, os.X_OK)
-    except OSError:
-        return False
 
 
 def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:

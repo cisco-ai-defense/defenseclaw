@@ -94,11 +94,17 @@ func WriteUnixEnumeratorAccounts(path string, accounts, identityOnly []UnixEligi
 // WriteUnixUnprotectedAgents publishes the enumerator's unprotected-agents
 // record at path with the same root-only contract as the eligible accounts.
 func WriteUnixUnprotectedAgents(path string, agents []UnprotectedAgent) error {
+	return WriteUnixUnprotectedAgentsForConfig(path, agents, 0, "")
+}
+
+// WriteUnixUnprotectedAgentsForConfig publishes a completed scan with the
+// lifecycle config generation and config digest it covered.
+func WriteUnixUnprotectedAgentsForConfig(path string, agents []UnprotectedAgent, configGeneration uint64, configSHA256 string) error {
 	path = filepath.Clean(strings.TrimSpace(path))
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("enterprise hooks: unprotected agents path must be absolute: %s", path)
 	}
-	data, err := MarshalUnprotectedAgents(agents)
+	data, err := MarshalUnprotectedAgentsForConfig(agents, configGeneration, configSHA256)
 	if err != nil {
 		return err
 	}
@@ -107,6 +113,52 @@ func WriteUnixUnprotectedAgents(path string, agents []UnprotectedAgent) error {
 	}
 	now := time.Now()
 	return os.Chtimes(path, now, now)
+}
+
+// WriteUnixUnprotectedAgentsScanStarted publishes, as the first act of an
+// enumerator cycle, that a scan of the config (generation, digest) has
+// started, so a lifecycle change that restarted the enumerator sees the new
+// generation within seconds instead of after the full scan (GAP-0782: the
+// first macOS cycle took 38 s). The record keeps the previous scan's agents
+// and reads as pending until the cycle's final record replaces it. A record
+// that already names this build and config (a completed scan, or the marker
+// of the scan in progress) is left alone, so the cycles of an unchanged
+// config never turn a complete record pending.
+func WriteUnixUnprotectedAgentsScanStarted(path string, configGeneration uint64, configSHA256 string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("enterprise hooks: unprotected agents path must be absolute: %s", path)
+	}
+	current, _ := readBoundedFile(path, UnprotectedAgentsMaxBytes)
+	data, err := unprotectedScanStartedRecord(current, configGeneration, configSHA256)
+	if err != nil || data == nil {
+		return err
+	}
+	if err := writeUnixRootOnlyRecord(path, data, ".defenseclaw-unprotected-*.new", UnprotectedAgentsMaxBytes); err != nil {
+		return err
+	}
+	now := time.Now()
+	return os.Chtimes(path, now, now)
+}
+
+// unprotectedScanStartedRecord is the announcement to write over current (the
+// record on disk, nil when absent or unreadable), or nil when none is due:
+// the config has no usable generation, or current already names this build
+// and config.
+func unprotectedScanStartedRecord(current []byte, configGeneration uint64, configSHA256 string) ([]byte, error) {
+	if configGeneration == 0 || configSHA256 == "" {
+		return nil, nil
+	}
+	var previous []UnprotectedAgent
+	if current != nil {
+		if UnprotectedAgentsRecordGeneration(current) == UnprotectedAgentsGeneration() &&
+			UnprotectedAgentsRecordConfigGeneration(current) == configGeneration &&
+			UnprotectedAgentsRecordConfigSHA256(current) == configSHA256 {
+			return nil, nil
+		}
+		previous, _ = ParseUnprotectedAgents(current)
+	}
+	return MarshalUnprotectedAgentsScanStarted(previous, configGeneration, configSHA256)
 }
 
 // writeUnixRootOnlyRecord writes data at path: root-owned 0600 below a

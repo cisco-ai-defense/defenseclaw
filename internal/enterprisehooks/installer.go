@@ -118,6 +118,12 @@ type InstallOptions struct {
 	// WindowsTargetLogon selects the logon a Windows install acts under for
 	// the target's user. The zero value is the user's active session.
 	WindowsTargetLogon WindowsTargetLogon
+	// OpenCodeServicePort is the guardian's SID-keyed port assignment for a
+	// managed Windows OpenCode target. Zero leaves other installs untouched.
+	OpenCodeServicePort int
+	// OpenCodeServicePortRequired refuses a managed Windows OpenCode install
+	// when the guardian could not assign that account a port.
+	OpenCodeServicePortRequired bool
 }
 
 // WindowsTargetLogon is the logon whose token a Windows install impersonates.

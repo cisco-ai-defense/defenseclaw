@@ -35,6 +35,11 @@ var (
 	windowsCodexRequirementsManifestLoader = enterprisehooks.LoadManifest
 )
 
+// windowsCodexRequirementsTeardownRemover is the uninstall's removal (remove
+// --uninstall): the only one that keeps a link at the Codex machine-policy
+// folder (GAP-0773).
+var windowsCodexRequirementsTeardownRemover = connector.RemoveWindowsCodexMachineRequirementsForTeardown
+
 type windowsCodexDeploymentMetadata struct {
 	SchemaVersion          int                                  `json:"schema_version"`
 	DeploymentMode         string                               `json:"deployment_mode"`
@@ -60,7 +65,7 @@ func newWindowsCodexRequirementsCommand() *cobra.Command {
 	}
 	for _, action := range []string{"inspect", "reconcile", "verify", "remove"} {
 		action := action
-		var jsonOutput bool
+		var jsonOutput, uninstall bool
 		child := &cobra.Command{
 			Use:          action,
 			Short:        action + " protected Codex requirements",
@@ -68,16 +73,20 @@ func newWindowsCodexRequirementsCommand() *cobra.Command {
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				return runWindowsCodexRequirementsAction(cmd, action, jsonOutput)
+				return runWindowsCodexRequirementsAction(cmd, action, jsonOutput, uninstall)
 			},
 		}
 		child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+		if action == "remove" {
+			child.Flags().BoolVar(&uninstall, "uninstall", false,
+				"the uninstall's removal: keep, and do not read, a link at the Codex machine-policy folder")
+		}
 		command.AddCommand(child)
 	}
 	return command
 }
 
-func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOutput bool) error {
+func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOutput, uninstall bool) error {
 	// Identity authorization intentionally precedes layout/config reads. A
 	// standard user cannot use this hidden parser as a protected-file oracle.
 	if err := enterpriseHooksPlatformPreflight(); err != nil {
@@ -97,7 +106,11 @@ func runWindowsCodexRequirementsAction(cmd *cobra.Command, action string, jsonOu
 	case "verify":
 		report, err = windowsCodexRequirementsVerifier(opts)
 	case "remove":
-		report, err = windowsCodexRequirementsRemover(opts)
+		if uninstall {
+			report, err = windowsCodexRequirementsTeardownRemover(opts)
+		} else {
+			report, err = windowsCodexRequirementsRemover(opts)
+		}
 	default:
 		err = fmt.Errorf("unsupported Codex requirements action %q", action)
 	}

@@ -16,13 +16,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import type { ScanResult } from "../types.js";
+import { HealthMonitor } from "../health-monitor.js";
+import { MODEL_OUTAGE_WARNING } from "../fetch-interceptor.js";
 
 // --- Hoisted mocks (available before module-level vi.mock factories) ---
 
-const { mockDaemonClient, mockEnforcer, mockRunSkillScan, mockRunPluginScan, mockRunCodeScan, mockScanMCPServer } =
+const { mockDaemonClient, mockEnforcer, mockRunSkillScan, mockRunPluginScan, mockRunCodeScan, mockScanMCPServer, mockOutageMode } =
   vi.hoisted(() => ({
     mockDaemonClient: {
       buildOutboundHeaders: vi.fn(async () => ({})),
@@ -42,7 +47,13 @@ const { mockDaemonClient, mockEnforcer, mockRunSkillScan, mockRunPluginScan, moc
     mockRunPluginScan: vi.fn(),
     mockRunCodeScan: vi.fn(),
     mockScanMCPServer: vi.fn(),
+    mockOutageMode: vi.fn((_tool?: { args?: Record<string, unknown>; cwd?: string }) => "closed"),
   }));
+
+vi.mock("../sidecar-config.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../sidecar-config.js")>()),
+  loadOpenClawOutageMode: mockOutageMode,
+}));
 
 vi.mock("@openclaw/plugin-sdk", () => ({
   definePluginEntry: (fn: unknown) => fn,
@@ -121,10 +132,12 @@ import { DaemonClient } from "../client.js";
 describe("DefenseClaw OpenClaw Plugin", () => {
   let listeners: Record<string, EventHandler>;
   let commands: Record<string, { handler: (ctx: { args: Record<string, unknown> }) => Promise<{ text: string }> }>;
+  let hostApi: ReturnType<typeof createMockContext>["ctx"]["api"];
 
   beforeEach(() => {
     vi.clearAllMocks();
     delete process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN;
+    mockOutageMode.mockReturnValue("closed");
     delete (globalThis as Record<string, unknown>).__defenseclawAwsHttp1ShimEvaluated;
     delete (globalThis as Record<string, unknown>).__defenseclawAwsHttp1GuardrailPatch;
     mockEnforcer.syncFromDaemon.mockResolvedValue(undefined);
@@ -136,6 +149,7 @@ describe("DefenseClaw OpenClaw Plugin", () => {
     mockDaemonClient.getEchoedSidecarInstanceId.mockReturnValue(undefined);
 
     const mock = createMockContext();
+    hostApi = mock.ctx.api;
     listeners = mock.listeners;
     commands = mock.commands;
     (pluginSetup as (api: unknown) => void)(mock.ctx.api);
@@ -152,6 +166,25 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       expect(commands["scan"]).toBeDefined();
       expect(commands["block"]).toBeDefined();
       expect(commands["allow"]).toBeDefined();
+    });
+
+    it("puts the saved open outage warning in the agent prompt", async () => {
+      const down = vi.spyOn(HealthMonitor.prototype, "isGatewayDown", "get").mockReturnValue(true);
+      const refresh = vi.spyOn(HealthMonitor.prototype, "refresh").mockResolvedValue();
+      const warning = vi.spyOn(HealthMonitor.prototype, "getWarningMessage")
+        .mockReturnValue("[DEFENSECLAW WARNING] Model calls continue without inspection.");
+      try {
+        mockOutageMode.mockReturnValue("open");
+        await expect(listeners.before_prompt_build()).resolves.toEqual({
+          prependContext: expect.stringContaining("continue without inspection"),
+        });
+        mockOutageMode.mockReturnValue("closed");
+        await expect(listeners.before_prompt_build()).resolves.toBeUndefined();
+      } finally {
+        down.mockRestore();
+        refresh.mockRestore();
+        warning.mockRestore();
+      }
     });
   });
 
@@ -257,6 +290,36 @@ describe("DefenseClaw OpenClaw Plugin", () => {
         expect(warn).toHaveBeenCalledWith(expect.stringContaining("audit is degraded"));
       } finally {
         warn.mockRestore();
+      }
+    });
+
+    it("sends the call id with the check and leaves the block reason as it was (GAP-0644)", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const ctx = { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" };
+        const block = rawAnswer(JSON.stringify({
+          action: "block", raw_action: "block", severity: "HIGH", reason: "protected write", mode: "action",
+        }));
+        const sentBody = () => mockDaemonClient.postRaw.mock.calls.at(-1)![1] as Record<string, unknown>;
+
+        // The reason the model sees carries nothing the gateway added.
+        mockDaemonClient.postRaw.mockResolvedValue(block);
+        expect(await listeners.before_tool_call({ toolName: "exec", toolCallId: "call_1|fc_1", params: { command: "x" } }, ctx))
+          .toEqual({ block: true, blockReason: "DefenseClaw: protected write" });
+        expect(sentBody().tool_call_id).toBe("call_1|fc_1");
+        expect(await listeners.before_tool_call(
+          { toolName: "message", toolCallId: "call_2", params: { to: "team@example.test", content: "status update" } },
+          { ...ctx, toolName: "message" },
+        )).toEqual({ block: true, blockReason: "DefenseClaw: outbound blocked \u2014 protected write" });
+        expect(sentBody().tool_call_id).toBe("call_2");
+
+        // A host that sends no id (or an empty or non-string one): no field.
+        for (const id of [undefined, "", 7]) {
+          await listeners.before_tool_call({ toolName: "exec", toolCallId: id, params: { command: "x" } }, ctx);
+          expect(sentBody().tool_call_id).toBeUndefined();
+        }
+      } finally {
+        log.mockRestore();
       }
     });
 
@@ -394,8 +457,8 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       });
     });
 
-    it("fails closed on malformed JSON even when fail-open is set", async () => {
-      process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
+    it("fails closed on malformed JSON even when the saved outage mode is open", async () => {
+      mockOutageMode.mockReturnValue("open");
       mockDaemonClient.postRaw.mockResolvedValue(
         rawAnswer("{not-json", {
           status: 200,
@@ -414,9 +477,11 @@ describe("DefenseClaw OpenClaw Plugin", () => {
       });
     });
 
-    it("fail-open treats aborted verdict bodies as unavailable", async () => {
-      process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
-      mockDaemonClient.postRaw.mockResolvedValue({ status: 0, body: "", error: "The operation was aborted" });
+    it("the saved open mode allows a timed-out verdict body with a warning", async () => {
+      mockOutageMode.mockReturnValue("open");
+      // DaemonClient reports a timeout on the proven connection as an outage
+      // (listener-proof.test.ts covers the transport).
+      mockDaemonClient.postRaw.mockResolvedValue({ status: 0, body: "", error: "request timed out", outage: true });
 
       await expect(
         listeners.before_tool_call(
@@ -424,6 +489,177 @@ describe("DefenseClaw OpenClaw Plugin", () => {
           { sessionKey: "agent:main:main", runId: "run-1", toolName: "exec" },
         ),
       ).resolves.toBeUndefined();
+    });
+
+    it("runs an ordinary tool during a default-tier outage and adds the warning to its result", async () => {
+      mockOutageMode.mockReturnValue("open");
+      // Nothing listens on the gateway port: DaemonClient reports an outage.
+      mockDaemonClient.postRaw.mockResolvedValue({
+        status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+      });
+      const event = { toolName: "exec", toolCallId: "call-outage", params: { command: "date" } };
+      const ctx = { sessionKey: "agent:main:main", runId: "run-outage", toolName: "exec", toolCallId: "call-outage" };
+
+      await expect(listeners.before_tool_call(event, ctx)).resolves.toBeUndefined();
+      const result = listeners.tool_result_persist(
+        { toolName: "exec", toolCallId: "call-outage", message: { role: "toolResult", content: [{ type: "text", text: "today" }] } },
+        { sessionKey: ctx.sessionKey, toolCallId: "call-outage" },
+      ) as { message: { content: Array<{ text: string }> } };
+      expect(result.message.content[0].text).toBe("today");
+      expect(result.message.content[1].text).toContain("DefenseClaw warning:");
+      expect(result.message.content[1].text).toContain("without inspection");
+    });
+
+    it("resolves outage targets from the agent workspace and relative tool workdir", async () => {
+      (hostApi.config.agents.defaults as Record<string, unknown>).workspace = "/tmp/openclaw-agent-workspace";
+      mockOutageMode.mockImplementation((tool) =>
+        tool?.cwd === "/tmp/openclaw-agent-workspace" ? "protected" : "open");
+      mockDaemonClient.postRaw.mockResolvedValue({
+        status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+      });
+      for (const workdir of [undefined, "../.defenseclaw"]) {
+        const params = { command: "printf x >> config.yaml", ...(workdir ? { workdir } : {}) };
+        await expect(listeners.before_tool_call(
+          { toolName: "exec", params },
+          { agentId: "main", sessionKey: "agent:main:main", toolName: "exec" },
+        )).resolves.toMatchObject({ block: true });
+        expect(mockOutageMode).toHaveBeenLastCalledWith({ name: "exec", args: params, cwd: "/tmp/openclaw-agent-workspace" });
+      }
+
+      mockOutageMode.mockImplementation((tool) =>
+        tool?.cwd === "/tmp/openclaw-agent-workspace" ? "open" : "protected");
+      await expect(listeners.before_tool_call(
+        { toolName: "exec", params: { command: "printf x >> notes.txt" } },
+        { agentId: "main", toolName: "exec" },
+      )).resolves.toBeUndefined();
+    });
+
+    it("uses the selected agent's configured workspace during an outage", async () => {
+      (hostApi.config.agents as Record<string, unknown>).list = [
+        { id: "main", default: true, workspace: "/tmp/openclaw-main" },
+        { id: "research", workspace: "/tmp/openclaw-research" },
+      ];
+      mockOutageMode.mockReturnValue("open");
+      mockDaemonClient.postRaw.mockResolvedValue({
+        status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+      });
+      await listeners.before_tool_call(
+        { toolName: "exec", params: { command: "date" } },
+        { agentId: "research", sessionKey: "agent:research:main", toolName: "exec" },
+      );
+      expect(mockOutageMode).toHaveBeenLastCalledWith({
+        name: "exec", args: { command: "date" }, cwd: "/tmp/openclaw-research",
+      });
+    });
+
+    it("uses OpenClaw's normalized agent id and home-relative workspace", async () => {
+      vi.stubEnv("OPENCLAW_HOME", "~/openclaw-home");
+      try {
+        (hostApi.config.agents as Record<string, unknown>).list = [
+          { id: "Research Team", workspace: "~/agent-workspace" },
+        ];
+        mockOutageMode.mockReturnValue("open");
+        mockDaemonClient.postRaw.mockResolvedValue({
+          status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+        });
+        await listeners.before_tool_call(
+          { toolName: "exec", params: { command: "date" } },
+          { agentId: "research-team", toolName: "exec" },
+        );
+        const osHome = process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || homedir();
+        expect(mockOutageMode).toHaveBeenLastCalledWith({
+          name: "exec", args: { command: "date" },
+          cwd: resolve(osHome, "openclaw-home", "agent-workspace"),
+        });
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("uses the legacy state directory for an unconfigured secondary agent", async () => {
+      const home = mkdtempSync(join(tmpdir(), "openclaw-workspace-"));
+      mkdirSync(join(home, ".clawdbot"));
+      vi.stubEnv("OPENCLAW_HOME", home);
+      vi.stubEnv("OPENCLAW_STATE_DIR", "");
+      try {
+        mockOutageMode.mockReturnValue("open");
+        mockDaemonClient.postRaw.mockResolvedValue({
+          status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+        });
+        await listeners.before_tool_call(
+          { toolName: "exec", params: { command: "date" } },
+          { agentId: "research", toolName: "exec" },
+        );
+        expect(mockOutageMode).toHaveBeenLastCalledWith({
+          name: "exec", args: { command: "date" },
+          cwd: join(home, ".clawdbot", "workspace-research"),
+        });
+      } finally {
+        vi.unstubAllEnvs();
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      "printf x >> ~/.defenseclaw/config.yaml",
+      `printf x >> "$HOME/.defenseclaw/config.yaml"`,
+    ])("keeps a protected target closed during an open outage: %s", async (command) => {
+      mockOutageMode.mockImplementation((tool) =>
+        tool?.args?.command === command ? "protected" : "open");
+      mockDaemonClient.postRaw.mockResolvedValue({
+        status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+      });
+      await expect(listeners.before_tool_call(
+        { toolName: "exec", params: { command } },
+        { sessionKey: "agent:main:main", toolName: "exec" },
+      )).resolves.toMatchObject({ block: true, blockReason: expect.stringContaining("protected state") });
+    });
+
+    it("uses the saved open mode when the sidecar connection resets", async () => {
+      mockOutageMode.mockReturnValue("open");
+      // The proven connection broke off before the verdict.
+      mockDaemonClient.postRaw.mockResolvedValue({ status: 0, body: "", error: "socket hang up", outage: true });
+
+      await expect(listeners.before_tool_call(
+        { toolName: "exec", params: { command: "date" } },
+        { sessionKey: "agent:main:main", toolName: "exec" },
+      )).resolves.toBeUndefined();
+    });
+
+    it("keeps strict and managed outage mode closed even with the old environment setting", async () => {
+      mockOutageMode.mockReturnValue("closed");
+      process.env.DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN = "1";
+      mockDaemonClient.postRaw.mockResolvedValue({
+        status: 0, body: "", error: "connect ECONNREFUSED 127.0.0.1:18970", outage: true,
+      });
+      await expect(listeners.before_tool_call(
+        { toolName: "exec", toolCallId: "call-closed", params: { command: "date" } },
+        { sessionKey: "agent:main:main", toolName: "exec", toolCallId: "call-closed" },
+      )).resolves.toMatchObject({ block: true });
+      expect(listeners.tool_result_persist(
+        { toolName: "exec", toolCallId: "call-closed", message: { role: "toolResult", content: [] } },
+        { toolCallId: "call-closed" },
+      )).toBeUndefined();
+    });
+
+    it("blocks a check whose listener did not prove it is the gateway, in every saved mode", async () => {
+      // A listener answered without a valid proof (or there was no token or a
+      // non-loopback gateway.host): that is not an outage (GAP-0594).
+      for (const mode of ["open", "closed"]) {
+        mockOutageMode.mockReturnValue(mode);
+        mockDaemonClient.postRaw.mockResolvedValue({
+          status: 0, body: "", outage: false,
+          error: "the listener on 127.0.0.1:18970 did not prove it is the DefenseClaw gateway; nothing was sent to it",
+        });
+        await expect(listeners.before_tool_call(
+          { toolName: "exec", toolCallId: `call-unproven-${mode}`, params: { command: "date" } },
+          { sessionKey: "agent:main:main", toolName: "exec", toolCallId: `call-unproven-${mode}` },
+        )).resolves.toMatchObject({ block: true, blockReason: expect.stringContaining("did not prove") });
+        expect(listeners.tool_result_persist(
+          { toolName: "exec", toolCallId: `call-unproven-${mode}`, message: { role: "toolResult", content: [] } },
+          { toolCallId: `call-unproven-${mode}` },
+        )).toBeUndefined();
+      }
     });
 
     it("fails closed on an unknown action enum", async () => {

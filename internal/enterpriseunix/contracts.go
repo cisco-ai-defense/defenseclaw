@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -434,9 +435,10 @@ func installScanPendingReason(data []byte, modTime, now time.Time) (string, bool
 }
 
 // installScanPending reports whether the record is missing or is not the
-// current install's scan, the two states the enumerator restarted by this
-// change resolves with its first cycle. A record that cannot be read is not
-// waited for: describeUnprotectedAgents reports it as it is.
+// scan of the installed config by the current install, the states the
+// enumerator restarted by this change resolves with its first cycle. A
+// record that cannot be read, or an installed config no scan can be matched
+// to, is not waited for: describeUnprotectedAgents reports it as it is.
 func (l *lifecycle) installScanPending() bool {
 	env := l.env
 	path := env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath))
@@ -451,29 +453,99 @@ func (l *lifecycle) installScanPending() bool {
 	if err != nil {
 		return false
 	}
-	_, pending := installScanPendingReason(data, info.ModTime(), time.Now())
+	_, pending, _ := l.installScanVerdict(data, info.ModTime(), time.Now())
 	return pending
 }
+
+// installScanVerdict is the one test of an unprotected-agents record (data,
+// last written at modTime) that the wait for the restarted enumerator and the
+// result both use, so the wait ends exactly when the result stops reporting
+// the scan as pending (GAP-0782: the wait tested only the build and the age,
+// returned at once on a record the previous config generation stamped, and
+// the result then reported it pending). pending is true, with the reason,
+// when the record is stale, from another install, or does not name the
+// installed config generation and digest: the first cycle of the enumerator
+// restarted by this change resolves each. unmatched is set instead when the
+// installed config has no usable generation record, which no scan resolves.
+func (l *lifecycle) installScanVerdict(data []byte, modTime, now time.Time) (reason string, pending bool, unmatched string) {
+	if reason, pending := installScanPendingReason(data, modTime, now); pending {
+		return reason, true, ""
+	}
+	// The build and age can match after a connector or policy change.
+	// The scan stamp must name a generation bound to the installed config
+	// bytes; a restored or incomplete generation record is not proof.
+	configPath := l.env.P(l.env.Layout.ConfigPath)
+	current, err := configwrite.ReadGenerationState(configPath)
+	switch {
+	case err != nil:
+		unmatched = err.Error()
+	case current.Generation == 0:
+		unmatched = "generation is zero"
+	case current.ConfigSHA256 == "":
+		unmatched = "config digest is missing"
+	default:
+		installed, readErr := readBounded(configPath, maxInputBytes)
+		if readErr != nil {
+			unmatched = "config.yaml cannot be read: " + readErr.Error()
+		} else if sha256Bytes(installed) != current.ConfigSHA256 {
+			unmatched = "config digest differs from config.yaml"
+		}
+	}
+	if unmatched != "" {
+		return "", false, unmatched
+	}
+	// The digest names the bytes the scan read. A number alone can repeat
+	// after the generation record is rebuilt.
+	if enterprisehooks.UnprotectedAgentsRecordConfigGeneration(data) != current.Generation ||
+		enterprisehooks.UnprotectedAgentsRecordConfigSHA256(data) != current.ConfigSHA256 {
+		return "from a different config generation", true, ""
+	}
+	// The enumerator announces a scan of this config before it runs it; the
+	// announcement carries the previous scan's agents and is not a result.
+	if enterprisehooks.UnprotectedAgentsRecordScanInProgress(data) {
+		return "still being rewritten by a scan of the new config that has not finished", true, ""
+	}
+	return "", false, ""
+}
+
+// defaultInstallScanTimeout bounds awaitInstallScan. The restarted macOS
+// enumerator wrote its first record 38 s after the launchd kickstart (GAP-0782,
+// two measurements on the standalone pkg host), so the bound is more than
+// twice that.
+const defaultInstallScanTimeout = 90 * time.Second
+
+// installScanProgressEvery spaces the progress lines of awaitInstallScan.
+const installScanProgressEvery = 10 * time.Second
 
 // awaitInstallScan waits, bounded by InstallScanTimeout, for the enumerator
 // this change restarted to publish its first record, so the result of an
 // upgrade reports the install scan of the new install, not the previous
-// one's. Without it an ensure that restarts the enumerator a moment before
+// release's. Without it an ensure that restarts the enumerator a moment before
 // its own verify read "NOT COVERED (scan pending)" from the record the
 // previous release wrote (GAP-0726: the Enterprise Upgrade Lane (pkg) step
 // "upgrade to 9.9.9" exited 0 with coverage_complete=false). The wait ends
-// at once when the record is already current, so a change that left the
-// enumerator running does not wait. A record still pending at the deadline
-// is reported by describeUnprotectedAgents with its remedy.
+// at once when the record is already current (this install, the installed
+// config generation), so a change that left the enumerator running does
+// not wait. It polls and prints a progress line while it waits. A record
+// still pending at the deadline is reported by describeUnprotectedAgents
+// with its remedy.
 func (l *lifecycle) awaitInstallScan(ctx context.Context) bool {
 	env := l.env
-	deadline := env.Now().Add(env.InstallScanTimeout)
+	start := env.Now()
+	deadline := start.Add(env.InstallScanTimeout)
+	nextProgress := start
 	for {
 		if !l.installScanPending() {
 			return true
 		}
-		if !env.Now().Before(deadline) {
+		now := env.Now()
+		if !now.Before(deadline) {
 			return false
+		}
+		if env.Progress != nil && !now.Before(nextProgress) {
+			env.Progress(fmt.Sprintf("waiting for the enumerator to scan the new config (%s of at most %s)",
+				now.Sub(start).Round(time.Second), env.InstallScanTimeout))
+			nextProgress = now.Add(installScanProgressEvery)
 		}
 		select {
 		case <-ctx.Done():
@@ -527,8 +599,16 @@ func (l *lifecycle) describeUnprotectedAgents() {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
 		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
-	} else if reason, pending := installScanPendingReason(data, info.ModTime(), time.Now()); pending {
+	} else if reason, pending, unmatched := l.installScanVerdict(data, info.ModTime(), time.Now()); pending {
 		l.reportInstallScanPending(reason)
+	} else if unmatched != "" {
+		message := "NOT COVERED (scan pending): the enumerator's scan cannot be matched to the installed config generation: " + unmatched
+		if l.opts.Action == ActionVerify {
+			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		} else {
+			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
+		}
+		r.MarkCoverageIncomplete(enterprisehooks.UnprotectedCodeInstallScanIncomplete)
 	}
 	// One machine-wide OpenCode V1 copy is one warning with the user count,
 	// not one per account (GAP-0071); every account still counts below.

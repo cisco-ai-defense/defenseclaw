@@ -275,6 +275,43 @@ var windowsManagedClaudeCurrentUserSID = func() (string, error) {
 // removeWindowsManagedHooksStandalonePerUserRegistrations); Secure Client
 // writes none. Per-user runtime files stay, like every other connector.
 
+// windowsEnterpriseKeptLinkReason is the reason of a machine_state_remaining
+// entry for a link a purge kept. The psm1 purge steps write the same text.
+const windowsEnterpriseKeptLinkReason = "kept: a link sits here; DefenseClaw does not follow, change or remove it"
+
+// windowsEnterpriseCodexKeptLinkReason is the reason for the link at the Codex
+// machine-policy folder: the entry starts with windowsEnterpriseKeptLinkReason
+// and says what a kept link cannot promise. Nothing behind the link is read,
+// so a Codex requirement there may still name the hook binary the uninstall
+// removes (GAP-0773). The psm1 purge steps write only the shorter text for a
+// link they meet, and the first entry for a path wins.
+const windowsEnterpriseCodexKeptLinkReason = windowsEnterpriseKeptLinkReason +
+	"; what is behind it was not checked, so a Codex requirement there may still name the DefenseClaw hook binary that the uninstall removes"
+
+// windowsManagedHooksKeptLinkedFolders names, as machine_state_remaining
+// entries (path: kept: reason), each vendor folder a teardown kept because a
+// link sits there: the ones the Cursor, Claude Code, selector and per-user
+// teardown steps of this process met, and the ones on the Go-owned policy
+// paths (Copilot, OpenCode, Devin), which an earlier step of the uninstall
+// may have kept. It only reads. Replaceable in tests.
+var windowsManagedHooksKeptLinkedFolders = func() []string {
+	const reason = windowsEnterpriseKeptLinkReason
+	var out []string
+	for _, folder := range enterprisehooks.WindowsManagedPolicyFoldersKept() {
+		out = append(out, folder+": "+reason)
+	}
+	for _, folder := range connector.WindowsCodexMachineFoldersKept() {
+		out = append(out, folder+": "+windowsEnterpriseCodexKeptLinkReason)
+	}
+	if layout, programFiles, programData, err := standaloneEnterprisePolicyLayout(); err == nil {
+		opts := enterprisepolicy.LayoutOptions(layout, programFiles, programData)
+		for _, folder := range enterprisepolicy.WindowsGoOwnedLinkedFolders(opts) {
+			out = append(out, folder+": "+reason)
+		}
+	}
+	return out
+}
+
 func windowsManagedHooksStandalonePerUserTarget(connectorName string) bool {
 	return enterprisehooks.IsWindowsProfilePerUserConnector(connectorName)
 }
@@ -369,38 +406,24 @@ var windowsManagedHooksStandaloneFloorPurger = purgeWindowsManagedHooksUnrecorde
 // Claude Code version floor drop-in that holds DefenseClaw's floor but whose
 // ownership record is gone (a rolled-back install left it), which the
 // teardown's recorded removal keeps.
+//
+// It removes the drop-in only. The ClaudeCode and managed-settings.d folders
+// it leaves are not removed here: the purge removes a vendor folder only when
+// the created-folder record names it (the lifecycle's record-driven removal,
+// Remove-DefenseClawStandaloneCreatedFolder, and enterprisehooks.
+// RemoveWindowsCreatedFolderIfEmpty), so an empty ClaudeCode folder an
+// administrator made before the install stays and the purge names it
+// (GAP-0758 round 2, the g091 record-only rule). A by-name removal used to
+// run here.
 func purgeWindowsManagedHooksUnrecordedClaudeFloor() error {
 	layout, programFiles, programData, err := standaloneEnterprisePolicyLayout()
 	if err != nil {
 		return err
 	}
-	if _, err := enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
+	_, err = enterprisepolicy.PurgeWindowsUnrecordedClaudeVersionFloor(
 		enterprisepolicy.LayoutOptions(layout, programFiles, programData),
-	); err != nil {
-		return err
-	}
-	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
-	return nil
-}
-
-// removeEmptyWindowsClaudeManagedSettingsFolders removes Claude Code's
-// managed-settings.d, and then its ClaudeCode folder, under programFiles when
-// the purge left them empty. Setup creates them for its drop-ins. A folder
-// that holds anything, or is not a plain directory, stays.
-func removeEmptyWindowsClaudeManagedSettingsFolders(programFiles string) {
-	root := filepath.Join(programFiles, "ClaudeCode")
-	for _, dir := range []string{filepath.Join(root, "managed-settings.d"), root} {
-		info, err := os.Lstat(dir)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeType != os.ModeDir {
-			return
-		}
-		if err := os.Remove(dir); err != nil {
-			return
-		}
-	}
+	)
+	return err
 }
 
 func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManagedHooksTeardownJournal) error {

@@ -709,6 +709,12 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 	}
 	if report.Complete {
 		fmt.Fprintln(out, "\nResult: complete")
+		for _, state := range report.Result.States {
+			if state.Connector == enterprisepolicy.ConnectorDevinCascade {
+				fmt.Fprintln(out, "    complete covers the machine-policy routes above only: Devin Desktop builds before 3.9.19 (Cascade) are not covered, see the devincascade note")
+				break
+			}
+		}
 	} else {
 		fmt.Fprintln(out, "\nResult: INCOMPLETE")
 	}

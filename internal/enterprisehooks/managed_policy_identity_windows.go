@@ -40,7 +40,13 @@ func VerifyWindowsClaudeManagedPolicyIdentity(
 		HookExecutable:    hookExecutable,
 	})
 	provider := connector.NewClaudeCodeConnector()
-	return windowsClaudeManagedPolicyTransaction(func() error {
+	if kept, keptErr := windowsClaudeManagedPolicyLinkKept(); keptErr != nil || kept {
+		if keptErr != nil {
+			return keptErr
+		}
+		return errors.New("enterprise hooks: Claude managed policy is absent: a link sits at the managed-settings folder")
+	}
+	return withWindowsClaudeManagedPolicyTeardownTransaction(func() error {
 		path, err := windowsClaudeManagedPolicyPath()
 		if err != nil {
 			return err
@@ -123,7 +129,7 @@ func VerifyWindowsCursorManagedPolicyIdentity(
 	if err := connector.ValidateWindowsManagedGatewayServiceName(gatewayServiceName); err != nil {
 		return err
 	}
-	return withWindowsCursorManagedTransaction(func() error {
+	return withWindowsCursorManagedTeardownTransaction(func() error {
 		artifacts, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err

@@ -780,6 +780,9 @@ func runWindowsEnterpriseStandaloneAction(
 	if err := refuseWindowsEnterpriseBelowProductFloor(action, opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
+	if err := refuseWindowsEnterpriseRepairOverUnprovenApprovedSource(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
 	if err := refuseUntrustedWindowsScannerRuntimeBeforeChange(canonicalWindowsEnterpriseAction(action), opts); err != nil {
 		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
@@ -905,7 +908,26 @@ func runWindowsEnterpriseStandaloneAction(
 		settleWindowsEnterpriseHotConfigClosure(ctx, result, action)
 	}
 	addWindowsEnterpriseNothingInstalledError(result, report, action)
+	if action == "install" || action == "upgrade" || action == "repair" {
+		// An upgrade without CONFIG= carries the earlier approved config
+		// source forward, and a repair that found nothing to restore leaves
+		// it as it is: heal it as ensure does. Every one of them also leaves
+		// the proof a later Repair over a hand edit needs (GAP-0779).
+		healWindowsEnterpriseApprovedSourceOnSuccess(result, opts)
+	}
 	return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+}
+
+// healWindowsEnterpriseApprovedSourceOnSuccess runs the approved config source
+// check for a lifecycle run that ended with no error on an installed
+// deployment and delivered no signed bundle. It reports whether the check
+// added an error.
+func healWindowsEnterpriseApprovedSourceOnSuccess(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) bool {
+	if len(result.Errors) != 0 || !result.Installed || opts.bundle != nil {
+		return false
+	}
+	windowsEnterpriseHealApprovedSource(result)
+	return len(result.Errors) != 0
 }
 
 // settleWindowsEnterpriseHotConfigClosure handles the closure a config change
@@ -950,6 +972,7 @@ func settleWindowsEnterpriseHotConfigClosure(ctx context.Context, result *enterp
 // admission issues. A refused config reports
 // them too, as the running deployment's (GAP-0103).
 func appendWindowsEnterpriseStatusAdvisories(ctx context.Context, result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
+	appendWindowsOpenCodePortWarnings(result)
 	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
 		if raw, err := readWindowsEnterpriseBoundedFile(layout.ConfigPath, windowsEnterpriseHotConfigMaxBytes); err == nil {
 			if installed, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw); err == nil {
@@ -1931,6 +1954,10 @@ func windowsEnterpriseNoStartMessages(
 func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStatePurged) {
 		result.Changes = append(result.Changes, windowsEnterprisePurgedUserStateChange(entry))
+		if account, kept, found := strings.Cut(entry, windowsManagedHooksKeptEntriesMarker); found {
+			kept, _, _ = strings.Cut(kept, windowsManagedHooksPurgedBinariesMarker)
+			result.AddWarning("per_user_state_remaining", "kept account entries in .defenseclaw of "+account+": "+kept)
+		}
 	}
 	var notLocalSystem, pathEntryKept, keptForRegistrations, accountLinksKept, remaining []string
 	for _, entry := range windowsEnterpriseReportStrings(report.UserStateRemaining) {
@@ -2023,17 +2050,36 @@ func windowsEnterprisePurgeRerunFindsAccounts(report *windowsEnterpriseInstaller
 // uninstall also reports intentional machine file retention, including a
 // Cursor tombstone for a pending Cursor registration. Two cleanup steps can
 // report the same path (GAP-0571).
+//
+// A link a purge kept is named once, and only as kept: a file the purge did not
+// look for behind it, or a folder below it, is not listed as one it could not
+// remove, and a link below another kept link is not named again (GAP-0773).
 func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	var failed, kept []string
 	seen := map[string]bool{}
-	for _, entry := range windowsEnterpriseReportStrings(report.MachineStateRemaining) {
+	entries := windowsEnterpriseReportStrings(report.MachineStateRemaining)
+	var links []string
+	for _, entry := range entries {
+		if path, reason, _ := strings.Cut(entry, ": "); strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason) {
+			links = append(links, path)
+		}
+	}
+	for _, entry := range entries {
 		path, reason, _ := strings.Cut(entry, ": ")
+		if windowsEnterprisePathBehindKeptLink(path, links, strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason)) {
+			continue
+		}
 		key := strings.ToLower(path)
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
 		if strings.HasPrefix(reason, "kept: ") {
+			if strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason) && windowsEnterpriseCodexLinkPath(path) {
+				// A link at the Codex folder is named with what it cannot
+				// promise, whichever step met it first (GAP-0773).
+				entry = path + ": " + windowsEnterpriseCodexKeptLinkReason
+			}
 			kept = append(kept, entry)
 		} else {
 			failed = append(failed, entry)
@@ -2052,6 +2098,28 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 			len(kept), windowsEnterpriseBoundedLabels(kept),
 		))
 	}
+}
+
+// windowsEnterpriseCodexLinkPath reports whether path is the Codex
+// machine-policy folder or its vendor folder (a link above it is kept as the
+// vendor folder).
+func windowsEnterpriseCodexLinkPath(path string) bool {
+	folded := strings.TrimRight(strings.ToLower(path), `\`)
+	return strings.HasSuffix(folded, `\programdata\openai\codex`) || strings.HasSuffix(folded, `\programdata\openai`)
+}
+
+// windowsEnterprisePathBehindKeptLink reports whether path is below one of the
+// kept links, or is one of them while the entry is not the link's own kept
+// entry (a failure written for the link path itself).
+func windowsEnterprisePathBehindKeptLink(path string, links []string, isKeptLinkEntry bool) bool {
+	folded := strings.TrimRight(strings.ToLower(path), `\`)
+	for _, link := range links {
+		prefix := strings.TrimRight(strings.ToLower(link), `\`)
+		if strings.HasPrefix(folded, prefix+`\`) || (folded == prefix && !isKeptLinkEntry) {
+			return true
+		}
+	}
+	return false
 }
 
 // addWindowsEnterpriseRecoveryGatewayWarnings records which gateway a
@@ -2622,12 +2690,14 @@ type windowsEnterpriseManifestAccount struct {
 // windowsEnterpriseAccountCreatedDataDir reports an account-created data
 // folder, windowsEnterpriseAccountOwnedDataDirLink a link the account made at
 // that folder or its hooks folder, and windowsEnterpriseAccountDeleted a local
-// account SID that no longer names an account. Tests replace them.
+// account SID that no longer names an account; windowsEnterpriseAccountForeignDataDirLink
+// reports a link at that folder that another principal owns (GAP-0585). Tests replace them.
 var (
-	windowsEnterpriseManifestAccounts        = readWindowsEnterpriseManifestAccounts
-	windowsEnterpriseAccountCreatedDataDir   = enterprisehooks.WindowsAccountCreatedDataDir
-	windowsEnterpriseAccountOwnedDataDirLink = enterprisehooks.WindowsAccountOwnedDataDirLink
-	windowsEnterpriseAccountDeleted          = func(sid string) bool {
+	windowsEnterpriseManifestAccounts          = readWindowsEnterpriseManifestAccounts
+	windowsEnterpriseAccountCreatedDataDir     = enterprisehooks.WindowsAccountCreatedDataDir
+	windowsEnterpriseAccountOwnedDataDirLink   = enterprisehooks.WindowsAccountOwnedDataDirLink
+	windowsEnterpriseAccountForeignDataDirLink = enterprisehooks.WindowsForeignOwnedDataDirLink
+	windowsEnterpriseAccountDeleted            = func(sid string) bool {
 		// A domain or Entra account's lookup also fails while its directory
 		// is unreachable; never tell the administrator to remove that
 		// profile.
@@ -2718,6 +2788,14 @@ func applyWindowsEnterpriseAccountFolders(result *enterprisestatus.Result) {
 					"never follows that link, moves it aside and enrolls the account when it next signs in, and Upgrade and Repair "+
 					"leave this account pending until then",
 				label, filepath.Join(account.Home, ".defenseclaw")))
+		case windowsEnterpriseAccountForeignDataDirLink(account.Home, account.SID):
+			result.AddWarning("enrollment_skipped_account_link", fmt.Sprintf(
+				"the account %s has a link or junction at %s (or its hooks folder) that the account does not own, such as one an "+
+					"administrator made, so it is not protected; DefenseClaw never follows that link and leaves this account out so "+
+					"Setup, Upgrade and Repair finish for the other accounts. Remove the link (rmdir on a junction removes only the "+
+					"link), then run `%s` from an elevated PowerShell prompt",
+				label, filepath.Join(account.Home, ".defenseclaw"),
+				managed.WindowsAdminCommand("enterprise", "windows", "repair", "--profile", managed.ProfileStandalone)))
 		case windowsEnterpriseAccountCreatedDataDir(account.Home, account.SID):
 			result.AddWarning("enrollment_pending_account_folder", fmt.Sprintf(
 				"the account %s created %s itself, so it has no DefenseClaw runtime (for example when an agent it ran before enrollment "+
@@ -3908,6 +3986,11 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		errorsBefore := len(result.Errors)
 		settleWindowsEnterpriseHotConfigClosure(ctx, result, "ensure")
 		if len(result.Errors) != errorsBefore {
+			code = windowsEnterpriseFailureCodeFor(result)
+		}
+		// Last, after the closure proof: the approved config source changes
+		// only for a run that otherwise succeeded (GAP-0779).
+		if healWindowsEnterpriseApprovedSourceOnSuccess(result, opts) {
 			code = windowsEnterpriseFailureCodeFor(result)
 		}
 		return finishWindowsEnterpriseStandalone(cmd, opts, result, code)

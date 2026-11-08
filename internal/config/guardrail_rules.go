@@ -107,8 +107,10 @@ func (g *GuardrailConfig) EffectiveRulePackRef(connector string) RulePackRef {
 
 // ResolveRulePackDir returns the directory a reference loads from: a
 // built-in name is <policy_dir>/guardrail/<name>, a custom_packs name its
-// path, and a v8 rule_pack_dir itself. On the Linux and macOS standalone
-// layout a built-in name whose policy_dir folder does not exist is the
+// path, and a v8 rule_pack_dir itself. A custom_packs entry with a config
+// error loads its built-in fallback (BuiltinRulePackFor), except one with a
+// stale pin, which stays the pack the gateway then refuses. On the Linux and
+// macOS standalone layout a built-in name whose policy_dir folder does not exist is the
 // shipped vendor pack, as the implicit default pack is
 // (standaloneRulePackDefault). An unknown name resolves to "" (the
 // gateway's generation build rejects it before anything loads). A copy set
@@ -125,12 +127,12 @@ func (c *Config) resolveRulePackDir(ref RulePackRef) string {
 	if ref.Name == "" {
 		return strings.TrimSpace(ref.Dir)
 	}
-	if custom, ok := c.Guardrail.CustomPacks[ref.Name]; ok {
-		return strings.TrimSpace(custom.Path)
+	if custom, ok := c.UsableCustomRulePack(ref.Name); ok {
+		return customPackPathIn(c.customPackBase(), custom)
 	}
-	if IsBuiltinRulePack(ref.Name) && strings.TrimSpace(c.PolicyDir) != "" {
-		dir := filepath.Join(c.PolicyDir, "guardrail", ref.Name)
-		if vendor := c.vendorRulePackDir(ref.Name); vendor != "" {
+	if name := c.BuiltinRulePackFor(ref.Name); name != "" && strings.TrimSpace(c.PolicyDir) != "" {
+		dir := filepath.Join(c.PolicyDir, "guardrail", name)
+		if vendor := c.vendorRulePackDir(name); vendor != "" {
 			if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 				return vendor
 			}
@@ -177,11 +179,7 @@ func (c *Config) offlineVendorPath(dir string) string {
 // "rule_pack: default" was refused there with "policy_dir is not set", and
 // Setup /ensure exited 1639.
 func (c *Config) EmbeddedRulePack(ref RulePackRef) bool {
-	if c == nil || ref.Name != "default" || strings.TrimSpace(c.PolicyDir) != "" {
-		return false
-	}
-	_, custom := c.Guardrail.CustomPacks[ref.Name]
-	return !custom
+	return c != nil && c.BuiltinRulePackFor(ref.Name) == "default" && strings.TrimSpace(c.PolicyDir) == ""
 }
 
 // vendorRulePackDir is the shipped built-in pack name of the Linux or macOS
@@ -241,7 +239,7 @@ func (c *Config) ReferencedRulePackDirs() map[string]string {
 		}
 	}
 	for name, pack := range g.CustomPacks {
-		out["guardrail.custom_packs."+name+".path"] = strings.TrimSpace(pack.Path)
+		out["guardrail.custom_packs."+name+".path"] = customPackPathIn(c.customPackBase(), pack)
 	}
 	return out
 }

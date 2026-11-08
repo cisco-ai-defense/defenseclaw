@@ -3541,7 +3541,11 @@ function Save-HelperRecoveryCopy {
     try {
         New-Item -ItemType Directory -Path $InstallerDir -Force | Out-Null
         Install-File $guard (Join-Path $InstallerDir "defenseclaw-hook-guard.exe")
-        $lines = foreach ($name in @("defenseclaw-gateway.exe", "defenseclaw-hook-guard.exe")) {
+        # The launcher's digest lets doctor and status tell the installed
+        # launcher from another program under its name (GAP-0810).
+        $recorded = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-hook-guard.exe") |
+            Where-Object { Test-Path -LiteralPath (Join-Path $BinDir $PSItem) -PathType Leaf }
+        $lines = foreach ($name in $recorded) {
             "$((Get-Sha256 (Join-Path $BinDir $name)).ToLowerInvariant())  $name"
         }
         $record = Join-Path $InstallerDir "binaries.sha256"
@@ -5057,20 +5061,33 @@ function Restore-HooksAfterAbortedRollback {
     }
 }
 
-function Invoke-PruneOrphanedHooks([string[]]$Gateways) {
+function Invoke-PruneOrphanedHooks([string[]]$Gateways, [string]$RollbackBackupsDir = "") {
     # GAP-0009: remove the DefenseClaw hook entries of every connector the
-    # live install does not configure, with the first gateway that has the
-    # command: a connector set up after an upgrade kept its entries after the
-    # rollback, and its agent ran a hook the restored install cannot serve.
-    # Only DefenseClaw-owned entries go. An older gateway prints its
-    # connector help for the unknown command, so the help is checked first.
+    # live install does not configure. Run every available reader: the older
+    # release can have the command without knowing connectors added later.
+    # A connector set up after an upgrade otherwise keeps its entries after
+    # rollback, and its agent can run a hook the restored install cannot serve.
+    # Only DefenseClaw-owned entries go. The newer reader restores an
+    # unchanged vendor file from its connector backup before either reader
+    # performs surgical cleanup. An older gateway prints its connector help
+    # for an unknown command or flag, so the help is checked first.
+    $readers = @()
     foreach ($gateway in $Gateways) {
         if (-not (Test-Path -LiteralPath $gateway)) { continue }
-        if ((Get-NativeOutput $gateway @("connector", "prune-orphans", "--help")) -notmatch "connector prune-orphans") { continue }
-        if ((Invoke-Native $gateway @("connector", "prune-orphans", "--data-dir", $DataDir)) -ne 0) {
-            Write-Warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see above); 'defenseclaw doctor' lists them"
+        $help = Get-NativeOutput $gateway @("connector", "prune-orphans", "--help")
+        if ($help -notmatch "connector prune-orphans") { continue }
+        $hasBackups = $RollbackBackupsDir -and $help -match '--rollback-backups-dir'
+        $readers += [pscustomobject]@{ Gateway = $gateway; HasBackups = [bool]$hasBackups }
+    }
+    foreach ($withBackups in @($true, $false)) {
+        foreach ($reader in $readers) {
+            if ($reader.HasBackups -ne $withBackups) { continue }
+            $pruneArgs = @("connector", "prune-orphans", "--data-dir", $DataDir)
+            if ($withBackups) { $pruneArgs += @("--rollback-backups-dir", $RollbackBackupsDir) }
+            if ((Invoke-Native $reader.Gateway $pruneArgs) -ne 0) {
+                Write-Warn "Could not remove the DefenseClaw hook entries of connectors that are not configured (see above); 'defenseclaw doctor' lists them"
+            }
         }
-        return
     }
 }
 
@@ -5309,7 +5326,7 @@ function Invoke-Rollback {
     # Homes upgraded before the uv folder was protected (GAP-1988).
     Protect-UvDirectory
     if (-not $toLegacy) {
-        Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), (Join-Path $Previous "bin\defenseclaw-gateway.exe"))
+        Invoke-PruneOrphanedHooks @((Join-Path $BinDir "defenseclaw-gateway.exe"), (Join-Path $Previous "bin\defenseclaw-gateway.exe")) (Join-Path $Previous "data")
     }
     $quarantined = ""
     if ($auditDamaged) {

@@ -9,13 +9,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-// copilotSharedLocalFileFacts keeps the exact file operation attached to both
-// the name the Local tool received and the file reached through an existing
-// link. The hook's resolved target is preferred; a per-user gateway can also
+// fileToolLinkTargetFacts keeps the exact file operation of every connector
+// attached to both the name the file tool received and the file reached
+// through an existing link, so a link gets the path verdict the name of its
+// target gets, whatever the connector or body shape (GAP-0797). The resolved
+// target the hook client reports is preferred; a per-user gateway can also
 // resolve a path locally when that evidence is absent. Only file tools that
 // follow their final path reach this function.
-func copilotSharedLocalFileFacts(facts actionfacts.Facts, request trustedActionRequest) actionfacts.Facts {
-	if !request.CopilotSharedLocalFile || !actionfacts.PathTool(request.Input.Tool) || !facts.Authoritative() || !facts.EnforcementEligible() {
+func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionRequest) actionfacts.Facts {
+	if !actionfacts.PathTool(request.Input.Tool) || !facts.Authoritative() || !facts.EnforcementEligible() {
 		return facts
 	}
 	originalPaths := len(facts.Paths)
@@ -47,6 +49,7 @@ func copilotSharedLocalFileFacts(facts actionfacts.Facts, request trustedActionR
 		linked.Value = physical
 		linked.Normalized = physical
 		linked.Resolved = physical
+		linked.Linked = true
 		facts.Paths = append(facts.Paths, linked)
 	}
 	return facts
@@ -56,13 +59,13 @@ func copilotSharedLocalFileFacts(facts actionfacts.Facts, request trustedActionR
 // facts supply the exact resolved target too, so a link receives the same
 // path rule as a direct file call. The usual typed path and proof filters
 // still decide whether each finding can enforce.
-func copilotSharedLocalPathFindings(
+func fileToolLinkTargetFindings(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 	options ruleScanOptions,
 ) []RuleFinding {
-	if !request.CopilotSharedLocalFile || !actionfacts.PathTool(request.Input.Tool) || !facts.Authoritative() || !facts.EnforcementEligible() {
+	if !actionfacts.PathTool(request.Input.Tool) || !facts.Authoritative() || !facts.EnforcementEligible() {
 		return nil
 	}
 	var findings []RuleFinding

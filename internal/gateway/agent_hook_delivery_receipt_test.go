@@ -79,9 +79,17 @@ func newManagedHookAuditFixtureForExportingTo(
 	remote delivery.Adapter, off ...observability.Bucket,
 ) managedHookAuditFixture {
 	t.Helper()
+	return newManagedHookAuditFixtureForExportingToInDir(t, t.TempDir(), connectorName, wrap, remote, off...)
+}
+
+func newManagedHookAuditFixtureForExportingToInDir(
+	t *testing.T, directory, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter,
+	remote delivery.Adapter, off ...observability.Bucket,
+) managedHookAuditFixture {
+	t.Helper()
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, connectorName)
-	fixture := newSidecarRuntimeFixtureExportingTo(t, nil, remote, off...)
+	fixture := newSidecarRuntimeFixtureExportingToInDir(t, directory, nil, remote, off...)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
 		t.Fatal(err)

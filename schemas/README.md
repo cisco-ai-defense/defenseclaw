@@ -37,6 +37,7 @@ flowchart LR
 | `telemetry/runtime/compatibility/*.json.gz` | Generated destination/consumer views | Galileo, OpenInference, local-observability, and v7 migration projections; these do not become canonical producer schemas |
 | `internal/observability/zz_generated_telemetry_*.go` (repo-root path, outside `schemas/`) | Generated runtime API and metadata | Typed family builders, IDs, catalog data, producer mappings, and builder fixtures |
 | Top-level `*.json` and `otel/*.schema.json` | Retained public v7 compatibility/reference contracts | Fixed-path, Draft 2020-12, producer-parity, fixture, and mirror checks where applicable; not v8 telemetry authoring sources |
+| `per-user-commands.json` | Hand-authored list of the per-user CLI top-level commands; `internal/cli/embed/per-user-commands.json` is its byte-for-byte copy | Managed Windows binary answers each listed command it does not serve; `cli/tests/test_managed_per_user_commands.py` pins it to the Python CLI command table; `scripts/check_schemas.py` checks the mirror |
 | `registry-manifest.schema.json` | Registry manifest contract outside the v8 telemetry family registry | Runtime validation by the manifest loader |
 
 The compiler's logical artifact names use

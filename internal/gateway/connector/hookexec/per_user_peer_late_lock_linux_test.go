@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 const lateLockPeerHelperEnv = "DC_TEST_LATE_LOCK_PEER_HELPER"
@@ -49,6 +51,7 @@ func TestLateLockPeerHelper(t *testing.T) {
 // the read deferred to the proof (c68e763cc9) the exited holder was no
 // longer named and the restart went unproven.
 func TestRestartProofNamesThePeerReadAtConnect(t *testing.T) {
+	clock := proofclocktest.Install(t)
 	reservation, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -97,4 +100,5 @@ func TestRestartProofNamesThePeerReadAtConnect(t *testing.T) {
 	if !PerUserGatewayRestartProvenDuringCall(dir, record, false) {
 		t.Fatal("a held start lock and an exited connected gateway gave no restart proof")
 	}
+	requireRestartProofBudgets(t, clock)
 }

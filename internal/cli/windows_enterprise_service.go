@@ -328,6 +328,7 @@ func init() {
 	recovery.Hidden = true // Setup uses this once after a timed-out lifecycle child.
 	enterpriseWindowsCmd.AddCommand(recovery)
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsOpenCodePortClearCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseCoworkInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())

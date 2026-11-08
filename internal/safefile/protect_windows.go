@@ -159,6 +159,34 @@ func ValidatePrivateHandle(handle windows.Handle) error {
 	return nil
 }
 
+// ValidatePrivateFileHandleAllowingAdministrators is
+// ValidatePrivateFileOwnershipAllowingAdministrators for an object the caller
+// already holds open: the owner and the write entries of the object the handle
+// names (the target of a final link the open followed) are judged, not the
+// path it was reached by. The caller checks that the handle is a regular file.
+func ValidatePrivateFileHandleAllowingAdministrators(handle windows.Handle) error {
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return err
+	}
+	ok, err := privateSecurityDescriptorIsWriterRepairableForSubject(sd, identity, true)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("safefile: private file handle has an owner or write entry that is not this account or the system owners")
+	}
+	return nil
+}
+
 func validatePrivateOwnership(path string, wantDirectory, trustSystemOwners bool) error {
 	if err := rejectReparseChain(path); err != nil {
 		return err
@@ -190,7 +218,7 @@ func validatePrivateOwnership(path string, wantDirectory, trustSystemOwners bool
 		return err
 	}
 	if !repairable {
-		return fmt.Errorf("safefile: private path DACL is unsafe to repair: %s", path)
+		return unsafePrivateDACLError(path, identity, trustSystemOwners)
 	}
 	return nil
 }
@@ -734,7 +762,7 @@ func privateSecurityDescriptorIsSafeForSubject(
 	if err != nil {
 		return false, err
 	}
-	dacl, _, err := sd.DACL()
+	dacl, err := descriptorDACL(sd)
 	if err != nil || dacl == nil {
 		return false, err
 	}
@@ -831,6 +859,20 @@ func privateSecurityDescriptorIsSafeForSubject(
 	return foundOwner && foundSystem, nil
 }
 
+// descriptorDACL returns the DACL of sd, or nil when sd grants no access list:
+// a NULL DACL (present, grants everyone every access) and a descriptor with no
+// DACL component at all. SECURITY_DESCRIPTOR.DACL reports the second as
+// ERROR_OBJECT_NOT_FOUND; the private-descriptor judgements treat both as the
+// refusal "no DACL" instead of an error that names nothing. Any other error is
+// returned as is.
+func descriptorDACL(sd *windows.SECURITY_DESCRIPTOR) (*windows.ACL, error) {
+	dacl, _, err := sd.DACL()
+	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
+		return nil, nil
+	}
+	return dacl, err
+}
+
 func privateDACLIsWriterRepairableForSubject(
 	path string,
 	identity windowsProtectionSubject,
@@ -856,65 +898,112 @@ func privateSecurityDescriptorIsWriterRepairableForSubject(
 	identity windowsProtectionSubject,
 	trustSystemOwners bool,
 ) (bool, error) {
+	refusals, err := privateSecurityDescriptorRefusals(sd, identity, trustSystemOwners)
+	return len(refusals) == 0 && err == nil, err
+}
+
+// daclRefusal is one reason privateSecurityDescriptorRefusals refused a
+// descriptor. sid is the trustee of the refused entry; it is nil when no
+// single entry is to blame (no descriptor, an untrusted owner, no DACL, an
+// entry of a kind this check does not parse).
+type daclRefusal struct {
+	sid  *windows.SID
+	deny bool
+}
+
+// untrustedDACLWrite is the access that makes an allow entry of an untrusted
+// account unsafe.
+const untrustedDACLWrite = windows.ACCESS_MASK(
+	windows.GENERIC_ALL |
+		windows.GENERIC_WRITE |
+		windows.DELETE |
+		windows.WRITE_DAC |
+		windows.WRITE_OWNER |
+		windows.FILE_WRITE_DATA |
+		windows.FILE_APPEND_DATA |
+		windows.FILE_WRITE_EA |
+		windows.FILE_WRITE_ATTRIBUTES |
+		0x00000040, // FILE_DELETE_CHILD
+)
+
+// daclEntryRefused is the one judgement of a single entry: a deny entry of a
+// trusted account with any access, or an allow entry of an untrusted account
+// with write access. privateSecurityDescriptorRefusals applies it to the refused
+// path, and the carrier lookup applies it to the parents, so both look for the
+// same kind of entry.
+func daclEntryRefused(deny, trusted bool, mask windows.ACCESS_MASK) bool {
+	if deny {
+		return trusted && mask != 0
+	}
+	return !trusted && mask&untrustedDACLWrite != 0
+}
+
+// privateSecurityDescriptorRefusals is the one rule behind "writer repairable":
+// it returns nil when sd may be repaired by its writer, and every refused
+// entry otherwise (one per account and kind, in DACL order). A DACL can hold
+// several, and a repair that clears the first leaves the refusal in place.
+// When the refusal is not an entry (no descriptor, an untrusted owner, no
+// DACL, an entry of a kind this check does not parse) the result is one
+// refusal with no sid. The boolean answer and the named entries cannot
+// disagree.
+func privateSecurityDescriptorRefusals(
+	sd *windows.SECURITY_DESCRIPTOR,
+	identity windowsProtectionSubject,
+	trustSystemOwners bool,
+) ([]*daclRefusal, error) {
 	if sd == nil {
-		return false, nil
+		return []*daclRefusal{{}}, nil
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	dacl, _, err := sd.DACL()
-	if err != nil || dacl == nil {
-		return false, err
+	dacl, err := descriptorDACL(sd)
+	if err != nil {
+		return nil, err
+	}
+	if dacl == nil {
+		return []*daclRefusal{{}}, nil
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if identity.sid == nil {
-		return false, fmt.Errorf("safefile: protection subject SID is unavailable")
+		return nil, fmt.Errorf("safefile: protection subject SID is unavailable")
 	}
 	if !ownerTrustedForSubject(owner, identity, trustSystemOwners) {
-		return false, nil
+		return []*daclRefusal{{}}, nil
 	}
-	untrustedWrite := windows.ACCESS_MASK(
-		windows.GENERIC_ALL |
-			windows.GENERIC_WRITE |
-			windows.DELETE |
-			windows.WRITE_DAC |
-			windows.WRITE_OWNER |
-			windows.FILE_WRITE_DATA |
-			windows.FILE_APPEND_DATA |
-			windows.FILE_WRITE_EA |
-			windows.FILE_WRITE_ATTRIBUTES |
-			0x00000040, // FILE_DELETE_CHILD
-	)
+	var refused []*daclRefusal
 	for index := uint16(0); index < dacl.AceCount; index++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
-			return false, err
+			return nil, err
 		}
 		if ace == nil {
 			continue
 		}
 		if !isSimpleDiscretionaryACE(ace.Header.AceType) {
-			return false, nil
+			return []*daclRefusal{{}}, nil
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		trusted := sid.Equals(identity.sid) || sid.Equals(system) ||
 			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) ||
 			(trustSystemOwners && winowner.Trusted(sid.String(), ""))
-		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
-			if trusted && ace.Mask != 0 {
-				return false, nil
-			}
+		deny := ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE
+		if !daclEntryRefused(deny, trusted, ace.Mask) {
 			continue
 		}
-		if !trusted && ace.Mask&untrustedWrite != 0 {
-			return false, nil
+		known := false
+		for _, earlier := range refused {
+			known = known || (earlier.deny == deny && earlier.sid.Equals(sid))
+		}
+		if !known {
+			refused = append(refused, &daclRefusal{sid: sid, deny: deny})
 		}
 	}
-	return true, nil
+	return refused, nil
 }
 
 // isSimpleDiscretionaryACE deliberately recognizes only the two ACE layouts

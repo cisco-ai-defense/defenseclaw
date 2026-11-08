@@ -352,4 +352,40 @@ def test_windows_remaining_package_control_stays_covered() -> None:
     packages = sorted(set(timings["packages"]) - excluded)
     shards = partition_packages(packages, 6, timings, root=root)
     control = prefix + "internal/hookpaths"
-    assert sum(package == control for shard in shards for package, _ in shard) == 1
+    # GAP-0749: the hookpaths program sweep (every form through Resolve on
+    # native Windows, eight tests) and its archive table take about 20 minutes
+    # on a hosted runner, more than one shard step. The package runs in parts:
+    # every one of its tests is in exactly one part, no part is a whole
+    # package, and no part is estimated past half the 14 minute go test timeout.
+    parts = [regex for shard in shards for package, regex in shard if package == control]
+    assert len(parts) >= 2 and all(parts), parts
+    tests = sorted({name for _, names in discover_test_files(root / "internal/hookpaths") for name in names})
+    assert check_exact_cover([regex_names(regex) for regex in parts], tests) == []
+    seconds = timings["tests"]["internal/hookpaths"]
+    for regex in parts:
+        estimated = sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+        assert estimated <= 0.5 * 14 * 60, (regex, estimated)
+
+
+def test_linux_remaining_package_hookpaths_runs_in_parts_under_the_race_timeout() -> None:
+    root = Path(__file__).resolve().parents[2]
+    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    excluded = {prefix + path for path in ("internal/audit", "internal/gateway")}
+    packages = sorted(set(timings["packages"]) - excluded)
+    shards = partition_packages(packages, 12, timings, root=root)
+    control = prefix + "internal/hookpaths"
+    # The hookpaths program sweep and archive table take 7 to 8 minutes in the
+    # race run of a hosted runner and hit the 11 minute go test timeout of the
+    # remaining-package shard when the package ran whole (it was recorded at
+    # 6 seconds). The package runs in parts: every one of its tests is in
+    # exactly one part, no part is a whole package, and no part is estimated
+    # past half the 11 minute go test timeout.
+    parts = [regex for shard in shards for package, regex in shard if package == control]
+    assert len(parts) >= 2 and all(parts), parts
+    tests = sorted({name for _, names in discover_test_files(root / "internal/hookpaths") for name in names})
+    assert check_exact_cover([regex_names(regex) for regex in parts], tests) == []
+    seconds = timings["tests"]["internal/hookpaths"]
+    for regex in parts:
+        estimated = sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+        assert estimated <= 0.5 * 11 * 60, (regex, estimated)

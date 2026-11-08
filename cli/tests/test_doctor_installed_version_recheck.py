@@ -734,3 +734,39 @@ def test_the_run_evidence_is_read_again_after_the_attended_refresh() -> None:
         doctor_health.reset_installed_version_probes()
         second = doctor_health.read_run_discovery("")
     assert second.agents["codex"].binary_path == _NEW
+
+
+def _unversioned() -> AgentDiscovery:
+    # A fresh account: init cached codex before setup, so no version was probed.
+    discovery = _discovery(version="")
+    discovery.agents["codex"] = AgentSignal(
+        name="codex",
+        installed=True,
+        config_path="",
+        binary_path=_BINARY,
+        version="",
+        error=agent_discovery.VERSION_NOT_PROBED,
+    )
+    return discovery
+
+
+def test_a_configured_connector_cached_without_a_version_is_read_now() -> None:
+    # GAP-0752: the row warned "version was not observed" until `agent discover --refresh`.
+    row, probe = _row(_unversioned(), ("codex-cli 0.160.0", ""))
+    assert "installed=0.160.0" in row["detail"]
+    assert "not observed" not in row["detail"]
+    assert "recorded" not in row["detail"]
+    assert row["status"] == "pass"
+    assert probe.call_args.args[:2] == ("codex", _BINARY)
+
+
+def test_an_unversioned_connector_whose_probe_fails_still_warns_not_observed() -> None:
+    row, _ = _row(_unversioned(), ("", agent_discovery.VERSION_PROBE_TIMED_OUT))
+    assert "not observed" in row["detail"]
+    assert row["status"] == "warn"
+
+
+def test_an_unversioned_agent_nobody_set_up_is_not_run() -> None:
+    result = doctor_health.recheck_installed_versions(_unversioned(), ["claudecode"], "")
+    assert result.discovery.agents["codex"].version == ""
+    assert not result.changed

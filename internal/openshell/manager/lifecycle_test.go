@@ -51,6 +51,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 var anthropicLLM = &sandboxapi.LLMCredential{Profile: profiles.AnthropicID, Credentials: map[string]string{"ANTHROPIC_API_KEY": "sk-test-secret"}}
@@ -875,10 +876,7 @@ func TestEndHarnessScript(t *testing.T) {
 		t.Skip("the script reads /proc")
 	}
 	root := filepath.Join(t.TempDir(), "harness")
-	sleepBin, err := exec.LookPath("sleep")
-	if err != nil {
-		t.Skip("no sleep(1)")
-	}
+	sleepBin := testenv.NativeSleep(t)
 	data, err := os.ReadFile(sleepBin)
 	must(t, err)
 	bin := writeFile(t, filepath.Join(root, "bin", "fakeharness"), string(data))

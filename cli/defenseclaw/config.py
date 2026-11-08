@@ -575,7 +575,7 @@ def config_path_for_data_dir(data_dir: str | os.PathLike[str] | None = None) -> 
 GATEWAY_PID_FILE_NAME = "gateway.pid"
 
 # (path, st_dev, st_ino, st_size, st_mtime_ns) -> (configured data_dir, managed mode).
-_home_config_cache: dict[tuple[str, int, int, int, int], tuple[str | None, bool]] = {}
+_home_config_cache: dict[tuple[str, str, int, int, int, int], tuple[str | None, bool]] = {}
 
 
 def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
@@ -598,16 +598,43 @@ def gateway_home_for_data_dir(data_dir: str | os.PathLike[str]) -> str:
     """
     own = os.fspath(data_dir)
     try:
-        home = os.fspath(default_data_path())
+        home, configured, managed = _install_home_binding()
     except (OSError, KeyError, NotImplementedError):
         return own
-    active_config = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
-    configured, managed = _home_config_binding(active_config)
-    if managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV)):
+    if managed:
         return own
     if configured and _same_folder(configured, own):
         return home
     return own
+
+
+def _install_home_binding() -> tuple[str, str | None, bool]:
+    """The install home, the store its active config binds, and whether it is managed."""
+    home = os.fspath(default_data_path())
+    active_config = os.environ.get(CONFIG_PATH_ENV) or os.path.join(home, CONFIG_FILE_NAME)
+    if not os.path.isabs(active_config):
+        # The gateway starts in the install home, so it reads a relative
+        # config path from there, whatever folder this process runs in.
+        active_config = os.path.join(home, active_config)
+    configured, managed = _home_config_binding(active_config, home)
+    return home, configured, managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+
+
+def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
+    """The PID-record home of a store the install-home config itself names.
+
+    ``store`` came from reading that config's ``data_dir`` the way the gateway
+    does, so the config binds it by construction: the PID record is in the
+    install home. Asking :func:`gateway_home_for_data_dir` again would compare
+    the store with a second reading of the same text, which can differ (a
+    ``~/`` data_dir), and then name the store as the home (GAP-0711, GAP-0713).
+    A managed runtime keeps its own PID home.
+    """
+    try:
+        home, _configured, managed = _install_home_binding()
+    except (OSError, KeyError, NotImplementedError):
+        return os.fspath(store)
+    return os.fspath(store) if managed else home
 
 
 def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
@@ -615,13 +642,18 @@ def gateway_pid_path(data_dir: str | os.PathLike[str]) -> str:
     return os.path.join(gateway_home_for_data_dir(data_dir), GATEWAY_PID_FILE_NAME)
 
 
-def _home_config_binding(path: str) -> tuple[str | None, bool]:
-    """Return the config's resolved store and whether it declares managed mode."""
+def _home_config_binding(path: str, home: str) -> tuple[str | None, bool]:
+    """Return the config's resolved store and whether it declares managed mode.
+
+    The gateway starts in the install home ``home``, so it makes a relative
+    data_dir absolute from there, not from the folder of the config or the one
+    this process runs in.
+    """
     try:
         st = os.stat(path)
     except OSError:
         return None, False
-    key = (path, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    key = (path, home, st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
     if key in _home_config_cache:
         return _home_config_cache[key]
     resolved: str | None = None
@@ -634,7 +666,7 @@ def _home_config_binding(path: str) -> tuple[str | None, bool]:
         managed = _is_managed_enterprise_mode(str(raw.get("deployment_mode") or ""))
         configured = raw.get("data_dir")
         if isinstance(configured, str) and configured.strip():
-            resolved = _configured_data_dir(raw, os.path.dirname(path))
+            resolved = os.path.abspath(os.path.join(home, _expand_store_home(configured.strip())))
     if len(_home_config_cache) > 32:
         _home_config_cache.clear()
     _home_config_cache[key] = (resolved, managed)
@@ -3044,6 +3076,22 @@ class GuardrailConfig:
         from defenseclaw import policy_catalog
 
         name = self.effective_rule_pack(connector)
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        if cfg is None or getattr(cfg, "guardrail", None) is not self:
+            from types import SimpleNamespace
+
+            cfg = SimpleNamespace(guardrail=self, policy_dir="", data_dir="")
+        if name in (getattr(self, "custom_packs", None) or {}):
+            problem, verified = policy_catalog.custom_pack_check(cfg, name)
+            if problem or not verified:
+                # A broken custom_packs entry is a config error, whatever its
+                # name: its selection loads the built-in fallback, and no pack
+                # posture it claims can open an outage (Go:
+                # brokenCustomRulePackSelected). A pack the Go loader has not
+                # vouched for grants no posture either (Go: a standalone
+                # selection without the loader stays strict).
+                return "strict"
         if name in {"default", "strict", "permissive"} and name not in (getattr(self, "custom_packs", None) or {}):
             # A built-in pack's tier is its name, also where its folder is not
             # installed (Go: a built-in name without a manifest posture).
@@ -4820,7 +4868,13 @@ class Config:
         """
         self.__dict__.setdefault("_decided_paths", []).extend(paths)
 
-    def save(self, *, actor: str | None = None, reason: str = "") -> Any:
+    def save(
+        self,
+        *,
+        actor: str | None = None,
+        reason: str = "",
+        check_candidate: Callable[[str, bytes], None] | None = None,
+    ) -> Any:
         """Persist this :class:`Config` through the single config writer.
 
         Only modeled values that changed since load are applied to the file
@@ -4830,11 +4884,12 @@ class Config:
         The writer locks ``config.yaml.lock``, validates the candidate with
         the canonical validator, replaces the file durably and advances
         ``config.generation.json``. ``actor`` defaults to ``cli:<os user>``.
-        Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
+        ``check_candidate`` inspects the final bytes under the writer lock and
+        may refuse the write. Returns the writer's :class:`~defenseclaw.config_writer.WriteResult`.
         """
         path = str(config_path_for_data_dir(self.data_dir))
         try:
-            return self._write(path, actor=actor, reason=reason)
+            return self._write(path, actor=actor, reason=reason, check_candidate=check_candidate)
         except ConfigSaveError:
             raise
         except OSError as exc:
@@ -4872,6 +4927,7 @@ class Config:
         actor: str | None = None,
         reason: str = "",
         verify: Callable[[str], None] | None = None,
+        check_candidate: Callable[[str, bytes], None] | None = None,
     ) -> Any:
         from defenseclaw import config_writer
 
@@ -4894,6 +4950,7 @@ class Config:
             path=path,
             verify=verify,
             decided=decided,
+            check_candidate=check_candidate,
         )
         # The admission pins the writer added (GAP-1488) go into this Config
         # too, so it reads as the file it wrote.
@@ -8088,6 +8145,13 @@ def load(
     cfg._source_config_version = source_config_version
     cfg._loaded_generation = _generation_of_loaded_text(cfg_file, loaded_text)
     _apply_secure_client_hook_fail_default(cfg, raw)
+    # A relative guardrail.custom_packs path is read against the directory of the
+    # config file as loaded; hold that absolute base so a later chdir, or a copy
+    # of this config, never moves the pack (Go GuardrailConfig customPackBase).
+    try:
+        object.__setattr__(cfg.guardrail, "_custom_pack_base", os.path.dirname(os.path.abspath(cfg_file)))
+    except (AttributeError, TypeError):  # a test double without attributes
+        pass
     _mark_openclaw_not_installed(cfg)
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)

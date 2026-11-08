@@ -347,6 +347,11 @@ type Options struct {
 	// failure takes the administrator's open; every other failure is closed
 	// (managedNonOutageMode, bounded review P1).
 	managedOutageOpen bool
+	// lateOrdinary, when set, scans the call for a path a protected file
+	// could be reached through (lateOrdinaryCheck). A per-user call that a
+	// verified gateway took and did not answer by the deadline follows the
+	// outage mode when it is ordinary (GAP-0518); it stays closed otherwise.
+	lateOrdinary func() bool
 	// perUserOutage is set on a per-user hook for a failure that is a gateway
 	// outage (withPerUserOutage): this account's gateway refused or dropped
 	// the connection, gave no connection within the restart budget, or could
@@ -990,6 +995,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// take time after Run, leaving a healthy gateway only a fraction of the
 	// configured answer budget. The early watchdog still caps the whole call.
 	opts.requestFacts = &hookRequestFacts{}
+	opts.lateOrdinary = lateOrdinaryCheck(opts, payload)
 	if opts.ManagedEnterprise && !opts.SecureClient {
 		opts.requestFacts.set(make(http.Header), opts, payload)
 	}
@@ -1198,7 +1204,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return failResponse(opts, sp, nonOutageFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", http.StatusUnauthorized))
+			return failGatewayUnauthorized(opts, sp, nonOutageFailMode(opts, failMode), payload)
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
@@ -1379,7 +1385,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			opts.Event = resolveHookEvent("", payload)
 		}
 		return failEnrollmentRefusal(opts, sp, managedRootDeniedReason)
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusUnauthorized:
+		// An authentication refusal is integrity, not an outage. A Windows
+		// standalone account meets it in its first minutes (GAP-0722).
+		return failGatewayUnauthorized(opts, sp, answeredFailMode, payload)
+	case resp.StatusCode == http.StatusForbidden:
 		// An authentication refusal is integrity, not an outage.
 		return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	case resp.StatusCode < 200 || resp.StatusCode >= 300:
@@ -3131,6 +3141,49 @@ func failEnrollmentRefusalOf(opts Options, sp spec, reason string, excluded bool
 	if managedStandaloneHook(opts) && (reason == managedUIDUnregisteredReason || reason == managedRootDeniedReason) {
 		explanation = "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + why + "."
 	}
+	return emitEnrollmentExplanation(opts, sp, explanation)
+}
+
+// managedCredentialPendingReason is the hook-failure reason of a Windows
+// standalone call the gateway answered 401 after the resends of
+// hookAuthRetries: the gateway has not accepted the account credentials
+// yet. A new account holds its runtime before the gateway names it, and
+// that can outlast the resends, which must stay inside the agent hook
+// timeout (GAP-0722). The refusal report is the audit row that names the
+// account; refusalpipe.ReasonCredentialPending is the same code.
+const managedCredentialPendingReason = "enterprise_managed_credential_pending"
+
+// credentialPendingExplanation is why such a call is blocked. It leads with
+// the cause and the wait, as unenrolledAccountExplanation does.
+const credentialPendingExplanation = "DefenseClaw has not accepted the credentials of this account yet, " +
+	"which is usual in the first minutes after a new account signs in. Try again in a minute or two; " +
+	"if this continues, contact your administrator"
+
+// failGatewayUnauthorized ends a call the gateway answered 401 after the
+// resends. A Windows standalone account (ExplainUnenrolledAccount) is
+// blocked with credentialPendingExplanation and an audit report, in every
+// fail mode, as any authentication refusal is closed; every other hook, and
+// an event that cannot block, keeps the generic response failure.
+func failGatewayUnauthorized(opts Options, sp spec, failMode string, payload []byte) int {
+	reason := fmt.Sprintf("gateway returned HTTP %d", http.StatusUnauthorized)
+	if !opts.ManagedEnterprise || !opts.ExplainUnenrolledAccount || opts.SecureClient || sp.failOpenOnly ||
+		failClosedStopEvent(opts, sp) {
+		return failResponse(opts, sp, failMode, reason)
+	}
+	if strings.TrimSpace(opts.Event) == "" {
+		opts.Event = resolveHookEvent("", payload)
+	}
+	reportUnenrolledRefusal(opts, sp, managedCredentialPendingReason)
+	logHookFailure(opts, sp, reason, "response", "closed", true)
+	if code, handled := copilotFailClosed(opts, sp, "response", managedCredentialPendingReason); handled {
+		return code
+	}
+	return emitEnrollmentExplanation(opts, sp, "DefenseClaw blocked this "+hookEventSubject(opts.Event)+": "+credentialPendingExplanation+".")
+}
+
+// emitEnrollmentExplanation delivers explanation as the block of a call the
+// enrollment policy or a pending account refuses.
+func emitEnrollmentExplanation(opts Options, sp spec, explanation string) int {
 	// Claude Code shows a structured block without its hook-command prefix
 	// (GAP-0554, GAP-0636).
 	if sp.connector == "claudecode" && managedStandaloneHook(opts) {
@@ -3164,7 +3217,8 @@ var sendUnenrolledRefusal = refusalpipe.Send
 // nothing is written on disk. The Unix standalone gateway refuses and audits
 // an unenrolled caller itself (managedUIDUnregisteredReason).
 func reportUnenrolledRefusal(opts Options, sp spec, reason string) {
-	if reason != managedSIDUnregisteredReason && reason != managedEnrollmentPendingReason {
+	if reason != managedSIDUnregisteredReason && reason != managedEnrollmentPendingReason &&
+		reason != managedCredentialPendingReason {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), unenrolledRefusalReportBudget)

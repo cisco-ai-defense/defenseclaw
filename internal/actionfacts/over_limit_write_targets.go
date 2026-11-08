@@ -168,13 +168,13 @@ func OverLimitWriteElidedContentTarget(input Input, facts Facts) (string, bool) 
 // fragments, and PAM configuration. "" for any other path.
 func contentRuleWriteTarget(value string) string {
 	switch {
-	case value == dockerDaemonConfigPath:
+	case EtcSpelling(value) == dockerDaemonConfigPath:
 		return "docker-daemon-config"
 	case exactSudoersWriteTarget(value):
 		return "sudoers"
-	case value == posixPasswdPath:
+	case EtcSpelling(value) == posixPasswdPath:
 		return "account-database"
-	case value == "/etc/ld.so.preload" || ExactGlobalLDPreloadProfilePath(value):
+	case EtcSpelling(value) == "/etc/ld.so.preload" || ExactGlobalLDPreloadProfilePath(value):
 		return "global-preload"
 	case exactProtectedPAMPath(value):
 		return "pam"

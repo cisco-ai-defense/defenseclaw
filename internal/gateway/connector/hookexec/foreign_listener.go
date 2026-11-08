@@ -74,10 +74,41 @@ func perUserRootGatewayReason(opts Options) string {
 	if holderErr != nil {
 		holder = daemon.PortHolder{UID: -1}
 	}
-	if perUserListenerClass(host, port, opts.Home, holder, holderErr, true) != daemon.PerUserListenerOwnGatewayRunAsRoot {
+	for _, home := range perUserRecordHomes(opts) {
+		if perUserListenerClass(host, port, home, holder, holderErr, true) == daemon.PerUserListenerOwnGatewayRunAsRoot {
+			return daemon.RootGatewayListenerReason + " " + daemon.RootGatewayListenerRemedy(home)
+		}
+	}
+	return ""
+}
+
+// PerUserRootGatewayReason returns the verified root-gateway diagnosis for a
+// shell hook's current data store. It only describes the listener; the hook's
+// connected-peer check continues to decide whether a call can be sent.
+func PerUserRootGatewayReason(apiAddr, dataDir string) string {
+	return perUserRootGatewayReason(Options{APIAddr: apiAddr, Home: dataDir})
+}
+
+// perUserRootReasonFrame starts the stdout of a per-user post transport that
+// refused a root-run gateway of the calling account. The shell hooks read it
+// back from exit status PerUserPostPeerUnverifiedExit (_hardening.sh).
+const perUserRootReasonFrame = "DCPOSTROOT1:"
+
+// PerUserPeerRefusalOutput is what a per-user post transport prints on stdout
+// when err is a refused connected listener (PerUserPostPeerUnverified): the
+// framed root-gateway diagnosis, or "" when the listener is not a root-run
+// gateway of the calling account. Both transports, the gateway CLI hook-post
+// and the small defenseclaw-hook-post helper, print this one text, so the
+// message a hook shows does not depend on which of them the install has
+// beside the gateway (rel-1-0-6 GAP-0712).
+func PerUserPeerRefusalOutput(err error, apiAddr, dataDir string) string {
+	if !PerUserPostPeerUnverified(err) {
 		return ""
 	}
-	return daemon.RootGatewayListenerReason + " " + daemon.RootGatewayListenerRemedy(opts.Home)
+	if reason := PerUserRootGatewayReason(apiAddr, dataDir); reason != "" {
+		return perUserRootReasonFrame + reason
+	}
+	return ""
 }
 
 func perUserPeerRefusal(reason string) bool {

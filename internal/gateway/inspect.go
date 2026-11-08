@@ -80,6 +80,9 @@ type ToolInspectRequest struct {
 	Direction       string          `json:"direction,omitempty"`
 	SessionID       string          `json:"session_id,omitempty"`
 	ApprovalSurface string          `json:"approval_surface,omitempty"`
+	// ToolCallID is the OpenClaw id of the call, sent by the OpenClaw plugin so
+	// an enforced block can be tied to the result message of that call (GAP-0644).
+	ToolCallID string `json:"tool_call_id,omitempty"`
 	// Connector is an optional assertion. The authenticated server route
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
@@ -2219,23 +2222,33 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		v *ToolInspectVerdict
 	}
 	ch := make(chan verdictResult, 1)
-	workerDone := a.inspectToolWorkerDone
-	go func() {
-		if workerDone != nil {
-			defer workerDone()
-		}
-		var v *ToolInspectVerdict
-		if strings.EqualFold(req.Tool, "message") {
-			v = a.inspectMessageContent(workerCtx, &req)
-		} else {
-			// Pass the 200ms-capped ctx so the tool-call judge lane's
-			// deadline guard short-circuits on this generic endpoint
-			// (mirroring the message lane); native hook callers go
-			// through inspectToolPolicy with a deadline-free context.
-			v = a.inspectToolPolicyCtx(workerCtx, &req)
-		}
-		ch <- verdictResult{v}
-	}()
+	// The strict install-window decision is independent of the scanner.
+	// Decide it on the request goroutine so a saturated scanner cannot turn
+	// this required refusal into a scan timeout.
+	installVerdict := &ToolInspectVerdict{}
+	a.strictInstallWindowInspect(r.Context(), serverConnector, &req, installVerdict)
+	installBlocked := installVerdict.Action == "block"
+	if installBlocked {
+		ch <- verdictResult{installVerdict}
+	} else {
+		workerDone := a.inspectToolWorkerDone
+		go func() {
+			if workerDone != nil {
+				defer workerDone()
+			}
+			var v *ToolInspectVerdict
+			if strings.EqualFold(req.Tool, "message") {
+				v = a.inspectMessageContent(workerCtx, &req)
+			} else {
+				// Pass the 200ms-capped ctx so the tool-call judge lane's
+				// deadline guard short-circuits on this generic endpoint
+				// (mirroring the message lane); native hook callers go
+				// through inspectToolPolicy with a deadline-free context.
+				v = a.inspectToolPolicyCtx(workerCtx, &req)
+			}
+			ch <- verdictResult{v}
+		}()
+	}
 
 	var verdict *ToolInspectVerdict
 	select {
@@ -2255,14 +2268,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.BoundedPrefixReview {
-		verdict.markOversizeUninspected()
+	if !installBlocked {
+		if req.BoundedPrefixReview {
+			verdict.markOversizeUninspected()
+		}
+		verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
+		a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
+		// A lock that appeared during the scan still decides this request.
+		a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
 	}
-	verdict.applyMode(inspectMode(a.decisionConfig(r.Context()), serverConnector))
-	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
-	// The strict tier refuses a call while an install or upgrade holds this
-	// account's data directory, as on the hook route (GAP-1438).
-	a.strictInstallWindowInspect(r.Context(), serverConnector, &req, verdict)
 
 	// Count the check against the authenticated connector so /health (and the
 	// TUI's "0 requests ... verify your agent is dialing the gateway port"
@@ -2390,6 +2404,22 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		}
 		fmt.Fprintf(os.Stderr, "[inspect] inspect audit persistence failed tool=%q action=%s denied_for_audit=%t: %v\n",
 			req.Tool, verdict.Action, denied, auditErr)
+	}
+
+	// The proxy shows an enforced OpenClaw block on the reply that follows it,
+	// whichever tool made the call and whichever step made the block, so this
+	// is decided on the final verdict, after a failed audit write may have
+	// turned an allow into a block (GAP-0644). Secure Client answers stay as
+	// they were.
+	if strings.EqualFold(firstNonEmpty(req.Connector, connectorName), "openclaw") &&
+		openClawNoticeAllowed(a.decisionConfig(r.Context())) {
+		if session := strings.TrimSpace(req.SessionID); verdict.Action == "block" && verdict.Mode == "action" {
+			rememberOpenClawBlockNotice(req.Tool, req.ToolCallID, session, evalCtx.RuleIDs, verdict.Reason)
+		} else {
+			// Not a block: the call id is noted so that a block under the
+			// same id is known to be ambiguous.
+			observeOpenClawToolCall(req.ToolCallID)
+		}
 	}
 
 	a.emitCodeGuardTelemetry(r.Context(), &req, verdict, elapsed)

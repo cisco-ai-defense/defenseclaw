@@ -21,11 +21,17 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
+	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // perUserFreshGatewayWindow covers the short interval after a gateway start
 // when its listener has returned but the first hook answer is still pending.
 const perUserFreshGatewayWindow = 12 * time.Second
+
+// freshOwnerCaptureWait bounds the background read of the sole holder of a
+// verified connection (perUserCaptureFreshGatewayOwner); a read past it
+// leaves the owner unknown and the call closed.
+const freshOwnerCaptureWait = time.Second
 
 // PerUserGatewayFreshStartNoAnswer recognizes a no-status call sent to a
 // recently started gateway recorded for this account. The connected peer,
@@ -68,7 +74,7 @@ func perUserGatewayRecentlyStarted(dataDir string) bool {
 	if err != nil || !info.Mode().IsRegular() {
 		return false
 	}
-	age := time.Since(info.ModTime())
+	age := proofclock.Since(info.ModTime())
 	return age > -2*time.Second && age <= perUserFreshGatewayWindow+2*time.Second
 }
 
@@ -146,18 +152,25 @@ func perUserCaptureFreshGatewayOwner(check *perUserPeerCheck) {
 	if !okc || !oks {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		pid, ok := perUserConnectedPeerPIDWithin(ctx, client, server)
-		if !ok {
-			return
-		}
-		identity, ok := procidentity.Of(pid)
-		if ok && identity != "" && ctx.Err() == nil {
-			check.owner.Store(&perUserPeerProcess{pid: pid, identity: identity})
-		}
-	}()
+	go captureFreshGatewayOwner(check, client, server, perUserConnectedPeerPIDWithin)
+}
+
+// captureFreshGatewayOwner reads the sole holder of the connection with scan
+// and records it when the read ends inside freshOwnerCaptureWait on the proof
+// clock. A read that ends after that wait names no owner, whatever it found.
+// scan is the process-table read; a test replaces it to end the read at a
+// moment it chooses.
+func captureFreshGatewayOwner(check *perUserPeerCheck, client, server *net.TCPAddr, scan func(context.Context, *net.TCPAddr, *net.TCPAddr) (int, bool)) {
+	ctx, cancel := proofclock.WithTimeout(context.Background(), freshOwnerCaptureWait)
+	defer cancel()
+	pid, ok := scan(ctx, client, server)
+	if !ok {
+		return
+	}
+	identity, ok := procidentity.Of(pid)
+	if ok && identity != "" && ctx.Err() == nil {
+		check.owner.Store(&perUserPeerProcess{pid: pid, identity: identity})
+	}
 }
 
 func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {
@@ -194,7 +207,7 @@ func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {
 	if !ok {
 		return perUserPeerProcess{}, false
 	}
-	age := time.Since(start)
+	age := proofclock.Since(start)
 	if age < 0 || age > perUserFreshGatewayWindow {
 		return perUserPeerProcess{}, false
 	}
@@ -305,7 +318,7 @@ func PerUserGatewayRecordObservedAnswer(dataDir string, peer *PerUserPeerRecord)
 	if !connected {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := proofclock.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	owners, found := perUserListenerOwners(ctx, server)
 	if found && ctx.Err() == nil && len(owners) == 1 && owners[0].identity != "" {

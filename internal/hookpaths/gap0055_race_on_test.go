@@ -5,5 +5,5 @@
 
 package hookpaths
 
-// gap0055RaceBuild: a race build runs a stride of the GAP-0055 sweep.
+// gap0055RaceBuild: a race build reads a spread of the GAP-0055 sweep through Resolve.
 const gap0055RaceBuild = true

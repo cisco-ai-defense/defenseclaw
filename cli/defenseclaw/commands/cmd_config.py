@@ -47,7 +47,7 @@ import click
 import yaml
 
 from defenseclaw import config as config_module
-from defenseclaw import connector_paths, ux
+from defenseclaw import ux
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.config_inspect import (
     ConfigInspectError,
@@ -59,6 +59,7 @@ from defenseclaw.config_inspect import (
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
+from defenseclaw.guardrail_roster import check_guardrail_connector_roster, guardrail_enabled
 from defenseclaw.observability.v8_config import (
     MAX_SOURCE_BYTES,
     RETIRED_KEY_ACTION_PREFIX,
@@ -804,6 +805,7 @@ def _shadowed_hilt_notes(changes: list) -> list[str]:
 # patched (teardown restores it).
 _MOVED_DATA_DIR_RECORD = "agent_discovery.json"
 _MOVED_DATA_DIR_BACKUP_SUFFIX = "_backup.json"
+_HOOK_CREDENTIAL_PATTERN = re.compile(rb"[0-9a-f]{64}")
 
 
 def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
@@ -874,6 +876,381 @@ def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
     return notes
 
 
+def _hook_store_entry_is_account_private(path: str, info: os.stat_result) -> bool:
+    """Whether *path* is a token file or folder only this account can change.
+
+    POSIX: owned by the effective user, with no group or other access to a
+    file and no group or other write on a folder. Windows: the test the
+    gateway applies to the same token (``safefile.ValidatePrivateFile``): no
+    reparse point on the path, a regular file owned by this account with a
+    private DACL. A folder only has to be a real directory there, because a
+    token another account put in it fails the file test.
+    """
+    from defenseclaw.file_permissions import reject_reparse_path, windows_guard_private_file_error
+
+    if os.name == "nt":
+        try:
+            reject_reparse_path(path)
+        except OSError:
+            return False
+        if stat.S_ISDIR(info.st_mode):
+            return True
+        return stat.S_ISREG(info.st_mode) and windows_guard_private_file_error(path) is None
+    if stat.S_ISDIR(info.st_mode):
+        return info.st_uid == os.geteuid() and not info.st_mode & 0o022
+    return stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and not info.st_mode & 0o077
+
+
+def _read_moved_hook_credential(path: str) -> bytes:
+    """Read an account-owned scoped credential from a private regular file."""
+    from defenseclaw.file_permissions import open_regular_file_no_follow
+
+    info = os.lstat(path)
+    if not _hook_store_entry_is_account_private(path, info):
+        raise OSError("hook credential is not an account-private regular file")
+    with os.fdopen(open_regular_file_no_follow(path, expected_stat=info), "rb") as handle:
+        data = handle.read(4097)
+    token = data.strip()
+    if len(data) > 4096 or not _HOOK_CREDENTIAL_PATTERN.fullmatch(token):
+        raise OSError("hook credential is not valid")
+    return token
+
+
+def _carry_hook_credentials(old_dir: str, new_dir: str, connectors: list[str]) -> list[str]:
+    """Keep existing sessions' scoped credentials valid after a store move."""
+    if config_module._is_admin_process() or not old_dir or not new_dir:
+        return []
+    try:
+        if os.path.samefile(old_dir, new_dir):
+            return []
+    except OSError:
+        if os.path.abspath(old_dir) == os.path.abspath(new_dir):
+            return []
+    from defenseclaw.file_permissions import atomic_write_private_bytes, make_private_directory
+
+    old_hooks = os.path.join(old_dir, "hooks")
+    try:
+        for directory in (old_dir, old_hooks):
+            if not _hook_store_entry_is_account_private(directory, os.lstat(directory)):
+                raise OSError("hook credential directory is not account-owned and private")
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [
+            "warning: existing hook credentials could not be carried to the new data_dir; "
+            "restart active agent sessions after the gateway restart."
+        ]
+
+    new_hooks = os.path.join(new_dir, "hooks")
+    carried: list[str] = []
+    unavailable: list[str] = []
+    for name in sorted({normalize_connector(name) for name in connectors}):
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", name):
+            continue
+        source = os.path.join(old_hooks, f".hook-{name}.token")
+        if not os.path.lexists(source):
+            continue
+        target = os.path.join(new_hooks, f".hook-{name}.token")
+        try:
+            token = _read_moved_hook_credential(source)
+            make_private_directory(new_dir)
+            make_private_directory(new_hooks)
+            for directory in (new_dir, new_hooks):
+                if not _hook_store_entry_is_account_private(directory, os.lstat(directory)):
+                    raise OSError("new hook credential directory is not account-owned and private")
+            if os.path.lexists(target):
+                info = os.lstat(target)
+                if not stat.S_ISREG(info.st_mode) or (os.name != "nt" and info.st_uid != os.geteuid()):
+                    raise OSError("new hook credential is not an account-owned regular file")
+                try:
+                    current = _read_moved_hook_credential(target)
+                except OSError:
+                    current = b""
+                if current == token:
+                    continue
+            atomic_write_private_bytes(target, token + b"\n")
+            carried.append(name)
+        except OSError:
+            unavailable.append(name)
+    notes = []
+    if carried:
+        notes.append("Kept the scoped hook credentials for the new data_dir: " + ", ".join(carried) + ".")
+    if unavailable:
+        notes.append(
+            "warning: scoped hook credentials for " + ", ".join(unavailable) +
+            " could not be carried to the new data_dir; restart active agent sessions after the gateway restart."
+        )
+    return notes
+
+
+# What `defenseclaw setup <connector>` seals under the data_dir and the
+# restarted gateway reads back from the new one: the hook contract lock (the
+# agent executable and version hook contract admission trusts; Windows has no
+# other source for an agent it cannot run from the gateway) and each
+# connector's backup of the agent settings DefenseClaw patched (teardown
+# restores it). Without them a moved data_dir left Codex and OpenCode skipped
+# ("agent version not probed") and Codex failing closed on a per-user Windows
+# install, and on other systems let a restarted gateway take its backup from
+# settings that already carry DefenseClaw's hooks (rel-1-0-6 GAP-0801).
+_MOVED_DATA_DIR_LOCK = "hook_contract_lock.json"
+_MOVED_DATA_DIR_BACKUP_TREE = "connector_backups"
+_MOVED_STATE_MAX_FILE_BYTES = 32 << 20
+_MOVED_STATE_MAX_ENTRIES = 4096
+# A CodeGuard archive holds a copy of the skill folder it replaced, as deep as that folder was, so the
+# walk is bounded by the entry count and the length of the path, never by a folder count.
+_MOVED_STATE_MAX_PATH_CHARS = 4096
+
+
+def _state_entry_is_account_owned(path: str, info: os.stat_result) -> bool:
+    """Whether no other account could have written *path* (a file or folder).
+
+    These files are copied into a private store, so it does not matter who may
+    read the source; it matters that nobody else could have planted it, since
+    teardown writes the backups back into the agent's settings. POSIX: owned
+    by the effective user, with no group or other write. Windows: no reparse
+    point on the path and the one owner and writer trust set of the product
+    (this account, SYSTEM, Administrators, TrustedInstaller).
+    """
+    from defenseclaw.file_permissions import reject_reparse_path, windows_acl_custody_write_error
+
+    if not (stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)):
+        return False
+    if os.name == "nt":
+        try:
+            reject_reparse_path(path)
+        except OSError:
+            return False
+        return windows_acl_custody_write_error(path, allow_current_user=True) is None
+    return info.st_uid == os.geteuid() and not info.st_mode & 0o022
+
+
+def _moved_state_sources(old_dir: str) -> tuple[list[tuple[str, os.stat_result]], list[str]]:
+    """The regular files to carry (relative path, lstat) and the paths refused.
+
+    The backup tree comes first and the lock last, so an interrupted copy never
+    leaves a lock that claims a backup the new folder does not have.
+    """
+    files: list[tuple[str, os.stat_result]] = []
+    refused: list[str] = []
+    pending = [_MOVED_DATA_DIR_BACKUP_TREE, _MOVED_DATA_DIR_LOCK]
+    seen = 0
+    while pending:
+        rel = pending.pop()
+        path = os.path.join(old_dir, rel)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            refused.append(rel)
+            continue
+        seen += 1
+        if (
+            seen > _MOVED_STATE_MAX_ENTRIES
+            or len(rel) > _MOVED_STATE_MAX_PATH_CHARS
+            or not _state_entry_is_account_owned(path, info)
+        ):
+            refused.append(rel)
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            try:
+                names = sorted(os.listdir(path), reverse=True)
+            except OSError:
+                refused.append(rel)
+                continue
+            pending.extend(os.path.join(rel, name) for name in names)
+        elif info.st_size > _MOVED_STATE_MAX_FILE_BYTES:
+            refused.append(rel)
+        else:
+            files.append((rel, info))
+    files.sort(key=lambda item: (item[0] == _MOVED_DATA_DIR_LOCK, item[0]))
+    return files, refused
+
+
+class _MovedStateConflictError(OSError):
+    """The new data_dir already has something else at a path being carried."""
+
+
+def _store_moved_state_file(new_dir: str, rel: str, data: bytes) -> bool:
+    """Create ``new_dir/rel`` with *data*, private; never replace or follow a link.
+
+    True when the file was created, False when an identical regular file that
+    only this account can use was already there (the gateway refuses a lock or
+    backup with group or other access, so equal bytes alone do not make it
+    usable). Raises :class:`_MovedStateConflictError` for anything else that is
+    already there (different bytes, a link, a folder, a file the gateway would
+    refuse) and ``OSError`` when a
+    folder on the way is a link, belongs to another account or cannot be made.
+    On POSIX every folder is opened from the one before it without following
+    links, so the destination stays bound while the file is written; Windows
+    makes each folder with the private-folder helper, which refuses a reparse
+    point.
+    """
+    from defenseclaw.file_permissions import make_private_directory, open_regular_file_no_follow
+
+    parts = rel.split(os.sep)
+    create = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    make_private_directory(new_dir)
+    if os.name == "nt":
+        current = new_dir
+        for part in parts[:-1]:
+            current = os.path.join(current, part)
+            make_private_directory(current)
+        target = os.path.join(current, parts[-1])
+        try:
+            fd = os.open(target, create, 0o600)
+        except FileExistsError:
+            try:
+                with os.fdopen(open_regular_file_no_follow(target), "rb") as handle:
+                    same = handle.read(len(data) + 1) == data and _hook_store_entry_is_account_private(
+                        target, os.lstat(target)
+                    )
+            except OSError as exc:
+                raise _MovedStateConflictError(rel) from exc
+            if same:
+                return False
+            raise _MovedStateConflictError(rel) from None
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        return True
+
+    folder = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(new_dir, folder)
+    try:
+        for part in parts[:-1]:
+            try:
+                os.mkdir(part, 0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            child = os.open(part, folder, dir_fd=fd)
+            os.close(fd)
+            fd = child
+            info = os.fstat(fd)
+            if info.st_uid != os.geteuid():
+                raise OSError(f"{part} belongs to another account")
+            if info.st_mode & 0o077:
+                os.fchmod(fd, 0o700)
+        name = parts[-1]
+        try:
+            leaf = os.open(name, create, 0o600, dir_fd=fd)
+        except FileExistsError:
+            try:
+                existing = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            except OSError as exc:
+                raise _MovedStateConflictError(rel) from exc
+            with os.fdopen(existing, "rb") as handle:
+                same = _hook_store_entry_is_account_private(name, os.fstat(handle.fileno())) and (
+                    handle.read(len(data) + 1) == data
+                )
+            if same:
+                return False
+            raise _MovedStateConflictError(rel) from None
+        try:
+            with os.fdopen(leaf, "wb") as handle:
+                handle.write(data)
+        except OSError:
+            os.unlink(name, dir_fd=fd)
+            raise
+        return True
+    finally:
+        os.close(fd)
+
+
+def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
+    """Copy the hook contract lock and the connector backups the new data_dir lacks.
+
+    The same rules as :func:`_carry_connector_records`: nothing the new folder
+    already has is replaced, the old folder is left as it is, an
+    administrator copies nothing, and the source is opened without following
+    links. A file another account could have written is refused, and every
+    copy is private to this account whatever the source mode or ACL was.
+    """
+    from defenseclaw.file_permissions import open_regular_file_no_follow
+
+    if config_module._is_admin_process() or not old_dir or not new_dir:
+        return []
+    try:
+        if os.path.samefile(old_dir, new_dir):
+            return []
+    except OSError:
+        if os.path.abspath(old_dir) == os.path.abspath(new_dir):
+            return []
+    try:
+        if not _hook_store_entry_is_account_private(old_dir, os.lstat(old_dir)):
+            raise OSError("not account-private")
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return [
+            "warning: the hook contract lock and connector backups could not be carried to the new "
+            "data_dir; if the gateway skips a connector at start, run: defenseclaw setup <connector> --yes"
+        ]
+    sources, refused = _moved_state_sources(old_dir)
+    carried: list[str] = []
+    differs: list[str] = []
+    for rel, info in sources:
+        try:
+            with os.fdopen(open_regular_file_no_follow(os.path.join(old_dir, rel), expected_stat=info), "rb") as handle:
+                data = handle.read(_MOVED_STATE_MAX_FILE_BYTES + 1)
+            if len(data) > _MOVED_STATE_MAX_FILE_BYTES:
+                raise OSError("file is too large")
+            if _store_moved_state_file(new_dir, rel, data):
+                carried.append(rel)
+        except _MovedStateConflictError:
+            differs.append(rel)
+        except OSError:
+            refused.append(rel)
+    notes = []
+    if carried:
+        backups = sum(1 for rel in carried if rel != _MOVED_DATA_DIR_LOCK)
+        parts = ([_MOVED_DATA_DIR_LOCK] if _MOVED_DATA_DIR_LOCK in carried else []) + (
+            [f"{backups} connector backup file{'s' if backups != 1 else ''}"] if backups else []
+        )
+        notes.append("Copied the connector seals to the new data_dir: " + ", ".join(parts) + ".")
+    repair = "if the gateway skips a connector at start, run: defenseclaw setup <connector> --yes"
+    if differs:
+        notes.append(
+            f"warning: {new_dir} already has connector state that differs from the old data_dir's, "
+            "is not a plain file, or is open to other accounts; it was kept as it is "
+            f"({', '.join(sorted(set(differs)))}); {repair}"
+        )
+    if refused:
+        notes.append(
+            f"warning: some connector state was not copied to {new_dir} ({', '.join(sorted(set(refused)))}); {repair}"
+        )
+    return notes
+
+
+def _create_moved_audit_store(cfg) -> list[str]:
+    """Create the audit store of a new data_dir the way a first run does.
+
+    A store the gateway creates on its first start gets the gateway's own
+    protected descriptor, which on Windows names BUILTIN Administrators;
+    doctor refuses that for audit.db, while the store a first run creates
+    keeps only this account and SYSTEM (rel-1-0-6 GAP-0801). A store that
+    already exists, or that config keeps outside the data_dir, is left alone.
+    """
+    audit_db = str(getattr(cfg, "audit_db", "") or "")
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    if not audit_db or not data_dir or config_module._is_admin_process() or os.path.lexists(audit_db):
+        return []
+    if os.path.normcase(os.path.dirname(os.path.abspath(audit_db))) != os.path.normcase(os.path.abspath(data_dir)):
+        return []
+    from defenseclaw.db import Store
+    from defenseclaw.file_permissions import make_private_directory
+
+    try:
+        make_private_directory(data_dir)
+        store = Store(audit_db)
+        try:
+            store.init()
+        finally:
+            store.close()
+    except Exception as exc:  # noqa: BLE001 - the change is committed; the gateway creates the store if this cannot
+        return [f"warning: the audit store was not created in {data_dir} ({exc}); the gateway creates it at start."]
+    return []
+
+
 def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
     """Seed the rule packs, Rego policies and connector records under a new data_dir.
 
@@ -889,7 +1266,15 @@ def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
         cfg = config_module.load()
     except Exception:  # noqa: BLE001 - the change is committed; seeding is best effort
         return []
-    notes = _carry_connector_records(old_data_dir, str(cfg.data_dir or ""))
+    new_data_dir = str(cfg.data_dir or "")
+    notes = _carry_connector_records(old_data_dir, new_data_dir)
+    if not cfg.guardrail.secure_client_hook_fail_modes():
+        notes.extend(_carry_hook_credentials(
+            old_data_dir, new_data_dir,
+            [name for name in cfg.active_connectors() if cfg.guardrail.effective_enabled(name)],
+        ))
+        notes.extend(_carry_connector_seals(old_data_dir, new_data_dir))
+        notes.extend(_create_moved_audit_store(cfg))
     return notes + _seed_moved_policies(cfg)
 
 
@@ -1232,95 +1617,41 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
-    roster_change = parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-    selection_change = parts and parts[0] in {"guardrail", "claw"}
-
-    def _check_candidate(path: str, candidate: bytes) -> None:
-        if roster_change:
-            _check_guardrail_connector_roster(path, candidate)
-        _check_config_connector_selection(path, candidate)
-
-    check_candidate = _check_candidate if selection_change else None
+    check_candidate = _connector_roster_check([parts])
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
 
 
-def _configured_connector_selection(document: object) -> tuple[set[str], str]:
-    """Resolve the enabled roster and primary from the written config shape."""
-    if not isinstance(document, dict):
-        return set(), ""
-    guardrail = document.get("guardrail")
-    guardrail = guardrail if isinstance(guardrail, dict) else {}
-    claw = document.get("claw")
-    claw = claw if isinstance(claw, dict) else {}
-    primary = guardrail.get("connector")
-    primary = connector_paths.normalize(primary) if isinstance(primary, str) and primary.strip() else ""
-    # A missing claw.mode loads as OpenClaw in Config.load and the Go loader.
-    mode = claw.get("mode", "openclaw")
-    mode = connector_paths.normalize(mode) if isinstance(mode, str) and mode.strip() else ""
-    roster = guardrail.get("connectors")
-    if isinstance(roster, dict) and roster:
-        enabled = {
-            connector_paths.normalize(name)
-            for name, entry in roster.items()
-            if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
-        }
-        names = sorted(connector_paths.normalize(name) for name in roster if isinstance(name, str))
-        selected = primary or (mode if mode in names else names[0] if names else "")
-        return enabled, selected
-    selected = primary or mode
-    return ({selected} if selected else set()), selected
+def _selects_connectors(parts: list) -> bool:
+    """True for a key that can change which connectors share the gateway process."""
+    return (
+        parts in (["guardrail"], ["claw"], ["guardrail", "connector"], ["claw", "mode"])
+        or parts[:2] == ["guardrail", "connectors"]
+    )
 
 
-def _check_config_connector_selection(path: str, candidate: bytes, *, allow_removal: bool = False) -> None:
-    """A settings edit cannot select another live connector as a side effect."""
-    from defenseclaw import config_writer
+def _connector_roster_check(parts_list: list[list]):
+    """The final-file check for a set or unset that can change the process.
 
-    after = config_writer._parse_config_document(candidate)
-    if config_writer.secure_client_document(after):
-        return
-    current, _, _ = config_writer._read_current(path)
-    before = config_writer._parse_config_document(current) if current else {}
-    active_before, primary_before = _configured_connector_selection(before)
-    active_after, primary_after = _configured_connector_selection(after)
-    # A whole-entry unset explicitly removes its guardrail scope and already
-    # reports that to the operator. It may drop an enabled name, but cannot
-    # select a new primary or enable another entry in the same batch.
-    enabled_changed = (active_after - active_before) if allow_removal else (active_after ^ active_before)
-    if enabled_changed or primary_after != primary_before:
-        raise config_writer.ConfigWriteError(
-            "connector selection requires setup; use defenseclaw setup or a connector command "
-            "to change the active connector"
-        )
+    One rule for every selection key (guardrail.connector, claw.mode, an entry
+    under guardrail.connectors, or a whole map) and for guardrail.enabled
+    turning on: judge the written file, not the key. The guardrail enable
+    commands pass the same check to ``Config.save``.
+    """
+    if any(_selects_connectors(parts) for parts in parts_list):
+        return check_guardrail_connector_roster
+    if any(parts == ["guardrail", "enabled"] for parts in parts_list):
+        return _check_roster_when_guardrail_on
+    return None
 
 
-def _check_guardrail_connector_roster(_path: str, candidate: bytes) -> None:
-    """Check the final enabled roster while the writer holds config.yaml.lock."""
-    from defenseclaw import config_writer
+def _check_roster_when_guardrail_on(path: str, candidate: bytes) -> None:
+    """Turning the guardrail on activates whatever roster the file already holds.
 
-    document = config_writer._parse_config_document(candidate)
-    if config_writer.secure_client_document(document):
-        return
-    guardrail = document.get("guardrail", {}) if isinstance(document, dict) else {}
-    roster = guardrail.get("connectors", {}) if isinstance(guardrail, dict) else {}
-    if not isinstance(roster, dict):
-        return
-    configured = {normalize_connector(name) for name in roster if isinstance(name, str)}
-    if len(configured) < 2:
-        return
-    enabled = {
-        normalize_connector(name)
-        for name, entry in roster.items()
-        if isinstance(name, str) and isinstance(entry, dict) and entry.get("enabled") is not False
-    }
-    proxies = sorted(enabled & {"openclaw", "zeptoclaw"})
-    if proxies:
-        proxy = proxies[0]
-        others = sorted(configured - {proxy})
-        label = "hook connectors" if not set(others) & {"openclaw", "zeptoclaw"} else "other connectors"
-        raise config_writer.ConfigWriteError(
-            f"{proxy} needs a proxy binding and cannot share a gateway process "
-            f"with {label} ({', '.join(others)})."
-        )
+    Judged only when the final file has it on, so switching it off or unsetting
+    it (default off) is never refused for a roster that was already there.
+    """
+    if guardrail_enabled(candidate):
+        check_guardrail_connector_roster(path, candidate)
 
 
 def _refuse_retired_scanner_key(key: str, parts: list) -> None:
@@ -1373,20 +1704,7 @@ def config_unset(app: AppContext, keys: tuple[str, ...], expect_sha256: str | No
         )
         for key, parts in parsed
     ]
-    roster_change = any(
-        parts == ["guardrail"] or parts[:2] == ["guardrail", "connectors"]
-        for _key, parts in parsed
-    )
-    selection_change = any(
-        parts and parts[0] in {"guardrail", "claw"} for _key, parts in parsed
-    )
-
-    def _check_candidate(path: str, candidate: bytes) -> None:
-        if roster_change:
-            _check_guardrail_connector_roster(path, candidate)
-        _check_config_connector_selection(path, candidate, allow_removal=True)
-
-    check_candidate = _check_candidate if selection_change else None
+    check_candidate = _connector_roster_check([parts for _key, parts in parsed])
     if _write_config_change(app, changes, expect_sha256, "unset", check_candidate=check_candidate):
         for note in _left_roster_notes(parsed, roster):
             click.echo(note)
@@ -2029,6 +2347,8 @@ def validate_config() -> ValidationResult:
         if inspected.valid is not True:
             res.errors.append("the configuration validator returned no validity decision")
         res.warnings.extend(inspected.warnings)
+        if res.ok:
+            res.warnings.extend(_port_layout_warnings())
         if os.name == "nt" and res.ok:
             source = load_masked_v8(_bounded_source(cfg_path) or b"", source_name=cfg_path)
             res.warnings.extend(_per_user_windows_group_warnings(source))
@@ -2045,6 +2365,20 @@ def validate_config() -> ValidationResult:
         return res
     res.errors.append(_not_current_message(cfg_path))
     return res
+
+
+def _port_layout_warnings() -> list[str]:
+    """Ports in the config that collide with each other (GAP-0053)."""
+    from defenseclaw.bootstrap import port_layout_conflict
+
+    try:
+        cfg = config_module.load()
+    except Exception:  # noqa: BLE001 - the validator above already judged the file
+        return []
+    openclaw = int(cfg.gateway.port or 0) if "openclaw" in cfg.active_connectors() else 0
+    if conflict := port_layout_conflict(int(cfg.gateway.api_port or 0), int(cfg.guardrail.port or 0), openclaw):
+        return [f"gateway.api_port / guardrail.port: {conflict}"]
+    return []
 
 
 def _per_user_windows_group_warnings(source: dict) -> list[str]:

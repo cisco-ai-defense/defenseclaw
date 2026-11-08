@@ -179,13 +179,61 @@ func windowsCursorManagedPaths() (windowsCursorPaths, error) {
 	}, nil
 }
 
+// withWindowsCursorManagedTransaction is the write-side transaction: it
+// creates and takes over the Cursor folder, and refuses a reparse point on its
+// path. Install, ensure, repair and the rollbacks that write use it.
 func withWindowsCursorManagedTransaction(fn func() error) error {
+	return runWindowsCursorManagedTransaction(false, fn)
+}
+
+// withWindowsCursorManagedTeardownTransaction is the transaction of a
+// teardown, a read and the publication of an enrollment. It creates nothing
+// and does not follow a link (GAP-0758): on the standalone profile a folder
+// that is absent, or a link kept at its path, means no DefenseClaw Cursor
+// state is there, fn runs against that (every snapshot reads it as absent) and
+// the kept path is named. A real folder gets the usual transaction.
+func withWindowsCursorManagedTeardownTransaction(fn func() error) error {
+	return runWindowsCursorManagedTransaction(true, fn)
+}
+
+// windowsCursorManagedTransactionFor picks the transaction that restores
+// snapshot: a snapshot that held no Cursor file puts nothing back, so it must
+// not create or take over the folder; one that held a file writes it.
+func windowsCursorManagedTransactionFor(
+	snapshot WindowsCursorManagedPolicyTeardownSnapshot,
+) func(func() error) error {
+	if !snapshot.PolicyActive && !snapshot.HooksExisted && !snapshot.AdapterExisted &&
+		!snapshot.StateExisted && !snapshot.ReceiptExisted {
+		return withWindowsCursorManagedTeardownTransaction
+	}
+	return withWindowsCursorManagedTransaction
+}
+
+// windowsCursorManagedRootNotFollowed reports, on the standalone profile, that
+// a link or a non-folder sits at the Cursor folder or on its path. The caller
+// then treats every Cursor artifact as absent; nothing behind the link is read.
+func windowsCursorManagedRootNotFollowed(root string) (bool, error) {
+	return windowsManagedPolicyLinkKept(root)
+}
+
+func runWindowsCursorManagedTransaction(teardown bool, fn func() error) error {
 	paths, err := windowsCursorManagedPaths()
 	if err != nil {
 		return err
 	}
 	root := paths.Root
 	lockPath := paths.Lock
+	if teardown {
+		state, err := windowsManagedPolicyTeardownState(root)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: inspect Cursor enterprise directory: %w", err)
+		}
+		if state != windowsManagedPolicyDirPlain {
+			// Absent or kept: nothing of DefenseClaw is there to lock or to
+			// change, and every snapshot in fn reads it as absent.
+			return fn()
+		}
+	}
 	if err := ensureWindowsManagedPolicyDirectory(root); err != nil {
 		return fmt.Errorf("enterprise hooks: prepare Cursor enterprise directory: %w", err)
 	}
@@ -285,6 +333,9 @@ func snapshotWindowsCursorManagedArtifacts() (windowsCursorManagedArtifacts, err
 	if err != nil {
 		return result, err
 	}
+	if notFollowed, err := windowsCursorManagedRootNotFollowed(paths.Root); err != nil || notFollowed {
+		return result, err
+	}
 	receiptPath := paths.Receipt
 	repairWindowsCursorPrivateReceiptProtection(receiptPath)
 	result.receipt, err = snapshotWindowsManagedFileWithLimit(receiptPath, windowsCursorManagedReceiptLimit)
@@ -331,6 +382,9 @@ func snapshotWindowsCursorManagedPublicArtifacts() (windowsCursorManagedArtifact
 	adapterPath := paths.Adapter
 	statePath := paths.State
 	result := windowsCursorManagedArtifacts{root: paths.Root}
+	if notFollowed, err := windowsCursorManagedRootNotFollowed(paths.Root); err != nil || notFollowed {
+		return result, err
+	}
 	result.hooks, err = snapshotWindowsManagedFileWithLimit(hooksPath, windowsCursorManagedHooksLimit)
 	if err != nil {
 		return result, err
@@ -1211,8 +1265,26 @@ func refreshWindowsCursorManagedAdapter(hookExecutable string, upgradeTemplate b
 		return false, err
 	}
 	hookExecutable = filepath.Clean(hookExecutable)
+	// The guardian runs this on every pass, with Cursor configured or not. It
+	// refreshes or rebuilds a guard that exists; it never creates the folder
+	// (GAP-0758). With no folder there is no guard and no protected state to
+	// rebuild one from, and a link kept at the folder is not followed: both
+	// are left as they are, and the kept path is named. Whether a configured
+	// Cursor connector has its guard is the enrollment sync's check, which
+	// prepares the folder and refuses a link.
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		return false, err
+	}
+	state, err := windowsManagedPolicyTeardownState(paths.Root)
+	if err != nil {
+		return false, fmt.Errorf("enterprise hooks: inspect Cursor enterprise directory: %w", err)
+	}
+	if state != windowsManagedPolicyDirPlain {
+		return false, nil
+	}
 	refreshed := false
-	err := withWindowsCursorManagedTransaction(func() error {
+	err = withWindowsCursorManagedTransaction(func() error {
 		current, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -1813,6 +1885,9 @@ func PurgeWindowsCursorManagedTombstone() error {
 	if err != nil {
 		return err
 	}
+	if notFollowed, err := windowsCursorManagedRootNotFollowed(paths.Root); err != nil || notFollowed {
+		return err
+	}
 	present := false
 	for _, path := range []string{paths.Adapter, paths.Lock} {
 		if _, statErr := os.Lstat(path); statErr == nil {
@@ -1824,7 +1899,7 @@ func PurgeWindowsCursorManagedTombstone() error {
 	if !present {
 		return nil
 	}
-	return withWindowsCursorManagedTransaction(purgeWindowsCursorManagedTombstoneUnlocked)
+	return withWindowsCursorManagedTeardownTransaction(purgeWindowsCursorManagedTombstoneUnlocked)
 }
 
 // WindowsCursorManagedTombstoneFilePaths returns the existing adapter and
@@ -1832,6 +1907,9 @@ func PurgeWindowsCursorManagedTombstone() error {
 func WindowsCursorManagedTombstoneFilePaths() ([]string, error) {
 	paths, err := windowsCursorManagedPaths()
 	if err != nil {
+		return nil, err
+	}
+	if notFollowed, err := windowsCursorManagedRootNotFollowed(paths.Root); err != nil || notFollowed {
 		return nil, err
 	}
 	var present []string
@@ -1869,7 +1947,7 @@ func removeWindowsCursorManagedPolicyTarget(targetSID *windows.SID) error {
 	if targetSID == nil {
 		return errors.New("enterprise hooks: Cursor target SID is required")
 	}
-	return withWindowsCursorManagedTransaction(func() error {
+	return withWindowsCursorManagedTeardownTransaction(func() error {
 		current, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -1916,7 +1994,7 @@ func PublishWindowsCursorManagedPolicyTargets(
 	if err != nil {
 		return err
 	}
-	return withWindowsCursorManagedTransaction(func() error {
+	return withWindowsCursorManagedTeardownTransaction(func() error {
 		currentArtifacts, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -1960,7 +2038,7 @@ func DeactivateWindowsCursorManagedPolicy() error {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	return withWindowsCursorManagedTransaction(func() error {
+	return withWindowsCursorManagedTeardownTransaction(func() error {
 		current, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -2916,7 +2994,7 @@ func CaptureWindowsCursorManagedPolicySnapshot(
 	opts WindowsCursorManagedPolicyTeardownOptions,
 ) (WindowsCursorManagedPolicyTeardownSnapshot, error) {
 	var snapshot WindowsCursorManagedPolicyTeardownSnapshot
-	err := withWindowsCursorManagedTransaction(func() error {
+	err := withWindowsCursorManagedTeardownTransaction(func() error {
 		currentArtifacts, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -2994,7 +3072,7 @@ func PrepareWindowsCursorManagedPolicyTeardown(
 	persist func(WindowsCursorManagedPolicyTeardownSnapshot) error,
 ) (WindowsCursorManagedPolicyTeardownSnapshot, error) {
 	var captured WindowsCursorManagedPolicyTeardownSnapshot
-	err := withWindowsCursorManagedTransaction(func() error {
+	err := withWindowsCursorManagedTeardownTransaction(func() error {
 		artifacts, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -3031,7 +3109,7 @@ func RestoreWindowsCursorManagedPolicyTeardown(
 	opts WindowsCursorManagedPolicyTeardownOptions,
 	snapshot WindowsCursorManagedPolicyTeardownSnapshot,
 ) error {
-	return withWindowsCursorManagedTransaction(func() error {
+	return windowsCursorManagedTransactionFor(snapshot)(func() error {
 		current, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -3051,7 +3129,7 @@ func RestoreWindowsCursorManagedPolicySnapshot(
 	current WindowsCursorManagedPolicyTeardownOptions,
 	snapshot WindowsCursorManagedPolicyTeardownSnapshot,
 ) error {
-	return withWindowsCursorManagedTransaction(func() error {
+	return windowsCursorManagedTransactionFor(snapshot)(func() error {
 		currentArtifacts, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err

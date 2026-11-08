@@ -247,6 +247,10 @@ func rotationCleanupRequested(cmd *cobra.Command) bool {
 	return err == nil && enabled
 }
 
+// refuseStartInUntrustedHome is daemon.RefuseStartInUntrustedHome. A variable
+// so a test can stand in for the root run it cannot be.
+var refuseStartInUntrustedHome = daemon.RefuseStartInUntrustedHome
+
 func runStart(cmd *cobra.Command, args []string) error {
 	coldStart := cmd != nil && hookColdStartRequested(cmd.Flags())
 	if coldStart && !hookColdStartSupported() {
@@ -256,6 +260,10 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	dataDir := config.DefaultDataPath()
+	// Before the login path, the start lock or any other write into the home.
+	if err := refuseStartInUntrustedHome(dataDir); err != nil {
+		return err
+	}
 	if coldStart {
 		if err := hookColdStartRefusal(dataDir, time.Now()); err != nil {
 			return fmt.Errorf("hook cold start skipped: %w", err)
@@ -324,7 +332,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	// Validate every process-identity artifact before that fast path so malformed
 	// or unreadable watchdog state can never be hidden by a valid gateway PID.
 	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return err
+		return refuseOverRootOwnedState(cmd, "start", err)
 	}
 	bootSource := configSourceDigest(config.ConfigPath())
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
@@ -388,6 +396,9 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if problem := foreignGatewayListener(cfg); problem != "" {
 			return fmt.Errorf("cannot start the gateway: %s. %s", problemClause(problem), foreignGatewayListenerFix(cfg))
 		}
+	}
+	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "start"); err != nil {
+		return err
 	}
 	if !coldStart {
 		upgradeAuditStoreBeforeStart(cfg, os.Stdout, os.Stderr)
@@ -805,6 +816,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if err := refuseGatewayLifecycleOnManagedHost(); err != nil {
 		return err
 	}
+	if err := refuseStartInUntrustedHome(config.DefaultDataPath()); err != nil {
+		return err
+	}
 	release, err := acquireGatewayStartLock(config.DefaultDataPath(), gatewayStartLockWait)
 	if err != nil {
 		return err
@@ -817,7 +831,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	// process-identity artifact before that first side effect so malformed or
 	// unreadable watchdog state can never authorize a partial restart.
 	if err := d.ValidateStartIdentityFiles(); err != nil {
-		return err
+		return refuseOverRootOwnedState(cmd, "restart", err)
 	}
 	cfg, cfgLoadErr := loadDaemonConfig(cmd)
 	// Refuse before stopping anything: the new gateway could not start.
@@ -825,6 +839,9 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	if err := gatewayDiskFullError("restart", config.DefaultDataPath()); err != nil {
+		return err
+	}
+	if err := rootOwnedRuntimeLeftoversRefusal(cfg, "restart"); err != nil {
 		return err
 	}
 	var cfgErr error
