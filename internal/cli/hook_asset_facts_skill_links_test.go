@@ -1,0 +1,60 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package cli
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+)
+
+// The standalone hook runs as the user and follows a link the gateway may not
+// be able to, and reports the skill folder it leads to; a call with no link
+// into a skill folder reports nothing.
+func TestHookAssetFactsReportsTheSkillFolderALinkLeadsTo(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	held := filepath.Join(home, ".claude", "skills", "held")
+	proj := filepath.Join(home, "proj")
+	for _, dir := range []string{held, proj} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(held, filepath.Join(proj, "lnk-held")); err != nil {
+		t.Skipf("cannot create a link here: %v", err)
+	}
+	event := func(path string) []byte {
+		raw, err := json.Marshal(map[string]any{
+			"tool_name": "Read", "cwd": proj, "tool_input": map[string]any{"file_path": path},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	facts, _ := assetfacts.Decode(hookAssetFacts("claudecode", event("lnk-held/SKILL.md")))
+	if len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != held {
+		t.Fatalf("SkillLinks = %v, want [%s]", facts.SkillLinks, held)
+	}
+	for _, path := range []string{filepath.Join(held, "SKILL.md"), filepath.Join(proj, "notes.txt")} {
+		if facts, _ := assetfacts.Decode(hookAssetFacts("claudecode", event(path))); len(facts.SkillLinks) != 0 {
+			t.Fatalf("%s: SkillLinks = %v, want none", path, facts.SkillLinks)
+		}
+	}
+}
