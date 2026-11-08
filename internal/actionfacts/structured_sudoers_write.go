@@ -41,7 +41,7 @@ func projectPOSIXUnrestrictedSudoersGrantWrites(
 	}
 	for _, write := range nativeFileWrites(input.Tool, input.Args) {
 		if (sudoersWriteTargetInCWD(write.target, input.CWD) ||
-			clientResolvedSudoersTarget(write.target, input.CWD, input.ClientResolvedTargets)) &&
+			clientResolvedSudoersTarget(write.target, input.CWD, input.ClientWorkingDirectories, input.ClientResolvedTargets)) &&
 			addsUnrestrictedSudoersGrant(write.added, write.replaced) {
 			return []POSIXUnrestrictedSudoersGrantWriteFact{{}}
 		}
@@ -64,14 +64,19 @@ func resolvesToSudoersTarget(resolved map[string]string) bool {
 // clientResolvedSudoersTarget reports whether the hook client, resolving the
 // write target as the user, placed it on /etc/sudoers or a direct child of
 // /etc/sudoers.d: a link of any name to such a file is that file. The client
-// keys its answer by OperandPath, so a ./ or doubled-slash spelling is asked
-// by the cleaned path while a dot-dot spelling keeps its raw form.
-func clientResolvedSudoersTarget(target, cwd string, resolved map[string]string) bool {
+// keys its answer by OperandPath of the directory it was given, so a ./ or
+// doubled-slash spelling is asked by the cleaned path while a dot-dot spelling
+// keeps its raw form. That directory is asked in each spelling the gateway
+// knows: its own (the resolved project) and the clients (clientDirs), which
+// differ when the project is reached through a link.
+func clientResolvedSudoersTarget(target, cwd string, clientDirs []string, resolved map[string]string) bool {
 	if len(resolved) == 0 || target == "" {
 		return false
 	}
-	if physical, found := resolved[OperandPath(target, cwd)]; found {
-		return exactSudoersWriteTarget(physical)
+	for _, dir := range append([]string{cwd}, clientDirs...) {
+		if exactSudoersWriteTarget(resolved[OperandPath(target, dir)]) {
+			return true
+		}
 	}
 	return exactSudoersWriteTarget(resolved[target])
 }

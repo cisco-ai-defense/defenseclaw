@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // sudoersLinkSpelledRow is a Claude Code Write of text through a project
@@ -78,6 +80,74 @@ func TestFileToolWriteThroughALinkToAnOrdinaryFileIsNotAGrantTarget(t *testing.T
 		for _, profile := range []string{"default", "permissive"} {
 			t.Run(spelling+"/"+profile+"/ordinary file", func(t *testing.T) {
 				row := sudoersLinkSpelledRow(t, other, "r109yem5 ALL=(ALL) NOPASSWD: ALL\n", spell)
+				blocked, _, body := postSudoersHook(t, row, profile, false)
+				if blocked || strings.Contains(body, sudoersGrantRuleID) {
+					t.Fatalf("blocked = %t, names the grant rule = %t, want neither: %.600s", blocked, strings.Contains(body, sudoersGrantRuleID), body)
+				}
+			})
+		}
+	}
+}
+
+// sudoersLinkFromAliasedProjectRow is sudoersLinkSpelledRow for a call whose
+// reported working directory is a symlink to the project: the hook client keys
+// its answer by the name it was given, the gateway resolves the project.
+func sudoersLinkFromAliasedProjectRow(t *testing.T, target, text, operand string) sudoersHookRow {
+	return sudoersHookRow{"claudecode", "Write through a link from an aliased project", func(project string) map[string]any {
+		alias := filepath.Join(filepath.Dir(project), "project-alias")
+		if err := os.Symlink(project, alias); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(project, "grant-link")); err != nil {
+			t.Fatal(err)
+		}
+		payload := sudoersClaudeCall("Write", sudoersFixed(map[string]any{"file_path": operand, "content": text}))(project)
+		payload["cwd"] = alias
+		resolved, ok := hookpaths.Decode(hookpaths.Resolve(mustJSON(t, payload)))
+		if key := hookpaths.OperandPath(operand, alias); !ok || resolved[key] != target {
+			t.Fatalf("the hook client did not place %q on %q: valid=%t got %q", key, target, ok, resolved[key])
+		}
+		return payload
+	}}
+}
+
+// TestFileToolWriteOfAGrantThroughALinkFromAnAliasedProjectIsBlockedInEveryProfile:
+// a relative link name written from a project the client reports through a
+// symlink is still the file the client proved, so the grant is refused with
+// the grant rule like the absolute write.
+func TestFileToolWriteOfAGrantThroughALinkFromAnAliasedProjectIsBlockedInEveryProfile(t *testing.T) {
+	if _, err := os.Stat("/etc/sudoers"); err != nil {
+		t.Skip("main sudoers file absent on this host")
+	}
+	hostLinksEtc(t, false)
+	for _, operand := range []string{"grant-link", "./grant-link"} {
+		for _, profile := range []string{"default", "permissive", "strict"} {
+			for _, managed := range []bool{false, true} {
+				t.Run(operand+"/"+profile+"/"+map[bool]string{false: "per-user", true: "managed"}[managed], func(t *testing.T) {
+					row := sudoersLinkFromAliasedProjectRow(t, "/etc/sudoers", "r109yem5 ALL=(ALL) NOPASSWD: ALL\n", operand)
+					blocked, _, body := postSudoersHook(t, row, profile, managed)
+					if !blocked || !strings.Contains(body, sudoersGrantRuleID) {
+						t.Fatalf("blocked = %t, want a block naming %s: %.600s", blocked, sudoersGrantRuleID, body)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestFileToolWriteThroughALinkFromAnAliasedProjectToAnOrdinaryFileIsAllowed is
+// the benign twin: the same call to an ordinary file never names the grant
+// rule, and the balanced profiles allow it.
+func TestFileToolWriteThroughALinkFromAnAliasedProjectToAnOrdinaryFileIsAllowed(t *testing.T) {
+	hostLinksEtc(t, false)
+	other := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(other, []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, operand := range []string{"grant-link", "./grant-link"} {
+		for _, profile := range []string{"default", "permissive"} {
+			t.Run(operand+"/"+profile, func(t *testing.T) {
+				row := sudoersLinkFromAliasedProjectRow(t, other, "r109yem5 ALL=(ALL) NOPASSWD: ALL\n", operand)
 				blocked, _, body := postSudoersHook(t, row, profile, false)
 				if blocked || strings.Contains(body, sudoersGrantRuleID) {
 					t.Fatalf("blocked = %t, names the grant rule = %t, want neither: %.600s", blocked, strings.Contains(body, sudoersGrantRuleID), body)
