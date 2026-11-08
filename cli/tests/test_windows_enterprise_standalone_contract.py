@@ -755,7 +755,7 @@ def test_restart_manager_is_never_asked_about_a_file_the_account_cannot_open() -
     # The probe's answer is classified in one place: gone (2, 3) and deletable
     # (0) are no holder, a sharing violation (32) is one, anything else throws
     # and so fails closed (behaviour in the smoke's classification rows).
-    classify = native.index("public static bool DeleteProbeFindsHolder(int answer, string path)")
+    classify = native.index("public static bool DeleteProbeFindsHolder(int answer, string path, string privilegeNote)")
     classified = native[classify : native.index("private static FileHolder[] QueryRestartManager", classify)]
     assert "answer == ERROR_FILE_NOT_FOUND" in classified and "answer == ERROR_PATH_NOT_FOUND" in classified
     assert "throw new Win32Exception(" in classified and "this account cannot delete" in classified
@@ -768,6 +768,19 @@ def test_restart_manager_is_never_asked_about_a_file_the_account_cannot_open() -
         module, "Get-DefenseClawStateFileHolderText"
     )
     assert "[int]$_.Id -le 0" in _function_body(module, "Assert-DefenseClawHookNotHeld")
+    for name in (
+        "Get-DefenseClawStateFileHolders",
+        "Get-DefenseClawStateFileHolderText",
+        "Get-DefenseClawInstallRootHolders",
+    ):
+        body = _function_body(module, name)
+        assert "UnnamedFileHolder" in body or "FileHolderKey" in body, name
+    # Process id 0 is what a stopped service reports, so the exclusions must
+    # not be what drops the unnamed holder.
+    holders = _function_body(module, "Get-DefenseClawStateFileHolders")
+    assert holders.index("Test-DefenseClawUnnamedFileHolder") < holders.index("$Excluded.Contains")
+    install = _function_body(module, "Get-DefenseClawInstallRootHolders")
+    assert install.count("foreach ($id in @($ExcludedProcessIds))") == 0
 
 
 def test_the_unreadable_file_probe_and_the_state_deletion_enable_privileges_for_one_call_only() -> None:
@@ -791,6 +804,20 @@ def test_the_unreadable_file_probe_and_the_state_deletion_enable_privileges_for_
     scope_class = native[native.index("class UninstallFilePrivilegeScope") : native.index("[DllImport", native.index("class UninstallFilePrivilegeScope"))]
     assert "SetThreadToken(IntPtr.Zero, privilegedToken)" in scope_class and "privilegedToken" in scope_class
     assert "if (!skipTakeOwnership)" in scope_class
+    # A failed revert of the thread token stops the process with a named reason
+    # (review S1); the privileged branch of the native query is standalone only
+    # (review S4); the deletion fallback enables backup and restore only (S3).
+    assert "FailClosedAfterRevertFailure(restoreError)" in scope_class
+    assert "Environment.FailFast(message)" in native and "privilege_revert_failed" in native
+    gate_off = native.index("if (!StandaloneHolderProbe)")
+    assert native.index("return QueryRestartManager(paths);", gate_off) < native.index("GetPlainOpenError(path, FILE_READ_ATTRIBUTES)", gate_off)
+    init = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    assert init.count("StandaloneHolderProbe = [bool](Test-DefenseClawStandaloneProfile)") == 2
+    assert "public static string[] DeleteTreePrivileged(string root, List<string> deleted)" in native
+    assert "DeleteTreePrivilegedCore(root, deleted, true)" in native and "DeleteTreePrivilegedCore(root, null, false)" in native
+    assert "new UninstallFilePrivilegeScope(true, backupRestoreOnly)" in native
+    # The two-argument probe classifier is gone (nothing in production called it).
+    assert "DeleteProbeFindsHolder(int answer, string path)" not in native
     deleter = _function_body(module, "Remove-DefenseClawStateTreePrivileged")
     for guard in (
         "Test-DefenseClawStandaloneProfile",
@@ -806,19 +833,11 @@ def test_the_unreadable_file_probe_and_the_state_deletion_enable_privileges_for_
     tree = _function_body(module, "Remove-DefenseClawManagedTree")
     assert tree.index("Assert-DefenseClawManagedTreeNoReparse") < tree.index("Remove-DefenseClawStateTreePrivileged")
     assert tree.index("Remove-Item") < tree.index("Remove-DefenseClawStateTreePrivileged")
-    for name in (
-        "Get-DefenseClawStateFileHolders",
-        "Get-DefenseClawStateFileHolderText",
-        "Get-DefenseClawInstallRootHolders",
-    ):
-        body = _function_body(module, name)
-        assert "UnnamedFileHolder" in body or "FileHolderKey" in body, name
-    # Process id 0 is what a stopped service reports, so the exclusions must
-    # not be what drops the unnamed holder.
-    holders = _function_body(module, "Get-DefenseClawStateFileHolders")
-    assert holders.index("Test-DefenseClawUnnamedFileHolder") < holders.index("$Excluded.Contains")
-    install = _function_body(module, "Get-DefenseClawInstallRootHolders")
-    assert install.count("foreach ($id in @($ExcludedProcessIds))") == 0
+    # The rollback retry root is checked again right before the privileged pass (S6).
+    before_fallback = tree[: tree.index("Remove-DefenseClawStateTreePrivileged -Root")]
+    assert before_fallback.rindex("Test-DefenseClawManagedTreeRetryRoot") > before_fallback.index("$lastError")
+    # The path passed to the native call is the checked root (S3).
+    assert "$targetPlain" in deleter and deleter.index("$targetPlain") < deleter.index("DeleteTreePrivileged($Target, $deleted)")
 
 
 # The standalone PowerShell smokes run inside disposable scratch directories
