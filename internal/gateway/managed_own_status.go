@@ -34,6 +34,12 @@ var ownStatusGuardianAuthorization = readManagedGuardianAuthorization
 // not name it.
 var ownStatusWindowsAccountName = func(string) string { return "" }
 
+// ownStatusWindowsAccountDomain names the domain LookupAccountSid gives a
+// verified Windows account SID (set on Windows); "" when the LSA does not
+// name it. The pipe passes the bare account name, so the DOMAIN\account
+// spelling the enumerator matches exclude_users by is built from this.
+var ownStatusWindowsAccountDomain = func(string) string { return "" }
+
 // handleOwnStatus serves GET managed.OwnStatusPath on the hook socket: the
 // protection state of the socket's kernel-verified caller, for the
 // `defenseclaw status` of a standard user on a managed computer, who holds
@@ -85,7 +91,11 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	if name != "" {
 		account["name"] = name
 	}
-	excluded := cfg != nil && ownAccountExcluded(cfg.Enterprise.Enrollment, idKey, self, name)
+	domain := ""
+	if idKey == "sid" {
+		domain = ownStatusWindowsAccountDomain(self)
+	}
+	excluded := cfg != nil && ownAccountExcluded(cfg.Enterprise.Enrollment, idKey, self, name, domain)
 	claudeCode := false
 	claudeConfigured := false
 	desktopRefused := false
@@ -151,15 +161,20 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 // any case. A qualified entry selects one domain: it never matches the same
 // short name in another. Root is never excluded by name: enrollment.root
 // decides its calls.
-func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name string) bool {
+func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name, domain string) bool {
 	if idKey == "uid" && self == "0" {
 		return false
 	}
 	var names []string
 	if idKey == "sid" {
 		names = []string{self, name}
+		account := name
 		if _, short, qualified := strings.Cut(name, `\`); qualified {
 			names = append(names, short)
+			account = short
+		}
+		if domain = strings.TrimSpace(domain); domain != "" && account != "" {
+			names = append(names, domain+`\`+account)
 		}
 		if home := userScopedIdentityHome(self); home != "" {
 			names = append(names, accountFolderName(home))
