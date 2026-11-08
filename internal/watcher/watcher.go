@@ -3977,16 +3977,8 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 // cannot have the gateway move another account's files.
 func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string, []string) {
 	for _, root := range roots {
-		resolved, err := filepath.EvalSymlinks(root)
-		if !w.secureClientActive() {
-			resolved, err = skillrootsafe.Resolve(root, watcherEvalSymlinks)
-		}
-		if err != nil || sameWatcherPath(resolved, root) {
-			continue
-		}
-		linkOwner, linkOwned := w.ownerOf(root)
-		targetOwner, targetOwned := w.ownerOf(resolved)
-		if linkOwned != targetOwned || linkOwner.Home != targetOwner.Home {
+		resolved, ok := w.resolvedRootOf(root)
+		if !ok {
 			continue
 		}
 		withResolved := append(append([]string(nil), roots...), resolved)
@@ -4003,6 +3995,26 @@ func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string
 		return filepath.Join(resolved, rel), withResolved
 	}
 	return path, roots
+}
+
+// resolvedRootOf is the physical folder behind a watched root that is reached
+// through a link, when that folder is in the home of the account that owns
+// the root. False for a plain root, an unsafe link or another account's
+// folder.
+func (w *InstallWatcher) resolvedRootOf(root string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(root)
+	if !w.secureClientActive() {
+		resolved, err = skillrootsafe.Resolve(root, watcherEvalSymlinks)
+	}
+	if err != nil || sameWatcherPath(resolved, root) {
+		return "", false
+	}
+	linkOwner, linkOwned := w.ownerOf(root)
+	targetOwner, targetOwned := w.ownerOf(resolved)
+	if linkOwned != targetOwned || linkOwner.Home != targetOwner.Home {
+		return "", false
+	}
+	return resolved, true
 }
 
 // forgetMovedAsset drops the rescan baseline of an asset that admission
@@ -4178,7 +4190,18 @@ func (w *InstallWatcher) linkedAssetScanTarget(evt InstallEvent) (string, error)
 	if linkOwned != targetOwned || linkOwner.Home != targetOwner.Home {
 		return "", errLinkedAssetOutsideRoots
 	}
-	for _, root := range w.sourceRootsFor(evt.Type) {
+	roots := w.sourceRootsFor(evt.Type)
+	if !w.secureClientActive() {
+		// The link target is a physical path; a watched root reached
+		// through a link (~/.claude -> dotfiles) holds it at its resolved
+		// folder, as a plain root does (GAP-0906).
+		for _, root := range roots {
+			if resolved, ok := w.resolvedRootOf(root); ok {
+				roots = append(slices.Clone(roots), resolved)
+			}
+		}
+	}
+	for _, root := range roots {
 		if watcherPathAtOrBelow(target, root) {
 			return target, nil
 		}
@@ -4239,7 +4262,11 @@ func (w *InstallWatcher) refuseForeignLink(ctx context.Context, evt InstallEvent
 // points to is never touched (GAP-0394). Before, quarantine refused the link
 // and only gateway.log said so, while the skill read as quarantined.
 func (w *InstallWatcher) removeLinkedAsset(ctx context.Context, evt InstallEvent) error {
-	target, err := enforce.RemoveLinkedAsset(w.sourceRootsFor(evt.Type), evt.Type.String(), evt.Path)
+	// The link is removed itself, never followed; a root reached through a
+	// link is addressed by its resolved folder, because the removal refuses a
+	// linked ancestor (GAP-0906).
+	linkPath, roots := w.resolvedLinkedRoot(evt.Path, w.sourceRootsFor(evt.Type))
+	target, err := enforce.RemoveLinkedAsset(roots, evt.Type.String(), linkPath)
 	if err != nil {
 		w.emitQuarantineFailure(ctx, evt, err)
 		return err
