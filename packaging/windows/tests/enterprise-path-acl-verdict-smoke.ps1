@@ -211,6 +211,62 @@ public static class DcPathAclSmokeNativeSecurity
             $failures.Add("$($case.name): want $want, got '$observed'")
         }
     }
+
+    # g877b review S5 (GAP-0766): the lazily created lock files are named out of
+    # the content gate's class (StandaloneContentGateOutOfClass) because the
+    # stamp and the verify still refuse an account that is not trusted as their
+    # owner. Every real lock entry, with the kind and the call shape of the
+    # verify, refuses an untrusted owner that the re-stamp does not remove, also
+    # when the re-stamp itself fails; a trusted file passes.
+    $lockCases = @(
+        @{ name = 'untrusted owner, re-stamp does nothing'; readings = @($owner); stamp = 'noop'; expect = $owner.Reason }
+        @{ name = 'untrusted owner, re-stamp fails'; readings = @($owner); stamp = 'throw'; expect = $owner.Reason }
+        @{ name = 'trusted owner'; readings = @(); stamp = 'noop'; expect = '' }
+    )
+    $lockEntries = 0
+    foreach ($case in $lockCases) {
+        [Environment]::SetEnvironmentVariable($strictEnv, '', 'Process')
+        $observed = & $module {
+            param($Case, $Fixture)
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
+            $script:LockReading = [object[]]@($Case['readings'] | Microsoft.PowerShell.Core\ForEach-Object { [pscustomobject]$_ })
+            $script:StampMode = [string]$Case['stamp']
+            function script:Get-DefenseClawPathAclVerdicts { return $script:LockReading }
+            function script:Set-DefenseClawPathAcl {
+                if ($script:StampMode -ceq 'throw') { throw 'simulated: the canonical stamp lost a race' }
+            }
+            $layout = @{ ConfigDirectory = 'C:\dc-lock-layout\config'; RuntimeDirectory = 'C:\dc-lock-layout\runtime' }
+            $entries = @(Get-DefenseClawLazyLockFiles -Layout $layout)
+            $results = [Collections.Generic.List[string]]::new()
+            foreach ($lock in $entries) {
+                try {
+                    Assert-DefenseClawPathAcl `
+                        -Path $Fixture `
+                        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+                        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID) `
+                        -RejectUntrustedRead `
+                        -SelfHealKind $lock.Kind `
+                        -SelfHealGatewayServiceSID 'S-1-5-80-1' `
+                        -WarningAction SilentlyContinue
+                    $results.Add('')
+                }
+                catch {
+                    $results.Add([string]$_.Exception.Message)
+                }
+            }
+            return , @($entries.Count, $results.ToArray())
+        } $case $fixture
+        $lockEntries = [int]$observed[0]
+        if ($lockEntries -ne 4) {
+            $failures.Add("lock file: $($case.name): the lazy lock list has $lockEntries entries, want 4")
+        }
+        foreach ($message in @($observed[1])) {
+            if ([string]$message -cne [string]$case.expect) {
+                $want = if ($case.expect) { "refusal '$($case.expect)'" } else { 'pass' }
+                $failures.Add("lock file: $($case.name): want $want, got '$message'")
+            }
+        }
+    }
 }
 finally {
     [Environment]::SetEnvironmentVariable($strictEnv, $savedStrict, 'Process')
@@ -220,7 +276,7 @@ finally {
 if ($failures.Count -gt 0) {
     throw ("enterprise-path-acl-verdict-smoke: FAIL`n" + ($failures -join "`n"))
 }
-Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: PASS ($($cases.Count + $rawCases.Count + $readCases.Count) cases)"
+Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: PASS ($($cases.Count + $rawCases.Count + $readCases.Count + $lockCases.Count * 4) cases)"
 # A case's icacls repair attempt on a missing path fails on purpose; its exit
 # code must not become this script's.
 exit 0
