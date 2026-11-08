@@ -121,11 +121,11 @@ func TestNativeFileWriteBesideALoaderInjectionStaysUnproven(t *testing.T) {
 	}
 }
 
-// TestNativeWholeFileWriteOfAnInsecureRegistryIsProvenForEveryToolShape: the
-// docker daemon proof needs the complete final document, so it reads every
-// native whole-file write (a patch that adds the file, Copilot create,
-// OpenCode write) and no edit, patch hunk or append.
-func TestNativeWholeFileWriteOfAnInsecureRegistryIsProvenForEveryToolShape(t *testing.T) {
+// TestNativeFileWriteOfAnInsecureRegistryIsProvenForEveryToolShape: the
+// docker daemon proof reads every native file-tool write (a patch that adds
+// the file, Copilot create, OpenCode write, and an edit, patch hunk or append
+// by the text it adds).
+func TestNativeFileWriteOfAnInsecureRegistryIsProvenForEveryToolShape(t *testing.T) {
 	linksEtcForTest(t, true)
 	const target = "/etc/docker/daemon.json"
 	for _, row := range []struct {
@@ -138,17 +138,17 @@ func TestNativeWholeFileWriteOfAnInsecureRegistryIsProvenForEveryToolShape(t *te
 		{"create host:port", "create", map[string]any{"path": target, "file_text": nativeDockerHostPort}, true},
 		{"opencode write host:port", "write", map[string]any{"path": target, "content": nativeDockerHostPort}, true},
 		{"apply_patch add host:port", "apply_patch", nativeProofPatch("Add", target, nativeDockerHostPort), true},
-		{"apply_patch update host:port", "apply_patch", nativeProofPatch("Update", target, nativeDockerHostPort), false},
+		{"apply_patch update host:port", "apply_patch", nativeProofPatch("Update", target, nativeDockerHostPort), true},
 		{"apply_patch add", "apply_patch", nativeProofPatch("Add", target, nativeDockerHTTP), true},
 		{"create macOS physical spelling", "create", map[string]any{"path": "/private" + target, "file_text": nativeDockerHTTP}, true},
-		{"apply_patch update", "apply_patch", nativeProofPatch("Update", target, nativeDockerHTTP), false},
-		{"edit", "edit", map[string]any{"path": target, "old_str": "{}", "new_str": nativeDockerHTTP}, false},
+		{"apply_patch update", "apply_patch", nativeProofPatch("Update", target, nativeDockerHTTP), true},
+		{"edit", "edit", map[string]any{"path": target, "old_str": "{}", "new_str": nativeDockerHTTP}, true},
 		{"create of a settings file", "create", map[string]any{"path": target, "file_text": `{"log-level":"warn"}`}, false},
 		{"create of an https URL registry", "create", map[string]any{"path": target, "file_text": `{"insecure-registries":["https://registry.example.test"]}`}, true},
 		{"create of another file", "create", map[string]any{"path": "/tmp/daemon.json", "file_text": nativeDockerHTTP}, false},
-		{"create with a dot-dot target", "create", map[string]any{"path": "/etc/docker/../docker/daemon.json", "file_text": nativeDockerHTTP}, false},
+		{"create with a dot-dot target", "create", map[string]any{"path": "/etc/docker/../docker/daemon.json", "file_text": nativeDockerHTTP}, true},
 		{"create with a relative target", "create", map[string]any{"path": "daemon.json", "file_text": nativeDockerHTTP}, false},
-		{"append_file", "append_file", map[string]any{"path": target, "content": nativeDockerHTTP}, false},
+		{"append_file", "append_file", map[string]any{"path": target, "content": nativeDockerHTTP}, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input, facts := nativeProofInput(t, row.tool, "", row.args)
