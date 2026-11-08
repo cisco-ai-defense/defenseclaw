@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -87,6 +89,30 @@ func windowsActiveHomeMutation(candidate actionfacts.PathFact, home string) bool
 		activeHomeAsTilde(candidate.Resolved, home) != candidate.Resolved
 }
 
+// windowsUserPath splits a drive-letter path under a Users folder, in any
+// letter case, into the drive, the account name and the rest.
+var windowsUserPath = regexp.MustCompile(`(?i)^([a-z]:)/users/([^/]+)/(.+)$`)
+
+// typedTargetRuleText is the text the path rules read for the typed target of
+// a file operation. A Windows path names the same file in any letter case,
+// while the rules name each home folder and credential file in one: the home
+// is spelled ~ (or its Users folder in the case the rules read) and the names
+// below it are read in lower case, which is how the rules write them. Other
+// paths are read as given, with the active home respelled.
+func typedTargetRuleText(resolved, home string) string {
+	text := activeHomeAsTilde(resolved, home)
+	if !actionfacts.DriveLetterPath(resolved) {
+		return text
+	}
+	if rest, ok := strings.CutPrefix(text, "~/"); ok {
+		return "~/" + strings.ToLower(rest)
+	}
+	if match := windowsUserPath.FindStringSubmatch(text); match != nil {
+		return match[1] + "/Users/" + match[2] + "/" + strings.ToLower(match[3])
+	}
+	return text
+}
+
 // hasApplyPatchCommand reports an apply_patch command in the parsed action,
 // whichever tool carried the shell text.
 func hasApplyPatchCommand(facts actionfacts.Facts) bool {
@@ -130,7 +156,7 @@ func fileToolLinkTargetFindings(
 			continue
 		}
 		for _, finding := range scanRuleGeneration(
-			generation, activeHomeAsTilde(candidate.Resolved, request.Input.ActiveHome), request.Input.Tool, options,
+			generation, typedTargetRuleText(candidate.Resolved, request.Input.ActiveHome), request.Input.Tool, options,
 		) {
 			if trustedActionSensitivePathRule(finding.RuleID) {
 				findings = append(findings, finding)
