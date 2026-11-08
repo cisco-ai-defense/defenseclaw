@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
@@ -149,6 +150,15 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	if source == "" {
 		_, capture := analyzeWithRedirectTargets(input, "")
 		source = capture.source
+		if source == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) &&
+			argsExecutionTool(input.Tool) {
+			// The POSIX reader rejects a construct only Bash has (select, a
+			// here-string), so it kept no source; the shell parse below reads
+			// it, and each command of it is judged as any other is.
+			if command := extractArgsForTool(input.Args, input.Tool).command; utf8.ValidString(command) && !strings.ContainsRune(command, 0) {
+				source = command
+			}
+		}
 	}
 	if len(source) > maxCommandBytes {
 		return []SimpleCommand{{EvaluationFailure: "limit"}}
@@ -344,6 +354,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				updateSimpleVariables(state.vars, call.Assigns)
 				changed = true
 				nextVariants = append(nextVariants, state)
+				if part.maySkip && len(prior.forked) != 0 {
+					// The assignment may not run: the word of the loop stays.
+					nextVariants = append(nextVariants, prior)
+				}
 				continue
 			}
 			text := part.text
@@ -535,6 +549,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				state.cwdUnknown = nextCWD == ""
 			}
 			nextVariants = append(nextVariants, state)
+			if part.maySkip && len(prior.forked) != 0 {
+				// The statement may not run: the word of the loop stays.
+				nextVariants = append(nextVariants, prior)
+			}
 		}
 		states[part.scope] = compact(uniqueSimpleStates(nextVariants), partIndex+1)
 		if simpleOverStateBound(states[part.scope]) {

@@ -208,6 +208,30 @@ func TestLoopVariableOrderLinksAndDelimiters(t *testing.T) {
 		{"empty-delimiter-directory-link", `echo aliasdir | while IFS= read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, true},
 		{"other-delimiter-directory-link", `echo aliasdir | while IFS=: read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, true},
 		{"trailing-delimiter-state-name", `echo .defenseclawx | while IFS=x read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, true},
+		// review 3: select takes the words of its list as for does.
+		{"select-login", `select u in $USER; do ` + write + `; break; done`, true},
+		{"select-redirect", `select u in $USER; do ` + redirectBody + `; break; done`, true},
+		{"select-directory-link", `select u in a aliasdir; do sed -i s/a/b/ ` + home + `/$u/config.yaml; break; done`, true},
+		{"select-ordinary", `select u in alice bob; do ` + ordinary + `; break; done`, false},
+		{"select-login-ordinary-file", `select u in $USER; do ` + ordinary + `; break; done`, false},
+		// review 3: code that may not run does not end the word of the loop.
+		{"if-false-assign", `for u in $USER; do if false; then u=ordinary; fi; ` + write + `; done`, true},
+		{"and-false-assign", `for u in $USER; do false && u=ordinary; ` + write + `; done`, true},
+		{"or-true-assign", `for u in $USER; do true || u=ordinary; ` + write + `; done`, true},
+		{"case-nonmatch-assign", `for u in $USER; do case x in y) u=ordinary;; esac; ` + write + `; done`, true},
+		{"if-false-read", `for u in $USER; do if false; then read u; fi; ` + write + `; done`, true},
+		{"subshell-assign", `for u in $USER; do (u=ordinary); ` + write + `; done`, true},
+		{"while-if-false-assign", `echo $USER | while read u; do if false; then u=ordinary; fi; ` + write + `; done`, true},
+		{"link-if-false-assign", `for u in a aliasdir; do if false; then u=ordinary; fi; sed -i s/a/b/ ` + home + `/$u/config.yaml; done`, true},
+		{"link-and-false-assign", `for u in a aliasdir; do false && u=ordinary; sed -i s/a/b/ ` + home + `/$u/config.yaml; done`, true},
+		{"if-true-ordinary", `for u in $USER; do if true; then u=ordinary; fi; ` + ordinary + `; done`, false},
+		{"or-true-ordinary", `for u in $USER; do true || u=ordinary; ` + ordinary + `; done`, false},
+		// review 3: IFS code that may not run does not stop the read of the loop,
+		// and a delimiter of more than one byte is dropped whole.
+		{"while-if-false-ifs-before", `if false; then IFS=x; fi; echo $USER | while read u; do ` + write + `; done`, true},
+		{"while-ifs-before-state-name", `IFS=x; echo $USER | while read u; do ` + write + `; done`, true},
+		{"while-utf8-ifs-link", `echo aliasdiré | while IFS=é read -r u; do sed -i s/a/b/ ` + home + `/$u/config.yaml; done`, true},
+		{"while-utf8-ifs-ordinary", `echo notesé | while IFS=é read -r u; do sed -i s/a/b/ ` + home + `/$u/notes.txt; done`, false},
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, managed := range []bool{false, true} {
