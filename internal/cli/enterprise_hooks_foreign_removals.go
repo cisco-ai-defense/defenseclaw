@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -19,7 +18,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // enterpriseForeignHookRemovalsMu serializes ledger updates of this process:
@@ -279,18 +277,8 @@ var (
 )
 
 func loadEnterpriseForeignHookRemovals(path string) ([]enterprisepolicy.ForeignHookRemoval, error) {
-	info, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
-		return nil, err
-	}
-	data, err := readEnterpriseHookBoundedFile(path, info, enterprisepolicy.ForeignHookRemovalsMaxBytes, "foreign-hook removal ledger")
-	if err != nil {
+	data, exists, err := readEnterpriseHookPublishedRecord(path, "foreign-hook removal ledger", enterprisepolicy.ForeignHookRemovalsMaxBytes, enterpriseHookAuthorizationFileTrustCheck)
+	if err != nil || !exists {
 		return nil, err
 	}
 	return enterprisepolicy.ParseForeignHookRemovals(data)
