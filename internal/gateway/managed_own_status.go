@@ -199,10 +199,12 @@ func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, sel
 
 // ownExclusionUnjudgeable reports whether an exclude_users entry may name the
 // caller in a spelling the lookups did not give the means to judge. On Windows
-// any entry that is not a SID needs the account name, a DOMAIN\account entry
-// needs the domain too, and any other entry may be the profile folder name, so
-// it needs the folder. On Unix an entry needs the account name (the uid is
-// proven by the kernel). The enumerator matches those spellings and may already
+// any entry needs the account name, a DOMAIN\account entry needs the domain
+// too, and any other entry may be the profile folder name, so it needs the
+// folder. That includes an entry spelled as a SID that is not the caller own
+// SID: the enumerator also compares the folder name, and a folder can be named
+// like a different account or Entra SID. On Unix an entry needs the account
+// name (the uid is proven by the kernel). The enumerator matches those spellings and may already
 // have removed the hook, so the status claims no protection. An entry the
 // caller already matched was decided as excluded before this is asked.
 func ownExclusionUnjudgeable(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name, domain, folder string) bool {
@@ -215,7 +217,7 @@ func ownExclusionUnjudgeable(enrollment config.EnterpriseEnrollmentConfig, idKey
 	for _, entry := range enrollment.ExcludeUsers {
 		entry = strings.TrimSpace(entry)
 		switch {
-		case entry == "", idKey == "sid" && refusalpipe.AccountSID(entry):
+		case entry == "":
 		case !nameKnown:
 			return true
 		case idKey == "sid" && strings.Contains(entry, `\`) && !domainKnown,
