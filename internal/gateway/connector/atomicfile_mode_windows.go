@@ -167,7 +167,7 @@ func atomicFilePublishPrivateBound(
 	// destination byte and name untouched.
 	if err := renameAtomicTransformBoundFileWithBusyRetryUsing(
 		parent, stage, filepath.Base(destination), replace,
-		confirmingRename(destination, renameAtomicTransformBoundFilePlatform),
+		renameAtomicTransformBoundFilePlatform,
 		time.Sleep,
 	); err != nil {
 		if !replace && errors.Is(err, errAtomicTransformConflict) {

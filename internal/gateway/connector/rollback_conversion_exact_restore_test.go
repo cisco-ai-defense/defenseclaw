@@ -401,35 +401,64 @@ func testDevinConversionWithSavesAt(t *testing.T, hook *func(string), saves int,
 	}
 }
 
-// A publisher that retries a busy rename checks the managed span before every
-// attempt: a save that lands while it waits stops the next attempt.
-func TestConfirmingRenameStopsAnAttemptAfterASaveInAConversion(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "hooks.json")
+// A conversion span is keyed by the path the caller names, and the writer
+// follows a link to its target. The span must still find the save made through
+// the link after the last check, so the conversion refuses instead of replacing
+// it; the same write over a file nobody saved goes through the link.
+func TestRollbackConversionSpanHoldsAFileReachedThroughALink(t *testing.T) {
 	read := []byte(`{"a":1}`)
-	if err := os.WriteFile(path, read, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if !beginManagedConversionSpan(path, sha256Hex(read)) {
-		t.Fatal("no span")
-	}
-	t.Cleanup(func() { endManagedSetupSpan(path) })
-	if err := noteManagedSetupWrite(path, []byte(`{"a":2}`)); err != nil {
-		t.Fatal(err)
-	}
-	attempts := 0
-	rename := confirmingRename(path, func(_, _ *os.File, _ string, _ bool) error {
-		attempts++
-		return nil
-	})
-	if err := rename(nil, nil, "x", true); err != nil || attempts != 1 {
-		t.Fatalf("untouched file: err=%v attempts=%d, want the rename to run once", err, attempts)
-	}
-	if err := os.WriteFile(path, []byte(`{"a":1,"saved":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := rename(nil, nil, "x", true); !errors.Is(err, errManagedTargetMoved) || attempts != 1 {
-		t.Fatalf("saved file: err=%v attempts=%d, want a refusal before the rename", err, attempts)
+	converted := []byte(`{"a":2}`)
+	saved := []byte("// operator note\n{}")
+	for _, save := range []bool{false, true} {
+		name := "no save"
+		if save {
+			name = "a save through the link after the check"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, "repo-copy.json")
+			link := filepath.Join(root, "hooks.json")
+			if err := os.WriteFile(target, read, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Skipf("cannot create a link here: %v", err)
+			}
+			if !beginManagedConversionSpan(link, sha256Hex(read)) {
+				t.Fatal("no span")
+			}
+			t.Cleanup(func() { endManagedSetupSpan(link) })
+			if save {
+				atomicFileAfterConfirm = func(p string) {
+					if p == link {
+						if err := os.WriteFile(link, saved, 0o600); err != nil {
+							t.Error(err)
+						}
+					}
+				}
+				t.Cleanup(func() { atomicFileAfterConfirm = nil })
+			}
+			err := atomicWriteFile(link, converted, 0o600)
+			want := converted
+			if save {
+				want = saved
+				if !errors.Is(err, errManagedTargetMoved) {
+					t.Fatalf("error = %v, want errManagedTargetMoved", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got, rerr := os.ReadFile(target); rerr != nil || !bytes.Equal(got, want) {
+				t.Fatalf("link target = %q, %v; want %q", got, rerr, want)
+			}
+			if info, lerr := os.Lstat(link); lerr != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("the link was replaced: %v, %v", info, lerr)
+			}
+			leftovers, _ := filepath.Glob(filepath.Join(root, ".tmp-*"))
+			if len(leftovers) != 0 {
+				t.Fatalf("staging files left behind: %v", leftovers)
+			}
+		})
 	}
 }
 
