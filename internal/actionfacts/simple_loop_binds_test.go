@@ -41,12 +41,32 @@ func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
 		{"function declared in the body is not a binding", "for u in home; do f() { u=other; }; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
 		{"prefix assignment is not a binding", "for u in home; do u=other true; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
 		// A branch may not run: the word of the loop stays read next to the bound one.
-		{"write after a binding in a branch", "for u in other; do if true; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state, other}, nil},
+		{"write after a binding in a branch", "for u in other; do if test -f /x; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state, other}, nil},
+		{"write after a binding in one branch of two", "for u in other; do if test -f /x; then u=home; else :; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state, other}, nil},
+		{"write after a binding in an arm without a default", "for u in other; do case x in y) u=home;; z) u=home;; esac; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state, other}, nil},
+		// Code that certainly runs ends the word of the loop (review 4).
+		{"write after a binding in an if that is true", "for u in other; do if true; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a binding in an if with a colon", "for u in other; do if :; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a binding in the else of a false if", "for u in other; do if false; then :; else u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a binding in both branches", "for u in other; do if test -f /x; then u=home; else u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a binding in every arm", "for u in other; do case x in y) u=home;; *) u=home;; esac; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a binding behind a true and", "for u in other; do true && u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a binding behind a negated false and", "for u in other; do ! false && u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a binding behind a false or", "for u in other; do false || u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a printf -v", "for u in other; do printf -v u home; sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{other}},
+		{"write in the same if after its binding", "for u in other; do if true; then u=home; sed -i x /r/$u/.defenseclaw/config.yaml; fi; done", []string{state}, []string{other}},
+		{"write on the right of a binding and", "for u in other; do u=home && sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		// A function the action declares replaces the builtin of its name.
+		{"read shadowed by a function", "read() { :; }; for u in home; do read u; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"printf shadowed by a function", "printf() { :; }; for u in home; do printf -v u other; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"true shadowed by a function", "true() { return 1; }; for u in home; do true && u=other; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"read shadowed after the loop", "for u in home; do read u; sed -i x /r/$u/.defenseclaw/config.yaml; done; read() { :; }", []string{state}, nil},
 		{"write after a binding that cannot run", "for u in other; do if false; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after a binding behind a failed and", "for u in other; do false && u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after a binding behind a skipped or", "for u in other; do true || u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after a binding in a case arm", "for u in other; do case x in y) u=home;; esac; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after a binding in a subshell", "for u in other; do (u=home); sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after a binding behind an unknown and", "for u in other; do test -f /x && u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after a binding in a pipeline stage", "for u in other; do u=home | cat; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after a read in a branch", "for u in other; do if false; then read u; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after arithmetic on another name", "for u in other; do ((i++)); sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
@@ -130,6 +150,59 @@ func TestSimpleCommandsReadPipedLoopVariable(t *testing.T) {
 			}
 			if read != row.reads {
 				t.Errorf("%s: reading of the state path = %v, want %v", row.command, read, row.reads)
+			}
+		})
+	}
+}
+
+// rel-1-0-6:GAP-0880, GAP-0885 review 4: a read loop reads with the IFS that
+// reaches it: the value the walk holds where the loop starts (also one a
+// known variable gave it), with the values an enclosing loop that runs again or
+// a function it calls assigns. Code after the loop, in its body or in a
+// function that is not called before it cannot reach the read.
+func TestSimpleCommandsReadLoopIFSReachingTheRead(t *testing.T) {
+	const write = "sed -i x /r/$d/.defenseclaw/config.yaml"
+	const stripped = "sed -i x '/r/home/.defenseclaw/config.yaml'"
+	const kept = "sed -i x '/r/homex/.defenseclaw/config.yaml'"
+	const read = "echo homex | while read -r d; do " + write + "; done"
+	for _, row := range []struct {
+		name, command          string
+		wantStripped, wantKept bool
+	}{
+		{"default", read, false, true},
+		{"assigned before", "IFS=x; " + read, true, false},
+		{"known variable", "sep=x; IFS=$sep; " + read, true, false},
+		{"known variable declared", "sep=x; export IFS=$sep; " + read, true, false},
+		{"unknown variable", "IFS=$(cat /x); " + read, false, true},
+		{"assigned after the loop", read + "; IFS=x", false, true},
+		{"assigned in the body after the write", "echo homex | while read -r d; do " + write + "; IFS=x; done", false, true},
+		{"assigned in a function declared after", read + "; f() { IFS=x; }", false, true},
+		{"assigned in a function declared before", "f() { IFS=x; }; " + read, false, true},
+		{"assigned by a function called before", "f() { IFS=x; }; f; " + read, true, false},
+		{"assigned in a branch", "if test -f /x; then IFS=x; fi; " + read, true, true},
+		{"emptied for the read", "IFS=y; echo homex | while IFS= read -r d; do " + write + "; done", false, true},
+		{"set for the read", "echo homex | while IFS=x read -r d; do " + write + "; done", true, false},
+		{"loop that runs again", "while test -f /x; do " + read + "; IFS=x; done", true, true},
+		{"for loop over one word", "for i in 1; do " + read + "; IFS=x; done", false, true},
+		{"for loop over two words", "for i in 1 2; do " + read + "; IFS=x; done", true, true},
+		{"function called before the assignment", "f() { " + read + "; }; f; IFS=x", false, true},
+		{"function called after the assignment", "f() { " + read + "; }; IFS=x; f", true, false},
+		{"function called by a loop", "f() { " + read + "; }; for i in 1 2; do f; IFS=x; done", true, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			input := Input{Tool: "Bash", Command: row.command, ActiveHome: "/r/home", CWD: "/r/home/proj"}
+			var got []string
+			for _, simple := range SimpleCommands(input, Analyze(input)) {
+				if simple.EvaluationFailure != "" {
+					t.Fatalf("evaluation failure %q for %s", simple.EvaluationFailure, row.command)
+				}
+				got = append(got, simple.Text)
+			}
+			if has := slices.Contains(got, stripped); has != row.wantStripped {
+				t.Errorf("%s: reads the delimiter-stripped word = %v, want %v (%q)", row.command, has, row.wantStripped, got)
+			}
+			if has := slices.Contains(got, kept); has != row.wantKept {
+				t.Errorf("%s: reads the whole word = %v, want %v (%q)", row.command, has, row.wantKept, got)
 			}
 		})
 	}

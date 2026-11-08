@@ -258,3 +258,63 @@ func TestLoopVariableOrderLinksAndDelimiters(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-6:GAP-0880, GAP-0885 review 4: a binding that certainly runs ends
+// the word of the loop (a true condition, an if or case whose every branch
+// binds it, printf -v, a true &&), a function named like the builtin it
+// shadows binds nothing, and the IFS of a read is the one that reaches it: a
+// known variable gave it, code after the loop did not. Protected writes keep
+// their block, ordinary ones their verdict.
+func TestLoopVariableCertainBindingsAndReachingIFS(t *testing.T) {
+	home, project, parent := g235bBinderFixture(t)
+	write := `sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml`
+	direct := `sed -i s/a/b/ ` + parent + `$u/.defenseclaw/config.yaml`
+	readWrite := `echo aliasdirx | while read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`
+	rows := []struct {
+		name, command string
+		protected     bool
+	}{
+		{"read-shadowed-by-function", `read() { :; }; for u in $USER; do read u; ` + direct + `; done`, true},
+		{"read-shadowed-link", `read() { :; }; for u in $USER; do read u; ` + write + `; done`, true},
+		{"printf-shadowed-by-function", `printf() { :; }; for u in $USER; do printf -v u ordinary; ` + direct + `; done`, true},
+		{"true-shadowed-by-function", `true() { return 1; }; for u in $USER; do true && u=ordinary; ` + direct + `; done`, true},
+		{"if-true-unknown-condition", `for u in $USER; do if test -f /nonexistent; then u=ordinary; fi; ` + write + `; done`, true},
+		{"if-one-branch-only", `for u in $USER; do if test -f /nonexistent; then u=ordinary; else :; fi; ` + write + `; done`, true},
+		{"case-without-default", `for u in $USER; do case x in y) u=ordinary;; esac; ` + write + `; done`, true},
+		{"and-unknown-condition", `for u in $USER; do test -f /nonexistent && u=ordinary; ` + write + `; done`, true},
+		{"ifs-from-known-variable", `sep=x; IFS=$sep; ` + readWrite, true},
+		{"ifs-from-known-variable-declared", `sep=x; export IFS=$sep; ` + readWrite, true},
+		{"ifs-static", `IFS=x; ` + readWrite, true},
+		{"ifs-in-a-branch", `if test -f /nonexistent; then IFS=x; fi; ` + readWrite, true},
+		{"ifs-in-a-loop-that-runs-again", `while test -f /nonexistent; do ` + readWrite + `; IFS=x; done`, true},
+		{"if-true-binds", `for u in $USER; do if true; then u=ordinary; fi; ` + write + `; done`, false},
+		{"and-true-binds", `for u in $USER; do true && u=ordinary; ` + write + `; done`, false},
+		{"printf-v-binds", `for u in $USER; do printf -v u ordinary; ` + write + `; done`, false},
+		{"or-false-binds", `for u in $USER; do false || u=ordinary; ` + write + `; done`, false},
+		{"both-branches-bind", `for u in $USER; do if test -f /nonexistent; then u=ordinary; else u=ordinary; fi; ` + write + `; done`, false},
+		{"every-arm-binds", `for u in $USER; do case x in y) u=ordinary;; *) u=ordinary;; esac; ` + write + `; done`, false},
+		{"ifs-after-the-loop", readWrite + `; IFS=x`, false},
+		{"ifs-after-the-write", `echo aliasdirx | while read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; IFS=x; done`, false},
+		{"ifs-in-a-function-declared-after", readWrite + `; f() { IFS=x; }`, false},
+		{"ifs-in-a-function-declared-before", `f() { IFS=x; }; ` + readWrite, false},
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			for _, pack := range []string{"", "permissive", "strict"} {
+				for _, row := range rows {
+					if !row.protected && pack == "strict" {
+						continue
+					}
+					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
+					block := strings.HasPrefix(got, `{"action":"block"`)
+					if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
+						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", row.name, connector, managed, pack, got)
+					}
+					if !row.protected && block {
+						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want ordinary allow", row.name, connector, managed, pack, got)
+					}
+				}
+			}
+		}
+	}
+}
