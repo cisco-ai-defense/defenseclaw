@@ -97,6 +97,23 @@ func readNativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 	return writes
 }
 
+// NativeFileWriteTargets lists, as written, the files a native file-tool call
+// writes, edits or patches (nativeFileWrites). A gateway that resolves the
+// links of a per-user home itself asks it which names to resolve.
+func NativeFileWriteTargets(input Input) []string {
+	if input.Command != "" || len(input.Argv) != 0 {
+		return nil
+	}
+	writes := nativeFileWrites(input.Tool, input.Args)
+	targets := make([]string, 0, len(writes))
+	for _, write := range writes {
+		if write.target != "" {
+			targets = append(targets, write.target)
+		}
+	}
+	return targets
+}
+
 func nativeWholeFileWrites(object map[string]any) []nativeFileWrite {
 	if len(object) != 2 {
 		return nil
