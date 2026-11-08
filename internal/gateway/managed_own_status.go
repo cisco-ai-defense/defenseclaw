@@ -85,6 +85,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	if name != "" {
 		account["name"] = name
 	}
+	excluded := cfg != nil && ownAccountExcluded(cfg.Enterprise.Enrollment, idKey, self, name)
 	claudeCode := false
 	claudeConfigured := false
 	desktopRefused := false
@@ -100,7 +101,9 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	// watcher supplies the published vendor-source proof used to judge managed
 	// hook calls. A missing or changed view never claims protection.
 	var connectors map[string]any
-	if idKey == "uid" && cfg != nil {
+	if excluded {
+		connectors = ownExcludedConnectorStates(cfg)
+	} else if idKey == "uid" && cfg != nil {
 		connectors = a.ownConnectorStates(cfg, self, name)
 	} else if idKey == "sid" && cfg != nil {
 		connectors = a.ownWindowsConnectorStates(cfg, self, name)
@@ -115,6 +118,8 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	}
 	cowork := ownCoworkRow(true, "protected", "cowork_hooks", "Cowork runs the Claude Code hooks your organization manages")
 	switch {
+	case excluded:
+		cowork = ownCoworkRow(false, "excluded", ownCauseExcluded.code, ownCauseExcluded.reason)
 	case !claudeCode && claudeConfigured:
 		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
 	case !claudeCode:
@@ -137,6 +142,39 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 		answer["connectors"] = connectors
 	}
 	return answer
+}
+
+// ownAccountExcluded reports whether enterprise.enrollment.exclude_users names
+// the caller, as the enumerator matches it: on Linux and macOS the exact
+// account name or decimal uid, on Windows the SID or the account name (the
+// domain may be omitted on either side). Root is never excluded by name:
+// enrollment.root decides its calls.
+func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name string) bool {
+	if idKey == "uid" && self == "0" {
+		return false
+	}
+	for _, entry := range enrollment.ExcludeUsers {
+		entry = strings.TrimSpace(entry)
+		switch {
+		case entry == "":
+		case idKey == "uid" && (entry == self || name != "" && entry == name):
+			return true
+		case idKey == "sid" && (strings.EqualFold(entry, self) || ownStatusSameAccount(entry, name)):
+			return true
+		}
+	}
+	return false
+}
+
+// ownExcludedConnectorStates is the roster of an excluded account: every
+// connector the machine policy would otherwise cover is excluded, for the
+// account never inherits the machine-wide state.
+func ownExcludedConnectorStates(cfg *config.Config) map[string]any {
+	states := make(map[string]any)
+	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
+		states[connector] = ownExcluded()
+	}
+	return states
 }
 
 // ownWindowsConnectorStates keeps the Windows status roster aligned with the

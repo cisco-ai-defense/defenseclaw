@@ -63,6 +63,11 @@ var (
 	// per-connector hook proof for any connector but Claude Code.
 	ownCauseWindowsUnchecked = ownCause{"windows_unchecked", "your account's status cannot check this agent",
 		"Ask IT to run the administrator status for this computer"}
+	// ownCauseExcluded: the account is listed in exclude_users, so the
+	// machine policy does not cover it whatever it says for other accounts.
+	ownCauseExcluded = ownCause{"excluded_users",
+		"your account is listed in enterprise.enrollment.exclude_users, so DefenseClaw does not protect this agent for it",
+		"Ask IT to remove your account from enterprise.enrollment.exclude_users; defenseclaw-gateway enterprise policy show --user <account> shows the rule"}
 	// ownCauseNoUnprotectedReason: the scan lists the agent as unprotected
 	// but recorded no reason text.
 	ownCauseNoUnprotectedReason = ownCause{"scan_no_reason",
@@ -119,6 +124,12 @@ func ownNotProtected(cause ownCause) map[string]any {
 
 func ownNotConfirmed(cause ownCause) map[string]any {
 	return ownRow(false, "not confirmed", cause)
+}
+
+// ownExcluded is the row of an account that exclude_users names: a state of
+// its own, never protected and never the machine-wide state.
+func ownExcluded() map[string]any {
+	return ownRow(false, "excluded", ownCauseExcluded)
 }
 
 func ownProtected() map[string]any {
