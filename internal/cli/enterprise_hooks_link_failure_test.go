@@ -129,6 +129,10 @@ func TestEnterpriseHookReconcileFailsOnlyTheLinkedConnectorsRows(t *testing.T) {
 				}}
 			}
 
+			// The streak tracker is process-wide: start this row with none.
+			previousHealth := enterpriseHookTargetHealth
+			enterpriseHookTargetHealth = &enterpriseHookTargetHealthTracker{}
+			t.Cleanup(func() { enterpriseHookTargetHealth = previousHealth })
 			var skips int
 			previousReport := managed.ReportResilienceEvent
 			managed.ReportResilienceEvent = func(marker string, _ map[string]string) {
