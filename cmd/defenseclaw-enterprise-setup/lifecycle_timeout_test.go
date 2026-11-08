@@ -12,10 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -91,19 +89,6 @@ func TestEnterpriseLifecycleChildHelper(t *testing.T) {
 func readHelperFile(path string) string {
 	body, _ := os.ReadFile(path)
 	return string(body)
-}
-
-func lifecycleHelperProcessAlive(pid int) bool {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		// FindProcess opens the process: it fails once the process is gone.
-		_ = process.Release()
-		return true
-	}
-	return process.Signal(syscall.Signal(0)) == nil
 }
 
 // GAP-0501, executed: TIMEOUTSECONDS kills a real lifecycle child mid-run,
