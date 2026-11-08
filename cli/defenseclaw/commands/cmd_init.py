@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 import click
 
-from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
+from defenseclaw import connector_paths, long_paths, platform_support, terminal_checkbox, ux
 
 if TYPE_CHECKING:
     from defenseclaw.bootstrap import StepResult
@@ -3058,7 +3058,7 @@ def _seed_guardrail_profiles(policy_dir: str) -> None:
         if os.path.isdir(dst):
             preserved.append(profile_dir.name)
             continue
-        shutil.copytree(str(profile_dir), dst)
+        long_paths.copytree(profile_dir, dst)
         seeded.append(profile_dir.name)
 
     if seeded:
@@ -3078,7 +3078,11 @@ def _seed_splunk_bridge(data_dir: str) -> None:
         click.echo(f"  Splunk bridge: preserved existing ({dest})")
         return
 
-    shutil.copytree(str(bundled), dest)
+    try:
+        long_paths.copytree(bundled, dest)
+    except OSError as exc:
+        click.echo(f"  warning: could not seed the Splunk bridge: {exc}", err=True)
+        return
     bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
     if os.path.isfile(bridge_bin):
         os.chmod(bridge_bin, 0o755)

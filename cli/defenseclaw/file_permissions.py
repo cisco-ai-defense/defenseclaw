@@ -847,7 +847,7 @@ def dotenv_key_is_process_control(key: str) -> bool:
     )
 
 
-def _windows_extended_path(path: str | os.PathLike[str]) -> str:
+def windows_extended_path(path: str | os.PathLike[str]) -> str:
     """Return an absolute Win32 path that is not limited by ``MAX_PATH``."""
 
     value = os.path.abspath(os.fspath(path))
@@ -904,8 +904,8 @@ def replace_file_durable(source: str | os.PathLike[str], target: str | os.PathLi
     code = _move_retrying_sharing_errors(
         lambda: bool(
             move_file_ex(
-                _windows_extended_path(source_path),
-                _windows_extended_path(target_path),
+                windows_extended_path(source_path),
+                windows_extended_path(target_path),
                 movefile_replace_existing | movefile_write_through,
             )
         ),
@@ -1080,7 +1080,7 @@ def _open_windows_stable_read_fd(path: str, *, share_delete: bool = True) -> int
     close_handle.restype = wintypes.BOOL
 
     handle = create_file(
-        _windows_extended_path(path),
+        windows_extended_path(path),
         generic_read,
         file_share_read | (file_share_delete if share_delete else 0),
         None,
