@@ -34,16 +34,46 @@ func projectPOSIXUnrestrictedSudoersGrantWrites(
 	input Input,
 ) []POSIXUnrestrictedSudoersGrantWriteFact {
 	if input.Command != "" || len(input.Argv) != 0 ||
-		(!mayNameSudoers([]byte(input.CWD)) && !mayNameSudoers(input.Args)) {
+		(!mayNameSudoers([]byte(input.CWD)) && !mayNameSudoers(input.Args) &&
+			!resolvesToSudoersTarget(input.ClientResolvedTargets)) {
 		return nil
 	}
 	for _, write := range nativeFileWrites(input.Tool, input.Args) {
-		if sudoersWriteTargetInCWD(write.target, input.CWD) &&
+		if (sudoersWriteTargetInCWD(write.target, input.CWD) ||
+			clientResolvedSudoersTarget(write.target, input.CWD, input.ClientResolvedTargets)) &&
 			addsUnrestrictedSudoersGrant(write.added, write.replaced) {
 			return []POSIXUnrestrictedSudoersGrantWriteFact{{}}
 		}
 	}
 	return nil
+}
+
+// resolvesToSudoersTarget is the cheap test that keeps an ordinary call from
+// being decoded when the hook client placed none of its paths on a sudoers
+// file: a link named anything can lead to one.
+func resolvesToSudoersTarget(resolved map[string]string) bool {
+	for _, physical := range resolved {
+		if exactSudoersWriteTarget(physical) {
+			return true
+		}
+	}
+	return false
+}
+
+// clientResolvedSudoersTarget reports whether the hook client, resolving the
+// write target as the user, placed it on /etc/sudoers or a direct child of
+// /etc/sudoers.d: a link of any name to such a file is that file.
+func clientResolvedSudoersTarget(target, cwd string, resolved map[string]string) bool {
+	if len(resolved) == 0 || target == "" {
+		return false
+	}
+	if physical, found := resolved[target]; found {
+		return exactSudoersWriteTarget(physical)
+	}
+	if !strings.HasPrefix(target, "/") && strings.HasPrefix(cwd, "/") {
+		return exactSudoersWriteTarget(resolved[cwd+"/"+target])
+	}
+	return false
 }
 
 // mayNameSudoers is the cheap test that keeps an ordinary file-tool call from
