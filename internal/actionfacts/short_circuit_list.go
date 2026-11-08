@@ -205,6 +205,22 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 type sequenceStatement struct {
 	text, scope string
 	sourceStart int
+	// binds holds the USER and LOGNAME names that a for or select loop
+	// around the statement binds, outermost first, with the list each
+	// takes its values from: the statement runs after the binding.
+	binds []simpleLoopBind
+}
+
+// loopScopeKinds are the scope kinds of the body of a loop that binds USER
+// (u) or LOGNAME (o); other conditional and loop bodies are kind c.
+var loopScopeKinds = map[string]byte{"USER": 'u', "LOGNAME": 'o'}
+
+// simpleLoopBind is a for or select loop that gives USER or LOGNAME one
+// word of its list in each iteration (an empty list is the positional
+// parameters).
+type simpleLoopBind struct {
+	name  string
+	items []*syntax.Word
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -258,6 +274,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		defer func() { scope = parent }()
 		return walk()
 	}
+	var loopBinds []simpleLoopBind
 	// keep adds the text of node, or of a command and its redirects.
 	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
 		from, to := node.Pos(), node.End()
@@ -276,7 +293,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		for index := len(redirects) - 1; index >= 0; index-- {
 			statement += " " + redirects[index]
 		}
-		statements = append(statements, sequenceStatement{text: statement, scope: scope, sourceStart: int(from.Offset())})
+		statements = append(statements, sequenceStatement{text: statement, scope: scope,
+			sourceStart: int(from.Offset()), binds: slices.Clone(loopBinds)})
 		return true
 	}
 	subshells := 0
@@ -405,7 +423,17 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			default:
 				return true, false
 			}
-			return true, childScope('c', func() bool { return flattenAll(typed.Do) })
+			kind := byte('c')
+			if iteration, ok := typed.Loop.(*syntax.WordIter); ok && iteration.Name != nil &&
+				slices.Contains(simpleUserNames, iteration.Name.Value) {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items})
+				defer func() { loopBinds = outer }()
+				// The scope kind names the login the loop binds, so the
+				// name has no value the walk can follow once the loop ends.
+				kind = loopScopeKinds[iteration.Name.Value]
+			}
+			return true, childScope(kind, func() bool { return flattenAll(typed.Do) })
 		case *syntax.CaseClause:
 			if !allSimple && !inertPOSIXWords(typed.Word) ||
 				allSimple && !flattenSubstitutions(typed.Word) {

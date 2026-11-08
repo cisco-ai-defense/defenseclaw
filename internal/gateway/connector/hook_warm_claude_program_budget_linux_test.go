@@ -75,7 +75,7 @@ func TestWarmRegisteredClaudeHookRunsAtMostEightPrograms(t *testing.T) {
 	script := filepath.Join(hookDir, "claude-code-hook.sh")
 	env := append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 	env = append(env, "KRB5CCNAME=")
-	run := func(i int, trace string) string {
+	run := func(i int, trace string) (string, bool) {
 		cmd := exec.Command(script)
 		if trace != "" {
 			cmd = exec.Command(strace, "-f", "-qq", "-e", "trace=execve", "-o", trace, script)
@@ -84,9 +84,14 @@ func TestWarmRegisteredClaudeHookRunsAtMostEightPrograms(t *testing.T) {
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		if err != nil {
+			// A tracing failure is not a hook refusal. Require an ordinary
+			// allowed call below, then obtain a complete trace for this call.
+			if trace != "" && strings.Contains(string(out), filepath.Base(strace)+": ") {
+				return string(out), false
+			}
 			t.Fatalf("warm call %d: %v\n%s", i, err, out)
 		}
-		return string(out)
+		return string(out), true
 	}
 	for i := 0; i < 3; i++ {
 		run(i, "")
@@ -98,7 +103,25 @@ func TestWarmRegisteredClaudeHookRunsAtMostEightPrograms(t *testing.T) {
 	traces := t.TempDir()
 	for call := 3; call < 43; call++ {
 		trace := filepath.Join(traces, fmt.Sprintf("execve-%d", call))
-		if out := run(call, trace); strings.Contains(out, "deny") || strings.Contains(out, "block") {
+		var out string
+		complete := false
+		for attempt := 0; attempt < 3; attempt++ {
+			var traced bool
+			out, traced = run(call, trace)
+			if traced {
+				complete = true
+				break
+			}
+			// Keep the allow assertion even when the tracer itself fails.
+			ordinary, _ := run(call, "")
+			if strings.Contains(ordinary, "deny") || strings.Contains(ordinary, "block") {
+				t.Fatalf("the allowed call %d was blocked:\n%s", call, ordinary)
+			}
+		}
+		if !complete {
+			t.Fatalf("warm call %d: no complete program trace after 3 attempts: %s", call, out)
+		}
+		if strings.Contains(out, "deny") || strings.Contains(out, "block") {
 			t.Fatalf("the allowed call %d was blocked:\n%s", call, out)
 		}
 		raw, err := os.ReadFile(trace)

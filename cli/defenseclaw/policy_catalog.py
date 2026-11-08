@@ -623,18 +623,156 @@ def _guardrail(cfg: Any) -> Any:
     return getattr(cfg, "guardrail", None)
 
 
+# The guardrail.custom_packs pin of a pack with no files (the digest of an empty
+# file set): it proves no content (Go ``config.EmptyRulePackFilesDigest``).
+EMPTY_RULE_PACK_FILES_DIGEST = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def custom_pack_dir(cfg: Any, entry: Any) -> str:
+    """The folder a ``guardrail.custom_packs`` entry names, "" when its path is blank.
+
+    An absolute path as written, a relative one against the absolute directory
+    of the config file recorded when the config was loaded (``config.load``),
+    never the working directory read now (Go ``customPackPathIn``). A config
+    built in code records none and takes the directory of its config path,
+    made absolute at this call. ``~`` is not expanded: the gateway does not.
+    """
+    raw = str(getattr(entry, "path", "") or "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        return os.path.normpath(raw)
+    base = str(getattr(_guardrail(cfg), "_custom_pack_base", "") or "")
+    if not base:
+        from defenseclaw.config import config_path_for_data_dir
+
+        base = os.path.dirname(os.path.abspath(str(config_path_for_data_dir(str(getattr(cfg, "data_dir", "") or "")))))
+    return os.path.abspath(os.path.join(base, raw))
+
+
+def _loader_verdict(path: str) -> tuple[str, str] | None:
+    """The Go rule loader verdict on pack folder *path*.
+
+    ``("", files_digest)`` for a pack it loads (``files_digest`` is the bare
+    hex ``guardrail.custom_packs`` pins as ``sha256:<hex>``), ``(reason, "")``
+    for a folder it refuses, ``None`` when the verdict is unavailable (no
+    trusted gateway binary, or a helper that does not answer). Python never
+    judges pack content itself: ``defenseclaw-gateway rulepack validate`` runs
+    the loader the gateway enforces with (``rulepack_validation``). The verdict
+    is asked on every read and never kept: any file or folder change, whatever
+    its size or time, reaches the next reader.
+    """
+    from defenseclaw import rulepack_validation
+
+    try:
+        result = rulepack_validation.validate_rule_pack(path)
+    except Exception:  # noqa: BLE001 - an unavailable helper is "unverified", never "usable".
+        return None
+    if result.valid:
+        return "", str((result.summary or {}).get("files_digest", "") or "").lower()
+    issue = result.error
+    return (f"{issue.code} at {issue.path}: {issue.reason}" if issue else "not a valid rule pack"), ""
+
+
+class StalePinProblem(str):
+    """The config error of an entry whose valid pack no longer hashes to its pin.
+
+    An integrity refusal, not a fallback (Go ``config.StalePinError``): the
+    gateway refuses the pack until the pin is reviewed and corrected, and no
+    built-in pack is enforced in its place.
+    """
+
+
+def custom_pack_check(cfg: Any, name: str) -> tuple[str, bool]:
+    """``(problem, verified)`` for ``guardrail.custom_packs.<name>``.
+
+    *problem* is the config error of the entry, "" when usable or not an
+    entry: Go ``Config.CustomRulePackError``. It is the structural check (a
+    path that is empty after trimming, an empty-file-set pin, a path that is
+    not a readable folder) and then the Go rule loader verdict: the folder
+    must load as a pack whose files hash to the pin (a missing pin matches
+    nothing). *verified* is False when the entry looks usable but the loader
+    verdict is unavailable; a caller that grants a posture from the pack must
+    treat that as strict, as the standalone hook does where the loader is not
+    linked (``HookPolicyTierForConnector``). Secure Client keeps its loader
+    own refusals: ("", True).
+    """
+    guardrail = _guardrail(cfg)
+    entry = (getattr(guardrail, "custom_packs", None) or {}).get(name)
+    if entry is None:
+        return "", True
+    secure_client = getattr(guardrail, "secure_client_hook_fail_modes", None)
+    if callable(secure_client) and secure_client():
+        return "", True
+    key = f"guardrail.custom_packs.{name}"
+    path = custom_pack_dir(cfg, entry)
+    pin = str(getattr(entry, "digest", "") or "").strip()
+    if not path:
+        return f"{key}.path is empty", True
+    if pin.lower() == EMPTY_RULE_PACK_FILES_DIGEST:
+        return f"{key}.digest pins an empty file set", True
+    if not os.path.isdir(path):
+        return f"{key}.path {path!r} is not a folder", True
+    try:
+        os.listdir(path)
+    except OSError as exc:
+        return f"{key}.path cannot be read: {exc.strerror or exc}", True
+    verdict = _loader_verdict(path)
+    if verdict is None:
+        return "", False
+    reason, files_digest = verdict
+    if reason:
+        return f"{key}.path {path!r} is not a valid rule pack: {reason}", True
+    if pin.lower() != f"sha256:{files_digest}":
+        return (
+            StalePinProblem(
+                f"the files in {path!r} hash to sha256:{files_digest}, which does not match {key}.digest; "
+                "review the pack, then pin that digest"
+            ),
+            True,
+        )
+    return "", True
+
+
+def custom_pack_problem(cfg: Any, name: str) -> str:
+    """The config error of ``guardrail.custom_packs.<name>`` (:func:`custom_pack_check`)."""
+    return custom_pack_check(cfg, name)[0]
+
+
+def custom_pack_falls_back(cfg: Any, name: str) -> bool:
+    """Whether the entry has a config error whose selection loads its built-in pack.
+
+    A stale pin does not (Go ``Config.CustomRulePackFallsBack``).
+    """
+    problem = custom_pack_problem(cfg, name)
+    return bool(problem) and not isinstance(problem, StalePinProblem)
+
+
+def builtin_rule_pack_fallback(name: str) -> str:
+    """The built-in pack a broken ``custom_packs`` entry's selection loads.
+
+    Its own name when built in (a custom pack never shadows a preset), else ``default``.
+    """
+    return name if name in RULE_PACK_PRESETS else "default"
+
+
 def configured_pack_dir(cfg: Any, block: Any) -> str:
     """The directory a guardrail scope block selects, "" when it selects none.
 
     A scope selects its ``rule_pack``: a preset name or a
     ``guardrail.custom_packs`` key (``config.ResolveRulePackDir`` in the gateway).
+    A custom entry with a config error (:func:`custom_pack_problem`) loads its
+    built-in fallback pack, as the gateway does, and never shadows a preset;
+    a stale pin keeps its folder, which the gateway refuses.
     """
     name = str(getattr(block, "rule_pack", "") or "").strip()
     if not name:
         return ""
     custom = (getattr(_guardrail(cfg), "custom_packs", None) or {}).get(name)
     if custom is not None:
-        return normalize_pack_path(str(getattr(custom, "path", "") or ""))
+        if custom_pack_falls_back(cfg, name):
+            return preset_pack_dir(cfg, builtin_rule_pack_fallback(name))
+        return custom_pack_dir(cfg, custom)
     if name in RULE_PACK_PRESETS:
         return preset_pack_dir(cfg, name)
     return ""

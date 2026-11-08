@@ -175,6 +175,10 @@ type trustedActionRequest struct {
 	DowngradeReadOnlyDataArgs bool
 	// A sandbox action may execute in a filesystem the gateway cannot see.
 	SkipLocalFilesystemResolution bool
+	// CopilotSharedLocalFile marks an exact file call decoded from a Local
+	// body in the per-user CLI document. Its direct protected read has the same
+	// file-action authority as its lexical path.
+	CopilotSharedLocalFile bool
 	// ProtectedHomeHook is set only from a kernel-verified managed hook peer.
 	// Its gateway cannot inspect the caller's home when ProtectHome is active.
 	ProtectedHomeHook bool
@@ -207,6 +211,10 @@ type trustedActionRequest struct {
 	recordTelemetry func(trustedActionTelemetry)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
+	// stateProofOnly limits the judgment to the rule that proves a write to
+	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
+	// that proof (loginGuessProvedFinding), so no other rule needs to run.
+	stateProofOnly bool
 	// overBudgetOmission, when set, is told that the authorized-keys proof
 	// found only an operand that the client's bounded map left out because
 	// it was full (hookpaths.BudgetKey, GAP-0146).
@@ -293,6 +301,15 @@ func dispatchTrustedAction(
 	if ManagedEnterpriseActive() {
 		return nil
 	}
+	// A script body the hook call kept unread because its network share
+	// budget was spent is not a body that writes nothing: the strict tier
+	// judges the call as one past the evaluation limit, the others alert
+	// (shareBodyUnreadFindings, rel-1-0-6:GAP-0482).
+	defer func() {
+		if hookpaths.ShareBodyUnread() {
+			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable)
+		}
+	}()
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
 	}
@@ -415,6 +432,7 @@ func dispatchTrustedAction(
 		facts = actionfacts.Analyze(request.Input)
 		analyzed = true
 	}
+	facts = fileToolLinkTargetFacts(facts, request)
 	// Only the Git hook rule uses the hook client's bounded directory. Parse
 	// that view when the action already names a possible active hook mutation;
 	// a text mention or an inactive .sample path needs no second reading.
@@ -501,7 +519,7 @@ func dispatchTrustedActionWith(
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
 	defer func() {
-		findings = withActiveStateTargetMention(generation, request, facts, findings)
+		findings = withActiveStateTargetMention(request, facts, findings)
 	}()
 	if !request.simpleCommandPass {
 		defer func() {
@@ -538,6 +556,24 @@ func dispatchTrustedActionWith(
 				child := request
 				child.Input.Command = simple.Text
 				child.Input.CWD = simple.CWD
+				if simple.AbsoluteOnly {
+					// The shell directory is unknown (an eval, a cd the walk
+					// cannot read) but no operand of the command depends on
+					// it: the directory the action starts in judges it as it
+					// judges the same command written out, so a no-op eval
+					// before a write does not hide the write.
+					child.Input.CWD = request.Input.CWD
+				}
+				if simple.LoginGuess && !loginGuessReadingMayProveStateWrite(request, simple.Text, child.Input.CWD) {
+					continue
+				}
+				if simple.UnboundUser {
+					// A name a read, loop or eval binds is not the login the
+					// home spells. The child keeps the spelling of the path
+					// as the home path it reads, but a file it reaches only
+					// through a link on disk is not a file the command names.
+					child.SkipLocalFilesystemResolution = true
+				}
 				// An earlier cd, pushd or env -C of the action moved a Git
 				// Bash shell to another native Windows directory: the
 				// child's operands resolve there (GAP-2473). The flag stays
@@ -564,6 +600,7 @@ func dispatchTrustedActionWith(
 				child.conflictSource = nil
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
+				child.stateProofOnly = simple.LoginGuess
 				parent := request.Input
 				if wholeCommandKnown {
 					parent.Command = wholeCommand
@@ -573,6 +610,11 @@ func dispatchTrustedActionWith(
 				// the call budget, like its parent.
 				child.generation, child.budget = generation, budget
 				childFindings := dispatchTrustedAction(ctx, child)
+				if simple.LoginGuess {
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return !loginGuessProvedFinding(f)
+					})
+				}
 				if child.Input.MovedWindowsShellCWD && !request.Input.MovedWindowsShellCWD {
 					// The moved-directory reading only adds findings: the
 					// child's reading without it (a hooks-dir removal or move
@@ -635,6 +677,9 @@ func dispatchTrustedActionWith(
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
+	}
+	if request.stateProofOnly {
+		options.onlyRule = loginGuessProvesRule
 	}
 	if generation == nil || len(generation.semanticRules) == 0 {
 		var fallbackTelemetry trustedActionTelemetry
@@ -788,6 +833,9 @@ func dispatchTrustedActionWith(
 		for _, candidate := range generation.semanticRules {
 			if ctx.Err() != nil {
 				break
+			}
+			if request.stateProofOnly && !loginGuessProvesRule(candidate.rule.ID) {
+				continue
 			}
 			if budget.spent() && !budget.judged(candidate, viewID) {
 				// Past the budget, only an expression another member of a
@@ -959,6 +1007,7 @@ func dispatchTrustedActionWith(
 		request.Input.Tool,
 		options,
 	)
+	scanned = append(scanned, fileToolLinkTargetFindings(generation, request, facts, options)...)
 	fallbackLanes := func(
 		legacyFindings []RuleFinding,
 		facts actionfacts.Facts,
@@ -991,8 +1040,12 @@ func dispatchTrustedActionWith(
 	finalized := finalizeTrustedActionFindings(
 		generation, request, contextFacts, findings,
 	)
-	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
-	finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+	if !request.stateProofOnly {
+		// These two add only SSH-key, private-key and unverified-write
+		// findings, never the state-write proof a stateProofOnly reading keeps.
+		finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
+		finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+	}
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -1015,11 +1068,16 @@ func dispatchTrustedActionWith(
 // find candidates, then requires the executing operand's mutation role and
 // physical target before adding a finding. Keep it separate from SSH keys.
 func withActiveStateTargetMention(
-	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
+	// The bounded view of a large structured write keeps its complete target
+	// facts. Use that same view for the gateway-owned state proof as the pack
+	// rules use for their path decisions.
+	if view, _, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
+		facts = view
+	}
 	// A pattern, brace list, rsync or git clean that expands onto the
 	// state names no path fact, so it is proved from the shell words
 	// (GAP-2047); so is an archive extraction into it (GAP-2415).
@@ -1051,6 +1109,11 @@ func withActiveStateTargetMention(
 		return check(facts, request) || placed && check(linkFacts, linkRequest) ||
 			driven && check(driveFacts, driveRequest)
 	}
+	// Structured write tools have no shell command to scan. Their complete
+	// path facts still prove the same mutation, independently of pack rules.
+	if actionfacts.StructuredWriteTool(request.Input.Tool) && throughLink(provenStateMutationPath) {
+		return withProvenActiveStateMutation(request, findings)
+	}
 	// A write through a link the command makes to active state is proven by
 	// the link reading: the mention scan and the whole-action proof do not
 	// follow the new link (GAP-2522), nor read sed -i --follow-symlinks
@@ -1075,7 +1138,8 @@ func withActiveStateTargetMention(
 			// followed into the state tree through a link the gateway cannot
 			// read (GAP-2549: rm /dev/shm/x/y/config.yaml, y -> ~/.defenseclaw).
 			if !request.ProtectedHomeHook ||
-				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) {
+				!provenShellRedirectStateWrite(request) && !provenStateMutationPath(facts, request) &&
+					!provenStaticRedirectStateMutation(facts, request) {
 				// The mention scan places files below the state directory; a
 				// cmd /c body that removes or moves the directory itself (cmd
 				// /c rd /s /q %USERPROFILE%\.defenseclaw) names none, while the
@@ -1086,35 +1150,49 @@ func withActiveStateTargetMention(
 					return findings
 				}
 			}
-		} else if !throughLink(provenStateMutationPath) && !provenBashAggregateStateWrite(request) &&
+		} else if !throughLink(provenStateMutationPath) && !provenStaticRedirectStateMutation(facts, request) &&
+			!provenBashAggregateStateWrite(request) &&
 			!provenShellRedirectStateWrite(request) && !provenCMDSlashCStateWrite(request) &&
 			!provenPowerShellStateWrite(request) {
 			return findings
 		}
 	}
-	return withProvenActiveStateMutation(generation, request, findings)
+	return withProvenActiveStateMutation(request, findings)
+}
+
+// provenStaticRedirectStateMutation keeps an independently proved state
+// operand when an unrelated redirect target is expanded by the shell. Both
+// complete readings of the redirect reduction must prove that operand.
+func provenStaticRedirectStateMutation(facts actionfacts.Facts, request trustedActionRequest) bool {
+	if facts.Authoritative() {
+		return false
+	}
+	view, twin, ok := actionfacts.DynamicRedirectTargetReduction(request.Input, facts)
+	return ok && provenStateMutationPath(view, request) && provenStateMutationPath(twin, request)
 }
 
 // withProvenActiveStateMutation adds (or upgrades) the
 // tamper.detector_state_write finding of a proven mutation of the active
 // state: the one finding observe mode still blocks on
 // (provenActiveStateMutation).
-func withProvenActiveStateMutation(generation *compiledRulePackCategories, request trustedActionRequest, findings []RuleFinding) []RuleFinding {
+func withProvenActiveStateMutation(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	const ruleID = "tamper.detector_state_write"
-	_, rule, ok := trustedActionCatalogRule(generation, ruleID)
-	if !ok {
-		return findings
-	}
+	// This protection belongs to the gateway. A selected pack may omit or
+	// relabel the rule, but a proved mutation of active state still blocks.
 	index := slices.IndexFunc(findings, func(f RuleFinding) bool { return f.RuleID == ruleID })
-	finding := RuleFinding{
-		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
-		Confidence: rule.Confidence, Tags: append([]string(nil), rule.Tags...),
+	canonical := RuleFinding{
+		RuleID: ruleID, Title: "DefenseClaw security state mutation", Severity: "CRITICAL",
+		Confidence: 0.98, Tags: []string{"cognitive-tampering", "tampering", "security-state"},
 		Evidence: trustedActionInputText(request.Input, ""), LineNumber: 1,
 	}
+	finding := canonical
 	if index >= 0 && findings[index].contributesToEnforcement() && findings[index].proof.authorizes(ruleID) &&
 		(findings[index].proof.kind == findingProofActionFactsSemantic ||
 			findings[index].proof.kind == findingProofActionFactsSubgraph) {
 		// Keep the stronger ActionFacts proof of an actual state mutation.
+		findings[index].Severity = "CRITICAL"
+		findings[index].Title = canonical.Title
+		findings[index].Tags = canonical.Tags
 		return findings
 	}
 	if index >= 0 && findings[index].disposition == findingDispositionUnspecified &&
@@ -1125,6 +1203,11 @@ func withProvenActiveStateMutation(generation *compiledRulePackCategories, reque
 		// by the rule itself: the mutation is proven ($CMD > ~/f, GAP-2225).
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
+	// The selected pack's posture and severity may differ, but a proved
+	// mutation of DefenseClaw state has one enforcement level in every pack.
+	finding.Severity = "CRITICAL"
+	finding.Title = canonical.Title
+	finding.Tags = canonical.Tags
 	finding.enforcement = findingEnforcementDetectionOnly
 	if request.EnforcementCapable {
 		finding.enforcement = findingEnforcementAllowed
@@ -3914,11 +3997,7 @@ func protectedHomePlacedReading(facts actionfacts.Facts, request trustedActionRe
 // placed; a command whose directory changes it cannot place is read whole
 // in its own directory.
 func placedLinkedStateWrite(request trustedActionRequest, text, home string, links hookpaths.Links) bool {
-	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
-	if !placed || len(statements) == 0 {
-		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
-	}
-	for _, statement := range statements {
+	for _, statement := range hookpaths.PlacedOrWhole(text, request.Input.CWD, home) {
 		input := request.Input
 		input.Args, input.Argv, input.Command, input.CWD = nil, nil, statement.Command, statement.Dir
 		projected := actionfacts.Analyze(input).EnforcementProjection()
@@ -3937,7 +4016,7 @@ func placedLinkedStateWrite(request trustedActionRequest, text, home string, lin
 				return true
 			}
 		}
-		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home) {
+		for _, operand := range hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, statement.User) {
 			targets := links.AliasTargets(operand, true)
 			if !request.SkipLocalFilesystemResolution && !request.ProtectedHomeHook {
 				// The linked entry's parent can go on through an existing
@@ -3985,14 +4064,10 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 	if home == "" {
 		return false
 	}
-	statements, placed := hookpaths.TopLevelStatements(text, request.Input.CWD, home)
-	if !placed || len(statements) == 0 {
-		statements = []hookpaths.PlacedStatement{{Command: text, Dir: request.Input.CWD}}
-	}
 	links := hookpaths.CommandLinks(request.Input.Tool, text, request.Input.CWD, home)
-	for _, statement := range statements {
-		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home)
-		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home)
+	for _, statement := range hookpaths.PlacedOrWhole(text, request.Input.CWD, home) {
+		operands := hookpaths.FollowedInPlaceEditOperands(statement.Command, statement.Dir, home, statement.User)
+		entries := hookpaths.InPlaceEditOperands(statement.Command, statement.Dir, home, statement.User)
 		if len(operands) == 0 && len(entries) == 0 {
 			continue
 		}
@@ -4033,6 +4108,10 @@ func provenFollowedInPlaceStateWrite(facts actionfacts.Facts, request trustedAct
 				if parent, ok := hookpaths.ResolveWriteTarget(filepath.Dir(entry)); ok {
 					targets = append(targets, filepath.Join(parent, filepath.Base(entry)))
 				}
+			} else if state, found := request.ResolvedWriteTargets[hookpaths.InPlaceEntryFactPrefix+entry]; found {
+				// The hook client followed the directory (rel-1-0-6:GAP-0681
+				// review 2).
+				targets = append(targets, state)
 			}
 			for _, target := range targets {
 				written := actionfacts.PathFact{
@@ -4211,7 +4290,7 @@ func stateDirectoryEntryTarget(
 		return "", false
 	}
 	entry := filepath.Join(parent, path.Base(filepath.ToSlash(value)))
-	if info, err := os.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
+	if info, err := hookpaths.Stat(entry); err == nil && info.IsDir() && (moveDestination || windows) {
 		return "", false
 	}
 	if candidate.Flavor == actionfacts.PathFlavorPOSIX {
@@ -4429,6 +4508,38 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 		}
 	}
 	return findings
+}
+
+// loginGuessProvedFinding reports a finding a LoginGuess reading of a simple
+// command may add: the proof of a write to DefenseClaw state. The reading
+// gives USER and LOGNAME the login the home spells, a guess the shell may
+// not hold, so it never decides a rule over the words of the command: a word
+// expanded at run time stays unproven (detection-only) there, as it is in the
+// reading without the guess.
+func loginGuessProvedFinding(finding RuleFinding) bool {
+	return loginGuessProvesRule(finding.RuleID)
+}
+
+// loginGuessProvesRule reports whether ruleID is the rule whose finding a
+// LoginGuess reading may add. Only that rule is judged on the reading
+// (trustedActionRequest.stateProofOnly): the others are discarded unread.
+func loginGuessProvesRule(ruleID string) bool {
+	return trustedActionFindingKey(ruleID) == canonicalTrustedRuleID("tamper.detector_state_write")
+}
+
+// loginGuessReadingMayProveStateWrite reports whether a LoginGuess reading of
+// a simple command is worth its full judgment. The reading only proves a
+// write to DefenseClaw state (loginGuessProvedFinding), and every lane that
+// proves one starts from a command that may name the state folder however it
+// is spelled (hookpaths.MayNameState) or whose operands the mention scan
+// resolves into the state, through a link on disk too
+// (ActionStateTargetMention, the scan withActiveStateTargetMention opens
+// with). A reading that does neither would add only its cost to a command
+// that merely names USER or LOGNAME. A managed hook proves the write from
+// the client evidence instead, so its readings are all judged.
+func loginGuessReadingMayProveStateWrite(request trustedActionRequest, text, cwd string) bool {
+	return request.ProtectedHomeHook || hookpaths.MayNameState(text) ||
+		request.targetMemo.ActionStateTargetMention(text, cwd, request.Input.ActiveHome)
 }
 
 // withSimpleCommandFindings adds each command's ordinary standalone result
@@ -6365,7 +6476,7 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(generation, facts, findings)
+	findings = applyTrustedActionContextDisposition(generation, facts, findings, request.CopilotSharedLocalFile && request.Input.Tool == "read_file")
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
@@ -6613,24 +6724,46 @@ func filterTrustedLegacyActionContext(
 	facts actionfacts.Facts,
 	downgradeReadOnlyDataArgs bool,
 ) []RuleFinding {
-	pathMatches, mutationMatches := trustedLegacyPathRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
+	// Each match set is read only by the findings of its category, and the
+	// scan that builds it is the cost of the call: build it on first use, so
+	// a call whose findings need none (or has no finding) pays for none.
+	var (
+		pathMatches, mutationMatches map[string]struct{}
+		pathMatchesKnown             bool
+		commandMatches               map[string]struct{}
+		commandMatchesKnown          bool
+		networkMatches               map[string]struct{}
+		networkMatchesKnown          bool
 	)
-	commandMatches := trustedLegacyCommandRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
-	)
-	networkMatches := trustedLegacyNetworkRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
-	)
+	loadPathMatches := func() (map[string]struct{}, map[string]struct{}) {
+		if !pathMatchesKnown {
+			pathMatches, mutationMatches = trustedLegacyPathRuleMatches(generation, input, toolName, facts)
+			pathMatchesKnown = true
+		}
+		return pathMatches, mutationMatches
+	}
+	loadPathOnly := func() map[string]struct{} {
+		path, _ := loadPathMatches()
+		return path
+	}
+	loadMutationMatches := func() map[string]struct{} {
+		_, mutation := loadPathMatches()
+		return mutation
+	}
+	loadCommandMatches := func() map[string]struct{} {
+		if !commandMatchesKnown {
+			commandMatches = trustedLegacyCommandRuleMatches(generation, input, toolName, facts)
+			commandMatchesKnown = true
+		}
+		return commandMatches
+	}
+	loadNetworkMatches := func() map[string]struct{} {
+		if !networkMatchesKnown {
+			networkMatches = trustedLegacyNetworkRuleMatches(generation, input, toolName, facts)
+			networkMatchesKnown = true
+		}
+		return networkMatches
+	}
 	var (
 		readOnlyInspectionKnown bool
 		readOnlyInspection      bool
@@ -6689,11 +6822,11 @@ func filterTrustedLegacyActionContext(
 			// Dedicated command and exfiltration owners still inspect the action.
 			continue
 		case "sensitive-path":
-			if _, ok := pathMatches[finding.RuleID]; ok {
+			if _, ok := loadPathOnly()[finding.RuleID]; ok {
 				filtered = append(filtered, finding)
 			}
 		case "cognitive-file":
-			if _, ok := mutationMatches[finding.RuleID]; ok {
+			if _, ok := loadMutationMatches()[finding.RuleID]; ok {
 				if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 					finding.RuleID,
 					facts,
@@ -6704,7 +6837,7 @@ func filterTrustedLegacyActionContext(
 				filtered = append(filtered, finding)
 			}
 		case "command":
-			if _, ok := commandMatches[finding.RuleID]; ok {
+			if _, ok := loadCommandMatches()[finding.RuleID]; ok {
 				filtered = append(
 					filtered,
 					trustedLegacyProvenCommandFinding(
@@ -6716,7 +6849,7 @@ func filterTrustedLegacyActionContext(
 				)
 			}
 		case "c2":
-			if _, ok := networkMatches[finding.RuleID]; ok {
+			if _, ok := loadNetworkMatches()[finding.RuleID]; ok {
 				if proof, proven := trustedNetworkFindingProofFromActions(
 					generation,
 					finding.RuleID,
@@ -6731,11 +6864,11 @@ func filterTrustedLegacyActionContext(
 		default:
 			switch {
 			case strings.HasPrefix(finding.RuleID, "PATH-"):
-				if _, ok := pathMatches[finding.RuleID]; ok {
+				if _, ok := loadPathOnly()[finding.RuleID]; ok {
 					filtered = append(filtered, finding)
 				}
 			case strings.HasPrefix(finding.RuleID, "COG-"):
-				if _, ok := mutationMatches[finding.RuleID]; ok {
+				if _, ok := loadMutationMatches()[finding.RuleID]; ok {
 					if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 						finding.RuleID,
 						facts,
@@ -6746,7 +6879,7 @@ func filterTrustedLegacyActionContext(
 					filtered = append(filtered, finding)
 				}
 			case strings.HasPrefix(finding.RuleID, "CMD-"):
-				if _, ok := commandMatches[finding.RuleID]; ok {
+				if _, ok := loadCommandMatches()[finding.RuleID]; ok {
 					filtered = append(
 						filtered,
 						trustedLegacyProvenCommandFinding(
@@ -6758,7 +6891,7 @@ func filterTrustedLegacyActionContext(
 					)
 				}
 			case strings.HasPrefix(finding.RuleID, "C2-"):
-				if _, ok := networkMatches[finding.RuleID]; ok {
+				if _, ok := loadNetworkMatches()[finding.RuleID]; ok {
 					if proof, proven := trustedNetworkFindingProofFromActions(
 						generation,
 						finding.RuleID,
@@ -8837,12 +8970,12 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 	if hasTwin {
 		twinFacts = actionfacts.Analyze(twin.Input)
 	}
-	state := func(member *compiledRulePackCategories, findings []RuleFinding) []RuleFinding {
-		findings = withActiveStateTargetMention(member, request, facts, findings)
+	state := func(findings []RuleFinding) []RuleFinding {
+		findings = withActiveStateTargetMention(request, facts, findings)
 		if !hasTwin || slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "tamper.detector_state_write" }) {
 			return findings
 		}
-		for _, finding := range withActiveStateTargetMention(member, twin, twinFacts, nil) {
+		for _, finding := range withActiveStateTargetMention(twin, twinFacts, nil) {
 			if finding.RuleID == "tamper.detector_state_write" {
 				findings = append(findings, finding)
 			}
@@ -8850,10 +8983,10 @@ func withOverBudgetStateMutation(parent context.Context, request trustedActionRe
 		return findings
 	}
 	if generation == nil || len(generation.members) == 0 {
-		findings = state(generation, findings)
+		findings = state(findings)
 	} else {
-		for i, member := range generation.members {
-			found := state(member, nil)
+		for i := range generation.members {
+			found := state(nil)
 			if i < len(generation.memberNames) {
 				for j := range found {
 					found[j].profile = generation.memberNames[i]
@@ -8902,7 +9035,7 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 					}
 				}
 				proved := false
-				add := func(member *compiledRulePackCategories, profile string) {
+				add := func(profile string) {
 					// Prefer the exact child reading; one proven state finding
 					// completes this rule for the current profile.
 					for i := len(readings) - 1; i >= 0; i-- {
@@ -8913,10 +9046,10 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 						}
 						var candidateFindings []RuleFinding
 						if candidate.ProtectedHomeHook && staticFunctionLiteralStateMutation(candidateFacts) {
-							candidateFindings = withProvenActiveStateMutation(member, candidate, nil)
+							candidateFindings = withProvenActiveStateMutation(candidate, nil)
 						}
 						if len(candidateFindings) == 0 {
-							candidateFindings = withActiveStateTargetMention(member, candidate, candidateFacts, nil)
+							candidateFindings = withActiveStateTargetMention(candidate, candidateFacts, nil)
 						}
 						for _, finding := range candidateFindings {
 							if finding.RuleID != "tamper.detector_state_write" {
@@ -8932,14 +9065,14 @@ func withStaticFunctionStateMutation(parent context.Context, request trustedActi
 					}
 				}
 				if generation == nil || len(generation.members) == 0 {
-					add(generation, "")
+					add("")
 				} else {
-					for i, member := range generation.members {
+					for i := range generation.members {
 						profile := ""
 						if i < len(generation.memberNames) {
 							profile = generation.memberNames[i]
 						}
-						add(member, profile)
+						add(profile)
 					}
 				}
 				if !proved {
@@ -9000,11 +9133,7 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 		// sent no description (review r3 finding 3, r4 finding 2). Behind
 		// ProtectHome the gateway cannot read the home to prove or rule
 		// out a state write among them, so the call is held as one.
-		generation := request.generation
-		if generation == nil {
-			generation = snapshotRulePackGenerationFor(parent, request.Connector)
-		}
-		return withProvenActiveStateMutation(generation, request, findings)
+		return withProvenActiveStateMutation(request, findings)
 	}
 	if reduced == "" || reduced == command {
 		return findings

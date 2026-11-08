@@ -93,7 +93,7 @@ var errWindowsBundleStoreBusy = errors.New("another policy bundle run holds the 
 
 // Seams for tests.
 var (
-	windowsBundleLayout                 = managed.StandaloneWindowsLayout
+	windowsBundleLayout                 = windowsManagedStandaloneLayout
 	windowsBundlePolicy                 = readWindowsBundleGatewayPolicy
 	windowsBundleSleep                  = time.Sleep
 	windowsBundleTrust                  = func(path string) error { return managed.ValidateTrustedFilePath(path, "policy bundle store") }

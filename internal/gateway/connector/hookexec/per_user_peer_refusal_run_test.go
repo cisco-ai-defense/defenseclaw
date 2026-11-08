@@ -101,16 +101,14 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 		{"check error at the restart deadline", refusing(fmt.Errorf("%w: owner check", errGatewayNotConnected))},
 		{"accepts and closes at once, owner check past the connect deadline", func(t *testing.T, opts *Options) *peerListener {
 			// The Windows tuple wait: the accepted row left the table, so
-			// the check waits its own 3 s, past the try's connect deadline
-			// (the restart budget, and at least the first try's connect
-			// window).
+			// the check is still waiting when the connect deadline of the try
+			// (the restart budget, and at least the connect window of the
+			// first try) comes. It ends when the test does, never on a timer
+			// of its own that the deadline would have to be raced against.
 			peer := newPeerListener(t, "127.0.0.1:0", true)
 			opts.APIAddr = peer.addr()
 			opts.HTTPClient = verifiedTestClient(peer.addr(), func(net.Conn) error {
-				select {
-				case <-time.After(max(gatewayRestartBudget, firstTryConnectWindow) + 300*time.Millisecond):
-				case <-stop:
-				}
+				<-stop
 				return errors.New("connected gateway server socket was not found")
 			})
 			return peer

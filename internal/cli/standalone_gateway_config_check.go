@@ -54,8 +54,8 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 			var schemaErr *config.V8SchemaError
 			if errors.As(err, &schemaErr) {
 				// The same words as the Linux and macOS refusal (GAP-0188).
-				if hint, moved := schemaErr.MovedKeyHint(); moved {
-					reason = strings.TrimPrefix(schemaErr.Path, "$.") + " is an unknown setting; " + hint
+				if retired, ok := schemaErr.RetiredKeyMessage(); ok {
+					reason = retired
 				}
 			}
 			return fmt.Errorf("the gateway cannot load %s at %s: %s", configPath, location, reason)
@@ -128,6 +128,9 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		return nil
 	}
 	serviceAccount := strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv))
+	if err := gateway.CheckSelectedCustomRulePacks(runtimeConfig); err != nil {
+		return fmt.Errorf("the gateway cannot use the guardrail rule packs that %s selects: %w", configPath, err)
+	}
 	for _, pack := range standaloneGatewayRulePackDirs(runtimeConfig) {
 		// The check runs as an administrator or LocalSystem, who read any
 		// folder, so the gateway service account's own access is checked
@@ -234,6 +237,9 @@ func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*
 		return nil, err
 	}
 	if loaded.runtime.Guardrail.Enabled {
+		if err := gateway.CheckSelectedCustomRulePacks(loaded.runtime); err != nil {
+			return nil, fmt.Errorf("the gateway cannot use the guardrail rule packs that %s selects: %w", configPath, err)
+		}
 		for _, pack := range standaloneGatewayRulePackDirs(loaded.runtime) {
 			if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
 				return nil, fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %w",

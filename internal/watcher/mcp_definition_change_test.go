@@ -68,7 +68,7 @@ func (h *definitionChangeHarness) pending(server config.MCPServerEntry) bool {
 
 func (h *definitionChangeHarness) journal(server config.MCPServerEntry) audit.ActionState {
 	h.t.Helper()
-	entry, err := h.store.GetActionForConnector("mcp", MCPJournalName(server), "claudecode")
+	entry, err := h.store.GetActionForConnector(MCPJournalType(server), MCPJournalName(server), "claudecode")
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestRestoredMCPServerIsReleasedByItsCleanAdmission(t *testing.T) {
 	}
 	// An operator block of the server is not the watcher's to lift.
 	key := MCPJournalName(h.servers[0])
-	if err := h.store.SetActionFieldForConnector("mcp", key, "claudecode", "runtime", "disable", "operator: hold"); err != nil {
+	if err := h.store.SetActionFieldForConnector(MCPJournalType(h.servers[0]), key, "claudecode", "runtime", "disable", "operator: hold"); err != nil {
 		t.Fatal(err)
 	}
 	h.servers[0].Args = []string{"-y", ".", "--quiet"}
@@ -205,7 +205,7 @@ func TestMCPRecoveryRescanReleasesOnlyItsOwnRejection(t *testing.T) {
 
 	// An administrator's later hold is separate from watcher enforcement.
 	key := MCPJournalName(h.servers[0])
-	if err := h.store.SetActionFieldForConnector("mcp", key, "claudecode", "runtime", "disable", "operator: hold"); err != nil {
+	if err := h.store.SetActionFieldForConnector(MCPJournalType(h.servers[0]), key, "claudecode", "runtime", "disable", "operator: hold"); err != nil {
 		t.Fatal(err)
 	}
 	h.w.cfg.Scanners.MCPScanner.ScanInstructions = true

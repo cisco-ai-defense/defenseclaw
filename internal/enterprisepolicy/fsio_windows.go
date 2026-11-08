@@ -1100,3 +1100,56 @@ func trustedWindowsPublicDirPrincipal(sid *windows.SID) bool {
 	return sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) ||
 		sid.String() == trustedInstallerSIDStr
 }
+
+// linkedPolicyComponent returns the first component of path below ProgramData
+// that is a reparse point, or "" when there is none or the path is absent. It
+// only reads attributes: nothing is followed, created or changed.
+func linkedPolicyComponent(opts Options, path string) string {
+	root, rel, ok := programDataRelative(opts, path)
+	if !ok {
+		return ""
+	}
+	cur := root
+	for _, part := range strings.Split(rel, `\`) {
+		cur = filepath.Join(cur, part)
+		name, err := windows.UTF16PtrFromString(cur)
+		if err != nil {
+			return ""
+		}
+		attributes, err := windows.GetFileAttributes(name)
+		if err != nil {
+			return ""
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return cur
+		}
+	}
+	return ""
+}
+
+// clearOrKeepLinkedPolicyPath is the removal side of a vendor policy path
+// that has a link on it (GAP-0758). A teardown never creates, takes back or
+// fails on it: a link a standard user planted is removed, the link only
+// (displacePlanted never follows it), and what it pointed at is untouched; a
+// link an administrator, SYSTEM or TrustedInstaller owns stays, as does one
+// DefenseClaw cannot remove, and the caller leaves the target alone and names
+// it. It returns the kept path and why, or "" when nothing is left to keep.
+func clearOrKeepLinkedPolicyPath(opts Options, path string, state *State) (string, string) {
+	if opts.SkipTrustChecks {
+		return "", ""
+	}
+	link := linkedPolicyComponent(opts, path)
+	if link == "" {
+		return "", ""
+	}
+	note, err := displacePlanted(opts, link)
+	switch {
+	case err == nil:
+		state.detail("%s", note)
+		return "", ""
+	case errors.Is(err, errOwnedByAdministrator):
+		return link, "a link that an administrator, SYSTEM or TrustedInstaller owns; DefenseClaw does not follow, change or remove it"
+	default:
+		return link, "a link DefenseClaw could not remove, so it does not follow or change it: " + err.Error()
+	}
+}

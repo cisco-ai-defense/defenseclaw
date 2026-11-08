@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -327,6 +328,7 @@ func init() {
 	recovery.Hidden = true // Setup uses this once after a timed-out lifecycle child.
 	enterpriseWindowsCmd.AddCommand(recovery)
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsOpenCodePortClearCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsStandaloneFleetInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsEnterpriseCoworkInspectCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
@@ -550,6 +552,7 @@ func runWindowsEnterpriseLifecycle(
 		}
 		return failPreflight(err)
 	}
+	windowsEnterpriseRunStandalone.Store(windowsEnterpriseStandalone(opts))
 	if (opts.bundlePath != "" || opts.trustAnchors != "") && !windowsEnterpriseStandalone(opts) {
 		return failPreflight(errors.New("--bundle and --trust-anchors are valid only with --profile standalone"))
 	}
@@ -730,10 +733,11 @@ func runWindowsEnterpriseLifecycle(
 				"only the installed CLI can uninstall from its own folder: %s would keep that folder "+
 					"in use, so the uninstall would stop halfway. From a prompt whose folder is outside %s "+
 					"(for example, cd /d C:\\ first), run \"%s\" enterprise windows uninstall --profile standalone, "+
-					"or run DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall",
+					"or run %s. %s",
 				filepath.Base(executable),
 				filepath.Dir(filepath.Dir(executable)),
 				filepath.Join(filepath.Dir(executable), "defenseclaw.exe"),
+				windowsEnterpriseSetupCommand("/uninstall"), managed.WindowsSetupSource,
 			))
 		}
 		if callerPID, ok := windowsEnterpriseSelfUninstallCaller(
@@ -1778,6 +1782,23 @@ func createProtectedWindowsEnterpriseDirectoryWithFallback(
 	return "", newWindowsEnterpriseStagingBlockedPrereq(label, parents, err)
 }
 
+// windowsEnterpriseRunStandalone is set once the lifecycle has resolved its
+// profile. The staging directories are created before any helper carries the
+// profile pin, and their block is the one text of this file that both
+// profiles produce.
+var windowsEnterpriseRunStandalone atomic.Bool
+
+// windowsEnterpriseStagingRetryStep ends the remedy of a blocked staging
+// directory. Secure Client keeps "run Setup again". A standalone computer may
+// be running the installed CLI, not Setup, and has no Setup installed, so it
+// asks for the failed run again (cowork-1-0-8 GAP-0095).
+func windowsEnterpriseStagingRetryStep() string {
+	if windowsEnterpriseRunStandalone.Load() {
+		return "run the same command again"
+	}
+	return "run Setup again"
+}
+
 // windowsEnterpriseStagingBlockedError is the prerequisite reported when
 // every staging parent refused a protected directory. Its text is the
 // resilience-event line; it still unwraps to the access-denied cause.
@@ -1803,7 +1824,7 @@ func newWindowsEnterpriseStagingBlockedPrereq(label string, parents []string, ca
 		"remedy": "allow " + executable + " through Controlled Folder Access (Windows Security > Virus & threat " +
 			"protection > Ransomware protection > Allow an app through Controlled folder access, or " +
 			"Add-MpPreference -ControlledFolderAccessAllowedApplications '" + executable + "') and in the " +
-			"endpoint protection allow list, then run Setup again",
+			"endpoint protection allow list, then " + windowsEnterpriseStagingRetryStep(),
 	}).Error()
 	managed.EmitResilienceEvent(managed.MarkerPrereq, parseWindowsEnterprisePrereqFields(line))
 	return &windowsEnterpriseStagingBlockedError{line: line, cause: cause}

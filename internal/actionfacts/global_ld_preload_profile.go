@@ -17,7 +17,7 @@ const globalLDPreloadProfileDirectory = "/etc/profile.d/"
 func ExactGlobalLDPreloadProfileWrite(input Input, facts Facts) bool {
 	if input.Command != "" || len(input.Argv) != 0 ||
 		!facts.Authoritative() || !facts.EnforcementEligible() ||
-		facts.Tool != input.Tool || len(facts.Paths) != 1 {
+		facts.Tool != input.Tool || len(facts.OperandPaths()) != 1 {
 		return false
 	}
 
@@ -46,7 +46,7 @@ func ExactGlobalLDPreloadProfileWrite(input Input, facts Facts) bool {
 		return false
 	}
 
-	candidate := facts.Paths[0]
+	candidate := facts.OperandPaths()[0]
 	return candidate.Access == PathAccessWrite && candidate.Flavor == PathFlavorPOSIX &&
 		candidate.Value == target && candidate.Normalized == target &&
 		candidate.Resolved == target && candidate.Absolute
@@ -58,8 +58,11 @@ func ExactGlobalLDPreloadProfileWrite(input Input, facts Facts) bool {
 func ExactGlobalLDPreloadProfilePath(value string) bool {
 	if value == "" || len(value) > maxScalarBytes || !utf8.ValidString(value) ||
 		strings.TrimSpace(value) != value || strings.IndexByte(value, 0) >= 0 ||
-		path.Clean(value) != value || hasUnresolvedPathSyntax(value) ||
-		!strings.HasPrefix(value, globalLDPreloadProfileDirectory) {
+		path.Clean(value) != value || hasUnresolvedPathSyntax(value) {
+		return false
+	}
+	value = EtcSpelling(value)
+	if !strings.HasPrefix(value, globalLDPreloadProfileDirectory) {
 		return false
 	}
 	leaf := strings.TrimPrefix(value, globalLDPreloadProfileDirectory)

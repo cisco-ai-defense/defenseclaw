@@ -92,6 +92,7 @@ from defenseclaw.config import (
     config_path_for_data_dir,
     enable_all_runtime_planes,
     enable_user_runtime_planes,
+    gateway_home_for_data_dir,
     gateway_pid_path,
     locked_config_yaml,
     locked_file_update,
@@ -144,6 +145,7 @@ from defenseclaw.file_permissions import (
     windows_acl_custody_confidentiality_error,
     windows_acl_custody_write_error,
     windows_acl_write_error,
+    windows_untrusted_writer_sid,
 )
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import (
@@ -5318,6 +5320,13 @@ def setup_gateway(
             gw.port = port
         if api_port is not None:
             gw.api_port = api_port
+        if api_port is not None or port is not None:
+            from defenseclaw.bootstrap import port_layout_conflict
+
+            if conflict := port_layout_conflict(
+                gw.api_port, int(app.cfg.guardrail.port or 0), gw.port if uses_openclaw else 0
+            ):
+                raise click.UsageError(conflict)
         if token is not None:
             _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, data_dir)
             gw.token = ""
@@ -6143,8 +6152,16 @@ def _connector_contract_upgrade_guidance(
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     if key == "opencode":
+        # V1 (opencode-ai) and V2 install the same `opencode` command, so npm
+        # refuses V2 beside an npm-installed V1 (GAP-0053).
+        remove_v1 = (
+            "Remove OpenCode V1 first: 'npm uninstall -g opencode-ai' (with the same --prefix if you gave one). "
+            if normalized_version.split(".", 1)[0] == "1"
+            else ""
+        )
         return (
-            f"Install OpenCode V2 with 'npm install -g @opencode/cli@2' (where you cannot write npm's global "
+            f"{remove_v1}Install OpenCode V2 with 'npm install -g @opencode/cli@2' "
+            "(where you cannot write npm's global "
             "prefix, for your account: 'npm install -g --prefix ~/.npm-global @opencode/cli@2', with "
             f"~/.npm-global/bin first on PATH), then run: {rerun}."
         )
@@ -6372,7 +6389,16 @@ def _check_connector_version_supported_for_setup(
                 ux.err(problem)
             _refuse_in_every_mode(_refusal_scope, problem)
             return False
-        if _discovery is None and platform_support.host_os() != "windows":
+        if _discovery is None and platform_support.host_os() == "windows":
+            # Windows never takes Codex authority from this cache (the gateway
+            # reads the protected setup selection), so a write that fails
+            # changes no admission. The version setup just accepted is still
+            # published where doctor and `agent discover` read it, or both
+            # report it as not observed until `agent discover --refresh`.
+            # This connector and every peer the scan read replace their
+            # entries; a peer the scan missed keeps its evidence (GAP-0752).
+            agent_discovery._publish_agent_signal(disc, connector, data_dir=data_dir)
+        elif _discovery is None:
             if not agent_discovery._write_cache(disc, data_dir=data_dir):
                 if emit:
                     ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
@@ -6679,7 +6705,12 @@ def _refuse_opencode_v1_before_questions(app: AppContext) -> None:
     raw = (getattr(signal, "version", "") or "").strip() if signal is not None else ""
     if signal is None or not signal.installed or not raw or not opencode_requires_v2_upgrade(raw):
         return
-    ux.err(_opencode_v2_required(raw.rstrip("."), _connector_contract_upgrade_guidance("opencode", "OpenCode")))
+    ux.err(
+        _opencode_v2_required(
+            raw.rstrip("."),
+            _connector_contract_upgrade_guidance("opencode", "OpenCode", normalize_agent_version(raw)),
+        )
+    )
     raise click.ClickException("OpenCode setup stopped before any change; nothing was changed")
 
 
@@ -7034,10 +7065,21 @@ def _warn_openclaw_setup_advisories(
             "and openclaw.json names a Bedrock model without it, so OpenClaw model calls fail with "
             '"No API provider registered for api: bedrock-converse-stream".'
         )
-        ux.subhead(
-            f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE} "
-            "(it adds amazon-bedrock to plugins.allow), then openclaw gateway restart."
-        )
+        ux.subhead(f"Run: openclaw plugins install {OPENCLAW_BEDROCK_PLUGIN_PACKAGE}")
+        ux.subhead("Then: openclaw plugins enable amazon-bedrock")
+        plugins = openclaw_config.get("plugins") if isinstance(openclaw_config, dict) else None
+        if isinstance(plugins, dict):
+            allowed = plugins.get("allow")
+            if isinstance(allowed, list) and "amazon-bedrock" not in allowed:
+                value = _json.dumps([*allowed, "amazon-bedrock"], separators=(",", ":"))
+                ux.subhead(f"Then: openclaw config set plugins.allow {shlex.quote(value)} --strict-json")
+            denied = plugins.get("deny")
+            if isinstance(denied, list) and "amazon-bedrock" in denied:
+                value = _json.dumps(
+                    [name for name in denied if name != "amazon-bedrock"], separators=(",", ":"),
+                )
+                ux.subhead(f"Then: openclaw config set plugins.deny {shlex.quote(value)} --strict-json")
+        ux.subhead("Then: openclaw gateway restart")
 
 
 def _hilt_support_note(connector: str) -> str:
@@ -7610,9 +7652,8 @@ def setup_guardrail(
             app.cfg, capture_runtime=_windows_runtime_rollback(restart)
         )
     except OSError as exc:
-        raise click.ClickException(
-            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
-        ) from exc
+        reason, next_step = _setup_rollback_point_failure(exc)
+        raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
 
     protected_selection: _VerifiedSetupAgentSelections | None = None
     selection_attempted = False
@@ -7786,6 +7827,15 @@ def setup_guardrail(
         if cisco_timeout_ms is not None:
             aid.timeout_ms = cisco_timeout_ms
         gc.port = guard_port or gc.port or 4000
+        if guard_port:
+            from defenseclaw.bootstrap import port_layout_conflict
+
+            if conflict := port_layout_conflict(
+                int(app.cfg.gateway.api_port or 0),
+                gc.port,
+                app.cfg.gateway.port if "openclaw" in app.cfg.active_connectors() else 0,
+            ):
+                raise click.UsageError(conflict)
         if block_message is not None and per_connector_target:
             gc.connectors[target_connector].block_message = block_message
         elif block_message is not None:
@@ -8765,11 +8815,13 @@ class RollbackSourceRefusedError(OSError):
     (cowork-1-0-8 GAP-0074).
     """
 
-    def __init__(self, label: str, path: str, problem: str, kind: str) -> None:
+    def __init__(self, label: str, path: str, problem: str, kind: str, detail: str | None = None) -> None:
         self.label = label
         self.path = path
         self.problem = problem
         self.kind = kind
+        self.detail = detail
+        self._account: tuple[str, str] | None = None
         super().__init__(self._render("the file", "run the command again"))
 
     def _render(self, file: str, rerun: str) -> str:
@@ -8785,6 +8837,30 @@ class RollbackSourceRefusedError(OSError):
     def for_user(self, command: str) -> str:
         """The message with the full path, for the account that owns the file."""
         return self._render(self.path, f"run {command} again")
+
+    def writer(self) -> tuple[str, str] | None:
+        """The account that can write the file, as (name for a sentence, icacls argument), on Windows."""
+        if (sid := windows_untrusted_writer_sid(self.detail)) is None:
+            return None
+        if self._account is None:
+            try:
+                from defenseclaw.inventory.claw_inventory import _windows_account_name_for_sid
+
+                name = _windows_account_name_for_sid(sid)
+            except Exception:  # noqa: BLE001 - an unresolved account is named by its SID, which icacls takes after *.
+                name = ""
+            self._account = (name, f'"{name}"') if name else (sid, f"*{sid}")
+        return self._account
+
+    def repair(self, path: str | None = None) -> tuple[str, str]:
+        """The one way out as (sentence, command) for the full path; the command is empty when only a person acts."""
+        shown = path or self.path
+        if (writer := self.writer()) is not None:
+            command = f'icacls "{shown}" /remove:g {writer[1]}'
+            return "Remove that account's access to it, then run the command again:", command
+        if self.kind == "shared":
+            return "Make it owner-only, then run the command again:", f"chmod 600 {shlex.quote(shown)}"
+        return "Move it out of the folder, or delete it if you did not create it, then run the command again.", ""
 
 
 def _capture_protected_setup_file(
@@ -8834,7 +8910,7 @@ def _capture_protected_setup_file(
             if acl_error is not None:
                 if skip_if_untrusted:
                     return False, b"", None
-                raise RollbackSourceRefusedError(label, path, "not protected", "foreign")
+                raise RollbackSourceRefusedError(label, path, "not protected", "foreign", acl_error)
         else:
             if not trusted_runtime_owner(info.st_uid):
                 if skip_if_untrusted:
@@ -8900,6 +8976,39 @@ def _setup_runtime_subject(name: object) -> str:
     return f"id-{_setup_runtime_ref(raw)}"
 
 
+class _SetupRuntimeCustodyRefusedError(OSError):
+    """A file read for the rollback point can be changed by another account.
+
+    Not a transient read failure: setup stays refused and nothing is written,
+    and the account gets the file, who can change it and the one repair.
+    ``str()`` names no path, like every recorded rollback-point error;
+    :meth:`reason` and :meth:`next_step` name it for the account's own terminal.
+    """
+
+    def __init__(self, role: str, identity: str, path: str, refusal: RollbackSourceRefusedError) -> None:
+        self.role = role
+        self.path = path
+        self.refusal = refusal
+        refusal.writer()  # resolve the account now, while the capture still sees the host as it was
+        super().__init__(f"{role} evidence {identity[:12]} is not protected")
+
+    def reason(self) -> str:
+        if (writer := self.refusal.writer()) is not None:
+            return f"{self.role} file {self.path} can be changed by {writer[0]}"
+        return f"{self.role} file {self.path} is not protected the way DefenseClaw writes its files"
+
+    def next_step(self) -> str:
+        sentence, command = self.refusal.repair(self.path)
+        return f"Nothing was changed. {sentence}" + (f"\n      {command}" if command else "")
+
+
+def _setup_rollback_point_failure(exc: OSError) -> tuple[str, str]:
+    """The reason and next step to print for a rollback point setup could not take."""
+    if isinstance(exc, _SetupRuntimeCustodyRefusedError):
+        return exc.reason(), exc.next_step()
+    return str(exc), _SETUP_ROLLBACK_POINT_NEXT_STEP
+
+
 def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, str]:
     raw = os.fspath(path) if isinstance(path, str | os.PathLike) else ""
     if not raw or not os.path.isabs(raw) or "\x00" in raw:
@@ -8919,6 +9028,10 @@ def _capture_setup_runtime_location(path: object, role: str) -> tuple[str, str, 
             # gateway's custody rule (#1026) applies here as well.
             trust_windows_administrators=True,
         )
+    except RollbackSourceRefusedError as exc:
+        # The refusal stays; the account is told which file and the repair
+        # instead of a bounded-retry reference (rel-1-0-6 GAP-0804).
+        raise _SetupRuntimeCustodyRefusedError(role, identity, os.path.normpath(os.path.abspath(raw)), exc) from None
     except Exception:
         raise OSError(f"{role} evidence {identity[:12]} is unavailable") from None
     if not existed or generation is None:
@@ -9397,6 +9510,7 @@ def _capture_setup_applied_runtime(
     last_error: Exception | None = None
     last_error_site: str | None = None
     last_difference: str | None = None
+    refusal: _SetupRuntimeCustodyRefusedError | None = None
     started = time.monotonic()
     for attempt in range(_SETUP_RUNTIME_SNAPSHOT_ATTEMPTS):
         try:
@@ -9409,7 +9523,12 @@ def _capture_setup_applied_runtime(
             # bounded loop still fails closed without two equal successes.
             last_error = exc
             last_error_site = _setup_runtime_error_site(exc)
+            # A custody refusal is deterministic: when the last attempt ends in
+            # one, it is reported with its file and repair even after an
+            # earlier complete sample.
+            refusal = exc if isinstance(exc, _SetupRuntimeCustodyRefusedError) else None
         else:
+            refusal = None
             if previous == current:
                 return current
             if previous is not None:
@@ -9419,6 +9538,8 @@ def _capture_setup_applied_runtime(
             time.sleep(_SETUP_RUNTIME_SNAPSHOT_RETRY_SECONDS)
     if last_difference is None and isinstance(last_error, _SetupGatewayNoAnswerError):
         raise _SetupGatewayNoAnswerError(last_error.pid, time.monotonic() - started) from None
+    if refusal is not None:
+        raise refusal from None
     if last_difference is not None:
         reference = f"diff={last_difference}"
     elif last_error is not None:
@@ -11447,9 +11568,9 @@ def _apply_hook_connector_setup(
         return False
     except OSError as exc:
         restore_preflight_discovery()
+        reason, next_step = _setup_rollback_point_failure(exc)
         ux.echo(
-            f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
-            f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
+            f"  ✗ Cannot establish connector setup rollback point: {reason}\n    {next_step}",
             err=True,
         )
         return False
@@ -11766,6 +11887,7 @@ def _apply_hook_connector_setup(
                     connector=connector,
                     connectors=_guarded_connectors(cfg, _actives),
                     wait_for_connector_ready=True,
+                    notice_connectors=[connector],
                 )
         except Exception as exc:  # noqa: BLE001 — readiness failure triggers transaction rollback.
             with _temporary_codex_setup_marker(None) if connector == "codex" else nullcontext():
@@ -13856,7 +13978,7 @@ def _agent_settings_refusal(
     if not executable:
         return ""
     data_dir = str(cfg.data_dir)
-    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    env = {**os.environ, "DEFENSECLAW_HOME": gateway_home_for_data_dir(data_dir)}
     if connector == "codex":
         selected_root = _selected_codex_setup_root()
         env["CODEX_HOME"] = selected_root
@@ -14010,8 +14132,8 @@ def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str
     if not executable:
         return [], "no verified defenseclaw-gateway executable is installed"
     data_dir = str(cfg.data_dir)
-    # The gateway reads config.yaml of this data directory, not of $HOME.
-    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    # The gateway reads the install-home config.yaml that names this data directory.
+    env = {**os.environ, "DEFENSECLAW_HOME": gateway_home_for_data_dir(data_dir)}
     try:
         result = run_pinned_executable(
             [executable, "connector", "prune-orphans", "--connector", connector, "--data-dir", data_dir, "--json"],
@@ -14753,9 +14875,8 @@ def _setup_guardrail_connector_alias(
     try:
         prior_snapshot = _capture_setup_config_snapshot(app.cfg, capture_runtime=_windows_runtime_rollback(restart))
     except OSError as exc:
-        raise click.ClickException(
-            f"cannot establish guardrail setup rollback point: {exc}\n{_SETUP_ROLLBACK_POINT_NEXT_STEP}"
-        ) from exc
+        reason, next_step = _setup_rollback_point_failure(exc)
+        raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
@@ -16372,12 +16493,17 @@ def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntime
 
 def _preflight_opencode_plugin_folder() -> None:
     """Reject an unsafe OpenCode plugin folder before setup writes config."""
-    from defenseclaw.connector_paths import connector_config_files, opencode_writable_plugin_folder
+    from defenseclaw.connector_paths import (
+        connector_config_files,
+        opencode_custody_text,
+        opencode_unsafe_plugin_paths,
+    )
 
-    if loose := opencode_writable_plugin_folder(connector_config_files("opencode")[:1]):
+    if unsafe := opencode_unsafe_plugin_paths(connector_config_files("opencode")[:1]):
+        advice = opencode_custody_text(unsafe)
+        kind = "folder" if os.path.isdir(unsafe[0]) else "file"
         raise click.ClickException(
-            f"OpenCode plugin folder {loose} is group/other writable; "
-            f"run `chmod go-w {shlex.quote(loose)}` and retry setup. No changes made."
+            f"OpenCode plugin {kind} {advice.named} {advice.why}; {advice.action} and retry setup. No changes made."
         )
 
 
@@ -16393,6 +16519,7 @@ def _restart_services(
     summary_exclude: frozenset[str] = frozenset(),
     teardown: bool = False,
     required_connectors: frozenset[str] = frozenset(),
+    notice_connectors: list[str] | None = None,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
@@ -16419,7 +16546,9 @@ def _restart_services(
     ``summary_exclude`` names connectors left out of the closing roster line
     because they stay disabled (GAP-1809); the restart itself is unchanged.
     ``teardown`` marks a ``guardrail disable`` restart: the closing line says
-    the hooks were removed instead of announcing enforcement (GAP-1985)."""
+    the hooks were removed instead of announcing enforcement (GAP-1985).
+    ``notice_connectors`` limits restore notices to connectors selected by
+    this setup; a global setup reports notices for every active connector."""
     ux.section(title)
     ctx = click.get_current_context(silent=True)
     if ctx is not None:
@@ -16427,6 +16556,9 @@ def _restart_services(
 
     # Names of services whose restart failed; non-empty ⇒ fail the command.
     failed: list[str] = []
+    # OpenClaw restart failed but its gateway answers (GAP-0744); the note that
+    # the config is kept is printed at the end, only if nothing else failed.
+    kept_note_pending = False
 
     hook_targets = sorted(
         {
@@ -16479,8 +16611,13 @@ def _restart_services(
         # wait, so that wait sees the plugin the restarted server loads.
         from defenseclaw import opencode_service
 
+        opencode_binary = opencode_service.account_binary(data_dir)
+        if not teardown:
+            # Its default port is shared by every account on a computer
+            # (GAP-0053); set before the restart so the server moves now.
+            opencode_service.report_port(opencode_service.ensure_account_port())
         opencode_service.report(
-            opencode_service.restart_if_running(opencode_service.account_binary(data_dir)),
+            opencode_service.restart_if_running(opencode_binary),
             what="runs the plugin as it is now",
         )
 
@@ -16558,8 +16695,16 @@ def _restart_services(
     # time, also when the step did not wait for the connector runtime (a
     # `setup hermes` run said nothing then, GAP-0333).
     if hook_targets and not teardown:
-        agent_config_notice.wait_for_put_back(data_dir, hook_targets)
-        for note in agent_config_notice.put_back_notes(data_dir, hook_targets):
+        # A connector setup restarts the shared gateway, but its result is
+        # about the selected connector. A peer's earlier restore notice is
+        # reported when that peer is set up (or by a global setup).
+        notice_targets = (
+            sorted({normalize_connector(name) for name in notice_connectors} & set(hook_targets))
+            if notice_connectors is not None
+            else hook_targets
+        )
+        agent_config_notice.wait_for_put_back(data_dir, notice_targets)
+        for note in agent_config_notice.put_back_notes(data_dir, notice_targets):
             ux.warn(note)
 
     # Multi-connector global change: every active hook connector is affected
@@ -16607,10 +16752,17 @@ def _restart_services(
         return
 
     if connector == "openclaw":
-        if not _restart_openclaw_gateway():
+        # GAP-0744: whether OpenClaw is running is decided by the health probe
+        # that follows, not by the exit status of `openclaw gateway restart`.
+        # That command needs a service manager (launchd GUI domain, systemd
+        # --user, a Windows service) and fails on an account that has none
+        # while the gateway, run in a terminal, keeps answering. Only a gateway
+        # that does not answer fails the step (and rolls the setup back).
+        restart_ok = _restart_openclaw_gateway()
+        if not _check_openclaw_gateway(oc_host, oc_port):
             failed.append("openclaw-gateway")
-        if not _check_openclaw_gateway(oc_host, oc_port) and "openclaw-gateway" not in failed:
-            failed.append("openclaw-gateway")
+        elif not restart_ok:
+            kept_note_pending = True
     elif connector in _PROXY_BACKED_CONNECTORS:
         # OpenClaw is the only proxy-backed connector that owns its own
         # gateway process; others (ZeptoClaw today) get the proxy
@@ -16642,6 +16794,24 @@ def _restart_services(
             )
 
     click.echo()
+    if kept_note_pending and not failed:
+        # Said only when nothing else failed: with a failed defenseclaw-gateway
+        # restart the setup rolls back, and the config is not kept.
+        # A rollback restart runs on the restored configuration: the attempted
+        # new one is not kept there.
+        outcome = (
+            "the previous configuration stays in place"
+            if title == _ROLLBACK_RESTART_TITLE
+            else "the new configuration is kept"
+        )
+        click.echo(
+            "  OpenClaw could not restart its gateway through a service manager here, but the "
+            f"gateway answers at {oc_host}:{oc_port}, so {outcome}."
+        )
+        click.echo(
+            "    OpenClaw reloads openclaw.json on its own; if it does not load the DefenseClaw "
+            "plugin, restart the gateway where it runs (for example `openclaw gateway run` in its terminal)."
+        )
     _fail_if_restart_failed(failed)
 
 
@@ -17060,8 +17230,9 @@ def _agent_not_on_path_hint(connector: str) -> str:
     )
 
 
-def _connector_not_started_detail(connector: str, reason: str) -> str:
-    detail = f"the gateway did not start it: {_bounded_gateway_reason(reason)}"
+def _connector_not_started_detail(connector: str, reason: str, repair: str = "") -> str:
+    # The repair arrives apart from the reason and is shown as recorded (GAP-0731).
+    detail = f"the gateway did not start it: {_bounded_gateway_reason(reason)}{repair}"
     if missing := _agent_not_on_path_hint(connector):
         detail = f"{missing}; {detail}"
     return detail
@@ -17305,10 +17476,15 @@ def _wait_for_connector_runtime(
     last_failure = _ConnectorRuntimeReadiness(False, invariant="snapshot", detail="runtime files are not ready")
     agent_settings_refused: dict[str, str] = {}
     not_started_reasons: dict[str, str] = {}
-    from defenseclaw.commands.cmd_status import _connectors_not_started_reasons, _connectors_refused_by_agent_settings
+    not_started_repairs: dict[str, str] = {}
+    from defenseclaw.commands.cmd_status import (
+        _connectors_not_started_reasons,
+        _connectors_not_started_repairs,
+        _connectors_refused_by_agent_settings,
+    )
 
     def gateway_ready(deadline: float) -> tuple[bool, str | None, _ConnectorRuntimeReadiness]:
-        nonlocal gateway_generation, agent_settings_refused, not_started_reasons
+        nonlocal gateway_generation, agent_settings_refused, not_started_reasons, not_started_repairs
         if not require_gateway_health and gateway_generation is None:
             return True, gateway_generation, _ConnectorRuntimeReadiness(True)
         remaining = deadline - time.monotonic()
@@ -17350,6 +17526,7 @@ def _wait_for_connector_runtime(
         guardrail = health.get("guardrail")
         agent_settings_refused = _connectors_refused_by_agent_settings(health)
         not_started_reasons = _connectors_not_started_reasons(health)
+        not_started_repairs = _connectors_not_started_repairs(health)
         state = guardrail.get("state") if isinstance(guardrail, dict) else None
         if isinstance(state, str) and state.strip().lower() in {"error", "stopped"}:
             detail = f"restarted gateway guardrail is {state.strip().lower()}"
@@ -17510,7 +17687,8 @@ def _wait_for_connector_runtime(
         if not_started:
             name = not_started[0]
             return _ConnectorRuntimeReadiness(
-                False, name, "not-started", _connector_not_started_detail(name, not_started_reasons[name])
+                False, name, "not-started",
+                _connector_not_started_detail(name, not_started_reasons[name], not_started_repairs.get(name, "")),
             )
         if settings_refused:
             for name in sorted(settings_refused):
@@ -17557,9 +17735,10 @@ def _wait_for_connector_runtime(
                         ux.warn(f"skipping {name}: {_lock_contract_failure_detail(name, None, 'roster')}")
                     else:
                         reason = not_started_reasons.get(name)
+                        repair = not_started_repairs.get(name, "")
                         ux.warn(
                             f"skipping {name}: the restarted gateway did not activate it "
-                            + (f"({_connector_not_started_detail(name, reason)})" if reason
+                            + (f"({_connector_not_started_detail(name, reason, repair)})" if reason
                                else "(gateway.log names the reason)")
                             + ", so it is not guarded now"
                         )
@@ -17596,10 +17775,10 @@ def _wait_for_connector_runtime(
                     tolerated=tolerated,
                 )
             if snapshot_ready:
-                # The Windows native setup launcher publishes the complete roster
-                # before this sequential passive-Doctor pass. Do not make that
-                # roster share the residual publication no-progress window; the
-                # existing count-aware absolute deadline is its transaction bound.
+                # On Windows the complete roster is published before this
+                # sequential passive-Doctor pass. Do not make that roster share
+                # the residual publication no-progress window; the existing
+                # count-aware absolute deadline is its transaction bound.
                 # Preserve the established non-Windows timing contract in this
                 # Windows-parity change.
                 deadline = (
@@ -17679,7 +17858,7 @@ def _restart_openclaw_gateway() -> bool:
     effect.
 
     Returns True when the restart succeeded, False on any failure
-    (missing CLI, timeout, or non-zero exit). Avarice F-0143: this used
+    (missing or unrunnable CLI, timeout, or non-zero exit). Avarice F-0143: this used
     to swallow every failure and return ``None`` so the caller could not
     tell the OpenClaw gateway never came back — setup then reported
     success while traffic kept flowing past a down (fail-open) gateway."""
@@ -17688,7 +17867,10 @@ def _restart_openclaw_gateway() -> bool:
         result = subprocess.run(
             ["openclaw", "gateway", "restart"],
             capture_output=True,
-            text=True,
+            # Output is only shown to the operator: bytes that do not decode
+            # must not turn into an exception that skips the health probe.
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         output = f"{result.stdout or ''}\n{result.stderr or ''}".lower()
@@ -17709,8 +17891,9 @@ def _restart_openclaw_gateway() -> bool:
             # the gateway answers, and it reloads openclaw.json on its own.
             click.echo(" - (no OpenClaw gateway service to restart)")
             click.echo(
-                "    If OpenClaw runs in a terminal (openclaw gateway run), restart it there if it does not "
-                "load the DefenseClaw plugin."
+                "    Restart required: a gateway that was already running in a terminal (openclaw gateway run) "
+                "must be stopped and started again there so it loads the DefenseClaw plugin at startup; "
+                "do not rely on its config hot reload."
             )
             return True
         if result.returncode == 0:
@@ -17728,10 +17911,18 @@ def _restart_openclaw_gateway() -> bool:
         return False
     except subprocess.TimeoutExpired:
         # OpenClaw owns this lifecycle and exposes no DefenseClaw pid/data-dir
-        # state that we can safely reconcile here.  A timeout is therefore a
-        # fail-closed restart failure; the native DefenseClaw gateway helper
-        # below performs its own identity-aware timeout reconciliation.
+        # state that we can safely reconcile here.  A timeout is reported as a
+        # failed restart; the caller then decides from the gateway health probe
+        # (GAP-0744), and the native DefenseClaw gateway helper below performs
+        # its own identity-aware timeout reconciliation.
         ux.echo(" ✗ (timed out)")
+        return False
+    except OSError as exc:
+        # Any other failure to start the command (not executable, wrong
+        # executable format, no permission) is a failed restart like a missing
+        # CLI; the caller decides from the health probe (GAP-0744).
+        ux.echo(f" ✗ (could not run the openclaw CLI: {exc.strerror or type(exc).__name__})")
+        click.echo("    Fix the openclaw CLI or restart its gateway manually.")
         return False
 
 
@@ -17778,6 +17969,7 @@ def _gateway_lifecycle_candidate(
 
     from defenseclaw.gateway import (
         GATEWAY_BIN_NAME,
+        _launcher_sibling_gateway,
         canonical_install_path,
         packaged_windows_gateway_path,
         packaged_windows_install_root,
@@ -17804,20 +17996,24 @@ def _gateway_lifecycle_candidate(
             continue
         seen_directories.add(normalized_directory)
         search_directories.append(absolute_directory)
-    sanitized_search_path = os.pathsep.join(search_directories)
     # Lifecycle mutations deliberately ignore DEFENSECLAW_GATEWAY_BIN. The
     # config loader accepts credential names from .env, so an attacker who
     # could previously write that file could otherwise plant an executable
     # override and have Doctor run it after merely tightening permissions.
-    executable = shutil.which(GATEWAY_BIN_NAME, path=sanitized_search_path)
-    if executable:
-        # Older Python runtimes on Windows can prepend the current directory
-        # even when an explicit PATH is supplied. Accept only a concrete result
-        # whose parent was one of the sanitized search directories.
-        executable_parent = os.path.normcase(os.path.abspath(os.path.dirname(executable)))
-        allowed_parents = {os.path.normcase(directory) for directory in search_directories}
-        if not os.path.isabs(executable) or executable_parent not in allowed_parents:
-            executable = None
+    # This install's own gateway comes before PATH: a DefenseClaw Setup 0.8.x
+    # folder listed first would otherwise run the lifecycle call (GAP-0100).
+    own_gateway = _launcher_sibling_gateway() if search_path is None else None
+    # Look in each folder by its full name. A bare name with path= makes
+    # shutil.which search the current directory first on Windows, so a stray
+    # gateway there (a build left in the checkout) hid the one on the search path.
+    executable = own_gateway or next(
+        (
+            found
+            for directory in search_directories
+            if (found := shutil.which(os.path.join(directory, GATEWAY_BIN_NAME))) and os.path.isabs(found)
+        ),
+        None,
+    )
     if not executable:
         canonical = canonical_install_path()
         if os.path.isfile(canonical) and os.access(canonical, os.X_OK):
@@ -18494,6 +18690,7 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
                     wait_for_connector_ready=True,
                     start_if_stopped=True,
                     required_connectors=frozenset(focus),
+                    notice_connectors=focus,
                 )
             for connector, audit_mode in batch_audits:
                 _log_setup_action(

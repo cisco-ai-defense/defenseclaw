@@ -59,11 +59,12 @@ func refusePerUserGatewayOnManagedHost() error {
 	}
 	if where, present := managedHostWindowsStandalone(); present {
 		// Name the restart route too, as the Unix refusal does: the managed
-		// gateway is a service Setup /repair restarts (GAP-0718).
+		// gateway is a service the installed CLI's repair restarts
+		// (GAP-0718). Setup is not installed on a managed computer, so the
+		// route is the installed CLI, by its full path (GAP-0095).
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so the per-user gateway is disabled; "+
-			"an administrator can check the managed deployment %s, and restart or repair the managed gateway by running "+
-			"`DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1` (the installed release's Setup) from an elevated prompt",
-			where, managedWindowsAdminStatusHint())
+			"an administrator can check the managed deployment %s, and restart or repair the managed gateway with %s from the same prompt",
+			where, managedWindowsAdminStatusHint(), windowsEnterpriseAdminCommand("repair"))
 	}
 	path, present := managedHostUnixRecord(os.Stderr)
 	if !present {
@@ -148,6 +149,8 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: asset_policy.%s is set in the admin config (MDM or management plane); %s %s did not change it. %s", kind, kind, args[0], next)), 3)
 		})
 	}
+	// Every other per-user command gets the managed answer too (GAP-0795).
+	addManagedWindowsPerUserAnswers(root, where)
 }
 
 // managedDeviceAnswer is a managed Windows answer: a sentence that starts
@@ -729,11 +732,7 @@ func managedHostPlatform() string {
 // secure_path does not include the install directory, so a bare
 // `defenseclaw-gateway` in a hint fails with "command not found".
 func managedHostGatewayCommand() string {
-	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
-	if err != nil {
-		return "defenseclaw-gateway"
-	}
-	return layout.BinDir + "/defenseclaw-gateway"
+	return managed.StandaloneGatewayPath(runtime.GOOS)
 }
 
 // managedRecordTrusted reports whether a managed-deployment record at path

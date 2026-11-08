@@ -365,16 +365,16 @@ func trustedOrdinaryPathReassignment(name, home, cwd string) bool {
 	if !ok {
 		return false
 	}
-	entry, entryErr := os.Stat(resolved)
-	if entryErr != nil && !os.IsNotExist(entryErr) {
+	entry, entryErr := hookpaths.Stat(resolved)
+	if entryErr != nil && !hookpaths.NotExist(entryErr) {
 		return false
 	}
 	for _, protected := range hookpaths.ProtectedAuthorizedKeysPaths(home) {
 		if canonicalSemanticPath(resolved) == canonicalSemanticPath(protected) {
 			return false
 		}
-		guarded, err := os.Stat(protected)
-		if err != nil && !os.IsNotExist(err) {
+		guarded, err := hookpaths.Stat(protected)
+		if err != nil && !hookpaths.NotExist(err) {
 			return false
 		}
 		if entryErr == nil && err == nil && os.SameFile(entry, guarded) {
@@ -1166,7 +1166,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if cannotResolveLocally || runtime.GOOS != "windows" {
 			return false
 		}
-		if info, err := os.Lstat(target); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+		if info, err := hookpaths.Lstat(target); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			return false
 		}
 		if !windowsMovedRead {
@@ -1235,7 +1235,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cannot walk the user's home (ProtectHome); the hook client's walk of
 		// the same operand replaces only that missing view (GAP-0278).
 		if !safeRedirect && links.OpaqueTargetWithFacts(target, ownCopy, opaqueFacts) {
-			if info, err := os.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
+			if info, err := hookpaths.Lstat(target); err != nil || info.Mode()&os.ModeCharDevice == 0 {
 				return true
 			}
 		}
@@ -1313,8 +1313,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 			return true
 		}
-		info, err := os.Lstat(target)
-		if err != nil && !os.IsNotExist(err) {
+		info, err := hookpaths.Lstat(target)
+		if err != nil && !hookpaths.NotExist(err) {
 			return false
 		}
 		if err == nil && info.Mode()&os.ModeSymlink == 0 {
@@ -1323,7 +1323,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return false
 			}
 			for _, path := range protectedPaths {
-				if file, err := os.Stat(path); err == nil && os.SameFile(info, file) {
+				if file, err := hookpaths.Stat(path); err == nil && os.SameFile(info, file) {
 					return confirmed()
 				}
 			}
@@ -1530,6 +1530,17 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	for _, candidate := range view.Paths {
 		if candidate.Access != actionfacts.PathAccessWrite &&
 			candidate.Access != actionfacts.PathAccessAppend {
+			continue
+		}
+		// A fact for the file a link reaches is no further operand: the
+		// operand it was added for is judged here with the client's answer
+		// for it, which already names that file. The client lists no entry
+		// for the physical name, so judging it as an operand would read
+		// the missing entry as an operand the client left out (GAP-0819).
+		if candidate.Linked {
+			if isProtected(candidate.Resolved) {
+				return confirmed()
+			}
 			continue
 		}
 		command, ok := integrityCommandByID(view, candidate.CommandID)

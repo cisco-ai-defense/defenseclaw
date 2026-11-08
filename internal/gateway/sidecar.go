@@ -1671,7 +1671,7 @@ func (s *Sidecar) runActiveGuardrail(ctx context.Context) error {
 		return err
 	}
 	runGuardrailFn := s.runGuardrail
-	if len(s.currentConfig().ActiveConnectors()) > 1 {
+	if multi, _, _ := s.currentConfig().GuardrailBootSet(); multi {
 		runGuardrailFn = s.runGuardrailMulti
 	}
 	err := runGuardrailFn(ctx)
@@ -4422,9 +4422,9 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		// earlier versions kept under the bare name move to their account
 		// before the watcher runs (GAP-0216).
 		if moved, kept, err := watcher.MigrateAccountMCPJournal(s.store); err != nil {
-			fmt.Fprintf(os.Stderr, "[watcher] move MCP journal rows to their accounts: %v (bare rows stay and keep refusing by name)\n", err)
+			fmt.Fprintf(os.Stderr, "[watcher] move MCP journal rows to their accounts: %v\n", err)
 		} else if moved > 0 || kept > 0 {
-			fmt.Fprintf(os.Stderr, "[watcher] moved %d MCP journal rows to their accounts; %d blocking rows stay by name\n", moved, kept)
+			fmt.Fprintf(os.Stderr, "[watcher] moved %d MCP journal rows to their accounts; %d bare rows retained\n", moved, kept)
 		}
 		// Retries a server whose admission could not run at the poll.
 		w.SetMCPDiscoveryPoll(true)
@@ -4892,6 +4892,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	s.migrateRetiredConnectorState(ctx, registry)
 	s.removeRemovedConnectorLeftovers(ctx, registry)
 	s.reportUnrebasedRulePacks(ctx)
+	s.reportBrokenCustomRulePacks(ctx)
 	conn, err := resolveActiveConnector(registry, configuredConnectorName(s.currentConfig()), "guardrail")
 	if err != nil {
 		// Fail fast: the operator explicitly set a connector that does
@@ -5460,6 +5461,7 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	s.migrateRetiredConnectorState(ctx, registry)
 	s.removeRemovedConnectorLeftovers(ctx, registry)
 	s.reportUnrebasedRulePacks(ctx)
+	s.reportBrokenCustomRulePacks(ctx)
 
 	// configured is every connector in guardrail.connectors. names is the
 	// ENABLED subset: a connector explicitly disabled via
@@ -5471,13 +5473,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// defaults to true, so a connector with no explicit override is
 	// unaffected and single-connector installs never reach this path.
 	configured := s.currentConfig().ActiveConnectors()
-	names := make([]string, 0, len(configured))
-	for _, name := range configured {
-		if s.currentConfig().Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
-			names = append(names, name)
-		} else {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — excluded from active set; teardown will run\n", name, name)
-		}
+	_, names, disabledNames := s.currentConfig().GuardrailBootSet()
+	for _, name := range disabledNames {
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — excluded from active set; teardown will run\n", name, name)
 	}
 
 	// Resolve every enabled connector up front. An unknown connector
@@ -5765,6 +5763,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		}
 		if reasons := setupTransaction.notStartedReasonsFor(notStarted); len(reasons) > 0 {
 			guardrailDetails[GuardrailNotStartedReasons] = reasons
+		}
+		if repairs := setupTransaction.notStartedRepairsFor(notStarted); len(repairs) > 0 {
+			guardrailDetails[GuardrailNotStartedRepairs] = repairs
 		}
 		s.health.SetGuardrail(StateRunning, "", guardrailDetails)
 	}
@@ -6325,6 +6326,9 @@ type multiConnectorSetupTransaction struct {
 	// so setup and status name it instead of only a roster mismatch
 	// (GAP-0620).
 	notStartedReasons map[string]string
+	// notStartedRepairs maps each connector in notStartedReasons whose refusal
+	// carries a repair to that repair, kept apart from the reason (GAP-0731).
+	notStartedRepairs map[string]NotStartedRepair
 	// keptRegistrations lists the agentSettingsRefused connectors that still
 	// hold their earlier registration. They stay in the saved active set, so a
 	// later per-connector disable removes them through the non-fatal
@@ -6555,6 +6559,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 		transaction.releaseRefused = false
 		transaction.agentSettingsRefused = nil
 		transaction.notStartedReasons = nil
+		transaction.notStartedRepairs = nil
 		transaction.keptRegistrations = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
@@ -6724,6 +6729,20 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					}
 					transaction.agentSettingsRefused[registration.conn.Name()] = reason
 					transaction.noteNotStarted(registration.conn.Name(), errors.New(reason))
+					if strings.TrimSpace(previousLock.Connector) != "" {
+						transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
+					}
+					continue
+				}
+				if connectorRefusedAtCustody(err) {
+					// Another account can write where the guard of this connector
+					// lives. Setup changed nothing, so its earlier registration
+					// stays, only this connector is not started (its hooks follow
+					// the outage mode and still block a protected call), and every
+					// other connector keeps enforcing. The refusal names the one
+					// fix; a restart retries it (GAP-0798).
+					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s not started, another account can write where its guard lives (other connectors unaffected): %v\n", registration.conn.Name(), err)
+					transaction.noteNotStarted(registration.conn.Name(), err)
 					if strings.TrimSpace(previousLock.Connector) != "" {
 						transaction.keptRegistrations = append(transaction.keptRegistrations, registration.conn.Name())
 					}
@@ -8505,13 +8524,19 @@ func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) 
 // close it. An agent discovery could not find or read names its own fix
 // (GAP-1167, GAP-2479, GAP-2520), and an agent that answered a setup probe
 // too slowly is started once first (GAP-2520). An agent installed where
-// another account can write is reinstalled, not closed (GAP-2479).
+// another account can write is reinstalled, not closed (GAP-2479). A plugin
+// folder another account can write is fixed with the command its refusal
+// names, then the gateway is restarted (GAP-0730).
 func refreshRefusalNextStep(err error) string {
 	switch {
 	case errors.As(err, new(agentVersionUnread)):
 		return ", then run: defenseclaw upgrade"
 	case errors.Is(err, connector.ErrAgentVersionProbeTimeout):
 		return "; the agent answered too slowly (a cold first start or a busy host): start it once from this account and let it finish, then run: defenseclaw upgrade"
+	case errors.Is(err, connector.ErrPluginFolderCustody):
+		// The refusal names the folders and the command that clears it; a
+		// closed agent or an upgrade changes neither (GAP-0730).
+		return "; then run: defenseclaw-gateway restart"
 	case errors.Is(err, connector.ErrAgentInstallNotTrusted):
 		return "; the agent is installed where another account can write: install it where only administrators or this account can write, or remove that write access, then run: defenseclaw upgrade"
 	default:
@@ -8533,8 +8558,27 @@ const GuardrailAgentSettingsRefused = "connectors_refused_by_agent_settings"
 // (GAP-0620).
 const GuardrailNotStartedReasons = "connectors_not_started_reasons"
 
+// GuardrailNotStartedRepairs is the guardrail health detail that maps a
+// connector in GuardrailNotStartedReasons to the repair its refusal carries,
+// as fields apart from the reason: the reason is prose, and a repair holds
+// paths and accounts a reader must be able to copy exactly (GAP-0731).
+const GuardrailNotStartedRepairs = "connectors_not_started_repairs"
+
+// NotStartedRepair is the repair of a refusal: the shell command that repairs
+// what a command can repair and the steps only a person can take. A field
+// longer than notStartedRepairMaxBytes is left out, never cut, and OmittedBytes
+// says how many bytes were left out.
+type NotStartedRepair struct {
+	Fix          string `json:"fix,omitempty"`
+	ByHand       string `json:"by_hand,omitempty"`
+	OmittedBytes int    `json:"omitted_bytes,omitempty"`
+}
+
 // notStartedReasonMaxBytes bounds one reason in guardrail health.
 const notStartedReasonMaxBytes = 1024
+
+// notStartedRepairMaxBytes bounds each field of a repair in guardrail health.
+const notStartedRepairMaxBytes = 8192
 
 func (t *multiConnectorSetupTransaction) noteNotStarted(name string, err error) {
 	if err == nil {
@@ -8543,11 +8587,52 @@ func (t *multiConnectorSetupTransaction) noteNotStarted(name string, err error) 
 	if t.notStartedReasons == nil {
 		t.notStartedReasons = map[string]string{}
 	}
-	reason := err.Error()
-	if len(reason) > notStartedReasonMaxBytes {
-		reason = strings.ToValidUTF8(reason[:notStartedReasonMaxBytes], "") + " [truncated; the gateway log has the rest]"
+	key := strings.ToLower(strings.TrimSpace(name))
+	reason, repair := splitNotStartedRefusal(err)
+	t.notStartedReasons[key] = boundNotStartedReason(reason)
+	delete(t.notStartedRepairs, key)
+	if repair != (NotStartedRepair{}) {
+		if t.notStartedRepairs == nil {
+			t.notStartedRepairs = map[string]NotStartedRepair{}
+		}
+		t.notStartedRepairs[key] = repair
 	}
-	t.notStartedReasons[strings.ToLower(strings.TrimSpace(name))] = reason
+}
+
+// splitNotStartedRefusal returns the text of err with the repair of a
+// refusal that carries one (connector.RepairedRefusal) taken out of it, and
+// that repair. The repair comes from the error's own fields, never from its
+// text, so no name in the text can move the boundary between the two.
+func splitNotStartedRefusal(err error) (string, NotStartedRepair) {
+	var refusal connector.RepairedRefusal
+	if !errors.As(err, &refusal) {
+		return err.Error(), NotStartedRepair{}
+	}
+	text, whole := err.Error(), refusal.Error()
+	if at := strings.LastIndex(text, whole); at >= 0 {
+		text = text[:at] + refusal.CauseText() + text[at+len(whole):]
+	}
+	fix, byHand := refusal.Repair()
+	var repair NotStartedRepair
+	for _, field := range []struct {
+		value string
+		to    *string
+	}{{fix, &repair.Fix}, {byHand, &repair.ByHand}} {
+		if len(field.value) > notStartedRepairMaxBytes {
+			repair.OmittedBytes += len(field.value)
+			continue
+		}
+		*field.to = field.value
+	}
+	return text, repair
+}
+
+// boundNotStartedReason bounds a reason at notStartedReasonMaxBytes.
+func boundNotStartedReason(reason string) string {
+	if len(reason) <= notStartedReasonMaxBytes {
+		return reason
+	}
+	return strings.ToValidUTF8(reason[:notStartedReasonMaxBytes], "") + " [truncated; the gateway log has the rest]"
 }
 
 // notStartedReasonsFor returns the recorded reasons of the connectors in
@@ -8561,6 +8646,19 @@ func (t *multiConnectorSetupTransaction) notStartedReasonsFor(notStarted []strin
 		}
 	}
 	return reasons
+}
+
+// notStartedRepairsFor returns the recorded repairs of the connectors in
+// notStarted.
+func (t *multiConnectorSetupTransaction) notStartedRepairsFor(notStarted []string) map[string]NotStartedRepair {
+	repairs := map[string]NotStartedRepair{}
+	for _, name := range notStarted {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if repair, ok := t.notStartedRepairs[key]; ok {
+			repairs[key] = repair
+		}
+	}
+	return repairs
 }
 
 // GuardrailHookContractAdmissionRefused is the guardrail health detail that
@@ -8796,11 +8894,18 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := apiListenAddr(s.currentConfig())
 	api := newAPIServer(addr, s.health, s.client, s.store, s.logger, cloneConfig(s.currentConfig()))
 	api.SetShutdownRequester(s.requestProcessShutdown)
-	api.SetMCPAdmissionPending(func(connector, server, home, cwd string) (string, bool) {
-		return s.installWatcher.Load().MCPAdmissionPending(watcher.MCPAdmissionQuery{
+	api.SetMCPAdmissionStatus(func(connector, server, home, cwd string) watcher.MCPAdmissionStatus {
+		return s.installWatcher.Load().MCPAdmissionStatus(watcher.MCPAdmissionQuery{
 			Connector: connector, Server: server, Home: home, CWD: cwd,
 		})
 	})
+	if watcherUsesEnrolledUserDirs(s.currentConfig()) {
+		api.SetMCPPublished(func(connector, server, home, cwd, digest string) watcher.MCPPublication {
+			return s.installWatcher.Load().MCPPublished(watcher.MCPAdmissionQuery{
+				Connector: connector, Server: server, Home: home, CWD: cwd,
+			}, digest)
+		})
+	}
 	api.SetMCPRefreshBeforeCall(s.refreshEnrolledMCPBeforeCall)
 	if s.configMgr != nil {
 		api.SetConfigRuntime(s.configMgr.Reload, s.currentConfig)

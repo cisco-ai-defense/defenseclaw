@@ -54,7 +54,9 @@ func TestGAP0295FreshListenerHelper(t *testing.T) {
 		}
 		if os.Getenv(freshListenerCloseAcceptedEnv) == "1" {
 			_, _ = fmt.Fprintln(os.Stdout, "accepted")
-			time.Sleep(2 * time.Second)
+			// Closed when the test says so, once it has what it needs from the
+			// open connection; an ended stdin closes it too.
+			_, _ = bufio.NewReader(os.Stdin).ReadString(0x0a)
 			_ = conn.Close()
 			_, _ = fmt.Fprintln(os.Stdout, "closed")
 			continue
@@ -70,6 +72,10 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestGAP0295FreshListenerHelper$")
 	cmd.Env = append(os.Environ(), freshListenerHelperEnv+"=1", freshListenerCloseAcceptedEnv+"=1")
 	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeAccepted, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,10 +97,11 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	clock, start := freshGatewayClock(t, pid)
 	dataDir := t.TempDir()
 	record, err := json.Marshal(map[string]any{
 		"pid": pid, "executable": strings.TrimSuffix(executable, " (deleted)"), "data_dir": dataDir,
-		"start_time": time.Now().Add(-time.Second).Unix(), "start_identity": identity,
+		"start_time": start.Add(-time.Second).Unix(), "start_identity": identity,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +109,7 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), record, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	dateGatewayRecord(t, dataDir, start.Add(500*time.Millisecond))
 	conn, err := net.Dial("tcp", strings.TrimSpace(line))
 	if err != nil {
 		t.Fatal(err)
@@ -115,10 +123,17 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	sp, _ := specFor("claudecode")
 	w := &answerWatchdog{restart: &perUserRestartAnswer{mode: "open"}}
 	w.restartWindowContact(Options{Home: dataDir}, sp, "open", check)
-	for end := time.Now().Add(time.Second); time.Now().Before(end) && check.owner.Load() == nil; time.Sleep(10 * time.Millisecond) {
-	}
-	if owner := check.owner.Load(); owner == nil || owner.pid != pid {
+	eventuallyWithin(t, "the read of the connection owner", time.Second, func() bool { return check.owner.Load() != nil })
+	if owner := check.owner.Load(); owner.pid != pid {
 		t.Fatalf("captured owner = %+v, want the fresh gateway", owner)
+	}
+	// The read asked for the product wait, and it was not spent.
+	if got := clock.Requested(); len(got) != 1 || got[0] != freshOwnerCaptureWait {
+		t.Fatalf("owner read timers = %v, want one of %v", got, freshOwnerCaptureWait)
+	}
+	// Only now does the gateway close the accepted socket.
+	if _, err := fmt.Fprintln(closeAccepted, "close"); err != nil {
+		t.Fatal(err)
 	}
 	if line, err := lines.ReadString('\n'); err != nil || strings.TrimSpace(line) != "closed" {
 		t.Fatalf("close signal = %q, %v", line, err)
@@ -164,6 +179,7 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	clock, start := freshGatewayClock(t, pid)
 	dataDir := t.TempDir()
 	writeRecord := func(started time.Time) {
 		t.Helper()
@@ -177,6 +193,7 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), b, 0o600); err != nil {
 			t.Fatal(err)
 		}
+		dateGatewayRecord(t, dataDir, start.Add(500*time.Millisecond))
 	}
 	checkFor := func(conn net.Conn) *perUserPeerCheck {
 		check := &perUserPeerCheck{}
@@ -189,18 +206,36 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	}
 	defer conn.Close()
 	check := checkFor(conn)
-	writeRecord(time.Now().Add(-time.Second))
+	writeRecord(start.Add(-time.Second))
 	if !perUserGatewayRecentlyStarted(dataDir) {
 		t.Fatal("a just-written gateway record is not recent")
 	}
 	// The helper accept()s the connection after the dial returns.
-	proven := false
-	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && !proven; time.Sleep(10 * time.Millisecond) {
-		proven = perUserFreshGatewayHoldsCall(dataDir, check)
+	eventuallyWithin(t, "the helper holding the connection", 5*time.Second, func() bool { return perUserFreshGatewayHoldsCall(dataDir, check) })
+	// The limits are the product ones, read on the clock of the test: the
+	// record is recent up to the window and two seconds of slack past the
+	// modification time, and the gateway process is fresh up to 12 s.
+	recordedAt := start.Add(500 * time.Millisecond)
+	clock.Set(recordedAt.Add(perUserFreshGatewayWindow + 2*time.Second))
+	if !perUserGatewayRecentlyStarted(dataDir) {
+		t.Fatal("a gateway record at the end of its window is not recent")
 	}
-	if !proven {
-		t.Fatal("a connection held by the fresh, unanswered gateway is not proven")
+	clock.Set(recordedAt.Add(perUserFreshGatewayWindow + 2*time.Second + time.Millisecond))
+	if perUserGatewayRecentlyStarted(dataDir) {
+		t.Fatal("a gateway record past its window is recent")
 	}
+	clock.Set(start.Add(perUserFreshGatewayWindow))
+	if !perUserFreshGatewayHoldsCall(dataDir, check) {
+		t.Fatal("a gateway process at the end of its 12 s window is not fresh")
+	}
+	clock.Set(start.Add(perUserFreshGatewayWindow + time.Millisecond))
+	if perUserFreshGatewayHoldsCall(dataDir, check) {
+		t.Fatal("a gateway process past its 12 s window is proven fresh")
+	}
+	if got := perUserFreshGatewayProof(dataDir, check).reason; got != "not_fresh" {
+		t.Fatalf("old gateway reason = %q", got)
+	}
+	clock.Set(start.Add(time.Second))
 	if perUserFreshGatewayHoldsCall(dataDir, &perUserPeerCheck{}) {
 		t.Fatal("a try with no proven connection is proven")
 	}
@@ -209,14 +244,14 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	}
 
 	// A stale record: its recorded start is far older than the process.
-	writeRecord(time.Now().Add(-time.Minute))
+	writeRecord(start.Add(-time.Minute))
 	if perUserFreshGatewayHoldsCall(dataDir, check) {
 		t.Fatal("a stale gateway record is proven fresh")
 	}
 	if got := perUserFreshGatewayProof(dataDir, check).reason; got != "not_fresh" {
 		t.Fatalf("stale record reason = %q", got)
 	}
-	writeRecord(time.Now().Add(-time.Second))
+	writeRecord(start.Add(-time.Second))
 	if !perUserFreshGatewayHoldsCall(dataDir, check) {
 		t.Fatal("the restored record is not proven")
 	}
@@ -273,14 +308,10 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 	defer late.Close()
 	lateCheck := checkFor(late)
 	client, server := late.LocalAddr().(*net.TCPAddr), late.RemoteAddr().(*net.TCPAddr)
-	held := false
-	for end := time.Now().Add(5 * time.Second); time.Now().Before(end) && !held; time.Sleep(10 * time.Millisecond) {
+	eventuallyWithin(t, "the helper accepting the late connection", 5*time.Second, func() bool {
 		owner, unique := perUserConnectedPeerPID(client, server)
-		held = unique && owner == pid
-	}
-	if !held {
-		t.Fatal("the helper never accepted the late connection")
-	}
+		return unique && owner == pid
+	})
 	if perUserFreshGatewayHoldsCall(dataDir, lateCheck) {
 		t.Fatal("a call that reached the gateway after its first answer is proven fresh")
 	}

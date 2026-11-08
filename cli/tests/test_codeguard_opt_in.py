@@ -28,7 +28,7 @@ import defenseclaw.commands.cmd_codeguard as cmd_codeguard_module
 import pytest
 from click.testing import CliRunner
 from defenseclaw import commands as command_helpers
-from defenseclaw import gateway
+from defenseclaw import gateway, gateway_path
 from defenseclaw.codeguard_skill import (
     codeguard_status,
     install_codeguard_asset,
@@ -350,7 +350,7 @@ def test_codeguard_install_hint_uses_standard_absolute_gateway(tmp_path, monkeyp
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.delenv("DEFENSECLAW_INSTALL_ROOT", raising=False)
     monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)
-    monkeypatch.setattr(gateway, "_CANONICAL_INSTALL_DIR", str(trusted_dir))
+    monkeypatch.setattr(gateway_path, "_CANONICAL_INSTALL_DIR", str(trusted_dir))
     monkeypatch.setattr(gateway.shutil, "which", lambda _name: str(hostile_gateway))
     hints = _capture_hints(monkeypatch)
 
@@ -373,7 +373,7 @@ def test_codeguard_install_hint_is_short_when_path_gateway_is_trusted(tmp_path, 
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.delenv("DEFENSECLAW_INSTALL_ROOT", raising=False)
     monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)
-    monkeypatch.setattr(gateway, "_CANONICAL_INSTALL_DIR", str(trusted_dir))
+    monkeypatch.setattr(gateway_path, "_CANONICAL_INSTALL_DIR", str(trusted_dir))
     monkeypatch.setattr(gateway.shutil, "which", lambda _name: str(trusted_gateway))
     hints = _capture_hints(monkeypatch)
 
@@ -399,7 +399,7 @@ def test_codeguard_install_hint_accepts_absolute_gateway_override(tmp_path, monk
     monkeypatch.delenv("DEFENSECLAW_INSTALL_ROOT", raising=False)
     monkeypatch.setenv("DEFENSECLAW_GATEWAY_BIN", str(trusted_gateway))
     monkeypatch.setattr(
-        gateway,
+        gateway_path,
         "_CANONICAL_INSTALL_DIR",
         str(tmp_path / "missing-profile" / ".local" / "bin"),
     )
@@ -487,7 +487,7 @@ def test_codeguard_install_hint_reports_unresolved_gateway(tmp_path, monkeypatch
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
     monkeypatch.delenv("DEFENSECLAW_INSTALL_ROOT", raising=False)
     monkeypatch.setattr(
-        gateway,
+        gateway_path,
         "_CANONICAL_INSTALL_DIR",
         str(tmp_path / "missing-profile" / ".local" / "bin"),
     )

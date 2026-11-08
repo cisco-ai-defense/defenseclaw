@@ -181,6 +181,20 @@ func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
 	return OwnedHooksPresentContext(context.Background(), conn, opts)
 }
 
+// OwnedHooksPresentForPendingInstall checks the registration against the
+// runtime digests rendered by this install transaction before publishing its
+// contract lock. Ordinary readers continue to require the persisted lock.
+func OwnedHooksPresentForPendingInstall(conn Connector, opts SetupOpts, pending HookContractLockEntry) (bool, error) {
+	if conn == nil || normalizeConnectorName(pending.Connector) != normalizeConnectorName(conn.Name()) {
+		return false, errors.New("pending hook contract names a different connector")
+	}
+	opts.pendingHookScriptDigests = make(map[string]string, len(pending.HookScriptDigests))
+	for name, digest := range pending.HookScriptDigests {
+		opts.pendingHookScriptDigests[name] = digest
+	}
+	return OwnedHooksPresent(conn, opts)
+}
+
 // OwnedHooksPresentContext is the cancellable form used by managed guardians
 // when a connector's effective policy check may perform bounded external work.
 // A registration that still holds an edited DefenseClaw entry next to the
@@ -529,8 +543,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 			want[spec.event] = hermesHookEntry(command, spec.event, spec.matcher, opts)
 		}
 		return hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
-			command, _ := hermesHookEntryCommand(entry)
-			return hermesReplaceableHookCommand(command, recognized)
+			return hermesHookEntryOwned(entry, hookCommand, recognized)
 		})
 	case "copilot":
 		events := c.copilotHookEvents(opts)
@@ -553,7 +566,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		})
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.
-		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand) {
+		for key, rendered := range antigravityOwnedHookKeys(runtime.GOOS, hookCommand, opts.ManagedEnterprise) {
 			if !sameHookJSON(document[key], rendered) {
 				return false
 			}
@@ -606,8 +619,7 @@ func HookRegistrationLacksOnlyFailClosed(conn Connector, opts SetupOpts) (bool, 
 		}
 		hooks, _ := document["hooks"].(map[string]interface{})
 		if !hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
-			command, _ := hermesHookEntryCommand(entry)
-			return hermesReplaceableHookCommand(command, recognized)
+			return hermesHookEntryOwned(entry, hookOnly.hookCommand(opts), recognized)
 		}) {
 			return false, nil
 		}

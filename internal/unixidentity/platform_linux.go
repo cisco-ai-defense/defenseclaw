@@ -135,6 +135,10 @@ func platformLocalAccountRecord(context.Context, string) (LocalAccountRecord, bo
 	return LocalAccountRecord{}, false, errors.New("unixidentity: local account records are listed only on macOS")
 }
 
+func platformAccountsAtHome(context.Context, string) ([]HomeAccount, error) {
+	return nil, errors.New("unixidentity: home folders are searched only on macOS")
+}
+
 // platformAccountRecordGone is false: these lookups already run in a
 // fresh process (getent) or read the files backend, so a found account is
 // current.

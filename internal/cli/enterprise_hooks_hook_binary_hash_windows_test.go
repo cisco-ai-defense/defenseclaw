@@ -178,6 +178,22 @@ func TestKeepWindowsManagedFileCopyReportsPlainReadFailure(t *testing.T) {
 	if _, err := os.Lstat(target); err != nil {
 		t.Skipf("exclusive read handle prevents the initial metadata check: %v", err)
 	}
+	// The exclusive handle is this process's own, so the guardian finds no
+	// other process to close it in: the second check names the hold and the
+	// read error. The first only waits (GAP-0755).
+	resetWindowsHeldSwapsForTest(t)
+	advance := fakeWindowsHeldSwapClock(t)
+	savedStandalone := windowsHolderStandalone
+	windowsHolderStandalone = func() bool { return true }
+	windowsHolderGate, windowsHolderLog = windowsHolderState{}, nil
+	t.Cleanup(func() {
+		windowsHolderStandalone = savedStandalone
+		windowsHolderGate, windowsHolderLog = windowsHolderState{}, nil
+	})
+	if damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false); err != nil || damage != "" {
+		t.Fatalf("first check: damage %q, err %v", damage, err)
+	}
+	advance(windowsHookBinaryCheckInterval)
 	damage, err := keepWindowsManagedFileCopy(target, copyPath, want, false)
 	if err == nil || damage != "" || !strings.Contains(err.Error(), target) || !strings.Contains(err.Error(), "changed during bounded digest") {
 		t.Fatalf("plain read failure: damage %q, err %v", damage, err)

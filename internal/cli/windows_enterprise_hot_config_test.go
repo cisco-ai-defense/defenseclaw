@@ -42,6 +42,11 @@ type hotConfigHost struct {
 	digestCalls int
 	adoptAfter  int
 	refreshes   int
+	// GAP-0779: the config bytes each approved-source refresh was asked to
+	// record, and the error it returns.
+	approved   []string
+	approveErr error
+	heals      int
 	// The targets record of a refreshing apply (GAP-0847): how often it was
 	// taken and put back, what fails, and the targets it says are dropped.
 	targetRecords    int
@@ -140,7 +145,9 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
 	closeHooksSeam, hooksHeldSeam, releaseHooksSeam := windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks
 	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
+	approveSeam, healSeam := windowsEnterpriseHotConfigApproveSource, windowsEnterpriseHealApprovedSource
 	t.Cleanup(func() {
+		windowsEnterpriseHotConfigApproveSource, windowsEnterpriseHealApprovedSource = approveSeam, healSeam
 		windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover = restartSeam, recoverSeam
 		windowsEnterpriseHotConfigFailClosed = failClosedSeam
 		windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks = closeHooksSeam, hooksHeldSeam, releaseHooksSeam
@@ -164,6 +171,15 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		return managed.StandaloneLayout{ConfigPath: host.configPath, ConfigDir: filepath.Dir(host.configPath), DataDir: dir, ServiceUser: `NT SERVICE\DefenseClawGateway`}, nil
 	}
 	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return func() {}, nil }
+	windowsEnterpriseHotConfigApproveSource = func(managed.StandaloneLayout) error {
+		installed, err := os.ReadFile(host.configPath)
+		if err != nil {
+			return err
+		}
+		host.approved = append(host.approved, string(installed))
+		return host.approveErr
+	}
+	windowsEnterpriseHealApprovedSource = func(*enterprisestatus.Result) { host.heals++ }
 	windowsEnterpriseHotConfigRefreshTargets = func(context.Context, managed.StandaloneLayout) error {
 		host.refreshes++
 		return nil
@@ -339,7 +355,7 @@ func TestWindowsEnterpriseHeldHookClosureIsReportedAndReleased(t *testing.T) {
 			if tc.wantError {
 				messages = result.Errors
 			}
-			if !windowsBundleHasCode(messages, tc.wantCode) || !strings.Contains(messages[len(messages)-1].Message, "/repair") {
+			if !windowsBundleHasCode(messages, tc.wantCode) || !strings.Contains(messages[len(messages)-1].Message, windowsEnterpriseAdminCommand("repair")) {
 				t.Fatalf("held closure not named: errors=%v warnings=%v", result.Errors, result.Warnings)
 			}
 		})
@@ -459,6 +475,53 @@ func TestWindowsEnterpriseEnsureAppliesAConfigOnlyChangeInTheRunningGateway(t *t
 	if string(got) != previous || string(generation) == recorded || len(host.writes) != 2 ||
 		len(stub.calls) != 2 || stub.calls[1][1] != "Upgrade" {
 		t.Fatalf("gateway never adopted: config %q, generation %q, writes %q, installer runs %q", got, generation, host.writes, stub.calls)
+	}
+}
+
+// GAP-0779: a config-only ensure that stays in the running gateway makes the
+// config it applied the approved config source, so a later Repair never puts
+// back the config of an earlier ensure; an ensure that cannot record it puts
+// the previous config back and leaves the change to the upgrade transaction.
+func TestWindowsEnterpriseEnsureApprovesTheConfigItApplied(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const next = "config_version: 9\nguardrail:\n  mode: action\n"
+
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	if len(host.approved) != 1 || host.approved[0] != next {
+		t.Fatalf("approved config sources %q, want exactly the applied config", host.approved)
+	}
+	if host.heals != 1 {
+		t.Fatalf("a finished ensure checked the approved source %d times, want once", host.heals)
+	}
+
+	// A change the gateway never adopts is undone before anything is approved.
+	host, opts = newHotConfigHost(t, previous, next)
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	if len(host.approved) != 0 {
+		t.Fatalf("a config the gateway never adopted was approved: %q", host.approved)
+	}
+
+	// An approved source that cannot be recorded undoes the apply: the
+	// previous config is back and the upgrade transaction runs. The installed
+	// config is the one an earlier ensure recorded, so the undo records the
+	// restore as a new generation through the config writer (a hand edit
+	// would go back unrecorded, outside the writer).
+	host, opts = newHotConfigHost(t, previous, next)
+	host.adopted = true
+	host.approveErr = errors.New("deployment record is locked")
+	recorded := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
+	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	got, _ := os.ReadFile(host.configPath)
+	if string(got) != previous || len(host.writes) != 2 || stub.calls[len(stub.calls)-1][1] != "Upgrade" {
+		t.Fatalf("unrecordable approved source: config %q, writes %q, installer runs %q", got, host.writes, stub.calls)
 	}
 }
 
@@ -1852,5 +1915,204 @@ func TestWindowsHotConfigReadinessCommandCarriesGuardianPins(t *testing.T) {
 	}
 	if args := strings.Join(command.Args[1:], " "); args != "enterprise hooks readiness --manifest "+layout.ManifestPath+" --json" {
 		t.Errorf("readiness args = %q", args)
+	}
+}
+
+// GAP-0779: the check at the end of an ensure refreshes a stale approved
+// source of a deployment that records one, leaves a host without a record and
+// a signed-bundle deployment alone, and warns, not fails, on a record it
+// cannot bind (a null source record must not panic).
+func TestWindowsEnterpriseEnsureHealsAStaleApprovedConfigSource(t *testing.T) {
+	const record = `{"installed":true,"profile":"standalone","approved_policy_sources":{"config":"%s"}}`
+	stage := func(t *testing.T, recordBody string) managed.StandaloneLayout {
+		t.Helper()
+		newHotConfigHost(t, approvedSourceConfigB, approvedSourceConfigB)
+		layout, _ := windowsEnterpriseHotConfigLayout()
+		layout.LifecycleDir = t.TempDir()
+		windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+		if recordBody != "" {
+			for name, body := range map[string]string{managedDeploymentRecordFile: recordBody, managedApprovedConfigFile: approvedSourceConfigA} {
+				if err := os.WriteFile(filepath.Join(layout.LifecycleDir, name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return layout
+	}
+	copyOf := func(layout managed.StandaloneLayout) string {
+		raw, _ := os.ReadFile(filepath.Join(layout.LifecycleDir, managedApprovedConfigFile))
+		return string(raw)
+	}
+	stale := fmt.Sprintf(record, configwrite.SHA256Hex([]byte(approvedSourceConfigA)))
+
+	layout := stage(t, stale)
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	result := &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigB || len(result.Changes) != 1 || len(result.Warnings) != 0 || len(result.Errors) != 0 {
+		t.Fatalf("stale source: copy %q, changes %q, warnings %v", copyOf(layout), result.Changes, result.Warnings)
+	}
+
+	// Twins: no deployment record, and a signed-bundle deployment.
+	stage(t, "")
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if len(result.Changes) != 0 || len(result.Warnings) != 0 {
+		t.Fatalf("a host without a deployment record: %+v", result)
+	}
+	layout = stage(t, stale)
+	if err := os.MkdirAll(filepath.Join(layout.ConfigDir, "bundles"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout.ConfigDir, "bundles", "v1"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Changes) != 0 {
+		t.Fatalf("a signed-bundle deployment was healed: copy %q, %+v", copyOf(layout), result)
+	}
+
+	// A record it cannot bind fails the run and never panics.
+	layout = stage(t, `{"installed":true,"profile":"standalone","approved_policy_sources":null}`)
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "approved_config_source_stale" {
+		t.Fatalf("null source record: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+
+	// A stale source whose config is not bound to a lifecycle generation, or
+	// whose lock another run holds, fails the run and leaves A.
+	layout = stage(t, stale)
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "approved_config_source_stale" ||
+		windowsEnterpriseFailureCodeFor(result) != enterprisestatus.WindowsExitFailure {
+		t.Fatalf("no generation record: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return nil, windows.ERROR_SHARING_VIOLATION }
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_busy" ||
+		windowsEnterpriseFailureCodeFor(result) != enterprisestatus.WindowsExitBusy {
+		t.Fatalf("busy lock: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+}
+
+// GAP-0779 review: an approved source record the hot path cannot bind makes it
+// undo the applied config instead of keeping a config no Repair can name.
+func TestWindowsEnterpriseEnsureUndoesAHotApplyWhoseApprovedSourceRecordIsMalformed(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  mode: observe\n"
+	const next = "config_version: 9\nguardrail:\n  mode: action\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	host.adopted = true
+	stateDir := t.TempDir()
+	record := `{"installed":true,"profile":"standalone","approved_policy_sources":null}`
+	if err := os.WriteFile(filepath.Join(stateDir, managedDeploymentRecordFile), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	windowsEnterpriseHotConfigApproveSource = func(managed.StandaloneLayout) error {
+		installed, err := os.ReadFile(host.configPath)
+		if err != nil {
+			return err
+		}
+		return refreshManagedApprovedConfigSource(stateDir, host.configPath, installed)
+	}
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify"), installedStatus("Upgrade")}}
+	runHotConfigEnsure(t, host, opts, stub)
+	got, _ := os.ReadFile(host.configPath)
+	if string(got) != previous || stub.calls[len(stub.calls)-1][1] != "Upgrade" {
+		t.Fatalf("malformed approved source record: config %q, installer runs %q", got, stub.calls)
+	}
+}
+
+// GAP-0779 review: a run that fails its closure proof, or that fails for any
+// other reason, never changes the approved config source (the check is the
+// last step of a run that otherwise succeeded); a source that stays stale
+// fails an ensure that would otherwise be compliant, so a later hand edit and
+// Repair cannot restore an older config after an apparent success.
+func TestWindowsEnterpriseEnsureChecksTheApprovedSourceLastAndFailsOnAStaleOne(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	for _, tc := range []struct {
+		name        string
+		digestFails bool
+		healError   bool
+		wantHeals   int
+		wantOK      bool
+		wantCode    string
+	}{
+		{name: "clean ensure checks once", wantHeals: 1, wantOK: true},
+		{name: "closure proof fails, source untouched", digestFails: true, wantHeals: 0, wantCode: "hook_closure_held"},
+		{name: "stale source fails the ensure", healError: true, wantHeals: 1, wantCode: "approved_config_source_stale"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, config, config)
+			host.closureHeld, host.adopted = true, true
+			digest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = digest })
+			opts.configPath = ""
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = host.digest
+			if tc.digestFails {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return nil, errors.New("readback unavailable") }
+			}
+			windowsEnterpriseHealApprovedSource = func(result *enterprisestatus.Result) {
+				host.heals++
+				if tc.healError {
+					result.AddError("approved_config_source_stale", "the approved config source could not be refreshed")
+				}
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			runErr := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			var result enterprisestatus.Result
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("ensure output: %v\n%s", err, stdout.String())
+			}
+			if host.heals != tc.wantHeals || result.OK != tc.wantOK || (runErr == nil) != tc.wantOK ||
+				(tc.wantCode != "" && !windowsBundleHasCode(result.Errors, tc.wantCode)) {
+				t.Fatalf("heals=%d ok=%t err=%v errors=%v, want heals=%d ok=%t code %q",
+					host.heals, result.OK, runErr, result.Errors, tc.wantHeals, tc.wantOK, tc.wantCode)
+			}
+		})
+	}
+}
+
+// GAP-0779 review: an explicit upgrade (no CONFIG=) or repair that ends
+// without an error checks the approved config source too, because an upgrade
+// carries the earlier digest forward and Repair would restore it; a failed
+// run does not.
+func TestWindowsEnterpriseExplicitUpgradeAndRepairCheckTheApprovedSource(t *testing.T) {
+	const config = "config_version: 9\nguardrail:\n  hook_fail_mode: open\n"
+	failed := installedStatus("upgrade")
+	failed["ok"], failed["errors"] = false, []string{"the upgrade failed"}
+	for _, tc := range []struct {
+		name      string
+		action    string
+		replies   []map[string]any
+		wantHeals int
+	}{
+		{name: "upgrade", action: "upgrade", replies: []map[string]any{installedStatus("upgrade")}, wantHeals: 1},
+		{name: "repair", action: "repair", replies: []map[string]any{installedStatus("repair")}, wantHeals: 1},
+		{name: "failed upgrade", action: "upgrade", replies: []map[string]any{failed, installedStatus("status"), installedStatus("status")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, _ := newHotConfigHost(t, config, config)
+			stub := &ensureStub{t: t, replies: tc.replies}
+			stub.install(t)
+			opts := ensureTestOptions()
+			opts.configPath, opts.manifestPath = "", ""
+			command := &cobra.Command{}
+			command.SetOut(&bytes.Buffer{})
+			command.SetErr(&bytes.Buffer{})
+			_ = runWindowsEnterpriseStandaloneAction(context.Background(), command, tc.action, opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs(tc.action, opts))
+			if host.heals != tc.wantHeals {
+				t.Fatalf("%s checked the approved source %d times, want %d", tc.action, host.heals, tc.wantHeals)
+			}
+		})
 	}
 }

@@ -348,9 +348,13 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		_ = publishEnterpriseWindowsMCPServers(cfg, manifest, stderr) // logged; the next cycle publishes again
 		publishEnterpriseWindowsIDEAppData(cfg, manifest, stderr)
 		unprotected = append(unprotected, ownerUnknown...)
-		if _, recordErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected); recordErr != nil {
+		if recordErr := replaceEnterpriseHookUnprotectedAgentsRecord(cfg.DataDir, func() error {
+			_, writeErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, unprotected)
+			return writeErr
+		}); recordErr != nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %v\n", recordErr)
 		}
+		publishEnterpriseWindowsGatewayUnprotectedAgents(cfg, stderr, manifestPath)
 		for _, agent := range unprotected {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 		}
@@ -448,9 +452,13 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 		agents = enterprisehooks.WindowsManifestScanIncomplete(opts.ManifestSubjects, opts.ExcludeUsers, agents, err)
 	}
 	agents = append(agents, ownerUnknown...)
-	if _, err := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents); err != nil {
+	if err := replaceEnterpriseHookUnprotectedAgentsRecord(cfg.DataDir, func() error {
+		_, writeErr := enterpriseWindowsEnumerateUnprotectedWriter(manifestPath, agents)
+		return writeErr
+	}); err != nil {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents: %s\n", enumeratorErrorText(err))
 	}
+	publishEnterpriseWindowsGatewayUnprotectedAgents(cfg, stderr, manifestPath)
 	for _, agent := range agents {
 		fmt.Fprintf(stderr, "[hook-enumerator] WARN %s: %s\n", agent.Code, agent.Message())
 	}
@@ -718,7 +726,7 @@ func runEnterpriseWindowsEnumerateInterval(
 
 	ticker := time.NewTicker(opts.interval)
 	defer ticker.Stop()
-	// Claude Code and Kiro MCP servers are published between cycles too, so a server
+	// The published MCP servers are published between cycles too, so a server
 	// a user adds reaches install admission within a minute (GAP-0424, GAP-1468).
 	mcpRefresh := time.NewTicker(enterpriseWindowsClaudeMCPSpoolInterval)
 	defer mcpRefresh.Stop()
@@ -822,7 +830,7 @@ func serveEnterpriseWindowsMCPAsUser(ctx context.Context, stderr io.Writer, mani
 	}
 }
 
-// enterpriseWindowsClaudeMCPSpoolInterval is how often the Claude Code and Kiro MCP
+// enterpriseWindowsClaudeMCPSpoolInterval is how often the published MCP
 // servers of enrolled users are published between enumeration cycles.
 const enterpriseWindowsClaudeMCPSpoolInterval = 30 * time.Second
 
@@ -835,10 +843,11 @@ var enterpriseWindowsMCPPublishMu sync.Mutex
 // that wait for it (mcpasuser.Coalescer).
 var enterpriseWindowsMCPRefresh mcpasuser.Coalescer
 
-// publishEnterpriseWindowsMCPServers publishes the Claude Code and Kiro MCP
-// servers of the users manifest enrolls for the gateway, whose service
-// account cannot read ~/.claude.json (GAP-0424) nor a protected
-// ~/.kiro/settings/mcp.json (GAP-1468). Standalone only: the Secure Client
+// publishEnterpriseWindowsMCPServers publishes the MCP servers of every
+// connector in mcpasuser.PublishedConnectors for the users manifest enrolls
+// for the gateway, whose service account reads nothing in a profile:
+// ~/.claude.json (GAP-0424), a protected ~/.kiro/settings/mcp.json
+// (GAP-1468), Codex config.toml (GAP-0686). Standalone only: the Secure Client
 // profile gateway has no enrolled-user watcher. When something was not
 // published (also logged) it returns a *mcpasuser.RefreshIncomplete that
 // names, per connector, the records it could not publish, or the connector
@@ -856,26 +865,21 @@ func publishEnterpriseWindowsMCPServers(cfg *config.Config, manifest enterpriseh
 	authorizationDir := managed.HookGuardianAuthorizationDir(cfg.DataDir)
 	var errs []error
 	incomplete := &mcpasuser.RefreshIncomplete{}
-	for _, spool := range []struct {
-		connector, label, dir string
-		write                 func(string, enterprisehooks.Manifest, func(string) error, func(string, ...any)) error
-	}{
-		{"claudecode", "Claude Code", enterprisehooks.ClaudeMCPSpoolDir(authorizationDir), enterpriseWindowsClaudeMCPSpoolWriter},
-		{"kiro", "Kiro", enterprisehooks.KiroMCPSpoolDir(authorizationDir), enterpriseWindowsKiroMCPSpoolWriter},
-	} {
-		err := spool.write(spool.dir, manifest, enterpriseHookAuthorizationOwnershipSetter, logf)
+	for _, spool := range mcpasuser.PublishedConnectors() {
+		dir := enterprisehooks.MCPSpoolDir(authorizationDir, spool.Connector)
+		err := enterpriseWindowsMCPSpoolWriter(dir, spool.Connector, manifest, enterpriseHookAuthorizationOwnershipSetter, logf)
 		if err == nil {
 			continue
 		}
-		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish %s MCP servers: %v\n", spool.label, err)
-		errs = append(errs, fmt.Errorf("publish %s MCP servers: %w", spool.label, err))
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish %s MCP servers: %v\n", spool.Label, err)
+		errs = append(errs, fmt.Errorf("publish %s MCP servers: %w", spool.Label, err))
 		records, whole := enterprisehooks.MCPSpoolRecordFailures(err)
 		if whole {
-			incomplete.Connectors = append(incomplete.Connectors, spool.connector)
+			incomplete.Connectors = append(incomplete.Connectors, spool.Connector)
 			continue
 		}
 		for _, record := range records {
-			incomplete.Records = append(incomplete.Records, mcpasuser.RefreshRecord{Connector: spool.connector, SID: record.SID, Home: record.Home})
+			incomplete.Records = append(incomplete.Records, mcpasuser.RefreshRecord{Connector: spool.Connector, SID: record.SID, Home: record.Home})
 		}
 	}
 	if len(errs) == 0 {
@@ -957,11 +961,13 @@ var (
 	enterpriseWindowsEnumerateGroupCacheLoader   = enterprisehooks.LoadWindowsEnrollmentGroupCache
 	enterpriseWindowsEnumerateGroupCacheWriter   = enterprisehooks.SaveWindowsEnrollmentGroupCache
 	enterpriseWindowsIdentitySpoolWriter         = enterprisehooks.WriteWindowsIdentitySpool
-	enterpriseWindowsClaudeMCPSpoolWriter        = enterprisehooks.WriteWindowsClaudeMCPSpool
-	enterpriseWindowsKiroMCPSpoolWriter          = enterprisehooks.WriteWindowsKiroMCPSpool
+	enterpriseWindowsMCPSpoolWriter              = enterprisehooks.WriteWindowsMCPSpool
 	enterpriseWindowsIDEAppDataSpoolWriter       = enterprisehooks.WriteWindowsIDEAppDataSpool
 	enterpriseWindowsManifestGroupCacheRefresher = enterprisehooks.RefreshWindowsManifestIdentityGroups
 	enterpriseWindowsEnumerateUnprotectedWriter  = enterprisehooks.WriteWindowsUnprotectedAgents
+	// enterpriseWindowsEnumerateGatewayAgents is the gateway's copy of that
+	// record: the gateway service cannot read the protected one.
+	enterpriseWindowsEnumerateGatewayAgents = mirrorEnterpriseHookGatewayUnprotectedAgents
 	// enterpriseWindowsInventoryReadRevoker takes the gateway's inventory
 	// ACEs from the profiles a cycle stopped enrolling.
 	enterpriseWindowsInventoryReadRevoker = enterprisehooks.RevokeGatewayInventoryReadForManifest
@@ -1026,4 +1032,15 @@ func standaloneWindowsEnumerateIdleReason(cfg *config.Config) string {
 		return "enterprise.enrollment.mode is manifest; the administrator publishes targets"
 	}
 	return ""
+}
+
+// publishEnterpriseWindowsGatewayUnprotectedAgents mirrors the unprotected-
+// agents record as it stands after the cycle where the gateway service can
+// read it, so a standard account own status never says protected for an agent
+// the administrator status lists as unprotected (rel-1-0-6 GAP-0789). The
+// Windows record is not stamped with a config generation.
+func publishEnterpriseWindowsGatewayUnprotectedAgents(cfg *config.Config, stderr io.Writer, manifestPath string) {
+	if err := enterpriseWindowsEnumerateGatewayAgents(cfg.DataDir, enterprisehooks.UnprotectedAgentsPath(manifestPath)); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the unprotected agents for the gateway: %s\n", enumeratorErrorText(err))
+	}
 }

@@ -17,6 +17,12 @@ $begin = $source.IndexOf('function Get-DefenseClawApprovedPolicyPath {', [String
 $end = $source.IndexOf("`nfunction ", $begin, [StringComparison]::Ordinal)
 if ($begin -lt 0 -or $end -le $begin) { throw 'approved policy path function was not found' }
 Invoke-Expression $source.Substring($begin, $end - $begin)
+# GAP-0766: the managed ACL pass also stamps the lazily created lock files;
+# slice the real list from the module so the smoke judges what ships.
+$begin = $source.IndexOf('function Get-DefenseClawLazyLockFiles {', [StringComparison]::Ordinal)
+$end = $source.IndexOf("`nfunction ", $begin, [StringComparison]::Ordinal)
+if ($begin -lt 0 -or $end -le $begin) { throw 'lazy lock file function was not found' }
+Invoke-Expression $source.Substring($begin, $end - $begin)
 $script:AdministratorsSID = 'S-1-5-32-544'
 
 function Get-DefenseClawServiceSID { 'S-1-5-80-1-2-3-4-5' }
@@ -104,6 +110,21 @@ try {
     if (@($script:Calls | Where-Object { $_.Path -ceq $approvedManifest }).Count -ne 0) {
         throw 'repair tried to stamp an absent approved manifest copy'
     }
+    # GAP-0766: an existing lazy lock file in the runtime folder is stamped like
+    # the file it guards; an absent one is never created by repair.
+    $envLock = [IO.Path]::Combine($runtime, '.env.lock')
+    $acpLock = [IO.Path]::Combine($runtime, 'acp', '.enterprise-credentials.lock')
+    [IO.File]::WriteAllText($envLock, "")
+    $script:Calls = @()
+    Set-DefenseClawManagedAcls -Layout $layout -GatewayServiceName 'DefenseClawGateway'
+    $lockCalls = @($script:Calls | Where-Object { $_.Path -ceq $envLock })
+    if ($lockCalls.Count -ne 1 -or $lockCalls[0].Kind -cne 'RuntimeFile' -or
+        $lockCalls[0].SID -cne 'S-1-5-80-1-2-3-4-5') {
+        throw "existing runtime .env.lock was not stamped for the gateway service: $($lockCalls | ConvertTo-Json -Compress)"
+    }
+    if (@($script:Calls | Where-Object { $_.Path -ceq $acpLock }).Count -ne 0) {
+        throw 'repair tried to create an absent ACP credential lock'
+    }
     [IO.File]::WriteAllText($envPath, "DC_TEST_TOKEN=fixture`n")
     $script:Standalone = $false
     $script:Calls = @()
@@ -113,6 +134,9 @@ try {
     }
     if (@($script:Calls | Where-Object { $_.Path -ceq $approvedConfig }).Count -ne 0) {
         throw 'Secure Client repair stamped a standalone approved policy copy'
+    }
+    if (@($script:Calls | Where-Object { $_.Path -ceq $envLock }).Count -ne 0) {
+        throw 'Secure Client repair stamped a standalone lazy lock file'
     }
     Write-Output 'enterprise-standalone-runtime-env-acl-smoke: OK'
 }

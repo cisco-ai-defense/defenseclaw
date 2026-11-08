@@ -296,6 +296,9 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	)
 	respellTrustedPOSIXHomeTilde(&facts, homeRewrittenCommands, homeTildeOperands)
 	resolveTrustedDriveHomePaths(&facts)
+	if drive := strings.ToLower(input.CurrentWindowsDrive); len(drive) == 1 && drive >= "a" && drive <= "z" {
+		facts.CurrentWindowsDrive = drive
+	}
 	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
 	facts.ActiveAgentFilesCaseInsensitive = cloneSlice(
 		activeAgentFilesCaseInsensitive,
@@ -1480,6 +1483,14 @@ type toolArgumentSemantics struct {
 	acceptsHTTPPayload bool
 	acceptsContent     bool
 	flow               toolFlow
+}
+
+// PathTool reports whether tool is a reviewed file-path tool: one whose typed
+// arguments name the files it reads, writes, appends to, copies or patches.
+// Shell, network and unknown tools are not.
+func PathTool(tool string) bool {
+	semantics, known := lookupToolArgumentSemantics(tool)
+	return known && semantics.acceptsPaths
 }
 
 func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {

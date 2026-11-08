@@ -27,7 +27,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The status v2 blocks (enterprisestatus connector_block.go,
@@ -83,7 +82,7 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 		return ok
 	}
 	in.cfg, in.configErr = loadWindowsEnterpriseStandaloneConfig("")
-	layout, err := managed.StandaloneWindowsLayout()
+	layout, err := windowsManagedLayout.standalone()
 	if err != nil {
 		in.manifestErr = err
 		return in

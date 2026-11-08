@@ -1984,6 +1984,13 @@ type GuardrailConfig struct {
 	// derived configuration ("" when it inherits). ProfileModeForConnector
 	// reads it. Unexported like profileConnectors.
 	profileMode string
+	// customPackBase is the directory of the config file that declares
+	// custom_packs: the base of a relative custom_packs path. customRulePackChecks
+	// is each custom_packs entry as the loader checked it, once. Both are
+	// recorded by the loader and carried by every copy of the configuration
+	// (DeepCopy), so one load has one verdict for every reader.
+	customPackBase       string
+	customRulePackChecks map[string]customRulePackCheck
 }
 
 // PerConnectorGuardrailConfig carries the subset of guardrail policy
@@ -3176,13 +3183,12 @@ func loadConfigSourceCheckedWithLayout(
 	cfg.ConfigFilePath = configFile
 	cfg.offlineInspection = inspection
 	cfg.rulePackDirDeclared = viper.InConfig("guardrail.rule_pack_dir")
+	cfg.CheckCustomRulePacks()
 	cfg.openShellPackDirDeclared = viper.InConfig("openshell.pack_dir")
 	cfg.legacyConnectorRouteSelectors = legacyConnectorRouteSelectorPaths(viper.Get("observability.destinations"))
 	// Move retired connector IDs to their replacement before any connector
 	// key is normalized or checked for duplicates.
-	migrateLegacyConnectorIDs(&cfg)
-	dropRetiredConnectorSettings(&cfg)
-	canonicalizeConnectorSelection(&cfg)
+	migrateConnectorSelection(&cfg, resolvesToSecureClient(&cfg, pinnedDeploymentMode))
 
 	if err := checkRuntimeConfigVersion(cfg.ConfigVersion, resolvesToSecureClient(&cfg, pinnedDeploymentMode)); err != nil {
 		return nil, err

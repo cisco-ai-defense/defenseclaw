@@ -107,6 +107,7 @@ func exactProtectedPAMPath(value string) bool {
 		path.Clean(value) != value || hasUnresolvedPathSyntax(value) {
 		return false
 	}
+	value = EtcSpelling(value)
 	if value == "/etc/pam.conf" {
 		return true
 	}
@@ -158,7 +159,7 @@ func exactPAMLines(target, content string) ([]exactPAMLine, bool) {
 		return nil, false
 	}
 
-	pamConf := target == "/etc/pam.conf"
+	pamConf := EtcSpelling(target) == "/etc/pam.conf"
 	lines := make([]exactPAMLine, 0, 4)
 	for _, rawLine := range strings.Split(content, "\n") {
 		line := strings.Trim(rawLine, " \t")

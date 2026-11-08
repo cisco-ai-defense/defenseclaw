@@ -379,6 +379,23 @@ def _warn_setup_refuses_reenable(app: AppContext, names: list[str]) -> None:
         )
 
 
+def _save_enabling(app: AppContext) -> None:
+    """Save a config that turns protection on, judged like ``config set``.
+
+    The gateway cannot boot a proxy connector beside other listed entries, so
+    the final file passes the same roster check ``config set`` applies; a
+    refusal leaves config.yaml unchanged (GAP-0588).
+    """
+    from defenseclaw import config_writer
+    from defenseclaw.guardrail_roster import check_guardrail_connector_roster
+
+    try:
+        app.cfg.save(check_candidate=check_guardrail_connector_roster)
+    except config_writer.ConfigWriteError as exc:
+        ux.err(f"{exc} Nothing was changed.", indent="  ")
+        raise SystemExit(1)
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -493,7 +510,10 @@ def _toggle_connector_guardrail(
         conns[key] = entry
     entry.enabled = bool(enable)
     try:
-        app.cfg.save()
+        if enable:
+            _save_enabling(app)
+        else:
+            app.cfg.save()
         ux.ok(
             f"Config saved (guardrail.connectors.{key}.enabled = {str(enable).lower()})",
             indent="  ",
@@ -1455,7 +1475,7 @@ def enable_cmd(
 
     gc.enabled = True
     try:
-        app.cfg.save()
+        _save_enabling(app)
         ux.ok("Config saved (guardrail.enabled = true)", indent="  ")
     except OSError as exc:
         ux.err(f"Failed to save config: {exc}", indent="  ")

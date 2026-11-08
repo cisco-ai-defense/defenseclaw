@@ -28,6 +28,8 @@ func currentClock() (string, int64, bool) { return "", 0, false }
 
 func executablePath(int) string { return "" }
 
+func workingDirectory(int) string { return "" }
+
 func commandLine(int) ([]string, string, error) {
 	return nil, "", errors.New("reading a process command line is not supported on this platform")
 }

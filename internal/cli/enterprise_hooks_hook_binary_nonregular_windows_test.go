@@ -103,7 +103,7 @@ func TestCopyWindowsManagedFileReplacesFileSymlinkEntry(t *testing.T) {
 		t.Fatal(err)
 	}
 	windowsSymlinkOrSkipPrivilege(t, pointed, target)
-	if err := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, true); err != nil {
+	if err := copyWindowsManagedFile(copyPath, target, windowsInstallFileSDDL, true, true); err != nil {
 		t.Fatalf("MoveFileEx could not replace the file symlink entry: %v", err)
 	}
 	assertWindowsHookRestored(t, target, want, "")

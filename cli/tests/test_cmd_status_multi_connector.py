@@ -947,7 +947,12 @@ class TestStatusJson(unittest.TestCase):
         reason = json.loads(as_json.output)["sidecar"]["reason"]
         for shown in (reason, as_text.output):
             self.assertIn(ROOT_GATEWAY_REASON, shown)
-            self.assertIn("sudo env DEFENSECLAW_HOME=", shown)
+            if sys.platform.startswith("win"):
+                # GAP-0747: the Windows remedy is an elevated PowerShell prompt, never sudo.
+                self.assertIn("elevated PowerShell prompt", shown)
+                self.assertNotIn("sudo", shown)
+            else:
+                self.assertIn("sudo env DEFENSECLAW_HOME=", shown)
             self.assertNotIn("--api-port", shown)
 
     def test_json_roster_has_per_connector_mode(self):
@@ -1420,6 +1425,70 @@ def test_status_uses_gateway_removed_agent_reason_in_text_and_json():
     assert rows["amp"]["state"] == "not running"
     assert rows["amp"]["runtime_detail"] == reason
     assert rows["codex"]["state"] == "running"
+
+
+_CUSTODY_FOLDER = "/home/lane/.config/opencode"
+_CUSTODY_REASON = f"validate plugin directory custody: {_CUSTODY_FOLDER} is group/other writable"
+
+
+def _refused_health(name: str, reason: str, repair: dict | None) -> dict:
+    details: dict = {"connectors_not_started": [name], "connectors_not_started_reasons": {name: reason}}
+    if repair is not None:
+        details["connectors_not_started_repairs"] = {name: repair}
+    return {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": details},
+    }
+
+
+def test_status_names_the_folder_and_fix_for_an_opencode_the_gateway_refused():
+    # A custody-refused OpenCode has no connector row; status called it
+    # "DEGRADED runtime load unverified" and hid the folder and the fix.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    fix = f"chmod go-w {_CUSTODY_FOLDER}"
+    health = _refused_health("opencode", _CUSTODY_REASON, {"fix": fix})
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "NOT RUNNING" in block and "DEGRADED" not in block
+    assert "runtime load unverified" not in block
+    assert _CUSTODY_FOLDER in block and fix in block and "defenseclaw setup opencode" in block
+    rows = {row["name"]: row for row in cmd_status._connector_roster(cfg, health)}
+    assert rows["opencode"]["state"] == "not running"
+    assert _CUSTODY_FOLDER in rows["opencode"]["runtime_detail"] and fix in rows["opencode"]["runtime_detail"]
+    assert "runtime load unverified" not in rows["opencode"]["runtime_detail"]
+
+
+def test_status_gives_every_refused_connector_its_recorded_reason_and_fix():
+    # The same renderer serves every connector, not only OpenCode.
+    cfg = _cfg(["codex", "hermes"], modes={"codex": "action", "hermes": "action"})
+    health = _refused_health("hermes", "hermes config is busy", {"fix": "close Hermes", "by_hand": "then restart it"})
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("Hermes (hermes)"):]
+    assert "hermes config is busy; fix: close Hermes; then by hand: then restart it" in block
+    detail = cmd_status._connector_roster(cfg, health)
+    hermes = next(row for row in detail if row["name"] == "hermes")["runtime_detail"]
+    assert "hermes config is busy; fix: close Hermes" in hermes
+
+
+def test_status_without_a_recorded_reason_still_points_to_the_gateway_log():
+    # Benign twin: an older gateway that records no reason keeps the generic line.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    health = {
+        "connectors": [{"name": "codex", "state": "running"}],
+        "guardrail": {"state": "running", "details": {"connectors_not_started": ["opencode"]}},
+    }
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "NOT RUNNING" in block and "see gateway.log, then run: defenseclaw setup opencode" in block
+
+
+def test_status_still_calls_an_opencode_with_no_row_and_no_refusal_unverified():
+    # Benign twin: with no refusal recorded, the runtime truth is unchanged.
+    cfg = _cfg(["codex", "opencode"], modes={"codex": "action", "opencode": "action"})
+    health = {"connectors": [{"name": "codex", "state": "running"}], "guardrail": {"state": "running", "details": {}}}
+    out = " ".join(_render_live(cfg, health).split())
+    block = out[out.index("OpenCode (opencode)"):]
+    assert "runtime load unverified: authenticated status has no OpenCode connector row" in block
 
 
 def test_policy_row_names_the_config_generation_that_survives_a_restart(capsys) -> None:

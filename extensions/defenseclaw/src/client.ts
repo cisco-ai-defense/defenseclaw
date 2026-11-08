@@ -35,7 +35,7 @@ import type {
   OutboundSidecarRequestLog,
 } from "./types.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
-import { proveListener, provenCreateConnection } from "./listener-proof.js";
+import { ListenerProofError, proveListener, provenCreateConnection } from "./listener-proof.js";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
@@ -393,10 +393,11 @@ export class DaemonClient {
             );
           });
 
-          res.on("error", (err) => finish({ status: 0, body: "", error: err.message }, ctx));
+          res.on("error", (err) =>
+            finish({ status: 0, body: "", error: err.message, outage: gatewayDidNotAnswer(err) }, ctx));
           // A body cut off mid-response is no answer, not a short 2xx.
           res.on("close", () => {
-            if (!res.complete) finish({ status: 0, body: "", error: "response body cut off" }, ctx);
+            if (!res.complete) finish({ status: 0, body: "", error: "response body cut off", outage: true }, ctx);
           });
         },
       );
@@ -405,13 +406,14 @@ export class DaemonClient {
       req.once("socket", () => {
         deadline = setTimeout(() => {
           req.destroy();
-          finish({ status: 0, body: "", error: "request timed out" }, ctx);
+          finish({ status: 0, body: "", error: "request timed out", outage: true }, ctx);
         }, timeoutMs);
       });
-      req.on("error", (err) => finish({ status: 0, body: "", error: err.message }, ctx));
+      req.on("error", (err) =>
+        finish({ status: 0, body: "", error: err.message, outage: gatewayDidNotAnswer(err) }, ctx));
       req.on("timeout", () => {
         req.destroy();
-        finish({ status: 0, body: "", error: "request timed out" }, ctx);
+        finish({ status: 0, body: "", error: "request timed out", outage: true }, ctx);
       });
 
       if (payload !== undefined) {
@@ -427,6 +429,26 @@ export interface RawResponse {
   status: number;
   body: string;
   error?: string;
+  /**
+   * With status 0, true when the gateway did not answer: nothing listens on
+   * its port, the connection, its proof or the request timed out, or a proven
+   * connection broke off. False for a listener that did not prove it is this
+   * account's gateway and for a request that was never sent (GAP-0594).
+   */
+  outage?: boolean;
+}
+
+// A proven gateway connection that broke off before the answer. An error
+// before the proof is a ListenerProofError, which says whether anything
+// answered.
+const BROKEN_CONNECTION_CODES = new Set([
+  "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "EHOSTUNREACH", "ENETUNREACH",
+]);
+
+function gatewayDidNotAnswer(err: unknown): boolean {
+  if (err instanceof ListenerProofError) return err.unreachable;
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "string" && BROKEN_CONNECTION_CODES.has(code);
 }
 
 function defaultCorrelation(): CorrelationContext {

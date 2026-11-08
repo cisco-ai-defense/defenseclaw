@@ -541,32 +541,6 @@ func TestCompleteWindowsManagedHooksTeardownAmpCleanupIsStandaloneOnly(t *testin
 	}
 }
 
-func TestRemoveEmptyWindowsClaudeManagedSettingsFolders(t *testing.T) {
-	programFiles := t.TempDir()
-	dropIns := filepath.Join(programFiles, "ClaudeCode", "managed-settings.d")
-	if err := os.MkdirAll(dropIns, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	kept := filepath.Join(programFiles, "ClaudeCode", "managed-settings.json")
-	if err := os.WriteFile(kept, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
-	if _, err := os.Lstat(dropIns); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the empty managed-settings.d stayed: %v", err)
-	}
-	if _, err := os.Lstat(kept); err != nil {
-		t.Fatalf("a ClaudeCode folder that holds the administrator's settings changed: %v", err)
-	}
-	if err := os.Remove(kept); err != nil {
-		t.Fatal(err)
-	}
-	removeEmptyWindowsClaudeManagedSettingsFolders(programFiles)
-	if _, err := os.Lstat(filepath.Join(programFiles, "ClaudeCode")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the empty ClaudeCode folder stayed: %v", err)
-	}
-}
-
 // GAP-1765: finalize revokes the gateway's AI-discovery read ACEs before it
 // removes users' registrations, and names a revoke failure.
 func TestCompleteWindowsManagedHooksTeardownUserCleanupRevokesInventoryACEsFirst(t *testing.T) {
@@ -659,6 +633,43 @@ func TestWindowsManagedHooksTeardownPurgeRemovesEveryAccountsACPCopies(t *testin
 	}
 	if len(report.UserStateRemaining) != 1 || !strings.HasPrefix(report.UserStateRemaining[0], acpOnly+`: C:\Users\odd\.defenseclaw\acp: access denied`) {
 		t.Fatalf("remaining = %v", report.UserStateRemaining)
+	}
+}
+
+// GAP-0669 review 2 M5: an ACP-only account whose folder keeps entries the
+// purge does not own (an account file, its own .token) is reported as purged
+// with those entries named; a folder that is empty is reported as before.
+func TestWindowsManagedHooksTeardownPurgeNamesKeptACPEntries(t *testing.T) {
+	originalCopies, originalACPPurger := windowsManagedHooksStandaloneACPUserCopies, windowsManagedHooksStandaloneACPUserPurger
+	originalIdentity := enterpriseHookWindowsUserCleanupIdentity
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneACPUserCopies, windowsManagedHooksStandaloneACPUserPurger = originalCopies, originalACPPurger
+		enterpriseHookWindowsUserCleanupIdentity = originalIdentity
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return nil }
+	const mixed, clean = "S-1-5-21-1-2-3-3921", "S-1-5-21-1-2-3-3922"
+	mixedHome, cleanHome := filepath.Join(t.TempDir(), "mixed"), filepath.Join(t.TempDir(), "clean")
+	for _, name := range []string{".token", "inventory.db"} {
+		path := filepath.Join(mixedHome, ".defenseclaw", "acp", name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	windowsManagedHooksStandaloneACPUserCopies = func() ([]enterprisehooks.WindowsACPUserCopy, error) {
+		return []enterprisehooks.WindowsACPUserCopy{{SID: mixed, Home: mixedHome}, {SID: clean, Home: cleanHome}}, nil
+	}
+	windowsManagedHooksStandaloneACPUserPurger = func(string, string) error { return nil }
+	remaining, purged := windowsManagedHooksStandaloneACPUserState(nil)
+	if len(remaining) != 0 || len(purged) != 2 {
+		t.Fatalf("remaining = %v, purged = %v", remaining, purged)
+	}
+	wantMixed := mixed + ": " + filepath.Join(mixedHome, ".defenseclaw", "acp") + windowsManagedHooksKeptEntriesMarker + "acp/.token, acp/inventory.db"
+	wantClean := clean + ": " + filepath.Join(cleanHome, ".defenseclaw", "acp")
+	if purged[0] != wantMixed || purged[1] != wantClean {
+		t.Fatalf("purged = %q, want %q and %q", purged, wantMixed, wantClean)
 	}
 }
 

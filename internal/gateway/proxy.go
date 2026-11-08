@@ -806,7 +806,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	// Strip /c/<connector>/ prefix so connector-routed traffic
 	// (ANTHROPIC_BASE_URL=http://proxy/c/claudecode) hits the same
 	// handlers as fetch-interceptor traffic.
-	stripped := connectorPrefixStripper(mux, p.registry)
+	stripped := connectorPrefixStripper(openClawBlockNoticeMiddleware(mux, p.openClawNoticeAuthorized), p.registry)
 	scoped := p.thresholdScopeMiddleware(stripped)
 	limited := p.rateLimitMiddleware(scoped)
 	logged := p.requestLogger(limited)
@@ -954,10 +954,17 @@ func connectorPrefixStripper(next http.Handler, reg *connector.Registry) http.Ha
 				}
 				r.URL.Path = p[3+idx:]
 				r.URL.RawPath = ""
+				r = r.WithContext(context.WithValue(r.Context(), proxyConnectorKey{}, name))
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// openClawNoticeAuthorized reports whether r carries the gateway owner's
+// credential, the one OpenClaw's fetch interceptor sends (GAP-0644).
+func (p *GuardrailProxy) openClawNoticeAuthorized(r *http.Request) bool {
+	return p.skipAuthForTest || p.presentsOwnerCredential(r)
 }
 
 func isValidConnectorName(name string) bool {
@@ -5327,7 +5334,7 @@ func launderChatCompletionsHistory(raw json.RawMessage) (json.RawMessage, int, e
 				case '[':
 					text = responsesTextFromContent(contentTrim)
 				}
-				if strings.HasPrefix(text, defenseClawBlockBanner) {
+				if isDefenseClawBlockTurn(text) {
 					stripped++
 					continue
 				}
@@ -5391,7 +5398,7 @@ func launderResponsesHistory(raw json.RawMessage) (json.RawMessage, int, error) 
 				stripped++
 				continue
 			}
-			if strings.HasPrefix(responsesTextFromContent(probe.Content), defenseClawBlockBanner) {
+			if isDefenseClawBlockTurn(responsesTextFromContent(probe.Content)) {
 				stripped++
 				continue
 			}

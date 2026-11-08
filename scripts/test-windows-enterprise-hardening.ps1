@@ -179,6 +179,7 @@ $script:SourceDigests = [ordered]@{}
 $script:PowerShellSelection = $null
 $script:PowerShellPrerequisite = $null
 $script:FailureEvidence = $null
+$script:CertificationParentRootPaths = @()
 $script:CertificationParentRoots = @()
 $script:LifecycleLockPreinstallBaseline = $null
 $script:LifecycleLockCleanupBaseline = $null
@@ -19634,12 +19635,7 @@ function Remove-EmptyCertificationParentRoot([object]$State) {
         -not (Test-Path -LiteralPath ([string]$State.path))) {
         return
     }
-    $expected = @(
-        $script:ProgramFilesCertificationRoot,
-        $script:ProgramDataCertificationRoot,
-        $script:ProgramDataStagingRoot,
-        $script:ProgramDataWorkRoot
-    ) | Where-Object {
+    $expected = @($script:CertificationParentRootPaths) | Where-Object {
         [string]::Equals(
             (ConvertTo-CanonicalPath $_),
             (ConvertTo-CanonicalPath ([string]$State.path)),
@@ -20836,6 +20832,21 @@ $script:ProgramDataStagingRoot = ConvertTo-CanonicalPath (
 $script:ProgramDataWorkRoot = ConvertTo-CanonicalPath (
     Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Cert-Work'
 )
+# The two folders above the certification roots. Creating a certification root
+# creates them when the host has no Secure Client, so they are recorded too and
+# removed only when this run created them and they are empty (GAP-0780).
+$script:ProgramFilesSecureClientRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client'
+)
+$script:ProgramFilesCiscoRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramFiles 'Cisco'
+)
+$script:ProgramDataSecureClientRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client'
+)
+$script:ProgramDataCiscoRoot = ConvertTo-CanonicalPath (
+    Join-Path $script:KnownProgramData 'Cisco'
+)
 $script:InstallRoot = Assert-PathBelow `
     (Join-Path $script:ProgramFilesCertificationRoot $script:RunToken) `
     $script:ProgramFilesCertificationRoot `
@@ -20877,13 +20888,20 @@ $script:WorkRoot = Assert-PathBelow `
     (Join-Path $script:ProgramDataWorkRoot $script:RunToken) `
     $script:ProgramDataWorkRoot `
     'work root'
+# One list feeds the cleanup allowlist (Remove-EmptyCertificationParentRoot) and
+# the recorded parent states, so the two cannot drift apart.
+$script:CertificationParentRootPaths = @(
+    $script:ProgramFilesCertificationRoot,
+    $script:ProgramDataCertificationRoot,
+    $script:ProgramDataStagingRoot,
+    $script:ProgramDataWorkRoot,
+    $script:ProgramFilesSecureClientRoot,
+    $script:ProgramFilesCiscoRoot,
+    $script:ProgramDataSecureClientRoot,
+    $script:ProgramDataCiscoRoot
+)
 $script:CertificationParentRoots = @(
-    foreach ($parentRoot in @(
-        $script:ProgramFilesCertificationRoot,
-        $script:ProgramDataCertificationRoot,
-        $script:ProgramDataStagingRoot,
-        $script:ProgramDataWorkRoot
-    )) {
+    foreach ($parentRoot in $script:CertificationParentRootPaths) {
         [pscustomobject]@{
             path = ConvertTo-CanonicalPath $parentRoot
             existed_before = Test-Path -LiteralPath $parentRoot

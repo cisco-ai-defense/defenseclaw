@@ -119,30 +119,68 @@ func gap0055NoPanic(t *testing.T, name string, read func()) {
 	read()
 }
 
-// TestGAP0055ProgramBranchesShortArgvNoPanic is the class test of GAP-0055:
-// a program-specific branch that reads an argv word by position, or skips
-// an option's value, without checking that the word is there. Every word
-// and option the package's branches compare with is run with zero, one and
-// two arguments, alone and behind each lookup and wrapper, and every option
-// is put last with its value missing, through the hook client's evidence
-// (Resolve) and the extraction check. None may panic. A race build runs a
-// fixed stride of the forms and every archive program form.
-func TestGAP0055ProgramBranchesShortArgvNoPanic(t *testing.T) {
-	words, options := gap0055SourceLiterals(t)
-	if len(words) < 400 || len(options) < 200 {
-		t.Fatalf("source literals: %d words, %d options; the harvest is broken", len(words), len(options))
+// gap0055BoundedSweep is true in a race build, where one hook client
+// evidence call (Resolve) costs several times what it does in a plain build.
+// Every other build, native Windows included, reads every form through
+// Resolve: the sweep is split into gap0055SweepParts tests so the Windows
+// shard packer can run the parts side by side (GAP-0749).
+var gap0055BoundedSweep = gap0055RaceBuild
+
+// gap0055SweepParts is the number of tests the sweep is split into; part i
+// reads the forms whose index is i modulo this number. A test of each part
+// follows TestGAP0055ProgramBranchesShortArgvNoPanic (TestGAP0749SweepPartsAreAllRun).
+const gap0055SweepParts = 8
+
+// gap0055ResolveBudget bounds the forms a bounded sweep reads through
+// Resolve, so a source that grows more program-specific words cannot push it
+// past what a slow runner reads.
+const gap0055ResolveBudget = 22000
+
+// gap0055Form is one command of the sweep. A form with resolve set is read
+// through Resolve; a bounded sweep reads the others through the parsers and
+// decision readers Resolve is built on (gap0055ReadParsers). Every form is
+// read one way or the other: a bounded sweep drops no form.
+type gap0055Form struct {
+	command string
+	resolve bool
+}
+
+// gap0055Argvs are the argument lists each word is run with: none, one and
+// two arguments, an option, a bare dash and a double dash, an empty word and
+// a variable.
+var gap0055Argvs = []string{"", " -v", " -", " --", " a", " a b", " ''", " $X"}
+
+// gap0055SweepForms is every form of the sweep: the GAP-0055 commands, each
+// word of the source behind each argv and each wrapper, and each program of
+// the package with each option, last and after one operand. A bounded sweep
+// reads through Resolve: every GAP-0055 command, every bare argv form of every
+// word, every argv and wrapper form of an archive program (where the GAP-0055 panic was), each
+// wrapper behind every fourth word, and one eighth of the program-option pairs,
+// spread so that each program meets a spread of options and each option a
+// spread of programs.
+func gap0055SweepForms(words, options []string, bounded bool) (forms []gap0055Form, programs []string) {
+	add := func(command string, resolve bool) {
+		forms = append(forms, gap0055Form{command, resolve || !bounded})
 	}
-	cwd, home := t.TempDir(), t.TempDir()
-	commands := append([]string(nil), gap0055Commands...)
-	for _, word := range words {
-		for _, argv := range []string{"", " -v", " -", " --", " a", " a b", " ''", " $X"} {
-			commands = append(commands, word+argv)
-		}
-		for _, wrapper := range gap0055Wrappers {
-			commands = append(commands, fmt.Sprintf(wrapper, word))
+	for _, command := range gap0055Commands {
+		add(command, true)
+	}
+	// The archive programs are swept as words, whether or not the source
+	// spells them as one (7zr starts with a digit).
+	swept := slices.Clone(words)
+	for _, program := range archivePrograms {
+		if !slices.Contains(swept, program) {
+			swept = append(swept, program)
 		}
 	}
-	var programs []string
+	for wordIndex, word := range swept {
+		for _, argv := range gap0055Argvs {
+			add(word+argv, true)
+		}
+		for wrapperIndex, wrapper := range gap0055Wrappers {
+			add(fmt.Sprintf(wrapper, word), slices.Contains(archivePrograms, word) || (wordIndex+wrapperIndex)%4 == 0)
+		}
+	}
 	for _, list := range [][]string{archivePrograms, copyPrograms, linkPrograms, renamePrograms, cdPrograms, multicallPrograms,
 		braceOperandPrograms, dataPrograms, hiddenDirectoryPrograms, knownWordPrograms, readOnlyLinkWordPrograms, readerPrograms,
 		{"env", "sudo", "doas", "nice", "exec", "timeout", "xargs", "command", "builtin", "nohup", "time", "stdbuf",
@@ -153,30 +191,59 @@ func TestGAP0055ProgramBranchesShortArgvNoPanic(t *testing.T) {
 			}
 		}
 	}
-	for _, program := range programs {
-		for _, option := range options {
-			commands = append(commands, program+" "+option, program+" a "+option)
+	for programIndex, program := range programs {
+		for optionIndex, option := range options {
+			add(program+" "+option, (programIndex+optionIndex)%16 == 0)
+			add(program+" a "+option, (programIndex+optionIndex)%16 == 8)
 		}
 	}
-	if gap0055RaceBuild {
-		var sample []string
-		for i, command := range commands {
-			if i%11 == 0 || slices.Contains(archivePrograms, strings.Fields(command + " x")[0]) {
-				sample = append(sample, command)
-			}
-		}
-		commands = sample
+	return forms, programs
+}
+
+// gap0055ReadParsers reads a form the way Resolve does without its file
+// system evidence: the link reader (with and without the disk), the archive
+// reader, the command decision in the Windows and the hook client dialects
+// and every other reader Resolve runs on the command text
+// (gap0749ResolveReaders). These hold every program-specific branch that
+// reads an argv word by position; what Resolve adds is file system probes
+// that do not depend on the form.
+func gap0055ReadParsers(command, cwd, home string) {
+	commandLinksRead(command, cwd, home, nil, false, false, false)
+	commandLinksRead(command, cwd, home, nil, false, false, true)
+	ArchiveBeforeWrite(command, home)
+	ActionCommandAuditReasonWithDialect(command, cwd, home, "")
+	gap0749ResolveReaders(command, cwd, home)
+}
+
+// gap0055SweepPart runs one part of the class test of GAP-0055 (the tests
+// TestGAP0055ProgramBranchesShortArgvNoPanicPart0 to Part7 run every form):
+// a program-specific branch that reads an argv word by position, or skips
+// an option's value, without checking that the word is there. Every word
+// and option the package's branches compare with is run with zero, one and
+// two arguments, alone and behind each lookup and wrapper, and every option
+// is put last with its value missing, through the hook client's evidence
+// (Resolve) and the extraction check. None may panic. A race build reads a spread of the forms through Resolve and the rest
+// through the readers it is built on (gap0055BoundedSweep): every form is
+// read.
+func gap0055SweepPart(t *testing.T, part int) {
+	t.Helper()
+	words, options := gap0055SourceLiterals(t)
+	if len(words) < 400 || len(options) < 200 {
+		t.Fatalf("source literals: %d words, %d options; the harvest is broken", len(words), len(options))
 	}
+	cwd, home := t.TempDir(), t.TempDir()
+	forms, programs := gap0055SweepForms(words, options, gap0055BoundedSweep)
 	var mu sync.Mutex
 	reported := map[string]bool{}
 	failures := 0
-	jobs := make(chan string)
+	jobs := make(chan gap0055Form)
 	var wg sync.WaitGroup
 	for range runtime.GOMAXPROCS(0) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for command := range jobs {
+			for form := range jobs {
+				command := form.command
 				payload, err := json.Marshal(map[string]any{"session_id": "gap0055", "hook_event_name": "PreToolUse", "cwd": cwd,
 					"tool_name": "Bash", "tool_input": map[string]any{"command": command}})
 				if err != nil {
@@ -194,19 +261,36 @@ func TestGAP0055ProgramBranchesShortArgvNoPanic(t *testing.T) {
 							}
 						}
 					}()
-					Resolve(payload)
-					ArchiveBeforeWrite(command, home)
+					if form.resolve {
+						Resolve(payload)
+						ArchiveBeforeWrite(command, home)
+					} else {
+						gap0055ReadParsers(command, cwd, home)
+					}
 				}()
 			}
 		}()
 	}
-	for _, command := range commands {
-		jobs <- command
+	read := 0
+	for index, form := range forms {
+		if index%gap0055SweepParts == part {
+			jobs <- form
+			read++
+		}
 	}
 	close(jobs)
 	wg.Wait()
-	t.Logf("%d words, %d options, %d programs, %d commands, %d panics", len(words), len(options), len(programs), len(commands), failures)
+	t.Logf("part %d of %d: %d words, %d options, %d programs, %d of %d commands, %d panics", part, gap0055SweepParts, len(words), len(options), len(programs), read, len(forms), failures)
 }
+
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart0(t *testing.T) { gap0055SweepPart(t, 0) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart1(t *testing.T) { gap0055SweepPart(t, 1) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart2(t *testing.T) { gap0055SweepPart(t, 2) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart3(t *testing.T) { gap0055SweepPart(t, 3) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart4(t *testing.T) { gap0055SweepPart(t, 4) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart5(t *testing.T) { gap0055SweepPart(t, 5) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart6(t *testing.T) { gap0055SweepPart(t, 6) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart7(t *testing.T) { gap0055SweepPart(t, 7) }
 
 // TestGAP0055ArchiveProgramsShortArgvNoPanic: the archive readers take an
 // argv of any length, with static flags of any length.
@@ -257,4 +341,134 @@ func FuzzGAP0055CommandLinksRead(f *testing.F) {
 		}
 		Resolve(payload)
 	})
+}
+
+// TestGAP0749BoundedSweepReadsEveryFormAndStaysInBudget: the bounded sweep
+// (race builds) reads every form of the full sweep, holds the
+// forms it reads through Resolve to a budget a slow runner finishes in its
+// shard step, and reads through Resolve every bare argv form of every word and
+// every argv and wrapper form of an archive program; each wrapper, program and option meets Resolve
+// in a spread of forms. The full sweep, all through Resolve in one test, ran past the
+// 1020 s step of the Windows shard pk3 (GAP-0749).
+func TestGAP0749BoundedSweepReadsEveryFormAndStaysInBudget(t *testing.T) {
+	words, options := gap0055SourceLiterals(t)
+	full, programs := gap0055SweepForms(words, options, false)
+	bounded, boundedPrograms := gap0055SweepForms(words, options, true)
+	if len(bounded) != len(full) || len(boundedPrograms) != len(programs) {
+		t.Fatalf("the bounded sweep reads %d forms and %d programs, the full sweep %d and %d", len(bounded), len(boundedPrograms), len(full), len(programs))
+	}
+	deep := make(map[string]bool, len(bounded))
+	resolved := 0
+	for index, form := range bounded {
+		if form.command != full[index].command {
+			t.Fatalf("form %d is %q in the bounded sweep and %q in the full one", index, form.command, full[index].command)
+		}
+		// The benign twin: a run that is not bounded reads every form through Resolve.
+		if !full[index].resolve {
+			t.Fatalf("an unbounded run reads %q only through the parsers", form.command)
+		}
+		if form.resolve {
+			resolved++
+			deep[form.command] = true
+		}
+	}
+	t.Logf("bounded sweep: %d forms, %d through Resolve, budget %d", len(bounded), resolved, gap0055ResolveBudget)
+	if resolved > gap0055ResolveBudget {
+		t.Fatalf("the bounded sweep reads %d forms through Resolve; the budget is %d: thin the spread, not the budget", resolved, gap0055ResolveBudget)
+	}
+	if resolved >= len(full) {
+		t.Fatalf("the bounded sweep reads all %d forms through Resolve", len(full))
+	}
+	for _, command := range gap0055Commands {
+		if !deep[command] {
+			t.Errorf("GAP-0055 command %q is not read through Resolve", command)
+		}
+	}
+	for _, word := range words {
+		for _, argv := range gap0055Argvs {
+			if !deep[word+argv] {
+				t.Errorf("bare form %q is not read through Resolve", word+argv)
+			}
+		}
+	}
+	for _, program := range archivePrograms {
+		for _, argv := range gap0055Argvs {
+			if !deep[program+argv] {
+				t.Errorf("archive program form %q is not read through Resolve", program+argv)
+			}
+		}
+		for _, wrapper := range gap0055Wrappers {
+			if !deep[fmt.Sprintf(wrapper, program)] {
+				t.Errorf("archive program form %q is not read through Resolve", fmt.Sprintf(wrapper, program))
+			}
+		}
+	}
+	for _, wrapper := range gap0055Wrappers {
+		seen := 0
+		for _, word := range words {
+			if deep[fmt.Sprintf(wrapper, word)] {
+				seen++
+			}
+		}
+		if seen < len(words)/8 {
+			t.Errorf("wrapper %q is read through Resolve behind %d of %d words", wrapper, seen, len(words))
+		}
+	}
+	pairs := func(program, option string) int {
+		n := 0
+		for _, form := range []string{program + " " + option, program + " a " + option} {
+			if deep[form] {
+				n++
+			}
+		}
+		return n
+	}
+	for _, program := range programs {
+		seen := 0
+		for _, option := range options {
+			seen += pairs(program, option)
+		}
+		if seen < len(options)/16 {
+			t.Errorf("program %q is read through Resolve with %d of %d options", program, seen, len(options))
+		}
+	}
+	for _, option := range options {
+		seen := 0
+		for _, program := range programs {
+			seen += pairs(program, option)
+		}
+		if seen < len(programs)/16 {
+			t.Errorf("option %q is read through Resolve behind %d of %d programs", option, seen, len(programs))
+		}
+	}
+}
+
+// TestGAP0749SweepPartsAreAllRun: the sweep is run by exactly
+// gap0055SweepParts tests, one per part, so no part of the forms is left to a
+// test that does not exist.
+func TestGAP0749SweepPartsAreAllRun(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "gap0055_archive_short_argv_test.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := map[int]bool{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !strings.HasPrefix(fn.Name.Name, "TestGAP0055ProgramBranchesShortArgvNoPanicPart") {
+			continue
+		}
+		part, err := strconv.Atoi(strings.TrimPrefix(fn.Name.Name, "TestGAP0055ProgramBranchesShortArgvNoPanicPart"))
+		if err != nil || found[part] {
+			t.Fatalf("%s is not part %d once", fn.Name.Name, part)
+		}
+		found[part] = true
+	}
+	for part := range gap0055SweepParts {
+		if !found[part] {
+			t.Errorf("part %d of the sweep has no test", part)
+		}
+	}
+	if len(found) != gap0055SweepParts {
+		t.Errorf("%d part tests, want %d", len(found), gap0055SweepParts)
+	}
 }

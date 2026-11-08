@@ -1648,7 +1648,7 @@ func TestWindowsEnterpriseEnsureRecordOwnerMismatchNamesRecovery(t *testing.T) {
 	}
 	for _, want := range []string{
 		record, "inspect the deployment record owner", "restore its expected owner",
-		"/uninstall FORCE=1 PURGE=1 JSON=1", "/ensure CONFIG=<config.yaml> JSON=1",
+		windowsEnterpriseSetupCommand("/uninstall", "FORCE=1", "PURGE=1", "JSON=1"), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1"), managed.WindowsSetupSource,
 	} {
 		if !strings.Contains(result.Errors[0].Message, want) {
 			t.Fatalf("error %q does not name %q", result.Errors[0].Message, want)
@@ -1951,7 +1951,8 @@ func TestWindowsEnterpriseUnparseableInstalledConfigMessage(t *testing.T) {
 	}
 	_, err := readWindowsEnterpriseConfiguredTrust("repair", &windowsEnterpriseLifecycleOptions{stateRoot: stateRoot})
 	if err == nil || !strings.Contains(err.Error(), "does not parse at line 1 (it holds text where a mapping of keys is expected)") ||
-		!strings.Contains(err.Error(), "/ensure CONFIG=<config.yaml> JSON=1") || strings.Contains(err.Error(), "struct {") {
+		!strings.Contains(err.Error(), windowsEnterpriseSetupCommand("/ensure", "CONFIG=<config.yaml>", "JSON=1")) || !strings.Contains(err.Error(), managed.WindowsSetupSource) ||
+		strings.Contains(err.Error(), "struct {") {
 		t.Fatalf("err = %v", err)
 	}
 }
@@ -2233,7 +2234,8 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	// run was not LocalSystem, and names the next step.
 	if !strings.Contains(got[0].Message, "2 user connector registration(s) because this uninstall did not run as LocalSystem") ||
 		!strings.Contains(got[0].Message, sid+": devin, hermes") ||
-		!strings.Contains(got[0].Message, "Setup /ensure and then /uninstall, both as LocalSystem") {
+		!strings.Contains(got[0].Message, windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")+", both as LocalSystem") ||
+		!strings.Contains(got[0].Message, managed.WindowsSetupSource) {
 		t.Fatalf("warnings = %+v", got)
 	}
 	// A removal that was attempted and failed is still reported.
@@ -2242,7 +2244,7 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	if len(attempted) != 2 || attempted[1].Code != "user_registrations_failed" ||
 		!strings.Contains(attempted[1].Message, `defenseclaw.json still holds`) ||
 		// GAP-1932: a failed removal names a next step.
-		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run DefenseClaw Setup /ensure and then /uninstall") {
+		!strings.Contains(attempted[1].Message, "remove the named DefenseClaw entries from those files as that user, or run "+windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")) {
 		t.Fatalf("attempted-failure warnings = %+v", attempted)
 	}
 	failedReport, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"user_registrations_failed":["claudecode/` + sid + `: settings still holds DefenseClaw's hook"]}`))
@@ -2293,7 +2295,7 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 	applyWindowsEnterpriseInstallerReport(failed, &windowsEnterpriseLifecycleOptions{purge: true}, notSystem, windowsEnterpriseStandaloneRun{})
 	if len(failed.Errors) != 1 || failed.Errors[0].Code != "per_user_state_remaining" || len(failed.Warnings) != 0 ||
 		!strings.Contains(failed.Errors[0].Message, "--purge did not run as LocalSystem") ||
-		!strings.Contains(failed.Errors[0].Message, "/uninstall PURGE=1, both as LocalSystem") ||
+		!strings.Contains(failed.Errors[0].Message, windowsEnterpriseLocalSystemRemedy("/uninstall PURGE=1")) ||
 		!strings.HasSuffix(failed.Errors[0].Message, `Accounts: alice (`+sid+`): C:\Users\alice\.defenseclaw`) {
 		t.Fatalf("not-LocalSystem purge: errors %+v warnings %+v", failed.Errors, failed.Warnings)
 	}
@@ -2360,6 +2362,45 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		only[0].Code != "machine_state_kept" || strings.Contains(only[0].Message, "could not remove") {
 		t.Fatalf("a kept selector alone: %+v", only)
 	}
+	// A link a purge kept is named once, and only as kept (GAP-0773): the files
+	// behind it are not "could not remove", and a kept folder below it is not
+	// named again. A failure elsewhere is still reported.
+	const keptLink = `: kept: a link sits here; DefenseClaw does not follow, change or remove it`
+	linked := warnings(base + `,"machine_state_remaining":[` +
+		`"C:\\Program Files\\ClaudeCode\\managed-settings.d\\90-defenseclaw.json: reparse points are not allowed in managed path: C:\\Program Files\\ClaudeCode",` +
+		`"C:\\Program Files\\ClaudeCode\\managed-settings.d` + keptLink + `",` +
+		`"C:\\Program Files\\ClaudeCode` + keptLink + `",` +
+		`"C:\\Program Files\\ClaudeCode\\managed-settings.d\\.defenseclaw-managed-hooks.state: reparse points are not allowed in managed path: C:\\Program Files\\ClaudeCode",` +
+		`"C:\\ProgramData\\OpenAI\\Codex` + keptLink + `",` +
+		`"C:\\ProgramData\\DefenseClaw-PowerShell-x: access denied"]}`)
+	if len(linked) != 2 || linked[0].Code != "machine_state_remaining" || linked[1].Code != "machine_state_kept" ||
+		strings.Contains(linked[0].Message, "ClaudeCode") || strings.Contains(linked[0].Message, "Codex") ||
+		!strings.Contains(linked[0].Message, "could not remove 1 DefenseClaw machine folder(s)") ||
+		!strings.Contains(linked[1].Message, "kept 2 DefenseClaw machine file(s) or folder(s) on purpose") ||
+		strings.Count(linked[1].Message, `ClaudeCode`) != 1 || strings.Contains(linked[1].Message, "managed-settings.d") ||
+		strings.Count(linked[1].Message, `OpenAI\Codex`) != 1 {
+		t.Fatalf("a kept link listed twice, or as a failure: %+v", linked)
+	}
+	// The Codex entry carries the longer reason (the policy behind the link
+	// was not checked) and is still one kept item.
+	codex := warnings(base + `,"machine_state_remaining":["C:\\ProgramData\\OpenAI\\Codex: ` + windowsEnterpriseCodexKeptLinkReason + `"]}`)
+	if len(codex) != 1 || codex[0].Code != "machine_state_kept" ||
+		!strings.Contains(codex[0].Message, "may still name the DefenseClaw hook binary") {
+		t.Fatalf("the Codex kept link: %+v", codex)
+	}
+	// The same link met first by a psm1 purge step (the short reason) is still
+	// named with the longer Codex reason.
+	for _, link := range []string{`C:\\ProgramData\\OpenAI\\Codex`, `C:\\ProgramData\\OpenAI`} {
+		short := warnings(base + `,"machine_state_remaining":["` + link + keptLink + `"]}`)
+		if len(short) != 1 || short[0].Code != "machine_state_kept" ||
+			!strings.Contains(short[0].Message, "may still name the DefenseClaw hook binary") {
+			t.Fatalf("the Codex link %s met by a purge step: %+v", link, short)
+		}
+	}
+	other := warnings(base + `,"machine_state_remaining":["C:\\ProgramData\\Cursor` + keptLink + `"]}`)
+	if len(other) != 1 || strings.Contains(other[0].Message, "hook binary") {
+		t.Fatalf("a non-Codex kept link got the Codex reason: %+v", other)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}
@@ -2414,7 +2455,8 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	for _, want := range []string{
 		`the permissions on C:\Users\alice\.defenseclaw\hooks are not the ones DefenseClaw set`,
 		"Next step: run the same Setup as LocalSystem",
-		`DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=C:\Staging\config.yaml JSON=1`,
+		`& '.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure CONFIG=C:\Staging\config.yaml JSON=1`,
+		managed.WindowsSetupSource,
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("error %q does not contain %q", message, want)
@@ -2477,7 +2519,7 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 		}
 	}
 	if len(leftovers) != 2 ||
-		!strings.Contains(leftovers[0], "bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in; to remove it, run DefenseClaw Setup /ensure and then /uninstall") ||
+		!strings.Contains(leftovers[0], "bob (S-1-5-21-1-2-3-1019) [codex, cursor]: DefenseClaw's agent registrations, because the account is not signed in; to remove it, run "+windowsEnterpriseSetupCommand("/ensure")+" and then "+windowsEnterpriseSetupCommand("/uninstall")) ||
 		!strings.HasSuffix(leftovers[1], `hooks.json, which changed after DefenseClaw wrote it; remove DefenseClaw's entries from that file by hand`) {
 		t.Fatalf("rollback leftovers = %q", leftovers)
 	}
@@ -2773,7 +2815,7 @@ func TestWindowsEnterpriseResultNamesUntrustedUserRuntimeFolders(t *testing.T) {
 	}
 	if len(skipped) != 1 || !strings.Contains(skipped[0], "of 1 account(s)") ||
 		!strings.Contains(skipped[0], `C:\Users\stale\.defenseclaw\hooks`) ||
-		!strings.Contains(skipped[0], "run Setup /ensure again") {
+		!strings.Contains(skipped[0], "run "+windowsEnterpriseAdminCommand("ensure")+" from an elevated PowerShell prompt again to remove the old copies") {
 		t.Fatalf("skipped folder warning = %q", skipped)
 	}
 	if len(result.Errors) != 0 {

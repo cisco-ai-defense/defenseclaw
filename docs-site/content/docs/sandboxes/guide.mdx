@@ -370,7 +370,7 @@ You are an AI agent. Set up OpenShell sandboxes for the user, run one agent in a
 
 1. Observe first. Never unblock a site, switch to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes to that exact change.
 2. Never print a key or token. Do not pass the user's secrets into a sandbox.
-3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`.
+3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json` ([Managed command availability](/docs/enterprise/managed-commands)).
 4. Do not delete or undo a sandbox's work without the user's yes.
 
 ### Steps

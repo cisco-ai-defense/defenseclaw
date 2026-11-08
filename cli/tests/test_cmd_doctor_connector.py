@@ -85,7 +85,6 @@ from defenseclaw.commands.cmd_doctor import (
     _run_cursor_windows_runtime_process,
 )
 
-
 # The exporter DefenseClaw writes into a sandboxed Codex config.
 _DEFENSECLAW_CODEX_EXPORTER = (
     '[otel.exporter.otlp-http]\nendpoint = "http://127.0.0.1:18970/otlp/codex/' + "a" * 64 + '/v1/logs"\n'
@@ -1605,7 +1604,14 @@ class TestCheckHookContractLock(unittest.TestCase):
         self.assertEqual(check["status"], "fail")
         self.assertEqual(check["label"], "Hook contract")
         self.assertIn("root-owned from a sudo-started gateway", check["detail"])
-        self.assertIn("verified descriptor-bound ownership repair", check["detail"])
+        self.assertNotIn("descriptor-bound", check["detail"])
+        self.assertNotIn("rerun it once with sudo", check["detail"])
+        self.assertIn('sudo chown -R "$(id -un)" ', check["remediation"])
+        self.assertIn("defenseclaw-gateway start", check["remediation"])
+        # stop, return, start: a start before the stop fails while a root gateway lives.
+        remediation = check["remediation"]
+        self.assertLess(remediation.index(" stop && sudo chown"), remediation.index("sudo chown -R"))
+        self.assertLess(remediation.index("sudo chown -R"), remediation.index("&& defenseclaw-gateway start"))
         self.assertTrue(
             check["detail"].startswith(
                 "hook_contract_lock.json is root-owned from a sudo-started gateway"
@@ -2567,9 +2573,10 @@ class TestCheckHookHealth(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX folder modes")
     def test_opencode_group_writable_plugin_folder_is_named_with_a_fix(self) -> None:
-        # Ubuntu's umask 002 left ~/.config/opencode/plugins at 0775; the
-        # gateway would not start and doctor only said the hook file is missing.
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}):
+        # A shared group on the folder must still get a matching doctor hint.
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"HOME": tmp}), patch(
+            "defenseclaw.file_permissions.owner_private_group", return_value=False
+        ):
             plugins = Path(tmp) / ".config" / "opencode" / "plugins"
             plugins.mkdir(parents=True)
             plugins.chmod(0o775)
@@ -2579,6 +2586,67 @@ class TestCheckHookHealth(unittest.TestCase):
 
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn(f"chmod go-w {os.path.realpath(plugins)}", r.checks[-1]["detail"])
+
+    @unittest.skipIf(os.name == "nt", "POSIX folder modes")
+    def test_opencode_installed_plugin_in_open_folder_warns_with_one_fix(self) -> None:
+        # GAP-0730: the running gateway installed the plugin; the next start
+        # refuses it once another account can write the folder or an ancestor.
+        # Doctor said PASS. It now names every refused element, outermost
+        # first, with one command.
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "defenseclaw.file_permissions.owner_private_group", return_value=False
+        ):
+            config = Path(tmp) / ".config"
+            plugins = config / "opencode" / "plugins"
+            plugins.mkdir(parents=True)
+            for folder in (config, plugins.parent):
+                folder.chmod(0o775)
+            hook = plugins / "defenseclaw.js"
+            hook.write_text("export const plugin = () => 1;  // defenseclaw bridge\n", encoding="utf-8")
+            hook.chmod(0o600)
+            r = _DoctorResult()
+            cfg = self._cfg(tmp, "opencode", [str(hook)])
+            with (
+                patch("defenseclaw.commands.cmd_doctor._managed_plugin_drift", return_value=""),
+                patch("defenseclaw.commands.cmd_doctor._edited_hook_problem", return_value=""),
+                patch("defenseclaw.commands.cmd_doctor._unguarded_tool_call_problem", return_value=""),
+                patch("defenseclaw.commands.cmd_doctor._opencode_v1_problem", return_value=""),
+            ):
+                _check_hook_health(cfg, "opencode", r)
+        row = r.checks[-1]
+        self.assertEqual(row["status"], "warn")
+        outer, leaf = os.path.realpath(config), os.path.realpath(plugins.parent)
+        self.assertIn(outer, row["detail"])
+        self.assertIn(f"chmod go-w {outer} {leaf}", row["remediation"])
+        self.assertIn("defenseclaw-gateway restart", row["remediation"])
+
+    def test_connector_skipped_row_quotes_the_recorded_reason(self) -> None:
+        # GAP-0731: the row sent the user to gateway.log; the gateway already
+        # recorded why it skipped the connector.
+        from defenseclaw.commands.cmd_doctor import _check_connector_skipped_at_start
+
+        reason = "opencode setup failed"
+        fix = 'icacls "C:\\u\\.config\\opencode" /remove:g "H\\other"'
+        health = {
+            "guardrail": {
+                "details": {
+                    "connectors_not_started": ["opencode"],
+                    "connectors_not_started_reasons": {"opencode": reason},
+                    "connectors_not_started_repairs": {"opencode": {"fix": fix}},
+                }
+            }
+        }
+        r = _DoctorResult()
+        _check_connector_skipped_at_start("opencode", health, r)
+        self.assertEqual(r.checks[-1]["status"], "warn")
+        self.assertIn("/remove:g", r.checks[-1]["detail"])
+        self.assertNotIn("gateway.log has the reason", r.checks[-1]["detail"])
+        # Benign twin: no recorded reason keeps the old pointer.
+        del health["guardrail"]["details"]["connectors_not_started_reasons"]
+        del health["guardrail"]["details"]["connectors_not_started_repairs"]
+        r = _DoctorResult()
+        _check_connector_skipped_at_start("opencode", health, r)
+        self.assertIn("gateway.log has the reason", r.checks[-1]["detail"])
 
     def test_opencode_missing_load_heartbeat_is_unverified_without_guessing_pure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

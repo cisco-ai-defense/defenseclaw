@@ -84,6 +84,10 @@ func commandLine(pid int) ([]string, string, error) {
 	return args, "", nil
 }
 
+// workingDirectory is unknown: macOS does not report the working directory
+// of another process without libproc.
+func workingDirectory(int) string { return "" }
+
 // executablePath reads the executable path kern.procargs2 records after its
 // 4-byte argument count.
 func executablePath(pid int) string {

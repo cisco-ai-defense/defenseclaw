@@ -134,17 +134,17 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 		return result(opts), nil
 	}
-	enterpriseHookWorkerDiscoverVersion = func(_ context.Context, home, connector string, allowExec bool) (string, string) {
+	enterpriseHookWorkerDiscoverVersion = func(_ context.Context, home, connector string, allowExec bool) (string, string, string) {
 		if connector == "codex" && allowExec {
-			return "0.142.0", ""
+			return "0.142.0", "", ""
 		}
-		return "", "not installed"
+		return "", "not installed", ""
 	}
-	enterpriseHookWorkerDiscoverVersionInAccountHome = func(_ context.Context, _, connector string) (string, string) {
+	enterpriseHookWorkerDiscoverVersionInAccountHome = func(_ context.Context, _, connector string) (string, string, string) {
 		if connector == "hermes" {
-			return "0.21.5", ""
+			return "0.21.5", "", ""
 		}
-		return "", "not installed"
+		return "", "not installed", ""
 	}
 	enterpriseHookWorkerDiscoverStaticVersion = func(_ context.Context, home, connector string) (string, string) {
 		if connector == "hermes" {
@@ -171,14 +171,14 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 	if mode == "blocked-private" || mode == "blocked-version" {
 		// A file system call that never returns and never observes the
 		// context (GAP-1413: macOS held an open() in the home walk).
-		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string) {
+		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string, string) {
 			switch {
 			case connector == "hermes":
-				return "0.21.5", ""
+				return "0.21.5", "", ""
 			case connector == "codex" && mode == "blocked-version":
 				select {}
 			}
-			return "", "not installed"
+			return "", "not installed", ""
 		}
 		enterpriseHookWorkerDiscoverSurfaces = func(context.Context, string, string, bool) ([]connector.AgentSurface, bool) {
 			return nil, true
@@ -653,6 +653,23 @@ type standaloneFixture struct {
 	requests                                []enterpriseHookWorkerRequest
 }
 
+// stubNoFreshAccountProof makes every fresh account-database proof say "not
+// gone" for the test. The fixture accounts exist only in its resolver; the
+// real fresh read (dscl on macOS) has no record of alice or bob on the test
+// machine, and would retire their pending cleanups (r105 GAP-2323) and
+// confirm their targets removed (GAP-0693). No fixture account is gone
+// unless a test installs its own proof after this call.
+func stubNoFreshAccountProof(t *testing.T) {
+	t.Helper()
+	previousCleanup, previousName, previousUID := enterpriseHookCleanupAccountGone, enterpriseHookGuardianFreshAccountGone, enterpriseHookRecordedAccountGone
+	t.Cleanup(func() {
+		enterpriseHookCleanupAccountGone, enterpriseHookGuardianFreshAccountGone, enterpriseHookRecordedAccountGone = previousCleanup, previousName, previousUID
+	})
+	enterpriseHookCleanupAccountGone = func(context.Context, string) bool { return false }
+	enterpriseHookGuardianFreshAccountGone = func(context.Context, string) bool { return false }
+	enterpriseHookRecordedAccountGone = func(context.Context, string, int) bool { return false }
+}
+
 // newStandaloneFixture puts the CLI into the standalone Unix profile with
 // the root-only trust checks stubbed so the reconcile logic can run as an
 // unprivileged user.
@@ -677,14 +694,14 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 	origOwner, origDirTrust, origFileTrust, origStateTrust := enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck
 	origToken, origOTLP, origRunner, origLog := enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog
 	origUserToken, origUserTokenLoader, origTransport := enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport
-	origCheckHome, origAccountGone := enterpriseHookCheckHome, enterpriseHookCleanupAccountGone
+	origCheckHome := enterpriseHookCheckHome
 	t.Cleanup(func() {
 		cfg, enterpriseHookManifest = origCfg, origManifest
 		enterpriseHooksMutationIdentityPreflight, enterpriseHookManifestFileTrustCheck, enterpriseHookStandaloneRuntimeCheck = origPreflight, origManifestTrust, origRuntime
 		enterpriseHookAuthorizationOwnershipSetter, enterpriseHookAuthorizationDirTrustCheck, enterpriseHookAuthorizationFileTrustCheck, enterpriseHookGuardianStateFileTrustCheck = origOwner, origDirTrust, origFileTrust, origStateTrust
 		enterpriseHookScopedTokenMinter, enterpriseHookScopedOTLPTokenMinter, enterpriseHookWorkerRunner, enterpriseHookWorkerLog = origToken, origOTLP, origRunner, origLog
 		enterpriseHookUserTokenMinter, enterpriseHookUserTokenLoader, enterpriseHookStandaloneHookTransport = origUserToken, origUserTokenLoader, origTransport
-		enterpriseHookCheckHome, enterpriseHookCleanupAccountGone = origCheckHome, origAccountGone
+		enterpriseHookCheckHome = origCheckHome
 		enterprisehooks.SetStandaloneUnix(false)
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
@@ -715,12 +732,7 @@ func newStandaloneFixture(t *testing.T, resolver unixidentity.Resolver) *standal
 		return "/run/defenseclaw-hook/hook.sock", 995, nil
 	}
 	enterpriseHookWorkerLog = io.Discard
-	// The fixture's accounts exist only in its resolver. The real fresh
-	// directory read (dscl on macOS) has no record of alice or bob on the
-	// test machine and would retire their pending cleanups (r105
-	// GAP-2323), so no fixture account is confirmed gone unless a test
-	// says so.
-	enterpriseHookCleanupAccountGone = func(context.Context, string) bool { return false }
+	stubNoFreshAccountProof(t)
 	enterprisehooks.SetStandaloneUnix(true)
 	enterprisehooks.SetStandaloneResolver(resolver)
 	enterpriseHookWorkerRunner = func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
@@ -2041,6 +2053,7 @@ func TestStandaloneUnixRemovedAccountRowIsExcused(t *testing.T) {
 		enterpriseHooksEnumerateLocalAccounts, enterpriseHooksEnumerateDirectoryConfigured = previousLocal, previousDirectory
 		enterprisehooks.SetStandaloneResolver(nil)
 	})
+	stubNoFreshAccountProof(t)
 	cfg = &config.Config{
 		DeploymentMode: managed.DeploymentModeManagedEnterprise,
 		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},

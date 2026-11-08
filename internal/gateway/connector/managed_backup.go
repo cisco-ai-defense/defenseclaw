@@ -663,8 +663,9 @@ func codexNativeCommandsForLauncher(oldLauncher string) map[string]struct{} {
 	add(legacyWindowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
 	for _, contract := range builtinHookContracts["codex"] {
 		for _, event := range contract.Events {
-			add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, oldLauncher))
-			add(windowsCodexHookCommandForBinaryEvent(event, contract.ContractID, oldLauncher))
+			for _, command := range windowsCodexPerUserHookCommands(event, contract.ContractID, oldLauncher) {
+				add(command)
+			}
 		}
 	}
 	return commands
@@ -927,6 +928,161 @@ func RestoreManagedFileBackups(dataDir, home string) (restored, kept []string, e
 		return nil
 	})
 	return restored, kept, err
+}
+
+// RestoreManagedFileBackupsForRollback uses the saved newer install's
+// connector backup list after the older data directory is back in place.
+// Every connector absent from the restored configuration is eligible,
+// including one the restored gateway does not know. Each backup still
+// requires its exact post-setup file hash, so later operator
+// edits remain in place for the normal surgical prune to handle.
+func RestoreManagedFileBackupsForRollback(
+	savedDataDir, currentDataDir, home string, configured map[string]bool, onlyConnector string,
+) (restored, kept []string, err error) {
+	current := newManagedDataDir(currentDataDir)
+	err = forEachManagedFileBackup(savedDataDir, func(b managedFileBackup) error {
+		if configured[strings.ToLower(strings.TrimSpace(b.Connector))] ||
+			(onlyConnector != "" && !strings.EqualFold(b.Connector, onlyConnector)) {
+			return nil
+		}
+		if !managedBackupRollbackTargetUsable(b, current, home) {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		if b.PostSHA256 == "" {
+			kept = append(kept, b.Path)
+			return nil
+		}
+		if !managedBackupDigestMatches(b) {
+			return fmt.Errorf("restore %s: connector backup does not match its saved digest", b.Path)
+		}
+		ok, restoreErr := restoreManagedFileBackupIfUnchanged(savedDataDir, b.Connector, b.LogicalName, b.Path)
+		switch {
+		case restoreErr != nil:
+			return fmt.Errorf("restore %s: %w", b.Path, restoreErr)
+		case ok:
+			restored = append(restored, b.Path)
+		default:
+			kept = append(kept, b.Path)
+		}
+		return nil
+	})
+	return restored, kept, err
+}
+
+func managedBackupDigestMatches(b managedFileBackup) bool {
+	return managedFileSnapshotHash(b.PristineBytes, b.Existed) == b.PristineSHA256
+}
+
+// managedBackupRollbackTargetUsable reports whether a rollback may act on the
+// agent file the record names: an absolute path inside the account home and
+// outside the data directory now in place. Restore and verification share it,
+// so a record the restore would not touch is never counted as proof.
+func managedBackupRollbackTargetUsable(b managedFileBackup, current *managedDataDir, home string) bool {
+	return managedBackupTargetInside(home, b.Path) && !current.contains(b.Path)
+}
+
+// managedDataDir is the data directory a rollback is putting back, resolved
+// once: as given (a relative folder is taken from the working directory),
+// with its links resolved, and as the directory it physically is.
+type managedDataDir struct {
+	abs      string
+	resolved string
+	info     os.FileInfo
+}
+
+// newManagedDataDir resolves dir once. A blank or unresolvable dir yields a
+// matcher that contains nothing; a dir that does not exist yet is compared by
+// spelling only.
+func newManagedDataDir(dir string) *managedDataDir {
+	if strings.TrimSpace(dir) == "" {
+		return &managedDataDir{}
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return &managedDataDir{}
+	}
+	d := &managedDataDir{abs: abs, resolved: resolveExistingPrefix(abs)}
+	if info, err := os.Stat(abs); err == nil && info.IsDir() {
+		d.info = info
+	}
+	return d
+}
+
+// contains reports whether path is inside the data directory by spelling, by
+// resolved links, or by identity: a folder the filesystem opens through a
+// different spelling (a case variant on a case-insensitive volume, a link)
+// is the same directory whatever its components are called.
+func (d *managedDataDir) contains(path string) bool {
+	if d == nil || d.abs == "" || !filepath.IsAbs(path) {
+		return false
+	}
+	if managedBackupTargetInside(d.abs, path) ||
+		managedBackupTargetInside(d.resolved, resolveExistingPrefix(path)) {
+		return true
+	}
+	if d.info == nil {
+		return false
+	}
+	for cur := filepath.Dir(filepath.Clean(path)); ; {
+		if info, err := os.Stat(cur); err == nil && os.SameFile(info, d.info) {
+			return true
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return false
+		}
+		cur = parent
+	}
+}
+
+// resolveExistingPrefix resolves links in the longest existing leading part
+// of path and keeps the rest as written, so a file that does not exist yet
+// still lands in the folder its parent really is.
+func resolveExistingPrefix(path string) string {
+	path = filepath.Clean(path)
+	rest := ""
+	for cur := path; ; {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return path
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
+}
+
+// VerifyManagedFileBackups reads every connector backup record in dataDir and
+// returns how many name an agent file a rollback can restore: an absolute path
+// inside home and outside currentDataDir. A record that does not load, does
+// not sit where its connector and name put it, does not match its saved
+// digest, or names a path that is empty, relative or inside currentDataDir is
+// an error. A record for an absolute path outside home (a connector whose
+// config root the operator moved) is valid but is left alone by the restore,
+// so it is neither proof nor a veto: the other records decide. A nil error
+// with a positive count therefore means every record is sound and at least
+// one is usable. Rollback cleanup that has no config.yaml to go by needs that
+// proof before it removes anything.
+func VerifyManagedFileBackups(dataDir, currentDataDir, home string) (int, error) {
+	count := 0
+	current := newManagedDataDir(currentDataDir)
+	err := forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		usable := managedBackupRollbackTargetUsable(b, current, home)
+		if !usable && (!filepath.IsAbs(b.Path) || current.contains(b.Path)) {
+			return fmt.Errorf("connector backup %q does not name an agent file a rollback can restore", b.Path)
+		}
+		if !managedBackupDigestMatches(b) {
+			return fmt.Errorf("connector backup %s does not match its saved digest", b.Path)
+		}
+		if usable {
+			count++
+		}
+		return nil
+	})
+	return count, err
 }
 
 // ManagedFileBackupTargets lists the agent file each connector backup record

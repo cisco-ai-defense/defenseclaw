@@ -27,6 +27,15 @@ import (
 	"golang.org/x/time/rate"
 )
 
+// newManagedHookAuditFixtureInDir is the managed claudecode audit fixture with
+// its stores under directory. Only this test runs it (it is not built on
+// Windows), so it lives here, where the unused check on Windows sees no helper
+// without a caller.
+func newManagedHookAuditFixtureInDir(t *testing.T, directory string) managedHookAuditFixture {
+	t.Helper()
+	return newManagedHookAuditFixtureForExportingToInDir(t, directory, "claudecode", nil, nil)
+}
+
 // TestGAP0490SandboxReceiptCapacity sends 400 relayed tool calls, 20 at a
 // time and inside the documented per-binding hook rate (above that rate the
 // ingress answers 429 by design), the way the sandbox hook sends them
@@ -44,7 +53,14 @@ import (
 // unacknowledged.
 func TestGAP0490SandboxReceiptCapacity(t *testing.T) {
 	const calls, parallel = 400, 20
-	f := newManagedHookAuditFixture(t, nil)
+	// This disposable fixture writes hundreds of audit and receipt rows.
+	// Keep its synchronous writes off the shared build disk when an
+	// adequately sized private memory-backed test directory is available.
+	scratch := sandboxReceiptScratchDir(t)
+	if scratch == "" {
+		scratch = t.TempDir()
+	}
+	f := newManagedHookAuditFixtureInDir(t, scratch)
 	bindings, err := sandboxauth.OpenFileStore(sandboxauth.DefaultStorePath(t.TempDir()), sandboxauth.WithRefreshInterval(0))
 	if err != nil {
 		t.Fatal(err)

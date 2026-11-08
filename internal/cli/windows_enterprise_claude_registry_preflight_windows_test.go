@@ -57,10 +57,15 @@ func TestWindowsEnterpriseStandaloneClaudeRegistryPolicyPreflight(t *testing.T) 
 					"nothing was changed",
 					"Delete that registry value",
 					"guardrail.connectors.claudecode.enabled: false",
+					"run the same command again",
 				} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("refusal %q does not say %q", err, want)
 					}
+				}
+				// Setup is not installed on the computer (cowork-1-0-8 GAP-0095).
+				if strings.Contains(err.Error(), "Setup") {
+					t.Errorf("refusal %q names Setup", err)
 				}
 			}
 		})

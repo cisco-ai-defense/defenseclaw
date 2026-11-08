@@ -152,18 +152,45 @@ func (c *Config) activeConnector() string {
 		return normalizeConnectorKey(name)
 	}
 	if roster := c.rosterConnectorNames(); len(roster) > 0 {
-		mode := normalizeConnectorKey(string(c.Claw.Mode))
-		for _, name := range roster {
-			if name == mode {
-				return mode
-			}
-		}
-		return roster[0]
+		return rosterPrimary(roster, c.Claw.Mode)
 	}
 	if mode := strings.TrimSpace(string(c.Claw.Mode)); mode != "" {
 		return normalizeConnectorKey(mode)
 	}
 	return ""
+}
+
+// rosterPrimary is the connector a roster resolves to when no
+// guardrail.connector names one: claw.mode when the roster lists it, else the
+// first name in sorted order. roster is normalized and sorted
+// (rosterConnectorNames). The Python Config.active_connector follows the same
+// rule; test/testdata/active-connectors.json pins both (GAP-0707).
+func rosterPrimary(roster []string, mode ClawMode) string {
+	want := normalizeConnectorKey(string(mode))
+	for _, name := range roster {
+		if name == want {
+			return want
+		}
+	}
+	return roster[0]
+}
+
+// migrateConnectorSelection settles the connector fields a load reads from. A
+// roster with no guardrail.connector boots the connector claw.mode names when
+// the roster lists it (rosterPrimary), as the Python CLI does (GAP-0707).
+// until 1.1: a retired singular connector, and every Secure Client config,
+// keep the first sorted roster key that dropRetiredConnectorSettings picks;
+// Secure Client selection does not change.
+func migrateConnectorSelection(cfg *Config, secureClient bool) {
+	unnamed := strings.TrimSpace(cfg.Guardrail.Connector) == ""
+	migrateLegacyConnectorIDs(cfg)
+	dropRetiredConnectorSettings(cfg)
+	if unnamed && !secureClient {
+		if roster := cfg.rosterConnectorNames(); len(roster) > 0 {
+			cfg.Guardrail.Connector = rosterPrimary(roster, cfg.Claw.Mode)
+		}
+	}
+	canonicalizeConnectorSelection(cfg)
 }
 
 // activeConnectors returns the configured connector roster for this config, in
@@ -177,6 +204,27 @@ func (c *Config) activeConnectors() []string {
 		return names
 	}
 	return []string{c.activeConnector()}
+}
+
+// GuardrailBootSet is the one decision the gateway boot makes from the roster.
+// multi is true when more than one connector is listed under
+// guardrail.connectors, enabled or not: the shared (multi-connector) boot runs
+// then and the single-connector boot does not. enabled and disabled split the
+// listed connectors by guardrail.connectors.<name>.enabled; enabled is what the
+// shared boot sets up, and a proxy connector in it makes that boot fail.
+// The Python config set check (cmd_config._check_guardrail_connector_roster)
+// refuses the files this decision cannot boot; test/testdata/active-connectors.json
+// pins both sides to the same cases.
+func (c *Config) GuardrailBootSet() (multi bool, enabled, disabled []string) {
+	configured := c.ActiveConnectors()
+	for _, name := range configured {
+		if c.Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
+			enabled = append(enabled, name)
+		} else {
+			disabled = append(disabled, name)
+		}
+	}
+	return len(configured) > 1, enabled, disabled
 }
 
 func (c *Config) rosterConnectorNames() []string {
@@ -1053,6 +1101,20 @@ func openClawBinaryFallbacks() []string {
 	return paths
 }
 
+// CodexHomeRelocated reports whether the calling process runs Codex with a
+// CODEX_HOME other than ~/.codex, so the config.toml it reads is not the one
+// under the user's home (GAP-0686).
+func CodexHomeRelocated() bool {
+	if strings.TrimSpace(os.Getenv("CODEX_HOME")) == "" {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return true
+	}
+	return !strings.EqualFold(connectorEnvHome("CODEX_HOME", ".codex"), filepath.Join(home, ".codex"))
+}
+
 func connectorEnvHome(variable, defaultDir string) string {
 	if configured := strings.TrimSpace(os.Getenv(variable)); configured != "" {
 		configured = expandPath(configured)
@@ -1520,18 +1582,33 @@ func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 	return readMCPServersCodexAt(filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml"), workspaceDir), nil
 }
 
-// readMCPServersCodexAt reads Codex's servers from the user config.toml at
+// readMCPServersCodexAt reads the Codex servers from the user config.toml at
 // userPath and the project layers of workspaceDir.
 func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
+	return readMCPServersCodexLayers(userPath, workspaceDir, false)
+}
+
+// readMCPServersCodexLayers reads the layers readMCPServersCodexAt lists.
+// With effectiveOnly, a project layer Codex does not activate (one the user
+// config does not trust) is left out, so the entries are the servers a
+// session runs rather than the ones discovery should scan.
+func readMCPServersCodexLayers(userPath, workspaceDir string, effectiveOnly bool) []MCPServerEntry {
 	// Codex stores user and project MCP registries in config.toml
 	// [mcp_servers] tables. Candidate project layers are read closest-first so
 	// their entries take precedence, then the user layer fills remaining names.
 	// Filesystem presence is discovery only: project entries carry
 	// TrustRequired because Codex activates them only for trusted projects.
 	cwd := strings.TrimSpace(workspaceDir)
+	var trusted codexProjectTrust
+	if effectiveOnly {
+		trusted = readCodexProjectTrust(userPath)
+	}
 
 	var entries []MCPServerEntry
 	for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
+		if effectiveOnly && !trusted.covers(layer, cwd) {
+			continue
+		}
 		projectPath := filepath.Join(layer, ".codex", "config.toml")
 		if e, err := readMCPFromCodexConfigTOML(projectPath); err == nil {
 			entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
@@ -1541,6 +1618,20 @@ func readMCPServersCodexAt(userPath, workspaceDir string) []MCPServerEntry {
 		entries = append(entries, e...)
 	}
 	return dedupMCPEntries(entries)
+}
+
+// LookupEffectiveCodexMCPToolServer finds the Codex MCP server a tool call
+// names among the servers a session runs: Codex activates the .codex/config.toml
+// of a project only when the user config trusts the project, so an untrusted
+// project file does not override the server of that name in the user config
+// (GAP-0686).
+func LookupEffectiveCodexMCPToolServer(workspaceDir, name string) (MCPServerEntry, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return MCPServerEntry{}, false
+	}
+	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
+	return lookupMCPToolServer("codex", readMCPServersCodexLayers(userPath, workspaceDir, true), name)
 }
 
 func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, trustRequired bool) []MCPServerEntry {
@@ -1604,11 +1695,27 @@ func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
 	if err != nil {
 		return nil, err
 	}
+	return annotateCodexUserMCPEntries(entries, path), nil
+}
+
+// ParseCodexUserMCPServers parses the Codex user config.toml at path, which
+// the caller read: the managed Windows enumerator reads it as LocalSystem,
+// since the gateway service reads nothing in a profile (GAP-0686). It
+// annotates the entries as ReadMCPFromCodexUserConfigTOML does.
+func ParseCodexUserMCPServers(data []byte, path string) ([]MCPServerEntry, error) {
+	entries, err := ParseMCPFromCodexConfigTOML(data)
+	if err != nil {
+		return nil, err
+	}
+	return annotateCodexUserMCPEntries(entries, path), nil
+}
+
+func annotateCodexUserMCPEntries(entries []MCPServerEntry, path string) []MCPServerEntry {
 	entries = annotateCodexMCPEntries(entries, path, "user", false)
 	for index := range entries {
 		entries[index].Bundled = entries[index].codexBuiltinShape
 	}
-	return entries, nil
+	return entries
 }
 
 const maxCodexInventoryConfigBytes = 1 << 20

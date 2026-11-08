@@ -219,7 +219,7 @@ func CheckScannerRuntimeAdmittedSHA256(root, executable, got string) error {
 }
 
 func checkScannerRuntimeAdmitted(root, executable string, digest func() (string, error)) (string, error) {
-	const restore = "run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair to install the payload copy"
+	restore := "run `" + WindowsSetupCommand("/repair", "JSON=1") + "` to install the payload copy. " + WindowsSetupSource
 	admitted, err := ReadScannerRuntimeAdmission(root)
 	if errors.Is(err, ErrScannerRuntimeAdmissionUnproven) {
 		return "", fmt.Errorf("%w: %s is not run: its admission record, from DefenseClaw 1.0.3 or earlier or an "+

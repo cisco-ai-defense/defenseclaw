@@ -17,10 +17,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -176,6 +178,7 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 			}
 		}
 	}
+	env.warnOpenCodePortsRecord(r)
 	if failure := env.lastPackageInstallFailure(); failure != "" {
 		// A package reinstall or upgrade the lifecycle refused (a full disk,
 		// a config it rejected) printed Complete and left status and verify
@@ -194,8 +197,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if strict && pending == nil {
 		// The enumerator may have just rewritten the manifest (a fresh install
 		// enrolls every eligible account): verify the guardian reconcile of it,
-		// not the seconds before it (GAP-2176).
-		l.awaitGuardianManifestReconcile(ctx)
+		// not the seconds before it (GAP-2176), and the retirement of an
+		// account just deleted (GAP-0777).
+		l.awaitGuardianReconcile(ctx)
 	}
 	problems := l.verifyInstalled(ctx, record, strict)
 	l.warnLowDiskSpace()
@@ -844,8 +848,8 @@ func (e *Env) lifecycleCommand(action string) string {
 	return e.gatewayCommand("enterprise " + group + " " + action)
 }
 
-// gatewayCommand is the installed gateway, by its absolute path, with args: the
-// packages put the gateway on no PATH, and sudo's secure_path does not include
+// gatewayCommand is the installed gateway, by its absolute path, with args:
+// it is not on the PATH, and sudo's secure_path does not include
 // the install directory, so a bare defenseclaw-gateway is "command not found".
 func (e *Env) gatewayCommand(args string) string {
 	return filepath.Join(e.Layout.BinDir, binGateway) + " " + args
@@ -1579,3 +1583,63 @@ func auditWriteFailureRecovered(lastFailureAt string, now time.Time) bool {
 	}
 	return now.Sub(at) > auditWriteFailureWindow
 }
+
+// warnOpenCodePortsRecord reports a guardian OpenCode service ports record
+// that cannot be read: the guardian then gives no account a new OpenCode
+// port (REVIEW-gx053-4 MF2). Removing it rebuilds it from the accounts'
+// service.json files on the next pass.
+func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
+	path := filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName)
+	if _, err := os.Lstat(env.P(path)); err != nil {
+		// A non-root status cannot open the root-only guardian folder: say
+		// it could not check, where OpenCode is on the machine policy, so a
+		// silent status never reads as "no problem" (REVIEW-gx053-5 MF2).
+		if !errors.Is(err, fs.ErrNotExist) && openCodePortsRecordGeteuid() != 0 {
+			if _, pluginErr := os.Stat(env.P(filepath.Join(openCodePluginDir(env.Layout), "index.js"))); pluginErr == nil {
+				r.AddWarning("opencode_port_record_unchecked", fmt.Sprintf(
+					"this account cannot read the guardian's OpenCode service ports record %s; while it cannot be read no account gets a new OpenCode port. Check it as root: sudo %s",
+					path, env.lifecycleCommand(ActionStatus)))
+			}
+		}
+		return
+	}
+	state, err := loadOpenCodePortsRecord(env.P(path))
+	unknown := state.Unknown
+	if err != nil {
+		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
+			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
+			path, err, path))
+		return
+	}
+	for _, entry := range state.Contested {
+		uids := make([]string, 0, len(entry.UIDs))
+		for _, uid := range entry.UIDs {
+			uids = append(uids, strconv.Itoa(uid))
+		}
+		if len(entry.UIDs) == 1 {
+			r.AddWarning("opencode_port_contested", fmt.Sprintf(
+				"OpenCode service port %d remains held because uid %s's file could not be replaced in the record's import pass; repair the account file, then release the held mark: sudo %s %d --yes",
+				entry.Port, uids[0], env.lifecycleCommand("opencode-port-clear"), entry.Port))
+			continue
+		}
+		r.AddWarning("opencode_port_contested", fmt.Sprintf(
+			"OpenCode service port %d was named by the files of uids %s when the guardian's record was built, so no account is given it; to release it: sudo %s %d --yes",
+			entry.Port, strings.Join(uids, ", "), env.lifecycleCommand("opencode-port-clear"), entry.Port))
+	}
+	if len(unknown) > 0 {
+		names := make([]string, 0, len(unknown))
+		for _, entry := range unknown {
+			names = append(names, fmt.Sprintf("%s (uid %d): %s (%s); to clear it: %s", entry.User, entry.UID, entry.Path, entry.Reason, entry.Fix))
+		}
+		r.AddWarning("opencode_port_account_unknown", fmt.Sprintf(
+			"the guardian could not read or write the OpenCode service port file of these accounts as the account; each keeps its recorded port, nothing in the record changes, and other accounts are not affected: %s",
+			strings.Join(names, "; ")))
+	}
+}
+
+// openCodePortsRecordGeteuid is os.Geteuid (tests replace it).
+var openCodePortsRecordGeteuid = os.Geteuid
+
+// loadOpenCodePortsRecord is enterprisehooks.LoadUnixOpenCodeServicePortsFull
+// (tests replace it).
+var loadOpenCodePortsRecord = enterprisehooks.LoadUnixOpenCodeServicePortsFull

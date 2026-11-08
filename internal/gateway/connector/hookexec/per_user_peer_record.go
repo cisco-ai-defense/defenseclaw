@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/procidentity"
+	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // perUserPeerReadWait bounds the wait, at the deadline, for the read of the
@@ -116,12 +117,19 @@ func (r *PerUserPeerRecord) wait(wait time.Duration) (perUserPeerProcess, bool) 
 	if r == nil || r.done == nil {
 		return perUserPeerProcess{}, false
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	// A read that has ended is the answer, whatever the wait (a wait of zero
+	// asks only whether the read has ended).
 	select {
 	case <-r.done:
 		return r.peer, r.ok
-	case <-timer.C:
+	default:
+	}
+	expired, stop := proofclock.NewTimer(wait)
+	defer stop()
+	select {
+	case <-r.done:
+		return r.peer, r.ok
+	case <-expired:
 		return perUserPeerProcess{}, false
 	}
 }

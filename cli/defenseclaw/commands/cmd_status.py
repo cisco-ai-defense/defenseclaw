@@ -1007,6 +1007,11 @@ def _print_agents(
     if sidecar_root and enabled_count:
         header = ux._style(f"{enabled_count} configured; hooks refuse the root-run gateway", fg="yellow")
     _status_row("Agents", header)
+    if "openclaw" in actives and _is_enabled("openclaw"):
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+
+        if issue := configured_openclaw_plugin_config_issue(cfg):
+            ux.warn(f"{issue}; OpenClaw may skip reload. Run defenseclaw setup openclaw.")
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:
@@ -1090,17 +1095,6 @@ def _print_agents(
             elif conn in agent_missing:
                 suffix = _connector_state_verb("off") + ux.dim(f" ({_agent_missing_detail(conn)})")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
-            elif conn == "opencode" and not sidecar_down:
-                # With the sidecar stopped the header already says no
-                # connector is enforced; tag none of them (GAP-1871).
-                runtime_state, runtime_detail = _opencode_runtime_truth(
-                    None,
-                    gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
-                    gateway_available=isinstance(health, dict),
-                )
-                suffix = _connector_state_verb(runtime_state)
-                suffix += ux.dim(f" ({runtime_detail})")
-                _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
@@ -1111,11 +1105,24 @@ def _print_agents(
                 suffix = _connector_state_verb("not running") + ux.dim(f" (not enforced: {reason})")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn.strip().lower() in not_started:
-                # Setup failed when the gateway started (GAP-1714).
+                # Setup failed when the gateway started (GAP-1714). This comes
+                # before the OpenCode runtime branch: a connector the gateway
+                # refused has no connector row, so the runtime branch would
+                # call it "unverified" and hide the refusal and its fix.
                 suffix = _connector_state_verb("not running") + ux.dim(
-                    " (setup failed when the gateway started, so it is not enforced; "
-                    f"see gateway.log, then run: defenseclaw setup {conn.strip().lower()})"
+                    f" ({_connector_not_started_detail(health, conn.strip().lower(), conn.strip().lower())})"
                 )
+                _echo_wrapped(f"                {dim_text}{suffix}", 18)
+            elif conn == "opencode" and not sidecar_down:
+                # With the sidecar stopped the header already says no
+                # connector is enforced; tag none of them (GAP-1871).
+                runtime_state, runtime_detail = _opencode_runtime_truth(
+                    None,
+                    gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
+                    gateway_available=isinstance(health, dict),
+                )
+                suffix = _connector_state_verb(runtime_state)
+                suffix += ux.dim(f" ({runtime_detail})")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             else:
                 # A drifted or removed hook registration shows with the
@@ -1520,6 +1527,67 @@ def _connectors_not_started_reasons(health: dict | None) -> dict[str, str]:
         for name, reason in reasons.items()
         if isinstance(name, str) and name.strip() and isinstance(reason, str) and reason.strip()
     }
+
+
+def _connectors_not_started_repairs(health: dict | None) -> dict[str, str]:
+    """The repair each skipped connector's refusal carries, ready to show after its reason (GAP-0731).
+
+    The gateway sends the fix command and the by-hand steps as fields of their
+    own, apart from the reason, so no folder or account name in the reason can
+    move the boundary between them. They hold paths and accounts inside quotes,
+    where a run of spaces is part of the argument, so they are shown exactly as
+    recorded. A repair too long for the health field was left out by the
+    gateway, which says so here and points to the gateway log.
+    """
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    repairs = details.get("connectors_not_started_repairs") if isinstance(details, dict) else None
+    if not isinstance(repairs, dict):
+        return {}
+    shown: dict[str, str] = {}
+    for name, repair in repairs.items():
+        if not isinstance(name, str) or not name.strip() or not isinstance(repair, dict):
+            continue
+        fix, by_hand, omitted = repair.get("fix"), repair.get("by_hand"), repair.get("omitted_bytes")
+        text = ""
+        if isinstance(fix, str) and fix:
+            text += f"; fix: {fix}"
+        if isinstance(by_hand, str) and by_hand:
+            text += f"; then by hand: {by_hand}" if text else f"; by hand: {by_hand}"
+        if isinstance(omitted, int) and not isinstance(omitted, bool) and omitted > 0:
+            text += f"; repair omitted: it is {omitted} bytes, too long for this field; the gateway log has it whole"
+        if text:
+            shown[name.strip().lower()] = text
+    return shown
+
+
+def _connector_recorded_cause(health: dict | None, name: str) -> str:
+    """The reason the gateway recorded for skipping *name*, bounded, followed by
+    its repair as recorded; empty when the gateway recorded no reason.
+
+    The one place status, ``status --json`` and doctor read a refusal's cause
+    and fix from, so none of them falls back to "see gateway.log" while the
+    gateway has already named the folder and the command (GAP-0832).
+    """
+    reason = _connectors_not_started_reasons(health).get(name, "")
+    if not reason:
+        return ""
+    from defenseclaw.commands.cmd_doctor import _bounded_recorded_reason
+
+    return _bounded_recorded_reason(reason, _connectors_not_started_repairs(health).get(name, ""))
+
+
+def _connector_not_started_detail(health: dict | None, name: str, setup_name: str) -> str:
+    """Why a connector the gateway did not start is not enforced, and the fix."""
+    if recorded := _connector_recorded_cause(health, name):
+        return (
+            f"setup failed when the gateway started, so it is not enforced: {recorded}; "
+            f"then run: defenseclaw setup {setup_name}"
+        )
+    return (
+        "setup failed when the gateway started, so it is not enforced; "
+        f"see gateway.log, then run: defenseclaw setup {setup_name}"
+    )
 
 
 def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
@@ -2301,9 +2369,8 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             row["runtime_detail"] = _agent_missing_detail(name)
         if row.get("enabled") and name in not_started:
             row["state"] = "not running"
-            row["runtime_detail"] = removed_agent_reasons.get(name) or (
-                "setup failed when the gateway started, so it is not enforced; "
-                f"run defenseclaw setup {'claude-code' if name == 'claudecode' else name}"
+            row["runtime_detail"] = removed_agent_reasons.get(name) or _connector_not_started_detail(
+                health, name, "claude-code" if name == "claudecode" else name
             )
     if "opencode" in rows and rows["opencode"].get("enabled") and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
@@ -2479,6 +2546,11 @@ def _status_payload(app) -> dict:
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)
+    if any(row.get("name") == "openclaw" and row.get("enabled") for row in payload["connectors"]):
+        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+
+        if issue := configured_openclaw_plugin_config_issue(cfg):
+            payload["openclaw_plugin_config_issue"] = issue
     if (
         not skip_live_health
         and (cowork_row := _cowork_status(cfg, health, gateway_running=health is not None or bool(live_pid)))

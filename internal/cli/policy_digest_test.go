@@ -128,10 +128,10 @@ func TestPolicyDigestRecordedHandEditRecoveryByWindowsDeploymentMode(t *testing.
 	}{
 		{
 			name: "signed bundle", extra: `,"gateway_reported_bundle_id":"b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"`,
-			want: "/repair JSON=1", absent: "/ensure CONFIG=",
+			want: "enterprise windows repair", absent: "/ensure CONFIG=",
 		},
 		{
-			name: "standalone config", want: "ensure with the intended config", absent: "/repair JSON=1",
+			name: "standalone config", want: "ensure with the intended config", absent: "enterprise windows repair",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -189,14 +189,6 @@ class BuildPlanTests(unittest.TestCase):
 
 
 class UninstallCommandTests(unittest.TestCase):
-    def setUp(self) -> None:
-        patcher = patch(
-            "defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall",
-            return_value=None,
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_dry_run_does_not_execute(self):
         runner = CliRunner()
         with patch("defenseclaw.commands.cmd_uninstall._execute_plan") as exec_mock:
@@ -246,12 +238,6 @@ class CoworkPluginLineTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self._data = Path(self._tmp.name) / "data"
         self._data.mkdir()
-        for target in (
-            "defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall",
-        ):
-            patcher = patch(target, return_value=None)
-            patcher.start()
-            self.addCleanup(patcher.stop)
         patcher = patch(
             "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
             return_value=self._data,
@@ -310,82 +296,6 @@ class CoworkPluginLineTests(unittest.TestCase):
         self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
         self.assertLess(flat.index("older plugins may block"), flat.index("dry-run"))
 
-    def _native_request(self):
-        from defenseclaw.commands.windows_native_uninstall import NativeWindowsUninstallRequest
-
-        return NativeWindowsUninstallRequest(
-            platform_name="win32",
-            wipe_data=False,
-            install_root="C:\\Program Files\\DefenseClaw",
-            state_path="state.json",
-            payload_manifest_path="manifest.json",
-            setup_path="C:\\Program Files\\DefenseClaw\\Setup.exe",
-            version="1.0.9",
-            source_commit="0" * 40,
-            state_sha256="0" * 64,
-            payload_manifest_sha256="0" * 64,
-            argv=("Setup.exe", "/uninstall"),
-        )
-
-    def _native_uninstall(self, *args: str, returncode: int | None = None):
-        """Run the native Windows uninstall with Setup stubbed to `returncode`."""
-        from defenseclaw.commands.windows_native_uninstall import NativeWindowsUninstallOutcome
-
-        with (
-            patch(
-                "defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall",
-                return_value=self._native_request(),
-            ),
-            patch(
-                "defenseclaw.commands.windows_native_uninstall.execute_native_windows_uninstall",
-                return_value=NativeWindowsUninstallOutcome(returncode=returncode or 0),
-            ) as execute,
-            patch.object(cmd_uninstall, "_build_plan") as build_plan,
-            patch.object(cmd_uninstall, "_configured_gateway_ports", return_value=frozenset()),
-            patch.object(cmd_uninstall, "_remove_marked_native_otel_left"),
-            patch.object(cmd_uninstall, "_relay_native_setup_removed_connector_leftovers"),
-        ):
-            result = CliRunner().invoke(cmd_uninstall.uninstall_cmd, list(args))
-        build_plan.assert_not_called()
-        return result, " ".join(result.output.split()), execute
-
-    def test_native_windows_dry_run_prints_both_lines(self):
-        # The native Windows path has its own dry-run block (review F2, N1).
-        self._cowork_state()
-        result, flat, execute = self._native_uninstall("--dry-run")
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("authenticated native Windows installation", flat)
-        self.assertIn(self.LINE, flat)
-        self.assertIn("Customize > Plugins, then the ... menu > Remove", flat)
-        self.assertIn("older plugins may block", flat)
-        self.assertIn("dry-run", flat)
-        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
-        self.assertLess(flat.index("older plugins may block"), flat.index("dry-run"))
-        execute.assert_not_called()
-
-    def test_native_windows_real_run_prints_the_full_step_once(self):
-        self._cowork_state()
-        result, flat, _ = self._native_uninstall("--yes", returncode=0)
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(flat.count("older plugins may block"), 1)
-
-    def test_native_windows_restart_required_prints_the_full_step_once(self):
-        # Setup exit 3010 is a successful uninstall that waits for a restart (review N2).
-        self._cowork_state()
-        result, flat, _ = self._native_uninstall("--yes", returncode=3010)
-        self.assertEqual(result.exit_code, 3010, msg=result.output)
-        self.assertIn("restart required", flat)
-        self.assertIn(self.LINE, flat)
-        self.assertEqual(flat.count("older plugins may block"), 1)
-        self.assertLess(flat.index(self.LINE), flat.index("cannot remove its Cowork plugin"))
-
-    def test_native_windows_failed_setup_prints_no_removal_step(self):
-        self._cowork_state()
-        for code in (1603, 5):
-            result, flat, _ = self._native_uninstall("--yes", returncode=code)
-            self.assertEqual(result.exit_code, code, msg=result.output)
-            self.assertNotIn("cannot remove its Cowork plugin", flat)
-
     def test_reset_prints_the_line(self):
         self._cowork_state()
         flat = self._reset()
@@ -415,10 +325,7 @@ class CoworkRemovalNotRecordedTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self._data = Path(self._tmp.name) / "data"
         self._data.mkdir()
-        for target, value in (
-            ("defenseclaw.commands.windows_native_uninstall.prepare_native_windows_uninstall", None),
-            ("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", self._data),
-        ):
+        for target, value in (("defenseclaw.commands.cmd_uninstall.config_module.default_data_path", self._data),):
             patcher = patch(target, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -708,7 +615,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             hook.parent.mkdir(parents=True)
             hook.write_bytes(b"MZ")
             (local / "DefenseClaw" / "InstallerState").mkdir()
-            with patch.object(cmd_uninstall.windows_native_uninstall, "_known_folder_path", return_value=str(local)):
+            with patch.object(cmd_uninstall.legacy_setup_install, "local_app_data", return_value=str(local)):
                 leftovers = cmd_uninstall._windows_setup_leftovers("win32")
                 self.assertEqual(len(leftovers), 2)
                 cmd_uninstall._remove_setup_leftovers(leftovers)
@@ -730,7 +637,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
             copy.write_bytes(b"MZ")
             (runtime / "defenseclaw-hook.exe").write_bytes(b"MZ")
             state = runtime / "hook-runtime-state.json"
-            with patch.object(cmd_uninstall.windows_native_uninstall, "_known_folder_path", return_value=str(local)):
+            with patch.object(cmd_uninstall.legacy_setup_install, "local_app_data", return_value=str(local)):
                 state.write_text(json.dumps({"schema_version": 2, "hook_path": str(copy)}), encoding="utf-8")
                 leftovers = cmd_uninstall._windows_setup_leftovers("win32")
                 self.assertEqual(leftovers, (str(runtime),))
@@ -2881,6 +2788,7 @@ class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
             patch.object(cmd_uninstall, "_remove_data_dir", side_effect=remove_data),
             patch.object(cmd_uninstall, "_remove_empty_plugin_cache"),
             patch.object(cmd_uninstall, "remove_own_api_port_claims") as claims,
+            patch.object(cmd_uninstall, "_configured_claim_ports", return_value=frozenset({18970, 4000})),
             patch.object(cmd_uninstall, "_remove_binaries") as binaries,
             capture_click_output(),
         ):
@@ -2888,7 +2796,7 @@ class ExecutePlanAfterVenvRemovalTests(unittest.TestCase):
 
         self.assertTrue(result.succeeded)
         self.assertEqual([p.name for p in result.phases][-2:], ["data removal", "binary removal"])
-        claims.assert_called_once_with()
+        claims.assert_called_once_with(frozenset({18970, 4000}))
         binaries.assert_called_once_with(plan)
 
 

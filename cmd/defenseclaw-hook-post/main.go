@@ -20,13 +20,20 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 const maxInput = hookexec.MaxPerUserPluginRequest
+
+// peerRefusalOutput is the root-gateway diagnosis printed after a refused
+// listener (a seam for tests: the listener a real refusal needs belongs to
+// another account).
+var peerRefusalOutput = hookexec.PerUserPeerRefusalOutput
 
 const userGuardCapability = "defenseclaw-hook-post guard-user-hook v1\n"
 
@@ -43,6 +50,14 @@ func run(args []string, input io.Reader, output io.Writer) error {
 // runWithPeer is run; peer, when set, receives the process behind the
 // request's connection (hookexec.WithPerUserPeerRecord).
 func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexec.PerUserPeerRecord) error {
+	return runCall(args, input, output, peer, nil)
+}
+
+// postedCall is the path and body of the request a run sent (runCall).
+type postedCall struct{ path, body string }
+
+// runCall is runWithPeer; call, when set, receives the request that was sent.
+func runCall(args []string, input io.Reader, output io.Writer, peer *hookexec.PerUserPeerRecord, call *postedCall) error {
 	if len(args) == 1 && args[0] == "--version" {
 		_, err := fmt.Fprintf(output, "defenseclaw-hook-post version %s (commit=%s, built=%s)\n", version, commit, date)
 		return err
@@ -65,19 +80,9 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 		_, err = output.Write(review)
 		return err
 	}
-	if len(args) == 0 || args[0] != "hook-post" {
-		return fmt.Errorf("expected hook-post subcommand")
-	}
-	flags := flag.NewFlagSet("hook-post", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	apiAddr := flags.String("api-addr", "", "gateway loopback host:port")
-	maxTime := flags.Int("max-time", 10, "maximum request time in seconds")
-	curlOutput := flags.Bool("curl-output", false, "print response body and trailing HTTP code")
-	if err := flags.Parse(args[1:]); err != nil {
+	opts, err := parseHookPostFlags(args)
+	if err != nil {
 		return err
-	}
-	if flags.NArg() != 0 || *apiAddr == "" || *maxTime < 1 || *maxTime > 30 {
-		return fmt.Errorf("invalid per-user hook transport arguments")
 	}
 	data, err := io.ReadAll(io.LimitReader(input, maxInput+1))
 	if err != nil {
@@ -87,7 +92,7 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 		return fmt.Errorf("native hook input is invalid or too large")
 	}
 	var request hookexec.PerUserPluginRequest
-	if *curlOutput {
+	if opts.curlOutput {
 		if !bytes.HasPrefix(data, []byte("DCPOST1\x00")) {
 			return fmt.Errorf("native hook input is invalid or too large")
 		}
@@ -99,7 +104,10 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 	} else if request, err = hookexec.DecodePerUserPluginRequest(data); err != nil {
 		return err
 	}
-	timeout := requestTimeout(*maxTime)
+	timeout := requestTimeout(opts.maxTime)
+	if call != nil {
+		*call = postedCall{path: request.Path, body: request.Body}
+	}
 	if request.Headers == nil {
 		request.Headers = map[string]string{}
 	}
@@ -108,16 +116,47 @@ func runWithPeer(args []string, input io.Reader, output io.Writer, peer *hookexe
 	request.Headers[hookexec.HookAnswerWithinHeader] = strconv.FormatInt(timeout.Milliseconds(), 10)
 	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(context.Background(), peer), timeout)
 	defer cancel()
-	response, err := hookexec.PostPerUserHook(ctx, *apiAddr, request.Path, request.Headers, []byte(request.Body))
+	response, err := hookexec.PostPerUserHook(ctx, opts.apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
 		return err
 	}
 	hookexec.PerUserGatewayRecordObservedAnswer(os.Getenv(hookPostDataDirEnv), peer)
-	if !*curlOutput {
+	if !opts.curlOutput {
 		return json.NewEncoder(output).Encode(response)
 	}
 	_, err = fmt.Fprintf(output, "%s\n%d", response.Body, response.Status)
 	return err
+}
+
+// hookPostFlags are the parsed arguments of the hook-post subcommand.
+type hookPostFlags struct {
+	apiAddr    string
+	maxTime    int
+	curlOutput bool
+}
+
+// parseHookPostFlags is the one reading of the hook-post arguments: the
+// request, and the diagnosis printed after a refused listener, take the
+// address and output mode from it, so every spelling the flag package
+// accepts (name value, name=value, a repeated flag, --curl-output=true)
+// reaches both the same way (rel-1-0-6 GAP-0712).
+func parseHookPostFlags(args []string) (hookPostFlags, error) {
+	if len(args) == 0 || args[0] != "hook-post" {
+		return hookPostFlags{}, fmt.Errorf("expected hook-post subcommand")
+	}
+	flags := flag.NewFlagSet("hook-post", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	var opts hookPostFlags
+	flags.StringVar(&opts.apiAddr, "api-addr", "", "gateway loopback host:port")
+	flags.IntVar(&opts.maxTime, "max-time", 10, "maximum request time in seconds")
+	flags.BoolVar(&opts.curlOutput, "curl-output", false, "print response body and trailing HTTP code")
+	if err := flags.Parse(args[1:]); err != nil {
+		return hookPostFlags{}, err
+	}
+	if flags.NArg() != 0 || opts.apiAddr == "" || opts.maxTime < 1 || opts.maxTime > 30 {
+		return hookPostFlags{}, fmt.Errorf("invalid per-user hook transport arguments")
+	}
+	return opts, nil
 }
 
 // hookPostDeadlineEnv is the shell hook's time left for this request in
@@ -243,7 +282,8 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 	dataDir := os.Getenv(hookPostDataDirEnv)
 	peer := hookexec.NewPerUserPeerRecord()
 	stopObservingStart := observeGatewayStartDuringCall(dataDir, peer)
-	err := runWithPeer(args, input, output, peer)
+	var call postedCall
+	err := runCall(args, input, output, peer, &call)
 	startObservation := stopObservingStart()
 	if err == nil {
 		return 0
@@ -260,7 +300,12 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		return hookexec.PerUserPostOutageExit
 	case hookexec.PerUserPostPeerUnverified(err):
 		// Nothing of the call was sent: the one failure the OpenCode and
-		// Amp plugins send again (GAP-2083).
+		// Amp plugins send again (GAP-2083). The shell hook reads the
+		// root-gateway diagnosis from stdout, as it does from the gateway
+		// CLI hook-post (rel-1-0-6 GAP-0712).
+		if opts, perr := parseHookPostFlags(args); perr == nil && opts.curlOutput {
+			_, _ = io.WriteString(output, peerRefusalOutput(err, opts.apiAddr, dataDir))
+		}
 		return hookexec.PerUserPostPeerUnverifiedExit
 	case hookexec.PerUserPostNoAnswer(err):
 		// A local deadline before the verified connection is not an
@@ -283,16 +328,35 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		} else {
 			// The shell consumes this fixed token only for exit 9. It never
 			// reaches the agent or changes the no-answer decision.
-			for _, arg := range args {
-				if arg == "--curl-output" {
-					_, _ = fmt.Fprint(output, "DCPOSTPROOF1:"+reason)
-					break
-				}
+			if opts, perr := parseHookPostFlags(args); perr == nil && opts.curlOutput {
+				_, _ = fmt.Fprint(output, "DCPOSTPROOF1:"+reason)
 			}
+		}
+		if lateOrdinary(call) {
+			// A gateway that is up and late with a call that names nothing
+			// protected is no reason to deny it (GAP-0518): the shell reads
+			// this status as the outage and follows the outage mode.
+			return hookexec.PerUserPostLateOrdinaryExit
 		}
 		return hookexec.PerUserPostNoAnswerExit
 	}
 	return 1
+}
+
+// lateOrdinary reports a sent Claude Code or Codex tool call that the scan
+// finds ordinary (hookpaths.LateOrdinaryCall). The connector is named by the
+// request path; any other path is not scanned.
+func lateOrdinary(call postedCall) bool {
+	var connector string
+	switch {
+	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
+		connector = "claudecode"
+	case strings.Contains(call.path, "codex"):
+		connector = "codex"
+	default:
+		return false
+	}
+	return hookpaths.LateOrdinaryCall(connector, []byte(call.body))
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {

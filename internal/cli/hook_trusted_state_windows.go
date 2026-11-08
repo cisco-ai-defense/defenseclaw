@@ -60,7 +60,7 @@ func standaloneEnterpriseHookExecutable(executable string) bool {
 	if !strings.EqualFold(filepath.Base(bin), "bin") {
 		return false
 	}
-	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
+	roots, err := windowsManagedLayout.roots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
 		return false
 	}

@@ -23,6 +23,8 @@ assessment.
 
 from __future__ import annotations
 
+import dataclasses
+import io
 import json
 import os
 import stat
@@ -59,7 +61,7 @@ from defenseclaw.scanner.plugin_scanner.types import (
     ScanMetadata,
     ScanResult,
 )
-from defenseclaw.scanner.plugin_scanner.vendor_identity import is_official_provider_tree
+from defenseclaw.scanner.plugin_scanner.vendor_identity import inspect_official_provider_tree
 
 # The C loader is several times faster on manifests; same safe semantics.
 _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
@@ -67,6 +69,45 @@ _YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+# What a published provider release has on its own code (the exec class), and
+# the rules that read what a package declares: dependencies, install scripts
+# and permissions. A published release declares nothing that these rules flag
+# at MEDIUM or above. An identity that rests on an install record alone waives
+# the first and nothing else (see ``_ordinary_scan_unless_vendor_code_only``).
+_PROVIDER_CODE_RULES = frozenset({"SRC-EXEC"})
+_DECLARATION_RULE_PREFIXES = ("DEP-", "SCRIPT-", "PERM-")
+
+
+def _beyond_provider_code(finding: Finding) -> bool:
+    if finding.severity in ("HIGH", "CRITICAL"):
+        return finding.rule_id not in _PROVIDER_CODE_RULES
+    return finding.severity == "MEDIUM" and finding.rule_id.startswith(_DECLARATION_RULE_PREFIXES)
+
+
+def _ordinary_scan_unless_vendor_code_only(
+    target: str, options: PluginScanOptions | None,
+) -> ScanResult | None:
+    """The ordinary scan of an unverified provider tree, or None to admit it.
+
+    The registry could not be asked, so the bytes are not proven: the same
+    analyzers as for any other plugin read the tree, manifest scripts,
+    dependencies and permissions as much as source and protected-file rules.
+    The tree is admitted only when every finding that counts belongs to the
+    class that the published provider code has by itself; any other finding
+    gives the ordinary verdict, in every profile. The judge stays off:
+    it would be a network call on an outage.
+    """
+
+    override = {**((options.llm_override if options else None) or {}), "enabled": False}
+    ordinary = scan_plugin(
+        target,
+        dataclasses.replace(
+            options or PluginScanOptions(), disable_vendor_identity=True, llm_override=override,
+        ),
+    )
+    return ordinary if any(_beyond_provider_code(f) for f in ordinary.findings) else None
 
 
 def scan_plugin(
@@ -91,12 +132,6 @@ def scan_plugin(
             [],
             start_ms,
             ScanMetadata(manifest_name="defenseclaw"),
-        )
-
-    if not (options and options.include_self) and is_official_provider_tree(target):
-        return build_result(
-            target, [], start_ms,
-            ScanMetadata(manifest_name="@openclaw/amazon-bedrock-provider"),
         )
 
     # --- Load policy ---
@@ -124,6 +159,54 @@ def scan_plugin(
 
     # Profile from options overrides policy profile
     profile = (options.profile if options and options.profile else None) or policy.profile
+
+    if (profile in ("default", "permissive")
+            and policy.profile in ("default", "permissive")
+            and not (options and (options.include_self or options.disable_vendor_identity))):
+        official = inspect_official_provider_tree(
+            target, data_dir=options.data_dir if options else "",
+        )
+        if official is not None and official.unverified:
+            ordinary = _ordinary_scan_unless_vendor_code_only(target, options)
+            if ordinary is not None:
+                return ordinary
+        if official is not None:
+            findings = audit_skipped_dirs_for_native(target)
+            if official.possible_peer:
+                findings.append(make_finding(
+                    len(findings) + 1,
+                    rule_id="VENDOR-PEER-POSSIBLE",
+                    severity="INFO",
+                    confidence=1.0,
+                    title="OpenClaw peer link has possible provenance",
+                    description=(
+                        "Published provider bytes match. The peer link resolves to an "
+                        "OpenClaw package outside protected and state paths; the "
+                        "active runtime package is not verified."
+                    ),
+                    location=os.path.join(target, "node_modules", "openclaw"),
+                    tags=["supply-chain"],
+                ))
+            if official.unverified:
+                findings.append(make_finding(
+                    len(findings) + 1,
+                    rule_id="VENDOR-REGISTRY-UNVERIFIED",
+                    severity="MEDIUM",
+                    confidence=1.0,
+                    title="Provider release not confirmed against the registry",
+                    description=(
+                        "The npm registry could not be reached. The install record names "
+                        "the registry archive of this release; the package files were "
+                        "not compared with it. Scan again when the registry is reachable, "
+                        "or use the strict profile, which does not rely on the record."
+                    ),
+                    location=os.path.join(target, "package.json"),
+                    tags=["supply-chain"],
+                ))
+            return build_result(
+                target, findings, start_ms,
+                ScanMetadata(manifest_name=official.name),
+            )
 
     # --- Load manifest ---
     manifest = _load_manifest(target)
@@ -513,6 +596,14 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
             except OSError:
                 pass
 
+    return _parse_manifest_text(candidate, raw_text)
+
+
+def _parse_manifest_text(candidate: str, raw_text: str) -> dict | None:
+    """Parse manifest text as a scan does: YAML for .yaml/.yml, JSON otherwise.
+
+    Returns None for text that is not a mapping or that the loader refuses.
+    """
     try:
         if candidate.endswith((".yaml", ".yml")):
             data = yaml.load(raw_text, Loader=_YAML_LOADER)
@@ -521,6 +612,31 @@ def _safe_read_manifest(candidate: str, scan_root: str) -> dict | None:
     except (json.JSONDecodeError, ValueError, yaml.YAMLError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def declared_entrypoints(manifests: dict[str, bytes]) -> list[str]:
+    """Entrypoints declared by manifest bytes that the caller already read.
+
+    The gateway watcher must know which files of a shipped plugin a scan can
+    read (a declared entrypoint is read wherever it lives). It asks this
+    module, so the manifest grammar has one reader. manifests maps a candidate
+    path (slash-separated, as in _MANIFEST_CANDIDATES) to the bytes the caller
+    read once. The bytes are decoded and parsed exactly as _safe_read_manifest
+    does (UTF-8 text mode), and the entrypoints of every manifest present are
+    united, which is a superset of what one scan reads. Text the loader refuses
+    declares nothing, as in a scan; bytes that are not UTF-8 raise, as in a scan.
+    """
+    declared: list[str] = []
+    for rel_path, _label in _MANIFEST_CANDIDATES:
+        raw = manifests.get(rel_path.replace(os.sep, "/"))
+        if raw is None:
+            continue
+        with io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8") as handle:
+            data = _parse_manifest_text(rel_path, handle.read())
+        if data is None:
+            continue
+        declared.extend(ep for ep in _manifest_entrypoints(data) if ep not in declared)
+    return declared
 
 
 def _manifest_parent_is_safe(directory: str, rel_path: str, scan_root: str) -> bool:

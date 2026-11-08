@@ -70,7 +70,8 @@ func windowsLocationOrdinaryWriteTarget(target string) bool {
 	if !windowsLocationAbsolute(target) {
 		return false
 	}
-	target = strings.ToLower(strings.ReplaceAll(target, `\`, "/"))
+	// The extended-length prefix is no wildcard (rel-1-0-6:GAP-0482).
+	target = windowsLocationWithoutExtendedPrefix(strings.ToLower(strings.ReplaceAll(target, `\`, "/")))
 	parts := strings.Split(target, "/")
 	for i, part := range parts {
 		name := strings.TrimRight(part, ". ")
@@ -97,12 +98,7 @@ func windowsLocationAbsolute(value string) bool {
 }
 
 func windowsLocationCanonical(value string) string {
-	value = strings.ToLower(strings.ReplaceAll(value, `\`, "/"))
-	if strings.HasPrefix(value, "//?/unc/") {
-		value = "//" + strings.TrimPrefix(value, "//?/unc/")
-	} else if strings.HasPrefix(value, "//?/") {
-		value = strings.TrimPrefix(value, "//?/")
-	}
+	value = windowsLocationWithoutExtendedPrefix(strings.ToLower(strings.ReplaceAll(value, `\`, "/")))
 	if len(value) >= 4 && value[0] == '/' && value[2] == '/' &&
 		value[1] >= 'a' && value[1] <= 'z' {
 		value = value[1:2] + ":" + value[2:]
@@ -111,6 +107,16 @@ func windowsLocationCanonical(value string) string {
 		return "/" + path.Clean(value)
 	}
 	return path.Clean(value)
+}
+
+// windowsLocationWithoutExtendedPrefix drops the extended-length prefix of a
+// lower-case, slash-separated path: //?/unc/server/share/x names
+// //server/share/x and //?/c:/x names c:/x.
+func windowsLocationWithoutExtendedPrefix(value string) string {
+	if rest, ok := strings.CutPrefix(value, "//?/unc/"); ok {
+		return "//" + rest
+	}
+	return strings.TrimPrefix(value, "//?/")
 }
 
 func windowsLocationResolve(value, current string, input actionfacts.Input, dialect actionfacts.Dialect) (string, bool) {
@@ -169,8 +175,8 @@ func windowsLocationAuthorizedKeys(target string, input actionfacts.Input) bool 
 		// On real Windows, file identity also covers an 8.3 or UNC spelling
 		// of an existing directory. Synthetic tests use the path comparison.
 		if runtime.GOOS == "windows" && path.Base(target) == name {
-			gotDir, err1 := os.Stat(filepath.FromSlash(path.Dir(target)))
-			homeDir, err2 := os.Stat(filepath.FromSlash(path.Dir(protected)))
+			gotDir, err1 := hookpaths.Stat(filepath.FromSlash(path.Dir(target)))
+			homeDir, err2 := hookpaths.Stat(filepath.FromSlash(path.Dir(protected)))
 			if err1 == nil && err2 == nil && os.SameFile(gotDir, homeDir) {
 				return true
 			}

@@ -1,0 +1,176 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+"""GAP-0788: root-owned state that stops the gateway start of this account.
+
+A gateway that ran under sudo and stopped leaves root-owned state behind. The
+blocker scan reads it with ``lstat``, so the tests stand in for the owner of
+the files they list (an ordinary user cannot create root-owned ones).
+"""
+
+from __future__ import annotations
+
+import os
+import shlex
+import stat
+import subprocess
+
+import pytest
+from defenseclaw import file_permissions as fp
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="a root caller never sees root-owned leftovers",
+)
+
+
+def _write(directory, name, mode):
+    path = directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}")
+    path.chmod(mode)
+    return path
+
+
+def _owned_by_root(monkeypatch, *paths):
+    real = os.lstat
+    owned = {os.fspath(p) for p in paths}
+
+    def lstat(path, *args, **kwargs):
+        info = real(path, *args, **kwargs)
+        if os.fspath(path) in owned:
+            fields = list(info)
+            fields[stat.ST_UID] = 0
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(fp.os, "lstat", lstat)
+
+
+def test_root_files_of_any_mode_block_and_loose_ones_are_flagged(tmp_path, monkeypatch):
+    lock = _write(tmp_path, "hook_contract_lock.json", 0o600)
+    active = _write(tmp_path, "active_connector.json", 0o644)
+    _write(tmp_path, "application_protection_state.json", 0o600)  # owned by this account
+    _owned_by_root(monkeypatch, lock, active)
+
+    blockers, loose = fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=True)
+
+    assert blockers == ["hook_contract_lock.json", "active_connector.json"]
+    assert loose == [str(active)]
+
+
+def test_the_sudo_leftovers_row_still_names_private_files_only(tmp_path, monkeypatch):
+    lock = _write(tmp_path, "hook_contract_lock.json", 0o600)
+    active = _write(tmp_path, "active_connector.json", 0o644)
+    _owned_by_root(monkeypatch, lock, active)
+
+    assert fp.sudo_runtime_leftover_relpaths(tmp_path) == ["hook_contract_lock.json"]
+
+
+def test_a_root_owned_store_this_account_cannot_use_is_named_as_a_whole(tmp_path, monkeypatch):
+    _owned_by_root(monkeypatch, tmp_path)
+    monkeypatch.setattr(fp.os, "access", lambda *_a, **_k: False)
+    blockers, loose = fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=True)
+    assert blockers == [fp.STORE_DIR_ENTRY]
+    # Its files are invisible, so the store is also listed as a folder to sweep.
+    assert loose == [os.fspath(tmp_path) + os.sep]
+
+    # The benign twin: the same owner with write access to the store is no blocker.
+    monkeypatch.setattr(fp.os, "access", lambda *_a, **_k: True)
+    assert fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=True) == ([], [])
+
+
+def test_discovery_state_blocks_only_while_discovery_is_enabled(tmp_path, monkeypatch):
+    state = _write(tmp_path, "ai_discovery_state.json", 0o600)
+    _owned_by_root(monkeypatch, state)
+
+    assert fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=False) == ([], [])
+    assert fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=True) == (["ai_discovery_state.json"], [])
+
+
+def test_a_root_owned_pid_record_in_the_install_home_blocks_a_moved_store(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    home = tmp_path / "home"
+    stale = _write(store, "gateway.pid", 0o600)  # the start reads the record from the home, not here
+    pid = _write(home, "gateway.pid", 0o600)
+    _write(home, "device.key", 0o600)  # root-owned in a home the store left: not read
+    _owned_by_root(monkeypatch, stale, pid, home / "device.key")
+
+    blockers, loose = fp.root_owned_start_blockers(store, ai_discovery_enabled=True, pid_dir=home)
+
+    assert blockers == [str(pid)]
+    assert loose == []
+    # With the store and the install home one folder, the record is read from it.
+    assert fp.root_owned_start_blockers(store, ai_discovery_enabled=True, pid_dir=store)[0] == ["gateway.pid"]
+
+
+def test_the_hook_files_are_read_from_the_store_not_the_install_home(tmp_path, monkeypatch):
+    store = tmp_path / "store"
+    home = tmp_path / "home"
+    old_token = _write(home, "hooks/.hook-old.token", 0o600)
+    new_token = _write(store, "hooks/.hook-new.token", 0o600)
+    _owned_by_root(monkeypatch, old_token, home / "hooks", new_token)
+
+    blockers, _ = fp.root_owned_start_blockers(store, ai_discovery_enabled=True, pid_dir=home)
+
+    assert blockers == ["hooks/.hook-new.token"]
+    # The benign twin: nothing root-owned under the store, a stale hooks folder in the old home.
+    new_token.unlink()
+    assert fp.root_owned_start_blockers(store, ai_discovery_enabled=True, pid_dir=home) == ([], [])
+
+
+def test_an_account_owned_store_has_no_blockers(tmp_path):
+    for name in fp.SUDO_RUNTIME_LEFTOVER_NAMES:
+        _write(tmp_path, name, 0o600)
+    _write(tmp_path, "hooks/.hook-abc.token", 0o600)
+
+    assert fp.root_owned_start_blockers(tmp_path, ai_discovery_enabled=True, pid_dir=tmp_path) == ([], [])
+    assert fp.root_owned_start_blockers(tmp_path / "missing", ai_discovery_enabled=True) == ([], [])
+
+
+def _local_chain_steps(command: str) -> list[str]:
+    """The printed steps this account can run itself: not sudo, not the start."""
+    return [step for step in command.split(" && ") if not step.startswith("sudo ") and "defenseclaw-gateway start" not in step]
+
+
+def test_chain_restores_owner_access_so_the_files_are_usable(tmp_path, monkeypatch) -> None:
+    """The owner return alone leaves a mode 000 file (or 044, once loosened) unreadable.
+
+    The printed chain restores the owner bits (group and other untouched), then
+    takes group and other access away from the loose one. The steps run for
+    real on files of this account, in the order they are printed.
+    """
+    from defenseclaw.commands import cmd_doctor
+
+    home = tmp_path / "install home"
+    unreadable = _write(home, "active_connector.json", 0)
+    loose = _write(home, "hook_contract_lock.json", 0o044)
+    token = _write(home, "hooks/.hook-a.token", 0)
+    (home / "hooks").chmod(0)
+    monkeypatch.setattr(cmd_doctor, "_root_gateway_install_home", lambda _cfg: os.fspath(home))
+    monkeypatch.setattr(cmd_doctor, "_root_gateway_moved_store", lambda: ("", "", False))
+    try:
+        command = cmd_doctor._root_gateway_return_and_start_command(None, (os.fspath(loose),))
+        local = _local_chain_steps(command)
+        owned = shlex.quote(os.fspath(home))
+        assert command.startswith(f'sudo chown -R "$(id -un)" {owned} && chmod -R u+rwX {owned} && chmod go-rwx ')
+        assert len(local) == 2, local
+        subprocess.run(["sh", "-c", " && ".join(local)], check=True)
+        for path in (unreadable, loose, token):
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600, path
+            assert path.read_text() == "{}"
+    finally:
+        (home / "hooks").chmod(0o700)
+
+
+def test_chain_without_named_files_restores_owner_access_on_what_it_returns(monkeypatch, tmp_path) -> None:
+    """Status and the Sidecar API row know no file: the chain is still the same."""
+    from defenseclaw.commands import cmd_doctor
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(cmd_doctor, "_root_gateway_install_home", lambda _cfg: os.fspath(home))
+    monkeypatch.setattr(cmd_doctor, "_root_gateway_moved_store", lambda: ("", "", False))
+    quoted = shlex.quote(os.fspath(home))
+    assert cmd_doctor._root_gateway_return_and_start_command(None).endswith(
+        f"{quoted} && chmod -R u+rwX {quoted} && defenseclaw-gateway start"
+    )

@@ -421,6 +421,14 @@ def _transact(
     validate_candidate(target, candidate)
     if check_candidate is not None:
         check_candidate(target, candidate)
+    if decided is not None:
+        # Every ordinary write that turns protection on is judged here, whatever
+        # check the caller also supplies, so no command can save a roster the
+        # gateway refuses to boot (GAP-0588). A migration or restore (as_is)
+        # writes the bytes it was given.
+        from defenseclaw.guardrail_roster import check_guardrail_activation
+
+        check_guardrail_activation(target, candidate)
     # A hand edit does not take config.yaml.lock. Recheck the exact source
     # bytes after validation before installing the candidate.
     latest, _, latest_exists = _read_current(target)
@@ -898,6 +906,13 @@ def pack_pin_repair(message: str, *, files_digest: str = "<files digest>") -> st
 
 
 def plain_error(exc: BaseException, *, value: Any = None, directory: str = "") -> str:
+    """:func:`_plain_error_text` plus the advice the gateway check attached (GAP-0099)."""
+    text = _plain_error_text(exc, value=value, directory=directory)
+    note = getattr(exc.__cause__, "note", "") or getattr(exc, "note", "")
+    return text + note if isinstance(note, str) and note and note not in text else text
+
+
+def _plain_error_text(exc: BaseException, *, value: Any = None, directory: str = "") -> str:
     """A refused change in plain words: the key and what to do about it.
 
     The validators report a JSON path, a bracketed error code and pointers to

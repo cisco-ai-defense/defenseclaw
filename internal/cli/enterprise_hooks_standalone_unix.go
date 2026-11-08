@@ -162,32 +162,11 @@ func lockEnterpriseHookReconcile(ctx context.Context) (func(), error) {
 	if err := ensureEnterpriseHookStandaloneAuthDir(dir); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, enterpriseHookReconcileLockFile)
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
+	unlock, err := enterprisehooks.LockUnixGuardianReconcile(ctx, dir, enterpriseHookReconcileLockWait)
 	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: open reconcile lock: %w", err)
+		return nil, fmt.Errorf("enterprise hooks: %w", err)
 	}
-	deadline := time.Now().Add(enterpriseHookReconcileLockWait)
-	for {
-		err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
-			_ = file.Close()
-			return nil, fmt.Errorf("enterprise hooks: another reconcile holds %s: %w", path, err)
-		}
-		select {
-		case <-ctx.Done():
-			_ = file.Close()
-			return nil, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
-	return func() {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		_ = file.Close()
-	}, nil
+	return unlock, nil
 }
 
 // ensureEnterpriseHookStandaloneAuthDir creates or re-hardens the
@@ -676,6 +655,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	if err != nil {
 		return run, err
 	}
+	previousState, previousStateExists, previousStateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
 	run.ManifestSHA256 = manifestSHA256
 	// until 1.1: the OpenHands/OmniGent rows a 1.0.2-1.0.4 enumerator wrote
 	// are not enrolled targets (GAP-2504).
@@ -695,6 +675,24 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	}
 	registry := newEnterpriseHooksConnectorRegistry()
 	bindings := loadEnterpriseHookUnixBindings()
+	priorUIDs := map[string][]int{}
+	if previousStateErr == nil && previousStateExists {
+		for _, prior := range previousState.Results {
+			if key := enterpriseHookProtectedTargetKey(prior); key != "" {
+				priorUIDs[key] = append(priorUIDs[key], prior.UID)
+			}
+		}
+	}
+	if authorization, exists, err := loadEnterpriseHookGuardianAuthorization(cfg.DataDir); err == nil && exists {
+		for _, prior := range authorization.ProtectedTargets {
+			if key := enterpriseHookProtectedTargetKey(prior); key != "" {
+				priorUIDs[key] = append(priorUIDs[key], prior.UID)
+			}
+		}
+	}
+	for key, binding := range bindings.Bindings {
+		priorUIDs[key] = append(priorUIDs[key], binding.UID)
+	}
 	machinePolicy := enterpriseHookStandaloneMachinePolicySet()
 	// Remove DefenseClaw's own registrations from the homes of targets the
 	// manifest no longer enrolls, as each user, before this run's state
@@ -734,6 +732,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			UserHome:  strings.TrimSpace(target.UserHome),
 			Connector: strings.TrimSpace(target.Connector),
 		}
+		proofRow := row
+		if target.UID == nil {
+			proofRow.UID = enterpriseHookGuardianPriorUID(priorUIDs[enterpriseHookProtectedTargetKey(row)]...)
+		}
 		pendingRow := func(reason string) {
 			row.Pending = true
 			rows = append(rows, row)
@@ -748,6 +750,25 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			}
 		}
 		account, pendingReason, err := resolveEnterpriseHookStandaloneAccount(target, resolver)
+		if enterpriseHookGuardianTargetRemoved(ctx, target, proofRow, err) {
+			row.Removed = true
+			row.RevokeProtection = true
+			switch {
+			case target.UID != nil && *target.UID > 0:
+				row.UID = *target.UID
+			case proofRow.UID > 0:
+				row.UID = proofRow.UID
+			case account.UID > 0:
+				row.UID = account.UID
+			default:
+				if binding, ok := bindings.Bindings[enterpriseHookProtectedTargetKey(row)]; ok {
+					row.UID = binding.UID
+				}
+			}
+			row.Error = fmt.Sprintf("enterprise hooks: target account %q does not exist: %s", row.User, errEnterpriseHookTargetNotFound)
+			rows = append(rows, row)
+			continue
+		}
 		if reason := enterpriseHookTargetNoHomeReason(err); reason != "" {
 			pendingRow(reason)
 			continue
@@ -953,6 +974,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			Mode:                enterpriseHookWorkerModeVerifyOrRepair,
 			PreviouslyProtected: previousProtection.PreviouslyProtected,
 			Options:             enterpriseHookWorkerOptionsFrom(opts),
+			PriorCredentials:    enterpriseHookPriorUserTokens(cfg.DataDir, target.Connector, identity),
 		})
 	}
 
@@ -1133,6 +1155,10 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	writeEnterpriseHookGuardianNotices(enterpriseHookWorkerLog, cfg.DataDir, notices)
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, manifestSHA256, rows, failures, true)
+	if stateErr == nil {
+		removed := logEnterpriseHookRemovedTransitions(enterpriseHookWorkerLog, previousState.Results, rows)
+		reportEnterpriseHookGuardianRemoved(ctx, hookSocket, removed)
+	}
 	if stateErr == nil && bindingsErr != nil {
 		stateErr = fmt.Errorf("persist protected target identity bindings: %w", bindingsErr)
 	}
@@ -1170,6 +1196,88 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 // enterpriseHookCredentialKeyID names the per-user credential key a
 // reconcile rendered from; a seam for tests, whose minter reads no key.
 var enterpriseHookCredentialKeyID = currentEnterpriseHookUserTokenKeyID
+
+// enterpriseHookPriorUserTokens returns a target credentials from the key
+// of the held credential rotation that this run does not render from: the
+// committed key while a prepare renders the staged one, the staged key while
+// a rollback renders the committed one. They are the credentials the target
+// held when the rotation previous step reached it, so a rewrite that only
+// replaces them is configuration, not repair. Nil without a rotation whose
+// recorded keys are both present.
+func enterpriseHookPriorUserTokens(dataDir, connectorName, identity string) *enterprisehooks.HookCredentials {
+	transaction, err := loadEnterpriseHookCredentialTransaction(dataDir)
+	if err != nil || transaction == nil {
+		return nil
+	}
+	if validateEnterpriseHookUserTokenKeyLocation(dataDir) != nil {
+		return nil
+	}
+	committed, err := connector.LoadUserScopedTokenKey(dataDir)
+	if err != nil {
+		return nil
+	}
+	next := loadEnterpriseHookRotationNextKey(dataDir, *transaction)
+	key := enterpriseHookPriorUserTokenKey(*transaction, committed, next)
+	if key == "" {
+		return nil
+	}
+	api, err := connector.UserScopedHookAPIToken(key, connectorName, identity)
+	if err != nil {
+		return nil
+	}
+	prior := &enterprisehooks.HookCredentials{APIToken: api}
+	if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
+		if prior.OTLPPathToken, err = connector.UserScopedOTLPPathToken(key, scope, identity); err != nil {
+			return nil
+		}
+	}
+	return prior
+}
+
+// loadEnterpriseHookRotationNextKey reads the transaction next key from
+// where its phase keeps it, with the committed key location and trust
+// checks and the transaction own fingerprint: the staged file while the
+// rotation prepares, and while it rolls back the retiring file the lifecycle
+// renames the staged one to (the staged file itself until that rename).
+// It returns "" when no such key matches the transaction.
+func loadEnterpriseHookRotationNextKey(dataDir string, transaction enterprisehooks.CredentialTransaction) string {
+	type source struct {
+		path func(string) (string, error)
+		load func(string) (string, error)
+	}
+	pending := source{connector.PendingUserScopedTokenKeyPath, connector.LoadPendingUserScopedTokenKey}
+	retiring := source{connector.RetiringUserScopedTokenKeyPath, connector.LoadRetiringUserScopedTokenKey}
+	sources := []source{pending}
+	if transaction.Phase == enterprisehooks.CredentialPhaseRollback {
+		sources = []source{retiring, pending}
+	}
+	for _, src := range sources {
+		path, err := src.path(dataDir)
+		if err != nil || validateEnterpriseHookTokenPathLocation(dataDir, path, "rotation per-user credential key") != nil {
+			continue
+		}
+		if key, err := src.load(dataDir); err == nil && key != "" &&
+			connector.UserScopedTokenKeyFingerprint(key) == transaction.NextKeyID {
+			return key
+		}
+	}
+	return ""
+}
+
+// enterpriseHookPriorUserTokenKey selects the rotation key a run does not
+// render from, or "" when the committed and next keys are not the
+// transaction's two keys.
+func enterpriseHookPriorUserTokenKey(transaction enterprisehooks.CredentialTransaction, committed, staged string) string {
+	if committed == "" || staged == "" ||
+		connector.UserScopedTokenKeyFingerprint(committed) != transaction.PreviousKeyID ||
+		connector.UserScopedTokenKeyFingerprint(staged) != transaction.NextKeyID {
+		return ""
+	}
+	if transaction.RendersNext(transaction.PreviousKeyID, transaction.NextKeyID) {
+		return committed
+	}
+	return staged
+}
 
 // writeEnterpriseHookCredentialAttestation publishes what this reconcile did
 // to each enabled target (enterprisehooks.CredentialAttestation), root-only

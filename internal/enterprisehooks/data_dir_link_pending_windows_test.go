@@ -162,6 +162,58 @@ func TestStandaloneLifecycleValidationSkipsAdministratorOwnedDataDirLink(t *test
 	}
 }
 
+// GAP-0585: the guardian and status name the junction an administrator (or
+// SYSTEM) owns as a link the account does not own, apart from the account's
+// own junction, a plain folder and a missing folder. Nothing it names is read.
+func TestWindowsForeignOwnedDataDirLinkIsDistinctFromAccountOwned(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	sid := currentWindowsTestSID(t)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	if WindowsForeignOwnedDataDirLink(target.UserHome, sid.String()) {
+		t.Fatal("a missing folder was reported as a foreign link")
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if WindowsForeignOwnedDataDirLink(target.UserHome, sid.String()) {
+		t.Fatal("a plain folder was reported as a foreign link")
+	}
+	if err := os.Remove(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	outside, canary := outsideDataDirTree(t, target.UserHome)
+	admin, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plantWindowsAccountJunction(t, dataDir, outside, admin)
+	if !WindowsForeignOwnedDataDirLink(target.UserHome, sid.String()) ||
+		WindowsAccountOwnedDataDirLink(target.UserHome, sid.String()) {
+		t.Fatal("an Administrators-owned junction was not classified as a link the account does not own")
+	}
+	if WindowsForeignOwnedDataDirLink(target.UserHome, admin.String()) ||
+		!WindowsAccountOwnedDataDirLink(target.UserHome, admin.String()) {
+		t.Fatal("the owner of the junction was classified as foreign to it")
+	}
+	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+	if owner, err := windowsPathOwnerNoFollow(dataDir); err != nil || owner == nil || !owner.Equals(admin) {
+		t.Fatalf("junction owner changed: %v, %v", owner, err)
+	}
+}
+
+func TestWindowsAccountOwnDataDirLinkIsNotForeign(t *testing.T) {
+	target := deferredPendingProofFixture(t, true)
+	sid := currentWindowsTestSID(t)
+	dataDir := filepath.Join(target.UserHome, ".defenseclaw")
+	outside, canary := outsideDataDirTree(t, target.UserHome)
+	plantWindowsAccountJunction(t, dataDir, outside, sid)
+	if WindowsForeignOwnedDataDirLink(target.UserHome, sid.String()) ||
+		!WindowsAccountOwnedDataDirLink(target.UserHome, sid.String()) {
+		t.Fatal("the account's own junction (GAP-0193) was classified as foreign")
+	}
+	requireOutsideDataDirTreeUnchanged(t, outside, canary)
+}
+
 func TestSecureClientDeferredOwnDataDirLinkStaysRefused(t *testing.T) {
 	target := deferredPendingProofFixture(t, false)
 	sid := currentWindowsTestSID(t)

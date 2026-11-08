@@ -208,10 +208,6 @@ func verifyPipeClient(pipe windows.Handle, gatewaySID *windows.SID) error {
 	return <-result
 }
 
-// errEnumeratorNotServing says that the as-user pipe does not exist.
-var errEnumeratorNotServing = errors.New("the DefenseClaw hook enumerator service is not serving MCP as-user scans; " +
-	"it starts them once it runs (Setup /repair restarts it)")
-
 // refreshPipeAbsentGrace is how long a refresh waits for the as-user pipe to
 // exist. The pipe exists while the hook enumerator serves it (when all its
 // instances are in use, opening it answers ERROR_PIPE_BUSY instead), so a
@@ -266,12 +262,12 @@ func dial(ctx context.Context, gatewayService string, absentGrace time.Duration)
 		case absentSince.IsZero():
 			absentSince = time.Now()
 		case absentGrace > 0 && time.Since(absentSince) >= absentGrace:
-			return nil, errEnumeratorNotServing
+			return nil, enumeratorNotServing()
 		}
 		select {
 		case <-ctx.Done():
 			if absent {
-				return nil, errEnumeratorNotServing
+				return nil, enumeratorNotServing()
 			}
 			return nil, fmt.Errorf("open %s: %w", name, ctx.Err())
 		case <-time.After(50 * time.Millisecond):

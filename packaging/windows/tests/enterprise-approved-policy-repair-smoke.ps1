@@ -19,9 +19,19 @@ foreach ($name in @(
     'Get-DefenseClawApprovedPolicyPath',
     'Get-DefenseClawApprovedPolicyHash',
     'Get-DefenseClawStandaloneBundleRepairCommand',
+    'Test-DefenseClawStandaloneProfile',
+    'Format-DefenseClawSetupAction',
+    'Format-DefenseClawRepairAction',
     'Get-DefenseClawApprovedPolicySource',
     'Get-DefenseClawRecordedConfigGenerationHash',
     'Get-DefenseClawRepairRollbackApprovedConfigSource',
+    'Get-DefenseClawRecordedConfigGeneration',
+    'ConvertTo-DefenseClawConfigGenerationNumber',
+    'Test-DefenseClawSignedBundleStoreHoldsVersions',
+    'Get-DefenseClawHandEditApprovedConfigSource',
+    'Assert-DefenseClawApprovedConfigProven',
+    'Restore-DefenseClawApprovedConfigOverHandEdit',
+    'ConvertTo-DefenseClawBoundedDiagnostic',
     'Invoke-DefenseClawRepairApprovedPolicyRecovery',
     'Publish-DefenseClawApprovedPolicySources',
     'Install-DefenseClawSourceDescriptor',
@@ -54,6 +64,7 @@ if ($preflightCall -lt 0 -or $installCall -le $preflightCall) {
     throw 'Repair does not validate rollback before the install-like lifecycle'
 }
 
+$script:DefenseClawEnterpriseProfile = 'Standalone'
 $script:SystemSID = 'S-1-5-18'
 $script:AdministratorsSID = 'S-1-5-32-544'
 $script:TrustedInstallerSID = 'S-1-5-80-1'
@@ -62,6 +73,7 @@ $script:DriftManifest = $false
 $script:Copies = 0
 $script:AclWrites = 0
 $script:ValidatedConfigPaths = [Collections.Generic.List[string]]::new()
+$script:ResilienceReasons = [Collections.Generic.List[string]]::new()
 function Get-DefenseClawArtifactPath {
     param($Layout, $Name)
     if ($Name -ceq 'config') { return $Layout.ConfigPath }
@@ -100,6 +112,10 @@ function Set-DefenseClawPathAcl {
     $script:AclWrites++
 }
 function Get-DefenseClawServiceSID { param($ServiceName) return $script:SystemSID }
+function Write-DefenseClawResilienceEvent {
+    param($Marker, $Fields)
+    $script:ResilienceReasons.Add([string]$Fields.reason)
+}
 function Get-DefenseClawStandaloneManifestAdoption {
     param($Layout, $GatewayServiceName, $Activation, $InstalledManifestSHA256)
     return @{ ok = $false }
@@ -184,7 +200,8 @@ try {
             -Sources @{} -Metadata $noRecord -GatewayServiceName 'gateway'
     }
     catch { $refusal = $_.Exception.Message }
-    if ($refusal -notmatch 'Setup /ensure' -or $script:Copies -ne $priorCopies) {
+    if ($refusal -notmatch [regex]::Escape("DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure") -or
+        $refusal -notmatch 'Setup is not installed on this computer' -or $script:Copies -ne $priorCopies) {
         throw 'source-less Repair did not refuse with a working command'
     }
     [IO.File]::WriteAllBytes($script:Layout.ConfigPath, $approvedConfig)
@@ -197,7 +214,8 @@ try {
             -Sources @{} -Metadata $noRecord -GatewayServiceName 'gateway'
     }
     catch { $refusal = $_.Exception.Message }
-    if ($refusal -notmatch 'Setup /ensure' -or $script:Copies -ne $priorCopies) {
+    if ($refusal -notmatch [regex]::Escape("DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure") -or
+        $refusal -notmatch 'Setup is not installed on this computer' -or $script:Copies -ne $priorCopies) {
         throw 'source-less Repair accepted a changed manifest without an approved source'
     }
     $script:DriftManifest = $false
@@ -262,6 +280,227 @@ try {
         $script:Copies -ne $copiesBeforeRefusal -or
         [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "invalid: true`n") {
         throw 'stale approved copy lacked a working bundle-mode recovery command'
+    }
+    # GAP-0743: a hand edit is recorded in config.generation.json for exactly
+    # the bytes now installed. Repair and its rollback must still put the
+    # recorded approved bytes back before the gateway is started, whether the
+    # edit is a comment or a content change, and must record them afterwards.
+    $generationFile = [IO.Path]::Combine($etc, 'config.generation.json')
+    # The hand edit is generation 7. A lifecycle run of this release proved the
+    # approved copy at generation 6 (approved-config.current.json), so by
+    # default the edit directly follows the proven generation (GAP-0779).
+    $proofFile = [IO.Path]::Combine($install, 'approved-config.current.json')
+    function Set-ApprovedProof {
+        param([string]$Json)
+        [IO.File]::WriteAllText($proofFile, $Json)
+    }
+    function Set-HandEditRecord {
+        param([string]$Text, [string]$Actor = 'hand-edit:unattributed', [string]$Proof = 'default', [string]$Previous = 'default')
+        [IO.File]::WriteAllText($script:Layout.ConfigPath, $Text)
+        $hash = (Get-FileHash -LiteralPath $script:Layout.ConfigPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        # A record names the digest of the config it replaced (the approved
+        # config unless a case says otherwise; 'none' leaves the field out).
+        $link = if ($Previous -ceq 'none') { '' }
+        else { ',"previous_config_sha256":"' + $(if ($Previous -ceq 'default') { $record.config } else { $Previous }) + '"' }
+        [IO.File]::WriteAllText($generationFile,
+            ('{"generation":7,"config_sha256":"' + $hash + '","actor":"' + $Actor + '"' + $link + '}'))
+        if ($Proof -ceq 'default') {
+            Set-ApprovedProof ('{"config_sha256":"' + $record.config + '","generation":6}')
+        }
+        $script:DriftConfig = $true
+    }
+    function Assert-ConfigIsApproved {
+        param([string]$Message)
+        if (-not [Linq.Enumerable]::SequenceEqual(
+                [byte[]][IO.File]::ReadAllBytes($script:Layout.ConfigPath), $approvedConfig)) {
+            throw $Message
+        }
+    }
+    foreach ($edit in @(
+        @{ name = 'comment-only'; text = "config_version: 9`n# edited by hand`n" },
+        @{ name = 'content'; text = "config_version: 9`nguardrail:`n  mode: bogus`n" }
+    )) {
+        Set-HandEditRecord -Text $edit.text
+        $copiesBefore = $script:Copies
+        $recovered = @{}
+        Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+            -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig $recovered
+        Assert-ConfigIsApproved "Repair left a $($edit.name) hand edit installed"
+        if ($script:Copies -ne $copiesBefore + 1 -or $recovered['config'] -cne $record.config) {
+            throw "Repair did not report the approved config it restored over a $($edit.name) hand edit"
+        }
+        # Rollback puts the same preimage back; it must not leave the edit.
+        Set-HandEditRecord -Text $edit.text
+        $script:MetadataForPreflight = $metadata
+        Restore-DefenseClawApprovedConfigOverHandEdit -Layout $script:Layout -GatewayServiceName 'gateway'
+        Assert-ConfigIsApproved "rollback restored a $($edit.name) hand edit managed startup refuses"
+    }
+    # Drift from a lifecycle-recorded config (no hand-edit record) reports the
+    # approved bytes it restored too: the guardian may record them as a hand
+    # edit before the config step runs.
+    [IO.File]::WriteAllText($script:Layout.ConfigPath, "config_version: 9`nchanged: true`n")
+    $script:DriftConfig = $true
+    [IO.File]::WriteAllText($generationFile,
+        ('{"config_sha256":"' + $record.config + '","actor":"lifecycle"}'))
+    $recovered = @{}
+    Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+        -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig $recovered
+    Assert-ConfigIsApproved 'Repair left a drifted lifecycle config installed'
+    if ($recovered['config'] -cne $record.config) {
+        throw 'Repair did not report the approved config it restored over drift'
+    }
+    # A reverted edit: the bytes are approved again but the record is still a
+    # hand edit. Nothing is copied, and the approved hash is still reported so
+    # the config step records the lifecycle generation.
+    Set-HandEditRecord -Text ([Text.Encoding]::UTF8.GetString($approvedConfig))
+    $script:DriftConfig = $false
+    $copiesBefore = $script:Copies
+    $recovered = @{}
+    Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+        -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig $recovered
+    if ($script:Copies -ne $copiesBefore -or $recovered['config'] -cne $record.config) {
+        throw 'Repair did not adopt a reverted hand edit through the approved hash'
+    }
+    # Preflight: a running gateway whose installed config is an invalid hand
+    # edit validates the approved copy, not the edit, and changes nothing.
+    Set-HandEditRecord -Text "invalid: true`n"
+    $script:MetadataForPreflight = $metadata
+    $script:ValidatedConfigPaths.Clear()
+    Assert-DefenseClawRepairRollbackConfig -Layout $script:Layout `
+        -Sources @{} -GatewayServiceName 'gateway'
+    if ($script:ValidatedConfigPaths.Count -ne 2 -or
+        [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "invalid: true`n") {
+        throw 'preflight did not validate the approved copy in place of an invalid hand edit'
+    }
+    # Benign twin: an ordinary lifecycle record of the installed bytes is not
+    # a hand edit; nothing is rewritten and nothing is reported.
+    [IO.File]::WriteAllBytes($script:Layout.ConfigPath, $approvedConfig)
+    $script:DriftConfig = $false
+    [IO.File]::WriteAllText($generationFile,
+        ('{"config_sha256":"' + $record.config + '","actor":"lifecycle"}'))
+    $copiesBefore = $script:Copies
+    $recovered = @{}
+    Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+        -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig $recovered
+    Restore-DefenseClawApprovedConfigOverHandEdit -Layout $script:Layout -GatewayServiceName 'gateway'
+    if ($script:Copies -ne $copiesBefore -or $recovered.Count -ne 0) {
+        throw 'a lifecycle-recorded config was rewritten or reported as a hand-edit recovery'
+    }
+    # A deployment that stored a signed bundle cannot prove the approved copy
+    # is current: Repair refuses with the CLI's bundle command, rollback keeps
+    # the restored bytes, and neither changes the installed file.
+    Set-HandEditRecord -Text "config_version: 9`n# edited by hand`n"
+    [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($etc, 'bundles', 'v0001'))
+    $copiesBefore = $script:Copies
+    $refusal = ''
+    try {
+        Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+            -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig @{}
+    }
+    catch { $refusal = $_.Exception.Message }
+    if (-not $refusal.Contains((Get-DefenseClawStandaloneBundleRepairCommand -Layout $script:Layout)) -or
+        $script:Copies -ne $copiesBefore) {
+        throw 'a bundle-managed hand edit was not refused with the bundle repair command'
+    }
+    Restore-DefenseClawApprovedConfigOverHandEdit -Layout $script:Layout -GatewayServiceName 'gateway'
+    if ($script:Copies -ne $copiesBefore -or
+        [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "config_version: 9`n# edited by hand`n") {
+        throw 'rollback replaced a hand edit of a bundle-managed deployment'
+    }
+    [IO.Directory]::Delete([IO.Path]::Combine($etc, 'bundles'), $true)
+    # GAP-0779: the copy is restored over a hand edit only when a lifecycle run
+    # of this release proved it current. No proof, a proof of another copy, a
+    # proof an older build left without a generation, and a proof of an older
+    # generation (a config was applied after it, so the hand edit no longer
+    # directly follows it) all stop Repair and the rollback before anything is
+    # changed, and name the ensure that proves the next copy.
+    $brokenProofs = [ordered]@{
+        'no proof'                       = $null
+        'a proof of another copy'        = ('{"config_sha256":"' + ('0' * 64) + '","generation":6}')
+        'a proof without generation'     = ('{"config_sha256":"' + $record.config + '"}')
+        'a proof of an older generation' = ('{"config_sha256":"' + $record.config + '","generation":5}')
+        'a proof of a later generation'  = ('{"config_sha256":"' + $record.config + '","generation":7}')
+        'a proof that is not JSON'       = 'not json'
+    }
+    foreach ($name in $brokenProofs.Keys) {
+        Set-HandEditRecord -Text "config_version: 9`n# edited by hand`n" -Proof 'none'
+        if ($null -eq $brokenProofs[$name]) {
+            if ([IO.File]::Exists($proofFile)) { [IO.File]::Delete($proofFile) }
+        }
+        else { Set-ApprovedProof $brokenProofs[$name] }
+        $copiesBefore = $script:Copies
+        $refusal = ''
+        try {
+            Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+                -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig @{}
+        }
+        catch { $refusal = $_.Exception.Message }
+        if ($refusal -notlike ("*" + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>') + "*") -or
+            $script:Copies -ne $copiesBefore -or
+            [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "config_version: 9`n# edited by hand`n") {
+            throw "Repair restored the approved copy over a hand edit with $name"
+        }
+        Restore-DefenseClawApprovedConfigOverHandEdit -Layout $script:Layout -GatewayServiceName 'gateway'
+        if ($script:Copies -ne $copiesBefore -or
+            [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "config_version: 9`n# edited by hand`n") {
+            throw "rollback restored the approved copy over a hand edit with $name"
+        }
+    }
+    # A generation record that restarted after the proof (it was lost, and a
+    # build that knows nothing of the proof applied another config) numbers the
+    # hand edit as directly after the proof, but the edit replaced another
+    # config, or no readable record: Repair and the rollback stop the same way.
+    $brokenLinks = [ordered]@{
+        'a hand edit that replaced another config' = ('0' * 64)
+        'a hand edit with no recorded predecessor' = 'none'
+        'a predecessor that is not a digest'      = 'not-a-digest'
+    }
+    foreach ($name in $brokenLinks.Keys) {
+        Set-HandEditRecord -Text "config_version: 9`n# edited by hand`n" -Previous $brokenLinks[$name]
+        $copiesBefore = $script:Copies
+        $refusal = ''
+        try {
+            Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+                -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig @{}
+        }
+        catch { $refusal = $_.Exception.Message }
+        if ($refusal -notlike ("*" + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute config path>') + "*") -or
+            $script:Copies -ne $copiesBefore -or
+            [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "config_version: 9`n# edited by hand`n") {
+            throw "Repair restored the approved copy over $name"
+        }
+        Restore-DefenseClawApprovedConfigOverHandEdit -Layout $script:Layout -GatewayServiceName 'gateway'
+        if ($script:Copies -ne $copiesBefore -or
+            [IO.File]::ReadAllText($script:Layout.ConfigPath) -cne "config_version: 9`n# edited by hand`n") {
+            throw "rollback restored the approved copy over $name"
+        }
+    }
+    # Benign twin: the proof of the generation directly before the hand edit
+    # restores the copy.
+    Set-HandEditRecord -Text "config_version: 9`n# edited by hand`n"
+    $copiesBefore = $script:Copies
+    $recovered = @{}
+    Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+        -Sources @{} -Metadata $metadata -GatewayServiceName 'gateway' -ApprovedConfig $recovered
+    Assert-ConfigIsApproved 'Repair did not restore the approved copy over a proven hand edit'
+    if ($script:Copies -ne $copiesBefore + 1) { throw 'a proven restore copied more than once' }
+    Set-HandEditRecord -Text "config_version: 9`n# edited by hand`n"
+    $copiesBefore = $script:Copies
+    # No recorded approved source: Repair refuses before changing anything and
+    # rollback keeps the restored bytes, with the reason on the event log.
+    $script:ResilienceReasons.Clear()
+    $refusal = ''
+    try {
+        Invoke-DefenseClawRepairApprovedPolicyRecovery -Layout $script:Layout `
+            -Sources @{} -Metadata $noRecord -GatewayServiceName 'gateway' -ApprovedConfig @{}
+    }
+    catch { $refusal = $_.Exception.Message }
+    $script:MetadataForPreflight = $noRecord
+    Restore-DefenseClawApprovedConfigOverHandEdit -Layout $script:Layout -GatewayServiceName 'gateway'
+    if ($refusal -notlike ("*" + (Format-DefenseClawSetupAction -Action '/ensure CONFIG=<approved absolute path>') + "*") -or $script:Copies -ne $copiesBefore -or
+        $script:ResilienceReasons.Count -ne 1 -or
+        $script:ResilienceReasons[0] -notmatch 'kept the restored config') {
+        throw 'a hand edit without a recorded approved source was not left as it was'
     }
     'approved policy Repair smoke passed'
 }

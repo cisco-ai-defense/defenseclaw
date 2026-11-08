@@ -11,7 +11,9 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
@@ -443,18 +445,23 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	// A per-user gateway can prove its process groups while only root can
 	// confirm that SSSD has no second holder of its uid. When this is the
-	// sole missing fact and the unproven profile differs only in its hook
+	// sole missing fact and the unproven profile differs only in its block
 	// threshold, the OSS default and permissive tiers use the profile selected
 	// by proven assignments on hook decisions and pathless explanations when
-	// every represented connector has an eligible tier. Inspection, a
-	// different sandbox, or a different rule pack still needs account proof.
-	// Strict and managed installs keep their proof requirement.
+	// every represented connector has an eligible tier. An inspection takes
+	// the same fallback when the proven profile already enforces on it, so
+	// only the threshold differs (an inspection refused here refused every
+	// prompt of the account, GAP-0732); a profile that would start enforcing
+	// there still needs account proof. A different sandbox, rule pack or
+	// approval control also needs it. Strict and managed installs keep their
+	// proof requirement.
 	if verified && subject.holderUnproven && !subject.LookupFailed &&
-		path != profilePathInspect && slices.Equal(needed, []string{"account:unknown"}) &&
+		slices.Equal(needed, []string{"account:unknown"}) &&
 		set.base != nil && !managed.IsManagedEnterprise(set.base.DeploymentMode) &&
 		!slices.ContainsFunc(scans, func(name string) bool {
 			return set.base.HookPolicyTierForConnector(name) == config.HookPolicyTierStrict
 		}) &&
+		(path != profilePathInspect || set.provenEnforcesInspection(proven, scans)) &&
 		set.unconfirmedHolderOnlyTightensHook(uncoveredMaybe, proven, scans) {
 		decision := set.decision(proven, profileMatchDefaultLookupFailed, "", source)
 		if len(yes) > 0 {
@@ -514,6 +521,16 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	return decision
 }
 
+// provenEnforcesInspection reports whether the selected profile blocks on the
+// inspect path of every connector in scans, so an unconfirmed account can only
+// lower the severity that blocks there.
+func (set *guardrailProfileSet) provenEnforcesInspection(proven string, scans []string) bool {
+	cfg := set.profilePathConfig(proven, profilePathInspect)
+	return cfg != nil && len(scans) > 0 && !slices.ContainsFunc(scans, func(name string) bool {
+		return !configBlocksOn(cfg, name, profilePathInspect)
+	})
+}
+
 // unconfirmedHolderOnlyTightensHook allows the OSS proven selection when an
 // unconfirmed named account could select a stricter hook threshold but no
 // different rule pack, sandbox floor, or approval control.
@@ -564,30 +581,21 @@ func orderedFacts(facts []string) []string {
 func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName, agent string) string {
 	why := make([]string, 0, len(facts))
 	for _, fact := range facts {
-		switch fact {
-		case "account:failed":
-			why = append(why, "the account holder is ambiguous")
-		case "account:ambiguous_short_name":
-			why = append(why, "a bare users entry may name accounts in more than one trusted domain; use a qualified name or uid")
-		case "account:unknown":
-			why = append(why, "the account holder is unconfirmed")
-		case "upn:unknown":
-			why = append(why, "this account's UPN is unconfirmed")
-		case "groups:unknown":
-			why = append(why, "group membership is unconfirmed")
-		case "agent:unknown":
-			why = append(why, "ownership of a pre-upgrade agent identity is unconfirmed")
-		case factAssignmentGroupSID:
-			why = append(why, "an assignment group SID is unconfirmed")
-		default:
-			why = append(why, "identity fact "+fact+" is unconfirmed")
-		}
+		why = append(why, identityFactClause(fact))
 	}
 	if subject != nil && subject.tokenGroupsCause != "" {
 		why = append(why, subject.tokenGroupsCause)
 	}
-	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "`" + set.profileExplainPrompt() + " to inspect the identity decision"
+	command := set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown"))
+	// The hint follows the command as printed: a command without the
+	// placeholder (the OSS profile list of an account without a verified ID,
+	// a built-in connector) has nothing to substitute.
+	hint := ""
+	if strings.Contains(command, " --connector "+profileConnectorPlaceholder) {
+		hint = identityRefusalConnectorHint
+	}
+	return issueIdentityRefusal(identityRefusalPrefix + strings.Join(why, "; ") +
+		"; run `" + command + "`" + set.profileExplainPrompt() + identityRefusalTail + hint)
 }
 
 // explainOnRequestPaths is explain's decision for connectorName's requests:
@@ -656,7 +664,7 @@ func sandboxRefusedWarning(connectorName, reason string) string {
 // GAP-0076).
 func (set *guardrailProfileSet) profileExplainPrompt() string {
 	if runtime.GOOS == "windows" && set.base != nil && set.base.StandaloneEnterprise() {
-		return " from an elevated PowerShell prompt"
+		return identityRefusalElevatedPrompt
 	}
 	return ""
 }
@@ -669,40 +677,96 @@ func (set *guardrailProfileSet) profileExplainPrompt() string {
 // commands do not run there (GAP-1692).
 func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName, agent string, agentNeeded bool) string {
 	user := ""
-	if subject != nil && subject.UserID == strings.TrimSpace(subject.UserID) && useridentity.KindForID(subject.UserID) != "" {
+	if subject != nil && profileCommandUser(subject.UserID) {
 		user = subject.UserID
 	}
 	standalone := set.base != nil && set.base.StandaloneEnterprise()
 	if user == "" {
 		if !standalone {
-			return "defenseclaw guardrail profile list"
+			return profileExplainList
 		}
-		user = "<user>"
+		user = profileExplainUserPlaceholder
 	}
-	command := "defenseclaw guardrail profile explain --user " + user
+	command := profileExplainOSS + " --user " + user
 	if standalone {
 		switch runtime.GOOS {
 		case "linux":
-			command = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user " + user
+			command = profileExplainLinux + " --user " + user
 		case "darwin":
-			command = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos profile-explain --user " + user
+			command = profileExplainDarwin + " --user " + user
 		case "windows":
 			// The installed CLI under the registered Program Files, with
 			// the user quoted for PowerShell (cowork-1-0-8 GAP-0076).
 			command = managed.WindowsAdminCommand("enterprise", "windows", "profile-explain", "--user", user)
 		}
 	}
-	if profileCommandToken(connectorName) {
-		command += " --connector " + connectorName
+	return command + set.profileCommandSuffix(connectorName, agent, agentNeeded)
+}
+
+// The explain command of each platform up to its --user argument, and the
+// placeholder for an account without a verified ID.
+const (
+	profileExplainList            = "defenseclaw guardrail profile list"
+	profileExplainOSS             = "defenseclaw guardrail profile explain"
+	profileExplainUserPlaceholder = "<user>"
+)
+
+// The installed administrator commands name the gateway binary through the
+// one standalone layout helper, so a layout change moves the producer and
+// the display recognizer together.
+var (
+	profileExplainLinux  = "sudo " + managed.StandaloneGatewayPath("linux") + " enterprise linux profile-explain"
+	profileExplainDarwin = "sudo " + managed.StandaloneGatewayPath("darwin") + " enterprise macos profile-explain"
+)
+
+// profileCommandSuffix is the --connector and --agent arguments of an
+// explain command: a connector the build ships or the configuration names
+// (explain without it cannot check the hook and inspect paths of that
+// connector) and the verified agent ID, never another value.
+func (set *guardrailProfileSet) profileCommandSuffix(connectorName, agent string, agentNeeded bool) string {
+	suffix := ""
+	if set.profileCommandConnector(connectorName) {
+		suffix += " --connector " + profileCommandConnectorArgument(connectorName)
 	}
-	if agentNeeded && profileCommandToken(agent) {
-		command += " --agent " + agent
+	if agentNeeded && profileCommandAgent(agent) {
+		suffix += " --agent " + agent
 	}
-	return command
+	return suffix
+}
+
+// profileCommandUser reports a verified account ID: a SID or a decimal uid.
+func profileCommandUser(id string) bool {
+	return id == strings.TrimSpace(id) && useridentity.KindForID(id) != ""
+}
+
+// profileCommandConnector reports a connector name the build ships or the
+// configuration lists, spelled as a plain token of any length the
+// configuration accepts.
+func (set *guardrailProfileSet) profileCommandConnector(name string) bool {
+	return profileCommandToken(name) && (connector.IsKnownBuiltinConnector(name) || set.knownConnector(name))
+}
+
+// profileConnectorPlaceholder stands for the name of a connector the
+// administrator configured. The refusal is shown as written, and an
+// administrator-chosen value cannot be told from a credential by any check
+// of the name alone (and what the display scrub masks depends on the text
+// around it), so no configured name rides in the reason: the flag stays so
+// the command still checks that connector, and the reason says to substitute
+// the name.
+const profileConnectorPlaceholder = "<connector>"
+
+// profileCommandConnectorArgument is the value of --connector for a name
+// that passed profileCommandConnector: a built-in connector name is ship
+// text; any other is the placeholder.
+func profileCommandConnectorArgument(name string) string {
+	if connector.IsKnownBuiltinConnector(name) {
+		return name
+	}
+	return profileConnectorPlaceholder
 }
 
 func profileCommandToken(value string) bool {
-	if value == "" || len(value) > 64 {
+	if value == "" {
 		return false
 	}
 	for _, r := range value {
@@ -710,6 +774,21 @@ func profileCommandToken(value string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// profileCommandAgent reports an agent ID as agentidentity derives it:
+// the prefix and 16 lower-case hex digits.
+func profileCommandAgent(id string) bool {
+	digits, ok := strings.CutPrefix(id, agentidentity.AgentIDPrefix)
+	if !ok || len(digits) != 16 {
+		return false
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' && r < 'a' || r > 'f' {
+			return false
+		}
 	}
 	return true
 }
@@ -1076,8 +1155,9 @@ func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdm
 
 // profileStricter orders profiles that do not cover each other: a blocks
 // (action) where b only observes, or both block and a blocks from a lower
-// severity (block_at). A name that is not a profile is the base
-// configuration.
+// severity (block_at). A block_at left unset is the level the rule pack of
+// the connector blocks from, so a profile that sets one is compared with that
+// level (GAP-0732). A name that is not a profile is the base configuration.
 func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool {
 	ca, cb := set.profileConfig(a), set.profileConfig(b)
 	modeA, modeB := ca.HookModeForConnector(connectorName), cb.HookModeForConnector(connectorName)
@@ -1085,7 +1165,13 @@ func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool
 		return modeA == "action"
 	}
 	rankA, rankB := blockAtRank(ca, connectorName), blockAtRank(cb, connectorName)
-	return rankA > 0 && rankB > 0 && rankA > rankB
+	if rankA > 0 && rankB > 0 {
+		return rankA > rankB
+	}
+	// guardrailThresholdRanks counts up from LOW, so a lower level blocks more.
+	effA, _ := guardrailThresholdRanks(resolveThresholds(ca, connectorName))
+	effB, _ := guardrailThresholdRanks(resolveThresholds(cb, connectorName))
+	return effA < effB
 }
 
 // profileConfig is the configuration a decision for profile name applies.

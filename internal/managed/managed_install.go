@@ -28,6 +28,10 @@ type ManagedInstallLayout struct {
 	// IPCDirectory is the gateway's IPC socket folder. Set it only when the
 	// folder belongs to this installation.
 	IPCDirectory string
+	// Standalone lists the lock files the standalone profile creates lazily
+	// inside StateRoot. The Secure Client profile leaves it false and keeps
+	// the objects it listed before (GAP-0766).
+	Standalone bool
 }
 
 // targets expands the layout into the ordered object list, parents before
@@ -75,6 +79,13 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 		add(ObjectAdminDirectory, root, "logs", "guardian")
 		add(ObjectAdminDirectory, root, "logs", "cmid-broker")
 		addContent(ObjectConfigFile, root, "etc", "config.yaml")
+		if layout.Standalone {
+			// The config writer's lock sits beside the config and is created
+			// lazily; an untrusted write entry on it would let any account
+			// hold the lock (GAP-0766). Its bytes are never read, so it is
+			// not content.
+			add(ObjectConfigFile, root, "etc", "config.yaml.lock")
+		}
 		addContent(ObjectAdminFile, root, "hook-guardian", "targets.yaml")
 		for _, name := range []string{
 			"deployment.json",
@@ -142,9 +153,10 @@ var managedInstallRefusesContentDrift = StandaloneRefusesContentDrift
 
 // standaloneContentRepairRefusal is the recovery step logged with a refused
 // content file.
-const standaloneContentRepairRefusal = "not repaired in place on a standalone install, because an account " +
-	"that could write this file may have changed it: from an elevated prompt run Setup /ensure so Setup " +
-	"writes a fresh file, then Setup /verify (GAP-0561)"
+var standaloneContentRepairRefusal = "not repaired in place on a standalone install, because an account " +
+	"that could write this file may have changed it: from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure") +
+	"` so Setup writes a fresh file, then `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") +
+	"` (GAP-0561). " + WindowsSetupSource
 
 // refuseStandaloneContentRepair reads target's descriptor without writing.
 // When an untrusted principal can write or owns the file, or the strict

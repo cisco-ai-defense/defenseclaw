@@ -10,7 +10,12 @@
 
 package winpath
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/productlayout"
+)
 
 func TestEnterpriseRootsForProfiles(t *testing.T) {
 	secureClient, err := EnterpriseRootsFor("secure_client", `C:\Program Files\`, `C:\ProgramData`)
@@ -142,6 +147,24 @@ func TestEnterpriseMetadataDeferredConfigPending(t *testing.T) {
 	} {
 		if got := enterpriseMetadataDeferredConfigPending([]byte(tc.body)); got != tc.want {
 			t.Fatalf("%q: deferred config pending %v, want %v", tc.body, got, tc.want)
+		}
+	}
+}
+
+// Every DefenseClaw-named folder an enterprise root builds is a registered
+// product folder, so the audit redaction detector knows it is not a secret.
+func TestEnterpriseRootsUseRegisteredProductFolders(t *testing.T) {
+	for _, profile := range []string{EnterpriseProfileSecureClient, EnterpriseProfileStandalone} {
+		roots, err := EnterpriseRootsFor(profile, `C:\Program Files`, `C:\ProgramData`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{roots.InstallRoot, roots.StateRoot, roots.CertificationInstallBase, roots.CertificationStateBase, roots.ManagedIPCDir, roots.LifecycleDir, roots.MetadataPath} {
+			for _, segment := range strings.Split(path, `\`) {
+				if strings.HasPrefix(strings.ToLower(segment), "defenseclaw") && !productlayout.IsFolderName(segment) {
+					t.Errorf("%s: %q in %q is not a registered product folder", profile, segment, path)
+				}
+			}
 		}
 	}
 }

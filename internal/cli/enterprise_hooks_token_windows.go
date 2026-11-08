@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -456,6 +457,11 @@ func repairEnterpriseHookGatewayDataPathsPlatform() {
 	}
 	paths.LogPaths = []string{enterpriseHookGatewayLogPath(paths.DataDir)}
 	paths.RuntimeDirs = []string{filepath.Join(paths.DataDir, "hooks")}
+	if managed.WindowsStandaloneTrustScope() {
+		// The lazily created lock files of the standalone profile; the Secure
+		// Client profile keeps the objects it listed before (GAP-0766).
+		paths.LockFiles = append(acp.EnterpriseLockFilePaths(paths.DataDir), filepath.Join(paths.DataDir, ".env.lock"))
+	}
 	_ = enterpriseWindowsManagedDataPathsRepair(paths, managed.CanonicalOptions{
 		AllowUntrustedOwnerTransfer: enterpriseHookOwnerTransferAllowed(paths.DataDir),
 	})

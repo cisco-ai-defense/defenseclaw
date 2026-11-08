@@ -218,7 +218,7 @@ A managed host is a device on the standalone enterprise profile (`deployment_mod
 
 ### Local writers refuse
 
-Every local command that would change policy refuses on a managed standalone host and changes nothing. On Linux and macOS the packaged `defenseclaw` runs only `sandbox` commands and refuses the rest with exit `2`. A per-user CLI left from an earlier install exits `3`:
+Every local command that would change policy refuses on a managed standalone host and changes nothing. On Linux and macOS the packaged `defenseclaw` runs only the commands in [Managed command availability](/docs/enterprise/managed-commands) and refuses the rest with exit `2`. A per-user CLI left from an earlier install exits `3`:
 
 ```text
 error: This device is managed: change config.yaml in the admin config (MDM or management plane), not on the device
@@ -250,7 +250,7 @@ A forged `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE` canno
 
 ### Updates
 
-Managed hosts do not self-update: `defenseclaw upgrade` and `defenseclaw rollback` refuse there and the lifecycle applies updates ([Lifecycle](/docs/enterprise/lifecycle)). `update.source` changes only where release files come from; the signature check always uses the release identity compiled into DefenseClaw.
+Managed hosts do not self-update: `defenseclaw upgrade` and `defenseclaw rollback` refuse there ([Managed command availability](/docs/enterprise/managed-commands)) and the lifecycle applies updates ([Lifecycle](/docs/enterprise/lifecycle)). `update.source` changes only where release files come from; the signature check always uses the release identity compiled into DefenseClaw.
 
 ## Where do I change it?
 

@@ -91,7 +91,11 @@ type WindowsCodexManagedRuntimeTarget struct {
 }
 
 type WindowsCodexManagedRuntimeRegistry struct {
-	Active             bool
+	Active bool
+	// Kept is set only by the teardown read: the link (or non-folder) at the
+	// Codex machine-policy folder, which is not read through. The registry is
+	// then empty and says nothing about what is behind the link (GAP-0773).
+	Kept               string
 	GatewayAddr        string
 	GatewayServiceName string
 	Targets            []WindowsCodexManagedRuntimeTarget
@@ -140,6 +144,12 @@ type WindowsCodexMachineRequirementsReport struct {
 	// requirements bytes. It is advisory: verification still succeeds and the
 	// next privileged reconcile refreshes the pin.
 	PinMismatch bool `json:"pin_mismatch,omitempty"`
+	// LinkKept is set only by the teardown removal when a link sits at the
+	// Codex machine-policy folder: the link is kept, nothing behind it was
+	// read, and so nothing in the report says what it holds (GAP-0773). The
+	// report then attests neither SafeToRemoveBinary nor
+	// ManagedStateRemovedOrAbsent.
+	LinkKept string `json:"link_kept,omitempty"`
 }
 
 type windowsCodexMachineOwnership struct {

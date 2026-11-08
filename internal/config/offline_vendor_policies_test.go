@@ -7,6 +7,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -15,13 +16,21 @@ import (
 // folder, keeps the configured paths themselves, and survives DeepCopy (the
 // guardrail profiles derive their configs through it) (GAP-0223).
 func TestUseOfflineVendorPoliciesRedirectsShippedPacksOnly(t *testing.T) {
-	const vendor = "/opt/defenseclaw/share/policies"
+	// Each custom pack is a folder (CustomRulePackError); the shipped one
+	// exists only in the offline copy.
+	vendor := filepath.Join(t.TempDir(), "share", "policies")
 	root := t.TempDir()
+	own := filepath.Join(t.TempDir(), "policies", "guardrail", "own")
+	for _, dir := range []string{filepath.Join(root, "guardrail", "strict"), vendor + "-extra/guardrail/strict", own} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := &Config{}
 	cfg.Guardrail.CustomPacks = map[string]CustomRulePack{
 		"shipped": {Path: vendor + "/guardrail/strict"},
 		"sibling": {Path: vendor + "-extra/guardrail/strict"},
-		"own":     {Path: "/etc/defenseclaw/policies/guardrail/own"},
+		"own":     {Path: own},
 	}
 	cfg.UseOfflineVendorPolicies(vendor+"/", root)
 	copied, err := cfg.DeepCopy()
@@ -38,7 +47,7 @@ func TestUseOfflineVendorPoliciesRedirectsShippedPacksOnly(t *testing.T) {
 			{RulePackRef{Dir: vendor + "/guardrail/../guardrail/default"}, filepath.Join(root, "guardrail", "default")},
 			{RulePackRef{Name: "shipped"}, filepath.Join(root, "guardrail", "strict")},
 			{RulePackRef{Name: "sibling"}, vendor + "-extra/guardrail/strict"},
-			{RulePackRef{Name: "own"}, "/etc/defenseclaw/policies/guardrail/own"},
+			{RulePackRef{Name: "own"}, own},
 			{RulePackRef{Dir: "/opt/defenseclaw/share/policy/guardrail/default"}, "/opt/defenseclaw/share/policy/guardrail/default"},
 			{RulePackRef{}, ""},
 		} {

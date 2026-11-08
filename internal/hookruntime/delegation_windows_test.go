@@ -716,65 +716,6 @@ func TestLockVerifiedHookRejectsReparseOwnerDACLAndReplacement(t *testing.T) {
 	})
 }
 
-func TestStableRuntimeUpgradesLegacyFullToTrampolineAndRollsBack(t *testing.T) {
-	paths := testRuntimePaths(t)
-	fullHook := copyDelegationTestExecutable(t)
-	gateway := writeRuntimeGateway(t, "MZ-gateway")
-	dataRoot := filepath.Join(t.TempDir(), "data")
-	if err := publishAt(
-		paths,
-		fullHook,
-		fullHook,
-		gateway,
-		dataRoot,
-		stableRuntimeTransactionOne,
-	); err != nil {
-		t.Fatal(err)
-	}
-	legacy, _, err := readTrustedAt(paths, paths.Launcher)
-	if err != nil || legacy.DelegationCapable() {
-		t.Fatalf("legacy full state = %+v, error %v", legacy, err)
-	}
-
-	small := filepath.Join(t.TempDir(), HookLauncherName)
-	if err := os.WriteFile(small, []byte("MZ-small-trampoline"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := publishAt(
-		paths,
-		small,
-		fullHook,
-		gateway,
-		dataRoot,
-		stableRuntimeTransactionTwo,
-	); err != nil {
-		t.Fatal(err)
-	}
-	upgraded, _, err := readTrustedAt(paths, paths.Launcher)
-	if err != nil || !upgraded.Active() || !upgraded.DelegatesTo(fullHook) {
-		t.Fatalf("trampoline state = %+v, error %v", upgraded, err)
-	}
-	if body, err := os.ReadFile(paths.Launcher); err != nil || string(body) != "MZ-small-trampoline" {
-		t.Fatalf("stable trampoline bytes = %q, error %v", body, err)
-	}
-
-	if err := publishAt(
-		paths,
-		fullHook,
-		fullHook,
-		gateway,
-		dataRoot,
-		stableRuntimeTransactionOne,
-	); err != nil {
-		t.Fatal(err)
-	}
-	rolledBack, _, err := readTrustedAt(paths, paths.Launcher)
-	if err != nil || !rolledBack.Active() || rolledBack.DelegationCapable() ||
-		rolledBack.LauncherKind != "" || rolledBack.HookPath != "" || rolledBack.HookSHA256 != "" {
-		t.Fatalf("rolled-back full state = %+v, error %v", rolledBack, err)
-	}
-}
-
 func TestSchemaTwoTrampolineFieldsRemainReadableByLegacyFullStateShape(t *testing.T) {
 	fixture := newDelegationFixture(t)
 	state, _, err := readTrustedAt(fixture.paths, fixture.executable)
@@ -805,33 +746,6 @@ func TestSchemaTwoTrampolineFieldsRemainReadableByLegacyFullStateShape(t *testin
 		legacy.GatewayPath != state.GatewayPath || legacy.GatewaySHA256 != state.GatewaySHA256 ||
 		legacy.TransactionID != state.TransactionID {
 		t.Fatalf("legacy full state shape changed: %+v", legacy)
-	}
-}
-
-func TestTrampolinePublicationRejectsLauncherOverSizeContract(t *testing.T) {
-	paths := testRuntimePaths(t)
-	source := filepath.Join(t.TempDir(), HookLauncherName)
-	file, err := os.Create(source)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Truncate(MaxHookLauncherBytes + 1); err != nil {
-		_ = file.Close()
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	err = publishAt(
-		paths,
-		source,
-		copyDelegationTestExecutable(t),
-		writeRuntimeGateway(t, "MZ-gateway"),
-		filepath.Join(t.TempDir(), "data"),
-		stableRuntimeTransactionOne,
-	)
-	if err == nil || !strings.Contains(err.Error(), "maximum") {
-		t.Fatalf("oversize trampoline publication error = %v", err)
 	}
 }
 

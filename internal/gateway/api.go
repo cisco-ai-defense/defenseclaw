@@ -42,6 +42,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -146,6 +147,12 @@ type APIServer struct {
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
 	mcpAdmissionPending func(connector, server, home, cwd string) (string, bool)
+	// mcpAdmissionStatus also distinguishes a completed scan failure from a
+	// pending scan and carries the scan's remaining timeout.
+	mcpAdmissionStatus func(connector, server, home, cwd string) watcher.MCPAdmissionStatus
+	// mcpPublished looks for the definition, named by its launch digest, in
+	// the servers the install watcher admits for the caller (GAP-0686).
+	mcpPublished func(connector, server, home, cwd, digest string) watcher.MCPPublication
 	// mcpRefreshBeforeCall brings the gateway's view of the enrolled users'
 	// MCP servers up to date before an MCP tool call is decided (GAP-0216).
 	// Set once before serving.
@@ -1208,6 +1215,24 @@ func (a *APIServer) SetMCPAdmissionPending(pending func(connector, server, home,
 	a.mcpAdmissionPending = pending
 }
 
+// SetMCPAdmissionStatus wires the watcher's current admission state.
+func (a *APIServer) SetMCPAdmissionStatus(status func(connector, server, home, cwd string) watcher.MCPAdmissionStatus) {
+	if a == nil {
+		return
+	}
+	a.mcpAdmissionStatus = status
+}
+
+// SetMCPPublished wires the install watcher's check that a definition the
+// caller's agent runs is one it admits (GAP-0686). Call it before the server
+// starts.
+func (a *APIServer) SetMCPPublished(published func(connector, server, home, cwd, digest string) watcher.MCPPublication) {
+	if a == nil {
+		return
+	}
+	a.mcpPublished = published
+}
+
 // SetMCPRefreshBeforeCall wires the refresh of the enrolled users' MCP
 // servers before an MCP tool call (GAP-0216). Call it before the server
 // starts.
@@ -1518,6 +1543,9 @@ func (a *APIServer) Run(ctx context.Context) error {
 		Handler:     handler,
 		BaseContext: apiRequestBaseContext(baseCtx),
 		ConnContext: acpPeerConnContext,
+		// A standalone hook sends the asset facts of its request in a header
+		// (assetfacts.Header) that can pass the net/http default of 1 MiB.
+		MaxHeaderBytes: assetfacts.MaxRequestHeaderBytes,
 	}
 
 	// Bind with a short retry instead of a bare ListenAndServe. During
@@ -3054,6 +3082,8 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 	// Sandbox attribution comes only from an authenticated sandbox binding
 	// (audit.CorrelationEnvelope), never from a request body.
 	event.SandboxID, event.SandboxName = "", ""
+	// The same holds for the agent identity and the verified caller facts.
+	dropBodyAssignedIdentity(&event)
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now().UTC()
 	}

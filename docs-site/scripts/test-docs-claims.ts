@@ -223,12 +223,25 @@ describe('Observe mode policy findings and gateway outages', () => {
 
   it('qualifies proxy connector claims for OpenClaw and ZeptoClaw', () => {
     assert.match(source('internal/gateway/proxy.go'), /verdict.Action == "block" && mode == "action"/);
-    for (const connector of ['openclaw', 'zeptoclaw']) {
-      const setup = page(`connectors/${connector}.mdx`).split('## Setup')[1]?.split('## Check it')[0] ?? '';
-      assert.match(setup, /Observe records policy findings without blocking on those findings/i, connector);
-      assert.match(setup, /gateway outage still stops proxied requests/i, connector);
-      assert.match(page(`connectors/${connector}.mdx`), /While the gateway is down, requests are blocked/i, connector);
-    }
+    const interceptor = source('extensions/defenseclaw/src/fetch-interceptor.ts');
+    assert.match(interceptor, /if \(getOutageMode\(\) !== "open"\) return false;/);
+    assert.match(interceptor, /onOutageWarning\?\.\(MODEL_OUTAGE_WARNING\)/);
+    const openclaw = page('connectors/openclaw.mdx');
+    const openclawSetup = openclaw.split('## Setup')[1]?.split('## Check it')[0] ?? '';
+    assert.match(openclawSetup, /Observe records policy findings without blocking on those findings/i);
+    assert.match(openclawSetup, /During a gateway outage, the saved outage mode decides whether a model request continues directly to its configured provider with a warning/i);
+    assert.match(openclaw, /On a classified proxy outage.{0,200}default and permissive policies continue the original request to its configured provider with an agent warning; strict and managed policies block/i);
+    assert.ok(!/While the gateway is down, requests are blocked/i.test(openclaw));
+    const outageRow = openclaw.split('| Gateway outage |')[1]?.split('| Proxy port |')[0] ?? '';
+    assert.ok(outageRow !== '', 'OpenClaw setup table lost its Gateway outage row');
+    assert.match(outageRow, /saved outage mode.*default and permissive continue with a warning, strict and managed `closed`/i);
+    assert.match(outageRow, /guardrail fail-mode open\\\|closed --connector openclaw/);
+    assert.ok(!/not configurable|does not apply|no hooks/i.test(outageRow), 'OpenClaw setup table must not call the gateway outage mode fixed or unconfigurable');
+    const zeptoclaw = page('connectors/zeptoclaw.mdx');
+    const zeptoclawSetup = zeptoclaw.split('## Setup')[1]?.split('## Check it')[0] ?? '';
+    assert.match(zeptoclawSetup, /Observe records policy findings without blocking on those findings/i);
+    assert.match(zeptoclawSetup, /gateway outage still stops proxied requests/i);
+    assert.match(zeptoclaw, /While the gateway is down, requests are blocked/i);
   });
 
   it('scopes general guardrail observe guidance to policy findings', () => {
@@ -896,6 +909,11 @@ describe('docs claim CI coverage', () => {
   it('runs when any product source read by these checks changes', () => {
     const testSource = readFileSync(fileURLToPath(import.meta.url), 'utf8');
     const dependencies = [...testSource.matchAll(/join\(repo,\s*'([^']+)'/g)].map((match) => match[1]);
+    // The launcher refusal pages are checked against a fixture the Go launcher
+    // test writes (launcherRefusalText), from the launcher source and the
+    // standalone layout that supplies its paths. A change to any of the three
+    // must run this gate.
+    dependencies.push('internal/cli/launcher.go', 'internal/cli/testdata/launcher_refusal.json', 'internal/managed/standalone_layout.go');
     assert.ok(dependencies.includes('scripts/install.ps1'));
     assert.ok(dependencies.includes('cli/defenseclaw/commands/cmd_setup.py'));
     const workflow = readFileSync(join(repo, '.github/workflows/docs-site.yml'), 'utf8');
@@ -1085,7 +1103,7 @@ describe('1.0.4 operator routes and limits', () => {
 
   it('gives a working managed restart route without promising it in the refusal', () => {
     const lifecycle = page('enterprise/lifecycle.mdx');
-    assert.match(lifecycle, /Windows \| Run the installed release's Setup with `\/repair JSON=1`/);
+    assert.match(lifecycle, /\| Windows \| From an elevated PowerShell prompt: `& 'C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw\.exe' enterprise windows repair --profile standalone` \| The same \|/);
     assert.doesNotMatch(lifecycle, /the refusal names the commands below/i);
   });
 
@@ -1258,26 +1276,87 @@ describe('per-user install window refusal (GAP-2173)', () => {
   });
 });
 
-describe('managed launcher refusal on every page (GAP-1387, GAP-1569)', () => {
-  it('quotes launcherRefusal wherever a page quotes the refusal', () => {
-    const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'))?.[1];
-    assert.ok(refusal, 'launcher refusal not found');
+// launcherRefusalText is what the launcher prints on each OS. It is read from
+// internal/cli/testdata/launcher_refusal.json, which the Go test
+// TestLauncherRefusalGoldenMatchesTheLauncher evaluates from
+// launcherRefusalFor and fails on when it differs. The docs gate therefore
+// follows the launcher behavior, not the spelling of its source: a refactor
+// that keeps the output keeps this test green, and a change to the output
+// turns the Go test red until the fixture and the pages are updated.
+type LauncherRefusal = { message: string; linux: string; macos: string; gateways: { linux: string; macos: string }; views: string[] };
+
+function launcherRefusalText(): LauncherRefusal {
+  const texts = JSON.parse(source('internal/cli/testdata/launcher_refusal.json')) as { linux: string; darwin: string; windows: string };
+  const message = texts.windows;
+  assert.ok(message && texts.linux && texts.darwin, 'launcher_refusal.json has no text for linux, darwin and windows');
+  for (const text of [texts.linux, texts.darwin]) {
+    assert.ok(text.startsWith(message + " For administrator views"), 'the Linux and macOS refusal does not extend the shared sentence with the administrator views');
+  }
+  const gatewayOf = (text: string, platform: string): string => {
+    const gateway = new RegExp("`sudo (\\S+) enterprise " + platform + " status`").exec(text)?.[1];
+    assert.ok(gateway, "the " + platform + " refusal does not name the installed gateway");
+    return gateway;
+  };
+  // The commands each text tells an administrator to run, after sudo and the
+  // gateway path: the Linux views, then the macOS views.
+  const viewsOf = (text: string): string[] => [...text.matchAll(/`sudo \S+ ([^`]+)`/g)].map((match) => match[1]);
+  return {
+    message,
+    linux: texts.linux,
+    macos: texts.darwin,
+    gateways: { linux: gatewayOf(texts.linux, 'linux'), macos: gatewayOf(texts.darwin, 'macos') },
+    views: [...viewsOf(texts.linux), ...viewsOf(texts.darwin)],
+  };
+}
+
+// carriesAdministratorViews: a page that quotes the shared sentence says where
+// the administrator views are. It either quotes a whole OS text or lists every
+// view the launcher prints: each enterprise status command in full, and every
+// later view in full or by its verb in a code span.
+function carriesAdministratorViews(text: string, refusal: LauncherRefusal): boolean {
+  if (text.includes(refusal.linux) || text.includes(refusal.macos)) return true;
+  const named = new Set<string>();
+  return refusal.views.every((view) => {
+    const platform = /^enterprise (\w+) /.exec(view)?.[1];
+    if (text.includes(view)) {
+      if (platform) named.add(platform);
+      return true;
+    }
+    return platform !== undefined && named.has(platform) && text.includes("`" + view.split(" ").pop() + "`");
+  });
+}
+
+describe('managed launcher refusal on every page (GAP-1387, GAP-1569, GAP-0635)', () => {
+  it('quotes the launcher refusal the code builds for each OS', () => {
+    const refusal = launcherRefusalText();
+    const { message, linux, macos } = refusal;
     let quoted = 0;
     for (const file of enterprisePages(docs)) {
       const text = readFileSync(file, 'utf8').split(/\s+/).join(' ');
-      assert.ok(!text.includes('commands are available here'), `${relative(docs, file)} quotes the retired launcher refusal`);
-      if (text.includes(refusal)) quoted += 1;
+      const name = relative(docs, file);
+      assert.ok(!text.includes('commands are available here'), name + " quotes the retired launcher refusal");
+      assert.ok(!text.includes('Other commands require an administrator'), name + " quotes the retired launcher refusal ending");
+      if (text.includes(message)) {
+        quoted += 1;
+        assert.ok(carriesAdministratorViews(text, refusal), name + " quotes the launcher refusal without the administrator views it prints on Linux and macOS");
+      }
     }
-    assert.ok(quoted >= 10, `expected the launcher refusal on at least 10 pages, found ${quoted}`);
+    assert.ok(quoted >= 10, "expected the launcher refusal on at least 10 pages, found " + quoted);
+    const index = readFileSync(join(docs, 'enterprise/index.mdx'), 'utf8').split(/\s+/).join(' ');
+    assert.ok(index.includes(linux), 'enterprise/index.mdx does not quote the Linux launcher refusal');
+    assert.ok(index.includes(macos), 'enterprise/index.mdx does not quote the macOS launcher refusal');
+    const trouble = readFileSync(join(docs, 'enterprise/troubleshooting.mdx'), 'utf8').split(/\s+/).join(' ');
+    assert.ok(trouble.includes(linux), 'enterprise/troubleshooting.mdx does not quote the Linux launcher refusal');
+    assert.ok(trouble.includes(refusal.gateways.macos) && trouble.includes('enterprise macos'), 'enterprise/troubleshooting.mdx does not name the macOS gateway');
   });
 });
 
 describe('the TUI page on a managed computer (rel-1-0-4 GAP-0597)', () => {
   it('quotes the launcher refusal and links the managed-device steps', () => {
-    const refusal = /launcherRefusal = "([^"]+)"/.exec(source('internal/cli/launcher.go'));
-    assert.ok(refusal, 'launcher refusal not found');
+    const refusal = launcherRefusalText();
     const tui = page('tui.mdx');
-    assert.ok(tui.includes(refusal[1]), 'features/tui.mdx does not quote the launcher refusal');
+    assert.ok(tui.includes(refusal.message), 'features/tui.mdx does not quote the launcher refusal');
+    assert.ok(carriesAdministratorViews(tui, refusal), 'features/tui.mdx does not name the administrator views');
     assert.ok(tui.includes('/docs/tui#on-a-managed-device'));
     assert.ok(page('tui.mdx').includes('#### On a managed device'));
   });
@@ -1550,6 +1629,12 @@ const r105Rows: DocRow[] = [
   { gap: "1.0.4 known issues fixed in 1.0.5", page: "support-matrix.mdx", section: "Known issues", lacks: ["These are bugs in 1.0.4.", "**Changing the fail mode with Setup `/ensure`:**", "hot-config-undo-closed", "**No skill, MCP or plugin scanner:**"] },
   { gap: "GAP-2329, GAP-0956, GAP-2285", page: "support-matrix.mdx", section: "Known issues", has: ["**Ordinary work blocked:**", "`alias ll=ls`", "`defenseclaw guardrail mode observe --connector NAME`"] },
   { gap: "GAP-2001", page: "enterprise/troubleshooting.mdx", has: ["the run stops with `hook_in_use` and exit `1618` before it replaces anything"] },
+  // GAP-0656 (rel-1-0-6 r109): the upgrade-window measurement and the recovery from a refused hook replacement.
+  { gap: "GAP-0656", page: "enterprise/windows.mdx", section: "Upgrades and downgrades", has: ["They made 222,039 hook starts and none failed.", "That hit about 3% of upgrades.", "No start storm ran during `/repair` or the purge", "not real agent calls by a standard user", "(the length of that hold was not measured in place; the hit rate is the measure)"], lacks: ["for about 23 ms", "within one check"] },
+  // GAP-0755 (rel-1-0-6 r109): the bounds of the guardian's close of another program's handle on the hook.
+  { gap: "GAP-0755", page: "enterprise/windows.mdx", section: "Upgrades and downgrades", has: ["closing that one handle in the process that owns it", "It waits for the second or third check.", "It never closes a handle in a protected process, in a process that runs as LocalSystem, LocalService, NetworkService or another service account, or in session 0.", "writes a HIGH `connector-hook-tampered` audit row", "A holder that takes the handle again is closed again after 10 seconds, then 20, doubling to 5 minutes", "Secure Client is unchanged", "if that user has other handles on the hook, in the same process or another, on the same file object or another, the guardian can close one that was not the cause (a read handle that shares deletion) before it reaches the one that was", "closes no more than it needs to start the hook", "A single read shorter than about 5 seconds is not closed", "Several short reads in a row are closed only when the same program keeps the hook blocked across two checks, or the same user across three", "with a handle of the same program on both: the same process, or the same file object", "waits for a third check", "the guardian closes no user's handle either", "once per streak, one file object at a time, to rule the program out", "can write or append, or if it is the only file object open on the hook", "A handle that its owner protected from being closed is named and skipped", "HTTP 400, 413, 415 or 422", "`closed` set to `false`", "It watches the files a hook start reads, not only the hook", "The guardian does not walk the folder.", "A lock file (`.defenseclaw-enrollment.lock`, `.defenseclaw-managed-runtime-selector.lock`), a `.defenseclaw-policy-*.tmp` temp file, a setup record or any other name is never watched", "at most 4 held runtime files", "cannot delay the binary; the other held files are handled at most 4 per check", "up to ceil(N/4) checks for its pass", "the one with a handle that can write or append first", "A file anywhere else is not watched", "A standard user cannot make such a hold, as measured on Windows Server 2025", "0 of 12 tries with the file read-only for Users, 12 of 12 with Users allowed to modify it", "other Windows builds were not measured", "so a gateway that is down delays the row, never the close", "is audited when it finishes", "may have been closed", "dropped after 5 tries", "closes at most 64 handles in one check", "more than about 2,000 file handles", "A user who keeps 24 such calls blocked"], lacks: ["cannot delay the binary or the others", "with Defender on", "is never closed", "Any account may open the hook", "does not stop the guardian from closing a signed-in user's handles", "whatever the handle value or the process"] },
+  { gap: "GAP-0656", page: "enterprise/troubleshooting.mdx", has: ["#### Setup refuses to replace the installed hook", "Do not copy `defenseclaw-hook.exe` out of the release zip by hand"] },
+  { gap: "GAP-0755", page: "enterprise/troubleshooting.mdx", has: ["#### A program holds the hook open and no agent can start it", "It never closes a handle in a protected process, in a service account's process (LocalSystem, LocalService, NetworkService and the others) or in session 0", "closes handles only in the processes of a signed-in user", "has the hook open and may be what refuses its starts", "if that user has other handles on the hook, in the same process or another, on the same file object or another, the guardian can close one that was not the cause before it reaches the one that was", "it closes no user's handle either", "closes that user's handles once per streak, to rule the program out", "a handle its owner protected from closing is skipped", "at most 64 handles in one check", "is audited when it finishes", "the hook runtime file ... is held open by another program, so the hook cannot read it", "On Windows Server 2025 a standard user cannot make such a hold, as measured", "has `closed` set to `false`"], lacks: ["holds it with no sharing", "Any account may open the hook"] },
   { gap: "GAP-2049", page: "policies/deterministic-detection.mdx", section: "Action-mode rule details", has: ["The permissive pack keeps it at HIGH and reports it."] },
   { gap: "GAP-1519", page: "connectors/index.mdx", section: "Pick yours", has: ["| [GitHub Copilot CLI](/docs/connectors/copilot) | Hook | Tool calls | No: a confirmation blocks |", "Where an agent cannot ask, a confirm verdict becomes an alert with the original action kept; Copilot CLI blocks it instead."], lacks: ["| Tool calls | `preToolUse` |"] },
   { gap: "GAP-1537", page: "enterprise/mdm/intune-linux.mdx", has: ["The wrapper itself makes up to three attempts on exit `75` (busy): the first run and two retries, 10 seconds apart."], lacks: ["retries exit `75` (busy) up to three times"] },
@@ -1858,7 +1943,7 @@ const r105Rows: DocRow[] = [
   { gap: "GAP-1536", page: "enterprise/mdm/intune-macos.mdx", has: ["| Upload script | Your edited copy of `defenseclaw-enterprise.sh`, with the config added |"], lacks: ["the wrapper is about"] },
   // pod docs i1 (2026-10-28)
   { gap: "GAP-2051", page: "get-started/windows/telemetry-security.mdx", has: ["OpenCode's managed plugin also grant access only to the user (or `OWNER RIGHTS`) and SYSTEM", "`judge_bodies.db`", "also grant Administrators"], lacks: ["readable by the user, Administrators, and SYSTEM, and so is OpenCode's managed"] },
-  { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["and `verify` reports it as an error and exits `1`. On Windows `status` warns `policy_not_applied` with the Setup `/repair` next step, `security_complete` is `false`, and `verify` fails (exit `1603`)."], lacks: ["computes to. The message gives both and says the gateway applies the config on its next reload. `status` and `verify` show the same condition"] },
+  { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["and `verify` reports it as an error and exits `1`. On Windows `status` warns `policy_not_applied` with the installed CLI's `repair` as the next step (`enterprise windows repair --profile standalone`, by its full path from an elevated PowerShell prompt; see [Repair](/docs/enterprise/lifecycle#repair)), `security_complete` is `false`, and `verify` fails (exit `1603`)."], lacks: ["computes to. The message gives both and says the gateway applies the config on its next reload. `status` and `verify` show the same condition"] },
   { gap: "GAP-1766", page: "enterprise/troubleshooting.mdx", has: ["`policy.last_reload_error` and `policy.applied: false` say the same. `verify` fails with this code (exit `1603`)."] },
   { gap: "GAP-2099", page: "support-matrix.mdx", has: ["the guardian rewrites, within seconds, the records that no longer match the live registration", "Records that still match stay byte for byte as restored."], lacks: ["the guardian and gateway rewrite them at the next check", "the running guardian rewrites them within minutes"] },
   // pod docs it2 (2026-10-28)
@@ -2366,6 +2451,29 @@ describe('1.0.5 docs rows', () => {
   }
 });
 
+// GAP-0755 (rel-1-0-6 r109): the release note carries the bounds of the guardian's handle close, the collateral caveat and the audit-row delivery.
+describe('the CHANGELOG states the guardian hook-handle close (GAP-0755)', () => {
+  it('names the collateral caveat, the rule for a brief read and the row delivery', () => {
+    const changelog = repoText('CHANGELOG.md');
+    for (const phrase of [
+      "when a user has several separate handles on the hook, in one process or several, on one file object or several, the guardian can close one that was not the cause before it reaches the one that was",
+      'a read shorter than about 5 seconds is closed only if the same program keeps the hook blocked across two checks or the same user across three',
+      'with a handle of the same program on both (the same process or the same file object)',
+      'closes at most 64 handles in one check',
+      'so a gateway that is down delays the row and never the close',
+      '(`closed` false), and while one has the hook open in a way that could refuse the start (it can write, or it is the only file object open on the hook) the guardian closes no user\'s handle either',
+      'so the hook stays unavailable until that program lets go, except that after about 30 seconds of one user\'s hold the guardian closes that user\'s handles once per streak to rule it out',
+      'is audited when it finishes',
+      'the same close, per file, to the machine files a hook start reads besides the binary',
+      'never DefenseClaw\'s own lock files',
+      'the hook binary is checked first and at most 4 held files get a pass in one check',
+      'on Windows Server 2025 a standard user cannot make such a hold, as measured',
+      'A hook that a program holds open',
+    ]) assert.ok(changelog.includes(phrase), `CHANGELOG lacks: ${phrase}`);
+    assert.ok(!changelog.includes('A hook that any account holds open'), 'CHANGELOG still says any account can hold the hook');
+  });
+});
+
 // GH #1101 (p0 GAP-0677, GAP-0765): the limit messages the configuration pages quote.
 describe('policy test leaves unblocks out without --sandbox (GAP-2495)', () => {
   it('only the daemon path carries unblocks', () => {
@@ -2492,7 +2600,7 @@ describe('Sandboxes panel keys and status strip segments match tui.mdx (GAP-2349
 describe('rendered gateway.toml drift is reported without a pause (GAP-0730)', () => {
   it('only a changed rendered gateway configuration is non-blocking', () => {
     const go = source('internal/gateway/sandbox_daemon_openshell.go');
-    assert.ok(go.includes('renderedGatewayDriftField     = "gateway configuration"'), 'rendered drift field renamed: re-check observability/sandbox-telemetry.mdx and enterprise/sandboxes.mdx');
+    assert.ok(/renderedGatewayDriftField\s+= "gateway configuration"/.test(go), 'rendered drift field renamed: re-check observability/sandbox-telemetry.mdx and enterprise/sandboxes.mdx');
     assert.ok(go.includes('if item.Field != renderedGatewayDriftField || item.Have != "changed" {'), 'blockingOpenShellDrift changed: a changed render may pause again, re-check the GAP-0730 pages');
     assert.ok(go.includes('drift = blockingOpenShellDrift(drift)'), 'readyOpenShell no longer filters drift: re-check the GAP-0730 pages');
     assert.ok(go.includes('return "gateway_configuration"') && go.includes('driftFieldInvalid.ReplaceAllString(strings.ToLower(field), "_")'), 'driftEventField changed: re-check the field value sandbox-telemetry.mdx names');

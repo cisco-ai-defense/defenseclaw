@@ -619,7 +619,31 @@ func (d *Daemon) ValidateStartIdentityFiles() error {
 	return nil
 }
 
+// RefuseStartInUntrustedHome is the first step of a start. A root run writes
+// the lock, log, PID record and login path into the home before the ownership
+// step that gives them back, so a home whose owner it cannot prove must be
+// refused before the first write: a refusal after it leaves root-owned files
+// that stop the account's own start (GAP-0714). It is the check
+// safefile.ReclaimToDirectoryOwner makes, run early. A managed install keeps
+// its own trust model.
+func RefuseStartInUntrustedHome(dataDir string) error {
+	if managed.IsManagedEnterprise(managed.PinnedDeploymentMode()) {
+		return nil
+	}
+	if err := preflightStartHome(dataDir); err != nil {
+		return fmt.Errorf("daemon: refusing to start: %w", err)
+	}
+	return nil
+}
+
+// preflightStartHome is the ownership check RefuseStartInUntrustedHome runs. A
+// variable so a test can stand in for the root run it cannot be.
+var preflightStartHome = safefile.PreflightReclaimDirectory
+
 func (d *Daemon) Start(args []string) (int, error) {
+	if err := RefuseStartInUntrustedHome(d.dataDir); err != nil {
+		return 0, err
+	}
 	if err := d.ValidateStartIdentityFiles(); err != nil {
 		return 0, err
 	}
@@ -1176,40 +1200,40 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 	info, readErr := d.readPIDInfo()
 	if readErr == nil {
 		if info.PID <= 0 {
-			return 0, 0, fmt.Errorf(
+			return 0, 0, &pidRecordError{record: PIDFileName, err: fmt.Errorf(
 				"%w: gateway PID file %s contains an invalid PID",
 				ErrUnsafeProcessIdentity,
 				d.pidFile,
-			)
+			)}
 		}
 		trackedPID = info.PID
 	} else if !errors.Is(readErr, os.ErrNotExist) {
-		return 0, 0, fmt.Errorf(
+		return 0, 0, &pidRecordError{record: PIDFileName, rootDenied: deniedByRoot(d.pidFile, readErr), err: fmt.Errorf(
 			"%w: gateway PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
 			d.pidFile,
 			readErr,
-		)
+		)}
 	}
 
 	watchdogPID, readErr = d.readWatchdogPID()
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		if managedIdentityHeldByWriter(readErr) {
-			return 0, 0, fmt.Errorf(
+			return 0, 0, &pidRecordError{record: WatchdogPIDFileName, err: fmt.Errorf(
 				"%w: watchdog PID file %s is held by a legacy or live writer; "+
 					"safely stop the previous watchdog and complete the upgrade before retrying "+
 					"(do not delete the PID file while its process may be live): %w",
 				ErrUnsafeProcessIdentity,
 				filepath.Join(d.dataDir, WatchdogPIDFileName),
 				readErr,
-			)
+			)}
 		}
-		return 0, 0, fmt.Errorf(
+		return 0, 0, &pidRecordError{record: WatchdogPIDFileName, rootDenied: deniedByRoot(filepath.Join(d.dataDir, WatchdogPIDFileName), readErr), err: fmt.Errorf(
 			"%w: watchdog PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
 			filepath.Join(d.dataDir, WatchdogPIDFileName),
 			readErr,
-		)
+		)}
 	}
 	return trackedPID, watchdogPID, nil
 }
@@ -1261,10 +1285,22 @@ func (d *Daemon) writePIDInfoAt(pid int, executable string, startIdentity string
 	if err != nil {
 		return err
 	}
-	return managed.WriteServiceRuntimeFile(
+	if err := writeGatewayPIDFile(
 		managed.PinnedDeploymentMode(), d.pidFile, "gateway pid file", data,
-	)
+	); err != nil {
+		// The write can land and the ownership step after it fail: a root
+		// start for an account whose owner it cannot prove leaves a root-owned
+		// record that stops the account's own start (GAP-0714). Take back the
+		// record this call wrote, and only it.
+		d.removePIDFileIfStarted(info)
+		return err
+	}
+	return nil
 }
+
+// writeGatewayPIDFile writes gateway.pid. A variable so a test can fail the
+// step after the write.
+var writeGatewayPIDFile = managed.WriteServiceRuntimeFile
 
 func IsDaemonChild() bool {
 	return os.Getenv(EnvDaemon) == "1"

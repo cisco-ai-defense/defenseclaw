@@ -166,7 +166,7 @@ With `fleet.enabled: true`, a managed install with no compiler stops before it c
   already installed fails with `already_installed`. A Linux host whose binaries
   belong to the RPM or DEB refuses `--payload` with `package_owned_binaries`,
   so keep Fleet off there. Python 3 and PyYAML must be on the host.
-- **Windows.** Setup neither carries nor passes a compiler. It keeps the compiler a Fleet-enabled install already recorded on the host; with none it refuses: `turn Fleet off in the config, then run Setup again`. To install one, run the lifecycle CLI from a payload folder with `--policy-compiler <file>`, using `policy_compiler.py` from the same release. A file that differs from that release's compiler is refused.
+- **Windows.** Setup neither carries nor passes a compiler. It keeps the compiler a Fleet-enabled install already recorded on the host; with none it refuses: `turn Fleet off in the config, then run the same command again with that config`. To install one, run the lifecycle CLI from a payload folder with `--policy-compiler <file>`, using `policy_compiler.py` from the same release. A file that differs from that release's compiler is refused.
 
 The compiler's output is described in [policies](/docs/edge-connector/policies#compile-the-policy).
 

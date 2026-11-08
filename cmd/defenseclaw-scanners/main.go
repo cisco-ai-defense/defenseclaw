@@ -15,7 +15,8 @@
 //
 //	defenseclaw-scanners skill-scanner <skill-scanner arguments>
 //	defenseclaw-scanners mcp-scan --input-stdin <url>
-//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self]
+//	defenseclaw-scanners plugin-scan <plugin dir> [--policy p] [--profile p] [--connector c] [--include-self] [--disable-vendor-identity]
+//	defenseclaw-scanners plugin-manifest-entrypoints   (manifests as JSON on stdin)
 //	defenseclaw-scanners versions | --version | prepare | prune
 package main
 
@@ -104,6 +105,8 @@ while i<len(a):
         i+=2
     elif x=="--include-self":
         o.include_self=True; i+=1
+    elif x=="--disable-vendor-identity":
+        o.disable_vendor_identity=True; i+=1
     elif t is None and not x.startswith("--"):
         t=x; i+=1
     else:
@@ -130,6 +133,14 @@ if o.include_self or not is_first_party_self_target(t,trusted_paths=o.trusted_se
         item["scanner"]=result["scanner"]
         result["findings"].append(item)
 print(json.dumps(result))`
+
+	// pluginManifestEntrypointsScript prints the entrypoints the plugin
+	// scanner reads from the manifest bytes on stdin, so the gateway watcher
+	// asks the scanner what a manifest declares instead of parsing it again.
+	pluginManifestEntrypointsScript = `import base64,json,sys
+from defenseclaw.scanner.plugin_scanner.scanner import declared_entrypoints
+r=json.load(sys.stdin)
+print(json.dumps({"entrypoints":declared_entrypoints({str(k):base64.b64decode(v,validate=True) for k,v in r["manifests"].items()})}))`
 
 	// mcpScanScript reads the config-derived scan input from stdin. Large
 	// pinned rule sets never enter either Windows process command line.
@@ -179,7 +190,7 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: defenseclaw-scanners skill-scanner|mcp-scan|plugin-scan|versions|prepare [arguments]")
+		fmt.Fprintln(stderr, "usage: defenseclaw-scanners skill-scanner|mcp-scan|plugin-scan|plugin-manifest-entrypoints|versions|prepare [arguments]")
 		return 2
 	}
 	if runtime.GOOS != "windows" {
@@ -243,6 +254,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		script, scriptArgs = pluginScanScript, args[1:]
 	case "mcp-scan":
 		script, scriptArgs = mcpScanScript, args[1:]
+	case "plugin-manifest-entrypoints":
+		script, scriptArgs = pluginManifestEntrypointsScript, args[1:]
 	default:
 		fmt.Fprintf(stderr, "defenseclaw-scanners: unknown tool %q\n", args[0])
 		return 2
@@ -254,7 +267,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	defer release()
 	if err := validateRuntimeCodeTree(); err != nil {
-		fmt.Fprintf(stderr, "defenseclaw-scanners: runtime code is not trusted: %v; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem\n", err)
+		fmt.Fprintf(stderr, "defenseclaw-scanners: runtime code is not trusted: %v; run `%s` as LocalSystem. %s\n", err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 		return 1
 	}
 	pythonDir := filepath.Join(dir, "python")
@@ -512,7 +525,7 @@ func prepareRuntime(manifest runtimeManifest) (string, error) {
 		return "", fmt.Errorf("the unpacked scanner runtime does not match this build: %w", err)
 	}
 	if err := validateRuntimeCodeTree(); err != nil {
-		return "", fmt.Errorf("the unpacked scanner runtime code is not trusted: %w; run DefenseClawSetup-Enterprise-Standalone-x64.exe /repair JSON=1 as LocalSystem", err)
+		return "", fmt.Errorf("the unpacked scanner runtime code is not trusted: %w; run `%s` as LocalSystem. %s", err, managed.WindowsSetupCommand("/repair", "JSON=1"), managed.WindowsSetupSource)
 	}
 	return dir, nil
 }

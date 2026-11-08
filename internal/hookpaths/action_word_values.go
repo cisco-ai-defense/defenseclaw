@@ -1190,6 +1190,16 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 	}
 	switch command := stmt.Cmd.(type) {
 	case *syntax.CallExpr:
+		temporaryAssignments := false
+		if len(command.Assigns) > 0 && len(command.Args) > 0 {
+			if program, fixed := StaticWord(command.Args[0], home); fixed {
+				switch programBase(program) {
+				case "eval", "source", ".", "export", "readonly", "set", "unset", "declare", "local", "typeset":
+				default:
+					temporaryAssignments = true
+				}
+			}
+		}
 		if len(command.Assigns) == 0 {
 			if len(command.Args) == 0 {
 				return []actionValues{values}
@@ -1208,6 +1218,19 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 		}
 		next := maps.Clone(values)
 		actionUpdateValuesAs(stmt, next, cwd, home, false)
+		if temporaryAssignments {
+			for _, assignment := range command.Assigns {
+				if assignment.Name == nil {
+					continue
+				}
+				name := assignment.Name.Value
+				if before, known := values[name]; known {
+					next[name] = before
+				} else {
+					delete(next, name)
+				}
+			}
+		}
 		return []actionValues{next}
 	case *syntax.FuncDecl:
 		next := maps.Clone(values)
@@ -1247,6 +1270,9 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 		}
 		return next
 	case *syntax.WhileClause:
+		if next, known := actionKeptWhileControl(command, values, cwd, home, steps); known {
+			return next
+		}
 		condition := actionKeptStatements(command.Cond, []actionValues{values}, cwd, home, steps)
 		if actionKeptSaturated(condition) {
 			return condition
@@ -1256,8 +1282,14 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 		}
 		return actionAppendValueCandidates(condition, actionKeptStatements(command.Do, condition, cwd, home, steps))
 	case *syntax.ForClause:
+		if next, known := actionKeptFixedFor(command, values, cwd, home, steps); known {
+			return next
+		}
 		return actionAppendValueCandidates([]actionValues{values}, actionKeptStatements(command.Do, []actionValues{values}, cwd, home, steps))
 	case *syntax.CaseClause:
+		if next, known := actionKeptFixedCase(command, values, cwd, home, steps); known {
+			return next
+		}
 		next := []actionValues{values}
 		for _, item := range command.Items {
 			next = actionAppendValueCandidates(next, actionKeptStatements(item.Stmts, []actionValues{values}, cwd, home, steps))
@@ -1272,14 +1304,644 @@ func actionKeptStatement(stmt *syntax.Stmt, values actionValues, cwd, home strin
 	}
 }
 
+// A fixed, non-globbing for-list runs once per item. The shared value
+// tracker can then keep assignments made by that loop without retaining a
+// path that was overwritten before the next command.
+func actionKeptFixedFor(clause *syntax.ForClause, values actionValues, cwd, home string, steps *int) ([]actionValues, bool) {
+	exit, beyond, ok := actionKeptFixedForFlow(clause, values, cwd, home, steps)
+	if !ok {
+		return nil, false
+	}
+	// No enclosing loop is read here, so a counted break leaves this one.
+	for _, states := range beyond {
+		exit = actionAppendValueCandidates(exit, states)
+	}
+	return exit, true
+}
+
+// actionKeptFixedForFlow returns the states that leave a fixed for list and,
+// in beyond, those a counted break carries past it: beyond[i] also leaves
+// i more enclosing loops.
+func actionKeptFixedForFlow(clause *syntax.ForClause, values actionValues, cwd, home string, steps *int) ([]actionValues, [][]actionValues, bool) {
+	name, items, ok := actionFixedForItems(clause, values, cwd, home)
+	if !ok {
+		return nil, nil, false
+	}
+	if len(items) == 0 {
+		return []actionValues{values}, nil, true
+	}
+	current := []actionValues{values}
+	var left []actionValues
+	var beyond [][]actionValues
+	for _, item := range items {
+		var next []actionValues
+		for _, candidate := range current {
+			bound := maps.Clone(candidate)
+			bound[name] = item
+			flow := actionKeptLoopBody(clause.Do, []actionValues{bound}, cwd, home, steps)
+			if states, saturated := flow.saturatedStates(); saturated {
+				return states, nil, true
+			}
+			next = actionAppendValueCandidates(next, flow.ended)
+			next = actionAppendValueCandidates(next, flow.continued)
+			left = actionAppendValueCandidates(left, flow.broken)
+			for level, states := range flow.beyond {
+				for len(beyond) <= level {
+					beyond = append(beyond, nil)
+				}
+				beyond[level] = actionAppendValueCandidates(beyond[level], states)
+			}
+			if actionKeptSaturated(next) {
+				return next, nil, true
+			}
+			if actionKeptSaturated(left) {
+				return left, nil, true
+			}
+		}
+		current = next
+		if len(current) == 0 {
+			break
+		}
+	}
+	return actionAppendValueCandidates(left, current), beyond, true
+}
+
+// actionFixedForItems returns the variable and the fixed items of a
+// non-globbing for list.
+func actionFixedForItems(clause *syntax.ForClause, values actionValues, cwd, home string) (string, []string, bool) {
+	loop, ok := clause.Loop.(*syntax.WordIter)
+	if !ok || clause.Select || loop.Name == nil || len(loop.Items) > 16 {
+		return "", nil, false
+	}
+	items := make([]string, 0, len(loop.Items))
+	for _, word := range loop.Items {
+		item, known := actionWordValue(word, values, cwd, home)
+		if !known {
+			return "", nil, false
+		}
+		switch {
+		case actionWordOneField(word):
+			// Every expansion is quoted: the word is one item, and its
+			// expanded text is not a pattern.
+		case !wordExpandsParameter(word) && !strings.ContainsAny(item, "*?["):
+		case simpleShellParameter(word) != "" && !strings.ContainsAny(item, "*?["):
+			// An unquoted expansion splits at the field separators the
+			// shell has: the default ones, or the IFS the command set.
+			separators := " \t\n"
+			if set, changed := values["IFS"]; changed {
+				separators = set
+			}
+			fields := shellFields(item, separators)
+			if len(items)+len(fields) > 16 {
+				return "", nil, false
+			}
+			items = append(items, fields...)
+			continue
+		default:
+			return "", nil, false
+		}
+		items = append(items, item)
+	}
+	return loop.Name.Value, items, true
+}
+
+// shellFields splits the text of an unquoted expansion as the shell does at
+// the characters of ifs. A white space separator is dropped at the ends and
+// merged with its neighbours; any other separator ends a field, empty or not.
+func shellFields(text, ifs string) []string {
+	if ifs == "" {
+		if text == "" {
+			return nil
+		}
+		return []string{text}
+	}
+	runes := []rune(text)
+	separator := func(r rune) bool { return strings.ContainsRune(ifs, r) }
+	space := func(r rune) bool { return (r == ' ' || r == '\t' || r == '\n') && separator(r) }
+	var fields []string
+	i := 0
+	skipSpace := func() {
+		for i < len(runes) && space(runes[i]) {
+			i++
+		}
+	}
+	skipSpace()
+	for i < len(runes) {
+		start := i
+		for i < len(runes) && !separator(runes[i]) {
+			i++
+		}
+		fields = append(fields, string(runes[start:i]))
+		if i >= len(runes) {
+			break
+		}
+		if space(runes[i]) {
+			skipSpace()
+			if i < len(runes) && separator(runes[i]) {
+				i++
+				skipSpace()
+			}
+		} else {
+			i++
+			skipSpace()
+		}
+	}
+	return fields
+}
+
+// actionWordOneField reports a word whose expansions are all quoted and
+// whose unquoted text has no pattern character, so the shell makes exactly
+// one field of it.
+func actionWordOneField(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+		case *syntax.Lit:
+			if strings.ContainsAny(part.Value, "*?[") {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return len(word.Parts) > 0
+}
+
+// actionKeptWhileControl reads a while or until loop whose body runs break
+// or continue. The loop leaves when its condition fails or a break runs;
+// passes repeat until they reach no new state.
+func actionKeptWhileControl(clause *syntax.WhileClause, values actionValues, cwd, home string, steps *int) ([]actionValues, bool) {
+	if len(clause.Cond) == 0 || len(clause.Do) == 0 {
+		return nil, false
+	}
+	for _, condition := range clause.Cond {
+		if actionNodeRunsLoopControl(condition, home, false) {
+			return nil, false
+		}
+	}
+	controlled := false
+	for _, stmt := range clause.Do {
+		if actionNodeRunsLoopControl(stmt, home, false) {
+			controlled = true
+			break
+		}
+	}
+	if !controlled {
+		return nil, false
+	}
+	truth := actionStaticCondition(clause.Cond[len(clause.Cond)-1], home)
+	if clause.Until {
+		truth = -truth
+	}
+	states := []actionValues{values}
+	seen := []actionValues{values}
+	var left []actionValues
+	for pass := 0; pass < 8 && len(states) > 0; pass++ {
+		condition := actionKeptStatements(clause.Cond, states, cwd, home, steps)
+		if actionKeptSaturated(condition) {
+			return condition, true
+		}
+		if truth <= 0 {
+			left = actionAppendValueCandidates(left, condition)
+		}
+		if truth < 0 {
+			return left, true
+		}
+		flow := actionKeptLoopBody(clause.Do, condition, cwd, home, steps)
+		if saturated, ok := flow.saturatedStates(); ok {
+			return saturated, true
+		}
+		left = actionAppendValueCandidates(left, flow.broken)
+		if actionKeptSaturated(left) {
+			return left, true
+		}
+		var next []actionValues
+		for _, state := range actionAppendValueCandidates(actionAppendValueCandidates(nil, flow.ended), flow.continued) {
+			if !slices.ContainsFunc(seen, func(prior actionValues) bool { return maps.Equal(prior, state) }) {
+				next = append(next, state)
+				seen = append(seen, state)
+			}
+		}
+		states = next
+	}
+	// A pass cap with states still running keeps them as candidates.
+	left = actionAppendValueCandidates(left, states)
+	if len(left) == 0 {
+		// The loop never leaves; keep the entry state for what follows.
+		return []actionValues{values}, true
+	}
+	return left, true
+}
+
+// actionLoopFlow holds the value states that leave part of a loop body:
+// ended runs the following statement, continued starts the next item and
+// broken leaves the loop.
+type actionLoopFlow struct {
+	ended, continued, broken []actionValues
+	// beyond[i] leaves this loop and i+1 enclosing loops (break N, N > 1).
+	beyond [][]actionValues
+}
+
+func (flow *actionLoopFlow) addBeyond(level int, states []actionValues) {
+	for len(flow.beyond) <= level {
+		flow.beyond = append(flow.beyond, nil)
+	}
+	flow.beyond[level] = actionAppendValueCandidates(flow.beyond[level], states)
+}
+
+func (flow *actionLoopFlow) add(other actionLoopFlow) {
+	flow.ended = actionAppendValueCandidates(flow.ended, other.ended)
+	flow.continued = actionAppendValueCandidates(flow.continued, other.continued)
+	flow.broken = actionAppendValueCandidates(flow.broken, other.broken)
+	for level, states := range other.beyond {
+		flow.addBeyond(level, states)
+	}
+}
+
+func (flow actionLoopFlow) saturatedStates() ([]actionValues, bool) {
+	for _, states := range append([][]actionValues{flow.ended, flow.continued, flow.broken}, flow.beyond...) {
+		if actionKeptSaturated(states) {
+			return states, true
+		}
+	}
+	return nil, false
+}
+
+// actionKeptLoopBody runs a loop body over states. It follows break and
+// continue through blocks, if clauses and && or || lists with the static
+// conditions the value tracker already uses.
+func actionKeptLoopBody(statements []*syntax.Stmt, states []actionValues, cwd, home string, steps *int) actionLoopFlow {
+	var flow actionLoopFlow
+	for _, stmt := range statements {
+		if len(states) == 0 {
+			break
+		}
+		part := actionKeptLoopStatement(stmt, states, cwd, home, steps)
+		if _, saturated := part.saturatedStates(); saturated {
+			return part
+		}
+		flow.continued = actionAppendValueCandidates(flow.continued, part.continued)
+		flow.broken = actionAppendValueCandidates(flow.broken, part.broken)
+		for level, beyond := range part.beyond {
+			flow.addBeyond(level, beyond)
+		}
+		states = part.ended
+		if _, saturated := flow.saturatedStates(); saturated {
+			return flow
+		}
+	}
+	flow.ended = actionAppendValueCandidates(nil, states)
+	return flow
+}
+
+func actionKeptLoopStatement(stmt *syntax.Stmt, states []actionValues, cwd, home string, steps *int) actionLoopFlow {
+	if !actionNodeRunsLoopControl(stmt, home, false) {
+		return actionLoopFlow{ended: actionUpdateValuesKept(stmt, states, cwd, home, steps)}
+	}
+	if !stmt.Background && !stmt.Negated && len(stmt.Redirs) == 0 {
+		switch command := stmt.Cmd.(type) {
+		case *syntax.CallExpr:
+			switch control, count := actionLoopControlCall(command, home); {
+			case control == "break" && count == 1:
+				return actionLoopFlow{broken: actionAppendValueCandidates(nil, states)}
+			case control == "break":
+				var flow actionLoopFlow
+				flow.addBeyond(count-2, states)
+				return flow
+			case control == "continue" && count == 1:
+				return actionLoopFlow{continued: actionAppendValueCandidates(nil, states)}
+			}
+		case *syntax.ForClause:
+			// A nested fixed loop keeps its own controls; a counted break
+			// in it leaves this loop as well.
+			if !actionNestedLoopEscapesKnown(command, home) {
+				break
+			}
+			var flow actionLoopFlow
+			for _, state := range states {
+				exit, beyond, fixed := actionKeptFixedForFlow(command, state, cwd, home, steps)
+				if !fixed {
+					return actionUnknownLoopFlow(stmt, states, cwd, home, steps)
+				}
+				if actionKeptSaturated(exit) {
+					return actionLoopFlow{ended: exit}
+				}
+				flow.ended = actionAppendValueCandidates(flow.ended, exit)
+				for level, escaped := range beyond {
+					if level == 0 {
+						flow.broken = actionAppendValueCandidates(flow.broken, escaped)
+					} else {
+						flow.addBeyond(level-1, escaped)
+					}
+				}
+			}
+			return flow
+		case *syntax.Block:
+			return actionKeptLoopBody(command.Stmts, states, cwd, home, steps)
+		case *syntax.IfClause:
+			return actionKeptLoopIf(stmt, command, states, cwd, home, steps)
+		case *syntax.CaseClause:
+			// The selected items of a fixed case run in order, as one list.
+			var flow actionLoopFlow
+			for _, state := range states {
+				items, fixed := actionFixedCaseItems(command, state, cwd, home)
+				if !fixed {
+					return actionUnknownLoopFlow(stmt, states, cwd, home, steps)
+				}
+				var selected []*syntax.Stmt
+				for _, item := range items {
+					selected = append(selected, item.Stmts...)
+				}
+				flow.add(actionKeptLoopBody(selected, []actionValues{state}, cwd, home, steps))
+				if _, saturated := flow.saturatedStates(); saturated {
+					return flow
+				}
+			}
+			return flow
+		case *syntax.BinaryCmd:
+			if (command.Op == syntax.AndStmt || command.Op == syntax.OrStmt) && !actionNodeRunsLoopControl(command.X, home, false) {
+				left := actionUpdateValuesKept(command.X, states, cwd, home, steps)
+				if actionKeptSaturated(left) {
+					return actionLoopFlow{ended: left}
+				}
+				truth := actionStaticCondition(command.X, home)
+				var flow actionLoopFlow
+				if truth == 0 || command.Op == syntax.AndStmt && truth < 0 || command.Op == syntax.OrStmt && truth > 0 {
+					flow.ended = actionAppendValueCandidates(nil, left)
+				}
+				if truth == 0 || command.Op == syntax.AndStmt && truth > 0 || command.Op == syntax.OrStmt && truth < 0 {
+					flow.add(actionKeptLoopStatement(command.Y, left, cwd, home, steps))
+				}
+				return flow
+			}
+		}
+	}
+	return actionUnknownLoopFlow(stmt, states, cwd, home, steps)
+}
+
+func actionKeptLoopIf(whole *syntax.Stmt, clause *syntax.IfClause, states []actionValues, cwd, home string, steps *int) actionLoopFlow {
+	if len(clause.Cond) == 0 { // else
+		return actionKeptLoopBody(clause.Then, states, cwd, home, steps)
+	}
+	for _, condition := range clause.Cond {
+		if actionNodeRunsLoopControl(condition, home, false) {
+			return actionUnknownLoopFlow(whole, states, cwd, home, steps)
+		}
+	}
+	condition := actionKeptStatements(clause.Cond, states, cwd, home, steps)
+	if actionKeptSaturated(condition) {
+		return actionLoopFlow{ended: condition}
+	}
+	truth := actionStaticCondition(clause.Cond[len(clause.Cond)-1], home)
+	var flow actionLoopFlow
+	if truth >= 0 {
+		flow.add(actionKeptLoopBody(clause.Then, condition, cwd, home, steps))
+	}
+	if truth <= 0 {
+		if clause.Else == nil {
+			flow.ended = actionAppendValueCandidates(flow.ended, condition)
+		} else {
+			flow.add(actionKeptLoopIf(whole, clause.Else, condition, cwd, home, steps))
+		}
+	}
+	return flow
+}
+
+// A statement that may run a loop control in a form this reader does not
+// follow may leave the loop, start the next item or finish, so each value
+// it can reach stays a candidate on every outcome.
+func actionUnknownLoopFlow(stmt *syntax.Stmt, states []actionValues, cwd, home string, steps *int) actionLoopFlow {
+	ended := actionUpdateValuesKept(stmt, states, cwd, home, steps)
+	if actionKeptSaturated(ended) {
+		return actionLoopFlow{ended: ended}
+	}
+	reach := actionAppendValueCandidates(actionAppendValueCandidates(nil, states), ended)
+	flow := actionLoopFlow{ended: reach, continued: reach, broken: reach}
+	// A counted break in it may also leave enclosing loops.
+	syntax.Walk(stmt, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl, *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
+			return false
+		case *syntax.CallExpr:
+			if control, count := actionLoopControlCall(node, home); control == "break" && count > 1 {
+				for level := 0; level <= count-2; level++ {
+					flow.addBeyond(level, reach)
+				}
+			}
+		}
+		return true
+	})
+	return flow
+}
+
+// actionLoopControlCall names a plain break or continue with its loop
+// count: one when absent, or a fixed positive count.
+func actionLoopControlCall(call *syntax.CallExpr, home string) (string, int) {
+	if len(call.Assigns) != 0 || len(call.Args) == 0 || len(call.Args) > 2 {
+		return "", 0
+	}
+	name, known := StaticWord(call.Args[0], home)
+	if !known || name != "break" && name != "continue" {
+		return "", 0
+	}
+	count := 1
+	if len(call.Args) == 2 {
+		word, fixed := StaticWord(call.Args[1], home)
+		number, err := strconv.Atoi(word)
+		if !fixed || err != nil || number < 1 || number > 16 {
+			return "", 0
+		}
+		count = number
+	}
+	return name, count
+}
+
+// actionNestedLoopEscapesKnown reports that every control in a nested loop
+// that may reach past it is a counted break this reader carries out. A
+// counted continue or another form keeps the conservative reading.
+func actionNestedLoopEscapesKnown(clause *syntax.ForClause, home string) bool {
+	known := true
+	syntax.Walk(clause, func(node syntax.Node) bool {
+		if !known {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl, *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
+			return false
+		case *syntax.WhileClause:
+			known = !actionNodeRunsLoopControl(node, home, true)
+			return false
+		case *syntax.CallExpr:
+			if actionLoopControlWord(node, home, true) {
+				if control, count := actionLoopControlCall(node, home); control != "break" || count < 2 {
+					known = false
+				}
+			}
+		}
+		return known
+	})
+	return known
+}
+
+// actionNodeRunsLoopControl reports a break or continue in root that can
+// leave the loop running root. A subshell, substitution or function body
+// runs its own controls; a nested loop keeps its own unless a count other
+// than one may reach past it (nested).
+func actionNodeRunsLoopControl(root syntax.Node, home string, nested bool) bool {
+	found := false
+	syntax.Walk(root, func(node syntax.Node) bool {
+		if found {
+			return false
+		}
+		switch node := node.(type) {
+		case *syntax.FuncDecl, *syntax.Subshell, *syntax.CmdSubst, *syntax.ProcSubst:
+			return false
+		case *syntax.ForClause, *syntax.WhileClause:
+			if node != root {
+				found = actionNodeRunsLoopControl(node, home, true)
+				return false
+			}
+		case *syntax.CallExpr:
+			found = actionLoopControlWord(node, home, nested)
+		}
+		return !found
+	})
+	return found
+}
+
+func actionLoopControlWord(call *syntax.CallExpr, home string, nested bool) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	name, known := StaticWord(call.Args[0], home)
+	if !known {
+		return false
+	}
+	switch name {
+	case "break", "continue":
+		if !nested {
+			return true
+		}
+		if len(call.Args) == 1 {
+			return false
+		}
+		count, fixed := StaticWord(call.Args[1], home)
+		return !fixed || count != "1"
+	case "eval", "builtin", "command":
+		for _, arg := range call.Args[1:] {
+			if word, fixed := StaticWord(arg, home); fixed && (strings.Contains(word, "break") || strings.Contains(word, "continue")) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Resolve only simple, fixed case patterns. Other pattern forms retain the
+// existing conservative candidate reading.
+func actionKeptFixedCase(clause *syntax.CaseClause, values actionValues, cwd, home string, steps *int) ([]actionValues, bool) {
+	items, known := actionFixedCaseItems(clause, values, cwd, home)
+	if !known {
+		return nil, false
+	}
+	current := []actionValues{values}
+	for _, item := range items {
+		current = actionKeptStatements(item.Stmts, current, cwd, home, steps)
+		if actionKeptSaturated(current) {
+			return current, true
+		}
+	}
+	return current, true
+}
+
+func actionFixedCaseItems(clause *syntax.CaseClause, values actionValues, cwd, home string) ([]*syntax.CaseItem, bool) {
+	word, known := actionWordValue(clause.Word, values, cwd, home)
+	if !known || len(clause.Items) > 16 {
+		return nil, false
+	}
+	var selected []*syntax.CaseItem
+	falling := false
+	for _, item := range clause.Items {
+		if item.Op != syntax.Break && item.Op != syntax.Fallthrough && item.Op != syntax.Resume {
+			return nil, false
+		}
+		itemMatches := falling
+		if !falling {
+			for _, patternWord := range item.Patterns {
+				if len(patternWord.Parts) != 1 {
+					return nil, false
+				}
+				literal, ok := patternWord.Parts[0].(*syntax.Lit)
+				if !ok || !actionSimpleCasePattern(literal.Value) {
+					return nil, false
+				}
+				pattern := literal.Value
+				if pattern == "*" || strings.HasSuffix(pattern, "*") && strings.HasPrefix(word, strings.TrimSuffix(pattern, "*")) || pattern == word {
+					itemMatches = true
+				}
+			}
+		}
+		if !itemMatches {
+			continue
+		}
+		selected = append(selected, item)
+		falling = item.Op == syntax.Fallthrough
+		if item.Op == syntax.Break {
+			break
+		}
+	}
+	return selected, true
+}
+
+func actionSimpleCasePattern(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	for i := 0; i < len(pattern); i++ {
+		char := pattern[i]
+		if char == '*' && (i == len(pattern)-1 || pattern == "*") {
+			continue
+		}
+		if !strings.ContainsRune("_-./+:@%,", rune(char)) && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 // 1 is true, -1 false, and 0 unknown. Only shell builtins whose result is
 // fixed without inspecting the environment narrow a branch here.
 func actionStaticCondition(stmt *syntax.Stmt, home string) int {
 	if stmt == nil {
 		return 0
 	}
+	if block, ok := stmt.Cmd.(*syntax.Block); ok && len(block.Stmts) == 1 && len(stmt.Redirs) == 0 && !stmt.Background && !stmt.Negated {
+		return actionStaticCondition(block.Stmts[0], home)
+	}
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) != 1 || len(call.Assigns) != 0 || len(stmt.Redirs) != 0 {
+	if !ok || len(stmt.Redirs) != 0 {
+		return 0
+	}
+	if len(call.Args) == 0 && len(call.Assigns) > 0 {
+		for _, assignment := range call.Assigns {
+			if assignment.Value == nil {
+				continue
+			}
+			commandSubstitution := false
+			syntax.Walk(assignment.Value, func(node syntax.Node) bool {
+				switch node.(type) {
+				case *syntax.CmdSubst, *syntax.ProcSubst:
+					commandSubstitution = true
+				}
+				return !commandSubstitution
+			})
+			if commandSubstitution {
+				return 0
+			}
+		}
+		return 1
+	}
+	if len(call.Args) != 1 || len(call.Assigns) != 0 {
 		return 0
 	}
 	program, fixed := StaticWord(call.Args[0], home)
@@ -1439,6 +2101,29 @@ func actionUpdateValuesAs(stmt *syntax.Stmt, values actionValues, cwd, home stri
 			values[actionReadonlyValuePrefix+name] = "1"
 		}
 	case "eval":
+		if len(call.Args) == 2 {
+			if body, fixed := actionWordValue(call.Args[1], values, cwd, home); fixed && len(body) <= 4096 {
+				if parsed, ok := parseShell(body); ok && len(parsed.Stmts) > 0 && len(parsed.Stmts) <= 8 {
+					var assignments []*syntax.Assign
+					for _, nested := range parsed.Stmts {
+						plain, direct := nested.Cmd.(*syntax.CallExpr)
+						if !direct || nested.Background || nested.Negated || len(nested.Redirs) != 0 ||
+							len(plain.Args) != 0 || len(plain.Assigns) != 1 || plain.Assigns[0].Name == nil ||
+							!actionEvalAssignmentName(plain.Assigns[0].Name.Value) {
+							assignments = nil
+							break
+						}
+						assignments = append(assignments, plain.Assigns[0])
+					}
+					if len(assignments) == len(parsed.Stmts) {
+						for _, assignment := range assignments {
+							update(assignment)
+						}
+						return
+					}
+				}
+			}
+		}
 		// eval of static name=value words assigns them; any other eval
 		// may change every name (rel-1-0-2:GAP-0409, eval f=<link>).
 		assigned := map[string]string{}

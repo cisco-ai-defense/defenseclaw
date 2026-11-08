@@ -310,6 +310,9 @@ func contextWithCancelGrace(parent context.Context, grace time.Duration) (contex
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// The request is one hook call: its reads wait for network shares
+		// one answer wait in all, its own (rel-1-0-6:GAP-0482).
+		defer hookpaths.HookCall()()
 		chargeBudget := func(receipt bool) bool {
 			if err := chargeSandboxHookBudget(r.Context(), receipt); err != nil {
 				w.Header().Set("Retry-After", "1")
@@ -439,8 +442,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required", "reason": hookexec.MalformedHookPayloadReason})
 				return
 			}
-			// The registered hook surface and event own the dialect. Body
-			// fields cannot select a different parser.
+			// The registered surface selects the profile and the command
+			// binds the event. The per-user CLI profile reads either body
+			// shape under the same CLI policy.
 			var vscodeLocal bool
 			event, vscodeLocal = copilotargs.LocalDialect(copilotHookDialectFromHeaders(r.Header), event)
 			if vscodeLocal {
@@ -462,6 +466,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
 				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event", "reason": hookexec.MalformedHookPayloadReason})
 				return
+			} else {
+				// The per-user CLI document is read by both harnesses. Its
+				// shared parser accepts two disjoint body shapes under the
+				// command-bound event and keeps the same CLI policy for each.
+				// Strict, managed and Secure Client keep their exact schemas.
+				cfg := a.decisionConfig(r.Context())
+				if cfg != nil && !cfg.SecureClientIntegration() &&
+					!managed.IsManagedEnterprise(cfg.DeploymentMode) &&
+					cfg.HookPolicyTierForConnector("copilot") != config.HookPolicyTierStrict {
+					r = r.WithContext(withCopilotCLISharedEvent(r.Context(), event))
+				}
 			}
 			if hookName := payloadString(payload, "hookName"); hookName != "" && hookName != event {
 				a.recordConnectorHookRejection(r.Context(), connectorName, event, "bound_event_mismatch", int64(len(b)))
@@ -600,6 +615,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		structuredToolRoute := toolRoute == connector.ToolEventRouteStructuredAction ||
 			profile.ToolCallLifecycle.Version == 0 && isGenericToolInspectionEvent(req.HookEventName)
 		if structuredToolRoute {
+			copilotCLILocalBody := false
+			if connectorName == "copilot" {
+				_, copilotCLILocalBody = copilotargs.CLIHookLocalEvent(
+					copilotCLISharedEventFromContext(r.Context()), payloadString(payload, "hook_event_name"))
+			}
 			if !hookToolCallJSONUnambiguous(connectorName, rawBody) {
 				req.ToolCallUnparsed = true
 			}
@@ -610,8 +630,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				req.ToolCallUnparsed = true
 			}
 			if connectorName == "copilot" && !copilotVSCodeLocalFromContext(r.Context()) &&
+				!copilotCLILocalBody &&
 				(payload["hook_event_name"] != nil || payload["tool_name"] != nil ||
 					payload["tool_input"] != nil) {
+				req.ToolCallUnparsed = true
+			}
+			if connectorName == "copilot" && copilotCLILocalBody &&
+				(copilotCLIMixedLocalFields(payload) ||
+					payload["tool_name"] == nil || payload["tool_input"] == nil ||
+					req.ToolName == "" || req.ToolArgsProjectionUncertain) {
 				req.ToolCallUnparsed = true
 			}
 			if connectorName == "copilot" && req.HookEventName == "permissionRequest" {
@@ -665,6 +692,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		startVerdictBlocked, startVerdictReason := true, sessionStartUnfinishedReason
 		if canonicalHookLifecycleEvent(req.HookEventName) == "session_start" {
 			startTicket = a.sessionStartGate.begin(startGateKey)
+			// The refusal this request was resolved to was issued before the
+			// start began; the start is expected to end with it.
+			startTicket.adopt(profileRefusal(r.Context()))
 			defer func() { startTicket.finish(startVerdictBlocked, startVerdictReason) }()
 		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
@@ -1822,8 +1852,13 @@ func (a *APIServer) hookDecisionMeta(
 	req agentHookRequest,
 ) (llmEventMeta, string, bool) {
 	if req.ConnectorName == "opencode" && req.HookEventName == "defenseclaw.plugin.loaded" {
+		// A plugin load comes before any session, so it has no agent
+		// instance: it is a lifecycle event, and its connector audit row
+		// stays, rather than a hook decision that cannot name the instance
+		// (GAP-0577). A load that does carry an instance, and Secure Client,
+		// keep their decision.
 		cfg := a.decisionConfig(ctx)
-		if cfg == nil || (!cfg.SecureClientIntegration() && !managed.IsManagedEnterprise(cfg.DeploymentMode)) {
+		if (cfg == nil || !cfg.SecureClientIntegration()) && AgentIdentityFromContext(ctx).AgentInstanceID == "" {
 			return llmEventMeta{}, "", false
 		}
 	}
@@ -2366,6 +2401,9 @@ func (a *APIServer) safeEvaluateHook(
 	payload map[string]interface{},
 	runtime hookProfileRuntime,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -2392,6 +2430,9 @@ func (a *APIServer) safeEvaluateSyntheticHook(
 	connectorName string,
 	req agentHookRequest,
 ) (resp agentHookResponse, panicked bool) {
+	defer hookpaths.HookCall()()
+	baseCtx := ctx
+	ctx = withShareBodyStrict(ctx, func() bool { return a.shareBodyStrictTier(baseCtx, connectorName) })
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
@@ -3579,6 +3620,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Args:                     trustedArgs,
 			CWD:                      agentHookTrustedActionCWDReported(ctx, req.CWD, req.ReportedCWD, toolCWD),
 			ActiveHome:               hookActiveHome(ctx),
+			CurrentWindowsDrive:      reportedWindowsDrive(req.ReportedCWD),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 		}
@@ -3597,6 +3639,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			LegacyText:              string(req.ToolArgs),
 			conflictSource:          conflictSource,
 			Connector:               req.ConnectorName,
+			CopilotSharedLocalFile:  copilotSharedLocalFileCall(ctx, req),
 			EnforcementCapable:      enforcementCapable,
 			StrictPolicy:            a.strictPolicyTierForHook(ctx, req.ConnectorName),
 			ManagedHookOverflowHold: managedWindowsHookOverflowHold(ctx, a.scannerCfg, req.ConnectorName, runtime.GOOS),
@@ -3635,7 +3678,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// by returning advisory-only changes (action stays allow,
 	// rawAction promoted to block, wouldBlock=true). For events
 	// the connector itself does not declare blockable, we further
-	// downgrade through mapHookAction so we never tell the agent
+	// downgrade through its capability map so we never tell the agent
 	// to block on a surface it cannot honor.
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
@@ -3643,7 +3686,10 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			action, rawAction, severity, reason, findings,
 		)
 		if mergedAction == "block" {
-			capable, capableWouldBlock := mapHookActionForProfile("block", effectiveMode, req.HookEventName, caps, profile, req.Payload)
+			capable, capableWouldBlock := mapAssetBlockForProfile(
+				effectiveMode, req.HookEventName, caps, profile, req.Payload,
+				a.scannerCfg != nil && a.scannerCfg.SecureClientIntegration(),
+			)
 			if capable != "block" {
 				mergedAction = capable
 				if capableWouldBlock {
@@ -3921,8 +3967,9 @@ func agentHookWindowsShellDialect(input actionfacts.Input) actionfacts.Dialect {
 // belong at this server-owned boundary, without trusting a payload-supplied
 // dialect hint or changing the recorded tool identity.
 func agentHookTrustedActionTool(connectorName, toolName, platformName string) string {
-	if strings.EqualFold(strings.TrimSpace(connectorName), "opencode") && toolName == "patch" {
-		return "apply_patch"
+	// The hook client describes the call under the same name (GAP-0073).
+	if mapped := hookpaths.ConnectorActionTool(connectorName, toolName); mapped != toolName {
+		return mapped
 	}
 	if strings.EqualFold(strings.TrimSpace(platformName), "windows") {
 		connectorName = strings.TrimSpace(connectorName)

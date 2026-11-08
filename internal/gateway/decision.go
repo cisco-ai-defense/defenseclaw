@@ -209,7 +209,7 @@ func guardrailContentActionForGuardrail(gc *config.GuardrailConfig, connector, s
 		posture := "default"
 		if gc != nil {
 			ref := gc.EffectiveRulePackRef("")
-			posture = packPosture(ref, guardrailRulePackDir(gc, ref))
+			posture = guardrailPackPosture(gc, ref)
 		}
 		blockThreshold, alertThreshold := guardrailProfileThresholds(posture)
 		return guardrailActionForRank(guardrailSeverityRank(severity), blockThreshold, alertThreshold, false, 0)
@@ -314,8 +314,8 @@ func guardrailProfileThresholds(profile string) (blockThreshold int, alertThresh
 }
 
 // guardrailProfileForDir is the posture of a rule-pack folder without a
-// manifest posture: its base name (strict, permissive), else default. Only
-// the three built-in packs rely on it.
+// manifest posture: its base name (strict, permissive), else default. Shipped
+// packs carry manifests; this preserves the legacy directory fallback.
 func guardrailProfileForDir(dir string) string {
 	if strings.TrimSpace(dir) == "" {
 		return "default"

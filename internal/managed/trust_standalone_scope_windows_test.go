@@ -166,7 +166,7 @@ func TestStandaloneTrustNeverRepairsDriftedConfigInPlace(t *testing.T) {
 	if err == nil {
 		t.Fatal("standalone accepted a drifted config.yaml")
 	}
-	if !strings.Contains(err.Error(), "Setup /ensure") {
+	if !strings.Contains(err.Error(), `.\DefenseClawSetup-Enterprise-Standalone-x64.exe' /ensure`) {
 		t.Fatalf("standalone refusal %q does not say how to recover", err)
 	}
 	if *calls != 0 {

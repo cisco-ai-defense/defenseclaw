@@ -61,7 +61,7 @@ const (
 var (
 	// windowsSecretLayout resolves the standalone layout (tests use a
 	// temporary tree).
-	windowsSecretLayout = managed.StandaloneWindowsLayout
+	windowsSecretLayout = windowsManagedStandaloneLayout
 	// windowsSecretGatewayAccount is the service whose SID may read the
 	// credentials.
 	windowsSecretGatewayAccount = `NT SERVICE\` + managed.StandaloneWindowsGatewaySvc
@@ -90,7 +90,7 @@ var (
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
 	windowsSecretLifecycleLockPath = func() (string, error) {
-		roots, err := winpath.TrustedEnterpriseRoots(managed.ProfileStandalone)
+		roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
 		if err != nil {
 			return "", err
 		}

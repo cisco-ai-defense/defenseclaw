@@ -254,13 +254,14 @@ class BootstrapEnvTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "POSIX folder modes")
     def test_opencode_readiness_names_a_group_writable_plugin_folder_with_its_fix(self):
-        # Ubuntu's umask 002 leaves ~/.config/opencode/plugins at 0775; init
-        # ended partial and suggested `setup opencode`, which fails the same way.
+        # A shared group on this folder must still get a matching init hint.
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
         plugin_dir = os.path.join(self._tmp.name, ".config", "opencode", "plugins")
         os.makedirs(plugin_dir)
         os.chmod(plugin_dir, 0o775)
-        with patch.dict(os.environ, {"HOME": self._tmp.name}):
+        with patch.dict(os.environ, {"HOME": self._tmp.name}), patch(
+            "defenseclaw.file_permissions.owner_private_group", return_value=False
+        ):
             os.environ.pop("OPENCODE_CONFIG_DIR", None)
             os.environ.pop("XDG_CONFIG_HOME", None)
             result = _connector_readiness(cfg, "opencode")

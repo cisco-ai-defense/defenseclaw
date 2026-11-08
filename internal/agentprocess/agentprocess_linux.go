@@ -59,12 +59,51 @@ func currentClock() (string, int64, bool) {
 	return boot, now.Nano() / (1_000_000_000 / linuxClockTicks), true
 }
 
+// procPath is the /proc entry of a process. It is built without fmt: a hook
+// reads several of these for every request that needs its agent.
+func procPath(pid int, leaf string) string { return "/proc/" + strconv.Itoa(pid) + "/" + leaf }
+
+// readLink is os.Readlink with one buffer on the stack: the link of an
+// ordinary path fits it, and a longer one is read by os.Readlink.
+func readLink(path string) (string, error) {
+	var buf [512]byte
+	n, err := unix.Readlink(path, buf[:])
+	if err != nil {
+		return "", &os.PathError{Op: "readlink", Path: path, Err: err}
+	}
+	if n == len(buf) {
+		return os.Readlink(path)
+	}
+	return string(buf[:n]), nil
+}
+
+// readStat reads /proc/<pid>/stat with the three system calls a small procfs
+// file needs (os.ReadFile adds a stat, a second read and a file object).
+func readStat(pid int) ([]byte, error) {
+	path := procPath(pid, "stat")
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+	buf := make([]byte, 1024)
+	n, err := unix.Read(fd, buf)
+	if err != nil {
+		return nil, err
+	}
+	if n == len(buf) {
+		// A line this long is not the usual one; read it whole.
+		return os.ReadFile(path)
+	}
+	return buf[:n], nil
+}
+
 // lookupProc reads /proc/<pid>/stat. The name comes from the executable
 // link, not the command name: the kernel names a process started from a
 // script after the script ("cursor-hook.sh"), while its executable is the
 // shell that runs it.
 func lookupProc(pid int) (Process, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	data, err := readStat(pid)
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 		return Process{}, errNotFound
 	}
@@ -86,11 +125,20 @@ func lookupProc(pid int) (Process, error) {
 // with starttime the 22nd field. comm may hold spaces and parentheses, so
 // the fields after it start at the last ')'.
 func executablePath(pid int) string {
-	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	exe, err := readLink(procPath(pid, "exe"))
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSuffix(exe, " (deleted)")
+}
+
+// workingDirectory reads the /proc/<pid>/cwd link.
+func workingDirectory(pid int) string {
+	dir, err := readLink(procPath(pid, "cwd"))
+	if err != nil || strings.HasSuffix(dir, " (deleted)") {
+		return ""
+	}
+	return dir
 }
 
 // commandLine reads /proc/<pid>/cmdline, NUL-separated arguments, and the
@@ -121,15 +169,29 @@ func parseStat(pid int, data []byte) (Process, error) {
 	if open < 0 || closing < open || closing+2 > len(data) {
 		return Process{}, fmt.Errorf("malformed /proc/%d/stat", pid)
 	}
-	fields := strings.Fields(string(data[closing+2:]))
-	if len(fields) < 20 {
+	// Only the first 20 fields after the name are needed; they are split in
+	// place, without a copy of the line or a slice of all its fields.
+	var fields [20][]byte
+	count := 0
+	for rest := data[closing+2:]; count < len(fields); count++ {
+		rest = bytes.TrimLeft(rest, " \t\n")
+		if len(rest) == 0 {
+			break
+		}
+		end := bytes.IndexAny(rest, " \t\n")
+		if end < 0 {
+			end = len(rest)
+		}
+		fields[count], rest = rest[:end], rest[end:]
+	}
+	if count < len(fields) {
 		return Process{}, fmt.Errorf("malformed /proc/%d/stat", pid)
 	}
-	parent, err := strconv.Atoi(fields[1])
+	parent, err := strconv.Atoi(string(fields[1]))
 	if err != nil {
 		return Process{}, fmt.Errorf("malformed /proc/%d/stat: %w", pid, err)
 	}
-	start, err := strconv.ParseInt(fields[19], 10, 64)
+	start, err := strconv.ParseInt(string(fields[19]), 10, 64)
 	if err != nil {
 		return Process{}, fmt.Errorf("malformed /proc/%d/stat: %w", pid, err)
 	}
@@ -138,6 +200,6 @@ func parseStat(pid int, data []byte) (Process, error) {
 		Parent: parent,
 		Name:   string(data[open+1 : closing]),
 		Start:  start,
-		Exited: fields[0] == "Z" || fields[0] == "X",
+		Exited: string(fields[0]) == "Z" || string(fields[0]) == "X",
 	}, nil
 }

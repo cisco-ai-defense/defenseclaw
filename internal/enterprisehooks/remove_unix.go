@@ -136,8 +136,11 @@ func hookFolderUnsearchable(hooksDir string) bool {
 // PurgeSummary is what PurgeUserState found and removed, so the uninstall
 // names only that for each account (GAP-1444).
 type PurgeSummary struct {
-	// Data reports that ~/.defenseclaw was there and is gone.
+	// Data reports that DefenseClaw-owned entries in ~/.defenseclaw went.
 	Data bool
+	// KeptEntries names account entries that remain after the owned entries
+	// were removed. They are relative to ~/.defenseclaw.
+	KeptEntries []string
 	// Kept reports that ~/.defenseclaw holds the account's own per-user
 	// install from before the managed deployment enrolled it: the purge
 	// leaves that folder and the install's binaries as they are, because a
@@ -185,11 +188,12 @@ func purgeUserFiles(home, dataDir string, uid int, summary *PurgeSummary) error 
 // teardown fails, the state stays for a rerun. Only the
 // Claude Code blocker the enrollment wrote over the install's hook script
 // goes in both cases (UnblockPersonalClaudeHook). Otherwise
-// all of ~/.defenseclaw goes, including the hook scripts and the account's own
-// hooks the foreign-hook policy moved aside (see connector.PurgeUserState),
-// and so do the binaries and launcher links the per-user install put in
-// ~/.local/bin (see RemoveUserBinaries) and DefenseClaw's entries in the
-// account's uv cache (see RemoveUserUVCacheEntries). The caller stops the
+// known managed entries in ~/.defenseclaw go, including hook scripts and
+// credentials. Unrelated entries and saved originals stay, and the folder
+// goes only if empty (see connector.PurgeUserStateWithResult). The binaries
+// and launcher links in ~/.local/bin (see RemoveUserBinaries) and
+// DefenseClaw's entries in the account's uv cache (see
+// RemoveUserUVCacheEntries) go too. The caller stops the
 // account's per-user gateway first. A home that no longer exists is not an
 // error. The per-user worker runs it only after every Remove of the same job
 // was checked clean (GAP-0632), and it keeps the state while a connector
@@ -225,8 +229,8 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, err
 	if rel, err := filepath.Rel(home, dataDir); err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return summary, fmt.Errorf("enterprise hooks: refusing to purge %s, which is not inside the user home %s", dataDir, home)
 	}
-	// The purge deletes everything in the folder, so only DefenseClaw's own
-	// folder, and never through a link, which would name the user's files.
+	// The purge enters only DefenseClaw's own folder and never follows a
+	// link, which could name a different account's files.
 	if filepath.Base(dataDir) != ".defenseclaw" {
 		return summary, fmt.Errorf("enterprise hooks: refusing to purge %s, which is not a .defenseclaw folder", dataDir)
 	}
@@ -295,10 +299,12 @@ func PurgeUserState(ctx context.Context, opts InstallOptions) (PurgeSummary, err
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: kept the per-user state: %w", err)
 			}
-			if err := connector.PurgeUserState(dataDir); err != nil {
+			purged, err := connector.PurgeUserStateWithResult(dataDir)
+			if err != nil {
 				return fmt.Errorf("enterprise hooks: remove the per-user state: %w", err)
 			}
-			summary.Data = true
+			summary.Data = purged.Removed
+			summary.KeptEntries = purged.Kept
 			removeStaleHookTempEntries(uid, os.TempDir(), filepath.Join(home, ".hermes", "cache", "scratch"))
 			return purgeUserFiles(home, dataDir, uid, &summary)
 		})

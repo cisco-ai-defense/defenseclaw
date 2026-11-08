@@ -29,6 +29,7 @@ what the CI gate runs.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import textwrap
@@ -437,7 +438,17 @@ def write_bundled_registry() -> bool:
     )
     if source_bytes != old_bundled:
         _TARGET_BUNDLED_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
-        _TARGET_BUNDLED_REGISTRY.write_bytes(source_bytes)
+        # Replace the mirror in one step: a reader (a --check, a test that
+        # loads the bundled registry) never sees it empty or half written
+        # while a `make _bundle-data` publishes it (GAP-0794).
+        staged = _TARGET_BUNDLED_REGISTRY.with_name(
+            f".{_TARGET_BUNDLED_REGISTRY.name}.{os.getpid()}.tmp"
+        )
+        try:
+            staged.write_bytes(source_bytes)
+            os.replace(staged, _TARGET_BUNDLED_REGISTRY)
+        finally:
+            staged.unlink(missing_ok=True)
         return True
     return False
 

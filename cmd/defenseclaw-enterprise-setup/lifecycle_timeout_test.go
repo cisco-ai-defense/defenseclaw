@@ -12,10 +12,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -56,6 +54,10 @@ func TestEnterpriseLifecycleChildHelper(t *testing.T) {
 		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
 		time.Sleep(5 * time.Minute)
 		os.Exit(0)
+	case "exit-still-active":
+		// Ends at once with the exit status Windows also uses for running.
+		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		os.Exit(259)
 	case "recover":
 		// The recovery replays the journal only once the stopped child is
 		// gone; one still running would race it.
@@ -91,19 +93,6 @@ func TestEnterpriseLifecycleChildHelper(t *testing.T) {
 func readHelperFile(path string) string {
 	body, _ := os.ReadFile(path)
 	return string(body)
-}
-
-func lifecycleHelperProcessAlive(pid int) bool {
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	if runtime.GOOS == "windows" {
-		// FindProcess opens the process: it fails once the process is gone.
-		_ = process.Release()
-		return true
-	}
-	return process.Signal(syscall.Signal(0)) == nil
 }
 
 // GAP-0501, executed: TIMEOUTSECONDS kills a real lifecycle child mid-run,

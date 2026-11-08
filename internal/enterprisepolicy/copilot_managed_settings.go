@@ -416,7 +416,7 @@ func copilotManagedSettings(opts Options, state *State, write bool) error {
 	}
 	ownedNow := append(keep, add...)
 	if len(ownedNow) == 0 {
-		removeCopilotManagedSettingsDirs(opts, path, record, record == nil && len(drop) > 0)
+		removeCopilotManagedSettingsDirs(opts, path, record)
 		if record != nil {
 			return deleteRecord(opts, copilotManagedSettingsRecord)
 		}
@@ -444,19 +444,17 @@ func writeCopilotManagedSettings(opts Options, path string, doc *object) ([]stri
 }
 
 // removeCopilotManagedSettingsDirs removes, once the managed settings file
-// is gone, the folders DefenseClaw recorded creating for it, deepest first,
-// and with recordless (an older build's file DefenseClaw just emptied) the
-// file's own folder. Only an empty folder goes.
-func removeCopilotManagedSettingsDirs(opts Options, path string, record *ownershipRecord, recordless bool) {
+// is gone, the folders DefenseClaw recorded creating for it, deepest first.
+// Only an empty folder goes, and never one without a record: the file of a
+// build before 1.0.0 has none, and its folder may be the administrator's
+// (GAP-0091).
+func removeCopilotManagedSettingsDirs(opts Options, path string, record *ownershipRecord) {
 	if _, err := os.Lstat(platformPath(opts, path)); !errors.Is(err, os.ErrNotExist) {
 		return
 	}
 	var dirs []string
 	if record != nil {
 		dirs = append(dirs, record.CreatedDirs...)
-	}
-	if recordless {
-		dirs = appendUnique(dirs, dirFor(opts, path))
 	}
 	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
 	for _, dir := range dirs {
@@ -514,7 +512,7 @@ func removeCopilotManagedSettings(opts Options, state *State) error {
 			state.detail("vscode: removed %s from %s", strings.Join(removed, ", "), path)
 		}
 	}
-	removeCopilotManagedSettingsDirs(opts, path, record, record == nil && len(removed) > 0)
+	removeCopilotManagedSettingsDirs(opts, path, record)
 	if record == nil {
 		return nil
 	}

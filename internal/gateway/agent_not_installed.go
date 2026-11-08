@@ -33,6 +33,17 @@ func setupRefusedBeforeAnyChange(err error) bool {
 		errors.Is(err, connector.ErrSetupRefusedUnchanged)
 }
 
+// connectorRefusedAtCustody reports a refusal made before Setup wrote anything
+// because another account can write where the guard of a connector lives: the
+// plugin folder chain or file (connector.PluginFolderRefusedBeforeChange), or
+// the folder of the agent executable. The user clears it with the command the
+// refusal names, so only that connector waits for a restart; failing the start
+// for it left every other connector unchecked (GAP-0798).
+func connectorRefusedAtCustody(err error) bool {
+	return connector.PluginFolderRefusedBeforeChange(err) ||
+		errors.Is(err, connector.ErrAgentInstallNotTrusted) && setupRefusedBeforeAnyChange(err)
+}
+
 // agentNotInstalledReason skips only a connector with positive absence
 // evidence. A missing selected executable at an arbitrary path can mean the
 // agent moved, so that case keeps the existing startup refusal.

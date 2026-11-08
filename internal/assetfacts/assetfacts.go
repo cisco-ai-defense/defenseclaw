@@ -23,12 +23,17 @@ package assetfacts
 
 import (
 	"bytes"
+	"compress/flate"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -40,10 +45,55 @@ import (
 const Header = "X-DefenseClaw-Asset-Facts"
 
 const (
-	maxHeaderBytes   = 128 << 10
-	maxSkills        = 16
-	maxFieldBytes    = 1024
-	maxArgs          = 32
+	// maxHeaderBytes bounds the encoded facts. It holds the ordinary text of
+	// the most candidate owners one plugin tool name can have (23, each up to
+	// the per-file and escaped-text caps of content.go) even when the text
+	// does not shrink, together with the most an MCP definition adds. The
+	// gateway servers that take the hook request read headers up to
+	// MaxRequestHeaderBytes, which leaves room for the other headers. Their
+	// worst case is about 2.4 MiB of text (random printable characters deflate
+	// to four fifths). The argument digests of a Codex project definition (up
+	// to 0.7 MiB) come with a request that selects no plugin.
+	maxHeaderBytes = 3 << 20
+	// MaxRequestHeaderBytes is the request header limit of a gateway server
+	// that takes a hook request: the largest Header value plus room for the
+	// other headers (the net/http default of 1 MiB cannot carry it).
+	MaxRequestHeaderBytes = maxHeaderBytes + 64<<10
+	// compressedPrefix marks a header value whose JSON is deflated before
+	// the base64 step ('.' is not in the base64url alphabet, so it cannot be
+	// mistaken for the plain form). Only a large value is deflated: the
+	// ordinary small claim keeps the plain form and its cost.
+	compressedPrefix = "z."
+	compressAbove    = 16 << 10
+	// maxDecodedBytes bounds the JSON a header value may expand to, so that a
+	// small deflated value cannot make the gateway allocate without limit.
+	maxDecodedBytes = 8 << 20
+	maxSkills       = 16
+	maxFieldBytes   = 1024
+	maxArgs         = 32
+	// maxPinArgs bounds the argument digests a claim carries: a definition
+	// past maxArgs still pins every argument a deny prefix can sensibly name.
+	// A prefix longer than this cannot be ruled out and is refused.
+	maxPinArgs = 2048
+	// maxTailPins bounds the argument digests (MCPPins.Tail, pinTailDigestLen
+	// bytes each) that follow the maxPinArgs full ones, so a deny prefix that
+	// differs deep in a long argument list is still ruled out. An argument
+	// past both bounds cannot be ruled out and is refused as a possible match.
+	// The bound is the one the one-byte digests had (65,536 positions): a
+	// wider digest must not shorten the list an ordinary call can have.
+	maxTailPins = 1 << 16
+	// pinTailDigestLen is the byte length of a tail digest. It is as wide as
+	// the full ones (pinArgDigestLen hex characters), so an argument that is
+	// not the one a rule names has no practical chance of sharing it: a
+	// matching tail digest is decisive, not a coin flip that blocks an
+	// ordinary call.
+	pinTailDigestLen = pinArgDigestLen / 2
+	// maxPinArgCount bounds the argument count a claim states; it is a
+	// sanity bound, not a clamp that could rule out an exact deny.
+	maxPinArgCount = math.MaxInt32
+	// pinArgDigestLen is the hex length of an argument digest: a collision
+	// only makes a rule "may match", the safe side.
+	pinArgDigestLen  = 16
 	maxManifestBytes = 64 << 10
 	maxNameBytes     = 255
 	maxInputStrings  = 64
@@ -71,6 +121,10 @@ type Facts struct {
 	// a gateway that cannot read it cannot prove it is not a denied skill
 	// (GAP-1303).
 	SkillsTruncated bool `json:"skills_truncated,omitempty"`
+	// Contents holds the text of the skill or plugin folders the request
+	// selects, read as the user, for a gateway that may not read a profile
+	// (GAP-0699, GAP-0701).
+	Contents []Content `json:"contents,omitempty"`
 }
 
 // SourceCommandLine marks an MCP definition read from the agent's command
@@ -94,6 +148,68 @@ type MCPServer struct {
 	// Source is SourceCommandLine for a definition from the agent's command
 	// line, "" for one from its config files.
 	Source string `json:"source,omitempty"`
+	// Relocated marks a user-scope, non-built-in definition the hook read
+	// from the config file of a CODEX_HOME other than ~/.codex: the file the
+	// agent runs, which a gateway reading the default one would miss. A
+	// managed Windows gateway admits it only when the enumerator published
+	// the same definition (GAP-0686).
+	Relocated bool `json:"relocated,omitempty"`
+	// ProjectScope marks a definition the hook read from a project
+	// .codex/config.toml, which takes precedence over the user config and
+	// which a managed Windows enumerator does not publish (GAP-0686).
+	ProjectScope bool `json:"project,omitempty"`
+	// Digest is config.MCPLaunchDigest of the complete definition the hook
+	// read, set with Relocated or ProjectScope. The fields above are bounded
+	// and carry no environment, so a gateway that holds the published record
+	// compares the digest, never the bounded fields.
+	Digest string `json:"digest,omitempty"`
+	// Pins holds, for a claim whose definition does not fit the bounds, what
+	// a rule that pins where the server points can be checked against: a
+	// SHA-256 of each value a rule compares exactly. A gateway tells a deny
+	// pinned to another endpoint from one that may match, instead of
+	// refusing every server of that name.
+	Pins *MCPPins `json:"pins,omitempty"`
+}
+
+// MCPPins are the SHA-256 digests (hex) of the values an asset_policy rule
+// compares on an MCP server, taken from the complete definition the hook
+// read: the trimmed URL, the base name of the trimmed command, and each
+// trimmed argument (up to maxPinArgs, as PinArgSum), then the same-width
+// digest of each further argument (Tail, up to maxTailPins), with the count
+// of arguments and the transport.
+type MCPPins struct {
+	URL      string   `json:"url,omitempty"`
+	Command  string   `json:"command,omitempty"`
+	Args     []string `json:"args,omitempty"`
+	ArgCount int      `json:"arg_count,omitempty"`
+	// Tail holds PinTailDigest of the arguments from position len(Args) on,
+	// concatenated and base64url encoded, only when Args is full. A digest
+	// that differs rules a deny out; one that matches keeps it.
+	Tail      string `json:"tail,omitempty"`
+	Transport string `json:"transport,omitempty"`
+}
+
+// TailBytes are the decoded Tail digests, pinTailDigestLen bytes per
+// argument and whole digests only, or nil.
+func (p *MCPPins) TailBytes() []byte {
+	if p == nil || p.Tail == "" {
+		return nil
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(p.Tail)
+	if err != nil {
+		return nil
+	}
+	return raw[:min(len(raw)/pinTailDigestLen, maxTailPins)*pinTailDigestLen]
+}
+
+// TailDigestAt is the digest at position i of tail (TailBytes, decoded once
+// by the caller: the argument at position len(Args)+i), or nil when the claim
+// holds none there.
+func TailDigestAt(tail []byte, i int) []byte {
+	if i < 0 || (i+1)*pinTailDigestLen > len(tail) {
+		return nil
+	}
+	return tail[i*pinTailDigestLen : (i+1)*pinTailDigestLen]
 }
 
 // Encode renders facts as a header value, or "" when there is nothing to
@@ -101,7 +217,7 @@ type MCPServer struct {
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && !facts.SkillsTruncated {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && !facts.SkillsTruncated && len(facts.Contents) == 0 {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -110,11 +226,60 @@ func Encode(facts Facts) string {
 	if encoder.Encode(facts) != nil {
 		return ""
 	}
-	value := base64.RawURLEncoding.EncodeToString(bytes.TrimSuffix(raw.Bytes(), []byte{10}))
+	plain := bytes.TrimSuffix(raw.Bytes(), []byte{10})
+	value := base64.RawURLEncoding.EncodeToString(plain)
+	if len(value) > compressAbove {
+		if packed, ok := deflate(plain); ok && len(packed) < len(value) {
+			value = packed
+		}
+	}
 	if len(value) > maxHeaderBytes {
+		if len(facts.Contents) > 0 && hasContentFiles(facts.Contents) {
+			// Too much text for one header: keep the facts, and the contents
+			// as truncated ones without text, which the gateway refuses as
+			// unknown; dropping them would let the asset run unjudged.
+			facts.Contents = withoutContentFiles(facts.Contents)
+			return Encode(facts)
+		}
 		return ""
 	}
 	return value
+}
+
+// deflate renders json as a compressed header value: the prefix and the
+// base64url of the deflated bytes. Ordinary text (the candidate owners of one
+// tool name, each a few tens of KiB of documentation) shrinks to a fraction of
+// its size; digests do not, and keep their own bound.
+func deflate(json []byte) (string, bool) {
+	var packed bytes.Buffer
+	writer, err := flate.NewWriter(&packed, flate.DefaultCompression)
+	if err != nil {
+		return "", false
+	}
+	if _, err := writer.Write(json); err != nil || writer.Close() != nil {
+		return "", false
+	}
+	return compressedPrefix + base64.RawURLEncoding.EncodeToString(packed.Bytes()), true
+}
+
+// decodeValue returns the JSON a header value carries, or false when it is
+// malformed or expands past maxDecodedBytes.
+func decodeValue(value string) ([]byte, bool) {
+	rest, compressed := strings.CutPrefix(value, compressedPrefix)
+	raw, err := base64.RawURLEncoding.DecodeString(rest)
+	if err != nil {
+		return nil, false
+	}
+	if !compressed {
+		return raw, true
+	}
+	reader := flate.NewReader(bytes.NewReader(raw))
+	defer reader.Close()
+	out, err := io.ReadAll(io.LimitReader(reader, maxDecodedBytes+1))
+	if err != nil || len(out) > maxDecodedBytes {
+		return nil, false
+	}
+	return out, true
 }
 
 // Decode parses a header value. ok is false for an absent, oversized or
@@ -124,8 +289,8 @@ func Decode(value string) (Facts, bool) {
 	if value == "" || len(value) > maxHeaderBytes {
 		return Facts{}, false
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(value)
-	if err != nil {
+	raw, ok := decodeValue(value)
+	if !ok {
 		return Facts{}, false
 	}
 	var facts Facts
@@ -133,7 +298,7 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || facts.SkillsTruncated
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || facts.SkillsTruncated || len(facts.Contents) > 0
 }
 
 // DeclaredFor returns the names the facts say folder declares.
@@ -168,6 +333,7 @@ func bounded(facts Facts) Facts {
 		}
 	}
 	facts.SkillDirs = dirs
+	facts.Contents = boundedContents(facts.Contents)
 	if server := facts.MCP; server != nil {
 		out := MCPServer{
 			Name: clean(server.Name, maxNameBytes), URL: clean(server.URL, maxFieldBytes),
@@ -183,11 +349,23 @@ func bounded(facts Facts) Facts {
 			lossy = lossy || out.Args[len(out.Args)-1] != strings.TrimSpace(arg)
 		}
 		commandLine := server.Source == SourceCommandLine
+		unpublished := false
 		if commandLine {
 			out.Source = SourceCommandLine
+		} else {
+			out.Relocated, out.ProjectScope = server.Relocated, server.ProjectScope
+			out.Digest = cleanDigest(server.Digest)
+			unpublished = out.Relocated || out.ProjectScope
 		}
 		facts.MCP = nil
 		switch {
+		case out.Name != "" && unpublished && (lossy || (out.URL == "" && out.Command == "")):
+			// The definition does not fit (or was already reduced to the name and
+			// digest by an earlier pass): keep the claim without it, so the
+			// gateway still knows an unpublished source runs and judges the
+			// published record by its digest; falling back to the config
+			// files it reads would judge another definition.
+			facts.MCP = &MCPServer{Name: out.Name, Relocated: out.Relocated, ProjectScope: out.ProjectScope, Digest: out.Digest, Pins: pinsOf(*server)}
 		case out.Name != "" && (out.URL != "" || out.Command != "") && !(commandLine && lossy):
 			facts.MCP = &out
 		case commandLine && facts.MCPUnproven == "":
@@ -198,6 +376,113 @@ func bounded(facts Facts) Facts {
 	}
 	facts.MCPUnproven = clean(facts.MCPUnproven, maxNameBytes)
 	return facts
+}
+
+// PinSum is the digest of one value as MCPPins holds it.
+func PinSum(value string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return hex.EncodeToString(sum[:])
+}
+
+// PinTailDigest is the digest of one argument as MCPPins.Tail holds it: the
+// first pinTailDigestLen bytes of the SHA-256 of the trimmed value.
+func PinTailDigest(value string) []byte {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return sum[:pinTailDigestLen]
+}
+
+// PinArgSum is the digest of one argument as MCPPins.Args holds it: the
+// first pinArgDigestLen hex characters of PinSum.
+func PinArgSum(value string) string { return PinSum(value)[:pinArgDigestLen] }
+
+// PinArgMatches reports whether digest is PinArgSum(value). It allocates
+// nothing, so a rule prefix of thousands of arguments is compared without
+// garbage per argument.
+func PinArgMatches(value, digest string) bool {
+	if len(digest) != pinArgDigestLen {
+		return false
+	}
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	var hexed [pinArgDigestLen]byte
+	hex.Encode(hexed[:], sum[:pinArgDigestLen/2])
+	return string(hexed[:]) == digest
+}
+
+// PinTailMatches reports whether held is PinTailDigest(value), without
+// allocating.
+func PinTailMatches(value string, held []byte) bool {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(value)))
+	return bytes.Equal(sum[:pinTailDigestLen], held)
+}
+
+// pinsOf takes the pins of a definition: from its fields while it holds them,
+// otherwise the ones an earlier pass already took, or none: a claim from a
+// hook that took no pins cannot refute a rule.
+func pinsOf(server MCPServer) *MCPPins {
+	if server.URL == "" && server.Command == "" && len(server.Args) == 0 {
+		if server.Pins == nil {
+			return nil
+		}
+		pins := MCPPins{
+			URL: cleanDigest(server.Pins.URL), Command: cleanDigest(server.Pins.Command),
+			ArgCount: min(max(server.Pins.ArgCount, 0), maxPinArgCount), Transport: clean(server.Pins.Transport, 64),
+		}
+		for _, arg := range server.Pins.Args {
+			if sum := cleanArgDigest(arg); sum != "" && len(pins.Args) < maxPinArgs {
+				pins.Args = append(pins.Args, sum)
+			}
+		}
+		held := len(pins.Args)
+		if held == maxPinArgs {
+			// A tail follows only a full run of digests; its positions start
+			// there.
+			if tail := server.Pins.TailBytes(); len(tail) > 0 {
+				pins.Tail = base64.RawURLEncoding.EncodeToString(tail)
+				held += len(tail) / pinTailDigestLen
+			}
+		}
+		pins.ArgCount = max(pins.ArgCount, held)
+		return &pins
+	}
+	pins := MCPPins{ArgCount: len(server.Args), Transport: clean(server.Transport, 64)}
+	var tail []byte
+	if strings.TrimSpace(server.URL) != "" {
+		pins.URL = PinSum(server.URL)
+	}
+	if command := strings.TrimSpace(server.Command); command != "" {
+		pins.Command = PinSum(filepath.Base(command))
+	}
+	for i, arg := range server.Args {
+		switch {
+		case i < maxPinArgs:
+			pins.Args = append(pins.Args, PinArgSum(arg))
+		case len(tail) < maxTailPins*pinTailDigestLen:
+			tail = append(tail, PinTailDigest(arg)...)
+		}
+	}
+	if len(tail) > 0 {
+		pins.Tail = base64.RawURLEncoding.EncodeToString(tail)
+	}
+	return &pins
+}
+
+// cleanDigest keeps a value only when it is a hex SHA-256.
+func cleanDigest(value string) string { return cleanHexDigest(value, 64) }
+
+// cleanArgDigest keeps a value only when it is a PinArgSum.
+func cleanArgDigest(value string) string { return cleanHexDigest(value, pinArgDigestLen) }
+
+func cleanHexDigest(value string, length int) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) != length {
+		return ""
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return ""
+		}
+	}
+	return value
 }
 
 // clean drops a value that is not valid UTF-8, holds a control character or
@@ -273,6 +558,8 @@ func ProjectSkillDirs(connector string) []string {
 		return []string{filepath.Join(".claude", "skills")}
 	case "codex":
 		return []string{filepath.Join(".agents", "skills"), filepath.Join(".codex", "skills")}
+	case "copilot":
+		return []string{filepath.Join(".github", "skills"), filepath.Join(".claude", "skills"), filepath.Join(".agents", "skills")}
 	}
 	return nil
 }
@@ -287,6 +574,8 @@ func SkillRoots(connector, home, cwd string) []string {
 		user = []string{filepath.Join(".claude", "skills")}
 	case "codex":
 		user = []string{filepath.Join(".codex", "skills"), filepath.Join(".agents", "skills")}
+	case "copilot":
+		user = []string{filepath.Join(".copilot", "skills"), filepath.Join(".claude", "skills"), filepath.Join(".agents", "skills")}
 	default:
 		return nil
 	}
@@ -297,26 +586,196 @@ func SkillRoots(connector, home, cwd string) []string {
 			roots = append(roots, filepath.Join(home, rel))
 		}
 	}
-	if dir := strings.TrimSpace(cwd); filepath.IsAbs(dir) {
-		dir = filepath.Clean(dir)
-		for level := 0; level < maxProjectLevels; level++ {
-			if home != "" && filepath.Clean(home) == dir {
-				break
-			}
-			for _, rel := range project {
-				roots = append(roots, filepath.Join(dir, rel))
-			}
-			if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-				break
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
+	for _, dir := range projectLevels(home, cwd) {
+		for _, rel := range project {
+			roots = append(roots, filepath.Join(dir, rel))
 		}
 	}
 	return roots
+}
+
+// projectLevels lists the folders from cwd up to the repository root (or
+// maxProjectLevels folders, stopping at home) a project skill folder is
+// looked for in.
+func projectLevels(home, cwd string) []string {
+	dir := strings.TrimSpace(cwd)
+	if !filepath.IsAbs(dir) {
+		return nil
+	}
+	dir = filepath.Clean(dir)
+	var levels []string
+	for level := 0; level < maxProjectLevels; level++ {
+		if home != "" && filepath.Clean(home) == dir {
+			break
+		}
+		levels = append(levels, dir)
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return levels
+}
+
+// CopilotHomeSet reports whether COPILOT_HOME is set: Copilot then loads its
+// user skills from there and not from ~/.copilot, whether or not the value is
+// usable.
+func CopilotHomeSet() bool {
+	_, exists := os.LookupEnv("COPILOT_HOME")
+	return exists
+}
+
+// EnvSkillRoots lists the skill folders a connector takes from the
+// environment of the agent process: Copilot's COPILOT_HOME and
+// COPILOT_SKILLS_DIRS (comma separated; "~/" is the home, a relative one is
+// below the folder Copilot runs in: launch when the hook can read it from the
+// agent process, otherwise the guesses of launchWorkspaces). Only the
+// standalone hook, which runs in the environment of the agent, can know them;
+// the environment of a gateway is not the one of the user.
+//
+// launch reads the folder Copilot runs in from the agent process. It is called
+// at most once and only for a relative entry, the one case that needs it, so a
+// hook without such an entry never walks the process table.
+func EnvSkillRoots(connector, home, cwd string, launch func() string) []string {
+	if strings.ToLower(strings.TrimSpace(connector)) != "copilot" {
+		return nil
+	}
+	var roots []string
+	var launched string
+	launchRead := false
+	if configured, exists := os.LookupEnv("COPILOT_HOME"); exists {
+		if strings.TrimSpace(configured) == configured && !strings.ContainsAny(configured, "\x00\r\n") &&
+			filepath.IsAbs(configured) && filepath.Clean(configured) == configured {
+			roots = append(roots, filepath.Join(configured, "skills"))
+		}
+	}
+	for _, raw := range strings.Split(os.Getenv("COPILOT_SKILLS_DIRS"), ",") {
+		dir := strings.TrimSpace(raw)
+		switch {
+		case dir == "":
+			continue
+		case strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`):
+			if !filepath.IsAbs(home) {
+				continue
+			}
+			dir = filepath.Join(home, dir[2:])
+		case !filepath.IsAbs(dir):
+			if !launchRead && launch != nil {
+				launchRead, launched = true, launch()
+			}
+			for _, level := range launchWorkspaces(home, cwd, launched) {
+				if root := filepath.Join(level, dir); !slices.Contains(roots, root) {
+					roots = append(roots, root)
+				}
+			}
+			continue
+		}
+		if dir = filepath.Clean(dir); !slices.Contains(roots, dir) {
+			roots = append(roots, dir)
+		}
+	}
+	return roots
+}
+
+// launchWorkspaces are the folders a relative COPILOT_SKILLS_DIRS entry can
+// belong to: Copilot resolves it against the one folder it runs in, never
+// against the folders between it and the repository root. launch is that
+// folder as the hook read it from the agent process. When the hook knows it,
+// it is the only root, whatever the event cwd is (below it, above it, beside
+// it or absent): a skill of any other folder is not loaded, so judging it
+// would decide the selection on a copy the agent never reads.
+// Without it the hook sees only its event cwd, which is that folder or a
+// folder below it, so the roots are cwd itself and the outermost folder above
+// it that is a repository root, or home when no repository is found below
+// home. A skill folder of an intermediate folder is not a guessed root, so it
+// can neither be judged in place of the selected one nor hide it behind a
+// nested repository or the home folder.
+func launchWorkspaces(home, cwd, launch string) []string {
+	if launch = strings.TrimSpace(launch); filepath.IsAbs(launch) {
+		return []string{filepath.Clean(launch)}
+	}
+	dir := strings.TrimSpace(cwd)
+	if !filepath.IsAbs(dir) {
+		return nil
+	}
+	dir = filepath.Clean(dir)
+	out := []string{dir}
+	home = filepath.Clean(strings.TrimSpace(home))
+	outer, homeAbove := "", ""
+	for level := 0; level < maxProjectLevels; level++ {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			outer = dir
+		}
+		if home != "" && home == dir {
+			homeAbove = dir
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if outer == "" {
+		outer = homeAbove
+	}
+	if outer != "" && outer != out[0] {
+		out = append(out, outer)
+	}
+	return out
+}
+
+// SkillNameFromInput is the folder name of the skill a tool call selects
+// through its arguments, under every spelling the gateway's skill probe
+// reads (skill_name, skill, skill_key, a nested skill object, a skill path),
+// or "" when it selects none. The hook reads the folder under the name the
+// gateway will judge, so a spelling the gateway recognises cannot be one the
+// hook skips.
+func SkillNameFromInput(input map[string]any) string {
+	first := func(values map[string]any, keys ...string) string {
+		for _, key := range keys {
+			if text, ok := values[key].(string); ok && strings.TrimSpace(text) != "" {
+				return strings.TrimSpace(text)
+			}
+		}
+		return ""
+	}
+	if raw := first(input, "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId"); raw != "" {
+		return normalizeSkillName(raw)
+	}
+	for _, key := range []string{"skill", "skill_info", "skillInfo", "source_skill", "sourceSkill"} {
+		switch value := input[key].(type) {
+		case string:
+			if name := normalizeSkillName(value); name != "" {
+				return name
+			}
+		case map[string]any:
+			raw := first(value, "name", "key", "id", "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId")
+			if raw == "" {
+				raw = first(value, "path", "source_path", "sourcePath", "skill_path", "skillPath")
+			}
+			if name := normalizeSkillName(raw); name != "" {
+				return name
+			}
+		}
+	}
+	return normalizeSkillName(first(input, "skill_path", "skillPath", "source_path", "sourcePath"))
+}
+
+func normalizeSkillName(value string) string {
+	name := strings.Trim(strings.TrimSpace(value), `"'`)
+	if strings.ContainsAny(name, `/\`) {
+		path := filepath.Clean(name)
+		if strings.EqualFold(filepath.Base(path), "SKILL.md") {
+			path = filepath.Dir(path)
+		}
+		name = filepath.Base(path)
+	}
+	return strings.TrimSpace(strings.TrimPrefix(name, "@"))
 }
 
 // FolderRef is a skill folder a tool call names: the folder path as far as

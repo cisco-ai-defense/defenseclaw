@@ -30,6 +30,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
@@ -67,17 +68,14 @@ config.yaml. 'defenseclaw guardrail status' lists the connector names.
 }
 
 var (
-	connectorFlagName                 string
-	connectorFlagJSON                 bool
-	connectorFlagDataDir              string
-	connectorFlagConfigHome           string
-	connectorFlagHookExe              string
-	connectorRollbackRestore          bool
-	connectorRollbackToVersion        string
-	connectorVerifySetupParent        string
-	connectorVerifySetupStartIdentity string
-	connectorVerifyCleanupRecord      string
-	connectorVerifyCleanupTransaction string
+	connectorFlagName           string
+	connectorFlagJSON           bool
+	connectorFlagDataDir        string
+	connectorFlagConfigHome     string
+	connectorFlagHookExe        string
+	connectorRollbackRestore    bool
+	connectorRollbackToVersion  string
+	connectorRollbackBackupsDir string
 )
 
 // connectorExit is the indirection used in place of os.Exit so tests can
@@ -96,7 +94,6 @@ var connectorSaveOpenCodeActive = connector.SaveActiveConnectors
 var connectorSaveOpenCodeLock = connector.SaveFreshHookContractLockEntry
 var connectorSaveAmpLock = connector.SaveFreshHookContractLockEntry
 var connectorEnsureHookAPIToken = connector.EnsureHookAPIToken
-var connectorVerifyRootPersistentPreRun = rootPersistentPreRunE
 var connectorCheckPlatformSupportOnHost = connector.CheckPlatformSupportOnHost
 
 var connectorTeardownCmd = &cobra.Command{
@@ -145,7 +142,7 @@ only that connector is checked. The installers run it after a rollback or an
 upgrade, and 'defenseclaw setup remove' runs it for a connector that is not
 configured.`,
 	Hidden:      true,
-	Annotations: map[string]string{auditOptionalAnnotation: "true"},
+	Annotations: map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
 	RunE:        runConnectorPruneOrphans,
 }
 
@@ -164,9 +161,8 @@ Exit codes:
   0   connector is clean
   1   connector has residual state (details printed to stderr)
   2   connector unknown / config error`,
-	Annotations:       map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
-	PersistentPreRunE: runConnectorVerifyPersistentPreRunE,
-	RunE:              runConnectorVerify,
+	Annotations: map[string]string{auditOptionalAnnotation: "true", configOptionalAnnotation: "true"},
+	RunE:        runConnectorVerify,
 }
 
 var connectorReconcileCmd = &cobra.Command{
@@ -234,6 +230,8 @@ func init() {
 		"Restore authenticated current-release hooks after an aborted rollback")
 	connectorPrepareRollbackCmd.Flags().StringVar(&connectorRollbackToVersion, "to-version", "",
 		"The release the rollback goes to: before 1.0.5, the OpenHands and OmniGent files this release removed come back")
+	connectorPruneOrphansCmd.Flags().StringVar(&connectorRollbackBackupsDir, "rollback-backups-dir", "",
+		"Use the saved newer install's connector backups to restore unchanged vendor files")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagName, "connector", "",
 		"Connector name (default: the active connector; 'defenseclaw guardrail status' lists them)")
 	connectorCmd.PersistentFlags().BoolVar(&connectorFlagJSON, "json", false,
@@ -246,34 +244,6 @@ func init() {
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagHookExe, "hook-executable", "",
 		"Bind native connector maintenance to an installer-validated hook launcher")
 	_ = connectorCmd.PersistentFlags().MarkHidden("hook-executable")
-	connectorVerifyCmd.Flags().StringVar(
-		&connectorVerifySetupParent,
-		"internal-setup-parent",
-		"",
-		"internal authenticated Setup parent binding",
-	)
-	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-parent")
-	connectorVerifyCmd.Flags().StringVar(
-		&connectorVerifySetupStartIdentity,
-		"internal-setup-start-identity",
-		"",
-		"internal authenticated Setup process-instance binding",
-	)
-	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-start-identity")
-	connectorVerifyCmd.Flags().StringVar(
-		&connectorVerifyCleanupRecord,
-		"internal-deferred-cleanup-record",
-		"",
-		"internal authenticated deferred-cleanup record binding",
-	)
-	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-record")
-	connectorVerifyCmd.Flags().StringVar(
-		&connectorVerifyCleanupTransaction,
-		"internal-deferred-cleanup-transaction",
-		"",
-		"internal authenticated deferred-cleanup transaction binding",
-	)
-	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-transaction")
 
 	connectorReconcileCmd.Flags().BoolVar(&connectorReconcileEvery, "every-connector", false,
 		"refresh and read back every connector the config guards; exit 3 naming each that is not on its current hook")
@@ -288,25 +258,6 @@ func init() {
 	connectorCmd.AddCommand(connectorListBackupsCmd)
 
 	rootCmd.AddCommand(connectorCmd)
-}
-
-func runConnectorVerifyPersistentPreRunE(cmd *cobra.Command, args []string) error {
-	if connectorVerifySetupParent == "" &&
-		connectorVerifySetupStartIdentity == "" &&
-		connectorVerifyCleanupRecord == "" &&
-		connectorVerifyCleanupTransaction == "" {
-		return connectorVerifyRootPersistentPreRun(cmd, args)
-	}
-	if err := validateDeferredUninstallConnectorVerify(cmd); err != nil {
-		return fmt.Errorf("connector verify deferred-uninstall authorization: %w", err)
-	}
-	// The authenticated deferred-uninstall child is deliberately configless:
-	// DELETEUSERDATA has already removed the runtime v8 source. VerifyClean uses
-	// only the transaction-bound data/config homes validated above.
-	cfg = nil
-	activeObservabilityV8Startup = nil
-	version.SetBinaryVersion(appVersion)
-	return nil
 }
 
 // resolveActiveConnectorName returns the connector name to operate on for
@@ -1146,14 +1097,26 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	if dataDir == "" {
 		return fmt.Errorf("connector prune-orphans: no data directory configured (set --data-dir)")
 	}
-	// What is configured decides what is an orphan: without config.yaml or
-	// with an unreadable connector state nothing is removed on a guess.
-	if cfg == nil {
-		return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed")
-	}
+	// What is configured decides what is an orphan: with a config.yaml that
+	// does not load, or an unreadable connector state, nothing is removed on a
+	// guess. A rolled-back install that was never initialized has no
+	// config.yaml at all (a link, even a dangling one, is a config that does not
+	// load, not an absent config); with a usable data folder and the saved newer
+	// install backup folder confirmed (confirmedRollbackWithoutConfig), that is
+	// a rollback, and the connector state (if any) names what stays configured.
+	// Every other connector is an orphan whose DefenseClaw
+	// entries go, with the operator own bytes kept.
 	configured := map[string]bool{}
-	for _, name := range cfg.ActiveConnectors() {
-		configured[strings.ToLower(strings.TrimSpace(name))] = true
+	noConfig := false
+	if cfg != nil {
+		for _, name := range cfg.ActiveConnectors() {
+			configured[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	} else {
+		if err := confirmedRollbackWithoutConfig(dataDir, connectorRollbackBackupsDir); err != nil {
+			return fmt.Errorf("connector prune-orphans: config.yaml is not loaded; nothing was removed (%v)", err)
+		}
+		noConfig = true
 	}
 	active, _, err := connector.ReadActiveConnectorState(dataDir)
 	if err != nil {
@@ -1173,8 +1136,22 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	}
 	removed := map[string][]string{}
 	failed := map[string]string{}
+	var restored, kept []string
+	var restoreErr error
+	if connectorRollbackBackupsDir != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("connector prune-orphans: find the account home: %w", err)
+		}
+		restored, kept, restoreErr = connector.RestoreManagedFileBackupsForRollback(
+			connectorRollbackBackupsDir, dataDir, home, configured, strings.ToLower(strings.TrimSpace(connectorFlagName)),
+		)
+	}
 	for _, name := range names {
-		if configured[name] {
+		// With no config.yaml the verified saved backups are the only
+		// evidence of what the newer install set up: a restore that failed
+		// leaves the vendor files as they are.
+		if configured[name] || (noConfig && restoreErr != nil) {
 			continue
 		}
 		conn, _ := reg.Get(name)
@@ -1188,14 +1165,27 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 	if connectorFlagJSON {
 		payload := map[string]any{
 			"action":  "prune-orphans",
-			"ok":      len(failed) == 0,
+			"ok":      len(failed) == 0 && restoreErr == nil,
 			"removed": removed,
 			"failed":  failed,
+		}
+		if connectorRollbackBackupsDir != "" {
+			payload["restored_vendor_files"] = restored
+			payload["kept_vendor_files"] = kept
+			if restoreErr != nil {
+				payload["restore_error"] = restoreErr.Error()
+			}
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
 			return err
 		}
 	} else {
+		for _, path := range restored {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s restored the previous vendor file %s\n", Style(glyph("✓", "OK"), "fg=green", "bold"), path)
+		}
+		if restoreErr != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %v\n", restoreErr)
+		}
 		for _, name := range names {
 			if paths := removed[name]; len(paths) > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s %s is not configured: removed its DefenseClaw hook entries from %s\n",
@@ -1215,6 +1205,43 @@ func runConnectorPruneOrphans(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("connector prune-orphans: could not remove the hook entries of %s",
 			strings.Join(failedNames, ", "))
+	}
+	if restoreErr != nil {
+		return fmt.Errorf("connector prune-orphans: some vendor files could not be restored")
+	}
+	return nil
+}
+
+// confirmedRollbackWithoutConfig returns nil when the missing config is a
+// confirmed absence on a rollback: the older data folder resolves to a usable
+// directory (a link whose target is unavailable proves nothing about what was
+// inside), config.yaml is confirmed absent there (Lstat, so a link is a
+// present config), and the saved newer install folder holds connector backup
+// records that all load and match their digests, at least one of which names an
+// agent file under the account home (an empty or unrelated folder, or a
+// rejected record, is no evidence of what the newer install set up; a record
+// for a file outside the home is skipped by the restore and decides nothing).
+// Anything else is a refusal, with the reason, that removes nothing.
+func confirmedRollbackWithoutConfig(dataDir, savedDir string) error {
+	if savedDir == "" {
+		return errors.New("no saved newer install folder was given")
+	}
+	if info, err := os.Stat(dataDir); err != nil || !info.IsDir() {
+		return errors.New("the older data folder is not available")
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, config.DefaultConfigName)); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("config.yaml is present in the older data folder")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("find the account home: %w", err)
+	}
+	count, err := connector.VerifyManagedFileBackups(savedDir, dataDir, home)
+	if err != nil {
+		return fmt.Errorf("the saved connector backups are not usable: %w", err)
+	}
+	if count == 0 {
+		return errors.New("the saved newer install folder holds no connector backup records")
 	}
 	return nil
 }

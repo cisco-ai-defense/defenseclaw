@@ -37,7 +37,7 @@ func TestWindowsEnterpriseRollbackLeftoverOfACreatedFolder(t *testing.T) {
 		t.Fatalf("created-folder leftover = %q", warnings[0].Message)
 	}
 	if !strings.Contains(warnings[1].Message, "the rollback of the failed first install could not remove bob") ||
-		!strings.Contains(warnings[1].Message, "/ensure and then /uninstall") {
+		!strings.Contains(warnings[1].Message, "to remove it, "+windowsEnterpriseLocalSystemRemedy("/uninstall")) {
 		t.Fatalf("first-install leftover = %q", warnings[1].Message)
 	}
 }

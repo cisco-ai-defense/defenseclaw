@@ -35,6 +35,7 @@ func applyTrustedActionContextDisposition(
 	generation *compiledRulePackCategories,
 	facts actionfacts.Facts,
 	findings []RuleFinding,
+	protectedLocalFileRead ...bool,
 ) []RuleFinding {
 	adjusted := append([]RuleFinding(nil), findings...)
 	// Detection sees the complete action, while authorization considers only
@@ -88,6 +89,18 @@ func applyTrustedActionContextDisposition(
 					trustedActionContextFindingProof(finding.RuleID, findingFacts),
 				)
 			case trustedActionSensitivePathRead:
+				if len(protectedLocalFileRead) != 0 && protectedLocalFileRead[0] &&
+					finding.enforcement != findingEnforcementDetectionOnly &&
+					(slices.Contains(finding.Tags, "credential") || slices.Contains(finding.Tags, "privilege")) {
+					// The Local file tool opens this exact credential or control
+					// target. Keep its path rule enforceable, as for a direct
+					// mutation of the same file.
+					finding = finding.withTrustedActionProof(
+						trustedActionContextFindingProof(finding.RuleID, findingFacts),
+					)
+					adjusted[index] = finding
+					continue
+				}
 				if (finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "PATH-WIN-SSH-KEY") &&
 					trustedActionActiveSSHPrivateKeyContentRead(findingFacts) {
 					finding = finding.withTrustedActionProof(

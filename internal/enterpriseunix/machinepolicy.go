@@ -14,6 +14,7 @@ package enterpriseunix
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // Machine policy codes in the lifecycle result.
@@ -110,35 +112,52 @@ func (m *policyManager) options(cfg *config.Config) (enterprisepolicy.Options, e
 	return opts, opts.Validate()
 }
 
-// copilotAccountHomes applies the current Copilot enrollment to the
+// copilotHomeScope is the Copilot Local homes of one enrollment reading: the
+// homes whose hook file is expected, the homes outside enrollment, and the
+// homes of deleted accounts whose current holders could not be read clearly.
+type copilotHomeScope struct {
+	scoped, outOfScope, unclear []string
+}
+
+// copilotAccountHomes is the scoped and out-of-scope homes of
+// copilotAccountScope; a home it cannot judge is in neither.
+func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []string, error) {
+	scope, err := m.copilotAccountScope(cfg)
+	return scope.scoped, scope.outOfScope, err
+}
+
+// copilotAccountScope applies the current Copilot enrollment to the
 // enumerator's eligible-accounts record. That record can predate a manifest
 // or exclude_users edit. The guardian's own record also names old homes that
 // need removal, so verify can report a still-active hook outside scope.
-func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []string, error) {
+func (m *policyManager) copilotAccountScope(cfg *config.Config) (copilotHomeScope, error) {
 	if !slices.Contains(enterprisepolicy.StandaloneConnectors(cfg), enterprisepolicy.ConnectorCopilot) {
-		return nil, nil, nil
+		return copilotHomeScope{}, nil
 	}
 	env := m.env
 	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, nil, fmt.Errorf("read Copilot eligible accounts: %w", err)
+		return copilotHomeScope{}, fmt.Errorf("read Copilot eligible accounts: %w", err)
 	}
 	var record struct {
 		Accounts []enterprisehooks.UnixEligibleAccount `json:"accounts"`
 	}
 	if err == nil {
 		if err := json.Unmarshal(data, &record); err != nil {
-			return nil, nil, fmt.Errorf("parse Copilot eligible accounts: %w", err)
+			return copilotHomeScope{}, fmt.Errorf("parse Copilot eligible accounts: %w", err)
 		}
 	}
 	eligible := record.Accounts
 	accounts := eligible
 	enrollment := cfg.Enterprise.Enrollment
+	// enrolled says whether the manifest enrolls an account; every account is
+	// enrolled where enrollment does not read the manifest.
+	enrolled := func(enterprisehooks.UnixEligibleAccount) bool { return true }
 	if strings.EqualFold(strings.TrimSpace(enrollment.Mode), config.EnterpriseEnrollmentManifest) ||
 		strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) {
 		manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath))
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, nil, fmt.Errorf("read Copilot enrollment manifest: %w", err)
+			return copilotHomeScope{}, fmt.Errorf("read Copilot enrollment manifest: %w", err)
 		}
 		var targets []enterprisehooks.ManifestTarget
 		for _, target := range manifest.Targets {
@@ -146,6 +165,9 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 				(target.Enabled == nil || *target.Enabled) {
 				targets = append(targets, target)
 			}
+		}
+		enrolled = func(account enterprisehooks.UnixEligibleAccount) bool {
+			return len(enterprisehooks.ManifestEnrolledAccounts([]enterprisehooks.UnixEligibleAccount{account}, enterprisehooks.Manifest{Targets: targets})) == 1
 		}
 		allowed := enterprisehooks.ManifestEnrolledAccounts(accounts, enterprisehooks.Manifest{Targets: targets})
 		inManifest := make(map[int]bool, len(allowed))
@@ -164,40 +186,102 @@ func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []str
 	for _, entry := range append(append([]string{}, enrollment.ExcludeUsers...), enrollment.ExemptUsers...) {
 		leftOut[strings.TrimSpace(entry)] = true
 	}
-	var scoped, outOfScope []string
-	seen := map[string]bool{}
+	var entries []scopeEntry
+	goneHomes := newConfirmedGoneHomes()
+	// The accounts recorded beyond the enrolled ones add a home once
+	// for the live and once for the gone, so a gone account cannot hide a
+	// live one at its home.
+	liveSeen, goneSeen := map[string]bool{}, map[string]bool{}
 	for _, account := range accounts {
-		home := env.P(account.Home)
-		if leftOut[account.User] || leftOut[strconv.Itoa(account.UID)] {
-			outOfScope = append(outOfScope, home)
+		gone := goneHomes.note(account.User, account.UID, account.Home)
+		entries = append(entries, scopeEntry{
+			home: account.Home, outOfScope: leftOut[account.User] || leftOut[strconv.Itoa(account.UID)], gone: gone,
+		})
+		if gone {
+			goneSeen[account.Home] = true
 		} else {
-			scoped = append(scoped, home)
+			liveSeen[account.Home] = true
 		}
-		seen[home] = true
 	}
-	for _, account := range eligible {
-		home := env.P(account.Home)
+	leftOver := func(user string, uid int, home string) {
+		gone := goneHomes.note(user, uid, home)
+		seen := liveSeen
+		if gone {
+			seen = goneSeen
+		}
 		if !seen[home] {
-			outOfScope = append(outOfScope, home)
+			entries = append(entries, scopeEntry{home: home, outOfScope: true, gone: gone})
 			seen[home] = true
 		}
+	}
+	for _, account := range eligible {
+		leftOver(account.User, account.UID, account.Home)
 	}
 	for _, recordPath := range []string{
 		filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixCopilotVSCodeAccountsFileName),
 		enterprisehooks.UnixCopilotVSCodeAccountsPath(env.Layout.ManifestPath),
 	} {
-		for _, home := range env.accountHomes(recordPath) {
-			if !seen[home] {
-				outOfScope = append(outOfScope, home)
-				seen[home] = true
+		for _, account := range env.accountRecords(recordPath) {
+			leftOver(account.User, account.UID, account.Home)
+		}
+	}
+	// An account the directory confirms gone contributes nothing: a leftover
+	// Local file in its home is nothing to enroll or to report, and the
+	// guardian retires the account in the pass that verify would otherwise
+	// call it an account outside enrollment (GAP-0777). It contributes
+	// nothing even where a live account shares its home, so the deleted
+	// account cannot put the home of the live one out of scope. A fresh read
+	// of the whole search policy asks who holds the home of a gone account
+	// now, even when a recorded account is live there (the record has not
+	// caught up with a replacement, local or from a directory): each holder
+	// the record does not already name as live is scoped by its own name and
+	// uid, never by the deleted account, since enrollment may leave out the
+	// one and not the other. A read that does not answer, or whose answer is
+	// not a complete one, makes the home unclear, always, even where a
+	// recorded account is live there: that account stays judged by its own
+	// entry, and the caller reports the home pending, since a home that may
+	// have another holder is never called free. A home with no live account
+	// is in neither list, so no hook file in it is called drift.
+	var scoped, outOfScope, unclear []string
+	add := func(home string, out bool) {
+		if out {
+			outOfScope = append(outOfScope, env.P(home))
+		} else {
+			scoped = append(scoped, env.P(home))
+		}
+	}
+	judged := map[string]bool{}
+	for _, entry := range entries {
+		if !entry.gone {
+			add(entry.home, entry.outOfScope)
+			continue
+		}
+		if judged[entry.home] {
+			continue
+		}
+		judged[entry.home] = true
+		holders, err := goneHomes.accountsAt(entry.home)
+		if err != nil {
+			// A home whose holders the directory did not clearly answer is
+			// unclear, even where a recorded account is live: that account
+			// is still judged by its own entry, but it does not prove the
+			// home has no other holder, so the home is reported pending.
+			unclear = append(unclear, env.P(entry.home))
+			continue
+		}
+		for _, holder := range holders {
+			if goneHomes.liveAccount(entry.home, holder.Name, holder.UID) {
+				continue
 			}
+			add(entry.home, leftOut[holder.Name] || leftOut[strconv.Itoa(holder.UID)] ||
+				!enrolled(enterprisehooks.UnixEligibleAccount{User: holder.Name, UID: holder.UID, Home: entry.home}))
 		}
 	}
 	// Status and verify read no settings below a home that does not answer
 	// (GAP-1751); describeUnansweredHomes names it.
 	scoped = slices.DeleteFunc(scoped, func(home string) bool { return !env.homeAnswers(home) })
 	outOfScope = slices.DeleteFunc(outOfScope, func(home string) bool { return !env.homeAnswers(home) })
-	return scoped, outOfScope, nil
+	return copilotHomeScope{scoped: scoped, outOfScope: outOfScope, unclear: unclear}, nil
 }
 
 // accountHomes are the homes (under Root) in a root-only record in the
@@ -214,25 +298,135 @@ func (env *Env) accountHomes(recordPath string) []string {
 // canonicalAccountHomes is the homes of the accounts an eligible-accounts
 // record names, as the record spells them.
 func (env *Env) canonicalAccountHomes(recordPath string) []string {
+	var homes []string
+	for _, account := range env.accountRecords(recordPath) {
+		homes = append(homes, account.Home)
+	}
+	return homes
+}
+
+// accountRecord is one account of an eligible-accounts record: the name and
+// uid it was enrolled under, and its home as the record spells it.
+type accountRecord struct {
+	User string
+	UID  int
+	Home string
+}
+
+// accountRecords are the accounts of a root-only record in the
+// eligible-accounts format that name a home. An unreadable record has none.
+func (env *Env) accountRecords(recordPath string) []accountRecord {
 	data, err := readBounded(env.P(recordPath), maxInputBytes)
 	if err != nil {
 		return nil
 	}
 	var record struct {
 		Accounts []struct {
+			User string `json:"user"`
+			UID  int    `json:"uid"`
 			Home string `json:"home"`
 		} `json:"accounts"`
 	}
 	if json.Unmarshal(data, &record) != nil {
 		return nil
 	}
-	var homes []string
+	var accounts []accountRecord
 	for _, account := range record.Accounts {
 		if home := strings.TrimSpace(account.Home); home != "" {
-			homes = append(homes, home)
+			accounts = append(accounts, accountRecord{User: strings.TrimSpace(account.User), UID: account.UID, Home: home})
 		}
 	}
-	return homes
+	return accounts
+}
+
+// scopeEntry is one account's contribution to the Copilot Local homes: its
+// home as the record spells it, whether enrollment leaves it out, and whether
+// a fresh directory read confirms it gone.
+type scopeEntry struct {
+	home       string
+	outOfScope bool
+	gone       bool
+}
+
+// confirmedGoneHomes asks, once per account (name and uid), whether a fresh
+// directory read confirms it gone by the evidence the guardian retires a
+// target on (guardianAccountConfirmedGone), and tracks per home the accounts
+// recorded at it that are live.
+type confirmedGoneHomes struct {
+	asked map[string]bool
+	held  map[string]homeAccounts
+	// liveAt is the named accounts recorded live at each home (name:uid).
+	liveAt map[string]map[string]bool
+}
+
+// homeAccounts is the answer of one fresh read of the accounts at a home.
+type homeAccounts struct {
+	accounts []unixidentity.HomeAccount
+	err      error
+}
+
+func newConfirmedGoneHomes() *confirmedGoneHomes {
+	return &confirmedGoneHomes{asked: map[string]bool{}, held: map[string]homeAccounts{}, liveAt: map[string]map[string]bool{}}
+}
+
+// note records one account recorded at home and returns whether it is
+// confirmed gone. An account with no name is never confirmed gone.
+func (g *confirmedGoneHomes) note(user string, uid int, home string) bool {
+	if user == "" {
+		return false
+	}
+	key := user + ":" + strconv.Itoa(uid)
+	gone, asked := g.asked[key]
+	if !asked {
+		gone = guardianAccountConfirmedGone(user, uid)
+		g.asked[key] = gone
+	}
+	if !gone {
+		if g.liveAt[home] == nil {
+			g.liveAt[home] = map[string]bool{}
+		}
+		g.liveAt[home][key] = true
+	}
+	return gone
+}
+
+// liveAccount reports whether the account (name and uid) is one of those
+// recorded live at home, which the scope already judges by its own entry.
+func (g *confirmedGoneHomes) liveAccount(home, user string, uid int) bool {
+	return g.liveAt[home][user+":"+strconv.Itoa(uid)]
+}
+
+// accountsAt are the live accounts a fresh read of the search policy finds
+// at home, asked once per home.
+func (g *confirmedGoneHomes) accountsAt(home string) ([]unixidentity.HomeAccount, error) {
+	answer, asked := g.held[home]
+	if !asked {
+		answer.accounts, answer.err = guardianAccountsAtHome(home)
+		g.held[home] = answer
+	}
+	return answer.accounts, answer.err
+}
+
+// guardianAccountConfirmedGone is unixidentity.AccountUIDGone for a recorded
+// uid and AccountRecordGone for a name alone: a directory that does not
+// answer, a live account and every platform other than macOS are false.
+// Tests replace it.
+var guardianAccountConfirmedGone = func(user string, uid int) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if uid > 0 {
+		return unixidentity.AccountUIDGone(ctx, user, uid)
+	}
+	return unixidentity.AccountRecordGone(ctx, user)
+}
+
+// guardianAccountsAtHome is unixidentity.AccountsAtHome: the accounts of the
+// whole search policy (local and bound directory nodes) with home as their
+// home folder; a directory that does not answer is an error. Tests replace it.
+var guardianAccountsAtHome = func(home string) ([]unixidentity.HomeAccount, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return unixidentity.AccountsAtHome(ctx, home)
 }
 
 func (m *policyManager) Intended(cfg *config.Config) ([]string, error) {
@@ -720,8 +914,14 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 	// the guardian has not written the file for yet (a fresh install or a
 	// newly enrolled user; GAP-1267), which is a warning until its pass.
 	homeOf := map[string]string{}
-	homes, _, _ := (&policyManager{env: env}).copilotAccountHomes(validated.Loaded)
-	for _, home := range homes {
+	scope, _ := (&policyManager{env: env}).copilotAccountScope(validated.Loaded)
+	for _, home := range scope.unclear {
+		r.MarkSecurityIncomplete(codeCopilotHomeUnclear)
+		r.AddWarning(codeCopilotHomeUnclear, fmt.Sprintf(
+			"the accounts that hold %s could not be read clearly from the directory in this run, so DefenseClaw's Copilot Local hook there is not checked; its account was deleted and the home is neither called free nor failed; run `%s` again in a minute",
+			boundedGuardianReason(home), env.lifecycleCommand(ActionVerify)))
+	}
+	for _, home := range scope.scoped {
 		homeOf[enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)] = home
 		homeOf[enterprisepolicy.CopilotPluginHooksPath(home)] = home
 	}
