@@ -47,3 +47,33 @@ func TestLateOrdinaryCallAtTellsProtectedFilesAgainstTheAccountHome(t *testing.T
 		})
 	}
 }
+
+// A given home that is no folder (missing, relative, a regular file) cannot
+// index the protected files. The scan tells the account database home
+// instead and treats any hard-linked regular file as not ordinary, so a
+// protected hard link stays closed and an ordinary call stays ordinary.
+func TestLateOrdinaryCallAtWithAHomeThatIsNoFolder(t *testing.T) {
+	f := newLateFixture(t)
+	for _, home := range []string{"relative/home", filepath.Join(f.home, "missing"), filepath.Join(f.project, "plain.txt")} {
+		for _, tc := range []struct {
+			name, command string
+			want          bool
+		}{
+			{"hard link to the keys", "cat hardlink", false},
+			{"hard link first of a long list", lateOperands(5000, "hardlink", "first"), false},
+			{"hard link last of a long list", lateOperands(5000, "hardlink", "last"), false},
+			{"hard link by absolute path", "cat " + filepath.Join(f.project, "hardlink"), false},
+			{"long list of plain names", lateOperands(5000, "", ""), true},
+			{"plain file", "cat plain.txt", true},
+		} {
+			t.Run(tc.name+" "+filepath.Base(home), func(t *testing.T) {
+				for _, connector := range []string{"claudecode", "codex"} {
+					payload := lateBash(t, "Bash", f.project, tc.command)
+					if got := LateOrdinaryCallAt(home, connector, payload); got != tc.want {
+						t.Errorf("%s home %q: ordinary=%v, want %v", connector, home, got, tc.want)
+					}
+				}
+			})
+		}
+	}
+}
