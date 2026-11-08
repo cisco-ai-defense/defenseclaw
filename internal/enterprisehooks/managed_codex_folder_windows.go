@@ -70,6 +70,13 @@ func EnsureWindowsStandaloneCodexMachineFolder() (WindowsCodexMachineFolderEnsur
 	}
 	switch state {
 	case windowsManagedPolicyDirPlain:
+		// A folder that is there but not trusted (a standard user made it after an
+		// administrator deleted it, or its owner or protection drifted) is not taken
+		// over from the guardian: the reconcile refuses it and stays closed, and an
+		// administrator takes it over the documented way, with Setup /repair.
+		if trustErr := windowsCodexMachineFolderTrust(folder); trustErr != nil {
+			return result, windowsCodexMachineFolderUntrusted(folder, trustErr)
+		}
 		return result, nil
 	case windowsManagedPolicyDirKept:
 		return result, windowsCodexMachineFolderWarn(folder, link, nil)
@@ -84,6 +91,31 @@ func EnsureWindowsStandaloneCodexMachineFolder() (WindowsCodexMachineFolderEnsur
 		"reason": "recreated the missing Codex machine-policy folder with the protection Setup gives it",
 	})
 	return result, nil
+}
+
+// windowsCodexMachineFolderTrust is the check the install-time creator makes
+// of a folder that already exists: the folder and its existing ancestors are
+// DefenseClaw-trusted. Replaceable in tests.
+var windowsCodexMachineFolderTrust = func(folder string) error {
+	if err := windowsManagedPolicyAncestorTrustCheck(folder); err != nil {
+		return err
+	}
+	return windowsManagedPolicyDirTrustCheck(folder)
+}
+
+// windowsCodexMachineFolderUntrusted names, once, an existing Codex
+// machine-policy folder that is not trusted, with the fix. The guardian does
+// not take it over; the same named error returns on every pass until an
+// administrator runs Setup /repair, which does.
+func windowsCodexMachineFolderUntrusted(folder string, cause error) error {
+	fix := "as an administrator, run Setup /repair, which takes the folder over with the owner and protection Setup gives it; the guardian does not take over a folder that already exists"
+	text := fmt.Sprintf("the Codex machine-policy folder %s exists but is not trusted: %v", folder, cause)
+	managed.EmitResilienceEventOnce(folder, managed.MarkerBoundary, map[string]string{
+		"path":   folder,
+		"reason": text,
+		"fix":    fix,
+	})
+	return fmt.Errorf("%w: %s; %s", ErrWindowsCodexMachineFolderUnavailable, text, fix)
 }
 
 // windowsManagedPolicyMissingChain lists the folders of path that do not
