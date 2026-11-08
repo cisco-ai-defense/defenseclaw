@@ -3104,7 +3104,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		// The row names the link; the cause (access denied, a trust failure) is
 		// logged once, so a real failure next to a link stays visible.
 		for _, failure := range linkFailures.Failures {
-			enterpriseHookRepeatFolds.emit(os.Stderr, time.Now(), "link:"+failure.Connector, failure.Cause.Error(),
+			enterpriseHookLinkCauseFolds.emit(os.Stderr, time.Now(), "link:"+failure.Connector, failure.Cause.Error(),
 				"the same link cause",
 				fmt.Sprintf("[hook-guardian] the %s machine folder is a link (%s); its targets fail and the others go on: %s\n",
 					failure.Connector, failure.Link, failure.Cause))
