@@ -118,16 +118,6 @@ func windowsCodexMachineFolderUntrusted(folder string, cause error) error {
 	return fmt.Errorf("%w: %s; %s", ErrWindowsCodexMachineFolderUnavailable, text, fix)
 }
 
-// WindowsCodexMachineFolderLink returns the link, or non-folder, that sits on
-// the path of the Codex machine-policy folder, found without opening or
-// following anything, and "" when there is none. It names nothing and creates
-// nothing, so a status check can ask it as often as it likes. The caller is the
-// standalone status path (the CLI process of an administrator carries no
-// standalone profile in its environment, so this does not test for one).
-func WindowsCodexMachineFolderLink() (string, error) {
-	return WindowsManagedConnectorFolderLink("codex")
-}
-
 // windowsManagedPolicyMissingChain lists the folders of path that do not
 // exist yet, parents first.
 func windowsManagedPolicyMissingChain(path string) []string {
