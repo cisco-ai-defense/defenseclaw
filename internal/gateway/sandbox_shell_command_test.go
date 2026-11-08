@@ -523,7 +523,7 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 			mapped := actionfacts.Analyze(actionfacts.Input{
 				Tool: agentHookTrustedActionTool(tc.connector, tc.tool, "linux"),
 				Args: args,
-				CWD:  agentHookTrustedActionCWD(context.Background(), sessionCWD, toolCWD),
+				CWD:  agentHookTrustedActionCWDReported(context.Background(), "", sessionCWD, "", toolCWD),
 			})
 			if mapped.Parse.Status != actionfacts.StatusComplete {
 				t.Fatalf("mapped parse = %+v, want complete", mapped.Parse)
@@ -540,7 +540,7 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	}
 	// The tool call's directory replaces the session's, mapped the same way
 	// (on the host: an existing absolute directory, symlinks resolved).
-	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", ""); got != "/work/app" {
+	if got := agentHookTrustedActionCWDReported(context.Background(), "", "/work/app", "", ""); got != "/work/app" {
 		t.Errorf("no tool cwd = %q, want the request's", got)
 	}
 	dir := t.TempDir()
@@ -548,10 +548,10 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", dir); got != want {
+	if got := agentHookTrustedActionCWDReported(context.Background(), "", "/work/app", "", dir); got != want {
 		t.Errorf("tool cwd = %q, want %q", got, want)
 	}
-	if got := agentHookTrustedActionCWD(context.Background(), "/work/app", filepath.Join(dir, "missing")); got != "" {
+	if got := agentHookTrustedActionCWDReported(context.Background(), "", "/work/app", "", filepath.Join(dir, "missing")); got != "" {
 		t.Errorf("missing tool cwd = %q, want none", got)
 	}
 	// A relative directory is resolved against the session's; one the
@@ -559,11 +559,11 @@ func TestAgentHookTrustedActionShellShapes(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(want, "sub"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if got := agentHookTrustedActionCWD(context.Background(), want, "sub"); got != filepath.Join(want, "sub") {
+	if got := agentHookTrustedActionCWDReported(context.Background(), "", want, "", "sub"); got != filepath.Join(want, "sub") {
 		t.Errorf("relative tool cwd = %q, want %q", got, filepath.Join(want, "sub"))
 	}
 	for _, tc := range []struct{ request, tool string }{{"", "sub"}, {want, "~/sub"}, {want, "missing"}} {
-		if got := agentHookTrustedActionCWD(context.Background(), tc.request, tc.tool); got != "" {
+		if got := agentHookTrustedActionCWDReported(context.Background(), "", tc.request, "", tc.tool); got != "" {
 			t.Errorf("tool cwd %q in %q = %q, want none", tc.tool, tc.request, got)
 		}
 	}

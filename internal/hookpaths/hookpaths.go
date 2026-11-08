@@ -1443,6 +1443,8 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	// Codex exec_command runs in tool_input.workdir, which can differ from
 	// the session cwd carried by the hook event. Resolve relative operands
 	// there so client evidence and the gateway proof name the same files.
+	// Codex cleans the workdir as text (WorkdirCleanedByAgent), so a parent
+	// step after a link is not followed here either.
 	if tool == "exec_command" {
 		if raw, present := toolArgs["workdir"]; present {
 			var workdir string
@@ -1450,7 +1452,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				strings.HasPrefix(workdir, "~") || strings.IndexByte(workdir, 0) >= 0 {
 				return incompleteEvidence(cwd)
 			}
-			cwd = PlaceDirectory(cwd, workdir)
+			cwd = CleanedDirectory(cwd, workdir)
 		}
 	}
 	home, err := os.UserHomeDir()

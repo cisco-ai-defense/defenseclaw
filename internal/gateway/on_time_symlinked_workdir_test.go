@@ -17,11 +17,15 @@ import (
 )
 
 // A call whose working directory reaches the account home only through a
-// symlinked parent step (project/lnk/.., lnk -> ~/.ssh) runs in the home. The
-// hook client and the gateway place the call by the file system, not by a
-// text clean-up of the parent step, so a hard link to authorized_keys in the
-// home is the protected file whatever the length of the operand list and
-// whichever way the working directory is spelled.
+// symlinked parent step (project/lnk/.., lnk -> ~/.ssh) runs in the home when
+// the agent hands the directory to the system (a reported cwd). The hook
+// client and the gateway place such a call by the file system, not by a text
+// clean-up of the parent step, so a hard link to authorized_keys in the home
+// is the protected file whatever the length of the operand list and whichever
+// way the working directory is spelled. Codex cleans an exec_command workdir
+// as text before it starts the process, so the same spelling there runs in
+// the project: an ordinary file of that name is allowed, and a hard link to
+// the keys inside the project stays the protected file.
 func TestOnTimeCallWithAWorkdirThroughASymlinkedParentStepTellsTheHome(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX gateway walk")
@@ -46,6 +50,11 @@ func TestOnTimeCallWithAWorkdirThroughASymlinkedParentStepTellsTheHome(t *testin
 			t.Fatal(err)
 		}
 	}
+	// A hard link to the keys inside the project: the folder a Codex workdir
+	// of lnk/.. runs in.
+	if err := os.Link(keys, filepath.Join(project, "hlk-proj")); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "lnk")); err != nil {
 		t.Fatal(err)
 	}
@@ -61,13 +70,15 @@ func TestOnTimeCallWithAWorkdirThroughASymlinkedParentStepTellsTheHome(t *testin
 	type call struct {
 		name, connector, tool string
 		cwd, workdir          string
+		cleaned               bool
 	}
 	calls := []call{
-		{"claudecode cwd through link", "claudecode", "Bash", project + "/lnk/..", ""},
-		{"claudecode cwd through link, dot", "claudecode", "Bash", project + "/lnk/../.", ""},
-		{"codex cwd through link", "codex", "Bash", project + "/lnk/..", ""},
-		{"codex exec_command relative workdir", "codex", "exec_command", project, "lnk/.."},
-		{"codex exec_command absolute workdir", "codex", "exec_command", project, project + "/lnk/.."},
+		{"claudecode cwd through link", "claudecode", "Bash", project + "/lnk/..", "", false},
+		{"claudecode cwd through link, dot", "claudecode", "Bash", project + "/lnk/../.", "", false},
+		{"codex cwd through link", "codex", "Bash", project + "/lnk/..", "", false},
+		{"codex exec_command relative workdir", "codex", "exec_command", project, "lnk/..", true},
+		{"codex exec_command absolute workdir", "codex", "exec_command", project, project + "/lnk/..", true},
+		{"codex exec_command plain workdir", "codex", "exec_command", home, "proj", true},
 	}
 	homes := filepath.Dir(home)
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
@@ -76,7 +87,7 @@ func TestOnTimeCallWithAWorkdirThroughASymlinkedParentStepTellsTheHome(t *testin
 			for _, probe := range []struct {
 				target string
 				want   bool
-			}{{"hlk-home", true}, {"hlk-ord", false}} {
+			}{{"hlk-home", !c.cleaned}, {"hlk-proj", c.cleaned}, {"hlk-ord", false}} {
 				for _, protectHome := range []bool{false, true} {
 					t.Run(fmt.Sprintf("%s/%d operands/%s/protect home=%t", c.name, count, probe.target, protectHome), func(t *testing.T) {
 						input := map[string]any{"command": operands(count, probe.target)}
