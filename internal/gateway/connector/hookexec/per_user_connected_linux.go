@@ -175,7 +175,13 @@ func readListenerInodes(procNet, table string, keys []string) ([]string, bool) {
 // descriptor table, but a thread can own a private copy (unshare with
 // CLONE_FILES) that keeps a socket open after the leader closed it, and the
 // leader folder /proc/<pid>/fd shows only the leader table, so every thread
-// folder is read. A thread that exits while the list is read is skipped.
+// folder is read. A thread that exits while the list is read is skipped. A
+// thread folder the kernel refuses (permission) is skipped too when another
+// thread folder of the process was read: a thread that has exited, such as a
+// leader that left while its workers run, holds no descriptors, and
+// dumpability belongs to the process, so a process whose live threads are
+// readable has no unreadable live thread. When no thread folder can be read
+// the permission error is returned.
 func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
 	taskDir := filepath.Join(procRoot, strconv.Itoa(pid), "task")
 	threads, err := os.ReadDir(taskDir)
@@ -183,6 +189,8 @@ func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
 		return nil, err
 	}
 	held := make(map[string]bool)
+	var denied error
+	read := 0
 	for _, thread := range threads {
 		dir := filepath.Join(taskDir, thread.Name(), "fd")
 		entries, err := os.ReadDir(dir)
@@ -190,8 +198,13 @@ func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
 			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
 				continue // thread gone
 			}
+			if errors.Is(err, os.ErrPermission) {
+				denied = err
+				continue
+			}
 			return nil, err
 		}
+		read++
 		for _, entry := range entries {
 			target, err := os.Readlink(filepath.Join(dir, entry.Name()))
 			if err != nil {
@@ -204,6 +217,9 @@ func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
 				held[strings.TrimSuffix(inode, "]")] = true
 			}
 		}
+	}
+	if denied != nil && read == 0 {
+		return nil, denied
 	}
 	return held, nil
 }
