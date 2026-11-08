@@ -35,7 +35,7 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 		if !linkTargetCandidate(facts, candidate, typed) {
 			continue
 		}
-		spelling, placed := linkTargetSpelling(request, candidate)
+		spelling, placed, reported := linkTargetSpelling(request, candidate)
 		if spelling == "" {
 			continue
 		}
@@ -46,7 +46,7 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 				break
 			}
 		}
-		if physical == "" && !request.SkipLocalFilesystemResolution {
+		if physical == "" && !reported && !request.SkipLocalFilesystemResolution {
 			physical, _ = request.targetMemo.ResolveWriteTarget(spelling)
 		}
 		if !filepath.IsAbs(physical) {
@@ -77,11 +77,15 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 // user, so it receives none of its own; the path stayed relative to nothing
 // and was never followed to the file a link reaches, where the absolute
 // spelling of the same link was (IB17). placed is true for a relative path,
-// which had no absolute fact until now. The spelling is empty when no
-// trustworthy working directory places it.
-func linkTargetSpelling(request trustedActionRequest, candidate actionfacts.PathFact) (spelling string, placed bool) {
+// which had no absolute fact until now. reported is true when the directory
+// is only the one the client reported, outside the home and project root the
+// gateway may walk: the spelling then only looks up the evidence the client
+// keyed by it and is never walked locally, so a known protected target
+// blocks wherever the project lives (GAP-0831). The spelling is empty when
+// no working directory places it.
+func linkTargetSpelling(request trustedActionRequest, candidate actionfacts.PathFact) (spelling string, placed, reported bool) {
 	if filepath.IsAbs(candidate.Resolved) {
-		return candidate.Resolved, false
+		return candidate.Resolved, false, false
 	}
 	// Without a working directory the analysis keeps a literal relative
 	// path as written and leaves it unresolved, with the flavor of a typed
@@ -91,16 +95,19 @@ func linkTargetSpelling(request trustedActionRequest, candidate actionfacts.Path
 		candidate.Absolute || candidate.Resolved != "" ||
 		candidate.Normalized == "" || candidate.Value == "" ||
 		strings.HasPrefix(candidate.Value, "~") || strings.ContainsAny(candidate.Value, "$`\x00") {
-		return "", false
+		return "", false, false
 	}
 	cwd := request.Input.CWD
 	if !filepath.IsAbs(cwd) {
 		var ok bool
 		if cwd, ok = protectedHomeClientDirectory(request); !ok {
-			return "", false
+			if cwd, ok = protectedHomeReportedDirectory(request); !ok {
+				return "", false, false
+			}
+			reported = true
 		}
 	}
-	return hookpaths.OperandPath(candidate.Value, cwd), true
+	return hookpaths.OperandPath(candidate.Value, cwd), true, reported
 }
 
 // linkTargetCandidate reports whether a path fact is a file operation that
