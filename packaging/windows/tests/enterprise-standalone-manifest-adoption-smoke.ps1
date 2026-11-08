@@ -410,6 +410,25 @@ try {
                 }
                 Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $ciscoRow)
                 Assert-TestSyncRefuses 'a link in the DefenseClaw tree' 'failure-free reconcile'
+                # The first link on the path can be above the vendor root (the root itself a link, as
+                # ProgramData can be): that is no kept vendor folder, and the row stays unexplained.
+                $linkedRootTarget = [IO.Path]::Combine($Root, 'linked-root-target')
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($linkedRootTarget, 'vendor', 'OpenAI'))
+                $linkedRoot = [IO.Path]::Combine($Root, 'linked-root')
+                & cmd.exe /c mklink /J "$linkedRoot" "$linkedRootTarget" | Out-Null
+                $rootLinkRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $([IO.Path]::Combine($linkedRoot, 'vendor', 'OpenAI', 'Codex'))"
+                }
+                $script:DefenseClawVendorFolderRoots = @([IO.Path]::Combine($linkedRoot, 'vendor'))
+                try {
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $rootLinkRow)
+                    Assert-TestSyncRefuses 'a link above the vendor root' 'failure-free reconcile'
+                }
+                finally {
+                    $script:DefenseClawVendorFolderRoots = @($vendorRoot)
+                    & cmd.exe /c rmdir "$linkedRoot" | Out-Null
+                }
                 # A link that is there, but not under a vendor root (an account folder, say), is not explained.
                 $profileRow = [pscustomobject]@{
                     user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false

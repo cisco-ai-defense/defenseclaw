@@ -32401,7 +32401,15 @@ function Get-DefenseClawGuardianRowMachineFolderLink {
     }
     catch {
         if ($_.Exception.Message -match '^reparse points are not allowed in managed path: (?<link>.+)$') {
-            return [string]$Matches['link']
+            # The walk names the first link on the path, which can be above the
+            # vendor root (ProgramData itself a link). Only a link strictly under a
+            # vendor root is the kept vendor folder (rel-1-0-9 g758b review L1).
+            $link = [string]$Matches['link']
+            foreach ($root in $roots) {
+                if ($link.Replace('/', '\').StartsWith($root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                    return $link
+                }
+            }
         }
     }
     return ''
