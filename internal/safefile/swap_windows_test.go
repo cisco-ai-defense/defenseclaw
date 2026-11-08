@@ -448,28 +448,68 @@ func TestCompareAndSwapFileRollsBackUncommittedRename(t *testing.T) {
 }
 
 func TestCompareAndSwapFileFallsBackWhenTransactionsUnavailable(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+	}{
+		{name: "unsupported volume", err: windows.ERROR_NOT_SUPPORTED},
+		{name: "encrypted stage", err: windows.ERROR_EFS_NOT_ALLOWED_IN_TRANSACTION},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			destination := filepath.Join(dir, "hooks.json")
+			if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			source := writeSwapSourceForTest(t, dir, "new")
+			previousTx, previousPlain := swapTransactedRename, swapRenameReplace
+			defer func() { swapTransactedRename, swapRenameReplace = previousTx, previousPlain }()
+			transacted, plain := 0, 0
+			swapTransactedRename = func(_, _ string, _ uint32, _ windows.Handle) error {
+				transacted++
+				return test.err
+			}
+			swapRenameReplace = func(from, to string, class, flags uint32) error {
+				plain++
+				return renameReplace(from, to, class, flags)
+			}
+			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+			if err != nil || !result.Swapped || transacted != 1 || plain != 1 {
+				t.Fatalf("CAS fallback: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
+			}
+			requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
+		})
+	}
+}
+
+func TestCompareAndSwapFileRechecksIdentityAfterEncryptedStageFallback(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "hooks.json")
 	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	source := writeSwapSourceForTest(t, dir, "new")
+	newer := filepath.Join(dir, "newer.tmp")
+	if err := os.WriteFile(newer, []byte("newer save"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	previousTx, previousPlain := swapTransactedRename, swapRenameReplace
 	defer func() { swapTransactedRename, swapRenameReplace = previousTx, previousPlain }()
 	transacted, plain := 0, 0
-	swapTransactedRename = func(_, _ string, _ uint32, _ windows.Handle) error {
+	swapTransactedRename = func(_, to string, _ uint32, _ windows.Handle) error {
 		transacted++
-		return windows.ERROR_NOT_SUPPORTED
+		posixRenameForTest(t, newer, to)
+		return windows.ERROR_EFS_NOT_ALLOWED_IN_TRANSACTION
 	}
 	swapRenameReplace = func(from, to string, class, flags uint32) error {
 		plain++
 		return renameReplace(from, to, class, flags)
 	}
 	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
-	if err != nil || !result.Swapped || transacted != 1 || plain != 1 {
-		t.Fatalf("CAS fallback: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
+	if !errors.Is(err, ErrSwapRaced) || result.Swapped || transacted != 1 || plain != 0 {
+		t.Fatalf("CAS fallback race: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
 	}
-	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
+	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "newer save", "source.tmp": "new"})
 }
 
 func TestCompareAndSwapFileLeavesProgramImagesOutsideTransactions(t *testing.T) {
