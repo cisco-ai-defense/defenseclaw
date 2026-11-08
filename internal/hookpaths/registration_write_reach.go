@@ -460,7 +460,7 @@ func registrationInstallReach(words []string, cwd string, protected protectedFil
 func registrationPlacedPaths(words []string, known []bool, cwd string) []string {
 	var operands []string
 	directory := ""
-	noTarget, optionsEnded := false, false
+	noTarget, optionsEnded, parents := false, false, false
 	for i := 1; i < len(words); i++ {
 		if known != nil && !known[i] {
 			operands = append(operands, "")
@@ -471,6 +471,8 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 			operands = append(operands, word)
 		case word == "--":
 			optionsEnded = true
+		case registrationCopyParentsOption(words[0], word):
+			parents = true
 		case word == "-t" || word == "--target-directory":
 			if i+1 < len(words) {
 				if known != nil && !known[i+1] {
@@ -498,7 +500,9 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 		if last == "" {
 			return nil
 		}
-		if !noTarget {
+		if parents {
+			directory = last
+		} else if !noTarget {
 			if info, err := pathStat(OperandPath(last, cwd)); strings.HasSuffix(last, "/") || (err == nil && info.IsDir()) {
 				directory = last
 			}
@@ -509,12 +513,32 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 	}
 	if directory != "" {
 		for _, source := range operands {
-			if source != "" {
-				placed = append(placed, filepath.Join(OperandPath(directory, cwd), filepath.Base(source)))
+			if source == "" {
+				continue
 			}
+			name := filepath.Base(source)
+			if parents {
+				name = source
+			}
+			placed = append(placed, filepath.Join(OperandPath(directory, cwd), name))
 		}
 	}
 	return placed
+}
+
+// registrationCopyParentsOption reports the cp option --parents (or an
+// unambiguous abbreviation of it): the copy is named after the whole source
+// path under the destination folder, not after the source base name.
+func registrationCopyParentsOption(program, word string) bool {
+	if base := programBase(program); base != "cp" && base != "gcp" {
+		return false
+	}
+	name, ok := strings.CutPrefix(word, "--")
+	if !ok {
+		return false
+	}
+	option, ok := longOption(name, cpLongOptions)
+	return ok && option == "parents"
 }
 
 func registrationRsyncReach(words []string, cwd string, protected protectedFiles) bool {
@@ -579,7 +603,13 @@ func registrationCopyReach(file *syntax.File, cwd, home string, protected protec
 		if info, err := pathStat(dest); err != nil || !info.IsDir() {
 			return true
 		}
-		if protectedReachPath(filepath.Join(dest, filepath.Base(source)), protected, "") {
+		name := filepath.Base(source)
+		if args, _ := copyProgramArgs(argv); len(args) > 0 {
+			if parsed := cpOperands(args, makeStatic(len(args))); parsed.ok && parsed.parents {
+				name = source
+			}
+		}
+		if protectedReachPath(filepath.Join(dest, name), protected, "") {
 			found = true
 			return false
 		}
