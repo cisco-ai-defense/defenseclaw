@@ -561,6 +561,17 @@ func TestMachineLayoutWindowsDOSDevicePathsNameTheFile(t *testing.T) {
 		`\\.\C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
 		`\\.\UNC\localhost\C$\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
 		`\\?\UNC\localhost\C$\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		// Each name is read without trailing dots and spaces under every
+		// namespace prefix, although the exact prefixes keep them: a look-alike
+		// machine folder is a documented false block, never a protected allow.
+		`\\?\C:\ProgramData\Cisco\DefenseClaw.\etc\project.yaml`,
+		`\\?\C:\ProgramData\Cisco\DefenseClaw \etc\project.yaml`,
+		`\\.\C:\ProgramData\Cisco\DefenseClaw.\etc\project.yaml`,
+		`\\.\C:\ProgramData\Cisco\DefenseClaw \etc\project.yaml`,
+		`\\?\UNC\localhost\C$\ProgramData\Cisco\DefenseClaw.\etc\project.yaml`,
+		`\\?\UNC\localhost\C$\ProgramData\Cisco\DefenseClaw \etc\project.yaml`,
+		`\\?\UNC\localhost\C$.\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`\\.\UNC\localhost\C$\ProgramData\Cisco\DefenseClaw .\etc\project.yaml`,
 	}
 	ordinary := []string{
 		`\\.\D:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
@@ -611,7 +622,7 @@ func TestMachineLayoutPOSIXHomeUnderMountedDriveIsAPOSIXTarget(t *testing.T) {
 						if _, got := machineLayoutCall(t, posixHome, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
 							t.Errorf("Write %s home=%s from %q managed=%t pack=%q = %.200s, want allow", file, posixHome, project, managed, pack, got)
 						}
-						if _, got := machineLayoutCall(t, posixHome, project, "Bash", map[string]any{"command": "echo x >  + file + "}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
+						if _, got := machineLayoutCall(t, posixHome, project, "Bash", map[string]any{"command": "echo x > \"" + file + "\""}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
 							t.Errorf("Bash write %s home=%s from %q managed=%t pack=%q = %.200s, want allow", file, posixHome, project, managed, pack, got)
 						}
 					}
