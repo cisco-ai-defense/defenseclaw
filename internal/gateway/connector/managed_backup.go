@@ -205,30 +205,25 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 // change. The record is marked instead, so only the DefenseClaw entries are
 // ever removed from that file. A target that still matches keeps the exact
 // restore, but only on condition: the record stays open until the read-back
-// update (see updateManagedFileBackupPostHash). A target that is missing or
-// not a regular file changes nothing.
+// update (see updateManagedFileBackupPostHash). A target that is not a
+// regular file changes nothing.
 func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup, targetPath string) error {
 	if b.PostSHA256 == managedBackupDriftedHash {
 		return nil
 	}
-	expected := b.PostSHA256
-	if expected == "" {
-		expected = b.PristineSHA256
-	}
-	data, err := readHookConfigFile(targetPath)
+	expected := managedFileBackupExpectedHash(&b)
+	data, info, err := readManagedTarget(targetPath)
 	if err != nil {
 		return nil
 	}
-	if sha256Hex(data) != expected {
+	if managedFileSnapshotHash(data, info != nil) != expected {
 		b.PostSHA256 = managedBackupDriftedHash
 		b.LaterSetupOpen = false
 		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	} else if b.PostSHA256 != "" {
+	} else {
 		// Not a change of custody: UpdatedAt stays, so a setup that rewrites
 		// nothing leaves the record byte-identical once it closes it again.
 		b.LaterSetupOpen = true
-	} else {
-		return nil
 	}
 	return writeManagedFileBackup(backupPath, b)
 }
@@ -260,11 +255,12 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 		nextHash = managedFileSnapshotHash(data, true)
 	}
 	if b.LaterSetupOpen {
-		// A later setup began on the committed bytes. Bytes it left
-		// unchanged are still ours. Anything else was merged over a base
-		// this read cannot vouch for (an edit may have landed between the
-		// capture and the merge), so it is never recorded as ours.
-		if nextHash != b.PostSHA256 {
+		// A later setup began on the expected bytes (the committed ones, or
+		// the pre-setup ones while no post hash was published). Bytes it
+		// left unchanged are still ours. Anything else was merged over a
+		// base this read cannot vouch for (an edit may have landed between
+		// the capture and the merge), so it is never recorded as ours.
+		if nextHash != managedFileBackupExpectedHash(&b) {
 			b.PostSHA256 = managedBackupDriftedHash
 			b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		}
