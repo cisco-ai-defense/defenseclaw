@@ -59,11 +59,9 @@ func TestGAP0641LinkedParentOrdinaryFileIsAnOrdinaryPayload(t *testing.T) {
 	}
 }
 
-// The payload is ordinary for the shared reader (test above); the restart-window
-// scan (GAP-0518) does not step through a dot-dot component, and the open tier
-// needs both scans, so the dot-dot spelling stays closed at the deadline as on
-// the release base. The plain protected name stays closed.
-func TestGAP0641LinkedParentDotDotStaysClosedAtTheOSSDeadlineWithoutBothScans(t *testing.T) {
+// An ordinary file reached through a linked working directory stays open at the
+// OSS deadline; the plain protected name stays closed.
+func TestGAP0641LinkedParentOrdinaryFileStaysOpenAtTheOSSDeadline(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
 	addr := hungGateway(t)
 	_, project := reverseDotDotFixture(t)
@@ -73,7 +71,7 @@ func TestGAP0641LinkedParentDotDotStaysClosedAtTheOSSDeadlineWithoutBothScans(t 
 		dir, command string
 		blocked      bool
 	}{
-		{cwd, "cat ../status", true},
+		{cwd, "cat ../status", false},
 		{project, "cat status", true},
 	} {
 		t.Run(row.command, func(t *testing.T) {
