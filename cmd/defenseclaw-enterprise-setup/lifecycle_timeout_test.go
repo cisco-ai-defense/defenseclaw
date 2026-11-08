@@ -54,6 +54,10 @@ func TestEnterpriseLifecycleChildHelper(t *testing.T) {
 		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
 		time.Sleep(5 * time.Minute)
 		os.Exit(0)
+	case "exit-still-active":
+		// Ends at once with the exit status Windows also uses for running.
+		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		os.Exit(259)
 	case "recover":
 		// The recovery replays the journal only once the stopped child is
 		// gone; one still running would race it.
