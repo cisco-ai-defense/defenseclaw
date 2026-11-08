@@ -12443,11 +12443,24 @@ function ConvertFrom-DefenseClawServiceQuiescenceTimestamp {
     return $timestamp
 }
 
+function ConvertTo-DefenseClawGuardianTimestamp {
+    # The invariant UTC text of a guardian record timestamp. A DateTime keeps
+    # its full 100 ns resolution: a whole-second form made two publications
+    # inside one second the same generation, so a restart that republished
+    # within that second looked like no restart (GAP-0931).
+    param([Parameter(Mandatory)][DateTime]$Value)
+    return $Value.ToUniversalTime().ToString(
+        'yyyy-MM-ddTHH:mm:ss.fffffffZ',
+        [Globalization.CultureInfo]::InvariantCulture
+    )
+}
+
 function Get-DefenseClawGuardianGeneration {
     # Returns state.updated_at, or $null when the report carries no state.
     # StrictMode throws on a missing property, so absence is probed on the
     # property set. PowerShell 7 materializes the ISO string as a DateTime, whose
-    # [string] form is local-culture and drops the UTC designator.
+    # [string] form is local-culture and drops the UTC designator; a string the
+    # parser kept (eight or nine fractional digits) is returned as it is.
     param($Report)
     if ($null -eq $Report -or $null -eq $Report.PSObject.Properties['state']) {
         return $null
@@ -12461,7 +12474,7 @@ function Get-DefenseClawGuardianGeneration {
         return $null
     }
     if ($value -is [DateTime]) {
-        return ([DateTime]$value).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        return ConvertTo-DefenseClawGuardianTimestamp -Value ([DateTime]$value)
     }
     return [string]$value
 }
@@ -35868,9 +35881,8 @@ function Test-DefenseClawGuardianCoverageReport {
             return & $reject "guardian reconcile ID '$reconcileID' is not fresh"
         }
         $activationGeneration = if ($activation.updated_at -is [DateTime]) {
-            ([DateTime]$activation.updated_at).ToUniversalTime().ToString(
-                'yyyy-MM-ddTHH:mm:ssZ'
-            )
+            ConvertTo-DefenseClawGuardianTimestamp `
+                -Value ([DateTime]$activation.updated_at)
         }
         else {
             [string]$activation.updated_at
