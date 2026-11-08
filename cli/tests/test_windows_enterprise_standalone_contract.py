@@ -798,6 +798,7 @@ def test_the_unreadable_file_probe_and_the_state_deletion_enable_privileges_for_
         "Test-DefenseClawAccessDeniedError",
         "[StringComparison]::OrdinalIgnoreCase",
         "defenseclaw_repair",
+        "Write-DefenseClawLifecycleLogDiagnostic",
         "DeleteTreePrivileged($Target, $deleted)",
     ):
         assert guard in deleter, guard

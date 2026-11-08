@@ -41681,6 +41681,11 @@ function Remove-DefenseClawStateTreePrivileged {
             path   = [string]$entry
             reason = "deleted after access denied, with backup and restore privileges enabled for this call only: $($ErrorRecord.Exception.Message)"
         }
+        # The warning stream is not kept by the CLI or Setup; the lifecycle
+        # log is, so each privileged deletion is named there too.
+        Write-DefenseClawLifecycleLogDiagnostic -Message (
+            'defenseclaw_repair path=' + [string]$entry +
+            ': deleted after access denied, with backup and restore privileges enabled for this call only')
     }
     foreach ($failure in $failures) {
         Microsoft.PowerShell.Utility\Write-Verbose "privileged deletion left: $failure"
