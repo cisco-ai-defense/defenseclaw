@@ -1146,6 +1146,18 @@ jobs:
       # part left no log at all (GAP-0834).
       - run: make connector-matrix-test CONNECTOR_MATRIX_PART=${{ matrix.part }} CONNECTOR_MATRIX_CONNECTOR_PARTS=4 GO_TEST_TIMEOUT=14m
         timeout-minutes: 18
+      - name: Gateway throughput tests (no race)
+        # The managed sandbox open-loop tests (internal/gateway
+        # gap0490_open_loop_test.go, built without -race) measure wall-clock
+        # answers inside the hook window. Every gateway test in the race shards
+        # is built with -race, and the matrix pattern above does not select
+        # them, so they run here, after the make step so nothing else loads
+        # the runner. Each carries its own same-run control (the same stream
+        # to a handler that only answers) and skips, naming it, only on a
+        # runner that cannot carry the offered load.
+        if: ${{ !cancelled() && matrix.part == 'packages' }}
+        timeout-minutes: 5
+        run: go test -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes)$' ./internal/gateway
 
   # The Secure Client profile hook hardening flow (a synthetic target home and
   # a TCP fake gateway) runs only on macOS. Linux has only the standalone
