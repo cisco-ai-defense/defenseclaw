@@ -246,7 +246,10 @@ return `ERROR_FILE_NOT_FOUND` or a sharing error to another process opening
 that name. DefenseClaw's own managed-file readers use a bounded retry for
 transient opens. A separate application that opens the file at that instant may
 need to reopen it. Run upgrades while clients are idle when possible.
-Third-party readers should share deletion and retry transient open failures.
+Third-party readers should share deletion and retry transient open failures
+(`ERROR_FILE_NOT_FOUND`, `ERROR_PATH_NOT_FOUND`, or a sharing violation) within
+a bounded window. The policy compare-and-swap reader test uses two seconds,
+matching the writer's lock wait.
 
 This is an observed Windows file-name replacement limit, not a field failure
 rate. In a 2026-11-06 Windows Server 2025 NTFS stress run of 400 changed-body
@@ -269,8 +272,8 @@ The policy compare-and-swap reader test also reached this Windows name
 window. In 50 native repetitions on the same Windows Server 2025 host, the
 release base passed 45 and branch head `afc6eea8c6` passed 46. The published
 body remained complete, but a fresh open occasionally found no name during a
-replacement. The test keeps its existing assertion so later Windows behavior
-changes remain visible.
+replacement. The test requires a complete old or new policy after that retry
+window, so later Windows behavior changes remain visible.
 
 ### Build
 
