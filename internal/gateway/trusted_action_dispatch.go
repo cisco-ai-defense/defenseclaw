@@ -3462,6 +3462,28 @@ func protectedHomeClientDirectory(request trustedActionRequest) (string, bool) {
 	return filepath.Clean(cwd), true
 }
 
+// protectedHomeReportedDirectory is the directory a managed hook peer
+// reported for its call, as protectedHomeClientDirectory reads it, without
+// the bound of the caller home and its project root: a project may live
+// anywhere the user can reach. It places a path only to look up the evidence
+// the client keyed by that spelling, which can add a block and never walks
+// the gateway into the directory. ok is false when the call is not a managed
+// hook peer call, the gateway knows the cwd, or the directory is not an
+// absolute path without ".." and NUL.
+func protectedHomeReportedDirectory(request trustedActionRequest) (string, bool) {
+	if !request.ProtectedHomeHook || filepath.IsAbs(request.Input.CWD) {
+		return "", false
+	}
+	cwd := request.evidenceCWD
+	if !filepath.IsAbs(cwd) {
+		cwd = request.ResolvedWriteTargets[hookpaths.CWDKey]
+	}
+	if !filepath.IsAbs(cwd) || hasParentElement(cwd) || strings.ContainsRune(cwd, 0) {
+		return "", false
+	}
+	return filepath.Clean(cwd), true
+}
+
 // protectedHomePrivateKeyTwinRequest returns the call of a managed hook
 // peer placed in the directory the hook client ran it in
 // (protectedHomeClientDirectory), when its text names an SSH private key
