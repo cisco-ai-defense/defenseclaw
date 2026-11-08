@@ -175,7 +175,7 @@ func appendOverLimitElidedContentFinding(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
-	class, ok := actionfacts.OverLimitWriteElidedContentTarget(request.Input, facts)
+	class, ok := actionfacts.OverLimitWriteElidedContentTarget(request.Input, facts, request.ResolvedWriteTargets)
 	if !ok {
 		return findings
 	}
