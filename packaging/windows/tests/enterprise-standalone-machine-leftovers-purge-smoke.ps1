@@ -1391,11 +1391,11 @@ $failures = & $module {
                 if ((Get-DefenseClawVendorMachineFolderLink -Directory $g773Link) -ne $g773Link) {
                     $failures.Add('GAP-0773: the Codex folder link was not found')
                 }
-                if ((Get-DefenseClawVendorMachineFolderLink -Directory [IO.Path]::Combine($g773Link, 'sub')) -ne $g773Link) {
+                if ((Get-DefenseClawVendorMachineFolderLink -Directory ([IO.Path]::Combine($g773Link, 'sub'))) -ne $g773Link) {
                     $failures.Add('GAP-0773: a folder below the Codex link was not reported as behind the link')
                 }
                 if ((Get-DefenseClawVendorMachineFolderLink -Directory $g773Plain) -ne '' -or
-                    (Get-DefenseClawVendorMachineFolderLink -Directory [IO.Path]::Combine($g773Plain, 'absent')) -ne '') {
+                    (Get-DefenseClawVendorMachineFolderLink -Directory ([IO.Path]::Combine($g773Plain, 'absent'))) -ne '') {
                     $failures.Add('GAP-0773: a plain or absent Codex folder was reported as a link')
                 }
                 $g773SecureClient = 'unset'
