@@ -32,7 +32,13 @@ import (
 // loadEnterpriseHookRemovedConnectors reads the record; a missing file is an
 // empty record.
 func loadEnterpriseHookRemovedConnectors(dataDir string) ([]managed.RemovedConnector, error) {
-	path := managed.RemovedConnectorsPath(dataDir)
+	return loadEnterpriseHookRemovedConnectorsAt(managed.RemovedConnectorsPath(dataDir))
+}
+
+// loadEnterpriseHookRemovedConnectorsAt reads the record at path: the status
+// commands name the guardian's protected state folder from the installed
+// layout, not from the service environment pin the guardian runs with.
+func loadEnterpriseHookRemovedConnectorsAt(path string) ([]managed.RemovedConnector, error) {
 	info, err := pathidentity.LstatPinned(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
