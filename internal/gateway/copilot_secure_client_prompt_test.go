@@ -12,7 +12,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// On the Windows Secure Client profile a blocked GitHub Copilot prompt is
+// On the Secure Client profile a blocked GitHub Copilot prompt is
 // replaced, through the mutation-only userPromptTransformed event, with
 // DefenseClaw's notice. Observe mode, other verdicts, other events, other
 // connectors and every other profile keep the unmodified output.
@@ -68,8 +68,14 @@ func TestCopilotSecureClientPromptOutput(t *testing.T) {
 	}
 }
 
-// The rewrite is the Windows Secure Client profile's alone.
+// The rewrite is the Secure Client profile's alone, on the platforms Secure
+// Client deploys Copilot on.
 func TestCopilotSecureClientPromptRewriteProfiles(t *testing.T) {
+	for goos, want := range map[string]bool{"windows": true, "darwin": true, "linux": false} {
+		if got := copilotSecureClientPromptRewriteOS(goos); got != want {
+			t.Fatalf("rewrite on %s = %v, want %v", goos, got, want)
+		}
+	}
 	standalone := &config.Config{
 		DeploymentMode: managed.DeploymentModeManagedEnterprise,
 		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
