@@ -29,16 +29,13 @@ var ownStatusCoworkEvents = coworkaudit.LastEvents
 // record used by managed readiness and verification; a seam for tests.
 var ownStatusGuardianAuthorization = readManagedGuardianAuthorization
 
-// ownStatusWindowsAccountName names a verified Windows account SID for the
-// own-status answer (LookupAccountSid, set on Windows); "" when the LSA does
-// not name it.
-var ownStatusWindowsAccountName = func(string) string { return "" }
-
-// ownStatusWindowsAccountDomain names the domain LookupAccountSid gives a
-// verified Windows account SID (set on Windows); "" when the LSA does not
-// name it. The pipe passes the bare account name, so the DOMAIN\account
-// spelling the enumerator matches exclude_users by is built from this.
-var ownStatusWindowsAccountDomain = func(string) string { return "" }
+// ownStatusWindowsAccount names a verified Windows account SID for the
+// own-status answer from one LookupAccountSid result: the bare account name
+// and the domain it was found in (set on Windows). Both are "" when the LSA
+// does not name the SID. The pipe passes the bare account name, so the
+// DOMAIN\account spelling the enumerator matches exclude_users by is built from
+// the domain of the same result; two lookups could disagree.
+var ownStatusWindowsAccount = func(string) (name, domain string) { return "", "" }
 
 // handleOwnStatus serves GET managed.OwnStatusPath on the hook socket: the
 // protection state of the socket's kernel-verified caller, for the
@@ -59,7 +56,7 @@ func (a *APIServer) handleOwnStatus(w http.ResponseWriter, r *http.Request) {
 		writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonPeerUnverified)
 		return
 	}
-	a.writeJSON(w, http.StatusOK, a.ownStatusAnswer(r.Context(), "uid", strconv.Itoa(peer.UID), peer.Name))
+	a.writeJSON(w, http.StatusOK, a.ownStatusAnswer(r.Context(), "uid", strconv.Itoa(peer.UID), peer.Name, ""))
 }
 
 // ownStatusForWindowsAccount is the own-status answer, as JSON, for the
@@ -72,7 +69,8 @@ func (a *APIServer) ownStatusForWindowsAccount(ctx context.Context, sid string) 
 	if !refusalpipe.AccountSID(sid) {
 		return nil
 	}
-	body, err := json.Marshal(a.ownStatusAnswer(ctx, "sid", sid, ownStatusWindowsAccountName(sid)))
+	name, domain := ownStatusWindowsAccount(sid)
+	body, err := json.Marshal(a.ownStatusAnswer(ctx, "sid", sid, name, domain))
 	if err != nil || len(body) > refusalpipe.MaxOwnStatusBytes {
 		return nil
 	}
@@ -81,8 +79,9 @@ func (a *APIServer) ownStatusForWindowsAccount(ctx context.Context, sid string) 
 
 // ownStatusAnswer is the own-status answer for the verified caller whose OS
 // identifier (a uid, or a SID on Windows) is self, under idKey, and whose
-// account name is name.
-func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name string) map[string]any {
+// account name is name and whose Windows domain is domain ("" on Unix, and
+// where the LSA did not name it).
+func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, domain string) map[string]any {
 	cfg := a.runtimeConfigSnapshot()
 	if g := a.generation(); g != nil && g.Config != nil {
 		cfg = g.Config
@@ -90,10 +89,6 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	account := map[string]any{idKey: self}
 	if name != "" {
 		account["name"] = name
-	}
-	domain := ""
-	if idKey == "sid" {
-		domain = ownStatusWindowsAccountDomain(self)
 	}
 	excluded := cfg != nil && ownAccountExcluded(cfg.Enterprise.Enrollment, idKey, self, name, domain)
 	claudeCode := false
@@ -113,6 +108,8 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	var connectors map[string]any
 	if excluded {
 		connectors = ownExcludedConnectorStates(cfg)
+	} else if idKey == "sid" && cfg != nil && ownExclusionUnjudgeable(cfg.Enterprise.Enrollment, name, domain) {
+		connectors = ownUnresolvedConnectorStates(cfg)
 	} else if idKey == "uid" && cfg != nil {
 		connectors = a.ownConnectorStates(cfg, self, name)
 	} else if idKey == "sid" && cfg != nil {
@@ -191,6 +188,36 @@ func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, sel
 		}
 	}
 	return false
+}
+
+// ownExclusionUnjudgeable reports whether a Windows caller's exclude_users
+// entry names the account in a spelling the lookup did not give the means to
+// judge: any entry that is not a SID needs the account name, and a DOMAIN\account
+// entry needs the domain too. The enumerator matches those spellings and may
+// already have removed the hook, so the status claims no protection for it.
+func ownExclusionUnjudgeable(enrollment config.EnterpriseEnrollmentConfig, name, domain string) bool {
+	nameKnown := strings.TrimSpace(name) != ""
+	domainKnown := strings.TrimSpace(domain) != "" || strings.Contains(name, `\`)
+	for _, entry := range enrollment.ExcludeUsers {
+		entry = strings.TrimSpace(entry)
+		switch {
+		case entry == "", refusalpipe.AccountSID(entry):
+		case !nameKnown, strings.Contains(entry, `\`) && !domainKnown:
+			return true
+		}
+	}
+	return false
+}
+
+// ownUnresolvedConnectorStates is the roster of a Windows caller whose
+// exclude_users entries cannot be judged: every configured connector is not
+// confirmed, for there is no coverage proof.
+func ownUnresolvedConnectorStates(cfg *config.Config) map[string]any {
+	states := make(map[string]any)
+	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
+		states[connector] = ownNotConfirmed(ownCauseAccountUnresolved)
+	}
+	return states
 }
 
 // ownExcludedConnectorStates is the roster of an excluded account: every

@@ -113,7 +113,7 @@ func TestManagedOwnStatusReportsConfiguredConnectorProof(t *testing.T) {
 	}})
 	read := func(uid, name string) map[string]any {
 		t.Helper()
-		return api.ownStatusAnswer(context.Background(), "uid", uid, name)
+		return api.ownStatusAnswer(context.Background(), "uid", uid, name, "")
 	}
 	connectors, ok := read("5001", "alice")["connectors"].(map[string]any)
 	if !ok || len(connectors) != 4 {
@@ -221,7 +221,7 @@ func TestManagedOwnStatusIncludesStandaloneConnectorSources(t *testing.T) {
 			api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{
 				"claudecode": {}, "codex": {},
 			}})
-			answer := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice")
+			answer := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice", "")
 			roster, ok := answer["connectors"].(map[string]any)
 			if !ok || len(roster) != len(tc.want) {
 				t.Fatalf("roster = %#v, want %v", answer["connectors"], tc.want)
@@ -243,8 +243,8 @@ func TestManagedOwnStatusIncludesStandaloneConnectorSources(t *testing.T) {
 // gets no answer.
 func TestOwnStatusForWindowsAccountAnswersOnlyThatAccount(t *testing.T) {
 	completeOwnStatusScan(t, nil)
-	previousEvents, previousName := ownStatusCoworkEvents, ownStatusWindowsAccountName
-	t.Cleanup(func() { ownStatusCoworkEvents, ownStatusWindowsAccountName = previousEvents, previousName })
+	previousEvents, previousName := ownStatusCoworkEvents, ownStatusWindowsAccount
+	t.Cleanup(func() { ownStatusCoworkEvents, ownStatusWindowsAccount = previousEvents, previousName })
 	const alice, bob = "S-1-5-21-1004336348-1177238915-682003330-1001", "S-1-5-21-1004336348-1177238915-682003330-1002"
 	mine := time.Date(2026, 11, 4, 13, 0, 0, 0, time.UTC)
 	ownStatusCoworkEvents = func(context.Context, string) ([]enterprisestatus.CoworkAccountEvent, bool, error) {
@@ -254,11 +254,11 @@ func TestOwnStatusForWindowsAccountAnswersOnlyThatAccount(t *testing.T) {
 			{UserID: strings.ToLower(alice), UserName: `WIN11\alice`, At: mine},
 		}, false, nil
 	}
-	ownStatusWindowsAccountName = func(sid string) string {
+	ownStatusWindowsAccount = func(sid string) (string, string) {
 		if sid == alice {
-			return `WIN11\alice`
+			return `WIN11\alice`, ""
 		}
-		return ""
+		return "", ""
 	}
 	cfg := &config.Config{AuditDB: `C:\ProgramData\Cisco\DefenseClaw\audit.db`}
 	cfg.Guardrail.Mode = "action"
@@ -301,9 +301,9 @@ func TestOwnStatusForWindowsAccountAnswersOnlyThatAccount(t *testing.T) {
 // status. A connector without per-user proof stays unconfirmed.
 func TestOwnStatusForWindowsAccountListsConfiguredConnectors(t *testing.T) {
 	completeOwnStatusScan(t, nil)
-	previousName := ownStatusWindowsAccountName
-	ownStatusWindowsAccountName = func(string) string { return `WIN11\alice` }
-	t.Cleanup(func() { ownStatusWindowsAccountName = previousName })
+	previousName := ownStatusWindowsAccount
+	ownStatusWindowsAccount = func(string) (string, string) { return `WIN11\alice`, "" }
+	t.Cleanup(func() { ownStatusWindowsAccount = previousName })
 	enabled, disabled := true, false
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"

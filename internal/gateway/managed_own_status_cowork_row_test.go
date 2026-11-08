@@ -33,7 +33,7 @@ func TestOwnStatusCoworkRowStateIsOneWordWithSeparateReason(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := ownReasonsAPI(t, ownReasonsScenario{view: tc.view, configure: tc.configure})
-			raw, err := json.Marshal(api.ownStatusAnswer(context.Background(), "uid", "5001", "alice"))
+			raw, err := json.Marshal(api.ownStatusAnswer(context.Background(), "uid", "5001", "alice", ""))
 			if err != nil {
 				t.Fatal(err)
 			}

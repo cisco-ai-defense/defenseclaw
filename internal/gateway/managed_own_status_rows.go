@@ -63,6 +63,11 @@ var (
 	// per-connector hook proof for any connector but Claude Code.
 	ownCauseWindowsUnchecked = ownCause{"windows_unchecked", "your account's status cannot check this agent",
 		"Ask IT to run the administrator status for this computer"}
+	// ownCauseAccountUnresolved: the Windows account could not be named, so
+	// whether exclude_users covers it cannot be judged.
+	ownCauseAccountUnresolved = ownCause{"account_unresolved",
+		"DefenseClaw cannot look up your account name right now, so it cannot check whether your organization's policy covers it",
+		ownRetryNextStep}
 	// ownCauseExcluded: the account is listed in exclude_users, so the
 	// machine policy does not cover it whatever it says for other accounts.
 	ownCauseExcluded = ownCause{"excluded_users",

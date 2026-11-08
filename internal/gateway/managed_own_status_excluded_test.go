@@ -83,7 +83,7 @@ func requireExcludedRow(t *testing.T, name string, row map[string]any, wantNext 
 
 func ownStatusRowFor(t *testing.T, api *APIServer, idKey, id, name, connector string) map[string]any {
 	t.Helper()
-	roster, ok := api.ownStatusAnswer(context.Background(), idKey, id, name)["connectors"].(map[string]any)
+	roster, ok := api.ownStatusAnswer(context.Background(), idKey, id, name, "")["connectors"].(map[string]any)
 	if !ok {
 		t.Fatal("own status has no connector roster")
 	}
@@ -100,8 +100,8 @@ func TestOwnStatusExcludedAccountIsExcludedOnEveryRow(t *testing.T) {
 
 	// By name, and by decimal uid; a scan entry for the account does not
 	// change the state, which comes from the exclusion.
-	requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "uid", "5003", "carol"))
-	requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "uid", "5004", "dave"))
+	requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "uid", "5003", "carol", ""))
+	requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "uid", "5004", "dave", ""))
 }
 
 // Enrolled accounts on the same machine keep their current rows: protected
@@ -125,7 +125,7 @@ func TestOwnStatusEnrolledAccountBesideExcludedAccountIsUnchanged(t *testing.T) 
 			t.Fatalf("%s (uid %s) Claude Code row = %#v, want protected", tc[1], tc[0], row)
 		}
 	}
-	if cowork, _ := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice")["cowork"].(map[string]any); cowork["state"] != "protected" {
+	if cowork, _ := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice", "")["cowork"].(map[string]any); cowork["state"] != "protected" {
 		t.Fatalf("enrolled alice Cowork row = %#v, want protected", cowork)
 	}
 }
@@ -152,7 +152,7 @@ func TestOwnStatusWindowsExcludedAccountIsExcludedOnEveryRow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := ownStatusExcludedFixture(t, tc.exclude, nil)
-			requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `WIN11\alice`))
+			requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `WIN11\alice`, ""))
 			// Benign twin: bob is enrolled.
 			if row := ownStatusRowFor(t, api, "sid", bob, `WIN11\bob`, "claudecode"); row["state"] == "excluded" {
 				t.Fatalf("bob claudecode row = %#v, want not excluded", row)
@@ -194,7 +194,7 @@ func TestOwnStatusWindowsExclusionFollowsTheEnumeratorSpellings(t *testing.T) {
 				t.Fatalf("exclude_users [%s]: row = %#v, excluded = %v, want %v", tc.exclude, row, got, tc.excluded)
 			}
 			if tc.excluded {
-				requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `CONTOSO\alice`))
+				requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `CONTOSO\alice`, ""))
 			} else if row["state"] != "protected" {
 				t.Fatalf("enrolled row = %#v, want protected", row)
 			}
@@ -208,12 +208,9 @@ func TestOwnStatusWindowsExclusionFollowsTheEnumeratorSpellings(t *testing.T) {
 // enumerator removed, and leaves the others enrolled.
 func TestOwnStatusWindowsPipeEntrypointExcludesTheQualifiedSpelling(t *testing.T) {
 	const alice = "S-1-5-21-1004336348-1177238915-682003330-1001"
-	previousName, previousDomain, previousHome := ownStatusWindowsAccountName, ownStatusWindowsAccountDomain, userScopedIdentityHome
-	t.Cleanup(func() {
-		ownStatusWindowsAccountName, ownStatusWindowsAccountDomain, userScopedIdentityHome = previousName, previousDomain, previousHome
-	})
-	ownStatusWindowsAccountName = func(string) string { return "alice" }
-	ownStatusWindowsAccountDomain = func(string) string { return "CONTOSO" }
+	previousAccount, previousHome := ownStatusWindowsAccount, userScopedIdentityHome
+	t.Cleanup(func() { ownStatusWindowsAccount, userScopedIdentityHome = previousAccount, previousHome })
+	ownStatusWindowsAccount = func(string) (string, string) { return "alice", "CONTOSO" }
 	userScopedIdentityHome = func(string) string { return `C:\Users\alice` }
 	for _, tc := range []struct {
 		exclude  string
@@ -241,6 +238,61 @@ func TestOwnStatusWindowsPipeEntrypointExcludesTheQualifiedSpelling(t *testing.T
 			}
 			if !tc.excluded && row["state"] != "protected" {
 				t.Fatalf("enrolled row = %#v, want protected", row)
+			}
+		})
+	}
+}
+
+// When the LSA does not give the name, or the domain, an exclude_users entry
+// is spelled in, the status cannot tell whether the enumerator removed the
+// hook for that entry: it claims no protection. Entries it can judge, and an
+// account with no entries, keep today's rows.
+func TestOwnStatusWindowsPipeUnresolvedAccountClaimsNoProtection(t *testing.T) {
+	const alice = "S-1-5-21-1004336348-1177238915-682003330-1001"
+	const other = "S-1-5-21-1004336348-1177238915-682003330-1002"
+	previousAccount, previousHome := ownStatusWindowsAccount, userScopedIdentityHome
+	t.Cleanup(func() { ownStatusWindowsAccount, userScopedIdentityHome = previousAccount, previousHome })
+	userScopedIdentityHome = func(string) string { return "" }
+	for _, tc := range []struct {
+		name, account, domain string
+		exclude               []string
+		want                  string
+	}{
+		{"qualified entry, domain missing", "alice", "", []string{`CONTOSO\alice`}, "not confirmed"},
+		{"name entry, nothing resolved", "", "", []string{"alice"}, "not confirmed"},
+		{"qualified entry, nothing resolved", "", "", []string{`CONTOSO\alice`}, "not confirmed"},
+		{"qualified entry, name qualified", `CONTOSO\alice`, "", []string{`CONTOSO\alice`}, "excluded"},
+		{"name entry, domain missing", "alice", "", []string{"alice"}, "excluded"},
+		{"other name entry, domain missing", "alice", "", []string{"bob"}, "protected"},
+		{"own SID entry, nothing resolved", "", "", []string{alice}, "excluded"},
+		{"other SID entry, nothing resolved", "", "", []string{other}, "protected"},
+		{"no entries, nothing resolved", "", "", nil, "protected"},
+		{"qualified entry, both resolved", "alice", "OTHER", []string{`CONTOSO\alice`}, "protected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ownStatusWindowsAccount = func(string) (string, string) { return tc.account, tc.domain }
+			api := ownStatusExcludedFixture(t, tc.exclude, nil)
+			var answer map[string]any
+			if err := json.Unmarshal(api.ownStatusForWindowsAccount(context.Background(), alice), &answer); err != nil {
+				t.Fatal(err)
+			}
+			connectors, _ := answer["connectors"].(map[string]any)
+			cowork, _ := answer["cowork"].(map[string]any)
+			legacy, _ := answer["claude_code"].(map[string]any)
+			for _, name := range []string{"claudecode", "copilot", "opencode"} {
+				row, _ := connectors[name].(map[string]any)
+				if tc.want == "protected" && name != "claudecode" {
+					continue
+				}
+				if row["state"] != tc.want {
+					t.Fatalf("%s row = %#v, want %s", name, row, tc.want)
+				}
+				if tc.want == "not confirmed" && row["reason_code"] != "account_unresolved" {
+					t.Fatalf("%s row = %#v, want reason_code account_unresolved", name, row)
+				}
+			}
+			if protected := tc.want == "protected"; legacy["protected"] != protected || (cowork["state"] == "protected") != protected {
+				t.Fatalf("claude_code = %#v, cowork = %#v, want protected %v", legacy, cowork, protected)
 			}
 		})
 	}

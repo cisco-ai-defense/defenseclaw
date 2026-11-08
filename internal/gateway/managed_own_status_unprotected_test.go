@@ -59,7 +59,7 @@ func ownStatusUnprotectedFixture(t *testing.T, agents []enterprisehooks.Unprotec
 
 func ownStatusConnectorRow(t *testing.T, api *APIServer, uid, name, connector string) map[string]any {
 	t.Helper()
-	roster, ok := api.ownStatusAnswer(context.Background(), "uid", uid, name)["connectors"].(map[string]any)
+	roster, ok := api.ownStatusAnswer(context.Background(), "uid", uid, name, "")["connectors"].(map[string]any)
 	if !ok {
 		t.Fatal("own status has no connector roster")
 	}
@@ -138,7 +138,7 @@ func TestOwnStatusEveryUnprotectedConnectorIsNotProtected(t *testing.T) {
 	if row := ownStatusConnectorRow(t, api, "5004", "Carol", "claudecode"); row["protected"] != true {
 		t.Fatalf("Carol (another account) Claude Code row = %#v, want protected", row)
 	}
-	answer := api.ownStatusAnswer(context.Background(), "uid", "5003", "carol")
+	answer := api.ownStatusAnswer(context.Background(), "uid", "5003", "carol", "")
 	if answer["claude_code"].(map[string]any)["protected"] != false {
 		t.Fatalf("carol claude_code = %#v, want not protected, as the roster says", answer["claude_code"])
 	}
@@ -164,7 +164,7 @@ func TestOwnStatusUnknownScanIsNotConfirmed(t *testing.T) {
 	if row["protected"] != false || ownRowText(row) != "not confirmed: "+ownCauseScanUnknown.text() {
 		t.Fatalf("OpenCode row = %#v, want not confirmed", row)
 	}
-	if answer := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice"); answer["claude_code"].(map[string]any)["protected"] != false {
+	if answer := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice", ""); answer["claude_code"].(map[string]any)["protected"] != false {
 		t.Fatalf("claude_code = %#v, want not protected while the scan is unknown", answer["claude_code"])
 	}
 }
@@ -202,14 +202,14 @@ func windowsOwnStatusRow(t *testing.T, api *APIServer, sid, connector string) (m
 
 func windowsOwnStatusAPI(t *testing.T, agents []enterprisehooks.UnprotectedAgent, readErr error) *APIServer {
 	t.Helper()
-	previous := ownStatusWindowsAccountName
-	ownStatusWindowsAccountName = func(sid string) string {
+	previous := ownStatusWindowsAccount
+	ownStatusWindowsAccount = func(sid string) (string, string) {
 		if sid == windowsAliceSID {
-			return `WIN11\alice`
+			return `WIN11\alice`, ""
 		}
-		return `WIN11\bob`
+		return `WIN11\bob`, ""
 	}
-	t.Cleanup(func() { ownStatusWindowsAccountName = previous })
+	t.Cleanup(func() { ownStatusWindowsAccount = previous })
 	failOwnStatusScan(t, agents, readErr)
 	enabled := true
 	cfg := &config.Config{}
@@ -304,7 +304,7 @@ func TestOwnStatusNameOnlyEntryOfAnUnnamedWindowsCallerIsNotProtected(t *testing
 	unnamed := func(t *testing.T, agents []enterprisehooks.UnprotectedAgent) *APIServer {
 		t.Helper()
 		api := windowsOwnStatusAPI(t, agents, nil)
-		ownStatusWindowsAccountName = func(string) string { return "" }
+		ownStatusWindowsAccount = func(string) (string, string) { return "", "" }
 		return api
 	}
 	// A name-only Claude Code entry, and one for an account that could not be
