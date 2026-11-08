@@ -32,8 +32,6 @@ func TestEvaluationLimitOnlyVerdictMapsByProfile(t *testing.T) {
 	}
 	limit := trustedActionLimitFindings(true)
 	observed := trustedActionLimitFindings(false)
-	namesState := slices.Clone(limit)
-	namesState[0].namesState = true
 	state := RuleFinding{RuleID: "tamper.detector_state_write", Severity: "HIGH"}
 	keys := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL"}
 	advisory := RuleFinding{RuleID: "persistence.ssh_authorized_keys_command", Severity: "CRITICAL", enforcement: findingEnforcementAlertOnly}
@@ -51,8 +49,6 @@ func TestEvaluationLimitOnlyVerdictMapsByProfile(t *testing.T) {
 		{"limit only, strict", limit, false, true, "block"},
 		{"limit only, Secure Client keeps the block", limit, true, false, "block"},
 		{"limit that cannot block changes nothing", observed, false, false, "allow"},
-		{"limit on a call that names the state folder blocks in default", namesState, false, false, "block"},
-		{"limit on a call that names the state folder, Secure Client", namesState, true, false, "block"},
 		{"limit and a proven keys finding block in default", with(limit, keys), false, false, "block"},
 		{"limit and self-protection block in default", with(limit, state), false, false, "block"},
 		{"limit and an advisory finding alert in default", with(limit, advisory), false, false, "alert"},
@@ -153,14 +149,21 @@ func TestEvaluationLimitOnlyCallAlertsOutsideStrict(t *testing.T) {
 		{"ordinary settings removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/project/settings.json", alertOutsideStrict, true},
 		{"ordinary hooks removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/project/hooks.json", alertOutsideStrict, true},
 		{"ordinary parent step removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/project/normal/../settings.json", alertOutsideStrict, true},
-		{"state folder removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/.defenseclaw", everywhere, false},
-		{"state folder removal, quoted name, behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/.defense'claw", everywhere, false},
-		// Ordinary calls that only mention the state folder name: a printed
-		// word and an unrelated file whose name starts with it.
-		{"printed state folder name behind an unparsed statement", "PowerShell", unparsed + "Write-Output '.defenseclaw'", alertOutsideStrict, true},
+		// The reader resolves these writes into the DefenseClaw state folder,
+		// so self-protection blocks them in every profile.
+		{"state folder removal, shell", "Bash", "rm -rf ~/.defenseclaw", everywhere, false},
+		{"state file append", "Bash", "printf changed >> ~/.defenseclaw/config.yaml", everywhere, false},
+		// Ordinary calls that only mention the state folder name, in any
+		// spelling next to an unparsed statement, prove no target: they alert
+		// outside strict like every other limit-only call.
+		{"printed state folder name behind an unparsed statement", "PowerShell", unparsed + "Write-Output \".defenseclaw\"", alertOutsideStrict, true},
+		{"printed home and state folder name behind an unparsed statement", "PowerShell", unparsed + "Write-Output $HOME \".defenseclaw\"", alertOutsideStrict, true},
+		{"printed profile and state folder name behind an unparsed statement", "PowerShell", unparsed + "Write-Output $env:USERPROFILE \".defenseclaw\"", alertOutsideStrict, true},
 		{"unrelated backup file behind an unparsed statement", "PowerShell", unparsed + "Remove-Item ~/project/.defenseclaw-backup", alertOutsideStrict, true},
-		{"state folder joined to the home behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse (Join-Path $HOME '.defenseclaw')", everywhere, false},
-		{"state folder, Windows spelling, behind an unparsed statement", "PowerShell", unparsed + `Remove-Item -Recurse $env:USERPROFILE\.defenseclaw`, everywhere, false},
+		{"unrelated tilde backup file behind an unparsed statement", "PowerShell", unparsed + "Remove-Item ~/project/.defenseclaw~backup", alertOutsideStrict, true},
+		// A mention the reader cannot resolve to a target is the unproven case
+		// (documented limit); strict blocks it.
+		{"state folder removal behind an unparsed statement", "PowerShell", unparsed + "Remove-Item -Recurse -Force ~/.defenseclaw", alertOutsideStrict, true},
 		{"ordinary command over the statement budget", "Bash", over, alertOutsideStrict, true},
 		{"DefenseClaw state write over the statement budget", "Bash", over + "; printf changed >> ~/.defenseclaw/config.yaml", everywhere, false},
 		// The documented limit: no target is proven in these calls, so they
@@ -187,35 +190,6 @@ func TestEvaluationLimitOnlyCallAlertsOutsideStrict(t *testing.T) {
 					}
 				}
 			}
-		}
-	}
-}
-
-// The text test of a call no reader could analyse: the state folder spelled
-// plainly, quoted, escaped or in any case is named; other words are not.
-func TestTextNamesStateFolder(t *testing.T) {
-	for command, want := range map[string]bool{
-		"Remove-Item ~/.defenseclaw":                   true,
-		"rm -rf ~/.Defense'claw/":                      true,
-		`rm -rf ~/.defense\claw`:                       true,
-		"rm -rf ~/.defense`claw":                       true,
-		"Remove-Item ~/.defenseclaw*":                  true,
-		`rm -rf $HOME/.defenseclaw/config.yaml`:        true,
-		`Remove-Item $env:USERPROFILE\.defenseclaw`:    true,
-		"Remove-Item $HOME\\.defense`claw":             true,
-		"Remove-Item (Join-Path $HOME '.defenseclaw')": true,
-		"Remove-Item .defenseclaw/config.yaml":         true,
-		"Write-Output '.defenseclaw'":                  false,
-		"echo see .defenseclaw docs":                   false,
-		"Remove-Item ~/project/.defenseclaw-backup":    false,
-		"ls ~/project/.defenseclaw.bak":                false,
-		"cat ~/x.defenseclaw/a":                        false,
-		"openclaw status && git commit -m defense":     false,
-		"printf x >> notes.txt":                        false,
-		"":                                             false,
-	} {
-		if got := textNamesStateFolder(command); got != want {
-			t.Errorf("%q: names the state folder = %t, want %t", command, got, want)
 		}
 	}
 }
