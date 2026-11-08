@@ -84,11 +84,14 @@ from defenseclaw.connector_contracts import (
     stable_agent_version,
 )
 from defenseclaw.connector_paths import (
+    KNOWN_CONNECTORS,
     amp_config_home,
     amp_managed_settings_path,
+    claude_config_dir,
     codex_home,
     connector_config_files,
     connector_home,
+    connector_hook_config_paths,
     connector_policy_settings,
     copilot_home,
     copilot_settings_resolution,
@@ -1842,6 +1845,35 @@ def _root_owned_file(path: str) -> bool:
     return stat.S_ISREG(info.st_mode) and info.st_uid == 0 and os.geteuid() != 0
 
 
+def _root_owned_agent_config_files() -> list[str]:
+    """Agent config files inside the account home that root owns while doctor does not run as root.
+
+    A gateway run as root for an account wrote them before the writers kept the
+    account as the owner (GAP-0848): the account cannot read or replace them,
+    and its own start fails on them. A file outside the home (a machine-wide
+    config) is root-owned by design and is not listed. Go lists the same files
+    in ``connector.RootOwnedAgentConfigFiles``; it reads with ``lstat`` only.
+    """
+    if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0:
+        return []
+    home = os.path.abspath(str(Path.home()))
+    candidates = [os.path.join(claude_config_dir(), "settings.json"), os.path.join(codex_home(), "config.toml")]
+    for name in KNOWN_CONNECTORS:
+        candidates.extend(connector_hook_config_paths(name))
+    found: set[str] = set()
+    for path in candidates:
+        path = os.path.normpath(path)
+        if not os.path.isabs(path) or path == home or os.path.commonpath([home, path]) != home:
+            continue
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and info.st_uid == 0:
+            found.add(path)
+    return sorted(found)
+
+
 def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
     """Name root-owned ~/.defenseclaw leftovers from a sudo-started gateway."""
 
@@ -1861,22 +1893,24 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
         if _doctor_managed(cfg)
         else [name for name in ("config.yaml", "gateway.log") if _root_owned_file(os.path.join(data_dir, name))]
     )
+    agent_configs = [] if _doctor_managed(cfg) else _root_owned_agent_config_files()
     if chown:
         user = getpass.getuser()
         _emit(
             "fail",
             "Sudo leftovers",
-            "root-owned from a sudo defenseclaw run: " + ", ".join(chown + leftovers),
+            "root-owned from a sudo defenseclaw run: " + ", ".join(chown + leftovers + agent_configs),
             r=r,
             check_id="doctor.state.sudo-leftovers",
             reason_code="sudo-runtime-leftovers",
             remediation="give them back to this account: sudo chown "
             + user
             + " "
-            + " ".join(os.path.join(data_dir, name) for name in chown)
+            + " ".join([os.path.join(data_dir, name) for name in chown] + [shlex.quote(item) for item in agent_configs])
             + (", then rerun `defenseclaw doctor`" if not leftovers else ", then rerun doctor for the rest"),
         )
         return
+    leftovers = leftovers + agent_configs
     if not leftovers:
         _emit(
             "pass",
@@ -2008,8 +2042,12 @@ def _root_gateway_return_and_start_command(cfg, loosen: tuple[str, ...] = ()) ->
     if store and store not in homes:
         homes.append(store)
     owned = " ".join(shlex.quote(item) for item in homes)
+    # The agent config files a root run wrote in the account home (GAP-0848):
+    # the owner return above does not reach them. Go renders the same step.
+    configs = " ".join(shlex.quote(item) for item in _root_owned_agent_config_files())
     return (
         f'sudo chown -R "$(id -un)" {owned} && chmod -R u+rwX {owned}'
+        + (f' && sudo chown "$(id -un)" {configs} && chmod u+rw {configs}' if configs else "")
         + "".join(" && " + step for step in _root_gateway_loosen_steps(loosen))
         + " && defenseclaw-gateway start"
     )

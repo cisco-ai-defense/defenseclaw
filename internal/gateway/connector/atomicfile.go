@@ -90,7 +90,7 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 	noteManagedSetupWrite(path, data)
 
 	dir := filepath.Dir(writePath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := atomicMkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", writePath, err)
 	}
 	// Avoid replacing an already-correct config. This is especially important
@@ -104,6 +104,11 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 	tmp, tmpPath, err := atomicFileCreateTemp(dir, perm)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
+	}
+	if err := atomicStageKeepOwner(tmpPath, writePath); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("keep owner of temp file: %w", err)
 	}
 	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
 		// atomicFileCreateTemp creates private Windows files with their final

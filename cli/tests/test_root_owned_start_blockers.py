@@ -174,3 +174,66 @@ def test_chain_without_named_files_restores_owner_access_on_what_it_returns(monk
     assert cmd_doctor._root_gateway_return_and_start_command(None).endswith(
         f"{quoted} && chmod -R u+rwX {quoted} && defenseclaw-gateway start"
     )
+
+
+# GAP-0848: a root-run gateway wrote the agent config files in the account home
+# as root. The Sudo leftovers row and the printed chain return them too.
+
+
+def _agent_home(tmp_path, monkeypatch):
+    home = tmp_path / "account home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", os.fspath(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("DEFENSECLAW_HOME", os.fspath(home / ".defenseclaw"))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    (home / ".defenseclaw").mkdir()
+    return home, {
+        "claude": _write(home, ".claude/settings.json", 0o600),
+        "codex": _write(home, ".codex/config.toml", 0o600),
+        "copilot": _write(home, ".copilot/hooks/defenseclaw.json", 0o600),
+        "cursor": _write(home, ".cursor/hooks.json", 0o600),
+    }
+
+
+def test_the_chain_and_the_row_return_agent_config_files_root_wrote(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from defenseclaw import gateway as gateway_module
+    from defenseclaw.commands import cmd_doctor
+
+    home, files = _agent_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: "")
+    cfg = SimpleNamespace(data_dir=os.fspath(home / ".defenseclaw"), deployment_mode="")
+    owned = [files["claude"], files["codex"], files["copilot"]]
+    _owned_by_root(monkeypatch, *owned)
+
+    assert cmd_doctor._root_owned_agent_config_files() == sorted(os.fspath(p) for p in owned)
+    chain = cmd_doctor._root_leftovers_remedy(cfg)
+    quoted = " ".join(shlex.quote(os.fspath(p)) for p in sorted(owned))
+    assert f' && sudo chown "$(id -un)" {quoted} && chmod u+rw {quoted} && defenseclaw-gateway start' in chain
+    assert os.fspath(files["cursor"]) not in chain  # the account still owns it
+
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_sudo_runtime_leftovers(cfg, result)
+    check = result.checks[-1]
+    assert check["status"] == "fail"
+    assert all(os.fspath(p) in check["detail"] for p in owned)
+
+
+def test_an_account_owned_home_keeps_the_chain_and_the_row_as_they_were(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from defenseclaw import gateway as gateway_module
+    from defenseclaw.commands import cmd_doctor
+
+    home, _files = _agent_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: "")
+    cfg = SimpleNamespace(data_dir=os.fspath(home / ".defenseclaw"), deployment_mode="")
+
+    assert cmd_doctor._root_owned_agent_config_files() == []
+    assert "chmod u+rw" not in cmd_doctor._root_leftovers_remedy(cfg)
+    result = cmd_doctor._DoctorResult(quiet=True)
+    cmd_doctor._check_sudo_runtime_leftovers(cfg, result)
+    assert result.checks[-1]["status"] == "pass"
