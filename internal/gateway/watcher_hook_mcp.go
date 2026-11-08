@@ -7,6 +7,7 @@ package gateway
 import (
 	"context"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -22,9 +23,13 @@ import (
 // and the hooks allowed the server calls unscanned (GAP-2591). The hook runs
 // as the user and sends, with each MCP tool call, the definition it read in
 // the user files (assetfacts); the watcher admits the URL servers it learns
-// that way. A local (stdio) server would start under the gateway service
-// account, and nothing on these platforms starts it as its user, so it keeps
-// the asset_policy lists the hooks apply.
+// that way, and the local (stdio) servers whose launcher the scanner refuses
+// from the definition alone (a python3 or node server, a command path), so
+// the refusal is recorded and the fail-closed tier blocks them like a
+// refused URL server (GAP-0925). A local server with a launcher the scanner
+// would start (npx, uvx) would start under the gateway service account, and
+// nothing on these platforms starts it as its user, so it keeps the
+// asset_policy lists the hooks apply.
 func watcherUsesHookReportedMCP(cfg *config.Config) bool {
 	return runtime.GOOS != "windows" && cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()
 }
@@ -79,7 +84,8 @@ func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
 		h.perHome = map[string]int{}
 	}
 	if old, ok := h.servers[key]; ok {
-		if old.URL == entry.URL && old.Transport == entry.Transport {
+		if old.URL == entry.URL && old.Transport == entry.Transport && old.Command == entry.Command &&
+			slices.Equal(old.Args, entry.Args) {
 			return false
 		}
 	} else if len(h.servers) >= hookReportedMCPLimit || h.perHome[entry.Home] >= hookReportedMCPPerHomeLimit {
@@ -92,9 +98,10 @@ func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
 }
 
 // noteHookReportedMCPServer records, on a managed Linux or macOS gateway,
-// the URL server an MCP tool call about to run reaches, as the hook of the
+// the server an MCP tool call about to run reaches, as the hook of the
 // calling account defined it, so the pending check that follows refuses the
-// call until the watcher has admitted the server (GAP-2591).
+// call until the watcher has admitted the server (GAP-2591): a URL server,
+// or a local one whose launcher the scanner refuses (GAP-0925).
 func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) {
 	if a == nil || a.hookMCP == nil || !probe.Matched || probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return
@@ -108,11 +115,19 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		return
 	}
 	entry, ok := a.lookupCallerMCPServer(ctx, cfg, connectorName, probe.WorkspaceDir, probe.ServerName)
-	if !ok || strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.URL) == "" {
+	if !ok || strings.TrimSpace(entry.Name) == "" {
 		return
 	}
-	a.hookMCP.note(config.MCPServerEntry{
+	reported := config.MCPServerEntry{
 		Name: strings.TrimSpace(entry.Name), URL: strings.TrimSpace(entry.URL), Transport: entry.Transport,
 		Connector: connectorName, Home: home,
-	})
+	}
+	if reported.URL == "" {
+		if !watcher.MCPLauncherRefused(entry) {
+			return
+		}
+		reported.Command = strings.TrimSpace(entry.Command)
+		reported.Args = slices.Clone(entry.Args)
+	}
+	a.hookMCP.note(reported)
 }
