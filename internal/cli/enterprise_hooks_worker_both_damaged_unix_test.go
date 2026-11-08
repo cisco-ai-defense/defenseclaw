@@ -190,3 +190,32 @@ func TestWorkerRechecksARepairedTargetAndKeepsBothRestores(t *testing.T) {
 		t.Fatalf("twin answer = %+v, want the script alone restored", got)
 	}
 }
+
+// An element file too large to read before the repair has no known change: the
+// report names the element and no kind, and the unreadable body is not taken
+// for an empty one (which would call an append a deletion). The twin reads a
+// small file of the same element and names the append.
+func TestWorkerNamesNoChangeForAnElementFileTooLargeToRead(t *testing.T) {
+	scriptElement := "hook runtime file hermes-hook.sh"
+	for _, tc := range []struct {
+		name       string
+		extra      int
+		wantChange string
+	}{
+		{"append over the read bound", hookElementBodyMaxBytes + 1, ""},
+		{"append within the read bound", 1, enterprisehooks.HookChangeAppended},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newBothDamagedFixture(t)
+			grown := append(slices.Clone(f.installedScript), strings.Repeat("#", tc.extra)...)
+			if err := os.WriteFile(f.script, grown, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			got := f.apply(t, 0)
+			if !got.OK || !slices.Equal(got.RestoredElements, []string{scriptElement}) || !slices.Equal(got.RestoredChanges, []string{tc.wantChange}) {
+				t.Fatalf("answer = %+v, want a healthy target with the script restored (%q)", got, tc.wantChange)
+			}
+			f.requireIntact(t, "after the repair")
+		})
+	}
+}

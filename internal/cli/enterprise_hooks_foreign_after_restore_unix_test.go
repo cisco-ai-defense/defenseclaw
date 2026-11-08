@@ -17,11 +17,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// GAP-0754: a hook entry swapped for another command is put back beside it, and
-// the foreign-hook cleanup that removes the other command ran once every five
-// minutes, so the config stayed changed for minutes after the restore. A pass
-// that restored an element makes the cleanup due at once, once.
-func TestForeignCleanupRunsInThePassThatRestoredAnElement(t *testing.T) {
+// useForeignCleanupFixture sets up a standalone host with one eligible account
+// and a worker that counts the cleanups it completes (a canceled one removes
+// nothing and counts nothing). It returns the function that runs one cleanup
+// pass at a time on a context, and the number of cleanups it completed.
+func useForeignCleanupFixture(t *testing.T) func(ctx context.Context, at time.Time) int32 {
+	t.Helper()
 	dataDir := useUserCleanupStateDir(t)
 	previousCfg, previousManifest := cfg, enterpriseHookManifest
 	previousLoad, previousCheck, previousRunner := enterpriseHookLoadEligibleAccounts, enterpriseHookCheckHome, enterpriseHookWorkerRunner
@@ -52,7 +53,10 @@ func TestForeignCleanupRunsInThePassThatRestoredAnElement(t *testing.T) {
 		return enterprisehooks.HomeCheck{State: enterprisehooks.HomeAvailable, Inode: 7}
 	}
 	var runs atomic.Int32
-	enterpriseHookWorkerRunner = func(_ context.Context, _ enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+	enterpriseHookWorkerRunner = func(ctx context.Context, _ enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		if ctx.Err() != nil {
+			return enterpriseHookWorkerResponse{}, ctx.Err() // a canceled worker removes nothing
+		}
 		runs.Add(1)
 		var targets []enterpriseHookWorkerTargetResult
 		for _, target := range request.Targets {
@@ -60,26 +64,68 @@ func TestForeignCleanupRunsInThePassThatRestoredAnElement(t *testing.T) {
 		}
 		return enterpriseHookWorkerResponse{Targets: targets}, nil
 	}
-	clean := func(at time.Time) int32 {
+	return func(ctx context.Context, at time.Time) int32 {
 		before := runs.Load()
-		runEnterpriseHookStandaloneForeignCleanup(context.Background(), &bytes.Buffer{}, at, enterprisehooks.Manifest{},
+		runEnterpriseHookStandaloneForeignCleanup(ctx, &bytes.Buffer{}, at, enterprisehooks.Manifest{},
 			map[string]map[string]bool{"alice": {"codex": true}}, "")
 		return runs.Load() - before
 	}
+}
+
+// GAP-0754: a pass canceled before its cleanup could run did not do it, though
+// the scheduler used the request up. Whatever made that pass due (the restore
+// request, or the first pass of the process), the next pass runs the cleanup.
+func TestForeignCleanupStaysDueAfterACanceledPass(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
 	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
-	if got := clean(now); got != 1 {
+	for _, tc := range []struct {
+		name  string
+		setup func(clean func(context.Context, time.Time) int32)
+	}{
+		{"a restore requested it", func(clean func(context.Context, time.Time) int32) {
+			clean(context.Background(), now)
+			requestEnterpriseHookForeignCleanupNow()
+		}},
+		{"the first pass of the process", func(func(context.Context, time.Time) int32) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clean := useForeignCleanupFixture(t)
+			tc.setup(clean)
+			if got := clean(canceled, now.Add(time.Second)); got != 0 {
+				t.Fatalf("a canceled pass completed %d cleanups, want none", got)
+			}
+			if got := clean(context.Background(), now.Add(2*time.Second)); got != 1 {
+				t.Fatalf("the next pass completed %d cleanups, want one", got)
+			}
+			// The twin: once done, a quiet pass inside the interval does nothing.
+			if got := clean(context.Background(), now.Add(3*time.Second)); got != 0 {
+				t.Fatalf("a quiet pass completed %d cleanups, want none", got)
+			}
+		})
+	}
+}
+
+// GAP-0754: a hook entry swapped for another command is put back beside it, and
+// the foreign-hook cleanup that removes the other command ran once every five
+// minutes, so the config stayed changed for minutes after the restore. A pass
+// that restored an element makes the cleanup due at once, once.
+func TestForeignCleanupRunsInThePassThatRestoredAnElement(t *testing.T) {
+	clean := useForeignCleanupFixture(t)
+	now := time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC)
+	if got := clean(context.Background(), now); got != 1 {
 		t.Fatalf("first cleanup spawned %d workers, want one", got)
 	}
 	// The twin: nothing restored, so a pass a second later does no cleanup.
-	if got := clean(now.Add(time.Second)); got != 0 {
+	if got := clean(context.Background(), now.Add(time.Second)); got != 0 {
 		t.Fatalf("a pass within the interval spawned %d workers, want none", got)
 	}
 	requestEnterpriseHookForeignCleanupNow()
-	if got := clean(now.Add(2 * time.Second)); got != 1 {
+	if got := clean(context.Background(), now.Add(2*time.Second)); got != 1 {
 		t.Fatalf("the pass after a restore spawned %d workers, want one", got)
 	}
 	// The request is used up by that cleanup.
-	if got := clean(now.Add(3 * time.Second)); got != 0 {
+	if got := clean(context.Background(), now.Add(3*time.Second)); got != 0 {
 		t.Fatalf("the next pass spawned %d workers, want none", got)
 	}
 }
