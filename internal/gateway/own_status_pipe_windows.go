@@ -22,6 +22,13 @@ func init() {
 		}
 		return account.Name
 	}
+	ownStatusWindowsAccountDomain = func(sid string) string {
+		account, err := lsaAccountBySID(sid)
+		if err != nil {
+			return ""
+		}
+		return account.Domain
+	}
 }
 
 // serveOwnStatusPipe answers a standard account's own `defenseclaw status`

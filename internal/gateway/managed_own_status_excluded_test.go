@@ -201,3 +201,47 @@ func TestOwnStatusWindowsExclusionFollowsTheEnumeratorSpellings(t *testing.T) {
 		})
 	}
 }
+
+// The Windows pipe names the caller by the bare account name, so the
+// DOMAIN\account spelling the enumerator matches comes from the domain the
+// LSA names for the SID: the pipe entrypoint excludes exactly the accounts the
+// enumerator removed, and leaves the others enrolled.
+func TestOwnStatusWindowsPipeEntrypointExcludesTheQualifiedSpelling(t *testing.T) {
+	const alice = "S-1-5-21-1004336348-1177238915-682003330-1001"
+	previousName, previousDomain, previousHome := ownStatusWindowsAccountName, ownStatusWindowsAccountDomain, userScopedIdentityHome
+	t.Cleanup(func() {
+		ownStatusWindowsAccountName, ownStatusWindowsAccountDomain, userScopedIdentityHome = previousName, previousDomain, previousHome
+	})
+	ownStatusWindowsAccountName = func(string) string { return "alice" }
+	ownStatusWindowsAccountDomain = func(string) string { return "CONTOSO" }
+	userScopedIdentityHome = func(string) string { return `C:\Users\alice` }
+	for _, tc := range []struct {
+		exclude  string
+		excluded bool
+	}{
+		{`CONTOSO\alice`, true},
+		{`contoso\ALICE`, true},
+		{"alice", true},
+		{`OTHER\alice`, false},
+		{`CONTOSO\bob`, false},
+	} {
+		t.Run(tc.exclude, func(t *testing.T) {
+			api := ownStatusExcludedFixture(t, []string{tc.exclude}, nil)
+			var answer map[string]any
+			if err := json.Unmarshal(api.ownStatusForWindowsAccount(context.Background(), alice), &answer); err != nil {
+				t.Fatal(err)
+			}
+			connectors, _ := answer["connectors"].(map[string]any)
+			row, _ := connectors["claudecode"].(map[string]any)
+			if got := row["state"] == "excluded"; got != tc.excluded {
+				t.Fatalf("exclude_users [%s]: claudecode row = %#v, excluded = %v, want %v", tc.exclude, row, got, tc.excluded)
+			}
+			if legacy, _ := answer["claude_code"].(map[string]any); tc.excluded && legacy["protected"] != false {
+				t.Fatalf("excluded account legacy claude_code = %#v, want protected false", legacy)
+			}
+			if !tc.excluded && row["state"] != "protected" {
+				t.Fatalf("enrolled row = %#v, want protected", row)
+			}
+		})
+	}
+}
