@@ -1086,3 +1086,60 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 		})
 	}
 }
+
+// Secure Client, deferred Codex error. A Codex registry that cannot be read is
+// deferred so an independent Cursor step still runs: when Cursor passes, the
+// pass returns the deferred Codex error after it; when Cursor fails, the Cursor
+// error wins. Nothing is typed, as before.
+func TestWindowsGuardianPrePassSecureClientReturnsTheDeferredCodexErrorAfterCursor(t *testing.T) {
+	codexErr := errors.New("read the Codex registry: access is denied")
+	cursorErr := errors.New("read the Cursor policy: access is denied")
+	for _, tc := range []struct {
+		name       string
+		cursorFail bool
+		want       error
+		notWant    error
+	}{
+		{name: "Cursor passes: the deferred Codex error is returned after it", want: codexErr},
+		{name: "Cursor fails: the Cursor error wins", cursorFail: true, want: cursorErr, notWant: codexErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousCfg := cfg
+			previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+			previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+			previousLink := enterpriseHookVendorFolderLink
+			t.Cleanup(func() {
+				cfg = previousCfg
+				enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+				enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+				enterpriseHookVendorFolderLink = previousLink
+			})
+			cfg = &config.Config{
+				DeploymentMode: managed.DeploymentModeManagedEnterprise,
+				Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileSecureClient},
+			}
+			enterpriseHookVendorFolderLink = func(string) string { return `C:\ProgramData\Cursor` }
+			enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+				return connector.WindowsCodexMachineRequirementsOptions{HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`}, nil
+			}
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, false, nil }
+			enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+			enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return connector.WindowsCodexManagedRuntimeRegistry{}, codexErr
+			}
+			enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				if tc.cursorFail {
+					return nil, false, cursorErr
+				}
+				return nil, false, nil
+			}
+			enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+			err := syncEnterpriseHookManagedMachineEnrollments(enterprisehooks.Manifest{}, "127.0.0.1:32109", true)
+			if !errors.Is(err, tc.want) || (tc.notWant != nil && errors.Is(err, tc.notWant)) || enterpriseHookLinkFailures(err) != nil {
+				t.Fatalf("Secure Client returned %v, want %v (not typed)", err, tc.want)
+			}
+		})
+	}
+}
