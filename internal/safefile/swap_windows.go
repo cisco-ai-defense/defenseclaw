@@ -292,11 +292,7 @@ func holdMatchedFileForReplace(
 // names the file at destination.
 func replaceHeldFile(source, destination string, held *os.File, beforeRename func()) error {
 	deadline := time.Now().Add(swapLockTimeout)
-	programImage, err := swapSourceIsProgramImage(source)
-	if err != nil {
-		return err
-	}
-	useTransaction := !programImage
+	useTransaction := !swapRequiresPlainRename(source)
 	for {
 		target, err := openFileForReplace(destination, useTransaction)
 		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
