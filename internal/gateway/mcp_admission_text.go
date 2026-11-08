@@ -22,6 +22,8 @@ func mcpScanIssueClause(issue string) string {
 	switch issue {
 	case watcher.MCPScanIssueLauncher:
 		return "its launcher is not npx or uvx"
+	case watcher.MCPScanIssueArguments:
+		return "its npx or uvx arguments run code or name no package"
 	case watcher.MCPScanIssueAddress:
 		return "its URL is a loopback, private or link-local address"
 	}
@@ -47,6 +49,8 @@ func mcpAdmissionNextStep(name, issue, step string) string {
 	switch issue {
 	case watcher.MCPScanIssueLauncher:
 		alternative = "start it with npx or uvx, or serve it from a public URL"
+	case watcher.MCPScanIssueArguments:
+		alternative = "start it with npx or uvx and a package name, or serve it from a public URL"
 	case watcher.MCPScanIssueAddress:
 		alternative = "serve it from a public URL"
 	}

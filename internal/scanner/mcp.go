@@ -539,11 +539,18 @@ func mcpScannerMessage(text string) string {
 	return text
 }
 
+// mcpForbiddenStdioFlags are the arguments that turn an allowlisted launcher
+// into a code-running one (cli/defenseclaw/scanner/mcp.py
+// _FORBIDDEN_STDIO_FLAGS).
+var mcpForbiddenStdioFlags = map[string]bool{
+	"-c": true, "--command": true, "--eval": true, "-e": true, "--exec": true, "--script": true, "-x": true,
+}
+
 // MCPLocalLauncherRefusal is the scanner's refusal of a local server's
-// launcher from the command alone, in the words of the Python scanner
+// command alone, in the words of the Python scanner
 // (cli/defenseclaw/scanner/mcp.py _stdio_scan_command_error): a command path,
 // or any launcher but the bare npx or uvx. "" when the launcher is one a scan
-// starts. A scan never starts anything else, so the verdict needs no process.
+// starts.
 func MCPLocalLauncherRefusal(command string) string {
 	command = strings.TrimSpace(command)
 	switch base := strings.ToLower(command); {
@@ -557,6 +564,42 @@ func MCPLocalLauncherRefusal(command string) string {
 			"a scan starts only npm or PyPI packages through npx or uvx, never another program", command)
 	}
 	return ""
+}
+
+// MCPLocalArgumentsRefusal is the scanner's refusal of the arguments of an
+// allowlisted launcher (same source): an execution flag, or no package
+// argument. "" for a launcher MCPLocalLauncherRefusal refuses, which it
+// words, and for arguments a scan starts.
+func MCPLocalArgumentsRefusal(command string, args []string) string {
+	command = strings.TrimSpace(command)
+	if command == "" || MCPLocalLauncherRefusal(command) != "" {
+		return ""
+	}
+	hasPackage := false
+	for _, arg := range args {
+		token := strings.TrimSpace(arg)
+		flag, _, _ := strings.Cut(token, "=")
+		if flag = strings.ToLower(flag); mcpForbiddenStdioFlags[flag] {
+			return fmt.Sprintf("launcher %q uses forbidden execution flag %q", command, flag)
+		}
+		if token != "" && !strings.HasPrefix(token, "-") {
+			hasPackage = true
+		}
+	}
+	if !hasPackage {
+		return fmt.Sprintf("launcher %q requires a package/server argument", command)
+	}
+	return ""
+}
+
+// MCPLocalRefusal is the scanner's refusal of a local server from its command
+// and arguments alone, "" when a scan starts the server. A scan never starts
+// anything else, so the verdict needs no process.
+func MCPLocalRefusal(command string, args []string) string {
+	if reason := MCPLocalLauncherRefusal(command); reason != "" {
+		return reason
+	}
+	return MCPLocalArgumentsRefusal(command, args)
 }
 
 // MCPRefusedLauncher reports a failed MCP scan whose scanner refused the
@@ -603,10 +646,10 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 	if entry := s.ServerEntry; entry != nil && entry.Home != "" && entry.RunAsSID == "" && entry.URL == "" {
 		// A local server of an enrolled account that a gateway lists without
 		// a way to start it as its user (managed Linux and macOS, GAP-0925):
-		// the launcher is refused from the definition, and nothing starts,
+		// the definition is refused as it stands, and nothing starts,
 		// where the name lookup of the scanner CLI would read the service
 		// account's files, not the user's.
-		if reason := MCPLocalLauncherRefusal(entry.Command); reason != "" {
+		if reason := MCPLocalRefusal(entry.Command, entry.Args); reason != "" {
 			return nil, refusedMCPScan(fmt.Errorf("scan failed: refusing to scan local MCP server %q: %s", entry.Name, reason))
 		}
 	}
