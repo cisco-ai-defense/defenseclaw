@@ -172,6 +172,13 @@ switch ($Case) {
     'writer-stopped' { Set-Counter 3; $script:CodexStateSettleSeconds = 2 }
     'writer-stopped-after-copy' { Set-Counter 3; $script:CodexStateSettleSeconds = 2; Set-Content -LiteralPath "$state.4" -Value x -NoNewline }
     'no-lock' { Set-Content -LiteralPath $state -Value x -NoNewline }
+    # The counter is even each time it is read but never the same twice, as a
+    # writer that keeps starting and ending transactions (review S3).
+    'still-changing' {
+        $script:CodexStateSettleSeconds = 2
+        $script:tick = 0
+        function Get-DefenseClawCodexManagedHooksWriterCounter { param($Path) $script:tick += 2; [int64]$script:tick }
+    }
 }
 $threw = ''
 $resolved = ''
@@ -263,6 +270,15 @@ def test_a_writer_that_stopped_after_its_copy_left_the_state_the_hook_reads(tmp_
     assert 2 <= result["seconds"] < 10, result
 
 
+def test_a_counter_that_keeps_moving_is_refused_by_name_at_the_bound(tmp_path: Path) -> None:
+    # Review S3: even each time it is read, never the same before and after.
+    result = _run(tmp_path, "still-changing")
+    assert result["threw"].startswith("codex_state_unsettled: "), result
+    assert "(still changing) for 2 seconds" in result["threw"], result
+    assert result["judged"] == [], result
+    assert 2 <= result["seconds"] < 10, result
+
+
 def test_the_refusal_names_the_rollback_and_the_next_step(tmp_path: Path) -> None:
     result = _run(tmp_path, "writer-stopped")
     assert "nothing was changed" not in result["threw"], result
@@ -290,6 +306,17 @@ def test_a_soft_caller_falls_back_to_the_plain_resolver_for_a_writer_that_never_
     result = _run(tmp_path, "writer-stopped", call="soft")
     assert result["threw"] == "", result
     assert result["resolved"] == ".defenseclaw-managed-hooks.state.4", result
+    assert 2 <= result["seconds"] < 10, result
+
+
+@pytest.mark.parametrize("call", ["strict", "soft"])
+def test_a_caller_on_a_counter_that_keeps_moving_is_refused_or_falls_back(tmp_path: Path, call: str) -> None:
+    result = _run(tmp_path, "still-changing", call=call)
+    if call == "strict":
+        assert result["threw"].startswith("codex_state_unsettled: "), result
+    else:
+        assert result["threw"] == "", result
+        assert result["resolved"].startswith(".defenseclaw-managed-hooks.state"), result
     assert 2 <= result["seconds"] < 10, result
 
 
