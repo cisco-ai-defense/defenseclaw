@@ -11,11 +11,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// followMountPoints is the final path of the file or folder at path, which
+// evalLinks is the final path of the file or folder at path, which
 // the system reaches through every junction and symbolic link on the way. A
 // share that has not answered is asked first, as for any read of a path a
 // hook call names.
-func followMountPoints(path string) (string, error) {
+func evalLinks(path string) (string, error) {
 	file, err := pathOpen(path)
 	if err != nil {
 		return "", err
