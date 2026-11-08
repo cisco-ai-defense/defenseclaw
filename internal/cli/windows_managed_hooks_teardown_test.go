@@ -1835,3 +1835,101 @@ func TestWindowsManagedHooksKeptLinkIsNamedOnce(t *testing.T) {
 		t.Fatalf("kept links = %q, want %q", got, want)
 	}
 }
+
+// rel-1-0-9 g758b review S1. After the uninstall committed, the clean check
+// reads each per-user connector enrollment, and a rollback puts the enrollment
+// back. Both go through the machine folder of the connector, and the read
+// follows a link on that folder: an enrollment.json behind an administrator
+// link made the purge exit 1603. The stand-in reader fails the way that read
+// does when the decoy file is behind the link.
+func stubPerUserEnrollmentIO(t *testing.T, decoyBehind ...string) (reads, restores *[]string) {
+	t.Helper()
+	previousReader, previousRestorer := windowsManagedHooksPerUserEnrollmentReader, windowsManagedHooksPerUserEnrollmentRestorer
+	t.Cleanup(func() {
+		windowsManagedHooksPerUserEnrollmentReader, windowsManagedHooksPerUserEnrollmentRestorer = previousReader, previousRestorer
+	})
+	reads, restores = new([]string), new([]string)
+	windowsManagedHooksPerUserEnrollmentReader = func(name string) ([]enterprisehooks.WindowsPerUserManagedEnrollmentTarget, bool, error) {
+		*reads = append(*reads, name)
+		if slices.Contains(decoyBehind, name) {
+			return nil, false, errors.New(name + " enrollment is untrusted: reparse point in path")
+		}
+		return nil, false, nil
+	}
+	windowsManagedHooksPerUserEnrollmentRestorer = func(name, _ string, _ []enterprisehooks.WindowsPerUserManagedEnrollmentTarget) error {
+		*restores = append(*restores, name)
+		if slices.Contains(decoyBehind, name) {
+			return errors.New(name + " enrollment directory is a link")
+		}
+		return nil
+	}
+	return reads, restores
+}
+
+func TestWindowsManagedHooksTeardownCleanCheckDoesNotReadBehindAKeptPerUserLink(t *testing.T) {
+	names := enterprisehooks.WindowsProfilePerUserConnectorNames()
+	if len(names) == 0 {
+		t.Skip("no per-user connector on this profile")
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			reads, _ := stubPerUserEnrollmentIO(t, name)
+			keepConnectorFolders(t, name)
+			if err := verifyWindowsManagedHooksStandalonePerUserClean(); err != nil {
+				t.Fatalf("the clean check read %s behind a kept link: %v", name, err)
+			}
+			if slices.Contains(*reads, name) {
+				t.Fatalf("the clean check read the enrollment of %s behind a kept link", name)
+			}
+			// The same decoy with no link on the folder is a real read, and it still fails the check.
+			keepConnectorFolders(t)
+			if err := verifyWindowsManagedHooksStandalonePerUserClean(); err == nil {
+				t.Fatalf("an unreadable %s enrollment with no link was accepted", name)
+			}
+			// A link at another connector excuses nothing here.
+			keepConnectorFolders(t, "cursor", "claudecode", "codex")
+			if err := verifyWindowsManagedHooksStandalonePerUserClean(); err == nil {
+				t.Fatalf("a link at another connector excused %s", name)
+			}
+		})
+	}
+}
+
+func TestWindowsManagedHooksTeardownCleanCheckStillFailsOnASurvivingPerUserEnrollment(t *testing.T) {
+	names := enterprisehooks.WindowsProfilePerUserConnectorNames()
+	if len(names) == 0 {
+		t.Skip("no per-user connector on this profile")
+	}
+	previous := windowsManagedHooksPerUserEnrollmentReader
+	t.Cleanup(func() { windowsManagedHooksPerUserEnrollmentReader = previous })
+	windowsManagedHooksPerUserEnrollmentReader = func(string) ([]enterprisehooks.WindowsPerUserManagedEnrollmentTarget, bool, error) {
+		return []enterprisehooks.WindowsPerUserManagedEnrollmentTarget{{SID: keptTestSID}}, true, nil
+	}
+	keepConnectorFolders(t)
+	if err := verifyWindowsManagedHooksStandalonePerUserClean(); err == nil || !strings.Contains(err.Error(), "survived") {
+		t.Fatalf("a surviving enrollment was accepted: %v", err)
+	}
+}
+
+func TestWindowsManagedHooksTeardownRollbackDoesNotRestoreBehindAKeptPerUserLink(t *testing.T) {
+	journal := windowsManagedHooksTeardownJournal{
+		ActivationState: windowsManagedHooksActivated,
+		HookBinary:      `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		Targets:         []windowsManagedHooksTeardownTarget{keptTestTarget("copilot")},
+	}
+	_, restores := stubPerUserEnrollmentIO(t, "copilot")
+	keepConnectorFolders(t, "copilot")
+	if err := restoreWindowsManagedHooksStandalonePerUserEnrollments(journal); err != nil {
+		t.Fatalf("a rollback republished an enrollment behind a kept link: %v", err)
+	}
+	if len(*restores) != 0 {
+		t.Fatalf("a rollback wrote the enrollment of %q behind a kept link", *restores)
+	}
+	keepConnectorFolders(t)
+	if err := restoreWindowsManagedHooksStandalonePerUserEnrollments(journal); err == nil {
+		t.Fatal("a rollback with no link did not republish the enrollment")
+	}
+	if !slices.Equal(*restores, []string{"copilot"}) {
+		t.Fatalf("restores = %q, want copilot once", *restores)
+	}
+}

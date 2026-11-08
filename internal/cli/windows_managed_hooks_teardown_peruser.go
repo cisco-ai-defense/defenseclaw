@@ -335,6 +335,16 @@ func windowsManagedHooksNameKeptLinksOnce(codex, vendor, goOwned []string) []str
 	return out
 }
 
+// The per-user enrollment reads and the rollback republication, replaceable in
+// tests. A teardown makes none of them for a connector whose machine folder a
+// link keeps: the read follows a link on the parent, so an enrollment.json
+// behind an administrator link would fail the check after the uninstall
+// committed (rel-1-0-9 g758b review S1).
+var (
+	windowsManagedHooksPerUserEnrollmentReader   = enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets
+	windowsManagedHooksPerUserEnrollmentRestorer = enterprisehooks.RestoreWindowsPerUserManagedEnrollment
+)
+
 func windowsManagedHooksStandalonePerUserTarget(connectorName string) bool {
 	return enterprisehooks.IsWindowsProfilePerUserConnector(connectorName)
 }
@@ -370,7 +380,7 @@ func validateWindowsManagedHooksStandalonePerUserEnrollment(identity windowsMana
 		} else if kept {
 			continue
 		}
-		current, exists, err := enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets(connectorName)
+		current, exists, err := windowsManagedHooksPerUserEnrollmentReader(connectorName)
 		if err != nil {
 			return err
 		}
@@ -462,7 +472,14 @@ func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManag
 		if len(targets) == 0 {
 			continue
 		}
-		if err := enterprisehooks.RestoreWindowsPerUserManagedEnrollment(connectorName, journal.HookBinary, targets); err != nil {
+		// Nothing was removed behind a kept link, so there is nothing to put back.
+		if kept, err := windowsManagedHooksTeardownConnectorKept(connectorName); err != nil {
+			errs = append(errs, err)
+			continue
+		} else if kept {
+			continue
+		}
+		if err := windowsManagedHooksPerUserEnrollmentRestorer(connectorName, journal.HookBinary, targets); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -473,7 +490,13 @@ func restoreWindowsManagedHooksStandalonePerUserEnrollments(journal windowsManag
 
 func verifyWindowsManagedHooksStandalonePerUserClean() error {
 	for _, connectorName := range enterprisehooks.WindowsProfilePerUserConnectorNames() {
-		_, exists, err := enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets(connectorName)
+		// A link at the machine folder of the connector is kept and was never read.
+		if kept, err := windowsManagedHooksTeardownConnectorKept(connectorName); err != nil {
+			return err
+		} else if kept {
+			continue
+		}
+		_, exists, err := windowsManagedHooksPerUserEnrollmentReader(connectorName)
 		if err != nil {
 			return err
 		}
