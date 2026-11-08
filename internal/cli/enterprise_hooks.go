@@ -5105,7 +5105,7 @@ func validateEnterpriseHookManagedRuntime() error {
 		if validationErr := managed.ValidateTrustedServiceRuntimeDir(
 			cfg.DataDir,
 			"hook guardian state data_dir",
-			os.Getenv(managed.WindowsServiceAccountEnv),
+			managed.GatewayServiceAccount(),
 		); validationErr != nil {
 			return fmt.Errorf(
 				"enterprise hooks: data_dir trust check failed: %w",
@@ -5120,7 +5120,7 @@ func validateEnterpriseHookManagedRuntime() error {
 	if err := managed.ValidateTrustedServiceRuntimeDir(
 		cfg.DataDir,
 		"hook guardian state data_dir",
-		os.Getenv(managed.WindowsServiceAccountEnv),
+		managed.GatewayServiceAccount(),
 	); err != nil {
 		return fmt.Errorf("enterprise hooks: data_dir trust check failed: %w", err)
 	}
