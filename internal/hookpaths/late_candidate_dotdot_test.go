@@ -142,12 +142,13 @@ func TestGAP0641LeadingParentFromLinkedWorkingDirectory(t *testing.T) {
 	}
 }
 
-// OperandPath keeps a dot-dot step inside the operand raw, and a leading one
-// raw when the supplied directory has a link in its path (the kernel applies
-// the step to the link target). With no link in the directory the clean join
-// is the same path, so a leading step stays clean there (also for a directory
-// that does not exist, which a command such as pushd has not entered).
-func TestOperandPathKeepsEveryDotDotStepRaw(t *testing.T) {
+// OperandPath keeps a dot-dot step after a name raw. A step in front of every
+// name (also with a ./ before it) stays raw when the supplied directory has a
+// link in its path (the kernel applies the step to the link target) and is
+// cleaned when it has none: the clean join is then the path the kernel opens,
+// also for a directory that does not exist, which a command such as pushd has
+// not entered.
+func TestOperandPathCleansDotDotOnlyWithoutALink(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -161,6 +162,10 @@ func TestOperandPathKeepsEveryDotDotStepRaw(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 	missing := filepath.Join(root, "missing", "dir")
+	inner := filepath.Join(root, "inner")
+	if err := os.Symlink(real, inner); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
 	for _, row := range []struct{ cwd, name, want string }{
 		{linked, "..", linked + "/.."},
 		{linked, "../x", linked + "/../x"},
@@ -173,8 +178,17 @@ func TestOperandPathKeepsEveryDotDotStepRaw(t *testing.T) {
 		{linked, ".../x", linked + "/.../x"},
 		{real, "..", root},
 		{real, "../x", root + "/x"},
-		{real, "./../x", real + "/./../x"},
+		{real, "./../x", root + "/x"},
+		{real, "../../x", filepath.Dir(root) + "/x"},
+		{real, ".//../x", root + "/x"},
+		{real, "a/../x", real + "/a/../x"},
+		{real, "x/./../y", real + "/x/./../y"},
+		{real, "./../a/../x", real + "/./../a/../x"},
 		{missing, "../x", filepath.Join(root, "missing", "x")},
+		{missing, "./../x", filepath.Join(root, "missing", "x")},
+		{root, "real/../x", root + "/real/../x"},
+		{root, "inner/../x", root + "/inner/../x"},
+		{inner, "./../x", inner + "/./../x"},
 	} {
 		if got := filepath.ToSlash(OperandPath(row.name, row.cwd)); got != filepath.ToSlash(row.want) {
 			t.Errorf("OperandPath(%q, %q)=%q, want %q", row.name, row.cwd, got, row.want)
