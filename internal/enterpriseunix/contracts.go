@@ -558,14 +558,18 @@ func (l *lifecycle) awaitInstallScan(ctx context.Context) bool {
 // guardianCatchUpPending reports whether the guardian is still reconciling
 // what this change wrote: its credential attestation does not yet name the
 // current targets.yaml (the enumerator rewrites it after the config changes,
-// for example a connector roster change), or a per-user cleanup this change
+// for example a connector roster change) or does not yet match the
+// authorization ledger it just published (its normal two-step publication), or a per-user cleanup this change
 // started (recorded at or after since, with no failed attempt) is still on
 // the guardian ledger. A ledger that is not published, or an attestation that
 // is wrong in another way, is not waited for: describe reports it.
 func (l *lifecycle) guardianCatchUpPending(since time.Time) bool {
 	env := l.env
 	if data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile)), 4<<20); err == nil {
-		if problem, _ := env.attestationProblem(data); problem == guardianManifestNotReconciled {
+		// Both are the guardian part-way through one reconcile: the cleanup
+		// ledger is already gone and the new authorization ledger is out, but
+		// its matching attestation is not (or still names the old targets.yaml).
+		if problem, _ := env.attestationProblem(data); problem == guardianManifestNotReconciled || problem == guardianLedgerNotAttested {
 			return true
 		}
 	}

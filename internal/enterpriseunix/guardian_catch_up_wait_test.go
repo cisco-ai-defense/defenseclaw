@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,5 +152,68 @@ func TestChangeDoesNotWaitForAnOlderOrAFailedGuardianCleanup(t *testing.T) {
 	requireOK(t, h.run(Options{Action: ActionRepair}))
 	if took := time.Since(begun); took > 20*time.Second {
 		t.Fatalf("repair waited %s for cleanups it did not start or that already failed", took)
+	}
+}
+
+// The guardian publishes its authorization ledger, then state, audit and
+// owned-file records, then the attestation bound to the ledger. A read
+// between the first and the last sees a torn ledger, which is the guardian
+// mid-reconcile, not a guardian that is current.
+func TestGuardianCatchUpIsPendingBetweenTheLedgerAndItsAttestation(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	l := &lifecycle{env: h.env}
+	since := time.Now().Add(-time.Minute)
+	if l.guardianCatchUpPending(since) {
+		t.Fatal("a guardian whose attestation matches its ledger and targets.yaml is not pending")
+	}
+	authorization := h.env.P(filepath.Join(h.env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
+	oldLedger, err := os.ReadFile(authorization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newLedger := append(oldLedger, 0x0a)
+	if err := os.WriteFile(authorization, newLedger, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if problem, torn := h.env.attestationProblem(newLedger); !torn || !strings.Contains(problem, "does not match") {
+		t.Fatalf("fixture did not reach the interval between the ledger and attestation writes: %q torn=%v", problem, torn)
+	}
+	if !l.guardianCatchUpPending(since) {
+		t.Fatal("the wait would end before the guardian publishes the attestation bound to its new ledger")
+	}
+	h.publishLedger(newLedger)
+	if l.guardianCatchUpPending(since) {
+		t.Fatal("the wait must end once the attestation is bound to the published ledger")
+	}
+}
+
+// The ensure holds for the staged publication and reports coverage complete.
+func TestEnsureWaitsForTheAttestationAfterTheGuardianPublishesItsLedger(t *testing.T) {
+	h, started := startGuardianCatchUpHost(t, "darwin", 0, func(h *testHost) {
+		authorization := h.env.P(filepath.Join(h.env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
+		oldLedger, err := os.ReadFile(authorization)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		newLedger := append(oldLedger, 0x0a)
+		if err := os.WriteFile(authorization, newLedger, 0o640); err != nil {
+			t.Error(err)
+			return
+		}
+		time.Sleep(3 * time.Second)
+		h.publishLedger(newLedger)
+	})
+	h.env.PollInterval = 50 * time.Millisecond
+	h.env.InstallScanTimeout = 6 * time.Second
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: writeChangedConfig(t, h, "mode: observe", "mode: action")})
+	requireOK(t, r)
+	if !started() {
+		t.Fatal("the change did not restart the enumerator; the test proves nothing")
+	}
+	if !r.CoverageComplete {
+		t.Fatalf("ensure returned during the guardian staged publication: warnings=%+v", r.Warnings)
 	}
 }
