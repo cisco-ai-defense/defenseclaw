@@ -16,15 +16,15 @@ import (
 )
 
 // A sourced script whose folder is reached through more links than the share
-// walk follows (40, or the fewer links the system opens in one path) is a body
-// the call could not read. It is judged as a body the share budget kept
+// walk follows (the links the system opens in one path) is a body the call
+// could not read. It is judged as a body the share budget kept
 // unread is: the strict tier blocks, the default tier allows with the alert. A chain within the bound reads the script, and
 // the script that writes a protected file through a link is blocked in both
 // tiers (rel-1-0-9:GAP-0621).
 func TestSourcedScriptBehindTooManyLinksIsJudgedByTheTier(t *testing.T) {
-	// The links the call reads through: the share walk bound, which is never
-	// more than the system opens in one path (40 on Linux and Windows, 32 on
-	// macOS). One more is a path the call could not read.
+	// The links the call reads through: the share walk bound, the links the
+	// system opens in one path (32 on macOS, 40 on Linux, 63 on Windows). One
+	// more is a path the call could not read.
 	within := hookpaths.ShareWalkLinkLimit()
 	for _, tc := range []struct {
 		name          string

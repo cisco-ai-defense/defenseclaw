@@ -27,11 +27,13 @@ func TestScriptBodyBehindMoreLinksThanTheWalkFollowsIsRecordedUnread(t *testing.
 		{networkLinkHopLimit + 5, false},
 	} {
 		t.Run(fmt.Sprint(tc.links, " links"), func(t *testing.T) {
-			dir := t.TempDir()
+			// The folders are spelled without a link of their own (macOS keeps
+			// /var behind one), so the chain is the links counted.
+			dir := linkFreeTempDir(t)
 			if err := os.WriteFile(filepath.Join(dir, "safe.sh"), []byte("echo ordinary > report.txt\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cwd := localLinkChain(t, t.TempDir(), tc.links, dir)
+			cwd := localLinkChain(t, linkFreeTempDir(t), tc.links, dir)
 			fakeNetworkShare(t, t.TempDir(), 20*time.Millisecond, time.Second, func(string) {})
 			defer HookCall()()
 			_, read := readIndirectSource("safe.sh", cwd)
@@ -48,11 +50,11 @@ func TestScriptBodyBehindMoreLinksThanTheWalkFollowsIsRecordedUnread(t *testing.
 
 // Outside a hook call nothing is recorded.
 func TestScriptBodyBehindTooManyLinksOutsideAHookCallRecordsNothing(t *testing.T) {
-	dir := t.TempDir()
+	dir := linkFreeTempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "safe.sh"), []byte("echo ordinary > report.txt\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cwd := localLinkChain(t, t.TempDir(), networkLinkHopLimit+1, dir)
+	cwd := localLinkChain(t, linkFreeTempDir(t), networkLinkHopLimit+1, dir)
 	fakeNetworkShare(t, t.TempDir(), 20*time.Millisecond, time.Second, func(string) {})
 	if _, read := readIndirectSource("safe.sh", cwd); read || ShareBodyUnread() {
 		t.Errorf("outside a call: read %v, unread recorded %v", read, ShareBodyUnread())
