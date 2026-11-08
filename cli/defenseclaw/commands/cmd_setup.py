@@ -83,6 +83,7 @@ from defenseclaw.bundle_refresh import (
     is_compose_project_running,
     refresh_splunk_bridge,
 )
+from defenseclaw.cause_text import single_line
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import (
     CONFIG_PATH_ENV,
@@ -17201,7 +17202,7 @@ _GATEWAY_REASON_MAX_CHARS = 1200
 
 
 def _bounded_gateway_reason(reason: str) -> str:
-    reason = " ".join(reason.split())
+    reason = single_line(reason)
     if len(reason) > _GATEWAY_REASON_MAX_CHARS:
         reason = reason[:_GATEWAY_REASON_MAX_CHARS] + " ... (gateway.log has the rest)"
     return reason

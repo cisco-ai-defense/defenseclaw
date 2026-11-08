@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from defenseclaw import windows_acl
+from defenseclaw.cause_text import single_line
 from defenseclaw.connector_contracts import (
     STATUS_KNOWN,
     compare_agent_versions,
@@ -274,7 +275,7 @@ def probe_error_means_agent_did_not_run(error: str) -> bool:
 
 def agent_did_not_run_message(label: str, error: str) -> str:
     """One line naming the failed probe and the step that fixes it."""
-    detail = " ".join((error or "").split())
+    detail = single_line(error or "")
     if len(detail) > 300:
         detail = detail[:300] + "..."
     return (
