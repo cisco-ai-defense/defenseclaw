@@ -19426,7 +19426,7 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
     throw (
         'codex_state_unsettled: the Codex writer transaction counter next to ' + $Path +
         ' stayed at ' + $last + ' (' + $why + ') for ' + $TimeoutSeconds +
-        ' seconds, so the Codex managed-hooks state could not be judged; nothing was changed. Next step: run ' +
+        ' seconds, so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run ' +
         (Format-DefenseClawSetupAction -Action '/repair') +
         ' again once no Codex writer is running (the next Codex writer pass ends a stopped transaction)'
     )

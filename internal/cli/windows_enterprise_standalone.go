@@ -3383,6 +3383,12 @@ var windowsEnterpriseKnownCodes = []string{
 	// (GAP-0803).
 	"codex_requirements_held",
 	"codex_state_held",
+	// The Codex writer's transaction counter stayed odd or kept moving for
+	// the whole wait, so the Codex managed-hooks state could not be judged.
+	// Inside an install, repair, ensure or upgrade the throw is followed by
+	// the rollback text, so the code is not at the start of the message
+	// (GAP-0877, review S2). It exits 1603, like any refusal.
+	"codex_state_unsettled",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
