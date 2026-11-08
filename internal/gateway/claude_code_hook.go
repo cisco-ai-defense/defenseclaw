@@ -147,6 +147,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
 	ctx = a.withInstructionStartup(ctx, "claudecode", req.SessionID, activeAgentContext)
+	a.mcpSessionStarted(ctx, "claudecode", req.SessionID, req.HookEventName, req.Source)
 	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {
