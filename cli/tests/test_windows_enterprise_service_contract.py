@@ -6387,6 +6387,25 @@ def test_vendor_folder_link_refusal_runs_first_for_standalone_install_like_actio
     assert "if !windowsManagedHooksStandaloneProcess() {" in go[go.index("var windowsManagedHooksRefuseLinkedVendorFolders") :]
 
 
+def test_rollback_skips_codex_files_behind_a_link_and_reads_the_user_sid_label() -> None:
+    """GAP-0900: a rollback never writes through a link that appeared on the Codex
+    folder after the transaction opened (it names the link and goes on, so the
+    services come back), and the acceptance of a completed guardian reconcile with
+    failed accounts reads the "user (SID)" label Windows has used since 1.0.5."""
+    module = read(MODULE)
+    restore = _psm1_function(module, "Restore-DefenseClawTransaction")
+    shared = restore[restore.index("        if ($isSharedCodexFile) {") :]
+    link = shared.index("Get-DefenseClawVendorMachineFolderLink")
+    skip = shared.index("continue", link)
+    assert link < skip < shared.index("Assert-DefenseClawCodexMachinePolicyDirectory")
+    assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded" in shared[link:skip]
+    assert 'cmd /c rmdir `"$restoreCodexLink`"' in shared[link:skip]
+
+    attributable = _psm1_function(module, "Test-DefenseClawGuardianReportErrorsAttributable")
+    assert "(?<connector>[^@\\s]+)@(?<account>.+?)(?: \\((?<sid>S-1-[0-9-]+)\\))?: " in attributable
+    assert "'^last guardian reconcile failed for (\\S+): '" not in attributable
+
+
 def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
     """GAP-0773 / GAP-0758 round 4: only the uninstall keeps a link at the Codex
     machine-policy folder. The snapshot skip, the removal option and the kept
