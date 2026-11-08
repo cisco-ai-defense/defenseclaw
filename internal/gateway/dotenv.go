@@ -19,6 +19,8 @@ package gateway
 import (
 	"os"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 )
 
 // loadDotEnv reads a KEY=VALUE file (one per line).  Blank lines and
@@ -31,6 +33,8 @@ func loadDotEnv(path string) (map[string]string, error) {
 		return nil, err
 	}
 	out := make(map[string]string)
+	// An adopted gateway token copy never shadows the one the operator saved.
+	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -45,7 +49,7 @@ func loadDotEnv(path string) (map[string]string, error) {
 		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
 			v = v[1 : len(v)-1]
 		}
-		if k != "" {
+		if k != "" && !shadowed.Has(k) {
 			out[k] = v
 		}
 	}

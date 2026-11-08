@@ -60,6 +60,7 @@ from defenseclaw import (
     codex_toml,
     connector_paths,
     envvars,
+    gateway_token_adoption,
     openclaw_presence,
     platform_support,
     removed_connectors,
@@ -15140,6 +15141,7 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
         keys.append(gw.token_env)
     for key in keys:
         _save_secret_to_dotenv(key, detected, data_dir)
+    _record_adopted_gateway_token(detected, data_dir)
     click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
     if stopped:
         ctx = click.get_current_context(silent=True)
@@ -21395,6 +21397,18 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
             ((key, value),),
         )
     os.environ[key] = value
+
+
+def _record_adopted_gateway_token(token: str, data_dir: str) -> None:
+    """Mark *token*, copied from openclaw.json into .env, as an adopted copy.
+
+    A later edit of one gateway-token spelling then wins over the copy under the
+    other (GAP-0847); see ``defenseclaw.gateway_token_adoption``.
+    """
+    dotenv_path = os.path.join(data_dir, ".env")
+    with locked_file_update(dotenv_path):
+        snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        atomic_write_private_bytes(dotenv_path, gateway_token_adoption.with_adopted_marker(snapshot.body, token))
 
 
 # ---------------------------------------------------------------------------

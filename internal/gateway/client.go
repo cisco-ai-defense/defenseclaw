@@ -902,7 +902,11 @@ func (c *Client) adoptOpenClawToken(token string) {
 // the gateway.auth.token in openclaw.json, and the copy the gateway adopted
 // from openclaw.json earlier. An adopted copy is rewritten whenever
 // openclaw.json holds a different token, and keys set replaces it under
-// both variable names, so a stale copy never shadows a newer saved token.
+// both variable names, so a stale copy never shadows a newer saved token. A
+// token saved by editing one spelling in .env also wins over the adopted copy
+// under the other: adoption records the copy it wrote in a marker comment, and
+// every .env reader leaves a marked copy out when the other spelling differs
+// (envvars.ShadowedAdoptedGatewayTokens).
 const openClawGiveTokenStep = "defenseclaw keys set OPENCLAW_GATEWAY_TOKEN and restart the gateway with " +
 	"defenseclaw-gateway restart (a variable exported in your shell does not reach the background gateway)"
 
@@ -1056,11 +1060,18 @@ func persistRefreshedToken(dataDir, newToken string) error {
 // updateEnvFileToken rewrites OPENCLAW_GATEWAY_TOKEN and
 // DEFENSECLAW_GATEWAY_TOKEN lines in a .env-style file. Missing keys
 // are appended. The file is created if it doesn't exist. Other lines
-// (LLM keys, comments, etc.) are preserved verbatim.
+// (LLM keys, comments, etc.) are preserved verbatim, except the adopted-token
+// marker: newToken is an adopted copy, so the marker is replaced with one that
+// records it. A later edit of one spelling then shows which value the operator
+// saved, and every .env reader prefers it (envvars.ShadowedAdoptedGatewayTokens).
 func updateEnvFileToken(path, newToken string) error {
 	var lines []string
 	if data, err := os.ReadFile(path); err == nil {
-		lines = strings.Split(string(data), "\n")
+		for _, line := range strings.Split(string(data), "\n") {
+			if !envvars.IsAdoptedGatewayTokenMarker(line) {
+				lines = append(lines, line)
+			}
+		}
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -1095,6 +1106,7 @@ func updateEnvFileToken(path, newToken string) error {
 	for len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
+	lines = append(lines, envvars.AdoptedGatewayTokenMarker(newToken))
 	out := strings.Join(lines, "\n") + "\n"
 
 	return managed.WriteServiceRuntimeFile(
