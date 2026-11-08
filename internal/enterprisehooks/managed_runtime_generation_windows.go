@@ -1249,10 +1249,35 @@ func collectWindowsManagedRuntimeGenerations(
 			return 0, fmt.Errorf("%w: %w", ErrWindowsManagedRuntimeGenerationDirectoryUntrusted, err)
 		}
 	}
-	err = withWindowsManagedRuntimeSelectorTeardownTransaction(validated.Connector, func() error {
-		selector, _, exists, err := readWindowsManagedRuntimeSelector(validated.Connector, true)
+	// The uninstall finalize runs after the selectors stopped naming the target
+	// (Retired). A link kept at the selector folder is not read, so no selector
+	// names the target there either: the collection goes on without reading or
+	// locking anything behind the link, and removes the target's bundles. Every
+	// other collection leaves them alone, as the teardown transaction does
+	// (GAP-0773).
+	collection := withWindowsManagedRuntimeSelectorTeardownTransaction
+	selectorKept := false
+	if opts.Retired && !classifyOnly {
+		selectorPath, err := windowsManagedRuntimeSelectorPath(validated.Connector)
 		if err != nil {
-			return err
+			return 0, err
+		}
+		if selectorKept, err = windowsManagedPolicyLinkKept(filepath.Dir(selectorPath)); err != nil {
+			return 0, fmt.Errorf("enterprise hooks: inspect managed runtime selector directory: %w", err)
+		}
+		if selectorKept {
+			collection = func(_ string, fn func() error) error { return fn() }
+		}
+	}
+	err = collection(validated.Connector, func() error {
+		var selector windowsManagedRuntimeSelector
+		exists := false
+		if !selectorKept {
+			var err error
+			selector, _, exists, err = readWindowsManagedRuntimeSelector(validated.Connector, true)
+			if err != nil {
+				return err
+			}
 		}
 		selected := false
 		selectedGenerationID := ""
