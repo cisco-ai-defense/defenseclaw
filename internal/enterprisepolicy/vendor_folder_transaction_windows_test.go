@@ -61,7 +61,7 @@ func TestSafeTransactionHandlesAFileAddedBetweenTheCheckAndTheStamp(t *testing.T
 					if variant.by == "user" {
 						plantAsUser(t, path, "file")
 					} else {
-						writeFile(t, path, "{}\n")
+						writeAdministratorFile(t, path, "{}\n")
 					}
 				})
 
