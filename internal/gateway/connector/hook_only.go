@@ -4562,11 +4562,15 @@ func hermesMovedHomeCommand(entryCommand, command string) bool {
 // records and seals and leaves the old folder and the allowlist as they were,
 // so Setup, repair and teardown read their own earlier approval as a tampered
 // command and refused every run, which left the gateway down after the advised
-// restart (GAP-0914). Same identity test as a moved home: the script name at
-// the same place below any other absolute root, nothing at that path or a
-// DefenseClaw-generated script there; no record of the old folder is needed,
-// because a second move leaves approvals that name any earlier folder. Any
-// other command on a marked entry keeps the refusal.
+// restart (GAP-0914). The root must be one DefenseClaw can show was its data
+// directory: the install home (the default data_dir, which the move list
+// never names) or a folder in the list config set data_dir keeps there, which
+// holds every earlier folder, so a second move, a move into or out of an
+// earlier folder and an earlier folder that was deleted afterwards all work.
+// On top of that the script name sits at the same place below the root, with
+// nothing at that path or a DefenseClaw-generated script there. A marked
+// approval that names a folder that is neither, present or absent, keeps the
+// refusal, as does any other command on a marked entry.
 func hermesMovedStoreCommand(entryCommand, command string) bool {
 	if runtime.GOOS == "windows" || entryCommand == command {
 		return false
@@ -4579,7 +4583,64 @@ func hermesMovedStoreCommand(entryCommand, command string) bool {
 	if !strings.HasSuffix(script, tail) || !strings.HasSuffix(moved, tail) || len(moved) == len(tail) {
 		return false
 	}
-	return hermesScriptAbsentOrDefenseClaws(moved)
+	return hermesEarlierDataDir(strings.TrimSuffix(moved, tail)) && hermesScriptAbsentOrDefenseClaws(moved)
+}
+
+// hermesEarlierDataDirsFile is the list config set data_dir keeps in the
+// install home of the folders it moved the stores away from (GAP-0874).
+const (
+	hermesEarlierDataDirsFile  = "previous-data-dirs.json"
+	hermesEarlierDataDirsLimit = 16
+	hermesEarlierDataDirsBytes = 64 * 1024
+)
+
+// hermesEarlierDataDir reports whether root is an install home or a folder the
+// list in an install home names. The install home is ~/.defenseclaw and, when
+// the process has it, DEFENSECLAW_HOME: a process started with its data folder
+// as DEFENSECLAW_HOME is not told where the install home is, so both are read.
+// The list is read the way Python reads it: a regular file only this account
+// can change, in a private folder, not a link, bounded; anything else names
+// nothing.
+func hermesEarlierDataDir(root string) bool {
+	if !filepath.IsAbs(root) {
+		return false
+	}
+	root = filepath.Clean(root)
+	homes := []string{filepath.Join(userHomeDir(), ".defenseclaw")}
+	if env := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); env != "" {
+		homes = append(homes, env)
+	}
+	for _, home := range homes {
+		if !filepath.IsAbs(home) || filepath.Clean(home) != home {
+			continue
+		}
+		if root == home || hermesDataDirListed(home, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func hermesDataDirListed(home, root string) bool {
+	body, ok := readStablePrivateStateFile(home, hermesEarlierDataDirsFile, hermesEarlierDataDirsBytes)
+	if !ok {
+		return false
+	}
+	var document struct {
+		Folders []interface{} `json:"folders"`
+	}
+	if json.Unmarshal(body, &document) != nil {
+		return false
+	}
+	if len(document.Folders) > hermesEarlierDataDirsLimit {
+		document.Folders = document.Folders[:hermesEarlierDataDirsLimit]
+	}
+	for _, raw := range document.Folders {
+		if folder, ok := raw.(string); ok && filepath.IsAbs(folder) && filepath.Clean(folder) == root {
+			return true
+		}
+	}
+	return false
 }
 
 // hermesRelocatedHookCommand reports whether a marked approval names
