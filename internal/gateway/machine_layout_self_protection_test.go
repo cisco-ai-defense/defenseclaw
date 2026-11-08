@@ -8,6 +8,7 @@ package gateway
 import (
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -276,11 +277,18 @@ func TestMachineLayoutOnMacOSIgnoresCase(t *testing.T) {
 			t.Errorf("Write %s = %.200s, want protected block", file, got)
 		}
 	}
-	// A Linux file system tells these names apart.
+	// The same differently cased names outside a macOS home: a Linux file
+	// system tells them apart (different files, allowed), a macOS one does not
+	// (the same protected file, blocked).
+	wantBlocked := runtime.GOOS == "darwin"
 	home, project := dynamicWordParityProject(t)
 	for _, file := range []string{"/opt/CISCO/DefenseClaw/etc/config.yaml", "/ETC/defenseclaw/config.yaml"} {
-		if _, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, false, ""); strings.HasPrefix(got, `{"action":"block"`) {
-			t.Errorf("Write %s on Linux = %.200s, want allow", file, got)
+		protectedBlock, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, false, "")
+		if wantBlocked && !protectedBlock {
+			t.Errorf("Write %s on %s = %.200s, want protected block", file, runtime.GOOS, got)
+		}
+		if !wantBlocked && strings.HasPrefix(got, `{"action":"block"`) {
+			t.Errorf("Write %s on %s = %.200s, want allow", file, runtime.GOOS, got)
 		}
 	}
 }
