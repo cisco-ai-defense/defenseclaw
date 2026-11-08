@@ -77,6 +77,11 @@ type UnixEnumeratorState struct {
 	// accounts that stall cannot keep the same later accounts uninspected
 	// cycle after cycle (GAP-1586).
 	DiscoveryDeferred map[string]string `json:"discovery_deferred,omitempty"`
+	// VerifiedAgents is, per (user, connector), the last version read that
+	// worked and the stamp of the CLI it came from. A later failed read of
+	// the same unchanged CLI keeps that version for a few cycles instead of
+	// reporting the account unprotected (see carryVerifiedAgentVersions).
+	VerifiedAgents map[string]UnixVerifiedAgent `json:"verified_agents,omitempty"`
 }
 
 const (
@@ -667,6 +672,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
+		}
+		if check.State == HomeAvailable && !discoveryFailed && (opts.DiscoverSurfaces != nil || opts.Discover != nil) {
+			versions = carryVerifiedAgentVersions(opts.State, name, home,
+				append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...), versions, reasons, opts.Logger)
 		}
 		if discoveryFailed {
 			// The worker also owns the private-install scan for per-user
@@ -1995,6 +2004,14 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 				state.ACPSources = map[string]string{}
 			}
 			state.ACPSources[principal] = source
+		}
+	}
+	for key, verified := range parsed.VerifiedAgents {
+		if key != "" && verified.valid() && len(state.VerifiedAgents) < unixVerifiedAgentsMax {
+			if state.VerifiedAgents == nil {
+				state.VerifiedAgents = map[string]UnixVerifiedAgent{}
+			}
+			state.VerifiedAgents[key] = verified
 		}
 	}
 	for user, why := range parsed.DiscoveryDeferred {
