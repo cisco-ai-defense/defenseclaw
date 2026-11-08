@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/textproto"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -380,12 +381,12 @@ func lateOrdinaryLook(opts Options) bool {
 // (hookpaths.LateOrdinaryCall, GAP-0518), which also reads a path out of a
 // key=value word, a sed write and a dash-named link target. The open tier
 // applies only when neither names a protected file, so a call that one of
-// them reaches stays closed. The link-hop scan does not step through a
-// dot-dot component, so such a call stays closed here as it does on the
-// release base.
+// them reaches stays closed. The link-hop scan is written for POSIX paths and
+// answers false for every call on Windows, where the shared reader (with the
+// Windows lexer) is the one scan.
 func bothLateScansOrdinary(opts Options) bool {
 	return toolGateEvent(opts.Connector, opts.Event) &&
-		hookpaths.LateOrdinaryCall(opts.Connector, opts.failurePayload) &&
+		(runtime.GOOS == "windows" || hookpaths.LateOrdinaryCall(opts.Connector, opts.failurePayload)) &&
 		OrdinaryNoAnswerPayload(opts.failurePayload)
 }
 
