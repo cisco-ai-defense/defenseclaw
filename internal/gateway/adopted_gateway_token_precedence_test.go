@@ -21,6 +21,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // The gateway writes an adopted token under both spellings. An operator who
@@ -90,5 +92,30 @@ func TestEnsureGatewayTokenKeepsAnUneditedAdoptedToken(t *testing.T) {
 	body, _ := os.ReadFile(envPath)
 	if n := strings.Count(string(body), "adopted gateway token sha256="); n != 1 {
 		t.Fatalf("want one marker line, found %d:\n%s", n, body)
+	}
+}
+
+// A .env at the size every reader accepts stays readable after an adoption: the
+// marker is provenance only and is left out rather than push the file over.
+func TestAdoptionKeepsAnAcceptedMaximumSizeDotenvReadable(t *testing.T) {
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	tokens := "DEFENSECLAW_GATEWAY_TOKEN=old-token\nOPENCLAW_GATEWAY_TOKEN=old-token\n"
+	padding := "#" + strings.Repeat("x", safefile.MaxDotEnvBytes-len(tokens)-2) + "\n"
+	if err := os.WriteFile(envPath, []byte(tokens+padding), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := persistRefreshedToken(dir, "new-token"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(envPath)
+	if err != nil || info.Size() > safefile.MaxDotEnvBytes {
+		t.Fatalf("size = %v, %v, want at most %d", info, err, safefile.MaxDotEnvBytes)
+	}
+	got, err := EnsureGatewayToken(envPath)
+	if err != nil || got != "new-token" {
+		t.Fatalf("token = %q, %v, want new-token", got, err)
 	}
 }

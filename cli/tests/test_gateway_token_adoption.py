@@ -8,9 +8,13 @@ from __future__ import annotations
 import os
 
 import pytest
+from types import SimpleNamespace
+
 from defenseclaw import config as config_module
 from defenseclaw import credential_provenance, gateway_token_adoption
+from defenseclaw.commands import cmd_doctor
 from defenseclaw.commands.cmd_setup import _record_adopted_gateway_token
+from defenseclaw.file_permissions import MAX_DOTENV_BYTES
 
 # The line the Go gateway writes for the token "adopted"
 # (internal/envvars/gateway_token_adoption_test.go asserts the same text).
@@ -79,3 +83,49 @@ def test_setup_records_the_token_it_copied_and_a_later_edit_wins(tmp_path):
     assert "DEFENSECLAW_LLM_KEY=keep" in body
     edited = body.replace("OPENCLAW_GATEWAY_TOKEN=adopted", "OPENCLAW_GATEWAY_TOKEN=edited")
     assert _resolve(tmp_path, edited) == "edited"
+
+
+@pytest.mark.parametrize("edited", NAMES)
+def test_doctor_picks_the_token_the_runtime_resolves(tmp_path, edited):
+    # Doctor authenticates with this answer; it must be the one the daemon starts with.
+    values = {name: "adopted" for name in NAMES}
+    values[edited] = "edited"
+    body = "".join(f"{name}={values[name]}\n" for name in NAMES) + GO_MARKER + "\n"
+    runtime = _resolve(tmp_path, body)
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=config_module.GatewayConfig())
+    assert cmd_doctor._daemon_effective_gateway_token(cfg)[0] == runtime == "edited"
+
+
+def test_doctor_keeps_an_unedited_adopted_token(tmp_path):
+    body = f"DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n{GO_MARKER}\n"
+    assert _resolve(tmp_path, body) == "adopted"
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=config_module.GatewayConfig())
+    token, name, _ = cmd_doctor._daemon_effective_gateway_token(cfg)
+    assert (token, name) == ("adopted", "DEFENSECLAW_GATEWAY_TOKEN")
+
+
+def _fill_to_limit(tmp_path, tokens: str) -> None:
+    path = tmp_path / ".env"
+    padding = b"#" + b"x" * (MAX_DOTENV_BYTES - len(tokens) - 2) + b"\n"
+    path.write_bytes(tokens.encode() + padding)
+    path.chmod(0o600)
+    assert path.stat().st_size == MAX_DOTENV_BYTES
+
+
+def test_recording_the_marker_never_makes_an_accepted_dotenv_unreadable(tmp_path):
+    _fill_to_limit(tmp_path, "DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n")
+    _record_adopted_gateway_token("adopted", str(tmp_path))
+    assert (tmp_path / ".env").stat().st_size <= MAX_DOTENV_BYTES
+    config_module._load_dotenv_into_os(str(tmp_path))
+    assert config_module.GatewayConfig().resolved_token() == "adopted"
+
+
+def test_the_marker_still_fits_just_under_the_limit(tmp_path):
+    tokens = "DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n"
+    room = len(gateway_token_adoption.marker_line("adopted")) + 1
+    path = tmp_path / ".env"
+    path.write_bytes(tokens.encode() + b"#" + b"x" * (MAX_DOTENV_BYTES - len(tokens) - room - 2) + b"\n")
+    path.chmod(0o600)
+    _record_adopted_gateway_token("adopted", str(tmp_path))
+    assert path.stat().st_size == MAX_DOTENV_BYTES
+    assert GO_MARKER in path.read_text()
