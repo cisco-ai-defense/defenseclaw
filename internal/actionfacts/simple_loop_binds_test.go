@@ -4,7 +4,9 @@
 package actionfacts
 
 import (
+	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
@@ -37,8 +39,22 @@ func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
 		{"write before a called function", "f() { u=other; }; for u in home; do sed -i x /r/$u/.defenseclaw/config.yaml; f; done", []string{state}, nil},
 		{"function declared in the body is not a binding", "for u in home; do f() { u=other; }; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
 		{"prefix assignment is not a binding", "for u in home; do u=other true; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
-		{"write after a binding in a branch", "for u in other; do if true; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{other}},
-		{"write in an inner loop that binds", "for u in home; do while true; do sed -i x /r/$u/.defenseclaw/config.yaml; u=other; done; done", nil, []string{state}},
+		// A branch may not run: the word of the loop stays read next to the bound one.
+		{"write after a binding in a branch", "for u in other; do if true; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state, other}, nil},
+		{"write after a binding that cannot run", "for u in other; do if false; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after a binding behind a failed and", "for u in other; do false && u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after a binding behind a skipped or", "for u in other; do true || u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after a binding in a case arm", "for u in other; do case x in y) u=home;; esac; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after a binding in a subshell", "for u in other; do (u=home); sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after a binding in a pipeline stage", "for u in other; do u=home | cat; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after a read in a branch", "for u in other; do if false; then read u; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after arithmetic on another name", "for u in other; do ((i++)); sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write after an unconditional binding in a block", "for u in other; do { u=home; }; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after the left side of an and", "for u in other; do u=home && true; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
+		{"write after a binding in the condition of an if", "for u in other; do if read u; then :; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{other}},
+		{"write after a read with a prompt option", "for u in other; do read -p u v; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
+		{"write in an inner loop that binds", "for u in home; do while true; do sed -i x /r/$u/.defenseclaw/config.yaml; u=other; done; done", []string{state}, nil},
+		{"select reads the words of its list", "select u in $USER; do sed -i x /r/$u/.defenseclaw/config.yaml; break; done", []string{state}, nil},
 		{"after the loop", "for u in home; do :; done; sed -i x /r/$u/.defenseclaw/config.yaml", nil, []string{state}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -52,7 +68,7 @@ func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
 				for _, want := range row.want {
 					// The reading of an iteration only proves a state write;
 					// a statement whose name the body binds is an ordinary one.
-					if simple.Text == want && simple.LoginGuess == (row.name == "body binds the name") {
+					if simple.Text == want && simple.LoginGuess == (simple.Text == state && strings.Contains(row.command, "u=home")) {
 						t.Errorf("%q: LoginGuess = %v", simple.Text, simple.LoginGuess)
 					}
 				}
@@ -85,16 +101,17 @@ func TestSimpleCommandsReadPipedLoopVariable(t *testing.T) {
 		{"literal", "echo home | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"two words", "echo $USER other | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
 		{"unreadable input", "ls | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
-		{"changed IFS", "IFS=x; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
-		{"IFS declared", "export IFS=x; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
+		{"changed IFS", "IFS=x; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
+		{"IFS declared", "export IFS=x; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"IFS emptied for the read", "echo $USER | while IFS= read -r u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"IFS set for the read", "echo $USER | while IFS=: read -r u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"IFS only spelled", "x=IFS; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"IFS bound after the loop", "echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done; IFS=x", true},
 		{"IFS bound in the body", "echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; IFS=x; done", true},
 		{"IFS bound in a declared function", "f() { IFS=x; }; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
-		{"IFS bound in a called function", "f() { IFS=x; }; f; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
-		{"IFS bound after the loop that runs again", "while true; do echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done; IFS=x; done", false},
+		{"IFS bound in a called function", "f() { IFS=x; }; f; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
+		{"IFS bound after the loop that runs again", "while true; do echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done; IFS=x; done", true},
+		{"IFS assigned in a branch that does not run", "if false; then IFS=x; fi; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"IFS bound before a read with its own", "IFS=x; echo $USER | while IFS= read -r u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"another prefix", "echo $USER | while PATH=/x read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
 		{"body binds the name", "echo $USER | while read u; do read u; sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
@@ -165,6 +182,8 @@ func TestSimpleCommandsLoopVariableNearForms(t *testing.T) {
 		{"inner delimiter only", "homes", "e", "homes"},
 		{"no delimiter", "home", ":", "home"},
 		{"no IFS of its own", "home", "", "home"},
+		{"a multibyte delimiter is one character", "homeé", "é", "home"},
+		{"a multibyte delimiter keeps the word with another", "éhomeé", "é", "éhomeé"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			prefix := ""
@@ -310,5 +329,35 @@ func TestSimpleCommandsPlainWordsShareOneState(t *testing.T) {
 		if shared := simplePlaceholderToken(loop.Do, "u", "") != ""; shared != row.shared {
 			t.Errorf("%s: shared state = %v, want %v", row.body, shared, row.shared)
 		}
+	}
+}
+
+// rel-1-0-6:GAP-0880 review 3: a construct only Bash has (select) is rejected
+// by the POSIX reader of the call, yet each command of it is read as any
+// other, from the command the tool arguments carry.
+func TestSimpleCommandsReadBashOnlyLoopFromArguments(t *testing.T) {
+	const state = "sed -i x '/r/home/.defenseclaw/config.yaml'"
+	for _, row := range []struct {
+		name, command string
+		reads         bool
+	}{
+		{"select", "select u in $USER; do sed -i x /r/$u/.defenseclaw/config.yaml; break; done", true},
+		{"select ordinary", "select u in alice; do sed -i x /r/$u/notes.txt; break; done", false},
+		{"for", "for u in $USER; do sed -i x /r/$u/.defenseclaw/config.yaml; break; done", true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"command": row.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := Input{Tool: "Bash", Args: args, ActiveHome: "/r/home", CWD: "/r/home/proj"}
+			read := false
+			for _, simple := range SimpleCommands(input, Analyze(input)) {
+				read = read || simple.Text == state
+			}
+			if read != row.reads {
+				t.Errorf("%s: reading of the state path = %v, want %v", row.command, read, row.reads)
+			}
+		})
 	}
 }

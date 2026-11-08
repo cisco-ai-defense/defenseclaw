@@ -205,6 +205,9 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 type sequenceStatement struct {
 	text, scope string
 	sourceStart int
+	// maySkip marks a statement that is the right side of && or ||: it runs
+	// only when the left side lets it.
+	maySkip bool
 	// binds holds the USER and LOGNAME names that a for or select loop
 	// around the statement binds, outermost first, with the list each
 	// takes its values from: the statement runs after the binding.
@@ -224,8 +227,9 @@ type simpleLoopBind struct {
 	// fork marks a variable other than USER and LOGNAME, read once for each
 	// word of its list (simpleForkLoopBind).
 	fork bool
-	// ifs is the IFS a read loop sets for its read (while IFS=: read name).
-	ifs string
+	// ifs holds the IFS values a read loop can read with (simpleIFSValues, or
+	// the one IFS= the read itself sets); empty for a for loop.
+	ifs []string
 	// rebound is where the body may hold another value of the variable than
 	// the loop gave it (simpleReboundSpans).
 	rebound []simpleSpan
@@ -247,15 +251,9 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		return nil, false, false
 	}
 	declined := false
-	// functionNames are the functions the action declares: a call of one is
-	// code that can bind a loop variable.
-	var functionNames []string
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch typed := node.(type) {
 		case *syntax.FuncDecl:
-			if typed.Name != nil {
-				functionNames = append(functionNames, typed.Name.Value)
-			}
 			declined = declined || !allSimple
 		case *syntax.Redirect:
 			declined = declined || !allSimple &&
@@ -297,6 +295,9 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	}
 	childScope := func(kind byte, walk func() bool) bool { return namedScope(kind, "", walk) }
 	var loopBinds []simpleLoopBind
+	// skippable counts the right sides of && and || around the statement
+	// being flattened.
+	skippable := 0
 	// pipeInput is the stage before the while loop being flattened.
 	var pipeInput *syntax.Stmt
 	// keep adds the text of node, or of a command and its redirects.
@@ -318,7 +319,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			statement += " " + redirects[index]
 		}
 		statements = append(statements, sequenceStatement{text: statement, scope: scope,
-			sourceStart: int(from.Offset()), binds: slices.Clone(loopBinds)})
+			sourceStart: int(from.Offset()), maySkip: skippable != 0, binds: slices.Clone(loopBinds)})
 		return true
 	}
 	subshells := 0
@@ -402,7 +403,14 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				return true, childScope('s', func() bool { return flatten(typed.X) }) &&
 					childScope('s', func() bool { return flatten(typed.Y) })
 			}
-			return true, flatten(typed.X) && flatten(typed.Y)
+			if !flatten(typed.X) {
+				return true, false
+			}
+			if typed.Op == syntax.AndStmt || typed.Op == syntax.OrStmt {
+				skippable++
+				defer func() { skippable-- }()
+			}
+			return true, flatten(typed.Y)
 		}
 		if !compound {
 			return false, false
@@ -436,7 +444,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			kind, name := byte('c'), ""
 			input := pipeInput
 			pipeInput = nil
-			bind, forks := simpleReadLoopBind(typed, input, file, functionNames)
+			bind, forks := simpleReadLoopBind(typed, input, file)
 			// The condition runs before the variable has its first word.
 			if !flattenAll(typed.Cond) {
 				return true, false
@@ -476,7 +484,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(iteration) {
 				outer := loopBinds
 				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true,
-					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, functionNames, nil),
+					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value),
 					token:   simplePlaceholderToken(typed.Do, iteration.Name.Value, source)})
 				defer func() { loopBinds = outer }()
 				kind, name = forkedLoopScopeKind, iteration.Name.Value

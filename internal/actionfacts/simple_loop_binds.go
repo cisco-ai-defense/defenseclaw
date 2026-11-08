@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
@@ -63,117 +64,86 @@ func (bind simpleLoopBind) reboundAt(offset int) bool {
 	return slices.ContainsFunc(bind.rebound, func(span simpleSpan) bool { return offset >= span.from && offset < span.to })
 }
 
-// simpleReboundSpans returns where in stmts, the body of a loop, name may hold
-// another value than the loop gave it: after any code that can bind it again,
-// and all of a nested loop or declared function that holds such code (it runs
-// again, or later). A statement before every such code keeps the word of the
-// loop. A function the action only declares binds nothing until it is called,
-// and a prefix assignment (u=x cmd) sets the environment of cmd only. skip is
-// one call that is left out (the read of a while read loop).
-func simpleReboundSpans(stmts []*syntax.Stmt, name string, functionNames []string, skip *syntax.CallExpr) []simpleSpan {
+// simpleReboundSpans returns where in stmts, the body of a loop, name holds
+// another value than the loop gave it for certain: after a statement that
+// runs on every pass through the body and binds it again (u=x, export u=x,
+// read u). Code that may or may not run (a branch, the right side of && or ||,
+// a case arm, a nested loop, a function body, a subshell or a pipeline stage)
+// and code the walk cannot read (eval, a function call, a program named by a
+// variable) end nothing: the walk keeps both values of a branch it reads, and
+// a binding it cannot follow is no reason to leave a write through the name
+// unjudged (rel-1-0-6:GAP-0880 review 3).
+func simpleReboundSpans(stmts []*syntax.Stmt, name string) []simpleSpan {
 	if len(stmts) == 0 {
 		return nil
 	}
 	end := int(stmts[len(stmts)-1].End().Offset())
-	var binders []int
-	var wraps []syntax.Node
-	var visit func(node syntax.Node) bool
-	visit = func(node syntax.Node) bool {
-		switch node := node.(type) {
-		case *syntax.FuncDecl, *syntax.ForClause, *syntax.WhileClause:
-			wraps = append(wraps, node)
-			if _, declared := node.(*syntax.FuncDecl); declared {
-				return false
-			}
+	var spans []simpleSpan
+	var visit func(stmt *syntax.Stmt)
+	visit = func(stmt *syntax.Stmt) {
+		if stmt == nil || stmt.Background || stmt.Coprocess {
+			return
+		}
+		binds := false
+		switch cmd := stmt.Cmd.(type) {
 		case *syntax.CallExpr:
-			if node == skip {
-				return false
+			binds = simpleCallBinds(cmd, name)
+		case *syntax.DeclClause:
+			binds = slices.ContainsFunc(cmd.Args, func(arg *syntax.Assign) bool {
+				return arg.Name != nil && arg.Name.Value == name && !arg.Naked
+			})
+		case *syntax.Block:
+			for _, inner := range cmd.Stmts {
+				visit(inner)
 			}
-			if len(node.Args) != 0 {
-				// The prefix assignments are not walked; the words are.
-				if simpleCallMayBind(node, name, functionNames) {
-					binders = append(binders, int(node.Pos().Offset()))
-				}
-				for _, arg := range node.Args {
-					syntax.Walk(arg, visit)
-				}
-				return false
+		case *syntax.BinaryCmd:
+			// The left side always runs; the right side may not.
+			if cmd.Op == syntax.AndStmt || cmd.Op == syntax.OrStmt {
+				visit(cmd.X)
+			}
+		case *syntax.IfClause:
+			for _, cond := range cmd.Cond {
+				visit(cond)
+			}
+		case *syntax.WhileClause:
+			for _, cond := range cmd.Cond {
+				visit(cond)
 			}
 		}
-		if simpleNodeBinds(node, name) {
-			binders = append(binders, int(node.Pos().Offset()))
+		if binds {
+			spans = append(spans, simpleSpan{int(stmt.Pos().Offset()) + 1, end})
 		}
-		return true
 	}
 	for _, stmt := range stmts {
-		syntax.Walk(stmt, visit)
-	}
-	if len(binders) == 0 {
-		return nil
-	}
-	var spans []simpleSpan
-	for _, offset := range binders {
-		spans = append(spans, simpleSpan{offset + 1, end})
-	}
-	for _, wrap := range wraps {
-		from, to := int(wrap.Pos().Offset()), int(wrap.End().Offset())
-		if _, declared := wrap.(*syntax.FuncDecl); declared || slices.ContainsFunc(binders, func(offset int) bool { return offset >= from && offset < to }) {
-			spans = append(spans, simpleSpan{from, to})
-		}
+		visit(stmt)
 	}
 	return spans
 }
 
-// simpleNodeBinds reports a node that gives name another value, in a way the
-// walk does not follow as an assignment of its own: a loop, a declaration,
-// arithmetic, or a default assignment. A command that binds is
-// simpleCallMayBind.
-func simpleNodeBinds(node syntax.Node, name string) bool {
-	switch node := node.(type) {
-	case *syntax.Assign:
-		return node.Name == nil || node.Name.Value == name
-	case *syntax.WordIter:
-		return node.Name == nil || node.Name.Value == name
-	case *syntax.DeclClause:
-		return slices.ContainsFunc(node.Args, func(arg *syntax.Assign) bool { return arg.Name == nil })
-	case *syntax.ArithmCmd, *syntax.ArithmExp, *syntax.LetClause, *syntax.CStyleLoop:
-		return true
-	case *syntax.ParamExp:
-		return node.Exp != nil && node.Param != nil && node.Param.Value == name &&
-			(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull)
-	}
-	return false
-}
-
-// simpleCallMayBind reports a call that can bind name: a program the walk
-// cannot read, a function of the action, code it runs from text (eval,
-// source, trap), or a builtin that names variables, given a word that is
-// name or that the walk cannot read.
-func simpleCallMayBind(call *syntax.CallExpr, name string, functionNames []string) bool {
+// simpleCallBinds reports a call that gives name another value as the call
+// itself: a plain assignment (u=x), or read with name among its variables.
+// A prefix assignment (u=x cmd) sets the environment of cmd only.
+func simpleCallBinds(call *syntax.CallExpr, name string) bool {
 	if len(call.Args) == 0 {
+		return slices.ContainsFunc(call.Assigns, func(assign *syntax.Assign) bool {
+			return assign.Name != nil && assign.Name.Value == name
+		})
+	}
+	if program, static := simpleStaticWord(call.Args[0], nil); !static || program != "read" {
 		return false
 	}
-	program, known := simpleStaticWord(call.Args[0], nil)
-	if !known || slices.Contains(functionNames, program) {
-		return true
-	}
-	switch program {
-	case "eval", "source", ".", "trap", "alias", "enable", "coproc":
-		return true
-	case "printf":
-		// Only printf -v names a variable; a quoted format word is one word,
-		// never the option.
-		for index, arg := range call.Args[1:] {
-			value, static := simpleStaticWord(arg, nil)
-			if static && value == "-v" || !static && index == 0 && !simpleQuotedWord(arg) {
-				return true
+	for index := 1; index < len(call.Args); index++ {
+		value, static := simpleStaticWord(call.Args[index], nil)
+		switch {
+		case !static:
+			return false
+		case strings.HasPrefix(value, "-") && len(value) > 1:
+			// An option that takes a word (-p prompt) consumes the next one.
+			if strings.ContainsAny(value[len(value)-1:], "ptdnNui") {
+				index++
 			}
-		}
-	case "read", "mapfile", "readarray", "getopts", "unset", "export", "readonly", "declare", "typeset", "local", "set", "shift":
-		for _, arg := range call.Args[1:] {
-			if value, static := simpleStaticWord(arg, nil); !static || value == name {
-				return true
-			}
+		case value == name:
+			return true
 		}
 	}
 	return false
@@ -205,23 +175,24 @@ func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind, plain *si
 			if !known || strings.ContainsAny(value, " \t\n*?[") {
 				continue
 			}
-			reading := bind.reading(value)
-			if slices.ContainsFunc(candidates, func(seen candidate) bool { return seen.value == reading }) ||
-				slices.Contains(shared, reading) {
-				continue
+			for _, reading := range bind.readings(value) {
+				if slices.ContainsFunc(candidates, func(seen candidate) bool { return seen.value == reading }) ||
+					slices.Contains(shared, reading) {
+					continue
+				}
+				tier := 2
+				switch {
+				case reading == login || !simpleLiteralWord(word):
+					tier = 0
+				case strings.ContainsAny(reading, "/."):
+					tier = 1
+				}
+				if tier == 2 && bind.token != "" && simplePlainName(reading) {
+					shared = append(shared, reading)
+					continue
+				}
+				candidates = append(candidates, candidate{reading, tier})
 			}
-			tier := 2
-			switch {
-			case reading == login || !simpleLiteralWord(word):
-				tier = 0
-			case strings.ContainsAny(reading, "/."):
-				tier = 1
-			}
-			if tier == 2 && bind.token != "" && simplePlainName(reading) {
-				shared = append(shared, reading)
-				continue
-			}
-			candidates = append(candidates, candidate{reading, tier})
 		}
 		// The words that can name state come first when the list is long.
 		slices.SortStableFunc(candidates, func(a, b candidate) int { return a.tier - b.tier })
@@ -393,16 +364,27 @@ func simpleLiteralWord(word *syntax.Word) bool {
 	return true
 }
 
-// reading is the value a read loop variable takes from one input word. read
-// drops one trailing delimiter of its IFS (while IFS=r read -r d, fed
-// aliasdir, reads aliasdi), only when that is the one delimiter in the word:
-// with another, the variable keeps the word as it is.
-func (bind simpleLoopBind) reading(value string) string {
-	if last := len(value) - 1; last >= 0 && strings.IndexByte(bind.ifs, value[last]) >= 0 &&
-		!strings.ContainsAny(value[:last], bind.ifs) {
-		return value[:last]
+// readings are the values a read loop variable takes from one input word,
+// one for each IFS the read can have (ifs). read drops one trailing delimiter
+// of its IFS (while IFS=r read -r d, fed aliasdir, reads aliasdi), only when
+// that character is the one delimiter in the word: with another, the variable
+// keeps the word as it is. A for loop (no ifs) reads the word.
+func (bind simpleLoopBind) readings(value string) []string {
+	if len(bind.ifs) == 0 {
+		return []string{value}
 	}
-	return value
+	var out []string
+	for _, ifs := range bind.ifs {
+		reading := value
+		if last, size := utf8.DecodeLastRuneInString(value); size > 0 && last != utf8.RuneError &&
+			strings.ContainsRune(ifs, last) && !strings.ContainsAny(value[:len(value)-size], ifs) {
+			reading = value[:len(value)-size]
+		}
+		if !slices.Contains(out, reading) {
+			out = append(out, reading)
+		}
+	}
+	return out
 }
 
 // simpleEnterForkedLoops forks the states at the start of each forked loop
@@ -506,10 +488,9 @@ func simpleParamNames(text string) []string {
 // simpleReadLoopBind returns the binding of a while read [-r] name loop whose
 // input is one static echo or printf stage: name takes that one word, as an
 // iteration of a for loop over it would. The read may have an IFS prefix
-// (while IFS= read -r name). A longer input, other options, a backslash
-// (read without -r reads it as an escape), and a body or an action that
-// binds the name or IFS in a way the walk cannot read leave it unread.
-func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, file *syntax.File, functionNames []string) (simpleLoopBind, bool) {
+// (while IFS= read -r name). A longer input, other options and a backslash
+// (read without -r reads it as an escape) leave it unread.
+func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, file *syntax.File) (simpleLoopBind, bool) {
 	if input == nil || loop.Until || len(loop.Cond) != 1 || input.Negated || input.Background || len(input.Redirs) != 0 {
 		return simpleLoopBind{}, false
 	}
@@ -518,7 +499,7 @@ func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, file *synt
 		len(read.Args) < 2 || len(read.Args) > 3 {
 		return simpleLoopBind{}, false
 	}
-	ifs, ok := simpleReadIFS(read.Assigns)
+	ifs, own, ok := simpleReadIFS(read.Assigns)
 	if !ok {
 		return simpleLoopBind{}, false
 	}
@@ -551,91 +532,82 @@ func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, file *synt
 			word = echo.Args[2]
 		}
 	}
-	if word == nil || len(read.Assigns) == 0 && simpleIFSMayBeBound(file, loop, functionNames, read) {
+	if word == nil {
 		return simpleLoopBind{}, false
 	}
 	if text, static := simpleStaticWord(word, nil); static && (strings.HasPrefix(text, "-") || strings.Contains(text, "\\")) {
 		return simpleLoopBind{}, false
 	}
-	return simpleLoopBind{name: name, items: []*syntax.Word{word}, fork: true, ifs: ifs,
-		rebound: simpleReboundSpans(loop.Do, name, functionNames, nil)}, true
+	// A read with an IFS of its own reads with that one; any other read has
+	// the default IFS, or one the action assigned anywhere (simpleIFSValues).
+	sets := []string{ifs}
+	if !own {
+		sets = simpleIFSValues(file)
+	}
+	return simpleLoopBind{name: name, items: []*syntax.Word{word}, fork: true, ifs: sets,
+		rebound: simpleReboundSpans(loop.Do, name)}, true
 }
 
-// simpleIFSMayBeBound reports code that can give IFS a value the walk does not
-// read before the read of loop runs (a read with an IFS prefix of its own does
-// not depend on it): code that starts before the loop, any
-// code of the action when the loop runs again (inside a loop or a function),
-// and a call of a declared function. The pipeline gives the read one line, so code
-// after the loop, in its body, or in a function the action only declares
-// does not change what the read reads.
-func simpleIFSMayBeBound(file *syntax.File, loop *syntax.WhileClause, functionNames []string, read *syntax.CallExpr) bool {
-	var stack []syntax.Node
-	var repeats []syntax.Node
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if node == nil {
-			stack = stack[:len(stack)-1]
-			return true
+// simpleIFSValues returns the values IFS can have where a read without an IFS
+// of its own runs: the default (written as an empty value here, which strips
+// nothing a word of the loop spells) and every static value the action assigns
+// it (IFS=x, export IFS=x). An assignment the walk cannot read adds none, and
+// a prefix assignment (IFS=x cmd) sets the environment of cmd only. The
+// readings of all of them are kept: where a branch or the order decides which
+// IFS the read has, the write is judged under each.
+func simpleIFSValues(file *syntax.File) []string {
+	values := []string{""}
+	add := func(assign *syntax.Assign) {
+		if assign.Name == nil || assign.Name.Value != "IFS" || assign.Append || assign.Array != nil || assign.Index != nil {
+			return
 		}
-		if node == loop {
-			for _, ancestor := range stack {
-				switch ancestor.(type) {
-				case *syntax.FuncDecl, *syntax.WhileClause, *syntax.ForClause:
-					repeats = append(repeats, ancestor)
-				}
+		value := ""
+		if assign.Value != nil {
+			var static bool
+			if value, static = simpleStaticWord(assign.Value, nil); !static {
+				return
 			}
 		}
-		stack = append(stack, node)
+		if !slices.Contains(values, value) {
+			values = append(values, value)
+		}
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.CallExpr:
+			if len(node.Args) == 0 {
+				for _, assign := range node.Assigns {
+					add(assign)
+				}
+			}
+		case *syntax.DeclClause:
+			for _, assign := range node.Args {
+				add(assign)
+			}
+		}
 		return true
 	})
-	start := int(loop.Pos().Offset())
-	binds := false
-	var visit func(node syntax.Node) bool
-	visit = func(node syntax.Node) bool {
-		switch node := node.(type) {
-		case *syntax.FuncDecl:
-			// Declared code binds nothing until it is called, unless it is
-			// the code the loop runs in.
-			return slices.Contains(repeats, syntax.Node(node))
-		case *syntax.CallExpr:
-			if node == read {
-				return false
-			}
-			if len(node.Args) != 0 {
-				// The prefix assignments set the environment of the command.
-				if simpleCallMayBind(node, "IFS", functionNames) {
-					binds = binds || len(repeats) != 0 || int(node.Pos().Offset()) < start
-				}
-				for _, arg := range node.Args {
-					syntax.Walk(arg, visit)
-				}
-				return false
-			}
-		}
-		if simpleNodeBinds(node, "IFS") {
-			binds = binds || len(repeats) != 0 || int(node.Pos().Offset()) < start
-		}
-		return !binds
-	}
-	syntax.Walk(file, visit)
-	return binds
+	return values
 }
 
 // simpleReadIFS returns the IFS a read call sets for itself with a prefix
-// assignment, "" when it sets none. Any other prefix is not read.
-func simpleReadIFS(assigns []*syntax.Assign) (string, bool) {
+// assignment, and whether it sets one. Any other prefix is not read (ok is
+// false).
+func simpleReadIFS(assigns []*syntax.Assign) (ifs string, own, ok bool) {
 	switch len(assigns) {
 	case 0:
-		return "", true
+		return "", false, true
 	case 1:
 		assign := assigns[0]
 		if assign.Name == nil || assign.Name.Value != "IFS" || assign.Append || assign.Naked ||
 			assign.Array != nil || assign.Index != nil {
-			return "", false
+			return "", false, false
 		}
 		if assign.Value == nil {
-			return "", true
+			return "", true, true
 		}
-		return simpleStaticWord(assign.Value, nil)
+		value, static := simpleStaticWord(assign.Value, nil)
+		return value, true, static
 	}
-	return "", false
+	return "", false, false
 }
