@@ -196,7 +196,9 @@ func takeBackWindowsGoOwnedForRemoval(opts Options, target Target) ([]unprotecte
 	switch target.Name() {
 	case ConnectorDevinCascade:
 		// The pre-rename Devin file is removed as well when DefenseClaw
-		// recorded writing it.
+		// recorded writing it. Kept for the supported 1.0.5-1.0.8 to 1.0.9
+		// upgrade only, until the Cascade withdrawal goes in 1.1 (the reason
+		// is at weakVendorFolders, g877b review S6).
 		if len(paths) > 1 {
 			if record, err := loadRecord(opts, devinCascadeLegacyRecord); err == nil && record != nil {
 				walk = paths[:2]
