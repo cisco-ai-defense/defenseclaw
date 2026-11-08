@@ -252,9 +252,9 @@ func TestR105WindowsCMDBodyReaderIsLinear(t *testing.T) {
 			if full {
 				n = size
 			}
-			start := time.Now()
+			done := startWork()
 			cmdInvocationReadings("cmd x "+strings.Repeat(unit, n/len(unit)), true)
-			return time.Since(start)
+			return done()
 		}
 		assertLinearReaderTime(t, fmt.Sprintf("unit %q", unit), read(true), read)
 	}
@@ -299,7 +299,7 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 			args, _ := json.Marshal(map[string]string{"command": command})
 			input := actionfacts.Input{Tool: "Bash", Args: args, CWD: home + `\project`, ActiveHome: home}
 			input.DialectHint = agentHookWindowsShellDialect(input)
-			start := time.Now()
+			done := startWork()
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: string(args), Connector: connectorName,
 				EnforcementCapable: true, ResolvedWriteTargets: resolved,
@@ -311,7 +311,7 @@ func TestR105WindowsCMDHeredocReceiverReadIsLinear(t *testing.T) {
 			if !tc.block {
 				findings = withoutStatementBudget(findings)
 			}
-			return findings, time.Since(start)
+			return findings, done()
 		}
 		findings, took := judge(size)
 		verdict := buildVerdict(findings, "tool_call")

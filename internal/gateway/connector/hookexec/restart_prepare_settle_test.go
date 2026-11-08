@@ -4,7 +4,10 @@
 package hookexec
 
 import (
+	"context"
+	"errors"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -59,6 +62,53 @@ func TestRestartAnswerReadHoldsForTheBackgroundPreparation(t *testing.T) {
 	})
 }
 
+// A call that reconnects after an outage runs the contact again: the
+// deadline reads wait for the scan of that later try as well, not only for
+// the first (GAP-0859 review 3).
+func TestRestartAnswerReadHoldsForALaterTryScan(t *testing.T) {
+	stubRestartWindowProof(t, false)
+	previous := holdForRestartPrepare
+	holdForRestartPrepare = func(settled <-chan struct{}) { <-settled }
+	t.Cleanup(func() { holdForRestartPrepare = previous })
+	sp, _ := specFor("claudecode")
+	opts := perUserRestartOptions(t.TempDir(), "open", false, newClaimedStopWriter(), newClaimedStopWriter(), func(int) {})
+	var scans atomic.Int32
+	secondStarted := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	opts.lateOrdinary = func() bool {
+		if scans.Add(1) == 1 {
+			return false
+		}
+		close(secondStarted)
+		<-releaseSecond
+		return true
+	}
+	w := prepareAnswerWatchdog(&opts, sp, "open", time.Time{})
+	w.restartWindowContact(opts, sp, "open", &perUserPeerCheck{})
+	<-w.contactSettled
+	w.awaitContactSettled() // the first scan is over: nothing to wait for
+	w.restartWindowContact(opts, sp, "open", &perUserPeerCheck{})
+	<-secondStarted
+	read := make(chan struct{})
+	go func() {
+		w.awaitContactSettled()
+		close(read)
+	}()
+	select {
+	case <-read:
+		t.Fatal("the deadline read passed while the later try was still scanning")
+	case <-time.After(50 * time.Millisecond): // a pause that can only hide a failure, never cause one
+	}
+	close(releaseSecond)
+	<-read
+	w.mu.Lock()
+	prepared := w.restart != nil
+	w.mu.Unlock()
+	if !prepared {
+		t.Fatal("the deadline read passed before the outage answer of the later try was ready")
+	}
+}
+
 // The service watch bounds one state read on the proof clock: a read the test
 // holds is not known only once the production bound is spent (GAP-0859).
 func TestManagedServiceStateReadIsBoundedOnTheProofClock(t *testing.T) {
@@ -82,5 +132,41 @@ func TestManagedServiceStateReadIsBoundedOnTheProofClock(t *testing.T) {
 	clock.Advance(managedGatewayServiceStateWait)
 	if s := <-got; s.up || s.known {
 		t.Fatalf("a read past its bound is %+v, want not known", s)
+	}
+}
+
+// The service watch spends its restart budget on the proof clock too: a stop
+// read at the budget ends the call once the test moves the clock to it, not
+// when a loaded host gets round to a real timer, and the repoll is the
+// production one (GAP-0859).
+func TestManagedServiceWatchSpendsItsBudgetOnTheProofClock(t *testing.T) {
+	clock := proofclocktest.Install(t)
+	const budget = time.Hour
+	ctx, stop, release := watchManagedGatewayService(context.Background(), func() (bool, bool) { return false, true },
+		time.Now().Add(budget), managedGatewayServiceWatchInterval)
+	defer release()
+	defer stop()
+	gotConn(ctx)
+	for hang := time.Now().Add(time.Minute); len(clock.Requested()) == 0; time.Sleep(time.Millisecond) {
+		if time.Now().After(hang) { // a hang guard, not a timing assertion
+			t.Fatal("the watch asked the proof clock for no timer")
+		}
+	}
+	if first := clock.Requested()[0]; first > budget || first < budget-time.Minute {
+		t.Fatalf("the watch asked for a timer of %s, want the budget of %s", first, budget)
+	}
+	select {
+	case <-ctx.Done():
+		t.Fatal("the watch ended the call before its budget was spent")
+	case <-time.After(20 * time.Millisecond): // a pause that can only hide a failure, never cause one
+	}
+	clock.Advance(budget)
+	select {
+	case <-ctx.Done():
+		if !errors.Is(context.Cause(ctx), errGatewayRestarting) {
+			t.Fatalf("the watch ended the call with %v, want errGatewayRestarting", context.Cause(ctx))
+		}
+	case <-time.After(time.Minute): // a hang guard, not a timing assertion
+		t.Fatal("the watch did not end the call once its budget was spent")
 	}
 }

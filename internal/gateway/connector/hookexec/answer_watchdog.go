@@ -117,12 +117,17 @@ type answerWatchdog struct {
 	// started moments ago and had answered no call before it (GAP-0295).
 	restart      *perUserRestartAnswer
 	restartProof func() restartProofResult
-	// contactSettled is closed once the first restartWindowContact and the
-	// background preparation it started are over; awaitSettled, read when
-	// the watchdog is armed, is the test seam that holds the deadline reads
-	// of the restart answer until then (holdForRestartPrepare).
+	// contactSettled is closed while no restartWindowContact (and the
+	// background preparation it started) is running and one has run. Every
+	// connected try is a contact, so a later try opens a new channel and the
+	// deadline reads wait for that try too. awaitSettled, read when the
+	// watchdog is armed, is the test seam that holds the deadline reads of
+	// the restart answer until then (holdForRestartPrepare). contactMu
+	// guards the three contact fields.
+	contactMu      sync.Mutex
 	contactSettled chan struct{}
-	settleOnce     sync.Once
+	contactPending int
+	contactClosed  bool
 	awaitSettled   func(settled <-chan struct{})
 	// failureLog is the call's hook-failure log, opened
 	// answerWatchdogLogPrepareLead before the deadline (watch).
@@ -582,10 +587,11 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	if w == nil {
 		return
 	}
+	w.beginContact()
 	background := false
 	defer func() {
 		if !background {
-			w.settleContact()
+			w.endContact()
 		}
 	}()
 	if check == nil || opts.Home == "" || !perUserRestartWindowCall(opts, sp) {
@@ -611,7 +617,7 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	}
 	background = true
 	go func() {
-		defer w.settleContact()
+		defer w.endContact()
 		reason := perUserGatewayRestartingReason
 		if !fresh {
 			// A gateway that has been up for a while and took the call may
@@ -637,16 +643,38 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	}()
 }
 
-// settleContact marks the first contact, and its background preparation,
-// over. A watchdog a test builds by hand has no channel to close.
-func (w *answerWatchdog) settleContact() {
-	if w.contactSettled != nil {
-		w.settleOnce.Do(func() { close(w.contactSettled) })
+// beginContact registers a contact and its preparation, which endContact
+// ends. The call is synchronous, so a deadline read that follows the contact
+// sees it. A watchdog a test builds by hand has no channel and tracks nothing.
+func (w *answerWatchdog) beginContact() {
+	w.contactMu.Lock()
+	defer w.contactMu.Unlock()
+	if w.contactSettled == nil {
+		return
+	}
+	if w.contactClosed {
+		w.contactSettled = make(chan struct{})
+		w.contactClosed = false
+	}
+	w.contactPending++
+}
+
+// endContact ends one contact; the last one to end settles the channel.
+func (w *answerWatchdog) endContact() {
+	w.contactMu.Lock()
+	defer w.contactMu.Unlock()
+	if w.contactSettled == nil {
+		return
+	}
+	w.contactPending--
+	if w.contactPending == 0 && !w.contactClosed {
+		close(w.contactSettled)
+		w.contactClosed = true
 	}
 }
 
 // holdForRestartPrepare, when a test sets it, makes the deadline read the
-// restart answer only after the contact of the call and its background
+// restart answer only after every contact of the call and its background
 // preparation (the scan of the call and the rendering of the outage answer)
 // are over, so a test decides the outcome from the scan, not from how fast a
 // loaded host ran it (GAP-0859). It is read when a watchdog is armed. Nil in
@@ -656,8 +684,21 @@ var holdForRestartPrepare func(settled <-chan struct{})
 // awaitContactSettled is the test seam at the two reads of the restart
 // answer at the deadline.
 func (w *answerWatchdog) awaitContactSettled() {
-	if w.awaitSettled != nil {
-		w.awaitSettled(w.contactSettled)
+	if w.awaitSettled == nil {
+		return
+	}
+	for {
+		w.contactMu.Lock()
+		settled := w.contactSettled
+		w.contactMu.Unlock()
+		w.awaitSettled(settled)
+		// A try that connected while this waited opened a new channel.
+		w.contactMu.Lock()
+		current := settled == w.contactSettled
+		w.contactMu.Unlock()
+		if current {
+			return
+		}
 	}
 }
 

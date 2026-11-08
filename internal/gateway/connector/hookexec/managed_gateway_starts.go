@@ -309,18 +309,26 @@ func watchManagedGatewayService(ctx context.Context, running func() (bool, bool)
 		}
 	}
 	go func() {
-		timer := time.NewTimer(time.Until(deadline))
-		defer timer.Stop()
+		// The budget and the repoll run on the proof clock, like every bound
+		// of a call after its deadline: a test spends them itself instead of
+		// racing the host for a goroutine (GAP-0859). A release build runs
+		// the system clock, with the same budget and repoll.
+		expired, stopTimer := proofclock.NewTimer(time.Until(deadline))
+		defer func() { stopTimer() }()
+		again := func(d time.Duration) {
+			stopTimer()
+			expired, stopTimer = proofclock.NewTimer(d)
+		}
 		for {
 			select {
 			case <-watched.Done():
 				return
 			case <-done:
 				return
-			case <-timer.C:
+			case <-expired:
 			}
 			if !connected.Load() {
-				timer.Reset(interval)
+				again(interval)
 				continue
 			}
 			if up, known := serviceRunningWithin(running, wait); known && !up {
@@ -331,7 +339,7 @@ func watchManagedGatewayService(ctx context.Context, running func() (bool, bool)
 				mu.Unlock()
 				return
 			}
-			timer.Reset(interval)
+			again(interval)
 		}
 	}()
 	return watched, stop, func() { stop(); cancel(nil) }
