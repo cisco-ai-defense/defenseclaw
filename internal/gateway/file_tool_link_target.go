@@ -55,6 +55,13 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 		if physical == "" && !reported && !request.SkipLocalFilesystemResolution {
 			physical, _ = request.targetMemo.ResolveWriteTarget(spelling)
 		}
+		if !filepath.IsAbs(physical) && !reported && !request.SkipLocalFilesystemResolution {
+			// A gateway that walks the link itself finds the same closed
+			// directory the client would.
+			if text, reached := hookpaths.LinkTextWriteTarget(spelling); reached {
+				physical = text
+			}
+		}
 		if !filepath.IsAbs(physical) {
 			// The user could not open a directory on the way of the link:
 			// the file its link text leads to is judged by name.

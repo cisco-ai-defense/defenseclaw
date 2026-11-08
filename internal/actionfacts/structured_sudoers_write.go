@@ -70,16 +70,31 @@ func resolvesToSudoersTarget(resolved map[string]string) bool {
 // knows: its own (the resolved project) and the clients (clientDirs), which
 // differ when the project is reached through a link.
 func clientResolvedSudoersTarget(target, cwd string, clientDirs []string, resolved map[string]string) bool {
+	_, ok := clientResolvedTargetWhere(target, cwd, clientDirs, resolved, exactSudoersWriteTarget)
+	return ok
+}
+
+// clientResolvedTargetWhere returns the first answer of the hook client for a
+// write target, in every spelling the client may have keyed it by, that accept
+// takes: the physical file of a link, or for a directory the user cannot open
+// the file its link text leads to. A content proof that reads the call text
+// before the facts carry a link fact asks it, so a link of any name is judged
+// by the file it leads to, as the direct name is.
+func clientResolvedTargetWhere(target, cwd string, clientDirs []string, resolved map[string]string, accept func(string) bool) (string, bool) {
 	if len(resolved) == 0 || target == "" {
-		return false
+		return "", false
 	}
 	for _, dir := range append([]string{cwd}, clientDirs...) {
-		if exactSudoersWriteTarget(resolved[OperandPath(target, dir)]) ||
-			exactSudoersWriteTarget(resolved[posixOperandPath(target, dir)]) {
-			return true
+		for _, key := range []string{OperandPath(target, dir), posixOperandPath(target, dir)} {
+			if physical := resolved[key]; accept(physical) {
+				return physical, true
+			}
 		}
 	}
-	return exactSudoersWriteTarget(resolved[target])
+	if physical := resolved[target]; accept(physical) {
+		return physical, true
+	}
+	return "", false
 }
 
 // posixOperandPath is OperandPath for a client that keys POSIX paths with

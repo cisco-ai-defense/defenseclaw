@@ -849,6 +849,13 @@ func linkTextWritePath(path string) (string, bool) {
 	return linkTextWalk("", path, 0)
 }
 
+// LinkTextWriteTarget is the file the link text of a write operand leads to
+// as far as the user can read it (linkTextWritePath), for a gateway that
+// resolves a link itself and finds a directory on the way closed.
+func LinkTextWriteTarget(path string) (string, bool) {
+	return linkTextWritePath(path)
+}
+
 func linkTextWalk(base, path string, linkDepth int) (string, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", false
