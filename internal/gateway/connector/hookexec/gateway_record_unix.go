@@ -55,14 +55,15 @@ func readGatewayRecord(dataDir string) (gatewayRecord, bool) {
 
 // recordedGatewayPID is the process the record in dataDir names, when that
 // process is alive and is the one the record describes: its kernel start
-// identity matches, so a reused PID is no match. A stopped process is alive.
+// identity matches, in the text the gateway writes it in (procidentity.Recorded,
+// shared with the gateway), so a reused PID is no match. A stopped process is
+// alive.
 func recordedGatewayPID(dataDir string) (int, bool) {
 	record, ok := readGatewayRecord(dataDir)
 	if !ok {
 		return 0, false
 	}
-	identity, ok := procidentity.Of(record.PID)
-	if !ok || identity != record.StartIdentity {
+	if !procidentity.IsRecorded(record.PID, record.StartIdentity) {
 		return 0, false
 	}
 	return record.PID, true

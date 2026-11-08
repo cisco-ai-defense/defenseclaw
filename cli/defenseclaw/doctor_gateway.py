@@ -895,7 +895,7 @@ def _darwin_kinfo_proc(pid: int) -> tuple[str, int]:
 
     ``kern.proc.pid`` describes every account's processes, as ``ps`` shows
     them, where libproc refuses another account's. The start identity has the
-    daemon's native format (``sec.usec``, darwinProcessStartIdentity), so it
+    daemon's native format (``sec.usec``, procidentity.Recorded), so it
     compares with the PID record.
     """
     import errno

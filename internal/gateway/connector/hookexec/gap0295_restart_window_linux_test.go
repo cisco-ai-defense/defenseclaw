@@ -89,10 +89,6 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := cmd.Process.Pid
-	identity, ok := procidentity.Of(pid)
-	if !ok {
-		t.Fatal("helper identity unavailable")
-	}
 	executable, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +97,7 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	dataDir := t.TempDir()
 	record, err := json.Marshal(map[string]any{
 		"pid": pid, "executable": strings.TrimSuffix(executable, " (deleted)"), "data_dir": dataDir,
-		"start_time": start.Add(-time.Second).Unix(), "start_identity": identity,
+		"start_time": start.Add(-time.Second).Unix(), "start_identity": recordedStart(t, pid),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +181,7 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 		t.Helper()
 		b, err := json.Marshal(map[string]any{
 			"pid": pid, "executable": strings.TrimSuffix(executable, " (deleted)"), "data_dir": dataDir,
-			"start_time": started.Unix(), "start_identity": identity,
+			"start_time": started.Unix(), "start_identity": recordedStart(t, pid),
 		})
 		if err != nil {
 			t.Fatal(err)
