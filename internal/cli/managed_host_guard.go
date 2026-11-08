@@ -110,14 +110,14 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	for _, verb := range []string{"set", "unset"} {
 		verb := verb
 		addManagedWindowsAnswer(configCmd, verb, func([]string) error {
-			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: change config.yaml in the admin config (MDM or management plane); config %s did not change it", verb)), 3)
+			return withExitCode(managedWindowsConfigWriterRefusal("config "+verb), 3)
 		})
 	}
 	// The guardrail writers were an unknown command here, so a refused
 	// `guardrail disable` left no audit row (GAP-2639).
 	addManagedWindowsAnswer(root, "guardrail", func(args []string) error {
 		if command, ok := launcherAuditedWriter(append([]string{"guardrail"}, args...)); ok {
-			return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: change config.yaml in the admin config (MDM or management plane); %s did not change it", command)), 3)
+			return withExitCode(managedWindowsConfigWriterRefusal(command), 3)
 		}
 		return withExitCode(managedDeviceAnswer(fmt.Sprintf("This device is managed: the guardrail is set in the admin config (MDM or management plane). %s",
 			windowsManagedStandardUserViewAnswer("The admission policy and guardrail thresholds", "policy", "show"))), 3)
@@ -151,6 +151,19 @@ func addManagedWindowsSetupAnswer(root *cobra.Command) {
 	}
 	// Every other per-user command gets the managed answer too (GAP-0795).
 	addManagedWindowsPerUserAnswers(root, where)
+}
+
+// managedWindowsConfigWriterRefusal is the one answer to a command that would
+// write config.yaml (config set and unset, the guardrail writers) on a managed
+// Windows computer: the file is the administrator's, the command changed
+// nothing, and the administrator commands that show the deployment and the
+// account's agents are named the way every other refused command names them
+// (managedWindowsPerUserCommandAnswer). The two writers had their own
+// sentence that named none (GAP-0857).
+func managedWindowsConfigWriterRefusal(command string) managedDeviceAnswer {
+	return managedDeviceAnswer(fmt.Sprintf("This device is managed: change config.yaml in the admin config (MDM or management plane); %s did not change it. "+
+		"Your administrator can check the managed deployment %s, and your account's agents with %s. Nothing was changed.",
+		command, managedWindowsAdminStatusHint(), managedWindowsAccountAgentsCommand()))
 }
 
 // managedDeviceAnswer is a managed Windows answer: a sentence that starts
