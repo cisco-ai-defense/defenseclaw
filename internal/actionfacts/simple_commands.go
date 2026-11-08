@@ -1582,8 +1582,9 @@ func simplePlainLiteral(text string) bool {
 	}
 	for index := 0; index < len(text); index++ {
 		char := text[index]
-		if char >= 0x80 || !(char >= 0x30 && char <= 0x39 || char >= 0x41 && char <= 0x5a || char >= 0x61 && char <= 0x7a ||
-			strings.IndexByte("._/:@%+,=-", char) >= 0) {
+		letter := char >= 0x41 && char <= 0x5a || char >= 0x61 && char <= 0x7a
+		digit := char >= 0x30 && char <= 0x39
+		if !letter && !digit && strings.IndexByte("._/:@%+,=-", char) < 0 {
 			return false
 		}
 	}

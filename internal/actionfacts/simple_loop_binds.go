@@ -451,18 +451,6 @@ func simpleForkedScopeName(scope string) string {
 	return name
 }
 
-// simpleQuotedWord reports a word that is one quoted string.
-func simpleQuotedWord(word *syntax.Word) bool {
-	if len(word.Parts) != 1 {
-		return false
-	}
-	switch word.Parts[0].(type) {
-	case *syntax.DblQuoted, *syntax.SglQuoted:
-		return true
-	}
-	return false
-}
-
 // simpleParamNames returns the variables text expands. A statement in a
 // forked state is one iteration of its loop where it spells the variable, and
 // only proves a write to DefenseClaw state (SimpleCommand.LoginGuess): the
