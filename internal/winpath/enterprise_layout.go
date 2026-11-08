@@ -84,22 +84,41 @@ func EnterpriseRootsFor(profile, programFiles, programData string) (EnterpriseRo
 	}, nil
 }
 
-// ValidateEnterpriseInstallRoot accepts exactly the profile's production
-// install root or one run-scoped certification root beneath its
-// certification base.
-func ValidateEnterpriseInstallRoot(roots EnterpriseRoots, root string) error {
+// EnterpriseGatewayServiceName is the gateway service the installer
+// registers for the production install root. internal/managed pins the
+// equality with StandaloneWindowsGatewaySvc.
+const EnterpriseGatewayServiceName = "DefenseClawGateway"
+
+// enterpriseCertificationGatewayPrefix starts the gateway service name of a
+// run-scoped certification install; the run identifier follows.
+const enterpriseCertificationGatewayPrefix = "DefenseClawCertGateway_"
+
+// EnterpriseGatewayServiceForRoot returns the gateway service the installer
+// registers for root, which must be exactly the profile's production install
+// root (DefenseClawGateway) or one run-scoped certification root beneath its
+// certification base (DefenseClawCertGateway_<run id>, the run id being the
+// last folder of the root). Any other root is an error.
+func EnterpriseGatewayServiceForRoot(roots EnterpriseRoots, root string) (string, error) {
 	clean := strings.TrimRight(strings.TrimSpace(root), `\`)
 	if strings.EqualFold(clean, roots.InstallRoot) {
-		return nil
+		return EnterpriseGatewayServiceName, nil
 	}
 	prefix := roots.CertificationInstallBase + `\`
 	if len(clean) > len(prefix) && strings.EqualFold(clean[:len(prefix)], prefix) {
 		runID := clean[len(prefix):]
 		if len(runID) == 10 && strings.Trim(runID, "0123456789abcdef") == "" {
-			return nil
+			return enterpriseCertificationGatewayPrefix + runID, nil
 		}
 	}
-	return fmt.Errorf("Windows enterprise install root %q is neither %q nor a certification root under %q", root, roots.InstallRoot, roots.CertificationInstallBase)
+	return "", fmt.Errorf("windows enterprise install root %q is neither %q nor a certification root under %q", root, roots.InstallRoot, roots.CertificationInstallBase)
+}
+
+// ValidateEnterpriseInstallRoot accepts exactly the profile's production
+// install root or one run-scoped certification root beneath its
+// certification base.
+func ValidateEnterpriseInstallRoot(roots EnterpriseRoots, root string) error {
+	_, err := EnterpriseGatewayServiceForRoot(roots, root)
+	return err
 }
 
 func windowsAbsoluteDrivePath(value string) bool {
