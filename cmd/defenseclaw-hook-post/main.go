@@ -298,6 +298,17 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 			return hookexec.PerUserPostRestartOutageExit
 		}
 		return hookexec.PerUserPostOutageExit
+	case hookexec.PerUserPostListenerUnanswered(err):
+		// The listener of this account took the connection into its queue and
+		// accepted nothing for the whole wait (a stopped or frozen gateway):
+		// the owner is proven, and nothing was sent. It is not the process of
+		// another account; the shell reads it like a gateway that is up and
+		// late, an ordinary tool call following the outage mode and every
+		// other call staying closed.
+		if lateOrdinary(call) {
+			return hookexec.PerUserPostLateOrdinaryExit
+		}
+		return hookexec.PerUserPostNoAnswerExit
 	case hookexec.PerUserPostPeerUnverified(err):
 		// Nothing of the call was sent: the one failure the OpenCode and
 		// Amp plugins send again (GAP-2083). The shell hook reads the

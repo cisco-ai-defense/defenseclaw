@@ -25,11 +25,88 @@ import (
 const procSelfNet = "/proc/self/net"
 
 func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	return verifyPerUserConnectedTupleIn(procSelfNet, os.Geteuid(), perUserConnectedWait, client, server)
+}
+
+// verifyPerUserConnectedTupleIn waits for the gateway to accept the held
+// connection. A connection still unaccepted at the end of the wait proves
+// nothing about the process that will accept it, but when every listener on
+// the server port belongs to this account the socket can only be accepted by
+// this account: it is the gateway of this account, stopped or frozen, and
+// the error says so (errPerUserListenerUnanswered). A listener of another
+// account, one that cannot be read, or a port nobody lists stays unverified.
+func verifyPerUserConnectedTupleIn(procNet string, self int, wait time.Duration, client, server *net.TCPAddr) error {
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	return awaitPerUserLinuxSocket(ctx, os.Geteuid(), func() (int, error) {
-		return findConnectedTCPUID(procSelfNet, client, server)
+	err := awaitPerUserLinuxSocket(ctx, self, func() (int, error) {
+		return findConnectedTCPUID(procNet, client, server)
 	})
+	if errors.Is(err, errConnectedSocketNotAccepted) && listenersAreOwnedBy(procNet, self, server) {
+		return fmt.Errorf("%w: %w", errPerUserListenerUnanswered, err)
+	}
+	return err
+}
+
+// listenersAreOwnedBy reports whether the kernel lists at least one listening
+// socket that can take a connection to server and every one is owned by uid.
+// A dual-stack IPv6 listener appears in tcp6, so both tables are read; a
+// socket bound to the wildcard address counts for the loopback server.
+func listenersAreOwnedBy(procNet string, uid int, server *net.TCPAddr) bool {
+	key, table, err := procTCPEndpoint(server)
+	if err != nil {
+		return false
+	}
+	any4 := fmt.Sprintf("00000000:%04X", server.Port)
+	any6 := fmt.Sprintf("00000000000000000000000000000000:%04X", server.Port)
+	keys := map[string][]string{"tcp": {key, any4}, "tcp6": {any6}}
+	if table == "tcp" {
+		keys["tcp6"] = append(keys["tcp6"], mappedTCP6Endpoint(server))
+	} else {
+		keys["tcp"] = nil
+		keys["tcp6"] = append(keys["tcp6"], key)
+	}
+	found := false
+	for _, name := range []string{"tcp", "tcp6"} {
+		owned, seen, ok := readListenerOwners(procNet, name, keys[name], uid)
+		if !ok || !owned {
+			return false
+		}
+		found = found || seen
+	}
+	return found
+}
+
+// readListenerOwners reads one socket table and reports whether every
+// listening row on one of keys has the owner uid, whether there was any, and
+// whether the table could be read (tcp6 may be missing from a host).
+func readListenerOwners(procNet, table string, keys []string, uid int) (owned, seen, ok bool) {
+	if len(keys) == 0 {
+		return true, false, true
+	}
+	file, err := os.Open(filepath.Join(procNet, table))
+	if err != nil {
+		return true, false, table == "tcp6" && os.IsNotExist(err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Scan() // header
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 10 || fields[3] != "0A" {
+			continue
+		}
+		for _, key := range keys {
+			if !strings.EqualFold(fields[1], key) {
+				continue
+			}
+			owner, err := strconv.Atoi(fields[7])
+			if err != nil || owner != uid {
+				return false, true, true
+			}
+			seen = true
+		}
+	}
+	return true, seen, scanner.Err() == nil
 }
 
 // Connect can finish before the gateway accepts the same held socket. Until
