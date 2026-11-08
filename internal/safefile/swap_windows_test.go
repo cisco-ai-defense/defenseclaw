@@ -396,6 +396,30 @@ func TestCompareAndSwapFileTransactsNonImagePublication(t *testing.T) {
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
 }
 
+func TestCompareAndSwapFileRetriesTransactionalConflict(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, "new")
+	previous := swapTransactedRename
+	defer func() { swapTransactedRename = previous }()
+	calls := 0
+	swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
+		calls++
+		if calls == 1 {
+			return windows.ERROR_TRANSACTIONAL_CONFLICT
+		}
+		return renameTransacted(from, to, flags, tx)
+	}
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	if err != nil || !result.Swapped || calls != 2 {
+		t.Fatalf("CAS publication: result=%+v calls=%d err=%v", result, calls, err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
+}
+
 func TestCompareAndSwapFileLeavesProgramImagesOutsideTransactions(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "program.exe")
