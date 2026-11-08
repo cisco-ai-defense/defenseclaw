@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -948,20 +949,29 @@ func ensureManagedBackupDirRestricted(dir string) error {
 	return nil
 }
 
+// readManagedTarget reads a managed target without waiting on it. A missing
+// path is (nil, nil, nil); anything that is not a regular file (a named pipe, a
+// device, a directory) is an error, because opening a named pipe for reading
+// blocks until a writer appears and would stall the Setup that inspects it.
 func readManagedTarget(path string) ([]byte, os.FileInfo, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, nil
-		}
-		return nil, nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	info, err := os.Stat(path)
+	file, err := openManagedTargetForRead(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, nil
 		}
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
 		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s is %s, not a regular file", path, hookConfigFileKind(info.Mode()))
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return data, info, nil
 }
