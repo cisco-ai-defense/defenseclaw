@@ -99,10 +99,11 @@ func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr)
 // heldByNoOtherProcessOfThisAccount reports whether no process other than pid
 // holds one of the socket inodes. Every process of this account is read. A
 // process that cannot be read is skipped when the kernel refuses the read as a
-// permission matter (a non-dumpable process such as an sshd session child, or
-// another account's process) or the process is gone or exiting: such a process
-// is not a copy of the gateway's own descriptors, which a fork keeps readable.
-// Any other read failure leaves the answer open, so it is false.
+// permission matter of the whole process (a non-dumpable process such as an
+// sshd session child, see socketInodesOf) or the process is gone or exiting:
+// such a process is not a copy of the gateway's own descriptors, which a fork
+// keeps readable. A live thread that cannot be read beside readable ones, and
+// any other read failure, leave the answer open, so it is false.
 func heldByNoOtherProcessOfThisAccount(procRoot string, pid int, inodes []string) bool {
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
@@ -170,18 +171,30 @@ func readListenerInodes(procNet, table string, keys []string) ([]string, bool) {
 	return inodes, scanner.Err() == nil
 }
 
+// errUnreadableLiveThread is a refusal that is not a permission skip: a live
+// thread whose descriptor folder this account may not read, in a process the
+// account cannot be shown to be unable to read as a whole.
+var errUnreadableLiveThread = errors.New("a live thread of the process has a descriptor folder this account may not read")
+
 // socketInodesOf lists the socket inodes process pid holds open, from the
 // descriptor folder of each of its threads. Threads usually share one
 // descriptor table, but a thread can own a private copy (unshare with
 // CLONE_FILES) that keeps a socket open after the leader closed it, and the
 // leader folder /proc/<pid>/fd shows only the leader table, so every thread
-// folder is read. A thread that exits while the list is read is skipped. A
-// thread folder the kernel refuses (permission) is skipped too when another
-// thread folder of the process was read: a thread that has exited, such as a
-// leader that left while its workers run, holds no descriptors, and
-// dumpability belongs to the process, so a process whose live threads are
-// readable has no unreadable live thread. When no thread folder can be read
-// the permission error is returned.
+// folder is read. A thread that exits while the list is read is skipped, and
+// so is the folder of a thread that has exited but is still listed (the
+// leader of a process whose workers run on is a zombie): it holds no
+// descriptors.
+//
+// A folder (or a link in it) the kernel refuses for a thread that is alive is
+// a thread this account cannot see into. Credentials belong to the thread, so
+// such a thread can sit beside readable ones, and it may hold the socket; the
+// answer is errUnreadableLiveThread then. The one refusal that is a plain permission
+// error is a process none of whose threads can be read, all of them with this
+// account's own user and group IDs: only the dumpable flag (shared by every
+// thread) explains that, as for an sshd session child, and it is not a copy of
+// the gateway's descriptors, which a fork keeps readable. Any other unreadable
+// live process, such as one holding group IDs of another group, is ambiguous.
 func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
 	taskDir := filepath.Join(procRoot, strconv.Itoa(pid), "task")
 	threads, err := os.ReadDir(taskDir)
@@ -190,38 +203,108 @@ func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
 	}
 	held := make(map[string]bool)
 	var denied error
-	read := 0
+	read, unreadable := 0, 0
+	sameIDs := true
 	for _, thread := range threads {
-		dir := filepath.Join(taskDir, thread.Name(), "fd")
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
-				continue // thread gone
+		threadDir := filepath.Join(taskDir, thread.Name())
+		sockets, err := socketsOfThread(threadDir)
+		switch {
+		case err == nil:
+			read++
+			for inode := range sockets {
+				held[inode] = true
 			}
-			if errors.Is(err, os.ErrPermission) {
-				denied = err
-				continue
+		case errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH):
+			// thread gone
+		case errors.Is(err, os.ErrPermission):
+			denied = err
+			if !threadHasExited(threadDir) {
+				unreadable++
+				sameIDs = sameIDs && threadHasOwnIDs(threadDir)
 			}
+		default:
 			return nil, err
 		}
-		read++
-		for _, entry := range entries {
-			target, err := os.Readlink(filepath.Join(dir, entry.Name()))
-			if err != nil {
-				if errors.Is(err, os.ErrNotExist) {
-					continue // closed while listing
-				}
-				return nil, err
-			}
-			if inode, ok := strings.CutPrefix(target, "socket:["); ok {
-				held[strings.TrimSuffix(inode, "]")] = true
-			}
-		}
 	}
-	if denied != nil && read == 0 {
+	switch {
+	case unreadable > 0 && (read > 0 || !sameIDs):
+		return nil, errUnreadableLiveThread
+	case denied != nil && read == 0:
 		return nil, denied
 	}
 	return held, nil
+}
+
+// socketsOfThread lists the socket inodes in one thread's descriptor folder.
+// The kernel can let the folder be listed and still refuse to read the links
+// in it (the check on the links is the one that looks at the thread's
+// credentials), so a refusal of either is a permission error of the thread.
+func socketsOfThread(threadDir string) (map[string]bool, error) {
+	dir := filepath.Join(threadDir, "fd")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	sockets := make(map[string]bool)
+	for _, entry := range entries {
+		target, err := os.Readlink(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // closed while listing
+			}
+			return nil, err
+		}
+		if inode, ok := strings.CutPrefix(target, "socket:["); ok {
+			sockets[strings.TrimSuffix(inode, "]")] = true
+		}
+	}
+	return sockets, nil
+}
+
+// threadHasExited reports whether the task folder is one of a thread that has
+// exited (zombie or dead state) or is gone. A state that cannot be read is a
+// live thread.
+func threadHasExited(threadDir string) bool {
+	raw, err := os.ReadFile(filepath.Join(threadDir, "stat"))
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
+	}
+	// pid (comm) state ...: comm may hold spaces and parentheses, so the
+	// state follows the last closing parenthesis.
+	text := string(raw)
+	end := strings.LastIndexByte(text, ')')
+	if end < 0 || end+2 >= len(text) {
+		return false
+	}
+	return text[end+2] == 'Z' || text[end+2] == 'X'
+}
+
+// threadHasOwnIDs reports whether every user and group ID of the thread (real,
+// effective, saved, file system) is this account's own, from the Uid and Gid
+// lines of its status. Anything unreadable is false.
+func threadHasOwnIDs(threadDir string) bool {
+	raw, err := os.ReadFile(filepath.Join(threadDir, "status"))
+	if err != nil {
+		return false
+	}
+	want := map[string]string{"Uid:": strconv.Itoa(os.Geteuid()), "Gid:": strconv.Itoa(os.Getegid())}
+	seen := 0
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || want[fields[0]] == "" {
+			continue
+		}
+		if len(fields) != 5 {
+			return false
+		}
+		for _, id := range fields[1:] {
+			if id != want[fields[0]] {
+				return false
+			}
+		}
+		seen++
+	}
+	return seen == 2
 }
 
 // Connect can finish before the gateway accepts the same held socket. Until

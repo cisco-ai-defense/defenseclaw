@@ -150,14 +150,7 @@ func TestListenersHeldOnlyByTheRecordedGateway(t *testing.T) {
 				if os.Geteuid() == 0 {
 					t.Skip("root reads every descriptor list")
 				}
-				hidden := filepath.Join(procRoot, "5252", "task", "5252", "fd")
-				if err := os.MkdirAll(hidden, 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Chmod(hidden, 0); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = os.Chmod(hidden, 0o755) })
+				writeFakeProcess(t, procRoot, 5252, fakeThread{tid: 5252, state: "S", ids: "own"})
 			}
 			if got := listenersHeldOnlyBy(procTables(t, tc.tcp, tc.tcp6), procRoot, gateway, server); got != tc.want {
 				t.Fatalf("listenersHeldOnlyBy = %v, want %v", got, tc.want)

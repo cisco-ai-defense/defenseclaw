@@ -182,7 +182,7 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 				if strings.Contains(out, "fail mode open for an outage") {
 					t.Fatalf("an unproven listener was reported as an outage: %q", out)
 				}
-				if !strings.Contains(out, foreignListenerReasonPrefix) {
+				if !strings.Contains(out, unprovenListenerReasonPrefix) || strings.Contains(out, foreignListenerReasonPrefix) {
 					t.Fatalf("the deny does not name the listener: %q", out)
 				}
 				if n := peer.received.Load(); n != 0 {
