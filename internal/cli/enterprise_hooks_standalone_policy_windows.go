@@ -21,7 +21,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -551,27 +550,8 @@ func windowsStandaloneRevokedUserCleanupConnector(name string) bool {
 	return windowsStandalonePerUserCleanupConnector(name) || enterprisehooks.WindowsMachineScopeUserRuntimeConnector(name)
 }
 
-// enterpriseHookWindowsConnectorUserRuntimeRemover and
-// enterpriseHookWindowsRemovedConnectorRecorder are replaceable in tests.
-var (
-	enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
-	enterpriseHookWindowsRemovedConnectorRecorder    = recordWindowsStandaloneRemovedConnector
-)
-
-// recordWindowsStandaloneRemovedConnector writes the removed-connectors record
-// for a machine-scope connector whose per-user files the cleanup removed, when
-// the loaded config no longer publishes the connector: the administrator took
-// it off the roster. A connector the config still publishes was dropped for
-// this account alone (it is excluded, or the agent is gone), which is not a
-// roster removal and is not recorded.
-func recordWindowsStandaloneRemovedConnector(entry enterpriseHookUserCleanup) error {
-	if cfg == nil || enterprisepolicy.StandaloneConnectorPublished(cfg, entry.Connector) {
-		return nil
-	}
-	return recordEnterpriseHookRemovedConnector(cfg.DataDir, managed.RemovedConnector{
-		Connector: entry.Connector, SID: entry.SID, User: entry.User, UserHome: entry.UserHome,
-	}, time.Now())
-}
+// enterpriseHookWindowsConnectorUserRuntimeRemover is replaceable in tests.
+var enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
 
 // enterpriseHookStandalonePlatformRevokeUsers removes DefenseClaw's own hook
 // registrations and plugins (Amp, Antigravity, Copilot, Devin, Hermes,
@@ -585,11 +565,24 @@ func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.
 		return nil
 	}
 	// A connector back on the roster for an account, or an account that is
-	// gone, ends its removed-connectors record first.
-	if err := pruneEnterpriseHookRemovedConnectors(cfg.DataDir, manifest,
-		func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) },
+	// gone, ends its removed-connectors record; a machine-scope connector the
+	// config no longer publishes is recorded for each account the guardian's
+	// last pass or its ledger held a row of it for.
+	published := func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) }
+	if err := pruneEnterpriseHookRemovedConnectors(cfg.DataDir, manifest, published,
 		func(sid string) bool { return enterpriseHookWindowsUserProfileRemoved(sid) },
 		time.Now()); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise removed connectors record: %v\n", err)
+	}
+	var held []enterpriseHookReconcileRow
+	if state, _, err := loadEnterpriseHookGuardianState(cfg.DataDir); err == nil {
+		held = append(held, state.Results...)
+	}
+	if authorization, _, err := loadEnterpriseHookGuardianAuthorization(cfg.DataDir); err == nil {
+		held = append(held, authorization.ProtectedTargets...)
+	}
+	if err := recordEnterpriseHookRemovedConnectors(cfg.DataDir, held, manifest, published,
+		enterprisehooks.WindowsMachineScopeUserRuntimeConnector, time.Now()); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise removed connectors record: %v\n", err)
 	}
 	return reconcileEnterpriseHookUserCleanups(
@@ -660,9 +653,6 @@ func attemptWindowsStandaloneUserCleanup(
 		// in; no session token is needed and none is waited for (GAP-0916).
 		if err := enterpriseHookWindowsConnectorUserRuntimeRemover(home, entry.SID, entry.DataDir, entry.Connector); err != nil {
 			return enterpriseHookUserCleanupFailed, err
-		}
-		if err := enterpriseHookWindowsRemovedConnectorRecorder(entry); err != nil {
-			return enterpriseHookUserCleanupFailed, fmt.Errorf("record the removed connector: %w", err)
 		}
 		return enterpriseHookUserCleanupDone, nil
 	}

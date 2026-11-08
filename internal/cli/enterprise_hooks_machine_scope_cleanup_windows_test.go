@@ -9,12 +9,9 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-0916: a connector a roster change took off the roster leaves its scoped
@@ -25,16 +22,8 @@ import (
 // under the account's own session.
 func TestAttemptWindowsStandaloneUserCleanupRemovesMachineScopeRuntimeWithoutASession(t *testing.T) {
 	home := t.TempDir()
-	original, originalRecorder := enterpriseHookWindowsConnectorUserRuntimeRemover, enterpriseHookWindowsRemovedConnectorRecorder
-	t.Cleanup(func() {
-		enterpriseHookWindowsConnectorUserRuntimeRemover, enterpriseHookWindowsRemovedConnectorRecorder = original, originalRecorder
-	})
-	var recorded []string
-	recordErr := error(nil)
-	enterpriseHookWindowsRemovedConnectorRecorder = func(entry enterpriseHookUserCleanup) error {
-		recorded = append(recorded, entry.Connector)
-		return recordErr
-	}
+	original := enterpriseHookWindowsConnectorUserRuntimeRemover
+	t.Cleanup(func() { enterpriseHookWindowsConnectorUserRuntimeRemover = original })
 	type call struct{ home, sid, dataDir, connector string }
 	var calls []call
 	removeErr := error(nil)
@@ -61,21 +50,10 @@ func TestAttemptWindowsStandaloneUserCleanupRemovesMachineScopeRuntimeWithoutASe
 			t.Fatalf("%s: outcome=%d err=%v calls=%+v", name, outcome, err, calls)
 		}
 	}
-	if strings.Join(recorded, ",") != "Cursor,claudecode,codex" {
-		t.Fatalf("recorded removed connectors = %v, want one per completed cleanup", recorded)
-	}
-	// A record that cannot be written fails the cleanup, which is retried.
-	recordErr = errors.New("record locked")
-	entryR := enterpriseHookUserCleanup{Connector: "cursor", SID: userCleanupSIDA, UserHome: home, DataDir: filepath.Join(home, ".defenseclaw")}
-	if outcome, err := attemptWindowsStandaloneUserCleanup(context.Background(), entryR); outcome != enterpriseHookUserCleanupFailed || err == nil {
-		t.Fatalf("record failure: outcome=%d err=%v", outcome, err)
-	}
-	recordErr = nil
-	recorded = nil
 	removeErr = errors.New("a file is held")
 	entry := enterpriseHookUserCleanup{Connector: "cursor", SID: userCleanupSIDA, UserHome: home, DataDir: filepath.Join(home, ".defenseclaw")}
-	if outcome, err := attemptWindowsStandaloneUserCleanup(context.Background(), entry); outcome != enterpriseHookUserCleanupFailed || err == nil || len(recorded) != 0 {
-		t.Fatalf("failed removal: outcome=%d err=%v recorded=%v, want a failure the guardian retries and no record", outcome, err, recorded)
+	if outcome, err := attemptWindowsStandaloneUserCleanup(context.Background(), entry); outcome != enterpriseHookUserCleanupFailed || err == nil {
+		t.Fatalf("failed removal: outcome=%d err=%v, want a failure the guardian retries", outcome, err)
 	}
 	// A profile folder that is gone is handled before the removal, as for every connector.
 	gone := entry
@@ -102,36 +80,5 @@ func TestWindowsStandaloneRevokedUserCleanupConnectors(t *testing.T) {
 		if windowsStandalonePerUserCleanupConnector(name) {
 			t.Errorf("uninstall's plan took on %q", name)
 		}
-	}
-}
-
-// The record is written only for a connector the loaded config no longer
-// publishes (the administrator removed it from the roster); a connector it
-// still publishes was dropped for this account alone.
-func TestRecordWindowsStandaloneRemovedConnectorNeedsTheConnectorOffTheRoster(t *testing.T) {
-	dataDir := stubRemovedConnectorsRecord(t)
-	previous := cfg
-	t.Cleanup(func() { cfg = previous })
-	entry := enterpriseHookUserCleanup{Connector: "cursor", SID: userCleanupSIDA, User: "alice", UserHome: `C:\Users\alice`}
-
-	cfg = &config.Config{DataDir: dataDir, DeploymentMode: string(managed.DeploymentModeManagedEnterprise), Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone}}
-	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"cursor": {}}
-	if err := recordWindowsStandaloneRemovedConnector(entry); err != nil {
-		t.Fatal(err)
-	}
-	if entries, _ := loadEnterpriseHookRemovedConnectors(dataDir); len(entries) != 0 {
-		t.Fatalf("a connector still on the roster was recorded as removed: %+v", entries)
-	}
-	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {}}
-	if err := recordWindowsStandaloneRemovedConnector(entry); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := loadEnterpriseHookRemovedConnectors(dataDir)
-	if err != nil || len(entries) != 1 || entries[0].Connector != "cursor" || entries[0].User != "alice" || entries[0].SID != userCleanupSIDA {
-		t.Fatalf("entries = %+v, %v", entries, err)
-	}
-	cfg = nil
-	if err := recordWindowsStandaloneRemovedConnector(entry); err != nil {
-		t.Fatalf("no config: %v", err)
 	}
 }
