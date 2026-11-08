@@ -19,6 +19,8 @@
 package cli
 
 import (
+	"fmt"
+
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -66,9 +68,11 @@ func keepConfigDACL(path string) (apply func(paths ...string) error, err error) 
 // that account as its owner, and renaming it into place leaves the record
 // with the wrong owner until the guardian puts it back (GAP-0899).
 //
-// The owner is taken first with the writer's own token, then with the
-// restore and take-ownership privileges enabled, as the guardian's repair
-// does. A token that holds neither stamps the DACL alone, as before.
+// The owner is taken first with the token of the writing account, then with
+// the restore and take-ownership privileges enabled, as the guardian repair
+// does. A token that holds neither can still stamp the DACL, but only on a
+// file that already has the owner of path; otherwise the stamp fails and the
+// caller publishes nothing.
 func keepConfigSecurity(path string) (apply func(paths ...string) error, err error) {
 	extended, err := winpath.Extended(path)
 	if err != nil {
@@ -105,7 +109,16 @@ func keepConfigSecurity(path string) (apply func(paths ...string) error, err err
 	}, nil
 }
 
+// setNamedSecurityInfo is the Windows call that stamps a descriptor; tests
+// replace it to deny the owner stamp.
+var setNamedSecurityInfo = windows.SetNamedSecurityInfo
+
 // stampConfigSecurity stamps owner, group and the protected dacl on target.
+// The DACL alone is accepted only when target already has owner: the right to
+// set a DACL does not imply the right to set an owner, so a DACL-only success
+// after both full attempts failed proves nothing about the owner, and the
+// record would be published with the writing account as owner until the hook
+// guardian put it back (GAP-0899).
 func stampConfigSecurity(target string, owner, group *windows.SID, dacl *windows.ACL) error {
 	daclOnly := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	full := daclOnly
@@ -116,7 +129,7 @@ func stampConfigSecurity(target string, owner, group *windows.SID, dacl *windows
 		full |= windows.GROUP_SECURITY_INFORMATION
 	}
 	set := func(information windows.SECURITY_INFORMATION) error {
-		return windows.SetNamedSecurityInfo(target, windows.SE_FILE_OBJECT, information, owner, group, dacl, nil)
+		return setNamedSecurityInfo(target, windows.SE_FILE_OBJECT, information, owner, group, dacl, nil)
 	}
 	if full == daclOnly {
 		return set(daclOnly)
@@ -124,8 +137,22 @@ func stampConfigSecurity(target string, owner, group *windows.SID, dacl *windows
 	if err := set(full); err == nil {
 		return nil
 	}
-	if err := managed.RunWithWindowsRepairPrivileges(func() error { return set(full) }); err == nil {
+	fullErr := managed.RunWithWindowsRepairPrivileges(func() error { return set(full) })
+	if fullErr == nil {
 		return nil
+	}
+	if owner != nil {
+		sd, err := windows.GetNamedSecurityInfo(target, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if err != nil {
+			return err
+		}
+		current, _, err := sd.Owner()
+		if err != nil {
+			return err
+		}
+		if current == nil || !windows.EqualSid(current, owner) {
+			return fmt.Errorf("set the owner of %s to %s: %w", target, owner, fullErr)
+		}
 	}
 	return set(daclOnly)
 }
