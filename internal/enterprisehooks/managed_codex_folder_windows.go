@@ -121,11 +121,10 @@ func windowsCodexMachineFolderUntrusted(folder string, cause error) error {
 // WindowsCodexMachineFolderLink returns the link, or non-folder, that sits on
 // the path of the Codex machine-policy folder, found without opening or
 // following anything, and "" when there is none. It names nothing and creates
-// nothing, so a status check can ask it as often as it likes. Standalone only.
+// nothing, so a status check can ask it as often as it likes. The caller is the
+// standalone status path (the CLI process of an administrator carries no
+// standalone profile in its environment, so this does not test for one).
 func WindowsCodexMachineFolderLink() (string, error) {
-	if !windowsEnterpriseStandaloneProcess() {
-		return "", nil
-	}
 	selector, err := windowsManagedRuntimeSelectorPath("codex")
 	if err != nil {
 		return "", err
