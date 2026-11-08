@@ -1785,13 +1785,15 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 							filepath.Clean(simple.CWD) != filepath.Clean(cwd) {
 							commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
 						}
-						// A reading that spells a path through a value the walk
-						// follows (u=$USER; ... /home/$u/f, a loop variable) names
-						// a file and a link the command text does not: it is
-						// described as the reading of a runtime-expanded word is,
-						// for a gateway that cannot walk the home itself.
-						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) &&
-							filepath.Clean(simple.CWD) == filepath.Clean(cwd) && strings.Contains(command, "$") &&
+						// A reading that spells a path through the login or a
+						// loop variable (u=$USER; ... /home/$u/f) names a file and a
+						// link the command text does not: it is described as the
+						// reading of a runtime-expanded word is, for a gateway that
+						// cannot walk the home itself. Only the readings that prove
+						// a write to state (LoginGuess) are described; any other
+						// reading keeps the answer the command text has.
+						if simple.EvaluationFailure == "" && simple.LoginGuess && simple.Text != command &&
+							filepath.IsAbs(simple.CWD) && filepath.Clean(simple.CWD) == filepath.Clean(cwd) &&
 							!strings.Contains(command, simple.Text) && !slices.Contains(dynamicReadings, simple.Text) {
 							if len(dynamicReadings) >= maxResolvedReadings {
 								truncated = true
