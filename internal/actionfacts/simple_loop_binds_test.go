@@ -24,7 +24,7 @@ func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
 		{"nested", "for a in $USER; do for u in $a; do sed -i x /r/$u/.defenseclaw/config.yaml; done; done", []string{state}, nil},
 		{"unread word", "for u in $(ls) home; do sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
 		{"pattern word stays unread", "for u in h*; do sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{"sed -i x '/r/h*/.defenseclaw/config.yaml'"}},
-		{"twelve words are read", "for u in a b c d e f g h i j k l; do sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{"sed -i x '/r/a/.defenseclaw/config.yaml'", "sed -i x '/r/l/.defenseclaw/config.yaml'"}, nil},
+		{"plain words are read up to the bound", "for u in a b c d e f g h i j k l; do sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{"sed -i x '/r/a/.defenseclaw/config.yaml'", "sed -i x '/r/d/.defenseclaw/config.yaml'"}, []string{"sed -i x '/r/e/.defenseclaw/config.yaml'"}},
 		{"login after eight words", "for u in a b c d e f g h $USER; do sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
 		{"body binds the name", "for u in other; do u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, []string{other}},
 		{"read in the body", "for u in other; do read u; sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{other}},

@@ -21,16 +21,19 @@ import (
 //
 // The walk forks its states once, where it enters the loop (simpleForkLoopBind),
 // and drops the name where the loop ends. The readings are proof-only, so they
-// have a bound of their own and do not count against maxSimpleStates. A list
-// with more distinct words than maxLoopReadings is read for the words that can
-// name DefenseClaw state first: an expansion, the login, a path or a dotted
-// name. The rest, and a list the walk cannot read at all, stay unread and
-// follow the compound-limit rule: the walk does not report a limit for them,
-// because a long ordinary list is not an over-limit call.
+// have a bound of their own and do not count against maxSimpleStates. The
+// words that can name DefenseClaw state are read first: an expansion, the
+// login, a path or a dotted name. Of the other words the first
+// maxPlainReadings are read. The rest, and a list the walk cannot read at all,
+// stay unread and follow the compound-limit rule: the walk does not report a
+// limit for them, because a long ordinary list is not an over-limit call.
 const (
 	// maxLoopReadings is the most distinct values one loop variable is read as
-	// from one state.
-	maxLoopReadings = 48
+	// from one state; maxPlainReadings of them may be plain words, which only
+	// name state through a link. Each reading costs a check of its own, and a
+	// hook answers within a bound of its time.
+	maxLoopReadings  = 48
+	maxPlainReadings = 4
 	// maxForkedStates is the most states, forked readings included, that a
 	// scope holds.
 	maxForkedStates = 256
@@ -157,9 +160,15 @@ func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind) (forked [
 			}
 			return 1
 		})
+		plain := 0
 		for index, read := range candidates {
 			if index == maxLoopReadings {
 				break
+			}
+			if !read.priority {
+				if plain++; plain > maxPlainReadings {
+					break
+				}
 			}
 			alt := prior.clone()
 			alt.vars[bind.name] = read.value

@@ -108,6 +108,7 @@ func TestLoopVariableNearFormsReachState(t *testing.T) {
 		{"for-file-link", `for u in $USER; do sed -i s/a/b/ ` + parent + `$u/statealias; done`, true},
 		{"for-directory-link", `for u in $USER; do sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml; done`, true},
 		{"while-file-link", `echo $USER | while read u; do sed -i s/a/b/ ` + parent + `$u/statealias; done`, true},
+		{"literal-link-name", `for d in ordinary aliasdir; do sed -i s/a/b/ ` + parent + active + `/$d/config.yaml; done`, true},
 		{"assigned-file-link", `u=$USER; sed -i s/a/b/ ` + parent + `$u/statealias`, true},
 		{"assigned-directory-link", `u=$USER; sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml`, true},
 		{"literal-file-link", `sed -i s/a/b/ ` + parent + active + `/statealias`, true},

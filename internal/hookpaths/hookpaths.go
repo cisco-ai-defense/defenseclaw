@@ -1794,7 +1794,8 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 						// reading keeps the answer the command text has.
 						if simple.EvaluationFailure == "" && simple.LoginGuess && simple.Text != command &&
 							filepath.IsAbs(simple.CWD) && filepath.Clean(simple.CWD) == filepath.Clean(cwd) &&
-							!strings.Contains(command, simple.Text) && !slices.Contains(dynamicReadings, simple.Text) {
+							!strings.Contains(command, simple.Text) && !slices.Contains(dynamicReadings, simple.Text) &&
+							readingReachesLink(simple.Text, cwd, home) {
 							if len(dynamicReadings) >= maxResolvedReadings {
 								truncated = true
 							} else {
@@ -3396,6 +3397,30 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 		}
 	}
 	return stackWords, stackStatic, expanded
+}
+
+// readingReachesLink reports a reading with a write operand that lies behind a
+// link, the only reading whose map needs more than its text has: a reading
+// that names no link has the answer of the command text.
+func readingReachesLink(reading, cwd, home string) bool {
+	operands, _, _ := ShellWriteOperands(reading, cwd, home)
+	operands = append(operands, LiteralWriteOperands(reading, cwd, home)...)
+	for _, edit := range inPlaceStateOperands(reading, cwd, home, KnownUser{}) {
+		operands = append(operands, edit.path)
+	}
+	input := actionfacts.Input{Tool: "Bash", Command: reading, CWD: cwd, ActiveHome: home}
+	for _, candidate := range actionfacts.Analyze(input).Paths {
+		if candidate.Resolved != "" && (candidate.Access == actionfacts.PathAccessWrite || candidate.Access == actionfacts.PathAccessAppend) {
+			operands = append(operands, candidate.Resolved)
+		}
+	}
+	for _, operand := range operands {
+		path := OperandPath(operand, cwd)
+		if resolved, ok := ResolveWriteTarget(path); !ok || resolved != filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
 }
 
 // maxResolvedReadings is the most readings of a command, with a variable
