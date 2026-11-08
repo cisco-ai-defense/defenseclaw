@@ -3385,18 +3385,36 @@ func parsePolicyHold(reason string) (fields, copies []string) {
 }
 
 // policyCopyKey names one copy of an asset in a hold tag: its absolute,
-// cleaned path (folded on Windows, as sameWatcherPath does), encoded so that
-// no path can end or split the tag.
+// cleaned path in the spelling it was written with, encoded so that no path
+// can end or split the tag. The spelling is kept because the path is shown to
+// the operator; copies are matched with samePolicyCopy, which folds case on
+// Windows, as sameWatcherPath does.
 func policyCopyKey(path string) string {
 	abs, err := filepath.Abs(strings.TrimSpace(path))
 	if err != nil {
 		abs = strings.TrimSpace(path)
 	}
-	abs = filepath.Clean(abs)
-	if runtime.GOOS == "windows" {
-		abs = strings.ToLower(abs)
+	return base64.RawURLEncoding.EncodeToString([]byte(filepath.Clean(abs)))
+}
+
+// samePolicyCopy reports whether two tag keys name the same copy. Windows
+// paths differ only by case when they name one folder, and a tag written by an
+// earlier build holds the folded spelling.
+func samePolicyCopy(a, b string) bool {
+	return policyCopyKeysEqual(a, b, runtime.GOOS == "windows")
+}
+
+func policyCopyKeysEqual(a, b string, foldCase bool) bool {
+	if a == b {
+		return true
 	}
-	return base64.RawURLEncoding.EncodeToString([]byte(abs))
+	rawA, errA := base64.RawURLEncoding.DecodeString(a)
+	rawB, errB := base64.RawURLEncoding.DecodeString(b)
+	return foldCase && errA == nil && errB == nil && strings.EqualFold(string(rawA), string(rawB))
+}
+
+func hasPolicyCopy(keys []string, key string) bool {
+	return slices.ContainsFunc(keys, func(other string) bool { return samePolicyCopy(other, key) })
 }
 
 // livePolicyCopies are the copies of a tag other than skip whose folder is
@@ -3407,7 +3425,7 @@ func livePolicyCopies(copies []string, skip string) []string {
 	var live []string
 	for _, key := range copies {
 		raw, err := base64.RawURLEncoding.DecodeString(key)
-		if key != skip && err == nil && !policyCopyGone(string(raw)) && !slices.Contains(live, key) {
+		if err == nil && !samePolicyCopy(key, skip) && !policyCopyGone(string(raw)) && !hasPolicyCopy(live, key) {
 			live = append(live, key)
 		}
 	}
@@ -3636,7 +3654,7 @@ func (w *InstallWatcher) policyHeldScopes(evt InstallEvent) []string {
 			continue
 		}
 		fields, copies := parsePolicyHold(entry.Reason)
-		if !slices.Contains(copies, policyCopyKey(evt.Path)) {
+		if !hasPolicyCopy(copies, policyCopyKey(evt.Path)) {
 			continue
 		}
 		for _, field := range fields {
