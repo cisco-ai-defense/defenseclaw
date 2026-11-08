@@ -14227,7 +14227,7 @@ function Set-DefenseClawManagedAcls {
             -Kind MachinePolicyFile `
             -GatewayServiceSID $gatewaySID
     }
-    $codexStateCopy = Resolve-DefenseClawCodexManagedHooksStateCopy `
+    $codexStateCopy = Resolve-DefenseClawCodexManagedHooksStateCopySettled `
         -Path $Layout.CodexManagedHooksStatePath
     if (-not $SkipCodexMachineState -and
         [bool]$Layout.CodexTargetEnabled -and
@@ -16554,7 +16554,7 @@ function New-DefenseClawDeploymentMetadata {
         if ([bool]$Layout.CodexTargetEnabled) {
             foreach ($entry in @(
                 @($Layout.CodexMachinePolicyPath, 'policy'),
-                @((Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath), 'managed hooks state')
+                @((Resolve-DefenseClawCodexManagedHooksStateCopySettled -Strict -Path $Layout.CodexManagedHooksStatePath), 'managed hooks state')
             )) {
                 if (-not (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $entry[0] `
@@ -17327,7 +17327,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
             if ([string]$row[0] -ceq 'CodexManagedHooksStatePath' -and
                 -not [string]::IsNullOrWhiteSpace($entryPath)) {
                 # The copy of the Codex state the hook reads (GAP-0650).
-                $entryPath = Resolve-DefenseClawCodexManagedHooksStateCopy -Path $entryPath
+                $entryPath = Resolve-DefenseClawCodexManagedHooksStateCopySettled -Path $entryPath
             }
             $entries.Add([pscustomobject]@{
                 Path     = $entryPath
@@ -19216,6 +19216,10 @@ function Sync-DefenseClawCodexManagedHooksStateCopy {
         return
     }
     $committed = Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout
+    # The plain resolver, on purpose (GAP-0877, review S1): this computes the
+    # name of the copy to WRITE for the counter the rollback left, odd or
+    # even, with the writer stopped by the rollback; waiting for it to settle
+    # would be wrong, and nothing here judges a copy another process made.
     $current = Resolve-DefenseClawCodexManagedHooksStateCopy -Path $statePath
     $left = @(Remove-DefenseClawCodexManagedHooksStateCopies -Directory $directory -Keep @($committed))
     foreach ($copy in $left) {
@@ -19300,7 +19304,7 @@ function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
     # the fixed name of 1.0.8), a fixed name an earlier release left, and
     # the writer copy (GAP-0650).
     $copies = [Collections.Generic.List[string]]::new()
-    foreach ($candidate in @($path, (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $path))) {
+    foreach ($candidate in @($path, (Resolve-DefenseClawCodexManagedHooksStateCopySettled -Path $path))) {
         if (-not $copies.Contains($candidate) -and
             (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate)) {
             $copies.Add($candidate)
@@ -19439,6 +19443,43 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
         (Format-DefenseClawSetupAction -Action '/repair') +
         ' again once no Codex writer is running (the next Codex writer pass ends a stopped transaction)'
     )
+}
+
+function Resolve-DefenseClawCodexManagedHooksStateCopySettled {
+    <#
+        The Codex hook copy of the state at $Path for a caller that reads or
+        stamps it, read the way the hook reads it: through
+        Wait-DefenseClawCodexManagedHooksStateSettled, so a caller that looks
+        while the Codex writer is mid-transaction does not resolve the copy of
+        "odd counter + 1", which does not exist yet (GAP-0877, review S1).
+        Resolve-DefenseClawCodexManagedHooksStateCopy stays for the callers
+        that compute a name to write or to remove (Sync-... after a rollback)
+        and for a forced uninstall, whose writers are stopped.
+        Off the standalone profile this is the plain resolver: Secure Client
+        has no writer lock and keeps the fixed-name state of 1.0.8.
+        -Strict is for a caller that judges or records the state, where a
+        counter that stays odd or keeps moving to the bound refuses with the
+        named codex_state_unsettled; without it (an ACL stamp, a gate that
+        names paths, a check that the state is gone) such a writer falls back
+        to the plain resolver, as before this wait, and the verify steps
+        (Assert-DefenseClawCodexManagedHooksStateFile) still refuse it.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Strict
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Path)
+    }
+    try {
+        return [string](Wait-DefenseClawCodexManagedHooksStateSettled -Path $Path).Path
+    }
+    catch {
+        if ($Strict -or -not ([string]$_.Exception.Message).StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+            throw
+        }
+        return (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Path)
+    }
 }
 
 function Assert-DefenseClawCodexManagedHooksStateFile {
@@ -29170,7 +29211,7 @@ function Get-DefenseClawSharedManagedHookOwners {
     $specifications = @(
         @{
             name = 'Codex'
-            state = [string](Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath)
+            state = [string](Resolve-DefenseClawCodexManagedHooksStateCopySettled -Strict -Path $Layout.CodexManagedHooksStatePath)
             limit = 4194304
             bindings = @(@{
                 path = [string]$Layout.CodexMachinePolicyPath
@@ -30003,7 +30044,7 @@ function Complete-DefenseClawCodexRequirementsRemoval {
     # (GAP-0650).
     $committedState = Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout
     if ((Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath)) -or
+        -LiteralPath (Resolve-DefenseClawCodexManagedHooksStateCopySettled -Path $Layout.CodexManagedHooksStatePath)) -or
         ([IO.File]::Exists($committedState) -and [IO.FileInfo]::new($committedState).Length -gt 0)) {
         throw 'DefenseClaw Codex managed-hooks state remains after managed removal'
     }
@@ -47719,6 +47760,10 @@ function Restore-DefenseClawForcedUninstallCodexPolicy {
         return 'the forced uninstall did not resolve its InstallRoot, so it could not prove the Codex ownership record is this deployment''s'
     }
     $folder = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex')
+    # The plain resolver, on purpose (GAP-0877, review S1): the forced uninstall
+    # has stopped the guardian and the gateway and moved StateRoot aside
+    # (Invoke-DefenseClawForcedUninstallPreparation) before this runs, so no
+    # Codex writer transaction is open and the counter cannot move under it.
     $owner = Get-DefenseClawNuclearConnectorOwner `
         -StatePath (Resolve-DefenseClawCodexManagedHooksStateCopy -Path ([IO.Path]::Combine($folder, '.defenseclaw-managed-hooks.state'))) `
         -InstallRoot $installRoot

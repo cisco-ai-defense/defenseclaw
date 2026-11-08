@@ -24,11 +24,20 @@ $end = $source.IndexOf("`nfunction ", $begin, [StringComparison]::Ordinal)
 if ($begin -lt 0 -or $end -le $begin) { throw 'lazy lock file function was not found' }
 Invoke-Expression $source.Substring($begin, $end - $begin)
 # GAP-0650: the managed ACL pass also stamps the Codex state copy the hook
-# reads; slice the real resolver of that copy from the module as well.
-$begin = $source.IndexOf('function Resolve-DefenseClawCodexManagedHooksStateCopy {', [StringComparison]::Ordinal)
-$end = $source.IndexOf("`nfunction ", $begin, [StringComparison]::Ordinal)
-if ($begin -lt 0 -or $end -le $begin) { throw 'Codex state copy resolver was not found' }
-Invoke-Expression $source.Substring($begin, $end - $begin)
+# reads; slice the real resolver of that copy from the module as well. Since
+# GAP-0877 it reads the copy through the settle wait, so the wait, the counter
+# reader and the settled resolver come with it.
+foreach ($resolverName in @(
+        'Resolve-DefenseClawCodexManagedHooksStateCopy',
+        'Get-DefenseClawCodexManagedHooksWriterCounter',
+        'Wait-DefenseClawCodexManagedHooksStateSettled',
+        'Resolve-DefenseClawCodexManagedHooksStateCopySettled')) {
+    $begin = $source.IndexOf("function $resolverName {", [StringComparison]::Ordinal)
+    $end = $source.IndexOf("`nfunction ", $begin + 1, [StringComparison]::Ordinal)
+    if ($begin -lt 0 -or $end -le $begin) { throw "$resolverName was not found" }
+    Invoke-Expression $source.Substring($begin, $end - $begin)
+}
+$script:CodexStateSettleSeconds = 30
 $script:AdministratorsSID = 'S-1-5-32-544'
 
 function Get-DefenseClawServiceSID { 'S-1-5-80-1-2-3-4-5' }
