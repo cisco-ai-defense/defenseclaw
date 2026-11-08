@@ -165,7 +165,14 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     # go_test_report.py names the test still running.
     race = "go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "
     assert workflow.count("go test -race") == 0
-    assert workflow.count(race) == 3
+    assert workflow.count(race) == 2
+    # The remaining-package shards run several go test runs in one step: they
+    # share one deadline inside the step budget, and each run is stopped at
+    # most 11 minutes in or when the deadline is up, whichever comes first.
+    shared = 'go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$limit" '
+    assert workflow.count(shared) == 1
+    assert "deadline=$((SECONDS + 960))" in workflow
+    assert 'echo "$((left < 660 ? left : 660))s"' in workflow
     # The three Linux race jobs and the darwin connector parts.
     assert workflow.count("python3 scripts/go_test_report.py --timings") == 4
     assert workflow.count("label: macos-latest darwin connector ") == 4

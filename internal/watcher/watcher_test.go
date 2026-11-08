@@ -40,6 +40,49 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+// migratedAuditDB is the bytes of an audit database the current binary has
+// migrated and closed. Every fixture needs one, and applying the whole
+// migration list to a fresh file costs about 3 s under -race (0.3 s without),
+// so a package of a few hundred fixtures spent more than ten minutes there.
+var migratedAuditDB struct {
+	once sync.Once
+	data []byte
+	err  error
+}
+
+// seedMigratedAuditDB writes a migrated, empty audit database at dbPath so the
+// Init the caller still runs finds the schema in place. Each test opens its
+// own file; only the migration work is shared.
+func seedMigratedAuditDB(t *testing.T, dbPath string) {
+	t.Helper()
+	migratedAuditDB.once.Do(func() {
+		dir, err := os.MkdirTemp("", "watcher-audit-template-")
+		if err != nil {
+			migratedAuditDB.err = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		path := filepath.Join(dir, "template.db")
+		store, err := audit.NewStore(path)
+		if err == nil {
+			err = store.Init()
+			if closeErr := store.Close(); err == nil {
+				err = closeErr
+			}
+		}
+		if err == nil {
+			migratedAuditDB.data, err = os.ReadFile(path)
+		}
+		migratedAuditDB.err = err
+	})
+	if migratedAuditDB.err != nil {
+		t.Fatalf("migrate the template audit database: %v", migratedAuditDB.err)
+	}
+	if err := os.WriteFile(dbPath, migratedAuditDB.data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger *audit.Logger, skillDir string) {
 	t.Helper()
 
@@ -50,6 +93,7 @@ func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger 
 	}
 
 	dbPath := filepath.Join(tmpDir, "test-audit.db")
+	seedMigratedAuditDB(t, dbPath)
 	store, err := audit.NewStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
