@@ -18,8 +18,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 // rel-1-0-6 GAP-0648 (GAP-0167/GAP-0171 replay): a hook process the host
@@ -83,14 +81,6 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 	// A running gateway keeps its answer window, cut by the process cap.
 	capAt := managedAnswerDeadlineCap - gatewayRestartBudget + lead
 	stubManagedLifecycle(t, func() bool { return false })
-	// The service watch spends its restart budget, its state bound and its
-	// repoll on the proof clock, held here. The test moves that clock once
-	// the gateway has taken the call, so a loaded host never turns a stopped
-	// service into an unknown state, nor delays the read past the connection;
-	// the production 250 ms repoll is the product value (GAP-0859). The
-	// answer cap stays on the system clock: a running gateway keeps its
-	// window to it.
-	clock := proofclocktest.Install(t)
 	previousStopped := managedGatewayServiceStopped
 	managedGatewayServiceStopped = func(string) bool { return false }
 	t.Cleanup(func() { managedGatewayServiceStopped = previousStopped })
@@ -98,56 +88,25 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 		name           string
 		running        bool
 		reason         string
-		atLeast, below time.Duration // the cap, system clock; unset: blocked by the watch
+		atLeast, below time.Duration
 	}{
-		{"service stopping", false, managedGatewayRestartingReason, 0, 0},
+		{"service stopping", false, managedGatewayRestartingReason, lead - 50*time.Millisecond, lead + 400*time.Millisecond},
 		{"service running", true, managedGatewayNoAnswerReason, capAt - 100*time.Millisecond, capAt + time.Second},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			stubManagedServiceRunning(t, func(name string) (bool, bool) { return test.running, name == "DefenseClawGateway" })
 			home := t.TempDir()
-			taken := make(chan struct{}, 1)
-			release := make(chan struct{})
-			addr := gatewayAt(t, func(_ http.ResponseWriter, r *http.Request) {
-				select {
-				case taken <- struct{}{}:
-				default:
-				}
-				select {
-				case <-r.Context().Done():
-				case <-release:
-				}
-			})
-			t.Cleanup(func() { close(release) })
-			over := make(chan struct{})
-			driven := make(chan struct{})
-			var budgetSpent atomic.Bool
-			go func() {
-				defer close(driven)
-				select {
-				case <-taken:
-				case <-over:
-					return
-				}
-				budgetSpent.Store(true)
-				clock.Advance(lead)
-			}()
-			result, elapsed := runAgainstGateway(t, "claudecode", addr, func(opts *Options) {
+			result, elapsed := runAgainstGateway(t, "claudecode", hungGateway(t), func(opts *Options) {
 				managedWindowsStandalone(opts)
 				opts.ManagedGatewayServiceName = "DefenseClawGateway"
 				opts.FailureLogHome = userLogHome(home)
 				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`)
 				opts.StartedAt = opts.StartedAt.Add(-gatewayRestartBudget + lead)
 			})
-			close(over)
-			<-driven
 			if !blocked(result) {
 				t.Fatalf("after %s code=%d stdout=%q stderr=%q, want a block", elapsed, result.code, result.stdout, result.stderr)
 			}
-			if test.below == 0 && !budgetSpent.Load() {
-				t.Fatalf("blocked after %s before the restart budget was spent", elapsed)
-			}
-			if test.below != 0 && (elapsed < test.atLeast || elapsed >= test.below) {
+			if elapsed < test.atLeast || elapsed >= test.below {
 				t.Fatalf("blocked after %s, want in [%s, %s)", elapsed, test.atLeast, test.below)
 			}
 			entry := lastHookFailure(t, home)

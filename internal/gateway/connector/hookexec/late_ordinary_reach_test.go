@@ -45,7 +45,6 @@ func TestLateOrdinaryCallProtectedReach(t *testing.T) {
 		t.Fatal(err)
 	}
 	shortAnswerBudget(t, 400*time.Millisecond)
-	settleLateOrdinaryPrepare(t)
 	addr := hungGateway(t)
 	client, err := NewPerUserGatewayHTTPClient(2*time.Second, addr)
 	if err != nil {
