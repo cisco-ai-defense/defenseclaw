@@ -497,3 +497,100 @@ func TestEnumerateUnixReusedAccountDoesNotInheritAVerifiedVersion(t *testing.T) 
 		})
 	}
 }
+
+// An unknown home inode (zero) proves nothing: two unknowns are not the same
+// home. Nothing is recorded for such an owner, a stored record without an
+// inode is not loaded, and an earlier record is not carried for it.
+func TestCarryVerifiedAgentVersionNeverMatchesAnUnknownHomeInode(t *testing.T) {
+	home := t.TempDir()
+	path := installFakeOpenCode(t, home, "echo 2.2.3")
+	conns := []string{"opencode"}
+	good := map[string]string{"opencode": "2.2.3"}
+	unknown := UnixAgentOwner{UID: 1001, Home: home}
+
+	state := &UnixEnumeratorState{Version: 1}
+	carryVerifiedAgentVersions(state, "alice", home, unknown, conns, good, nil, ranFrom(path), nil)
+	if len(state.VerifiedAgents) != 0 {
+		t.Fatalf("a read for an owner without an inode was recorded: %+v", state.VerifiedAgents)
+	}
+	if got := carryVerifiedAgentVersions(state, "alice", home, unknown, conns, nil, unreadableReason(path), nil, nil); got["opencode"] != "" {
+		t.Fatalf("two unknown inodes carried a version: %v", got)
+	}
+
+	// A record that predates the rule (or was edited) is not loaded.
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state = &UnixEnumeratorState{Version: 1}
+	carryVerifiedAgentVersions(state, "alice", home, testOwner(home), conns, good, nil, ranFrom(path), nil)
+	record := state.VerifiedAgents["alice\x00opencode"]
+	record.Owner.HomeInode = 0
+	state.VerifiedAgents["alice\x00opencode"] = record
+	if err := SaveUnixEnumeratorState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	if loaded := LoadUnixEnumeratorState(statePath); len(loaded.VerifiedAgents) != 0 {
+		t.Fatalf("record without a home inode loaded: %+v", loaded.VerifiedAgents)
+	}
+
+	// Twin: a known inode still carries.
+	state = &UnixEnumeratorState{Version: 1}
+	carryVerifiedAgentVersions(state, "alice", home, testOwner(home), conns, good, nil, ranFrom(path), nil)
+	if got := carryVerifiedAgentVersions(state, "alice", home, testOwner(home), conns, nil, unreadableReason(path), nil, nil); got["opencode"] != "2.2.3" {
+		t.Fatalf("a known identity lost its version: %v", got)
+	}
+}
+
+// Through the enumerator on a filesystem that cannot supply a home inode: a
+// home replaced by a new directory (the CLI moved into it) is not enrolled on
+// the version read in the old home when its own read fails.
+func TestEnumerateUnixUnknownHomeInodeDoesNotInheritAVerifiedVersion(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	home := makeHome(t, homes, "alice")
+	path := installFakeOpenCode(t, home, "echo opencode 2.2.3")
+	resolver := &fakeResolver{
+		accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"}},
+		listed:   []string{"alice"},
+	}
+	readFails := false
+	opts := UnixEnumerateOptions{
+		Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+		MachinePolicyConnectors: []string{"opencode"}, State: &UnixEnumeratorState{Version: 1},
+		CheckHome: func(string, int) HomeCheck { return HomeCheck{State: HomeAvailable} },
+		DiscoverSurfaces: func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+			if readFails {
+				return UnixDiscovery{Reasons: unreadableReason(path)}, nil
+			}
+			return UnixDiscovery{Versions: map[string]string{"opencode": "2.2.3"}, VersionSources: ranFrom(path)}, nil
+		},
+	}
+	cfg := enumeratorConfig("opencode")
+	cfg.Enterprise.Enrollment.UnenrolledUsers = "deny"
+	if _, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts); err != nil || len(report.Unprotected) != 0 {
+		t.Fatalf("first read: err = %v, unprotected = %+v", err, report.Unprotected)
+	}
+	old := home + ".old"
+	if err := os.Rename(home, old); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(old, ".local"), filepath.Join(home, ".local")); err != nil {
+		t.Fatal(err)
+	}
+	readFails = true
+	manifest, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range report.Unprotected {
+		if item.Code == UnprotectedCodeHookContractUnverified {
+			return
+		}
+	}
+	t.Fatalf("an unknown home inode let a replaced home inherit the earlier version: unprotected = %+v, targets = %+v", report.Unprotected, manifest.Targets)
+}
