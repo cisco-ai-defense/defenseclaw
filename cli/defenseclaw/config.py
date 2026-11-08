@@ -2191,6 +2191,12 @@ class GatewayConfig:
            resort because plaintext secrets in YAML are discouraged
            (and ``_warn_plaintext_secrets`` already nags about it).
 
+        When ``.env`` holds both gateway-token spellings with different
+        values, the earlier name in this order wins. ``defenseclaw keys set``
+        on either name replaces every spelling already saved, so the two never
+        differ after it; a hand edit of only one spelling is the operator's to
+        make on both.
+
         Returns the empty string when no token is reachable; callers
         gate on the truthiness, so empty == "unauthenticated".
         """
