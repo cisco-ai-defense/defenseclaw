@@ -17995,7 +17995,6 @@ def _gateway_lifecycle_candidate(
             continue
         seen_directories.add(normalized_directory)
         search_directories.append(absolute_directory)
-    sanitized_search_path = os.pathsep.join(search_directories)
     # Lifecycle mutations deliberately ignore DEFENSECLAW_GATEWAY_BIN. The
     # config loader accepts credential names from .env, so an attacker who
     # could previously write that file could otherwise plant an executable
@@ -18003,15 +18002,17 @@ def _gateway_lifecycle_candidate(
     # This install's own gateway comes before PATH: a DefenseClaw Setup 0.8.x
     # folder listed first would otherwise run the lifecycle call (GAP-0100).
     own_gateway = _launcher_sibling_gateway() if search_path is None else None
-    executable = own_gateway or shutil.which(GATEWAY_BIN_NAME, path=sanitized_search_path)
-    if executable and not own_gateway:
-        # Older Python runtimes on Windows can prepend the current directory
-        # even when an explicit PATH is supplied. Accept only a concrete result
-        # whose parent was one of the sanitized search directories.
-        executable_parent = os.path.normcase(os.path.abspath(os.path.dirname(executable)))
-        allowed_parents = {os.path.normcase(directory) for directory in search_directories}
-        if not os.path.isabs(executable) or executable_parent not in allowed_parents:
-            executable = None
+    # Look in each folder by its full name. A bare name with path= makes
+    # shutil.which search the current directory first on Windows, so a stray
+    # gateway there (a build left in the checkout) hid the one on the search path.
+    executable = own_gateway or next(
+        (
+            found
+            for directory in search_directories
+            if (found := shutil.which(os.path.join(directory, GATEWAY_BIN_NAME))) and os.path.isabs(found)
+        ),
+        None,
+    )
     if not executable:
         canonical = canonical_install_path()
         if os.path.isfile(canonical) and os.access(canonical, os.X_OK):
