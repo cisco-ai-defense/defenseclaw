@@ -343,8 +343,8 @@ func TestCompareAndSwapFileUsesPOSIXReplacementFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := writeSwapSourceForTest(t, dir, "new")
-	previous := swapRenameReplace
-	defer func() { swapRenameReplace = previous }()
+	previous, previousTx := swapRenameReplace, swapTransactedRename
+	defer func() { swapRenameReplace, swapTransactedRename = previous, previousTx }()
 	calls := 0
 	swapRenameReplace = func(from, to string, class, flags uint32) error {
 		calls++
@@ -353,11 +353,88 @@ func TestCompareAndSwapFileUsesPOSIXReplacementFlags(t *testing.T) {
 		}
 		return renameReplace(from, to, class, flags)
 	}
+	swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
+		calls++
+		if flags != fileRenameReplaceIfExists|fileRenamePOSIXSemantics {
+			t.Errorf("CAS transacted rename flags=%#x", flags)
+		}
+		return renameTransacted(from, to, flags, tx)
+	}
 	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped || calls != 1 {
 		t.Fatalf("CAS publication: result=%+v calls=%d err=%v", result, calls, err)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
+}
+
+// The staged policy is published inside a transaction on NTFS so a reader
+// opening the live name during the replacement can still see the old file.
+func TestCompareAndSwapFileTransactsNonImagePublication(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, "new")
+	previous := swapTransactedRename
+	defer func() { swapTransactedRename = previous }()
+	transacted := 0
+	swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
+		transacted++
+		if tx == 0 || tx == windows.InvalidHandle {
+			t.Error("CAS publication received no file transaction")
+		}
+		return renameTransacted(from, to, flags, tx)
+	}
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	if err != nil || !result.Swapped {
+		t.Fatalf("CAS publication: result=%+v err=%v", result, err)
+	}
+	if transacted != 1 {
+		t.Fatal("policy publication did not run in a file transaction")
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
+}
+
+func TestCompareAndSwapFileLeavesProgramImagesOutsideTransactions(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "program.exe")
+	if err := os.WriteFile(destination, []byte("MZold"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, "MZnew")
+	previous, previousTx := swapRenameReplace, swapTransactedRename
+	defer func() { swapRenameReplace, swapTransactedRename = previous, previousTx }()
+	transacted := false
+	swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
+		transacted = true
+		return renameTransacted(from, to, flags, tx)
+	}
+	swapRenameReplace = func(from, to string, class, flags uint32) error {
+		return renameReplace(from, to, class, flags)
+	}
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("MZold")}, 16, nil)
+	if err != nil || !result.Swapped {
+		t.Fatalf("CAS publication: result=%+v err=%v", result, err)
+	}
+	if transacted {
+		t.Fatal("program image replacement ran in a file transaction")
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"program.exe": "MZnew"})
+}
+
+func TestCompareAndSwapFilePublishesEmptyNonImage(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, "")
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	if err != nil || !result.Swapped {
+		t.Fatalf("CAS publication: result=%+v err=%v", result, err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": ""})
 }
 
 func TestSwapPOSIXRenameFlagsKeepReadOnlySupport(t *testing.T) {
@@ -403,8 +480,13 @@ func TestCompareAndSwapFileWithoutPOSIXRenames(t *testing.T) {
 				t.Fatal(err)
 			}
 			source := writeSwapSourceForTest(t, dir, "new")
-			previousRename, previousMove := swapRenameReplace, swapMoveFileReplace
-			defer func() { swapRenameReplace, swapMoveFileReplace = previousRename, previousMove }()
+			previousRename, previousTx, previousMove := swapRenameReplace, swapTransactedRename, swapMoveFileReplace
+			defer func() {
+				swapRenameReplace, swapTransactedRename, swapMoveFileReplace = previousRename, previousTx, previousMove
+			}()
+			swapTransactedRename = func(_, _ string, _ uint32, _ windows.Handle) error {
+				return windows.ERROR_INVALID_PARAMETER
+			}
 			swapRenameReplace = func(_, _ string, class, _ uint32) error {
 				if class != windows.FileRenameInfoEx {
 					t.Error("the fallback used a classic rename")
