@@ -1145,6 +1145,16 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		return rescanSkipped
 	}
 
+	// An MCP server admitted without a scan stays admitted only while the
+	// allow rule or setting that admitted it stands. Once it does not (the
+	// check above found nothing that admits it), admission runs again: a
+	// scan that fails blocks it in the tiers that fail closed. The scan below
+	// for a baseline without a scan id recorded no outcome when it failed, so
+	// the stale admission stood (GAP-0920).
+	if w.mcpBaselineLapsed(evt, baseline) {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
+	}
+
 	// An unfinished MCP install scan was kept under the unverified-server
 	// setting. Its first completed scan must decide admission and enforce the
 	// verdict, even though the definition has not changed since it was kept.
