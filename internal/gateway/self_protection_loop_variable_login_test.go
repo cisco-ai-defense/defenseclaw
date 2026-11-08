@@ -231,6 +231,11 @@ func TestLoopVariableOrderLinksAndDelimiters(t *testing.T) {
 		{"while-if-false-ifs-before", `if false; then IFS=x; fi; echo $USER | while read u; do ` + write + `; done`, true},
 		{"while-ifs-before-state-name", `IFS=x; echo $USER | while read u; do ` + write + `; done`, true},
 		{"while-utf8-ifs-link", `echo aliasdiré | while IFS=é read -r u; do sed -i s/a/b/ ` + home + `/$u/config.yaml; done`, true},
+		{"here-string-login", `while read u; do ` + write + `; done <<< $USER`, true},
+		{"here-string-quoted-login", `while read -r u; do ` + write + `; done <<< "$USER"`, true},
+		{"here-string-directory-link", `while read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done <<< aliasdir`, true},
+		{"here-string-ordinary", `while read u; do ` + ordinary + `; done <<< $USER`, false},
+		{"here-string-ordinary-name", `while read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done <<< ordinary`, false},
 		{"while-utf8-ifs-ordinary", `echo notesé | while IFS=é read -r u; do sed -i s/a/b/ ` + home + `/$u/notes.txt; done`, false},
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
