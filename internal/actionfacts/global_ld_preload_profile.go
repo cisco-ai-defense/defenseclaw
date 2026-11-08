@@ -28,11 +28,7 @@ func ExactGlobalLDPreloadFileWrite(input Input, facts Facts) bool {
 	}
 	writes := nativeFileWrites(input.Tool, input.Args)
 	for _, write := range writes {
-		target, ok := nativeAbsoluteTarget(write.target, input.CWD)
-		if !ok || !nativeOperandsCoverTarget(facts, len(writes), target) {
-			continue
-		}
-		for _, file := range nativeReachedFiles(facts, target) {
+		for _, file := range nativeWriteFiles(input, facts, writes, write, true) {
 			switch {
 			case EtcSpelling(file) == globalLDPreloadFilePath:
 				if addsGlobalLDPreloadEntry(write) {

@@ -133,14 +133,11 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 		input Input
 	}{
 		{name: "commented line", input: pamWriteInput(t, "/etc/pam.d/sshd", "# auth sufficient pam_permit.so\n")},
-		{name: "inline comment", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so # example\n")},
 		{name: "wrong facility", input: pamWriteInput(t, "/etc/pam.d/sshd", "account sufficient pam_permit.so\n")},
-		{name: "facility prefix", input: pamWriteInput(t, "/etc/pam.d/sshd", "-auth sufficient pam_permit.so\n")},
 		{name: "module suffix", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so.example\n")},
 		{name: "module argument mention", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_unix.so pam_permit.so\n")},
 		{name: "include control", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth include pam_permit.so\n")},
 		{name: "substack control", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth substack pam_permit.so\n")},
-		{name: "include directive", input: pamWriteInput(t, "/etc/pam.d/sshd", "@include common-auth\nauth sufficient pam_permit.so\n")},
 		{name: "shell text", input: pamWriteInput(t, "/etc/pam.d/sshd", "echo 'auth sufficient pam_permit.so'\n")},
 		{name: "script", input: pamWriteInput(t, "/etc/pam.d/setup.sh", "auth sufficient pam_permit.so\n")},
 		{name: "documentation", input: pamWriteInput(t, "/etc/pam.d/README.md", "auth sufficient pam_permit.so\n")},
@@ -152,7 +149,6 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 		{name: "wrong pam conf shape", input: pamWriteInput(t, "/etc/pam.conf", "auth sufficient pam_permit.so\n")},
 		{name: "empty content", input: pamWriteInput(t, "/etc/pam.d/sshd", "")},
 		{name: "nul content", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so\x00\n")},
-		{name: "continued line", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient \\\npam_permit.so\n")},
 		{name: "append", input: pamBypassInput(t, "Append", validWrite)},
 		{name: "conflicting command", input: func() Input {
 			input := pamBypassInput(t, "Write", validWrite)

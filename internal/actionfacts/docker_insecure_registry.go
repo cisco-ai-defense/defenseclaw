@@ -35,20 +35,22 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	}
 	writes := nativeFileWrites(input.Tool, input.Args)
 	for _, write := range writes {
-		// A relative name (a link in the project) is placed in the working
-		// directory of the call, as the tool does; an absolute one must
-		// already be canonical.
-		canonical, absolute := nativeAbsoluteTarget(write.target, input.CWD)
-		if !write.whole || !absolute || strings.HasPrefix(write.target, "/") && canonical != write.target ||
-			!nativeOperandsCoverTarget(facts, len(writes), canonical) {
-			continue
-		}
 		content := write.added
-		if content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
+		if !write.whole || content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
 			strings.ContainsRune(content, 0) {
 			continue
 		}
-		for _, file := range nativeReachedFiles(facts, canonical) {
+		// An absolute name the call gives must itself be the canonical
+		// spelling; a relative name (a link in the project) is placed in the
+		// working directory of the call, as the tool does, and a link or a
+		// name the gateway cannot place is read from the client answer.
+		files := nativeClientReachedFiles(input, write.target)
+		if canonical, absolute := nativeAbsoluteTarget(write.target, input.CWD); absolute &&
+			(!strings.HasPrefix(write.target, "/") || canonical == write.target) &&
+			nativeOperandsCoverTarget(facts, len(writes), canonical) {
+			files = append(nativeReachedFiles(facts, canonical), files...)
+		}
+		for _, file := range files {
 			if EtcSpelling(file) == dockerDaemonConfigPath &&
 				writeToolNamesItsFile(input) &&
 				exactDockerInsecureRegistryDocument(content) {
