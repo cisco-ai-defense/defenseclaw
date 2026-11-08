@@ -8,19 +8,32 @@ cache (that would erase the reviewed version of another connector), so setup
 used to leave no entry at all and doctor failed a healthy fresh setup as
 "installation unavailable" until ``defenseclaw agent discover --refresh``.
 Setup now publishes its own connector entry and leaves every other as it was.
+
+Native-Windows OpenCode takes no generic version check at all: its executable
+comes from the protected selection, so the entry is published from that
+selection, on the real `setup` command. A cache that is missing or past its
+time limit is replaced by a scan, never merged, so no expired entry returns.
 """
 
 from __future__ import annotations
 
 import atexit
+import json
 import shutil
 import tempfile
+from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from defenseclaw import agent_selection
 from defenseclaw.commands import cmd_setup
+from defenseclaw.doctor_health import assess_connector_health
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery as ad
+
+from tests.helpers import cleanup_app, make_app_context
 
 _EXES = Path(tempfile.mkdtemp(prefix="setup-discovery-exes-"))
 atexit.register(shutil.rmtree, _EXES, ignore_errors=True)
@@ -125,4 +138,144 @@ def test_other_hosts_keep_the_scan_writing_the_cache_itself(host, tmp_path) -> N
     publish = mock.Mock(return_value=True)
     with mock.patch.object(cmd_setup.agent_discovery, "_publish_agent_signal", publish):
         _setup_check(host, "opencode", _scan("opencode"), tmp_path)
+    publish.assert_not_called()
+
+
+# --- the real native-Windows OpenCode route, and a cache past its time limit ---------------------
+
+
+def _age(data_dir: Path, *, days: int) -> None:
+    path = ad._cache_path(data_dir=data_dir)
+    payload = json.loads(path.read_text())
+    payload["scanned_at"] = ad._format_rfc3339(ad._now_utc() - timedelta(days=days))
+    path.write_text(json.dumps(payload))
+
+
+def _doctor_status(data_dir: Path, connector: str = "opencode") -> str:
+    cache = ad._read_cache(data_dir=data_dir)
+    return assess_connector_health([connector], cache)[0].status.value if cache is not None else "no cache"
+
+
+def _drive_windows_setup(connector: str, data_dir: Path, *, verified_exe: str, version: str = "2.2.6"):
+    """Run the real `setup <connector>` command as native Windows with a verified executable."""
+    from click.testing import CliRunner
+    from defenseclaw.agent_selection import SetupAgentSelection
+
+    def select(target_dir, connectors):
+        records = {
+            name: SetupAgentSelection(
+                connector=name, executable=verified_exe, raw_version=version,
+                normalized_version=version, sha256="0" * 64,
+            )
+            for name in connectors
+        }
+        agent_selection.publish_setup_agent_selections(target_dir, records)
+        return records, {}
+
+    app, temp_dir, db_path = make_app_context()
+    try:
+        app.cfg.data_dir = str(data_dir)
+        app.cfg.save = lambda: atomic_write_private_bytes(str(Path(temp_dir) / "config.yaml"), b"x\n")
+        with (
+            mock.patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+            mock.patch.object(cmd_setup, "_preflight_opencode_plugin_folder"),
+            mock.patch("defenseclaw.agent_selection.record_setup_agent_selections", side_effect=select),
+            mock.patch.object(cmd_setup, "_maybe_bring_up_local_stack", return_value=None),
+        ):
+            return CliRunner().invoke(
+                cmd_setup.setup, [connector, "--yes", "--no-restart", "--mode", "action"],
+                obj=app, catch_exceptions=True,
+            )
+    finally:
+        cleanup_app(app, db_path, temp_dir)
+
+
+@pytest.fixture
+def opencode_exe(tmp_path) -> str:
+    exe = tmp_path / "npm" / "opencode.exe"
+    exe.parent.mkdir()
+    exe.write_text("opencode", encoding="utf-8")
+    return str(exe)
+
+
+def test_the_real_windows_opencode_setup_leaves_doctor_a_passing_entry(tmp_path, opencode_exe) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    # What init left: a current cache that has not seen OpenCode, and a peer reviewed at a version.
+    _cache_with_cursor(data_dir)
+    assert _doctor_status(data_dir) == "unavailable"
+
+    result = _drive_windows_setup("opencode", data_dir, verified_exe=opencode_exe)
+
+    assert result.exit_code == 0, result.output
+    cache = ad._read_cache(data_dir=data_dir)
+    assert cache is not None
+    assert cache.agents["opencode"].installed and cache.agents["opencode"].binary_path == opencode_exe
+    assert cache.agents["opencode"].version == "2.2.6"
+    assert cache.agents["cursor"].version == "3.19.13"  # the peer keeps what it was reviewed at
+    assert _doctor_status(data_dir) == "supported"
+
+
+def test_the_real_windows_opencode_setup_makes_an_expired_cache_readable(tmp_path, opencode_exe) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    _cache_with_cursor(data_dir)
+    _age(data_dir, days=2)
+    assert ad._read_cache(data_dir=data_dir) is None
+
+    result = _drive_windows_setup("opencode", data_dir, verified_exe=opencode_exe)
+
+    assert result.exit_code == 0, result.output
+    assert _doctor_status(data_dir) == "supported"
+
+
+def test_the_real_windows_opencode_setup_with_no_cache_leaves_a_readable_one(tmp_path, opencode_exe) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    result = _drive_windows_setup("opencode", data_dir, verified_exe=opencode_exe)
+    assert result.exit_code == 0, result.output
+    assert _doctor_status(data_dir) == "supported"
+
+
+def test_an_expired_cache_is_replaced_by_a_windows_amp_publish(tmp_path) -> None:
+    # The helper route (Amp) had the same hole: a cache past its limit stayed unreadable.
+    _cache_with_cursor(tmp_path)
+    _age(tmp_path, days=2)
+    _setup_check("windows", "amp", _scan("amp"), tmp_path)
+    cache = ad._read_cache(data_dir=tmp_path)
+    assert cache is not None and cache.agents["amp"].installed is True
+
+
+def test_a_publish_never_writes_a_cache_that_lacks_a_catalog_entry(tmp_path) -> None:
+    partial = ad.AgentDiscovery(
+        scanned_at=ad._format_rfc3339(ad._now_utc()),
+        agents={"opencode": _scan("opencode").agents["opencode"]},
+        cache_hit=False,
+    )
+    assert ad._publish_agent_signal(partial, "opencode", data_dir=tmp_path) is False
+    assert not ad._cache_path(data_dir=tmp_path).exists()
+
+
+def test_a_failed_verified_publish_is_named_with_the_refresh_step(tmp_path, opencode_exe) -> None:
+    with (
+        mock.patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        mock.patch.object(cmd_setup.agent_discovery, "publish_verified_agent", return_value=False),
+        mock.patch.object(cmd_setup.ux, "warn") as warn,
+    ):
+        cmd_setup._publish_verified_selection_discovery(
+            tmp_path,
+            {"opencode": SimpleNamespace(executable=opencode_exe, raw_version="2.2.6")},
+        )
+    assert "defenseclaw agent discover --refresh" in warn.call_args.args[0]
+
+
+def test_a_peer_with_its_own_check_is_not_published_twice(tmp_path, opencode_exe) -> None:
+    # The benign twin: Codex and Amp are published by the version check, not by the selection step.
+    with (
+        mock.patch.object(cmd_setup.platform_support, "host_os", return_value="windows"),
+        mock.patch.object(cmd_setup.agent_discovery, "publish_verified_agent") as publish,
+    ):
+        cmd_setup._publish_verified_selection_discovery(
+            tmp_path, {"codex": SimpleNamespace(executable=opencode_exe, raw_version="1.0.0")}
+        )
     publish.assert_not_called()

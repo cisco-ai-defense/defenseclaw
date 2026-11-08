@@ -6912,7 +6912,7 @@ def _record_windows_setup_agent_selections(
         except OSError as exc:
             raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
     try:
-        return _validate_setup_agent_selection_receipt(
+        verified = _validate_setup_agent_selection_receipt(
             target_dir,
             selected,
             selections,
@@ -6922,6 +6922,36 @@ def _record_windows_setup_agent_selections(
         raise click.ClickException(
             f"could not bind selected agent executables to the protected receipt: {exc}"
         ) from exc
+    _publish_verified_selection_discovery(target_dir, selections)
+    return verified
+
+
+def _publish_verified_selection_discovery(
+    data_dir: str | os.PathLike[str],
+    selections: dict[str, Any],
+) -> None:
+    """Leave doctor the executable and version setup verified (GAP-0882).
+
+    Native-Windows OpenCode setup skips the generic version check, so no scan
+    wrote the discovery cache doctor reads and a healthy fresh setup failed
+    Connector compatibility until `agent discover --refresh`. Every route
+    reaches this through the one place that verifies the executables.
+    Only the entry of that one connector is written; admission comes from the protected
+    selection, so a write that fails changes nothing but this notice.
+    """
+    for name, selection in selections.items():
+        if not _windows_opencode_requires_exact_selection(name):
+            continue
+        if not agent_discovery.publish_verified_agent(
+            name,
+            binary_path=selection.executable,
+            version=selection.raw_version,
+            data_dir=data_dir,
+        ):
+            ux.warn(
+                f"could not record the verified {name} install for doctor; "
+                "run: defenseclaw agent discover --refresh"
+            )
 
 
 def _guardrail_effective_mode(gc, connector: str) -> str:
