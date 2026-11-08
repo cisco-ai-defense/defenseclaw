@@ -78,6 +78,20 @@ func beginManagedSetupSpan(path, expected string, later bool) {
 	managedSetupSpans.byPath[managedSetupSpanKey(path)] = &managedSetupSpan{expected: expected, base: expected, later: later}
 }
 
+// beginManagedConversionSpan opens a span for a rollback conversion that
+// starts on the bytes with hash expected. It reports false, and opens nothing,
+// when a setup holds a span on the path.
+func beginManagedConversionSpan(path, expected string) bool {
+	managedSetupSpans.Lock()
+	defer managedSetupSpans.Unlock()
+	key := managedSetupSpanKey(path)
+	if _, open := managedSetupSpans.byPath[key]; open {
+		return false
+	}
+	managedSetupSpans.byPath[key] = &managedSetupSpan{expected: expected, base: expected}
+	return true
+}
+
 // endManagedSetupSpan closes the span and returns it (ok is false when none
 // was open).
 func endManagedSetupSpan(path string) (managedSetupSpan, bool) {
