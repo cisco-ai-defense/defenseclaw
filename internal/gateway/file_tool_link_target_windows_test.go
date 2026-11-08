@@ -63,6 +63,21 @@ func TestWindowsFileToolThroughLinkGetsDirectPathVerdict(t *testing.T) {
 	} else {
 		t.Logf("no symbolic link privilege, junction cases only: %v", err)
 	}
+	// A directory symbolic link whose target starts at the drive root, as
+	// Windows allows (\Users\x): it reaches the same folder as the absolute
+	// spelling, for an existing file and for a new file name.
+	rootedLink := func(name, target string) string {
+		link := filepath.Join(project, name)
+		rooted := target[len(filepath.VolumeName(target)):]
+		if out, err := exec.Command("cmd.exe", "/d", "/c", "mklink", "/D", link, rooted).CombinedOutput(); err != nil {
+			t.Logf("no symbolic link privilege, no drive-rooted link cases: %v: %s", err, out)
+			return ""
+		}
+		return link
+	}
+	rootedToProtected := rootedLink("rooted", protectedDir)
+	rootedToEmpty := rootedLink("rooted-new", emptyDir)
+	rootedToOrdinary := rootedLink("rooted-ok", ordinaryDir)
 	ordinaryLink := ""
 	if err := os.Symlink(ordinary, filepath.Join(project, "ok-link")); err == nil {
 		ordinaryLink = filepath.Join(project, "ok-link")
@@ -104,6 +119,12 @@ func TestWindowsFileToolThroughLinkGetsDirectPathVerdict(t *testing.T) {
 		{name: "junction in the middle, slash spelling", tool: "Write", direct: "block", link: forwardSlash(filepath.Join(junctionToProtected, ".netrc")), name_: protected},
 		{name: "junction and a new file name", tool: "Write", direct: "block", link: filepath.Join(junctionToEmpty, ".netrc"), name_: filepath.Join(emptyDir, ".netrc")},
 	}
+	if rootedToProtected != "" && rootedToEmpty != "" {
+		rows = append(rows,
+			struct{ name, tool, direct, link, name_ string }{"drive-rooted link, Write", "Write", "block", filepath.Join(rootedToProtected, ".netrc"), protected},
+			struct{ name, tool, direct, link, name_ string }{"drive-rooted link, Read", "Read", "alert", filepath.Join(rootedToProtected, ".netrc"), protected},
+			struct{ name, tool, direct, link, name_ string }{"drive-rooted link and a new file name", "Write", "block", filepath.Join(rootedToEmpty, ".netrc"), filepath.Join(emptyDir, ".netrc")})
+	}
 	for kind, link := range fileLinks {
 		rows = append(rows,
 			struct{ name, tool, direct, link, name_ string }{kind + ", Write", "Write", "block", link, protected},
@@ -124,6 +145,9 @@ func TestWindowsFileToolThroughLinkGetsDirectPathVerdict(t *testing.T) {
 	ordinaryPaths := map[string]string{"junction": filepath.Join(junctionToOrdinary, "notes.txt")}
 	if ordinaryLink != "" {
 		ordinaryPaths["file symlink"] = ordinaryLink
+	}
+	if rootedToOrdinary != "" {
+		ordinaryPaths["drive-rooted link"] = filepath.Join(rootedToOrdinary, "notes.txt")
 	}
 	for kind, path := range ordinaryPaths {
 		for _, tool := range []string{"Write", "Read"} {
