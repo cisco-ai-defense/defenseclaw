@@ -32381,20 +32381,15 @@ function Get-DefenseClawGuardianRowMachineFolderLink {
     }
     $path = $found.Groups['path'].Value.Replace('/', '\').TrimEnd('\')
     $roots = @($script:DefenseClawVendorFolderRoots | Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $under = $false
     foreach ($root in $roots) {
         $prefix = $root.TrimEnd('\') + '\'
         if ($path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
-            $under = $true
             $relative = $path.Substring($prefix.Length)
             $first = ($relative -split '\\')[0]
             if ($first -ieq 'Cisco') {
                 return ''
             }
         }
-    }
-    if (-not $under) {
-        return ''
     }
     try {
         Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
