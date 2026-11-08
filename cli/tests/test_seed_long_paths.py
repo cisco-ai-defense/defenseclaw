@@ -9,6 +9,7 @@ limited by MAX_PATH. A seed the first run needs still fails it.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
 import tempfile
@@ -278,6 +279,42 @@ class SeedLongPathTests(unittest.TestCase):
         self.assertEqual(os.listdir(dest), [])
         self.assertEqual(os.stat(dest).st_ino, made[0].st_ino)
         self.assertEqual(self._staging_leftovers(), [])
+
+    def test_the_windows_error_path_keeps_a_refused_destination_a_file_exists_error(self):
+        real = shutil.copytree
+        dest = os.path.join(self.tmp, "destination")
+        flat = self._flat_source()
+
+        def copy_then_competitor_appears(src, dst, *args, **kwargs):
+            result = real(src, dst, *args, **kwargs)
+            os.makedirs(os.path.join(dest, "theirs"))
+            return result
+
+        with patch("defenseclaw.long_paths._windows", return_value=True), \
+                patch("defenseclaw.long_paths.extended", side_effect=os.fspath), \
+                patch("defenseclaw.long_paths.shutil.copytree", side_effect=copy_then_competitor_appears):
+            with self.assertRaises(FileExistsError) as caught:
+                long_paths.copytree(flat, dest)
+
+        self.assertEqual(caught.exception.errno, errno.EEXIST)
+        self.assertTrue(os.path.isdir(os.path.join(dest, "theirs")))
+        self.assertEqual(self._staging_leftovers(), [])
+
+    def test_a_windows_copy_failure_message_drops_the_extended_prefix_and_keeps_its_class(self):
+        flat = self._flat_source()
+        dest = os.path.join(self.tmp, "destination")
+
+        def refused(src, dst, *args, **kwargs):
+            raise PermissionError(errno.EACCES, "denied", "\\\\?\\C:\\x")
+
+        with patch("defenseclaw.long_paths._windows", return_value=True), \
+                patch("defenseclaw.long_paths.extended", side_effect=os.fspath), \
+                patch("defenseclaw.long_paths.shutil.copytree", side_effect=refused):
+            with self.assertRaises(PermissionError) as caught:
+                long_paths.copytree(flat, dest)
+
+        self.assertNotIn("\\\\?\\", str(caught.exception))
+        self.assertFalse(os.path.lexists(dest))
 
     def test_a_partial_destination_created_while_the_copy_runs_is_never_reported_as_a_seed(self):
         dest = os.path.join(self.tmp, "destination")
