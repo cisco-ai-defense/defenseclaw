@@ -13,35 +13,62 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// RegistrationWriteReach runs the shared concrete shell mutation reader against a
-// caller-supplied registration set. It uses the same value, directory and
-// link resolution as the protected state decision, including ordered shell
-// assignments and cd-relative operands. It reports only a proved write.
-func RegistrationWriteReach(command, cwd, home string, names []string) bool {
+// RegistrationWriteReached runs the shared concrete shell mutation reader
+// against a caller-supplied registration set and returns the members of that
+// set the command provably writes, in the order given. It uses the same
+// value, directory and link resolution as the protected state decision,
+// including ordered shell assignments and cd-relative operands. The command
+// is parsed and every member is stat-ed once; the set is then narrowed by
+// halves, so a command that reaches k members costs about k*log(n) reads of
+// the command rather than one per member. A write proof concerns one member,
+// so a half reaches exactly when one of its members does.
+func RegistrationWriteReached(command, cwd, home string, names []string) []string {
 	if command == "" || !filepath.IsAbs(cwd) || len(names) == 0 {
-		return false
+		return nil
 	}
 	if !RegistrationWriteCandidate(command) {
-		return false
+		return nil
 	}
 	file, ok := parseShell(command)
 	if !ok {
-		return false
+		return nil
 	}
 	protected := make(protectedFiles, 0, len(names))
-	fileProtected := make(protectedFiles, 0, len(names))
+	origin := make([]string, 0, len(names))
 	for _, name := range names {
 		if !filepath.IsAbs(name) {
 			continue
 		}
-		name = filepath.Clean(name)
-		entry := protectedFile{path: name}
-		if info, err := pathStat(name); err == nil {
+		entry := protectedFile{path: filepath.Clean(name)}
+		if info, err := pathStat(entry.path); err == nil {
 			entry.info = info
 		} else if !os.IsNotExist(err) {
 			entry.unknown = true
 		}
 		protected = append(protected, entry)
+		origin = append(origin, name)
+	}
+	var reached []string
+	var narrow func(lo, hi int)
+	narrow = func(lo, hi int) {
+		if lo >= hi || !registrationWriteReach(file, command, cwd, home, protected[lo:hi]) {
+			return
+		}
+		if hi-lo == 1 {
+			reached = append(reached, origin[lo])
+			return
+		}
+		mid := lo + (hi-lo)/2
+		narrow(lo, mid)
+		narrow(mid, hi)
+	}
+	narrow(0, len(protected))
+	return reached
+}
+
+func registrationWriteReach(file *syntax.File, command, cwd, home string, protected protectedFiles) bool {
+	fileProtected := make(protectedFiles, 0, len(protected))
+	for _, entry := range protected {
 		if entry.info == nil || !entry.info.IsDir() {
 			fileProtected = append(fileProtected, entry)
 		}
