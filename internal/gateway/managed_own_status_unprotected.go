@@ -247,20 +247,21 @@ const ownUnprotectedReasonsMax = 2
 
 // ownUnprotectedState is the own-status row for a connector the scan lists as
 // unprotected for the caller. Its text is the administrator's warning for
-// those agents, reason and remedy included; several installs of one connector
-// with different reasons (a Kiro CLI and IDE) each show theirs.
+// those agents followed by ownScanNextStep: the recorded reasons are free
+// text and not all of them name a remedy, and the machine code is never shown.
+// Several installs of one connector with different reasons (a Kiro CLI and
+// IDE) each show theirs.
 func ownUnprotectedState(agents []enterprisehooks.UnprotectedAgent) map[string]any {
 	var reasons []string
 	for _, agent := range agents {
 		reason := strings.TrimSpace(agent.Reason)
 		if reason == "" {
-			reason = agent.Code
+			continue
 		}
 		if !slices.Contains(reasons, reason) {
 			reasons = append(reasons, reason)
 		}
 	}
-	reasons = slices.DeleteFunc(reasons, func(reason string) bool { return reason == "" })
 	if len(reasons) == 0 {
 		return ownNotProtected(ownCauseNoUnprotectedReason)
 	}
@@ -268,5 +269,5 @@ func ownUnprotectedState(agents []enterprisehooks.UnprotectedAgent) map[string]a
 	if more := len(reasons) - ownUnprotectedReasonsMax; more > 0 {
 		text += fmt.Sprintf("; and %d more", more)
 	}
-	return ownNotProtected(text)
+	return ownNotProtected(strings.TrimRight(text, ". ") + ". " + ownScanNextStep)
 }

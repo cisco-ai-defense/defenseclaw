@@ -27,7 +27,7 @@ func requireOwnRowSaysWhy(t *testing.T, label, connector string, row map[string]
 	}
 	state, _ := row["state"].(string)
 	lower := strings.ToLower(state)
-	hasNextStep := strings.Contains(lower, "ask it") || strings.Contains(lower, "defenseclaw status") || strings.Contains(lower, "install")
+	hasNextStep := strings.Contains(lower, "ask it") || strings.Contains(lower, "defenseclaw status again")
 	if !ownReasonedRow.MatchString(state) || !hasNextStep {
 		t.Fatalf("%s: %s row %#v says no reason and next step", label, connector, row)
 	}
@@ -91,6 +91,10 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 	unmatched := enterprisehooks.UnprotectedAgent{User: enterprisehooks.UnprotectedUnknownAccount, Connector: "hermes",
 		Code: enterprisehooks.UnprotectedCodeAgentUnprotected, Reason: "running copy has no resolved account"}
 	noReason := unprotectedAgentFor("alice", 5001, "opencode", "", "")
+	codeOnly := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, "")
+	// The enumerator records this reason with no action when version discovery fails.
+	scanIncomplete := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeInstallScanIncomplete,
+		"the account's agent versions and private installs could not be inspected this cycle")
 	strictDeny := func(cfg *config.Config) { cfg.Enterprise.Enrollment.UnenrolledUsers = config.EnterpriseUnenrolledDeny }
 	rootDeny := func(cfg *config.Config) { cfg.Enterprise.Enrollment.Root = config.EnterpriseRootDeny }
 	scenarios := []ownReasonsScenario{
@@ -107,6 +111,10 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 			want: map[string]string{"hermes": "not confirmed: " + ownCauseScanUnmatched}},
 		{name: "scan entry with no recorded reason", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{noReason},
 			want: map[string]string{"opencode": "not protected: " + ownCauseNoUnprotectedReason}},
+		{name: "scan entry with a code and no recorded reason", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{codeOnly},
+			want: map[string]string{"opencode": "not protected: " + ownCauseNoUnprotectedReason}},
+		{name: "scan entry whose reason names no action", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{scanIncomplete},
+			want: map[string]string{"opencode": "not protected: " + scanIncomplete.Reason + ". " + ownScanNextStep}},
 		{name: "root denied", uid: "0", user: "root", view: proven, configure: rootDeny,
 			want: map[string]string{"opencode": "not protected: " + ownCauseRootDenied, "hermes": "not protected: " + ownCauseRootDenied}},
 		{name: "shared vendor source unproven", uid: "5001", user: "alice", guardian: guardianFor("alice", 5001, "hermes"),
@@ -146,7 +154,7 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 }
 
 // Benign twin: an account that is set up and enrolled keeps the plain
-// "protected" row and the scan keeps its own recorded reason and fix.
+// "protected" row and the scan keeps its own recorded reason and fix, followed by the one next step.
 func TestOwnStatusProtectedRowsAndRecordedReasonsAreUnchanged(t *testing.T) {
 	proven := &managedPolicyView{connectors: map[string]managedPolicyViewConnector{"claudecode": {}, "opencode": {}}}
 	api := ownReasonsAPI(t, ownReasonsScenario{view: proven, guardian: guardianFor("alice", 5001, "hermes")})
@@ -157,7 +165,7 @@ func TestOwnStatusProtectedRowsAndRecordedReasonsAreUnchanged(t *testing.T) {
 	}
 	v1 := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeOpenCodeV1, "it is OpenCode V1. Fix: npm install -g @opencode/cli@2")
 	api = ownReasonsAPI(t, ownReasonsScenario{view: proven, guardian: guardianFor("alice", 5001, "hermes"), scan: []enterprisehooks.UnprotectedAgent{v1}})
-	if row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode"); row["state"] != "not protected: it is OpenCode V1. Fix: npm install -g @opencode/cli@2" {
+	if row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode"); row["state"] != "not protected: it is OpenCode V1. Fix: npm install -g @opencode/cli@2. "+ownScanNextStep {
 		t.Fatalf("recorded reason changed: %#v", row)
 	}
 }
