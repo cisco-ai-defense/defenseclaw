@@ -3105,9 +3105,7 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		// logged once, so a real failure next to a link stays visible.
 		for _, failure := range linkFailures.Failures {
 			enterpriseHookLinkCauseFolds.emit(os.Stderr, time.Now(), "link:"+failure.Connector, failure.Cause.Error(),
-				"the same link cause",
-				fmt.Sprintf("[hook-guardian] the %s machine folder is a link (%s); its targets fail and the others go on: %s\n",
-					failure.Connector, failure.Link, failure.Cause))
+				"the same link cause", failure.causeLine())
 		}
 	}
 	// Remove DefenseClaw's own per-user registrations for revoked users (as
