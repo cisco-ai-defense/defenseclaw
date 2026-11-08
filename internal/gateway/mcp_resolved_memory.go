@@ -5,7 +5,6 @@
 package gateway
 
 import (
-	"crypto/sha256"
 	"slices"
 	"strings"
 	"sync"
@@ -29,11 +28,10 @@ const mcpResolvedTTL = 24 * time.Hour
 // its entry was gone. Only a definition read from an agent config is
 // remembered, so the bounds follow the size of the configs, not the number of
 // names a tool call can make up. A denied definition that still does not fit
-// is not forgotten: a short record of its name and of the denied rule that
-// matched it goes into the lost set of its session (mcpLostSet). The records
-// are exact and bounded by mcpResolvedLostLimit in all; a session that cannot
-// record one more is marked instead and refuses what a denied rule covers by
-// name.
+// goes into the lost set of its session (mcpLostSet), whole, so it is judged
+// on the policy in force like any remembered one. The lost definitions are
+// bounded by mcpResolvedLostLimit in all; a session that cannot hold one more
+// is marked instead and refuses what a denied rule covers by name.
 const (
 	mcpResolvedLimit         = 2048
 	mcpResolvedPerHome       = 256
@@ -42,36 +40,16 @@ const (
 	mcpResolvedLostLimit     = 65536
 )
 
-// mcpLostID identifies a lost denied definition: the key it was kept under
-// (connector, account, session, directory, name) and the denied rule that
-// matched it, as a truncated digest, so two records are equal only when both
-// are.
-type mcpLostID [16]byte
-
-func newMCPLostID(key, rule string) mcpLostID {
-	sum := sha256.Sum256([]byte(key + "\x00" + rule))
-	return mcpLostID(sum[:16])
-}
-
-// mcpRuleID is the identity of a rule of asset_policy.mcp.denied: what it
-// matches on. The reason does not take part, so rewording a rule does not
-// release the connections it denied.
-func mcpRuleID(rule config.AssetPolicyRule) string {
-	return strings.Join([]string{
-		rule.Name, rule.Connector, rule.URL, rule.Command, rule.Transport,
-		strings.Join(rule.ArgsPrefix, "\x01"), strings.Join(rule.SourcePathContains, "\x01"),
-	}, "\x00")
-}
-
 // mcpLostSet holds the denied definitions of one session that did not fit in
-// the memory, with the time of its last use. A record counts only while the
-// rule that matched the definition is still in the denied list: the live
-// connection is judged on the policy in force now, as a remembered definition
-// is.
+// the memory, by the key they were resolved under, with the time of its last
+// use. The definition is kept whole, not a digest of the rule that matched
+// it: the live connection is judged on the policy in force now (a replaced
+// rule, an equivalent spelling of it, a second rule, a scoped allow), exactly
+// as a remembered definition is.
 type mcpLostSet struct {
-	ids map[mcpLostID]struct{}
-	// overflow is set when a record could not be made, because the lost
-	// records were full or the rule that matched is not known.
+	defs map[string]config.MCPServerEntry
+	// overflow is set when a definition could not be kept, because the lost
+	// definitions were full.
 	overflow bool
 	at       time.Time
 }
@@ -115,10 +93,10 @@ func mcpResolvedKey(connector, home, session, cwd, name string) string {
 }
 
 // remember records entry, the definition just read for name, and whether a
-// denied rule matched it. It reports whether the definition is kept. When a
-// denied definition does not fit, deniedBy names the rule that matched it
-// (mcpRuleID), for the record of the session.
-func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name string, entry config.MCPServerEntry, denied bool, deniedBy func() string, now time.Time) bool {
+// denied rule matched it. It reports whether the definition is kept in the
+// memory; a denied one that does not fit is held in the lost set of its
+// session.
+func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name string, entry config.MCPServerEntry, denied bool, now time.Time) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
@@ -141,7 +119,7 @@ func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name st
 	}
 	if (!known || denied && !kept.denied) && !m.hasRoomLocked(home, denied, key) {
 		if denied {
-			m.markLostLocked(connector, home, session, key, deniedBy(), now)
+			m.markLostLocked(connector, home, session, key, entry, now)
 		}
 		return false
 	}
@@ -155,10 +133,10 @@ func mcpLostKey(connector, home, session string) string {
 	return strings.ToLower(connector) + "\x00" + home + "\x00" + session
 }
 
-// markLostLocked records that the denied definition kept under key, matched
-// by the denied rule rule, could not be kept. A rule that is not known, or no
-// room for another record, marks the session.
-func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key, rule string, now time.Time) {
+// markLostLocked holds the denied definition entry, resolved under key, that
+// could not be kept. The first one held for a key stays, as a denied
+// remembered definition does. No room for another one marks the session.
+func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key string, entry config.MCPServerEntry, now time.Time) {
 	if m.lost == nil {
 		m.lost = map[string]*mcpLostSet{}
 	}
@@ -169,50 +147,43 @@ func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key, r
 		m.lost[lostKey] = set
 	}
 	set.at = now
-	id := newMCPLostID(key, rule)
-	if _, held := set.ids[id]; held {
+	if _, held := set.defs[key]; held {
 		return
 	}
-	if rule == "" || m.lostCountLocked() >= mcpResolvedLostLimit {
+	if m.lostCountLocked() >= mcpResolvedLostLimit {
 		set.overflow = true
 		return
 	}
-	if set.ids == nil {
-		set.ids = map[mcpLostID]struct{}{}
+	if set.defs == nil {
+		set.defs = map[string]config.MCPServerEntry{}
 	}
-	set.ids[id] = struct{}{}
+	set.defs[key] = entry
 }
 
 func (m *mcpResolvedDefinitions) lostCountLocked() int {
 	var n int
 	for _, set := range m.lost {
-		n += len(set.ids)
+		n += len(set.defs)
 	}
 	return n
 }
 
-// lostDenied reports, within the TTL, whether the denied definition kept under
-// the name of the call did not fit in the memory and a rule of denied that
-// matched it is still in force (held), and whether the session could not
-// record every denied definition (overflow). A set that answers renews itself.
-func (m *mcpResolvedDefinitions) lostDenied(connector, home, session, cwd, name string, denied []config.AssetPolicyRule, now time.Time) (held, overflow bool) {
+// lostDenied returns, within the TTL, the denied definition held for the name
+// of the call because it did not fit in the memory, and whether the session
+// could not hold every denied definition (overflow). A set that answers
+// renews itself.
+func (m *mcpResolvedDefinitions) lostDenied(connector, home, session, cwd, name string, now time.Time) (entry config.MCPServerEntry, held, overflow bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	set := m.lost[mcpLostKey(connector, home, session)]
 	if set == nil || now.Sub(set.at) > mcpResolvedTTL {
-		return false, false
+		return config.MCPServerEntry{}, false, false
 	}
-	key := mcpResolvedKey(connector, home, session, cwd, name)
-	for _, rule := range denied {
-		if _, ok := set.ids[newMCPLostID(key, mcpRuleID(rule))]; ok {
-			held = true
-			break
-		}
-	}
+	entry, held = set.defs[mcpResolvedKey(connector, home, session, cwd, name)]
 	if held || set.overflow {
 		set.at = now
 	}
-	return held, set.overflow
+	return entry, held, set.overflow
 }
 
 // hasRoomLocked reports whether the definition under key, of the kind denied
