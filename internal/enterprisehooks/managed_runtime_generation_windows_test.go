@@ -1484,6 +1484,12 @@ func TestWindowsManagedRuntimeGenerationRetiredCollectionGoesOnBehindAKeptSelect
 	}
 	target := currentWindowsTestSID(t)
 	for _, path := range []string{dataDir, hookDir} {
+		// An elevated administrator token owns what it creates as the
+		// Administrators group; the fixture is owned by the target account.
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION, target, nil, nil, nil); err != nil {
+			t.Fatalf("own target directory %s: %v", path, err)
+		}
 		if err := setWindowsUserPathProtection(path, target, true); err != nil {
 			t.Fatalf("protect target directory %s: %v", path, err)
 		}
