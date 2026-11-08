@@ -71,3 +71,72 @@ func TestLoopVariableFromLoginReachesState(t *testing.T) {
 		}
 	}
 }
+
+// rel-1-0-6:GAP-0880, GAP-0885 review 1: the reading of a loop does not depend
+// on how long its list is, on a function the action only declares, on an IFS
+// the read sets for itself, on another loop that ends before the write, or on
+// a link: a state write through the variable, or through a link the variable
+// reaches, blocks in every profile and both connectors, as the literal path
+// does. Ordinary files keep their verdict.
+func TestLoopVariableNearFormsReachState(t *testing.T) {
+	home, project, parent := g235bBinderFixture(t)
+	active := filepath.Base(home)
+	write := `sed -i s/a/b/ ` + parent + `$u/.defenseclaw/config.yaml`
+	ordinary := `sed -i s/a/b/ ` + parent + `$u/notes.txt`
+	filler := func(count int) string {
+		list := ""
+		for index := 0; index < count; index++ {
+			list += "w" + string(rune('a'+index%26)) + string(rune('a'+index/26)) + " "
+		}
+		return list
+	}
+	rows := []struct {
+		name, command string
+		protected     bool
+	}{
+		{"nine-words", `for u in a b c d e f g h $USER; do ` + write + `; done`, true},
+		{"thirty-words", `for u in ` + filler(29) + `$USER; do ` + write + `; done`, true},
+		{"hundred-words", `for u in ` + filler(100) + `$USER; do ` + write + `; done`, true},
+		{"function-after", `for u in $USER; do ` + write + `; done; f() { :; }`, true},
+		{"function-before", `f() { :; }; for u in $USER; do ` + write + `; done`, true},
+		{"while-ifs-empty", `echo $USER | while IFS= read -r u; do ` + write + `; done`, true},
+		{"while-printf-ifs-empty", `printf '%s\n' "$USER" | while IFS= read -r u; do ` + write + `; done`, true},
+		{"while-ifs-set", `echo $USER | while IFS=: read -r u; do ` + write + `; done`, true},
+		{"while-ifs-text", `x=IFS; echo $USER | while read u; do ` + write + `; done`, true},
+		{"prior-binding-survives-other-loop", `u=$USER; for a in x; do :; done; ` + write + `; for u in x; do :; done`, true},
+		{"prior-binding-survives-read-loop", `u=$USER; echo x | while read a; do :; done; ` + write, true},
+		{"for-file-link", `for u in $USER; do sed -i s/a/b/ ` + parent + `$u/statealias; done`, true},
+		{"for-directory-link", `for u in $USER; do sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml; done`, true},
+		{"while-file-link", `echo $USER | while read u; do sed -i s/a/b/ ` + parent + `$u/statealias; done`, true},
+		{"assigned-file-link", `u=$USER; sed -i s/a/b/ ` + parent + `$u/statealias`, true},
+		{"assigned-directory-link", `u=$USER; sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml`, true},
+		{"literal-file-link", `sed -i s/a/b/ ` + parent + active + `/statealias`, true},
+		{"nine-ordinary", `for u in a b c d e f g h ordinary; do ` + ordinary + `; done`, false},
+		{"thirty-ordinary", `for u in ` + filler(29) + `ordinary; do ` + ordinary + `; done`, false},
+		{"login-ordinary", `for u in $USER; do ` + ordinary + `; done`, false},
+		{"sibling-ordinary", `for u in alice bob; do ` + ordinary + `; done`, false},
+		{"function-called-rebinds-sibling", `f() { u=ordinary; }; for u in $USER; do f; sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml; done`, false},
+		{"while-ifs-empty-ordinary", `echo $USER | while IFS= read -r u; do ` + ordinary + `; done`, false},
+		{"later-loop-rebinds-sibling", `u=ordinary; for u in $USER; do :; done; sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml`, false},
+		{"over-bound-ordinary", `for u in ` + filler(40) + `ordinary; do ` + ordinary + `; done`, false},
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			for _, pack := range []string{"", "permissive", "strict"} {
+				for _, row := range rows {
+					if !row.protected && pack == "strict" {
+						continue
+					}
+					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
+					block := strings.HasPrefix(got, `{"action":"block"`)
+					if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
+						t.Errorf("%s %s managed=%t pack=%q: %.120s = %.200s, want protected block", row.name, connector, managed, pack, row.command, got)
+					}
+					if !row.protected && block {
+						t.Errorf("%s %s managed=%t pack=%q: %.120s = %.200s, want ordinary allow", row.name, connector, managed, pack, row.command, got)
+					}
+				}
+			}
+		}
+	}
+}

@@ -1785,6 +1785,20 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 							filepath.Clean(simple.CWD) != filepath.Clean(cwd) {
 							commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
 						}
+						// A reading that spells a path through a value the walk
+						// follows (u=$USER; ... /home/$u/f, a loop variable) names
+						// a file and a link the command text does not: it is
+						// described as the reading of a runtime-expanded word is,
+						// for a gateway that cannot walk the home itself.
+						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) &&
+							filepath.Clean(simple.CWD) == filepath.Clean(cwd) && strings.Contains(command, "$") &&
+							!strings.Contains(command, simple.Text) && !slices.Contains(dynamicReadings, simple.Text) {
+							if len(dynamicReadings) >= maxResolvedReadings {
+								truncated = true
+							} else {
+								dynamicReadings = append(dynamicReadings, simple.Text)
+							}
+						}
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {
 							stateOperands = append(stateOperands, childStateOperands(simple.Text, simple.CWD, home)...)
 							stateOperands = append(stateOperands, inPlaceStateOperands(simple.Text, simple.CWD, home, KnownUser{})...)
@@ -3381,6 +3395,11 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 	}
 	return stackWords, stackStatic, expanded
 }
+
+// maxResolvedReadings is the most readings of a command, with a variable
+// resolved to the value the walk follows, that the map describes; past it the
+// map says it is incomplete.
+const maxResolvedReadings = 64
 
 func commandLinksWithFacts(command, cwd, home string, facts map[string]string, record bool) shellLinks {
 	return commandLinks(command, cwd, home, facts, record, false)

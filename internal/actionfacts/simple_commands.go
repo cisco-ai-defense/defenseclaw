@@ -40,7 +40,7 @@ type SimpleCommand struct {
 	// LoginGuess means this reading holds a value USER or LOGNAME has only as
 	// the guess that the login is the last element of the home, or the value
 	// one word of a for or while-read list gives its variable in one iteration
-	// (simpleForkLoopBinds). A rule over the words of the command must not read
+	// (simpleForkLoopBind). A rule over the words of the command must not read
 	// it (the shell may hold another login or run another iteration); it only
 	// proves a write to protected state.
 	LoginGuess bool
@@ -73,9 +73,9 @@ type simpleShellState struct {
 	// locals holds, innermost last, the caller value of each name a
 	// function body made local; the body end restores it.
 	locals []simpleLocal
-	// forked marks a state in which a forked loop variable holds the value of
-	// one list word (simpleForkLoopBinds), until the loop ends.
-	forked bool
+	// forked holds the forked loop variables that hold the value of one list
+	// word (simpleForkLoopBind) in this state, until their loop ends.
+	forked []string
 }
 
 // simpleLocal is the caller value of name saved by a local declaration in
@@ -94,7 +94,7 @@ const (
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
-		locals: slices.Clone(s.locals), forked: s.forked}
+		locals: slices.Clone(s.locals), forked: slices.Clone(s.forked)}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -179,7 +179,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	var futureSafe []bool
 	var checkedCases, tooManyCases bool
 	compact := func(states []simpleShellState, index int) []simpleShellState {
-		if len(states) <= maxSimpleStates {
+		if !simpleOverStateBound(states) {
 			return states
 		}
 		if !checkedCases {
@@ -248,6 +248,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	changed := reduced || len(parts) != 1
 	unproven := false
 	previousScope := "0"
+	unreadLoops := make(map[string]bool)
 	for partIndex, part := range parts {
 		// A conditional or loop body runs in its parent's shell when selected.
 		// Keep both its resulting state and the path that skipped the body.
@@ -265,11 +266,22 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					merged = simpleJoinForgottenUserVars(merged, body)
 					if previousScope[index+1] == forkedLoopScopeKind {
 						// Like USER and LOGNAME, the name of such a loop has the
-						// value of its last iteration, which the walk does not read.
+						// value of its last iteration, which the walk does not
+						// read. Only this loop's name goes: any other variable,
+						// also one that a later loop binds, keeps its value here.
+						name := simpleForkedScopeName(previousScope)
+						reading := func(state simpleShellState) bool { return slices.Contains(state.forked, name) }
+						unread := slices.DeleteFunc(slices.Clone(merged), reading)
 						for i := range merged {
 							merged[i] = merged[i].clone()
-							merged[i].forked = false
-							simpleForgetUserVars(merged[i].vars, simpleForkedNames(parts))
+							merged[i].forked = slices.DeleteFunc(merged[i].forked, func(forked string) bool { return forked == name })
+							simpleForgetUserVars(merged[i].vars, []string{name})
+						}
+						if simpleOverStateBound(uniqueSimpleStates(merged)) {
+							// Values the readings gave other variables of the
+							// body would not fit: keep the states of the walk
+							// that left the name unread.
+							merged = unread
 						}
 					}
 					for name, kind := range loopScopeKinds {
@@ -297,18 +309,23 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if parentStates, present := states[parent]; present {
 				states[parent] = compact(parentStates, partIndex)
 			}
-			if len(states[parent]) > maxSimpleStates {
+			if simpleOverStateBound(states[parent]) {
 				return []SimpleCommand{{EvaluationFailure: "limit"}}
 			}
 			previousScope = parent
 		}
 		previousScope = part.scope
+		var reads []string
+		if slices.ContainsFunc(part.binds, func(bind simpleLoopBind) bool { return bind.fork }) {
+			reads = simpleParamNames(part.text)
+		}
+		if !simpleEnterForkedLoops(states, part, unreadLoops) {
+			return []SimpleCommand{{EvaluationFailure: "parse"}}
+		}
 		variants := simpleScopeStates(states, part.scope)
 		if variants == nil {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
-		variants = simpleForkLoopBinds(variants, part.binds)
-		forkedRead := simpleReadsForkedName(part.text, part.binds)
 		file, parsed := shellparse.Parse(part.text)
 		if !parsed || len(file.Stmts) != 1 {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
@@ -327,6 +344,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			}
 			text := part.text
 			effective := state.vars
+			loopRead := slices.ContainsFunc(state.forked, func(name string) bool { return slices.Contains(reads, name) })
 			// unprefixed is the call without prefix assignments that can
 			// change which program runs (PATH=/x aws ...). The policy facts
 			// are the command's argv, so the call is also judged without
@@ -385,8 +403,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			call, _ := stmt.Cmd.(*syntax.CallExpr)
 			command := SimpleCommand{Text: text, CWD: state.cwd,
 				ZshHistoryBuiltin:       simpleZshHistoryCall(call, effective, interpreter),
-				LoginGuess:              state.forked && forkedRead,
-				LoopReading:             state.forked && forkedRead,
+				LoginGuess:              loopRead,
+				LoopReading:             loopRead,
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative}
@@ -515,7 +533,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			nextVariants = append(nextVariants, state)
 		}
 		states[part.scope] = compact(uniqueSimpleStates(nextVariants), partIndex+1)
-		if len(states[part.scope]) > maxSimpleStates {
+		if simpleOverStateBound(states[part.scope]) {
 			return []SimpleCommand{{EvaluationFailure: "limit"}}
 		}
 	}

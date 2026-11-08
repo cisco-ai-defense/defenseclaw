@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"path"
 	"slices"
 	"strings"
 
@@ -17,32 +18,46 @@ import (
 // the loop body once for each value the walk can read, so an operand spelled
 // through the variable is judged as the path it names (GAP-0880). USER and
 // LOGNAME keep their own login rule (simpleApplyLoopBinds).
+//
+// The walk forks its states once, where it enters the loop (simpleForkLoopBind),
+// and drops the name where the loop ends. The readings are proof-only, so they
+// have a bound of their own and do not count against maxSimpleStates. A list
+// with more distinct words than maxLoopReadings is read for the words that can
+// name DefenseClaw state first: an expansion, the login, a path or a dotted
+// name. The rest, and a list the walk cannot read at all, stay unread and
+// follow the compound-limit rule: the walk does not report a limit for them,
+// because a long ordinary list is not an over-limit call.
 const (
-	// maxLoopBindItems bounds the words of a list read this way; a longer
-	// list leaves its variable unknown, as every loop variable was before.
-	maxLoopBindItems = 8
-	// forkedLoopScopeKind is the scope kind of the body of such a loop.
+	// maxLoopReadings is the most distinct values one loop variable is read as
+	// from one state.
+	maxLoopReadings = 48
+	// maxForkedStates is the most states, forked readings included, that a
+	// scope holds.
+	maxForkedStates = 256
+	// forkedLoopScopeKind is the scope kind of the body of such a loop; the
+	// name of its variable follows the kind and an equals sign.
 	forkedLoopScopeKind = byte('l')
 )
 
 // simpleLoopForks reports a for or select loop whose variable is read per
-// word: an explicit list of a few words, a name the body does not bind
-// again, and no function the body could call to bind it.
-func simpleLoopForks(loop *syntax.ForClause, iteration *syntax.WordIter, functions bool) bool {
-	if functions || iteration.Name == nil || slices.Contains(simpleUserNames, iteration.Name.Value) ||
-		!iteration.InPos.IsValid() || len(iteration.Items) == 0 || len(iteration.Items) > maxLoopBindItems {
+// word: an explicit list and a name the body does not bind again. A function
+// the body calls is code the body runs, so it counts as a binding.
+func simpleLoopForks(loop *syntax.ForClause, iteration *syntax.WordIter, functionNames []string) bool {
+	if iteration.Name == nil || slices.Contains(simpleUserNames, iteration.Name.Value) ||
+		!iteration.InPos.IsValid() || len(iteration.Items) == 0 {
 		return false
 	}
-	return !simpleLoopBodyMayBind(loop.Do, iteration.Name.Value)
+	return !simpleMayBind(loop.Do, iteration.Name.Value, functionNames, nil)
 }
 
-// simpleLoopBodyMayBind reports code in body that can give name another
-// value than the loop does: an assignment, a loop or declaration of the
-// name, arithmetic, a default assignment, a command that reads into a
-// variable, and code the walk does not read.
-func simpleLoopBodyMayBind(body []*syntax.Stmt, name string) bool {
+// simpleMayBind reports code in stmts that can give name another value than
+// the loop does: an assignment, a loop or declaration of the name,
+// arithmetic, a default assignment, a command that reads into a variable, a
+// call of a function the action declares, and code the walk does not read.
+// skip is one call that is left out (the read of a while read loop).
+func simpleMayBind(stmts []*syntax.Stmt, name string, functionNames []string, skip *syntax.CallExpr) bool {
 	binds := false
-	for _, stmt := range body {
+	for _, stmt := range stmts {
 		syntax.Walk(stmt, func(node syntax.Node) bool {
 			switch node := node.(type) {
 			case *syntax.Assign:
@@ -57,7 +72,10 @@ func simpleLoopBodyMayBind(body []*syntax.Stmt, name string) bool {
 				binds = binds || node.Exp != nil && node.Param != nil && node.Param.Value == name &&
 					(node.Exp.Op == syntax.AssignUnset || node.Exp.Op == syntax.AssignUnsetOrNull)
 			case *syntax.CallExpr:
-				binds = binds || simpleCallMayBind(node, name)
+				if node == skip {
+					return false
+				}
+				binds = binds || simpleCallMayBind(node, name, functionNames)
 			}
 			return !binds
 		})
@@ -69,15 +87,15 @@ func simpleLoopBodyMayBind(body []*syntax.Stmt, name string) bool {
 }
 
 // simpleCallMayBind reports a call that can bind name: a program the walk
-// cannot read, code it runs from text (eval, source, trap), or a builtin
-// that names variables, given a word that is name or that the walk cannot
-// read.
-func simpleCallMayBind(call *syntax.CallExpr, name string) bool {
+// cannot read, a function of the action, code it runs from text (eval,
+// source, trap), or a builtin that names variables, given a word that is
+// name or that the walk cannot read.
+func simpleCallMayBind(call *syntax.CallExpr, name string, functionNames []string) bool {
 	if len(call.Args) == 0 {
 		return false
 	}
 	program, known := simpleStaticWord(call.Args[0], nil)
-	if !known {
+	if !known || slices.Contains(functionNames, program) {
 		return true
 	}
 	switch program {
@@ -102,48 +120,149 @@ func simpleCallMayBind(call *syntax.CallExpr, name string) bool {
 	return false
 }
 
-// simpleForkLoopBinds returns variants with each forked loop variable read
-// once for every list word the walk can read, next to the reading that
-// leaves it as it was (unread, as for a list it cannot read). A word with
-// several fields or a pattern is left to that reading. When the readings
-// would pass the state bound, the variable stays unread.
-func simpleForkLoopBinds(variants []simpleShellState, binds []simpleLoopBind) []simpleShellState {
-	for _, bind := range binds {
-		if !bind.fork {
-			continue
+// simpleForkLoopBind returns the states a forked loop starts its body with:
+// each of entry as it is (the variable unread, as for a list the walk cannot
+// read), and with the variable read once for every list word the walk can
+// read, up to maxLoopReadings distinct values. A word with several fields or
+// a pattern is left to the first reading. fits is false when the readings
+// would pass maxForkedStates; the variable then stays unread.
+func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind) (forked []simpleShellState, fits bool) {
+	for _, prior := range entry {
+		forked = append(forked, prior)
+		type candidate struct {
+			value    string
+			priority bool
 		}
-		var forked []simpleShellState
-		for _, prior := range variants {
-			forked = append(forked, prior)
-			for _, word := range bind.items {
-				value, known := simpleStaticWord(word, prior.vars)
-				if !known || strings.ContainsAny(value, " \t\n*?[") {
-					continue
+		var candidates []candidate
+		login := path.Base(prior.vars["HOME"])
+		for _, word := range bind.items {
+			value, known := simpleStaticWord(word, prior.vars)
+			if !known || strings.ContainsAny(value, " \t\n*?[") {
+				continue
+			}
+			for _, reading := range bind.readings(value) {
+				if !slices.ContainsFunc(candidates, func(seen candidate) bool { return seen.value == reading }) {
+					candidates = append(candidates, candidate{reading, reading == login ||
+						strings.ContainsAny(reading, "/.") || !simpleLiteralWord(word)})
 				}
-				alt := prior.clone()
-				alt.vars[bind.name] = value
-				alt.forked = true
-				forked = append(forked, alt)
 			}
 		}
-		if unique := uniqueSimpleStates(forked); len(unique) <= maxSimpleStates {
-			variants = unique
+		// The words that can name state come first when the list is long.
+		slices.SortStableFunc(candidates, func(a, b candidate) int {
+			switch {
+			case a.priority == b.priority:
+				return 0
+			case a.priority:
+				return -1
+			}
+			return 1
+		})
+		for index, read := range candidates {
+			if index == maxLoopReadings {
+				break
+			}
+			alt := prior.clone()
+			alt.vars[bind.name] = read.value
+			if !slices.Contains(alt.forked, bind.name) {
+				alt.forked = append(alt.forked, bind.name)
+			}
+			forked = append(forked, alt)
 		}
 	}
-	return variants
+	forked = uniqueSimpleStates(forked)
+	return forked, len(forked) <= maxForkedStates
 }
 
-// simpleForkedNames are the variables the forked loops of binds read.
-func simpleForkedNames(parts []sequenceStatement) []string {
-	var names []string
-	for _, part := range parts {
-		for _, bind := range part.binds {
-			if bind.fork && !slices.Contains(names, bind.name) {
-				names = append(names, bind.name)
+// simpleLiteralWord reports a word that is plain text, with no expansion.
+func simpleLiteralWord(word *syntax.Word) bool {
+	for _, part := range word.Parts {
+		switch part := part.(type) {
+		case *syntax.Lit, *syntax.SglQuoted:
+		case *syntax.DblQuoted:
+			for _, inner := range part.Parts {
+				if _, literal := inner.(*syntax.Lit); !literal {
+					return false
+				}
 			}
+		default:
+			return false
 		}
 	}
-	return names
+	return true
+}
+
+// readings are the values a read loop variable takes from one input word:
+// the word, and the word less its last character when the IFS of the read
+// ends the line with it (read drops one trailing delimiter).
+func (bind simpleLoopBind) readings(value string) []string {
+	if value != "" && strings.IndexByte(bind.ifs, value[len(value)-1]) >= 0 {
+		return []string{value, value[:len(value)-1]}
+	}
+	return []string{value}
+}
+
+// simpleEnterForkedLoops forks the states at the start of each forked loop
+// around part that the walk has not entered yet. A loop whose readings do not
+// fit stays unread. ok is false when the scopes and the loops of part do not
+// match.
+func simpleEnterForkedLoops(states map[string][]simpleShellState, part sequenceStatement, unread map[string]bool) bool {
+	scopes := simpleForkedScopes(part.scope)
+	var binds []simpleLoopBind
+	for _, bind := range part.binds {
+		if bind.fork {
+			binds = append(binds, bind)
+		}
+	}
+	if len(scopes) != len(binds) {
+		return false
+	}
+	for index, scope := range scopes {
+		if _, entered := states[scope]; entered || unread[scope] {
+			continue
+		}
+		entry := simpleScopeStates(states, scope)
+		if entry == nil {
+			return false
+		}
+		if forked, fits := simpleForkLoopBind(entry, binds[index]); fits {
+			states[scope] = forked
+		} else {
+			unread[scope] = true
+		}
+	}
+	return true
+}
+
+// simpleOverStateBound reports more states than a scope may hold: the states
+// no forked loop reads are bounded by maxSimpleStates, the forked readings by
+// maxForkedStates.
+func simpleOverStateBound(states []simpleShellState) bool {
+	plain := 0
+	for _, state := range states {
+		if len(state.forked) == 0 {
+			plain++
+		}
+	}
+	return plain > maxSimpleStates || len(states) > maxForkedStates
+}
+
+// simpleForkedScopes returns the scopes of forked loops that scope is in,
+// outermost first.
+func simpleForkedScopes(scope string) []string {
+	var scopes []string
+	parts := strings.Split(scope, "/")
+	for index := 1; index < len(parts); index++ {
+		if parts[index] != "" && parts[index][0] == forkedLoopScopeKind {
+			scopes = append(scopes, strings.Join(parts[:index+1], "/"))
+		}
+	}
+	return scopes
+}
+
+// simpleForkedScopeName returns the variable of the forked loop of scope.
+func simpleForkedScopeName(scope string) string {
+	_, name, _ := strings.Cut(scope[strings.LastIndexByte(scope, '/')+1:], "=")
+	return name
 }
 
 // simpleQuotedWord reports a word that is one quoted string.
@@ -158,46 +277,45 @@ func simpleQuotedWord(word *syntax.Word) bool {
 	return false
 }
 
-// simpleReadsForkedName reports a statement that reads a variable of a
-// forked loop around it. Its reading in a forked state is one iteration, and
+// simpleParamNames returns the variables text expands. A statement in a
+// forked state is one iteration of its loop where it spells the variable, and
 // only proves a write to DefenseClaw state (SimpleCommand.LoginGuess): the
 // whole action keeps deciding every other rule, as before.
-func simpleReadsForkedName(text string, binds []simpleLoopBind) bool {
-	var names []string
-	for _, bind := range binds {
-		if bind.fork {
-			names = append(names, bind.name)
-		}
-	}
-	if len(names) == 0 || !strings.ContainsRune(text, '$') {
-		return false
+func simpleParamNames(text string) []string {
+	if !strings.ContainsRune(text, '$') {
+		return nil
 	}
 	file, ok := shellparse.Parse(text)
 	if !ok {
-		return false
+		return nil
 	}
-	reads := false
+	var names []string
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil && slices.Contains(names, param.Param.Value) {
-			reads = true
+		if param, ok := node.(*syntax.ParamExp); ok && param.Param != nil && !slices.Contains(names, param.Param.Value) {
+			names = append(names, param.Param.Value)
 		}
-		return !reads
+		return true
 	})
-	return reads
+	return names
 }
 
 // simpleReadLoopBind returns the binding of a while read [-r] name loop whose
 // input is one static echo or printf stage: name takes that one word, as an
-// iteration of a for loop over it would. A longer input, other options, a
-// changed IFS, a backslash (read without -r reads it as an escape) and a body
-// that binds the name again leave it unread.
-func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, source string, functions bool) (simpleLoopBind, bool) {
-	if functions || input == nil || loop.Until || len(loop.Cond) != 1 || strings.Contains(source, "IFS") ||
-		input.Negated || input.Background || len(input.Redirs) != 0 {
+// iteration of a for loop over it would. The read may have an IFS prefix
+// (while IFS= read -r name). A longer input, other options, a backslash
+// (read without -r reads it as an escape), and a body or an action that
+// binds the name or IFS in a way the walk cannot read leave it unread.
+func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, file *syntax.File, functionNames []string) (simpleLoopBind, bool) {
+	if input == nil || loop.Until || len(loop.Cond) != 1 || input.Negated || input.Background || len(input.Redirs) != 0 {
 		return simpleLoopBind{}, false
 	}
 	read, ok := loop.Cond[0].Cmd.(*syntax.CallExpr)
-	if !ok || len(read.Assigns) != 0 || len(loop.Cond[0].Redirs) != 0 || len(read.Args) < 2 || len(read.Args) > 3 {
+	if !ok || loop.Cond[0].Negated || loop.Cond[0].Background || len(loop.Cond[0].Redirs) != 0 ||
+		len(read.Args) < 2 || len(read.Args) > 3 {
+		return simpleLoopBind{}, false
+	}
+	ifs, ok := simpleReadIFS(read.Assigns)
+	if !ok {
 		return simpleLoopBind{}, false
 	}
 	if program, static := simpleStaticWord(read.Args[0], nil); !static || program != "read" {
@@ -229,11 +347,32 @@ func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, source str
 			word = echo.Args[2]
 		}
 	}
-	if word == nil || simpleLoopBodyMayBind(loop.Do, name) {
+	if word == nil || simpleMayBind(loop.Do, name, functionNames, nil) ||
+		simpleMayBind(file.Stmts, "IFS", functionNames, read) {
 		return simpleLoopBind{}, false
 	}
 	if text, static := simpleStaticWord(word, nil); static && (strings.HasPrefix(text, "-") || strings.Contains(text, "\\")) {
 		return simpleLoopBind{}, false
 	}
-	return simpleLoopBind{name: name, items: []*syntax.Word{word}, fork: true}, true
+	return simpleLoopBind{name: name, items: []*syntax.Word{word}, fork: true, ifs: ifs}, true
+}
+
+// simpleReadIFS returns the IFS a read call sets for itself with a prefix
+// assignment, "" when it sets none. Any other prefix is not read.
+func simpleReadIFS(assigns []*syntax.Assign) (string, bool) {
+	switch len(assigns) {
+	case 0:
+		return "", true
+	case 1:
+		assign := assigns[0]
+		if assign.Name == nil || assign.Name.Value != "IFS" || assign.Append || assign.Naked ||
+			assign.Array != nil || assign.Index != nil {
+			return "", false
+		}
+		if assign.Value == nil {
+			return "", true
+		}
+		return simpleStaticWord(assign.Value, nil)
+	}
+	return "", false
 }
