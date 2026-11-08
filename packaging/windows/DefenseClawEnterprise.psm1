@@ -37564,22 +37564,6 @@ function Remove-DefenseClawManagedTree {
             }
         }
     }
-    if ($null -ne $lastError -and
-        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
-        # The rollback retry window checks the recorded root identity and
-        # descriptor before every delete; the privileged pass does too, after
-        # the five attempts above (GAP-0890 review S6).
-        if ($RetryHeldFileMilliseconds -gt 0 -and
-            -not (Test-DefenseClawManagedTreeRetryRoot `
-                -Path $safe `
-                -ExpectedIdentity $ExpectedRootIdentity `
-                -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
-            return
-        }
-        if (Remove-DefenseClawStateTreePrivileged -Root $safe -Target $target -Label $Label -ErrorRecord $lastError) {
-            return
-        }
-    }
     if ($RetryHeldFileMilliseconds -gt 0 -and
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
         # An executing hook answers AccessDenied even to SYSTEM. Extend the
@@ -37639,6 +37623,24 @@ function Remove-DefenseClawManagedTree {
                     $lastError = $_
                 }
             }
+        }
+    }
+    if ($null -ne $lastError -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
+        # Last resort, after the attempts above and the rollback holder wait:
+        # the rollback retry window checks the recorded root identity and
+        # descriptor before every delete, and the privileged pass does too
+        # (GAP-0890 review S6). It runs here so a root that the wait would have
+        # returned on is never reached.
+        if ($RetryHeldFileMilliseconds -gt 0 -and
+            -not (Test-DefenseClawManagedTreeRetryRoot `
+                -Path $safe `
+                -ExpectedIdentity $ExpectedRootIdentity `
+                -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
+            return
+        }
+        if (Remove-DefenseClawStateTreePrivileged -Root $safe -Target $target -Label $Label -ErrorRecord $lastError) {
+            return
         }
     }
     if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
