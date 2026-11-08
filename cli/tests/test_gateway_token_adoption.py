@@ -240,3 +240,53 @@ def test_the_token_save_writes_one_line_ending_whatever_the_os(tmp_path, ending)
     assert lines.count(f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
     assert lines.count(f"OPENCLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
     assert _resolved_after_load(tmp_path) == NEW_TOKEN
+
+
+# The earlier Go writer left a CRLF .env with LF on the lines it replaced or added.
+MIXED_ENV = (
+    b"DEFENSECLAW_LLM_KEY=keep\r\n"
+    + f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\n".encode()
+    + b"OTHER=1\r\nLAST=2\n"
+)
+
+
+def _one_ending(body: bytes, ending: bytes) -> bool:
+    # A replace-in-place keeps a missing final newline; every line break there is is the one ending.
+    return body.count(b"\n") == body.count(ending)
+
+
+@pytest.mark.parametrize("final_newline", [True, False], ids=["final-newline", "no-final-newline"])
+@pytest.mark.parametrize("writer", ["adoption", "secret-save", "rotation"])
+def test_every_python_writer_converges_a_mixed_dotenv_to_one_ending(tmp_path, writer, final_newline):
+    path = tmp_path / ".env"
+    seed = MIXED_ENV if final_newline else MIXED_ENV.rstrip(b"\n")
+    path.write_bytes(seed)
+    path.chmod(0o600)
+    if writer == "adoption":
+        _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+    elif writer == "secret-save":
+        _save_secret_to_dotenv("DEFENSECLAW_LLM_KEY", "changed", str(tmp_path))
+    else:
+        cmd_setup._rotate_token_atomic_write(str(path), NEW_TOKEN)
+    body = path.read_bytes()
+    assert _one_ending(body, b"\r\n")
+    if final_newline:
+        assert body.endswith(b"\r\n")
+    lines = body.decode().split("\r\n")
+    assert "OTHER=1" in lines
+    assert "LAST=2" in lines
+    if writer == "secret-save":
+        assert "DEFENSECLAW_LLM_KEY=changed" in lines
+    else:
+        assert f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}" in lines
+        assert _resolved_after_load(tmp_path) == NEW_TOKEN
+
+
+def test_a_dotenv_without_crlf_stays_lf_after_every_python_writer(tmp_path):
+    path = tmp_path / ".env"
+    path.write_bytes(MIXED_ENV.replace(b"\r\n", b"\n"))
+    path.chmod(0o600)
+    _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+    _save_secret_to_dotenv("DEFENSECLAW_LLM_KEY", "changed", str(tmp_path))
+    cmd_setup._rotate_token_atomic_write(str(path), NEW_TOKEN)
+    assert b"\r" not in path.read_bytes()

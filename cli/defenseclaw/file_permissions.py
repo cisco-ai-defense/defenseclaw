@@ -817,6 +817,16 @@ def dotenv_line_ending(body: bytes) -> bytes:
     return b"\r\n" if b"\r\n" in body else b"\n"
 
 
+def dotenv_with_line_ending(body: bytes, newline: bytes) -> bytes:
+    """*body* with every CRLF or LF line ending replaced by *newline*.
+
+    Every writer ends its render with this, so a file that already mixes both
+    endings (an older writer produced such files) leaves the writer with one.
+    """
+    unix = body.replace(b"\r\n", b"\n")
+    return unix if newline == b"\n" else unix.replace(b"\n", newline)
+
+
 def dotenv_key_is_process_control(key: str) -> bool:
     """Return whether a dotenv key can redirect or inject a child process."""
     normalized = key.strip().upper()

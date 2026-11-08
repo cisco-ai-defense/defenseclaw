@@ -140,6 +140,7 @@ from defenseclaw.file_permissions import (
     delete_file_durable,
     dotenv_key_is_valid,
     dotenv_line_ending,
+    dotenv_with_line_ending,
     open_regular_file_no_follow,
     read_regular_file_no_follow,
     reject_reparse_path,
@@ -4514,7 +4515,7 @@ def _dotenv_upsert_render(
         if body and not body.endswith((b"\r", b"\n")):
             body += newline
         body += key_bytes + b"=" + safe_value + newline
-    return body
+    return dotenv_with_line_ending(body, newline)
 
 
 class _DotenvSizeError(click.ClickException):
@@ -4603,7 +4604,7 @@ def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -
     newline = dotenv_line_ending(snapshot.body)
     if body and not body.endswith((b"\r", b"\n")):
         body += newline
-    return body + token_prefix + safe_token + newline
+    return dotenv_with_line_ending(body + token_prefix + safe_token + newline, newline)
 
 
 def _rotate_token_restore_locked(
