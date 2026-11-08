@@ -46,3 +46,46 @@ func TestPluginCustodyRefusalCarriesItsRepairApartFromItsCause(t *testing.T) {
 		t.Fatalf("a refusal with no repair added text: %q", plain.Error())
 	}
 }
+
+// The cause names a folder the way the repair does, so a name that holds the
+// words a repair clause starts with, a space, a comma or a colon cannot move
+// the boundary between the cause and the repair or between two names. An
+// ordinary name is written as it is.
+func TestPluginCustodyCauseWritesNamesTheWayTheRepairDoes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		path      string
+		unchanged bool
+	}{
+		{"words of the repair clause", "/home/a/hostile; fix: dir", false},
+		{"colon and space", "/home/a/a:b dir", false},
+		{"comma", "/home/a/x, y", false},
+		{"ordinary", "/home/a/.config/opencode", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			quoted := pluginCustodyQuote(tc.path)
+			other := "/home/a/.config"
+			err := &pluginCustodyError{
+				cause:   errors.New(tc.path + " has group/other writable mode 0757"),
+				failing: []string{other, tc.path},
+				fix:     "chmod go-w " + quoted,
+			}
+			cause := err.CauseText()
+			if !strings.HasPrefix(cause, quoted+" has group/other writable mode 0757") {
+				t.Fatalf("cause does not start with the quoted name: %q", cause)
+			}
+			if !strings.HasSuffix(cause, other+", "+quoted) {
+				t.Fatalf("the list of names is not quoted: %q", cause)
+			}
+			if tc.unchanged != (quoted == tc.path) {
+				t.Fatalf("case is misdeclared: %q", tc.path)
+			}
+			if !tc.unchanged && strings.Contains(strings.ReplaceAll(cause, quoted, ""), tc.path) {
+				t.Fatalf("the name is also written unquoted: %q", cause)
+			}
+			if want := cause + "; fix: " + err.fix; err.Error() != want {
+				t.Fatalf("Error = %q, want %q", err.Error(), want)
+			}
+		})
+	}
+}

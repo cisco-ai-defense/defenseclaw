@@ -8,9 +8,20 @@ package connector
 
 import (
 	"errors"
+	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
+
+// pluginCustodyQuote writes p for a PowerShell command line as the repair
+// does (managed.PowerShellLiteral), and only when it needs it.
+func pluginCustodyQuote(p string) string {
+	if p != "" && strings.Trim(p, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./\\-") == "" {
+		return p
+	}
+	return managed.PowerShellLiteral(p)
+}
 
 // explainPluginArtifactRefusal adds the command that clears a refused plugin
 // folder DACL to the refusal (GAP-0731). safefile names every account whose

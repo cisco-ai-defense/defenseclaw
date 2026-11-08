@@ -7,6 +7,7 @@ package connector
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -31,13 +32,53 @@ type pluginCustodyError struct {
 func (e *pluginCustodyError) Error() string { return e.CauseText() + e.repairText() }
 
 // CauseText is the refusal without its repair: the cause and every element the
-// walk refuses.
+// walk refuses. A folder or file is written the way the repair writes it
+// (pluginCustodyQuote), so a name that holds the text a repair clause starts
+// with, or a space or comma, cannot move the boundary between the cause and
+// the repair or between two names. An ordinary name is written as it is.
 func (e *pluginCustodyError) CauseText() string {
-	text := fmt.Sprintf("%v", e.cause)
+	text := quotePluginCustodyPaths(fmt.Sprintf("%v", e.cause), e.failing)
 	if len(e.failing) > 1 {
-		text += "; every folder or file to fix, outermost first: " + strings.Join(e.failing, ", ")
+		quoted := make([]string, len(e.failing))
+		for i, path := range e.failing {
+			quoted[i] = pluginCustodyQuote(path)
+		}
+		text += "; every folder or file to fix, outermost first: " + strings.Join(quoted, ", ")
 	}
 	return text
+}
+
+// quotePluginCustodyPaths writes every occurrence of a path of paths in text
+// as pluginCustodyQuote writes it, the longest path first at each position.
+// Only a path that needs quoting is looked for.
+func quotePluginCustodyPaths(text string, paths []string) string {
+	var needed []string
+	for _, path := range paths {
+		if pluginCustodyQuote(path) != path {
+			needed = append(needed, path)
+		}
+	}
+	if len(needed) == 0 {
+		return text
+	}
+	sort.SliceStable(needed, func(i, j int) bool { return len(needed[i]) > len(needed[j]) })
+	var out strings.Builder
+	for at := 0; at < len(text); {
+		matched := false
+		for _, path := range needed {
+			if strings.HasPrefix(text[at:], path) {
+				out.WriteString(pluginCustodyQuote(path))
+				at += len(path)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			out.WriteByte(text[at])
+			at++
+		}
+	}
+	return out.String()
 }
 
 // Repair is the command that repairs what a command can repair and the steps
