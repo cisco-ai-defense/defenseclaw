@@ -685,7 +685,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	}
 	a.rememberResolvedMCP(connector, res, denied, earlierDenied)
 	if res.unknown && decision.RawAction != "block" {
-		if unknown, ok := unknownMCPDefinitionDecision(cfg, connector, probe); ok {
+		if unknown, ok := unknownMCPDefinitionDecision(cfg, connector, probe, res.lost); ok {
 			decision = unknown
 		}
 	}
@@ -800,6 +800,9 @@ type mcpResolution struct {
 	// unknown is set when the server was looked up by name and found neither
 	// in the config nor in what the session resolved before.
 	unknown bool
+	// lost is set with unknown when a denied definition of the session did
+	// not fit in the memory, so the name may be one of them.
+	lost bool
 	// track is set when the session memory is used; home and name key it.
 	track bool
 	home  string
@@ -853,7 +856,7 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 		return res
 	}
 	secureClient := cfg.SecureClientIntegration()
-	if !cfg.AssetPolicy.Enabled && (secureClient || !mcpListsPinEndpoint(cfg.AssetPolicy.MCP)) {
+	if !cfg.AssetPolicy.Enabled && (secureClient || !mcpListsNeedResolving(cfg.AssetPolicy.MCP)) {
 		return res
 	}
 	if probe.Surface != "hook" || probe.URL != "" || probe.Command != "" || probe.ServerName == "" {
@@ -888,6 +891,7 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 		res.probe, res.entry, res.found = mcpProbeWithEntry(probe, kept, true), kept, true
 	default:
 		res.unknown = true
+		res.lost = res.track && a.mcpResolved.lostDenied(connector, home, probe.SessionID, time.Now())
 	}
 	return res
 }
@@ -904,21 +908,34 @@ func mcpConnectorResolvesByName(connector string) bool {
 // what its session resolved before (a gateway restart, a new session, or a
 // server the agent loads from outside the files read here). A rule of the
 // denied list that pins where a server points cannot be checked against it,
-// so the call is refused in a strict or managed deployment and allowed with a
-// warning in the default and permissive tiers, as for a server whose
-// admission is pending (GAP-0861). It applies whatever asset_policy.enabled
-// says, like the explicit deny. Secure Client keeps main (#1092).
-func unknownMCPDefinitionDecision(cfg *config.Config, connector string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+// and neither can an endpoint rule of the allowed list while asset_policy is
+// enabled, so the call is refused in a strict or managed deployment and
+// allowed with a warning in the default and permissive tiers, as for a server
+// whose admission is pending (GAP-0861). The allowed list follows
+// asset_policy.mode. When lost is set, a denied definition of the session did
+// not fit in the memory, so a name found nowhere may be that one and the
+// denied list refuses it in every tier. The denied list applies whatever
+// asset_policy.enabled says, like the explicit deny. Secure Client keeps main
+// (#1092).
+func unknownMCPDefinitionDecision(cfg *config.Config, connector string, probe mcpRuntimeProbe, lost bool) (config.AssetPolicyDecision, bool) {
 	if cfg == nil || cfg.SecureClientIntegration() || probe.Surface != "hook" || probe.ServerName == "" ||
-		!mcpConnectorResolvesByName(connector) ||
-		!rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
+		!mcpConnectorResolvesByName(connector) {
+		return config.AssetPolicyDecision{}, false
+	}
+	denyPins := rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName)
+	allowPins := cfg.AssetPolicy.Enabled && rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName)
+	if !denyPins && !allowPins {
 		return config.AssetPolicyDecision{}, false
 	}
 	reason := fmt.Sprintf("mcp server %q: DefenseClaw found no definition of it in the agent config or earlier in this session, "+
-		"so where it points cannot be checked against asset_policy.mcp.denied", probe.ServerName)
+		"so where it points cannot be checked against asset_policy.mcp", probe.ServerName)
 	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connector, "hook", reason, "mcp-definition-unproven")
 	decision.RegistryStatus = "unknown"
-	if !cfg.MCPAdmissionFailsClosed(connector) {
+	closed := denyPins && lost || cfg.MCPAdmissionFailsClosed(connector)
+	if !denyPins && !strings.EqualFold(cfg.EffectiveAssetPolicyModeForConnector(connector), config.AssetPolicyModeAction) {
+		closed = false
+	}
+	if !closed {
 		decision.Action = "allow"
 		decision.Mode = config.AssetPolicyModeObserve
 	}
@@ -1086,11 +1103,14 @@ func ruleMayMatchPins(rule config.AssetPolicyRule, pins *assetfacts.MCPPins, tai
 	return true
 }
 
-// mcpListsPinEndpoint reports whether a denied or allowed MCP rule matches
-// on how a server starts (url, command, args_prefix, transport), which a
-// name-only probe needs resolving for.
-func mcpListsPinEndpoint(p config.AssetTypePolicy) bool {
-	return rulesPinEndpoint(p.Denied) || rulesPinEndpoint(p.Allowed)
+// mcpListsNeedResolving reports whether the explicit lists need the server of
+// a name-only probe resolved while asset_policy is off: a denied rule of any
+// kind, because the agent keeps the connection under the name it had when the
+// call was judged and a later edit of its config (a rename, a removal) must
+// not take the deny off it (GAP-0861), or an allowed rule that matches on how
+// a server starts (url, command, args_prefix, transport).
+func mcpListsNeedResolving(p config.AssetTypePolicy) bool {
+	return len(p.Denied) > 0 || rulesPinEndpoint(p.Allowed)
 }
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
