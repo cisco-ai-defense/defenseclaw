@@ -161,7 +161,7 @@ function Set-Counter([int]$Size) { [IO.File]::WriteAllBytes($lock, [byte[]]::new
 function Start-Writer([int]$DelayMs, [string]$Copy, [int]$End) {
     $command = "Start-Sleep -Milliseconds $DelayMs; Set-Content -LiteralPath '$Copy' -Value x -NoNewline; [IO.File]::WriteAllBytes('$lock', [byte[]]::new($End))"
     $start = @{ FilePath = (Get-Process -Id $PID).Path; ArgumentList = @('-NoLogo', '-NoProfile', '-Command', $command); PassThru = $true }
-    if ($IsWindows) { $start['WindowStyle'] = 'Hidden' }
+    if ($PSVersionTable.PSVersion.Major -lt 6 -or $IsWindows) { $start['WindowStyle'] = 'Hidden' }
     Start-Process @start
 }
 $writer = $null
