@@ -221,6 +221,9 @@ var loopScopeKinds = map[string]byte{"USER": 'u', "LOGNAME": 'o'}
 type simpleLoopBind struct {
 	name  string
 	items []*syntax.Word
+	// fork marks a variable other than USER and LOGNAME, read once for each
+	// word of its list (simpleForkLoopBinds).
+	fork bool
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -235,10 +238,11 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	if !parsed {
 		return nil, false, false
 	}
-	declined := false
+	declined, anyFunction := false, false
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch typed := node.(type) {
 		case *syntax.FuncDecl:
+			anyFunction = true
 			declined = declined || !allSimple
 		case *syntax.Redirect:
 			declined = declined || !allSimple &&
@@ -275,6 +279,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		return walk()
 	}
 	var loopBinds []simpleLoopBind
+	// pipeInput is the stage before the while loop being flattened.
+	var pipeInput *syntax.Stmt
 	// keep adds the text of node, or of a command and its redirects.
 	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
 		from, to := node.Pos(), node.End()
@@ -371,6 +377,10 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				return false, false
 			}
 			if allSimple && (typed.Op == syntax.Pipe || typed.Op == syntax.PipeAll) {
+				// The stage before a while loop is its input.
+				if _, loop := typed.Y.Cmd.(*syntax.WhileClause); loop && typed.Op == syntax.Pipe && len(typed.Y.Redirs) == 0 {
+					pipeInput = typed.X
+				}
 				return true, childScope('s', func() bool { return flatten(typed.X) }) &&
 					childScope('s', func() bool { return flatten(typed.Y) })
 			}
@@ -405,8 +415,17 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			}
 			return true, true
 		case *syntax.WhileClause:
+			kind := byte('c')
+			input := pipeInput
+			pipeInput = nil
+			if bind, ok := simpleReadLoopBind(typed, input, source, anyFunction); ok {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), bind)
+				defer func() { loopBinds = outer }()
+				kind = forkedLoopScopeKind
+			}
 			return true, flattenAll(typed.Cond) &&
-				childScope('c', func() bool { return flattenAll(typed.Do) })
+				childScope(kind, func() bool { return flattenAll(typed.Do) })
 		case *syntax.ForClause:
 			switch iteration := typed.Loop.(type) {
 			case *syntax.WordIter:
@@ -432,6 +451,11 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				// The scope kind names the login the loop binds, so the
 				// name has no value the walk can follow once the loop ends.
 				kind = loopScopeKinds[iteration.Name.Value]
+			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(typed, iteration, anyFunction) {
+				outer := loopBinds
+				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true})
+				defer func() { loopBinds = outer }()
+				kind = forkedLoopScopeKind
 			}
 			return true, childScope(kind, func() bool { return flattenAll(typed.Do) })
 		case *syntax.CaseClause:

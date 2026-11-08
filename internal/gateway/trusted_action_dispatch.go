@@ -570,7 +570,7 @@ func dispatchTrustedActionWith(
 					// before a write does not hide the write.
 					child.Input.CWD = request.Input.CWD
 				}
-				if simple.LoginGuess && !loginGuessReadingMayProveStateWrite(request, simple.Text, child.Input.CWD) {
+				if simple.LoginGuess && !loginGuessReadingMayProveStateWrite(request, simple, child.Input.CWD) {
 					continue
 				}
 				if simple.UnboundUser {
@@ -4564,10 +4564,11 @@ func loginGuessProvesRule(ruleID string) bool {
 // (ActionStateTargetMention, the scan withActiveStateTargetMention opens
 // with). A reading that does neither would add only its cost to a command
 // that merely names USER or LOGNAME. A managed hook proves the write from
-// the client evidence instead, so its readings are all judged.
-func loginGuessReadingMayProveStateWrite(request trustedActionRequest, text, cwd string) bool {
-	return request.ProtectedHomeHook || hookpaths.MayNameState(text) ||
-		request.targetMemo.ActionStateTargetMention(text, cwd, request.Input.ActiveHome)
+// the client evidence instead, so its readings are all judged, except the
+// readings of one loop iteration, whose spelled path no client evidence keys.
+func loginGuessReadingMayProveStateWrite(request trustedActionRequest, simple actionfacts.SimpleCommand, cwd string) bool {
+	return request.ProtectedHomeHook && !simple.LoopReading || hookpaths.MayNameState(simple.Text) ||
+		request.targetMemo.ActionStateTargetMention(simple.Text, cwd, request.Input.ActiveHome)
 }
 
 // withSimpleCommandFindings adds each command's ordinary standalone result
