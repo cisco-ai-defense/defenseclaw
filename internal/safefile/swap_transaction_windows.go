@@ -84,8 +84,8 @@ func renameTransacted(source, destination string, flags uint32, tx windows.Handl
 
 // swapRenameInTransaction publishes one staged non-image file. The source
 // handle joins the transaction; the compared-file handles remain outside it.
-// unavailable is true only when the platform cannot start a transaction;
-// the caller can then use its guarded one-step replacement.
+// unavailable is true when the platform or staged file cannot participate in
+// the transaction; the caller can then use its guarded one-step replacement.
 func swapRenameInTransaction(source, destination string, flags uint32) (unavailable bool, err error) {
 	for _, proc := range []*windows.LazyProc{
 		swapCreateTransaction, swapCommitTransaction, swapRollbackTransaction,
@@ -126,7 +126,8 @@ func swapRenameInTransaction(source, destination string, flags uint32) (unavaila
 func swapTransactionUnavailable(err error) bool {
 	return errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
 		errors.Is(err, windows.ERROR_INVALID_FUNCTION) ||
-		errors.Is(err, windows.ERROR_TRANSACTIONS_UNSUPPORTED_REMOTE)
+		errors.Is(err, windows.ERROR_TRANSACTIONS_UNSUPPORTED_REMOTE) ||
+		errors.Is(err, windows.ERROR_EFS_NOT_ALLOWED_IN_TRANSACTION)
 }
 
 func swapCallError(err error) error {
