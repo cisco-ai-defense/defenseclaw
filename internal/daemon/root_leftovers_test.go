@@ -467,23 +467,32 @@ func TestRootLeftoversRemedyRestoresOwnerAccessOnWhatItReturns(t *testing.T) {
 	}
 }
 
-// The agent config files a root run wrote in the account home are returned by
-// the same chain (GAP-0848); a home with none keeps the chain unchanged.
-func TestRootLeftoversRemedyReturnsRootOwnedAgentConfigFiles(t *testing.T) {
+// The agent config files and folders a root run wrote in the account home are
+// returned by the same chain (GAP-0848), through the step that re-checks each
+// path when it runs; a home with none keeps the chain unchanged.
+func TestRootLeftoversRemedyReturnsRootOwnedAgentConfigPaths(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_CONFIG", "")
 	old := rootOwnedAgentConfigsOf
 	t.Cleanup(func() { rootOwnedAgentConfigsOf = old })
 	rootOwnedAgentConfigsOf = func(string) []string { return nil }
 	plain := RootLeftoversRemedy(home, nil)
-	if strings.Contains(plain, "chmod u+rw") {
-		t.Fatalf("chain names agent config files where root owns none: %q", plain)
+	if strings.Contains(plain, "-links 1") {
+		t.Fatalf("chain names agent config paths where root owns none: %q", plain)
 	}
-	files := []string{"/Users/a b/.claude/settings.json", "/Users/a b/.codex/config.toml"}
-	rootOwnedAgentConfigsOf = func(string) []string { return files }
+	paths := []string{"/Users/a b/.claude/settings.json", "/Users/a b/.copilot/hooks"}
+	rootOwnedAgentConfigsOf = func(string) []string { return paths }
 	remedy := RootLeftoversRemedy(home, nil)
-	quoted := shellQuote(files[0]) + " " + shellQuote(files[1])
-	if !strings.Contains(remedy, ` && sudo chown "$(id -un)" `+quoted+" && chmod u+rw "+quoted+" && defenseclaw-gateway start") {
-		t.Fatalf("chain does not return the agent config files before the start: %q", remedy)
+	step := rootOwnedAgentConfigStep(paths)
+	if !strings.Contains(remedy, " && "+step+" && defenseclaw-gateway start") {
+		t.Fatalf("chain does not return the agent config paths before the start: %q", remedy)
+	}
+	for _, want := range []string{"sh -c \x27for p; do", "-links 1", "-user root", "-execdir chown -h", "cd -P", "\x27 sh \x27/Users/a b/.claude/settings.json\x27 \x27/Users/a b/.copilot/hooks\x27"} {
+		if !strings.Contains(step, want) {
+			t.Fatalf("step lacks %q: %q", want, step)
+		}
+	}
+	if strings.Contains(remedy, "sudo chown \"$(id -un)\" \x27/Users") {
+		t.Fatalf("chain still names the paths in a bare chown: %q", remedy)
 	}
 }

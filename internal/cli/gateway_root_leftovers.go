@@ -18,9 +18,9 @@ import (
 )
 
 func init() {
-	// The recovery chain also returns the agent config files a root-run gateway
-	// wrote in the account home (GAP-0848).
-	daemon.RegisterRootOwnedAgentConfigFiles(connector.RootOwnedAgentConfigFiles)
+	// The recovery chain also returns the agent config files and folders a
+	// root-run gateway wrote in the account home (GAP-0848).
+	daemon.RegisterRootOwnedAgentConfigPaths(connector.RootOwnedAgentConfigPaths)
 }
 
 // rootRuntimeStartBlockers is a variable so a test can stand in for root-owned
