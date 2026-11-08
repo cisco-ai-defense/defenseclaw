@@ -33,7 +33,8 @@ func ExactPOSIXUnrestrictedSudoersGrantWrite(facts Facts) bool {
 func projectPOSIXUnrestrictedSudoersGrantWrites(
 	input Input,
 ) []POSIXUnrestrictedSudoersGrantWriteFact {
-	if input.Command != "" || len(input.Argv) != 0 || !mayNameSudoers(input.Args) {
+	if input.Command != "" || len(input.Argv) != 0 ||
+		(!mayNameSudoers([]byte(input.CWD)) && !mayNameSudoers(input.Args)) {
 		return nil
 	}
 	for _, write := range nativeFileWrites(input.Tool, input.Args) {
@@ -48,6 +49,9 @@ func projectPOSIXUnrestrictedSudoersGrantWrites(
 // mayNameSudoers is the cheap test that keeps an ordinary file-tool call from
 // being decoded a second time: a target of the sudoers files holds the word
 // sudoers in some letter case, or a \\u escape that could spell a letter of it.
+// It is asked of the arguments and of the working directory: a relative target
+// of a call made from /etc/sudoers.d names the word only in the directory, and
+// the word cannot be split between the two because a slash joins them.
 func mayNameSudoers(args []byte) bool {
 	const word = "sudoers"
 	for i := 0; i < len(args); i++ {
@@ -98,8 +102,10 @@ func unrestrictedSudoersGrantLines(text string) []string {
 	var grants []string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimLeft(strings.TrimSuffix(line, "\r"), "\t ")
+		// root already runs everything, so its own grant is ordinary whatever
+		// whitespace separates it from the host field.
 		if exactUnrestrictedSudoersGrantLine.MatchString(line) &&
-			!strings.HasPrefix(line, "root ") {
+			strings.Fields(line)[0] != "root" {
 			grants = append(grants, line)
 		}
 	}
@@ -123,14 +129,19 @@ func sudoersWriteTargetInCWD(target, cwd string) bool {
 }
 
 // exactSudoersWriteTarget reports /etc/sudoers and each direct child of
-// /etc/sudoers.d, in any letter case (macOS volumes fold case), after lexical
-// cleaning and with the macOS physical /private/etc spelling. A path nested
-// below the drop-in directory is not read by sudo and is not a target.
+// /etc/sudoers.d after lexical cleaning and with the macOS physical
+// /private/etc spelling. On macOS, where the volume folds letter case, any
+// letter case names the file; on a host that keeps case, /ETC/SUDOERS.D/x is a
+// different path that sudo does not read. A path nested below the drop-in
+// directory is not read by sudo and is not a target.
 func exactSudoersWriteTarget(value string) bool {
 	if !strings.HasPrefix(value, "/") {
 		return false
 	}
-	value = EtcSpelling(path.Clean(strings.ToLower(value)))
+	if HostLinksEtcToPrivate {
+		value = strings.ToLower(value)
+	}
+	value = EtcSpelling(path.Clean(value))
 	if value == "/etc/sudoers" {
 		return true
 	}
