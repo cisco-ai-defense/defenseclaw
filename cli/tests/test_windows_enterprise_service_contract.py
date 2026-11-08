@@ -7458,3 +7458,92 @@ def test_hardening_harness_removes_the_cisco_folders_it_creates() -> None:
     assert "[IO.FileAttributes]::ReparsePoint" in cleanup
     assert "$children.Count -ne 0" in cleanup
     assert "-Recurse" not in cleanup
+
+
+# GAP-0900 / REVIEW-g900 S7: the inserted lines of the Secure Client-shared rollback
+# functions. Each entry is (the two lines before, the inserted block, the line after) as
+# they sit in the module; taking the blocks out leaves the text rel had, line for line
+# (checked once against rel in the round, evidence sc-text-diff-vs-rel109.txt).
+_SC_SHARED_INSERTS = {
+    'Assert-DefenseClawEnterpriseDeployment': [
+        (
+            '        [switch]$PendingTransaction,\n        [switch]$ServicingTransaction,\n',
+            '        # GAP-0900: set only by the rollback of a transaction (Restore). A link on\n        # the Codex folder is then named and not read through; every forward path\n        # (static validation, the install commit) still fails closed on it.\n        [switch]$RollbackRestore,\n',
+            "        [string]$TransitionHookSHA256 = '',\n",
+        ),
+        (
+            '        }\n    }\n',
+            '    # GAP-0900: a rollback (-RollbackRestore) that finds a link on the Codex folder\n    # does not read the Codex machine policy through it. The checks below keep their\n    # lines; they are skipped by the braces around them.\n    $codexFolderLink = \'\'\n    if ($RollbackRestore -and $codexTargetEnabled) {\n        $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `\n            -Directory ([string]$Layout.CodexMachinePolicyDirectory)\n    }\n    if ($codexFolderLink -ne \'\') {\n        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{\n            subsystem = \'rollback\'\n            path      = $codexFolderLink\n            reason    = "a link sits on the Codex machine-policy folder; its policy was not checked and Codex is not protected until the link is removed with: cmd /c rmdir `"$codexFolderLink`""\n        }\n    }\n    if ($codexFolderLink -eq \'\') {\n',
+            '    if ($codexTargetEnabled) {\n',
+        ),
+        (
+            '            }\n        }\n',
+            '    }\n',
+            '    }\n',
+        ),
+        (
+            '    }\n    Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName\n',
+            "    if ($codexFolderLink -eq '') {\n",
+            '    [void](Invoke-DefenseClawCodexRequirementsCommand `\n',
+        ),
+        (
+            "        -GatewayServiceName $GatewayServiceName `\n        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))\n",
+            '    }\n',
+            '\n',
+        ),
+    ],
+    'Restore-DefenseClawTransaction': [
+        (
+            '        }\n        if ($isSharedCodexFile) {\n',
+            '            # GAP-0900: a link that appeared on the Codex folder after the\n            # transaction opened. Nothing is written through it and the rollback\n            # goes on, so the services come back; the link stays for the\n            # administrator, who removes only the link. Standalone only.\n            $restoreCodexLink = Get-DefenseClawVendorMachineFolderLink `\n                -Directory ([string]$Layout.CodexMachinePolicyDirectory)\n            if ($restoreCodexLink -ne \'\') {\n                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{\n                    subsystem = \'rollback\'\n                    path      = $restoreCodexLink\n                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`"; the next repair or ensure then finishes the work"\n                }\n                continue\n            }\n',
+            '            $policyDirectoryExists = Microsoft.PowerShell.Management\\Test-Path `\n',
+        ),
+        (
+            '                -GatewayServiceName ([string]$snapshot.gateway_service)\n        }\n',
+            "        # GAP-0900: nothing is stamped through a link on the Codex folder either.\n        $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `\n                -Directory ([string]$Layout.CodexMachinePolicyDirectory)) -ne ''\n",
+            '        Set-DefenseClawManagedAcls `\n',
+        ),
+        (
+            '            -Layout $Layout `\n            -GatewayServiceName ([string]$snapshot.gateway_service) `\n',
+            '            -SkipCodexMachineState:$restoreCodexLinked `\n',
+            '            -AllowTransactionRecordedBrokerAbsence:(\n',
+        ),
+    ],
+    'Assert-DefenseClawRestoredTransactionReadyForActivation': [
+        (
+            '        -GuardianServiceName ([string]$Snapshot.guardian_service) `\n        -ServicingTransaction `\n',
+            '        -RollbackRestore `\n',
+            "        -TransitionHookSHA256 (Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_sha256') `\n",
+        ),
+    ],
+}
+
+
+def test_secure_client_shared_rollback_functions_only_gain_dead_gated_lines() -> None:
+    """The three rollback functions Secure Client shares gain inserted lines only,
+    and every inserted line is gated by the standalone-only link probe: with the
+    blocks taken out no reference to the probe, the rollback switch or the link
+    variables is left, and a Secure Client profile never gets a link from the probe,
+    so every inserted branch is dead there and the path is rel's."""
+    module = read(MODULE)
+    probe = _psm1_function(module, "Get-DefenseClawVendorMachineFolderLink")
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in probe
+    assert probe.index("Test-DefenseClawStandaloneProfile") < probe.index("GetAttributes")
+    for name, blocks in _SC_SHARED_INSERTS.items():
+        body = _psm1_function(module, name)
+        for before, block, after in blocks:
+            anchored = before + block + after
+            assert body.count(anchored) == 1, (name, block[:60])
+            body = body.replace(anchored, before + after, 1)
+        for token in (
+            "Get-DefenseClawVendorMachineFolderLink",
+            "RollbackRestore",
+            "restoreCodexLink",
+            "codexFolderLink",
+            "GAP-0900",
+        ):
+            assert token not in body, (name, token)
+    # The only condition on any inserted branch is the probe, the switch only
+    # Restore's readiness check passes, and the Codex target flag.
+    assert module.count("-RollbackRestore `\n") == 1
+    assert module.count("if ($RollbackRestore -and $codexTargetEnabled) {") == 1
