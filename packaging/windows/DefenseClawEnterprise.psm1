@@ -23126,6 +23126,20 @@ function Restore-DefenseClawTransaction {
             continue
         }
         if ($isSharedCodexFile) {
+            # GAP-0900: a link that appeared on the Codex folder after the
+            # transaction opened. Nothing is written through it and the rollback
+            # goes on, so the services come back; the link stays for the
+            # administrator, who removes only the link. Standalone only.
+            $restoreCodexLink = Get-DefenseClawVendorMachineFolderLink `
+                -Directory ([string]$Layout.CodexMachinePolicyDirectory)
+            if ($restoreCodexLink -ne '') {
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                    subsystem = 'rollback'
+                    path      = $restoreCodexLink
+                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`", then run Setup /repair"
+                }
+                continue
+            }
             $policyDirectoryExists = Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.CodexMachinePolicyDirectory `
                 -PathType Container
