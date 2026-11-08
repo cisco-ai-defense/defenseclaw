@@ -15,119 +15,59 @@ import (
 
 const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 
-// ExactDockerInsecureRegistryWrite reports whether one authenticated,
-// closed-schema full-file write replaces Docker's daemon configuration with a
-// strict JSON document whose only setting enables at least one non-loopback
-// literal HTTP registry. It deliberately returns no path, registry, or content.
+// ExactDockerInsecureRegistryWrite reports whether one authenticated
+// whole-file write replaces Docker's daemon configuration with a strict JSON
+// document whose only setting enables at least one non-loopback literal HTTP
+// registry. The write is read from the closed argument shapes of every native
+// file tool (nativeFileWrites: Write, the write_file aliases whichever name
+// they give the path, Copilot create, OpenCode write, a patch that adds the
+// file), for the file the call names or the file an existing link reaches. It
+// deliberately returns no path, registry, or content.
 //
-// Substring editors are excluded: their arguments cannot prove that the
-// replacement is the complete final daemon.json document.
+// Substring editors, patch hunks and appends are excluded: their arguments
+// cannot prove that the replacement is the complete final daemon.json
+// document.
 func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	if input.Command != "" || len(input.Argv) != 0 ||
 		!facts.Authoritative() || !facts.EnforcementEligible() ||
 		facts.Tool != input.Tool {
 		return false
 	}
-	if exactDockerLegacyWriteTool(input.Tool) {
-		if !exactDockerDaemonWriteFacts(facts) {
-			return false
-		}
-		target, content, ok := exactDockerDaemonFullWrite(input)
-		return ok && EtcSpelling(target) == dockerDaemonConfigPath &&
-			exactDockerInsecureRegistryDocument(content)
-	}
-	return exactDockerNativeWholeWrite(input, facts)
-}
-
-// exactDockerLegacyWriteTool names the tools whose arguments the closed
-// contract of exactDockerDaemonFullWrite reads.
-func exactDockerLegacyWriteTool(tool string) bool {
-	switch tool {
-	case "Write", "write_file", "write-file", "writefile":
-		return true
-	default:
-		return false
-	}
-}
-
-// exactDockerNativeWholeWrite reads the whole-file writes of every other
-// native file tool (nativeFileWrites: Copilot create, OpenCode write, a
-// patch that adds the file) by the same document test. The target must be
-// the canonical absolute spelling, and the call's facts must name no file the
-// call does not write.
-func exactDockerNativeWholeWrite(input Input, facts Facts) bool {
 	writes := nativeFileWrites(input.Tool, input.Args)
 	for _, write := range writes {
 		canonical, absolute := nativeAbsoluteTarget(write.target, "")
 		if !write.whole || !absolute || canonical != write.target ||
-			EtcSpelling(canonical) != dockerDaemonConfigPath ||
 			!nativeOperandsCoverTarget(facts, len(writes), canonical) {
 			continue
 		}
 		content := write.added
-		if content != "" && len(content) <= maxCommandBytes && utf8.ValidString(content) &&
-			!strings.ContainsRune(content, 0) && exactDockerInsecureRegistryDocument(content) {
-			return true
+		if content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
+			strings.ContainsRune(content, 0) {
+			continue
+		}
+		for _, file := range nativeReachedFiles(facts, canonical) {
+			if EtcSpelling(file) == dockerDaemonConfigPath &&
+				writeToolNamesItsFile(input) &&
+				exactDockerInsecureRegistryDocument(content) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-func exactDockerDaemonWriteFacts(facts Facts) bool {
-	if len(facts.Commands) != 1 || len(facts.OperandPaths()) != 1 {
-		return false
+// writeToolNamesItsFile reports whether a Write call names its file the way
+// Claude Code's tool does, file_path: a Write that gives the path another name
+// is a call the tool refuses, not a write of that file. The other tools
+// (write_file aliases, Copilot, OpenCode, patches) take their spellings from
+// nativeFileWrites.
+func writeToolNamesItsFile(input Input) bool {
+	if input.Tool != "Write" {
+		return true
 	}
-	command := facts.Commands[0]
-	if command.Effect != EffectExecute ||
-		!hasFactOperation(command, OperationExecute) ||
-		!hasFactOperation(command, OperationWrite) ||
-		len(command.Operations) != 2 {
-		return false
-	}
-	path := facts.OperandPaths()[0]
-	return path.CommandID == command.ID && path.Access == PathAccessWrite &&
-		path.Flavor == PathFlavorPOSIX && EtcSpelling(path.Value) == dockerDaemonConfigPath &&
-		EtcSpelling(path.Normalized) == dockerDaemonConfigPath && path.Absolute &&
-		EtcSpelling(path.Resolved) == dockerDaemonConfigPath
-}
-
-// exactDockerDaemonFullWrite owns only the full-document write contracts that
-// are already authenticated by the generic ActionFacts projection:
-//
-//   - Write: {"file_path": string, "content": string}
-//   - write_file aliases: {"path": string, "content": string}
-//
-// No case folding, semantic aliases, modes, metadata, nesting, or additional
-// fields are accepted here. In particular, Edit old_string/new_string calls
-// are partial replacements and cannot establish a final-document proof.
-func exactDockerDaemonFullWrite(input Input) (string, string, bool) {
 	object, problem := exactJSONObject(input.Args)
-	if problem.status != "" || len(object) != 2 {
-		return "", "", false
-	}
-
-	pathKey := ""
-	switch input.Tool {
-	case "Write":
-		pathKey = "file_path"
-	case "write_file", "write-file", "writefile":
-		pathKey = "path"
-	default:
-		return "", "", false
-	}
-	for key := range object {
-		if key != pathKey && key != "content" {
-			return "", "", false
-		}
-	}
-	target, targetOK := object[pathKey].(string)
-	content, contentOK := object["content"].(string)
-	if !targetOK || !contentOK || EtcSpelling(target) != dockerDaemonConfigPath ||
-		content == "" || len(content) > maxCommandBytes ||
-		!utf8.ValidString(content) || strings.ContainsRune(content, 0) {
-		return "", "", false
-	}
-	return target, content, true
+	_, named := object["file_path"]
+	return problem.status == "" && named
 }
 
 func exactDockerInsecureRegistryDocument(content string) bool {
