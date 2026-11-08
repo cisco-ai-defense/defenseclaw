@@ -505,10 +505,7 @@ with locked_file_update(lock_base):
             finally:
                 os.chdir(previous)
 
-        which.assert_called_once_with(
-            "defenseclaw-gateway",
-            path=os.path.abspath(allowed),
-        )
+        which.assert_called_once_with(os.path.join(os.path.abspath(allowed), "defenseclaw-gateway"))
 
     def test_packaged_lifecycle_does_not_fall_back_when_sibling_is_missing(self) -> None:
         with (

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -149,6 +150,53 @@ def test_doctor_with_an_explicit_search_path_ignores_the_own_layout(tmp_path: Pa
     ):
         assert cmd_setup._gateway_lifecycle_candidate(search_path=str(other.parent)) == str(other.resolve())
     sibling.assert_not_called()
+
+
+def _cwd_first_which(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Search the working directory before an explicit path, as Python 3.12 does on Windows."""
+    real_which = shutil.which
+
+    def which(cmd, mode=os.F_OK | os.X_OK, path=None):
+        if os.path.dirname(cmd):
+            return real_which(cmd, mode, path)
+        return real_which(cmd, mode, os.pathsep.join([os.curdir, path or ""]))
+
+    monkeypatch.setattr(cmd_setup.shutil, "which", which)
+
+
+def test_a_gateway_in_the_working_directory_does_not_hide_the_one_on_the_search_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A gateway built into the checkout (the CLI smoke test did) sits in the working
+    # directory; the Windows lookup returned it first and the lifecycle then found no gateway.
+    stray = _gateway_file(tmp_path / "work")
+    wanted = _gateway_file(tmp_path / "wanted")
+    monkeypatch.chdir(stray.parent)
+    _cwd_first_which(monkeypatch)
+    with (
+        patch.object(gateway, "_launcher_sibling_gateway", return_value=None),
+        patch.object(gateway, "packaged_windows_install_root", return_value=None),
+        patch.object(gateway, "canonical_install_path", return_value=str(tmp_path / "absent")),
+        patch.dict(os.environ, {"PATH": str(wanted.parent)}),
+    ):
+        assert cmd_setup._gateway_lifecycle_candidate() == str(wanted.resolve())
+        assert cmd_setup._gateway_lifecycle_candidate(search_path=str(wanted.parent)) == str(wanted.resolve())
+
+
+def test_a_gateway_only_in_the_working_directory_is_still_not_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stray = _gateway_file(tmp_path / "work")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.chdir(stray.parent)
+    _cwd_first_which(monkeypatch)
+    with (
+        patch.object(gateway, "_launcher_sibling_gateway", return_value=None),
+        patch.object(gateway, "packaged_windows_install_root", return_value=None),
+        patch.object(gateway, "canonical_install_path", return_value=str(tmp_path / "absent")),
+    ):
+        assert cmd_setup._gateway_lifecycle_candidate(search_path=str(empty)) is None
 
 
 @posix_only
