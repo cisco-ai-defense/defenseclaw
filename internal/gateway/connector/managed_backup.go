@@ -30,6 +30,12 @@ import (
 const managedBackupVersion = 1
 const managedBackupMissingHash = "missing"
 
+// managedBackupDriftedHash is the post-setup hash of a record whose target
+// held bytes DefenseClaw did not commit when a later setup began. It is not a
+// digest, so no file ever matches it: an exact restore is off for good and
+// teardown or rollback removes only DefenseClaw-owned entries.
+const managedBackupDriftedHash = "drifted"
+
 type managedFileBackup struct {
 	Version        int    `json:"version"`
 	Connector      string `json:"connector"`
@@ -153,8 +159,10 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	existing, err := loadManagedFileBackupPath(backupPath)
 	if err == nil {
-		_, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath)
-		return err
+		if _, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath); err != nil {
+			return err
+		}
+		return retireManagedFileBackupExactRestore(backupPath, existing, boundPath)
 	}
 	if !os.IsNotExist(err) {
 		return fmt.Errorf("load managed backup: %w", err)
@@ -183,6 +191,28 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	return writeManagedFileBackup(backupPath, b)
 }
 
+// retireManagedFileBackupExactRestore runs when a setup finds a record from an
+// earlier setup. A target that no longer holds the bytes DefenseClaw last
+// committed was changed by someone else (the operator saving the file again,
+// the agent itself). The setup that follows merges over those bytes and
+// records the result as its own, which would make teardown restore the
+// pre-setup copy over the change. The record is marked instead, so only the
+// DefenseClaw entries are ever removed from that file. A record without a
+// post hash, a target that is missing or not a regular file, and a target
+// that still matches change nothing.
+func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup, targetPath string) error {
+	if b.PostSHA256 == "" || b.PostSHA256 == managedBackupDriftedHash {
+		return nil
+	}
+	data, err := readHookConfigFile(targetPath)
+	if err != nil || sha256Hex(data) == b.PostSHA256 {
+		return nil
+	}
+	b.PostSHA256 = managedBackupDriftedHash
+	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return writeManagedFileBackup(backupPath, b)
+}
+
 func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, targetPath string) error {
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	b, err := loadManagedFileBackupPath(backupPath)
@@ -195,6 +225,11 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
 	if err != nil {
 		return err
+	}
+	if b.PostSHA256 == managedBackupDriftedHash {
+		// The file holds more than DefenseClaw wrote: it is never recorded
+		// as DefenseClaw own output (see retireManagedFileBackupExactRestore).
+		return nil
 	}
 	data, info, err := readManagedTarget(boundPath)
 	if err != nil {
