@@ -557,6 +557,32 @@ var (
 	enterpriseHookWindowsOffRosterPublisher          = enterprisehooks.PublishWindowsConnectorOffRoster
 )
 
+// enterpriseHookStandalonePlatformClearStaleOffRoster removes the off-roster
+// marker of every connector the loaded config publishes, before the pass
+// republishes its machine policy: a connector back on the roster never keeps a
+// marker into the pass that publishes its policy again. The markers of the
+// connectors still off the roster are published after the machine policy is
+// synced (enterpriseHookStandalonePlatformRevokeUsers).
+func enterpriseHookStandalonePlatformClearStaleOffRoster(stderr io.Writer) {
+	if cfg == nil || !cfg.StandaloneEnterprise() || !enterprisehooks.WindowsStandaloneProcess() {
+		return
+	}
+	clearWindowsStandaloneOffRosterMarkers(stderr, func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) })
+}
+
+// clearWindowsStandaloneOffRosterMarkers removes the markers of the published
+// connectors; a failure is logged, and the marker then only keeps the hook's
+// refusal (the hook allows nothing while the policy is present).
+func clearWindowsStandaloneOffRosterMarkers(stderr io.Writer, published func(string) bool) {
+	for _, name := range []string{"claudecode", "codex"} {
+		if published(name) {
+			if err := enterpriseHookWindowsOffRosterPublisher(name, false); err != nil {
+				fmt.Fprintf(stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
+			}
+		}
+	}
+}
+
 // publishWindowsStandaloneOffRosterMarkers publishes, for Claude Code and
 // Codex, whether the loaded config leaves the connector off the roster; a
 // failure is logged and the previous marker stays, which only keeps the hook's

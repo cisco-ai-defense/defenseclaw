@@ -3107,6 +3107,11 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if proxyAddr == "" {
 		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
+	// An off-roster marker of a connector the config publishes again goes
+	// before the machine policy is published again, so it never survives into
+	// the pass that republishes the policy (the Windows standalone guardian
+	// only; the hook allows only while the policy is absent).
+	enterpriseHookStandalonePlatformClearStaleOffRoster(os.Stderr)
 	// Revoke removed/disabled SIDs before touching any target runtime. This
 	// makes stale enrollment fail closed even when a later repair fails.
 	// A link at a connector's vendor folder fails that connector's targets

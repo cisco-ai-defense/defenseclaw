@@ -19,6 +19,10 @@ import (
 
 func enterpriseHookStandalonePlatformPrepare(io.Writer) error { return nil }
 
+// enterpriseHookStandalonePlatformClearStaleOffRoster has no equivalent
+// outside the Windows standalone guardian.
+func enterpriseHookStandalonePlatformClearStaleOffRoster(io.Writer) {}
+
 // enterpriseHookStandalonePlatformWatch checks, for the life of the watch
 // loop, for a missing hook binary or a changed machine-policy drop-in.
 func enterpriseHookStandalonePlatformWatch(ctx context.Context, stderr io.Writer) {
