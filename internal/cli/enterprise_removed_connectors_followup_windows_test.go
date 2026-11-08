@@ -114,3 +114,48 @@ func TestOwnRemovedConnectorLinesCallsThePipeOnlyOnStandalone(t *testing.T) {
 		t.Fatalf("a standard account on a standalone computer: %v %d", lines, calls)
 	}
 }
+
+// A connector back in the config never keeps its off-roster marker into the
+// pass that publishes its machine policy again: the guardian clears the
+// marker of every published connector before it syncs the policy, and the
+// policy publication itself clears it first, in that order.
+func TestWindowsOffRosterMarkerIsClearedBeforeThePolicyIsRepublished(t *testing.T) {
+	previous := enterpriseHookWindowsOffRosterPublisher
+	t.Cleanup(func() { enterpriseHookWindowsOffRosterPublisher = previous })
+	var events []string
+	failClear := false
+	enterpriseHookWindowsOffRosterPublisher = func(name string, off bool) error {
+		events = append(events, "marker:"+name+":"+map[bool]string{true: "set", false: "clear"}[off])
+		if failClear {
+			return errors.New("directory busy")
+		}
+		return nil
+	}
+	var log bytes.Buffer
+	// Pass start: only the published connector's marker goes.
+	clearWindowsStandaloneOffRosterMarkers(&log, func(name string) bool { return name == "codex" })
+	if strings.Join(events, ",") != "marker:codex:clear" {
+		t.Fatalf("stale marker clearing = %v, want only codex's cleared", events)
+	}
+	// The policy publication clears the marker first, then publishes.
+	events = nil
+	if err := publishWindowsMachinePolicyClearingOffRoster("claudecode", func() error {
+		events = append(events, "policy:claudecode")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(events, ",") != "marker:claudecode:clear,policy:claudecode" {
+		t.Fatalf("order = %v, want the marker cleared before the policy is published", events)
+	}
+	// A marker that cannot be removed is logged; the policy is published anyway
+	// (the hook allows only while the policy is absent) and its error is returned.
+	events, failClear = nil, true
+	boom := errors.New("publish failed")
+	if err := publishWindowsMachinePolicyClearingOffRoster("codex", func() error {
+		events = append(events, "policy:codex")
+		return boom
+	}); !errors.Is(err, boom) || strings.Join(events, ",") != "marker:codex:clear,policy:codex" {
+		t.Fatalf("a marker that cannot be removed changed the publication: %v %v", err, events)
+	}
+}

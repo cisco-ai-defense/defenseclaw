@@ -304,6 +304,19 @@ func syncEnterpriseHookManagedEnrollments(
 	return syncEnterpriseHookManagedMachineEnrollments(manifest, apiAddr, publishExact)
 }
 
+// publishWindowsMachinePolicyClearingOffRoster runs publish, which puts a
+// connector's machine policy in place, after removing the connector's
+// off-roster marker: the marker is the guardian's statement that the connector
+// is off the roster, so it never stays beside a policy that is being published
+// for the connector. A marker that cannot be removed is logged and the policy
+// is published anyway: the hook allows only while the policy is absent.
+func publishWindowsMachinePolicyClearingOffRoster(name string, publish func() error) error {
+	if err := enterpriseHookWindowsOffRosterPublisher(name, false); err != nil {
+		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
+	}
+	return publish()
+}
+
 // syncEnterpriseHookManagedMachineEnrollments revokes stale enrollments and
 // publishes the exact set, one connector at a time. A failure of the Claude
 // Code or Codex step (a link at its machine folder, a policy that cannot be
@@ -374,9 +387,11 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		if cfg.StandaloneEnterprise() {
 			switch {
 			case configured["claudecode"] && !claudeActive:
-				if err := enterpriseHookClaudePolicyEnsurer(connector.SetupOpts{
-					APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
-					HookContractID: enterpriseHookMachinePolicyContract(manifest),
+				if err := publishWindowsMachinePolicyClearingOffRoster("claudecode", func() error {
+					return enterpriseHookClaudePolicyEnsurer(connector.SetupOpts{
+						APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
+						HookContractID: enterpriseHookMachinePolicyContract(manifest),
+					})
 				}); err != nil {
 					return fmt.Errorf("ensure configured Claude machine policy: %w", errors.Join(claudeRestoreErr, err))
 				}
@@ -449,7 +464,12 @@ func syncEnterpriseHookManagedMachineEnrollments(
 					ensured.Folder, strings.Join(ensured.Created, ", "))
 			}
 			codexOpts.CodexTargetEnabled = true
-			report, reconcileErr := enterpriseHookCodexRequirementsReconciler(codexOpts)
+			var report connector.WindowsCodexMachineRequirementsReport
+			reconcileErr := publishWindowsMachinePolicyClearingOffRoster("codex", func() error {
+				var err error
+				report, err = enterpriseHookCodexRequirementsReconciler(codexOpts)
+				return err
+			})
 			if reconcileErr != nil {
 				return fmt.Errorf("ensure configured Codex machine requirements: %w", reconcileErr)
 			}
