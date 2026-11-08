@@ -19133,6 +19133,24 @@ function Resolve-DefenseClawCodexManagedHooksStateCopy {
     return ('{0}.{1}' -f $Path, $counter)
 }
 
+function Get-DefenseClawCodexManagedHooksWriterCounter {
+    <#
+        The transaction counter of the Codex writer for the state at $Path:
+        the size of the writer lock beside it, 0 when there is no lock or no
+        transaction has used it yet (GAP-0650).
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $lock = [IO.Path]::Combine(
+        [IO.Path]::GetDirectoryName($Path),
+        '.defenseclaw-managed-hooks.writer.lock'
+    )
+    $info = [IO.FileInfo]::new($lock)
+    if (-not $info.Exists -or $info.Length -le 0) {
+        return [int64]0
+    }
+    return [int64]$info.Length
+}
+
 function Get-DefenseClawCodexManagedHooksStateCopies {
     <#
         Every copy of the Codex managed runtime state in $Directory: the
@@ -19350,14 +19368,86 @@ function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
     }
 }
 
+# The longest a check of the Codex managed runtime state waits for a Codex
+# writer transaction that is open (GAP-0877). A transaction takes
+# milliseconds; a counter that is still odd after this is a writer that stopped.
+$script:CodexStateSettleSeconds = 30
+
+function Wait-DefenseClawCodexManagedHooksStateSettled {
+    <#
+        The hook copy of the Codex managed runtime state, read the way the
+        hook reads it (GAP-0877). The writer (the hook guardian, a Setup step)
+        makes the transaction counter odd while it runs and the next even
+        value, with the new hook copy in place, when it ends, even when
+        nothing changed. A check that looks in between finds the counter odd
+        and the copy of the end value not there yet, which is not a missing
+        state. This waits, bounded by $TimeoutSeconds, for a counter that is
+        even and the same before and after the copy is looked at, and returns
+        the copy path and whether it is there. A counter still odd or still
+        moving at the bound is a writer that stopped: when it left the hook
+        copy of its end value the state is that copy, otherwise the check
+        refuses with the named reason and changes nothing. The next Setup run
+        or the next guardian pass ends a stopped transaction.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [int]$TimeoutSeconds = $script:CodexStateSettleSeconds
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0, $TimeoutSeconds))
+    $last = [int64]0
+    $waitStarted = $null
+    while ($true) {
+        $before = Get-DefenseClawCodexManagedHooksWriterCounter -Path $Path
+        $last = $before
+        if (($before % 2) -eq 0) {
+            $copy = if ($before -le 0) { $Path } else { '{0}.{1}' -f $Path, $before }
+            $present = [bool](Microsoft.PowerShell.Management\Test-Path -LiteralPath $copy -PathType Leaf)
+            if ((Get-DefenseClawCodexManagedHooksWriterCounter -Path $Path) -eq $before) {
+                if ($null -ne $waitStarted) {
+                    # A wait is rare and short; the log shows how long it was.
+                    Write-DefenseClawResilienceEvent -Marker defenseclaw_accept -Fields @{
+                        path   = $Path
+                        reason = ('a Codex writer transaction was open; the state check waited {0} ms for counter {1}' -f
+                            [int]([DateTime]::UtcNow - $waitStarted).TotalMilliseconds, $before)
+                    }
+                }
+                return [pscustomobject]@{ Path = $copy; Present = $present; Counter = $before }
+            }
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            break
+        }
+        if (-not $waitStarted) {
+            $waitStarted = [DateTime]::UtcNow
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 100
+    }
+    if (($last % 2) -ne 0) {
+        # A writer that stopped after it put the hook copy of its end value in
+        # place left the state the hook would read (the transaction "ends with
+        # the copy n + 1"): that copy is judged, as it was before this wait.
+        $ended = '{0}.{1}' -f $Path, ($last + 1)
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $ended -PathType Leaf) {
+            return [pscustomobject]@{ Path = $ended; Present = $true; Counter = ($last + 1) }
+        }
+    }
+    $why = if (($last % 2) -ne 0) { 'odd: a transaction is open' } else { 'still changing' }
+    throw (
+        'codex_state_unsettled: the Codex writer transaction counter next to ' + $Path +
+        ' stayed at ' + $last + ' (' + $why + ') for ' + $TimeoutSeconds +
+        ' seconds, so the Codex managed-hooks state could not be judged; nothing was changed. Next step: run ' +
+        (Format-DefenseClawSetupAction -Action '/repair') +
+        ' again once no Codex writer is running (the next Codex writer pass ends a stopped transaction)'
+    )
+}
+
 function Assert-DefenseClawCodexManagedHooksStateFile {
     param([Parameter(Mandatory)][hashtable]$Layout)
     Assert-DefenseClawCodexManagedHooksStateFilePreflight -Layout $Layout
-    $stateCopy = Resolve-DefenseClawCodexManagedHooksStateCopy `
+    $settled = Wait-DefenseClawCodexManagedHooksStateSettled `
         -Path $Layout.CodexManagedHooksStatePath
-    if (-not (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $stateCopy `
-        -PathType Leaf)) {
+    $stateCopy = [string]$settled.Path
+    if (-not $settled.Present) {
         throw "DefenseClaw Codex managed-hooks state is missing: $stateCopy"
     }
     $required = New-DefenseClawRequiredRights -Kind MachinePolicy
