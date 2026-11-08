@@ -1891,6 +1891,14 @@ function Test-LongPathsEnabled {
     } catch { return $false }
 }
 
+function Resolve-UvCacheDir([string]$CacheDir) {
+    # A relative UV_CACHE_DIR means the folder under PowerShell's location,
+    # which is where the native uv starts; [Environment]::CurrentDirectory (what
+    # GetFullPath uses) is the process folder and can differ after Set-Location.
+    # Measure and hand uv the one absolute folder (GAP-0865).
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CacheDir)
+}
+
 function Assert-UvBuildPathFits([string]$CacheDir) {
     # Before anything is created, so a refusal changes nothing (GAP-0865).
     $cache = [IO.Path]::GetFullPath($CacheDir).TrimEnd("\")
@@ -5667,6 +5675,7 @@ function Invoke-Install {
     # data dir, so `uninstall --all` leaves nothing of them in AppData.
     if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $DataDir ".uv\cache" }
     if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\python" }
+    $env:UV_CACHE_DIR = Resolve-UvCacheDir $env:UV_CACHE_DIR
     Assert-UvBuildPathFits $env:UV_CACHE_DIR
     Protect-UvDirectory -Create
     # uv's defaults (60 s to compile one file, 30 s per download read) fail

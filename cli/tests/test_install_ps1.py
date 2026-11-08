@@ -1294,8 +1294,9 @@ def test_the_uv_build_path_check_runs_before_the_uv_folder_is_created() -> None:
     # cache folder is known and before Protect-UvDirectory -Create makes it.
     install = _ps1_function("Invoke-Install")
     known = install.index('$env:UV_CACHE_DIR = Join-Path $DataDir ".uv\\cache"')
+    resolve = install.index("$env:UV_CACHE_DIR = Resolve-UvCacheDir $env:UV_CACHE_DIR")
     check = install.index("Assert-UvBuildPathFits $env:UV_CACHE_DIR")
-    assert known < check < install.index("Protect-UvDirectory -Create")
+    assert known < resolve < check < install.index("Protect-UvDirectory -Create")
 
 
 def test_the_lock_has_one_source_only_package_and_the_build_path_reserve_is_its_own() -> None:
@@ -1353,6 +1354,42 @@ try {{ Assert-UvBuildPathFits $path; 'ALLOWED' }} catch {{ 'REFUSED ' + $_.Excep
     assert f"is {length} characters long" in out
     assert "win-unicode-console" in out and "WinError 206" in out
     assert "UV_CACHE_DIR" in out and "Nothing was changed" in out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(("ps_location_deep", "refused"), [(True, True), (False, False)])
+def test_a_relative_uv_cache_folder_is_measured_where_uv_will_use_it(
+    tmp_path: Path, ps_location_deep: bool, refused: bool,
+) -> None:
+    # GAP-0865: uv starts in PowerShell's location, which Set-Location moves
+    # without moving the process folder GetFullPath reads. A relative
+    # UV_CACHE_DIR is measured (and handed to uv) from the PowerShell location,
+    # so a deep one is refused and a short one is not, whatever the process
+    # folder is.
+    deep = tmp_path.joinpath(*["d" * 50] * 3)
+    shallow = tmp_path / "s"
+    deep.mkdir(parents=True)
+    shallow.mkdir()
+    ps_dir, process_dir = (deep, shallow) if ps_location_deep else (shallow, deep)
+    text = _text()
+    constants = "\n".join(re.search(rf"^\${name} = .*$", text, re.M).group(0) for name in ("UvBuildPathReserve", "WindowsPathLimit"))
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Die([string]$Message) {{ throw $Message }}
+{constants}
+function Test-LongPathsEnabled {{ return $false }}
+{_ps1_function('Resolve-UvCacheDir')}
+{_ps1_function('Assert-UvBuildPathFits')}
+Set-Location -LiteralPath '{ps_dir}'
+[Environment]::CurrentDirectory = '{process_dir}'
+$resolved = Resolve-UvCacheDir 'cache'
+if ($resolved -ne (Join-Path '{ps_dir}' 'cache')) {{ throw "resolved to $resolved" }}
+try {{ Assert-UvBuildPathFits $resolved; 'ALLOWED' }} catch {{ 'REFUSED ' + $_.Exception.Message }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout.strip()
+    assert result.returncode == 0, out + result.stderr
+    assert out.startswith("REFUSED") == refused, out
 
 
 def _bin_dir_functions() -> str:
