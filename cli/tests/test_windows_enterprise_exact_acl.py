@@ -950,9 +950,12 @@ def test_install_recovers_from_leftover_state_and_reconcile_repairs_services() -
     assert loop.index("Invoke-DefenseClawInstallAutoRecovery") < loop.index(
         "$preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery"
     )
-    assert loop.index("return Invoke-DefenseClawInstallLikeLifecycle") < loop.index(
-        "$installRecoveryReason = [string]$_.Exception.Message"
-    )
+    install_call = loop.index("$installResult = Invoke-DefenseClawInstallLikeLifecycle")
+    assert install_call < loop.index("$installRecoveryReason = [string]$_.Exception.Message")
+    # A successful Install, Upgrade or Repair cancels the restart deletes a
+    # held-file purge queued for its paths before it returns.
+    cancel = loop.index("Clear-DefenseClawQueuedRestartDeletes -Layout $layout")
+    assert install_call < cancel < loop.index("return $installResult")
     recovery = _extract_function_body(
         source,
         "function Invoke-DefenseClawInstallAutoRecovery",
