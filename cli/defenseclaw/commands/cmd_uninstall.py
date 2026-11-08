@@ -195,6 +195,10 @@ class UninstallPlan:
     remove_data_dir: bool = False
     remove_binaries: bool = False
     data_dir: str = ""
+    # store_dir is the data_dir config.yaml names when it is another folder
+    # than data_dir (the install home): the hook scripts and connector records
+    # are there, so teardown reads them there (GAP-0874).
+    store_dir: str = ""
     openclaw_config_file: str = ""
     openclaw_home: str = ""
     # connector is the active framework adapter resolved from config.
@@ -293,6 +297,11 @@ class UninstallPlan:
     # uninstall goes on from the connector records and says so; it used to
     # drop the error without a word (rel-1-0-6 GAP-0153).
     config_error: str = ""
+
+    @property
+    def records_dir(self) -> str:
+        """The folder that holds the connector records and hook scripts."""
+        return self.store_dir or self.data_dir
 
 
 @dataclass(frozen=True)
@@ -1120,9 +1129,10 @@ def _build_plan(
         )
         openclaw_home_candidate = os.path.dirname(openclaw_candidate) if openclaw_owned else ""
 
+    store_dir = config_module.configured_store_dir()
     connectors = _teardown_connectors(
         active_connectors,
-        data_dir=data_dir,
+        data_dir=store_dir or data_dir,
         openclaw_config_file=openclaw_candidate,
         include_openclaw=revert_openclaw,
         openclaw_owned=openclaw_owned,
@@ -1144,6 +1154,7 @@ def _build_plan(
         remove_data_dir=wipe_data,
         remove_binaries=binaries,
         data_dir=data_dir,
+        store_dir=store_dir,
         openclaw_config_file=openclaw_config_file,
         openclaw_home=openclaw_home,
         connector=connector,
@@ -2558,7 +2569,7 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     if plan.config_error:
         ux.warn(
             f"config.yaml did not load ({plan.config_error}); the teardown goes on from the connector "
-            f"records in {plan.data_dir}",
+            f"records in {plan.records_dir}",
             indent="    ",
         )
     if display_connectors:
@@ -2637,6 +2648,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         )
         ux.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
     ux.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+    if plan.store_dir:
+        ux.echo(
+            f"  • {ux.bold('data_dir in config.yaml:')} {plan.store_dir}: the connector hooks and records are "
+            "read there; this uninstall does not remove that folder"
+        )
     if plan.remove_data_dir and plan.data_dir:
         from defenseclaw.removed_connectors import backup_dirs, kept_backups_root
 
@@ -4418,7 +4434,7 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
                 "verify",
                 "--connector",
                 connector,
-                *(["--data-dir", plan.data_dir] if plan is not None else []),
+                *(["--data-dir", plan.records_dir] if plan is not None else []),
             ],
             capture_output=True,
             encoding="utf-8",
@@ -4468,7 +4484,7 @@ def _run_gateway_connector_teardown(
                 "teardown",
                 "--connector",
                 connector,
-                *(["--data-dir", plan.data_dir] if plan is not None else []),
+                *(["--data-dir", plan.records_dir] if plan is not None else []),
             ],
             capture_output=True,
             encoding="utf-8",
@@ -4505,7 +4521,7 @@ def _run_gateway_connector_teardown(
             "verify",
             "--connector",
             connector,
-            *(["--data-dir", plan.data_dir] if plan is not None else []),
+            *(["--data-dir", plan.records_dir] if plan is not None else []),
         ]
         try:
             verified = subprocess.run(
