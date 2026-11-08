@@ -294,6 +294,10 @@ jobs:
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
       - name: Run remaining Go race/coverage shard
+        # Ends inside the 20-minute job limit: the log of a step that ends is
+        # kept, the log of a job the limit cancels is lost (shards 0 and 2 of
+        # 1528216f51 left none).
+        timeout-minutes: 18
         env:
           GO_PACKAGE_SHARD: ${{ matrix.shard }}
           GO_PACKAGE_SHARDS: 12
@@ -321,10 +325,26 @@ jobs:
           profiles=()
           timings="go-test-timings-other-$GO_PACKAGE_SHARD.json"
           : > "$timings"
+          # One deadline for the whole shard: 16 of the step 18 minutes. Each
+          # go test run gets at most 11 minutes and never more than what is
+          # left, so the run that overruns the shard is stopped by go test with
+          # the goroutine dump that names its test; a run that cannot start
+          # inside the deadline fails and says so.
+          deadline=$((SECONDS + 960))
+          run_timeout() { # run_timeout <part>: the -timeout of the next go test run
+            local left=$((deadline - SECONDS))
+            if (( left < 30 )); then
+              echo "::error::Go shard $GO_PACKAGE_SHARD used its 16-minute budget before $1 could start" >&2
+              return 1
+            fi
+            echo "$((left < 660 ? left : 660))s"
+          }
           # checkptr is off only in modernc.org, and the log comes from
           # go_test_report.py: see Go Gateway Test.
           run_go() { # run_go <part> <go test arguments...>: go test's exit status
-            go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 11m "${@:2}" 2>&1 |
+            local limit
+            limit=$(run_timeout "$1") || return 1
+            go test -json -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout "$limit" "${@:2}" 2>&1 |
               python3 scripts/go_test_report.py --timings "$RUNNER_TEMP/timings-$1.json" \
                 --annotate "Go shard $GO_PACKAGE_SHARD failed"
             local go_status=${PIPESTATUS[0]}
@@ -1078,7 +1098,13 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
       - run: make plugin
       - run: make dev-pycli
-      - run: make connector-matrix-test CONNECTOR_MATRIX_PART=${{ matrix.part }} CONNECTOR_MATRIX_CONNECTOR_PARTS=4
+      # go test stops itself at 14 minutes, inside the 20-minute job limit
+      # (about 1.5 minutes go to the steps above): a run that overruns prints
+      # the goroutine dump that names its test, and its log is kept. The
+      # Makefile default of 60 minutes outlived the job, so a hung connector
+      # part left no log at all (GAP-0834).
+      - run: make connector-matrix-test CONNECTOR_MATRIX_PART=${{ matrix.part }} CONNECTOR_MATRIX_CONNECTOR_PARTS=4 GO_TEST_TIMEOUT=14m
+        timeout-minutes: 18
 
   # The Secure Client profile hook hardening flow (a synthetic target home and
   # a TCP fake gateway) runs only on macOS. Linux has only the standalone
