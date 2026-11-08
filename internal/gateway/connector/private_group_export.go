@@ -21,3 +21,12 @@ import "os"
 func OwnerPrivateGroup(path string, info os.FileInfo) bool {
 	return ownerPrivateGroupStrictAfterACL(path, info)
 }
+
+// OwnerPrivateGroupLocal is the local-files proof of OwnerPrivateGroup: the
+// group and account files, os/user, and no access ACL on path (an ACL fails
+// it). It starts no process, so a check that runs on every watcher event can
+// ask it for each folder of a path (GAP-0905); it cannot see a member only a
+// directory service adds, so the managed setter keeps OwnerPrivateGroup.
+func OwnerPrivateGroupLocal(path string, info os.FileInfo) bool {
+	return ownerPrivateGroup(path, info)
+}

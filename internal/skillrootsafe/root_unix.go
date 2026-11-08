@@ -11,9 +11,14 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 const maxRootLinks = 32
+
+// ownerPrivateGroup is the private-group proof (tests replace it).
+var ownerPrivateGroup = connector.OwnerPrivateGroupLocal
 
 func fileUID(info os.FileInfo) (uint32, bool) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
@@ -21,6 +26,24 @@ func fileUID(info os.FileInfo) (uint32, bool) {
 		return 0, false
 	}
 	return stat.Uid, true
+}
+
+// writableByOtherAccount reports whether an account other than the owner can
+// write the folder info describes (GAP-0905). Other write always counts. Group
+// write counts unless the group is the owner's own private group, the scheme
+// Ubuntu, Debian and RHEL use with a umask of 002: that group has no other
+// member, so it lets nobody else in. Any other group keeps the refusal.
+func writableByOtherAccount(path string, info os.FileInfo) bool {
+	perm := info.Mode().Perm()
+	if perm&0o002 != 0 {
+		return true
+	}
+	return perm&0o020 != 0 && !ownerPrivateGroup(path, info)
+}
+
+func writableAncestor(root, ancestor string, info os.FileInfo) error {
+	return fmt.Errorf("linked or unavailable skill root: %s: %w", root,
+		&WritableAncestorError{Ancestor: ancestor, Mode: info.Mode()})
 }
 
 func pathParts(path string) []string {
@@ -97,8 +120,9 @@ func validateLinkedPath(path, want string) error {
 		}
 		// A root-owned sticky system temp folder protects entries by owner;
 		// any other writable ancestor could replace a validated link target.
-		if info.Mode().Perm()&0o022 != 0 && (uid != 0 || info.Mode()&os.ModeSticky == 0) {
-			return unsafeRoot(path)
+		if info.Mode().Perm()&0o022 != 0 && (uid != 0 || info.Mode()&os.ModeSticky == 0) &&
+			writableByOtherAccount(next, info) {
+			return writableAncestor(path, next, info)
 		}
 		current = next
 	}
@@ -110,8 +134,11 @@ func validateLinkedPath(path, want string) error {
 		return unsafeRoot(path)
 	}
 	uid, ok := fileUID(final)
-	if !ok || uid != accountUID || final.Mode().Perm()&0o022 != 0 {
+	if !ok || uid != accountUID {
 		return unsafeRoot(path)
+	}
+	if final.Mode().Perm()&0o022 != 0 && writableByOtherAccount(current, final) {
+		return writableAncestor(path, current, final)
 	}
 	return nil
 }

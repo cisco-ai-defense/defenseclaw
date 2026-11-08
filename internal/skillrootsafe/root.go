@@ -90,4 +90,17 @@ func canonicalSystemPath(path string) string {
 	return path
 }
 
+// WritableAncestorError names the folder of a linked skill root that an
+// account other than the owner can write, so the root is not trusted: a link
+// target could be replaced through it.
+type WritableAncestorError struct {
+	Ancestor string
+	Mode     os.FileMode
+}
+
+func (e *WritableAncestorError) Error() string {
+	return fmt.Sprintf("%s is writable by another account (mode %04o); remove its group and other write bits (chmod go-w) to restore admission scanning",
+		e.Ancestor, e.Mode.Perm())
+}
+
 func unsafeRoot(path string) error { return fmt.Errorf("linked or unavailable skill root: %s", path) }
