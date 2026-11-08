@@ -39,7 +39,7 @@ var walkLstat = pathidentity.LstatPinned
 // the system opens in one path (SystemLinkLimit; macOS refuses a path past 32
 // links, so a walk past 32 there is a path no read can go through, an unread
 // body). A walk that reaches the bound has not proven the path free of an
-// unasked share (the system follows far more links than this on Windows), so
+// unasked share (the system follows more links than this on Windows, 63), so
 // it reports the path as unanswered, as a share that did not answer, and
 // never as a completed check.
 var networkLinkHopLimit = min(40, SystemLinkLimit())
