@@ -6,6 +6,9 @@ package actionfacts
 import (
 	"slices"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // rel-1-0-6:GAP-0880: a for variable other than USER and LOGNAME is read once
@@ -222,5 +225,90 @@ func TestSimpleCommandsLoopLongListReadsStateNamesFirst(t *testing.T) {
 				t.Errorf("%.60s: reading of the state path = %v, want %v", row.command, read, row.reads)
 			}
 		})
+	}
+}
+
+// rel-1-0-6:GAP-0880 review 2: the plain words of a list that share one state
+// (simplePlaceholderToken) read the commands that each word read alone does,
+// and a body that does more with the variable than name a file operand reads
+// each word alone.
+func TestSimpleCommandsPlainWordsShareOneState(t *testing.T) {
+	commands := []string{
+		"for u in alice bob carol; do cp a.txt ../$u/x:y; done",
+		"for u in alice bob carol $USER; do cp a.txt ../$u/x:y; done",
+		"for u in alice bob a.b; do sed -i x /r/$u/.defenseclaw/config.yaml; done",
+		"for u in alice bob; do d=$u/x; cp a.txt /r/$d; printf x > /r/$d/y; done",
+		"for u in alice bob; do cp a.txt /r/$u/x && mv /r/$u/x /r/$u/y; done",
+		"for u in alice bob; do cd /r/$u; cp a.txt b.txt; done",
+		"for u in alice bob; do cd /r; cp a.txt $u/x; done",
+		"for u in alice bob; do $u -c x; done",
+		"for u in sh bash; do $u -c 'echo x > /r/home/.defenseclaw/y'; done",
+		"for u in alice bob; do bash -c 'cp a /r/$u/x'; done",
+		"for u in alice bob; do cp a.txt $(echo /r/$u)/x; done",
+		"for u in alice bob; do if true; then cp a.txt /r/$u/x; fi; done",
+		"for u in alice bob; do cp a.txt /r/${u}/x /r/${u%b}/y; done",
+		"for u in alice bob; do u=other; cp a.txt /r/$u/x; done",
+		"for u in alice bob; do cp a.txt /r/$u/x; u=other; cp a.txt /r/$u/y; done",
+		"for a in x y; do for b in alice bob; do cp a.txt /r/$a/$b; done; done",
+		"for u in a-b c_d 1e alice; do cp a.txt /r/$u/x; done",
+		"cd /r/home; for u in alice bob; do cp a.txt $u/x; done; cp a.txt z",
+	}
+	read := func(command string) map[SimpleCommand]bool {
+		input := Input{Tool: "Bash", Command: command, ActiveHome: "/r/home", CWD: "/r/home/proj"}
+		got := make(map[SimpleCommand]bool)
+		for _, simple := range SimpleCommands(input, Analyze(input)) {
+			got[simple] = true
+		}
+		return got
+	}
+	defer func(was bool) { simplePlaceholderForks = was }(simplePlaceholderForks)
+	ordered := func(command string) []SimpleCommand {
+		input := Input{Tool: "Bash", Command: command, ActiveHome: "/r/home", CWD: "/r/home/proj"}
+		return SimpleCommands(input, Analyze(input))
+	}
+	for _, command := range commands {
+		simplePlaceholderForks = true
+		// Two walks of one action write the commands in one order: the
+		// gateway matches them by position.
+		if first, second := ordered(command), ordered(command); !slices.Equal(first, second) {
+			t.Errorf("%s: two walks differ:\n%+v\n%+v", command, first, second)
+		}
+		shared := read(command)
+		simplePlaceholderForks = false
+		alone := read(command)
+		for simple := range shared {
+			if !alone[simple] {
+				t.Errorf("%s: shared state reads %+v that each word alone does not", command, simple)
+			}
+		}
+		for simple := range alone {
+			if !shared[simple] {
+				t.Errorf("%s: each word alone reads %+v that the shared state does not", command, simple)
+			}
+		}
+	}
+	simplePlaceholderForks = true
+	for _, row := range []struct {
+		body   string
+		shared bool
+	}{
+		{"cp a.txt /r/$u/x; sed -i x /r/$u/y > /r/$u/z", true},
+		{"d=$u/x; printf x | tee /r/$d", true},
+		{"$u -c x", false},
+		{"cd /r/$u", false},
+		{"bash -c 'cp a /r/$u/x'", false},
+		{"cp a $(echo $u)", false},
+		{"if true; then cp a /r/$u; fi", false},
+		{"cp a /r/${u%b}", false},
+		{"find /r/$u -exec rm {} +", false},
+	} {
+		file, ok := shellparse.Parse("for u in a b; do " + row.body + "; done")
+		if !ok {
+			t.Fatalf("parse %q", row.body)
+		}
+		loop := file.Stmts[0].Cmd.(*syntax.ForClause)
+		if shared := simplePlaceholderToken(loop.Do, "u", "") != ""; shared != row.shared {
+			t.Errorf("%s: shared state = %v, want %v", row.body, shared, row.shared)
+		}
 	}
 }

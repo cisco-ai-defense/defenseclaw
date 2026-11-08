@@ -229,6 +229,9 @@ type simpleLoopBind struct {
 	// rebound is where the body may hold another value of the variable than
 	// the loop gave it (simpleReboundSpans).
 	rebound []simpleSpan
+	// token is the placeholder that stands for the plain words of the list
+	// in one state (simplePlaceholderToken), "" when each is read alone.
+	token string
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -473,7 +476,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(iteration) {
 				outer := loopBinds
 				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true,
-					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, functionNames, nil)})
+					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, functionNames, nil),
+					token:   simplePlaceholderToken(typed.Do, iteration.Name.Value, source)})
 				defer func() { loopBinds = outer }()
 				kind, name = forkedLoopScopeKind, iteration.Name.Value
 			}

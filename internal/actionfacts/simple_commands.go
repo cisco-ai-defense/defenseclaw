@@ -249,6 +249,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	unproven := false
 	previousScope := "0"
 	unreadLoops := make(map[string]bool)
+	var plainWords simplePlainWords
 	for partIndex, part := range parts {
 		// A conditional or loop body runs in its parent's shell when selected.
 		// Keep both its resulting state and the path that skipped the body.
@@ -319,7 +320,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		if slices.ContainsFunc(part.binds, func(bind simpleLoopBind) bool { return bind.fork }) {
 			reads = simpleParamNames(part.text)
 		}
-		if !simpleEnterForkedLoops(states, part, unreadLoops) {
+		if !simpleEnterForkedLoops(states, part, unreadLoops, &plainWords) {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
 		variants := simpleScopeStates(states, part.scope)
@@ -542,6 +543,10 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 	}
 	if !changed {
 		return nil
+	}
+	result, fits := simpleExpandPlainWords(result, &plainWords)
+	if !fits {
+		return []SimpleCommand{{EvaluationFailure: "limit"}}
 	}
 	if unproven {
 		return append(result, SimpleCommand{EvaluationFailure: "parse"})

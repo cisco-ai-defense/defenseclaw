@@ -6,7 +6,9 @@ package actionfacts
 import (
 	"path"
 	"slices"
+	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/syntax"
@@ -29,6 +31,13 @@ import (
 // or a dotted name), and a list the walk cannot read at all stays unread and
 // follows the compound-limit rule: the walk does not report a limit for it,
 // because a long ordinary list is not an over-limit call.
+//
+// The plain words of a list (letters, digits and underscores, no login) only
+// name state through a link, and each state costs a walk of its own. When the
+// body only runs programs that take the word as an operand and never as a
+// program, a directory or an option, the words share one state that holds a
+// placeholder for the variable, and each command the walk reads from it is
+// written once per word (simpleExpandPlainWords).
 const (
 	// maxForkedStates is the most states, forked readings included, that a
 	// scope holds.
@@ -177,7 +186,7 @@ func simpleCallMayBind(call *syntax.CallExpr, name string, functionNames []strin
 // reading. When the readings would pass maxForkedStates the words that can
 // name state come first; fits is false when not even one reading fits, and
 // the variable then stays unread.
-func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind) (forked []simpleShellState, fits bool) {
+func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind, plain *simplePlainWords) (forked []simpleShellState, fits bool) {
 	room := maxForkedStates/len(entry) - 1
 	if room < 1 {
 		return nil, false
@@ -189,6 +198,7 @@ func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind) (forked [
 			tier  int
 		}
 		var candidates []candidate
+		var shared []string
 		login := path.Base(prior.vars["HOME"])
 		for _, word := range bind.items {
 			value, known := simpleStaticWord(word, prior.vars)
@@ -196,7 +206,8 @@ func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind) (forked [
 				continue
 			}
 			reading := bind.reading(value)
-			if slices.ContainsFunc(candidates, func(seen candidate) bool { return seen.value == reading }) {
+			if slices.ContainsFunc(candidates, func(seen candidate) bool { return seen.value == reading }) ||
+				slices.Contains(shared, reading) {
 				continue
 			}
 			tier := 2
@@ -206,13 +217,27 @@ func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind) (forked [
 			case strings.ContainsAny(reading, "/."):
 				tier = 1
 			}
+			if tier == 2 && bind.token != "" && simplePlainName(reading) {
+				shared = append(shared, reading)
+				continue
+			}
 			candidates = append(candidates, candidate{reading, tier})
 		}
 		// The words that can name state come first when the list is long.
 		slices.SortStableFunc(candidates, func(a, b candidate) int { return a.tier - b.tier })
-		for _, read := range candidates[:min(len(candidates), room)] {
+		values := make([]string, 0, len(candidates)+1)
+		for _, read := range candidates[:min(len(candidates), room-min(len(shared), 1))] {
+			values = append(values, read.value)
+		}
+		if len(shared) != 0 {
+			values = append(values, bind.token)
+			for _, word := range shared {
+				plain.add(bind.token, word)
+			}
+		}
+		for _, value := range values {
 			alt := prior.clone()
-			alt.vars[bind.name] = read.value
+			alt.vars[bind.name] = value
 			if !slices.Contains(alt.forked, bind.name) {
 				alt.forked = append(alt.forked, bind.name)
 			}
@@ -221,6 +246,133 @@ func simpleForkLoopBind(entry []simpleShellState, bind simpleLoopBind) (forked [
 	}
 	forked = uniqueSimpleStates(forked)
 	return forked, len(forked) <= maxForkedStates
+}
+
+// simplePlainName reports a word of letters, digits and underscores that
+// starts with a letter: the one kind of value that every consumer of a
+// reading treats as any other, so a placeholder stands for it.
+func simplePlainName(word string) bool {
+	if word == "" || word[0] >= '0' && word[0] <= '9' {
+		return false
+	}
+	for _, r := range word {
+		if r != '_' && (r < '0' || r > '9') && (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// simplePlaceholderForks lets the plain words of a list share one state
+// (simplePlaceholderToken); a test turns it off to compare both readings.
+var simplePlaceholderForks = true
+
+var simplePlaceholderSequence atomic.Uint64
+
+// simplePlaceholderPrograms are the programs a body may run when its plain
+// words share a state: each takes the word only as a file operand or as text
+// it writes, and runs no program from its arguments.
+var simplePlaceholderPrograms = []string{"cp", "mv", "rm", "ln", "sed", "tee", "echo", "printf", "cat", "touch",
+	"mkdir", "chmod", "chown", "install", "truncate", "dd", "ls", "head", "tail"}
+
+// simplePlaceholderToken returns the placeholder for the plain words of a
+// loop over name, "" when the body does more with the variable than name a
+// file operand: any command but the programs above, a substitution, a
+// compound command, or an expansion of the name that is not the plain value.
+// The token is a name the action does not spell.
+func simplePlaceholderToken(body []*syntax.Stmt, name, source string) string {
+	if !simplePlaceholderForks {
+		return ""
+	}
+	safe := true
+	for _, stmt := range body {
+		syntax.Walk(stmt, func(node syntax.Node) bool {
+			switch node := node.(type) {
+			case nil:
+			case *syntax.Stmt, *syntax.BinaryCmd, *syntax.Redirect, *syntax.Word, *syntax.Lit,
+				*syntax.DblQuoted, *syntax.SglQuoted, *syntax.Assign:
+			case *syntax.CallExpr:
+				if len(node.Args) != 0 {
+					program, static := simpleStaticWord(node.Args[0], nil)
+					safe = safe && static && slices.Contains(simplePlaceholderPrograms, program)
+				}
+			case *syntax.ParamExp:
+				safe = safe && node.Param != nil && (node.Param.Value != name ||
+					node.Exp == nil && node.Repl == nil && node.Slice == nil && node.Index == nil && !node.Length &&
+						!node.Excl && !node.IsSet && !node.Width && node.Names == 0 && node.Flags == nil &&
+						node.NestedParam == nil && len(node.Modifiers) == 0)
+			default:
+				safe = false
+			}
+			return safe
+		})
+		if !safe {
+			return ""
+		}
+	}
+	for {
+		token := "DCLOOPWORD" + strconv.FormatUint(simplePlaceholderSequence.Add(1), 36) + "X"
+		if !strings.Contains(source, token) {
+			return token
+		}
+	}
+}
+
+// simplePlainWords holds the plain words each placeholder stands for, in the
+// order the walk met the placeholders: two walks of one action write their
+// commands in the same order.
+type simplePlainWords struct {
+	tokens []string
+	words  map[string][]string
+}
+
+func (plain *simplePlainWords) add(token, word string) {
+	if plain.words == nil {
+		plain.words = make(map[string][]string)
+	}
+	if _, met := plain.words[token]; !met {
+		plain.tokens = append(plain.tokens, token)
+	}
+	if !slices.Contains(plain.words[token], word) {
+		plain.words[token] = append(plain.words[token], word)
+	}
+}
+
+// simpleExpandPlainWords writes each command that holds a placeholder once
+// for every plain word it stands for. ok is false when the commands would
+// pass maxSimpleEvaluations.
+func simpleExpandPlainWords(commands []SimpleCommand, plain *simplePlainWords) ([]SimpleCommand, bool) {
+	if len(plain.tokens) == 0 {
+		return commands, true
+	}
+	var expanded []SimpleCommand
+	for _, command := range commands {
+		variants := []SimpleCommand{command}
+		for _, token := range plain.tokens {
+			var next []SimpleCommand
+			for _, variant := range variants {
+				if !strings.Contains(variant.Text, token) && !strings.Contains(variant.CWD, token) {
+					next = append(next, variant)
+					continue
+				}
+				for _, word := range plain.words[token] {
+					written := variant
+					written.Text, written.CWD = strings.ReplaceAll(variant.Text, token, word), strings.ReplaceAll(variant.CWD, token, word)
+					next = append(next, written)
+				}
+			}
+			variants = next
+		}
+		for _, variant := range variants {
+			if !slices.Contains(expanded, variant) {
+				expanded = append(expanded, variant)
+			}
+		}
+		if len(expanded) > maxSimpleEvaluations {
+			return nil, false
+		}
+	}
+	return expanded, true
 }
 
 // simpleLiteralWord reports a word that is plain text, with no expansion.
@@ -257,7 +409,7 @@ func (bind simpleLoopBind) reading(value string) string {
 // around part that the walk has not entered yet. A loop whose readings do not
 // fit stays unread. ok is false when the scopes and the loops of part do not
 // match.
-func simpleEnterForkedLoops(states map[string][]simpleShellState, part sequenceStatement, unread map[string]bool) bool {
+func simpleEnterForkedLoops(states map[string][]simpleShellState, part sequenceStatement, unread map[string]bool, plain *simplePlainWords) bool {
 	scopes := simpleForkedScopes(part.scope)
 	var binds []simpleLoopBind
 	for _, bind := range part.binds {
@@ -276,7 +428,7 @@ func simpleEnterForkedLoops(states map[string][]simpleShellState, part sequenceS
 		if entry == nil {
 			return false
 		}
-		if forked, fits := simpleForkLoopBind(entry, binds[index]); fits {
+		if forked, fits := simpleForkLoopBind(entry, binds[index], plain); fits {
 			states[scope] = forked
 		} else {
 			unread[scope] = true
