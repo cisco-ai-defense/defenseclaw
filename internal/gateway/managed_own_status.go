@@ -90,7 +90,13 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	if name != "" {
 		account["name"] = name
 	}
-	excluded := cfg != nil && ownAccountExcluded(cfg.Enterprise.Enrollment, idKey, self, name, domain)
+	// The profile folder is read once, so the exclusion and the can-it-be-judged
+	// check below see the same lookup result.
+	folder := ""
+	if idKey == "sid" {
+		folder = userScopedIdentityHome(self)
+	}
+	excluded := cfg != nil && ownAccountExcluded(cfg.Enterprise.Enrollment, idKey, self, name, domain, folder)
 	claudeCode := false
 	claudeConfigured := false
 	desktopRefused := false
@@ -108,7 +114,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	var connectors map[string]any
 	if excluded {
 		connectors = ownExcludedConnectorStates(cfg)
-	} else if idKey == "sid" && cfg != nil && ownExclusionUnjudgeable(cfg.Enterprise.Enrollment, name, domain) {
+	} else if cfg != nil && ownExclusionUnjudgeable(cfg.Enterprise.Enrollment, idKey, self, name, domain, folder) {
 		connectors = ownUnresolvedConnectorStates(cfg)
 	} else if idKey == "uid" && cfg != nil {
 		connectors = a.ownConnectorStates(cfg, self, name)
@@ -155,10 +161,11 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 // the caller, as the enumerator matches it: on Linux and macOS the exact
 // account name or decimal uid; on Windows (windowsProfileEnrollmentDecision)
 // the SID, the profile folder name, the account name, or DOMAIN\account, in
-// any case. A qualified entry selects one domain: it never matches the same
-// short name in another. Root is never excluded by name: enrollment.root
+// any case. folder is the caller's profile directory (Windows), "" when the
+// lookup failed. A qualified entry selects one domain: it never matches the
+// same short name in another. Root is never excluded by name: enrollment.root
 // decides its calls.
-func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name, domain string) bool {
+func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name, domain, folder string) bool {
 	if idKey == "uid" && self == "0" {
 		return false
 	}
@@ -173,8 +180,8 @@ func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, sel
 		if domain = strings.TrimSpace(domain); domain != "" && account != "" {
 			names = append(names, domain+`\`+account)
 		}
-		if home := userScopedIdentityHome(self); home != "" {
-			names = append(names, accountFolderName(home))
+		if folder != "" {
+			names = append(names, accountFolderName(folder))
 		}
 	}
 	for _, entry := range enrollment.ExcludeUsers {
@@ -190,19 +197,29 @@ func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, sel
 	return false
 }
 
-// ownExclusionUnjudgeable reports whether a Windows caller's exclude_users
-// entry names the account in a spelling the lookup did not give the means to
-// judge: any entry that is not a SID needs the account name, and a DOMAIN\account
-// entry needs the domain too. The enumerator matches those spellings and may
-// already have removed the hook, so the status claims no protection for it.
-func ownExclusionUnjudgeable(enrollment config.EnterpriseEnrollmentConfig, name, domain string) bool {
+// ownExclusionUnjudgeable reports whether an exclude_users entry may name the
+// caller in a spelling the lookups did not give the means to judge. On Windows
+// any entry that is not a SID needs the account name, a DOMAIN\account entry
+// needs the domain too, and any other entry may be the profile folder name, so
+// it needs the folder. On Unix an entry needs the account name (the uid is
+// proven by the kernel). The enumerator matches those spellings and may already
+// have removed the hook, so the status claims no protection. An entry the
+// caller already matched was decided as excluded before this is asked.
+func ownExclusionUnjudgeable(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name, domain, folder string) bool {
+	if idKey == "uid" && self == "0" {
+		return false
+	}
 	nameKnown := strings.TrimSpace(name) != ""
 	domainKnown := strings.TrimSpace(domain) != "" || strings.Contains(name, `\`)
+	folderKnown := strings.TrimSpace(folder) != ""
 	for _, entry := range enrollment.ExcludeUsers {
 		entry = strings.TrimSpace(entry)
 		switch {
-		case entry == "", refusalpipe.AccountSID(entry):
-		case !nameKnown, strings.Contains(entry, `\`) && !domainKnown:
+		case entry == "", idKey == "sid" && refusalpipe.AccountSID(entry):
+		case !nameKnown:
+			return true
+		case idKey == "sid" && strings.Contains(entry, `\`) && !domainKnown,
+			idKey == "sid" && !strings.Contains(entry, `\`) && !folderKnown:
 			return true
 		}
 	}

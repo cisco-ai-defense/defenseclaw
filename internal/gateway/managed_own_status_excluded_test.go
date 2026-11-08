@@ -252,18 +252,20 @@ func TestOwnStatusWindowsPipeUnresolvedAccountClaimsNoProtection(t *testing.T) {
 	const other = "S-1-5-21-1004336348-1177238915-682003330-1002"
 	previousAccount, previousHome := ownStatusWindowsAccount, userScopedIdentityHome
 	t.Cleanup(func() { ownStatusWindowsAccount, userScopedIdentityHome = previousAccount, previousHome })
-	userScopedIdentityHome = func(string) string { return "" }
+	userScopedIdentityHome = func(string) string { return `C:\Users\alice` }
 	for _, tc := range []struct {
 		name, account, domain string
 		exclude               []string
 		want                  string
 	}{
 		{"qualified entry, domain missing", "alice", "", []string{`CONTOSO\alice`}, "not confirmed"},
-		{"name entry, nothing resolved", "", "", []string{"alice"}, "not confirmed"},
+		{"name entry, nothing resolved", "", "", []string{"bob"}, "not confirmed"},
+		{"folder entry, nothing resolved but the folder", "", "", []string{"alice"}, "excluded"},
 		{"qualified entry, nothing resolved", "", "", []string{`CONTOSO\alice`}, "not confirmed"},
 		{"qualified entry, name qualified", `CONTOSO\alice`, "", []string{`CONTOSO\alice`}, "excluded"},
 		{"name entry, domain missing", "alice", "", []string{"alice"}, "excluded"},
 		{"other name entry, domain missing", "alice", "", []string{"bob"}, "protected"},
+		{"other qualified entry, domain missing", "alice", "", []string{`OTHER\bob`}, "not confirmed"},
 		{"own SID entry, nothing resolved", "", "", []string{alice}, "excluded"},
 		{"other SID entry, nothing resolved", "", "", []string{other}, "protected"},
 		{"no entries, nothing resolved", "", "", nil, "protected"},
@@ -294,6 +296,104 @@ func TestOwnStatusWindowsPipeUnresolvedAccountClaimsNoProtection(t *testing.T) {
 			if protected := tc.want == "protected"; legacy["protected"] != protected || (cowork["state"] == "protected") != protected {
 				t.Fatalf("claude_code = %#v, cowork = %#v, want protected %v", legacy, cowork, protected)
 			}
+		})
+	}
+}
+
+// The enumerator also excludes by the profile folder name. When the status
+// cannot read the folder, an entry that may be that folder claims no
+// protection; an entry that cannot be a folder (a SID, a qualified name), and a
+// readable folder, keep their rows.
+func TestOwnStatusWindowsPipeUnreadableProfileFolderClaimsNoProtection(t *testing.T) {
+	const alice = "S-1-5-21-1004336348-1177238915-682003330-1001"
+	const other = "S-1-5-21-1004336348-1177238915-682003330-1002"
+	previousAccount, previousHome := ownStatusWindowsAccount, userScopedIdentityHome
+	t.Cleanup(func() { ownStatusWindowsAccount, userScopedIdentityHome = previousAccount, previousHome })
+	ownStatusWindowsAccount = func(string) (string, string) { return "alice", "CONTOSO" }
+	for _, tc := range []struct {
+		name, home string
+		exclude    []string
+		want       string
+	}{
+		{"folder entry, folder unreadable", "", []string{"alice.CONTOSO"}, "not confirmed"},
+		{"arbitrary folder entry, folder unreadable", "", []string{"profile-7"}, "not confirmed"},
+		{"folder entry, folder readable", `C:\Users\alice.CONTOSO`, []string{"alice.CONTOSO"}, "excluded"},
+		{"other folder entry, folder readable", `C:\Users\alice`, []string{"alice.CONTOSO"}, "protected"},
+		{"name entry, folder unreadable", "", []string{"alice"}, "excluded"},
+		{"qualified entry, folder unreadable", "", []string{`CONTOSO\alice`}, "excluded"},
+		{"other qualified entry, folder unreadable", "", []string{`OTHER\alice`}, "protected"},
+		{"other SID entry, folder unreadable", "", []string{other}, "protected"},
+		{"no entries, folder unreadable", "", nil, "protected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userScopedIdentityHome = func(string) string { return tc.home }
+			api := ownStatusExcludedFixture(t, tc.exclude, nil)
+			var answer map[string]any
+			if err := json.Unmarshal(api.ownStatusForWindowsAccount(context.Background(), alice), &answer); err != nil {
+				t.Fatal(err)
+			}
+			requireUnresolvedOrState(t, answer, tc.want)
+		})
+	}
+}
+
+// requireUnresolvedOrState holds an answer to one outcome: every checked row,
+// the legacy claude_code field and Cowork either are in state want, or, for
+// protected, only the Claude Code row is held (the others follow the scan).
+func requireUnresolvedOrState(t *testing.T, answer map[string]any, want string) {
+	t.Helper()
+	connectors, _ := answer["connectors"].(map[string]any)
+	cowork, _ := answer["cowork"].(map[string]any)
+	legacy, _ := answer["claude_code"].(map[string]any)
+	for _, name := range []string{"claudecode", "copilot", "opencode"} {
+		row, _ := connectors[name].(map[string]any)
+		if want == "protected" && name != "claudecode" {
+			continue
+		}
+		if row["state"] != want {
+			t.Fatalf("%s row = %#v, want %s", name, row, want)
+		}
+		if want == "not confirmed" && row["reason_code"] != "account_unresolved" {
+			t.Fatalf("%s row = %#v, want reason_code account_unresolved", name, row)
+		}
+	}
+	if protected := want == "protected"; legacy["protected"] != protected || (cowork["state"] == "protected") != protected {
+		t.Fatalf("claude_code = %#v, cowork = %#v, want protected %v", legacy, cowork, protected)
+	}
+}
+
+// The Unix caller's uid is proven by the kernel but its account name can fail
+// to resolve. An exclude_users entry that may be that name then claims no
+// protection; an account with no entries keeps its rows, and root is decided by
+// enrollment.root.
+func TestOwnStatusUnixUnresolvedAccountNameClaimsNoProtection(t *testing.T) {
+	for _, tc := range []struct {
+		name, uid, account string
+		exclude            []string
+		want               string
+	}{
+		{"name entry, name unresolved", "5003", "", []string{"carol"}, "not confirmed"},
+		{"other name entry, name unresolved", "5001", "", []string{"carol"}, "not confirmed"},
+		{"uid entry, name unresolved", "5003", "", []string{"5003"}, "excluded"},
+		{"name entry, name resolved", "5003", "carol", []string{"carol"}, "excluded"},
+		{"other name entry, name resolved", "5001", "alice", []string{"carol"}, "protected"},
+		{"no entries, name unresolved", "5003", "", nil, "protected"},
+		{"root, name unresolved", "0", "", []string{"carol"}, "protected"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := ownStatusExcludedFixture(t, tc.exclude, nil)
+			answer := api.ownStatusAnswer(context.Background(), "uid", tc.uid, tc.account, "")
+			if tc.want == "excluded" {
+				requireExcludedAnswer(t, answer)
+				return
+			}
+			if tc.uid == "0" {
+				if row := ownStatusRowFor(t, api, "uid", "0", "", "claudecode"); row["state"] == "excluded" || row["reason_code"] == "account_unresolved" {
+					t.Fatalf("root row = %#v, want the root policy row", row)
+				}
+				return
+			}
+			requireUnresolvedOrState(t, answer, tc.want)
 		})
 	}
 }
