@@ -731,17 +731,22 @@ def set_aside_abandoned_identity(
     case the plan keeps refusing as before).  Keyless provenance files are
     continuity evidence of an identity that may have existed, and whoever can
     write the home can also write any marker inside it, so nothing stored in
-    the home authorizes setting them aside.  The only proof is that this init
-    found no config.yaml (``fresh_home``): no setup of this home ever finished,
-    so a creation that was cut short is the only way these files exist.  Even
-    then every file present must have exactly the shape a creation writes, or
-    a prefix of it (a write cut short, which Windows' CREATE_NEW publication
-    can leave), and be a regular private file.  A configured home stays with
-    the attended Doctor repair.
+    the home authorizes setting them aside.  The only proof is that no setup
+    of this data folder ever finished: this init found no config.yaml, neither
+    where it reads its config nor in the default home
+    (``fresh_home``, see bootstrap.home_found_without_config; the active
+    config path can be moved elsewhere while the folder keeps its identity).
+    Then every file present must have exactly the
+    shape a creation writes, or a prefix of it (a write cut short, which
+    Windows' CREATE_NEW publication can leave), and be a regular private file.
+    A sentinel that is complete with no key beside it is the same state as a
+    key deleted from a finished setup, so it is never set aside here.  A
+    configured home stays with the
+    attended Doctor repair.
 
     Files are renamed to a new ``*.orphaned-*`` name and never deleted, and
     never over an earlier file.  A key cut short counts as such a leftover; a
-    complete key never does.
+    key the normal validator accepts never does, whatever its last byte is.
     """
 
     normalized_target, normalized_data = _normalize_device_identity_disk_paths(target, data_dir)
@@ -781,7 +786,10 @@ def _is_unfinished_creation(key: str, provenance: str, secret: str) -> bool:
         (
             key,
             256,
-            lambda data: _is_creation_prefix(data, _DEVICE_KEY_HEAD, _BASE64_BYTES, 44, _DEVICE_KEY_TAIL, whole=False),
+            lambda data: (
+                _is_creation_prefix(data, _DEVICE_KEY_HEAD, _BASE64_BYTES, 44, _DEVICE_KEY_TAIL, whole=False)
+                and not _valid_device_key_bytes(data)  # a key the normal validator accepts is never cut short
+            ),
         ),
         (provenance, 256, lambda data: _is_creation_prefix(data, _DEVICE_PROVENANCE_PREFIX, _HEX_BYTES, 64, b"\n")),
         (secret, 64, lambda data: len(data) <= 32),
@@ -794,6 +802,10 @@ def _is_unfinished_creation(key: str, provenance: str, secret: str) -> bool:
                 return False
         except OSError:
             return False
+    # The key is published last, so a complete sentinel with no key beside it
+    # is what a key deleted from a finished setup looks like too.
+    if os.path.lexists(provenance) and not os.path.lexists(key):
+        return os.lstat(provenance).st_size < len(_DEVICE_PROVENANCE_PREFIX) + 64 + 1
     return True
 
 

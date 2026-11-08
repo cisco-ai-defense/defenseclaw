@@ -152,18 +152,18 @@ def test_two_inits_started_together_on_a_fresh_home_both_succeed(tmp_path, monke
     assert _orphans(home) == []
 
 
-def test_a_creation_that_stops_before_the_key_is_repaired_by_the_next_init(tmp_path, monkeypatch):
+def test_a_creation_that_stops_before_the_sentinel_is_repaired_by_the_next_init(tmp_path, monkeypatch):
     home = _home(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
     real_publish = doctor_recovery._publish_no_replace
 
-    def die_before_key(source: str, target: str) -> None:
-        if target.endswith("device.key"):
-            raise OSError("process ended before the key was published")
+    def die_before_sentinel(source: str, target: str) -> None:
+        if target.endswith(".provenance"):
+            raise OSError("process ended before the sentinel was published")
         real_publish(source, target)
 
     with monkeypatch.context() as crash:
-        crash.setattr(doctor_recovery, "_publish_no_replace", die_before_key)
+        crash.setattr(doctor_recovery, "_publish_no_replace", die_before_sentinel)
         crash.setattr(doctor_recovery, "_roll_back_device_identity", lambda placed: [])
         first = run_first_run(_options())
     assert first.status == "needs_attention"
@@ -226,17 +226,68 @@ def test_a_configured_home_stays_refused_for_a_cut_short_secret_too(tmp_path, mo
     _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
 
 
-def test_a_home_an_earlier_build_left_half_created_is_repaired_by_init(tmp_path, monkeypatch):
-    # The shape GAP-0927 left behind: provenance files, no key, no config.yaml.
+def test_a_complete_sentinel_with_no_key_and_no_config_is_kept_for_the_attended_repair(tmp_path, monkeypatch):
+    # The same state as a key deleted from a finished setup whose config.yaml is gone.
     home = _home(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
     _leftover_secret_and_sentinel(home)
+    secret_before = (home / SECRET).read_bytes()
+
+    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
+
+
+def test_a_finished_setup_that_lost_its_config_and_key_keeps_its_identity(tmp_path, monkeypatch):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+    (home / "config.yaml").unlink()
+    secret_before = (home / SECRET).read_bytes()
+
+    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("cut_short", [False, True])
+def test_a_moved_config_path_does_not_make_a_configured_data_folder_fresh(tmp_path, monkeypatch, plain, cut_short):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+    if cut_short:  # only a cut-short secret is left, which a fresh home would repair
+        (home / "device.key.provenance").unlink()
+        _write_private(home / SECRET, os.urandom(12))
+    secret_before = (home / SECRET).read_bytes()
+    elsewhere = Path(os.path.realpath(tmp_path)) / "elsewhere" / "config.yaml"
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(elsewhere))
+
+    if plain:
+        from click.testing import CliRunner
+        from defenseclaw.commands.cmd_init import init_cmd
+        from defenseclaw.context import AppContext
+
+        result = CliRunner().invoke(init_cmd, ["--skip-install"], obj=AppContext())
+        assert result.exit_code != 0
+        assert "continuity-evidence-present" in result.output
+    else:
+        _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
+    assert (home / SECRET).read_bytes() == secret_before
+    assert not (home / "device.key").exists()
+    assert _orphans(home) == []
+    assert (home / "config.yaml").is_file()
+
+
+def test_a_key_the_normal_validator_accepts_is_kept_whatever_its_last_byte_is(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    key = _new_device_key_pem().rstrip(b"\n")
+    secret = os.urandom(32)
+    sentinel = b"defenseclaw-device-provenance-v1:" + hmac.new(secret, key, hashlib.sha256).hexdigest().encode() + b"\n"
+    for name, data in (("device.key", key), (SECRET, secret), ("device.key.provenance", sentinel)):
+        _write_private(home / name, data)
+    assert _valid(home)
 
     report = run_first_run(_options())
 
-    assert report.status != "needs_attention", report.to_dict()
     assert _valid(home)
-    assert len(_orphans(home)) == 2
+    assert (home / "device.key").read_bytes() == key
+    assert (home / SECRET).read_bytes() == secret
+    assert _orphans(home) == []
+    assert report.status != "needs_attention", report.to_dict()
 
 
 def _cut_short_creation(home: Path, *, secret_length: int, sentinel_length: int, key_length: int | None) -> None:
@@ -266,7 +317,7 @@ def _cut_short_creation(home: Path, *, secret_length: int, sentinel_length: int,
         (32, 98, 20),
         (32, 98, 36),
         (32, 98, 60),
-        (32, 98, -1),
+        (32, 98, 80),
     ],
 )
 def test_a_fresh_home_with_a_cut_short_creation_is_repaired_by_init(
@@ -338,7 +389,7 @@ def test_repeated_set_asides_never_replace_an_earlier_orphan(tmp_path):
     kept: dict[str, bytes] = {}
     with patch.object(doctor_recovery.time, "gmtime", return_value=(2026, 11, 8, 12, 0, 0, 6, 312, 0)):
         for _ in range(3):
-            _leftover_secret_and_sentinel(home)
+            _cut_short_creation(home, secret_length=32, sentinel_length=60, key_length=None)
             moved = doctor_recovery.set_aside_abandoned_identity(
                 str(home / "device.key"), str(home), fresh_home=True
             )
@@ -477,7 +528,7 @@ def test_the_plain_init_path_repairs_a_fresh_home_left_half_created(tmp_path, mo
 
     home = _home(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
-    _leftover_secret_and_sentinel(home)
+    _cut_short_creation(home, secret_length=32, sentinel_length=60, key_length=None)
 
     result = CliRunner().invoke(init_cmd, ["--skip-install"], obj=AppContext())
 

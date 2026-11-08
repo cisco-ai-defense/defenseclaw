@@ -436,6 +436,7 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
 ) -> None:
     """The plain (non-guided) init; init_cmd holds the init lock around it."""
 
+    from defenseclaw.bootstrap import home_found_without_config
     from defenseclaw.config import (
         config_path,
         default_config,
@@ -463,6 +464,7 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
 
     cfg_file = config_path()
     is_new_config = not os.path.lexists(cfg_file)
+    fresh_home = is_new_config and home_found_without_config()
     if is_new_config:
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
@@ -564,7 +566,7 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
     _show_scanner_defaults(cfg)
 
     ux.banner("Gateway")
-    _setup_gateway_defaults(cfg, logger, is_new_config=is_new_config)
+    _setup_gateway_defaults(cfg, logger, is_new_config=is_new_config, fresh_home=fresh_home)
 
     ux.banner("Guardrail")
     guardrail_ok = False
@@ -3682,7 +3684,7 @@ def _validate_gateway_token(env_name: str, token: str) -> None:
         ) from exc
 
 
-def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
+def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True, fresh_home: bool = False) -> None:
     """Resolve gateway settings from the active connector and display them.
 
     Only applies connector values (host/port/token) when creating a new config.
@@ -3738,7 +3740,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
 
-    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir, fresh_home=is_new_config)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir, fresh_home=fresh_home)
 
     click.echo(f"  Gateway:       {cfg.gateway.host}:{cfg.gateway.port} (connector: {connector})")
     # Plan B2 / S0.2: the sidecar synthesizes a CSPRNG token on first
