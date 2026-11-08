@@ -24,6 +24,11 @@ param([string]$ScratchRoot = [IO.Path]::GetTempPath())
 
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# A failure outside the checks below (a cmdlet that cannot run) names its line.
+trap {
+    Microsoft.PowerShell.Utility\Write-Output ('enterprise-standalone-codex-vendor-folder-smoke: FAILED ' + $_.Exception.Message + "`n" + $_.InvocationInfo.PositionMessage + "`n" + $_.ScriptStackTrace)
+    throw
+}
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Microsoft.PowerShell.Utility\Write-Output 'enterprise-standalone-codex-vendor-folder-smoke: SKIP (requires an elevated token)'
