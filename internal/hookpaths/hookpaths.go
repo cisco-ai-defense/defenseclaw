@@ -554,6 +554,14 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
 	}
+	if base != "" && runtime.GOOS == "windows" {
+		// base is set only for the target of a link: spell it so the walk
+		// follows the file the link reaches (GAP-0855).
+		var ok bool
+		if path, ok = windowsLinkTarget(base, path); !ok {
+			return "", nil, linkDepth, false
+		}
+	}
 	current := base
 	absolute := filepath.IsAbs(path)
 	if absolute {
