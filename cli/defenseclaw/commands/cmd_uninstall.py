@@ -199,6 +199,10 @@ class UninstallPlan:
     # than data_dir (the install home): the hook scripts and connector records
     # are there, so teardown reads them there (GAP-0874).
     store_dir: str = ""
+    # previous_stores are the folders earlier `config set data_dir` moves left
+    # behind (config.previous_store_dirs): Setup wrote records there that a
+    # move does not carry (GAP-0874).
+    previous_stores: tuple[str, ...] = ()
     openclaw_config_file: str = ""
     openclaw_home: str = ""
     # connector is the active framework adapter resolved from config.
@@ -305,7 +309,9 @@ class UninstallPlan:
 
     @property
     def record_dirs(self) -> tuple[str, ...]:
-        """Every folder Setup can have written records in: the configured data_dir, then the install home.
+        """Every folder Setup can have written records in.
+
+        The configured data_dir, the folders earlier moves left, then the install home.
 
         ``config set data_dir`` carries the connector records and seals to the
         new folder and leaves the ACP ownership records, probe and
@@ -314,7 +320,16 @@ class UninstallPlan:
         new one. Teardown reads every record where it is, each with its own
         ownership proof (GAP-0874).
         """
-        return tuple(dict.fromkeys(folder for folder in (self.store_dir, self.data_dir) if folder))
+        return _record_dirs(self.store_dir, self.previous_stores, self.data_dir)
+
+
+def _record_dirs(store_dir: str, previous_stores: tuple[str, ...], data_dir: str) -> tuple[str, ...]:
+    """The folders Setup can have written records in, the current one first, without repeats."""
+    seen: list[str] = []
+    for folder in (store_dir, *previous_stores, data_dir):
+        if folder and not any(config_module._same_folder(folder, known) for known in seen):
+            seen.append(folder)
+    return tuple(seen)
 
 
 @dataclass(frozen=True)
@@ -1133,7 +1148,12 @@ def _build_plan(
     # OpenClaw backup index) in the data_dir config.yaml names, which can be
     # another folder than the install home (GAP-0874).
     store_dir = config_module.configured_store_dir()
-    record_dirs = tuple(dict.fromkeys(folder for folder in (store_dir, data_dir) if folder))
+    previous_stores = tuple(
+        folder
+        for folder in config_module.previous_store_dirs()
+        if not any(config_module._same_folder(folder, current) for current in (store_dir, data_dir) if current)
+    )
+    record_dirs = _record_dirs(store_dir, previous_stores, data_dir)
     if configured_openclaw:
         openclaw_candidate = str(getattr(cfg.claw, "config_file", "") or "")
         openclaw_home_candidate = str(getattr(cfg.claw, "home_dir", "") or "")
@@ -1182,6 +1202,7 @@ def _build_plan(
         remove_binaries=binaries,
         data_dir=data_dir,
         store_dir=store_dir,
+        previous_stores=previous_stores,
         openclaw_config_file=openclaw_config_file,
         openclaw_home=openclaw_home,
         connector=connector,
@@ -2694,6 +2715,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         ux.echo(
             f"  • {ux.bold('data_dir in config.yaml:')} {plan.store_dir}: the connector hooks and records are "
             "read there; this uninstall does not remove that folder"
+        )
+    for folder in plan.previous_stores:
+        ux.echo(
+            f"  • {ux.bold('earlier data_dir:')} {folder}: the setup records left there are read and removed; "
+            "this uninstall does not remove that folder"
         )
     if plan.remove_data_dir and plan.data_dir:
         from defenseclaw.removed_connectors import backup_dirs, kept_backups_root
