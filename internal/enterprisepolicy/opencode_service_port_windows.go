@@ -16,8 +16,24 @@ import (
 // checkOpenCodeServiceConfigFolders runs the folder checks the write runs,
 // without creating anything: a reparse point on the way, or a folder another
 // account can write, is refused whether or not the port already matches.
-func checkOpenCodeServiceConfigFolders(home, path string) ([]string, error) {
+//
+// follow is the account-side read of its own port (g053w M1): a folder the
+// account linked itself (a junction or directory link to its dotfiles) is
+// resolved and the folder it leads to is judged, so the read sees the port
+// the account keeps. The setter passes false and refuses every reparse point,
+// so the protected writer never goes through a link.
+func checkOpenCodeServiceConfigFolders(home, path string, follow bool) ([]string, error) {
 	for _, dir := range []string{filepath.Join(home, ".config"), filepath.Dir(path)} {
+		if follow {
+			resolved, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return nil, err
+			}
+			dir = resolved
+		}
 		if err := safefile.RejectReparseChain(dir); err != nil {
 			return nil, err
 		}

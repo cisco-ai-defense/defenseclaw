@@ -49,9 +49,7 @@ func TestSetOpenCodeServicePort(t *testing.T) {
 	if err != nil || !result.Changed || result.Port != 25001 {
 		t.Fatalf("first write: %+v %v", result, err)
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("mode: %v %v", info, err)
-	}
+	requireOpenCodeServiceFilePrivate(t, path)
 	if result, err = SetOpenCodeServicePort(home, 25001); err != nil || result.Changed {
 		t.Fatalf("second pass: %+v %v", result, err)
 	}

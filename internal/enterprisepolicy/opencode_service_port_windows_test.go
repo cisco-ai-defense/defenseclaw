@@ -14,6 +14,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
+// requireOpenCodeServiceFilePrivate is the private-file contract of the
+// platform: Windows has no POSIX mode, so the file must carry the
+// account-private owner and DACL the protected writer gives it.
+func requireOpenCodeServiceFilePrivate(t *testing.T, path string) {
+	t.Helper()
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		t.Fatalf("service.json is not account-private: %v", err)
+	}
+}
+
 func TestManagedWindowsOpenCodePortWriteIsAccountPrivate(t *testing.T) {
 	home := t.TempDir()
 	path := OpenCodeServiceConfigPath(home)
