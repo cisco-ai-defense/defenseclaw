@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,12 @@ import (
 
 const managedBackupVersion = 1
 const managedBackupMissingHash = "missing"
+
+// managedBackupDriftedHash is the post-setup hash of a record whose target
+// held bytes DefenseClaw did not commit when a later setup began. It is not a
+// digest, so no file ever matches it: an exact restore is off for good and
+// teardown or rollback removes only DefenseClaw-owned entries.
+const managedBackupDriftedHash = "drifted"
 
 type managedFileBackup struct {
 	Version        int    `json:"version"`
@@ -153,8 +160,10 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	existing, err := loadManagedFileBackupPath(backupPath)
 	if err == nil {
-		_, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath)
-		return err
+		if _, err = validateManagedFileBackupTarget(existing, connectorName, logicalName, boundPath); err != nil {
+			return err
+		}
+		return retireManagedFileBackupExactRestore(backupPath, existing, boundPath)
 	}
 	if !os.IsNotExist(err) {
 		return fmt.Errorf("load managed backup: %w", err)
@@ -180,7 +189,43 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	} else {
 		b.PristineSHA256 = managedBackupMissingHash
 	}
-	return writeManagedFileBackup(backupPath, b)
+	if err := writeManagedFileBackup(backupPath, b); err != nil {
+		return err
+	}
+	beginManagedSetupSpan(boundPath, b.PristineSHA256, false)
+	return nil
+}
+
+// retireManagedFileBackupExactRestore runs when a setup finds a record from an
+// earlier setup. A target that does not hold the bytes DefenseClaw last
+// committed (the post hash, or the pre-setup bytes while no post hash was
+// published) was changed by someone else: the operator saving the file again,
+// the agent itself, or an earlier setup that stopped before it recorded its
+// output. The setup that follows merges over those bytes, and recording the
+// result as its own would make teardown restore the pre-setup copy over the
+// change. The record is marked instead, so only the DefenseClaw entries are
+// ever removed from that file. A target that still matches keeps the exact
+// restore, but only on condition: an in-memory span stays open until the
+// read-back update (see updateManagedFileBackupPostHash), so a setup that
+// rewrites nothing leaves the record file untouched. A target that is not a
+// regular file changes nothing.
+func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup, targetPath string) error {
+	endManagedSetupSpan(targetPath)
+	if b.PostSHA256 == managedBackupDriftedHash {
+		return nil
+	}
+	expected := managedFileBackupExpectedHash(&b)
+	data, info, err := readManagedTarget(targetPath)
+	if err != nil {
+		return nil
+	}
+	if managedFileSnapshotHash(data, info != nil) != expected {
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
+	}
+	beginManagedSetupSpan(targetPath, expected, true)
+	return nil
 }
 
 func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, targetPath string) error {
@@ -196,6 +241,12 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	if err != nil {
 		return err
 	}
+	if b.PostSHA256 == managedBackupDriftedHash {
+		// The file holds more than DefenseClaw wrote: it is never recorded
+		// as DefenseClaw own output (see retireManagedFileBackupExactRestore).
+		return nil
+	}
+	span, spanOpen := endManagedSetupSpan(boundPath)
 	data, info, err := readManagedTarget(boundPath)
 	if err != nil {
 		return err
@@ -203,6 +254,29 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	nextHash := managedFileSnapshotHash(nil, false)
 	if info != nil {
 		nextHash = managedFileSnapshotHash(data, true)
+	}
+	if spanOpen && !span.later && (span.tainted || nextHash != span.expected) {
+		// A first setup records its output only when the target holds the
+		// bytes its writers committed on top of the bytes it began with
+		// (managedSetupSpan). An edit at any point in between stays out of
+		// the exact restore.
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
+	}
+	if spanOpen && span.later {
+		// A later setup began on the expected bytes (the committed ones, or
+		// the pre-setup ones while no post hash was published). Bytes it
+		// left unchanged are still ours, and the record is not rewritten.
+		// Anything else was merged over a base this read cannot vouch for
+		// (an edit may have landed between the capture and the merge), so
+		// it is never recorded as ours.
+		if nextHash == span.base {
+			return nil
+		}
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
 	}
 	return updateManagedFileBackupPostHashValue(dataDir, connectorName, logicalName, boundPath, nextHash)
 }
@@ -222,9 +296,13 @@ func updateManagedFileBackupPostHashValue(
 		}
 		return err
 	}
-	if _, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath); err != nil {
+	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
+	if err != nil {
 		return err
 	}
+	// The connector publishes its own hash: a span the capture opened has
+	// nothing left to vouch for.
+	endManagedSetupSpan(boundPath)
 	if nextHash == "" {
 		return fmt.Errorf("managed backup post hash is empty")
 	}
@@ -880,20 +958,29 @@ func ensureManagedBackupDirRestricted(dir string) error {
 	return nil
 }
 
+// readManagedTarget reads a managed target without waiting on it. A missing
+// path is (nil, nil, nil); anything that is not a regular file (a named pipe, a
+// device, a directory) is an error, because opening a named pipe for reading
+// blocks until a writer appears and would stall the Setup that inspects it.
 func readManagedTarget(path string) ([]byte, os.FileInfo, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil, nil
-		}
-		return nil, nil, fmt.Errorf("read %s: %w", path, err)
-	}
-	info, err := os.Stat(path)
+	file, err := openManagedTargetForRead(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil, nil
 		}
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
 		return nil, nil, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s is %s, not a regular file", path, hookConfigFileKind(info.Mode()))
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	return data, info, nil
 }

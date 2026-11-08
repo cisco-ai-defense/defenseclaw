@@ -574,7 +574,7 @@ func expandStaticShellWord(word *syntax.Word, env expand.Environ, haveHome bool)
 	if shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
-	fields, err := expand.Fields(&expand.Config{Env: env}, word)
+	fields, err := shellparse.Fields(&expand.Config{Env: env}, word)
 	if err != nil || len(fields) != 1 {
 		return "", false
 	}
@@ -850,6 +850,14 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
+	}
+	if base != "" && runtime.GOOS == "windows" {
+		// base is set only for the target of a link: spell it so the walk
+		// follows the file the link reaches (GAP-0855).
+		var ok bool
+		if path, ok = windowsLinkTarget(base, path); !ok {
+			return "", nil, linkDepth, false
+		}
 	}
 	current := base
 	absolute := filepath.IsAbs(path)

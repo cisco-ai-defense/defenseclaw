@@ -124,18 +124,40 @@ func WindowsStandaloneInstallExecutable() bool {
 	return windowsStandaloneInstallExecutable()
 }
 
-var windowsStandaloneInstallExecutable = sync.OnceValue(func() bool {
+var windowsStandaloneInstallExecutable = func() bool {
+	return windowsStandaloneInstallService() != ""
+}
+
+// windowsStandaloneInstallService is the gateway service the installer
+// registers for the install root the running binary sits in, or "" when it
+// sits in none: DefenseClawGateway for the production root,
+// DefenseClawCertGateway_<run id> for a run-scoped certification root. It is
+// the trusted deployment scope of an unpinned console. Tests replace it.
+var windowsStandaloneInstallService = sync.OnceValue(func() string {
 	executable, err := os.Executable()
-	if err != nil || !filepath.IsAbs(executable) {
-		return false
-	}
-	bin := filepath.Dir(filepath.Clean(executable))
-	if !strings.EqualFold(filepath.Base(bin), "bin") {
-		return false
+	if err != nil {
+		return ""
 	}
 	roots, err := winpath.TrustedEnterpriseRoots(winpath.EnterpriseProfileStandalone)
 	if err != nil {
-		return false
+		return ""
 	}
-	return winpath.ValidateEnterpriseInstallRoot(roots, filepath.Dir(bin)) == nil
+	return gatewayServiceForExecutable(executable, roots)
 })
+
+// gatewayServiceForExecutable is the gateway service of the standalone
+// install root that holds executable in its bin folder, or "".
+func gatewayServiceForExecutable(executable string, roots winpath.EnterpriseRoots) string {
+	if !filepath.IsAbs(executable) {
+		return ""
+	}
+	bin := filepath.Dir(filepath.Clean(executable))
+	if !strings.EqualFold(filepath.Base(bin), "bin") {
+		return ""
+	}
+	service, err := winpath.EnterpriseGatewayServiceForRoot(roots, filepath.Dir(bin))
+	if err != nil {
+		return ""
+	}
+	return service
+}

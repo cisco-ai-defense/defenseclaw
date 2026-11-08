@@ -1842,7 +1842,8 @@ func writeWindowsCodexSharedRequirements(base safefile.SharedFile, edit safefile
 		keep = &base.Metadata
 	}
 	published, swapped, err := safefile.PublishSharedFile(safefile.SharedPublish{
-		Base: base, CompareMetadata: true, Data: edit.Data, Limit: limit,
+		Class: safefile.PublishDefenseClawOwned,
+		Base:  base, CompareMetadata: true, Data: edit.Data, Limit: limit,
 		Inspect: windowsCodexMachineSingleLinkCheck, TempPattern: ".defenseclaw-codex-*",
 		Protect: func(temp string) error { return protectWindowsCodexSharedRequirements(temp, keep) },
 	})

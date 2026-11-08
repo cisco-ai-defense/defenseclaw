@@ -2993,3 +2993,92 @@ class NativeHookLauncherRemovalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MovedDataDirTeardownTests(unittest.TestCase):
+    """GAP-0874: after `config set data_dir` the hook scripts and connector records are in the new folder.
+
+    The plan took the install home for them, so the gateway teardown computed
+    the hook commands of the install home, found none of the commands Setup
+    wrote and refused to clean them up as a tampered entry.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / ".defenseclaw"
+        self.store = Path(self._tmp.name) / "state"
+        self.home.mkdir()
+        self.store.mkdir()
+        env = {key: value for key, value in os.environ.items() if not key.startswith("DEFENSECLAW_")}
+        patcher = patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch(
+            "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+            return_value=str(self.home),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _config(self, text: str) -> None:
+        (self.home / "config.yaml").write_text(text, encoding="utf-8")
+
+    def _plan(self):
+        class Guardrail:
+            connector = "hermes"
+
+        class Claw:
+            home_dir = "~/.openclaw"
+            config_file = "~/.openclaw/openclaw.json"
+
+        class Cfg:
+            guardrail = Guardrail()
+            claw = Claw()
+
+        with patch("defenseclaw.commands.cmd_uninstall.config_module.load", return_value=Cfg()):
+            return cmd_uninstall._build_plan(wipe_data=False, binaries=False, revert_openclaw=True, remove_plugin=True)
+
+    def _teardown_data_dir(self, plan) -> str:
+        completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with (
+            patch("shutil.which", return_value="defenseclaw-gateway"),
+            patch("subprocess.run", return_value=completed) as run_mock,
+            capture_click_output(),
+        ):
+            self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("hermes", plan=plan))
+        calls = [call.args[0] for call in run_mock.call_args_list]
+        self.assertEqual(len(calls), 2)  # teardown, then verify
+        for argv in calls:
+            self.assertEqual(argv[argv.index("--data-dir") + 1], plan.records_dir)
+        return calls[0][calls[0].index("--data-dir") + 1]
+
+    def test_teardown_and_verify_read_the_data_dir_config_names(self):
+        self._config(f"data_dir: {self.store}\n")
+        plan = self._plan()
+        self.assertEqual(plan.data_dir, str(self.home))
+        self.assertEqual(os.path.realpath(plan.store_dir), os.path.realpath(self.store))
+        self.assertEqual(self._teardown_data_dir(plan), plan.store_dir)
+
+    def test_the_plan_names_the_folder_it_reads_the_records_from(self):
+        self._config(f"data_dir: {self.store}\n")
+        with capture_click_output() as buf:
+            cmd_uninstall._render_plan(self._plan(), dry_run=True)
+        self.assertIn(f"data_dir in config.yaml: {self.store}", buf.getvalue())
+
+    def test_a_backup_record_in_the_moved_folder_selects_its_connector(self):
+        self._config(f"data_dir: {self.store}\n")
+        marker = self.store / "connector_backups" / "codex" / "config.toml.json"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("{}", encoding="utf-8")
+        self.assertIn("codex", self._plan().connectors)
+
+    def test_an_install_that_keeps_the_default_folder_is_unchanged(self):
+        for text in ("", f"data_dir: {self.home}\n"):
+            self._config(text)
+            plan = self._plan()
+            self.assertEqual(plan.store_dir, "")
+            self.assertEqual(self._teardown_data_dir(plan), str(self.home))
+            with capture_click_output() as buf:
+                cmd_uninstall._render_plan(plan, dry_run=True)
+            self.assertNotIn("data_dir in config.yaml", buf.getvalue())

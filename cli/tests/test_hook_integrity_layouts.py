@@ -340,3 +340,87 @@ def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_register
     assert hook_registration_problems(cfg, "copilot")  # one event and an incomplete native lock
     config.write_text(json.dumps({"version": 1, "hooks": {}}), encoding="utf-8")
     assert hook_registration_problems(cfg, "copilot") == [f"no DefenseClaw hooks are registered in {config}"]
+
+
+def _hermes_with_kept_entries(config: Path, data_dir: Path, *, keep_current: bool = True) -> None:
+    """Rewrite the healthy Hermes config as repair leaves it: the user hook and an edited one kept, the allowlist unchanged."""
+
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    edited = {"command": str(data_dir / "hooks" / "hookX"), "timeout": 30}
+    kept = [{"command": "/usr/local/bin/audit-tool-calls", "timeout": 5}, edited]
+    entries = document["hooks"]["pre_tool_call"]
+    document["hooks"]["pre_tool_call"] = [*kept, *(entries if keep_current else [])]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+
+@posix_only
+def test_a_kept_unapproved_edited_hermes_entry_is_not_a_registration_problem(tmp_path, monkeypatch):
+    # GAP-0873: repair keeps a hand-edited entry beside the current one and
+    # approves only the entries it writes. The registration check asked for an
+    # approval of the kept entry too, so the repair failed and rolled back.
+    monkeypatch.chdir(tmp_path)
+    cfg, config = _install(tmp_path, "hermes", _LAYOUTS["hermes"]["healthy"])
+    _hermes_with_kept_entries(config, Path(cfg.data_dir))
+    assert hook_registration_problems(cfg, "hermes") == []
+    assert hook_command_problems(cfg, "hermes") == []
+
+
+@posix_only
+def test_a_hermes_registration_with_only_an_edited_entry_is_reported(tmp_path, monkeypatch):
+    # The benign twin above must not hide a registration that lost the current
+    # command: an entry under the hooks folder that Setup did not write belongs
+    # to the user, so the tool call is unguarded.
+    monkeypatch.chdir(tmp_path)
+    cfg, config = _install(tmp_path, "hermes", _LAYOUTS["hermes"]["healthy"])
+    _hermes_with_kept_entries(config, Path(cfg.data_dir), keep_current=False)
+    assert hook_registration_problems(cfg, "hermes")
+
+
+@posix_only
+def test_the_current_hermes_entry_still_needs_its_approval(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    cfg, config = _install(tmp_path, "hermes", _LAYOUTS["hermes"]["healthy"])
+    _hermes_with_kept_entries(config, Path(cfg.data_dir))
+    (config.parent / hook_integrity.HERMES_ALLOWLIST_FILE).write_text(json.dumps({"approvals": []}), encoding="utf-8")
+    problems = hook_registration_problems(cfg, "hermes")
+    assert problems and "no approval" in problems[0]
+
+
+_KEPT_ENTRY_FORMS = {
+    "wrapped renamed hook": "bash {hooks}/hookX",
+    "wrapped, quoted": "bash \"{hooks}/hookX\"",
+    "renamed hook with arguments": "{hooks}/hookX --event pre_tool_call",
+    "padded edited script": " {hooks}/hermes-hook.sh.off --event pre_tool_call",
+    "trailing blank on edited script": "{hooks}/hermes-hook.sh.off --event pre_tool_call ",
+}
+
+
+@posix_only
+@pytest.mark.parametrize("form", sorted(_KEPT_ENTRY_FORMS))
+def test_every_check_leaves_a_kept_hermes_entry_alone(tmp_path, monkeypatch, form):
+    # GAP-0873: Setup keeps and lists an entry it did not write, however the
+    # command spells a path under the hooks folder. The check for commands the
+    # shell can run and the edited-entry check judged them anyway, so the
+    # registration Setup had just written failed readiness.
+    monkeypatch.chdir(tmp_path)
+    cfg, config = _install(tmp_path, "hermes", _LAYOUTS["hermes"]["healthy"])
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    kept = _KEPT_ENTRY_FORMS[form].format(hooks=Path(cfg.data_dir) / "hooks")
+    document["hooks"]["pre_tool_call"].insert(0, {"command": kept, "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    assert hook_command_problems(cfg, "hermes") == []
+    assert hook_integrity.edited_hook_problems(cfg, "hermes") == []
+    assert hook_registration_problems(cfg, "hermes") == []
+
+
+@posix_only
+def test_an_unpadded_edited_hermes_script_is_still_reported(tmp_path, monkeypatch):
+    # The twin of the kept forms above: the generated script at an edited path
+    # is an entry Setup wrote, which it replaces, so doctor still reports it.
+    monkeypatch.chdir(tmp_path)
+    cfg, config = _install(tmp_path, "hermes", _LAYOUTS["hermes"]["healthy"])
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    edited = str(Path(cfg.data_dir, "hooks", "hermes-hook.sh.off")) + " --event pre_tool_call"
+    document["hooks"]["pre_tool_call"].insert(0, {"command": edited, "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    assert any("hook command edited" in problem for problem in hook_command_problems(cfg, "hermes"))

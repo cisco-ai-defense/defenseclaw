@@ -195,6 +195,14 @@ class UninstallPlan:
     remove_data_dir: bool = False
     remove_binaries: bool = False
     data_dir: str = ""
+    # store_dir is the data_dir config.yaml names when it is another folder
+    # than data_dir (the install home): the hook scripts and connector records
+    # are there, so teardown reads them there (GAP-0874).
+    store_dir: str = ""
+    # previous_stores are the folders earlier `config set data_dir` moves left
+    # behind (config.previous_store_dirs): Setup wrote records there that a
+    # move does not carry (GAP-0874).
+    previous_stores: tuple[str, ...] = ()
     openclaw_config_file: str = ""
     openclaw_home: str = ""
     # connector is the active framework adapter resolved from config.
@@ -293,6 +301,35 @@ class UninstallPlan:
     # uninstall goes on from the connector records and says so; it used to
     # drop the error without a word (rel-1-0-6 GAP-0153).
     config_error: str = ""
+
+    @property
+    def records_dir(self) -> str:
+        """The folder that holds the connector records and hook scripts."""
+        return self.store_dir or self.data_dir
+
+    @property
+    def record_dirs(self) -> tuple[str, ...]:
+        """Every folder Setup can have written records in.
+
+        The configured data_dir, the folders earlier moves left, then the install home.
+
+        ``config set data_dir`` carries the connector records and seals to the
+        new folder and leaves the ACP ownership records, probe and
+        created-folder records, OpenClaw backup index and removed-connector
+        state in the folder they were written in, and later setups write in the
+        new one. Teardown reads every record where it is, each with its own
+        ownership proof (GAP-0874).
+        """
+        return _record_dirs(self.store_dir, self.previous_stores, self.data_dir)
+
+
+def _record_dirs(store_dir: str, previous_stores: tuple[str, ...], data_dir: str) -> tuple[str, ...]:
+    """The folders Setup can have written records in, the current one first, without repeats."""
+    seen: list[str] = []
+    for folder in (store_dir, *previous_stores, data_dir):
+        if folder and not any(config_module._same_folder(folder, known) for known in seen):
+            seen.append(folder)
+    return tuple(seen)
 
 
 @dataclass(frozen=True)
@@ -1107,6 +1144,16 @@ def _build_plan(
     # rendered, or used unless configuration or durable OpenClaw ownership
     # evidence adds OpenClaw to the teardown set.
     configured_openclaw = "openclaw" in active_connectors
+    # Setup wrote its records (connector records, ACP ownership records, the
+    # OpenClaw backup index) in the data_dir config.yaml names, which can be
+    # another folder than the install home (GAP-0874).
+    store_dir = config_module.configured_store_dir()
+    previous_stores = tuple(
+        folder
+        for folder in config_module.previous_store_dirs()
+        if not any(config_module._same_folder(folder, current) for current in (store_dir, data_dir) if current)
+    )
+    record_dirs = _record_dirs(store_dir, previous_stores, data_dir)
     if configured_openclaw:
         openclaw_candidate = str(getattr(cfg.claw, "config_file", "") or "")
         openclaw_home_candidate = str(getattr(cfg.claw, "home_dir", "") or "")
@@ -1114,18 +1161,28 @@ def _build_plan(
     else:
         default_home_candidate = os.path.expanduser("~/.openclaw")
         default_config_candidate = os.path.join(default_home_candidate, "openclaw.json")
-        openclaw_candidate, openclaw_owned = _owned_openclaw_candidate(
-            data_dir,
-            default_config_candidate,
+        openclaw_candidate, openclaw_owned = next(
+            (
+                owned
+                for owned in (_owned_openclaw_candidate(home, default_config_candidate) for home in record_dirs)
+                if owned[1]
+            ),
+            ("", False),
         )
         openclaw_home_candidate = os.path.dirname(openclaw_candidate) if openclaw_owned else ""
 
-    connectors = _teardown_connectors(
-        active_connectors,
-        data_dir=data_dir,
-        openclaw_config_file=openclaw_candidate,
-        include_openclaw=revert_openclaw,
-        openclaw_owned=openclaw_owned,
+    connectors = tuple(
+        dict.fromkeys(
+            name
+            for home in record_dirs
+            for name in _teardown_connectors(
+                active_connectors,
+                data_dir=home,
+                openclaw_config_file=openclaw_candidate,
+                include_openclaw=revert_openclaw,
+                openclaw_owned=openclaw_owned,
+            )
+        )
     )
     owns_openclaw = "openclaw" in connectors
     openclaw_config_file = openclaw_candidate if owns_openclaw else ""
@@ -1144,6 +1201,8 @@ def _build_plan(
         remove_data_dir=wipe_data,
         remove_binaries=binaries,
         data_dir=data_dir,
+        store_dir=store_dir,
+        previous_stores=previous_stores,
         openclaw_config_file=openclaw_config_file,
         openclaw_home=openclaw_home,
         connector=connector,
@@ -1175,7 +1234,7 @@ def _build_plan(
         sigstore_cache=_legacy_sigstore_cache(data_dir) if wipe_data and binaries else "",
         hook_temp_dirs=_hook_temp_dirs(platform_name) if wipe_data and not preserve_data_entries else (),
         quarantined=_quarantined_copies(data_dir) if wipe_data and not preserve_data_entries else (),
-        acp_entries=_acp_editor_entries(cfg, data_dir),
+        acp_entries=_acp_editor_entries(cfg, record_dirs),
         config_error=config_error,
     )
 
@@ -1186,15 +1245,22 @@ def _one_line(text: str, limit: int = 400) -> str:
     return flat if len(flat) <= limit else flat[: limit - 3] + "..."
 
 
-def _acp_editor_entries(cfg, data_dir: str) -> tuple[tuple[str, str, str], ...]:
+def _acp_editor_entries(cfg, data_dirs: tuple[str, ...]) -> tuple[tuple[str, str, str], ...]:
     """The guarded editor entries this runtime can prove `acp setup` wrote (GAP-2632).
 
-    The proof is the one `defenseclaw acp remove` uses, so a foreign or
-    adopted entry is never named. An editor file that cannot be read is left
-    as it is.
+    The proof is the one `defenseclaw acp remove` uses, from the ownership
+    record in each folder setup can have written it in (``UninstallPlan.record_dirs``),
+    so a foreign or adopted entry is never named. An editor file that cannot
+    be read is left as it is.
     """
     if getattr(cfg, "deployment_mode", "") == "managed_enterprise":
         return ()
+    found = dict.fromkeys(entry for data_dir in data_dirs for entry in _proven_acp_entries(data_dir))
+    return tuple(sorted(found))
+
+
+def _proven_acp_entries(data_dir: str) -> tuple[tuple[str, str, str], ...]:
+    """The editor entries the ownership record in data_dir proves `acp setup` wrote."""
     from defenseclaw.commands import cmd_acp
 
     records = cmd_acp._owned_entry_records(data_dir)
@@ -1217,27 +1283,35 @@ def _acp_editor_entries(cfg, data_dir: str) -> tuple[tuple[str, str, str], ...]:
 
 def _remove_acp_editor_entries(plan: UninstallPlan) -> None:
     """Take out the plan's ACP editor entries, their contract locks and their records."""
+    # Each folder's proof is read before any entry goes: a removal changes the editor files.
+    proven = {home: _proven_acp_entries(home) for home in plan.record_dirs}
+    for home, entries in proven.items():
+        if entries:
+            _remove_acp_editor_entries_in(home, entries)
+
+
+def _remove_acp_editor_entries_in(data_dir: str, entries: tuple[tuple[str, str, str], ...]) -> None:
     from defenseclaw.commands import cmd_acp
 
-    records = cmd_acp._owned_entry_records(plan.data_dir)
-    paths = {client: cmd_acp._remove_client_entry(client, agent, records) for client, agent, _ in plan.acp_entries}
+    records = cmd_acp._owned_entry_records(data_dir)
+    paths = {client: cmd_acp._remove_client_entry(client, agent, records) for client, agent, _ in entries}
     # A linked acp directory holds another runtime's locks and records.
-    if cmd_acp._acp_dir_is_redirected(plan.data_dir):
+    if cmd_acp._acp_dir_is_redirected(data_dir):
         return
-    pairs = {(client, agent) for client, agent, _path in plan.acp_entries}
+    pairs = {(client, agent) for client, agent, _path in entries}
     for client, agent in pairs:
-        lock = cmd_acp._contract_lock_path(plan.data_dir, client, agent)
+        lock = cmd_acp._contract_lock_path(data_dir, client, agent)
         if lock.is_file() and not lock.is_symlink():
             lock.unlink()
     for client, path in paths.items():
         try:
             # Another entry this runtime wrote in the same file keeps a current pin.
-            cmd_acp._refresh_client_contract_digests(plan.data_dir, client, path)
+            cmd_acp._refresh_client_contract_digests(data_dir, client, path)
         except click.ClickException as exc:
             ux.warn(f"{exc.message}; `defenseclaw acp verify` names what to repair")
     remaining = {key: digest for key, digest in records.items() if key[:2] not in pairs}
     if remaining != records:
-        cmd_acp._write_entry_records(plan.data_dir, remaining)
+        cmd_acp._write_entry_records(data_dir, remaining)
 
 
 def _quarantined_copies(data_dir: str) -> tuple[str, ...]:
@@ -2558,7 +2632,7 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
     if plan.config_error:
         ux.warn(
             f"config.yaml did not load ({plan.config_error}); the teardown goes on from the connector "
-            f"records in {plan.data_dir}",
+            f"records in {plan.records_dir}",
             indent="    ",
         )
     if display_connectors:
@@ -2637,6 +2711,16 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         )
         ux.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
     ux.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+    if plan.store_dir:
+        ux.echo(
+            f"  • {ux.bold('data_dir in config.yaml:')} {plan.store_dir}: the connector hooks and records are "
+            "read there; this uninstall does not remove that folder"
+        )
+    for folder in plan.previous_stores:
+        ux.echo(
+            f"  • {ux.bold('earlier data_dir:')} {folder}: the setup records left there are read and removed; "
+            "this uninstall does not remove that folder"
+        )
     if plan.remove_data_dir and plan.data_dir:
         from defenseclaw.removed_connectors import backup_dirs, kept_backups_root
 
@@ -2771,20 +2855,23 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     # their records name the agent configs outside the data folder.
     from defenseclaw.removed_connectors import backup_dirs, leftovers
 
-    removed_left = leftovers(plan.data_dir) if plan.data_dir else []
+    removed_left = {home: leftovers(home) for home in plan.record_dirs}
     moved: dict[str, str] = {}
     if plan.remove_data_dir and plan.data_dir and backup_dirs(plan.data_dir):
         run_phase(
             "removed connector backups",
             lambda: moved.update(_move_removed_connector_backups_out(plan.data_dir, plan.platform_name)),
         )
-    _print_removed_connector_leftovers(
-        plan.data_dir, data_removed=plan.remove_data_dir, found=removed_left, moved=moved
-    )
-    if plan.stop_gateway and plan.data_dir:
-        _remove_probe_created_state(plan.data_dir)
-        # The gateway is stopped, so its watcher no longer uses them.
-        _remove_created_dirs(plan.data_dir)
+    # A data_dir moved out of the install home stays: the wipe takes the install home only.
+    for home, found in removed_left.items():
+        _print_removed_connector_leftovers(
+            home, data_removed=plan.remove_data_dir and home == plan.data_dir, found=found, moved=moved
+        )
+    if plan.stop_gateway:
+        for home in plan.record_dirs:
+            _remove_probe_created_state(home)
+            # The gateway is stopped, so its watcher no longer uses them.
+            _remove_created_dirs(home)
     if "copilot" in plan.connectors or plan.remove_data_dir:
         _remove_orphan_copilot_plugin(plan.platform_name)
     if plan.remove_data_dir and plan.data_dir:
@@ -4418,7 +4505,7 @@ def _gateway_connector_is_unknown(connector: str, *, plan: UninstallPlan | None 
                 "verify",
                 "--connector",
                 connector,
-                *(["--data-dir", plan.data_dir] if plan is not None else []),
+                *(["--data-dir", plan.records_dir] if plan is not None else []),
             ],
             capture_output=True,
             encoding="utf-8",
@@ -4468,7 +4555,7 @@ def _run_gateway_connector_teardown(
                 "teardown",
                 "--connector",
                 connector,
-                *(["--data-dir", plan.data_dir] if plan is not None else []),
+                *(["--data-dir", plan.records_dir] if plan is not None else []),
             ],
             capture_output=True,
             encoding="utf-8",
@@ -4505,7 +4592,7 @@ def _run_gateway_connector_teardown(
             "verify",
             "--connector",
             connector,
-            *(["--data-dir", plan.data_dir] if plan is not None else []),
+            *(["--data-dir", plan.records_dir] if plan is not None else []),
         ]
         try:
             verified = subprocess.run(
@@ -4535,7 +4622,9 @@ def _revert_openclaw_python(plan: UninstallPlan) -> None:
         restore_openclaw_config,
     )
 
-    pristine = pristine_backup_path(plan.openclaw_config_file, plan.data_dir)
+    pristine = next(
+        filter(None, (pristine_backup_path(plan.openclaw_config_file, home) for home in plan.record_dirs)), None
+    )
     target = _expand(plan.openclaw_config_file)
     if pristine:
         try:

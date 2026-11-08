@@ -1047,7 +1047,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// the outage mode, as the shell hook does (GAP-0295).
 			opts.answerWatch.restartWindowContact(opts, sp, failMode, check)
 		}
-		tryCtx, release := connectBy(ctx, connectDeadline, onConnect)
+		tryCtx, release := connectBy(withPerUserGatewayHomes(ctx, func() []string { return perUserRecordHomes(opts) }), connectDeadline, onConnect)
 		check, _ = tryCtx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck)
 		releases = append(releases, release)
 		resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
@@ -1271,6 +1271,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// is a gateway service that is not running (see
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
+		}
+		if errors.Is(err, errPerUserListenerUnanswered) && !opts.ManagedEnterprise {
+			return failPerUserListenerUnanswered(opts, sp, failMode)
 		}
 		if errors.Is(err, errPerUserPeerUnverified) {
 			// A deadline on the peer check is a local verification failure,

@@ -37,7 +37,7 @@ func TestRestoreManagedFileBackupsForRollbackUsesConnectorWideRecords(t *testing
 			if err := captureManagedFileBackup(saved, "newer-connector", "hooks.json", path); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, installed, 0o600); err != nil {
+			if err := atomicWriteFile(path, installed, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if err := updateManagedFileBackupPostHash(saved, "newer-connector", "hooks.json", path); err != nil {

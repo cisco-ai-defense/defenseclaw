@@ -64,7 +64,7 @@ func TestManagedFileBackup_RestoresExactWhenUnchanged(t *testing.T) {
 	if err := captureManagedFileBackup(dir, "codex", "config", target); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
-	if err := os.WriteFile(target, []byte(`{"hooks":["defenseclaw"]}`), 0o600); err != nil {
+	if err := atomicWriteFile(target, []byte(`{"hooks":["defenseclaw"]}`), 0o600); err != nil {
 		t.Fatalf("patch target: %v", err)
 	}
 	if err := updateManagedFileBackupPostHash(dir, "codex", "config", target); err != nil {

@@ -46,7 +46,13 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths, credential_provenance, envvars, legacy_connector
+from defenseclaw import (
+    connector_paths,
+    credential_provenance,
+    envvars,
+    gateway_token_adoption,
+    legacy_connector,
+)
 from defenseclaw.config_writer import ManagedConfigWriteError
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
@@ -618,6 +624,108 @@ def _install_home_binding() -> tuple[str, str | None, bool]:
         active_config = os.path.join(home, active_config)
     configured, managed = _home_config_binding(active_config, home)
     return home, configured, managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
+
+
+def configured_store_dir() -> str:
+    """The data_dir the active config.yaml names when it is a folder other than the install home, else "".
+
+    ``defenseclaw config set data_dir`` moves the stores, hooks and connector
+    records (hook scripts, setup receipts, rollback markers) to that folder,
+    while config.yaml, gateway.pid and the Python environment stay in the
+    install home. A caller that reads or tears down connector records must
+    use this folder: the install home holds none of them, so the hook
+    commands it computes there are not the ones Setup wrote (GAP-0874). A
+    managed runtime keeps its own folder, so it returns "".
+    """
+    try:
+        home, configured, managed = _install_home_binding()
+    except (OSError, KeyError, NotImplementedError):
+        return ""
+    if managed or not configured or _same_folder(configured, home):
+        return ""
+    return configured
+
+
+STORE_HISTORY_FILE = "previous-data-dirs.json"
+_STORE_HISTORY_MAX_FOLDERS = 16
+_STORE_HISTORY_MAX_BYTES = 64 * 1024
+
+
+def _store_history_path() -> str:
+    return os.path.join(os.fspath(default_data_path()), STORE_HISTORY_FILE)
+
+
+def _account_private_regular_file(path: str, info: os.stat_result) -> bool:
+    """Whether *path* is a regular file only this account can read or change."""
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if os.name == "nt":
+        from defenseclaw.file_permissions import windows_guard_private_file_error
+
+        return windows_guard_private_file_error(path) is None
+    return info.st_uid == os.geteuid() and not info.st_mode & 0o077
+
+
+def previous_store_dirs() -> tuple[str, ...]:
+    """The folders ``config set data_dir`` moved the stores away from, oldest first.
+
+    A move carries the connector records and seals and leaves every other
+    record Setup wrote (ACP ownership records, probe and created-folder
+    records, the OpenClaw backup index, removed-connector state) in the
+    folder it was written in. The install home keeps this list so uninstall
+    can look in each of those folders, not only in the current one and the
+    install home (GAP-0874). The list only says where to look: every reader
+    still proves ownership of each record it finds. A list that is a link,
+    open to other accounts, oversized or malformed names nothing, and so does a
+    managed runtime.
+    """
+    path = _store_history_path()
+    try:
+        if _install_home_binding()[2]:
+            return ()  # a managed runtime keeps its own folder
+        info = os.lstat(path)
+        if not _account_private_regular_file(path, info):
+            return ()
+        document = json.loads(
+            read_regular_file_no_follow(path, max_bytes=_STORE_HISTORY_MAX_BYTES, expected_stat=info)
+        )
+    except (OSError, ValueError, NotImplementedError):
+        return ()
+    folders = document.get("folders") if isinstance(document, dict) else None
+    if not isinstance(folders, list):
+        return ()
+    found: dict[str, None] = {}
+    for folder in folders[:_STORE_HISTORY_MAX_FOLDERS]:
+        if isinstance(folder, str) and os.path.isabs(folder) and os.path.isdir(folder) and not os.path.islink(folder):
+            found[folder] = None
+    return tuple(found)
+
+
+def remember_previous_store(old_dir: str) -> list[str]:
+    """Add the folder a data_dir move leaves behind to the list in the install home; return warning notes.
+
+    The install home is always searched, so it is never listed. The newest
+    ``_STORE_HISTORY_MAX_FOLDERS`` folders are kept.
+    """
+    if _is_admin_process() or not old_dir or not os.path.isabs(old_dir):
+        return []
+    try:
+        home = os.fspath(default_data_path())
+        if _same_folder(old_dir, home) or not os.path.isdir(old_dir):
+            return []
+        from defenseclaw.file_permissions import atomic_write_private_bytes
+
+        # Folders that no longer exist are dropped; an unreadable list starts again.
+        kept = [folder for folder in previous_store_dirs() if not _same_folder(folder, old_dir)]
+        kept.append(old_dir)
+        body = json.dumps({"folders": kept[-_STORE_HISTORY_MAX_FOLDERS:]}, indent=2).encode() + b"\n"
+        atomic_write_private_bytes(_store_history_path(), body, protect_parent=False)
+    except (OSError, ValueError, NotImplementedError) as exc:
+        return [
+            f"warning: the old data_dir {old_dir} could not be added to the list uninstall searches ({exc}); "
+            "its setup records stay there until you remove them"
+        ]
+    return []
 
 
 def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
@@ -2190,6 +2298,14 @@ class GatewayConfig:
         4. ``self.token`` — literal value from ``config.yaml``. Last
            resort because plaintext secrets in YAML are discouraged
            (and ``_warn_plaintext_secrets`` already nags about it).
+
+        When ``.env`` holds both gateway-token spellings with different
+        values, the earlier name in this order wins, except that a copy the
+        gateway adopted from ``openclaw.json`` (recorded by the marker comment
+        in ``.env``, see ``defenseclaw.gateway_token_adoption``) never shadows a
+        value the operator saved under the other spelling: the load leaves the
+        adopted copy out. ``defenseclaw keys set`` on either name replaces every
+        spelling already saved.
 
         Returns the empty string when no token is reachable; callers
         gate on the truthiness, so empty == "unauthenticated".
@@ -7728,6 +7844,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     managed_host: bool | None = None
     try:
         body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
+        # An adopted gateway token copy never shadows the one the operator saved.
+        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -7762,6 +7880,12 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 seen_keys.add(key)
                 current = os.environ.get(key)
                 injected = current is None or credential_provenance.holds_injected_value(data_dir, key, current)
+                if gateway_token_adoption.is_shadowed(shadowed, key):
+                    # A long-lived process (the TUI) may hold the adopted copy an
+                    # earlier load injected.
+                    if current is not None and injected:
+                        del os.environ[key]
+                    continue
                 if injected:
                     os.environ[key] = value
                 credential_provenance.note_dotenv_candidate(

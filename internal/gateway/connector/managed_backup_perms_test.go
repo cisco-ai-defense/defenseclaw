@@ -434,7 +434,9 @@ func TestRestoreManagedFileBackupsPutsBackWhatSetupFound(t *testing.T) {
 		if err := captureManagedFileBackup(dataDir, item.connector, item.logical, item.path); err != nil {
 			t.Fatal(err)
 		}
-		write(item.path, item.body)
+		if err := atomicWriteFile(item.path, []byte(item.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 		if err := updateManagedFileBackupPostHash(dataDir, item.connector, item.logical, item.path); err != nil {
 			t.Fatal(err)
 		}
@@ -608,7 +610,7 @@ func TestRestoreFailureNamesTheTargetAndCauseOnce(t *testing.T) {
 	if err := captureManagedFileBackup(dataDir, "copilot", "config", target); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(target, []byte(`{"hooks":1}`), 0o600); err != nil {
+	if err := atomicWriteFile(target, []byte(`{"hooks":1}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := updateManagedFileBackupPostHash(dataDir, "copilot", "config", target); err != nil {

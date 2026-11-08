@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,7 +40,12 @@ import (
 // place name no call. A call id the provider rewrote before replay (a length
 // cap, a new id for a repeated id) matches nothing and the notice waits until
 // it expires: the line is UX only, so when the tie is unknown nothing is
-// shown. A provider whose results carry no call id (Ollama, Gemini without
+// shown. A Responses id is "<call id>|<item id>" and the result carries the
+// call id alone; OpenClaw drops the item id from the replayed call unless it
+// replays the reasoning too, so the result is tied to the block by the call id
+// when the request names no item of the call, and every inspected call is
+// remembered by its call id, so a second call under it makes the block
+// ambiguous. A provider whose results carry no call id (Ollama, Gemini without
 // ids) cannot be keyed and shows nothing. An allowed call records nothing.
 //
 // The line is shown only when the tie is unambiguous, and an unclear tie shows
@@ -59,7 +65,8 @@ import (
 //     nothing.
 //
 // An ambiguous block shows nothing and is consumed silently by the first result
-// that claims it. A notice is taken by one request, so a block is shown once. A
+// that claims it, and so is a block whose call part a request visibly carries
+// in several items (never kept for a later, shorter replay of the same result). A notice is taken by one request, so a block is shown once. A
 // reply with no text to lead with, or in a format that is not rewritten, gives
 // the notice back until it expires, so the line lands on the first reply that
 // can carry it. A reply DefenseClaw wrote itself (it starts with the block
@@ -96,10 +103,21 @@ type openClawBlockNotice struct {
 }
 
 // openClawSeenCall is one tool call the inspect endpoint saw, kept only to
-// tell that a call id was used twice.
+// tell that a call id was used twice. key is the call key of its id.
 type openClawSeenCall struct {
-	callID string
-	at     time.Time
+	key string
+	at  time.Time
+}
+
+// noticeCallKey is the part of a call id that names the call. OpenClaw names a
+// Responses call "<call id>|<item id>" and sends the call id alone back with
+// the result, so two ids with one call key are one call to a result. Any other
+// id is its own key.
+func noticeCallKey(id string) string {
+	if i := strings.Index(id, "|"); i > 0 {
+		return id[:i]
+	}
+	return id
 }
 
 var openClawBlockNotices struct {
@@ -176,15 +194,16 @@ func recordOpenClawToolCall(callID, session string, blockLine *string) {
 	defer openClawBlockNotices.mu.Unlock()
 	now := openClawToolOutcomeNow()
 	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, now)
+	key := noticeCallKey(callID)
 	seen := openClawBlockNotices.seen[:0]
 	used := false
 	for _, c := range openClawBlockNotices.seen {
 		if now.Sub(c.at) < openClawSeenCallTTL {
-			used = used || c.callID == callID
+			used = used || c.key == key
 			seen = append(seen, c)
 		}
 	}
-	seen = append(seen, openClawSeenCall{callID: callID, at: now})
+	seen = append(seen, openClawSeenCall{key: key, at: now})
 	if n := len(seen); n > openClawSeenCallCap {
 		seen = seen[n-openClawSeenCallCap:]
 	}
@@ -192,13 +211,13 @@ func recordOpenClawToolCall(callID, session string, blockLine *string) {
 
 	recorded := false
 	for i := range entries {
-		if entries[i].callID == callID {
+		if noticeCallKey(entries[i].callID) == key {
 			entries[i].ambiguous = true
 			recorded = recorded || entries[i].session == session
 		}
 	}
-	// A second block of one id and session adds no entry: the first is already
-	// ambiguous and the pair is consumed by one result.
+	// A second block of one call key and session adds no entry: the first is
+	// already ambiguous and the pair is consumed by one result.
 	if blockLine != nil && !recorded {
 		entries = append(entries, openClawBlockNotice{callID: callID, session: session, line: *blockLine, at: now, ambiguous: used})
 	}
@@ -254,11 +273,26 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	defer openClawBlockNotices.mu.Unlock()
 	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
 	claimed := make([]bool, len(entries))
+	// dropped marks a block of the request session whose call part this
+	// request carries in several items, so its result cannot be told apart.
+	// The notice is consumed with nothing shown, so a later replay of the same
+	// result with fewer items cannot attach it to an unrelated reply. One
+	// other item of the call part is a sibling call and drops nothing. The
+	// several-item rule comes before the id match: an id equal to the call
+	// part (a call OpenClaw gave no item id) is no more provable than a
+	// "<call>|<item>" one when the request shows several candidate items.
+	dropped := make([]bool, len(entries))
 	for _, r := range ids {
 		claim := -1
 		count := 0
 		for i, e := range entries {
-			if e.isResultOf(r) && e.inSession(session) {
+			if !e.inSession(session) {
+				continue
+			}
+			switch {
+			case r.items > 1 && noticeCallKey(e.callID) == r.id:
+				dropped[i] = true
+			case e.isResultOf(r):
 				claim = i
 				count++
 			}
@@ -271,10 +305,11 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(entries))
 	for i, e := range entries {
 		switch {
-		case !claimed[i]:
-			kept = append(kept, e)
-		case !e.ambiguous:
+		case claimed[i] && !e.ambiguous:
 			taken = append(taken, e)
+		case claimed[i] || dropped[i]:
+		default:
+			kept = append(kept, e)
 		}
 	}
 	openClawBlockNotices.entries = kept
@@ -342,9 +377,21 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 		}
 		notices := takeOpenClawBlockNotices(body, session)
 		if len(notices) == 0 {
+			// A live notice waits and this request did not claim it. The line
+			// names no call, session or text: it only tells a live run which
+			// condition kept the notice off the screen.
+			fmt.Fprintf(os.Stderr, "[guardrail] openclaw block notice: pending, not claimed by %s (session_bound=%t)\n", r.URL.Path, session != "")
 			next.ServeHTTP(w, r)
 			return
 		}
+		// The line is written into the reply text, so the reply must reach the
+		// writer as plain text. The model client asks for a compressed reply
+		// (undici adds accept-encoding) and the passthrough forwards that
+		// header, so a provider that compresses a stream would send back
+		// bytes the writer cannot rewrite and the line would be lost. Without
+		// the header the proxy transport asks for gzip itself and hands over
+		// the decoded reply, which the client reads as an ordinary reply.
+		r.Header.Del("Accept-Encoding")
 		nw := &openClawNoticeWriter{ResponseWriter: w, notices: notices}
 		lines := make([]string, len(notices))
 		for i, n := range notices {
@@ -353,6 +400,8 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 		nw.prefix = strings.Join(lines, "\n") + "\n\n"
 		next.ServeHTTP(nw, r)
 		nw.finish()
+		fmt.Fprintf(os.Stderr, "[guardrail] openclaw block notice: claimed by %s, shown=%t (mode=%d status=%d content_type=%q content_encoding=%q)\n",
+			r.URL.Path, nw.applied, nw.mode, nw.status, w.Header().Get("Content-Type"), w.Header().Get("Content-Encoding"))
 	})
 }
 

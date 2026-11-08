@@ -1147,10 +1147,10 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		}
 	}
 	recorded := false
-	deadlineWait := time.NewTimer(answerWatchdogLogWait)
-	defer deadlineWait.Stop()
-	fallbackWait := time.NewTimer(answerWatchdogLogWait / 2)
-	defer fallbackWait.Stop()
+	deadlineExpired, stopDeadline := proofclock.NewTimer(answerWatchdogLogWait)
+	defer stopDeadline()
+	fallbackExpired, stopFallback := proofclock.NewTimer(answerWatchdogLogWait / 2)
+	defer stopFallback()
 	for !recorded || receiptDone != nil {
 		select {
 		case <-localDone:
@@ -1165,7 +1165,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 			} else {
 				startOrdinary()
 			}
-		case <-fallbackWait.C:
+		case <-fallbackExpired:
 			if !recorded {
 				if markerTried {
 					startOrdinary()
@@ -1173,7 +1173,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 					startMarker()
 				}
 			}
-		case <-deadlineWait.C:
+		case <-deadlineExpired:
 			if !recorded {
 				fmt.Fprintln(os.Stderr, "defenseclaw: local failure record could not be appended before exit")
 			}
@@ -1226,6 +1226,20 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 	}
 }
 
+// waitForLog waits for the watchdog's hook-failures row (done) for at most
+// answerWatchdogLogWait. The bound runs on the proof clock like the other
+// post-deadline bounds of a call, so a test decides whether it is spent
+// instead of racing the host for a file append (GAP-0859); a release build
+// runs the system clock.
+func waitForLog(done <-chan struct{}) {
+	expired, stop := proofclock.NewTimer(answerWatchdogLogWait)
+	defer stop()
+	select {
+	case <-done:
+	case <-expired:
+	}
+}
+
 // installLockHeldWithin is installLockHeld bounded by wait: a look that
 // takes longer counts as a held lock.
 func installLockHeldWithin(home string, wait time.Duration) bool {
@@ -1240,12 +1254,12 @@ func installLockHeldWithin(home string, wait time.Duration) bool {
 func heldWithin(check func() bool, wait time.Duration) bool {
 	held := make(chan bool, 1)
 	go func() { held <- check() }()
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	expired, stop := proofclock.NewTimer(wait)
+	defer stop()
 	select {
 	case h := <-held:
 		return h
-	case <-timer.C:
+	case <-expired:
 		return true
 	}
 }
@@ -1417,12 +1431,7 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 		logged = done
 	}
 	if logged != nil {
-		timer := time.NewTimer(answerWatchdogLogWait)
-		select {
-		case <-logged:
-		case <-timer.C:
-		}
-		timer.Stop()
+		waitForLog(logged)
 	}
 	if w.deliveryReceipt != nil {
 		w.deliveryReceipt(false, true)

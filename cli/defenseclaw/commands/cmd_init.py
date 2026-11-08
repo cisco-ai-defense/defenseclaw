@@ -135,7 +135,8 @@ def refuse_first_run_when_managed() -> None:
     help=(
         "Saves your choice for a gateway outage: 'open' lets calls run with a warning "
         "and an audit entry, 'closed' blocks them. A saved choice wins over the policy "
-        "tier. Omitted, nothing is saved: default and permissive policy open an outage, "
+        "tier, except OpenClaw under the strict policy and ZeptoClaw model requests, "
+        "which stay closed. Omitted, nothing is saved: default and permissive policy open an outage, "
         "strict closes it. Every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
         "transport and missing-token failures closed."

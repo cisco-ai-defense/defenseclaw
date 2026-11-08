@@ -1287,6 +1287,114 @@ def test_a_room_refusal_runs_before_the_uv_folder_or_uv_is_created() -> None:
     assert room < install.index("Protect-UvDirectory -Create") < install.index("$Uv = if ($Run.UnprovenReplacement)")
 
 
+def test_the_uv_build_path_check_runs_before_the_uv_folder_is_created() -> None:
+    # GAP-0865: uv builds win-unicode-console from source in its cache folder,
+    # and a profile path of about 98 characters stopped there with WinError 206.
+    # The refusal names the path and changes nothing, so it comes after the
+    # cache folder is known and before Protect-UvDirectory -Create makes it.
+    install = _ps1_function("Invoke-Install")
+    known = install.index('$env:UV_CACHE_DIR = Join-Path $DataDir ".uv\\cache"')
+    resolve = install.index("$env:UV_CACHE_DIR = Resolve-UvCacheDir $env:UV_CACHE_DIR")
+    check = install.index("Assert-UvBuildPathFits $env:UV_CACHE_DIR")
+    assert known < resolve < check < install.index("Protect-UvDirectory -Create")
+
+
+def test_the_lock_has_one_source_only_package_and_the_build_path_reserve_is_its_own() -> None:
+    # The reserve in Assert-UvBuildPathFits is the longest path of the
+    # win-unicode-console build below uv's cache folder. A second package
+    # without a wheel would build somewhere the reserve was never measured.
+    import tomllib
+
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    source_only = sorted(p["name"] for p in lock["package"] if p.get("sdist") and not p.get("wheels"))
+    assert source_only == ["win-unicode-console"]
+    longest = (
+        "sdists-v9\\pypi\\win-unicode-console\\0.5\\" + "x" * 16 + "\\src\\"
+        "build\\bdist.win-amd64\\wheel\\.\\win_unicode_console-0.5-py3.12.egg-info\\dependency_links.txt"
+    )
+    assert re.search(rf"^\$UvBuildPathReserve = {len(longest) + 1}$", _text(), re.M)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(
+    ("length", "long_paths", "refused"),
+    [
+        (78, False, False),  # a 56-character profile: the install that worked
+        (108, False, False),  # the longest cache folder whose build still fits
+        (109, False, True),
+        (120, False, True),  # a 98-character profile with the default layout
+        (200, True, False),  # Windows long paths enabled
+    ],
+)
+def test_a_uv_cache_folder_too_deep_for_the_source_build_is_refused_by_length(
+    length: int, long_paths: bool, refused: bool,
+) -> None:
+    text = _text()
+    constants = "\n".join(re.search(rf"^\${name} = .*$", text, re.M).group(0) for name in ("UvBuildPathReserve", "WindowsPathLimit"))
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Die([string]$Message) {{ throw $Message }}
+{constants}
+{_ps1_function('Test-LongPathsEnabled')}
+if ((Test-LongPathsEnabled) -isnot [bool]) {{ throw 'Test-LongPathsEnabled must answer true or false' }}
+function Test-LongPathsEnabled {{ return ${str(long_paths).lower()} }}
+{_ps1_function('Assert-UvBuildPathFits')}
+$root = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\\', '/')
+$path = $root + [IO.Path]::DirectorySeparatorChar + ('a' * ({length} - $root.Length - 1))
+if ($path.Length -ne {length}) {{ throw "test path is $($path.Length) characters" }}
+try {{ Assert-UvBuildPathFits $path; 'ALLOWED' }} catch {{ 'REFUSED ' + $_.Exception.Message }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout.strip()
+    assert result.returncode == 0, out + result.stderr
+    if not refused:
+        assert out == "ALLOWED", out
+        return
+    assert out.startswith("REFUSED"), out
+    assert f"is {length} characters long" in out
+    assert "win-unicode-console" in out and "WinError 206" in out
+    assert "UV_CACHE_DIR" in out and "Nothing was changed" in out
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(("ps_location_deep", "refused"), [(True, True), (False, False)])
+def test_a_relative_uv_cache_folder_is_measured_where_uv_will_use_it(
+    tmp_path: Path, ps_location_deep: bool, refused: bool,
+) -> None:
+    # GAP-0865: uv starts in PowerShell's location, which Set-Location moves
+    # without moving the process folder GetFullPath reads. A relative
+    # UV_CACHE_DIR is measured (and handed to uv) from the PowerShell location,
+    # so a deep one is refused and a short one is not, whatever the process
+    # folder is. The limit is sized from the short cache folder, so the answer
+    # does not depend on how long the runner's temp folder already is; the real
+    # limit and reserve are held by the length cases above.
+    deep = tmp_path.joinpath(*["d" * 50] * 3)
+    shallow = tmp_path / "s"
+    deep.mkdir(parents=True)
+    shallow.mkdir()
+    ps_dir, process_dir = (deep, shallow) if ps_location_deep else (shallow, deep)
+    text = _text()
+    reserve = re.search(r"^\$UvBuildPathReserve = .*$", text, re.M).group(0)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+function Die([string]$Message) {{ throw $Message }}
+{reserve}
+$WindowsPathLimit = [IO.Path]::GetFullPath((Join-Path '{shallow}' 'cache')).Length + $UvBuildPathReserve
+function Test-LongPathsEnabled {{ return $false }}
+{_ps1_function('Resolve-UvCacheDir')}
+{_ps1_function('Assert-UvBuildPathFits')}
+Set-Location -LiteralPath '{ps_dir}'
+[Environment]::CurrentDirectory = '{process_dir}'
+$resolved = Resolve-UvCacheDir 'cache'
+if ($resolved -ne (Join-Path '{ps_dir}' 'cache')) {{ throw "resolved to $resolved" }}
+try {{ Assert-UvBuildPathFits $resolved; 'ALLOWED' }} catch {{ 'REFUSED ' + $_.Exception.Message }}
+"""
+    result = _run_powershell(script)
+    out = result.stdout.strip()
+    assert result.returncode == 0, out + result.stderr
+    assert out.startswith("REFUSED") == refused, out
+
+
 def _bin_dir_functions() -> str:
     text = _text()
     out = []

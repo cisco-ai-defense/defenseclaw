@@ -185,7 +185,7 @@ def test_a_long_recorded_reason_keeps_its_repair_whole() -> None:
     detail = _doctor_row("opencode", _health("opencode", reason, {"fix": fix}))["detail"]
     assert detail.endswith(f"; fix: {fix}")
     assert len(detail) < len(reason) + len(fix)
-    assert cmd_doctor._bounded_recorded_reason("short   reason\nhere") == "short reason here"
+    assert cmd_doctor._bounded_recorded_reason("short   reason\nhere") == "short   reason here"
     long_without_fix = cmd_doctor._bounded_recorded_reason("y " * 400)
     assert len(long_without_fix) <= 401 and long_without_fix.endswith("…")
 
@@ -425,7 +425,7 @@ def test_other_acl_callers_keep_one_two_second_inspection(monkeypatch) -> None:
     assert file_permissions.darwin_acl_write_error("/x") is None
 
 
-# Review 7, 9: the repair arrives as fields apart from the reason and is shown byte for byte; only the prose is collapsed.
+# Review 7, 9: the repair arrives as fields apart from the reason and is shown byte for byte, and so is the cause: only its line breaks are folded (GAP-0881).
 @pytest.mark.parametrize(
     "folder, trustee",
     [
@@ -437,7 +437,7 @@ def test_other_acl_callers_keep_one_two_second_inspection(monkeypatch) -> None:
 def test_a_repair_argument_with_repeated_spaces_is_shown_as_recorded(folder: str, trustee: str) -> None:
     fix = f"icacls '{folder}' /remove:g '{trustee}'"
     row = _doctor_row("opencode", _health("opencode", "validate plugin   directory custody: DACL\nunsafe", {"fix": fix}))
-    assert row["detail"].endswith(f"validate plugin directory custody: DACL unsafe; fix: {fix}")
+    assert row["detail"].endswith(f"validate plugin   directory custody: DACL unsafe; fix: {fix}")
 
 
 @pytest.mark.parametrize("name", ["Open; fix: Code  Dir", "Open; by hand: Code  Dir", "x; repair omitted: y"])
@@ -445,7 +445,7 @@ def test_a_folder_or_link_named_like_a_repair_marker_cannot_move_the_boundary(na
     path = f"/home/lane/{name}"
     fix, by_hand = f"chmod go-w '{path}'", f"replace the link '{path}' with a real folder"
     cause = f"validate plugin directory custody: {path} is writable by another account"
-    prose = " ".join(cause.split())  # the cause is prose; only the repair is kept byte for byte
+    prose = cause  # one line already: the cause and the repair are both shown byte for byte
     folder = _doctor_row("opencode", _health("opencode", cause, {"fix": fix}))
     assert folder["detail"].endswith(f"{prose}; fix: {fix}")
     link = _doctor_row("opencode", _health("opencode", cause, {"by_hand": by_hand}))
@@ -460,8 +460,8 @@ def test_an_omitted_repair_is_said_and_a_long_cause_is_bounded() -> None:
     assert "…" in row["detail"]
 
 
-def test_a_reason_with_no_repair_still_collapses_whitespace_and_a_stray_marker_stays_prose() -> None:
-    assert cmd_doctor._bounded_recorded_reason("a  b\n c") == "a b c"
+def test_a_reason_with_no_repair_folds_line_breaks_keeps_spaces_and_a_stray_marker_stays_prose() -> None:
+    assert cmd_doctor._bounded_recorded_reason("a  b\n c") == "a  b c"
     row = _doctor_row("opencode", _health("opencode", "settings busy; fix: not a repair", None))
     assert row["detail"].endswith("settings busy; fix: not a repair")
     # Malformed repair fields are ignored, not shown.
@@ -476,6 +476,6 @@ def test_setup_names_the_repair_beside_the_reason() -> None:
     health = _health("opencode", f"refused {path}", {"fix": f"chmod go-w '{path}'"})
     repair = _connectors_not_started_repairs(health)["opencode"]
     detail = cmd_setup._connector_not_started_detail("opencode", f"refused {path}", repair)
-    assert detail.endswith(f"refused {' '.join(path.split())}; fix: chmod go-w '{path}'")
+    assert detail.endswith(f"refused {path}; fix: chmod go-w '{path}'")
     # Benign twin: a reason with no repair is unchanged.
     assert cmd_setup._connector_not_started_detail("opencode", "refused").endswith("refused")

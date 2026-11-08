@@ -19,19 +19,43 @@ func TestGAP0613RelativeConfiguredRootIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := filepath.Join(t.TempDir(), ".claude", "skills")
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	// A root below the working folder is named relative to it on every
+	// platform and volume.
+	below, err := os.MkdirTemp(cwd, "relative-root-")
+	if err != nil {
 		t.Fatal(err)
 	}
-	relative, err := filepath.Rel(cwd, root)
+	t.Cleanup(func() { _ = os.RemoveAll(below) })
+	belowRoot := filepath.Join(below, ".claude", "skills")
+	if err := os.MkdirAll(belowRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(cwd, belowRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := unlinkedSkillTreePath(relative, relative); err != nil {
-		t.Fatalf("relative configured root: %v", err)
+		t.Fatalf("relative configured root below the working folder: %v", err)
+	}
+	// A root elsewhere is named through parent elements, which needs both
+	// folders on one volume.
+	root := filepath.Join(t.TempDir(), ".claude", "skills")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	if err := unlinkedSkillTreePath(root, root); err != nil {
 		t.Fatalf("absolute plain root: %v", err)
+	}
+	outside, err := filepath.Rel(cwd, root)
+	if err != nil {
+		if filepath.VolumeName(cwd) == filepath.VolumeName(root) {
+			t.Fatal(err)
+		}
+		t.Logf("working folder and temp folder are on different volumes: %v", err)
+		return
+	}
+	if err := unlinkedSkillTreePath(outside, outside); err != nil {
+		t.Fatalf("relative configured root outside the working folder: %v", err)
 	}
 }
 

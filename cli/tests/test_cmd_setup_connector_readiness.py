@@ -504,6 +504,7 @@ def test_hermes_running_host_warning_names_detected_pids(monkeypatch) -> None:
     assert ("Stop-Process -Id 4242, 4243" if os.name == "nt" else "kill 4242 4243") in step
 
 
+@pytest.mark.usefixtures("own_pids_outside_fake_listings")
 def test_windows_hermes_host_probe_collects_python_host_pid(monkeypatch) -> None:
     listing = '"python.exe","4300","RDP-Tcp#0","2","9 K"\n'
     monkeypatch.setattr(cmd_doctor, "_windows_process_command_lines", lambda _pids: {"4300": r"python.exe C:\Users\u\.local\bin\hermes"})

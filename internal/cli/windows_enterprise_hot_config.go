@@ -141,7 +141,13 @@ func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) 
 		return
 	}
 	changed, err := healManagedApprovedConfigSourceBound(layout.LifecycleDir, layout.ConfigPath, func() (func(), error) {
-		release, err := windowsEnterpriseHotConfigLock(filepath.Join(layout.LifecycleDir, "lifecycle.lock"))
+		// layout.LifecycleDir is the install state folder (deployment.json and
+		// the approved copy); the lock is in the lifecycle root (GAP-0854).
+		lockPath, err := windowsStandaloneLifecycleLockPath()
+		if err != nil {
+			return nil, err
+		}
+		release, err := windowsEnterpriseHotConfigLock(lockPath)
 		if windowsLifecycleLockBusy(err) {
 			return nil, errManagedApprovedSourceBusy
 		}
@@ -158,6 +164,23 @@ func healWindowsStandaloneApprovedConfigSource(result *enterprisestatus.Result) 
 	case changed:
 		result.Changes = append(result.Changes, "refreshed the approved config source to the installed config, which an earlier release had left at an older config")
 	}
+}
+
+// windowsStandaloneLifecycleLockPath is the lifecycle.lock every standalone
+// lifecycle run holds. It lives in the lifecycle root (roots.LifecycleDir,
+// ProgramData\Cisco\DefenseClaw-Lifecycle), not in the install state folder
+// (layout.LifecycleDir, ProgramData\Cisco\DefenseClaw\install) that holds
+// deployment.json and the approved config copy. The approved source check
+// built the lock path from the second folder, where no lock file exists, so
+// the proof of an up-to-date copy was never written after a Repair, a restart
+// ensure or a no-op ensure and the next Repair over a hand edit was refused
+// (GAP-0854).
+func windowsStandaloneLifecycleLockPath() (string, error) {
+	roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
+	if err != nil {
+		return "", fmt.Errorf("resolve the lifecycle lock folder: %w", err)
+	}
+	return filepath.Join(roots.LifecycleDir, "lifecycle.lock"), nil
 }
 
 // refuseWindowsEnterpriseRepairOverUnprovenApprovedSource stops a Repair that

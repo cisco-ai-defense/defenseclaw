@@ -493,7 +493,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 	}
 	// Every write and removal below is of this read: a save another writer
 	// makes meanwhile is kept, and the caller renders again (GAP-0896).
-	base := policyFileBase{exists: exists, data: current}
+	base := policyFileBase{exists: exists, data: current, owned: reservedDropIn(connector)}
 	switch {
 	case !exists:
 	case record == nil && wholeFile:

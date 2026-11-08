@@ -87,6 +87,8 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 		return err
 	}
 
+	noteManagedSetupWrite(path, data)
+
 	dir := filepath.Dir(writePath)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", writePath, err)

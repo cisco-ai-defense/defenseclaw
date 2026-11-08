@@ -40,6 +40,9 @@ func TestWindowsAuthorizedRepairRecoversSelfDeniedConfigDACL(t *testing.T) {
 		)
 	})
 	setWindowsSelfDenyDACLOnHandle(t, rescue, fixture.targetSID, windows.GENERIC_READ)
+	// An enabled SeBackupPrivilege (Go opens files with backup semantics)
+	// would bypass the deny above on an elevated SSH session.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 
 	if _, err := os.ReadFile(fixture.config); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("self-denied config read error = %v, want access denied", err)

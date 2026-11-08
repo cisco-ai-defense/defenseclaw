@@ -3241,7 +3241,11 @@ def opencode_custody_text(unsafe: list[PluginCustodyPath]) -> OpenCodeCustodyAdv
     def quote(paths: list[PluginCustodyPath]) -> str:
         return " ".join(shlex.quote(path) for path in paths)
 
-    named = unsafe[0] if len(unsafe) == 1 else f"{unsafe[0]} (and {', '.join(unsafe[1:])})"
+    # Written the way the repair writes them, so a name that holds the words a
+    # repair clause starts with, a comma or a space cannot blur the sentence.
+    first, *rest = (shlex.quote(path) for path in unsafe)
+    others = ", ".join(rest)
+    named = first if not rest else f"{first} (and {others})"
     links = [path for path in unsafe if "link" in path.problems]
     chmod = [path for path in unsafe if "mode" in path.problems]
     # On Linux the group bits of a path with an access list are its mask, so
