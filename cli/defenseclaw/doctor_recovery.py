@@ -42,11 +42,13 @@ from pathlib import Path
 
 _DEVICE_PROVENANCE_PREFIX = b"defenseclaw-device-provenance-v1:"
 _DEVICE_PROVENANCE_SECRET = "device.provenance.secret"
-# Written first and removed last by apply_device_key_recovery. While it exists
-# and the key does not, the identity was never usable: the key is published
-# after every other artifact, so only an interrupted creation can leave the
-# marker with no key.
+# Written first and removed last by apply_device_key_recovery. The key is
+# published after every other artifact, so an interrupted creation leaves the
+# marker with no key. Its content is a MAC under the secret the same creation
+# publishes next, so a marker that was only dropped into the home, or that
+# belongs to other files, does not pass for that proof.
 _DEVICE_IDENTITY_PENDING = "device.identity.creating"
+_PENDING_MARKER_PREFIX = b"defenseclaw-device-identity-creating-v1:"
 _AUDIT_REQUIRED_TABLES = frozenset({"audit_events", "scan_results", "findings"})
 # PRAGMA quick_check(N) still walks the whole file; N is only the error limit.
 # Bound the walk by time rather than by file size: a few hundred MiB finish in
@@ -634,7 +636,7 @@ def apply_device_key_recovery(
         pending_stage = _stage_private_bytes(
             plan.data_dir,
             ".doctor-device-identity-pending.",
-            b"device identity creation in progress\n",
+            _pending_marker_bytes(secret),
         )
         staged.append(pending_stage)
         secret_stage = _stage_private_bytes(plan.data_dir, ".doctor-device-provenance-secret.", secret)
@@ -750,18 +752,23 @@ def set_aside_abandoned_identity(
 
     Returns the new names of the files it moved (empty when there is nothing
     to repair or the evidence is not provably an unfinished creation, in which
-    case the plan keeps refusing as before).  The leftovers are proven
-    unfinished in one of two ways:
+    case the plan keeps refusing as before).  Provenance files with no key are
+    continuity evidence unless they are exactly what a creation writes and one
+    of these holds:
 
-    * the pending marker apply_device_key_recovery writes first is present
-      with no key (the key is published last, so none ever existed), or
-    * the home had no config.yaml when this init started (``fresh_home``) and
-      every leftover is exactly the shape a creation writes.  This covers
-      homes that an earlier build left half-created.
+    * the pending marker apply_device_key_recovery writes first is present and
+      authentic (a MAC under the leftover secret).  The key is published last,
+      so none ever existed.  A marker that is not authentic, or that sits
+      beside files that are not exactly what a creation writes, proves nothing.
+    * the home had no config.yaml when this init started (``fresh_home``).
+      This covers homes that an earlier build left half-created.
 
-    Files are renamed to ``*.orphaned-<time>``, never deleted.  A pending
-    marker beside an existing key is a creation that finished except for its
-    cleanup: it is deleted, since it would otherwise pass for proof later.
+    A pending marker with no other leftover is stale and is set aside: the
+    plan then sees the same home it would see without the marker.  Files are
+    renamed to a new ``*.orphaned-*`` name that did not exist, never deleted
+    and never over an earlier orphan.  A pending marker beside an existing key
+    is a creation that finished except for its cleanup: it is deleted, since
+    it would otherwise pass for proof later.
     """
 
     normalized_target, normalized_data = _normalize_device_identity_disk_paths(target, data_dir)
@@ -774,21 +781,50 @@ def set_aside_abandoned_identity(
         return []
     secret = os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET)
     provenance = normalized_target + ".provenance"
-    leftovers = [path for path in (secret, provenance, pending) if os.path.lexists(path)]
-    if not leftovers:
+    evidence = [path for path in (secret, provenance) if os.path.lexists(path)]
+    has_pending = os.path.lexists(pending)
+    if not evidence and not has_pending:
         return []
-    if pending not in leftovers and not (
-        fresh_home and _is_unfinished_creation_leftover(secret, provenance)
-    ):
-        return []
+    if evidence:
+        if not _is_unfinished_creation_leftover(secret, provenance):
+            return []
+        if not (fresh_home or (has_pending and _is_authentic_pending_marker(pending, secret))):
+            return []
+    # The marker moves last: a crash half-way still leaves it as the proof.
+    leftovers = [*evidence, *([pending] if has_pending else [])]
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
     moved: list[str] = []
-    # The marker moves last: a crash half-way still leaves it as the proof.
-    for path in sorted(leftovers, key=lambda candidate: candidate == pending):
-        aside = f"{path}.orphaned-{stamp}"
+    for path in leftovers:
+        aside = _new_orphan_name(path, stamp)
         os.replace(path, aside)
         moved.append(aside)
     return moved
+
+
+def _new_orphan_name(path: str, stamp: str) -> str:
+    """A name beside *path* that does not exist, so a set-aside never replaces one."""
+
+    while True:
+        aside = f"{path}.orphaned-{stamp}-{os.urandom(6).hex()}"
+        if not os.path.lexists(aside):
+            return aside
+
+
+def _pending_marker_bytes(secret: bytes) -> bytes:
+    mac = hmac.new(secret, _PENDING_MARKER_PREFIX, hashlib.sha256).hexdigest().encode("ascii")
+    return _PENDING_MARKER_PREFIX + mac + b"\n"
+
+
+def _is_authentic_pending_marker(pending: str, secret: str) -> bool:
+    """Whether the marker is the one a creation writes for this very secret."""
+
+    platform = _platform_name()
+    try:
+        secret_data = _read_private_regular_file(secret, max_bytes=64, platform=platform)
+        marker = _read_private_regular_file(pending, max_bytes=256, platform=platform)
+    except OSError:
+        return False
+    return len(secret_data) == 32 and hmac.compare_digest(marker, _pending_marker_bytes(secret_data))
 
 
 def _is_unfinished_creation_leftover(secret: str, provenance: str) -> bool:

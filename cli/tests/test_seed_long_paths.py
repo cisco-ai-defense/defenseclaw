@@ -367,7 +367,9 @@ class SeedLongPathTests(unittest.TestCase):
         seen_while_paused: list[bool] = []
 
         def fail_the_first_publish(source, destination):
-            if threading.current_thread().name == "first-seed" and os.fspath(destination) == os.fspath(final):
+            if threading.current_thread().name == "first-seed" and os.path.normcase(
+                long_paths.display(os.fspath(destination))
+            ) == os.path.normcase(os.fspath(final)):
                 seen_while_paused.append(final.exists())
                 reached_publish.set()
                 self.assertTrue(release.wait(10))

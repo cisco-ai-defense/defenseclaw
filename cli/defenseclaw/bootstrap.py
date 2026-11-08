@@ -38,7 +38,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Collection
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -810,52 +810,70 @@ def _restore_first_run_selection_authority(cfg, setup_snapshot) -> str:
 _FIRST_RUN_LOCK_WAIT_SECONDS = 30.0
 
 
-def run_first_run(options: FirstRunOptions) -> FirstRunReport:
-    """Run the first-run setup flow while holding the init lock of the data home.
+class InitLockError(Exception):
+    """The init lock of the data home could not be taken; the run changed nothing."""
+
+
+class InitLockBusyError(InitLockError):
+    """Another init still held the lock after the wait."""
+
+
+@contextlib.contextmanager
+def hold_init_lock() -> Iterator[None]:
+    """Hold the init lock of the data home for one init run.
 
     Two inits started together on one home used to race through the same seeds
     and device identity and leave it half created (GAP-0927). The lock is one
     exclusive file lock (init.lock: a byte lock on Windows, flock on POSIX)
-    taken before anything is read or written. The second run waits for the
-    first and then runs as an ordinary re-run of a finished init; if the first
-    is still going after _FIRST_RUN_LOCK_WAIT_SECONDS it changes nothing and
-    says another init is running. A home whose lock file cannot be made is not
-    locked: the steps that follow report the real problem.
+    taken before anything is read or written, by every path that initializes
+    the home. The second run waits for the first and then runs as an ordinary
+    re-run of a finished init; if the first is still going after
+    _FIRST_RUN_LOCK_WAIT_SECONDS it raises InitLockBusyError. A home whose lock
+    cannot be made or opened raises InitLockError, because without the lock the
+    run could race another one into the same half-created state.
     """
-    from contextlib import ExitStack
 
     from defenseclaw import config as cfg_mod
     from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
     from defenseclaw.file_permissions import make_private_directory
 
     home = str(cfg_mod.default_data_path())
-    with ExitStack() as held:
+    with contextlib.ExitStack() as held:
         try:
             make_private_directory(home)
             held.enter_context(
                 locked_file_update(os.path.join(home, "init"), timeout_seconds=_FIRST_RUN_LOCK_WAIT_SECONDS)
             )
-        except FileLockTimeoutError:
-            connector = _normalize_connector(options.connector)
-            return FirstRunReport(
-                status="needs_attention",
-                config_file=str(cfg_mod.config_path()),
-                data_dir=home,
-                connector=connector,
-                profile=_normalize_profile(options.profile, connector),
-                setup=[
-                    StepResult(
-                        "Init lock",
-                        "fail",
-                        f"another defenseclaw init is running on {home}; this run changed nothing",
-                        options.rerun_command,
-                    )
-                ],
-                next_commands=[options.rerun_command],
-            )
-        except OSError:
-            pass
-        return _run_first_run_locked(options)
+        except FileLockTimeoutError as exc:
+            raise InitLockBusyError(
+                f"another defenseclaw init is running on {home}; this run changed nothing"
+            ) from exc
+        except OSError as exc:
+            raise InitLockError(
+                f"cannot take the init lock of {home} ({exc.strerror or type(exc).__name__}); this run changed nothing"
+            ) from exc
+        yield
+
+
+def run_first_run(options: FirstRunOptions) -> FirstRunReport:
+    """Run the first-run setup flow while holding the init lock of the data home."""
+
+    try:
+        with hold_init_lock():
+            return _run_first_run_locked(options)
+    except InitLockError as exc:
+        from defenseclaw import config as cfg_mod
+
+        connector = _normalize_connector(options.connector)
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=str(cfg_mod.default_data_path()),
+            connector=connector,
+            profile=_normalize_profile(options.profile, connector),
+            setup=[StepResult("Init lock", "fail", str(exc), options.rerun_command)],
+            next_commands=[options.rerun_command],
+        )
 
 
 def _run_first_run_locked(options: FirstRunOptions) -> FirstRunReport:
