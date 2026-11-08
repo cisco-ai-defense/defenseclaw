@@ -152,9 +152,13 @@ func (l machineLayout) posixPath(value string, caseFold bool) bool {
 // (facts.CWD) and, where the gateway could not place it (a service account
 // that cannot reach the user directories), from the directory the hook
 // payload reported. known is false when neither is given on a Windows target;
-// the drive is empty when the directory has none (a UNC share or a POSIX
-// directory), and a path with no drive is then not on any drive of the layout.
+// the drive is empty when the directory has none (a UNC share), and a path with
+// no drive is then not on any drive of the layout. A POSIX target has no
+// drive-less Windows reading at all (see windowsTarget).
 func windowsCurrentDrive(facts actionfacts.Facts) (drive string, known bool) {
+	if !windowsTarget(facts) {
+		return "", true
+	}
 	if facts.CWD != "" {
 		drive, _, _ = windowsVolumeAndNames(facts.CWD)
 		return drive, true
@@ -162,21 +166,36 @@ func windowsCurrentDrive(facts actionfacts.Facts) (drive string, known bool) {
 	if facts.CurrentWindowsDrive != "" {
 		return facts.CurrentWindowsDrive, true
 	}
-	// Nothing places the directory. On a POSIX host with a POSIX home the
-	// target is POSIX: its /ProgramData is an ordinary path, never a drive
-	// folder. Elsewhere the drive stays unknown and a path with no drive is
-	// read on every drive.
-	if runtime.GOOS != "windows" {
-		if homeDrive, _, ok := windowsVolumeAndNames(facts.ActiveHome); !ok || homeDrive == "" {
-			return "", true
-		}
-	}
 	return "", false
 }
 
+// windowsTarget reports whether the machine the call runs on is a Windows
+// one. The gateway on Windows serves Windows hooks only. Elsewhere the target
+// is Windows when its home or working directory, or the one the hook reported,
+// is written as a Windows path (a drive letter or a UNC share); a directory that starts with a slash is a
+// POSIX one, and /mnt/c below it is a Windows drive mounted into the Linux
+// tree (WSL), not a Windows root, so no drive-less Windows reading applies to
+// a path of that target.
+func windowsTarget(facts actionfacts.Facts) bool {
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	for _, dir := range []string{facts.ActiveHome, facts.CWD} {
+		if _, _, ok := windowsVolumeAndNames(dir); ok && !strings.HasPrefix(dir, "/") {
+			return true
+		}
+	}
+	return facts.CurrentWindowsDrive != ""
+}
+
 // reportedWindowsDrive is the drive of the directory a hook payload reported,
-// empty when it names none.
+// empty when it names none. Off Windows, a directory that starts with a slash
+// is a POSIX one (/mnt/c/proj is a mounted drive inside the Linux tree), so it
+// names no drive.
 func reportedWindowsDrive(reportedCWD string) string {
+	if runtime.GOOS != "windows" && strings.HasPrefix(reportedCWD, "/") {
+		return ""
+	}
 	drive, _, _ := windowsVolumeAndNames(reportedCWD)
 	return drive
 }
@@ -227,18 +246,21 @@ func (f windowsMachineFolder) holds(drive string, names []string) bool {
 // suffix, as NTFS compares them, with . and .. applied.
 func windowsVolumeAndNames(value string) (drive string, names []string, ok bool) {
 	slashed := strings.ReplaceAll(value, `\`, "/")
+	// The \\?\ and \\.\ namespaces name the volume next (C:\ or UNC\host\share);
+	// what follows the prefix is not itself a UNC or a rooted path.
+	namespaced := false
+	if rest, found := strings.CutPrefix(slashed, "//?/"); found {
+		slashed, namespaced = rest, true
+	} else if rest, found := strings.CutPrefix(slashed, "//./"); found {
+		slashed, namespaced = rest, true
+	}
 	// Windows reads exactly two leading separators and a server name as a
 	// UNC path. One separator, or three or more (an empty server name), is
 	// rooted on the current drive, as the platform resolvers read them.
-	unc := strings.HasPrefix(slashed, "//") && !strings.HasPrefix(slashed, "///")
-	rooted := strings.HasPrefix(slashed, "/") && !unc
-	if rest, found := strings.CutPrefix(slashed, "//?/"); found {
-		slashed = rest
-	} else if rest, found := strings.CutPrefix(slashed, "//./"); found {
-		slashed = rest
-	}
-	if len(slashed) >= 4 && strings.EqualFold(slashed[:4], "unc/") {
-		slashed = "//" + slashed[4:]
+	unc := !namespaced && strings.HasPrefix(slashed, "//") && !strings.HasPrefix(slashed, "///")
+	rooted := !namespaced && strings.HasPrefix(slashed, "/") && !unc
+	if namespaced && len(slashed) >= 4 && strings.EqualFold(slashed[:4], "unc/") {
+		slashed, unc = "//"+slashed[4:], true
 	}
 	shellDrive, shellRest := posixShellDrive(slashed)
 	var rest string

@@ -455,12 +455,12 @@ func TestMachineLayoutWindowsDriveLessPathFollowsTheCurrentDrive(t *testing.T) {
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "permissive", "strict"} {
 			for _, file := range files {
-				for _, project := range []string{`D:\proj`, `D:/proj`, `/mnt/d/proj`} {
+				for _, project := range []string{`D:\proj`, `D:/proj`} {
 					if _, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
 						t.Errorf("Write %s from %s managed=%t pack=%q = %.200s, want allow", file, project, managed, pack, got)
 					}
 				}
-				for _, project := range []string{`C:\proj`, `c:/proj`, `/mnt/c/proj`} {
+				for _, project := range []string{`C:\proj`, `c:/proj`} {
 					if blocked, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); !blocked {
 						t.Errorf("Write %s from %s managed=%t pack=%q = %.200s, want protected block", file, project, managed, pack, got)
 					}
@@ -490,7 +490,7 @@ func TestMachineLayoutWindowsRepeatedLeadingSeparatorsAreRootedOnTheCurrentDrive
 	for _, managed := range []bool{false, true} {
 		for _, pack := range []string{"", "permissive", "strict"} {
 			for _, file := range files {
-				for _, project := range []string{`D:\proj`, `/mnt/d/proj`} {
+				for _, project := range []string{`D:\proj`} {
 					if _, got := machineLayoutCall(t, home, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
 						t.Errorf("Write %s from %s managed=%t pack=%q = %.200s, want allow", file, project, managed, pack, got)
 					}
@@ -539,6 +539,92 @@ func TestMachineLayoutPOSIXTargetWithoutPlacedDirectoryIsNotADriveLessWindowsPat
 	for _, file := range files {
 		if blocked, got := machineLayoutCall(t, `C:\Users\tester`, "", "Write", map[string]any{"file_path": file, "content": "x"}, true, ""); !blocked {
 			t.Errorf("Write %s with a Windows home and no directory = %.200s, want protected block", file, got)
+		}
+	}
+}
+
+// A DOS device path (\\.\C:\... or \\?\C:\...) names the volume right after
+// the prefix: it is the file on that drive, not a UNC share, in every
+// profile. The same file on another drive stays an ordinary one.
+func TestMachineLayoutWindowsDOSDevicePathsNameTheFile(t *testing.T) {
+	previous := defenseClawMachineLayout
+	defenseClawMachineLayout = func() machineLayout {
+		return newMachineLayout(func() (string, string, error) { return `C:\Program Files`, `C:\ProgramData`, nil })
+	}
+	t.Cleanup(func() { defenseClawMachineLayout = previous })
+	const home = `C:\Users\tester`
+	protected := []string{
+		`\\.\C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`//./C:/ProgramData/Cisco/DefenseClaw/etc/config.yaml`,
+		`\\.\c:\programdata\cisco\defenseclaw\etc\config.yaml`,
+		`\\?\C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`\\.\C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`,
+		`\\.\UNC\localhost\C$\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`\\?\UNC\localhost\C$\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+	}
+	ordinary := []string{
+		`\\.\D:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`\\?\D:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`\\.\C:\ProgramData\Cisco\DefenseClaw-Notes\a.txt`,
+		`\\.\C:\Users\tester\proj\notes.txt`,
+		`\\.\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+		`UNC\localhost\C$\ProgramData\Cisco\DefenseClaw\etc\config.yaml`,
+	}
+	for _, managed := range []bool{false, true} {
+		for _, pack := range []string{"", "permissive", "strict"} {
+			for _, file := range protected {
+				if blocked, got := machineLayoutCall(t, home, `D:\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); !blocked {
+					t.Errorf("Write %s managed=%t pack=%q = %.200s, want protected block", file, managed, pack, got)
+				}
+			}
+			if pack == "strict" {
+				continue
+			}
+			for _, file := range ordinary {
+				if _, got := machineLayoutCall(t, home, `D:\proj`, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
+					t.Errorf("Write %s managed=%t pack=%q = %.200s, want allow", file, managed, pack, got)
+				}
+			}
+		}
+	}
+}
+
+// A Linux home below /mnt/c (a Windows drive mounted into the Linux tree) is a
+// POSIX target: its /ProgramData is an ordinary path whatever directory the
+// hook reports, for a file tool and a shell write alike. The same /mnt/c
+// spelling of a machine file stays protected, and so does a Windows target.
+func TestMachineLayoutPOSIXHomeUnderMountedDriveIsAPOSIXTarget(t *testing.T) {
+	previous := defenseClawMachineLayout
+	defenseClawMachineLayout = func() machineLayout {
+		return newMachineLayout(func() (string, string, error) { return `C:\Program Files`, `C:\ProgramData`, nil })
+	}
+	t.Cleanup(func() { defenseClawMachineLayout = previous })
+	files := []string{
+		`/ProgramData/Cisco/DefenseClaw/etc/project.yaml`,
+		`/Program Files/Cisco/DefenseClaw/bin/project.exe`,
+	}
+	for _, posixHome := range []string{"/mnt/c/Users/tester", "/cygdrive/c/Users/tester", "/c/Users/tester"} {
+		for _, managed := range []bool{false, true} {
+			for _, pack := range []string{"", "permissive"} {
+				for _, project := range []string{"", posixHome + "/proj", "/mnt/c/proj"} {
+					for _, file := range files {
+						if _, got := machineLayoutCall(t, posixHome, project, "Write", map[string]any{"file_path": file, "content": "x"}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
+							t.Errorf("Write %s home=%s from %q managed=%t pack=%q = %.200s, want allow", file, posixHome, project, managed, pack, got)
+						}
+						if _, got := machineLayoutCall(t, posixHome, project, "Bash", map[string]any{"command": "echo x >  + file + "}, managed, pack); strings.HasPrefix(got, `{"action":"block"`) {
+							t.Errorf("Bash write %s home=%s from %q managed=%t pack=%q = %.200s, want allow", file, posixHome, project, managed, pack, got)
+						}
+					}
+				}
+			}
+		}
+	}
+	for _, file := range []string{
+		`/mnt/c/ProgramData/Cisco/DefenseClaw/etc/config.yaml`,
+		`/cygdrive/c/ProgramData/Cisco/DefenseClaw/etc/config.yaml`,
+	} {
+		if blocked, got := machineLayoutCall(t, "/mnt/c/Users/tester", "", "Write", map[string]any{"file_path": file, "content": "x"}, true, ""); !blocked {
+			t.Errorf("Write %s from a mounted drive = %.200s, want protected block", file, got)
 		}
 	}
 }
