@@ -1402,6 +1402,25 @@ def _account_owned_real_dir(path: str) -> bool:
     return os.name == "nt" or info.st_uid == os.geteuid()
 
 
+def _link_on_path(folder: str) -> str:
+    """The first link on the way to *folder* (or *folder* itself), else "".
+
+    A folder recorded earlier can sit below a parent that was a real folder
+    when it was recorded and is a link now; the account that can replace the
+    parent can point it anywhere. Links the system owns (a root-owned /var or
+    /tmp link) are not the account's to move and are not counted.
+    """
+    for link, _kind in link_guard.links_on_path(folder):
+        if os.name != "nt":
+            try:
+                if os.lstat(link).st_uid == 0:
+                    continue
+            except OSError:
+                pass
+        return link
+    return ""
+
+
 def _backup_record_stem(logical_name: str) -> str:
     """The file name managed_backup.go gives a backup record for a logical name."""
     stem = re.sub(r"[/\\: ]", "_", logical_name)
@@ -1443,9 +1462,11 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
     stayed: list[str] = []
     if not os.path.lexists(folder):
         return removed, stayed
-    if not _account_owned_real_dir(folder):
-        # Replaced since the plan was read: nothing under it is ours to follow.
-        return removed, [f"{folder} (not a folder this account owns, so it was not entered)"]
+    linked = _link_on_path(folder)
+    if linked or not _account_owned_real_dir(folder):
+        # Replaced since the plan was read, or reached through a link: nothing under it is ours to follow.
+        why = f"{linked} is a link on its path" if linked else "not a folder this account owns"
+        return removed, [f"{folder} ({why}, so it was not entered)"]
     hooks = os.path.join(folder, "hooks")
     backups = os.path.join(folder, "connector_backups")
 
@@ -1465,7 +1486,15 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
         removed += 1
 
     def real_dir(path: str) -> bool:
-        return _account_owned_real_dir(path) and _real_dir_chain(folder, path)
+        """Whether *path* is a real folder to enter; a folder that is there and is not one is reported once."""
+        if not os.path.lexists(path):
+            return False
+        if _account_owned_real_dir(path) and _real_dir_chain(folder, path):
+            return True
+        note = f"{path} (a link, or a folder another account owns, so it was not entered)"
+        if note not in stayed:
+            stayed.append(note)
+        return False
 
     for name in names:
         if real_dir(hooks):
@@ -1484,7 +1513,10 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
             stems = {}
             for entry in entries:
                 path = os.path.join(backup, entry)
-                if entry.endswith(".json") and _account_owned_regular_file(path):
+                if entry.endswith(".json") and _is_reparse_path(path):
+                    # Setup writes regular files: a link here cannot be told from a record, and is not followed.
+                    stayed.append(f"{path} (a link, so it was not followed)")
+                elif entry.endswith(".json") and _account_owned_regular_file(path):
                     stem = _setup_backup_record_stem(path, name)
                     if stem:
                         stems[stem] = path
@@ -1524,6 +1556,8 @@ def _connector_state_remains(folder: str) -> bool:
     folder with no hooks left can still hold another connector's backup.
     """
     for name in ("hooks", "connector_backups"):
+        if _is_reparse_path(os.path.join(folder, name)):
+            return True  # not entered, so not known to be empty
         try:
             entries = os.listdir(os.path.join(folder, name))
         except FileNotFoundError:

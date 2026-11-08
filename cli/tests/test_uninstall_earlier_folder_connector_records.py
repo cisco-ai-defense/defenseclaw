@@ -268,3 +268,90 @@ def test_the_uninstall_fails_and_names_what_stayed(tmp_path):
     left = cmd_uninstall._phases_left(result)
     assert [phase.name for phase in left] == [cmd_uninstall._EARLIER_FOLDER_RECORDS_PHASE]
     assert str(records["token"]) in left[0].detail
+
+
+def _run_plan_phases(plan):
+    with (
+        patch.object(cmd_uninstall, "_validate_plan"),
+        patch.object(cmd_uninstall, "_connector_teardown"),
+        patch.object(cmd_uninstall, "_turn_guardrail_off"),
+        patch.object(cmd_uninstall, "_print_removed_connector_leftovers"),
+        patch.object(cmd_uninstall, "_render_execution_result"),
+    ):
+        return cmd_uninstall._execute_plan(plan)
+
+
+def _plan_below(tmp_path, earlier):
+    home, current = tmp_path / ".defenseclaw", tmp_path / "current"
+    for folder in (home, current):
+        folder.mkdir(exist_ok=True)
+    return cmd_uninstall.UninstallPlan(
+        data_dir=str(home), store_dir=str(current), previous_stores=(str(earlier),), connectors=("hermes",)
+    )
+
+
+def test_an_earlier_folder_below_a_real_parent_is_cleaned(tmp_path):
+    earlier = tmp_path / "parent" / "state"
+    records = _connector_records(earlier)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan_below(tmp_path, earlier))
+
+    assert stayed == []
+    assert not records["token"].exists() and not records["lock"].exists()
+
+
+def test_an_earlier_folder_below_a_parent_that_became_a_link_is_not_entered(tmp_path):
+    old_parent, unrelated_parent = tmp_path / "old-parent", tmp_path / "unrelated-parent"
+    (old_parent / "state").mkdir(parents=True)
+    records = _connector_records(unrelated_parent / "state")
+    link = tmp_path / "parent-link"
+    link.symlink_to(unrelated_parent, target_is_directory=True)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan_below(tmp_path, link / "state"))
+
+    assert all(path.exists() for path in records.values()), "a linked ancestor redirected cleanup"
+    assert len(stayed) == 1 and str(link) in stayed[0]
+
+
+def test_a_linked_hooks_folder_fails_the_uninstall_and_keeps_the_shared_records(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    records = _connector_records(first)
+    outside = tmp_path / "outside-hooks"
+    (first / "hooks").rename(outside)
+    (first / "hooks").symlink_to(outside, target_is_directory=True)
+
+    result = _run_plan_phases(plan)
+
+    assert (outside / records["token"].name).exists()
+    assert records["lock"].is_file()
+    assert not result.succeeded
+    left = cmd_uninstall._phases_left(result)
+    assert [phase.name for phase in left] == [cmd_uninstall._EARLIER_FOLDER_RECORDS_PHASE]
+    assert str(first / "hooks") in left[0].detail
+
+
+def test_a_linked_backup_record_is_reported_not_followed(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    records = _connector_records(first)
+    outside = _write(tmp_path / "outside-backup.json", records["backup"].read_text())
+    records["backup"].unlink()
+    records["backup"].symlink_to(outside)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert records["backup"].is_symlink() and outside.is_file()
+    assert any(str(records["backup"]) in line for line in stayed), stayed
+    assert records["lock"].is_file()
+
+
+def test_a_linked_backup_folder_of_a_connector_is_reported(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    records = _connector_records(first)
+    outside = tmp_path / "outside-backups"
+    (first / "connector_backups" / "hermes").rename(outside)
+    (first / "connector_backups" / "hermes").symlink_to(outside, target_is_directory=True)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert (outside / records["backup"].name).is_file()
+    assert any(str(first / "connector_backups" / "hermes") in line for line in stayed), stayed
