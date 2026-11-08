@@ -4055,6 +4055,13 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
     # Get-DefenseClawKeptFileDrift reads the module's SID constants, which
     # only the module load sets (rel-1-0-6 GAP-0656 CI).
     sid_constants = _module_sid_constants(module)
+    # Install-DefenseClawFileAtomic and Get-DefenseClawKeptFileDrift write
+    # their notices with Write-DefenseClawLifecyclePhase, which sits after the
+    # cut above. The probe takes the module's own function, as it does for
+    # every other helper, so a drifted kept file reaches the replacement it is
+    # meant to reach (rel-1-0-6 GAP-0815: "The term
+    # 'Write-DefenseClawLifecyclePhase' is not recognized" on the CI runner).
+    lifecycle_phase = _module_function(module, "Write-DefenseClawLifecyclePhase")
     # Standalone swaps the file with the native SwapLaunchableFile (GAP-0240),
     # so the probe compiles the module's own native helper.
     native_security = _module_function(module, "Initialize-DefenseClawNativeSecurity")
@@ -4089,8 +4096,11 @@ def test_atomic_managed_file_replacement_is_idempotent_on_every_engine(
         + "\n"
         + profile_check
         + helpers
+        + lifecycle_phase
+        + "\n"
         + atomic_install
         + r'''
+try {
 foreach ($profileName in @('SecureClient', 'Standalone')) {
 $script:DefenseClawEnterpriseProfile = $profileName
 $root = [IO.Path]::Combine(
@@ -4117,6 +4127,16 @@ try {
     if ([IO.File]::ReadAllText($destination) -cne 'second') {
         throw 'repeated existing-destination replacement was not exact'
     }
+    # Standalone keeps a same-bytes file only when its object is one Setup
+    # could have made (GAP-0656 review M2): the file the probe wrote inherits
+    # the runner account's write access from the temp folder, which is drift,
+    # and drift is replaced, not kept. Give the destination the protected
+    # access list Setup gives it so the reader below meets a kept file.
+    $icacls = [IO.Path]::Combine($script:WindowsDirectory, 'System32', 'icacls.exe')
+    $null = & $icacls $destination /inheritance:r /grant:r '*S-1-5-18:(F)' '*S-1-5-32-544:(F)'
+    if ($LASTEXITCODE -ne 0) {
+        throw "icacls could not protect the destination (exit code $LASTEXITCODE)"
+    }
     $sameContentHandle = [IO.File]::Open(
         $destination,
         [IO.FileMode]::Open,
@@ -4135,6 +4155,19 @@ try {
     if ([IO.File]::ReadAllText($destination) -cne 'second') {
         throw 'same-content rollback changed its protected destination'
     }
+    # A same-bytes file that is not a kept object (the inherited access list
+    # the runner gave it): Standalone replaces it with a fresh copy and says so
+    # through Write-DefenseClawLifecyclePhase; Secure Client keeps it. Either
+    # way the bytes are exact and nothing is left beside it.
+    $drifted = [IO.Path]::Combine($root, 'drifted.txt')
+    [IO.File]::WriteAllText($drifted, 'second')
+    Install-DefenseClawFileAtomic `
+        -Source $source `
+        -Destination $drifted `
+        -SkipIfContentMatches
+    if ([IO.File]::ReadAllText($drifted) -cne 'second') {
+        throw "$profileName replacement of a same-bytes file that is not a kept object was not exact"
+    }
     if (@([IO.Directory]::GetFiles($root, '*.new.*')).Count -ne 0 -or
         @([IO.Directory]::GetFiles($root, '*.backup.*')).Count -ne 0) {
         throw "$profileName atomic replacement left a staging or backup file behind"
@@ -4145,6 +4178,13 @@ finally {
         [IO.Directory]::Delete($root, $true)
     }
 }
+}
+}
+catch {
+    # First line of the run: the reason, so a CI log shows it whatever the
+    # engine does with its error stream (rel-1-0-6 GAP-0815).
+    [Console]::Out.WriteLine("PROBE FAILED: $($_.Exception.Message) at $($_.ScriptStackTrace)")
+    exit 1
 }
 'ok'
 ''',
