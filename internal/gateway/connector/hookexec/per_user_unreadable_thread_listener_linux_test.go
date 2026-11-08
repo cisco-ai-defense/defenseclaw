@@ -195,7 +195,7 @@ type fakeThread struct {
 	tid      int
 	state    string // state letter of the stat file
 	readable bool   // whether this account may read the descriptor folder
-	ids      string // user and group IDs: "own", "other group", or "" for no status file
+	ids      string // user and group IDs: "own", "other group", or "" for no status file ("<ids>, exiting": the thread is exiting, PF_EXITING)
 	inodes   []int
 }
 
@@ -213,12 +213,17 @@ func writeFakeProcess(t *testing.T, procRoot string, pid int, threads ...fakeThr
 				t.Fatal(err)
 			}
 		}
-		stat := fmt.Sprintf("%d (odd ) name) %s 1 1 1 0 -1 0 0 0 0 0\n", th.tid, th.state)
+		ids, exiting := strings.CutSuffix(th.ids, ", exiting")
+		flags := 0
+		if exiting {
+			flags = pfExiting
+		}
+		stat := fmt.Sprintf("%d (odd ) name) %s 1 1 1 0 -1 %d 0 0 0 0\n", th.tid, th.state, flags)
 		if err := os.WriteFile(filepath.Join(dir, "stat"), []byte(stat), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		uid, gid := os.Geteuid(), os.Getegid()
-		switch th.ids {
+		switch ids {
 		case "own":
 		case "other group":
 			gid++
@@ -260,6 +265,10 @@ func TestSocketInodesOfUnreadableThreads(t *testing.T) {
 			{100, "Z", false, "own", nil}, {101, "S", true, "own", []int{11}}}, nil, []int{11}},
 		{"every thread readable", []fakeThread{
 			{100, "S", true, "own", nil}, {101, "S", true, "own", []int{11}}}, nil, []int{11}},
+		{"exiting worker beside a readable leader", []fakeThread{
+			{100, "S", true, "own", []int{11}}, {101, "R", false, "own, exiting", nil}}, nil, []int{11}},
+		{"every thread of an exiting process", []fakeThread{
+			{100, "R", false, "own, exiting", nil}, {101, "R", false, "other group, exiting", nil}}, nil, nil},
 		{"live unreadable worker beside a readable leader", []fakeThread{
 			{100, "S", true, "own", nil}, {101, "S", false, "other group", []int{11}}}, errUnreadableLiveThread, nil},
 		{"live unreadable worker with own IDs beside a readable leader", []fakeThread{
@@ -314,6 +323,8 @@ func TestListenerSoleHolderProofRefusesAnUnreadableLiveThread(t *testing.T) {
 			{5000, "S", false, "own", nil}}, true},
 		{"unreadable process of another group", []fakeThread{
 			{5000, "S", false, "other group", nil}}, false},
+		{"exiting process beside a readable thread", []fakeThread{
+			{5000, "S", true, "own", nil}, {5001, "R", false, "own, exiting", nil}}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			procRoot := t.TempDir()
