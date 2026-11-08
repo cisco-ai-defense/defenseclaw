@@ -104,16 +104,17 @@ def test_doctor_keeps_an_unedited_adopted_token(tmp_path):
     assert (token, name) == ("adopted", "DEFENSECLAW_GATEWAY_TOKEN")
 
 
-def _fill_to_limit(tmp_path, tokens: str) -> None:
+def _fill_to_limit(tmp_path, tokens: str, ending: bytes = b"\n") -> None:
     path = tmp_path / ".env"
-    padding = b"#" + b"x" * (MAX_DOTENV_BYTES - len(tokens) - 2) + b"\n"
+    padding = b"#" + b"x" * (MAX_DOTENV_BYTES - len(tokens) - 1 - len(ending)) + ending
     path.write_bytes(tokens.encode() + padding)
     path.chmod(0o600)
     assert path.stat().st_size == MAX_DOTENV_BYTES
 
 
-def test_recording_the_marker_never_makes_an_accepted_dotenv_unreadable(tmp_path):
-    _fill_to_limit(tmp_path, "DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n")
+@pytest.mark.parametrize("ending", [b"\n", b""], ids=["final-newline", "no-final-newline"])
+def test_recording_the_marker_never_makes_an_accepted_dotenv_unreadable(tmp_path, ending):
+    _fill_to_limit(tmp_path, "DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n", ending)
     _record_adopted_gateway_token("adopted", str(tmp_path))
     assert (tmp_path / ".env").stat().st_size <= MAX_DOTENV_BYTES
     config_module._load_dotenv_into_os(str(tmp_path))
