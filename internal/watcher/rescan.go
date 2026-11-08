@@ -113,6 +113,57 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	}
 }
 
+// rescanTracks reports whether the rescan keeps a baseline for the target at
+// path: always with periodic rescan on, and for a root watched closely
+// (GAP-0905) even with it off, so the rescan of a change there compares
+// against what admission scanned.
+func (w *InstallWatcher) rescanTracks(path string) bool {
+	return w.cfg.Watch.RescanEnabled || w.rootWarned(path)
+}
+
+// requestWarnedRescan asks for a rescan after a change under a root watched
+// closely: the whole cycle with periodic rescan on, only the skills and
+// plugins under such roots with it off.
+func (w *InstallWatcher) requestWarnedRescan() {
+	if w.cfg.Watch.RescanEnabled {
+		w.RequestRescan()
+		return
+	}
+	select {
+	case w.warnedRescanNow <- struct{}{}:
+	default:
+	}
+}
+
+// warnedRescanLoop serves requestWarnedRescan when periodic rescan is off.
+// It runs no startup or periodic cycle.
+func (w *InstallWatcher) warnedRescanLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.warnedRescanNow:
+			w.rescanWarnedRoots(ctx)
+		}
+	}
+}
+
+// rescanWarnedRoots rescans every skill and plugin under a root watched
+// closely, as a cycle of the periodic rescan does: a target whose content
+// and scanner are unchanged is skipped, one that changed is admitted again.
+func (w *InstallWatcher) rescanWarnedRoots(ctx context.Context) {
+	fpCache := make(map[string]string)
+	for _, evt := range w.enumerateTargets() {
+		if ctx.Err() != nil {
+			return
+		}
+		if evt.Type == InstallMCP || !w.rootWarned(evt.Path) {
+			continue
+		}
+		w.rescanTarget(ctx, evt, fpCache)
+	}
+}
+
 // scannerRuntimeRetry is the first wait before the rescan cycle after one
 // whose scans found the managed scanner runtime not ready; a var for tests.
 var scannerRuntimeRetry = 2 * time.Minute
@@ -1551,7 +1602,7 @@ func (w *InstallWatcher) auditRescanFailure(evt InstallEvent, scannerName string
 // so the baseline describes the content that was scanned. It returns nil
 // when periodic rescan is off or the target can't be snapshotted.
 func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
-	if w.store == nil || !w.cfg.Watch.RescanEnabled ||
+	if w.store == nil || !w.rescanTracks(evt.Path) ||
 		(evt.Type != InstallSkill && evt.Type != InstallPlugin) {
 		return nil
 	}
@@ -1574,7 +1625,7 @@ func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetS
 	if w.movedByAdmission(evt) || res.ScanID == "" && res.Reason != hermesVendorPluginReason {
 		return
 	}
-	if !w.cfg.Watch.RescanEnabled {
+	if !w.rescanTracks(evt.Path) {
 		if evt.Type != InstallPlugin || w.secureClientActive() ||
 			(res.Verdict != VerdictRejected && res.Verdict != VerdictBlocked) {
 			return

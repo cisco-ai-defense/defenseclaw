@@ -302,6 +302,9 @@ type InstallWatcher struct {
 
 	// rescanNow asks the rescan loop for a cycle before its interval ends.
 	rescanNow chan struct{}
+	// warnedRescanNow asks for a rescan of the roots watched closely when
+	// periodic rescan is off (GAP-0905); rescanNow has no receiver then.
+	warnedRescanNow chan struct{}
 	// runtimeNotReady says a scan of this rescan cycle found the managed
 	// scanner runtime not ready; runtimeRetries counts the cycles in a row
 	// that did (nextRescanDelay, GAP-0975).
@@ -661,6 +664,8 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		onAdmit:    onAdmit,
 		pending:    make(map[string]time.Time),
 		rescanNow:  make(chan struct{}, 1),
+
+		warnedRescanNow: make(chan struct{}, 1),
 
 		admitMCPNow: make(chan struct{}, 1),
 
@@ -1544,6 +1549,8 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 	if w.cfg.Watch.RescanEnabled {
 		startLoop(w.rescanLoop)
+	} else {
+		startLoop(w.warnedRescanLoop)
 	}
 	if w.admitNewMCP {
 		startLoop(w.addedMCPLoop)
@@ -1582,7 +1589,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				// A root reached through group-writable folders of a private
 				// group while pam_group is loaded: scan the root again for
 				// every change under it (GAP-0905).
-				w.RequestRescan()
+				w.requestWarnedRescan()
 			}
 			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
 				nestedMu.Lock()

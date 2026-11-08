@@ -867,6 +867,19 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertIn("chmod g-w /home/u/dotfiles", text)
         self.assertNotIn("off", text)
 
+    def test_gap0905_status_names_both_folders_when_one_root_is_off_and_another_is_watched_closely(self):
+        details = {
+            "watch_roots_unavailable": 1,
+            "admission_scanning_off": ["claudecode"],
+            "admission_root_writable_folders": ["/home/u/shared-dotfiles"],
+            "admission_root_rescan_folders": ["/home/u/dotfiles"],
+        }
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": details}})
+        text = " ".join(call.args[1] for call in row.call_args_list)
+        self.assertIn("chmod go-w /home/u/shared-dotfiles", text)
+        self.assertIn("chmod g-w /home/u/dotfiles", text)
+
     def test_gap0905_status_prints_nothing_for_a_root_without_the_warning(self):
         with patch.object(cmd_status, "_status_row") as row:
             cmd_status._print_watch_root_coverage({"watcher": {"details": {"skill_dirs": 2}}})
