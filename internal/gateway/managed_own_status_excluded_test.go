@@ -267,7 +267,7 @@ func TestOwnStatusWindowsPipeUnresolvedAccountClaimsNoProtection(t *testing.T) {
 		{"other name entry, domain missing", "alice", "", []string{"bob"}, "protected"},
 		{"other qualified entry, domain missing", "alice", "", []string{`OTHER\bob`}, "not confirmed"},
 		{"own SID entry, nothing resolved", "", "", []string{alice}, "excluded"},
-		{"other SID entry, nothing resolved", "", "", []string{other}, "protected"},
+		{"other SID entry, nothing resolved", "", "", []string{other}, "not confirmed"},
 		{"no entries, nothing resolved", "", "", nil, "protected"},
 		{"qualified entry, both resolved", "alice", "OTHER", []string{`CONTOSO\alice`}, "protected"},
 	} {
@@ -322,7 +322,11 @@ func TestOwnStatusWindowsPipeUnreadableProfileFolderClaimsNoProtection(t *testin
 		{"name entry, folder unreadable", "", []string{"alice"}, "excluded"},
 		{"qualified entry, folder unreadable", "", []string{`CONTOSO\alice`}, "excluded"},
 		{"other qualified entry, folder unreadable", "", []string{`OTHER\alice`}, "protected"},
-		{"other SID entry, folder unreadable", "", []string{other}, "protected"},
+		{"other account SID entry, folder unreadable", "", []string{other}, "not confirmed"},
+		{"Entra SID entry, folder unreadable", "", []string{"S-1-12-1-123456789-234567890-345678901-456789012"}, "not confirmed"},
+		{"other account SID entry, folder readable", `C:\Users\alice`, []string{other}, "protected"},
+		{"other account SID entry, SID-named folder readable", `C:\Users\` + other, []string{other}, "excluded"},
+		{"own SID entry, folder unreadable", "", []string{"S-1-5-21-1004336348-1177238915-682003330-1001"}, "excluded"},
 		{"no entries, folder unreadable", "", nil, "protected"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
