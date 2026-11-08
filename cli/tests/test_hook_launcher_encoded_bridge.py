@@ -124,7 +124,10 @@ def make_launcher(tmp_path, monkeypatch):
         launcher = base / "Users" / user / ".local" / "bin" / "defenseclaw-hook.exe"
         launcher.parent.mkdir(parents=True)
         launcher.write_bytes(_BODY)
-        return launcher, "C:/" + launcher.relative_to(base).as_posix()
+        # tmp_path already carries the host drive on Windows; elsewhere the "C:/" folder is relative.
+        text = launcher.as_posix() if sys.platform == "win32" else "C:/" + launcher.relative_to(base).as_posix()
+        assert os.path.isfile(text), "the registered launcher text must name the file written"
+        return launcher, text
 
     return make
 
