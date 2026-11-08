@@ -73,7 +73,9 @@ func writeOpenCodeServiceConfig(_ string, path string, data []byte) error {
 // it, whoever holds the group. The folders it sealed are returned. A folder
 // that cannot be made sticky is refused. A missing tail is created by the write
 // at 0700 and needs no check.
-func checkOpenCodeServiceConfigFolders(_, path string) (sealed []string, err error) {
+// The walk follows links for the read and the write alike, so the follow
+// argument (Windows: read only) is not used here.
+func checkOpenCodeServiceConfigFolders(_, path string, _ bool) (sealed []string, err error) {
 	pending := strings.Split(filepath.Clean(path), string(filepath.Separator))
 	cur := string(filepath.Separator)
 	links := 0

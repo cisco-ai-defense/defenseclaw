@@ -73,7 +73,7 @@ func ReadOpenCodeServicePortSealed(home string) (int, []string, error) {
 		return 0, nil, fmt.Errorf("opencode service port: home %q is not absolute", home)
 	}
 	path := OpenCodeServiceConfigPath(filepath.Clean(home))
-	sealed, err := checkOpenCodeServiceConfigFolders(filepath.Clean(home), path)
+	sealed, err := checkOpenCodeServiceConfigFolders(filepath.Clean(home), path, true)
 	if err != nil {
 		return 0, sealed, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -162,7 +162,7 @@ func SetOpenCodeServicePort(home string, port int) (OpenCodeServicePortResult, e
 	path := OpenCodeServiceConfigPath(home)
 	// A port that already matches is not accepted through a path another
 	// account could replace, any more than a write is.
-	sealed, err := checkOpenCodeServiceConfigFolders(home, path)
+	sealed, err := checkOpenCodeServiceConfigFolders(home, path, false)
 	result.Sealed = sealed
 	if err != nil {
 		return result, fmt.Errorf("opencode service port: %s: %w", path, err)

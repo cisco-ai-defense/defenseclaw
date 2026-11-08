@@ -16,6 +16,15 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+// requireOpenCodeServiceFilePrivate is the private-file contract of the
+// platform: the owner alone reads and writes the file (mode 0600).
+func requireOpenCodeServiceFilePrivate(t *testing.T, path string) {
+	t.Helper()
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode: %v %v", info, err)
+	}
+}
+
 // A port that already matches is checked like a port that does not
 // (GAP-0053 REVIEW-1 MF1). The stow layout (a link to the account's own
 // private dotfiles) stays a no-op; a link that leads to a file or folder
