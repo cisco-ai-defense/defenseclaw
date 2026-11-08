@@ -197,22 +197,30 @@ def _agent_home(tmp_path, monkeypatch):
     }
 
 
-def test_the_chain_and_the_row_return_agent_config_files_root_wrote(tmp_path, monkeypatch):
+def _cfg(home):
     from types import SimpleNamespace
 
+    return SimpleNamespace(data_dir=os.fspath(home / ".defenseclaw"), deployment_mode="")
+
+
+def test_the_chain_and_the_row_return_agent_config_files_root_wrote(tmp_path, monkeypatch):
     from defenseclaw import gateway as gateway_module
     from defenseclaw.commands import cmd_doctor
 
     home, files = _agent_home(tmp_path, monkeypatch)
     monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: "")
-    cfg = SimpleNamespace(data_dir=os.fspath(home / ".defenseclaw"), deployment_mode="")
+    cfg = _cfg(home)
     owned = [files["claude"], files["codex"], files["copilot"]]
     _owned_by_root(monkeypatch, *owned)
 
-    assert cmd_doctor._root_owned_agent_config_files() == sorted(os.fspath(p) for p in owned)
+    assert cmd_doctor._root_owned_agent_config_paths() == sorted(os.fspath(p) for p in owned)
     chain = cmd_doctor._root_leftovers_remedy(cfg)
-    quoted = " ".join(shlex.quote(os.fspath(p)) for p in sorted(owned))
-    assert f' && sudo chown "$(id -un)" {quoted} && chmod u+rw {quoted} && defenseclaw-gateway start' in chain
+    step = cmd_doctor._root_agent_config_return_step(sorted(os.fspath(p) for p in owned))
+    assert f" && {step} && defenseclaw-gateway start" in chain
+    # The paths enter a step that re-checks each one when it runs, never a bare chown.
+    assert "sudo chown " + chr(34) + "$(id -un)" + chr(34) + " " + shlex.quote(os.fspath(files["claude"])) not in chain
+    for token in ("-links 1", "-user root", "-execdir chown -h", "cd -P"):
+        assert token in step
     assert os.fspath(files["cursor"]) not in chain  # the account still owns it
 
     result = cmd_doctor._DoctorResult(quiet=True)
@@ -223,17 +231,76 @@ def test_the_chain_and_the_row_return_agent_config_files_root_wrote(tmp_path, mo
 
 
 def test_an_account_owned_home_keeps_the_chain_and_the_row_as_they_were(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     from defenseclaw import gateway as gateway_module
     from defenseclaw.commands import cmd_doctor
 
     home, _files = _agent_home(tmp_path, monkeypatch)
     monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: "")
-    cfg = SimpleNamespace(data_dir=os.fspath(home / ".defenseclaw"), deployment_mode="")
 
-    assert cmd_doctor._root_owned_agent_config_files() == []
-    assert "chmod u+rw" not in cmd_doctor._root_leftovers_remedy(cfg)
+    assert cmd_doctor._root_owned_agent_config_paths() == []
+    assert "-links 1" not in cmd_doctor._root_leftovers_remedy(_cfg(home))
     result = cmd_doctor._DoctorResult(quiet=True)
-    cmd_doctor._check_sudo_runtime_leftovers(cfg, result)
+    cmd_doctor._check_sudo_runtime_leftovers(_cfg(home), result)
     assert result.checks[-1]["status"] == "pass"
+
+
+def test_a_root_owned_vendor_folder_is_returned_whole_not_its_files(tmp_path, monkeypatch):
+    from defenseclaw.commands import cmd_doctor
+
+    _home, files = _agent_home(tmp_path, monkeypatch)
+    folder = files["copilot"].parent
+    _owned_by_root(monkeypatch, folder, files["copilot"])
+
+    assert cmd_doctor._root_owned_agent_config_paths() == [os.fspath(folder)]
+
+
+def test_a_path_that_links_outside_the_home_is_never_returned(tmp_path, monkeypatch):
+    from defenseclaw.commands import cmd_doctor
+
+    home, files = _agent_home(tmp_path, monkeypatch)
+    outside = tmp_path / "outside"
+    target = _write(outside, "settings.json", 0o600)
+    # A folder link on the way, a file link, and a hard link to the outside inode.
+    (home / ".claude" / "settings.json").unlink()
+    (home / ".claude").rmdir()
+    os.symlink(outside, home / ".claude")
+    files["codex"].unlink()
+    os.symlink(target, files["codex"])
+    files["copilot"].unlink()
+    os.link(target, files["copilot"])
+    _owned_by_root(monkeypatch, target, files["copilot"], files["codex"], home / ".claude" / "settings.json")
+
+    assert cmd_doctor._root_owned_agent_config_paths() == []
+
+
+def test_the_return_step_skips_a_folder_swapped_for_a_link_after_the_scan(tmp_path):
+    import subprocess
+
+    from defenseclaw.commands import cmd_doctor
+
+    root = tmp_path.resolve()
+    outside = root / "outside"
+    _write(outside, "settings.json", 0o600)
+    swapped = root / "swapped"
+    os.symlink(outside, swapped)
+    fake = root / "bin"
+    fake.mkdir()
+    log = root / "sudo.log"
+    sudo = fake / "sudo"
+    sudo.write_text("\n".join(["#!/bin/sh", "echo $* >> " + os.fspath(log), ""]))
+    sudo.chmod(0o755)
+    plain = _write(root / "plain", "settings.json", 0o600)
+
+    step = cmd_doctor._root_agent_config_return_step([os.fspath(swapped / "settings.json"), os.fspath(plain)])
+    done = subprocess.run(
+        ["sh", "-c", step],
+        env={"PATH": os.fspath(fake) + ":/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 0
+    assert "skipped" in done.stderr
+    calls = log.read_text().splitlines()
+    assert len(calls) == 1 and "find -P " + os.fspath(plain) in calls[0]

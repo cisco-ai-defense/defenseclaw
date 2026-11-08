@@ -1845,18 +1845,25 @@ def _root_owned_file(path: str) -> bool:
     return stat.S_ISREG(info.st_mode) and info.st_uid == 0 and os.geteuid() != 0
 
 
-def _root_owned_agent_config_files() -> list[str]:
-    """Agent config files inside the account home that root owns while doctor does not run as root.
+def _root_owned_agent_config_paths() -> list[str]:
+    """Agent config files and folders inside the account home that root owns while doctor does not run as root.
 
     A gateway run as root for an account wrote them before the writers kept the
-    account as the owner (GAP-0848): the account cannot read or replace them,
-    and its own start fails on them. A file outside the home (a machine-wide
-    config) is root-owned by design and is not listed. Go lists the same files
-    in ``connector.RootOwnedAgentConfigFiles``; it reads with ``lstat`` only.
+    account as the owner (GAP-0848): the account cannot read or replace a
+    root-owned file, nor create the atomic temp file in a root-owned folder, so
+    its own start fails on them. A file is listed when root owns it and it has
+    one hard link; a root-owned folder is listed whole (outermost first),
+    because it hides what it holds. Each path is walked from the physical home
+    one name at a time with ``lstat`` and a link on the way ends the walk, so
+    a linked folder or file, or a file whose inode may live outside the home,
+    is never listed. A file outside the home (a machine-wide config) is
+    root-owned by design and is not listed. Go lists the same paths in
+    ``connector.RootOwnedAgentConfigPaths``.
     """
     if os.name == "nt" or not hasattr(os, "geteuid") or os.geteuid() == 0:
         return []
     home = os.path.abspath(str(Path.home()))
+    physical_home = os.path.realpath(home)
     candidates = [os.path.join(claude_config_dir(), "settings.json"), os.path.join(codex_home(), "config.toml")]
     for name in KNOWN_CONNECTORS:
         candidates.extend(connector_hook_config_paths(name))
@@ -1865,13 +1872,54 @@ def _root_owned_agent_config_files() -> list[str]:
         path = os.path.normpath(path)
         if not os.path.isabs(path) or path == home or os.path.commonpath([home, path]) != home:
             continue
-        try:
-            info = os.lstat(path)
-        except OSError:
-            continue
-        if stat.S_ISREG(info.st_mode) and info.st_uid == 0:
-            found.add(path)
+        owned = _root_owned_under(physical_home, os.path.relpath(path, home).split(os.sep))
+        if owned:
+            found.add(owned)
     return sorted(found)
+
+
+def _root_owned_under(directory: str, names: list[str]) -> str:
+    """The first root-owned folder on the way down ``names``, or the last name when it is a root-owned one-link file.
+
+    Empty at the first name that is missing, unreadable or a link.
+    """
+    for index, name in enumerate(names):
+        directory = os.path.join(directory, name)
+        try:
+            info = os.lstat(directory)
+        except OSError:
+            return ""
+        if index == len(names) - 1:
+            return directory if stat.S_ISREG(info.st_mode) and info.st_uid == 0 and info.st_nlink == 1 else ""
+        if not stat.S_ISDIR(info.st_mode):
+            return ""
+        if info.st_uid == 0:
+            return directory
+    return ""
+
+
+# The body of the sh -c step that returns those paths to the account, one
+# argument each. The scan ran earlier and the account can change its own
+# folders in between, so the step re-checks each path when it runs: the folder
+# that holds it must still resolve to itself (no link on the way), and only a
+# root-owned folder, or a root-owned file with a single hard link, is changed.
+# find does not follow a link at the path itself, -execdir runs the change
+# inside the folder find is walking, chown -h changes a link rather than its
+# target, and -xdev keeps the walk of a returned folder on its own volume.
+# Go renders the same step in ``rootOwnedAgentConfigStep``.
+_ROOT_AGENT_CONFIG_RETURN_SCRIPT = (
+    "for p; do d=${p%/*}; "
+    + "[ \"$(cd -P \"$d\" 2>/dev/null && pwd -P)\" = \"$d\" ] "
+    + "|| { echo \"skipped $p: its folder is a link or moved\" >&2; continue; }; "
+    + "[ -e \"$p\" ] || continue; "
+    + "sudo find -P \"$p\" -xdev -user root \\( -type d -o -type f -links 1 \\) "
+    + "-execdir chown -h \"$(id -un)\" {} \\; -execdir chmod u+rwX {} \\; || exit 1; done"
+)
+
+
+def _root_agent_config_return_step(paths: list[str]) -> str:
+    """The chain step that returns the root-owned agent config paths to this account."""
+    return "sh -c \x27" + _ROOT_AGENT_CONFIG_RETURN_SCRIPT + "\x27 sh " + " ".join(shlex.quote(item) for item in paths)
 
 
 def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
@@ -1893,7 +1941,7 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
         if _doctor_managed(cfg)
         else [name for name in ("config.yaml", "gateway.log") if _root_owned_file(os.path.join(data_dir, name))]
     )
-    agent_configs = [] if _doctor_managed(cfg) else _root_owned_agent_config_files()
+    agent_configs = [] if _doctor_managed(cfg) else _root_owned_agent_config_paths()
     if chown:
         user = getpass.getuser()
         _emit(
@@ -1903,10 +1951,11 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
             r=r,
             check_id="doctor.state.sudo-leftovers",
             reason_code="sudo-runtime-leftovers",
-            remediation="give them back to this account: sudo chown "
-            + user
-            + " "
-            + " ".join([os.path.join(data_dir, name) for name in chown] + [shlex.quote(item) for item in agent_configs])
+            remediation="give them back to this account: "
+            + " && ".join(
+                ["sudo chown " + user + " " + " ".join(os.path.join(data_dir, name) for name in chown)]
+                + ([_root_agent_config_return_step(agent_configs)] if agent_configs else [])
+            )
             + (", then rerun `defenseclaw doctor`" if not leftovers else ", then rerun doctor for the rest"),
         )
         return
@@ -2042,12 +2091,13 @@ def _root_gateway_return_and_start_command(cfg, loosen: tuple[str, ...] = ()) ->
     if store and store not in homes:
         homes.append(store)
     owned = " ".join(shlex.quote(item) for item in homes)
-    # The agent config files a root run wrote in the account home (GAP-0848):
-    # the owner return above does not reach them. Go renders the same step.
-    configs = " ".join(shlex.quote(item) for item in _root_owned_agent_config_files())
+    # The agent config files and folders a root run wrote in the account home
+    # (GAP-0848): the owner return above does not reach them. Go renders the
+    # same step.
+    configs = _root_owned_agent_config_paths()
     return (
         f'sudo chown -R "$(id -un)" {owned} && chmod -R u+rwX {owned}'
-        + (f' && sudo chown "$(id -un)" {configs} && chmod u+rw {configs}' if configs else "")
+        + (" && " + _root_agent_config_return_step(configs) if configs else "")
         + "".join(" && " + step for step in _root_gateway_loosen_steps(loosen))
         + " && defenseclaw-gateway start"
     )

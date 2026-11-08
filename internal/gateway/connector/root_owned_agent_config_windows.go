@@ -5,6 +5,6 @@
 
 package connector
 
-// RootOwnedAgentConfigFiles has no meaning on Windows, which has no root-run
+// RootOwnedAgentConfigPaths has no meaning on Windows, which has no root-run
 // gateway that leaves root-owned files in the account home.
-func RootOwnedAgentConfigFiles(string) []string { return nil }
+func RootOwnedAgentConfigPaths(string) []string { return nil }

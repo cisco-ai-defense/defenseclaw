@@ -110,7 +110,7 @@ func rootGatewayRecoverySteps(dataDir string) (command, note string) {
 // other bits untouched) before the loosening step and the start.
 func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command, note string) {
 	dirs, configFile, storeErr := rootGatewayRecoveryDirs(dataDir)
-	agentConfigs := rootOwnedAgentConfigs(dirs[len(dirs)-1])
+	agentConfigs := rootOwnedAgentConfigPaths(dirs[len(dirs)-1])
 	for i, dir := range dirs {
 		dirs[i] = shellQuote(dir)
 	}
@@ -118,9 +118,9 @@ func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command
 	command = rootGatewayStopCommand(dataDir) + " && sudo chown -R \"$(id -un)\" " + owned +
 		" && chmod -R u+rwX " + owned
 	if len(agentConfigs) > 0 {
-		// The agent config files in the account home that a root run wrote
-		// (GAP-0848): the owner return above does not reach them.
-		command += " && sudo chown \"$(id -un)\" " + agentConfigs + " && chmod u+rw " + agentConfigs
+		// The agent config files and folders in the account home that a root run
+		// wrote (GAP-0848): the owner return above does not reach them.
+		command += " && " + rootOwnedAgentConfigStep(agentConfigs)
 	}
 	if step := rootGatewayLoosenStep(loosen); step != "" {
 		command += " && " + step
@@ -133,27 +133,49 @@ func rootGatewayRecoveryStepsLoosening(dataDir string, loosen []string) (command
 	return command, note
 }
 
-// rootOwnedAgentConfigsOf lists the agent config files in the account home that
-// root owns. The connector package imports this one, so it registers the
-// scan (RegisterRootOwnedAgentConfigFiles) instead of being imported here.
+// rootOwnedAgentConfigsOf lists the agent config files and folders in the
+// account home that root owns. The connector package imports this one, so it
+// registers the scan (RegisterRootOwnedAgentConfigPaths) instead of being
+// imported here.
 var rootOwnedAgentConfigsOf func(dataDir string) []string
 
-// RegisterRootOwnedAgentConfigFiles sets the scan the recovery chain uses to
-// name the root-owned agent config files (connector.RootOwnedAgentConfigFiles).
-func RegisterRootOwnedAgentConfigFiles(scan func(dataDir string) []string) {
+// RegisterRootOwnedAgentConfigPaths sets the scan the recovery chain uses to
+// name the root-owned agent config paths (connector.RootOwnedAgentConfigPaths).
+func RegisterRootOwnedAgentConfigPaths(scan func(dataDir string) []string) {
 	rootOwnedAgentConfigsOf = scan
 }
 
-// rootOwnedAgentConfigs is the quoted, space-separated list of those files.
-func rootOwnedAgentConfigs(dataDir string) string {
+func rootOwnedAgentConfigPaths(dataDir string) []string {
 	if rootOwnedAgentConfigsOf == nil {
-		return ""
+		return nil
 	}
-	var quoted []string
-	for _, path := range rootOwnedAgentConfigsOf(dataDir) {
-		quoted = append(quoted, shellQuote(path))
+	return rootOwnedAgentConfigsOf(dataDir)
+}
+
+// rootOwnedAgentConfigReturnScript is the body of the sh -c step that returns
+// those paths to the account, one argument each. The scan above ran earlier and
+// the account can change its own folders in between, so the step re-checks each
+// path when it runs: the folder that holds it must still resolve to itself
+// (no link on the way), and only a root-owned folder, or a root-owned file with
+// a single hard link, is changed. find does not follow a link at the path
+// itself, -execdir runs the change inside the folder find is walking (a folder
+// swapped for a link meanwhile is not followed), chown -h changes a link rather
+// than its target, and -xdev keeps the walk of a returned folder on its own
+// volume. A path that fails the check is skipped with a message; a failed sudo
+// ends the chain.
+const rootOwnedAgentConfigReturnScript = `for p; do d=${p%/*}; ` +
+	`[ "$(cd -P "$d" 2>/dev/null && pwd -P)" = "$d" ] || { echo "skipped $p: its folder is a link or moved" >&2; continue; }; ` +
+	`[ -e "$p" ] || continue; ` +
+	`sudo find -P "$p" -xdev -user root \( -type d -o -type f -links 1 \) ` +
+	`-execdir chown -h "$(id -un)" {} \; -execdir chmod u+rwX {} \; || exit 1; done`
+
+// rootOwnedAgentConfigStep is the chain step that returns the paths.
+func rootOwnedAgentConfigStep(paths []string) string {
+	quoted := make([]string, len(paths))
+	for i, path := range paths {
+		quoted[i] = shellQuote(path)
 	}
-	return strings.Join(quoted, " ")
+	return "sh -c \x27" + rootOwnedAgentConfigReturnScript + "\x27 sh " + strings.Join(quoted, " ")
 }
 
 // rootGatewayLoosenStep takes group and other access away from the root-owned
