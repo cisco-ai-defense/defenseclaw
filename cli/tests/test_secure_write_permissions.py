@@ -301,10 +301,10 @@ def test_windows_durable_replace_supports_path_beyond_max_path(tmp_path):
     # The validator itself may not be long-path-aware at the process manifest
     # level. Use the explicit Win32 namespace to create and inspect the
     # fixture; replace_file_durable must provide that same support internally.
-    extended_parent = Path(file_permissions._windows_extended_path(parent))
-    extended_target = Path(file_permissions._windows_extended_path(target))
-    extended_staging = Path(file_permissions._windows_extended_path(staging))
-    extended_root = Path(file_permissions._windows_extended_path(tmp_path / "durable-segment-00"))
+    extended_parent = Path(file_permissions.windows_extended_path(parent))
+    extended_target = Path(file_permissions.windows_extended_path(target))
+    extended_staging = Path(file_permissions.windows_extended_path(staging))
+    extended_root = Path(file_permissions.windows_extended_path(tmp_path / "durable-segment-00"))
     try:
         extended_parent.mkdir(parents=True)
         extended_target.write_bytes(b"old")

@@ -48,6 +48,7 @@ from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
 
 from tests.helpers import record_test_setup_agent_selections
 from tests.os_view import os_view
+from tests.test_seed_long_paths import _failing_copytree
 
 
 def test_init_health_probe_refuses_an_unverified_gateway() -> None:
@@ -2588,6 +2589,33 @@ class TestInitSeedsSplunkBridge(unittest.TestCase):
         seeded_bin = os.path.join(self.tmp_dir, "splunk-bridge", "bin", "splunk-claw-bridge")
         self.assertTrue(os.path.isfile(seeded_bin))
         self.assertTrue(os.access(seeded_bin, os.X_OK))
+
+    @patch("defenseclaw.long_paths.shutil.copytree", side_effect=_failing_copytree("splunk-bridge"))
+    @patch("defenseclaw.commands.cmd_init._resolve_splunk_bridge_bundle")
+    @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)
+    @patch("defenseclaw.commands.cmd_init._install_guardrail")
+    @patch("defenseclaw.commands.cmd_init._install_scanners")
+    @patch("defenseclaw.config.detect_environment", return_value="macos")
+    @patch("defenseclaw.config.default_data_path")
+    def test_init_warns_and_continues_when_the_splunk_runtime_cannot_be_copied(
+        self,
+        mock_path,
+        _mock_env,
+        _mock_scanners,
+        _mock_guardrail,
+        _mock_which,
+        mock_bundle,
+        _mock_copytree,
+    ):
+        mock_path.return_value = Path(self.tmp_dir)
+        mock_bundle.return_value = Path(self.bundle_dir)
+
+        app = AppContext()
+        result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("could not seed the Splunk bridge", result.output)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "splunk-bridge")))
 
 
 class TestSeedLocalObservabilityStack(unittest.TestCase):

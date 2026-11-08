@@ -73,6 +73,7 @@ from typing import Protocol
 
 import yaml
 
+from defenseclaw import long_paths
 from defenseclaw.observability.local_stack import (
     GRAFANA_ACCESS_PASSWORD,
     LocalStackController,
@@ -250,7 +251,7 @@ def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
         # No prior seed — fall back to a plain copytree. Keeps the
         # refresh path safe to call before ``init`` has run.
         try:
-            shutil.copytree(str(bundle), dest)
+            long_paths.copytree(bundle, dest)
         except OSError as exc:
             result.errors.append(f"initial seed: {exc}")
             return result
@@ -2412,8 +2413,9 @@ def _rsync_overwrite(
     except OSError as exc:
         return refreshed, preserved, [f"unsafe destination root: {exc}"]
 
-    for root, dirs, files in os.walk(src):
-        rel_root = os.path.relpath(root, src)
+    walk_root = long_paths.extended(src)
+    for root, dirs, files in os.walk(walk_root):
+        rel_root = os.path.relpath(root, walk_root)
         if rel_root == ".":
             rel_root = ""
 

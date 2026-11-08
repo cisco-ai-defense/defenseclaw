@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from defenseclaw import platform_support
+from defenseclaw import long_paths, platform_support
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.connector_paths import (
     amp_policy_plugin_path,
@@ -97,6 +97,8 @@ class BootstrapReport:
     gateway_token_cleanup: str = ""
     device_key_file: str = ""
     errors: list[str] = field(default_factory=list)
+    # Optional seeds that could not be written; they never fail the first run.
+    warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1201,6 +1203,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             )
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
+        setup.extend(StepResult("Bootstrap", "warn", w, "defenseclaw init") for w in bootstrap.warnings)
         if bootstrap.gateway_token_cleanup:
             setup.append(StepResult("Gateway token", "pass", bootstrap.gateway_token_cleanup))
         if bootstrap.openclaw_token_notice:
@@ -2749,7 +2752,7 @@ def _seed_guardrail_profiles(policy_dir: str, report: BootstrapReport) -> None:
             report.guardrail_profiles_preserved.append(profile.name)
             continue
         try:
-            shutil.copytree(str(profile), dst)
+            long_paths.copytree(profile, dst)
             report.guardrail_profiles_seeded.append(profile.name)
         except OSError as exc:
             report.errors.append(f"seed guardrail profile {profile.name}: {exc}")
@@ -2768,10 +2771,12 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
         report.splunk_bridge_preserved = True
         return
 
+    # The bridge is optional: it runs from the packaged files when this copy is
+    # missing, so a copy that cannot be made is a warning, not a failed init.
     try:
-        shutil.copytree(str(bundled), dest)
+        long_paths.copytree(bundled, dest)
     except OSError as exc:
-        report.errors.append(f"seed splunk-bridge: {exc}")
+        report.warnings.append(f"splunk-bridge was not copied to {dest} ({exc}); defenseclaw init tries again")
         return
 
     bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
@@ -2782,7 +2787,7 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
             pass
     from defenseclaw.bundle_refresh import ensure_splunk_bridge_container_access
 
-    report.errors.extend(f"seed splunk-bridge: {e}" for e in ensure_splunk_bridge_container_access(dest))
+    report.warnings.extend(f"splunk-bridge: {e}" for e in ensure_splunk_bridge_container_access(dest))
     report.splunk_bridge_dest = dest
 
 
