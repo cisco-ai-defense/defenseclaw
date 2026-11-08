@@ -298,8 +298,10 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	// skippable counts the right sides of && and || around the statement
 	// being flattened.
 	skippable := 0
-	// pipeInput is the stage before the while loop being flattened.
+	// pipeInput is the stage before the while loop being flattened, and
+	// hereString the word of a here-string it reads (done <<< word).
 	var pipeInput *syntax.Stmt
+	var hereString *syntax.Word
 	// keep adds the text of node, or of a command and its redirects.
 	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
 		from, to := node.Pos(), node.End()
@@ -442,9 +444,12 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			return true, true
 		case *syntax.WhileClause:
 			kind, name := byte('c'), ""
-			input := pipeInput
-			pipeInput = nil
-			bind, forks := simpleReadLoopBind(typed, input, file)
+			word := simpleEchoWord(pipeInput)
+			if hereString != nil {
+				word = hereString
+			}
+			pipeInput, hereString = nil, nil
+			bind, forks := simpleReadLoopBind(typed, word, file)
 			// The condition runs before the variable has its first word.
 			if !flattenAll(typed.Cond) {
 				return true, false
@@ -530,6 +535,10 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		saved := redirects
 		redirects = append(redirects[:len(redirects):len(redirects)], moved)
 		defer func() { redirects = saved }()
+		if _, loop := stmt.Cmd.(*syntax.WhileClause); loop && len(stmt.Redirs) == 1 &&
+			stmt.Redirs[0].Op == syntax.WordHdoc && stmt.Redirs[0].N == nil {
+			hereString = stmt.Redirs[0].Word
+		}
 		return flattenCompound(stmt.Cmd)
 	}
 	flatten = func(stmt *syntax.Stmt) bool {

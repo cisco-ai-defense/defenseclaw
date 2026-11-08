@@ -100,6 +100,11 @@ func TestSimpleCommandsReadPipedLoopVariable(t *testing.T) {
 		{"printf", "printf '%s\\n' $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"literal", "echo home | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"two words", "echo $USER other | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
+		{"here-string", "while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done <<< $USER", true},
+		{"quoted here-string", "while read -r u; do sed -i x /r/$u/.defenseclaw/config.yaml; done <<< \"$USER\"", true},
+		{"literal here-string", "while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done <<< home", true},
+		{"here-string with two words", "while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done <<< \"$USER other\"", false},
+		{"here-string after a pipe stage", "echo x | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done <<< $USER", true},
 		{"unreadable input", "ls | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", false},
 		{"changed IFS", "IFS=x; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
 		{"IFS declared", "export IFS=x; echo $USER | while read u; do sed -i x /r/$u/.defenseclaw/config.yaml; done", true},
@@ -120,7 +125,7 @@ func TestSimpleCommandsReadPipedLoopVariable(t *testing.T) {
 			input := Input{Tool: "Bash", Command: row.command, ActiveHome: "/r/home", CWD: "/r/home/proj"}
 			read := false
 			for _, simple := range SimpleCommands(input, Analyze(input)) {
-				read = read || simple.Text == state
+				read = read || strings.HasPrefix(simple.Text, state)
 			}
 			if read != row.reads {
 				t.Errorf("%s: reading of the state path = %v, want %v", row.command, read, row.reads)

@@ -486,12 +486,14 @@ func simpleParamNames(text string) []string {
 }
 
 // simpleReadLoopBind returns the binding of a while read [-r] name loop whose
-// input is one static echo or printf stage: name takes that one word, as an
-// iteration of a for loop over it would. The read may have an IFS prefix
-// (while IFS= read -r name). A longer input, other options and a backslash
-// (read without -r reads it as an escape) leave it unread.
-func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, file *syntax.File) (simpleLoopBind, bool) {
-	if input == nil || loop.Until || len(loop.Cond) != 1 || input.Negated || input.Background || len(input.Redirs) != 0 {
+// input is one static word: name takes that word, as an iteration of a for
+// loop over it would. input is that word, from one static echo or printf
+// stage before the loop or a here-string after it (simpleEchoWord). The read
+// may have an IFS prefix (while IFS= read -r name). A backslash (read without
+// -r reads it as an escape), other options and a longer input leave it
+// unread.
+func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Word, file *syntax.File) (simpleLoopBind, bool) {
+	if input == nil || loop.Until || len(loop.Cond) != 1 {
 		return simpleLoopBind{}, false
 	}
 	read, ok := loop.Cond[0].Cmd.(*syntax.CallExpr)
@@ -515,13 +517,32 @@ func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, file *synt
 			return simpleLoopBind{}, false
 		}
 	}
+	if text, static := simpleStaticWord(input, nil); static && strings.Contains(text, "\\") {
+		return simpleLoopBind{}, false
+	}
+	// A read with an IFS of its own reads with that one; any other read has
+	// the default IFS, or one the action assigned anywhere (simpleIFSValues).
+	sets := []string{ifs}
+	if !own {
+		sets = simpleIFSValues(file)
+	}
+	return simpleLoopBind{name: name, items: []*syntax.Word{input}, fork: true, ifs: sets,
+		rebound: simpleReboundSpans(loop.Do, name)}, true
+}
+
+// simpleEchoWord returns the one word that a static echo or printf stage
+// writes, nil for any other stage: the input a read loop after a pipe reads.
+func simpleEchoWord(input *syntax.Stmt) *syntax.Word {
+	if input == nil || input.Negated || input.Background || len(input.Redirs) != 0 {
+		return nil
+	}
 	echo, ok := input.Cmd.(*syntax.CallExpr)
 	if !ok || len(echo.Assigns) != 0 || len(echo.Args) < 2 {
-		return simpleLoopBind{}, false
+		return nil
 	}
 	program, static := simpleStaticWord(echo.Args[0], nil)
 	if !static {
-		return simpleLoopBind{}, false
+		return nil
 	}
 	var word *syntax.Word
 	switch {
@@ -533,19 +554,13 @@ func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Stmt, file *synt
 		}
 	}
 	if word == nil {
-		return simpleLoopBind{}, false
+		return nil
 	}
-	if text, static := simpleStaticWord(word, nil); static && (strings.HasPrefix(text, "-") || strings.Contains(text, "\\")) {
-		return simpleLoopBind{}, false
+	// echo takes a leading -n, -e or -E as an option.
+	if text, static := simpleStaticWord(word, nil); static && strings.HasPrefix(text, "-") {
+		return nil
 	}
-	// A read with an IFS of its own reads with that one; any other read has
-	// the default IFS, or one the action assigned anywhere (simpleIFSValues).
-	sets := []string{ifs}
-	if !own {
-		sets = simpleIFSValues(file)
-	}
-	return simpleLoopBind{name: name, items: []*syntax.Word{word}, fork: true, ifs: sets,
-		rebound: simpleReboundSpans(loop.Do, name)}, true
+	return word
 }
 
 // simpleIFSValues returns the values IFS can have where a read without an IFS
