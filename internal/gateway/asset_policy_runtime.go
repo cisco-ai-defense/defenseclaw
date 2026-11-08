@@ -671,19 +671,24 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	res := a.resolveMCPProbeEndpoint(ctx, cfg, connector, probe)
 	probe = res.probe
 	decision := mcpProbeDecision(ctx, cfg, connector, probe)
-	denied, earlierDenied := mcpDeniedDecision(decision), false
-	if res.earlier != nil {
+	denied := mcpDeniedDecision(decision)
+	var earlierDenied *mcpEarlier
+	for i := range res.earlier {
 		// The edit of a config file does not change the connection a running
 		// agent holds, and nothing here shows that it reconnected: a call is
-		// judged on the definition the config lists now and on the one the
-		// session was last judged on, and the stricter verdict holds.
-		earlier := mcpProbeDecision(ctx, cfg, connector, *res.earlier)
-		earlierDenied = mcpDeniedDecision(earlier)
-		if mcpDecisionRank(earlier) > mcpDecisionRank(decision) {
-			decision, probe = earlier, *res.earlier
+		// judged on the definition the config lists now and on those the
+		// session was judged on before (remembered, or denied and held apart),
+		// each on the policy in force now, and the strictest verdict holds.
+		earlier := &res.earlier[i]
+		verdict := mcpProbeDecision(ctx, cfg, connector, earlier.probe)
+		if earlierDenied == nil && mcpDeniedDecision(verdict) {
+			earlierDenied = earlier
+		}
+		if mcpDecisionRank(verdict) > mcpDecisionRank(decision) {
+			decision, probe = verdict, earlier.probe
 		}
 	}
-	a.rememberResolvedMCP(cfg, connector, res, denied, earlierDenied)
+	a.rememberResolvedMCP(connector, res, denied, earlierDenied)
 	if (res.unknown || res.lost) && decision.RawAction != "block" {
 		if unknown, ok := unknownMCPDefinitionDecision(cfg, connector, probe, res.unknown, res.lost); ok {
 			decision = unknown
@@ -772,15 +777,6 @@ func mcpPolicyInput(connector string, probe mcpRuntimeProbe) config.AssetPolicyI
 	}
 }
 
-// mcpDeniedRuleID is the identity (mcpRuleID) of the rule of the denied list
-// that matches the probe, "" when none does.
-func mcpDeniedRuleID(cfg *config.Config, connector string, probe mcpRuntimeProbe) string {
-	if verdict, rule := cfg.AssetListDecision(mcpPolicyInput(connector, probe)); verdict == config.AssetListDeny {
-		return mcpRuleID(rule)
-	}
-	return ""
-}
-
 // mcpDeniedDecision reports a verdict from the denied list.
 func mcpDeniedDecision(decision config.AssetPolicyDecision) bool {
 	return decision.Enabled && decision.RawAction == "block" && decision.Source == "admin-deny"
@@ -807,23 +803,47 @@ type mcpResolution struct {
 	entry config.MCPServerEntry
 	// found is set when probe holds a definition (entry).
 	found bool
-	// earlier is the definition remembered for the session when the config
-	// lists another one for the name now.
-	earlier      *mcpRuntimeProbe
-	earlierEntry config.MCPServerEntry
+	// earlier holds the other definitions of the name the session was judged
+	// on before: the one remembered when the config lists another now, and
+	// the denied one held apart because it did not fit in the memory.
+	earlier []mcpEarlier
 	// unknown is set when the server was looked up by name and found neither
 	// in the config nor in what the session resolved before.
 	unknown bool
-	// lost is set when the session had a denied definition under this name
-	// that did not fit in the memory, and the rule that matched it is still
-	// in the denied list, whatever the config lists for the name now. It is
-	// also set, for a name a denied rule covers, in a session that could not
-	// record every such definition.
+	// lost is set, for a name a denied rule covers, when the session could
+	// not hold every denied definition that did not fit in the memory, so
+	// this name may have had one.
 	lost bool
 	// track is set when the session memory is used; home and name key it.
 	track bool
 	home  string
 	name  string
+}
+
+// mcpEarlier is a definition of the server a call is judged on besides the
+// one the config lists now.
+type mcpEarlier struct {
+	probe mcpRuntimeProbe
+	entry config.MCPServerEntry
+}
+
+// addDefinition adds the definition entry of the server of base to the ones
+// the call is judged on, unless it is one of them. When no definition was
+// found yet it becomes the definition of the call.
+func (res *mcpResolution) addDefinition(base mcpRuntimeProbe, entry config.MCPServerEntry) {
+	if !res.found {
+		res.probe, res.entry, res.found, res.unknown = mcpProbeWithEntry(base, entry, true), entry, true, false
+		return
+	}
+	if sameMCPDefinition(res.entry, entry) {
+		return
+	}
+	for _, other := range res.earlier {
+		if sameMCPDefinition(other.entry, entry) {
+			return
+		}
+	}
+	res.earlier = append(res.earlier, mcpEarlier{probe: mcpProbeWithEntry(base, entry, true), entry: entry})
 }
 
 func mcpProbeWithEntry(probe mcpRuntimeProbe, entry config.MCPServerEntry, byConfiguredName bool) mcpRuntimeProbe {
@@ -842,17 +862,18 @@ func mcpProbeWithEntry(probe mcpRuntimeProbe, entry config.MCPServerEntry, byCon
 
 // rememberResolvedMCP keeps the definition a session was judged on, so a
 // later call finds it once the config no longer lists it. A definition that
-// the denied list matched is kept in place of a later one.
-func (a *APIServer) rememberResolvedMCP(cfg *config.Config, connector string, res mcpResolution, denied, earlierDenied bool) {
+// the denied list matched is kept in place of a later one: denied is the
+// verdict on the one the config lists now, earlierDenied the earlier one the
+// denied list matched, if any.
+func (a *APIServer) rememberResolvedMCP(connector string, res mcpResolution, denied bool, earlierDenied *mcpEarlier) {
 	if !res.track || !res.found {
 		return
 	}
-	entry, probe := res.entry, res.probe
-	if res.earlier != nil && earlierDenied {
-		entry, probe, denied = res.earlierEntry, *res.earlier, true
+	entry := res.entry
+	if earlierDenied != nil {
+		entry, denied = earlierDenied.entry, true
 	}
-	a.mcpResolved.remember(connector, res.home, res.probe.SessionID, res.probe.WorkspaceDir, res.name, entry, denied,
-		func() string { return mcpDeniedRuleID(cfg, connector, probe) }, time.Now())
+	a.mcpResolved.remember(connector, res.home, res.probe.SessionID, res.probe.WorkspaceDir, res.name, entry, denied, time.Now())
 }
 
 // resolveMCPProbeEndpoint fills a name-only hook probe (mcp__<server>__<tool>)
@@ -893,28 +914,23 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 	// (#1092).
 	home, serviceAccount := callerHomeForAssets(ctx)
 	res.track, res.home, res.name = !serviceAccount || home != "", home, probe.ServerName
-	var kept config.MCPServerEntry
-	var haveKept bool
-	if res.track {
-		kept, haveKept = a.mcpResolved.recall(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, time.Now())
+	if ok {
+		res.addDefinition(probe, entry)
 	}
-	switch {
-	case ok:
-		res.probe, res.entry, res.found = mcpProbeWithEntry(probe, entry, true), entry, true
-		if haveKept && !sameMCPDefinition(kept, entry) {
-			earlier := mcpProbeWithEntry(probe, kept, true)
-			res.earlier, res.earlierEntry = &earlier, kept
+	if res.track {
+		// What the session resolved before: the definition remembered for the
+		// name, and the denied one that did not fit in the memory. Either is
+		// the definition of the call when the config lists none now.
+		if kept, haveKept := a.mcpResolved.recall(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, time.Now()); haveKept {
+			res.addDefinition(probe, kept)
 		}
-	case haveKept:
-		res.probe, res.entry, res.found = mcpProbeWithEntry(probe, kept, true), kept, true
-	default:
-		res.unknown = true
+		lostEntry, held, overflow := a.mcpResolved.lostDenied(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, time.Now())
+		if held {
+			res.addDefinition(probe, lostEntry)
+		}
+		res.lost = overflow && rulesScopeServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName)
 	}
-	if res.track {
-		denied := cfg.AssetPolicy.MCP.Denied
-		held, overflow := a.mcpResolved.lostDenied(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, denied, time.Now())
-		res.lost = held || overflow && rulesScopeServer(denied, connector, probe.ServerName)
-	}
+	res.unknown = !res.found
 	return res
 }
 
@@ -939,12 +955,12 @@ func mcpConnectorResolvesByName(connector string) bool {
 // whose admission is pending (GAP-0861). The allowed list follows
 // asset_policy.mode.
 //
-// The server is lost when a denied definition of this very name, in this
-// session, did not fit in the memory and the rule that matched it is still in
-// the denied list. The live connection is the denied one whatever the config
-// lists now (an edit, a removal), so the call is refused in every tier and
-// profile. A rule that has left the list releases it: the connection is judged
-// on the policy in force now.
+// The server is lost when a rule of the denied list covers its name and the
+// session could not hold every denied definition that did not fit in the
+// memory, so this name may have had one that DefenseClaw can no longer judge.
+// The call is refused in every tier and profile. A denied definition that did
+// fit, or that was held apart, is not lost: it is judged on the policy in
+// force now like any other.
 //
 // The denied list applies whatever asset_policy.enabled says, like the
 // explicit deny. Secure Client keeps main (#1092).
@@ -965,8 +981,8 @@ func unknownMCPDefinitionDecision(cfg *config.Config, connector string, probe mc
 	reason := fmt.Sprintf("mcp server %q: DefenseClaw found no definition of it in the agent config or earlier in this session, "+
 		"so where it points cannot be checked against asset_policy.mcp", probe.ServerName)
 	if covered {
-		reason = fmt.Sprintf("mcp server %q: asset_policy.mcp.denied matched a definition of it earlier in this session "+
-			"that DefenseClaw could not keep, and the agent keeps that connection until it restarts", probe.ServerName)
+		reason = fmt.Sprintf("mcp server %q: asset_policy.mcp.denied covers it, and this session denied more definitions "+
+			"than DefenseClaw can keep, so it cannot tell which one the agent holds until it restarts", probe.ServerName)
 	}
 	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connector, "hook", reason, "mcp-definition-unproven")
 	decision.RegistryStatus = "unknown"
