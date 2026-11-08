@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	nativePreloadEntry  = "/usr/local/lib/libr109ib17.so\n"
-	nativeProfileExport = "export LD_PRELOAD=/usr/local/lib/libr109ib17.so\n"
-	nativeDockerHTTP    = `{"insecure-registries":["http://registry.example.test:5000"]}` + "\n"
+	nativePreloadEntry   = "/usr/local/lib/libr109ib17.so\n"
+	nativeProfileExport  = "export LD_PRELOAD=/usr/local/lib/libr109ib17.so\n"
+	nativeDockerHTTP     = `{"insecure-registries":["http://registry.example.test:5000"]}` + "\n"
+	nativeDockerHostPort = `{"insecure-registries":["198.51.100.7:5000"]}` + "\n"
 )
 
 func nativeProofPatch(directive, target, body string) map[string]any {
@@ -134,12 +135,16 @@ func TestNativeWholeFileWriteOfAnInsecureRegistryIsProvenForEveryToolShape(t *te
 	}{
 		{"create", "create", map[string]any{"path": target, "file_text": nativeDockerHTTP}, true},
 		{"opencode write", "write", map[string]any{"path": target, "content": nativeDockerHTTP}, true},
+		{"create host:port", "create", map[string]any{"path": target, "file_text": nativeDockerHostPort}, true},
+		{"opencode write host:port", "write", map[string]any{"path": target, "content": nativeDockerHostPort}, true},
+		{"apply_patch add host:port", "apply_patch", nativeProofPatch("Add", target, nativeDockerHostPort), true},
+		{"apply_patch update host:port", "apply_patch", nativeProofPatch("Update", target, nativeDockerHostPort), false},
 		{"apply_patch add", "apply_patch", nativeProofPatch("Add", target, nativeDockerHTTP), true},
 		{"create macOS physical spelling", "create", map[string]any{"path": "/private" + target, "file_text": nativeDockerHTTP}, true},
 		{"apply_patch update", "apply_patch", nativeProofPatch("Update", target, nativeDockerHTTP), false},
 		{"edit", "edit", map[string]any{"path": target, "old_str": "{}", "new_str": nativeDockerHTTP}, false},
 		{"create of a settings file", "create", map[string]any{"path": target, "file_text": `{"log-level":"warn"}`}, false},
-		{"create of an https registry", "create", map[string]any{"path": target, "file_text": `{"insecure-registries":["https://registry.example.test"]}`}, false},
+		{"create of an https URL registry", "create", map[string]any{"path": target, "file_text": `{"insecure-registries":["https://registry.example.test"]}`}, true},
 		{"create of another file", "create", map[string]any{"path": "/tmp/daemon.json", "file_text": nativeDockerHTTP}, false},
 		{"create with a dot-dot target", "create", map[string]any{"path": "/etc/docker/../docker/daemon.json", "file_text": nativeDockerHTTP}, false},
 		{"create with a relative target", "create", map[string]any{"path": "daemon.json", "file_text": nativeDockerHTTP}, false},

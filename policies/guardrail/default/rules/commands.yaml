@@ -1003,8 +1003,9 @@ rules:
     pattern: 'a^'
     title: "Configure Docker to trust an insecure HTTP registry"
     # Adopts the strict-profile posture in default: the proof requires a full
-    # daemon.json write whose sole setting names a literal non-loopback HTTP
-    # registry, which opens the image supply chain to on-path substitution.
+    # daemon.json write whose sole setting lists a non-loopback insecure
+    # registry in any spelling, which opens the image supply chain to
+    # on-path substitution.
     severity: CRITICAL
     confidence: 0.99
     tags: [container, supply-chain, docker, tampering, exact-actionfacts]

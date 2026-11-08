@@ -60,6 +60,8 @@ func TestContentProofsReadTheFileALinkReaches(t *testing.T) {
 		{"pam edit comment benign", nativeCall(t, "Edit", map[string]any{"file_path": "/work/pam-link", "old_string": "# old", "new_string": "# new"}), "/etc/pam.d/sshd", pam, false},
 		{"pam edit of an unprotected file", nativeCall(t, "Edit", map[string]any{"file_path": "/work/pam-link", "old_string": "account required pam_nologin.so", "new_string": "auth sufficient pam_permit.so\naccount required pam_nologin.so"}), "/work/notes", pam, false},
 		{"docker write through a link", nativeCall(t, "Write", map[string]any{"file_path": "/work/docker-link", "content": dockerBody}), "/etc/docker/daemon.json", ExactDockerInsecureRegistryWrite, true},
+		{"docker host:port write through a link", nativeCall(t, "Write", map[string]any{"file_path": "/work/docker-link", "content": `{"insecure-registries":["198.51.100.7:5000"]}`}), "/etc/docker/daemon.json", ExactDockerInsecureRegistryWrite, true},
+		{"docker cidr write through a link", nativeCall(t, "Write", map[string]any{"file_path": "/work/docker-link", "content": `{"insecure-registries":["10.0.0.0/8"]}`}), "/etc/docker/daemon.json", ExactDockerInsecureRegistryWrite, true},
 		{"docker benign document through a link", nativeCall(t, "Write", map[string]any{"file_path": "/work/docker-link", "content": `{"log-level":"warn"}`}), "/etc/docker/daemon.json", ExactDockerInsecureRegistryWrite, false},
 	}
 	for _, test := range cases {
