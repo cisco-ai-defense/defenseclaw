@@ -1066,8 +1066,16 @@ func persistRefreshedToken(dataDir, newToken string) error {
 // saved, and every .env reader prefers it (envvars.ShadowedAdoptedGatewayTokens).
 func updateEnvFileToken(path, newToken string) error {
 	var lines []string
+	// One line ending per file: the one the file already uses (CRLF when it
+	// holds any CRLF, otherwise LF). Every line is written with it, so a file
+	// never ends up half CRLF; the readers accept both.
+	eol := "\n"
 	if data, err := os.ReadFile(path); err == nil {
+		if bytes.Contains(data, []byte("\r\n")) {
+			eol = "\r\n"
+		}
 		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSuffix(line, "\r")
 			if !envvars.IsAdoptedGatewayTokenMarker(line) {
 				lines = append(lines, line)
 			}
@@ -1101,12 +1109,13 @@ func updateEnvFileToken(path, newToken string) error {
 		}
 	}
 
-	// Trim trailing blank lines from the original split artifact and
-	// add a single terminating newline.
+	// Trim trailing blank lines from the original split artifact and end
+	// every line, the last one included, with the file's line ending.
 	for len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	out := strings.Join(lines, "\n") + "\n" + envvars.AdoptedGatewayTokenMarker(newToken) + "\n"
+	lines = append(lines, envvars.AdoptedGatewayTokenMarker(newToken))
+	out := strings.Join(lines, eol) + eol
 	// The whole new file is checked before anything is published: a file over the
 	// size every reader accepts would lose the token, so it is refused and the
 	// current file stays as it is.

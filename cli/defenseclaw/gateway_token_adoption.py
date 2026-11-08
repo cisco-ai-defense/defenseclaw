@@ -22,6 +22,7 @@ import hashlib
 import os
 
 from defenseclaw.connector_paths import is_secret_ref_text
+from defenseclaw.file_permissions import dotenv_line_ending
 
 GATEWAY_TOKEN_NAMES = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
 _MARKER = b"# defenseclaw: adopted gateway token sha256="
@@ -51,7 +52,7 @@ def with_adopted_marker(body: bytes, token: str) -> bytes:
     The caller checks the whole result against ``MAX_DOTENV_BYTES`` before it
     publishes anything.
     """
-    newline = b"\r\n" if b"\r\n" in body else b"\n"
+    newline = dotenv_line_ending(body)
     kept = [line for line in body.splitlines(keepends=True) if not line.strip().startswith(_MARKER)]
     out = b"".join(kept)
     if out and not out.endswith((b"\r", b"\n")):
