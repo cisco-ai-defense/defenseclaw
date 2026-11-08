@@ -103,6 +103,67 @@ func TestWindowsNativeFileToolWriteOfActiveHomeCredentialFileIsJudgedWithCaseEqu
 	}
 }
 
+// The active home is found in the typed target the way Windows compares names,
+// through upper case: an account name spelled with a letter that is not ASCII
+// but upper-cases to an ASCII letter (dotless i, long s) is the same folder,
+// so a write of the credential file in it gets the verdict of the exact-case
+// spelling in every profile. The ordinary neighbours, a longer account name and
+// a read keep theirs.
+func TestWindowsNativeFileToolWriteOfActiveHomeCredentialFileIsJudgedWhenTheHomeHasCaseEquivalentLetters(t *testing.T) {
+	homes := []struct{ home, variant string }{
+		{`C:\Users\alice.smith`, `C:\Users\al` + "\u0131" + `ce.smith`},
+		{`C:\Users\alice.smith`, `C:\Users\alice.sm` + "\u0131" + `th`},
+		{`C:\Users\alice.smith`, `c:\USERS\AL` + "\u0131" + `CE.SM` + "\u0131" + `TH`},
+		{`C:\Users\susan`, `C:\Users\` + "\u017f" + `u` + "\u017f" + `an`},
+		{`C:\Users\iv` + "\u0131" + `n`, `C:\Users\ivin`},
+		{`C:\Users\iv` + "\u0131" + `n`, `C:\Users\IVIN`},
+	}
+	files := []string{`.netrc`, `.git-credentials`, `.aws\credentials`, `.kube\config`}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-home-equivalent-letters-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, home := range homes {
+			for _, file := range files {
+				exactAction, exactRules := windowsFileToolVerdict(t, connector, "Write", home.home, home.home+`\`+file)
+				if len(exactRules) == 0 {
+					t.Fatalf("%s home=%q: exact-case write of %s matches no rule", profile, home.home, file)
+				}
+				for _, tool := range []string{"Write", "Edit"} {
+					target := home.variant + `\` + file
+					action, rules := windowsFileToolVerdict(t, connector, tool, home.home, target)
+					if action != exactAction || !sameRules(rules, exactRules) {
+						t.Errorf("%s %s home=%q target=%q: %s %v, want %s %v", profile, tool, home.home, target, action, rules, exactAction, exactRules)
+					}
+					if file == ".netrc" && (action != "block" || !rules["PATH-NETRC"]) {
+						t.Errorf("%s %s home=%q target=%q: %s %v, want block by PATH-NETRC", profile, tool, home.home, target, action, rules)
+					}
+				}
+			}
+		}
+	}
+	const connector = "windows-native-home-equivalent-letters-neighbours"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	home := `C:\Users\alice.smith`
+	variant := `C:\Users\al` + "\u0131" + `ce.smith`
+	for _, ordinary := range []string{`notes.txt`, `.netrc.example`, `.npmrc.bak`, `Project\netrc.md`, `.aws\config.bak`} {
+		for _, tool := range []string{"Write", "Edit"} {
+			if action, rules := windowsFileToolVerdict(t, connector, tool, home, variant+`\`+ordinary); action != "allow" {
+				t.Errorf("%s of %s\\%s: %s %v, want allow", tool, variant, ordinary, action, rules)
+			}
+		}
+	}
+	for _, other := range []string{`C:\Users\al` + "\u0131" + `ce.smith2\notes.txt`, `C:\Users\al` + "\u0131" + `ce\notes.txt`, `C:\Users\alice.sm` + "\u0131" + `thx\notes.txt`} {
+		if action, rules := windowsFileToolVerdict(t, connector, "Write", home, other); action != "allow" {
+			t.Errorf("Write of %s: %s %v, want allow", other, action, rules)
+		}
+	}
+	for _, read := range []string{variant + `\.netrc`, variant + `\.aws\credentials`} {
+		if action, _ := windowsFileToolVerdict(t, connector, "Read", home, read); action == "block" {
+			t.Errorf("Read of %s blocked, want the alert it had", read)
+		}
+	}
+}
+
 // Ordinary files whose names differ only in letter case from a neighbour of a
 // credential file, a read of a credential file in another case, and a write in
 // a home that only starts like the active one keep the verdict they had.
