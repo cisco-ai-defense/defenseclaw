@@ -25,7 +25,7 @@ func (c ownCause) text() string {
 	if c.next == "" {
 		return c.reason
 	}
-	return c.reason + ". " + c.next
+	return strings.TrimRight(c.reason, ". ") + ". " + c.next
 }
 
 // ownRowText is the sentence the launcher prints for a row: the state, then
@@ -37,7 +37,7 @@ func ownRowText(row map[string]any) string {
 	if reason == "" {
 		return state
 	}
-	return state + ": " + reason + ". " + next
+	return state + ": " + strings.TrimRight(reason, ". ") + ". " + next
 }
 
 // requireOwnRowJSONContract holds a connector row to the contract scripts and
@@ -151,6 +151,9 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 	dotsAndSpace := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, " .\t. \n")
 	// A reason with a trailing period still shows its words.
 	periodEnded := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, "the plugin folder is not writable by the agent.")
+	// A recorded reason is shown as written: one that starts with a hidden
+	// path keeps its leading period.
+	hiddenPath := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, ".claude/settings.json is not writable by the agent")
 	// The enumerator records this reason with no action when version discovery fails.
 	scanIncomplete := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeInstallScanIncomplete,
 		"the account's agent versions and private installs could not be inspected this cycle")
@@ -178,6 +181,8 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 			want: map[string]string{"opencode": "not protected: " + ownCauseNoUnprotectedReason.text()}},
 		{name: "scan entry whose reason ends with a period", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{periodEnded},
 			want: map[string]string{"opencode": "not protected: the plugin folder is not writable by the agent. " + ownScanNextStep}},
+		{name: "scan entry whose reason starts with a hidden path", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{hiddenPath},
+			want: map[string]string{"opencode": "not protected: .claude/settings.json is not writable by the agent. " + ownScanNextStep}},
 		{name: "scan entry whose reason names no action", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{scanIncomplete},
 			want: map[string]string{"opencode": "not protected: " + scanIncomplete.Reason + ". " + ownScanNextStep}},
 		{name: "root denied", uid: "0", user: "root", view: proven, configure: rootDeny,
@@ -255,5 +260,18 @@ func TestOwnStatusWindowsNotConfirmedRowsSayWhyAndWhatToDo(t *testing.T) {
 				requireOwnRowSaysWhy(t, name, connector, value.(map[string]any))
 			}
 		})
+	}
+}
+
+// The reason field of a scan row is the recorded text byte for byte: nothing
+// at its start is removed, and the closing period stays (the launcher joins
+// the next step after it).
+func TestOwnUnprotectedStateKeepsRecordedReasonText(t *testing.T) {
+	for _, reason := range []string{".claude/settings.json is not writable", "..hidden dir is not writable.", "  indented reason"} {
+		agent := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, reason)
+		row := ownUnprotectedState([]enterprisehooks.UnprotectedAgent{agent})
+		if got, _ := row["reason"].(string); got != reason {
+			t.Errorf("reason %q was shown as %q", reason, got)
+		}
 	}
 }
