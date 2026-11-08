@@ -13778,11 +13778,11 @@ def _short_policy_digest(digest: str) -> str:
     return digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
 
 
-def _local_policy_digest(cfg) -> dict | None:
+def _local_policy_digest(cfg, *, failure: list[str] | None = None) -> dict | None:
     """effective_policy_digest computed from disk (see gateway.local_policy_digest)."""
     from defenseclaw.gateway import local_policy_digest
 
-    return local_policy_digest(cfg)
+    return local_policy_digest(cfg, failure=failure)
 
 
 def _saved_config_generation(cfg) -> int:
@@ -13890,16 +13890,21 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             remediation=_policy_dir_remediation(cfg, opa_unavailable)
             or f"Copy this release's admission.rego and guardrail.rego from {bundled_rego_dir()} into {rego_dir}",
         )
-    local = _local_policy_digest(cfg)
+    digest_failure: list[str] = []
+    local = _local_policy_digest(cfg, failure=digest_failure)
     if local is None:
+        cause = f" ({digest_failure[0]})" if digest_failure else ""
         _emit(
             "warn",
             label,
-            f"{applied}; local policy digest comparison was unavailable",
+            f"{applied}; local policy digest comparison was unavailable{cause}",
             r=r,
             check_id="doctor.policy.comparison-unavailable",
             reason_code="policy-comparison-unavailable",
-            remediation="Run `defenseclaw doctor` again after the local gateway policy digest command is available",
+            remediation=(
+                "Run `defenseclaw-gateway policy digest --json` to see why the digest cannot be computed, "
+                "then run `defenseclaw doctor` again"
+            ),
         )
         return
     pending = [str(key) for key in policy.get("pending_restart") or []]
