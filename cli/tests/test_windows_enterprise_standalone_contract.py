@@ -3258,6 +3258,29 @@ def test_lazy_lock_files_are_standalone_only_and_name_every_product_lock() -> No
     assert len(callers) == 2, "stamp (repair) and verify both read the one list"
 
 
+def test_a_lazy_lock_file_with_an_untrusted_owner_is_still_refused() -> None:
+    # g877b review S5: StandaloneContentGateOutOfClass names the lazily created
+    # lock files out of the content gate because "the stamp still refuses an
+    # untrusted owner". Pin that: the verify judges every lock with the
+    # untrusted-read rejection and the self-heal that refuses a foreign owner,
+    # the smoke drives each real lock entry with a foreign owner, and the
+    # exemption stays the only way a lock avoids the gate.
+    module = _text(MODULE)
+    start = module.index("foreach ($lockFile in @(Get-DefenseClawLazyLockFiles -Layout $Layout)) {\n        if (-not (")
+    verify = module[start : module.index("\n    }\n", start + 400)]
+    assert "Assert-DefenseClawPathAcl" in verify
+    assert "-RejectUntrustedRead" in verify
+    assert "-SelfHealKind $lockFile.Kind" in verify
+    exemption = module[module.index("$script:StandaloneContentGateOutOfClass = @("):]
+    exemption = exemption[: exemption.index("\n)\n")]
+    assert "the stamp still refuses an untrusted owner" in exemption
+    assert exemption.count("'LazyLockFiles'") == 1
+    smoke = (ROOT / "packaging" / "windows" / "tests" / "enterprise-path-acl-verdict-smoke.ps1").read_text(encoding="utf-8")
+    assert "Get-DefenseClawLazyLockFiles -Layout $layout" in smoke
+    assert "untrusted owner, re-stamp does nothing" in smoke
+    assert "untrusted owner, re-stamp fails" in smoke
+
+
 def test_codex_vendor_folder_adoption_runs_before_the_snapshot_and_tolerates_defenseclaws_own_lock() -> None:
     # g582 round 9 (the g091 round 4 integrated case): a Repair over an empty
     # administrator-made OpenAI\\Codex failed 1603 and left the transaction
