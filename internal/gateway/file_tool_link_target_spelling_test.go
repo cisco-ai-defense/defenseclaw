@@ -34,6 +34,12 @@ func TestWindowsPhysicalTargetOfALinkMatchesTheRuleOfItsName(t *testing.T) {
 			t.Fatalf("link target %q: rules %v lack PATH-NETRC", physical, ids)
 		}
 	}
+	// A drive-rooted link target is placed on the drive of its link, so the
+	// physical file is the one the PowerShell history rule names.
+	history := `C:\Users\acct\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt`
+	if ids := rulesOf(actionfacts.LinkedPathFact(operand, history).Resolved); !slices.Contains(ids, "PATH-WIN-PS-HISTORY") {
+		t.Fatalf("link target %q: rules %v lack PATH-WIN-PS-HISTORY", history, ids)
+	}
 	ordinary := actionfacts.LinkedPathFact(operand, `C:\Users\acct\proj\notes.txt`).Resolved
 	if ids := rulesOf(ordinary); len(ids) != 0 {
 		t.Fatalf("ordinary project file %q matched %v", ordinary, ids)
