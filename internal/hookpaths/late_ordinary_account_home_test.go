@@ -6,6 +6,7 @@
 package hookpaths
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -167,6 +168,71 @@ func TestLateOrdinaryCallAtReadsARelativeHomeWithALinkBeforeAParentStep(t *testi
 				payload := lateBash(t, "Bash", f.project, tc.command)
 				if got := LateOrdinaryCallAt(saved, connector, payload); got != tc.want {
 					t.Errorf("%s: ordinary=%v, want %v", connector, got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// A relative workdir is read by file system rules: a link before a parent
+// step leads somewhere else than a text clean-up of the path does. The
+// protected hard link in the folder the file system reaches stays closed, an
+// ordinary file there stays ordinary, and the same file name in the folder a
+// clean-up would name decides nothing. Both connectors, an absolute and a
+// relative saved home.
+func TestLateOrdinaryCallAtReadsARelativeWorkdirWithALinkBeforeAParentStep(t *testing.T) {
+	f := newLateFixture(t)
+	if err := os.Symlink(f.project, filepath.Join(f.project, "fold")); err != nil {
+		t.Fatal(err)
+	}
+	// "alias" is a hard link to the keys in the folder the workdir reaches
+	// and an ordinary file in the project a text clean-up would name.
+	if err := os.Link(filepath.Join(f.home, ".ssh", "authorized_keys"), filepath.Join(f.home, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(f.project, "alias"), filepath.Join(f.home, "note.txt")} {
+		if err := os.WriteFile(path, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Link(filepath.Join(f.home, "note.txt"), filepath.Join(f.home, "note-hl")); err != nil {
+		t.Fatal(err)
+	}
+	scratch, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", scratch)
+	workdir := "fold" + string(filepath.Separator) + ".."
+	if real, err := filepath.EvalSymlinks(f.project + string(filepath.Separator) + workdir); err != nil || real != f.home {
+		t.Fatalf("workdir should reach %q, got %q: %v", f.home, real, err)
+	}
+	for _, tc := range []struct {
+		name, command string
+		want          bool
+	}{
+		{"hard link to the keys", "touch alias", false},
+		{"hard link first of a long list", lateOperands(5000, "alias", "first"), false},
+		{"hard link last of a long list", lateOperands(5000, "alias", "last"), false},
+		{"hard link by absolute path", "touch " + filepath.Join(f.home, "alias"), false},
+		{"ordinary file", "cat note.txt", true},
+		{"hard link of an ordinary file", "cat note-hl", true},
+		{"hard link of an ordinary file in a long list", lateOperands(5000, "note-hl", "last"), true},
+		{"long list of plain names", lateOperands(5000, "", ""), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, c := range []struct{ connector, tool, field string }{
+				{"claudecode", "Bash", "command"}, {"codex", "exec_command", "cmd"}, {"codex", "shell", "command"},
+			} {
+				payload, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": f.project,
+					"tool_name": c.tool, "tool_input": map[string]any{c.field: tc.command, "workdir": workdir}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, saved := range []string{f.home, "."} {
+					if got := LateOrdinaryCallAt(saved, c.connector, payload); got != tc.want {
+						t.Errorf("%s %s saved home %q: ordinary=%v, want %v", c.connector, c.tool, saved, got, tc.want)
+					}
 				}
 			}
 		})
