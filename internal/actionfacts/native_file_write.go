@@ -10,9 +10,12 @@ import (
 
 // nativeFileWrite is one file a native file-tool call changes and the text it
 // gives that file. replaced is the text an edit tool removes; it is empty for
-// a whole-file write.
+// a whole-file write. whole is set when added is the complete new content of
+// the file (a whole-file write or a patch that adds the file), so a proof that
+// needs the final document may rely on it and not on a fragment.
 type nativeFileWrite struct {
 	target, added, replaced string
+	whole                   bool
 }
 
 // The argument names the reviewed whole-file write tools use for the target and
@@ -30,17 +33,49 @@ var (
 // tool is not a file-writing tool, yields nothing, so a proof built on it
 // never covers an unreviewed call.
 func nativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
+	writes := readNativeFileWrites(tool, args)
+	for index := range writes {
+		writes[index].added = boundedNativeText(writes[index].added)
+		writes[index].replaced = boundedNativeText(writes[index].replaced)
+	}
+	return writes
+}
+
+// boundedNativeText is text padded with white space past maxCommandBytes in
+// the form the file reads the same in: without the white space around it. A
+// proof's size bound then applies to the content, so padding a patch hunk
+// does not carry protected text past the proof, as it does not for a write
+// (OverLimitWriteBoundedTwin). Text without such padding is returned as it is.
+func boundedNativeText(text string) string {
+	if len(text) <= maxCommandBytes {
+		return text
+	}
+	if trimmed := strings.TrimSpace(text); len(trimmed) <= maxCommandBytes {
+		return trimmed
+	}
+	return text
+}
+
+func readNativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 	if tool == "" || strings.TrimSpace(tool) != tool {
 		return nil
 	}
 	patchTool := isApplyPatchTool(tool)
+	appendTool := false
 	if !patchTool {
 		semantics, known := lookupToolArgumentSemantics(tool)
 		if !known || !semantics.acceptsContent || !semantics.acceptsPaths {
 			return nil
 		}
+		appendTool = semantics.pathAccess == PathAccessAppend
 	}
-	object, problem := exactJSONObject(args)
+	// A patch envelope is a string the generic analysis reads up to the
+	// whole-argument bound, so it is read to that bound here too.
+	stringLimit := maxCommandBytes
+	if patchTool {
+		stringLimit = maxArgsJSONBytes
+	}
+	object, problem := exactJSONObjectWithStringLimit(args, stringLimit)
 	if problem.status != "" {
 		return nil
 	}
@@ -54,7 +89,12 @@ func nativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 	if _, ok := object[edit.old]; ok {
 		return nativeEditWrites(object, edit)
 	}
-	return nativeWholeFileWrites(object)
+	writes := nativeWholeFileWrites(object)
+	for index := range writes {
+		// An append tool adds to the file: its text is never the whole file.
+		writes[index].whole = !appendTool
+	}
+	return writes
 }
 
 func nativeWholeFileWrites(object map[string]any) []nativeFileWrite {
@@ -66,7 +106,7 @@ func nativeWholeFileWrites(object map[string]any) []nativeFileWrite {
 	if !targetOK || !contentOK {
 		return nil
 	}
-	return []nativeFileWrite{{target: target, added: content}}
+	return []nativeFileWrite{{target: target, added: content, whole: true}}
 }
 
 func nativeEditWrites(object map[string]any, edit codingAgentEditKeys) []nativeFileWrite {
@@ -84,6 +124,12 @@ func nativeEditWrites(object map[string]any, edit codingAgentEditKeys) []nativeF
 	newText, newOK := object[edit.new].(string)
 	if !targetOK || !oldOK || !newOK {
 		return nil
+	}
+	// A replace-all flag that is not a boolean is a call the tool refuses.
+	if value, present := object[edit.all]; edit.all != "" && present {
+		if _, isBool := value.(bool); !isBool {
+			return nil
+		}
 	}
 	return []nativeFileWrite{{target: target, added: newText, replaced: oldText}}
 }
@@ -133,7 +179,10 @@ func nativePatchWrites(object map[string]any) []nativeFileWrite {
 	) {
 		switch {
 		case strings.HasPrefix(line, "*** Add File: "), strings.HasPrefix(line, "*** Update File: "):
-			writes = append(writes, nativeFileWrite{target: line[strings.Index(line, ": ")+2:]})
+			writes = append(writes, nativeFileWrite{
+				target: line[strings.Index(line, ": ")+2:],
+				whole:  strings.HasPrefix(line, "*** Add File: "),
+			})
 			current = []int{len(writes) - 1}
 		case strings.HasPrefix(line, "*** Move to: "):
 			writes = append(writes, nativeFileWrite{target: strings.TrimPrefix(line, "*** Move to: ")})
