@@ -248,8 +248,11 @@ transient opens. A separate application that opens the file at that instant may
 need to reopen it. Run upgrades while clients are idle when possible.
 Third-party readers should share deletion and retry transient open failures
 (`ERROR_FILE_NOT_FOUND`, `ERROR_PATH_NOT_FOUND`, or a sharing violation) within
-a bounded window. The policy compare-and-swap reader test uses two seconds,
-matching the writer's lock wait.
+a bounded window. For non-image policy files, the compare-and-swap writer tries
+a file transaction; when the volume cannot use one, it warns and uses a guarded
+one-step replacement. The policy compare-and-swap test gives readers without
+deletion sharing two seconds, matching the writer's lock wait. Its reader that
+shares deletion must open the old or new name on the first attempt.
 
 This is an observed Windows file-name replacement limit, not a field failure
 rate. In a 2026-11-06 Windows Server 2025 NTFS stress run of 400 changed-body
