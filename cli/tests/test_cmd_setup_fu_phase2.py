@@ -352,6 +352,45 @@ class _BaseSetup(unittest.TestCase):
 class TestPerConnectorWriteSurface(_BaseSetup):
     # An explicit guardrail target must already be set up. The OpenCode
     # selection fixtures below include it in the configured roster.
+    def test_guardrail_secret_size_refusal_in_the_interactive_wizard(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        self._seed_map("codex")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "action"
+        gc.judge.enabled = False
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        path = Path(self.tmp_dir, ".env")
+        added_line = f"{env_name}={secret_value}\n".encode()
+        original = b"#" + b"x" * (MAX_DOTENV_BYTES + 1 - len(added_line) - 2) + b"\n"
+        atomic_write_private_bytes(str(path), original)
+        config_path = Path(self.cfg_path)
+        atomic_write_private_bytes(str(config_path), b"prior-config-marker\n")
+        before = (path.stat().st_ino, path.stat().st_mtime_ns, config_path.stat().st_mtime_ns)
+
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            _guardrail_judge_secret_wizard(Path(self.tmp_dir, "hook_contract_lock.json"), env_name, secret_value),
+            patch.object(cmd_setup.platform_support, "host_os", return_value="linux"),
+            patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+            patch.object(cmd_setup, "_check_guardrail_setup_connector_versions", side_effect=AssertionError("late validation")),
+            patch.object(cmd_setup, "execute_guardrail_setup", side_effect=AssertionError("late setup")),
+            patch.object(cmd_setup, "_restart_services", side_effect=AssertionError("late restart")),
+        ):
+            os.environ.pop(env_name, None)
+            result = _invoke(["guardrail", "--connector", "codex", "--no-restart"], self.app, catch=True)
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn(f"over the {MAX_DOTENV_BYTES}-byte limit", result.output)
+        self.assertNotIn(secret_value, _click_result_exception_diagnostics(result))
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(
+            (path.stat().st_ino, path.stat().st_mtime_ns, config_path.stat().st_mtime_ns),
+            before,
+        )
+
     def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
         receipt = os.path.join(self.tmp_dir, "agent_selection.json")
         prior = b'{"prior":"receipt"}\n'
