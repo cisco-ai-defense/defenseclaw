@@ -77,20 +77,23 @@ const (
 	ownScanNextStep = ownRetryNextStep
 )
 
-// ownScanReason is a recorded scan reason as the row shows it: free text with
-// the surrounding space and the closing sentence punctuation removed, so a
-// reason that is only punctuation is empty.
+// ownScanReason is a recorded scan reason as the row shows it: the recorded
+// text byte for byte, minus trailing space. The text is free text (it can
+// start with a path such as .claude/settings.json), so nothing at its start is
+// removed; a reason with no word in it, only periods and space, is empty.
 func ownScanReason(reason string) string {
-	return strings.TrimFunc(reason, func(r rune) bool { return r == '.' || unicode.IsSpace(r) })
+	reason = strings.TrimRightFunc(reason, unicode.IsSpace)
+	if strings.TrimFunc(reason, func(r rune) bool { return r == '.' || unicode.IsSpace(r) }) == "" {
+		return ""
+	}
+	return reason
 }
 
 // ownScanCause is the cause of a row the scan lists as unprotected for the
 // account: the recorded reasons (free text) and ownScanNextStep. A reason that
-// is empty once normalized gives the no-reason cause, so the row always has
-// its reason field.
+// is empty gives the no-reason cause, so the row always has its reason field.
 func ownScanCause(reasons string) ownCause {
-	reasons = ownScanReason(reasons)
-	if reasons == "" {
+	if reasons = ownScanReason(reasons); reasons == "" {
 		return ownCauseNoUnprotectedReason
 	}
 	return ownCause{"scan_unprotected", reasons, ownScanNextStep}
