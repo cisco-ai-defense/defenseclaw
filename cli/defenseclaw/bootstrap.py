@@ -644,7 +644,7 @@ def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> None:
     cfg.save()
 
 
-def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
+def bootstrap_env(cfg: Config, logger: Logger | None = None, *, fresh_home: bool = False) -> BootstrapReport:
     """Initialize ``~/.defenseclaw/`` and related state.
 
     Safe to call repeatedly. Each step is idempotent:
@@ -657,6 +657,10 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     Returns a :class:`BootstrapReport` describing what happened so the
     caller can render a user-facing summary. Never raises for
     recoverable failures — those are collected into ``report.errors``.
+
+    ``fresh_home`` is True when the run found no config.yaml; it lets the
+    device identity step repair a half-created identity (see
+    ``_ensure_device_key``).
     """
     from defenseclaw.config import config_path
     from defenseclaw.db import Store
@@ -714,7 +718,9 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
 
     # --- gateway defaults (OpenClaw token detection) ---
     try:
-        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config, logger, report)
+        report.openclaw_token_detected = _apply_gateway_defaults(
+            cfg, report.is_new_config, logger, report, fresh_home=fresh_home
+        )
     except Exception as exc:  # pragma: no cover — defensive
         report.errors.append(f"gateway defaults: {exc}")
 
@@ -799,7 +805,60 @@ def _restore_first_run_selection_authority(cfg, setup_snapshot) -> str:
     return "; ".join(errors)
 
 
+# How long a second init waits for the one that holds the data home before it
+# reports that another init is running.
+_FIRST_RUN_LOCK_WAIT_SECONDS = 30.0
+
+
 def run_first_run(options: FirstRunOptions) -> FirstRunReport:
+    """Run the first-run setup flow while holding the init lock of the data home.
+
+    Two inits started together on one home used to race through the same seeds
+    and device identity and leave it half created (GAP-0927). The lock is one
+    exclusive file lock (init.lock: a byte lock on Windows, flock on POSIX)
+    taken before anything is read or written. The second run waits for the
+    first and then runs as an ordinary re-run of a finished init; if the first
+    is still going after _FIRST_RUN_LOCK_WAIT_SECONDS it changes nothing and
+    says another init is running. A home whose lock file cannot be made is not
+    locked: the steps that follow report the real problem.
+    """
+    from contextlib import ExitStack
+
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
+    from defenseclaw.file_permissions import make_private_directory
+
+    home = str(cfg_mod.default_data_path())
+    with ExitStack() as held:
+        try:
+            make_private_directory(home)
+            held.enter_context(
+                locked_file_update(os.path.join(home, "init"), timeout_seconds=_FIRST_RUN_LOCK_WAIT_SECONDS)
+            )
+        except FileLockTimeoutError:
+            connector = _normalize_connector(options.connector)
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=home,
+                connector=connector,
+                profile=_normalize_profile(options.profile, connector),
+                setup=[
+                    StepResult(
+                        "Init lock",
+                        "fail",
+                        f"another defenseclaw init is running on {home}; this run changed nothing",
+                        options.rerun_command,
+                    )
+                ],
+                next_commands=[options.rerun_command],
+            )
+        except OSError:
+            pass
+        return _run_first_run_locked(options)
+
+
+def _run_first_run_locked(options: FirstRunOptions) -> FirstRunReport:
     """Run the canonical first-run setup flow without rendering UI.
 
     This is the backend shared by ``defenseclaw init``, ``quickstart``,
@@ -1196,7 +1255,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         # ordinary v8 setup mutations.
         logger = Logger.no_runtime() if new_config else Logger.from_config(cfg)
 
-        bootstrap = bootstrap_env(cfg, logger)
+        bootstrap = bootstrap_env(cfg, logger, fresh_home=was_config_absent)
         if bootstrap.errors:
             setup.extend(
                 StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix --dry-run") for e in bootstrap.errors
@@ -2796,6 +2855,8 @@ def _apply_gateway_defaults(
     is_new_config: bool,
     logger: Logger | None = None,
     report: BootstrapReport | None = None,
+    *,
+    fresh_home: bool = False,
 ) -> bool:
     """Sync gateway host/port/token from ``openclaw.json`` and dotenv.
 
@@ -2864,6 +2925,6 @@ def _apply_gateway_defaults(
 
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
-    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir, fresh_home=fresh_home)
 
     return token_configured

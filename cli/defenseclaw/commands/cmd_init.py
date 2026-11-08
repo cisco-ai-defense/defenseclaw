@@ -3433,12 +3433,18 @@ def _prepare_device_identity_directories(
         current = child
 
 
-def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
+def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bool = False) -> None:
     """Create one new device identity with HMAC-bound provenance.
 
     Existing identities are deliberately left untouched. In particular, an
     older unprovenanced key must remain visible to Doctor as legacy rather than
     being blessed after the fact.
+
+    The files of an identity whose creation never finished (a crash or a
+    killed init; see set_aside_abandoned_identity) are set aside and the
+    identity is created again, so such a home is never a dead end. Any other
+    keyless provenance file is still continuity evidence and still refuses.
+    ``fresh_home`` says this init found no config.yaml.
     """
     raw_path = os.fspath(path)
     raw_data_dir = os.fspath(data_dir) if data_dir is not None else None
@@ -3473,8 +3479,6 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
     target_parent = os.path.dirname(target)
     _validate_device_identity_windows_path_syntax(target, identity_root)
     _validate_device_identity_artifact_layout(target, identity_root)
-    if os.path.lexists(target):
-        return
 
     from defenseclaw.doctor_recovery import (
         RecoveryApplyStatus,
@@ -3483,7 +3487,13 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
         _device_identity_paths_equal,
         apply_device_key_recovery,
         plan_missing_device_key,
+        set_aside_abandoned_identity,
     )
+
+    if os.path.lexists(target):
+        # Drops a pending marker a finished creation did not get to delete.
+        set_aside_abandoned_identity(target, identity_root, fresh_home=False)
+        return
     try:
         common = os.path.commonpath((target, identity_root))
     except ValueError as exc:
@@ -3502,6 +3512,12 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
             "cannot safely create device identity (data-dir-path-is-indirect)"
         )
     _prepare_device_identity_directories(identity_root, target_parent)
+    try:
+        set_aside_abandoned_identity(target, identity_root, fresh_home=fresh_home)
+    except OSError as exc:
+        raise click.ClickException(
+            "cannot safely create device identity (abandoned-identity-set-aside-failed)"
+        ) from exc
 
     plan = plan_missing_device_key(target, data_dir=identity_root)
     if plan.disposition is not RecoveryDisposition.READY:
