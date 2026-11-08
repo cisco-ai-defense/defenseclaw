@@ -207,6 +207,29 @@ func OwnedHooksPresentContext(ctx context.Context, conn Connector, opts SetupOpt
 	return !ownedHookConfigHoldsEditedEntry(conn, opts), nil
 }
 
+// OwnedHookEntriesPresent judges the hook entries of conn in the agent config
+// alone, without running or hashing the hook runtime, so a hook entry that was
+// damaged together with a runtime file is told apart from the file (GAP-0754).
+// judged is false for a connector whose registration is proved only together
+// with its runtime (a plugin file, an effective-policy check): the caller then
+// leaves the entry unjudged. Like OwnedHooksPresentContext, an edited
+// DefenseClaw entry next to the working set is not present.
+func OwnedHookEntriesPresent(conn Connector, opts SetupOpts) (judged, present bool, err error) {
+	hookOnly, ok := conn.(*hookOnlyConnector)
+	if !ok || hookOnly.pluginArtifact {
+		return false, false, nil
+	}
+	switch hookOnly.name {
+	case "cursor", "devin", "opencode":
+		return false, false, nil
+	}
+	present, err = hookOnly.ownedHookEntriesPresent(opts)
+	if err != nil || !present {
+		return true, false, err
+	}
+	return true, !ownedHookConfigHoldsEditedEntry(conn, opts), nil
+}
+
 func ownedHookRegistrationPresent(ctx context.Context, conn Connector, opts SetupOpts) (bool, error) {
 	if inspector, ok := conn.(ownedHookContractContextInspector); ok {
 		return inspector.ownedHookContractPresentContext(ctx, opts)

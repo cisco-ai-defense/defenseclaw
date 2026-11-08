@@ -542,8 +542,11 @@ type enterpriseHookStandaloneOutcome struct {
 	// not the target is healthy after it (GAP-0754). It alone is counted,
 	// audited and recorded as a restore.
 	restored []string
-	err      string
-	result   *enterprisehooks.InstallResult
+	// restoredChanges says what happened to each restored element, in the
+	// same order (enterprisehooks.HookChange*), or "" where it is unknown.
+	restoredChanges []string
+	err             string
+	result          *enterprisehooks.InstallResult
 	// agentConfig is the worker's connector.AgentConfigStatus code.
 	agentConfig string
 }
@@ -593,10 +596,12 @@ func dispatchEnterpriseHookStandaloneJobs(
 				if !result.OK {
 					// repaired: the target failed, and the worker (or the files)
 					// show it put hook files back first (GAP-0754).
-					outcomes[target.Index] = enterpriseHookStandaloneOutcome{repaired: result.Repaired, restored: knownEnterpriseHookElements(result.RestoredElements), err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
+					restored, changes := knownEnterpriseHookElements(result.RestoredElements, result.RestoredChanges)
+					outcomes[target.Index] = enterpriseHookStandaloneOutcome{repaired: result.Repaired, restored: restored, restoredChanges: changes, err: firstNonEmpty(result.Error, "worker reported an unspecified failure")}
 					continue
 				}
-				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, restored: knownEnterpriseHookElements(result.RestoredElements), result: result.Result, agentConfig: result.AgentConfig}
+				restored, changes := knownEnterpriseHookElements(result.RestoredElements, result.RestoredChanges)
+				outcomes[target.Index] = enterpriseHookStandaloneOutcome{ok: true, repaired: result.Repaired, restored: restored, restoredChanges: changes, result: result.Result, agentConfig: result.AgentConfig}
 			}
 		}
 	}
@@ -1148,7 +1153,7 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 			// matching is a restore.
 			fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s restored: %s\n", enterpriseHookTargetLabel(row), strings.Join(outcome.restored, ", "))
 			repaired = append(repaired, enterpriseHookGuardianRepair{User: row.User, Connector: row.Connector})
-			auditRepairs = append(auditRepairs, enterpriseHookRestoreAudits(row.User, slot.account.UID, row.Connector, outcome.restored)...)
+			auditRepairs = append(auditRepairs, enterpriseHookRestoreAudits(row.User, slot.account.UID, row.Connector, outcome.restored, outcome.restoredChanges)...)
 			repairs += len(outcome.restored)
 		}
 		rows[index] = row
@@ -1213,6 +1218,9 @@ func runEnterpriseHookReconcileOnceStandaloneUnix(ctx context.Context) (enterpri
 	run.WatchExclusiveFiles = sortedEnterpriseHookWatchDirs(exclusiveFiles)
 	run.WatchSharedFiles = sortedEnterpriseHookWatchDirs(sharedFiles)
 	run.WatchPathOwners = watchPathOwners
+	if repairs > 0 {
+		requestEnterpriseHookForeignCleanupNow()
+	}
 	runEnterpriseHookStandaloneForeignCleanup(ctx, os.Stderr, time.Now(), manifest, enterpriseHookPerUserEnrolled(manifest, machinePolicy), hookSocket)
 	return run, nil
 }
@@ -1251,7 +1259,7 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 		uid := slot.account.UID
 		fmt.Fprintf(enterpriseHookWorkerLog, "[hook-guardian] %s restored: %s\n", enterpriseHookTargetLabel(rows[index]), strings.Join(outcome.restored, ", "))
 		repaired = append(repaired, enterpriseHookGuardianRepair{User: user, Connector: name})
-		audits = append(audits, enterpriseHookRestoreAudits(user, uid, name, outcome.restored)...)
+		audits = append(audits, enterpriseHookRestoreAudits(user, uid, name, outcome.restored, outcome.restoredChanges)...)
 		count += len(outcome.restored)
 		restored = append(restored, enterpriseHookGuardianRestore{UID: &uid, User: user, Connector: name, RestoredAt: restoredAt})
 		answered[user+"\x00"+strings.ToLower(name)] = true
@@ -1262,6 +1270,7 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 	if len(repaired) == 0 {
 		return repairedTargets, 0
 	}
+	requestEnterpriseHookForeignCleanupNow()
 	writeEnterpriseHookGuardianRepairs(dataDir, repaired)
 	// The record holds every target notice, and this pass answered only some:
 	// replace the notices of the repaired targets and keep the others.
@@ -1280,27 +1289,38 @@ func reportEnterpriseHookStandaloneInterruptedRepairs(dataDir, hookSocket string
 
 // enterpriseHookRestoreAudits is the audit report of one restore: one record
 // per protected element that went from not matching to matching, each naming
-// its element, so a restored script and a restored entry are two counted and
-// audited repairs on every path (GAP-0754).
-func enterpriseHookRestoreAudits(user string, uid int, connectorName string, elements []string) []enterpriseHookGuardianAuditReport {
+// its element and what happened to it (changes, in the same order), so a
+// restored script and a restored entry are two counted and audited repairs on
+// every path (GAP-0754).
+func enterpriseHookRestoreAudits(user string, uid int, connectorName string, elements, changes []string) []enterpriseHookGuardianAuditReport {
 	reports := make([]enterpriseHookGuardianAuditReport, 0, len(elements))
-	for _, element := range elements {
-		reports = append(reports, enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: connectorName, Element: element})
+	for i, element := range elements {
+		report := enterpriseHookGuardianAuditReport{User: user, UID: uid, Connector: connectorName, Element: element}
+		if i < len(changes) {
+			report.Change = changes[i]
+		}
+		reports = append(reports, report)
 	}
 	return reports
 }
 
 // knownEnterpriseHookElements keeps the protected element names the guardian
-// knows from what a worker, which runs as the user, reported: a name it made
-// up is no restore.
-func knownEnterpriseHookElements(names []string) []string {
-	var known []string
-	for _, name := range names {
-		if enterprisehooks.KnownHookElement(name) && !slices.Contains(known, name) {
-			known = append(known, name)
+// knows from what a worker, which runs as the user, reported, each once, with
+// the change kind reported for it when that is one the guardian knows: a name
+// it made up is no restore.
+func knownEnterpriseHookElements(names, changes []string) (known, knownChanges []string) {
+	for i, name := range names {
+		if !enterprisehooks.KnownHookElement(name) || slices.Contains(known, name) {
+			continue
 		}
+		change := ""
+		if i < len(changes) && enterprisehooks.KnownHookChange(changes[i]) {
+			change = changes[i]
+		}
+		known = append(known, name)
+		knownChanges = append(knownChanges, change)
 	}
-	return known
+	return known, knownChanges
 }
 
 // enterpriseHookCredentialKeyID names the per-user credential key a

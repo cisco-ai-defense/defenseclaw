@@ -86,7 +86,7 @@ func TestProbeHookElementsReadsEachElementOnItsOwn(t *testing.T) {
 	if err := os.WriteFile(config, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	probe("both broken", []string{scriptElement})
+	probe("both broken", []string{HookElementEntry, scriptElement})
 	if err := os.WriteFile(script, installedScript, 0o700); err != nil {
 		t.Fatal(err)
 	}

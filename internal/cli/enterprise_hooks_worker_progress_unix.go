@@ -9,13 +9,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // A worker answers once, after its last target. The guardian watch loop
@@ -105,24 +108,98 @@ func (w *enterpriseHookWorkerProgressWriter) end(outcome enterpriseHookWorkerTar
 // found it broken. When the parent asked for progress it reads which
 // protected elements did not match before the install (broken, and only when
 // the install rewrites hook material, restores) and which of them match once
-// it has returned, error or not, and returns those as the restore. Without
-// progress nothing is read and no restore is named.
-func repairEnterpriseHookTarget(ctx context.Context, progress *enterpriseHookWorkerProgressWriter, target enterpriseHookWorkerTarget, opts enterprisehooks.InstallOptions, restores bool) (enterprisehooks.InstallResult, []string, error) {
+// it has returned, error or not, and returns those as the restore, with what
+// happened to each (deleted, appended or edited), read from its files before
+// and after. Without progress nothing is read and no restore is named.
+func repairEnterpriseHookTarget(ctx context.Context, progress *enterpriseHookWorkerProgressWriter, target enterpriseHookWorkerTarget, opts enterprisehooks.InstallOptions, restores bool) (enterprisehooks.InstallResult, []string, []string, error) {
 	var broken []string
+	var files map[string][]string
+	var bodies map[string]hookElementBody
 	if progress != nil && restores {
 		if before, err := enterpriseHookWorkerProber(ctx, opts); err == nil {
-			broken = before.Broken()
+			broken, files = before.Broken(), before.Files
+			bodies = readHookElementBodies(files, broken)
 		}
 	}
 	progress.begin(target, broken)
 	result, err := reinstallEnterpriseHookTarget(ctx, opts)
-	var restored []string
+	var restored, changes []string
 	if len(broken) > 0 {
 		if after, probeErr := enterpriseHookWorkerProber(ctx, opts); probeErr == nil {
 			restored = restoredHookElements(broken, after)
+			changes = hookElementChanges(restored, files, bodies)
 		}
 	}
-	return result, restored, err
+	return result, restored, changes, err
+}
+
+// hookElementBody is what one file of a protected element held when a repair
+// began.
+type hookElementBody struct {
+	data    []byte
+	existed bool
+}
+
+// hookElementBodyMaxBytes bounds what is read of one element file.
+const hookElementBodyMaxBytes = 4 << 20
+
+// readHookElementBodies reads the files of the broken elements, so the change
+// to each can be named once it is put back. A file that cannot be read counts
+// as present with no content.
+func readHookElementBodies(files map[string][]string, broken []string) map[string]hookElementBody {
+	bodies := map[string]hookElementBody{}
+	for _, element := range broken {
+		for _, path := range files[element] {
+			if _, done := bodies[path]; done {
+				continue
+			}
+			data, err := safefile.ReadRegularFileBounded(path, hookElementBodyMaxBytes)
+			bodies[path] = hookElementBody{data: data, existed: !errors.Is(err, os.ErrNotExist)}
+		}
+	}
+	return bodies
+}
+
+// hookElementChanges names, for each restored element in order, what happened
+// to it (enterprisehooks.HookChange*): it compares the first of its files
+// whose content differs now with what the file held before the repair.
+func hookElementChanges(restored []string, files map[string][]string, bodies map[string]hookElementBody) []string {
+	changes := make([]string, 0, len(restored))
+	for _, element := range restored {
+		change := enterprisehooks.HookChangeEdited
+		for _, path := range files[element] {
+			before, known := bodies[path]
+			if !known {
+				continue
+			}
+			after, err := safefile.ReadRegularFileBounded(path, hookElementBodyMaxBytes)
+			if err != nil || (before.existed && bytes.Equal(before.data, after)) {
+				continue
+			}
+			change = enterprisehooks.ClassifyHookElementChange(before.data, before.existed, after)
+			break
+		}
+		changes = append(changes, change)
+	}
+	return changes
+}
+
+// mergeHookRestores adds the restores of a later check of the same repair to
+// the ones an earlier check made: an element restored by either is restored
+// once, with the change kind of the first.
+func mergeHookRestores(elements, changes, more, moreChanges []string) ([]string, []string) {
+	for i, element := range more {
+		if slices.Contains(elements, element) {
+			continue
+		}
+		elements = append(elements, element)
+		change := ""
+		if i < len(moreChanges) {
+			change = moreChanges[i]
+		}
+		changes = append(changes, change)
+	}
+	return elements, changes
 }
 
 // restoredHookElements returns the elements of broken that match in after, in

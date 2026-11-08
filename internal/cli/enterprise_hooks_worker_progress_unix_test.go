@@ -112,7 +112,7 @@ func TestRestoredHookElementsAreTheOnesThatWentFromBrokenToMatching(t *testing.T
 			t.Errorf("%s: restored = %v, want %v", tc.name, got, tc.want)
 		}
 	}
-	if got := knownEnterpriseHookElements([]string{"made up", enterprisehooks.HookElementEntry, enterprisehooks.HookElementEntry}); !slices.Equal(got, entryElement) {
+	if got, _ := knownEnterpriseHookElements([]string{"made up", enterprisehooks.HookElementEntry, enterprisehooks.HookElementEntry}, nil); !slices.Equal(got, entryElement) {
 		t.Errorf("known elements = %v, want the entry once", got)
 	}
 }

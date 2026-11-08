@@ -77,8 +77,14 @@ func TestEnterpriseHookWorkerNamesEachRestoredElementOnce(t *testing.T) {
 // A worker that reports an element name the guardian does not know, or one
 // twice, claims no more than the known element once.
 func TestStandaloneOutcomeKeepsOnlyKnownRestoredElements(t *testing.T) {
-	got := knownEnterpriseHookElements([]string{"shared agent config", enterprisehooks.HookElementRuntime, enterprisehooks.HookElementRuntime})
-	if !slices.Equal(got, runtimeElement) {
-		t.Fatalf("elements = %v, want the runtime files once", got)
+	got, changes := knownEnterpriseHookElements(
+		[]string{"shared agent config", enterprisehooks.HookElementRuntime, enterprisehooks.HookElementRuntime},
+		[]string{enterprisehooks.HookChangeEdited, enterprisehooks.HookChangeAppended, enterprisehooks.HookChangeEdited})
+	if !slices.Equal(got, runtimeElement) || !slices.Equal(changes, []string{enterprisehooks.HookChangeAppended}) {
+		t.Fatalf("elements = %v changes = %v, want the runtime files once with the change reported for it", got, changes)
+	}
+	// A change kind the guardian does not know, or none, is kept as unknown.
+	if _, changes := knownEnterpriseHookElements(entryElement, []string{"overwritten"}); !slices.Equal(changes, []string{""}) {
+		t.Fatalf("changes = %v, want an unknown change left empty", changes)
 	}
 }

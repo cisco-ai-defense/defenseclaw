@@ -1295,6 +1295,24 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 	return nil
 }
 
+// ownedHookEntriesPresent reads only the hook entries in the agent config of a
+// connector that registers them there (not a plugin artifact): the part of
+// ownedHookContractPresent that does not run or hash the hook runtime.
+func (c *hookOnlyConnector) ownedHookEntriesPresent(opts SetupOpts) (bool, error) {
+	if c.name == "hermes" {
+		// The config the Hermes of the account reads, or not verified: an
+		// unresolved home, another HERMES_HOME or a named profile. More
+		// than one active config proves nothing either.
+		if _, err := hermesVerifiedConfigPath(opts); err != nil {
+			return false, err
+		}
+		if len(HookConfigPathsForConnector(c, opts)) != 1 {
+			return false, nil
+		}
+	}
+	return ownedHooksPresentInConfig(c, opts)
+}
+
 // ownedHookContractPresent verifies the agent-visible plugin identity for
 // plugin-artifact connectors. The generic config reader intentionally parses
 // structured JSON/YAML/TOML hook registrations; an auto-loaded JavaScript
@@ -1302,22 +1320,13 @@ func (c *hookOnlyConnector) migrateConfigTarget(opts SetupOpts, target, label st
 // is present in the installed regular file.
 func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	if !c.pluginArtifact {
-		hermesConfig := ""
-		if c.name == "hermes" {
-			// The config the account's Hermes reads, or not verified: an
-			// unresolved home, another HERMES_HOME or a named profile. More
-			// than one active config proves nothing either.
-			var err error
-			if hermesConfig, err = hermesVerifiedConfigPath(opts); err != nil {
-				return false, err
-			}
-			if len(HookConfigPathsForConnector(c, opts)) != 1 {
-				return false, nil
-			}
-		}
-		present, err := ownedHooksPresentInConfig(c, opts)
+		present, err := c.ownedHookEntriesPresent(opts)
 		if err != nil || !present || c.name != "hermes" {
 			return present, err
+		}
+		hermesConfig, err := hermesVerifiedConfigPath(opts)
+		if err != nil {
+			return false, err
 		}
 		if !hermesRegisteredCommandExecutable(opts, c.hookCommand(opts)) {
 			return false, nil

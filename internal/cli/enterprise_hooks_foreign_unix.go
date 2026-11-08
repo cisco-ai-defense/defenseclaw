@@ -83,6 +83,19 @@ var enterpriseHookForeignCleanupState struct {
 	// the last pass could not rewrite: they wait for the interval, so only
 	// a newly drifted account makes the next pass due.
 	unrepaired map[string]bool
+	// now: a pass restored a protected element, so the cleanup is due at the
+	// next pass whatever the interval: a hook entry swapped for another
+	// command was put back beside it, and the other command goes in this
+	// pass, not five minutes later (GAP-0754).
+	now bool
+}
+
+// requestEnterpriseHookForeignCleanupNow makes the next foreign-hook cleanup
+// due at once, whatever the interval.
+func requestEnterpriseHookForeignCleanupNow() {
+	enterpriseHookForeignCleanupState.Lock()
+	enterpriseHookForeignCleanupState.now = true
+	enterpriseHookForeignCleanupState.Unlock()
 }
 
 // enterpriseHookForeignCleanupConnectors resolves the connectors whose
@@ -360,12 +373,13 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		}
 	}
 	enterpriseHookForeignCleanupState.unrepaired = stillUnrepaired
-	due := newDrift || fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
+	due := newDrift || enterpriseHookForeignCleanupState.now || fingerprint != enterpriseHookForeignCleanupState.fingerprint ||
 		((len(cleanups) > 0 || governed || claudeManaged || len(accounts) > 0 || !enterpriseHookForeignCleanupState.leftoversClean) &&
 			now.Sub(enterpriseHookForeignCleanupState.last) >= enterpriseHookForeignCleanupInterval)
 	if due {
 		enterpriseHookForeignCleanupState.last = now
 		enterpriseHookForeignCleanupState.fingerprint = fingerprint
+		enterpriseHookForeignCleanupState.now = false
 	}
 	enterpriseHookForeignCleanupState.Unlock()
 	if !due {

@@ -359,7 +359,11 @@ type enterpriseHookWorkerTargetResult struct {
 	// target health: a repair that only wrote other files, or the agent
 	// settings in a shared config, restored nothing (GAP-0754).
 	RestoredElements []string `json:"restored_elements,omitempty"`
-	Removed          bool     `json:"removed,omitempty"`
+	// RestoredChanges says, for each restored element in the same order, what
+	// happened to it: enterprisehooks.HookChangeDeleted, HookChangeAppended or
+	// HookChangeEdited, or none where the worker could not read it.
+	RestoredChanges []string `json:"restored_changes,omitempty"`
+	Removed         bool     `json:"removed,omitempty"`
 	// Restored: the unblock put the account's own Claude Code hook script
 	// back from the copy the enrollment kept (rel-1-0-6 GAP-0178).
 	Restored bool `json:"restored,omitempty"`
@@ -789,8 +793,12 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 			if err != nil {
 				policyOnly := request.Standalone && enterprisehooks.PreviousHookRuntimeIntactForConfigurationChange(ctx, opts, target.PriorCredentials)
 				repairing = true
-				result, outcome.RestoredElements, err = repairEnterpriseHookTarget(ctx, progress, target, opts, !policyOnly)
+				result, outcome.RestoredElements, outcome.RestoredChanges, err = repairEnterpriseHookTarget(ctx, progress, target, opts, !policyOnly)
 				outcome.Repaired = (err == nil && !policyOnly) || len(outcome.RestoredElements) > 0
+				// A repaired target is checked again over the window too: a
+				// second element damaged a moment after the install read its
+				// file is put back in this pass, not at the next interval.
+				recheck = err == nil && recheckWindow > 0
 			}
 		case enterpriseHookWorkerModeRemove:
 			previousHome := strings.TrimSpace(target.Options.PreviousHome)
@@ -958,11 +966,11 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		},
 		func(index int, _ error) {
 			outcome := &results[rechecks[index].result]
-			result, restored, err := repairEnterpriseHookTarget(ctx, progress, rechecks[index].target, rechecks[index].opts, true)
-			outcome.RestoredElements = restored
+			result, restored, changes, err := repairEnterpriseHookTarget(ctx, progress, rechecks[index].target, rechecks[index].opts, true)
+			outcome.RestoredElements, outcome.RestoredChanges = mergeHookRestores(outcome.RestoredElements, outcome.RestoredChanges, restored, changes)
 			if err != nil {
 				outcome.OK, outcome.Result, outcome.AgentConfig = false, nil, ""
-				outcome.Repaired = len(restored) > 0
+				outcome.Repaired = outcome.Repaired || len(restored) > 0
 				outcome.Pending = enterprisehooks.PendingTargetError(err) &&
 					enterprisehooks.CheckUnixTargetHome(request.Home, request.UID).State == enterprisehooks.HomePending
 				if !outcome.Pending {

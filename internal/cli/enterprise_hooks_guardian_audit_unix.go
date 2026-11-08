@@ -28,6 +28,9 @@ type enterpriseHookGuardianAuditReport struct {
 	// Element names the protected element the guardian put back; empty for
 	// a repair of a target as a whole.
 	Element string `json:"element,omitempty"`
+	// Change says what happened to the element (deleted, appended or edited);
+	// empty where the guardian could not read it.
+	Change string `json:"change,omitempty"`
 }
 
 var guardianAuditClientFactory = hookexec.NewManagedStandaloneHookSocketHTTPClient
