@@ -539,6 +539,20 @@ func windowsStandalonePerUserCleanupConnector(name string) bool {
 	return perUser
 }
 
+// windowsStandaloneRevokedUserCleanupConnector is the set the guardian cleans
+// after a user loses enrollment: the per-user connectors, whose registrations
+// live in the account's agent configuration, and the machine-scope ones
+// (Claude Code, Codex, Cursor), whose scoped hook token, hook config and
+// runtime records stay in the account's DefenseClaw folder after the machine
+// enrollment is revoked (GAP-0916). Uninstall's own plan keeps
+// windowsStandalonePerUserCleanupConnector.
+func windowsStandaloneRevokedUserCleanupConnector(name string) bool {
+	return windowsStandalonePerUserCleanupConnector(name) || enterprisehooks.WindowsMachineScopeUserRuntimeConnector(name)
+}
+
+// enterpriseHookWindowsConnectorUserRuntimeRemover is replaceable in tests.
+var enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
+
 // enterpriseHookStandalonePlatformRevokeUsers removes DefenseClaw's own hook
 // registrations and plugins (Amp, Antigravity, Copilot, Devin, Hermes,
 // OpenCode) from the agent configuration of every user whose row the
@@ -555,7 +569,7 @@ func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.
 		stderr,
 		cfg.DataDir,
 		manifest,
-		windowsStandalonePerUserCleanupConnector,
+		windowsStandaloneRevokedUserCleanupConnector,
 		enterpriseHookWindowsUserCleanupAttempt,
 		time.Now(),
 	)
@@ -610,6 +624,16 @@ func attemptWindowsStandaloneUserCleanup(
 			return enterpriseHookUserCleanupDone, nil
 		}
 		return enterpriseHookUserCleanupPending, nil
+	}
+	if enterprisehooks.WindowsMachineScopeUserRuntimeConnector(entry.Connector) {
+		// A machine-scope connector's machine enrollment is already revoked, so
+		// only DefenseClaw's own files in the account's DefenseClaw folder are
+		// left. LocalSystem removes them whether or not the account is signed
+		// in; no session token is needed and none is waited for (GAP-0916).
+		if err := enterpriseHookWindowsConnectorUserRuntimeRemover(home, entry.SID, entry.DataDir, entry.Connector); err != nil {
+			return enterpriseHookUserCleanupFailed, err
+		}
+		return enterpriseHookUserCleanupDone, nil
 	}
 	if err := enterpriseHookWindowsRequireTargetSession(entry.SID, home); err != nil {
 		if enterprisehooks.IsWindowsTargetSessionUnavailable(err) {
