@@ -23,31 +23,38 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 		owners, err := darwinSocketOwnerPIDs(ctx, server, client, darwinTCPEstablished)
 		return len(owners) != 0, err
 	})
-	if errors.Is(err, errDarwinSocketNotProven) && darwinOwnListenerHolds(server) {
-		return fmt.Errorf("%w: %w", errPerUserListenerUnanswered, err)
+	if errors.Is(err, errDarwinSocketNotProven) {
+		return fmt.Errorf("%w: %w", errPerUserNotAccepted, err)
 	}
 	return err
 }
 
-// darwinOwnListenerHolds reports whether a process of this account listens
-// on the server endpoint (or the wildcard address of its family). Only the
-// processes of this account are listed, so a listener of another account is
-// never found. A connection nobody accepted for the whole wait, on a port
-// this account listens on, is the gateway of this account, stopped or frozen.
-func darwinOwnListenerHolds(server *net.TCPAddr) bool {
+// listenersHeldOnlyByPID reports whether process pid holds a listening socket
+// that can take a connection to server (its address or the wildcard address
+// of its family, or the dual-stack wildcard) and no other process of this
+// account does. Only the processes of this account are listed, so a listener
+// of another account is never found; none found is false.
+func listenersHeldOnlyByPID(pid int, server *net.TCPAddr) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	wildcard := net.IPv6unspecified
+	ips := []net.IP{server.IP, net.IPv6unspecified}
 	if server.IP.To4() != nil {
-		wildcard = net.IPv4zero
+		ips = []net.IP{server.IP, net.IPv4zero, net.IPv6unspecified}
 	}
-	for _, ip := range []net.IP{server.IP, wildcard} {
+	found := false
+	for _, ip := range ips {
 		owners, err := darwinSocketOwnerPIDs(ctx, &net.TCPAddr{IP: ip, Port: server.Port}, nil, darwinTCPListen)
-		if err == nil && len(owners) != 0 {
-			return true
+		if err != nil {
+			return false
+		}
+		for _, owner := range owners {
+			if owner != pid {
+				return false
+			}
+			found = true
 		}
 	}
-	return false
+	return found
 }
 
 // errDarwinSocketNotProven ends the wait for a connected socket that was

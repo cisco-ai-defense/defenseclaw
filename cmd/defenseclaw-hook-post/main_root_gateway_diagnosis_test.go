@@ -7,14 +7,18 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
 
 // A listener this account cannot prove (here one of another account that never
@@ -97,12 +101,30 @@ func TestParseHookPostFlagsTakesWhatTheRequestUses(t *testing.T) {
 	}
 }
 
-// This account own listener that accepts nothing (a frozen gateway) is not a
-// listener of another account: nothing is sent, no root-gateway text is
-// printed, and the helper reports it like a gateway that is up and late. An
-// ordinary tool call gets the late-ordinary status, which the shell reads as
-// the outage, and any other call the no-answer status, which stays closed.
-func TestHookPostReadsAFrozenOwnListenerAsNoAnswer(t *testing.T) {
+// recordGateway writes this account's gateway.pid in dataDir, naming process
+// pid (the gateway), with the kernel start identity of that process.
+func recordGateway(t *testing.T, dataDir string, pid int) {
+	t.Helper()
+	identity, ok := procidentity.Of(pid)
+	if !ok {
+		t.Fatalf("no start identity for process %d", pid)
+	}
+	data, err := json.Marshal(map[string]any{"pid": pid, "executable": "/usr/local/bin/defenseclaw-gateway",
+		"data_dir": dataDir, "start_time": time.Now().Unix(), "start_identity": identity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "gateway.pid"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// This account recorded gateway that accepts nothing (a frozen gateway, here
+// the test process holding a listener its record names) is not a listener of
+// another account: nothing is sent, no root-gateway text is printed, and the
+// helper reports the outage status for every event but a tool call that does
+// not plainly name nothing protected, which stays closed.
+func TestHookPostReadsAFrozenRecordedGatewayAsAnOutage(t *testing.T) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -110,32 +132,68 @@ func TestHookPostReadsAFrozenOwnListenerAsNoAnswer(t *testing.T) {
 	defer listener.Close()
 	home := t.TempDir()
 	project := filepath.Join(home, "proj")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(project, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
-	t.Setenv(hookPostDataDirEnv, t.TempDir())
+	dataDir := t.TempDir()
+	recordGateway(t, dataDir, os.Getpid())
+	t.Setenv(hookPostDataDirEnv, dataDir)
 	previous := peerRefusalOutput
 	t.Cleanup(func() { peerRefusalOutput = previous })
 	peerRefusalOutput = func(error, string, string) string {
-		t.Error("a frozen own listener was diagnosed as a refused listener")
+		t.Error("a frozen recorded gateway was diagnosed as a refused listener")
 		return ""
 	}
-	ordinary := fmt.Sprintf(`{"hook_event_name":"PreToolUse","cwd":%q,"tool_name":"Bash","tool_input":{"command":"echo hi"}}`, project)
+	tool := func(command string) string {
+		return fmt.Sprintf(`{"hook_event_name":"PreToolUse","cwd":%q,"tool_name":"Bash","tool_input":{"command":%q}}`, project, command)
+	}
 	for _, tc := range []struct {
-		name, body string
-		want       int
+		name, path, body string
+		want             int
 	}{
-		{"ordinary tool call", ordinary, hookexec.PerUserPostLateOrdinaryExit},
-		{"event that is not a tool call", "{}", hookexec.PerUserPostNoAnswerExit},
+		{"ordinary tool call", "/api/v1/claude-code/hook", tool("echo hi"), hookexec.PerUserPostLateOrdinaryExit},
+		{"post-tool batch event", "/api/v1/claude-code/hook", `{"hook_event_name":"PostToolBatch"}`, hookexec.PerUserPostLateOrdinaryExit},
+		{"codex session event", "/api/v1/codex/hook", `{"hook_event_name":"SessionStart"}`, hookexec.PerUserPostLateOrdinaryExit},
+		{"tool call naming a protected file", "/api/v1/claude-code/hook", tool("cat ../.ssh/authorized_keys"), hookexec.PerUserPostNoAnswerExit},
+		{"event it cannot read", "/api/v1/claude-code/hook", "{}", hookexec.PerUserPostNoAnswerExit},
+		{"other connector", "/api/v1/cursor/hook", `{"hook_event_name":"stop"}`, hookexec.PerUserPostNoAnswerExit},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			frame := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00" + tc.body + "\x00")
+			frame := []byte("DCPOST1\x00" + tc.path + "\x00" + tc.body + "\x00")
 			var out bytes.Buffer
 			args := []string{"hook-post", "--api-addr", listener.Addr().String(), "--max-time", "5", "--curl-output"}
 			if got := runMain(args, bytes.NewReader(frame), &out, io.Discard); got != tc.want || out.Len() != 0 {
 				t.Fatalf("exit %d, stdout %q, want status %d and no text", got, out.String(), tc.want)
 			}
 		})
+	}
+}
+
+// A listener of this account that its record does not name is no gateway of
+// it: the helper refuses it as an unproven peer, whatever the call.
+func TestHookPostKeepsAnUnrecordedListenerOfThisAccountRefused(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	other := exec.Command("sleep", "60")
+	if err := other.Start(); err != nil {
+		t.Skipf("no second process: %v", err)
+	}
+	defer func() { _ = other.Process.Kill(); _ = other.Wait() }()
+	dataDir := t.TempDir()
+	recordGateway(t, dataDir, other.Process.Pid)
+	t.Setenv(hookPostDataDirEnv, dataDir)
+	for _, body := range []string{`{"hook_event_name":"PostToolBatch"}`, `{"hook_event_name":"PreToolUse","cwd":"/tmp","tool_name":"Bash","tool_input":{"command":"echo hi"}}`} {
+		frame := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00" + body + "\x00")
+		args := []string{"hook-post", "--api-addr", listener.Addr().String(), "--max-time", "5", "--curl-output"}
+		if got := runMain(args, bytes.NewReader(frame), io.Discard, io.Discard); got != hookexec.PerUserPostPeerUnverifiedExit {
+			t.Fatalf("exit %d for %s, want the unverified-peer status %d", got, body, hookexec.PerUserPostPeerUnverifiedExit)
+		}
 	}
 }
