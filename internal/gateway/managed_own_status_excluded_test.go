@@ -160,3 +160,44 @@ func TestOwnStatusWindowsExcludedAccountIsExcludedOnEveryRow(t *testing.T) {
 		})
 	}
 }
+
+// Windows enrollment also matches the profile folder name, and a qualified
+// entry selects one domain (windowsProfileEnrollmentDecision): status says
+// excluded exactly when the enumerator removed the account, and enrolled
+// otherwise.
+func TestOwnStatusWindowsExclusionFollowsTheEnumeratorSpellings(t *testing.T) {
+	const alice = "S-1-5-21-1004336348-1177238915-682003330-1001"
+	restoreHome := userScopedIdentityHome
+	t.Cleanup(func() { userScopedIdentityHome = restoreHome })
+	userScopedIdentityHome = func(id string) string {
+		if id == alice {
+			return `C:\Users\alice.CONTOSO`
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		name     string
+		exclude  string
+		excluded bool
+	}{
+		{"profile folder name", "Alice.contoso", true},
+		{"domain and account", `contoso\ALICE`, true},
+		{"other domain, same short name", `OTHER\alice`, false},
+		{"profile folder of another account", "bob.CONTOSO", false},
+		{"bare account name", "alice", true},
+		{"folder stem with other suffix", "alice.OTHER", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := ownStatusExcludedFixture(t, []string{tc.exclude}, nil)
+			row := ownStatusRowFor(t, api, "sid", alice, `CONTOSO\alice`, "claudecode")
+			if got := row["state"] == "excluded"; got != tc.excluded {
+				t.Fatalf("exclude_users [%s]: row = %#v, excluded = %v, want %v", tc.exclude, row, got, tc.excluded)
+			}
+			if tc.excluded {
+				requireExcludedAnswer(t, api.ownStatusAnswer(context.Background(), "sid", alice, `CONTOSO\alice`))
+			} else if row["state"] != "protected" {
+				t.Fatalf("enrolled row = %#v, want protected", row)
+			}
+		})
+	}
+}
