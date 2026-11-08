@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"maps"
 	"os"
@@ -518,15 +519,31 @@ func OperandPath(name, cwd string) string {
 	return actionfacts.OperandPath(name, cwd)
 }
 
-// directoryHasLink reports an existing absolute directory whose path passes
-// through a link. A directory that does not exist, or a relative one, has no
-// link to read.
+func init() { actionfacts.SetOperandLinkProbe(directoryHasLink) }
+
+// directoryHasLink reports a directory whose path, or the longest existing
+// part of it, passes through a link. A directory that does not exist yet is
+// read through its existing parents (a command such as pushd has not entered
+// it); a path that cannot be read (no permission, not a folder) has no link
+// to read, as before.
 func directoryHasLink(dir string) bool {
 	if !filepath.IsAbs(dir) {
 		return false
 	}
-	real, err := pathEvalSymlinks(dir)
-	return err == nil && real != filepath.Clean(dir)
+	for current := filepath.Clean(dir); ; {
+		real, err := pathEvalSymlinks(current)
+		if err == nil {
+			return real != current
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
 }
 
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as
