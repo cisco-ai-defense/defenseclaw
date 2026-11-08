@@ -105,30 +105,40 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 	return in
 }
 
-// windowsEnterpriseCodexFolderLink is the link that sits on the path of the
-// Codex machine-policy folder, "" when none. A seam for tests.
-var windowsEnterpriseCodexFolderLink = func() string {
-	link, _ := enterprisehooks.WindowsCodexMachineFolderLink()
+// windowsEnterpriseVendorFolderLink is the link that sits on the path of the
+// machine-policy folder of a connector, "" when none. A seam for tests.
+var windowsEnterpriseVendorFolderLink = func(connectorName string) string {
+	link, _ := enterprisehooks.WindowsManagedConnectorFolderLink(connectorName)
 	return link
 }
 
-// noteWindowsEnterpriseCodexFolderLink names, for status and verify, a link at
-// the Codex machine-policy folder with the command that removes it. The hook
-// guardian never writes through the link, so it logs the refusal on every
-// retry and cannot recreate or repair the folder until an administrator
-// removes it (GAP-0856).
-func noteWindowsEnterpriseCodexFolderLink(result *enterprisestatus.Result) {
-	if _, configured := result.MachinePolicy["codex"]; !configured || windowsEnterpriseResultHasWarning(result, "codex_machine_folder_link") {
-		return
+// windowsEnterpriseLinkedConnectors are the connectors whose machine-policy
+// folder a link can keep, with the name used in the warning.
+var windowsEnterpriseLinkedConnectors = []struct{ connector, label, code string }{
+	{"codex", "Codex", "codex_machine_folder_link"},
+	{"cursor", "Cursor", "cursor_machine_folder_link"},
+	{"claudecode", "Claude Code", "claudecode_machine_folder_link"},
+}
+
+// noteWindowsEnterpriseVendorFolderLinks names, for status and verify, a link at
+// the machine-policy folder of Codex, Cursor or Claude Code with the command
+// that removes it. The hook guardian never writes through the link: it fails
+// the targets of that connector and cannot recreate or repair the folder until
+// an administrator removes it (GAP-0856, GAP-0879).
+func noteWindowsEnterpriseVendorFolderLinks(result *enterprisestatus.Result) {
+	for _, entry := range windowsEnterpriseLinkedConnectors {
+		if _, configured := result.MachinePolicy[entry.connector]; !configured || windowsEnterpriseResultHasWarning(result, entry.code) {
+			continue
+		}
+		link := windowsEnterpriseVendorFolderLink(entry.connector)
+		if link == "" {
+			continue
+		}
+		result.AddWarning(entry.code, fmt.Sprintf("a link or a non-folder sits at %s on the path of the %s machine-policy folder; "+
+			"DefenseClaw does not follow, change or remove it, so the hook guardian cannot recreate or repair the folder and %s is not protected until it is gone; "+
+			"as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target); the guardian then recreates the folder on its next pass",
+			link, entry.label, entry.label, link))
 	}
-	link := windowsEnterpriseCodexFolderLink()
-	if link == "" {
-		return
-	}
-	result.AddWarning("codex_machine_folder_link", fmt.Sprintf("a link or a non-folder sits at %s on the path of the Codex machine-policy folder; "+
-		"DefenseClaw does not follow, change or remove it, so the hook guardian cannot recreate or repair the folder and Codex is not protected until it is gone; "+
-		"as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target); the guardian then recreates the folder on its next pass",
-		link, link))
 }
 
 // readWindowsEnterpriseStatusV2Manifest lists the manifest's targets without
@@ -164,7 +174,7 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	publish := result.Action == "status" || result.Action == "verify"
 	if publish {
-		noteWindowsEnterpriseCodexFolderLink(result)
+		noteWindowsEnterpriseVendorFolderLinks(result)
 	}
 	in := windowsEnterpriseStatusV2Read()
 	applyWindowsEnterpriseCoworkStatus(result, in.cfg)

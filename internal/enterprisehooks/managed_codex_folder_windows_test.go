@@ -226,7 +226,7 @@ func TestEnsureWindowsStandaloneCodexMachineFolderNamesAnUntrustedExistingFolder
 
 // The status path asks for the link without the standalone profile in its
 // process environment, and the question names nothing and creates nothing.
-func TestWindowsCodexMachineFolderLinkFindsALinkWithoutNamingIt(t *testing.T) {
+func TestWindowsManagedConnectorFolderLinkFindsALinkWithoutNamingIt(t *testing.T) {
 	for _, shape := range []string{"link at the folder", "link at the vendor parent", "plain folder", "nothing there"} {
 		t.Run(shape, func(t *testing.T) {
 			f := useKeptFixture(t, false, func(fixture keptFixture) []string {
@@ -250,7 +250,7 @@ func TestWindowsCodexMachineFolderLinkFindsALinkWithoutNamingIt(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, err := WindowsCodexMachineFolderLink()
+			got, err := WindowsManagedConnectorFolderLink("codex")
 			if err != nil || got != want {
 				t.Fatalf("link = %q (err %v), want %q", got, err, want)
 			}
