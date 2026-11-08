@@ -1214,7 +1214,7 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
 
         native = _claude_per_user_native_registration(cfg)
 
-    written = _hermes_written_command(cfg) if connector == "hermes" and strict else None
+    written = _hermes_written_command(cfg, connector)
 
     def owns(handler: Any) -> bool:
         if native is not None:
@@ -1265,8 +1265,8 @@ def hermes_approved_pairs(document: Any) -> set[tuple[str, str]]:
     }
 
 
-def _hermes_written_command(cfg: Any) -> Callable[[str], bool]:
-    """Whether a Hermes hook command is one DefenseClaw wrote, so the tool-guard and approval checks apply to it.
+def _hermes_written_command(cfg: Any, connector: str) -> Callable[[str], bool] | None:
+    """Whether a Hermes hook command is one DefenseClaw wrote, so the registration checks apply to it.
 
     Setup, repair and teardown own a Hermes hook entry only by identity
     (hermesHookEntryOwned in internal/gateway/connector/hook_only.go): the
@@ -1276,11 +1276,16 @@ def _hermes_written_command(cfg: Any) -> Callable[[str], bool]:
     checks used the wider "runs a DefenseClaw hook" test, so they failed a
     registration Setup had just written because of an entry Setup keeps by
     design, and repair rolled back (GAP-0873). A registration whose only
-    entry is such a command is reported as unguarded instead. Only per-user
-    Unix installs know the exact command; the Windows and managed
-    registrations stay as they were.
+    entry is such a command is reported as unguarded instead. Every check that
+    reads Hermes commands applies this one test (the tool-guard and approval
+    checks, the commands the shell can run, the edited-entry check), so no
+    check judges an entry that another spares. Only per-user Unix installs
+    know the exact command; it returns None where every command is judged
+    (another connector, Windows, managed).
     """
 
+    if connector != "hermes" or not _tool_inspection_strict(cfg):
+        return None
     data_dir = str(getattr(cfg, "data_dir", "") or "")
     current = {
         os.path.join(os.path.normpath(root), "hooks", HOOK_SCRIPT_NAMES["hermes"])
@@ -1288,10 +1293,14 @@ def _hermes_written_command(cfg: Any) -> Callable[[str], bool]:
     }
 
     def written(command: str) -> bool:
+        if command in current:
+            return True
         split = _split_hook_command(command)
         if split is not None and split[0] in current and not split[1]:
             return True
-        return bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
+        # The edited-path matchers trim blanks, which would claim a command
+        # Setup did not write: a command with a blank at either end belongs to the user.
+        return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
 
     return written
 
@@ -2010,6 +2019,7 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
     if os.name == "nt":
         return []
     hooks_dir = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks")
+    written = _hermes_written_command(cfg, connector)
     for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
@@ -2018,7 +2028,7 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
         except (OSError, ValueError):
             continue
         for command in _hook_command_strings(document):
-            if hooks_dir + os.sep not in command:
+            if hooks_dir + os.sep not in command or (written is not None and not written(command)):
                 continue
             try:
                 tokens = shlex.split(command)
@@ -2404,6 +2414,7 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     # through a wrapper or from another data directory. An unedited entry of
     # another data directory is not reported here.
     owner = os.path.dirname(data_dir).rstrip("/") + "/"
+    written = _hermes_written_command(cfg, connector)
     for path in _hook_config_paths(cfg, connector):
         try:
             if not path.is_file() or path.stat().st_size > _CONFIG_LIMIT:
@@ -2421,6 +2432,8 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
                 return [_independent_handler_problem(connector, path, repr(runs.strip()), current)]
             return unguarded or [_edited_hook_problem(connector, path, repr(runs.strip()), current)]
         for command in _hook_command_strings(document):
+            if written is not None and not written(command):
+                continue
             word = edited_hook_script(command, script_name)
             first = (_split_hook_command(command.strip()) or ("",))[0]
             if word and first != current and (first.startswith(owner) or copied_hook_script(command, script_name)):
