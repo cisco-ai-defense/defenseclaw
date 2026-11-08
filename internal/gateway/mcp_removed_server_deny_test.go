@@ -312,7 +312,7 @@ func TestResolvedMCPDefinitionMemoryExpiresAndIsBounded(t *testing.T) {
 	var memory mcpResolvedDefinitions
 	now := time.Now()
 	entry := config.MCPServerEntry{Name: "notes", URL: removedDeniedURL}
-	memory.remember("claudecode", "/home/a", "s1", "/work", "notes", entry, false, now)
+	memory.remember("claudecode", "/home/a", "s1", "/work", "notes", entry, false, mcpOneDefinition, now)
 	if got, ok := memory.recall("claudecode", "/home/a", "s1", "/work", "notes", now.Add(mcpResolvedTTL-time.Minute)); !ok || got.URL != removedDeniedURL {
 		t.Fatalf("recall within the TTL = %+v, %v", got, ok)
 	}
@@ -322,14 +322,14 @@ func TestResolvedMCPDefinitionMemoryExpiresAndIsBounded(t *testing.T) {
 	if _, ok := memory.recall("codex", "/home/a", "s1", "/work", "notes", now); ok {
 		t.Fatal("a definition was recalled for another connector")
 	}
-	memory.remember("claudecode", "/home/a", "s1", "/work", "notes", entry, false, now)
+	memory.remember("claudecode", "/home/a", "s1", "/work", "notes", entry, false, mcpOneDefinition, now)
 	if _, ok := memory.recall("claudecode", "/home/a", "s2", "/work", "notes", now); ok {
 		t.Fatal("a definition was recalled for another session")
 	}
 	for i := 0; i < mcpResolvedPerHome+10; i++ {
-		memory.remember("claudecode", "/home/flood", "s1", "/work", fmt.Sprintf("made-up-%d", i), entry, false, now)
+		memory.remember("claudecode", "/home/flood", "s1", "/work", fmt.Sprintf("made-up-%d", i), entry, false, mcpOneDefinition, now)
 	}
-	memory.remember("claudecode", "/home/b", "s1", "/work", "notes", entry, false, now)
+	memory.remember("claudecode", "/home/b", "s1", "/work", "notes", entry, false, mcpOneDefinition, now)
 	if _, ok := memory.recall("claudecode", "/home/b", "s1", "/work", "notes", now); !ok {
 		t.Fatal("one account filling its share pushed out another account")
 	}
@@ -338,10 +338,10 @@ func TestResolvedMCPDefinitionMemoryExpiresAndIsBounded(t *testing.T) {
 	}
 	// A denied definition has room of its own, and a later benign one does
 	// not replace it.
-	if !memory.remember("claudecode", "/home/flood", "s1", "/work", "wiki", entry, true, now) {
+	if !memory.remember("claudecode", "/home/flood", "s1", "/work", "wiki", entry, true, mcpOneDefinition, now) {
 		t.Fatal("a denied definition was refused room because ordinary ones filled the memory")
 	}
-	memory.remember("claudecode", "/home/flood", "s1", "/work", "wiki", config.MCPServerEntry{Name: "wiki", URL: removedOtherURL}, false, now)
+	memory.remember("claudecode", "/home/flood", "s1", "/work", "wiki", config.MCPServerEntry{Name: "wiki", URL: removedOtherURL}, false, mcpOneDefinition, now)
 	if got, ok := memory.recall("claudecode", "/home/flood", "s1", "/work", "wiki", now); !ok || got.URL != removedDeniedURL {
 		t.Fatalf("a benign definition replaced the denied one: %+v, %v", got, ok)
 	}
@@ -476,14 +476,14 @@ func TestResolvedMCPMemoryHoldsLostDeniedDefinitionsPerSession(t *testing.T) {
 		return held
 	}
 	for i := 0; i < mcpResolvedDeniedPerHome; i++ {
-		if !memory.remember("claudecode", "/home/a", "s1", "/work", fmt.Sprintf("denied%d", i), entry, true, now) {
+		if !memory.remember("claudecode", "/home/a", "s1", "/work", fmt.Sprintf("denied%d", i), entry, true, mcpOneDefinition, now) {
 			t.Fatalf("denied definition %d refused below the limit", i)
 		}
 	}
 	if lost("claudecode", "/home/a", "s1", "/work", "one-too-many", now) {
 		t.Fatal("a session within the limit holds a lost definition")
 	}
-	if memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, now) {
+	if memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, mcpOneDefinition, now) {
 		t.Fatal("a denied definition past the limit was kept")
 	}
 	got, held, _ := memory.lostDenied("claudecode", "/home/a", "s1", "/work", "one-too-many", now)
@@ -491,7 +491,7 @@ func TestResolvedMCPMemoryHoldsLostDeniedDefinitionsPerSession(t *testing.T) {
 		t.Fatalf("lost denied definition not held whole: held=%v entry=%+v", held, got)
 	}
 	// The first one held for a name stays.
-	memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", config.MCPServerEntry{Name: "notes", URL: removedOtherURL}, true, now)
+	memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", config.MCPServerEntry{Name: "notes", URL: removedOtherURL}, true, mcpOneDefinition, now)
 	if got, _, _ := memory.lostDenied("claudecode", "/home/a", "s1", "/work", "one-too-many", now); got.URL != removedDeniedURL {
 		t.Fatalf("a later definition replaced the lost one: %+v", got)
 	}
@@ -507,7 +507,7 @@ func TestResolvedMCPMemoryHoldsLostDeniedDefinitionsPerSession(t *testing.T) {
 	if lost("claudecode", "/home/a", "s1", "/work", "one-too-many", now.Add(2*mcpResolvedTTL)) {
 		t.Fatal("the definition outlived the TTL")
 	}
-	memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, now)
+	memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, mcpOneDefinition, now)
 	memory.forgetSession("claudecode", "/home/a", "s1")
 	if lost("claudecode", "/home/a", "s1", "/work", "one-too-many", now) {
 		t.Fatal("a session that started again kept its lost definition")
@@ -525,10 +525,10 @@ func TestResolvedMCPMemoryLostDefinitionsAreExactPerSession(t *testing.T) {
 	memory.mu.Lock()
 	for i := 0; i < sessions; i++ {
 		session := fmt.Sprintf("flood%d", i)
-		memory.markLostLocked("claudecode", "/home/a", session, mcpResolvedKey("claudecode", "/home/a", session, "/work", "wiki"), entry, now)
+		memory.markLostLocked("claudecode", "/home/a", session, mcpResolvedKey("claudecode", "/home/a", session, "/work", "wiki"), entry, mcpOneDefinition, now)
 	}
 	for i := 0; i < 20000; i++ {
-		memory.markLostLocked("claudecode", "/home/a", "big", mcpResolvedKey("claudecode", "/home/a", "big", "/work", fmt.Sprintf("lost%d", i)), entry, now)
+		memory.markLostLocked("claudecode", "/home/a", "big", mcpResolvedKey("claudecode", "/home/a", "big", "/work", fmt.Sprintf("lost%d", i)), entry, mcpOneDefinition, now)
 	}
 	memory.mu.Unlock()
 	for i := 0; i < sessions; i++ {
@@ -562,12 +562,12 @@ func TestResolvedMCPMemoryMarksASessionThatCannotHoldMore(t *testing.T) {
 	entry := config.MCPServerEntry{Name: "wiki", URL: removedDeniedURL}
 	memory.mu.Lock()
 	for i := 0; i < mcpResolvedLostLimit; i++ {
-		memory.markLostLocked("claudecode", "/home/a", "full", mcpResolvedKey("claudecode", "/home/a", "full", "/work", fmt.Sprintf("lost%d", i)), entry, now)
+		memory.markLostLocked("claudecode", "/home/a", "full", mcpResolvedKey("claudecode", "/home/a", "full", "/work", fmt.Sprintf("lost%d", i)), entry, mcpOneDefinition, now)
 	}
 	if memory.lostCountLocked() != mcpResolvedLostLimit {
 		t.Fatalf("%d definitions held, want %d", memory.lostCountLocked(), mcpResolvedLostLimit)
 	}
-	memory.markLostLocked("claudecode", "/home/a", "late", mcpResolvedKey("claudecode", "/home/a", "late", "/work", "wiki"), entry, now)
+	memory.markLostLocked("claudecode", "/home/a", "late", mcpResolvedKey("claudecode", "/home/a", "late", "/work", "wiki"), entry, mcpOneDefinition, now)
 	memory.mu.Unlock()
 	if _, held, over := memory.lostDenied("claudecode", "/home/a", "late", "/work", "wiki", now); held || !over {
 		t.Fatalf("late: held=%v overflow=%v, want a session mark", held, over)
@@ -820,9 +820,9 @@ func TestRestartedSessionDropsItsLostDeniedRecordAmongManySessions(t *testing.T)
 	api.mcpResolved.mu.Lock()
 	for i := 0; i < 2*mcpResolvedDeniedPerHome; i++ {
 		session := fmt.Sprintf("flood%d", i)
-		api.mcpResolved.markLostLocked("claudecode", home, session, mcpResolvedKey("claudecode", home, session, project, "lost"), entry, time.Now())
+		api.mcpResolved.markLostLocked("claudecode", home, session, mcpResolvedKey("claudecode", home, session, project, "lost"), entry, mcpOneDefinition, time.Now())
 	}
-	api.mcpResolved.markLostLocked("claudecode", home, "s1", mcpResolvedKey("claudecode", home, "s1", project, "wiki"), entry, time.Now())
+	api.mcpResolved.markLostLocked("claudecode", home, "s1", mcpResolvedKey("claudecode", home, "s1", project, "wiki"), entry, mcpOneDefinition, time.Now())
 	api.mcpResolved.mu.Unlock()
 	writeClaudeServers(t, home, project, `{"wiki":{"type":"http","url":"`+removedOtherURL+`"}}`)
 	decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
