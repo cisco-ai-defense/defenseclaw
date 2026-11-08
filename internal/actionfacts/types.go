@@ -101,6 +101,12 @@ type Input struct {
 	// file is judged as a write of that file. ActionFacts copies nothing from
 	// it into Facts and never derives it from action input.
 	ClientResolvedTargets map[string]string `json:"-"`
+	// ClientWorkingDirectories is trusted caller context: the spellings of
+	// the working directory the hook client keyed its path answers in, when
+	// they differ from CWD (the gateway resolves a project reached through a
+	// link, the client keys by the name it was given). ActionFacts never
+	// derives it from action input.
+	ClientWorkingDirectories []string `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-

@@ -23,6 +23,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -201,6 +202,30 @@ func clientResolvedPathTargets(targets map[string]string) map[string]string {
 		paths[spelling] = physical
 	}
 	return paths
+}
+
+// clientWorkingDirectories keeps the directory spellings the hook client keyed
+// its path answers in (hookpaths.DirectoryFactPrefix, the physical directory
+// as value) that name the directory the gateway judges in, cwd. The gateway
+// resolves a project reached through a link, the client keys a relative
+// operand by the name it was given, so the lookup asks both
+// (actionfacts.Input.ClientWorkingDirectories). With no absolute cwd the
+// gateway has nothing to compare and keeps every directory the client names.
+func clientWorkingDirectories(targets map[string]string, cwd string) []string {
+	var dirs []string
+	cwd = filepath.Clean(cwd)
+	for key, physical := range targets {
+		logical, ok := strings.CutPrefix(key, hookpaths.DirectoryFactPrefix)
+		if !ok || !filepath.IsAbs(logical) || !filepath.IsAbs(physical) {
+			continue
+		}
+		if filepath.IsAbs(cwd) && filepath.Clean(logical) != cwd && filepath.Clean(physical) != cwd {
+			continue
+		}
+		dirs = append(dirs, filepath.Clean(logical))
+	}
+	sort.Strings(dirs)
+	return dirs
 }
 
 // activeStateTreeHasNameFor is activeStateTreeHasName with the hook

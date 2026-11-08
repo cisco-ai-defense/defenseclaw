@@ -76,3 +76,28 @@ func TestNativeFileWriteThroughALinkElsewhereStaysUnproven(t *testing.T) {
 		})
 	}
 }
+
+// TestNativeFileWriteFromAProjectTheClientKeyedByAnotherNameIsProven: the
+// gateway resolves a project reached through a link, the client keys a
+// relative operand by the name it was given; the answer is found by either.
+func TestNativeFileWriteFromAProjectTheClientKeyedByAnotherNameIsProven(t *testing.T) {
+	linksEtcForTest(t, true)
+	for _, operand := range []string{"grant-link", "./grant-link"} {
+		args := nativeSudoersArgs(t, map[string]any{"file_path": operand, "content": nativeSudoersGrant})
+		input := Input{Tool: "Write", Args: args, CWD: "/work/proj",
+			ClientWorkingDirectories: []string{"/work/alias"},
+			ClientResolvedTargets:    map[string]string{"/work/alias/grant-link": "/etc/sudoers"}}
+		if !ExactPOSIXUnrestrictedSudoersGrantWrite(Analyze(input)) {
+			t.Errorf("%s: missing grant proof for the directory spelling the client used", operand)
+		}
+		input.ClientWorkingDirectories = nil
+		if ExactPOSIXUnrestrictedSudoersGrantWrite(Analyze(input)) {
+			t.Errorf("%s: a client answer keyed in a directory the gateway was not told is not read", operand)
+		}
+		input.ClientWorkingDirectories = []string{"/work/alias"}
+		input.ClientResolvedTargets = map[string]string{"/work/alias/grant-link": "/work/notes.txt"}
+		if ExactPOSIXUnrestrictedSudoersGrantWrite(Analyze(input)) {
+			t.Errorf("%s: a link to an ordinary file is not a grant target", operand)
+		}
+	}
+}
