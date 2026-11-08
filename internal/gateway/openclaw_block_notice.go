@@ -42,7 +42,9 @@ import (
 // letters and digits are kept and the id is cut to 40 characters, so
 // "toolu_bdrk_01ab" comes back as "toolubdrk01ab". The result is tied to the
 // block when its id is that replay form of the recorded id, and two calls whose
-// ids have one replay form are ambiguous (see replayToolCallID). A new id for a
+// ids have one replay form are ambiguous to those adapters (see
+// replayToolCallID); a Responses or Gemini result carries the id as recorded, so
+// it neither matches the replay form nor is made ambiguous by it. A new id for a
 // repeated id matches nothing and the notice waits until it expires: the line
 // is UX only, so when the tie is unknown nothing is shown. A Responses id is "<call id>|<item id>" and the result carries the
 // call id alone; OpenClaw drops the item id from the replayed call unless it
@@ -100,17 +102,24 @@ type openClawBlockNotice struct {
 	session string
 	line    string
 	at      time.Time
-	// ambiguous is set when any other inspected call used the same call id:
+	// ambiguous is set when any other inspected call used the same call key:
 	// no result can be told apart, so the notice is consumed by the first
 	// result that claims it and shows nothing.
 	ambiguous bool
+	// replayAmbiguous is set when another inspected call has a different id
+	// with the same replay form (replayToolCallID). Only a result of an
+	// adapter that replays ids in that form cannot tell the two apart; a
+	// Responses result carries the id as OpenClaw recorded it.
+	replayAmbiguous bool
 }
 
 // openClawSeenCall is one tool call the inspect endpoint saw, kept only to
-// tell that a call id was used twice. key is the call key of its id.
+// tell that a call id was used twice. key is the call key of its id and replay
+// is the replay form of the whole id.
 type openClawSeenCall struct {
-	key string
-	at  time.Time
+	key    string
+	replay string
+	at     time.Time
 }
 
 // noticeCallKey is the part of a call id that names the call. OpenClaw names a
@@ -146,13 +155,6 @@ func replayToolCallID(id string) string {
 		b = b[:40]
 	}
 	return string(b)
-}
-
-// noticeSeenKey is the key under which the inspect side remembers a call: the
-// call part of its id in replay form, so two calls that no result can tell
-// apart (the same id, or ids with one replay form) share a key.
-func noticeSeenKey(id string) string {
-	return replayToolCallID(noticeCallKey(id))
 }
 
 var openClawBlockNotices struct {
@@ -229,16 +231,21 @@ func recordOpenClawToolCall(callID, session string, blockLine *string) {
 	defer openClawBlockNotices.mu.Unlock()
 	now := openClawToolOutcomeNow()
 	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, now)
-	key := noticeSeenKey(callID)
+	// The inspect side does not know which adapter will carry the result, so it
+	// keeps both ties: calls with one call key, which every adapter confuses,
+	// and calls with one replay form, which only the adapters that replay ids
+	// in that form confuse.
+	key, replay := noticeCallKey(callID), replayToolCallID(callID)
 	seen := openClawBlockNotices.seen[:0]
-	used := false
+	used, usedReplay := false, false
 	for _, c := range openClawBlockNotices.seen {
 		if now.Sub(c.at) < openClawSeenCallTTL {
 			used = used || c.key == key
+			usedReplay = usedReplay || (c.key != key && c.replay == replay)
 			seen = append(seen, c)
 		}
 	}
-	seen = append(seen, openClawSeenCall{key: key, at: now})
+	seen = append(seen, openClawSeenCall{key: key, replay: replay, at: now})
 	if n := len(seen); n > openClawSeenCallCap {
 		seen = seen[n-openClawSeenCallCap:]
 	}
@@ -246,15 +253,18 @@ func recordOpenClawToolCall(callID, session string, blockLine *string) {
 
 	recorded := false
 	for i := range entries {
-		if noticeSeenKey(entries[i].callID) == key {
+		switch {
+		case noticeCallKey(entries[i].callID) == key:
 			entries[i].ambiguous = true
 			recorded = recorded || entries[i].session == session
+		case replayToolCallID(entries[i].callID) == replay:
+			entries[i].replayAmbiguous = true
 		}
 	}
 	// A second block of one call key and session adds no entry: the first is
 	// already ambiguous and the pair is consumed by one result.
 	if blockLine != nil && !recorded {
-		entries = append(entries, openClawBlockNotice{callID: callID, session: session, line: *blockLine, at: now, ambiguous: used})
+		entries = append(entries, openClawBlockNotice{callID: callID, session: session, line: *blockLine, at: now, ambiguous: used, replayAmbiguous: usedReplay})
 	}
 	openClawBlockNotices.entries = entries
 	capOpenClawBlockNotices()
@@ -308,6 +318,9 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	defer openClawBlockNotices.mu.Unlock()
 	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
 	claimed := make([]bool, len(entries))
+	// replayed marks a claim made by a result of an adapter that replays ids in
+	// the strict form, which cannot tell calls of one replay form apart.
+	replayed := make([]bool, len(entries))
 	// dropped marks a block of the request session whose call part this
 	// request carries in several items, so its result cannot be told apart.
 	// The notice is consumed with nothing shown, so a later replay of the same
@@ -334,13 +347,14 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 		}
 		if count == 1 {
 			claimed[claim] = true
+			replayed[claim] = replayed[claim] || r.replays
 		}
 	}
 	var taken []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(entries))
 	for i, e := range entries {
 		switch {
-		case claimed[i] && !e.ambiguous:
+		case claimed[i] && !e.ambiguous && !(replayed[i] && e.replayAmbiguous):
 			taken = append(taken, e)
 		case claimed[i] || dropped[i]:
 		default:
