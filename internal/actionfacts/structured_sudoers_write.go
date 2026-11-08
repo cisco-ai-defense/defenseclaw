@@ -4,11 +4,13 @@
 package actionfacts
 
 import (
+	"path"
 	"strings"
 )
 
-// POSIXUnrestrictedSudoersGrantWriteFact is a value-free proof of one exact,
-// closed-schema write containing a literal unrestricted passwordless grant.
+// POSIXUnrestrictedSudoersGrantWriteFact is a value-free proof that one native
+// file-tool call puts a literal unrestricted passwordless grant into the main
+// sudoers file or a direct drop-in of /etc/sudoers.d.
 type POSIXUnrestrictedSudoersGrantWriteFact struct{}
 
 var exactUnrestrictedSudoersGrantLine = lazyMustCompile(
@@ -22,45 +24,117 @@ func ExactPOSIXUnrestrictedSudoersGrantWrite(facts Facts) bool {
 		len(facts.POSIXUnrestrictedSudoersGrantWrites) == 1
 }
 
+// projectPOSIXUnrestrictedSudoersGrantWrites reads the text a native file tool
+// writes however that tool names its arguments (nativeFileWrites), so a grant
+// is one fact for every connector write, edit, multi-edit and patch call, not
+// only for one argument spelling. The text of a file tool is literal: no shell
+// expands it, so a template-looking character elsewhere in the file cannot
+// hide a grant line.
 func projectPOSIXUnrestrictedSudoersGrantWrites(
 	input Input,
 ) []POSIXUnrestrictedSudoersGrantWriteFact {
-	if input.Command != "" || len(input.Argv) != 0 ||
-		!exactStructuredWriteTool(input.Tool) {
+	if input.Command != "" || len(input.Argv) != 0 || !mayNameSudoers(input.Args) {
 		return nil
 	}
-	object, problem := exactJSONObject(input.Args)
-	if problem.status != "" || len(object) != 2 {
-		return nil
-	}
-	for key := range object {
-		if key != "path" && key != "content" {
-			return nil
-		}
-	}
-	target, targetOK := object["path"].(string)
-	content, contentOK := object["content"].(string)
-	if !targetOK || !contentOK || !exactSudoersWriteTarget(target) ||
-		content == "" || len(content) > maxCommandBytes ||
-		strings.ContainsAny(content, "\x00\r") || containsUnresolvedPasswdTemplate(content) {
-		return nil
-	}
-	for _, line := range strings.Split(strings.TrimSuffix(content, "\n"), "\n") {
-		if exactUnrestrictedSudoersGrantLine.MatchString(line) &&
-			!strings.HasPrefix(line, "root ") {
+	for _, write := range nativeFileWrites(input.Tool, input.Args) {
+		if sudoersWriteTargetInCWD(write.target, input.CWD) &&
+			addsUnrestrictedSudoersGrant(write.added, write.replaced) {
 			return []POSIXUnrestrictedSudoersGrantWriteFact{{}}
 		}
 	}
 	return nil
 }
 
+// mayNameSudoers is the cheap test that keeps an ordinary file-tool call from
+// being decoded a second time: a target of the sudoers files holds the word
+// sudoers in some letter case, or a \\u escape that could spell a letter of it.
+func mayNameSudoers(args []byte) bool {
+	const word = "sudoers"
+	for i := 0; i < len(args); i++ {
+		if args[i] == '\\' && i+1 < len(args) && args[i+1] == 'u' {
+			return true
+		}
+		if i+len(word) > len(args) {
+			continue
+		}
+		match := true
+		for j := 0; j < len(word); j++ {
+			if args[i+j]|0x20 != word[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+// addsUnrestrictedSudoersGrant reports whether added holds an unrestricted
+// grant line that replaced does not already hold: an edit that keeps a grant
+// the file had, or removes one, adds none.
+func addsUnrestrictedSudoersGrant(added, replaced string) bool {
+	if len(added) > maxCommandBytes || len(replaced) > maxCommandBytes {
+		return false
+	}
+	had := map[string]int{}
+	for _, line := range unrestrictedSudoersGrantLines(replaced) {
+		had[line]++
+	}
+	for _, line := range unrestrictedSudoersGrantLines(added) {
+		if had[line] == 0 {
+			return true
+		}
+		had[line]--
+	}
+	return false
+}
+
+func unrestrictedSudoersGrantLines(text string) []string {
+	if text == "" || strings.ContainsRune(text, 0) {
+		return nil
+	}
+	var grants []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimLeft(strings.TrimSuffix(line, "\r"), "\t ")
+		if exactUnrestrictedSudoersGrantLine.MatchString(line) &&
+			!strings.HasPrefix(line, "root ") {
+			grants = append(grants, line)
+		}
+	}
+	return grants
+}
+
+// sudoersWriteTargetInCWD resolves a relative target against the absolute
+// POSIX working directory of the call, as the tool does, and reports whether
+// the file is a sudoers write target.
+func sudoersWriteTargetInCWD(target, cwd string) bool {
+	if target == "" || len(target) > maxScalarBytes || strings.ContainsRune(target, 0) {
+		return false
+	}
+	if !strings.HasPrefix(target, "/") {
+		if !strings.HasPrefix(cwd, "/") {
+			return false
+		}
+		target = cwd + "/" + target
+	}
+	return exactSudoersWriteTarget(target)
+}
+
+// exactSudoersWriteTarget reports /etc/sudoers and each direct child of
+// /etc/sudoers.d, in any letter case (macOS volumes fold case), after lexical
+// cleaning and with the macOS physical /private/etc spelling. A path nested
+// below the drop-in directory is not read by sudo and is not a target.
 func exactSudoersWriteTarget(value string) bool {
-	value = EtcSpelling(value)
+	if !strings.HasPrefix(value, "/") {
+		return false
+	}
+	value = EtcSpelling(path.Clean(strings.ToLower(value)))
 	if value == "/etc/sudoers" {
 		return true
 	}
 	const prefix = "/etc/sudoers.d/"
 	child := strings.TrimPrefix(value, prefix)
-	return child != value && child != "" &&
-		!strings.Contains(child, "/") && child != "." && child != ".."
+	return child != value && child != "" && !strings.Contains(child, "/")
 }
