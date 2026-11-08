@@ -99,18 +99,26 @@ func TestListenersHeldOnlyByTheRecordedGateway(t *testing.T) {
 		held  []int
 		other bool
 		want  bool
+		// shared lists the inodes a second process of the account also holds;
+		// hidden adds a process whose descriptor list is permission-denied.
+		shared []int
+		hidden bool
 	}{
-		{"loopback listener of the gateway", []string{listen(loop, 11)}, nil, []int{11}, false, true},
-		{"wildcard listener of the gateway", []string{listen(anyV4, 11)}, nil, []int{11}, false, true},
-		{"dual-stack listener of the gateway", nil, []string{listen(anyV6, 11)}, []int{11}, false, true},
-		{"mapped listener of the gateway", nil, []string{listen(mapped, 11)}, []int{11}, false, true},
-		{"loopback and wildcard both of the gateway", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, true},
-		{"listener of another process of the account", []string{listen(loop, 11)}, nil, []int{99}, false, false},
-		{"gateway holds one, another process the other", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11}, false, false},
-		{"no listener", nil, nil, []int{11}, false, false},
-		{"listener on another port", []string{"0: 0100007F:1234 00000000:0000 0A 0 0 0 1000 0 11"}, nil, []int{11}, false, false},
-		{"an established row is not a listener", []string{"0: 0100007F:4A1A 0100007F:CB20 01 0 0 0 1000 0 11"}, nil, []int{11}, false, false},
-		{"descriptors of the process unreadable", []string{listen(loop, 11)}, nil, nil, true, false},
+		{"loopback listener of the gateway", []string{listen(loop, 11)}, nil, []int{11}, false, true, nil, false},
+		{"wildcard listener of the gateway", []string{listen(anyV4, 11)}, nil, []int{11}, false, true, nil, false},
+		{"dual-stack listener of the gateway", nil, []string{listen(anyV6, 11)}, []int{11}, false, true, nil, false},
+		{"mapped listener of the gateway", nil, []string{listen(mapped, 11)}, []int{11}, false, true, nil, false},
+		{"loopback and wildcard both of the gateway", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, true, nil, false},
+		{"listener of another process of the account", []string{listen(loop, 11)}, nil, []int{99}, false, false, nil, false},
+		{"gateway holds one, another process the other", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11}, false, false, nil, false},
+		{"no listener", nil, nil, []int{11}, false, false, nil, false},
+		{"listener on another port", []string{"0: 0100007F:1234 00000000:0000 0A 0 0 0 1000 0 11"}, nil, []int{11}, false, false, nil, false},
+		{"an established row is not a listener", []string{"0: 0100007F:4A1A 0100007F:CB20 01 0 0 0 1000 0 11"}, nil, []int{11}, false, false, nil, false},
+		{"descriptors of the process unreadable", []string{listen(loop, 11)}, nil, nil, true, false, nil, false},
+		{"another process of the account also holds the listener", []string{listen(loop, 11)}, nil, []int{11}, false, false, []int{11}, false},
+		{"another process holds only the wildcard listener", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, false, []int{12}, false},
+		{"another process holds an unrelated socket", []string{listen(loop, 11)}, nil, []int{11}, false, true, []int{77}, false},
+		{"a process of the account the kernel will not let us read, like an sshd child", []string{listen(loop, 11)}, nil, []int{11}, false, true, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			procRoot := t.TempDir()
@@ -125,10 +133,40 @@ func TestListenersHeldOnlyByTheRecordedGateway(t *testing.T) {
 					}
 				}
 			}
+			if len(tc.shared) != 0 {
+				writeHeldSockets(t, procRoot, 5151, tc.shared)
+			}
+			if tc.hidden {
+				if os.Geteuid() == 0 {
+					t.Skip("root reads every descriptor list")
+				}
+				hidden := filepath.Join(procRoot, "5252", "fd")
+				if err := os.MkdirAll(hidden, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(hidden, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(hidden, 0o755) })
+			}
 			if got := listenersHeldOnlyBy(procTables(t, tc.tcp, tc.tcp6), procRoot, gateway, server); got != tc.want {
 				t.Fatalf("listenersHeldOnlyBy = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// writeHeldSockets gives a fake process the socket descriptors inodes.
+func writeHeldSockets(t *testing.T, procRoot string, pid int, inodes []int) {
+	t.Helper()
+	fds := filepath.Join(procRoot, strconv.Itoa(pid), "fd")
+	if err := os.MkdirAll(fds, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i, inode := range inodes {
+		if err := os.Symlink(fmt.Sprintf("socket:[%d]", inode), filepath.Join(fds, strconv.Itoa(i+3))); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -314,5 +352,36 @@ func TestAnsweringGatewayStillAllowsTheCall(t *testing.T) {
 	reply, err := PostPerUserHook(ctx, addr, "/api/v1/claude-code/hook", nil, []byte("{}"))
 	if err != nil || reply.Status != http.StatusOK {
 		t.Fatalf("an answering gateway was refused: status=%d err=%v", reply.Status, err)
+	}
+}
+
+// A listener the recorded gateway shares with another process of the account
+// (a forked or inherited descriptor: the same socket, one accept queue) is not
+// the gateway's alone, so it stays refused as unverified in every fail mode.
+func TestSharedListenerOfTheRecordedGatewayStaysUnverified(t *testing.T) {
+	shortConnectedWait(t, 150*time.Millisecond)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	file, err := listener.(*net.TCPListener).File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	cmd := exec.Command("sleep", "60")
+	cmd.ExtraFiles = []*os.File{file}
+	if err := cmd.Start(); err != nil {
+		t.Skipf("no second process: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	ctx := WithPerUserGatewayDataDir(context.Background(), recordGateway(t, os.Getpid(), nil))
+	_, err = PostPerUserHook(ctx, listener.Addr().String(), "/api/v1/claude-code/hook", nil, []byte("{}"))
+	if err == nil {
+		t.Fatal("a listener that accepts nothing answered")
+	}
+	if PerUserPostListenerUnanswered(err) || !PerUserPostPeerUnverified(err) {
+		t.Fatalf("a listener shared with another process was not refused as unverified: %v", err)
 	}
 }
