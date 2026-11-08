@@ -77,13 +77,17 @@ func TestSourcedScriptBehindTooManyLinksIsJudgedByTheTier(t *testing.T) {
 	}
 }
 
+// linksEveryOSOpens is the links one path may cross on every supported
+// system (Linux stops at 40, Windows at 63).
+const linksEveryOSOpens = 40
+
 // gatewayLinkChain makes n links, the first named by the returned path, each
 // pointing at the next and the last at target. The links are made from the
 // last to the first so each target exists when its link is made: Windows
 // makes a link to a folder a folder link only if the folder is there, and a
 // file link to a folder cannot be opened as one, so a chain made from the
-// first to the last is a chain no read can go through. A chain that does not
-// open fails the test, never skips it.
+// first to the last is a chain no read can go through. A chain of up to
+// linksEveryOSOpens links that does not open fails the test, never skips it.
 func gatewayLinkChain(t *testing.T, n int, target string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -97,7 +101,7 @@ func gatewayLinkChain(t *testing.T, n int, target string) string {
 			t.Skipf("symlink unavailable: %v", err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(name(1), "safe.sh")); err != nil {
+	if _, err := os.Stat(filepath.Join(name(1), "safe.sh")); n <= linksEveryOSOpens && err != nil {
 		t.Fatalf("a chain of %d links to %s does not open: %v", n, target, err)
 	}
 	return name(1)
