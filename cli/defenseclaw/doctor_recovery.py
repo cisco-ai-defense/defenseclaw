@@ -42,13 +42,12 @@ from pathlib import Path
 
 _DEVICE_PROVENANCE_PREFIX = b"defenseclaw-device-provenance-v1:"
 _DEVICE_PROVENANCE_SECRET = "device.provenance.secret"
-# Written first and removed last by apply_device_key_recovery. The key is
-# published after every other artifact, so an interrupted creation leaves the
-# marker with no key. Its content is a MAC under the secret the same creation
-# publishes next, so a marker that was only dropped into the home, or that
-# belongs to other files, does not pass for that proof.
-_DEVICE_IDENTITY_PENDING = "device.identity.creating"
-_PENDING_MARKER_PREFIX = b"defenseclaw-device-identity-creating-v1:"
+# The exact shapes apply_device_key_recovery writes (see
+# set_aside_abandoned_identity).
+_DEVICE_KEY_HEAD = b"-----BEGIN ED25519 PRIVATE KEY-----\n"
+_DEVICE_KEY_TAIL = b"\n-----END ED25519 PRIVATE KEY-----\n"
+_BASE64_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+_HEX_BYTES = frozenset(b"0123456789abcdef")
 _AUDIT_REQUIRED_TABLES = frozenset({"audit_events", "scan_results", "findings"})
 # PRAGMA quick_check(N) still walks the whole file; N is only the error limit.
 # Bound the walk by time rather than by file size: a few hundred MiB finish in
@@ -455,7 +454,6 @@ def plan_missing_device_key(
         markers = (
             normalized_target + ".provenance",
             os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET),
-            os.path.join(normalized_data, _DEVICE_IDENTITY_PENDING),
             *continuity_paths,
         )
     else:
@@ -478,10 +476,9 @@ def _device_identity_artifact_alias_reason(target: str, data_dir: str) -> str | 
         return "windows-alternate-data-stream-path"
     secret_target = os.path.join(data_dir, _DEVICE_PROVENANCE_SECRET)
     provenance_target = target + ".provenance"
-    pending_target = os.path.join(data_dir, _DEVICE_IDENTITY_PENDING)
     normalized = tuple(
         _normalize_device_identity_path(candidate)
-        for candidate in (target, secret_target, provenance_target, pending_target)
+        for candidate in (target, secret_target, provenance_target)
     )
     if len(set(normalized)) != len(normalized):
         return "identity-artifact-alias"
@@ -608,13 +605,13 @@ def apply_device_key_recovery(
 ) -> RecoveryApplyResult:
     """Create a new Ed25519 identity and HMAC-bound provenance artifacts.
 
-    Device identity recovery is always attended.  The identity is published
-    all or nothing: a pending marker goes first (it also stops a second
-    creator), the provenance secret and HMAC sentinel follow, and the key goes
-    last, so no usable new identity exists before its provenance is durable.
-    A failure takes back what this call published.  A crash that cannot leaves
-    the marker, which proves the key never existed and lets the next init or
-    Doctor repair set the leftovers aside (set_aside_abandoned_identity).
+    Device identity recovery is always attended.  Publication order places the
+    provenance secret and HMAC sentinel before the key, so no usable new
+    identity exists before its provenance is durable.  A failure takes back
+    what this call published.  A crash, or a file that cannot be taken back,
+    leaves continuity evidence without a key, which the next plan blocks; only
+    a fresh home's init sets such leftovers aside
+    (set_aside_abandoned_identity).
     """
 
     _authorize_plan(plan, RecoveryKind.DEVICE_KEY, approved=approved, unattended=unattended)
@@ -623,7 +620,6 @@ def apply_device_key_recovery(
     target_parent = os.path.dirname(plan.target)
     provenance_target = plan.target + ".provenance"
     secret_target = os.path.join(plan.data_dir, _DEVICE_PROVENANCE_SECRET)
-    pending_target = os.path.join(plan.data_dir, _DEVICE_IDENTITY_PENDING)
     key_data = _new_device_key_pem()
     secret = os.urandom(32)
     digest = hmac.new(secret, key_data, hashlib.sha256).hexdigest().encode("ascii")
@@ -633,12 +629,6 @@ def apply_device_key_recovery(
     placed: list[tuple[str, str]] = []  # (label, path) this call created, in order
     failure = "device-key-create-failed"
     try:
-        pending_stage = _stage_private_bytes(
-            plan.data_dir,
-            ".doctor-device-identity-pending.",
-            _pending_marker_bytes(secret),
-        )
-        staged.append(pending_stage)
         secret_stage = _stage_private_bytes(plan.data_dir, ".doctor-device-provenance-secret.", secret)
         staged.append(secret_stage)
         key_stage = _stage_private_bytes(target_parent, ".doctor-device-key.", key_data)
@@ -652,7 +642,6 @@ def apply_device_key_recovery(
 
         _revalidate_plan(plan)
         for source, destination, label in (
-            (pending_stage, pending_target, "device-identity-pending"),
             (secret_stage, secret_target, "device-provenance-secret"),
             (provenance_stage, provenance_target, "device-provenance"),
             (key_stage, plan.target, "device-key"),
@@ -688,16 +677,12 @@ def apply_device_key_recovery(
             provenance_target,
             platform=plan.custody.platform,
         ):
-            # A marker that outlives the key would later pass for proof that
-            # a deleted key never existed, so a marker that cannot be taken
-            # away fails the creation (and rolls it back) instead.
-            if _discard_files([pending_target], attempts=5):
-                return RecoveryApplyResult(
-                    kind=RecoveryKind.DEVICE_KEY,
-                    status=RecoveryApplyStatus.CREATED,
-                    reason_code="device-key-created",
-                    created_artifacts=tuple(label for label, _path in placed[1:]),
-                )
+            return RecoveryApplyResult(
+                kind=RecoveryKind.DEVICE_KEY,
+                status=RecoveryApplyStatus.CREATED,
+                reason_code="device-key-created",
+                created_artifacts=tuple(label for label, _path in placed),
+            )
         else:
             failure = "device-key-postcondition-failed"
     except RecoveryRefusedError:
@@ -715,30 +700,21 @@ def apply_device_key_recovery(
         kind=RecoveryKind.DEVICE_KEY,
         status=RecoveryApplyStatus.FAILED,
         reason_code="device-key-recovery-incomplete" if left else failure,
-        created_artifacts=tuple(label for label, _path in left if label != "device-identity-pending"),
+        created_artifacts=tuple(label for label, _path in left),
     )
 
 
-def _discard_files(paths: list[str], *, attempts: int = 1) -> bool:
-    """Best-effort unlink; True when every path is gone afterwards.
-
-    More than one attempt rides out a scanner or indexer that briefly holds a
-    just-written file open on Windows.
-    """
+def _discard_files(paths: list[str]) -> bool:
+    """Best-effort unlink; True when every path is gone afterwards."""
 
     gone = True
     for path in paths:
-        for attempt in range(attempts):
-            try:
-                os.unlink(path)
-                break
-            except FileNotFoundError:
-                break
-            except OSError:
-                if attempt + 1 == attempts:
-                    gone = False
-                else:
-                    time.sleep(0.05 * (attempt + 1))
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            gone = False
     return gone
 
 
@@ -752,86 +728,64 @@ def set_aside_abandoned_identity(
 
     Returns the new names of the files it moved (empty when there is nothing
     to repair or the evidence is not provably an unfinished creation, in which
-    case the plan keeps refusing as before).  Provenance files with no key are
-    continuity evidence unless they are exactly what a creation writes and one
-    of these holds:
+    case the plan keeps refusing as before).  Keyless provenance files are
+    continuity evidence of an identity that may have existed, and whoever can
+    write the home can also write any marker inside it, so nothing stored in
+    the home authorizes setting them aside.  The only proof is that this init
+    found no config.yaml (``fresh_home``): no setup of this home ever finished,
+    so a creation that was cut short is the only way these files exist.  Even
+    then every file present must have exactly the shape a creation writes, or
+    a prefix of it (a write cut short, which Windows' CREATE_NEW publication
+    can leave), and be a regular private file.  A configured home stays with
+    the attended Doctor repair.
 
-    * the pending marker apply_device_key_recovery writes first is present and
-      authentic (a MAC under the leftover secret).  The key is published last,
-      so none ever existed.  A marker that is not authentic, or that sits
-      beside files that are not exactly what a creation writes, proves nothing.
-    * the home had no config.yaml when this init started (``fresh_home``).
-      This covers homes that an earlier build left half-created.
-
-    A pending marker with no other leftover is stale and is set aside: the
-    plan then sees the same home it would see without the marker.  Files are
-    renamed to a new ``*.orphaned-*`` name that did not exist, never deleted
-    and never over an earlier orphan.  A pending marker beside an existing key
-    is a creation that finished except for its cleanup: it is deleted, since
-    it would otherwise pass for proof later.
+    Files are renamed to a new ``*.orphaned-*`` name and never deleted, and
+    never over an earlier file.  A key cut short counts as such a leftover; a
+    complete key never does.
     """
 
     normalized_target, normalized_data = _normalize_device_identity_disk_paths(target, data_dir)
-    if not normalized_target or not normalized_data:
-        return []
-    pending = os.path.join(normalized_data, _DEVICE_IDENTITY_PENDING)
-    if os.path.lexists(normalized_target):
-        if os.path.lexists(pending):
-            _discard_files([pending], attempts=5)
+    if not fresh_home or not normalized_target or not normalized_data:
         return []
     secret = os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET)
     provenance = normalized_target + ".provenance"
-    evidence = [path for path in (secret, provenance) if os.path.lexists(path)]
-    has_pending = os.path.lexists(pending)
-    if not evidence and not has_pending:
+    leftovers = [path for path in (normalized_target, provenance, secret) if os.path.lexists(path)]
+    if not leftovers or not _is_unfinished_creation(normalized_target, provenance, secret):
         return []
-    if evidence:
-        if not _is_unfinished_creation_leftover(secret, provenance):
-            return []
-        if not (fresh_home or (has_pending and _is_authentic_pending_marker(pending, secret))):
-            return []
-    # The marker moves last: a crash half-way still leaves it as the proof.
-    leftovers = [*evidence, *([pending] if has_pending else [])]
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
-    moved: list[str] = []
-    for path in leftovers:
-        aside = _new_orphan_name(path, stamp)
-        os.replace(path, aside)
-        moved.append(aside)
-    return moved
+    return [_move_aside(path, stamp) for path in leftovers]
 
 
-def _new_orphan_name(path: str, stamp: str) -> str:
-    """A name beside *path* that does not exist, so a set-aside never replaces one."""
+def _move_aside(path: str, stamp: str) -> str:
+    """Rename *path* to a name that did not exist; a set-aside never replaces a file."""
 
     while True:
         aside = f"{path}.orphaned-{stamp}-{os.urandom(6).hex()}"
-        if not os.path.lexists(aside):
-            return aside
+        try:
+            if os.name == "nt":
+                os.rename(path, aside)  # refuses an existing name on Windows
+            else:
+                os.link(path, aside, follow_symlinks=False)  # refuses an existing name
+                os.unlink(path)
+        except FileExistsError:
+            continue
+        return aside
 
 
-def _pending_marker_bytes(secret: bytes) -> bytes:
-    mac = hmac.new(secret, _PENDING_MARKER_PREFIX, hashlib.sha256).hexdigest().encode("ascii")
-    return _PENDING_MARKER_PREFIX + mac + b"\n"
-
-
-def _is_authentic_pending_marker(pending: str, secret: str) -> bool:
-    """Whether the marker is the one a creation writes for this very secret."""
-
-    platform = _platform_name()
-    try:
-        secret_data = _read_private_regular_file(secret, max_bytes=64, platform=platform)
-        marker = _read_private_regular_file(pending, max_bytes=256, platform=platform)
-    except OSError:
-        return False
-    return len(secret_data) == 32 and hmac.compare_digest(marker, _pending_marker_bytes(secret_data))
-
-
-def _is_unfinished_creation_leftover(secret: str, provenance: str) -> bool:
-    """Whether the provenance files present are exactly what a creation writes."""
+def _is_unfinished_creation(key: str, provenance: str, secret: str) -> bool:
+    """Whether every identity file present is what a creation writes, or a cut-short part of it."""
 
     platform = _platform_name()
-    shapes = ((secret, 64, lambda data: len(data) == 32), (provenance, 256, _is_provenance_sentinel))
+    shapes = (
+        # The key is written last, so only a cut-short one can be present.
+        (
+            key,
+            256,
+            lambda data: _is_creation_prefix(data, _DEVICE_KEY_HEAD, _BASE64_BYTES, 44, _DEVICE_KEY_TAIL, whole=False),
+        ),
+        (provenance, 256, lambda data: _is_creation_prefix(data, _DEVICE_PROVENANCE_PREFIX, _HEX_BYTES, 64, b"\n")),
+        (secret, 64, lambda data: len(data) <= 32),
+    )
     for path, limit, valid in shapes:
         if not os.path.lexists(path):
             continue
@@ -843,31 +797,34 @@ def _is_unfinished_creation_leftover(secret: str, provenance: str) -> bool:
     return True
 
 
-def _is_provenance_sentinel(data: bytes) -> bool:
-    body = data.strip()
-    if not body.startswith(_DEVICE_PROVENANCE_PREFIX):
+def _is_creation_prefix(
+    data: bytes,
+    head: bytes,
+    body_bytes: frozenset[int],
+    body_length: int,
+    tail: bytes,
+    *,
+    whole: bool = True,
+) -> bool:
+    """Whether data is head + body + tail, or a cut-short start of it.
+
+    ``whole=False`` accepts only a cut-short start, not the complete file.
+    """
+
+    if len(data) <= len(head):
+        return head.startswith(data)
+    if not data.startswith(head):
         return False
-    digest = body[len(_DEVICE_PROVENANCE_PREFIX) :]
-    return len(digest) == 64 and all(byte in b"0123456789abcdef" for byte in digest)
+    body, rest = data[len(head) :][:body_length], data[len(head) + body_length :]
+    if not all(byte in body_bytes for byte in body) or not tail.startswith(rest):
+        return False
+    return whole or len(data) < len(head) + body_length + len(tail)
 
 
 def _roll_back_device_identity(placed: list[tuple[str, str]]) -> list[tuple[str, str]]:
-    """Take back what one creation published; return what could not be taken back.
+    """Take back what one creation published; return what could not be taken back."""
 
-    The pending marker goes last and only when everything else is gone, so a
-    leftover file is never left without the proof that its key never existed.
-    """
-
-    left: list[tuple[str, str]] = []
-    for label, path in reversed(placed):
-        if label == "device-identity-pending":
-            continue
-        if not _discard_files([path]):
-            left.append((label, path))
-    for label, path in placed:
-        if label == "device-identity-pending" and not left and not _discard_files([path]):
-            left.append((label, path))
-    return left[::-1]
+    return [item for item in reversed(placed) if not _discard_files([item[1]])][::-1]
 
 
 def _plan_missing_target(

@@ -818,49 +818,76 @@ class InitLockBusyError(InitLockError):
     """Another init still held the lock after the wait."""
 
 
-@contextlib.contextmanager
-def hold_init_lock() -> Iterator[None]:
-    """Hold the init lock of the data home for one init run.
+class InitLocks:
+    """The init locks one run holds, one per data folder it initializes."""
 
-    Two inits started together on one home used to race through the same seeds
-    and device identity and leave it half created (GAP-0927). The lock is one
-    exclusive file lock (init.lock: a byte lock on Windows, flock on POSIX)
-    taken before anything is read or written, by every path that initializes
-    the home. The second run waits for the first and then runs as an ordinary
-    re-run of a finished init; if the first is still going after
-    _FIRST_RUN_LOCK_WAIT_SECONDS it raises InitLockBusyError. A home whose lock
-    cannot be made or opened raises InitLockError, because without the lock the
-    run could race another one into the same half-created state.
-    """
+    def __init__(self, stack: contextlib.ExitStack) -> None:
+        self._stack = stack
+        self._held: set[str] = set()
 
-    from defenseclaw import config as cfg_mod
-    from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
-    from defenseclaw.file_permissions import make_private_directory
+    def take(self, directory: str | os.PathLike[str]) -> None:
+        """Take the init lock of one data folder; a folder this run already holds is skipped.
 
-    home = str(cfg_mod.default_data_path())
-    with contextlib.ExitStack() as held:
+        The lock is one exclusive file lock (init.lock: a byte lock on Windows,
+        flock on POSIX). The second run waits for the first and then runs as an
+        ordinary re-run of a finished init; if the first is still going after
+        _FIRST_RUN_LOCK_WAIT_SECONDS it raises InitLockBusyError. A folder whose
+        lock cannot be made or opened raises InitLockError, because without the
+        lock the run could race another one into the same half-created state.
+        """
+
+        from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
+        from defenseclaw.file_permissions import make_private_directory
+
+        folder = os.fspath(directory)
         try:
-            make_private_directory(home)
-            held.enter_context(
-                locked_file_update(os.path.join(home, "init"), timeout_seconds=_FIRST_RUN_LOCK_WAIT_SECONDS)
+            make_private_directory(folder)
+            key = os.path.normcase(os.path.realpath(folder))
+            if key in self._held:
+                return
+            self._stack.enter_context(
+                locked_file_update(os.path.join(folder, "init"), timeout_seconds=_FIRST_RUN_LOCK_WAIT_SECONDS)
             )
         except FileLockTimeoutError as exc:
             raise InitLockBusyError(
-                f"another defenseclaw init is running on {home}; this run changed nothing"
+                f"another defenseclaw init is running on {folder}; this run changed nothing"
             ) from exc
         except OSError as exc:
             raise InitLockError(
-                f"cannot take the init lock of {home} ({exc.strerror or type(exc).__name__}); this run changed nothing"
+                f"cannot take the init lock of {folder} ({exc.strerror or type(exc).__name__}); "
+                "this run changed nothing"
             ) from exc
-        yield
+        self._held.add(key)
+
+
+@contextlib.contextmanager
+def hold_init_lock() -> Iterator[InitLocks]:
+    """Hold the init lock of the data home for one init run.
+
+    Two inits started together on one home used to race through the same seeds
+    and device identity and leave it half created (GAP-0927). Every path that
+    initializes the home takes the lock before anything is read or written.
+    The home is not always where the identity lives: config.yaml can name
+    another data_dir, so the caller also takes that folder's lock
+    (InitLocks.take) as soon as the config says which it is, and before it
+    changes anything there. Two runs that name each other's folders can wait
+    on each other; both then stop at the wait limit and change nothing.
+    """
+
+    from defenseclaw import config as cfg_mod
+
+    with contextlib.ExitStack() as stack:
+        locks = InitLocks(stack)
+        locks.take(cfg_mod.default_data_path())
+        yield locks
 
 
 def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     """Run the first-run setup flow while holding the init lock of the data home."""
 
     try:
-        with hold_init_lock():
-            return _run_first_run_locked(options)
+        with hold_init_lock() as locks:
+            return _run_first_run_locked(options, locks)
     except InitLockError as exc:
         from defenseclaw import config as cfg_mod
 
@@ -876,7 +903,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         )
 
 
-def _run_first_run_locked(options: FirstRunOptions) -> FirstRunReport:
+def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRunReport:
     """Run the canonical first-run setup flow without rendering UI.
 
     This is the backend shared by ``defenseclaw init``, ``quickstart``,
@@ -958,6 +985,11 @@ def _run_first_run_locked(options: FirstRunOptions) -> FirstRunReport:
         # unversioned/legacy objects after the hard cutover.
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
+
+    # The identity and the stores live in the data folder the config names, which
+    # may not be the home locked so far. Lock it before anything is changed there.
+    if getattr(cfg, "data_dir", ""):
+        locks.take(cfg.data_dir)
 
     # First step after the config loads, before anything is set aside, written or
     # started: hooks of a DefenseClaw Setup 0.8.x install in the agent's settings
