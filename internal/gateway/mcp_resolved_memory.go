@@ -5,6 +5,8 @@
 package gateway
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"slices"
 	"strings"
 	"sync"
@@ -28,9 +30,11 @@ const mcpResolvedTTL = 24 * time.Hour
 // its entry was gone. Only a definition read from an agent config is
 // remembered, so the bounds follow the size of the configs, not the number of
 // names a tool call can make up. A denied definition that still does not fit
-// is not forgotten silently: its session is marked (mcpResolvedLostLimit
-// marks are kept), and a name that session cannot resolve afterwards may be
-// the one that was lost.
+// is not forgotten: the name it was kept under goes into a fixed-size filter
+// of its session (mcpLostSet), which answers yes for every name added and may
+// answer yes for others, so a bound can only make the memory refuse more.
+// mcpResolvedLostLimit sessions have a filter of their own; the sessions past
+// that share one.
 const (
 	mcpResolvedLimit         = 2048
 	mcpResolvedPerHome       = 256
@@ -38,6 +42,45 @@ const (
 	mcpResolvedDeniedPerHome = 1024
 	mcpResolvedLostLimit     = 1024
 )
+
+// mcpLostBloomWords sizes the filter of lost names: 16384 bits, three probes
+// per name, so a few thousand lost names keep false answers to a few percent
+// and a flood of them saturates toward refusing, never toward allowing.
+const (
+	mcpLostBloomWords  = 256
+	mcpLostBloomProbes = 3
+)
+
+// mcpLostSet is a Bloom filter of the keys (mcpResolvedKey) of denied
+// definitions that did not fit in the memory, with the time of its last use.
+type mcpLostSet struct {
+	bits [mcpLostBloomWords]uint64
+	at   time.Time
+}
+
+func (s *mcpLostSet) probes(key string) [mcpLostBloomProbes]uint32 {
+	sum := sha256.Sum256([]byte(key))
+	var at [mcpLostBloomProbes]uint32
+	for i := range at {
+		at[i] = binary.BigEndian.Uint32(sum[i*4:]) % (mcpLostBloomWords * 64)
+	}
+	return at
+}
+
+func (s *mcpLostSet) add(key string) {
+	for _, bit := range s.probes(key) {
+		s.bits[bit/64] |= 1 << (bit % 64)
+	}
+}
+
+func (s *mcpLostSet) has(key string) bool {
+	for _, bit := range s.probes(key) {
+		if s.bits[bit/64]&(1<<(bit%64)) == 0 {
+			return false
+		}
+	}
+	return true
+}
 
 // mcpResolvedDefinitions remembers, per connector, account home, agent
 // session, working directory and server name, the definition a hook resolved
@@ -52,9 +95,12 @@ const (
 type mcpResolvedDefinitions struct {
 	mu      sync.Mutex
 	entries map[string]mcpResolvedDefinition
-	// lost holds the sessions (connector, account and session id) for which a
-	// denied definition did not fit, with the time of their last use.
-	lost map[string]time.Time
+	// lost holds, per session (connector, account and session id), the
+	// names of the denied definitions of that session that did not fit.
+	lost map[string]*mcpLostSet
+	// spill takes them for the sessions past mcpResolvedLostLimit. It is not
+	// cleared when one of those sessions starts again; it expires with the TTL.
+	spill *mcpLostSet
 }
 
 type mcpResolvedDefinition struct {
@@ -101,7 +147,7 @@ func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name st
 	}
 	if (!known || denied && !kept.denied) && !m.hasRoomLocked(home, denied, key) {
 		if denied {
-			m.markLostLocked(connector, home, session, now)
+			m.markLostLocked(connector, home, session, key, now)
 		}
 		return false
 	}
@@ -115,41 +161,43 @@ func mcpLostKey(connector, home, session string) string {
 	return strings.ToLower(connector) + "\x00" + home + "\x00" + session
 }
 
-// markLostLocked records that a denied definition of the session could not be
-// kept. The oldest mark makes room when the marks are full.
-func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session string, now time.Time) {
+// markLostLocked records that the denied definition kept under key could not
+// be kept. When the session has no filter and the filters are all in use, the
+// shared one takes the name.
+func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key string, now time.Time) {
 	if m.lost == nil {
-		m.lost = map[string]time.Time{}
+		m.lost = map[string]*mcpLostSet{}
 	}
-	key := mcpLostKey(connector, home, session)
-	if _, ok := m.lost[key]; !ok && len(m.lost) >= mcpResolvedLostLimit {
-		oldest, oldestAt := "", now
-		for other, at := range m.lost {
-			if oldest == "" || at.Before(oldestAt) {
-				oldest, oldestAt = other, at
-			}
+	lostKey := mcpLostKey(connector, home, session)
+	set, ok := m.lost[lostKey]
+	switch {
+	case ok && now.Sub(set.at) > mcpResolvedTTL, !ok && len(m.lost) < mcpResolvedLostLimit:
+		set = &mcpLostSet{}
+		m.lost[lostKey] = set
+	case !ok:
+		if m.spill == nil || now.Sub(m.spill.at) > mcpResolvedTTL {
+			m.spill = &mcpLostSet{}
 		}
-		delete(m.lost, oldest)
+		set = m.spill
 	}
-	m.lost[key] = now
+	set.add(key)
+	set.at = now
 }
 
-// lostDenied reports whether a denied definition of the session did not fit
-// in the memory within the TTL, and renews the mark.
-func (m *mcpResolvedDefinitions) lostDenied(connector, home, session string, now time.Time) bool {
-	key := mcpLostKey(connector, home, session)
+// lostDenied reports whether the denied definition kept under the name of the
+// call did not fit in the memory within the TTL, and renews the filter that
+// holds it.
+func (m *mcpResolvedDefinitions) lostDenied(connector, home, session, cwd, name string, now time.Time) bool {
+	key := mcpResolvedKey(connector, home, session, cwd, name)
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	at, ok := m.lost[key]
-	if !ok {
-		return false
+	for _, set := range []*mcpLostSet{m.lost[mcpLostKey(connector, home, session)], m.spill} {
+		if set != nil && now.Sub(set.at) <= mcpResolvedTTL && set.has(key) {
+			set.at = now
+			return true
+		}
 	}
-	if now.Sub(at) > mcpResolvedTTL {
-		delete(m.lost, key)
-		return false
-	}
-	m.lost[key] = now
-	return true
+	return false
 }
 
 // hasRoomLocked reports whether the definition under key, of the kind denied
@@ -208,6 +256,11 @@ func (m *mcpResolvedDefinitions) expireLocked(now time.Time) {
 	for key, kept := range m.entries {
 		if now.Sub(kept.seen) > mcpResolvedTTL {
 			delete(m.entries, key)
+		}
+	}
+	for key, set := range m.lost {
+		if now.Sub(set.at) > mcpResolvedTTL {
+			delete(m.lost, key)
 		}
 	}
 }
