@@ -262,7 +262,7 @@ var (
 		return managed.ValidateTrustedServiceRuntimeFilePath(
 			path,
 			"hook guardian state",
-			os.Getenv(managed.WindowsServiceAccountEnv),
+			managed.GatewayServiceAccount(),
 		)
 	}
 	// Permission drift on targets.yaml is re-stamped first when the caller is
@@ -5355,7 +5355,7 @@ func writeEnterpriseHookGuardianState(
 		if err := managed.ValidateTrustedServiceRuntimeFilePath(
 			path,
 			"hook guardian state",
-			os.Getenv(managed.WindowsServiceAccountEnv),
+			managed.GatewayServiceAccount(),
 		); err != nil {
 			return err
 		}
