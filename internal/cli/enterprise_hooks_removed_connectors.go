@@ -91,25 +91,72 @@ func saveEnterpriseHookRemovedConnectors(dataDir string, entries []managed.Remov
 	return enterpriseHookAuthorizationFileTrustCheck(path)
 }
 
-// recordEnterpriseHookRemovedConnector adds (or refreshes) one account's
-// removed connector. An unreadable record is replaced: it holds no secret and
-// the guardian rebuilds it from the next removal.
-func recordEnterpriseHookRemovedConnector(dataDir string, entry managed.RemovedConnector, now time.Time) error {
-	entries, err := loadEnterpriseHookRemovedConnectors(dataDir)
-	if err != nil {
-		entries = nil
+// planEnterpriseHookRemovedConnectors adds to the record each account's
+// machine-scope connector (machineScope) that the loaded config no longer
+// publishes and the manifest no longer admits, for every row the guardian's
+// last pass or its authorization ledger held for it: protected, pending or
+// failed. The rows are the fact that the account had the connector; a record
+// made only when a cleanup finished lost it when a failed change was undone
+// and then applied again, because the undone pass brought the rows back as
+// pending and nothing was left to clean. It returns the new list and whether
+// it differs from existing.
+func planEnterpriseHookRemovedConnectors(
+	existing []managed.RemovedConnector,
+	rows []enterpriseHookReconcileRow,
+	manifest enterprisehooks.Manifest,
+	published func(connector string) bool,
+	machineScope func(connector string) bool,
+	now time.Time,
+) ([]managed.RemovedConnector, bool) {
+	admitted := enterpriseHookManifestAdmits(manifest)
+	planned := append([]managed.RemovedConnector(nil), existing...)
+	known := map[string]bool{}
+	for _, entry := range existing {
+		known[managed.RemovedConnectorKey(entry.Connector, entry.SID)] = true
 	}
-	key := managed.RemovedConnectorKey(entry.Connector, entry.SID)
-	kept := make([]managed.RemovedConnector, 0, len(entries)+1)
-	for _, existing := range entries {
-		if managed.RemovedConnectorKey(existing.Connector, existing.SID) != key {
-			kept = append(kept, existing)
+	changed := false
+	for _, row := range rows {
+		name := strings.ToLower(strings.TrimSpace(row.Connector))
+		if name == "" && row.Result != nil {
+			name = strings.ToLower(strings.TrimSpace(row.Result.Connector))
 		}
+		sid := strings.TrimSpace(row.SID)
+		key := managed.RemovedConnectorKey(name, sid)
+		if name == "" || sid == "" || row.Removed || known[key] || !machineScope(name) ||
+			(published != nil && published(name)) || admitted(name, sid) {
+			continue
+		}
+		known[key] = true
+		changed = true
+		planned = append(planned, managed.RemovedConnector{
+			Connector: name, SID: sid, User: strings.TrimSpace(row.User), UserHome: strings.TrimSpace(row.UserHome),
+			RemovedAt: now.UTC().Format(time.RFC3339Nano),
+		})
 	}
-	entry.Connector = strings.ToLower(strings.TrimSpace(entry.Connector))
-	entry.SID = strings.TrimSpace(entry.SID)
-	entry.RemovedAt = now.UTC().Format(time.RFC3339Nano)
-	return saveEnterpriseHookRemovedConnectors(dataDir, append(kept, entry), now)
+	return planned, changed
+}
+
+// recordEnterpriseHookRemovedConnectors loads the record, adds what
+// planEnterpriseHookRemovedConnectors finds and publishes it. An unreadable
+// record is replaced: it holds no secret and is rebuilt from the rows.
+func recordEnterpriseHookRemovedConnectors(
+	dataDir string,
+	rows []enterpriseHookReconcileRow,
+	manifest enterprisehooks.Manifest,
+	published func(connector string) bool,
+	machineScope func(connector string) bool,
+	now time.Time,
+) error {
+	existing, err := loadEnterpriseHookRemovedConnectors(dataDir)
+	damaged := err != nil
+	if damaged {
+		existing = nil
+	}
+	planned, changed := planEnterpriseHookRemovedConnectors(existing, rows, manifest, published, machineScope, now)
+	if !changed && !damaged {
+		return nil
+	}
+	return saveEnterpriseHookRemovedConnectors(dataDir, planned, now)
 }
 
 // pruneEnterpriseHookRemovedConnectors drops the entries whose connector is on
