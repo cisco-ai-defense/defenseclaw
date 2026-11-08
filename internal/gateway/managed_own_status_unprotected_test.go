@@ -161,7 +161,7 @@ func TestOwnStatusAccountLevelEntryCoversEveryConnector(t *testing.T) {
 func TestOwnStatusUnknownScanIsNotConfirmed(t *testing.T) {
 	api := ownStatusUnprotectedFixture(t, nil, errors.New("record is not trusted"))
 	row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode")
-	if row["protected"] != false || row["state"] != "not confirmed" {
+	if row["protected"] != false || row["state"] != "not confirmed: "+ownCauseScanUnknown {
 		t.Fatalf("OpenCode row = %#v, want not confirmed", row)
 	}
 	if answer := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice"); answer["claude_code"].(map[string]any)["protected"] != false {
@@ -286,7 +286,7 @@ func TestOwnStatusWindowsAccountLevelEntryAndUnknownScan(t *testing.T) {
 	// A missing, old or unmatched scan confirms nothing: not even Claude Code.
 	api = windowsOwnStatusAPI(t, nil, errors.New("the unprotected agents record is missing"))
 	row, out := windowsOwnStatusRow(t, api, windowsAliceSID, "claudecode")
-	if row["protected"] != false || row["state"] != "not confirmed" ||
+	if row["protected"] != false || row["state"] != "not confirmed: "+ownCauseScanUnknown ||
 		out["claude_code"].(map[string]any)["protected"] != false || out["cowork"].(map[string]any)["protected"] != false {
 		t.Fatalf("unknown scan: Claude Code row = %#v, answer = %#v, want not confirmed", row, out)
 	}

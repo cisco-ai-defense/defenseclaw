@@ -128,7 +128,7 @@ func TestManagedOwnStatusReportsConfiguredConnectorProof(t *testing.T) {
 	if _, listed := connectors["copilot"]; listed {
 		t.Fatal("disabled connector was listed as enrolled")
 	}
-	if row, ok := connectors["hermes"].(map[string]any); !ok || row["protected"] != false || row["state"] != "not confirmed" {
+	if row, ok := connectors["hermes"].(map[string]any); !ok || row["protected"] != false || row["state"] != "not confirmed: "+ownCauseNoGuardianRecord {
 		t.Fatalf("per-user connector without guardian proof = %#v", connectors["hermes"])
 	}
 	api.managedPolicyView.Store(&managedPolicyView{
@@ -342,7 +342,7 @@ func TestOwnStatusForWindowsAccountListsConfiguredConnectors(t *testing.T) {
 		t.Fatalf("Claude Code row = %+v; want existing protected state", row)
 	}
 	for _, name := range []string{"codex", "opencode", "hermes"} {
-		if row := out.Connectors[name]; row.Protected || row.State != "not confirmed" {
+		if row := out.Connectors[name]; row.Protected || row.State != "not confirmed: "+ownCauseWindowsUnchecked {
 			t.Fatalf("%s row = %+v; want unconfirmed", name, row)
 		}
 	}

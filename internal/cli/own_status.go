@@ -83,12 +83,6 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 	case view.Account.UID != "":
 		account += " (uid " + view.Account.UID + ")"
 	}
-	protected := func(on bool) string {
-		if on {
-			return "protected"
-		}
-		return "not protected"
-	}
 	last := "none from you yet"
 	if at, err := time.Parse(time.RFC3339, view.Cowork.LastEventAt); err == nil {
 		last = at.Local().Format("2006-01-02 15:04 MST")
@@ -96,15 +90,11 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 	fmt.Fprintln(out, "This computer is managed by your organization.")
 	fmt.Fprintf(out, "  Account       %s\n", account)
 	if row, ok := view.Connectors["claudecode"]; ok {
-		state := row.State
-		if state == "" {
-			state = protected(row.Protected)
-		}
-		fmt.Fprintf(out, "  Claude Code   %s\n", state)
+		fmt.Fprintf(out, "  Claude Code   %s\n", ownStateText(row.State, row.Protected))
 	} else if view.Connectors == nil {
 		// Older gateways use the legacy Claude Code field and do not send
 		// a connector roster.
-		fmt.Fprintf(out, "  Claude Code   %s\n", protected(view.ClaudeCode.Protected))
+		fmt.Fprintf(out, "  Claude Code   %s\n", ownStateText("", view.ClaudeCode.Protected))
 	}
 	names := make([]string, 0, len(view.Connectors))
 	for name := range view.Connectors {
@@ -115,19 +105,37 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 	sort.Strings(names)
 	for _, name := range names {
 		row := view.Connectors[name]
-		state := row.State
-		if state == "" {
-			state = protected(row.Protected)
-		}
-		fmt.Fprintf(out, "  %-13s %s\n", ownConnectorLabel(name), state)
+		fmt.Fprintf(out, "  %-13s %s\n", ownConnectorLabel(name), ownStateText(row.State, row.Protected))
 	}
-	fmt.Fprintf(out, "  Cowork        %s\n", view.Cowork.State)
+	fmt.Fprintf(out, "  Cowork        %s\n", ownStateText(view.Cowork.State, view.Cowork.Protected))
 	fmt.Fprintf(out, "  Last Cowork   %s\n", last)
 	fmt.Fprintln(out)
 	for _, line := range ownStatusNextSteps() {
 		fmt.Fprintln(out, line)
 	}
 	return nil
+}
+
+// ownStateNoReason is what a row says when the gateway sent no reason for it:
+// an older gateway sends a bare state (or none). A not-protected row always
+// carries a reason and the next step, whatever the gateway sent.
+const ownStateNoReason = "your gateway did not say why. Run defenseclaw status again in a few minutes, and ask IT if it stays this way"
+
+// ownStateText is the text of one status row: the gateway state when it says
+// why, "protected" for a protected row with no text, and the bare "not
+// protected" or "not confirmed" (or no text) completed with a reason and the
+// next step.
+func ownStateText(state string, protected bool) string {
+	state = strings.TrimSpace(state)
+	switch {
+	case state == "" && protected:
+		return "protected"
+	case state == "":
+		return "not protected: " + ownStateNoReason
+	case state == "not protected" || state == "not confirmed":
+		return state + ": " + ownStateNoReason
+	}
+	return state
 }
 
 func ownConnectorLabel(name string) string {

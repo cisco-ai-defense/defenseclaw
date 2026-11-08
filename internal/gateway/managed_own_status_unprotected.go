@@ -230,14 +230,14 @@ func (a *APIServer) ownUnprotectedAgents(cfg *config.Config, caller ownStatusCal
 // administrator warning for those agents.
 func (s ownScan) state(connector string) (map[string]any, bool) {
 	if !s.known {
-		return map[string]any{"protected": false, "state": "not confirmed"}, true
+		return ownNotConfirmed(ownCauseScanUnknown), true
 	}
 	gap := append(append([]enterprisehooks.UnprotectedAgent(nil), s.mine[connector]...), s.mine[""]...)
 	if len(gap) > 0 {
 		return ownUnprotectedState(gap), true
 	}
 	if s.unresolved[connector] || s.unresolved[""] {
-		return map[string]any{"protected": false, "state": "not confirmed: the administrator status lists an agent here that cannot be matched to this account"}, true
+		return ownNotConfirmed(ownCauseScanUnmatched), true
 	}
 	return nil, false
 }
@@ -260,9 +260,13 @@ func ownUnprotectedState(agents []enterprisehooks.UnprotectedAgent) map[string]a
 			reasons = append(reasons, reason)
 		}
 	}
+	reasons = slices.DeleteFunc(reasons, func(reason string) bool { return reason == "" })
+	if len(reasons) == 0 {
+		return ownNotProtected(ownCauseNoUnprotectedReason)
+	}
 	text := strings.Join(reasons[:min(len(reasons), ownUnprotectedReasonsMax)], "; ")
 	if more := len(reasons) - ownUnprotectedReasonsMax; more > 0 {
 		text += fmt.Sprintf("; and %d more", more)
 	}
-	return map[string]any{"protected": false, "state": "not protected: " + text}
+	return ownNotProtected(text)
 }
