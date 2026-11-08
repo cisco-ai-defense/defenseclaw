@@ -296,7 +296,7 @@ func (w *answerWatchdog) startOrdinaryLook(gen int, opts Options, sp spec, failM
 		return
 	}
 	go func() {
-		if !OrdinaryNoAnswerPayload(opts.failurePayload) {
+		if !bothLateScansOrdinary(opts) {
 			return
 		}
 		opts.lateOrdinaryOpen = true
