@@ -5,7 +5,11 @@
 
 package cli
 
-import "github.com/defenseclaw/defenseclaw/internal/managed"
+import (
+	"path/filepath"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+)
 
 // windowsEnterpriseRemovedConnectorsForStatus reads the removed-connectors
 // record the hook guardian keeps beside its authorization ledger; tests
@@ -15,5 +19,5 @@ var windowsEnterpriseRemovedConnectorsForStatus = func() ([]managed.RemovedConne
 	if err != nil {
 		return nil, err
 	}
-	return loadEnterpriseHookRemovedConnectors(layout.DataDir)
+	return loadEnterpriseHookRemovedConnectorsAt(filepath.Join(layout.GuardianAuthDir, managed.HookGuardianRemovedConnectorsFile))
 }
