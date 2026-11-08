@@ -243,7 +243,13 @@ func (f windowsMachineFolder) holds(drive string, names []string) bool {
 // /cygdrive/c/ forms of a POSIX shell on Windows. A relative path is not
 // absolute, so it is not a machine path whatever its names. Names are
 // returned lower case, without trailing dots and spaces and without a stream
-// suffix, as NTFS compares them, with . and .. applied.
+// suffix, as NTFS compares them, with . and .. applied. This holds under the
+// \\?\ , \\.\ and \\?\UNC\ prefixes too, although those skip Windows name
+// normalization and can name a distinct DefenseClaw. or "DefenseClaw " folder:
+// a machine path is read by its trimmed, case folded names under every prefix,
+// so such a spelling is protected and an ordinary file there is a documented
+// false block (nobody keeps project files in a look-alike machine folder). The
+// OS ACLs on ProgramData and the judge cover any spelling this does not read.
 func windowsVolumeAndNames(value string) (drive string, names []string, ok bool) {
 	slashed := strings.ReplaceAll(value, `\`, "/")
 	// The \\?\ and \\.\ namespaces name the volume next (C:\ or UNC\host\share);
@@ -268,10 +274,16 @@ func windowsVolumeAndNames(value string) (drive string, names []string, ok bool)
 	case unc:
 		// //host/C$/rest: the share names the volume.
 		parts := strings.SplitN(slashed[2:], "/", 3)
-		if len(parts) < 3 || len(parts[1]) != 2 || parts[1][1] != '$' || !isASCIILetterByte(parts[1][0]) {
+		if len(parts) < 3 {
 			return "", nil, false
 		}
-		drive, rest = strings.ToLower(parts[1][:1]), parts[2]
+		// The share is compared like every other name: without trailing
+		// dots and spaces.
+		share := strings.TrimRight(parts[1], ". ")
+		if len(share) != 2 || share[1] != '$' || !isASCIILetterByte(share[0]) {
+			return "", nil, false
+		}
+		drive, rest = strings.ToLower(share[:1]), parts[2]
 	case len(slashed) >= 3 && isASCIILetterByte(slashed[0]) && slashed[1] == ':' && slashed[2] == '/':
 		drive, rest = strings.ToLower(slashed[:1]), slashed[3:]
 	case len(slashed) >= 3 && slashed[0] == '/' && isASCIILetterByte(slashed[1]) && slashed[2] == '/':
