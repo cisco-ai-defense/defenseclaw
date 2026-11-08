@@ -27,6 +27,7 @@ import (
 	osuser "os/user"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"slices"
@@ -266,6 +267,40 @@ type trustedActionRequest struct {
 	// (hookpaths.TargetMemo, rel-1-0-2:GAP-0568). dispatchTrustedAction
 	// makes it; a copy of the request shares it.
 	targetMemo *hookpaths.TargetMemo
+	// simpleMemo keeps the simple commands of the call, read once for the
+	// statement budget and again for the pass of every profile member over the
+	// same input and facts. dispatchTrustedAction makes it; a copy of the
+	// request shares it, and a child command with another input reads its own.
+	simpleMemo *trustedSimpleMemo
+}
+
+// trustedSimpleMemo holds the first simple-command split asked of it.
+type trustedSimpleMemo struct {
+	mu      sync.Mutex
+	set     bool
+	input   actionfacts.Input
+	facts   actionfacts.Facts
+	simples []actionfacts.SimpleCommand
+}
+
+// commands returns actionfacts.SimpleCommands(input, facts): the split the memo
+// holds when input and facts are the ones it was made for, a fresh one
+// otherwise. The first split asked of an empty memo is kept.
+func (memo *trustedSimpleMemo) commands(input actionfacts.Input, facts actionfacts.Facts) []actionfacts.SimpleCommand {
+	if memo == nil {
+		return actionfacts.SimpleCommands(input, facts)
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if memo.set {
+		if reflect.DeepEqual(memo.input, input) && reflect.DeepEqual(memo.facts, facts) {
+			return slices.Clone(memo.simples)
+		}
+		return actionfacts.SimpleCommands(input, facts)
+	}
+	memo.set, memo.input, memo.facts = true, input, facts
+	memo.simples = actionfacts.SimpleCommands(input, facts)
+	return slices.Clone(memo.simples)
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -320,6 +355,9 @@ func dispatchTrustedAction(
 	if request.targetMemo == nil {
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
+	if request.simpleMemo == nil {
+		request.simpleMemo = &trustedSimpleMemo{}
+	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	request.Input.ClientResolvedTargets = clientResolvedPathTargets(request.ResolvedWriteTargets)
 	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
@@ -357,7 +395,7 @@ func dispatchTrustedAction(
 	if !request.simpleCommandPass {
 		facts = actionfacts.Analyze(request.Input)
 		analyzed = true
-		if trustedCallOverStatementBudget(request.Input, facts) {
+		if trustedCallOverStatementBudgetWith(request.Input, facts, request.simpleMemo.commands(request.Input, facts)) {
 			// Over the statement budget the call blocks with
 			// ACTION-COMPOUND-LIMIT whatever its statements are, so it is
 			// refused here, before the twins, the readers and the
@@ -534,7 +572,7 @@ func dispatchTrustedActionWith(
 			checkedLocalOrdinary := false
 			localOrdinary := false
 			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
-			simples := actionfacts.SimpleCommands(request.Input, facts)
+			simples := request.simpleMemo.commands(request.Input, facts)
 			if len(simples) == 0 && wholeCommandKnown &&
 				(facts.Parse.Dialect != actionfacts.DialectPOSIX || facts.Parse.Status == actionfacts.StatusLimitExceeded) &&
 				trustedStatementBudgetExceeded(request.Input, facts, wholeCommand) {
@@ -9186,7 +9224,12 @@ func withReducedStateReading(parent context.Context, request trustedActionReques
 // stopped early is counted past the stop (rel-1-0-6:GAP-0331), so its call
 // is over the budget even where the split it made is short.
 func trustedCallOverStatementBudget(input actionfacts.Input, facts actionfacts.Facts) bool {
-	simples := actionfacts.SimpleCommands(input, facts)
+	return trustedCallOverStatementBudgetWith(input, facts, actionfacts.SimpleCommands(input, facts))
+}
+
+// trustedCallOverStatementBudgetWith is trustedCallOverStatementBudget over
+// simples, the split of input and facts.
+func trustedCallOverStatementBudgetWith(input actionfacts.Input, facts actionfacts.Facts, simples []actionfacts.SimpleCommand) bool {
 	if slices.ContainsFunc(simples, func(simple actionfacts.SimpleCommand) bool {
 		return simple.EvaluationFailure == "limit"
 	}) {

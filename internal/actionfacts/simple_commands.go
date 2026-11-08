@@ -1508,6 +1508,13 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 	if word == nil {
 		return "", false
 	}
+	if len(word.Parts) == 1 {
+		// A word of one literal made of plain characters is its own value; the
+		// expansion below would only return it.
+		if lit, ok := word.Parts[0].(*syntax.Lit); ok && simplePlainLiteral(lit.Value) {
+			return lit.Value, true
+		}
+	}
 	safe := true
 	syntax.Walk(word, func(node syntax.Node) bool {
 		switch part := node.(type) {
@@ -1552,6 +1559,23 @@ func simpleStaticWordWithNewline(word *syntax.Word, vars map[string]string, allo
 		return "", false
 	}
 	return fields[0], true
+}
+
+// simplePlainLiteral reports text of letters, digits and . / _ : @ % + , = -
+// only: no quote, escape, expansion, glob, brace or tilde, so the shell
+// reads it as it is.
+func simplePlainLiteral(text string) bool {
+	if text == "" {
+		return false
+	}
+	for index := 0; index < len(text); index++ {
+		char := text[index]
+		if char >= 0x80 || !(char >= 0x30 && char <= 0x39 || char >= 0x41 && char <= 0x5a || char >= 0x61 && char <= 0x7a ||
+			strings.IndexByte("._/:@%+,=-", char) >= 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func simpleResolvedVariables(source string, vars map[string]string) (string, bool) {
