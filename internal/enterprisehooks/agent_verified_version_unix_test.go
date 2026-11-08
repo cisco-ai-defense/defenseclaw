@@ -32,6 +32,11 @@ func installFakeOpenCode(t *testing.T, home, body string) string {
 	return path
 }
 
+// ranFrom is the sources map of a discovery whose OpenCode answered from path.
+func ranFrom(path string) map[string]string {
+	return map[string]string{"opencode": path}
+}
+
 func unreadableReason(path string) map[string]string {
 	return map[string]string{"opencode": UnixAgentUnversionedReasonPrefix + path}
 }
@@ -48,13 +53,13 @@ func TestCarryVerifiedAgentVersionKeepsAnUnchangedAgentVerified(t *testing.T) {
 
 	// No record yet: a failed read stays unverified (nothing is marked
 	// protected that no read verified).
-	versions := carryVerifiedAgentVersions(state, "alice", home, conns, nil, unreadableReason(path), nil)
+	versions := carryVerifiedAgentVersions(state, "alice", home, conns, nil, unreadableReason(path), nil, nil)
 	if versions["opencode"] != "" {
 		t.Fatalf("carried %q with no record", versions["opencode"])
 	}
 
 	// A good read records the version and the file.
-	versions = carryVerifiedAgentVersions(state, "alice", home, conns, map[string]string{"opencode": "2.2.3"}, nil, nil)
+	versions = carryVerifiedAgentVersions(state, "alice", home, conns, map[string]string{"opencode": "2.2.3"}, nil, ranFrom(path), nil)
 	if versions["opencode"] != "2.2.3" || state.VerifiedAgents["alice\x00opencode"].Version == "" && len(state.VerifiedAgents) == 0 {
 		t.Fatalf("versions = %v, record = %+v", versions, state.VerifiedAgents)
 	}
@@ -63,19 +68,19 @@ func TestCarryVerifiedAgentVersionKeepsAnUnchangedAgentVerified(t *testing.T) {
 	// bound, and the reason is dropped.
 	for cycle := 1; cycle <= UnixVerifiedAgentCarryCycles; cycle++ {
 		reasons := unreadableReason(path)
-		got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, reasons, nil)
+		got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, reasons, nil, nil)
 		if got["opencode"] != "2.2.3" || reasons["opencode"] != "" {
 			t.Fatalf("cycle %d: versions = %v, reasons = %v", cycle, got, reasons)
 		}
 	}
 	reasons := unreadableReason(path)
-	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, reasons, nil); got["opencode"] != "" || reasons["opencode"] == "" {
+	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, reasons, nil, nil); got["opencode"] != "" || reasons["opencode"] == "" {
 		t.Fatalf("after %d failures in a row: versions = %v, reasons = %v; want unverified with the reason", UnixVerifiedAgentCarryCycles, got, reasons)
 	}
 
 	// A good read resets the count.
-	carryVerifiedAgentVersions(state, "alice", home, conns, map[string]string{"opencode": "2.2.3"}, nil, nil)
-	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, unreadableReason(path), nil); got["opencode"] != "2.2.3" {
+	carryVerifiedAgentVersions(state, "alice", home, conns, map[string]string{"opencode": "2.2.3"}, nil, ranFrom(path), nil)
+	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, unreadableReason(path), nil, nil); got["opencode"] != "2.2.3" {
 		t.Fatalf("after a good read: versions = %v", got)
 	}
 
@@ -84,7 +89,7 @@ func TestCarryVerifiedAgentVersionKeepsAnUnchangedAgentVerified(t *testing.T) {
 		t.Fatal(err)
 	}
 	reasons = unreadableReason(path)
-	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, reasons, nil); got["opencode"] != "" || reasons["opencode"] == "" {
+	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, reasons, nil, nil); got["opencode"] != "" || reasons["opencode"] == "" {
 		t.Fatalf("changed file: versions = %v, reasons = %v", got, reasons)
 	}
 	if len(state.VerifiedAgents) != 0 {
@@ -93,18 +98,18 @@ func TestCarryVerifiedAgentVersionKeepsAnUnchangedAgentVerified(t *testing.T) {
 
 	// A copy discovery did not run (other accounts can change it) never
 	// stands in, and not for another account's record.
-	carryVerifiedAgentVersions(state, "alice", home, conns, map[string]string{"opencode": "2.2.3"}, nil, nil)
+	carryVerifiedAgentVersions(state, "alice", home, conns, map[string]string{"opencode": "2.2.3"}, nil, ranFrom(path), nil)
 	noted := map[string]string{"opencode": UnixAgentUnversionedReasonPrefix + path + unixUntrustedCandidateNote}
-	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, noted, nil); got["opencode"] != "" {
+	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, noted, nil, nil); got["opencode"] != "" {
 		t.Fatalf("untrusted copy carried: %v", got)
 	}
-	carryVerifiedAgentVersions(state, "alice", home, conns, map[string]string{"opencode": "2.2.3"}, nil, nil)
-	if got := carryVerifiedAgentVersions(state, "bob", home, conns, nil, unreadableReason(path), nil); got["opencode"] != "" {
+	carryVerifiedAgentVersions(state, "alice", home, conns, map[string]string{"opencode": "2.2.3"}, nil, ranFrom(path), nil)
+	if got := carryVerifiedAgentVersions(state, "bob", home, conns, nil, unreadableReason(path), nil, nil); got["opencode"] != "" {
 		t.Fatalf("another account got alice's record: %v", got)
 	}
 
 	// The agent is gone: the record goes with it.
-	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, map[string]string{"opencode": "no opencode installation found for this user"}, nil); got["opencode"] != "" || len(state.VerifiedAgents) != 0 {
+	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, map[string]string{"opencode": "no opencode installation found for this user"}, nil, nil); got["opencode"] != "" || len(state.VerifiedAgents) != 0 {
 		t.Fatalf("uninstalled: versions = %v, record = %+v", got, state.VerifiedAgents)
 	}
 }
@@ -116,12 +121,12 @@ func TestUnixEnumeratorStateKeepsVerifiedAgentsAcrossRestarts(t *testing.T) {
 	path := installFakeOpenCode(t, home, "echo 2.2.3")
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	state := &UnixEnumeratorState{Version: 1}
-	carryVerifiedAgentVersions(state, "alice", home, []string{"opencode"}, map[string]string{"opencode": "2.2.3"}, nil, nil)
+	carryVerifiedAgentVersions(state, "alice", home, []string{"opencode"}, map[string]string{"opencode": "2.2.3"}, nil, ranFrom(path), nil)
 	if err := SaveUnixEnumeratorState(statePath, state); err != nil {
 		t.Fatal(err)
 	}
 	loaded := LoadUnixEnumeratorState(statePath)
-	if got := carryVerifiedAgentVersions(loaded, "alice", home, []string{"opencode"}, nil, unreadableReason(path), nil); got["opencode"] != "2.2.3" {
+	if got := carryVerifiedAgentVersions(loaded, "alice", home, []string{"opencode"}, nil, unreadableReason(path), nil, nil); got["opencode"] != "2.2.3" {
 		t.Fatalf("after reload: versions = %v", got)
 	}
 
@@ -166,8 +171,12 @@ func TestEnumerateUnixMachinePolicyOpenCodeStaysVerifiedThroughAFailedRead(t *te
 	}
 	cycle := func(versions, reasons map[string]string) []UnprotectedAgent {
 		t.Helper()
-		opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
-			return copyStringMap(versions), copyStringMap(reasons), nil
+		opts.DiscoverSurfaces = func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+			found := UnixDiscovery{Versions: copyStringMap(versions), Reasons: copyStringMap(reasons)}
+			if versions != nil {
+				found.VersionSources = ranFrom(path)
+			}
+			return found, nil
 		}
 		_, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
 		if err != nil {
@@ -211,4 +220,148 @@ func copyStringMap(in map[string]string) map[string]string {
 		out[key] = value
 	}
 	return out
+}
+
+// a version a different CLI supplied is never carried for this one, a version
+// from package metadata is bound to no file, and a version from the CLI itself
+// is.
+func TestCarryVerifiedAgentVersionBindsTheVersionToTheCLIThatSuppliedIt(t *testing.T) {
+	home := t.TempDir()
+	path := installFakeOpenCode(t, home, "echo 2.2.3")
+	other := filepath.Join(home, ".npm-global", "bin", "opencode")
+	conns := []string{"opencode"}
+	good := map[string]string{"opencode": "2.2.3"}
+
+	// The version came from another copy: the record names that copy, so the
+	// failed read of this one finds nothing to stand in for it.
+	state := &UnixEnumeratorState{Version: 1}
+	carryVerifiedAgentVersions(state, "alice", home, conns, good, nil, ranFrom(other), nil)
+	if len(state.VerifiedAgents) != 0 {
+		t.Fatalf("a path that is not an installed CLI was recorded: %+v", state.VerifiedAgents)
+	}
+	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, unreadableReason(path), nil, nil); got["opencode"] != "" {
+		t.Fatalf("carried a version no run of this CLI supplied: %v", got)
+	}
+
+	// Package metadata or a stamp supplied it: no source, no record.
+	carryVerifiedAgentVersions(state, "alice", home, conns, good, nil, nil, nil)
+	if len(state.VerifiedAgents) != 0 {
+		t.Fatalf("a version with no source was recorded: %+v", state.VerifiedAgents)
+	}
+
+	// A later read without a source drops the record of an earlier one.
+	carryVerifiedAgentVersions(state, "alice", home, conns, good, nil, ranFrom(path), nil)
+	carryVerifiedAgentVersions(state, "alice", home, conns, good, nil, nil, nil)
+	if got := carryVerifiedAgentVersions(state, "alice", home, conns, nil, unreadableReason(path), nil, nil); got["opencode"] != "" {
+		t.Fatalf("carried a version whose latest source was metadata: %v", got)
+	}
+
+	// A source that is not a clean absolute path, or another connector CLI
+	// name, is refused.
+	for _, source := range []string{"opencode", home + "/.local/bin/../bin/opencode", filepath.Join(home, "bin", "other")} {
+		carryVerifiedAgentVersions(state, "alice", home, conns, good, nil, ranFrom(source), nil)
+		if len(state.VerifiedAgents) != 0 {
+			t.Fatalf("source %q recorded: %+v", source, state.VerifiedAgents)
+		}
+	}
+}
+
+// The version a later CLI printed does not keep a first CLI that never printed
+// one verified: end to end through the real probe, with the later CLI gone the
+// first one is reported as an unverified contract (GAP-0845 review 1).
+// The twin: a CLI that answered and then fails once stays verified.
+func TestEnumerateUnixVersionFromALaterCLIIsNotCarriedForAnEarlierCLI(t *testing.T) {
+	oldPrefixes := machinePrefixes
+	machinePrefixes = func() []string { return nil }
+	t.Cleanup(func() { machinePrefixes = oldPrefixes })
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	home := makeHome(t, homes, "alice")
+	first := filepath.Join(home, ".local", "bin", "opencode")
+	later := filepath.Join(home, ".npm-global", "bin", "opencode")
+	for path, body := range map[string]string{first: "exit 1", later: "echo opencode 2.2.3"} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := unixAgentVersionRetryDelay
+	unixAgentVersionRetryDelay = time.Millisecond
+	t.Cleanup(func() { unixAgentVersionRetryDelay = old })
+	opts := UnixEnumerateOptions{
+		Resolver: &fakeResolver{
+			accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"}},
+			listed:   []string{"alice"},
+		},
+		HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1, MachinePolicyConnectors: []string{"opencode"},
+		State: &UnixEnumeratorState{Version: 1},
+		DiscoverSurfaces: func(ctx context.Context, account unixidentity.Account, _ []string) (UnixDiscovery, error) {
+			version, reason, source := DiscoverUnixAgentVersionFrom(ctx, account.Home, "opencode", true)
+			found := UnixDiscovery{Versions: map[string]string{}, Reasons: map[string]string{}, VersionSources: map[string]string{}}
+			if version != "" {
+				found.Versions["opencode"], found.VersionSources["opencode"] = version, source
+			} else {
+				found.Reasons["opencode"] = reason
+			}
+			return found, nil
+		},
+	}
+	cycle := func() []UnprotectedAgent {
+		t.Helper()
+		_, report, err := EnumerateUnix(context.Background(), enumeratorConfig("opencode"), connector.NewDefaultRegistry(), opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return report.Unprotected
+	}
+	if got := cycle(); len(got) != 0 {
+		t.Fatalf("the later CLI answered, yet unprotected = %+v", got)
+	}
+	if err := os.Remove(later); err != nil {
+		t.Fatal(err)
+	}
+	if got := cycle(); len(got) != 1 || got[0].Code != UnprotectedCodeHookContractUnverified {
+		t.Fatalf("the first CLI never printed a version; unprotected = %+v, want one hook_contract_unverified row", got)
+	}
+
+	// Twin: the first CLI answers, then fails without having changed: its own
+	// version stands in.
+	marker := filepath.Join(home, "busy")
+	script := "#!/bin/sh\nif [ -e " + marker + " ]; then exit 1; fi\necho opencode 2.2.3\n"
+	if err := os.WriteFile(first, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := cycle(); len(got) != 0 {
+		t.Fatalf("the first CLI answered, yet unprotected = %+v", got)
+	}
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := cycle(); len(got) != 0 {
+		t.Fatalf("the first CLI answered before and did not change, yet unprotected = %+v", got)
+	}
+}
+
+// DiscoverUnixAgentVersionFrom names the executable that ran, and nothing for
+// a version read from package metadata.
+func TestDiscoverUnixAgentVersionFromNamesTheExecutableThatAnswered(t *testing.T) {
+	oldPrefixes := machinePrefixes
+	machinePrefixes = func() []string { return nil }
+	t.Cleanup(func() { machinePrefixes = oldPrefixes })
+	home := t.TempDir()
+	path := installFakeOpenCode(t, home, "echo opencode 2.2.3")
+	version, reason, source := DiscoverUnixAgentVersionFrom(context.Background(), home, "opencode", true)
+	if version != "2.2.3" || reason != "" || source != path {
+		t.Fatalf("version %q reason %q source %q, want 2.2.3 from %s", version, reason, source, path)
+	}
+	version, _, source = DiscoverUnixAgentVersionFrom(context.Background(), home, "opencode", false)
+	if source != "" {
+		t.Fatalf("a read that ran nothing named source %q (version %q)", source, version)
+	}
 }

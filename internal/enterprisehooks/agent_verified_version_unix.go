@@ -57,18 +57,21 @@ func unixAgentStampOf(path string) (UnixAgentStamp, bool) {
 	}, true
 }
 
-// UnixAgentInstallStamp stamps connector's own CLI in home: the executable a
-// failed version read names in its reason (UnixAgentUnversionedReasonPrefix),
-// so the stamp taken after a read that worked and the stamp of the copy a
-// later failed read names are the same kind of thing. False when the
-// connector has no CLI there. It reads file metadata only.
-func UnixAgentInstallStamp(home, connector string) (UnixAgentStamp, bool) {
+// unixAgentSourceStamp stamps source, the executable a version read ran, when
+// it is one of connector's own CLI candidates in home: the executable a failed
+// version read names in its reason (UnixAgentUnversionedReasonPrefix), so the
+// stamp taken after a read that worked and the stamp of the copy a later
+// failed read names are the same kind of thing. False for any other path: a
+// version that did not come from a run of the connector's own CLI (package
+// metadata, a stamp, a generic alias) is bound to no file. It reads file
+// metadata only.
+func unixAgentSourceStamp(home, connector, source string) (UnixAgentStamp, bool) {
 	probe, ok := unixAgentProbes[strings.ToLower(strings.TrimSpace(connector))]
-	if !ok || len(probe.binaries) == 0 {
+	if !ok || len(probe.binaries) == 0 || !filepath.IsAbs(source) || filepath.Clean(source) != source {
 		return UnixAgentStamp{}, false
 	}
 	for _, candidate := range unixAgentBinaryCandidates(filepath.Clean(home), probe.binaries[0]) {
-		if unixAgentExecutablePresent(candidate) {
+		if candidate == source && unixAgentExecutablePresent(candidate) {
 			return unixAgentStampOf(candidate)
 		}
 	}
@@ -100,7 +103,7 @@ const UnixVerifiedAgentCarryCycles = 3
 const unixVerifiedAgentsMax = 4096
 
 // UnixVerifiedAgent is the last version read that worked for one (user,
-// connector) and the stamp of the executable it was read from.
+// connector) and the stamp of the executable whose run supplied it.
 type UnixVerifiedAgent struct {
 	Version  string         `json:"version"`
 	Stamp    UnixAgentStamp `json:"stamp"`
@@ -114,14 +117,16 @@ func (v UnixVerifiedAgent) valid() bool {
 
 // carryVerifiedAgentVersions keeps a verified contract across a failed
 // version read. For each connector it records the version a read returned
-// together with the stamp of the connector's CLI. When a later read finds the
-// CLI installed but prints no version, and the CLI is the same file as the
-// one the recorded read came from, the recorded version stands in, for at most
-// UnixVerifiedAgentCarryCycles cycles in a row. A changed or missing file, a
+// together with the stamp of the CLI whose run supplied it (sources names that
+// executable per connector; a version from anywhere else is recorded against
+// no file). When a later read finds a CLI installed but prints no version, and
+// that CLI is the same file as the one the recorded read ran, the recorded
+// version stands in, for at most UnixVerifiedAgentCarryCycles cycles in a
+// row. A CLI that never supplied a version, a changed or missing file, a
 // reason with anything but the bare path, or a connector with no record gets
 // no stand-in: it stays unverified, as before. Nothing is marked protected
 // that no read ever verified.
-func carryVerifiedAgentVersions(state *UnixEnumeratorState, user, home string, connectors []string, versions, reasons map[string]string, logf EnumerationLogger) map[string]string {
+func carryVerifiedAgentVersions(state *UnixEnumeratorState, user, home string, connectors []string, versions, reasons, sources map[string]string, logf EnumerationLogger) map[string]string {
 	if state == nil {
 		return versions
 	}
@@ -132,7 +137,7 @@ func carryVerifiedAgentVersions(state *UnixEnumeratorState, user, home string, c
 			continue
 		}
 		if version := versions[conn]; version != "" {
-			if stamp, ok := UnixAgentInstallStamp(home, conn); ok && ValidUnixAgentVersion(version) {
+			if stamp, ok := unixAgentSourceStamp(home, conn, sources[conn]); ok && ValidUnixAgentVersion(version) {
 				if state.VerifiedAgents == nil {
 					state.VerifiedAgents = map[string]UnixVerifiedAgent{}
 				}

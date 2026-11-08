@@ -282,6 +282,16 @@ func nodeModulesPackage(prefix, pkg string) []string {
 // allowExec enables the `--version` fallback; callers set it only when
 // already running with the target user's credentials.
 func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec bool) (string, string) {
+	version, reason, _ := DiscoverUnixAgentVersionFrom(ctx, home, connector, allowExec)
+	return version, reason
+}
+
+// DiscoverUnixAgentVersionFrom is DiscoverUnixAgentVersion plus the
+// executable whose `--version` run supplied the version. The source is empty
+// when the version came from package metadata, a stamp or a linked package,
+// or when there is no version: only a live run of one CLI proves that this CLI
+// is the copy the version describes (see carryVerifiedAgentVersions).
+func DiscoverUnixAgentVersionFrom(ctx context.Context, home, connector string, allowExec bool) (version, reason, source string) {
 	return discoverUnixAgentVersion(ctx, home, connector, allowExec, true)
 }
 
@@ -291,14 +301,22 @@ func DiscoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 // state is busy or read-only, retry with isolated state before trusting an
 // install stamp that may describe an older CLI.
 func DiscoverUnixAgentVersionInAccountHome(ctx context.Context, home, connector string) (string, string) {
+	version, reason, _ := DiscoverUnixAgentVersionInAccountHomeFrom(ctx, home, connector)
+	return version, reason
+}
+
+// DiscoverUnixAgentVersionInAccountHomeFrom is
+// DiscoverUnixAgentVersionInAccountHome plus the executable that supplied the
+// version (see DiscoverUnixAgentVersionFrom).
+func DiscoverUnixAgentVersionInAccountHomeFrom(ctx context.Context, home, connector string) (version, reason, source string) {
 	return discoverUnixAgentVersion(ctx, home, connector, true, false)
 }
 
-func discoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec, isolateState bool) (string, string) {
+func discoverUnixAgentVersion(ctx context.Context, home, connector string, allowExec, isolateState bool) (version, reason, source string) {
 	connector = strings.ToLower(strings.TrimSpace(connector))
 	probe, ok := unixAgentProbes[connector]
 	if !ok {
-		return "", fmt.Sprintf("no version probe for connector %s", connector)
+		return "", fmt.Sprintf("no version probe for connector %s", connector), ""
 	}
 	home = filepath.Clean(home)
 	userPrefixes := userNodePrefixes(home)
@@ -318,14 +336,14 @@ func discoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 					continue
 				}
 				if version, ok := readUnixPackageVersion(candidate, pkg, false); ok {
-					return version, ""
+					return version, "", ""
 				}
 			}
 		}
 	}
 	for _, dir := range probe.versionDirs {
 		if version := newestVersionDir(filepath.Join(home, filepath.FromSlash(dir))); version != "" {
-			return version, ""
+			return version, "", ""
 		}
 	}
 	stampVersion := ""
@@ -337,9 +355,9 @@ func discoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 	}
 	if !allowExec {
 		if stampVersion != "" {
-			return stampVersion, ""
+			return stampVersion, "", ""
 		}
-		return "", fmt.Sprintf("no %s package metadata under this home", connector)
+		return "", fmt.Sprintf("no %s package metadata under this home", connector), ""
 	}
 	installedAt, installedNote := "", ""
 	stateEnv := probe.stateEnv
@@ -354,11 +372,11 @@ func discoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 			trusted := unixDiscoveryCandidateTrusted(home, candidate)
 			if trusted {
 				if version := execUnixAgentVersion(ctx, candidate, home, stateEnv); version != "" {
-					return version, ""
+					return version, "", candidate
 				}
 				if !isolateState && probe.stateEnv != "" && ctx.Err() == nil {
 					if version := execUnixAgentVersion(ctx, candidate, home, probe.stateEnv); version != "" {
-						return version, ""
+						return version, "", candidate
 					}
 				}
 				// A user can install an npm CLI under an arbitrary prefix and
@@ -366,7 +384,7 @@ func discoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 				// live probe did not answer, use the linked package's version.
 				for _, pkg := range probe.npmPackages {
 					if version := linkedUnixPackageVersion(home, candidate, pkg); version != "" {
-						return version, ""
+						return version, "", ""
 					}
 				}
 			}
@@ -385,12 +403,12 @@ func discoverUnixAgentVersion(ctx context.Context, home, connector string, allow
 	// since the installer last wrote it (GAP-1274). Metadata remains useful
 	// when there is no CLI to query and for the existing isolated callers.
 	if stampVersion != "" && (installedAt == "" || isolateState) {
-		return stampVersion, ""
+		return stampVersion, "", ""
 	}
 	if installedAt != "" {
-		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote
+		return "", UnixAgentUnversionedReasonPrefix + installedAt + installedNote, ""
 	}
-	return "", fmt.Sprintf("no %s installation found for this user", connector)
+	return "", fmt.Sprintf("no %s installation found for this user", connector), ""
 }
 
 // linkedUnixPackageVersion accepts metadata only from the package whose bin
