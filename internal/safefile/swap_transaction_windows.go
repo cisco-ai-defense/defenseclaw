@@ -38,20 +38,21 @@ func warnSwapTransactionFallback() {
 	})
 }
 
-// swapSourceIsProgramImage keeps executable images out of a file transaction.
+// swapRequiresPlainRename keeps executable images out of a file transaction.
+// When the source cannot be read, retain the original plain rename behavior.
 // Windows can refuse an outside process launch while an image is transacted.
-func swapSourceIsProgramImage(path string) (bool, error) {
+func swapRequiresPlainRename(path string) bool {
 	file, err := os.Open(path)
 	if err != nil {
-		return false, err
+		return true
 	}
 	defer file.Close()
 	var header [2]byte
 	n, err := io.ReadFull(file, header[:])
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return false, err
+		return true
 	}
-	return n == len(header) && header == [2]byte{'M', 'Z'}, nil
+	return n == len(header) && header == [2]byte{'M', 'Z'}
 }
 
 // renameTransacted opens the staged file as part of tx, then renames through
