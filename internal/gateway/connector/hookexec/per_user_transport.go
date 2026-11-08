@@ -311,6 +311,14 @@ func verifiedPerUserHTTPClient(
 				}
 				if err := verify(conn); err != nil {
 					_ = conn.Close()
+					if errors.Is(err, errPerUserListenerUnanswered) {
+						// This account's own listener, never accepted: the
+						// owner is proven, so it is no foreign peer.
+						if check != nil {
+							check.pending.Store(false)
+						}
+						return nil, err
+					}
 					return nil, fmt.Errorf("%w: %w", errPerUserPeerUnverified, err)
 				}
 				if check != nil {

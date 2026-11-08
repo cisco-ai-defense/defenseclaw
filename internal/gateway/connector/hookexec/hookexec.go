@@ -1265,6 +1265,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
+		if errors.Is(err, errPerUserListenerUnanswered) && !opts.ManagedEnterprise {
+			return failPerUserListenerUnanswered(opts, sp, failMode)
+		}
 		if errors.Is(err, errPerUserPeerUnverified) {
 			// A deadline on the peer check is a local verification failure,
 			// not a verified gateway that gave no HTTP status.
