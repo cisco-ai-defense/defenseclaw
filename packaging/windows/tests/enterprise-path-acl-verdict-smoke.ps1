@@ -63,7 +63,69 @@ $cases = @(
 )
 
 $failures = [Collections.Generic.List[string]]::new()
+$realOwnerRows = 0
 try {
+    # g877b review S5, the real thing (before any case below replaces the verdict
+    # reader or the stamp): a file on disk that BUILTIN\Users owns, with the kind
+    # and the call shape of each lazy lock entry, is refused for its owner and its
+    # owner is not changed by the refusal. The owner is set with icacls, which
+    # needs the restore privilege an administrator token has; a token without it
+    # skips the rows and says so.
+    $ownerDirectory = [IO.Path]::Combine([IO.Path]::GetTempPath(), 'dc-lock-owner-' + [Guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($ownerDirectory)
+    try {
+        $ownerSid = 'S-1-5-32-545'
+        $lockKinds = & $module {
+            $script:DefenseClawEnterpriseProfile = 'Standalone'
+            @(Get-DefenseClawLazyLockFiles -Layout @{ ConfigDirectory = 'C:\dc-lock-layout\config'; RuntimeDirectory = 'C:\dc-lock-layout\runtime' } |
+                Microsoft.PowerShell.Core\ForEach-Object { [string]$_.Kind })
+        }
+        if (@($lockKinds).Count -ne 4) {
+            $failures.Add("real owner: the lazy lock list has $(@($lockKinds).Count) entries, want 4")
+        }
+        $lockIndex = 0
+        foreach ($kind in @($lockKinds)) {
+            $lockIndex++
+            $lockPath = [IO.Path]::Combine($ownerDirectory, "lock$lockIndex.lock")
+            [IO.File]::WriteAllBytes($lockPath, [byte[]]@())
+            $setOwner = & icacls.exe $lockPath /setowner "*$ownerSid" 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: real owner rows skipped (icacls /setowner: $setOwner)"
+                break
+            }
+            $observed = & $module {
+                param($Path, $Kind)
+                $script:DefenseClawEnterpriseProfile = 'Standalone'
+                try {
+                    Assert-DefenseClawPathAcl `
+                        -Path $Path `
+                        -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
+                        -AllowedReaderSIDs @($script:SystemSID, $script:AdministratorsSID) `
+                        -RejectUntrustedRead `
+                        -SelfHealKind $Kind `
+                        -SelfHealGatewayServiceSID 'S-1-5-80-1' `
+                        -WarningAction SilentlyContinue
+                    return 'passed'
+                }
+                catch {
+                    return [string]$_.Exception.Message
+                }
+            } $lockPath $kind
+            $stillOwned = ((Microsoft.PowerShell.Security\Get-Acl -LiteralPath $lockPath).GetOwner([Security.Principal.SecurityIdentifier])).Value -ceq $ownerSid
+            $want = "untrusted owner $ownerSid on managed path: $lockPath"
+            if ([string]$observed -cne $want) {
+                $failures.Add("real owner: $kind lock: want '$want', got '$observed'")
+            }
+            if (-not $stillOwned) {
+                $failures.Add("real owner: $kind lock: the refusal changed the owner")
+            }
+            $realOwnerRows++
+        }
+    }
+    finally {
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $ownerDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     # Canonical-descriptor check of a DACL that lost SE_DACL_PROTECTED: a
     # validation-only caller (no -AllowSelfHeal) refuses it whatever else the
     # descriptor holds; a protected DACL is judged ACE by ACE.
@@ -276,7 +338,7 @@ finally {
 if ($failures.Count -gt 0) {
     throw ("enterprise-path-acl-verdict-smoke: FAIL`n" + ($failures -join "`n"))
 }
-Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: PASS ($($cases.Count + $rawCases.Count + $readCases.Count + $lockCases.Count * 4) cases)"
+Microsoft.PowerShell.Utility\Write-Host "enterprise-path-acl-verdict-smoke: PASS ($($cases.Count + $rawCases.Count + $readCases.Count + $lockCases.Count * 4 + $realOwnerRows) cases)"
 # A case's icacls repair attempt on a missing path fails on purpose; its exit
 # code must not become this script's.
 exit 0
