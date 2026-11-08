@@ -183,10 +183,10 @@ const hookPostAccountHomeEnv = "_DC_HOOK_POST_ACCOUNT_HOME"
 // HOME the shell hook gives this process: the home the shell saved, exactly
 // as it got it, else the account database entry of the user. The saved value
 // is not rewritten here. The scan resolves it by file system rules (a parent
-// step through a link, a trailing slash) and keeps the late call closed when
-// it cannot (hookpaths.LateOrdinaryCallAt). Falling back to another home for
-// a value the shell supplied would index the protected files under the wrong
-// folder. Empty (the home of the process) only when neither is known.
+// step through a link, a trailing slash). A value that is no folder holds no
+// protected file; the scan then tells the account database home and keeps
+// every hard-linked file closed (hookpaths.LateOrdinaryCallAt). Empty (the
+// home of the process) only when neither is known.
 func accountHome() string {
 	if home := os.Getenv(hookPostAccountHomeEnv); home != "" {
 		return home

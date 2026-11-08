@@ -112,16 +112,30 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 			}
 		}
 	}
-	// A saved value that is no usable home (missing folder, relative path)
-	// keeps the late call closed, a protected target or not; it never sends
-	// the scan to another home.
-	for _, saved := range []string{filepath.Join(root, "missing"), filepath.Join(root, "missing", "deeper"), "relative/home"} {
+	// A saved value that is no usable home (missing folder, relative path, a
+	// regular file) holds no protected file. The scan then tells the account
+	// database home, and as the identities of the protected files of the
+	// saved home are unknown, any hard-linked regular file stays closed
+	// (exit 9). An ordinary late call that names no hard link keeps the
+	// outage-mode exit 12: balanced mode does not block ordinary work.
+	for _, saved := range []string{filepath.Join(root, "missing"), filepath.Join(root, "missing", "deeper"), "relative/home",
+		filepath.Join(project, "plain.txt")} {
 		for _, path := range []string{"/api/v1/codex/hook", "/api/v1/claude-code/hook"} {
-			for _, command := range []string{"touch hl-keys", "touch " + long} {
-				t.Run(strings.TrimPrefix(path, "/api/v1/")+" unusable saved home", func(t *testing.T) {
+			for _, tc := range []struct {
+				name, command string
+				want          int
+			}{
+				{"hard link to the keys", "touch hl-keys", hookexec.PerUserPostNoAnswerExit},
+				{"hard link first operand", "touch hl-keys " + long, hookexec.PerUserPostNoAnswerExit},
+				{"hard link last operand", "touch " + long + " hl-keys", hookexec.PerUserPostNoAnswerExit},
+				{"hard link by absolute path", "touch " + filepath.Join(project, "hl-keys"), hookexec.PerUserPostNoAnswerExit},
+				{"hard link of an ordinary file", "touch hl-plain", hookexec.PerUserPostNoAnswerExit},
+				{"ordinary late call", "touch " + long, hookexec.PerUserPostLateOrdinaryExit},
+			} {
+				t.Run(strings.TrimPrefix(path, "/api/v1/")+" "+tc.name+" unusable saved home "+filepath.Base(saved), func(t *testing.T) {
 					t.Setenv(hookPostAccountHomeEnv, saved)
-					if got := post(path, command); got != hookexec.PerUserPostNoAnswerExit {
-						t.Fatalf("home %q: exit %d, want %d", saved, got, hookexec.PerUserPostNoAnswerExit)
+					if got := post(path, tc.command); got != tc.want {
+						t.Fatalf("home %q: exit %d, want %d", saved, got, tc.want)
 					}
 				})
 			}
