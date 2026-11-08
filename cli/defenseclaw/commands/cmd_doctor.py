@@ -13814,33 +13814,58 @@ def _policy_dir_remediation(cfg, error: str) -> str:
     )
 
 
+def _gateway_repair_route() -> str:
+    """The step that restores the gateway executable of this install, by origin.
+
+    A machine-wide managed deployment is repaired by the administrator who
+    deploys it: defenseclaw-upgrade.sh refuses it and the per-user install
+    command bypasses it. Otherwise the per-user route applies (the release
+    upgrade resolver on macOS and Linux, the install command again on Windows).
+    """
+
+    from defenseclaw.upgrade_shim import managed_deployment, managed_lifecycle_command
+
+    deployment = managed_deployment()
+    if not deployment:
+        return _install_repair_hint("the gateway")
+    lifecycle = managed_lifecycle_command()
+    check = f"; an administrator checks it with `sudo {lifecycle} status`" if lifecycle else ""
+    return (
+        f"DefenseClaw on this computer is managed by your organization ({deployment}): "
+        f"ask your IT department to repair or redeploy the managed package{check}"
+    )
+
+
 def _policy_digest_unavailable_remediation(reason: str) -> str:
     """The next step for a Policy row whose local digest could not be computed.
 
     Running ``defenseclaw-gateway policy digest --json`` shows why a gateway that
     ran and failed did; it cannot help when the executable itself is missing,
     refused by the custody check, or not startable, so those name the step that
-    corrects the executable (the cause is in the row detail).
+    corrects the executable for the install this is (the cause is in the row
+    detail). DEFENSECLAW_GATEWAY_BIN is named only where the resolver reads it:
+    a corroborated native Windows package ignores it by design.
     """
 
-    from defenseclaw.gateway import gateway_executable_problem
+    from defenseclaw.gateway import gateway_executable_problem, packaged_windows_install_root
+    from defenseclaw.upgrade_shim import managed_deployment
 
     again = "then run `defenseclaw doctor` again"
-    part = "the gateway"
     problem = gateway_executable_problem(reason)
     if problem is None:
         return f"Run `defenseclaw-gateway policy digest --json` to see why the digest cannot be computed, {again}"
-    if os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip():
+    route = _gateway_repair_route()
+    if os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip() and not packaged_windows_install_root():
         return (
             "DEFENSECLAW_GATEWAY_BIN points at a gateway that cannot run: set it to the installed "
-            f"defenseclaw-gateway, or unset it, {again}"
+            f"defenseclaw-gateway, or unset it (if the installed gateway is missing too: {route}), {again}"
         )
-    if problem == "unverified":
+    if problem == "unverified" and not managed_deployment():
         return (
             "Make the gateway executable the cause names, and every directory above it, writable only by this "
-            f"account (or root), {again}; if it is damaged, {_install_repair_hint(part)}"
+            f"account (or root), {again}; if it is damaged, {route}"
         )
-    return f"{_install_repair_hint(part)}, {again}"
+    return f"{route[:1].upper()}{route[1:]}, {again}"
 
 
 def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> None:
