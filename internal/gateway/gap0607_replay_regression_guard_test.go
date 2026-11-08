@@ -74,11 +74,14 @@ func gap0607PendingCells(gap string, want map[string]string, current d1ReplayVer
 // The ratified 1.0.9 verdicts follow rel-1-0-6 GAP-0675: an ordinary command
 // that only names a protected user file (data, a log line, a read, a copy
 // out) runs in the balanced tiers with a visible alert and blocks in strict.
-// Its policy change (fix/r109-ghpw) is not yet on the release branch, so the
-// balanced cells are pinned to the current block and fail once it lands, for
-// review. A write to a protected file named directly, through a known value
-// or through an existing link blocks in every tier (wave-3 owner rule), with
-// no pin. The detection redesign of these shapes is the 1.0.10 round (#1189).
+// The shell-command protected-file policy (fix/r109-ghpw) is on this branch
+// and keeps every finding of the class a command names, so these ordinary
+// shapes still block in the balanced tiers: telling a read or a data mention
+// from a write needs a positive target proof, which is the detection redesign
+// (#1189, 1.0.10). Their balanced cells stay pinned to the current block and
+// fail once that work lands, for review. A write to a protected file named
+// directly, through a known value or through an existing link blocks in every
+// tier (wave-3 owner rule), with no pin.
 // {HOME} is the test's synthetic home directory.
 func gap0607ReplayGuards() []gap0607ReplayGuard {
 	finding := gap0607Tiered("alert", "block")
@@ -88,7 +91,7 @@ func gap0607ReplayGuards() []gap0607ReplayGuard {
 	allow := d1ReplayVerdict{Decision: "allow", RuleID: "-"}
 	policy := func(command, replay, gap string) gap0607ReplayGuard {
 		return gap0607ReplayGuard{Replay: replay, Gap: gap, Command: command, Want: finding,
-			Pending: gap0607PendingCells("GAP-0675", finding, block, "oss", "managed-balanced")}
+			Pending: gap0607PendingCells("GAP-0675 #1189", finding, block, "oss", "managed-balanced")}
 	}
 	return []gap0607ReplayGuard{
 		// A write through a name a preceding pull may materialize has no

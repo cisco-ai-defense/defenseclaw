@@ -41,11 +41,13 @@ type d1PendingProductDecision struct {
 }
 
 // The public corpus keeps the intended verdicts in its rows. These entries
-// pin peer-owned decisions until their product fixes reach this branch. A
-// changed result, including the intended result, requires removing the entry.
-// The archive cells belong to rel-1-0-6 GAP-0675 (gas-ux-r1 GAP-0054 was
-// folded into it). The GAP-0055 lookup cells left the list when its fix
-// reached rel/1.0.9.
+// pin decisions whose product change is not made yet. A changed result,
+// including the intended result, requires removing the entry. The archive
+// cells belong to rel-1-0-6 GAP-0675 (gas-ux-r1 GAP-0054 was folded into it):
+// the shell-command protected-file policy (fix/r109-ghpw) keeps their block,
+// because telling a read or a data mention from a write is the detection
+// redesign (#1189, 1.0.10). The GAP-0055 lookup cells left the list when its
+// fix reached rel/1.0.9.
 func d1PendingProductDecisions() map[string]d1PendingProductDecision {
 	pending := make(map[string]d1PendingProductDecision)
 	for _, id := range []string{
@@ -54,19 +56,19 @@ func d1PendingProductDecisions() map[string]d1PendingProductDecision {
 	} {
 		for _, connector := range []string{"claudecode", "codex"} {
 			pending[id+" "+connector+"/managed-balanced"] = d1PendingProductDecision{
-				Gap: "GAP-0675", Want: "alert",
+				Gap: "GAP-0675 #1189", Want: "alert",
 				Current: d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"},
 			}
 		}
 	}
 	for _, connector := range []string{"claudecode", "codex"} {
 		pending["d1-0043 "+connector+"/managed-balanced"] = d1PendingProductDecision{
-			Gap: "GAP-0675", Want: "allow",
+			Gap: "GAP-0675 #1189", Want: "allow",
 			Current: d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"},
 		}
 		for _, cell := range []string{connector + "/oss", connector + "/managed-balanced"} {
 			pending["d1-0081 "+cell] = d1PendingProductDecision{
-				Gap: "GAP-0675", Want: "allow",
+				Gap: "GAP-0675 #1189", Want: "allow",
 				Current: d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"},
 			}
 		}
@@ -408,7 +410,7 @@ func TestD1PendingProductDecisionInventory(t *testing.T) {
 	row := d1ReplayRow{ID: "d1-0081", Expected: map[string]string{"codex/oss": "allow"}}
 	cell := "codex/oss"
 	pending := map[string]d1PendingProductDecision{"d1-0081 codex/oss": {
-		Gap: "GAP-0675", Want: "allow",
+		Gap: "GAP-0675 #1189", Want: "allow",
 		Current: d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"},
 	}}
 	if err := d1CheckPublicVerdict(row, cell, d1ReplayVerdict{Decision: "block", RuleID: "persistence.ssh_authorized_keys_command"}, pending); err != nil {
