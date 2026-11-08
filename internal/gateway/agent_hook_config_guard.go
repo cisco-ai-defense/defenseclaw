@@ -1341,7 +1341,8 @@ func agentHookConfigAssignment(word string) bool {
 	}
 	for i := 0; i < len(name); i++ {
 		c := name[i]
-		if !(c == 0x5f || c >= 0x41 && c <= 0x5a || c >= 0x61 && c <= 0x7a || i > 0 && c >= 0x30 && c <= 0x39) {
+		letter := c == 0x5f || c >= 0x41 && c <= 0x5a || c >= 0x61 && c <= 0x7a
+		if !letter && (i == 0 || c < 0x30 || c > 0x39) {
 			return false
 		}
 	}
