@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -234,8 +235,8 @@ func TestCompareAndSwapFileKeepsMZRequirementsAtTheNameThroughout(t *testing.T) 
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "requirements.toml")
 	versions := [][]byte{
-		[]byte("MZ = 'retained'\nmode = 'old'\n"),
-		[]byte("MZ = 'retained'\nmode = 'new'\n"),
+		[]byte("MZ = 'retained'\nmode = 'old'\n# " + strings.Repeat("a", 128) + "\n"),
+		[]byte("MZ = 'retained'\nmode = 'new'\n# " + strings.Repeat("b", 128) + "\n"),
 	}
 	if err := os.WriteFile(destination, versions[0], 0o600); err != nil {
 		t.Fatal(err)
@@ -269,7 +270,7 @@ func TestCompareAndSwapFileKeepsMZRequirementsAtTheNameThroughout(t *testing.T) 
 			t.Fatal(err)
 		}
 		result, err := CompareAndSwapFile(source, destination,
-			SwapExpectation{Exists: true, Data: versions[swaps%2]}, 64, nil)
+			SwapExpectation{Exists: true, Data: versions[swaps%2]}, len(versions[0]), nil)
 		if err != nil || !result.Swapped || !result.Replaced {
 			close(stop)
 			<-done

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -429,8 +430,8 @@ func TestCompareAndSwapFileFallsBackAfterTransactionalConflict(t *testing.T) {
 func TestCompareAndSwapFileTransactsMZPrefixedRequirementsData(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "requirements.toml")
-	old := []byte("MZ = 'retained'\nmode = 'old'\n")
-	newData := []byte("MZ = 'retained'\nmode = 'new'\n")
+	old := []byte("MZ = 'retained'\nmode = 'old'\n# " + strings.Repeat("a", 128) + "\n")
+	newData := []byte("MZ = 'retained'\nmode = 'new'\n# " + strings.Repeat("b", 128) + "\n")
 	if err := os.WriteFile(destination, old, 0o600); err != nil {
 		t.Fatal(err)
 	}
