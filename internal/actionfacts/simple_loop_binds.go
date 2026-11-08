@@ -65,12 +65,14 @@ func (bind simpleLoopBind) reboundAt(offset int) bool {
 }
 
 // simpleBinder finds where code gives a variable another value for certain.
-// shadowed holds the names of the functions the action declares: a function
-// named read, printf, true, false or : replaces the builtin, so a call
-// spelled with that name proves nothing about the variable.
+// order tells which call a function the action declares replaces: a function
+// named read, printf, true, false or : that is declared before the call (or
+// that an earlier pass or an earlier call of the enclosing function can have
+// declared) replaces the builtin, so the call proves nothing about the
+// variable.
 type simpleBinder struct {
-	name     string
-	shadowed []string
+	name  string
+	order *simpleScriptOrder
 }
 
 // simpleReboundSpans returns where in stmts, the body of a loop, name holds
@@ -83,9 +85,9 @@ type simpleBinder struct {
 // through the name unjudged (rel-1-0-6:GAP-0880 review 3). A binding that
 // certainly runs is no reason to keep a value the shell no longer has
 // (review 4).
-func simpleReboundSpans(stmts []*syntax.Stmt, name string, shadowed []string) []simpleSpan {
+func simpleReboundSpans(stmts []*syntax.Stmt, name string, order *simpleScriptOrder) []simpleSpan {
 	var spans []simpleSpan
-	simpleBinder{name: name, shadowed: shadowed}.list(stmts, &spans)
+	simpleBinder{name: name, order: order}.list(stmts, &spans)
 	return spans
 }
 
@@ -160,13 +162,17 @@ func (b simpleBinder) always(stmt *syntax.Stmt) bool {
 	if stmt == nil || stmt.Background || stmt.Coprocess {
 		return false
 	}
+	// A redirection that fails ends the command before it runs, whatever it
+	// would have bound; only a command that is a bare assignment still sets
+	// its variables.
+	if call, ok := stmt.Cmd.(*syntax.CallExpr); (!ok || len(call.Args) != 0) && !simpleRedirectsHold(stmt.Redirs) {
+		return false
+	}
 	switch cmd := stmt.Cmd.(type) {
 	case *syntax.CallExpr:
 		return b.callBinds(cmd)
 	case *syntax.DeclClause:
-		return slices.ContainsFunc(cmd.Args, func(arg *syntax.Assign) bool {
-			return arg.Name != nil && arg.Name.Value == b.name && !arg.Naked
-		})
+		return b.declBinds(cmd)
 	case *syntax.Block:
 		return b.anyAlways(cmd.Stmts)
 	case *syntax.TimeClause:
@@ -231,7 +237,7 @@ func (b simpleBinder) status(stmt *syntax.Stmt) int {
 		return -1
 	}
 	program, static := simpleStaticWord(call.Args[0], nil)
-	if !static || slices.Contains(b.shadowed, program) {
+	if !static || b.order.shadows(program, stmt) {
 		return -1
 	}
 	status := -1
@@ -258,12 +264,13 @@ func (b simpleBinder) callBinds(call *syntax.CallExpr) bool {
 		})
 	}
 	program, static := simpleStaticWord(call.Args[0], nil)
-	if !static || slices.Contains(b.shadowed, program) {
+	if !static || b.order.shadows(program, call) {
 		return false
 	}
 	switch program {
 	case "printf":
-		if len(call.Args) < 3 {
+		// printf -v name format: without the format it sets nothing.
+		if len(call.Args) < 4 {
 			return false
 		}
 		option, static := simpleStaticWord(call.Args[1], nil)
@@ -276,9 +283,11 @@ func (b simpleBinder) callBinds(call *syntax.CallExpr) bool {
 			case !static:
 				return false
 			case strings.HasPrefix(value, "-") && len(value) > 1:
-				// An option that takes a word (-p prompt) consumes the next one.
-				if strings.ContainsAny(value[len(value)-1:], "ptdnNui") {
-					index++
+				// Only -r and -s read a line into the names. With another option
+				// (a prompt, a timeout, a delimiter, a count, a descriptor) the
+				// read may end without setting them.
+				if strings.Trim(value[1:], "rs") != "" {
+					return false
 				}
 			case value == b.name:
 				return true
@@ -288,17 +297,211 @@ func (b simpleBinder) callBinds(call *syntax.CallExpr) bool {
 	return false
 }
 
-// simpleDeclaredFunctions returns the names of the functions the action
-// declares anywhere.
-func simpleDeclaredFunctions(file *syntax.File) []string {
-	var names []string
+// declBinds reports a declaration (export u=x, readonly, declare) that gives
+// the name a value. local binds only inside a function.
+func (b simpleBinder) declBinds(decl *syntax.DeclClause) bool {
+	if decl.Variant != nil && decl.Variant.Value == "local" && !b.order.inFunction(decl) {
+		return false
+	}
+	return slices.ContainsFunc(decl.Args, func(arg *syntax.Assign) bool {
+		return arg.Name != nil && arg.Name.Value == b.name && !arg.Naked
+	})
+}
+
+// simpleReadWord is the value that a read of a here-string leaves in its
+// variable.
+type simpleReadWord struct{ name, word string }
+
+// simpleHereStringRead returns the variable and value of read [-r] name <<<
+// word, for one plain word, the default IFS and the builtin: the shell holds
+// the word in name from the next statement on. The walk then reads a write
+// through the name as the path it names, instead of as an unresolved
+// variable. Any other form is left unread.
+func simpleHereStringRead(call *syntax.CallExpr, redirs []*syntax.Redirect, order func() *simpleScriptOrder) *simpleReadWord {
+	if len(redirs) != 1 || redirs[0].Op != syntax.WordHdoc || redirs[0].N != nil {
+		return nil
+	}
+	name, word, ok := HereStringRead(call, redirs[0].Word)
+	if !ok || !order().readsHereString(call) {
+		return nil
+	}
+	return &simpleReadWord{name: name, word: word}
+}
+
+// readsHereString reports a call of read that runs the builtin with the
+// default IFS: no function of that name can replace it (shadows) and the call
+// does not spell IFS.
+func (order *simpleScriptOrder) readsHereString(call *syntax.CallExpr) bool {
+	return !order.ifs && !order.shadows("read", call)
+}
+
+// ReadBindsHereString returns a test for a call of read whose here-string
+// word is the value of its variable: the builtin runs, with the default IFS.
+// It reads file once, so it stays right while the caller rewrites statements.
+func ReadBindsHereString(file *syntax.File) func(call *syntax.CallExpr) bool {
+	return newSimpleScriptOrder(file).readsHereString
+}
+
+// HereStringRead returns the variable and value of a call read [-r|-s] name
+// whose input is the here-string word: one plain word (letters, digits and
+// . / _ : @ % + , = -) that the default IFS leaves as it is. ok is false for
+// any other call or word, and for USER and LOGNAME, which have their own
+// rule. The caller checks the IFS, a function named read and the redirects
+// (ReadBindsHereString).
+func HereStringRead(call *syntax.CallExpr, word *syntax.Word) (name, value string, ok bool) {
+	if call == nil || word == nil || len(call.Assigns) != 0 || len(call.Args) < 2 || len(call.Args) > 3 {
+		return "", "", false
+	}
+	if program, static := simpleStaticWord(call.Args[0], nil); !static || program != "read" {
+		return "", "", false
+	}
+	if len(call.Args) == 3 {
+		if option, static := simpleStaticWord(call.Args[1], nil); !static || option != "-r" && option != "-s" {
+			return "", "", false
+		}
+	}
+	name, static := simpleStaticWord(call.Args[len(call.Args)-1], nil)
+	if !static || !simpleVariableName(name) || slices.Contains(simpleUserNames, name) {
+		return "", "", false
+	}
+	value, static = simpleStaticWord(word, nil)
+	if !static || !simplePlainLiteral(value) {
+		return "", "", false
+	}
+	return name, value, true
+}
+
+// simpleRedirectsHold reports redirections that cannot fail: a here-document
+// or here-string, /dev/null, and a copy of a standard descriptor.
+func simpleRedirectsHold(redirs []*syntax.Redirect) bool {
+	for _, redir := range redirs {
+		switch redir.Op {
+		case syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc:
+		case syntax.RdrIn, syntax.RdrOut, syntax.AppOut, syntax.RdrAll, syntax.AppAll, syntax.RdrClob:
+			if target, static := simpleStaticWord(redir.Word, nil); !static || target != "/dev/null" {
+				return false
+			}
+		case syntax.DplIn, syntax.DplOut:
+			if target, static := simpleStaticWord(redir.Word, nil); !static || target != "0" && target != "1" && target != "2" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// simpleScriptOrder is the code of one call in source order: the functions it
+// declares and the loops it runs. The shell runs a declaration where it
+// stands, so only a call that comes after it, or one that a loop or a
+// function can run again after it, meets the function.
+type simpleScriptOrder struct {
+	funcs []*syntax.FuncDecl
+	loops []syntax.Node
+	// ifs is set when the call spells the name IFS anywhere: its words then
+	// split by a delimiter the walk does not know.
+	ifs bool
+}
+
+func newSimpleScriptOrder(file *syntax.File) *simpleScriptOrder {
+	order := &simpleScriptOrder{}
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil && !slices.Contains(names, decl.Name.Value) {
-			names = append(names, decl.Name.Value)
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			order.funcs = append(order.funcs, node)
+		case *syntax.ForClause, *syntax.WhileClause:
+			order.loops = append(order.loops, node)
+		case *syntax.Lit:
+			order.ifs = order.ifs || simpleSpellsIFS(node.Value)
+		case *syntax.SglQuoted:
+			order.ifs = order.ifs || simpleSpellsIFS(node.Value)
+		case *syntax.ParamExp:
+			order.ifs = order.ifs || node.Param != nil && node.Param.Value == "IFS"
 		}
 		return true
 	})
-	return names
+	return order
+}
+
+// simpleSpellsIFS reports text with IFS as a name of its own: not inside a
+// longer name, so a path that merely contains the letters is not one.
+func simpleSpellsIFS(text string) bool {
+	identifier := func(char byte) bool {
+		return char == '_' || char >= '0' && char <= '9' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z'
+	}
+	for from := 0; ; {
+		index := strings.Index(text[from:], "IFS")
+		if index < 0 {
+			return false
+		}
+		start, end := from+index, from+index+3
+		if (start == 0 || !identifier(text[start-1])) && (end == len(text) || !identifier(text[end])) {
+			return true
+		}
+		from = end
+	}
+}
+
+// simpleWithin reports inner spelled inside outer.
+func simpleWithin(outer, inner syntax.Node) bool {
+	return outer.Pos().Offset() <= inner.Pos().Offset() && inner.End().Offset() <= outer.End().Offset()
+}
+
+// inFunction reports code spelled in the body of a declared function.
+func (order *simpleScriptOrder) inFunction(node syntax.Node) bool {
+	return slices.ContainsFunc(order.funcs, func(decl *syntax.FuncDecl) bool { return simpleWithin(decl, node) })
+}
+
+// shadows reports a call of the builtin name that a function of that name can
+// replace: one declared before the call, one declared in a loop that also
+// runs the call (the next pass), and any in the action when the call is in a
+// function body (the function may be called after the declaration). A
+// declaration after the call, outside every such loop, replaces nothing the
+// call runs.
+func (order *simpleScriptOrder) shadows(name string, call syntax.Node) bool {
+	for _, decl := range order.funcs {
+		if decl.Name == nil || decl.Name.Value != name {
+			continue
+		}
+		if decl.Pos().Offset() < call.Pos().Offset() || order.inFunction(call) ||
+			slices.ContainsFunc(order.loops, func(loop syntax.Node) bool { return simpleWithin(loop, call) && simpleWithin(loop, decl) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// calledFrom returns the declared functions that the code of root can call,
+// directly or through the functions it calls. skip is not read.
+func (order *simpleScriptOrder) calledFrom(root, skip syntax.Node) []*syntax.FuncDecl {
+	var called []*syntax.FuncDecl
+	var names []string
+	pending := []syntax.Node{root}
+	for len(pending) > 0 {
+		next := pending[0]
+		pending = pending[1:]
+		syntax.Walk(next, func(node syntax.Node) bool {
+			if node == skip {
+				return false
+			}
+			call, ok := node.(*syntax.CallExpr)
+			if !ok || len(call.Args) == 0 {
+				return true
+			}
+			if name, static := simpleStaticWord(call.Args[0], nil); static && !slices.Contains(names, name) {
+				names = append(names, name)
+				for _, decl := range order.funcs {
+					if decl.Name != nil && decl.Name.Value == name {
+						called = append(called, decl)
+						pending = append(pending, decl.Body)
+					}
+				}
+			}
+			return true
+		})
+	}
+	return called
 }
 
 // simpleForkLoopBind returns the states a forked loop starts its body with:
@@ -633,7 +836,7 @@ func simpleParamNames(text string) []string {
 // may have an IFS prefix (while IFS= read -r name). A backslash (read without
 // -r reads it as an escape), other options and a longer input leave it
 // unread.
-func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Word, file *syntax.File, loops []syntax.Node) (simpleLoopBind, bool) {
+func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Word, order *simpleScriptOrder, loops []syntax.Node) (simpleLoopBind, bool) {
 	if input == nil || loop.Until || len(loop.Cond) != 1 {
 		return simpleLoopBind{}, false
 	}
@@ -664,11 +867,11 @@ func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Word, file *synt
 	// A read with an IFS of its own reads with that one; any other read has
 	// the IFS the walk holds where the loop starts (readIFS).
 	bind := simpleLoopBind{name: name, items: []*syntax.Word{input}, fork: true, read: true, ownIFS: own,
-		rebound: simpleReboundSpans(loop.Do, name, simpleDeclaredFunctions(file))}
+		rebound: simpleReboundSpans(loop.Do, name, order)}
 	if own {
 		bind.ifs = []string{ifs}
 	} else {
-		bind.outerIFS = simpleEnclosingIFS(file, loops, loop)
+		bind.outerIFS = simpleEnclosingIFS(order, loops, loop)
 	}
 	return bind, true
 }
@@ -738,12 +941,12 @@ func (bind simpleLoopBind) readIFS(vars map[string]string) []string {
 
 // simpleEnclosingIFS returns the IFS assignments that can reach a read loop
 // from code the walk meets after the loop: those in the outermost loop that
-// can run again around it (the next pass), and in the functions the action
-// declares (the loop may call one). Code after every enclosing loop, in the
-// body of the read loop, or in a function nobody calls from a loop cannot
-// reach the read. A for loop over one static word runs once and is no earlier
-// pass.
-func simpleEnclosingIFS(file *syntax.File, loops []syntax.Node, loop *syntax.WhileClause) []*syntax.Assign {
+// can run again around it (the next pass), and in the functions that loop
+// calls, directly or through other functions. A function that nothing in the
+// loop calls, code after every enclosing loop, and the body of the read loop
+// cannot reach the read. A for loop over one static word runs once and is no
+// earlier pass.
+func simpleEnclosingIFS(order *simpleScriptOrder, loops []syntax.Node, loop *syntax.WhileClause) []*syntax.Assign {
 	var outer syntax.Node
 	for _, enclosing := range loops {
 		if clause, ok := enclosing.(*syntax.ForClause); ok {
@@ -764,11 +967,15 @@ func simpleEnclosingIFS(file *syntax.File, loops []syntax.Node, loop *syntax.Whi
 			assigns = append(assigns, assign)
 		}
 	}
-	collect := func(root syntax.Node) {
+	// collect reads the assignments of root; a function declared inside it
+	// counts only where it is called, and its local declarations are its own.
+	collect := func(root syntax.Node, inFunction bool) {
 		syntax.Walk(root, func(node syntax.Node) bool {
 			switch node := node.(type) {
 			case *syntax.WhileClause:
 				return node != loop
+			case *syntax.FuncDecl:
+				return false
 			case *syntax.CallExpr:
 				if len(node.Args) == 0 {
 					for _, assign := range node.Assigns {
@@ -776,6 +983,10 @@ func simpleEnclosingIFS(file *syntax.File, loops []syntax.Node, loop *syntax.Whi
 					}
 				}
 			case *syntax.DeclClause:
+				if node.Variant != nil && (node.Variant.Value == "local" ||
+					inFunction && (node.Variant.Value == "declare" || node.Variant.Value == "typeset")) {
+					break
+				}
 				for _, assign := range node.Args {
 					add(assign)
 				}
@@ -783,14 +994,10 @@ func simpleEnclosingIFS(file *syntax.File, loops []syntax.Node, loop *syntax.Whi
 			return true
 		})
 	}
-	collect(outer)
-	syntax.Walk(file, func(node syntax.Node) bool {
-		if decl, ok := node.(*syntax.FuncDecl); ok {
-			collect(decl)
-			return false
-		}
-		return true
-	})
+	collect(outer, false)
+	for _, decl := range order.calledFrom(outer, loop) {
+		collect(decl.Body, true)
+	}
 	return assigns
 }
 

@@ -560,6 +560,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			if changedDirectory {
 				state.cwdUnknown = nextCWD == ""
 			}
+			if part.read != nil {
+				state.vars[part.read.name] = part.read.word
+			}
 			nextVariants = append(nextVariants, state)
 			if part.maySkip && len(prior.forked) != 0 {
 				// The statement may not run: the word of the loop stays.

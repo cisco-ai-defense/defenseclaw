@@ -208,6 +208,9 @@ type sequenceStatement struct {
 	// maySkip marks a statement that is the right side of && or ||: it runs
 	// only when the left side lets it.
 	maySkip bool
+	// read is the value a read of one here-string word leaves its variable
+	// (simpleHereStringRead), nil for any other statement.
+	read *simpleReadWord
 	// binds holds the USER and LOGNAME names that a for or select loop
 	// around the statement binds, outermost first, with the list each
 	// takes its values from: the statement runs after the binding.
@@ -268,6 +271,15 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		return nil, false, false
 	}
 	statements = make([]sequenceStatement, 0, len(file.Stmts))
+	// order is the declared functions and loops of the call, read once and
+	// only for a call that has a loop to bind.
+	var codeOrder *simpleScriptOrder
+	order := func() *simpleScriptOrder {
+		if codeOrder == nil {
+			codeOrder = newSimpleScriptOrder(file)
+		}
+		return codeOrder
+	}
 	text := func(from, to syntax.Pos) (string, bool) {
 		start, end := int(from.Offset()), int(to.Offset())
 		if start < 0 || end <= start || end > len(source) {
@@ -326,8 +338,12 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		for index := len(redirects) - 1; index >= 0; index-- {
 			statement += " " + redirects[index]
 		}
+		var read *simpleReadWord
+		if call, ok := node.(*syntax.CallExpr); ok {
+			read = simpleHereStringRead(call, redirs, order)
+		}
 		statements = append(statements, sequenceStatement{text: statement, scope: scope,
-			sourceStart: int(from.Offset()), maySkip: skippable != 0, binds: slices.Clone(loopBinds)})
+			sourceStart: int(from.Offset()), maySkip: skippable != 0, read: read, binds: slices.Clone(loopBinds)})
 		return true
 	}
 	subshells := 0
@@ -455,7 +471,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				word = hereString
 			}
 			pipeInput, hereString = nil, nil
-			bind, forks := simpleReadLoopBind(typed, word, file, enclosingLoops)
+			bind, forks := simpleReadLoopBind(typed, word, order(), enclosingLoops)
 			// The condition runs before the variable has its first word.
 			if !flattenAll(typed.Cond) {
 				return true, false
@@ -497,7 +513,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(iteration) {
 				outer := loopBinds
 				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true,
-					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, simpleDeclaredFunctions(file)),
+					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, order()),
 					token:   simplePlaceholderToken(typed.Do, iteration.Name.Value, source)})
 				defer func() { loopBinds = outer }()
 				kind, name = forkedLoopScopeKind, iteration.Name.Value
