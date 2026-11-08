@@ -1900,20 +1900,24 @@ def _root_owned_under(directory: str, names: list[str]) -> str:
 
 # The body of the sh -c step that returns those paths to the account, one
 # argument each. The scan ran earlier and the account can change its own
-# folders in between, so the step re-checks each path when it runs: the folder
-# that holds it must still resolve to itself (no link on the way), and only a
-# root-owned folder, or a root-owned file with a single hard link, is changed.
-# find does not follow a link at the path itself, -execdir runs the change
-# inside the folder find is walking, chown -h changes a link rather than its
-# target, and -xdev keeps the walk of a returned folder on its own volume.
-# Go renders the same step in ``rootOwnedAgentConfigStep``.
+# folders at any moment, so each path is bound to the folder that holds it
+# before sudo runs: the step enters that folder (cd -P), proves with the
+# external pwd -P (a getcwd of the folder it is in, not a lookup of the name)
+# that the folder is the physical in-home one, and runs sudo find on the bare
+# name inside it. sudo keeps the working directory, so replacing the folder or
+# its parent with a link after the check changes nothing about the folder the
+# find walks. Only a root-owned folder, or a root-owned file with a single hard
+# link, is changed: find does not follow a link at the path itself, -execdir
+# runs the change inside the folder find is walking, chown -h changes a link
+# rather than its target, and -xdev keeps the walk of a returned folder on its
+# own volume. Go renders the same step in ``rootOwnedAgentConfigStep``.
 _ROOT_AGENT_CONFIG_RETURN_SCRIPT = (
-    "for p; do d=${p%/*}; "
-    + "[ \"$(cd -P \"$d\" 2>/dev/null && pwd -P)\" = \"$d\" ] "
-    + "|| { echo \"skipped $p: its folder is a link or moved\" >&2; continue; }; "
-    + "[ -e \"$p\" ] || continue; "
-    + "sudo find -P \"$p\" -xdev -user root \\( -type d -o -type f -links 1 \\) "
-    + "-execdir chown -h \"$(id -un)\" {} \\; -execdir chmod u+rwX {} \\; || exit 1; done"
+    "for p; do d=${p%/*}; b=${p##*/}; "
+    + "(cd -P \"$d\" 2>/dev/null && [ \"$(/bin/pwd -P)\" = \"$d\" ] "
+    + "|| { echo \"skipped $p: its folder is a link or moved\" >&2; exit 0; }; "
+    + "[ -e \"$b\" ] || exit 0; "
+    + "sudo find -P \"./$b\" -xdev -user root \\( -type d -o -type f -links 1 \\) "
+    + "-execdir chown -h \"$(id -un)\" {} \\; -execdir chmod u+rwX {} \\;) || exit 1; done"
 )
 
 

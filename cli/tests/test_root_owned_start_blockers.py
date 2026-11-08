@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import stat
 import subprocess
+from pathlib import Path
 
 import pytest
 from defenseclaw import file_permissions as fp
@@ -303,4 +305,62 @@ def test_the_return_step_skips_a_folder_swapped_for_a_link_after_the_scan(tmp_pa
     assert done.returncode == 0
     assert "skipped" in done.stderr
     calls = log.read_text().splitlines()
-    assert len(calls) == 1 and "find -P " + os.fspath(plain) in calls[0]
+    assert len(calls) == 1 and "find -P ./settings.json" in calls[0]
+
+
+@pytest.mark.skipif(shutil.which("find") is None, reason="find is not available")
+@pytest.mark.parametrize(
+    ("parent", "path"),
+    [(".claude", ".claude/settings.json"), (".copilot", ".copilot/hooks")],
+)
+def test_the_return_step_walks_the_folder_it_checked_when_a_parent_is_swapped_for_a_link(tmp_path, parent, path):
+    """A parent swapped for a link at the moment sudo runs must not change which folder the find walks."""
+    import getpass
+
+    from defenseclaw.commands import cmd_doctor
+
+    base = tmp_path.resolve()
+    home = base / "home"
+    outside = base / "outside"
+    target = home / path
+    for item in (target, outside / Path(path).name):
+        if item.name == "hooks":
+            item.mkdir(parents=True)
+        else:
+            _write(item.parent, item.name, 0o600)
+    fake = base / "bin"
+    fake.mkdir()
+    log = base / "chown.log"
+    link = home / parent
+    scripts = {
+        "sudo": "\n".join(
+            [
+                "#!/bin/sh",
+                f"mv '{link}' '{link}-moved'",
+                f"ln -s '{outside}' '{link}'",
+                "n=$#; while [ $n -gt 0 ]; do a=$1; shift; "
+                f'[ "$a" = root ] && a={getpass.getuser()}; set -- "$@" "$a"; n=$((n-1)); done',
+                'exec "$@"',
+                "",
+            ]
+        ),
+        "chown": f'#!/bin/sh\necho "$(/bin/pwd -P)" >> {log}\n',
+        "chmod": "#!/bin/sh\n",
+    }
+    for name, body in scripts.items():
+        (fake / name).write_text(body)
+        (fake / name).chmod(0o755)
+
+    step = cmd_doctor._root_agent_config_return_step([os.fspath(target)])
+    done = subprocess.run(
+        ["sh", "-c", step],
+        env={"PATH": os.fspath(fake) + ":/usr/bin:/bin", "HOME": os.fspath(home)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 0, done.stderr
+    folders = log.read_text().split()
+    assert folders, "the owner change never ran"
+    assert all(folder.startswith(os.fspath(link) + "-moved") for folder in folders), folders
