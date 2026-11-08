@@ -757,8 +757,11 @@ def test_a_path_that_resolves_elsewhere_is_refused_with_the_link_step(profile) -
             assert link_guard.link_problem(str(folder), include_self=False) is None
     assert problem is not None and "resolves to" in problem and "Ask an administrator to check" in problem.step
     assert above is not None
-    # Off Windows the look is not made.
-    with patch.object(link_guard.os.path, "realpath", return_value="/nowhere"):
+    # Off Windows the look is not made. Say so: on a Windows runner the real platform check is True.
+    with (
+        patch.object(link_guard, "_windows", return_value=False),
+        patch.object(link_guard.os.path, "realpath", return_value="/nowhere"),
+    ):
         assert link_guard.link_problem(str(folder)) is None
 
 
