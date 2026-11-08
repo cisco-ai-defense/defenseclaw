@@ -629,6 +629,12 @@ func extractClosedCodingAgentArgs(raw json.RawMessage, tool string) extractedInp
 }
 
 func exactJSONObject(raw json.RawMessage) (map[string]any, extractedInput) {
+	return exactJSONObjectWithStringLimit(raw, maxCommandBytes)
+}
+
+// exactJSONObjectWithStringLimit is exactJSONObject with the longest string a
+// member may hold set by the caller.
+func exactJSONObjectWithStringLimit(raw json.RawMessage, maxStringBytes int) (map[string]any, extractedInput) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil, extractedInput{status: StatusNotApplicable}
 	}
@@ -638,7 +644,7 @@ func exactJSONObject(raw json.RawMessage) (map[string]any, extractedInput) {
 	if !utf8.Valid(raw) {
 		return nil, extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidUTF8}}
 	}
-	if issue := validateJSONWithStringLimit(raw, maxCommandBytes); issue != "" {
+	if issue := validateJSONWithStringLimit(raw, maxStringBytes); issue != "" {
 		return nil, extractedInput{status: statusForStructuredJSONIssue(issue), issues: []IssueCode{issue}}
 	}
 	var object map[string]any
