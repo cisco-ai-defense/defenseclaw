@@ -12830,12 +12830,20 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
     if "openclaw" in connectors:
-        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+        from defenseclaw.openclaw_plugin_config import (
+            configured_openclaw_plugin_config_issue,
+            openclaw_plugin_config_unreadable,
+        )
 
         if issue := configured_openclaw_plugin_config_issue(cfg):
             _emit(
                 "fail", label, issue,
-                remediation="run `defenseclaw setup openclaw` to migrate the plugin config, then rerun doctor",
+                remediation=(
+                    "fix the syntax error in openclaw.json at the position above (OpenClaw reads JSON5), "
+                    "then rerun doctor"
+                    if openclaw_plugin_config_unreadable(issue)
+                    else "run `defenseclaw setup openclaw` to migrate the plugin config, then rerun doctor"
+                ),
                 r=r,
             )
             return

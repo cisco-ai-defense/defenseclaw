@@ -278,11 +278,14 @@ def uninstall_openclaw_plugin(openclaw_home: str) -> str:
 def detect_current_model(openclaw_config_file: str) -> tuple[str, str]:
     """Read the current model from openclaw.json. Returns
     ``(model_id, provider_prefix)``."""
+    from defenseclaw import openclaw_json5
+
     path = _expand(openclaw_config_file)
     try:
-        with open(path) as f:
-            cfg = json.load(f)
-    except (OSError, json.JSONDecodeError):
+        cfg = openclaw_json5.load_file(path)
+    except (OSError, ValueError):
+        return "", ""
+    if not isinstance(cfg, dict):
         return "", ""
 
     primary = (

@@ -4700,9 +4700,14 @@ def _next_jsonc_significant_char(raw: str, index: int) -> str:
 
 
 def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
+    """Parse openclaw.json as JSON5, the way OpenClaw and the gateway sidecar do.
+
+    ``None`` when the file is missing, unreadable, or neither JSON nor JSON5.
+    """
+    from defenseclaw import openclaw_json5
+
     try:
-        with open(_expand(config_file), encoding="utf-8") as f:
-            return json.load(f)
+        return openclaw_json5.load_file(_expand(config_file))
     except (OSError, ValueError):
         return None
 
@@ -5140,17 +5145,14 @@ def _read_mcp_servers_from_openclaw_json(
     except UnicodeError:
         _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return []
-    data: dict[str, Any] | None = None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        try:
-            import json5  # type: ignore[import-untyped]
+    from defenseclaw import openclaw_json5
 
-            data = json5.loads(raw)
-        except Exception:
-            _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
-            return []
+    data: dict[str, Any] | None
+    try:
+        data = openclaw_json5.loads(raw)
+    except ValueError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return []
     if not isinstance(data, dict):
         return []
     servers = data.get("mcp", {}).get("servers")
