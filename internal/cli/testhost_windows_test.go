@@ -841,6 +841,8 @@ func isolateTestDeploymentReaders(dir string) {
 	sandboxSeam("windowsEnterpriseAmpMachineFolderProblems", &windowsEnterpriseAmpMachineFolderProblems, func() []string { return nil })
 	sandboxSeam("windowsManagedHooksKeptUntrustedPolicyFiles", &windowsManagedHooksKeptUntrustedPolicyFiles, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseVendorFolderProblems", &windowsEnterpriseVendorFolderProblems, func() []enterprisepolicy.VendorFolderProblem { return nil })
+	sandboxSeam("enterpriseHookWindowsUnrecordedFiles", &enterpriseHookWindowsUnrecordedFiles,
+		func(enterprisepolicy.Options, []string) []enterprisepolicy.VendorFolderProblem { return nil })
 	sandboxSeam("windowsEnterpriseVendorFolderHeal", &windowsEnterpriseVendorFolderHeal,
 		func() ([]enterprisepolicy.ReprotectedFolder, []enterprisepolicy.VendorFolderProblem) { return nil, nil })
 	sandboxSeam("windowsEnterpriseDiscoveryHomeDirs", &windowsEnterpriseDiscoveryHomeDirs, func() ([]string, error) { return nil, nil })

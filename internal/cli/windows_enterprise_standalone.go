@@ -3183,8 +3183,13 @@ func applyWindowsEnterpriseAmpMachineFolder(result *enterprisestatus.Result) {
 // can use to delete or replace that file, or, for a vendor that loads every
 // file in the folder, to add one. It is the verdict the guardian's publish
 // and machine-policy verify reach for the same folders
-// (enterprisepolicy.InspectRecordedVendorFolders). A host with no installed
-// standalone config has none. Replaceable in tests.
+// (enterprisepolicy.InspectRecordedVendorFolders), plus the vendor policy
+// files DefenseClaw has no record of that another account can change (what a
+// purge leaves behind, GAP-0930) and every other conflict or error that
+// machine-policy verify raises for the Go-owned targets
+// (enterprisepolicy.GoOwnedPolicyProblems, the same function), so status and
+// verify never claim coverage that machine-policy verify denies. A host with
+// no installed standalone config has none. Replaceable in tests.
 var windowsEnterpriseVendorFolderProblems = func() []enterprisepolicy.VendorFolderProblem {
 	installed, err := loadWindowsEnterpriseStandaloneConfig("")
 	if err != nil || installed == nil {
@@ -3195,7 +3200,7 @@ var windowsEnterpriseVendorFolderProblems = func() []enterprisepolicy.VendorFold
 		return nil
 	}
 	defer pinWindowsStandaloneTrustScope()()
-	return enterprisepolicy.InspectRecordedVendorFolders(opts, connectors)
+	return enterprisepolicy.GoOwnedPolicyProblems(opts, connectors)
 }
 
 // pinWindowsStandaloneTrustScope makes this process judge managed trust by the
@@ -3252,8 +3257,13 @@ func writeWindowsEnterpriseAuditRow(write func() error) error {
 }
 
 // windowsEnterpriseVendorFolderCode is the result code of a vendor folder that
-// does not protect DefenseClaw's recorded policy file.
+// does not protect DefenseClaw's recorded policy file, or of a vendor policy
+// file it cannot publish through.
 const windowsEnterpriseVendorFolderCode = "vendor_folder_not_held"
+
+// windowsEnterpriseMachinePolicyConflictCode is the result code of any other
+// conflict machine-policy verify raises for the Go-owned targets.
+const windowsEnterpriseMachinePolicyConflictCode = "machine_policy_not_covered"
 
 // refuseWindowsEnterpriseUntrustedVendorFolders is the install-like
 // lifecycle's and the reconcile's judgement of the vendor folders DefenseClaw
@@ -3338,10 +3348,14 @@ const (
 func applyWindowsEnterpriseVendorFolders(result *enterprisestatus.Result) {
 	for _, problem := range windowsEnterpriseVendorFolderProblems() {
 		message := problem.Connector + ": " + problem.Message
+		code := windowsEnterpriseVendorFolderCode
+		if problem.Conflict {
+			code = windowsEnterpriseMachinePolicyConflictCode
+		}
 		if result.Action == "verify" {
-			result.AddError(windowsEnterpriseVendorFolderCode, message)
+			result.AddError(code, message)
 		} else {
-			result.AddWarning(windowsEnterpriseVendorFolderCode, message)
+			result.AddWarning(code, message)
 		}
 		result.CoverageComplete, result.SecurityComplete = false, false
 	}
