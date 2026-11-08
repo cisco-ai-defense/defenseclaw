@@ -385,6 +385,51 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  go-test-frozen-gateway:
+    # The three frozen-gateway tests of the hook (a gateway of the account that
+    # takes no accept is an outage, not a listener of another account) run
+    # here alone and are skipped in the shared jobs above (they need
+    # DEFENSECLAW_FROZEN_GATEWAY_JOB=1). The hook proves who holds a listener
+    # by reading every other process of its account and refuses, by design, a
+    # same-account holder it cannot see into; a second test binary of the
+    # account running at the same time (the deliberate mixed-credential and
+    # private-thread helpers of the other hookexec tests) is such a holder.
+    # -p 1 runs one package, and the step fails if any of the three did not
+    # run and pass, so a skip cannot pass for a run.
+    name: Go Test (frozen gateway, alone)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        id: go
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
+      - name: Run the frozen-gateway tests alone
+        timeout-minutes: 10
+        env:
+          DEFENSECLAW_FROZEN_GATEWAY_JOB: "1"
+        run: |
+          set -euo pipefail
+          tests=(
+            TestFrozenOwnGatewayFollowsTheOutageMode
+            TestFrozenGatewayTheDaemonStartedFollowsTheOutageMode
+            TestParallelHookProcessesFollowTheOutageModeOfAFrozenGateway
+          )
+          pattern="^($(IFS="|"; echo "${tests[*]}"))$"
+          go test -v -p 1 -count=1 -timeout 8m -run "$pattern" ./internal/gateway/connector/hookexec 2>&1 | tee "$RUNNER_TEMP/frozen-gateway.log"
+          for name in "${tests[@]}"; do
+            grep -q "^--- PASS: $name " "$RUNNER_TEMP/frozen-gateway.log" || { echo "::error::$name did not run and pass"; exit 1; }
+          done
+
   go-pinned:
     # A pull request with no Go change still runs the Go tests that name a
     # file it changes, such as a docs page a test reads.
@@ -457,7 +502,7 @@ jobs:
     # packages. A pull request without Go changes skips the shards and runs
     # only Go Pinned Tests, if any.
     name: Go Test
-    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-pinned]
+    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-test-frozen-gateway, go-pinned]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -469,6 +514,7 @@ jobs:
           AUDIT_RESULT: ${{ needs.go-test-audit.result }}
           OTHER_RESULT: ${{ needs.go-test-other.result }}
           THROUGHPUT_RESULT: ${{ needs.go-test-throughput.result }}
+          FROZEN_GATEWAY_RESULT: ${{ needs.go-test-frozen-gateway.result }}
           PINNED_RESULT: ${{ needs.go-pinned.result }}
         run: |
           set -euo pipefail
@@ -481,6 +527,7 @@ jobs:
           test "$AUDIT_RESULT" = success
           test "$OTHER_RESULT" = success
           test "$THROUGHPUT_RESULT" = success
+          test "$FROZEN_GATEWAY_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         if: ${{ needs.changes.outputs.go != 'false' }}
         with:

@@ -18,7 +18,26 @@ import (
 const (
 	parallelHookAddrEnv = "DEFENSECLAW_TEST_PARALLEL_HOOK_ADDR"
 	parallelHookDirEnv  = "DEFENSECLAW_TEST_PARALLEL_HOOK_DIR"
+
+	// frozenGatewayJobEnv is set to 1 only by the dedicated CI job "Go Test
+	// (frozen gateway, alone)" in .github/workflows/ci.yml.
+	frozenGatewayJobEnv = "DEFENSECLAW_FROZEN_GATEWAY_JOB"
 )
+
+// requireFrozenGatewayJob skips a frozen-gateway test in every run except the
+// dedicated CI job, which runs them with -p 1 and no other test process of the
+// account. The hook proves who holds a listener by reading every other process
+// of its account, and it refuses (by design) a same-account holder it cannot
+// see into. Another test binary running as the same account (the deliberate
+// mixed-credential and private-thread helpers of the hookexec tests, or the
+// parallel packages of a shared runner) is such a holder, so these tests are
+// only meaningful when nothing else of the account runs.
+func requireFrozenGatewayJob(t *testing.T) {
+	t.Helper()
+	if os.Getenv(frozenGatewayJobEnv) != "1" {
+		t.Skip("runs only in the CI job \"Go Test (frozen gateway, alone)\" (" + frozenGatewayJobEnv + "=1): it needs a run in which no other test process of this account exists")
+	}
+}
 
 // TestParallelHookProcessChild is one of the separate hook processes the test
 // below starts. It runs the real native hook path for an ordinary command in
@@ -54,6 +73,7 @@ func TestParallelHookProcessChild(t *testing.T) {
 // starting or ending is not the gateway and not a copy of its sockets, so none
 // of them may turn an ordinary call into a refusal.
 func TestParallelHookProcessesFollowTheOutageModeOfAFrozenGateway(t *testing.T) {
+	requireFrozenGatewayJob(t)
 	addr, dataDir, pid := startRealGateway(t)
 	freezeProcess(t, pid)
 	const width, waves = 25, 4
