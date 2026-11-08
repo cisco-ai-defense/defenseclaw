@@ -277,7 +277,10 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	// request carries in several items, so its result cannot be told apart.
 	// The notice is consumed with nothing shown, so a later replay of the same
 	// result with fewer items cannot attach it to an unrelated reply. One
-	// other item of the call part is a sibling call and drops nothing.
+	// other item of the call part is a sibling call and drops nothing. The
+	// several-item rule comes before the id match: an id equal to the call
+	// part (a call OpenClaw gave no item id) is no more provable than a
+	// "<call>|<item>" one when the request shows several candidate items.
 	dropped := make([]bool, len(entries))
 	for _, r := range ids {
 		claim := -1
@@ -286,11 +289,12 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 			if !e.inSession(session) {
 				continue
 			}
-			if e.isResultOf(r) {
+			switch {
+			case r.items > 1 && noticeCallKey(e.callID) == r.id:
+				dropped[i] = true
+			case e.isResultOf(r):
 				claim = i
 				count++
-			} else if r.items > 1 && noticeCallKey(e.callID) == r.id {
-				dropped[i] = true
 			}
 		}
 		if count == 1 {

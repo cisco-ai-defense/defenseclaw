@@ -218,3 +218,42 @@ func TestGAP0644ResponsesUnrelatedResultKeepsBlockForItsOwnReplay(t *testing.T) 
 		t.Fatalf("the block result did not show the line once: %s", out)
 	}
 }
+
+// A block recorded under the call id alone (OpenClaw gave the call no item id)
+// is held to the same rule as "<call>|<item>": when the request shows several
+// function_call items of that call, the result is not provably the block's, so
+// the block is consumed with nothing shown, on the reply and on a later replay.
+// One item, named or not, still shows the line.
+func TestGAP0644ResponsesCallOnlyBlockWithSeveralItemsShowsNothing(t *testing.T) {
+	const responsesDone = `{"id":"r1","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"reply"}]}]}`
+	later := `{"input":[{"type":"function_call_output","call_id":"call_blk9","output":"old result"},{"type":"function_call","call_id":"call_new"},{"type":"function_call_output","call_id":"call_new","output":"new result"}]}`
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"two anonymous items", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}, [2]string{"call_blk9", ""}), false},
+		{"three anonymous items", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}, [2]string{"call_blk9", ""}, [2]string{"call_blk9", ""}), false},
+		{"two named items", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", "fc_1"}, [2]string{"call_blk9", "fc_2"}), false},
+		{"one anonymous item", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}), true},
+		{"one named item", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", "fc_1"}), true},
+		{"result alone", responsesBody("function_call_output", "call_blk9"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetOpenClawBlockNotices(t)
+			rememberOpenClawBlockNotice("exec", "call_blk9", noticeTestSession, []string{noticeTestRule}, "r")
+			for i, body := range []string{tc.body, later} {
+				if i == 1 {
+					observeOpenClawToolCall("call_new|fc_new")
+				}
+				out, _ := serveNoticeWith(t, noticeServe{path: "/openai/v1/responses", session: noticeTestSession, reqBody: body, ctype: "application/json", respBody: responsesDone})
+				if got := strings.Contains(out, openClawBlockNoticeMark); got != (tc.want && i == 0) {
+					t.Fatalf("request %d: line shown = %t, want %t: %s", i+1, got, tc.want && i == 0, out)
+				}
+			}
+			if openClawBlockNoticesPending() {
+				t.Fatal("the block is still pending")
+			}
+		})
+	}
+}
