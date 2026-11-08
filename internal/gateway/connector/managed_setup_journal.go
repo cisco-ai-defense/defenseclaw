@@ -44,6 +44,12 @@ type managedSetupSpan struct {
 	// retry) finds that, not the bytes it staged.
 	prior   string
 	tainted bool
+	// later marks a span opened over an existing record. It holds the target
+	// to base, the bytes the record vouches for when the setup began, whatever
+	// the writers report: the setup must leave them unchanged to keep the
+	// exact restore.
+	later bool
+	base  string
 }
 
 var managedSetupSpans = struct {
@@ -63,12 +69,13 @@ func managedSetupSpanKey(path string) string {
 	return abs
 }
 
-// beginManagedSetupSpan opens a span on a freshly captured target. expected is
-// the hash of the pre-setup state (managedFileSnapshotHash).
-func beginManagedSetupSpan(path, expected string) {
+// beginManagedSetupSpan opens a span on a captured target. expected is the
+// hash of the state the setup begins on (managedFileSnapshotHash); later is set
+// when it is the state an existing record vouches for.
+func beginManagedSetupSpan(path, expected string, later bool) {
 	managedSetupSpans.Lock()
 	defer managedSetupSpans.Unlock()
-	managedSetupSpans.byPath[managedSetupSpanKey(path)] = &managedSetupSpan{expected: expected}
+	managedSetupSpans.byPath[managedSetupSpanKey(path)] = &managedSetupSpan{expected: expected, base: expected, later: later}
 }
 
 // endManagedSetupSpan closes the span and returns it (ok is false when none

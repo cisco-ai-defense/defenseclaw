@@ -46,10 +46,6 @@ type managedFileBackup struct {
 	Mode           uint32 `json:"mode,omitempty"`
 	PristineSHA256 string `json:"pristine_sha256"`
 	PostSHA256     string `json:"post_sha256,omitempty"`
-	// LaterSetupOpen is set while a setup that found this record is still
-	// running: the target held the committed bytes when it began, and the
-	// read-back update must find them unchanged or retire the exact restore.
-	LaterSetupOpen bool   `json:"later_setup_open,omitempty"`
 	PristineBytes  []byte `json:"pristine_bytes,omitempty"`
 	CapturedAt     string `json:"captured_at"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
@@ -196,7 +192,7 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	if err := writeManagedFileBackup(backupPath, b); err != nil {
 		return err
 	}
-	beginManagedSetupSpan(boundPath, b.PristineSHA256)
+	beginManagedSetupSpan(boundPath, b.PristineSHA256, false)
 	return nil
 }
 
@@ -209,8 +205,9 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 // result as its own would make teardown restore the pre-setup copy over the
 // change. The record is marked instead, so only the DefenseClaw entries are
 // ever removed from that file. A target that still matches keeps the exact
-// restore, but only on condition: the record stays open until the read-back
-// update (see updateManagedFileBackupPostHash). A target that is not a
+// restore, but only on condition: an in-memory span stays open until the
+// read-back update (see updateManagedFileBackupPostHash), so a setup that
+// rewrites nothing leaves the record file untouched. A target that is not a
 // regular file changes nothing.
 func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup, targetPath string) error {
 	endManagedSetupSpan(targetPath)
@@ -224,14 +221,11 @@ func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup,
 	}
 	if managedFileSnapshotHash(data, info != nil) != expected {
 		b.PostSHA256 = managedBackupDriftedHash
-		b.LaterSetupOpen = false
 		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	} else {
-		// Not a change of custody: UpdatedAt stays, so a setup that rewrites
-		// nothing leaves the record byte-identical once it closes it again.
-		b.LaterSetupOpen = true
+		return writeManagedFileBackup(backupPath, b)
 	}
-	return writeManagedFileBackup(backupPath, b)
+	beginManagedSetupSpan(targetPath, expected, true)
+	return nil
 }
 
 func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, targetPath string) error {
@@ -252,7 +246,7 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 		// as DefenseClaw own output (see retireManagedFileBackupExactRestore).
 		return nil
 	}
-	span, firstSetup := endManagedSetupSpan(boundPath)
+	span, spanOpen := endManagedSetupSpan(boundPath)
 	data, info, err := readManagedTarget(boundPath)
 	if err != nil {
 		return err
@@ -261,7 +255,7 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	if info != nil {
 		nextHash = managedFileSnapshotHash(data, true)
 	}
-	if firstSetup && !b.LaterSetupOpen && (span.tainted || nextHash != span.expected) {
+	if spanOpen && !span.later && (span.tainted || nextHash != span.expected) {
 		// A first setup records its output only when the target holds the
 		// bytes its writers committed on top of the bytes it began with
 		// (managedSetupSpan). An edit at any point in between stays out of
@@ -270,17 +264,18 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		return writeManagedFileBackup(backupPath, b)
 	}
-	if b.LaterSetupOpen {
+	if spanOpen && span.later {
 		// A later setup began on the expected bytes (the committed ones, or
 		// the pre-setup ones while no post hash was published). Bytes it
-		// left unchanged are still ours. Anything else was merged over a
-		// base this read cannot vouch for (an edit may have landed between
-		// the capture and the merge), so it is never recorded as ours.
-		if nextHash != managedFileBackupExpectedHash(&b) {
-			b.PostSHA256 = managedBackupDriftedHash
-			b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		// left unchanged are still ours, and the record is not rewritten.
+		// Anything else was merged over a base this read cannot vouch for
+		// (an edit may have landed between the capture and the merge), so
+		// it is never recorded as ours.
+		if nextHash == span.base {
+			return nil
 		}
-		b.LaterSetupOpen = false
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		return writeManagedFileBackup(backupPath, b)
 	}
 	return updateManagedFileBackupPostHashValue(dataDir, connectorName, logicalName, boundPath, nextHash)
@@ -301,21 +296,20 @@ func updateManagedFileBackupPostHashValue(
 		}
 		return err
 	}
-	if _, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath); err != nil {
+	boundPath, err := validateManagedFileBackupTarget(b, connectorName, logicalName, targetPath)
+	if err != nil {
 		return err
 	}
+	// The connector publishes its own hash: a span the capture opened has
+	// nothing left to vouch for.
+	endManagedSetupSpan(boundPath)
 	if nextHash == "" {
 		return fmt.Errorf("managed backup post hash is empty")
 	}
 	if b.PostSHA256 == nextHash {
-		if !b.LaterSetupOpen {
-			return nil
-		}
-		b.LaterSetupOpen = false
-		return writeManagedFileBackup(backupPath, b)
+		return nil
 	}
 	b.PostSHA256 = nextHash
-	b.LaterSetupOpen = false
 	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return writeManagedFileBackup(backupPath, b)
 }
