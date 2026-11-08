@@ -193,7 +193,11 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 	} else {
 		b.PristineSHA256 = managedBackupMissingHash
 	}
-	return writeManagedFileBackup(backupPath, b)
+	if err := writeManagedFileBackup(backupPath, b); err != nil {
+		return err
+	}
+	beginManagedSetupSpan(boundPath, b.PristineSHA256)
+	return nil
 }
 
 // retireManagedFileBackupExactRestore runs when a setup finds a record from an
@@ -209,6 +213,7 @@ func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath st
 // update (see updateManagedFileBackupPostHash). A target that is not a
 // regular file changes nothing.
 func retireManagedFileBackupExactRestore(backupPath string, b managedFileBackup, targetPath string) error {
+	endManagedSetupSpan(targetPath)
 	if b.PostSHA256 == managedBackupDriftedHash {
 		return nil
 	}
@@ -247,6 +252,7 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 		// as DefenseClaw own output (see retireManagedFileBackupExactRestore).
 		return nil
 	}
+	span, firstSetup := endManagedSetupSpan(boundPath)
 	data, info, err := readManagedTarget(boundPath)
 	if err != nil {
 		return err
@@ -254,6 +260,15 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 	nextHash := managedFileSnapshotHash(nil, false)
 	if info != nil {
 		nextHash = managedFileSnapshotHash(data, true)
+	}
+	if firstSetup && !b.LaterSetupOpen && (span.tainted || nextHash != span.expected) {
+		// A first setup records its output only when the target holds the
+		// bytes its writers committed on top of the bytes it began with
+		// (managedSetupSpan). An edit at any point in between stays out of
+		// the exact restore.
+		b.PostSHA256 = managedBackupDriftedHash
+		b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		return writeManagedFileBackup(backupPath, b)
 	}
 	if b.LaterSetupOpen {
 		// A later setup began on the expected bytes (the committed ones, or
