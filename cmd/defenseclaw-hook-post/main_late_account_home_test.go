@@ -52,6 +52,11 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 	if err := os.Symlink(project, filepath.Join(root, "proj-link")); err != nil {
 		t.Fatal(err)
 	}
+	// A link to the call folder: "fold/.." reaches the parent of the call folder
+	// by file system rules, which a text clean-up of the path does not.
+	if err := os.Symlink(project, filepath.Join(project, "fold")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", scratch)
 	names := make([]string, 5000)
 	for i := range names {
@@ -127,6 +132,7 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 		{"relative missing", "relative/home", home},
 		{"regular file", filepath.Join(project, "plain.txt"), home},
 		{"relative to the call", "..", scratch},
+		{"relative through a link to the call", "fold/..", scratch},
 	} {
 		for _, path := range []string{"/api/v1/codex/hook", "/api/v1/claude-code/hook"} {
 			for _, tc := range []struct {

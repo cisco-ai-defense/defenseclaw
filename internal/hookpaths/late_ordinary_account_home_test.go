@@ -119,3 +119,56 @@ func TestLateOrdinaryCallAtReadsARelativeHomeAgainstTheCallFolder(t *testing.T) 
 		}
 	}
 }
+
+// A relative home whose parent step comes after a link names the folder the
+// file system reaches, not the one a text clean-up of the path gives: the
+// protected files of that folder are indexed, so a protected hard link stays
+// closed and a hard link to an ordinary file stays ordinary.
+func TestLateOrdinaryCallAtReadsARelativeHomeWithALinkBeforeAParentStep(t *testing.T) {
+	f := newLateFixture(t)
+	if err := os.Symlink(f.project, filepath.Join(f.project, "fold")); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range [][2]string{{"plain.txt", "hl-plain"}, {"hardlink", "hl-keys-2"}} {
+		if err := os.Link(filepath.Join(f.project, link[0]), filepath.Join(f.project, link[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, link := range [][2]string{{"hl-plain", "l-plain"}, {"hl-keys-2", "l-keys"}} {
+		if err := os.Symlink(filepath.Join(f.project, link[0]), filepath.Join(f.project, link[1])); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scratch, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", scratch)
+	saved := "fold" + string(filepath.Separator) + ".."
+	if real, err := filepath.EvalSymlinks(f.project + string(filepath.Separator) + saved); err != nil || real != f.home {
+		t.Fatalf("saved home should reach %q, got %q: %v", f.home, real, err)
+	}
+	for _, tc := range []struct {
+		name, command string
+		want          bool
+	}{
+		{"hard link to the keys", "cat hardlink", false},
+		{"hard link first of a long list", lateOperands(5000, "hardlink", "first"), false},
+		{"hard link last of a long list", lateOperands(5000, "hardlink", "last"), false},
+		{"hard link by absolute path", "cat " + filepath.Join(f.project, "hardlink"), false},
+		{"second hard link to the keys", "cat hl-keys-2", false},
+		{"link to the second hard link", "cat l-keys", false},
+		{"hard link of an ordinary file", "cat hl-plain", true},
+		{"link to a hard link of an ordinary file", "cat l-plain", true},
+		{"hard link of an ordinary file in a long list", lateOperands(5000, "hl-plain", "last"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, connector := range []string{"claudecode", "codex"} {
+				payload := lateBash(t, "Bash", f.project, tc.command)
+				if got := LateOrdinaryCallAt(saved, connector, payload); got != tc.want {
+					t.Errorf("%s: ordinary=%v, want %v", connector, got, tc.want)
+				}
+			}
+		})
+	}
+}
