@@ -217,3 +217,31 @@ func TestEnsureWaitsForTheAttestationAfterTheGuardianPublishesItsLedger(t *testi
 		t.Fatalf("ensure returned during the guardian staged publication: warnings=%+v", r.Warnings)
 	}
 }
+
+// A guardian whose attestation follows its new ledger after the bound is the
+// same transient as one that has not reconciled the targets: named as
+// pending, coverage incomplete, exit 0 (the twin of the targets.yaml case
+// above, for the second torn state of one reconcile).
+func TestEnsureNamesTheGuardianCatchUpWhenTheAttestationOutlastsTheBound(t *testing.T) {
+	h, started := startGuardianCatchUpHost(t, "darwin", 0, func(h *testHost) {
+		authorization := h.env.P(filepath.Join(h.env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
+		oldLedger, err := os.ReadFile(authorization)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.WriteFile(authorization, append(oldLedger, 0x0a), 0o640); err != nil {
+			t.Error(err)
+		}
+	})
+	h.env.PollInterval = 50 * time.Millisecond
+	h.env.InstallScanTimeout = 600 * time.Millisecond
+	r := h.run(Options{Action: ActionEnsure, ConfigFile: writeChangedConfig(t, h, "mode: observe", "mode: action")})
+	requireOK(t, r)
+	if !started() {
+		t.Fatal("the change did not restart the enumerator; the test proves nothing")
+	}
+	if !hasWarning(r, codeGuardianReconcilePending) || r.CoverageComplete {
+		t.Fatalf("a ledger published without its attestation at the bound must be named as pending: coverage=%v warnings=%+v", r.CoverageComplete, r.Warnings)
+	}
+}
