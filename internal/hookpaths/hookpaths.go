@@ -364,22 +364,10 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 	return called
 }
 
-// OperandPath preserves dot-dot in the command operand until link resolution.
-// filepath.Join would erase a directory link before the following dot-dot.
+// OperandPath is actionfacts.OperandPath: the client keys its path answers by
+// it, and the gateway asks for them by the same function.
 func OperandPath(name, cwd string) string {
-	// Keep the old canonical spelling for ordinary operands. Only dot-dot
-	// needs a raw spelling until the component walk has followed links.
-	if !strings.Contains(filepath.ToSlash(name), "/../") &&
-		!strings.HasSuffix(filepath.ToSlash(name), "/..") {
-		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
-			return filepath.Join(cwd, name)
-		}
-		return filepath.Clean(name)
-	}
-	if filepath.IsAbs(name) || !filepath.IsAbs(cwd) {
-		return name
-	}
-	return cwd + string(filepath.Separator) + name
+	return actionfacts.OperandPath(name, cwd)
 }
 
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as
