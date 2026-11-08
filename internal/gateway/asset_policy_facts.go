@@ -165,7 +165,7 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 			// An absent folder cannot make an unrelated selection inherit the
 			// refused root's decision.
 			if !selected {
-				if info, err := os.Lstat(dir); err == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+				if info, err := os.Lstat(dir); err == nil && (info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0) {
 					paths = append(paths, dir)
 				}
 			}
@@ -633,11 +633,11 @@ func gatewayVerifiedProjectSkillRoot(home, folder string) bool {
 	if gatewaySkillPathCheck(folder) != nil {
 		return false
 	}
-	realHome, err := filepath.EvalSymlinks(home)
+	realHome, err := hookpaths.EvalLinks(home)
 	if err != nil {
 		return false
 	}
-	realFolder, err := filepath.EvalSymlinks(folder)
+	realFolder, err := hookpaths.EvalLinks(folder)
 	if err != nil || !insideHome(realHome, realFolder) {
 		return false
 	}
