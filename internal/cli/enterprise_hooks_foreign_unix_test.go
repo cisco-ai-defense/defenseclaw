@@ -40,6 +40,11 @@ import (
 func useStandaloneForeignHookFenceFixture(t *testing.T) {
 	t.Helper()
 	useForeignHookRemovalRecords(t)
+	// The eligible accounts of these tests (alice, bob, carol) exist only in
+	// the test, so the machine account database (dscl on macOS) has no record
+	// of them and would read each as gone. A test that needs a deleted
+	// account installs its own proof after this call.
+	stubNoFreshAccountProof(t)
 }
 
 func TestWorkerForeignCleanupRemovesTheUsersForeignHook(t *testing.T) {
