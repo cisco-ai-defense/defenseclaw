@@ -315,6 +315,52 @@ class SeedLongPathTests(unittest.TestCase):
         self.assertFalse(result.refreshed)
         self.assertEqual(os.listdir(dest), ["partial.txt"])
 
+    def test_a_destination_is_not_visible_while_another_run_is_publishing_it(self):
+        from defenseclaw.bootstrap import BootstrapReport, _seed_guardrail_profiles
+
+        bundle = Path(self.tmp) / "bundled"
+        (bundle / "balanced").mkdir(parents=True)
+        (bundle / "balanced" / "needed.yaml").write_text("rules: []\n", encoding="utf-8")
+        policy_dir = Path(self.tmp) / "policy"
+        final = policy_dir / "guardrail" / "balanced"
+        reached_publish = threading.Event()
+        release = threading.Event()
+        first, second = BootstrapReport(), BootstrapReport()
+        real_rename = os.rename
+        seen_while_paused: list[bool] = []
+
+        def fail_the_first_publish(source, destination):
+            if threading.current_thread().name == "first-seed" and os.fspath(destination) == os.fspath(final):
+                seen_while_paused.append(final.exists())
+                reached_publish.set()
+                self.assertTrue(release.wait(10))
+                raise OSError(13, "injected publish failure", os.fspath(final))
+            return real_rename(source, destination)
+
+        with (
+            patch("defenseclaw.long_paths.os.rename", side_effect=fail_the_first_publish),
+            patch("defenseclaw.paths.bundled_guardrail_profiles_dir", return_value=bundle),
+        ):
+            worker = threading.Thread(
+                target=_seed_guardrail_profiles, args=(os.fspath(policy_dir), first), name="first-seed"
+            )
+            worker.start()
+            self.assertTrue(reached_publish.wait(10))
+            _seed_guardrail_profiles(os.fspath(policy_dir), second)
+            release.set()
+            worker.join(10)
+
+        self.assertEqual(seen_while_paused, [False])
+        self.assertEqual(len(first.errors), 1, msg=first.errors)
+        self.assertEqual(second.errors, [])
+        self.assertEqual(second.guardrail_profiles_preserved, [])
+        self.assertEqual(second.guardrail_profiles_seeded, ["balanced"])
+        self.assertTrue((final / "needed.yaml").is_file())
+        self.assertEqual(self._staging_leftovers_in(final.parent), [])
+
+    def _staging_leftovers_in(self, folder: Path) -> list[str]:
+        return [n for n in os.listdir(folder) if n.startswith(".balanced.seed-")]
+
     def test_a_relative_leaf_destination_is_seeded_in_the_working_directory(self):
         flat = self._flat_source()
         previous = os.getcwd()
