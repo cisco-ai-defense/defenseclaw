@@ -489,6 +489,17 @@ func OperandPath(name, cwd string) string {
 	return actionfacts.OperandPath(name, cwd)
 }
 
+// directoryHasLink reports an existing absolute directory whose path passes
+// through a link. A directory that does not exist, or a relative one, has no
+// link to read.
+func directoryHasLink(dir string) bool {
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	real, err := pathEvalSymlinks(dir)
+	return err == nil && real != filepath.Clean(dir)
+}
+
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as
 // POSIX sh.
 // callPastArgvBound reports whether a simple command of the shell text has
