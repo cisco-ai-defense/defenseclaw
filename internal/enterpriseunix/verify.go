@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	systemdunits "github.com/defenseclaw/defenseclaw/packaging/systemd"
 )
 
@@ -1667,11 +1668,13 @@ func (env *Env) openCodePortsStillUnknown(entries []enterprisehooks.UnixOpenCode
 // recorded (name and uid) no longer exists. The name now answering with
 // another uid is proof: the recorded account lost it. A lookup miss alone is
 // not, because getent gives the same answer for a live directory account while
-// the directory does not answer, and on macOS the local node does not see
-// directory accounts. A miss counts only with proof of the account being gone:
-// a fresh read of the whole search policy, or the enumerator having last seen
-// the account in the local account database, where no such user is definitive.
-// The enumerator miss counters are not proof: an account that loses its
+// the directory does not answer, for a local account when NSS stops before the
+// files backend, and on macOS the local node does not see directory accounts.
+// A miss counts only with proof: a fresh read of the whole search policy, or a
+// fresh read of the local account database that does not list the name and
+// either shows the host has no directory to ask or finds the enumerator
+// recorded the account as local or revoked on a definitive miss. The
+// enumerator miss counters are not proof: an account that loses its
 // enrollment group filter counts on the same row as one that is deleted.
 func (env *Env) openCodePortAccountGone(ctx context.Context, entry enterprisehooks.UnixOpenCodeServicePortUnknown, enumeration *enterprisehooks.UnixEnumeratorState) bool {
 	uid, found, ok := env.accountUID(ctx, entry.User)
@@ -1681,10 +1684,28 @@ func (env *Env) openCodePortAccountGone(ctx context.Context, entry enterprisehoo
 	if found {
 		return uid != entry.UID
 	}
-	return guardianAccountConfirmedGone(entry.User, entry.UID) ||
-		guardianFreshAccountRecordGone(ctx, entry.User) ||
-		enterprisehooks.UnixAccountSeenInLocalDatabase(enumeration, entry.User)
+	if guardianAccountConfirmedGone(entry.User, entry.UID) || guardianFreshAccountRecordGone(ctx, entry.User) {
+		return true
+	}
+	local, err := openCodePortLocalAccounts(ctx)
+	if err != nil {
+		return false
+	}
+	if localUID, listed := local[entry.User]; listed {
+		// The local database has the name, so the miss was the lookup: it
+		// is the recorded account only while the uid is the same.
+		return localUID != entry.UID
+	}
+	return !openCodePortDirectoryConfigured() || enterprisehooks.UnixAccountDeletionRecorded(enumeration, entry.User)
 }
+
+// openCodePortLocalAccounts and openCodePortDirectoryConfigured are the local
+// account database read and the directory check behind the unknown entry
+// proof (tests replace them).
+var (
+	openCodePortLocalAccounts       = unixidentity.LocalAccounts
+	openCodePortDirectoryConfigured = unixidentity.DirectoryConfigured
+)
 
 // openCodePortsRecordGeteuid is os.Geteuid (tests replace it).
 var openCodePortsRecordGeteuid = os.Geteuid

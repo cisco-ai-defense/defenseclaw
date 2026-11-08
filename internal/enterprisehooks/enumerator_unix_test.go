@@ -1220,6 +1220,26 @@ func TestEnumerateUnixRevokesADeletedLocalAccountThatACachedLookupStillResolves(
 	if _, ok := state.Sources["bob"]; ok {
 		t.Fatalf("a revoked user's source must be forgotten: %v", state.Sources)
 	}
+	// The source is forgotten with the rows, so the revocation itself is
+	// kept: status needs it to tell a deleted account from a missed lookup.
+	statePath := filepath.Join(root, "state.json")
+	if err := SaveUnixEnumeratorState(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	state = LoadUnixEnumeratorState(statePath)
+	if !UnixAccountDeletionRecorded(state, "bob") || !state.GoneAccounts["bob"] || len(state.GoneAccounts) != 1 {
+		t.Fatalf("gone accounts = %v, want only bob", state.GoneAccounts)
+	}
+	// An account that comes back with rows is no longer recorded gone.
+	opts.State = state
+	opts.LocalAccounts = func() (map[string]int, error) { return map[string]int{"alice": 502, "bob": 505}, nil }
+	resolver.listed = []string{"alice", "bob"}
+	if _, _, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if state.GoneAccounts["bob"] {
+		t.Fatalf("an account seen again with rows is still recorded gone: %v", state.GoneAccounts)
+	}
 }
 
 // A user whose account is not in the local database but resolves is a
@@ -1314,6 +1334,9 @@ func TestRevokeGoneUnixTargetsRemovesOnlyDefinitivelyDeletedAccounts(t *testing.
 	}
 	if _, ok := state.Sources["carol"]; ok {
 		t.Fatalf("a revoked user's source must go: %v", state.Sources)
+	}
+	if !state.GoneAccounts["carol"] || !state.GoneAccounts["dave"] || len(state.GoneAccounts) != 2 {
+		t.Fatalf("only the revoked accounts are recorded gone: %v", state.GoneAccounts)
 	}
 	if state.Misses[unixRowKey("frank", "opencode")] != 1 {
 		t.Fatalf("an unrelated miss count changed: %v", state.Misses)

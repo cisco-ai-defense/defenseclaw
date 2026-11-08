@@ -66,6 +66,11 @@ type UnixEnumeratorState struct {
 	// local account; for a directory account it counts only when the
 	// directory is shown to be answering.
 	Sources map[string]string `json:"sources,omitempty"`
+	// GoneAccounts names the accounts whose rows the enumerator revoked on
+	// a definitive "no such user", until it sees the name again. Sources
+	// forgets a user with no rows, so this is what lets status tell an
+	// account deleted from the host from one a lookup merely misses.
+	GoneAccounts map[string]bool `json:"gone_accounts,omitempty"`
 	// ACPMisses and ACPSources are the same for the uid principals of
 	// managed ACP enrollments, keyed by principal (uid:N).
 	ACPMisses  map[string]int    `json:"acp_misses,omitempty"`
@@ -975,6 +980,9 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				continue
 			}
 			logfSafely(opts.Logger, userName, fmt.Sprintf("%s %d times; revoking (%s, %s)", what, UnixRevokeAfterMisses, userName, prev.Connector))
+			if gone {
+				markUnixAccountGone(opts.State, userName)
+			}
 		}
 		delete(opts.State.Misses, key)
 		report.Revoked++
@@ -1022,9 +1030,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			delete(opts.State.Sources, user)
 		}
 	}
+	for user := range opts.State.GoneAccounts {
+		if _, listed := sources.local[user]; listed && sources.localKnown {
+			delete(opts.State.GoneAccounts, user) // back in the local account database
+		}
+	}
 	for user := range withRows {
 		if source := resolvedSource[user]; source != "" {
 			opts.State.Sources[user] = source
+			delete(opts.State.GoneAccounts, user)
 		}
 	}
 	// Earlier releases enrolled Kiro below both hook floors. Keep CLI rows so
@@ -1284,6 +1298,7 @@ func RevokeGoneUnixTargets(ctx context.Context, opts UnixRevokeGoneOptions) (Man
 	}
 	for user := range gone {
 		delete(opts.State.Sources, user)
+		markUnixAccountGone(opts.State, user)
 	}
 	if manifest.Version == 0 {
 		manifest.Version = 1
@@ -1723,13 +1738,30 @@ func UnixMissConfirmed(state *UnixEnumeratorState, user, connector string) bool 
 	return state.Misses[unixRowKey(user, connector)] > 0 || state.Sources[user] == unixSourceFiles
 }
 
-// UnixAccountSeenInLocalDatabase reports whether the enumerator last saw the
-// account in the local account database. A lookup that then finds no such user
-// is definitive there, and the account is gone. Unlike UnixMissConfirmed it
-// ignores the row miss counters, which also count an account that lost the
-// enrollment group filter.
-func UnixAccountSeenInLocalDatabase(state *UnixEnumeratorState, user string) bool {
-	return state != nil && state.Sources[strings.TrimSpace(user)] == unixSourceFiles
+// unixGoneAccountsMax bounds GoneAccounts; past it new names are not added,
+// and the account is then simply not proven gone.
+const unixGoneAccountsMax = 1024
+
+func markUnixAccountGone(state *UnixEnumeratorState, user string) {
+	user = strings.TrimSpace(user)
+	if user == "" || state.GoneAccounts[user] || len(state.GoneAccounts) >= unixGoneAccountsMax {
+		return
+	}
+	if state.GoneAccounts == nil {
+		state.GoneAccounts = map[string]bool{}
+	}
+	state.GoneAccounts[user] = true
+}
+
+// UnixAccountDeletionRecorded reports whether the enumerator state says the
+// account was in the local account database or had its rows revoked on a
+// definitive miss, and has not been seen since. It is a claim about the past:
+// a caller that deletes anything on it also checks the local account
+// database now. Unlike UnixMissConfirmed it ignores the row miss counters,
+// which also count an account that lost the enrollment group filter.
+func UnixAccountDeletionRecorded(state *UnixEnumeratorState, user string) bool {
+	user = strings.TrimSpace(user)
+	return state != nil && (state.Sources[user] == unixSourceFiles || state.GoneAccounts[user])
 }
 
 func unixRowKey(user, conn string) string {
@@ -2001,6 +2033,14 @@ func LoadUnixEnumeratorState(path string) *UnixEnumeratorState {
 				state.Sources = map[string]string{}
 			}
 			state.Sources[user] = source
+		}
+	}
+	for user, gone := range parsed.GoneAccounts {
+		if user != "" && gone && len(state.GoneAccounts) < unixGoneAccountsMax {
+			if state.GoneAccounts == nil {
+				state.GoneAccounts = map[string]bool{}
+			}
+			state.GoneAccounts[user] = true
 		}
 	}
 	for principal, count := range parsed.ACPMisses {

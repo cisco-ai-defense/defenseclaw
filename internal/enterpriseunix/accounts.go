@@ -85,37 +85,47 @@ type linuxAccounts struct {
 	env *Env
 }
 
-// passwdEntry reads name through getent passwd: the entry fields with its
-// uid and gid, and false when the host has no such account.
-func (a *linuxAccounts) passwdEntry(ctx context.Context, name string) (fields []string, uid, gid int, found bool, err error) {
+// passwdEntry reads name through getent passwd: the entry fields, and false
+// when the host has no such account. Only the entry shape is checked here;
+// what a field must hold is for the caller to decide.
+func (a *linuxAccounts) passwdEntry(ctx context.Context, name string) (fields []string, found bool, err error) {
 	result, err := a.env.Runner.Run(ctx, "getent", "passwd", name)
 	if err != nil {
 		if result.ExitCode == 2 {
-			return nil, 0, 0, false, nil
+			return nil, false, nil
 		}
-		return nil, 0, 0, false, fmt.Errorf("look up %s: %w", name, err)
+		return nil, false, fmt.Errorf("look up %s: %w", name, err)
 	}
 	fields = strings.Split(strings.TrimSpace(string(result.Stdout)), ":")
 	if len(fields) < 7 || fields[0] != name {
-		return nil, 0, 0, false, fmt.Errorf("look up %s: malformed passwd entry", name)
+		return nil, false, fmt.Errorf("look up %s: malformed passwd entry", name)
+	}
+	return fields, true, nil
+}
+
+// ResolveUID needs the uid alone: an ordinary account may have any primary
+// group, group 0 included.
+func (a *linuxAccounts) ResolveUID(ctx context.Context, name string) (int, bool, error) {
+	fields, found, err := a.passwdEntry(ctx, name)
+	if err != nil || !found {
+		return 0, false, err
+	}
+	uid, uidErr := strconv.Atoi(fields[2])
+	if uidErr != nil || uid < 0 {
+		return 0, false, fmt.Errorf("look up %s: invalid uid %q", name, fields[2])
+	}
+	return uid, true, nil
+}
+
+func (a *linuxAccounts) Lookup(ctx context.Context, name string) (Account, bool, error) {
+	fields, found, err := a.passwdEntry(ctx, name)
+	if err != nil || !found {
+		return Account{}, false, err
 	}
 	uid, uidErr := strconv.Atoi(fields[2])
 	gid, gidErr := strconv.Atoi(fields[3])
 	if uidErr != nil || gidErr != nil || uid <= 0 || gid <= 0 {
-		return nil, 0, 0, false, fmt.Errorf("look up %s: invalid uid/gid %q:%q", name, fields[2], fields[3])
-	}
-	return fields, uid, gid, true, nil
-}
-
-func (a *linuxAccounts) ResolveUID(ctx context.Context, name string) (int, bool, error) {
-	_, uid, _, found, err := a.passwdEntry(ctx, name)
-	return uid, found, err
-}
-
-func (a *linuxAccounts) Lookup(ctx context.Context, name string) (Account, bool, error) {
-	fields, uid, gid, found, err := a.passwdEntry(ctx, name)
-	if err != nil || !found {
-		return Account{}, false, err
+		return Account{}, false, fmt.Errorf("look up %s: invalid uid/gid %q:%q", name, fields[2], fields[3])
 	}
 	group, err := a.env.Runner.Run(ctx, "getent", "group", strconv.Itoa(gid))
 	if err != nil {

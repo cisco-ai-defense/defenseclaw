@@ -107,6 +107,16 @@ func TestStatusNamesContestedOpenCodePorts(t *testing.T) {
 	}
 }
 
+// openCodePortProofs replaces the fresh local account database read and the
+// directory check behind the unknown entry proof.
+func openCodePortProofs(t *testing.T, local map[string]int, localErr error, directory bool) {
+	t.Helper()
+	previousLocal, previousDirectory := openCodePortLocalAccounts, openCodePortDirectoryConfigured
+	t.Cleanup(func() { openCodePortLocalAccounts, openCodePortDirectoryConfigured = previousLocal, previousDirectory })
+	openCodePortLocalAccounts = func(context.Context) (map[string]int, error) { return local, localErr }
+	openCodePortDirectoryConfigured = func() bool { return directory }
+}
+
 // The record unknown list is the last guardian pass snapshot. Status drops an
 // entry only when the host proves the recorded account (name and uid) gone: a
 // lookup miss alone is the answer for a live directory account too while the
@@ -139,6 +149,10 @@ func TestStatusDropsOpenCodePortUnknownEntriesOnlyOnProofTheAccountIsGone(t *tes
 		entry    enterprisehooks.UnixOpenCodeServicePortUnknown
 		state    *enterprisehooks.UnixEnumeratorState
 		fresh    bool // the fresh search-policy read says the account is gone
+		local    map[string]int
+		localErr error
+		// files means a host with no directory: every miss is definitive.
+		files    bool
 		reported bool
 	}{
 		{name: "deleted local account, enumerator saw it in the local database",
@@ -157,6 +171,25 @@ func TestStatusDropsOpenCodePortUnknownEntriesOnlyOnProofTheAccountIsGone(t *tes
 			entry: unknown(1002, "kept"), reported: true},
 		{name: "deleted uid whose login name was given to another uid",
 			entry: unknown(1001, "kept")},
+		{name: "live local account, NSS stops before the files backend: the local database still lists it",
+			entry: unknown(1001, "gone"), state: &enterprisehooks.UnixEnumeratorState{Sources: map[string]string{"gone": "files"}},
+			local: map[string]int{"gone": 1001}, reported: true},
+		{name: "local account last seen in files, the local database cannot be read",
+			entry: unknown(1001, "gone"), state: &enterprisehooks.UnixEnumeratorState{Sources: map[string]string{"gone": "files"}},
+			localErr: errors.New("unreadable"), reported: true},
+		{name: "local database lists the name with another uid",
+			entry: unknown(1001, "gone"), local: map[string]int{"gone": 2002}},
+		{name: "deleted local account whose rows were revoked and source forgotten, directory host",
+			entry: unknown(1001, "gone"), state: &enterprisehooks.UnixEnumeratorState{GoneAccounts: map[string]bool{"gone": true}}},
+		{name: "revoked account that the local database lists again",
+			entry: unknown(1001, "gone"), state: &enterprisehooks.UnixEnumeratorState{GoneAccounts: map[string]bool{"gone": true}},
+			local: map[string]int{"gone": 1001}, reported: true},
+		{name: "host with no directory, no enumerator record: the local database is the whole answer",
+			entry: unknown(1001, "gone"), files: true},
+		{name: "host with no directory, the local database lists the account",
+			entry: unknown(1001, "gone"), files: true, local: map[string]int{"gone": 1001}, reported: true},
+		{name: "host with no directory, the local database cannot be read",
+			entry: unknown(1001, "gone"), files: true, localErr: errors.New("unreadable"), reported: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -166,6 +199,7 @@ func TestStatusDropsOpenCodePortUnknownEntriesOnlyOnProofTheAccountIsGone(t *tes
 			})
 			guardianAccountConfirmedGone = func(string, int) bool { return tc.fresh }
 			guardianFreshAccountRecordGone = func(context.Context, string) bool { return false }
+			openCodePortProofs(t, tc.local, tc.localErr, !tc.files)
 			var accounts AccountManager = &fakeAccounts{accounts: map[string]Account{"kept": {Name: "kept", UID: 1002}}}
 			if tc.accounts != nil {
 				accounts = tc.accounts
@@ -205,6 +239,7 @@ func TestStatusListsLiveOpenCodePortUnknownEntryBesideAGoneOne(t *testing.T) {
 	})
 	guardianAccountConfirmedGone = func(user string, _ int) bool { return user == "gone" }
 	guardianFreshAccountRecordGone = func(context.Context, string) bool { return false }
+	openCodePortProofs(t, nil, nil, true)
 	env := &Env{GOOS: "linux", Root: t.TempDir(), Layout: mustLayout(t, "linux"),
 		Accounts: &fakeAccounts{accounts: map[string]Account{"kept": {Name: "kept", UID: 1002}}}}
 	record := env.P(filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName))
@@ -256,6 +291,8 @@ func TestStatusOpenCodePortUnknownUsesOrdinaryAccountIdentity(t *testing.T) {
 		{name: "name reused by a new uid, private primary group", entry: "kept:x:2002:2002::/home/kept:/bin/bash", uid: 1001},
 		{name: "same uid, shared primary group", entry: "kept:x:1001:100::/home/kept:/bin/bash", uid: 1001, reported: true},
 		{name: "no account, no proof", entry: "", uid: 1001, reported: true},
+		{name: "name reused by a new uid, primary group 0", entry: "kept:x:2002:0::/home/kept:/bin/bash", uid: 1001},
+		{name: "same uid, primary group 0", entry: "kept:x:1001:0::/home/kept:/bin/bash", uid: 1001, reported: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -265,6 +302,7 @@ func TestStatusOpenCodePortUnknownUsesOrdinaryAccountIdentity(t *testing.T) {
 			})
 			guardianAccountConfirmedGone = func(string, int) bool { return false }
 			guardianFreshAccountRecordGone = func(context.Context, string) bool { return false }
+			openCodePortProofs(t, nil, nil, true)
 			env := &Env{GOOS: "linux", Root: t.TempDir(), Layout: mustLayout(t, "linux"), Runner: passwdRunner{entry: tc.entry}}
 			env.Accounts = &linuxAccounts{env: env}
 			record := env.P(filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName))
