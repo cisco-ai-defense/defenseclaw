@@ -2512,25 +2512,35 @@ def _windows_acl_write_error(path: str) -> str | None:
     return None
 
 
-def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
-    """Check the executable and every ancestor through its trusted prefix."""
+def _windows_acl_chain_error(resolved: str, prefix: str) -> str | None:
+    """Why the executable or an ancestor through *prefix* is not trusted, or None.
+
+    The reason names the folder or file that failed, so a refusal can say which
+    one to fix instead of reporting only that the path is not trusted.
+    """
     current = resolved
     prefix_key = _path_key(prefix)
     seen: set[str] = set()
     while current:
         key = _path_key(current)
         if key in seen:
-            return False
+            return f"{current}: the path loops back on itself"
         seen.add(key)
-        if _windows_acl_write_error(current) is not None:
-            return False
+        problem = _windows_acl_write_error(current)
+        if problem is not None:
+            return f"{current}: {problem}"
         if key == prefix_key:
-            return True
+            return None
         parent = os.path.dirname(current)
         if parent == current:
-            return False
+            return f"{resolved} is not below {prefix}"
         current = parent
-    return False
+    return f"{resolved} is not below {prefix}"
+
+
+def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
+    """Check the executable and every ancestor through its trusted prefix."""
+    return _windows_acl_chain_error(resolved, prefix) is None
 
 
 def _trusted_prefix_dir_mode_error(path: str, st: os.stat_result) -> str | None:
