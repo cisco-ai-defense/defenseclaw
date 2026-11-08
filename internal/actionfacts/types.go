@@ -94,6 +94,13 @@ type Input struct {
 	// every name as state (GAP-2404 pod check21). ActionFacts copies the map
 	// and never derives it from action input.
 	ActiveStateTreeNames map[string]string `json:"-"`
+	// ClientResolvedTargets is trusted caller context: the authenticated hook
+	// client's answers, read as the user, to where each absolute path spelling
+	// of the action really lands once links are followed (spelling -> absolute
+	// physical path). A native file-tool write through a link to a protected
+	// file is judged as a write of that file. ActionFacts copies nothing from
+	// it into Facts and never derives it from action input.
+	ClientResolvedTargets map[string]string `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-
