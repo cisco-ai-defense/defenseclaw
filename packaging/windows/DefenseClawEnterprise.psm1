@@ -21733,20 +21733,6 @@ function Restore-DefenseClawTransaction {
             continue
         }
         if ($isSharedCodexFile) {
-            # GAP-0900: a link that appeared on the Codex folder after the
-            # transaction opened. Nothing is written through it and the rollback
-            # goes on, so the services come back; the link stays for the
-            # administrator, who removes only the link. Standalone only.
-            $restoreCodexLink = Get-DefenseClawVendorMachineFolderLink `
-                -Directory ([string]$Layout.CodexMachinePolicyDirectory)
-            if ($restoreCodexLink -ne '') {
-                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
-                    subsystem = 'rollback'
-                    path      = $restoreCodexLink
-                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`"; the next repair or ensure then finishes the work"
-                }
-                continue
-            }
             $policyDirectoryExists = Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.CodexMachinePolicyDirectory `
                 -PathType Container
@@ -21954,13 +21940,9 @@ function Restore-DefenseClawTransaction {
                 -Layout $Layout `
                 -GatewayServiceName ([string]$snapshot.gateway_service)
         }
-        # GAP-0900: nothing is stamped through a link on the Codex folder either.
-        $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `
-                -Directory ([string]$Layout.CodexMachinePolicyDirectory)) -ne ''
         Set-DefenseClawManagedAcls `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
-            -SkipCodexMachineState:$restoreCodexLinked `
             -AllowTransactionRecordedBrokerAbsence:(
                 $snapshotBrokerAbsent
             )
@@ -22162,7 +22144,6 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
         -ServicingTransaction `
-        -RollbackRestore `
         -TransitionHookSHA256 (Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_sha256') `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
         -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
@@ -33676,10 +33657,6 @@ function Assert-DefenseClawEnterpriseDeployment {
         [switch]$RequireReadiness,
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
-        # GAP-0900: set only by the rollback of a transaction (Restore). A link on
-        # the Codex folder is then named and not read through; every forward path
-        # (static validation, the install commit) still fails closed on it.
-        [switch]$RollbackRestore,
         [string]$TransitionHookSHA256 = '',
         # Restore-only: an authenticated servicing preimage that predates the
         # Broker or Enumerator. Ordinary callers keep the full service set.
@@ -33986,22 +33963,6 @@ function Assert-DefenseClawEnterpriseDeployment {
             }
         }
     }
-    # GAP-0900: a rollback (-RollbackRestore) that finds a link on the Codex folder
-    # does not read the Codex machine policy through it. The checks below keep their
-    # lines; they are skipped by the braces around them.
-    $codexFolderLink = ''
-    if ($RollbackRestore -and $codexTargetEnabled) {
-        $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `
-            -Directory ([string]$Layout.CodexMachinePolicyDirectory)
-    }
-    if ($codexFolderLink -ne '') {
-        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
-            subsystem = 'rollback'
-            path      = $codexFolderLink
-            reason    = "a link sits on the Codex machine-policy folder; its policy was not checked and Codex is not protected until the link is removed with: cmd /c rmdir `"$codexFolderLink`""
-        }
-    }
-    if ($codexFolderLink -eq '') {
     if ($codexTargetEnabled) {
         Assert-DefenseClawCodexMachinePolicyDirectory `
             -Path $Layout.CodexVendorDirectory
@@ -34021,7 +33982,6 @@ function Assert-DefenseClawEnterpriseDeployment {
                 throw "Claude-only deployment retains stale DefenseClaw Codex ownership state: $ownedPath"
             }
         }
-    }
     }
     $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
     $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
@@ -34616,12 +34576,10 @@ function Assert-DefenseClawEnterpriseDeployment {
             -ExpectedStartMode $expectedServiceStartMode
     }
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
-    if ($codexFolderLink -eq '') {
     [void](Invoke-DefenseClawCodexRequirementsCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
-    }
 
     if ($RequireReadiness) {
         if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
