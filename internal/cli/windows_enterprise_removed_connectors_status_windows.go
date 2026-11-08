@@ -8,8 +8,15 @@ package cli
 import (
 	"path/filepath"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// windowsEnterpriseConnectorPublishedForStatus says whether the loaded config
+// publishes a connector; tests replace it.
+var windowsEnterpriseConnectorPublishedForStatus = func(name string) bool {
+	return cfg != nil && enterprisepolicy.StandaloneConnectorPublished(cfg, name)
+}
 
 // windowsEnterpriseRemovedConnectorsForStatus reads the removed-connectors
 // record the hook guardian keeps beside its authorization ledger; tests

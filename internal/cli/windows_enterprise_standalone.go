@@ -4005,7 +4005,9 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 	}
 	var manifest struct {
 		Targets []struct {
-			Enabled bool `yaml:"enabled"`
+			Enabled   bool   `yaml:"enabled"`
+			Connector string `yaml:"connector"`
+			SID       string `yaml:"sid"`
 		} `yaml:"targets"`
 	}
 	if err := yaml.Unmarshal(body, &manifest); err != nil {
@@ -4029,7 +4031,22 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 		enrollment.Accounts = windowsEnterpriseEnrollmentAccounts(state.Results)
 	}
 	if removed, err := windowsEnterpriseRemovedConnectorsForStatus(); err == nil {
-		enrollment.RemovedConnectors = windowsEnterpriseRemovedConnectorAccounts(removed)
+		// An entry ends on the guardian pass after its connector is back on the
+		// roster; until then it is not shown: the manifest admits the pair, or
+		// the loaded config publishes the connector again.
+		admitted := map[string]bool{}
+		for _, target := range manifest.Targets {
+			if target.Enabled {
+				admitted[managed.RemovedConnectorKey(target.Connector, target.SID)] = true
+			}
+		}
+		current := removed[:0:0]
+		for _, entry := range removed {
+			if !admitted[managed.RemovedConnectorKey(entry.Connector, entry.SID)] && !windowsEnterpriseConnectorPublishedForStatus(entry.Connector) {
+				current = append(current, entry)
+			}
+		}
+		enrollment.RemovedConnectors = windowsEnterpriseRemovedConnectorAccounts(current)
 	}
 	return enrollment, nil
 }
