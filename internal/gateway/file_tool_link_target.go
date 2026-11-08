@@ -55,6 +55,7 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 		linked.Normalized = physical
 		linked.Resolved = physical
 		linked.Linked = true
+		linked.LinkedFrom = candidate.Resolved
 		facts.Paths = append(facts.Paths, linked)
 	}
 	return facts
