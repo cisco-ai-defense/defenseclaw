@@ -39,6 +39,7 @@ foreach ($name in @(
         'Test-DefenseClawGuardianCoverageReport',
         'Test-DefenseClawGuardianReportCompletedWithFailedTargets',
         'Test-DefenseClawGuardianReportErrorsAttributable',
+        'ConvertTo-DefenseClawGuardianTimestamp',
         'Get-DefenseClawGuardianGeneration',
         'Get-DefenseClawGuardianReadinessProbe',
         'Invoke-DefenseClawGuardianReadinessCommand',
@@ -138,6 +139,37 @@ $skippedSID = 'S-1-5-21-1-2-3-1003'
 $otherSID = 'S-1-5-21-1-2-3-1001'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow -AllowedSIDs @($skippedSID)) $true 'failed skipped account'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow -AllowedSIDs @($otherSID)) $false 'failed unlisted account'
+
+# A restarted guardian's first publication inside the same UTC second as the
+# one before it (GAP-0931). The no-digest recovery and Reconcile callers prove
+# a restart by a generation and a state identity they had not seen. The status
+# JSON goes through ConvertFrom-Json as in production, which turns a timestamp
+# of up to seven fractional digits into a DateTime.
+function New-TimedReport([string]$UpdatedAt) {
+    return ('{"ok":true,"errors":[],"state":{"updated_at":"' + $UpdatedAt + '","target_count":1}}' |
+        ConvertFrom-Json)
+}
+function Test-NoDigestRestart($Prior, $Current, [string]$PriorIdentity, [string]$CurrentIdentity) {
+    return Test-DefenseClawGuardianCoverageReport `
+        -Report $Current `
+        -PriorReconcileID ('1' * 32) `
+        -PriorGeneration ([string](Get-DefenseClawGuardianGeneration -Report $Prior)) `
+        -PriorStateIdentity $PriorIdentity `
+        -CurrentStateIdentity $CurrentIdentity `
+        -ExpectedManifestSHA256 '' `
+        -StartedAfter $startedAfter
+}
+foreach ($pair in @(
+        @{ prior = '2026-10-29T00:00:05.1000000Z'; current = '2026-10-29T00:00:05.9000000Z'; label = 'seven digits in one second' },
+        @{ prior = '2026-10-29T00:00:05.1Z'; current = '2026-10-29T00:00:05.9Z'; label = 'one digit in one second' },
+        @{ prior = '2026-10-29T00:00:05.100000001Z'; current = '2026-10-29T00:00:05.900000001Z'; label = 'nine digits in one second' }
+    )) {
+    $prior = New-TimedReport $pair.prior
+    $current = New-TimedReport $pair.current
+    Assert-Result (Test-NoDigestRestart $prior $current 'old' 'new') $true "restart republished in one second ($($pair.label))"
+    Assert-Result (Test-NoDigestRestart $prior $current 'same' 'same') $false "same state file kept ($($pair.label))"
+    Assert-Result (Test-NoDigestRestart $prior $prior 'old' 'new') $false "same generation with a new state file ($($pair.label))"
+}
 
 # The readiness wait that follows uses `enterprise hooks status`, which exits
 # non-zero for a degraded Guardian. The same rollback-only allowance applies.
