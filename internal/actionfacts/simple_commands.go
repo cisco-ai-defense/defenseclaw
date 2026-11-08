@@ -108,6 +108,18 @@ func (s simpleShellState) clone() simpleShellState {
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
 func SimpleCommands(input Input, facts Facts) []SimpleCommand {
+	result := simpleCommandsOfCall(input, facts)
+	if input.Command == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) &&
+		slices.ContainsFunc(result, func(simple SimpleCommand) bool { return simple.EvaluationFailure != "" }) {
+		// The POSIX reader rejected the call (a construct only Bash has) and
+		// the shell parse reads it only to add readings (simpleCommands): a
+		// call it cannot read in full keeps the judgment it had without them.
+		return nil
+	}
+	return result
+}
+
+func simpleCommandsOfCall(input Input, facts Facts) []SimpleCommand {
 	result := simpleCommands(input, facts, 0, "", nil, false)
 	// USER and LOGNAME carry a value from the home only as the guess that the
 	// login is the home's last element, and the shell may hold another. A
