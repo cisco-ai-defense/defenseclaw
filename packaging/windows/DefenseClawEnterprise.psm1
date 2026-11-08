@@ -17575,21 +17575,20 @@ function Repair-DefenseClawDeploymentAclDrift {
     return $true
 }
 
-# The link on the path of the Codex machine-policy folder (a junction at
-# ProgramData\OpenAI\Codex or above it), or '' when there is none. Standalone
-# only: Secure Client keeps its refusal. Nothing is created, opened or
-# followed (GAP-0773).
-function Get-DefenseClawCodexMachineFolderLink {
-    param([Parameter(Mandatory)][hashtable]$Layout)
+# The link on the path of a vendor machine-policy folder (a junction at
+# ProgramData\OpenAI\Codex, ProgramData\Cursor or Program Files\ClaudeCode, or
+# above it), or '' when there is none. Standalone only: Secure Client keeps its
+# refusal. Nothing is created, opened or followed (GAP-0773, GAP-0900).
+function Get-DefenseClawVendorMachineFolderLink {
+    param([string]$Directory)
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return ''
     }
-    $directory = [string]$Layout.CodexMachinePolicyDirectory
-    if ([string]::IsNullOrWhiteSpace($directory)) {
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
         return ''
     }
     try {
-        Assert-DefenseClawNoReparsePath -Path $directory -AllowMissingLeaf
+        Assert-DefenseClawNoReparsePath -Path $Directory -AllowMissingLeaf
     }
     catch {
         if ($_.Exception.Message -match '^reparse points are not allowed in managed path: (?<link>.+)$') {
@@ -17598,6 +17597,48 @@ function Get-DefenseClawCodexMachineFolderLink {
         throw
     }
     return ''
+}
+
+function Assert-DefenseClawVendorMachineFoldersNotLinked {
+    <#
+        Install, Upgrade and Repair (and the Ensure that runs one) snapshot the
+        machine-policy folders of Codex, Cursor and Claude Code, and a link on
+        the path of any of them failed that snapshot with 1603 after the
+        services had stopped. With enrolled accounts the rollback could then
+        not bring the guardian back, and the transaction stayed pending with
+        the services stopped (GAP-0900). This refuses before anything is
+        changed: it runs once at the start of the action, with the one link
+        check the uninstall already uses, and names each link with the command
+        that removes it. Standalone only; Secure Client keeps its behaviour.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Action
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $found = [Collections.Generic.List[string]]::new()
+    $fixes = [Collections.Generic.List[string]]::new()
+    foreach ($folder in @(
+        @{ Name = 'Codex'; Path = [string]$Layout.CodexMachinePolicyDirectory },
+        @{ Name = 'Cursor'; Path = [IO.Path]::Combine($script:ProgramData, 'Cursor') },
+        @{ Name = 'Claude Code'; Path = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d') }
+    )) {
+        $link = Get-DefenseClawVendorMachineFolderLink -Directory $folder.Path
+        if ($link -ne '') {
+            $found.Add("$($folder.Name): $link")
+            $fixes.Add("cmd /c rmdir `"$link`"")
+        }
+    }
+    if ($found.Count -gt 0) {
+        throw (
+            "$Action stopped before it changed anything; the services and the deployment are as they were. " +
+            'DefenseClaw does not follow a link in the machine-policy folder of an agent. A link sits on the path of: ' +
+            ($found -join '; ') + '. As an administrator, remove only the link (the folder it points to is not changed) with: ' +
+            ($fixes -join '; ') + ', then run the same command again'
+        )
+    }
 }
 
 function New-DefenseClawTransaction {
@@ -18106,7 +18147,7 @@ function New-DefenseClawTransaction {
     if ($IncludeCodexMachineState) {
         $codexFolderLink = ''
         if ($SkipLinkedCodexMachineState) {
-            $codexFolderLink = Get-DefenseClawCodexMachineFolderLink -Layout $Layout
+            $codexFolderLink = Get-DefenseClawVendorMachineFolderLink -Directory ([string]$Layout.CodexMachinePolicyDirectory)
         }
         foreach ($destination in @(
             $Layout.CodexMachinePolicyPath,
@@ -52440,6 +52481,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     )
                 }
             }
+        }
+
+        # GAP-0900: a link on the path of a vendor machine-policy folder stops
+        # Install, Upgrade and Repair here, before a root, a recovery lane or a
+        # service is touched.
+        if ($Action -in @('Install', 'Upgrade', 'Repair')) {
+            Assert-DefenseClawVendorMachineFoldersNotLinked -Layout $layout -Action $Action
         }
 
         # An eligible Install that leftover state stops is cleared once

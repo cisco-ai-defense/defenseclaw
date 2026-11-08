@@ -1388,20 +1388,20 @@ $failures = & $module {
                 if ($g773Plain1 -cne 'C:\x\y: access denied') {
                     $failures.Add("GAP-0773: a plain failure lost its path and reason: $g773Plain1")
                 }
-                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Link }) -ne $g773Link) {
+                if ((Get-DefenseClawVendorMachineFolderLink -Directory $g773Link) -ne $g773Link) {
                     $failures.Add('GAP-0773: the Codex folder link was not found')
                 }
-                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = [IO.Path]::Combine($g773Link, 'sub') }) -ne $g773Link) {
+                if ((Get-DefenseClawVendorMachineFolderLink -Directory [IO.Path]::Combine($g773Link, 'sub')) -ne $g773Link) {
                     $failures.Add('GAP-0773: a folder below the Codex link was not reported as behind the link')
                 }
-                if ((Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Plain }) -ne '' -or
-                    (Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = [IO.Path]::Combine($g773Plain, 'absent') }) -ne '') {
+                if ((Get-DefenseClawVendorMachineFolderLink -Directory $g773Plain) -ne '' -or
+                    (Get-DefenseClawVendorMachineFolderLink -Directory [IO.Path]::Combine($g773Plain, 'absent')) -ne '') {
                     $failures.Add('GAP-0773: a plain or absent Codex folder was reported as a link')
                 }
                 $g773SecureClient = 'unset'
                 Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
                 try {
-                    $g773SecureClient = Get-DefenseClawCodexMachineFolderLink -Layout @{ CodexMachinePolicyDirectory = $g773Link }
+                    $g773SecureClient = Get-DefenseClawVendorMachineFolderLink -Directory $g773Link
                 }
                 finally {
                     Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
@@ -1708,6 +1708,109 @@ $failures = & $module {
             }
         }
         finally {
+            $script:ProgramFiles = $savedProgramFiles
+            $script:ProgramData = $savedProgramData
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
+        }
+
+        # GAP-0900: Install, Upgrade and Repair refuse a link on the path of the
+        # Codex, Cursor or Claude Code machine folder before they change anything,
+        # with the one link check the uninstall uses, and name each link with the
+        # command that removes it. Secure Client keeps its behaviour.
+        $savedProgramFiles = $script:ProgramFiles
+        $savedProgramData = $script:ProgramData
+        $savedProfile = Get-DefenseClawEnterpriseProfile
+        $g900Links = [Collections.Generic.List[string]]::new()
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $script:ProgramFiles = Microsoft.PowerShell.Management\Join-Path $Scratch 'PF900'
+            $script:ProgramData = Microsoft.PowerShell.Management\Join-Path $Scratch 'PD900'
+            $g900Target = [IO.Path]::Combine($script:ProgramData, 'decoys')
+            [void][IO.Directory]::CreateDirectory($g900Target)
+            [IO.File]::WriteAllText([IO.Path]::Combine($g900Target, 'decoy.txt'), 'decoy behind a link')
+            $g900Layout = @{ CodexMachinePolicyDirectory = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex') }
+            $g900Cursor = [IO.Path]::Combine($script:ProgramData, 'Cursor')
+            $g900Openai = [IO.Path]::Combine($script:ProgramData, 'OpenAI')
+            $g900Claude = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode')
+            $g900Refuses = {
+                param([string]$Action)
+                try {
+                    Assert-DefenseClawVendorMachineFoldersNotLinked -Layout $g900Layout -Action $Action
+                    return ''
+                }
+                catch {
+                    return [string]$_.Exception.Message
+                }
+            }
+            # No folder at all, and plain folders, are not refused.
+            if (& $g900Refuses 'Repair') {
+                $failures.Add('GAP-0900: absent machine folders were refused')
+            }
+            foreach ($plain in @([IO.Path]::Combine($g900Layout.CodexMachinePolicyDirectory), $g900Cursor, [IO.Path]::Combine($g900Claude, 'managed-settings.d'))) {
+                [void][IO.Directory]::CreateDirectory($plain)
+            }
+            if (& $g900Refuses 'Repair') {
+                $failures.Add('GAP-0900: plain machine folders were refused')
+            }
+            foreach ($case in @(
+                    @('Cursor folder', $g900Cursor, 'Cursor'),
+                    @('Claude Code folder above managed-settings.d', $g900Claude, 'Claude Code'),
+                    @('OpenAI folder above Codex', $g900Openai, 'Codex'))) {
+                $link = [string]$case[1]
+                [IO.Directory]::Delete($link, $true)
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($link))
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $link -Target $g900Target)
+                $g900Links.Add($link)
+                foreach ($action in @('Install', 'Upgrade', 'Repair')) {
+                    $message = & $g900Refuses $action
+                    $fix = 'cmd /c rmdir "' + $link + '"'
+                    if (-not $message.StartsWith("$action stopped before it changed anything") -or
+                        -not $message.Contains($case[2] + ': ' + $link) -or
+                        -not $message.Contains($fix)) {
+                    $failures.Add("GAP-0900: $action over a link at the $($case[0]) was not refused with the link and its fix: '$message'")
+                    }
+                }
+                if ([IO.File]::ReadAllText([IO.Path]::Combine($g900Target, 'decoy.txt')) -cne 'decoy behind a link' -or
+                    @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $g900Target -Force).Count -ne 1) {
+                    $failures.Add("GAP-0900: the folder behind the $($case[0]) link was changed")
+                }
+                # Secure Client keeps its behaviour: nothing is refused here.
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                try {
+                    if (& $g900Refuses 'Repair') {
+                        $failures.Add("GAP-0900: Secure Client refused a link at the $($case[0])")
+                    }
+                    if ((Get-DefenseClawVendorMachineFolderLink -Directory $link) -cne '') {
+                        $failures.Add("GAP-0900: Secure Client found a link at the $($case[0])")
+                    }
+                }
+                finally {
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                }
+                [IO.Directory]::Delete($link, $false)
+                $g900Links.Remove($link) | Out-Null
+                [void][IO.Directory]::CreateDirectory($link)
+                if (& $g900Refuses 'Repair') {
+                    $failures.Add("GAP-0900: the $($case[0]) was still refused after its link was removed")
+                }
+            }
+            # Two links at once are both named, so one run of the fix removes both.
+            foreach ($link in @($g900Cursor, $g900Claude)) {
+                [IO.Directory]::Delete($link, $true)
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $link -Target $g900Target)
+                $g900Links.Add($link)
+            }
+            $both = & $g900Refuses 'Repair'
+            if (-not $both.Contains('Cursor: ' + $g900Cursor) -or -not $both.Contains('Claude Code: ' + $g900Claude)) {
+                $failures.Add("GAP-0900: two links were not both named: '$both'")
+            }
+        }
+        finally {
+            foreach ($link in $g900Links) {
+                if ([IO.Directory]::Exists($link)) {
+                    [IO.Directory]::Delete($link, $false)
+                }
+            }
             $script:ProgramFiles = $savedProgramFiles
             $script:ProgramData = $savedProgramData
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $savedProfile
