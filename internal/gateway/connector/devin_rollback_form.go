@@ -91,9 +91,11 @@ func convertDevinHookForms(hooks map[string]interface{}, pairs map[string][][2]s
 // convertDevinHooksFile applies convertDevinHookForms to one Devin hooks
 // file under its lock, keeps a copy of it before a rollback conversion, and
 // returns how many handlers it rewrote. A file that holds exactly the bytes
-// DefenseClaw last committed keeps its exact restore (holdManagedExactRestore):
-// the converted bytes are recorded as the committed output, so a rollback
-// that finds the file unedited puts the saved pre-setup bytes back.
+// DefenseClaw last committed keeps its exact restore
+// (holdManagedExactRestoreOverRead): the converted bytes are recorded as the
+// committed output, so a rollback that finds the file unedited puts the saved
+// pre-setup bytes back. An edit that lands while the conversion runs keeps
+// the file out of the exact restore.
 func convertDevinHooksFile(path, dataDir, connectorName string, pairs map[string][][2]string, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return 0, nil
@@ -121,9 +123,13 @@ func convertDevinHooksFile(path, dataDir, connectorName string, pairs map[string
 				return fmt.Errorf("keep a copy of the Devin hooks: %w", err)
 			}
 		}
-		hold := holdManagedExactRestore(dataDir, connectorName, path, data)
+		// The writer reads the file again to keep the comments of the operator,
+		// so the bytes read above do not bind what it consumed: the hold
+		// follows its writes instead.
+		hold := holdManagedExactRestoreOverRead(dataDir, connectorName, path, data)
 		after, err := writeDevinHooksFileBytes(path, cfg)
 		if err != nil {
+			_ = hold(nil)
 			return err
 		}
 		return hold(after)
