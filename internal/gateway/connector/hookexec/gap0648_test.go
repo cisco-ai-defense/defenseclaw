@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 // rel-1-0-6 GAP-0648 (GAP-0167/GAP-0171 replay): a hook process the host
@@ -81,6 +83,15 @@ func TestManagedWindowsCallIntoAGatewayStopIsBlockedAtTheRestartBudget(t *testin
 	// A running gateway keeps its answer window, cut by the process cap.
 	capAt := managedAnswerDeadlineCap - gatewayRestartBudget + lead
 	stubManagedLifecycle(t, func() bool { return false })
+	// The service state read is bounded on the proof clock, held here, so a
+	// loaded host never turns a stopped service into an unknown state; a
+	// call not yet connected at the budget reads again after the 20 ms the
+	// neighbour test uses, not the production 250 ms (GAP-0859). The elapsed
+	// bounds below are the production ones.
+	proofclocktest.Install(t)
+	previousInterval := managedGatewayServiceWatchInterval
+	managedGatewayServiceWatchInterval = 20 * time.Millisecond
+	t.Cleanup(func() { managedGatewayServiceWatchInterval = previousInterval })
 	previousStopped := managedGatewayServiceStopped
 	managedGatewayServiceStopped = func(string) bool { return false }
 	t.Cleanup(func() { managedGatewayServiceStopped = previousStopped })
