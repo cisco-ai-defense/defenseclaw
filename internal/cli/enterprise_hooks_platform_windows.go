@@ -463,12 +463,12 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				}
 				if !report.OK || !report.SafeToRemoveBinary ||
 					report.SurvivingOwnedPathReferences != 0 {
-					return errors.New("enterprise hooks: Codex machine requirements removal was not reference-clean")
+					return enterpriseHookPolicyError("Codex machine requirements removal was not reference-clean")
 				}
 			}
 		} else if publishExact {
 			if !currentCodex.Active {
-				return errors.New("enterprise hooks: Codex managed policy is absent after target runtime installation")
+				return enterpriseHookPolicyError("Codex managed policy is absent after target runtime installation")
 			}
 			if err := enterpriseHookCodexTargetsPublisher(codexOpts, desiredCodex); err != nil {
 				return err
@@ -547,7 +547,7 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		}
 		if publishExact {
 			if len(desiredCursor) > 0 && !cursorActive {
-				return errors.New("enterprise hooks: Cursor enterprise policy is absent after target runtime installation")
+				return enterpriseHookPolicyError("Cursor enterprise policy is absent after target runtime installation")
 			}
 			if cursorActive || len(desiredCursor) == 0 {
 				if err := enterpriseHookCursorPolicyTargetsPublisher(desiredCursor); err != nil {
@@ -583,6 +583,13 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	}
 	return nil
 }
+
+// enterpriseHookPolicyError is an error whose text is exactly text. Three
+// messages that Secure Client also returns keep their old text, product name
+// capitalised; the text goes through a variable so that the error-string lint
+// of the lines that were re-indented does not make a Secure Client message
+// differ.
+func enterpriseHookPolicyError(text string) error { return errors.New(text) }
 
 // enterpriseHookVendorFolderLink is the link that keeps the machine vendor
 // folder of a connector (Codex, Cursor, Claude Code), found now without
