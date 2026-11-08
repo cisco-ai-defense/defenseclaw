@@ -449,7 +449,7 @@ jobs:
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
       - name: Run the open-loop throughput tests (-p 1, no race)
-        run: go test -p 1 -count=1 -timeout 8m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+|Judgement[A-Za-z]+|Queueing[A-Za-z]+)$' ./internal/gateway
+        run: go test -p 1 -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+|Judgement[A-Za-z]+|Queueing[A-Za-z]+)$' ./internal/gateway
 
   go-test:
     # Preserve the existing required-check name while combining the complete
