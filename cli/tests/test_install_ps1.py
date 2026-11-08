@@ -1365,18 +1365,21 @@ def test_a_relative_uv_cache_folder_is_measured_where_uv_will_use_it(
     # without moving the process folder GetFullPath reads. A relative
     # UV_CACHE_DIR is measured (and handed to uv) from the PowerShell location,
     # so a deep one is refused and a short one is not, whatever the process
-    # folder is.
+    # folder is. The limit is sized from the short cache folder, so the answer
+    # does not depend on how long the runner's temp folder already is; the real
+    # limit and reserve are held by the length cases above.
     deep = tmp_path.joinpath(*["d" * 50] * 3)
     shallow = tmp_path / "s"
     deep.mkdir(parents=True)
     shallow.mkdir()
     ps_dir, process_dir = (deep, shallow) if ps_location_deep else (shallow, deep)
     text = _text()
-    constants = "\n".join(re.search(rf"^\${name} = .*$", text, re.M).group(0) for name in ("UvBuildPathReserve", "WindowsPathLimit"))
+    reserve = re.search(r"^\$UvBuildPathReserve = .*$", text, re.M).group(0)
     script = f"""
 $ErrorActionPreference = 'Stop'
 function Die([string]$Message) {{ throw $Message }}
-{constants}
+{reserve}
+$WindowsPathLimit = [IO.Path]::GetFullPath((Join-Path '{shallow}' 'cache')).Length + $UvBuildPathReserve
 function Test-LongPathsEnabled {{ return $false }}
 {_ps1_function('Resolve-UvCacheDir')}
 {_ps1_function('Assert-UvBuildPathFits')}
