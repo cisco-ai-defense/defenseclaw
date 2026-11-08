@@ -332,52 +332,104 @@ func TestDevinProjectRollbackConversionHonoursAnEditMadeWhileItRuns(t *testing.T
 func TestDevinProjectRollbackConversionDoesNotReplaceAFileSavedBeforePublication(t *testing.T) {
 	toEarlier := devinWindowsHookFormPairs([]string{devinGuardTestLauncher}, false)
 	comment := []byte("// operator note added during rollback\n")
-	for _, saves := range []int{0, 1, devinConversionAttempts} {
-		t.Run(fmt.Sprintf("%d saves before the replacement", saves), func(t *testing.T) {
-			dataDir, root, path, pre := devinProjectSetUp(t)
-			made := 0
-			atomicFileBeforePublish = func(p string) {
-				if made >= saves || !sameManagedTargetPath(p, path) {
-					return
-				}
-				made++
-				old, err := os.ReadFile(path)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				if err := os.WriteFile(path, append(append([]byte{}, comment...), old...), 0o600); err != nil {
-					t.Error(err)
-				}
-			}
-			t.Cleanup(func() { atomicFileBeforePublish = nil })
-			n, err := convertDevinHooksFile(path, dataDir, "devin", toEarlier, true, nil)
-			atomicFileBeforePublish = nil
-			restored, kept, rerr := RestoreManagedFileBackupsForRollback(
-				dataDir, filepath.Join(root, "older-data"), root, map[string]bool{}, "",
-			)
-			if rerr != nil {
-				t.Fatal(rerr)
-			}
-			got, gerr := os.ReadFile(path)
-			if gerr != nil {
-				t.Fatal(gerr)
-			}
-			switch {
-			case saves == 0:
-				if err != nil || n != 3 || len(restored) != 1 || !bytes.Equal(got, pre) {
-					t.Fatalf("untouched file: n=%d err=%v restored=%v file=%q, want the pre-setup bytes", n, err, restored, got)
-				}
-			case saves < devinConversionAttempts:
-				if err != nil || n != 3 || len(restored) != 0 || len(kept) != 1 || !bytes.HasPrefix(got, comment) {
-					t.Fatalf("save before publication: n=%d err=%v restored=%v kept=%v file=%q, want the save kept", n, err, restored, kept, got)
-				}
-			default:
-				if !errors.Is(err, errManagedTargetMoved) || len(restored) != 0 || !bytes.HasPrefix(got, comment) {
-					t.Fatalf("saves under every attempt: err=%v restored=%v file=%q, want a refusal that keeps the saves", err, restored, got)
-				}
-			}
-		})
+	seams := []struct {
+		name string
+		hook *func(string)
+	}{
+		{"before the check", &atomicFileBeforePublish},
+		{"after the check", &atomicFileAfterConfirm},
+	}
+	for _, seam := range seams {
+		for _, saves := range []int{0, 1, devinConversionAttempts} {
+			t.Run(fmt.Sprintf("%d saves %s", saves, seam.name), func(t *testing.T) {
+				testDevinConversionWithSavesAt(t, seam.hook, saves, toEarlier, comment)
+			})
+		}
+	}
+}
+
+// testDevinConversionWithSavesAt converts the project hooks file of a Devin
+// setup while an editor saves it saves times at the seam hook, then runs the
+// rollback restore and checks what is left.
+func testDevinConversionWithSavesAt(t *testing.T, hook *func(string), saves int, toEarlier map[string][][2]string, comment []byte) {
+	dataDir, root, path, pre := devinProjectSetUp(t)
+	made := 0
+	*hook = func(p string) {
+		if made >= saves || !sameManagedTargetPath(p, path) {
+			return
+		}
+		made++
+		old, err := os.ReadFile(path)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.WriteFile(path, append(append([]byte{}, comment...), old...), 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	t.Cleanup(func() { *hook = nil })
+	n, err := convertDevinHooksFile(path, dataDir, "devin", toEarlier, true, nil)
+	*hook = nil
+	restored, kept, rerr := RestoreManagedFileBackupsForRollback(
+		dataDir, filepath.Join(root, "older-data"), root, map[string]bool{}, "",
+	)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	got, gerr := os.ReadFile(path)
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	switch {
+	case saves == 0:
+		if err != nil || n != 3 || len(restored) != 1 || !bytes.Equal(got, pre) {
+			t.Fatalf("untouched file: n=%d err=%v restored=%v file=%q, want the pre-setup bytes", n, err, restored, got)
+		}
+	case saves < devinConversionAttempts:
+		if err != nil || n != 3 || len(restored) != 0 || len(kept) != 1 || !bytes.HasPrefix(got, comment) {
+			t.Fatalf("save before publication: n=%d err=%v restored=%v kept=%v file=%q, want the save kept", n, err, restored, kept, got)
+		}
+	default:
+		if !errors.Is(err, errManagedTargetMoved) || len(restored) != 0 || !bytes.HasPrefix(got, comment) {
+			t.Fatalf("saves under every attempt: err=%v restored=%v file=%q, want a refusal that keeps the saves", err, restored, got)
+		}
+	}
+	leftovers, _ := filepath.Glob(filepath.Join(filepath.Dir(path), ".tmp-*"))
+	if len(leftovers) != 0 {
+		t.Fatalf("staging files left behind: %v", leftovers)
+	}
+}
+
+// A publisher that retries a busy rename checks the managed span before every
+// attempt: a save that lands while it waits stops the next attempt.
+func TestConfirmingRenameStopsAnAttemptAfterASaveInAConversion(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "hooks.json")
+	read := []byte(`{"a":1}`)
+	if err := os.WriteFile(path, read, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !beginManagedConversionSpan(path, sha256Hex(read)) {
+		t.Fatal("no span")
+	}
+	t.Cleanup(func() { endManagedSetupSpan(path) })
+	if err := noteManagedSetupWrite(path, []byte(`{"a":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	rename := confirmingRename(path, func(_, _ *os.File, _ string, _ bool) error {
+		attempts++
+		return nil
+	})
+	if err := rename(nil, nil, "x", true); err != nil || attempts != 1 {
+		t.Fatalf("untouched file: err=%v attempts=%d, want the rename to run once", err, attempts)
+	}
+	if err := os.WriteFile(path, []byte(`{"a":1,"saved":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rename(nil, nil, "x", true); !errors.Is(err, errManagedTargetMoved) || attempts != 1 {
+		t.Fatalf("saved file: err=%v attempts=%d, want a refusal before the rename", err, attempts)
 	}
 }
 

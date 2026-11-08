@@ -146,8 +146,11 @@ func noteManagedSetupWrite(path string, data []byte) error {
 // confirmManagedSetupPublish is called by a writer right before it replaces
 // path: the target must still be what noteManagedSetupWrite found. A save that
 // landed in between taints a setup span, and a conversion span refuses the
-// write. The replacement itself cannot compare the file, so a save in the
-// instant between this check and the replacement is the one case left.
+// write. A rollback conversion's replacement is an exchange that compares the
+// file it displaced (publishKeepingConversionSaves), so no save is lost between
+// this check and the replacement; where there is no exchange (Windows) the
+// instant of one rename call is the case left, and a busy-rename retry checks
+// again before each attempt (confirmingRename).
 func confirmManagedSetupPublish(path string) error {
 	managedSetupSpans.Lock()
 	defer managedSetupSpans.Unlock()
@@ -167,6 +170,18 @@ func confirmManagedSetupPublish(path string) error {
 	}
 	span.tainted = true
 	return nil
+}
+
+// managedConversionFound reports the hash of the bytes the last write of a
+// rollback conversion found at path, when a conversion holds a span on it.
+func managedConversionFound(path string) (string, bool) {
+	managedSetupSpans.Lock()
+	defer managedSetupSpans.Unlock()
+	span, ok := managedSetupSpans.byPath[managedSetupSpanKey(path)]
+	if !ok || !span.conversion {
+		return "", false
+	}
+	return span.found, true
 }
 
 // noteManagedSetupTransform is noteManagedSetupWrite for a writer that already
