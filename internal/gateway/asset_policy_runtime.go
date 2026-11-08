@@ -744,6 +744,21 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 	} else {
 		entry, ok = a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
 	}
+	if !secureClient {
+		// The agent keeps the connection to a server it started after the
+		// entry leaves its config, so the last definition resolved for the
+		// name is the one the call reaches (GAP-0861). Secure Client keeps
+		// main (#1092).
+		home, serviceAccount := callerHomeForAssets(ctx)
+		if !serviceAccount || home != "" {
+			now := time.Now()
+			if ok {
+				a.mcpResolved.remember(connector, home, probe.WorkspaceDir, probe.ServerName, entry, now)
+			} else {
+				entry, ok = a.mcpResolved.recall(connector, home, probe.WorkspaceDir, probe.ServerName, now)
+			}
+		}
+	}
 	if !ok {
 		return probe
 	}
