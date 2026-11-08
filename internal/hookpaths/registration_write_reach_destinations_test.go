@@ -60,6 +60,22 @@ func TestRegistrationWriteReachDestinationRoles(t *testing.T) {
 		{"loop overwrites other tools", "for f in " + bin + "/other-*; do echo x > \"$f\"; done", false},
 		{"loop reads hooks", "for f in " + bin + "/defenseclaw-hook-*; do cat \"$f\"; done", false},
 		{"loop copies hooks away", "for f in " + bin + "/defenseclaw-hook-*; do cp \"$f\" " + root + "/backup; done", false},
+		{"loop copies an ordinary source into the bin folder", "for f in " + source + "; do cp \"$f\" " + bin + "/; done", false},
+		{"loop copies into the bin folder without a slash", "for f in " + source + "; do cp \"$f\" " + bin + "; done", false},
+		{"loop installs an ordinary source into the bin folder", "for f in " + source + "; do install -m755 \"$f\" " + bin + "/; done", false},
+		{"loop installs with a target folder", "for f in " + source + "; do install -m755 -t " + bin + " \"$f\"; done", false},
+		{"loop links an ordinary source into the bin folder", "for f in " + source + "; do ln -sf \"$f\" " + bin + "/; done", false},
+		{"loop installs a hook-named source into the bin folder", "for f in " + owned + "; do install -m755 \"$f\" " + bin + "/; done", true},
+		{"loop copies a hook-named source into the bin folder", "for f in " + owned + "; do cp \"$f\" " + bin + "/; done", true},
+		{"loop links over the hook file", "for f in " + source + "; do ln -sf \"$f\" " + hook + "; done", true},
+		{"loop installs onto the hook file", "for f in " + source + "; do install -m755 \"$f\" " + hook + "; done", true},
+		{"loop perl edits the hook in place", "for f in " + hook + "; do perl -pi -e s/x/y/ \"$f\"; done", true},
+		{"loop perl edits the hook in place with a suffix", "for f in " + hook + "; do perl -pi.bak -e s/x/y/ \"$f\"; done", true},
+		{"loop perl edits the hook in place apart from the code option", "for f in " + hook + "; do perl -i -pe s/x/y/ \"$f\"; done", true},
+		{"loop perl with a module option reads the hook", "for f in " + hook + "; do perl -MFile::Spec -ne print \"$f\"; done", false},
+		{"loop perl without in-place edit reads the hook", "for f in " + hook + "; do perl -ne print \"$f\"; done", false},
+		{"loop sed prints the hook", "for f in " + hook + "; do sed -n 1p \"$f\"; done", false},
+		{"loop perl edits another tool in place", "for f in " + bin + "/other-tool; do perl -pi -e s/x/y/ \"$f\"; done", false},
 	} {
 		if got := len(RegistrationWriteReached(tc.command, root, home, names)) > 0; got != tc.want {
 			t.Errorf("%s: %q reached %v, want %v", tc.name, tc.command, got, tc.want)

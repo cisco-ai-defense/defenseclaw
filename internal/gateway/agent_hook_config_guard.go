@@ -1482,19 +1482,38 @@ func agentHookConfigGitGlobReach(spec, worktree string, guard *agentHookConfigGu
 
 func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string {
 	// GIT_WORK_TREE=dir (or GIT_DIR=dir/.git) before the command names the
-	// worktree as --work-tree=dir does.
+	// worktree as --work-tree=dir does, whether the assignment is written
+	// before git or passed through env or a process wrapper.
 	rest, workTree := argv, ""
-	for len(rest) > 0 && agentHookConfigAssignment(rest[0]) {
-		name, value, _ := strings.Cut(rest[0], "=")
-		switch name {
-		case "GIT_WORK_TREE":
-			workTree = value
-		case "GIT_DIR":
-			if workTree == "" && filepath.Base(value) == ".git" {
-				workTree = filepath.Dir(value)
+	for depth := 0; depth < 4 && len(rest) > 0; depth++ {
+		for len(rest) > 0 && agentHookConfigAssignment(rest[0]) {
+			name, value, _ := strings.Cut(rest[0], "=")
+			switch name {
+			case "GIT_WORK_TREE":
+				workTree = value
+			case "GIT_DIR":
+				if workTree == "" && filepath.Base(value) == ".git" {
+					workTree = filepath.Dir(value)
+				}
 			}
+			rest = rest[1:]
 		}
-		rest = rest[1:]
+		if len(rest) == 0 {
+			break
+		}
+		if child, directory, wrapper := agentHookConfigEnvChild(rest); wrapper {
+			if directory != "" {
+				if !filepath.IsAbs(directory) {
+					directory = filepath.Join(guard.cwd, directory)
+				}
+				guard = newAgentHookConfigGuard(directory, guard.home)
+			}
+			rest = child
+		} else if child, wrapper := agentHookConfigWrapperChild(rest); wrapper {
+			rest = child
+		} else {
+			break
+		}
 	}
 	if len(rest) != len(argv) {
 		if len(rest) > 0 && filepath.Base(rest[0]) == "git" {
@@ -2124,6 +2143,43 @@ var agentHookConfigWrapperOptionArgs = map[string][]string{
 	"sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from", "-D", "--chdir",
 		"-R", "--chroot", "-r", "--role", "-t", "--type", "-T", "--command-timeout", "-U", "--other-user"},
 	"doas": {"-u", "-C"},
+}
+
+// agentHookConfigEnvChild reads one env call and returns the words it runs:
+// the NAME=value assignments it passes (kept in front, in the order
+// agentHookConfigGitTarget reads) followed by the command, plus the folder
+// -C/--chdir starts it in. An option the reader does not know (-S, a split
+// string) is not a wrapper read, so the call is left as it is.
+func agentHookConfigEnvChild(argv []string) (child []string, directory string, wrapper bool) {
+	if len(argv) == 0 || strings.ToLower(filepath.Base(argv[0])) != "env" {
+		return nil, "", false
+	}
+	var assigned []string
+	index := 1
+	for ; index < len(argv); index++ {
+		word := argv[index]
+		switch {
+		case word == "--" || word == "-" || word == "-i" || word == "--ignore-environment" || word == "-0" || word == "--null" || word == "-v" || word == "--debug":
+		case word == "-u" || word == "--unset":
+			index++
+		case word == "-C" || word == "--chdir":
+			if index+1 >= len(argv) {
+				return nil, "", false
+			}
+			index++
+			directory = argv[index]
+		case strings.HasPrefix(word, "--chdir="):
+			directory = strings.TrimPrefix(word, "--chdir=")
+		case strings.HasPrefix(word, "--unset="):
+		case strings.HasPrefix(word, "-"):
+			return nil, "", false
+		case agentHookConfigAssignment(word):
+			assigned = append(assigned, word)
+		default:
+			return append(assigned, argv[index:]...), directory, true
+		}
+	}
+	return assigned, directory, true
 }
 
 // agentHookConfigWrapperChild reads one literal process wrapper (timeout,
