@@ -242,12 +242,12 @@ func TestR105WindowsPowerShellStateReaderIsLinear(t *testing.T) {
 				args, _ := json.Marshal(map[string]string{"command": command})
 				input := actionfacts.Input{Tool: "PowerShell", Args: args, CWD: home + `\project`, ActiveHome: home,
 					DialectHint: actionfacts.DialectPowerShell}
-				done := startWork()
+				start := time.Now()
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, LegacyText: string(args), Connector: connectorName,
 					EnforcementCapable: true, ResolvedWriteTargets: resolved,
 				})
-				return findings, done()
+				return findings, time.Since(start)
 			}
 			findings, took := judge(size)
 			if index == 0 {
@@ -304,12 +304,12 @@ func TestR105WindowsPowerShellBalancedNestingIsLinear(t *testing.T) {
 				args, _ := json.Marshal(map[string]string{"command": tc.build(n)})
 				input := actionfacts.Input{Tool: tool, Args: args, CWD: home + `\project`, ActiveHome: home}
 				input.DialectHint = agentHookWindowsShellDialect(input)
-				done := startWork()
+				start := time.Now()
 				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 					Input: input, LegacyText: string(args), Connector: connectorName,
 					EnforcementCapable: true, ResolvedWriteTargets: resolved,
 				})
-				return findings, done()
+				return findings, time.Since(start)
 			}
 			findings, took := judge(tc.n)
 			t.Logf("%s %s: %d bytes in %s", tc.name, tool, len(tc.build(tc.n)), took)

@@ -23,8 +23,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // errGatewayStartFailing ends a hook request early when the managed gateway
@@ -309,26 +307,18 @@ func watchManagedGatewayService(ctx context.Context, running func() (bool, bool)
 		}
 	}
 	go func() {
-		// The budget and the repoll run on the proof clock, like every bound
-		// of a call after its deadline: a test spends them itself instead of
-		// racing the host for a goroutine (GAP-0859). A release build runs
-		// the system clock, with the same budget and repoll.
-		expired, stopTimer := proofclock.NewTimer(time.Until(deadline))
-		defer func() { stopTimer() }()
-		again := func(d time.Duration) {
-			stopTimer()
-			expired, stopTimer = proofclock.NewTimer(d)
-		}
+		timer := time.NewTimer(time.Until(deadline))
+		defer timer.Stop()
 		for {
 			select {
 			case <-watched.Done():
 				return
 			case <-done:
 				return
-			case <-expired:
+			case <-timer.C:
 			}
 			if !connected.Load() {
-				again(interval)
+				timer.Reset(interval)
 				continue
 			}
 			if up, known := serviceRunningWithin(running, wait); known && !up {
@@ -339,16 +329,14 @@ func watchManagedGatewayService(ctx context.Context, running func() (bool, bool)
 				mu.Unlock()
 				return
 			}
-			again(interval)
+			timer.Reset(interval)
 		}
 	}()
 	return watched, stop, func() { stop(); cancel(nil) }
 }
 
 // serviceRunningWithin is running bounded by wait: a read that takes longer
-// is not known. The bound runs on the proof clock like the other bounds of a
-// call, so a test decides whether it is spent instead of racing the host for
-// a goroutine (GAP-0859); a release build runs the system clock.
+// is not known.
 func serviceRunningWithin(running func() (bool, bool), wait time.Duration) (up, known bool) {
 	type state struct{ up, known bool }
 	read := make(chan state, 1)
@@ -356,12 +344,12 @@ func serviceRunningWithin(running func() (bool, bool), wait time.Duration) (up, 
 		up, known := running()
 		read <- state{up, known}
 	}()
-	expired, stop := proofclock.NewTimer(wait)
-	defer stop()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
 	select {
 	case s := <-read:
 		return s.up, s.known
-	case <-expired:
+	case <-timer.C:
 		return false, false
 	}
 }
