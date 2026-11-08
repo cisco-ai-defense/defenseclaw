@@ -127,7 +127,7 @@ func (g *agentHookConfigGuard) shellMentionsRegistryPath(text string) bool {
 			}
 		}
 	}
-	for _, name := range []string{"defenseclaw-hook-user", "defenseclaw-hook-post", ".defenseclaw"} {
+	for _, name := range []string{"defenseclaw-hook", ".defenseclaw", ".local"} {
 		if strings.Contains(text, name) {
 			return true
 		}
@@ -269,10 +269,15 @@ func agentHookConfigRegistrationPaths(g *agentHookConfigGuard) []string {
 	}
 	if g.home != "" {
 		for _, name := range []string{"defenseclaw-hook-user", "defenseclaw-hook-post"} {
-			add(filepath.Join(g.home, ".local", "bin", name))
+			// The folders that hold an installed hook executable are removed
+			// with it (rm -rf ~/.local/bin).
+			for path := filepath.Join(g.home, ".local", "bin", name); path != g.home && filepath.IsAbs(path); path = filepath.Dir(path) {
+				add(path)
+			}
 		}
 		hooks := filepath.Join(g.home, ".defenseclaw", "hooks")
 		add(hooks)
+		add(filepath.Dir(hooks))
 		if entries, err := os.ReadDir(hooks); err == nil && len(entries) <= 64 {
 			for _, entry := range entries {
 				add(filepath.Join(hooks, entry.Name()))
@@ -1001,7 +1006,7 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 		managedRaw = agentHookConfigRawShellCommand(request.Input)
 		if managedRaw == "" || (!strings.Contains(managedRaw, "=") && !strings.Contains(managedRaw, "--settings") &&
 			!strings.Contains(managedRaw, "--config") && !strings.Contains(managedRaw, " -c") &&
-			!strings.Contains(managedRaw, "--setting-sources") && !hookpaths.RegistrationWriteCandidate(managedRaw)) {
+			!strings.Contains(managedRaw, "--setting-sources") && !strings.Contains(managedRaw, "env ") && !hookpaths.RegistrationWriteCandidate(managedRaw)) {
 			return findings
 		}
 	}
@@ -1041,14 +1046,9 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 			}
 			guard := newAgentHookConfigGuard(part.Dir, request.Input.ActiveHome)
 			if hookpaths.RegistrationWriteCandidate(part.Command) {
-				registered := agentHookConfigRegistrationPaths(guard)
-				for _, path := range registered {
-					if (strings.Contains(strings.ToLower(part.Command), strings.ToLower(filepath.Base(path))) ||
-						strings.Contains(part.Command, "patch") || strings.Contains(part.Command, "{")) &&
-						(guard.ownedFile(path) || guard.ownedFolder(path)) &&
-						hookpaths.RegistrationWriteReach(part.Command, part.Dir, request.Input.ActiveHome, []string{path}) {
-						add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
-					}
+				owned, _ := agentHookConfigReachedPaths(part, guard, agentHookConfigRegistrationPaths(guard))
+				for _, path := range owned {
+					add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
 				}
 			}
 			facts := []actionfacts.Facts{actionfacts.Analyze(actionfacts.Input{
@@ -1126,22 +1126,12 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 		}
 		if hookpaths.RegistrationWriteCandidate(part.Command) {
 			registered := agentHookConfigRegistrationPaths(partGuard)
-			if hookpaths.RegistrationWriteReach(part.Command, part.Dir, guard.home, registered) {
-				lowerCommand := strings.ToLower(part.Command)
-				for _, path := range registered {
-					if !strings.Contains(lowerCommand, strings.ToLower(filepath.Base(path))) &&
-						!strings.Contains(lowerCommand, "patch") && !strings.Contains(part.Command, "{") {
-						continue
-					}
-					if !hookpaths.RegistrationWriteReach(part.Command, part.Dir, guard.home, []string{path}) {
-						continue
-					}
-					if partGuard.ownedFile(path) || partGuard.ownedFolder(path) {
-						add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
-					} else {
-						add(agentHookConfigWriteRuleID, "", path)
-					}
-				}
+			owned, other := agentHookConfigReachedPaths(part, partGuard, registered)
+			for _, path := range owned {
+				add(agentHookConfigDisableRuleID, "changes a registered DefenseClaw hook file", path)
+			}
+			for _, path := range other {
+				add(agentHookConfigWriteRuleID, "", path)
 			}
 			if folder := hookpaths.RegistrationArchivePossibleReach(part.Command, part.Dir, guard.home, registered); folder != "" {
 				add(agentHookConfigWriteRuleID, "archive may replace a registered hook file", folder)
@@ -1168,6 +1158,28 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 		}
 	}
 	return out
+}
+
+// agentHookConfigReachedPaths lists the registered paths a statement writes,
+// split into installed DefenseClaw artifacts (and the folders that hold them)
+// and the other registration documents. The whole set is read once; the
+// per-path reads that tell the two apart run only for a statement that
+// reaches it, whatever spelling (brace, glob, loop, find) names the path.
+func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHookConfigGuard, registered []string) (owned, other []string) {
+	if !hookpaths.RegistrationWriteReach(part.Command, part.Dir, guard.home, registered) {
+		return nil, nil
+	}
+	for _, path := range registered {
+		if !hookpaths.RegistrationWriteReach(part.Command, part.Dir, guard.home, []string{path}) {
+			continue
+		}
+		if guard.ownedFile(path) || guard.ownedFolder(path) {
+			owned = append(owned, path)
+		} else {
+			other = append(other, path)
+		}
+	}
+	return owned, other
 }
 
 func agentHookConfigRawShellCommand(input actionfacts.Input) string {
@@ -1321,6 +1333,21 @@ func agentHookConfigGitGlobalSubcommand(argv []string, guard *agentHookConfigGua
 	return -1, ""
 }
 
+// agentHookConfigAssignment is a leading NAME=value word of a command.
+func agentHookConfigAssignment(word string) bool {
+	name, _, ok := strings.Cut(word, "=")
+	if !ok || name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if !(c == 0x5f || c >= 0x41 && c <= 0x5a || c >= 0x61 && c <= 0x7a || i > 0 && c >= 0x30 && c <= 0x39) {
+			return false
+		}
+	}
+	return true
+}
+
 func agentHookConfigGitJoin(root, value string) string {
 	if filepath.IsAbs(value) {
 		return filepath.Clean(value)
@@ -1363,6 +1390,11 @@ func agentHookConfigGitGlobReach(spec, worktree string, guard *agentHookConfigGu
 		if !strings.HasPrefix(file.Path, worktree+string(filepath.Separator)) {
 			continue
 		}
+		// A pattern matches the tracked files of the tree, not every name a
+		// registration file could have in this folder.
+		if _, err := os.Lstat(file.Path); err != nil {
+			continue
+		}
 		base := guard.cwd
 		if top {
 			base = worktree
@@ -1390,6 +1422,29 @@ func agentHookConfigGitGlobReach(spec, worktree string, guard *agentHookConfigGu
 }
 
 func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string {
+	// GIT_WORK_TREE=dir (or GIT_DIR=dir/.git) before the command names the
+	// worktree as --work-tree=dir does.
+	rest, workTree := argv, ""
+	for len(rest) > 0 && agentHookConfigAssignment(rest[0]) {
+		name, value, _ := strings.Cut(rest[0], "=")
+		switch name {
+		case "GIT_WORK_TREE":
+			workTree = value
+		case "GIT_DIR":
+			if workTree == "" && filepath.Base(value) == ".git" {
+				workTree = filepath.Dir(value)
+			}
+		}
+		rest = rest[1:]
+	}
+	if len(rest) != len(argv) {
+		if len(rest) > 0 && filepath.Base(rest[0]) == "git" {
+			argv = rest
+			if workTree != "" {
+				argv = append([]string{rest[0], "--work-tree=" + workTree}, rest[1:]...)
+			}
+		}
+	}
 	index, worktree := agentHookConfigGitGlobalSubcommand(argv, guard)
 	if index < 0 {
 		return ""
@@ -1660,6 +1715,10 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard, fact
 				index++
 				continue
 			}
+			if (argv[index] == "-C" || argv[index] == "--chdir") && index+1 < len(argv) {
+				index++
+				continue
+			}
 			if strings.HasPrefix(argv[index], "-") || strings.Contains(argv[index], "=") {
 				if agentHookConfigRunHomeAssignment(argv[index]) {
 					assignments = append(assignments, argv[index])
@@ -1693,54 +1752,11 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard, fact
 	if program == "exec" || program == "command" || program == "nohup" {
 		return agentHookConfigRunOverride(argv[1:], guard, facts)
 	}
-	if program == "timeout" || program == "nice" || program == "ionice" || program == "stdbuf" || program == "time" || program == "sudo" || program == "doas" {
-		for index := 1; index < len(argv); index++ {
-			word := argv[index]
-			if word == "--" {
-				continue
-			}
-			if strings.HasPrefix(word, "-") {
-				if (word == "-n" || word == "-u" || word == "-g" || word == "-o" || word == "-i") && index+1 < len(argv) {
-					index++
-				}
-				continue
-			}
-			if (program == "timeout" || program == "nice") && index == 1 && (program == "timeout" || word[0] >= '0' && word[0] <= '9') {
-				continue
-			}
-			return agentHookConfigRunOverride(argv[index:], guard, facts)
-		}
-		return "", ""
+	if child, wrapper := agentHookConfigWrapperChild(argv); wrapper {
+		return agentHookConfigRunOverride(child, guard, facts)
 	}
-	launcherStart := 0
-	if program == "npx" || program == "npx.cmd" || program == "bunx" || program == "bunx.cmd" {
-		launcherStart = 1
-	} else if (program == "pnpm" || program == "yarn") && len(argv) > 1 && argv[1] == "dlx" {
-		launcherStart = 2
-	} else if program == "npm" && len(argv) > 1 && (argv[1] == "exec" || argv[1] == "x") {
-		launcherStart = 2
-	}
-	if launcherStart > 0 {
-		for index := launcherStart; index < len(argv); index++ {
-			if argv[index] == "-y" || argv[index] == "--yes" || argv[index] == "--" {
-				continue
-			}
-			if (argv[index] == "-p" || argv[index] == "--package") && index+2 < len(argv) {
-				index++
-				continue
-			}
-			packageName := argv[index]
-			if at := strings.LastIndex(packageName, "@"); at > 0 {
-				packageName = packageName[:at]
-			}
-			switch packageName {
-			case "@anthropic-ai/claude-code", "claude-code", "claude":
-				return agentHookConfigRunOverride(append([]string{"claude"}, argv[index+1:]...), guard, facts)
-			case "@openai/codex", "codex":
-				return agentHookConfigRunOverride(append([]string{"codex"}, argv[index+1:]...), guard, facts)
-			}
-			break
-		}
+	if child := agentHookConfigLauncherChild(argv); child != nil {
+		return agentHookConfigRunOverride(child, guard, facts)
 	}
 	format := ""
 	switch program {
@@ -2013,40 +2029,123 @@ func agentHookConfigLaunchedAgent(argv []string) string {
 		if agentHookConfigRunAgent([]string{program}) {
 			return program
 		}
+		if child, wrapper := agentHookConfigWrapperChild(argv); wrapper {
+			argv = child
+			continue
+		}
+		if child := agentHookConfigLauncherChild(argv); child != nil {
+			return strings.ToLower(child[0])
+		}
 		switch program {
 		case "exec", "command", "nohup", "env":
 			argv = argv[1:]
 			for len(argv) > 0 && (strings.HasPrefix(argv[0], "-") || strings.Contains(argv[0], "=")) {
-				argv = argv[1:]
-			}
-		case "timeout", "nice", "ionice", "stdbuf", "time", "sudo", "doas":
-			argv = argv[1:]
-			for len(argv) > 0 && strings.HasPrefix(argv[0], "-") {
 				option := argv[0]
 				argv = argv[1:]
-				if (option == "-n" || option == "-u" || option == "-g" || option == "-o" || option == "-i") && len(argv) > 0 {
+				if (option == "-u" || option == "--unset" || option == "-C" || option == "--chdir") && len(argv) > 0 {
 					argv = argv[1:]
 				}
 			}
-			if (program == "timeout" || program == "nice" && len(argv) > 0 && len(argv[0]) > 0 && argv[0][0] >= '0' && argv[0][0] <= '9') && len(argv) > 0 {
-				argv = argv[1:]
-			}
-		case "npx", "bunx", "pnpm", "npm", "yarn":
-			for _, candidate := range argv[1:] {
-				candidate = strings.TrimSuffix(candidate, "@latest")
-				if strings.HasPrefix(candidate, "@anthropic-ai/claude-code") || candidate == "claude-code" {
-					return "claude"
-				}
-				if strings.HasPrefix(candidate, "@openai/codex") || candidate == "codex" {
-					return "codex"
-				}
-			}
-			return ""
 		default:
 			return ""
 		}
 	}
 	return ""
+}
+
+// agentHookConfigWrapperOptionArgs lists, for each literal process wrapper,
+// the options that consume the next word. A long option written
+// --name=value consumes none, and an attached short value (-k5) is one word.
+var agentHookConfigWrapperOptionArgs = map[string][]string{
+	"timeout": {"-k", "--kill-after", "-s", "--signal"},
+	"nice":    {"-n", "--adjustment"},
+	"ionice":  {"-c", "--class", "-n", "--classdata", "-p", "--pid", "-P", "--pgid", "-u", "--uid"},
+	"stdbuf":  {"-i", "--input", "-o", "--output", "-e", "--error"},
+	"time":    {"-f", "--format", "-o", "--output"},
+	"sudo": {"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from", "-D", "--chdir",
+		"-R", "--chroot", "-r", "--role", "-t", "--type", "-T", "--command-timeout", "-U", "--other-user"},
+	"doas": {"-u", "-C"},
+}
+
+// agentHookConfigWrapperChild reads one literal process wrapper (timeout,
+// nice, sudo ...) and returns the command it runs, found past the options
+// that take a value and the duration word of timeout. The launched agent
+// and the per-run overrides on it are read from this one place.
+func agentHookConfigWrapperChild(argv []string) ([]string, bool) {
+	if len(argv) == 0 {
+		return nil, false
+	}
+	program := strings.ToLower(filepath.Base(argv[0]))
+	options, wrapper := agentHookConfigWrapperOptionArgs[program]
+	if !wrapper {
+		return nil, false
+	}
+	index := 1
+	for index < len(argv) {
+		word := argv[index]
+		if word == "--" {
+			index++
+			continue
+		}
+		if !strings.HasPrefix(word, "-") {
+			break
+		}
+		index++
+		if slices.Contains(options, word) {
+			index++
+		}
+	}
+	if index < len(argv) && (program == "timeout" || program == "nice" && argv[index] != "" && argv[index][0] >= 0x30 && argv[index][0] <= 0x39) {
+		index++
+	}
+	if index >= len(argv) {
+		return nil, true
+	}
+	return argv[index:], true
+}
+
+// agentHookConfigLauncherChild reads a package runner (npx, bunx, pnpm dlx,
+// npm exec, yarn dlx) and returns the agent command it starts, with the
+// program name of the agent first; nil when it starts no known agent.
+func agentHookConfigLauncherChild(argv []string) []string {
+	if len(argv) == 0 {
+		return nil
+	}
+	start := 0
+	switch program := strings.ToLower(filepath.Base(argv[0])); {
+	case program == "npx" || program == "npx.cmd" || program == "bunx" || program == "bunx.cmd":
+		start = 1
+	case (program == "pnpm" || program == "yarn") && len(argv) > 1 && argv[1] == "dlx":
+		start = 2
+	case program == "npm" && len(argv) > 1 && (argv[1] == "exec" || argv[1] == "x"):
+		start = 2
+	}
+	if start == 0 {
+		return nil
+	}
+	for index := start; index < len(argv); index++ {
+		word := argv[index]
+		switch {
+		case word == "--":
+			continue
+		case word == "-p" || word == "--package":
+			index++
+			continue
+		case strings.HasPrefix(word, "-"):
+			continue
+		}
+		if at := strings.LastIndex(word, "@"); at > 0 {
+			word = word[:at]
+		}
+		switch word {
+		case "@anthropic-ai/claude-code", "claude-code", "claude":
+			return append([]string{"claude"}, argv[index+1:]...)
+		case "@openai/codex", "codex":
+			return append([]string{"codex"}, argv[index+1:]...)
+		}
+		return nil
+	}
+	return nil
 }
 
 func agentHookConfigRunSettingsWritten(raw string, guard *agentHookConfigGuard, facts []actionfacts.Facts) bool {
