@@ -138,14 +138,18 @@ func repairEnterpriseHookTarget(ctx context.Context, progress *enterpriseHookWor
 type hookElementBody struct {
 	data    []byte
 	existed bool
+	// unreadable: the file is there but its content could not be read (it is
+	// over the bound, or the read failed), so what the repair did to it is not
+	// known.
+	unreadable bool
 }
 
 // hookElementBodyMaxBytes bounds what is read of one element file.
 const hookElementBodyMaxBytes = 4 << 20
 
 // readHookElementBodies reads the files of the broken elements, so the change
-// to each can be named once it is put back. A file that cannot be read counts
-// as present with no content.
+// to each can be named once it is put back. A file that cannot be read is
+// present with unknown content, not an empty one.
 func readHookElementBodies(files map[string][]string, broken []string) map[string]hookElementBody {
 	bodies := map[string]hookElementBody{}
 	for _, element := range broken {
@@ -154,7 +158,14 @@ func readHookElementBodies(files map[string][]string, broken []string) map[strin
 				continue
 			}
 			data, err := safefile.ReadRegularFileBounded(path, hookElementBodyMaxBytes)
-			bodies[path] = hookElementBody{data: data, existed: !errors.Is(err, os.ErrNotExist)}
+			switch {
+			case err == nil:
+				bodies[path] = hookElementBody{data: data, existed: true}
+			case errors.Is(err, os.ErrNotExist):
+				bodies[path] = hookElementBody{}
+			default:
+				bodies[path] = hookElementBody{existed: true, unreadable: true}
+			}
 		}
 	}
 	return bodies
@@ -162,7 +173,10 @@ func readHookElementBodies(files map[string][]string, broken []string) map[strin
 
 // hookElementChanges names, for each restored element in order, what happened
 // to it (enterprisehooks.HookChange*): it compares the first of its files
-// whose content differs now with what the file held before the repair.
+// whose content differs now with what the file held before the repair. An
+// element whose file could not be read before the repair gets no kind (the
+// audit row then names the element alone): the repair cannot be told from a
+// deletion or an append without its before-content.
 func hookElementChanges(restored []string, files map[string][]string, bodies map[string]hookElementBody) []string {
 	changes := make([]string, 0, len(restored))
 	for _, element := range restored {
@@ -171,6 +185,10 @@ func hookElementChanges(restored []string, files map[string][]string, bodies map
 			before, known := bodies[path]
 			if !known {
 				continue
+			}
+			if before.unreadable {
+				change = ""
+				break
 			}
 			after, err := safefile.ReadRegularFileBounded(path, hookElementBodyMaxBytes)
 			if err != nil || (before.existed && bytes.Equal(before.data, after)) {

@@ -385,6 +385,14 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if !due {
 		return 0
 	}
+	// A pass canceled before its workers could finish did not do the cleanup,
+	// though the scheduler above used the request up: the next pass is due at
+	// once, whatever made this one due (GAP-0754).
+	defer func() {
+		if ctx.Err() != nil {
+			requestEnterpriseHookForeignCleanupNow()
+		}
+	}()
 
 	// OpenCode ports (gas-ux-r1 GAP-0053). The guardian's root-owned record is
 	// the only authority (REVIEW-gx053-9): a recorded uid keeps its port
