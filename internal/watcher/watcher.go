@@ -152,6 +152,12 @@ type InstallWatcher struct {
 	rootNotifyMu   sync.Mutex
 	rootCoverage   map[string]RootCoverageIssue
 	onRootCoverage func([]RootCoverageIssue)
+	// rootWarnings are admitted roots watched closely (RootWarning); the
+	// notify mutex orders the handler calls.
+	rootWarnMu       sync.RWMutex
+	rootWarnNotifyMu sync.Mutex
+	rootWarnings     map[string]RootWarning
+	onRootWarning    func([]RootWarning)
 	// managedArtifacts are exact connector-owned plugin files. They remain
 	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
 	// not inspect or quarantine DefenseClaw's own bridge artifact.
@@ -356,10 +362,15 @@ type InstallWatcher struct {
 }
 
 // RootCoverageIssue is a configured asset root whose admission scan is off.
-// Health exposes only counts and connector names; the gateway log names paths.
+// Health exposes counts, connector names and, when another account can write a
+// folder of the link route, that folder (Ancestor); the gateway log names the
+// root paths.
 type RootCoverageIssue struct {
 	Kind, Path, Connector, Reason string
-	Connectors                    []string
+	// Ancestor is the folder of the root's link route that another account
+	// can write (skillrootsafe.WritableAncestorError), else empty.
+	Ancestor   string
+	Connectors []string
 }
 
 // RootConsumer names a connector that loads a watched skill or plugin root.
@@ -386,9 +397,111 @@ func (w *InstallWatcher) RootCoverageIssues() []RootCoverageIssue {
 	return issues
 }
 
+// RootWarning is a configured asset root that is admitted and scanned, but
+// whose link route passes group-writable folders that only a private group made
+// acceptable, on a host where pam_group is loaded and can add an account to that
+// group at login (GAP-0905). The watcher scans the root again on every change
+// under it. Folders are the folders to run chmod g-w on.
+type RootWarning struct {
+	Kind, Path string
+	Connectors []string
+	Folders    []string
+}
+
+// SetRootWarningHandler publishes changes of the root warnings to the
+// gateway watcher health. Call before Run starts.
+func (w *InstallWatcher) SetRootWarningHandler(handler func([]RootWarning)) {
+	w.onRootWarning = handler
+}
+
+// RootWarnings returns a snapshot of the roots watched closely.
+func (w *InstallWatcher) RootWarnings() []RootWarning {
+	w.rootWarnMu.RLock()
+	defer w.rootWarnMu.RUnlock()
+	warnings := make([]RootWarning, 0, len(w.rootWarnings))
+	for _, warning := range w.rootWarnings {
+		warning.Connectors = append([]string(nil), warning.Connectors...)
+		warning.Folders = append([]string(nil), warning.Folders...)
+		warnings = append(warnings, warning)
+	}
+	sort.Slice(warnings, func(i, j int) bool { return warnings[i].Path < warnings[j].Path })
+	return warnings
+}
+
+// rootWarned reports whether path is at or below a root watched closely: the
+// event loop asks a rescan for every change there.
+func (w *InstallWatcher) rootWarned(path string) bool {
+	w.rootWarnMu.RLock()
+	defer w.rootWarnMu.RUnlock()
+	for _, warning := range w.rootWarnings {
+		if watcherPathAtOrBelow(path, warning.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+// rootRouteWarnings judges the link route of a root (tests replace it).
+var rootRouteWarnings = skillrootsafe.ResolveWithWarnings
+
+// refreshRootWarning judges the link route of an admitted root again.
+func (w *InstallWatcher) refreshRootWarning(kind, path string) {
+	_, folders, err := rootRouteWarnings(path, watcherEvalSymlinks)
+	if err != nil {
+		folders = nil
+	}
+	w.setRootWarning(kind, path, folders)
+}
+
+// setRootWarning records the folders of a root watched closely, or clears the
+// record when there are none.
+func (w *InstallWatcher) setRootWarning(kind, path string, folders []string) {
+	w.rootWarnNotifyMu.Lock()
+	defer w.rootWarnNotifyMu.Unlock()
+	key := kind + "\x00" + filepath.Clean(path)
+	w.rootWarnMu.Lock()
+	previous, hadPrevious := w.rootWarnings[key]
+	if len(folders) == 0 {
+		delete(w.rootWarnings, key)
+	} else {
+		if w.rootWarnings == nil {
+			w.rootWarnings = make(map[string]RootWarning)
+		}
+		connectors := w.rootConsumers[kind+"\x00"+w.rootCoveragePath(path)]
+		if len(connectors) == 0 {
+			if connector := w.connectorForPath(path); connector != "" {
+				connectors = []string{connector}
+			}
+		}
+		w.rootWarnings[key] = RootWarning{Kind: kind, Path: filepath.Clean(path),
+			Connectors: append([]string(nil), connectors...), Folders: slices.Clone(folders)}
+	}
+	current, has := w.rootWarnings[key]
+	w.rootWarnMu.Unlock()
+	if hadPrevious == has && slices.Equal(previous.Folders, current.Folders) && slices.Equal(previous.Connectors, current.Connectors) {
+		return
+	}
+	if has {
+		fmt.Fprintf(os.Stderr, "[watch] warning: %s root %s is reached through group-writable folders (%s) and pam_group is loaded; it is admitted and every change under it is scanned again; run chmod g-w on the folders\n",
+			kind, path, strings.Join(current.Folders, ", "))
+	} else {
+		fmt.Fprintf(os.Stderr, "[watch] %s root %s is no longer reached through group-writable folders\n", kind, path)
+	}
+	if w.onRootWarning != nil {
+		w.onRootWarning(w.RootWarnings())
+	}
+}
+
 func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
 	if w == nil || w.secureClientActive() {
 		return
+	}
+	// An admitted root is judged for the warning on every call; a root that
+	// is not admitted has none.
+	if cause == nil {
+		w.refreshRootWarning(kind, path)
+	} else {
+		w.setRootWarning(kind, path, nil)
 	}
 	w.rootNotifyMu.Lock()
 	defer w.rootNotifyMu.Unlock()
@@ -417,7 +530,12 @@ func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
 		if len(connectors) > 0 {
 			connector = connectors[0]
 		}
-		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Connectors: append([]string(nil), connectors...), Reason: cause.Error()}
+		ancestor := ""
+		var writable *skillrootsafe.WritableAncestorError
+		if errors.As(cause, &writable) {
+			ancestor = writable.Ancestor
+		}
+		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Connectors: append([]string(nil), connectors...), Reason: cause.Error(), Ancestor: ancestor}
 	}
 	current := w.rootCoverage[key]
 	changed := hadPrevious != (cause != nil) || (cause != nil &&
@@ -1459,6 +1577,12 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			if w.onReadEvent != nil {
 				w.onReadEvent(event)
+			}
+			if w.rootWarned(event.Name) {
+				// A root reached through group-writable folders of a private
+				// group while pam_group is loaded: scan the root again for
+				// every change under it (GAP-0905).
+				w.RequestRescan()
 			}
 			if event.Op&(fsnotify.Rename|fsnotify.Remove) != 0 {
 				nestedMu.Lock()
@@ -5117,7 +5241,7 @@ func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool)
 		for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
 			if _, err := os.Lstat(current); err == nil {
 				if _, resolveErr := skillrootsafe.Resolve(current, watcherEvalSymlinks); resolveErr != nil {
-					return nil, fmt.Errorf("linked or unavailable skill root: %s", dir)
+					return nil, linkedRootRefusal(dir, resolveErr)
 				}
 				break
 			} else if !errors.Is(err, fs.ErrNotExist) {

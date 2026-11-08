@@ -174,6 +174,18 @@ func assertSharedUnavailableSkillRootCoversEveryConnector(t *testing.T, explicit
 			t.Errorf("watcher health affected connectors = %v, missing %s", names, want)
 		}
 	}
+	// GAP-0905: the folder other accounts can write reaches health, so doctor
+	// and status can name it with the chmod.
+	physical, err := filepath.EvalSymlinks(shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rootIssue.Ancestor != physical {
+		t.Errorf("root issue ancestor = %q, want %q", rootIssue.Ancestor, physical)
+	}
+	if folders, _ := s.health.Snapshot().Watcher.Details["admission_root_writable_folders"].([]string); !slices.Equal(folders, []string{physical}) {
+		t.Errorf("watcher health writable folders = %v, want [%s]", folders, physical)
+	}
 }
 
 // Every configured connector consumes each explicit skill and plugin dir,

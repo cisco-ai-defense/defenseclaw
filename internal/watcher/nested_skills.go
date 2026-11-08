@@ -28,6 +28,17 @@ const nestedSkillDepthLimit = hermesskills.DefaultDepthLimit
 
 var watcherEvalSymlinks = filepath.EvalSymlinks
 
+// linkedRootRefusal is the error for a skill root whose link route is not
+// trusted. When a folder on the route is writable by another account it names
+// that folder and the one change that restores admission scanning (GAP-0905).
+func linkedRootRefusal(root string, cause error) error {
+	var writable *skillrootsafe.WritableAncestorError
+	if errors.As(cause, &writable) {
+		return fmt.Errorf("linked or unavailable skill root: %s: %w", root, writable)
+	}
+	return fmt.Errorf("linked or unavailable skill root: %s", root)
+}
+
 // trustedWalkRoot gives WalkDir a real starting directory when the final
 // component is a trusted link. WalkDir does not descend through a final link.
 // A link below that starting directory remains a non-directory entry.
@@ -192,7 +203,7 @@ func unlinkedSkillTreePath(root, subtree string) error {
 	}
 	resolvedRoot, err := skillrootsafe.Resolve(absoluteRoot, watcherEvalSymlinks)
 	if err != nil {
-		return fmt.Errorf("linked or unavailable skill root: %s", root)
+		return linkedRootRefusal(root, err)
 	}
 	for dir := filepath.Clean(absoluteSubtree); !sameWatcherPath(dir, absoluteRoot); dir = filepath.Dir(dir) {
 		info, err := os.Lstat(dir)
