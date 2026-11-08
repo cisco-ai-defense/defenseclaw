@@ -35,8 +35,10 @@ import (
 // and a launcher that falls behind its schedule never offers the rate the test
 // names, so every run is judged in this order:
 //   - The offered rate is measured, not assumed. driveOpenLoop records the real
-//     issue time of every call against its absolute slot; a call issued more
-//     than one tick after its slot is late and does not count. The achieved rate
+//     issue time of every call, taken in the call immediately before its
+//     proposal is posted (not when the launcher queued it), against its absolute
+//     slot; a call issued more than one tick after its slot is late and does not
+//     count. The achieved rate
 //     is the on-time calls over the window from the first to the last recorded
 //     issue (plus one tick). If it is below 95% of the required rate, for the
 //     stream or for its control, the run is INCONCLUSIVE and fails with that
@@ -56,8 +58,9 @@ import (
 //
 // The judgement is a function of the two measured streams (judgeOpenLoop), and
 // TestGAP0490OpenLoopCadence* run it against a stand-in with a rate cap: a
-// launcher held to about 20 calls a second is INCONCLUSIVE, a real 44 calls a
-// second against a 30/s cap fails on the 429s, and an uncapped stand-in passes.
+// launcher or a worker pool held to about 20 calls a second is INCONCLUSIVE, a
+// real 44 calls a second against a 30/s cap fails on the 429s, and an uncapped
+// stand-in passes.
 //
 // CI runs these without -race in the Connector Matrix (packages and CLI) step
 // "Gateway throughput tests (no race)" on Linux.
@@ -100,13 +103,17 @@ func TestGAP0490OpenLoopFourSandboxes(t *testing.T) {
 type openLoopPost func(ctx context.Context, token string, body []byte, receipt bool) (int, []byte, error)
 
 // openLoopPlan is one open-loop stream: perSecond calls a second from each
-// token for duration. stall is test-only: an extra pause before every launch,
-// to model a launcher that cannot keep its schedule.
+// token for duration. stall and dispatchLag are test-only. stall is an extra
+// pause before every launch, to model a launcher that cannot keep its schedule.
+// dispatchLag is an extra pause of n x dispatchLag in the worker of call n after
+// it started and before it posts, to model a worker pool that falls behind a
+// launcher that itself keeps its schedule.
 type openLoopPlan struct {
-	tokens    []string
-	perSecond int
-	duration  time.Duration
-	stall     time.Duration
+	tokens      []string
+	perSecond   int
+	duration    time.Duration
+	stall       time.Duration
+	dispatchLag time.Duration
 }
 
 // required is the account-wide rate the plan names.
@@ -176,21 +183,31 @@ func newOpenLoopPost(url string) openLoopPost {
 
 // driveOpenLoop issues the plan on an absolute schedule (call n of a token at
 // start + n ticks), without waiting for the calls before it, and waits for every
-// answer. It records the real issue time of every call: one issued more than a
-// tick after its slot is late and is left out of the achieved rate. A call has
-// one deadline of openLoopWait, started with its proposal and shared by its
-// receipt, and its measured latency is checked against that window as well, so
-// a call that took longer is never counted as answered.
+// answer. The real issue time of a call is taken inside the call, immediately
+// before its proposal is posted, so a launcher or a worker that falls behind
+// shows in the numbers: a call issued more than a tick after its slot is late
+// and is left out of the achieved rate. A call has one deadline of
+// openLoopWait, started at that same instant and shared by its receipt, and its
+// measured latency is checked against that window as well, so a call that took
+// longer is never counted as answered.
 func driveOpenLoop(parent context.Context, post openLoopPost, plan openLoopPlan) openLoopResult {
 	result := openLoopResult{problems: map[string]int{}}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	total := int(plan.duration.Seconds()) * plan.perSecond
+	result.offered = len(plan.tokens) * total
+	interval := time.Second / time.Duration(plan.perSecond)
+	start := time.Now()
+	var first, last time.Time
 	call := func(token string, session string, n int) {
 		defer wg.Done()
-		started := time.Now()
+		body := fmt.Sprintf(`{"hook_event_name":"PreToolUse","session_id":%q,"cwd":"/tmp","tool_name":"Bash","tool_use_id":"%s-%d","tool_input":{"command":"echo ok"}}`, session, session, n)
+		if plan.dispatchLag > 0 {
+			time.Sleep(time.Duration(n) * plan.dispatchLag)
+		}
 		ctx, cancel := context.WithTimeout(parent, openLoopWait)
 		defer cancel()
-		body := fmt.Sprintf(`{"hook_event_name":"PreToolUse","session_id":%q,"cwd":"/tmp","tool_name":"Bash","tool_use_id":"%s-%d","tool_input":{"command":"echo ok"}}`, session, session, n)
+		issued := time.Now()
 		status, out, err := post(ctx, token, []byte(body), false)
 		var answer struct {
 			Action          string `json:"action"`
@@ -202,12 +219,23 @@ func driveOpenLoop(parent context.Context, post openLoopPost, plan openLoopPlan)
 		} else if err == nil && status == http.StatusOK {
 			err = fmt.Errorf("proposal %s", out)
 		}
-		elapsed := time.Since(started)
+		elapsed := time.Since(issued)
 		if err == nil && status == http.StatusOK && elapsed > openLoopWait {
 			err = fmt.Errorf("answered after the %v window", openLoopWait)
 		}
 		mu.Lock()
 		defer mu.Unlock()
+		if issued.Sub(start.Add(time.Duration(n)*interval)) > interval {
+			result.late++
+		} else {
+			result.onTime++
+		}
+		if first.IsZero() || issued.Before(first) {
+			first = issued
+		}
+		if issued.After(last) {
+			last = issued
+		}
 		if status == http.StatusTooManyRequests {
 			result.refused++
 		}
@@ -217,49 +245,21 @@ func driveOpenLoop(parent context.Context, post openLoopPost, plan openLoopPlan)
 		}
 		result.latencies = append(result.latencies, elapsed)
 	}
-	total := int(plan.duration.Seconds()) * plan.perSecond
-	result.offered = len(plan.tokens) * total
-	interval := time.Second / time.Duration(plan.perSecond)
-	start := time.Now()
-	var first, last time.Time
 	var launch sync.WaitGroup
 	for i, token := range plan.tokens {
 		launch.Add(1)
 		go func() {
 			defer launch.Done()
 			session := fmt.Sprintf("g490-open-%d", i)
-			var onTime, late int
-			var firstIssue, lastIssue time.Time
 			for n := 0; n < total; n++ {
-				slot := start.Add(time.Duration(n) * interval)
-				if d := time.Until(slot); d > 0 {
+				if d := time.Until(start.Add(time.Duration(n) * interval)); d > 0 {
 					time.Sleep(d)
 				}
 				if plan.stall > 0 {
 					time.Sleep(plan.stall)
 				}
-				issued := time.Now()
-				if issued.Sub(slot) > interval {
-					late++
-				} else {
-					onTime++
-				}
-				if firstIssue.IsZero() {
-					firstIssue = issued
-				}
-				lastIssue = issued
 				wg.Add(1)
 				go call(token, session, n)
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			result.onTime += onTime
-			result.late += late
-			if first.IsZero() || firstIssue.Before(first) {
-				first = firstIssue
-			}
-			if lastIssue.After(last) {
-				last = lastIssue
 			}
 		}()
 	}
@@ -492,6 +492,33 @@ func TestGAP0490OpenLoopCadenceSlowLauncherIsInconclusive(t *testing.T) {
 			}
 			if got.achievedRate() >= openLoopMinCadence*tc.plan.required() {
 				t.Fatalf("the slowed launcher reached the required cadence (%.1f calls/s): %s", got.achievedRate(), verdict.detail)
+			}
+		})
+	}
+}
+
+// A launcher that keeps its schedule while the workers that post the calls fall
+// behind it (each worker starts later than the one before) issues about 25
+// proposals a second, not the 44 the plan names. The cadence is read where the
+// proposal is posted, so the run is INCONCLUSIVE and fails with that word,
+// whether the stand-in would have refused the real stream or not.
+func TestGAP0490OpenLoopCadenceSlowWorkerDispatchIsInconclusive(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		capPerSecond float64
+	}{
+		{"two sandboxes against a 30/s account cap", 30},
+		{"two sandboxes with no cap", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := openLoopStubPlan(2, 22, 4*time.Second, 0)
+			plan.dispatchLag = 35 * time.Millisecond
+			verdict, got := runOpenLoopStub(t, plan, tc.capPerSecond)
+			if verdict.kind != "inconclusive" || !strings.Contains(verdict.detail, "INCONCLUSIVE") {
+				t.Fatalf("delayed workers were judged %s, want inconclusive: %s", verdict.kind, verdict.detail)
+			}
+			if got.achievedRate() >= openLoopMinCadence*plan.required() {
+				t.Fatalf("the delayed workers reached the required cadence (%.1f calls/s): %s", got.achievedRate(), verdict.detail)
 			}
 		})
 	}
