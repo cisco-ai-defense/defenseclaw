@@ -72,6 +72,17 @@ func (failures *enterpriseHookConnectorLinkFailures) Unwrap() []error {
 	return causes
 }
 
+// coveredBy reports whether every connector named here already has a failed
+// row text in rows (the pre-pass of this run failed its targets).
+func (failures *enterpriseHookConnectorLinkFailures) coveredBy(rows map[string]string) bool {
+	for _, failure := range failures.Failures {
+		if _, ok := rows[failure.Connector]; !ok {
+			return false
+		}
+	}
+	return len(failures.Failures) > 0
+}
+
 // rowErrors maps each failed connector to the error text of its rows.
 func (failures *enterpriseHookConnectorLinkFailures) rowErrors() map[string]string {
 	rows := make(map[string]string, len(failures.Failures))

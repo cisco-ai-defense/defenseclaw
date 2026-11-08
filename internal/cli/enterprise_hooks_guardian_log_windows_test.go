@@ -12,13 +12,50 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // The guardian log is capped like the lifecycle log, while the services keep
 // appending through handles they hold open: the file is copied to .1 and
 // emptied in place, older generations move up, and the next line lands at the
 // start of the emptied file.
+func standaloneGuardianLogConfig(t *testing.T, profile string) {
+	t.Helper()
+	previous := cfg
+	t.Cleanup(func() { cfg = previous })
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, Enterprise: config.EnterpriseConfig{Profile: profile}}
+}
+
+// The Secure Client guardian log is left alone: no rotation, whatever its size.
+func TestCapWindowsGuardianLogLeavesTheSecureClientLogAlone(t *testing.T) {
+	standaloneGuardianLogConfig(t, managed.ProfileSecureClient)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hook-guardian.log")
+	t.Setenv(windowsGuardianServiceLogEnv, path)
+	previous := windowsGuardianLogLimit
+	windowsGuardianLogLimit = 16
+	t.Cleanup(func() { windowsGuardianLogLimit = previous })
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 4096)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	capWindowsGuardianLog(&stderr)
+	if info, err := os.Stat(path); err != nil || info.Size() != 4096 || stderr.Len() != 0 {
+		t.Fatalf("the Secure Client log was rotated: %v %v %q", info, err, stderr.String())
+	}
+	if _, err := os.Stat(path + ".1"); !os.IsNotExist(err) {
+		t.Fatalf("a generation was created: %v", err)
+	}
+	// The Secure Client guardian does not fold its lines either.
+	if enterpriseHookFoldRepeats() {
+		t.Fatal("the Secure Client guardian folds repeated lines")
+	}
+}
+
 func TestCapWindowsGuardianLogRotatesAFileAServiceHoldsOpen(t *testing.T) {
+	standaloneGuardianLogConfig(t, managed.ProfileStandalone)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hook-guardian.log")
 	t.Setenv(windowsGuardianServiceLogEnv, path)
@@ -78,6 +115,7 @@ func TestCapWindowsGuardianLogRotatesAFileAServiceHoldsOpen(t *testing.T) {
 }
 
 func TestCapWindowsGuardianLogLeavesAProcessWithoutAServiceLogAlone(t *testing.T) {
+	standaloneGuardianLogConfig(t, managed.ProfileStandalone)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hook-guardian.log")
 	if err := os.WriteFile(path, []byte(strings.Repeat("x", 4096)), 0o600); err != nil {
