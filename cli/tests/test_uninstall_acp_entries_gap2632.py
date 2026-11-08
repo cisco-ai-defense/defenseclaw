@@ -153,8 +153,13 @@ def _setup_zed_opencode(app, tmp_path):
     assert result.exit_code == 0, result.output
 
 
-def _two_data_dir_moves(tmp_path):
-    """Install home, then setup in a first store, then a second move: the records stay in the first store."""
+def _two_data_dir_moves(tmp_path, monkeypatch):
+    """Install home, then setup in a first store, then a second move: the records stay in the first store.
+
+    The list of earlier folders is only written by an unelevated account (an elevated process leaves no
+    list for the user to read), and the Windows CI runner is elevated, so the move runs as the user.
+    """
+    monkeypatch.setattr(cmd_config.config_module, "_is_admin_process", lambda: False)
     home = tmp_path / ".defenseclaw"
     home.mkdir()
     first = tmp_path / "state-one"
@@ -187,7 +192,7 @@ def test_uninstall_removes_the_acp_editor_entry_written_two_data_dir_moves_ago(t
     # second `config set data_dir` leaves them in a folder that is neither the
     # current one nor the install home. The install home lists that folder.
     _isolate_client_config(monkeypatch, tmp_path)
-    home, first, second, lock = _two_data_dir_moves(tmp_path)
+    home, first, second, lock = _two_data_dir_moves(tmp_path, monkeypatch)
     settings = _zed_settings(tmp_path)
     document = json.loads(settings.read_text())
     document["agent_servers"]["Foreign"] = {"command": "other"}
@@ -208,7 +213,7 @@ def test_uninstall_keeps_an_edited_acp_editor_entry_in_an_earlier_data_dir(tmp_p
     # The list of earlier folders only says where to look: the ownership proof in
     # that folder still decides, so an entry the user changed stays.
     _isolate_client_config(monkeypatch, tmp_path)
-    home, first, _second, lock = _two_data_dir_moves(tmp_path)
+    home, first, _second, lock = _two_data_dir_moves(tmp_path, monkeypatch)
     settings = _zed_settings(tmp_path)
     document = json.loads(settings.read_text())
     (name,) = document["agent_servers"]
