@@ -373,6 +373,17 @@ func enterpriseManagedRuntimeAbsenceNoop(
 	if resolveErr != nil || policyActive || registered {
 		return false
 	}
+	// On the standalone profile a machine-scope connector (Claude Code, Codex)
+	// whose machine policy is gone is a connector the administrator took off
+	// the roster: it is not managed, so a hook call a running agent still
+	// makes from its cached settings is allowed, with no gateway contact and no
+	// token read, as the Cursor tombstone adapter allows it (GAP-0916). While
+	// the connector is on the roster its policy is active with this account
+	// unregistered, which is the "not enrolled yet" refusal below. Secure
+	// Client, and a process that is not the standalone hook, are unchanged.
+	if (connectorName == "claudecode" || connectorName == "codex") && standaloneEnterpriseHookCheck(executable) {
+		return true
+	}
 	// An absent machine target is a trusted no-op only for the stable per-user
 	// launcher after its installer-owned state has become an inactive
 	// tombstone. Any other cached/retained enterprise runtime is de-enrolled;
