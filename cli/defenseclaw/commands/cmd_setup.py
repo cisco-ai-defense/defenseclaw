@@ -6310,10 +6310,13 @@ def _version_scan_persists(connector: str) -> bool:
 
     Native Windows OpenCode/Amp setup immediately records a protected,
     connector-scoped executable selection, so its admission scan does not
-    need to republish the process-wide discovery cache. Leaving that cache
-    untouched prevents an unrelated connector whose CLI is temporarily
-    undiscoverable from losing already-sealed version and contract status
-    when the gateway restarts every active connector.
+    republish the process-wide discovery cache: a whole-scan write would let
+    an unrelated connector whose CLI is temporarily undiscoverable lose
+    already-sealed version and contract status when the gateway restarts
+    every active connector. The version setup read is still recorded for
+    this connector alone, by :func:`_publish_agent_signal`, so doctor and
+    ``agent discover`` do not report a fresh setup as not installed until
+    ``agent discover --refresh`` (GAP-0882).
     """
     connector = normalize_connector(connector)
     return connector != "codex" and not (
@@ -6405,6 +6408,13 @@ def _check_connector_version_supported_for_setup(
                     ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
                 _refuse_in_every_mode(_refusal_scope, "Codex version evidence could not be saved for gateway restart")
                 return False
+    elif installed and _discovery is None and not _version_scan_persists(connector):
+        # Native Windows OpenCode/Amp: the scan above wrote nothing, and the
+        # protected selection is not what doctor reads, so the executable and
+        # version setup just verified are published here, for this connector
+        # only; every peer entry stays as the cache holds it (GAP-0882). A
+        # failed write changes no admission, which comes from the selection.
+        agent_discovery._publish_agent_signal(disc, connector, data_dir=data_dir)
 
     compatibility = resolve_connector_contract(connector, raw_version)
     if connector == "kiro":
