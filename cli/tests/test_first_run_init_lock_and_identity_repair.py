@@ -271,6 +271,107 @@ def test_a_moved_config_path_does_not_make_a_configured_data_folder_fresh(tmp_pa
     assert (home / "config.yaml").is_file()
 
 
+def _init(plain: bool):
+    """One init run on either path: (exit code or report status, a view of the refusal)."""
+
+    if not plain:
+        report = run_first_run(_options())
+        return report.status, any("continuity-evidence-present" in step.detail for step in report.setup)
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_init import init_cmd
+    from defenseclaw.context import AppContext
+
+    result = CliRunner().invoke(init_cmd, ["--skip-install"], obj=AppContext())
+    return result.exit_code, "continuity-evidence-present" in result.output
+
+
+def _finished_setup_whose_config_is_elsewhere(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """A finished setup: its config.yaml sits at an override path outside the data home."""
+
+    home = _home(tmp_path)
+    first = Path(os.path.realpath(tmp_path)) / "first" / "config.yaml"
+    first.parent.mkdir()
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(first))
+    assert run_first_run(_options()).status != "needs_attention"
+    assert first.is_file() and not (home / "config.yaml").exists()
+    return home, first
+
+
+def _lose_the_key(home: Path, shape: str) -> None:
+    (home / "device.key").unlink()
+    sentinel = home / "device.key.provenance"
+    if shape == "secret-only":
+        sentinel.unlink()
+    elif shape == "partial-sentinel":
+        sentinel.write_bytes(sentinel.read_bytes()[:60])
+        protect_private_file(str(sentinel))
+    else:  # the folder carries no record of earlier inits (made by a build that wrote none)
+        sentinel.unlink()
+        (home / "init.configs").unlink()
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("shape", ["secret-only", "partial-sentinel", "no-record"])
+def test_a_config_kept_at_an_earlier_override_path_keeps_the_identity_of_its_data_folder(
+    tmp_path, monkeypatch, plain, shape
+):
+    home, first = _finished_setup_whose_config_is_elsewhere(tmp_path, monkeypatch)
+    _lose_the_key(home, shape)
+    before = {path.name: path.read_bytes() for path in home.iterdir() if path.is_file()}
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(Path(os.path.realpath(tmp_path)) / "second" / "config.yaml"))
+
+    outcome, refused = _init(plain)
+
+    assert refused, outcome
+    assert outcome in ("needs_attention", 1)
+    assert not (home / "device.key").exists()
+    assert _orphans(home) == []
+    assert {name: data for name, data in before.items() if name != "init.configs"}.items() <= {
+        path.name: path.read_bytes() for path in home.iterdir() if path.is_file()
+    }.items()
+    assert first.is_file()
+
+
+def test_an_interrupted_first_creation_is_still_repaired_when_the_config_path_is_an_override(tmp_path, monkeypatch):
+    # The benign twin: the folder was only ever initialised by runs that never finished
+    # (a guided run rolls its config back; a plain run keeps it, which is a finished setup).
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(Path(os.path.realpath(tmp_path)) / "first" / "config.yaml"))
+    real_publish = doctor_recovery._publish_no_replace
+
+    def die_before_sentinel(source: str, target: str) -> None:
+        if target.endswith(".provenance"):
+            raise OSError("process ended before the sentinel was published")
+        real_publish(source, target)
+
+    with monkeypatch.context() as crash:
+        crash.setattr(doctor_recovery, "_publish_no_replace", die_before_sentinel)
+        crash.setattr(doctor_recovery, "_roll_back_device_identity", lambda placed: [])
+        assert run_first_run(_options()).status == "needs_attention"
+    assert (home / SECRET).exists() and not (home / "device.key").exists()
+    assert (home / "audit.db").exists()  # the folder holds more than identity files, so the record decides
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(Path(os.path.realpath(tmp_path)) / "second" / "config.yaml"))
+
+    status, refused = _init(False)
+
+    assert not refused
+    assert status != "needs_attention"
+    assert _valid(home)
+    assert any(name.startswith(SECRET + ".orphaned-") for name in _orphans(home))
+
+
+def test_the_record_of_earlier_inits_is_kept_to_a_bounded_list_of_paths(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    for index in range(40):
+        monkeypatch.setenv("DEFENSECLAW_CONFIG", str(home / f"c{index}" / "config.yaml"))
+        bootstrap.begin_data_folder_init(str(home))
+    lines = (home / "init.configs").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 32
+    assert lines[-1].endswith(os.path.join("c39", "config.yaml"))
+
+
 def test_a_key_the_normal_validator_accepts_is_kept_whatever_its_last_byte_is(tmp_path, monkeypatch):
     home = _home(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))

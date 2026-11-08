@@ -732,10 +732,13 @@ def set_aside_abandoned_identity(
     continuity evidence of an identity that may have existed, and whoever can
     write the home can also write any marker inside it, so nothing stored in
     the home authorizes setting them aside.  The only proof is that no setup
-    of this data folder ever finished: this init found no config.yaml, neither
-    where it reads its config nor in the default home
-    (``fresh_home``, see bootstrap.home_found_without_config; the active
-    config path can be moved elsewhere while the folder keeps its identity).
+    of this data folder ever finished (``fresh_home``): this init found no
+    config.yaml, neither where it reads its config nor in the default home
+    (bootstrap.home_found_without_config), and the folder is one no earlier
+    setup finished in (bootstrap.begin_data_folder_init: the config can be
+    kept at another path while the folder keeps its identity, so the folder is
+    new only when it holds nothing but identity files or when every config
+    path earlier inits recorded is gone).
     Then every file present must have exactly the
     shape a creation writes, or a prefix of it (a write cut short, which
     Windows' CREATE_NEW publication can leave), and be a regular private file.

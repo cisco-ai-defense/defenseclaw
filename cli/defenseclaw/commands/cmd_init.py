@@ -436,7 +436,7 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
 ) -> None:
     """The plain (non-guided) init; init_cmd holds the init lock around it."""
 
-    from defenseclaw.bootstrap import home_found_without_config
+    from defenseclaw.bootstrap import begin_data_folder_init, home_found_without_config
     from defenseclaw.config import (
         config_path,
         default_config,
@@ -508,6 +508,7 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
     # The identity and the stores live in the data folder the config names, which
     # may not be the home locked so far. Lock it before anything is changed there.
     locks.take(cfg.data_dir)
+    fresh_home = begin_data_folder_init(cfg.data_dir) and fresh_home
 
     cfg.environment = env
     if cfg.claw.mode.strip():
@@ -3477,12 +3478,13 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bo
     older unprovenanced key must remain visible to Doctor as legacy rather than
     being blessed after the fact.
 
-    On a home this init found without a config.yaml (``fresh_home``), the
-    files of an identity whose creation never finished (a crash or a killed
-    init; see set_aside_abandoned_identity) are set aside and the identity is
-    created again, so such a home is never a dead end. On any other home a
-    keyless provenance file is continuity evidence and still refuses; Doctor's
-    attended repair handles it.
+    On a home this init found new (``fresh_home``: no config.yaml at the paths
+    it reads, and a data folder no setup finished in; see
+    bootstrap.begin_data_folder_init), the files of an identity whose creation
+    never finished (a crash or a killed init; see set_aside_abandoned_identity)
+    are set aside and the identity is created again, so such a home is never a
+    dead end. On any other home a keyless provenance file is continuity
+    evidence and still refuses; Doctor's attended repair handles it.
     """
     raw_path = os.fspath(path)
     raw_data_dir = os.fspath(data_dir) if data_dir is not None else None
