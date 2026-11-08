@@ -66,13 +66,27 @@ func stripJSONCComments(data []byte) []byte {
 }
 
 func stripJSONCTrailingCommas(data []byte) []byte {
-	out := make([]byte, 0, len(data))
+	out, _ := stripTrailingCommas(data, false)
+	return out
+}
+
+// stripTrailingCommas drops the commas that sit before a closing brace or
+// bracket outside strings. With track set it also returns, for every byte of
+// the result, the index it had in data.
+func stripTrailingCommas(data []byte, track bool) (out []byte, from []int) {
+	out = make([]byte, 0, len(data))
+	emit := func(i int) {
+		out = append(out, data[i])
+		if track {
+			from = append(from, i)
+		}
+	}
 	inString := false
 	escaped := false
 	for i := 0; i < len(data); i++ {
 		b := data[i]
 		if inString {
-			out = append(out, b)
+			emit(i)
 			if escaped {
 				escaped = false
 			} else if b == '\\' {
@@ -84,7 +98,7 @@ func stripJSONCTrailingCommas(data []byte) []byte {
 		}
 		if b == '"' {
 			inString = true
-			out = append(out, b)
+			emit(i)
 			continue
 		}
 		if b == ',' {
@@ -96,7 +110,7 @@ func stripJSONCTrailingCommas(data []byte) []byte {
 				continue
 			}
 		}
-		out = append(out, b)
+		emit(i)
 	}
-	return out
+	return out, from
 }

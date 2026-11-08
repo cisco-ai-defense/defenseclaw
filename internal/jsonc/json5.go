@@ -37,9 +37,27 @@ import (
 // and the caller's strict parse then fails, which the caller must treat as
 // "could not read".
 func JSON5ToJSON(data []byte) []byte {
-	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	out, finished := rewriteJSON5(bytes.TrimPrefix(data, []byte("\xef\xbb\xbf")), nil)
+	if !finished {
+		return out
+	}
+	return stripJSONCTrailingCommas(out)
+}
+
+// rewriteMark records that out[outAt:] was produced from data[srcAt:]. When
+// marks is not nil, rewriteJSON5 appends one before every token it rewrites,
+// so a position in the rewritten text maps back to the original text.
+type rewriteMark struct{ outAt, srcAt int }
+
+// rewriteJSON5 is the rewrite of JSON5ToJSON before the trailing commas go.
+// It reports false when the text ended inside a block comment and the rest
+// was copied as it is.
+func rewriteJSON5(data []byte, marks *[]rewriteMark) ([]byte, bool) {
 	out := make([]byte, 0, len(data)+16)
 	for i := 0; i < len(data); {
+		if marks != nil {
+			*marks = append(*marks, rewriteMark{len(out), i})
+		}
 		b := data[i]
 		switch {
 		case b == '"' || b == '\'':
@@ -52,7 +70,7 @@ func JSON5ToJSON(data []byte) []byte {
 				// An unterminated block comment is not JSON5. Keep the rest
 				// as it is so the strict parse fails instead of reading the
 				// text before it as the whole document.
-				return append(out, data[i:]...)
+				return append(out, data[i:]...), false
 			}
 			i = next
 			out = append(out, ' ')
@@ -84,7 +102,7 @@ func JSON5ToJSON(data []byte) []byte {
 			i += size
 		}
 	}
-	return stripJSONCTrailingCommas(out)
+	return out, true
 }
 
 // skipJSON5Comment returns the index after the comment that starts at
