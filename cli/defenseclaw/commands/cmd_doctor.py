@@ -12277,9 +12277,8 @@ def _check_connector_skipped_at_start(connector: str, live_health: dict | None, 
     old hook file still passes the hook row, so name the fix here.
     """
     from defenseclaw.commands.cmd_status import (
+        _connector_recorded_cause,
         _connectors_not_started,
-        _connectors_not_started_reasons,
-        _connectors_not_started_repairs,
         _connectors_refused_by_agent_settings,
     )
 
@@ -12299,10 +12298,7 @@ def _check_connector_skipped_at_start(connector: str, live_health: dict | None, 
         return
     # The gateway recorded why it skipped the connector; quote it (bounded)
     # instead of sending the user to gateway.log (GAP-0731).
-    recorded = _bounded_recorded_reason(
-        _connectors_not_started_reasons(live_health).get(connector, ""),
-        _connectors_not_started_repairs(live_health).get(connector, ""),
-    )
+    recorded = _connector_recorded_cause(live_health, connector)
     label = _CONNECTOR_LABELS.get(connector, connector)
     _emit(
         "warn",
