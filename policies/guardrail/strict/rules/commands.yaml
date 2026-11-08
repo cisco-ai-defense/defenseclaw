@@ -1033,7 +1033,8 @@ rules:
   - id: tamper.docker_insecure_http_registry
     tool_call_only: true
     # Strict blocks only an authoritative full daemon.json replacement whose
-    # sole setting enables a literal, non-loopback HTTP registry.
+    # sole setting lists a non-loopback insecure registry in any spelling
+    # Docker accepts (host, host:port, IP, CIDR, http:// or https:// URL).
     pattern: 'a^'
     title: "Configure Docker to trust an insecure HTTP registry"
     severity: CRITICAL

@@ -6,6 +6,7 @@ package actionfacts
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/netip"
 	"net/url"
 	"strconv"
@@ -17,11 +18,13 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 
 // ExactDockerInsecureRegistryWrite reports whether one authenticated
 // whole-file write replaces Docker's daemon configuration with a strict JSON
-// document whose only setting enables at least one non-loopback literal HTTP
-// registry. The write is read from the closed argument shapes of every native
-// file tool (nativeFileWrites: Write, the write_file aliases whichever name
-// they give the path, Copilot create, OpenCode write, a patch that adds the
-// file), for the file the call names or the file an existing link reaches. It
+// document whose only setting lists at least one non-loopback insecure
+// registry in any spelling Docker accepts (host, host:port, IP, IPv6
+// [addr]:port, CIDR, or an http:// or https:// URL). The write is read from
+// the closed argument shapes of every native file tool (nativeFileWrites:
+// Write, the write_file aliases whichever name they give the path, Copilot
+// create, OpenCode write, a patch that adds the file), for the file the call
+// names or the file an existing link reaches. It
 // deliberately returns no path, registry, or content.
 //
 // Substring editors, patch hunks and appends are excluded: their arguments
@@ -91,7 +94,7 @@ func exactDockerInsecureRegistryDocument(content string) bool {
 	}
 
 	seen := make(map[string]struct{}, len(registries))
-	foundHTTP := false
+	foundInsecure := false
 	for _, value := range registries {
 		registry, ok := value.(string)
 		if !ok {
@@ -101,21 +104,39 @@ func exactDockerInsecureRegistryDocument(content string) bool {
 			return false
 		}
 		seen[registry] = struct{}{}
-		insecure, valid := exactDockerRegistryURL(registry)
+		insecure, valid := exactDockerRegistryEntry(registry)
 		if !valid {
 			return false
 		}
-		foundHTTP = foundHTTP || insecure
+		foundInsecure = foundInsecure || insecure
 	}
-	return foundHTTP
+	return foundInsecure
 }
 
-func exactDockerRegistryURL(value string) (insecure bool, valid bool) {
+// exactDockerRegistryEntry classifies one insecure-registries element. Docker
+// accepts four spellings: an http:// or https:// URL, a CIDR block, a bare
+// IP address, and host or host:port (including [IPv6]:port). Every spelling
+// makes the named registry insecure, so the spelling never decides the
+// verdict; only the address does. valid is false for anything the closed
+// grammar cannot prove, which leaves the whole document unproven. insecure is
+// true for a registry that is not covered by the built-in loopback exception.
+func exactDockerRegistryEntry(value string) (insecure bool, valid bool) {
 	if value == "" || len(value) > maxScalarBytes ||
 		strings.TrimSpace(value) != value || strings.ContainsAny(value, "\x00\r\n\t") ||
 		containsDockerRegistryInterpolation(value) {
 		return false, false
 	}
+	switch {
+	case strings.Contains(value, "://"):
+		return exactDockerRegistryURL(value)
+	case strings.Contains(value, "/"):
+		return exactDockerRegistryCIDR(value)
+	default:
+		return exactDockerRegistryHostPort(value)
+	}
+}
+
+func exactDockerRegistryURL(value string) (insecure bool, valid bool) {
 	isHTTP := strings.HasPrefix(value, "http://")
 	isHTTPS := strings.HasPrefix(value, "https://")
 	if !isHTTP && !isHTTPS {
@@ -131,72 +152,129 @@ func exactDockerRegistryURL(value string) (insecure bool, valid bool) {
 		(isHTTPS && parsed.Scheme != "https") {
 		return false, false
 	}
-	host := parsed.Hostname()
-	if !exactNonLoopbackRegistryHost(host) || !exactDockerRegistryPort(parsed.Port()) {
+	insecure, valid = exactDockerRegistryHost(parsed.Hostname())
+	if !valid || !exactDockerRegistryPort(parsed.Port()) {
 		return false, false
 	}
-	return isHTTP, true
+	return insecure, true
+}
+
+// exactDockerRegistryHostPort reads the scheme-less spellings: a bare IPv4 or
+// IPv6 address, a host, host:port or IPv4:port, and a bracketed [IPv6]:port.
+func exactDockerRegistryHostPort(value string) (insecure bool, valid bool) {
+	if address, err := netip.ParseAddr(value); err == nil {
+		return exactDockerRegistryAddress(address)
+	}
+	host := value
+	if strings.Contains(value, ":") {
+		var port string
+		var err error
+		host, port, err = net.SplitHostPort(value)
+		if err != nil || port == "" || !exactDockerRegistryPort(port) {
+			return false, false
+		}
+		if strings.HasPrefix(value, "[") {
+			address, err := netip.ParseAddr(host)
+			if err != nil || !address.Is6() {
+				return false, false
+			}
+		}
+	}
+	return exactDockerRegistryHost(host)
+}
+
+// exactDockerRegistryCIDR reads a CIDR block. A block is the loopback
+// exception only when every address in it is loopback; a wider block (for
+// example one that spans private ranges) names non-loopback registries.
+func exactDockerRegistryCIDR(value string) (insecure bool, valid bool) {
+	prefix, err := netip.ParsePrefix(value)
+	if err != nil || prefix.Addr().Zone() != "" {
+		return false, false
+	}
+	address, bits := prefix.Addr(), prefix.Bits()
+	if address.Is4In6() {
+		if bits < 96 {
+			return true, true
+		}
+		address, bits = address.Unmap(), bits-96
+	}
+	if address.IsLoopback() && bits >= loopbackBlockBits(address) ||
+		address.IsUnspecified() && bits == address.BitLen() {
+		return false, true
+	}
+	return true, true
+}
+
+// loopbackBlockBits is the shortest prefix that keeps a block inside the
+// loopback range: 127.0.0.0/8 for IPv4, the single address ::1 for IPv6.
+func loopbackBlockBits(address netip.Addr) int {
+	if address.Is4() {
+		return 8
+	}
+	return address.BitLen()
 }
 
 func containsDockerRegistryInterpolation(value string) bool {
 	return strings.Contains(value, "${") || strings.Contains(value, "$(") ||
 		strings.Contains(value, "{{") || strings.Contains(value, "}}") ||
-		strings.ContainsRune(value, '`')
+		strings.ContainsRune(value, 0x60)
 }
 
-func exactNonLoopbackRegistryHost(host string) bool {
+// exactDockerRegistryHost classifies a registry host name or address. A
+// loopback name or address is valid but not insecure: Docker already trusts
+// it, so it cannot make a document hazardous, and it must not make a document
+// that also lists a remote registry unprovable.
+func exactDockerRegistryHost(host string) (insecure bool, valid bool) {
 	if host == "" || len(host) > 253 || !dockerRegistryASCII(host) {
-		return false
+		return false, false
 	}
 	lower := strings.ToLower(host)
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") {
-		return false
+		return false, true
 	}
 	if address, err := netip.ParseAddr(host); err == nil {
-		address = address.Unmap()
-		return address.Zone() == "" && !address.IsLoopback() &&
-			!address.IsUnspecified()
+		return exactDockerRegistryAddress(address)
 	}
 	// Reject non-canonical numeric IPv4 spellings rather than relying on a
 	// platform resolver to decide whether they denote loopback.
 	if dockerRegistryNumericHost(host) {
-		return false
+		return false, false
 	}
 	if strings.HasSuffix(host, ".") {
-		return false
+		return false, false
 	}
 	for _, label := range strings.Split(host, ".") {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-			return false
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false, false
 		}
 		for _, character := range label {
-			if character >= 'a' && character <= 'z' ||
-				character >= 'A' && character <= 'Z' ||
-				character >= '0' && character <= '9' || character == '-' {
-				continue
+			if !strings.ContainsRune(dockerRegistryLabelCharacters, character) {
+				return false, false
 			}
-			return false
 		}
 	}
-	return true
+	return true, true
+}
+
+const dockerRegistryLabelCharacters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-"
+
+func exactDockerRegistryAddress(address netip.Addr) (insecure bool, valid bool) {
+	address = address.Unmap()
+	if address.Zone() != "" {
+		return false, false
+	}
+	return !address.IsLoopback() && !address.IsUnspecified(), true
 }
 
 func dockerRegistryNumericHost(value string) bool {
-	for _, character := range value {
-		if character < '0' || character > '9' {
-			if character != '.' {
-				return false
-			}
-		}
-	}
-	return true
+	return strings.Trim(value, "0123456789.") == ""
 }
 
 func exactDockerRegistryPort(port string) bool {
 	if port == "" {
 		return true
 	}
-	if len(port) > 5 || len(port) > 1 && port[0] == '0' {
+	if len(port) > 5 || len(port) > 1 && strings.HasPrefix(port, "0") {
 		return false
 	}
 	value, err := strconv.ParseUint(port, 10, 16)

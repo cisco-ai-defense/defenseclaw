@@ -44,6 +44,33 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
+			name:   "Docker insecure registry host:port",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:5000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry CIDR",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["10.0.0.0/8"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry HTTPS URL",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["https://mirror.local"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
 			name:   "named Kubernetes Secret content read",
 			ruleID: kubernetesNamedSecretReadRuleID,
 			input: actionfacts.Input{
@@ -101,11 +128,19 @@ func TestExactAdministrativeSecurityRuleHardNegatives(t *testing.T) {
 			}),
 		},
 		{
-			name:   "Docker HTTPS registry",
+			name:   "Docker log driver only",
 			ruleID: dockerInsecureHTTPRegistryRuleID,
 			input: exactStructuredInput(t, "Write", map[string]any{
 				"file_path": "/etc/docker/daemon.json",
-				"content":   `{"insecure-registries":["https://mirror.local"]}`,
+				"content":   `{"log-driver":"json-file"}`,
+			}),
+		},
+		{
+			name:   "Docker loopback registry",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["127.0.0.1:5000"]}`,
 			}),
 		},
 		{

@@ -44,7 +44,6 @@ func TestExactDockerInsecureRegistryWriteRejectsHardNegatives(t *testing.T) {
 		name  string
 		input Input
 	}{
-		{name: "https only", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["https://mirror.local"]}`)},
 		{name: "empty registry", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":[""]}`)},
 		{name: "empty list", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":[]}`)},
 		{name: "wrong value type", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":"http://mirror.local"}`)},
@@ -174,4 +173,160 @@ func dockerRegistryInput(t *testing.T, tool, pathKey, target, content string) In
 
 func dockerRegistryRawInput(tool, raw string) Input {
 	return Input{Tool: tool, Args: json.RawMessage(raw)}
+}
+
+// TestExactDockerInsecureRegistryWriteReadsEverySpelling pins that the
+// spelling of an insecure-registries entry never decides the verdict: every
+// form Docker accepts for a non-loopback registry is proved, the http:// URL
+// form included.
+func TestExactDockerInsecureRegistryWriteReadsEverySpelling(t *testing.T) {
+	t.Parallel()
+	for _, entry := range []string{
+		"http://198.51.100.7:5000",
+		"https://198.51.100.7:5000",
+		"https://mirror.example",
+		"198.51.100.7:5000",
+		"198.51.100.7",
+		"mirror.example",
+		"Mirror.Example:5000",
+		"registry.corp.example:443",
+		"[2001:db8::7]:5000",
+		"2001:db8::7",
+		"http://[2001:db8::7]:5000",
+		"198.51.100.0/24",
+		"10.0.0.0/8",
+		"192.168.0.5/16",
+		"0.0.0.0/0",
+		"126.0.0.0/7",
+		"2001:db8::/32",
+		"::/0",
+		"::ffff:198.51.100.0/120",
+		"::ffff:0:0/80",
+		"::ffff:198.51.100.7",
+	} {
+		content := `{"insecure-registries":[` + jsonString(t, entry) + `]}`
+		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, content)
+		facts := Analyze(input)
+		for _, projection := range []Facts{facts, facts.EnforcementProjection()} {
+			if !ExactDockerInsecureRegistryWrite(input, projection) {
+				t.Errorf("entry %q: missing exact proof", entry)
+			}
+		}
+	}
+}
+
+// TestExactDockerInsecureRegistryWriteKeepsLoopbackAndBenignAllowed pins the
+// other side: Docker already trusts loopback, so loopback entries in any
+// spelling, a daemon.json without insecure registries, and entries the closed
+// grammar cannot prove all stay allowed.
+func TestExactDockerInsecureRegistryWriteKeepsLoopbackAndBenignAllowed(t *testing.T) {
+	t.Parallel()
+	for _, entry := range []string{
+		"localhost",
+		"localhost:5000",
+		"docker.localhost:5000",
+		"127.0.0.1",
+		"127.0.0.1:5000",
+		"127.1.2.3:5000",
+		"[::1]:5000",
+		"::1",
+		"::ffff:127.0.0.1",
+		"127.0.0.0/8",
+		"127.0.0.0/24",
+		"127.0.0.1/32",
+		"::1/128",
+		"::ffff:127.0.0.0/104",
+		"0.0.0.0",
+		"0.0.0.0:5000",
+		"0.0.0.0/32",
+		"http://localhost:5000",
+		"https://127.0.0.1:5000",
+		// Not provable in the closed grammar, so the document is not proven.
+		"",
+		":5000",
+		"198.51.100.7:",
+		"198.51.100.7:0",
+		"198.51.100.7:70000",
+		"198.51.100.7:05000",
+		"198.51.100.7:5000:5000",
+		"[198.51.100.7]:5000",
+		"[2001:db8::7]",
+		"fe80::1%eth0",
+		"fe80::1%eth0/64",
+		"198.51.100.0/33",
+		"198.51.100.0/",
+		"/24",
+		"127.1",
+		"127.1:5000",
+		"2130706433",
+		"mirror.example.",
+		"bad_host.example",
+		"-mirror.example",
+		"mirror.example/path",
+		"mirror.example/v2",
+		"user@mirror.example",
+		"mirror.example?x=1",
+		"mirror example",
+		"${REGISTRY}",
+		"$(hostname):5000",
+		"{{ registry }}:5000",
+		"ftp://mirror.example",
+		"HTTP://mirror.example",
+		"unix:///var/run/registry.sock",
+	} {
+		content := `{"insecure-registries":[` + jsonString(t, entry) + `]}`
+		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, content)
+		facts := Analyze(input)
+		if ExactDockerInsecureRegistryWrite(input, facts) {
+			t.Errorf("entry %q produced a proof", entry)
+		}
+	}
+	for _, content := range []string{
+		`{"log-driver":"json-file"}`,
+		`{"log-driver":"json-file","log-opts":{"max-size":"10m"}}`,
+		`{"insecure-registries":[]}`,
+		`{"registry-mirrors":["https://mirror.example"]}`,
+		`{}`,
+	} {
+		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, content)
+		if facts := Analyze(input); ExactDockerInsecureRegistryWrite(input, facts) {
+			t.Errorf("benign document %q produced a proof", content)
+		}
+	}
+}
+
+// TestExactDockerInsecureRegistryWriteJudgesEveryEntry pins that one remote
+// registry decides the document even when other entries are loopback, and
+// that one entry the grammar cannot prove still leaves the document unproven.
+func TestExactDockerInsecureRegistryWriteJudgesEveryEntry(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		entries string
+		want    bool
+	}{
+		{"loopback then remote host port", `"127.0.0.1:5000","198.51.100.7:5000"`, true},
+		{"remote host port then loopback url", `"198.51.100.7:5000","http://localhost:5000"`, true},
+		{"remote cidr and loopback cidr", `"127.0.0.0/8","10.0.0.0/8"`, true},
+		{"mixed spellings", `"198.51.100.7:5000","http://mirror.example","10.1.0.0/16"`, true},
+		{"loopback only", `"127.0.0.1:5000","localhost","::1"`, false},
+		{"remote and unprovable entry", `"198.51.100.7:5000","bad_host.example"`, false},
+		{"remote and non-string entry", `"198.51.100.7:5000",7`, false},
+		{"duplicate spelling", `"198.51.100.7:5000","198.51.100.7:5000"`, false},
+	} {
+		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath,
+			`{"insecure-registries":[`+test.entries+`]}`)
+		if got := ExactDockerInsecureRegistryWrite(input, Analyze(input)); got != test.want {
+			t.Errorf("%s: proof=%t, want %t", test.name, got, test.want)
+		}
+	}
+}
+
+func jsonString(t *testing.T, value string) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }
