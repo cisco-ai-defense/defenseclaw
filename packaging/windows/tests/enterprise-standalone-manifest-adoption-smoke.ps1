@@ -391,6 +391,34 @@ try {
                     'a second line after the path' = "$codexRefusal`nrollback failed: access denied"
                     'a failure line before the refusal' = "write failed`n$codexRefusal"
                 }
+                # A tail on the same line must not become part of the path. The link is an
+                # ancestor of the path they name, so a pattern that took the tail into the path
+                # would have walked to the link and explained the row.
+                $cursorHooksPath = [IO.Path]::Combine($cursorLink, 'hooks.json')
+                $tailedRefusals = [ordered]@{
+                    'a colon tail after the path' = "enterprise hooks: reparse point in path: ${cursorHooksPath}: rollback failed: access denied"
+                    'a parenthesized tail after the path' = "enterprise hooks: reparse point in path: $cursorHooksPath (access denied)"
+                }
+                foreach ($tailed in $tailedRefusals.GetEnumerator()) {
+                    $tailedRow = [pscustomobject]@{
+                        user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                        error = $tailed.Value
+                    }
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $tailedRow)
+                    Assert-TestSyncRefuses "machine folder link with $($tailed.Key)" 'failure-free reconcile'
+                }
+                # The same path alone, below the link, is the refusal the gate explains.
+                $belowRow = [pscustomobject]@{
+                    user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'cursor'; ok = $false
+                    error = "enterprise hooks: reparse point in path: $cursorHooksPath"
+                }
+                Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $belowRow)
+                $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                    -Layout $layout -GatewayServiceName 'DefenseClawGateway' `
+                    -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                if (-not [bool]$adoption.ok) {
+                    $failures.Add("a path below the Cursor folder link refused adoption: $($adoption.reason)")
+                }
                 foreach ($joined in $joinedRefusals.GetEnumerator()) {
                     $joinedRow = [pscustomobject]@{
                         user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false

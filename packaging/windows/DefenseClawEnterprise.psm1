@@ -32349,9 +32349,14 @@ $script:AccountLinkGuardianErrors = @(
 # trimmed message must be one optional prefix and the refusal, as the account
 # link errors above are compared whole: a second failure joined to it (a
 # trailing '; rollback failed: ...', a newline from errors.Join, or a prefix that
-# carries its own failure) is not explained by the link.
+# carries its own failure) is not explained by the link. The path holds no colon
+# after its drive letter and no parenthesis, so a tail after it (": rollback
+# failed: ...", " (access denied)") ends the match instead of becoming part of
+# the path. A failure chained in front of the refusal with a colon ("disk full:
+# reconcile failed: reparse point in path: ...") cannot be told apart from an
+# error-wrap chain, and is accepted by design.
 $script:GuardianMachineFolderLinkPattern = [regex]::new(
-    '(?i)\A(?:[^;\r\n]*?:\s+)?reparse points? (?:are not allowed )?in (?:[a-z]+ )*path: (?<path>[a-z]:\\[^;\r\n]+?)\s*\z')
+    '(?i)\A(?:[^;\r\n]*?:\s+)?reparse points? (?:are not allowed )?in (?:[a-z]+ )*path: (?<path>[a-z]:\\[^;:()\r\n]+?)\s*\z')
 
 function Get-DefenseClawGuardianRowMachineFolderLink {
     <#
