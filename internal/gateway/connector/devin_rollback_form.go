@@ -6,6 +6,7 @@ package connector
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -102,37 +103,57 @@ func convertDevinHooksFile(path, dataDir, connectorName string, pairs map[string
 	}
 	converted := 0
 	err := withFileLockMode(path, false, func() error {
-		data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
-		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		cfg, err := readDevinJSONObject(path)
-		if err != nil {
-			return err
-		}
-		converted = convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier)
-		if converted == 0 {
-			return nil
-		}
-		if keepCopy != nil {
-			sum := sha256.Sum256([]byte(strings.ToLower(path)))
-			if err := keepCopy(dataDir, "devin-"+hex.EncodeToString(sum[:6])+".before-rollback.json", data); err != nil {
-				return fmt.Errorf("keep a copy of the Devin hooks: %w", err)
+		var err error
+		// A save that lands while the conversion runs makes the writer refuse
+		// to replace the file (errManagedTargetMoved); the conversion starts
+		// again from the saved bytes, which no longer match the record. The
+		// copy is kept once, from the first read.
+		for attempt := 0; attempt < devinConversionAttempts; attempt++ {
+			converted, err = convertDevinHooksOnce(path, dataDir, connectorName, pairs, toEarlier, keepCopy)
+			if !errors.Is(err, errManagedTargetMoved) {
+				return err
 			}
+			keepCopy = nil
 		}
-		// The writer reads the file again to keep the comments of the operator,
-		// so the bytes read above do not bind what it consumed: the hold
-		// follows its writes instead.
-		hold := holdManagedExactRestoreOverRead(dataDir, connectorName, path, data)
-		after, err := writeDevinHooksFileBytes(path, cfg)
-		if err != nil {
-			_ = hold(nil)
-			return err
-		}
-		return hold(after)
+		return err
 	})
 	return converted, err
+}
+
+// devinConversionAttempts bounds how often a conversion starts again after the
+// file was saved under it.
+const devinConversionAttempts = 3
+
+func convertDevinHooksOnce(path, dataDir, connectorName string, pairs map[string][][2]string, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
+	data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	cfg, err := readDevinJSONObject(path)
+	if err != nil {
+		return 0, err
+	}
+	converted := convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier)
+	if converted == 0 {
+		return 0, nil
+	}
+	if keepCopy != nil {
+		sum := sha256.Sum256([]byte(strings.ToLower(path)))
+		if err := keepCopy(dataDir, "devin-"+hex.EncodeToString(sum[:6])+".before-rollback.json", data); err != nil {
+			return converted, fmt.Errorf("keep a copy of the Devin hooks: %w", err)
+		}
+	}
+	// The writer reads the file again to keep the comments of the operator,
+	// so the bytes read above do not bind what it consumed: the hold follows
+	// its writes instead.
+	hold := holdManagedExactRestoreOverRead(dataDir, connectorName, path, data)
+	after, err := writeDevinHooksFileBytes(path, cfg)
+	if err != nil {
+		_ = hold(nil)
+		return converted, err
+	}
+	return converted, hold(after)
 }
