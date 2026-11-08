@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -97,12 +98,17 @@ func TestHeaderDeflatedValueCannotExpandWithoutBound(t *testing.T) {
 	if _, ok := Decode(compressedPrefix + "AAAA"); ok {
 		t.Error("a corrupt deflated value was decoded")
 	}
-	// The skill folder is absolute on this OS: a path that starts with a slash
-	// has no drive on Windows and the decoder rightly drops it, and a relative
-	// temporary directory (a relative GOTMPDIR) is dropped on every OS.
-	dir, err := filepath.Abs(filepath.Join(t.TempDir(), "skills", "notes"))
-	if err != nil {
-		t.Fatal(err)
+	// The skill folder is a short literal that is absolute on this OS: a path
+	// that starts with a slash has no drive on Windows and the decoder rightly
+	// drops it, and a folder built from the temporary directory (relative, or
+	// long) can be dropped past the field bound on any OS. A short folder
+	// independent of the environment keeps the within-bound claim within it.
+	dir := "/skills/notes"
+	if runtime.GOOS == "windows" {
+		dir = `C:\skills\notes`
+	}
+	if !filepath.IsAbs(dir) || len(dir) > maxFieldBytes {
+		t.Fatalf("test folder %q is not an absolute path within the field bound", dir)
 	}
 	within, err := json.Marshal(Facts{SkillDirs: []string{dir}})
 	if err != nil {
