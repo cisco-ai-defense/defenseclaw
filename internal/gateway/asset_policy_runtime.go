@@ -808,11 +808,14 @@ type mcpResolution struct {
 	// the denied one held apart because it did not fit in the memory.
 	earlier []mcpEarlier
 	// unknown is set when the server was looked up by name and found neither
-	// in the config nor in what the session resolved before.
+	// in the config nor in what the session resolved before, or when only the
+	// session record names it and that record cannot say which of several
+	// definitions the agent holds (it dropped one, or overflowed).
 	unknown bool
 	// lost is set, for a name a denied rule covers, when the session could
-	// not hold every denied definition that did not fit in the memory, so
-	// this name may have had one.
+	// not hold every denied definition that did not fit in the memory, or
+	// dropped a denied one beside the one it holds, so this name may have had
+	// one.
 	lost bool
 	// track is set when the session memory is used; home and name key it.
 	track bool
@@ -869,11 +872,20 @@ func (a *APIServer) rememberResolvedMCP(connector string, res mcpResolution, den
 	if !res.track || !res.found {
 		return
 	}
-	entry := res.entry
+	entry, dropped := res.entry, mcpOneDefinition
 	if earlierDenied != nil {
+		// The earlier denied definition is kept in place of the one the
+		// config lists now. When the two differ, the record says so: once the
+		// entry is gone nothing shows which one the connection is.
+		if !sameMCPDefinition(earlierDenied.entry, res.entry) {
+			dropped = mcpSeveralDefinitions
+			if denied {
+				dropped = mcpDeniedDefinitionDropped
+			}
+		}
 		entry, denied = earlierDenied.entry, true
 	}
-	a.mcpResolved.remember(connector, res.home, res.probe.SessionID, res.probe.WorkspaceDir, res.name, entry, denied, time.Now())
+	a.mcpResolved.remember(connector, res.home, res.probe.SessionID, res.probe.WorkspaceDir, res.name, entry, denied, dropped, time.Now())
 }
 
 // resolveMCPProbeEndpoint fills a name-only hook probe (mcp__<server>__<tool>)
@@ -928,9 +940,16 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 		if held {
 			res.addDefinition(probe, lostEntry)
 		}
-		res.lost = overflow && rulesScopeServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName)
+		// A record that cannot say which definition the agent holds does not
+		// stand for it once the config lists none: the call gets the unknown
+		// verdict (the denied verdict, if a denied rule covers the name), as
+		// for a server found nowhere.
+		ambiguity := a.mcpResolved.ambiguity(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, time.Now())
+		res.lost = (overflow || !ok && ambiguity == mcpDeniedDefinitionDropped) &&
+			rulesScopeServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName)
+		res.unknown = !ok && (overflow || ambiguity != mcpOneDefinition)
 	}
-	res.unknown = !res.found
+	res.unknown = res.unknown || !res.found
 	return res
 }
 
@@ -947,7 +966,8 @@ func mcpConnectorResolvesByName(connector string) bool {
 // The server is unknown when its definition is found nowhere: not in the
 // agent config, and not among what its session resolved before (a gateway
 // restart, a new session, or a server the agent loads from outside the files
-// read here). A rule of the denied list that pins where a server points
+// read here), or when the session record names it but dropped or could not
+// hold another definition, so it cannot say which one the agent holds. A rule of the denied list that pins where a server points
 // cannot be checked against it, and neither can an endpoint rule of the
 // allowed list while asset_policy and its runtime detection for MCP are
 // enabled, so the call is refused in a strict or managed deployment and
@@ -978,7 +998,7 @@ func unknownMCPDefinitionDecision(cfg *config.Config, connector string, probe mc
 	if !covered && !denyPins && !allowPins {
 		return config.AssetPolicyDecision{}, false
 	}
-	reason := fmt.Sprintf("mcp server %q: DefenseClaw found no definition of it in the agent config or earlier in this session, "+
+	reason := fmt.Sprintf("mcp server %q: DefenseClaw found no single definition of it in the agent config or earlier in this session, "+
 		"so where it points cannot be checked against asset_policy.mcp", probe.ServerName)
 	if covered {
 		reason = fmt.Sprintf("mcp server %q: asset_policy.mcp.denied covers it, and this session denied more definitions "+
