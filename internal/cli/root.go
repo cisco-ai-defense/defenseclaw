@@ -111,6 +111,23 @@ func writeMachineVersion(w io.Writer) error {
 	})
 }
 
+// skipsDaemonBootstrap reports whether cmd runs without the daemon bootstrap
+// (config load, audit store, PID registration): a command that carries the
+// shared annotation, and the help command cobra generates for the root.
+// `--help` never reaches the pre-run, but `help` and `help <command>` are a
+// command of their own and did, so a managed standard user with no per-user
+// config got the managed refusal instead of the help the command table
+// lists as Offered (GAP-0830).
+func skipsDaemonBootstrap(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+		return true
+	}
+	return cmd.Name() == "help" && cmd.Parent() != nil && !cmd.Parent().HasParent()
+}
+
 func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	if versionJSON {
 		return nil
@@ -123,7 +140,7 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) (err error) {
 	// which runs on hosts that may be halfway through a partial
 	// install with no v8 config). Opting-in via the shared annotation
 	// keeps the exemption discoverable in one place.
-	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+	if skipsDaemonBootstrap(cmd) {
 		return nil
 	}
 	// The bare root command (it has no parent) is the per-user gateway
@@ -400,7 +417,7 @@ func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
 	// rootPersistentPreRunE above; the two initializers must agree on
 	// the annotation contract or scrub regresses whenever it's routed
 	// through the no-audit variant.
-	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+	if skipsDaemonBootstrap(cmd) {
 		return nil
 	}
 	if err := daemon.RegisterCurrentProcess(); err != nil {
