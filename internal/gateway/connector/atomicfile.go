@@ -160,14 +160,15 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 	if atomicFileAfterConfirm != nil {
 		atomicFileAfterConfirm(path)
 	}
-	switch done, err := publishKeepingConversionSaves(path, tmpPath, writePath, data); {
-	case done && err != nil:
-		return err
-	case !done:
-		if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
-			os.Remove(tmpPath)
-			return &atomicPublishError{Path: writePath, Err: publishCause(err)}
+	if found, held := managedConversionFound(path); held {
+		// A rollback conversion never replaces by a plain rename: whatever
+		// saved the file since the last check must survive (publishHeldConversion).
+		if err := publishHeldConversion(tmpPath, writePath, found, data); err != nil {
+			return err
 		}
+	} else if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
+		os.Remove(tmpPath)
+		return &atomicPublishError{Path: writePath, Err: publishCause(err)}
 	}
 	// The staged file was synced before publication. POSIX rename additionally
 	// needs an explicit parent-directory fsync.
@@ -184,88 +185,6 @@ var (
 	atomicFileBeforePublish func(path string)
 	atomicFileAfterConfirm  func(path string)
 )
-
-// confirmingRename is a rename attempt of a publisher that retries a busy
-// rename (the Windows private publisher, up to 100 attempts 5 ms apart). Each
-// attempt checks the managed-setup span again, so a save that lands while the
-// publisher waits is found, not replaced.
-func confirmingRename(
-	path string,
-	rename func(parent, source *os.File, target string, replace bool) error,
-) func(parent, source *os.File, target string, replace bool) error {
-	return func(parent, source *os.File, target string, replace bool) error {
-		if err := confirmManagedSetupPublish(path); err != nil {
-			return err
-		}
-		return rename(parent, source, target, replace)
-	}
-}
-
-// publishKeepingConversionSaves replaces writePath with the staged tmpPath for
-// a rollback conversion by exchanging the two names, so the file displaced is
-// the one in tmpPath afterwards and can be compared with the bytes the
-// conversion consumed. A file that is not those bytes is a save made after the
-// last check: the exchange is undone, the save is back under its name and the
-// write is refused (errManagedTargetMoved), so a replacement never drops a save,
-// whatever the timing. done is false when no conversion holds the path or the
-// platform cannot exchange; the caller then replaces as before, with the one
-// remaining instant between its check and the rename (Windows, and a file
-// system without exchange).
-func publishKeepingConversionSaves(path, tmpPath, writePath string, data []byte) (done bool, err error) {
-	found, held := managedConversionFound(path)
-	if !held {
-		return false, nil
-	}
-	err = exchangeAtomicFiles(tmpPath, writePath)
-	switch {
-	case err == nil:
-	case atomicExchangeUnsupported(err):
-		return false, nil
-	case errors.Is(err, os.ErrNotExist):
-		// The target is gone, or never was: only a conversion that found it
-		// missing may create it, and never over a file made since.
-		if found != managedFileSnapshotHash(nil, false) {
-			os.Remove(tmpPath)
-			return true, errManagedTargetMoved
-		}
-		if moveErr := moveAtomicFileNoReplace(tmpPath, writePath); moveErr != nil {
-			os.Remove(tmpPath)
-			if errors.Is(moveErr, errAtomicTransformConflict) {
-				return true, errManagedTargetMoved
-			}
-			return true, &atomicPublishError{Path: writePath, Err: publishCause(moveErr)}
-		}
-		return true, nil
-	default:
-		os.Remove(tmpPath)
-		return true, &atomicPublishError{Path: writePath, Err: publishCause(err)}
-	}
-	if displacedMatches(tmpPath, found) {
-		os.Remove(tmpPath)
-		return true, nil
-	}
-	// Someone saved the file after the check. Put the save back.
-	if err := exchangeAtomicFiles(tmpPath, writePath); err != nil {
-		return true, fmt.Errorf("%s was saved while DefenseClaw replaced it and could not be put back; the saved file is %s: %w", writePath, tmpPath, err)
-	}
-	if displacedMatches(tmpPath, managedFileSnapshotHash(data, true)) {
-		os.Remove(tmpPath)
-		return true, errManagedTargetMoved
-	}
-	// A second save landed in the instant of the undo. Keep the newest one in
-	// place and the earlier one next to it, and say so.
-	if err := exchangeAtomicFiles(tmpPath, writePath); err != nil {
-		return true, fmt.Errorf("%s was saved twice while DefenseClaw replaced it; the earlier save is %s and the file may be that one: %w", writePath, tmpPath, err)
-	}
-	return true, fmt.Errorf("%s was saved twice while DefenseClaw replaced it; the earlier save is kept in %s", writePath, tmpPath)
-}
-
-// displacedMatches reports whether the file at path is a regular file whose
-// bytes have the managed snapshot hash want.
-func displacedMatches(path, want string) bool {
-	current, info, err := readManagedTarget(path)
-	return err == nil && info != nil && managedFileSnapshotHash(current, true) == want
-}
 
 // atomicFileSyncParent syncs dir after a rename into it. A failure leaves the
 // new file in place; tests replace it to prove callers handle that.

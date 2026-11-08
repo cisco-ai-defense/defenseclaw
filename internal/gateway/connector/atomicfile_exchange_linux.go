@@ -18,11 +18,8 @@ func exchangeAtomicFiles(a, b string) error {
 }
 
 // atomicExchangeUnsupported reports a kernel or file system that has no
-// exchange; the caller then publishes with a plain replacement.
+// exchange; a rollback conversion then refuses to replace the file.
 func atomicExchangeUnsupported(err error) bool {
 	return errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EINVAL) ||
 		errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP)
 }
-
-// moveAtomicFileNoReplace renames a to b and fails with errAtomicTransformConflict when b exists.
-func moveAtomicFileNoReplace(a, b string) error { return moveAtomicTransformPathNoReplace(a, b) }
