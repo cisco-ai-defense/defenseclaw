@@ -227,3 +227,93 @@ func TestResolvedMCPMemoryRecordsDroppedDefinitions(t *testing.T) {
 		t.Fatalf("after the session started again: ambiguity %d, want %d", got, mcpOneDefinition)
 	}
 }
+
+// A default deny in observe mode only observes: it must not stand in for the
+// verdict on a server whose session record cannot say which definition the
+// agent holds. Where a denied rule covers the dropped definition, or the
+// deployment is strict or managed, the call is refused whatever the observe
+// verdict on the one definition held; the default tier keeps its warning for a
+// name found nowhere, and a policy without a deny list keeps the allow.
+func TestObservedDefaultDenyDoesNotStandForAnIncompleteSessionRecord(t *testing.T) {
+	observeDefaultDeny := func(cfg *config.Config) *config.Config {
+		cfg.AssetPolicy.Enabled = true
+		cfg.AssetPolicy.Mode = config.AssetPolicyModeObserve
+		cfg.AssetPolicy.MCP.Default = "deny"
+		return cfg
+	}
+	session := func(cfg *config.Config) (*APIServer, context.Context, string, string) {
+		home, project := t.TempDir(), t.TempDir()
+		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+		return &APIServer{scannerCfg: cfg}, ctx, home, project
+	}
+
+	t.Run("a denied definition dropped from the record", func(t *testing.T) {
+		for _, profile := range []string{"default", "managed"} {
+			t.Run(profile, func(t *testing.T) {
+				cfg := deniedURLConfig()
+				if profile == "managed" {
+					cfg = managedURLDenyConfig()
+				}
+				observeDefaultDeny(cfg).AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: removedDeniedURL}, {URL: removedSecondDeniedURL}}
+				api, ctx, home, project := session(cfg)
+				for _, url := range []string{removedDeniedURL, removedSecondDeniedURL} {
+					writeClaudeServers(t, home, project, `{"wiki":{"type":"http","url":"`+url+`"}}`)
+					decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+					wantDenyBlock(t, "configured denied definition", decision, matched)
+				}
+				cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: removedSecondDeniedURL}}
+				writeClaudeServers(t, home, project, `{}`)
+				decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+				wantBlocked(t, "entry removed", decision, matched)
+			})
+		}
+	})
+
+	t.Run("two ordinary definitions, the dropped one denied later", func(t *testing.T) {
+		for _, profile := range []string{"default", "managed"} {
+			t.Run(profile, func(t *testing.T) {
+				cfg := deniedURLConfig()
+				if profile == "managed" {
+					cfg = managedURLDenyConfig()
+				}
+				observeDefaultDeny(cfg).AssetPolicy.MCP.Denied = nil
+				api, ctx, home, project := session(cfg)
+				for _, url := range []string{removedSecondDeniedURL, removedOtherURL} {
+					writeClaudeServers(t, home, project, `{"wiki":{"type":"http","url":"`+url+`"}}`)
+					decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+					wantNotBlocked(t, "configured, no deny yet", decision, matched)
+				}
+				cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{URL: removedSecondDeniedURL}}
+				writeClaudeServers(t, home, project, `{}`)
+				decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+				if profile == "managed" {
+					wantBlocked(t, "entry removed in a managed deployment", decision, matched)
+				} else {
+					wantNotBlocked(t, "entry removed in the default tier", decision, matched)
+				}
+			})
+		}
+	})
+
+	t.Run("a name found nowhere", func(t *testing.T) {
+		managed := observeDefaultDeny(managedURLDenyConfig())
+		api, ctx, home, project := session(managed)
+		writeClaudeServers(t, home, project, `{}`)
+		decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__never-seen__count_words")
+		wantBlocked(t, "managed", decision, matched)
+
+		// Benign twins: the default tier warns and goes ahead, and a policy
+		// without a deny list that pins an endpoint keeps the observe verdict.
+		def := observeDefaultDeny(deniedURLConfig())
+		api, ctx, home, project = session(def)
+		writeClaudeServers(t, home, project, `{}`)
+		decision, matched = claudeMCPCall(api, ctx, project, "s1", "mcp__never-seen__count_words")
+		wantNotBlocked(t, "default tier", decision, matched)
+		noPin := observeDefaultDeny(managedURLDenyConfig())
+		noPin.AssetPolicy.MCP.Denied = nil
+		api, ctx, home, project = session(noPin)
+		writeClaudeServers(t, home, project, `{}`)
+		decision, matched = claudeMCPCall(api, ctx, project, "s1", "mcp__never-seen__count_words")
+		wantNotBlocked(t, "managed, no deny list", decision, matched)
+	})
+}
