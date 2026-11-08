@@ -36,11 +36,13 @@ import (
 // limiter, no journal). The claims:
 //   - No call is ever refused by a rate limit (HTTP 429). That is decided by
 //     the limiter, not by load, so it holds on every runner.
-//   - Every call is answered inside the window. If one is not, the test fails
-//     when the control answered every call quickly (the gateway was slow on a
-//     runner that could keep up) and is skipped, with the control numbers
-//     named, only when the control itself could not reach the offered rate
-//     there. The offered rate is never lowered.
+//   - Every call (its proposal and its receipt together) is answered inside
+//     one window of 3.5 s that both requests share. If one is not, the test
+//     fails when the control answered every call of the same stream inside the
+//     same window (the gateway was slow on a runner that could keep up) and is
+//     skipped, with the control numbers named, only when the control itself
+//     did not answer every offered call there. The offered rate is never
+//     lowered.
 //
 // CI runs these three without -race in the Connector Matrix (packages and CLI)
 // step "Gateway throughput tests (no race)" on Linux and in the "Unix
@@ -81,7 +83,7 @@ func TestGAP0490OpenLoopFourSandboxes(t *testing.T) {
 }
 
 // openLoopPost sends one request of a call and returns its status and body.
-type openLoopPost func(token string, body []byte, receipt bool) (int, []byte, error)
+type openLoopPost func(ctx context.Context, token string, body []byte, receipt bool) (int, []byte, error)
 
 // openLoopResult is what one open-loop stream saw.
 type openLoopResult struct {
@@ -97,7 +99,7 @@ func (r openLoopResult) percentile(p int) time.Duration {
 	}
 	sorted := append([]time.Duration(nil), r.latencies...)
 	sort.Slice(sorted, func(a, b int) bool { return sorted[a] < sorted[b] })
-	return sorted[len(sorted)*p/100]
+	return sorted[min(len(sorted)*p/100, len(sorted)-1)]
 }
 
 func (r openLoopResult) answeredShare() float64 {
@@ -110,15 +112,8 @@ func (r openLoopResult) answeredShare() float64 {
 // openLoopWait is how long the hook waits for an answer.
 const openLoopWait = 3500 * time.Millisecond
 
-// openLoopControlHeadroom: a runner whose do-nothing handler needs more than
-// the answer window divided by this to answer 95 of 100 calls has no room left
-// to say anything about the gateway.
-const openLoopControlHeadroom = 4
-
-func newOpenLoopPost(t *testing.T, url string) openLoopPost {
-	return func(token string, body []byte, receipt bool) (int, []byte, error) {
-		ctx, cancel := context.WithTimeout(t.Context(), openLoopWait)
-		defer cancel()
+func newOpenLoopPost(url string) openLoopPost {
+	return func(ctx context.Context, token string, body []byte, receipt bool) (int, []byte, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+"/api/v1/claude-code/hook", bytes.NewReader(body))
 		if err != nil {
 			return 0, nil, err
@@ -141,25 +136,34 @@ func newOpenLoopPost(t *testing.T, url string) openLoopPost {
 }
 
 // driveOpenLoop issues perSecond calls a second for duration from each token,
-// without waiting for the calls before them, and waits for every answer.
-func driveOpenLoop(post openLoopPost, tokens []string, perSecond int, duration time.Duration) openLoopResult {
+// without waiting for the calls before them, and waits for every answer. A
+// call has one deadline of openLoopWait, started with its proposal and shared
+// by its receipt, and its measured latency is checked against that window as
+// well, so a call that took longer is never counted as answered.
+func driveOpenLoop(parent context.Context, post openLoopPost, tokens []string, perSecond int, duration time.Duration) openLoopResult {
 	result := openLoopResult{problems: map[string]int{}}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	call := func(token string, session string, n int) {
 		defer wg.Done()
 		started := time.Now()
+		ctx, cancel := context.WithTimeout(parent, openLoopWait)
+		defer cancel()
 		body := fmt.Sprintf(`{"hook_event_name":"PreToolUse","session_id":%q,"cwd":"/tmp","tool_name":"Bash","tool_use_id":"%s-%d","tool_input":{"command":"echo ok"}}`, session, session, n)
-		status, out, err := post(token, []byte(body), false)
+		status, out, err := post(ctx, token, []byte(body), false)
 		var answer struct {
 			Action          string `json:"action"`
 			DeliveryReceipt string `json:"delivery_receipt"`
 		}
 		if err == nil && status == http.StatusOK && json.Unmarshal(out, &answer) == nil && answer.Action == "allow" && answer.DeliveryReceipt != "" {
 			ack, _ := json.Marshal(map[string]string{"delivery_receipt": answer.DeliveryReceipt, "result": "ack"})
-			status, out, err = post(token, ack, true)
+			status, out, err = post(ctx, token, ack, true)
 		} else if err == nil && status == http.StatusOK {
 			err = fmt.Errorf("proposal %s", out)
+		}
+		elapsed := time.Since(started)
+		if err == nil && status == http.StatusOK && elapsed > openLoopWait {
+			err = fmt.Errorf("answered after the %v window", openLoopWait)
 		}
 		mu.Lock()
 		defer mu.Unlock()
@@ -170,7 +174,7 @@ func driveOpenLoop(post openLoopPost, tokens []string, perSecond int, duration t
 			result.problems[fmt.Sprintf("%d %.80s %v", status, out, err)]++
 			return
 		}
-		result.latencies = append(result.latencies, time.Since(started))
+		result.latencies = append(result.latencies, elapsed)
 	}
 	total := int(duration.Seconds()) * perSecond
 	result.offered = len(tokens) * total
@@ -235,12 +239,15 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 		_, _ = io.WriteString(w, `{"action":"allow","delivery_receipt":"control"}`)
 	}))
 	defer control.Close()
-	post := newOpenLoopPost(t, srv.URL)
+	post := newOpenLoopPost(srv.URL)
 	// Warm the sessions: the first call of an unseen session waits for its
 	// start, which is not what this test measures.
 	for i, token := range tokens {
 		session := fmt.Sprintf("g490-open-%d", i)
-		if status, out, err := post(token, []byte(managedHookBody(session, "UserPromptSubmit")), false); err != nil || status != http.StatusOK {
+		warm, cancel := context.WithTimeout(t.Context(), openLoopWait)
+		status, out, err := post(warm, token, []byte(managedHookBody(session, "UserPromptSubmit")), false)
+		cancel()
+		if err != nil || status != http.StatusOK {
 			t.Fatalf("session start %d %s %v", status, out, err)
 		}
 	}
@@ -249,27 +256,28 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 	controlDone.Add(1)
 	go func() {
 		defer controlDone.Done()
-		controlResult = driveOpenLoop(newOpenLoopPost(t, control.URL), tokens, perSecond, duration)
+		controlResult = driveOpenLoop(t.Context(), newOpenLoopPost(control.URL), tokens, perSecond, duration)
 	}()
-	got := driveOpenLoop(post, tokens, perSecond, duration)
+	got := driveOpenLoop(t.Context(), post, tokens, perSecond, duration)
 	controlDone.Wait()
 
 	if got.refused != 0 {
 		t.Fatalf("%d sandboxes at %d calls/s: %d of %d calls were refused with HTTP 429 (a rate limit, not load): %v",
 			sandboxes, perSecond, got.refused, got.offered, got.problems)
 	}
-	if len(got.problems) != 0 {
-		controlReached := len(controlResult.problems) == 0 &&
-			controlResult.percentile(95) <= openLoopWait/openLoopControlHeadroom
+	if len(got.latencies) != got.offered {
+		// The runner carried the offered load when the control answered every
+		// call of the same stream inside the same window.
+		controlReached := len(controlResult.latencies) == controlResult.offered
 		detail := fmt.Sprintf("%d sandboxes at %d calls/s: %d of %d calls unanswered inside %v (answered share %.3f; control answered share %.3f, control p95 %v): %v",
 			sandboxes, perSecond, got.offered-len(got.latencies), got.offered, openLoopWait,
 			got.answeredShare(), controlResult.answeredShare(), controlResult.percentile(95), got.problems)
 		if !controlReached {
-			t.Skipf("this runner cannot carry the offered load, so the stream says nothing about the gateway (the same stream straight to a handler that only answers: %d problems, p95 %v, limit %v): %s",
-				len(controlResult.problems), controlResult.percentile(95), openLoopWait/openLoopControlHeadroom, detail)
+			t.Skipf("this runner cannot carry the offered load, so the stream says nothing about the gateway (the same stream straight to a handler that only answers: %d of %d calls answered inside %v, p95 %v): %s",
+				len(controlResult.latencies), controlResult.offered, openLoopWait, controlResult.percentile(95), detail)
 		}
 		t.Fatal(detail)
 	}
-	t.Logf("%d sandboxes at %d calls/s: %d calls, p50 %v, p95 %v (control p95 %v)", sandboxes, perSecond, len(got.latencies),
-		got.percentile(50), got.percentile(95), controlResult.percentile(95))
+	t.Logf("%d sandboxes at %d calls/s: %d calls, p50 %v, p95 %v, max %v (control p95 %v)", sandboxes, perSecond, len(got.latencies),
+		got.percentile(50), got.percentile(95), got.percentile(100), controlResult.percentile(95))
 }
