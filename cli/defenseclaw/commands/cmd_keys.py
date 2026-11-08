@@ -332,7 +332,16 @@ def keys_set(app: AppContext, env_name: str, value: str | None, value_stdin: boo
         # command failed after the key was saved (GAP-0490).
         keep_running_gateway_token(app.logger, app.cfg.data_dir, app.cfg.gateway.resolved_token(), value)
     try:
-        _save_secret_to_dotenv(env_name, value, app.cfg.data_dir)
+        # The gateway token is one value with two spellings (and the gateway
+        # writes both when it adopts a token from openclaw.json). A saved token
+        # replaces every spelling already in .env, so an older copy under the
+        # other name never wins at the next gateway start (GAP-0847).
+        spellings = [env_name]
+        if gateway_name:
+            stored = set(_dotenv_names(dotenv_path))
+            spellings += sorted(name for name in _gateway_token_names(app.cfg) if name != env_name and name in stored)
+        for spelling in spellings:
+            _save_secret_to_dotenv(spelling, value, app.cfg.data_dir)
     except SafetyError as exc:
         _refuse_unsafe_dotenv(dotenv_path, exc)
     if app.logger:

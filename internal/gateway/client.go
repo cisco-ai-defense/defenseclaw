@@ -705,8 +705,13 @@ func (c *Client) Hello() *HelloOK {
 
 // ConnectWithRetry connects to the gateway with exponential backoff.
 // It blocks until a connection is established or the context is cancelled.
+//
+// A token that changed since the last attempt has not been tried yet, so the
+// wait before it is the base interval and the backoff starts over: the
+// backoff was earned by attempts that used the old token (GAP-0847).
 func (c *Client) ConnectWithRetry(ctx context.Context) error {
-	backoff := time.Duration(c.cfg.ReconnectMs) * time.Millisecond
+	base := time.Duration(c.cfg.ReconnectMs) * time.Millisecond
+	backoff := base
 	maxBackoff := time.Duration(c.cfg.MaxReconnectMs) * time.Millisecond
 	attempt := 0
 
@@ -717,10 +722,15 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 		if err == nil {
 			return nil
 		}
+		tokenBefore := c.cfg.Token
 		hint := c.handleConnectRejection(err)
 		wait := backoff
 		var wake func() bool
-		if hint == openClawTokenNotPersistedHint {
+		restart := c.cfg.Token != tokenBefore
+		switch {
+		case restart:
+			wait = base
+		case hint == openClawTokenNotPersistedHint:
 			// Nothing DefenseClaw can read changes until the operator
 			// persists a token, so retrying every few seconds only fills
 			// both logs. Retry slowly, and at once when a token appears.
@@ -733,23 +743,35 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 			c.OnConnectError(err, hint)
 		}
 
-		if err := c.waitBeforeRetry(ctx, wait, wake); err != nil {
+		woken, err := c.waitBeforeRetry(ctx, wait, wake)
+		if err != nil {
 			return err
 		}
+		if woken {
+			// The wait ended because openclaw.json got a token. Load it
+			// now: the next attempt would otherwise send the old token,
+			// be rejected, and only then pick this one up.
+			c.adoptPersistedToken()
+			restart = true
+		}
 
+		if restart {
+			backoff = base
+			continue
+		}
 		backoff = time.Duration(math.Min(float64(backoff)*1.7, float64(maxBackoff)))
 	}
 }
 
 // waitBeforeRetry sleeps for d. With wake set it checks wake every
-// tokenWatchEvery and returns early when it reports true.
-func (c *Client) waitBeforeRetry(ctx context.Context, d time.Duration, wake func() bool) error {
+// tokenWatchEvery and returns early, reporting woken, when it reports true.
+func (c *Client) waitBeforeRetry(ctx context.Context, d time.Duration, wake func() bool) (woken bool, err error) {
 	if wake == nil {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-time.After(d):
-			return nil
+			return false, nil
 		}
 	}
 	deadline := time.NewTimer(d)
@@ -759,12 +781,12 @@ func (c *Client) waitBeforeRetry(ctx context.Context, d time.Duration, wake func
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-deadline.C:
-			return nil
+			return false, nil
 		case <-tick.C:
 			if wake() {
-				return nil
+				return true, nil
 			}
 		}
 	}
@@ -797,6 +819,47 @@ func (c *Client) persistedTokenAppeared() bool {
 	return ok || errors.Is(err, errOpenClawTokenUnreadable)
 }
 
+// adoptPersistedToken makes the gateway token persisted in openclaw.json the
+// one the next connect attempt sends. It reports whether that changed the
+// token; a token equal to the current one, or none DefenseClaw can read,
+// changes nothing.
+func (c *Client) adoptPersistedToken() bool {
+	if c.cfg.ClawHome == "" {
+		return false
+	}
+	token, ok, _ := readOpenClawGatewayToken(c.cfg.ClawHome)
+	if !ok || token == c.cfg.Token {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "[gateway] openclaw.json now holds a gateway token; trying it\n")
+	c.adoptOpenClawToken(token)
+	return true
+}
+
+// adoptOpenClawToken makes token, read from openclaw.json, the gateway token
+// of this client, the API server and the on-disk token sources.
+func (c *Client) adoptOpenClawToken(token string) {
+	c.cfg.Token = token
+	c.refreshedToken.Store(&token)
+
+	// Persist the refreshed token to disk so hook scripts and
+	// operator shells see the same value. Without this, the in-
+	// memory refresh only helps the sidecar itself — downstream
+	// consumers (hooks/.token, .env) stay stale and every
+	// hook-driven request 401s until the next full sidecar
+	// restart re-reads openclaw.json on boot.
+	//
+	// Keep refreshed credentials in the configured data directory even
+	// when device_key_file is nested beneath it. Errors are logged but
+	// not returned — persistence is best-effort, the primary in-memory
+	// refresh already succeeded.
+	if c.dataDir != "" {
+		if err := persistRefreshedToken(c.dataDir, token); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] WARNING: failed to persist refreshed token to disk: %v — hook scripts may 401 until next restart\n", err)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Connect rejections. OpenClaw owns its device pairing state and DefenseClaw
 // never writes it (GAP-0592: the sidecar used to rewrite
@@ -813,10 +876,23 @@ func (c *Client) persistedTokenAppeared() bool {
 // DefenseClaw's own .env and hooks/.token.
 // ---------------------------------------------------------------------------
 
+// openClawGiveTokenStep is the one way to give the background gateway a
+// token it cannot read from openclaw.json. A variable exported in the shell
+// that starts the gateway does not reach the daemon, so it is not offered.
+//
+// Token precedence, highest first: a token the operator saved with
+// defenseclaw keys set (the process environment and ~/.defenseclaw/.env),
+// the gateway.auth.token in openclaw.json, and the copy the gateway adopted
+// from openclaw.json earlier. An adopted copy is rewritten whenever
+// openclaw.json holds a different token, and keys set replaces it under
+// both variable names, so a stale copy never shadows a newer saved token.
+const openClawGiveTokenStep = "defenseclaw keys set OPENCLAW_GATEWAY_TOKEN and restart the gateway with " +
+	"defenseclaw-gateway restart (a variable exported in your shell does not reach the background gateway)"
+
 // openClawTokenRejectedHint is the operator step for a rejected gateway token.
 const openClawTokenRejectedHint = "OpenClaw rejected the gateway token. DefenseClaw re-reads gateway.auth.token " +
 	"from openclaw.json on every retry; when it is a secret reference, give the DefenseClaw gateway the token " +
-	"in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN and restart it"
+	"with " + openClawGiveTokenStep
 
 // openClawTokenNotPersistedHint is the operator step when OpenClaw rejects the
 // gateway token and openclaw.json holds no gateway.auth.token. The token
@@ -828,7 +904,7 @@ const openClawTokenRejectedHint = "OpenClaw rejected the gateway token. DefenseC
 const openClawTokenNotPersistedHint = "OpenClaw rejected the gateway token and openclaw.json has no " +
 	"gateway.auth.token, so DefenseClaw cannot tell which token OpenClaw expects: it takes one from its own " +
 	"environment (OPENCLAW_GATEWAY_TOKEN, its .env file or service unit) or generates a runtime token at start. " +
-	"Give the DefenseClaw gateway that same token in OPENCLAW_GATEWAY_TOKEN and restart it, or persist one with " +
+	"Give the DefenseClaw gateway that same token with " + openClawGiveTokenStep + ", or persist one with " +
 	"'openclaw config set gateway.auth.mode token' and 'openclaw config set gateway.auth.token <token>', " +
 	"restart OpenClaw, then run 'defenseclaw setup openclaw'. DefenseClaw retries every few minutes, and at once " +
 	"when openclaw.json gets a token"
@@ -837,8 +913,10 @@ const openClawTokenNotPersistedHint = "OpenClaw rejected the gateway token and o
 // token DefenseClaw already took from OPENCLAW_GATEWAY_TOKEN and openclaw.json
 // has no gateway.auth.token. OpenClaw may be using a token from its own
 // environment or a runtime token it generated; DefenseClaw cannot tell which.
-const openClawTokenEnvRejectedHint = "OpenClaw rejected the gateway token DefenseClaw took from OPENCLAW_GATEWAY_TOKEN, " +
-	"and openclaw.json has no gateway.auth.token. Start OpenClaw with that same OPENCLAW_GATEWAY_TOKEN, or persist " +
+const openClawTokenEnvRejectedHint = "OpenClaw rejected the gateway token DefenseClaw took from OPENCLAW_GATEWAY_TOKEN " +
+	"(its saved value in ~/.defenseclaw/.env, which may be a copy adopted from openclaw.json before the token was " +
+	"removed there), and openclaw.json has no gateway.auth.token. Save the token OpenClaw expects with " +
+	openClawGiveTokenStep + ", start OpenClaw with that same OPENCLAW_GATEWAY_TOKEN, or persist " +
 	"one with 'openclaw config set gateway.auth.mode token' and 'openclaw config set gateway.auth.token <token>', " +
 	"restart OpenClaw, then run 'defenseclaw setup openclaw'"
 
@@ -911,25 +989,7 @@ func (c *Client) handleConnectRejection(connectErr error) string {
 		c.cfg.Token = newToken
 	} else if ok && newToken != c.cfg.Token {
 		fmt.Fprintf(os.Stderr, "[gateway] gateway token refreshed from openclaw.json\n")
-		c.cfg.Token = newToken
-		c.refreshedToken.Store(&newToken)
-
-		// Persist the refreshed token to disk so hook scripts and
-		// operator shells see the same value. Without this, the in-
-		// memory refresh only helps the sidecar itself — downstream
-		// consumers (hooks/.token, .env) stay stale and every
-		// hook-driven request 401s until the next full sidecar
-		// restart re-reads openclaw.json on boot.
-		//
-		// Keep refreshed credentials in the configured data directory even
-		// when device_key_file is nested beneath it. Errors are logged but
-		// not returned — persistence is best-effort, the primary in-memory
-		// refresh already succeeded.
-		if c.dataDir != "" {
-			if err := persistRefreshedToken(c.dataDir, newToken); err != nil {
-				fmt.Fprintf(os.Stderr, "[gateway] WARNING: failed to persist refreshed token to disk: %v — hook scripts may 401 until next restart\n", err)
-			}
-		}
+		c.adoptOpenClawToken(newToken)
 	}
 	return hint
 }
@@ -1106,7 +1166,7 @@ func isAuthError(err error) bool {
 // errOpenClawTokenUnreadable reports a gateway.auth.token that is a SecretRef
 // DefenseClaw cannot resolve (issue #1404). It never carries the token.
 var errOpenClawTokenUnreadable = errors.New("openclaw.json gateway.auth.token is a secret reference DefenseClaw cannot read; " +
-	"give DefenseClaw the token in OPENCLAW_GATEWAY_TOKEN or DEFENSECLAW_GATEWAY_TOKEN")
+	"give DefenseClaw the token with " + openClawGiveTokenStep)
 
 // errOpenClawTokenNotPersisted reports an openclaw.json that parses and holds
 // no gateway.auth.token. It is not a failure of the file; it tells the caller
