@@ -328,17 +328,24 @@ func patchDevinHooksForEvents(path string, commandFor func(event string) string,
 // hooks.v1.json keeps the operator's comments and other events, any other
 // file is written back as JSON.
 func writeDevinHooksFile(path string, cfg map[string]interface{}) error {
+	_, err := writeDevinHooksFileBytes(path, cfg)
+	return err
+}
+
+// writeDevinHooksFileBytes writes the Devin hooks file and returns the bytes
+// it committed.
+func writeDevinHooksFileBytes(path string, cfg map[string]interface{}) ([]byte, error) {
 	if strings.EqualFold(filepath.Base(path), "hooks.v1.json") {
 		// The project file is the operator's: keep its comments and foreign
 		// hook lists byte for byte, and edit only DefenseClaw's events
 		// (GAP-0192).
 		if data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit); err == nil && len(bytes.TrimSpace(data)) > 0 {
 			if spliced, ok := spliceDevinProjectHooks(data, devinHookEvents, cfg); ok {
-				return atomicWriteFile(path, spliced, 0o600)
+				return spliced, atomicWriteFile(path, spliced, 0o600)
 			}
 		}
 	}
-	return writeJSONObject(path, cfg)
+	return writeJSONObjectBytes(path, cfg)
 }
 
 func replaceManagedDevinHooks(raw interface{}, ownedHookScripts []string, entry map[string]interface{}) []interface{} {

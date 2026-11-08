@@ -206,6 +206,8 @@ func convertCodexConfigHookForms(opts SetupOpts, toBridge bool, keepCopy func(da
 		return 0, err
 	}
 	converted := 0
+	var hold func([]byte) error
+	var committed []byte
 	err = withFileLockMode(configPath, false, func() error {
 		return atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600,
 			func(current []byte, exists bool) (atomicTransformResult, error) {
@@ -222,9 +224,13 @@ func convertCodexConfigHookForms(opts SetupOpts, toBridge bool, keepCopy func(da
 					}
 				}
 				converted = changed
+				hold, committed = holdManagedExactRestore(opts.DataDir, "codex", configPath, current), out
 				return atomicTransformResult{Data: out}, nil
 			})
 	})
+	if err == nil && hold != nil {
+		err = hold(committed)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("rewrite Codex hooks in %s: %w", configPath, err)
 	}

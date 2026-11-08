@@ -61,6 +61,8 @@ func (c *KiroConnector) convertKiroConfigHookForms(opts SetupOpts, toEarlier boo
 			continue
 		}
 		converted := 0
+		var hold func([]byte) error
+		var committed []byte
 		err = withFileLockMode(path, false, func() error {
 			return atomicTransformFileWithStateDir(path, opts.DataDir, 0o600,
 				func(current []byte, exists bool) (atomicTransformResult, error) {
@@ -78,9 +80,13 @@ func (c *KiroConnector) convertKiroConfigHookForms(opts SetupOpts, toEarlier boo
 						}
 					}
 					converted = changed
+					hold, committed = holdManagedExactRestore(opts.DataDir, c.Name(), path, current), out
 					return atomicTransformResult{Data: out}, nil
 				})
 		})
+		if err == nil && hold != nil {
+			err = hold(committed)
+		}
 		if err != nil {
 			return total, fmt.Errorf("rewrite Kiro hooks in %s: %w", path, err)
 		}
