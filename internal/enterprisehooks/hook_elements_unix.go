@@ -9,22 +9,29 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 // HookElements says which protected elements of a target match what
-// DefenseClaw renders for it. The registration check also reads the hook
-// runtime files, so a registration is judged only once every one of them
-// matches: while a runtime element is broken, Entry is not judged and reads
-// true.
+// DefenseClaw renders for it. The hook entry is judged on the agent config
+// alone, so an entry damaged together with a runtime file is told apart from
+// that file (GAP-0754); only for a connector whose registration is proved
+// together with its runtime does a broken runtime leave the entry unjudged,
+// reading true.
 type HookElements struct {
 	Entry bool
 	// BrokenRuntime names the runtime file elements that do not match, in a
 	// fixed order; HookElementRuntime stands for a fault of the runtime as a
 	// whole.
 	BrokenRuntime []string
+	// Files says which files an element is read from: the agent configs for
+	// the hook entry and the runtime file itself for a runtime file element.
+	// The runtime as a whole has none.
+	Files map[string][]string
 }
 
 // Broken names the elements that do not match, in a fixed order.
@@ -80,8 +87,18 @@ func ProbeHookElements(ctx context.Context, opts InstallOptions) (HookElements, 
 					elements.BrokenRuntime = append(elements.BrokenRuntime, fault.element)
 				}
 			}
+			elements.Files = map[string][]string{HookElementEntry: connector.HookConfigPathsForConnector(conn, setupOpts)}
+			for _, element := range elements.BrokenRuntime {
+				if base, ok := strings.CutPrefix(element, hookElementFilePrefix); ok {
+					elements.Files[element] = hookRuntimeFilePaths(conn, setupOpts, target.dataDir, base)
+				}
+			}
 			if len(elements.BrokenRuntime) > 0 {
-				elements.Entry = true
+				// The registration check runs the hook, so it cannot tell a
+				// broken entry from a broken script: read the entry from the
+				// config alone where the connector allows it.
+				judged, present, entryErr := connector.OwnedHookEntriesPresent(conn, setupOpts)
+				elements.Entry = !judged || (entryErr == nil && present)
 				return nil
 			}
 			present, presentErr := connector.OwnedHooksPresentContext(ctx, conn, setupOpts)
@@ -93,4 +110,17 @@ func ProbeHookElements(ctx context.Context, opts InstallOptions) (HookElements, 
 		return HookElements{}, fmt.Errorf("enterprise hooks: probe the hook elements: %w", err)
 	}
 	return elements, nil
+}
+
+// hookRuntimeFilePaths returns where the runtime file named base is read from:
+// the hooks folder of the data directory and the managed plugin files of the
+// connector with that name.
+func hookRuntimeFilePaths(conn connector.Connector, opts connector.SetupOpts, dataDir, base string) []string {
+	paths := []string{filepath.Join(filepath.Clean(dataDir), "hooks", base)}
+	for _, path := range connector.ManagedPluginArtifacts(conn, opts) {
+		if filepath.Base(path) == base && !slices.Contains(paths, path) {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
