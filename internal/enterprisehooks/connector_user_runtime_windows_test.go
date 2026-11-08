@@ -320,8 +320,8 @@ func TestRemoveWindowsConnectorUserRuntimeCannotSwapTheFolderBeforeTheLockWrite(
 func TestRemoveWindowsConnectorUserRuntimeLeavesAPerUserInstall(t *testing.T) {
 	home, dataDir, sid := connectorRuntimeFixture(t, connectorRuntimeGateway)
 	gap45WriteFile(t, filepath.Join(dataDir, "config.yaml"), "config_version: 8\n")
-	if err := RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor"); err != nil {
-		t.Fatal(err)
+	if err := RemoveWindowsConnectorUserRuntime(home, sid.String(), "", "cursor"); !errors.Is(err, ErrWindowsConnectorUserRuntimeKept) || !strings.Contains(err.Error(), "config.yaml") {
+		t.Fatalf("a per-user install folder was reported as done: %v", err)
 	}
 	if present := connectorRuntimeExists(t, dataDir, `hooks\.hook-cursor.token`, "hook_contract_lock.json"); !present[0] || !present[1] {
 		t.Fatalf("a per-user install's files were removed: %v", present)

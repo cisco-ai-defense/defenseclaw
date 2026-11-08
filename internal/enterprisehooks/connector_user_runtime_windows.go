@@ -64,6 +64,11 @@ func windowsConnectorUserRuntimeLeaves(name string) ([]string, error) {
 // right before the privileged lock-entry write; a seam for tests.
 var windowsConnectorUserRuntimeBeforeLockClear = func() {}
 
+// ErrWindowsConnectorUserRuntimeKept is returned when the account's DefenseClaw
+// folder holds a per-user DefenseClaw install: its files are left as found, so
+// the cleanup is not done and the guardian reports and retries it.
+var ErrWindowsConnectorUserRuntimeKept = errors.New("the account's DefenseClaw folder holds a per-user DefenseClaw install, so the removed connector's files in it were left as found")
+
 // RemoveWindowsConnectorUserRuntime removes, for one account and one
 // machine-scope connector (Claude Code, Codex or Cursor) a roster change took
 // off the roster, what that connector's managed install wrote into the
@@ -82,7 +87,8 @@ var windowsConnectorUserRuntimeBeforeLockClear = func() {}
 // plan and the run cannot lose a file the install has just written. A folder
 // that holds a per-user DefenseClaw install (windowsPerUserInstallLeftover) is
 // left as found, as RemoveWindowsManagedUserRuntime leaves it: its files may
-// be that install's. The lock entry is cleared while the folder is still
+// be that install's. That is reported as ErrWindowsConnectorUserRuntimeKept,
+// not as done, while the files are still there. The lock entry is cleared while the folder is still
 // pinned, so the folder cannot be swapped for a junction between the link
 // check and the privileged write.
 func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorName string) error {
@@ -127,8 +133,8 @@ func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorNam
 	if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 		return fmt.Errorf("enterprise hooks: refusing to clean %s, which is not a plain folder", dataDir)
 	}
-	if windowsPerUserInstallLeftover(dataDir) != "" {
-		return nil
+	if leftover := windowsPerUserInstallLeftover(dataDir); leftover != "" {
+		return fmt.Errorf("%w (%s)", ErrWindowsConnectorUserRuntimeKept, leftover)
 	}
 	pin, err := openWindowsUserStatePin(home, rel)
 	if errors.Is(err, errInventoryDACLLink) {
