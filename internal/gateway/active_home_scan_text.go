@@ -6,6 +6,7 @@ package gateway
 import (
 	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -26,8 +27,9 @@ var ruleReadableHome = regexp.MustCompile(`^(?:/root|/home/\w+|/Users/\w+)$`)
 // name under a home of the usual shape. Only the home as a whole path prefix
 // is respelled: not a longer name, not a path that merely ends in it. A
 // drive-letter home is read in the forward-slash spelling the path facts
-// give, and compared without regard to letter case, as Windows does: in any
-// script, so an account name such as an accented one matches its other case.
+// give, and compared as Windows compares names: without regard to letter
+// case, in any script, and through upper case, so an account name such as an
+// accented one matches its other case and a dotless i matches i.
 func activeHomeAsTilde(text, home string) string {
 	home = strings.TrimRight(strings.ReplaceAll(home, `\`, "/"), "/")
 	windows := actionfacts.DriveLetterPath(home + "/")
@@ -70,27 +72,55 @@ func activeHomeAsTilde(text, home string) string {
 }
 
 // indexFoldedPrefix finds needle in text from byte offset from, comparing
-// letters by Unicode simple case folding as a Windows file system does, and
-// returns the byte span of the match in text (which can differ in length from
-// needle) or -1, -1. A match begins with the ASCII drive letter of needle, so
-// most positions are rejected on one byte.
+// letters as a Windows file system does (see windowsLetterEqual), and returns
+// the byte span of the match in text (which can differ in length from needle)
+// or -1, -1. A match begins with the ASCII drive letter of needle, so most
+// positions are rejected on one byte.
 func indexFoldedPrefix(text, needle string, from int) (int, int) {
-	runes := utf8.RuneCountInString(needle)
 	first := asciiLower(needle[0])
 	for start := from; start < len(text); start++ {
 		if asciiLower(text[start]) != first {
 			continue
 		}
-		end := start
-		for count := 0; count < runes && end < len(text); count++ {
-			_, size := utf8.DecodeRuneInString(text[end:])
-			end += size
-		}
-		if strings.EqualFold(text[start:end], needle) {
-			return start, end
+		if length, ok := foldedPrefixLength(text[start:], needle); ok {
+			return start, start + length
 		}
 	}
 	return -1, -1
+}
+
+// foldedPrefixLength reports whether text starts with needle letter for letter
+// under windowsLetterEqual, and the byte length of that prefix of text.
+func foldedPrefixLength(text, needle string) (int, bool) {
+	end := 0
+	for _, want := range needle {
+		if end >= len(text) {
+			return 0, false
+		}
+		got, size := utf8.DecodeRuneInString(text[end:])
+		if got == utf8.RuneError && size == 1 || !windowsLetterEqual(got, want) {
+			return 0, false
+		}
+		end += size
+	}
+	return end, true
+}
+
+// windowsLetterEqual reports whether two letters of a Windows name are the same
+// letter. Windows compares names through upper case, so a letter that
+// upper-cases to the same letter as another is that letter even when Unicode
+// simple case folding does not group them (dotless i and i). Letters grouped by
+// simple case folding stay equal, as they always were here.
+func windowsLetterEqual(a, b rune) bool {
+	if a == b || unicode.ToUpper(a) == unicode.ToUpper(b) {
+		return true
+	}
+	for folded := unicode.SimpleFold(a); folded != a; folded = unicode.SimpleFold(folded) {
+		if folded == b {
+			return true
+		}
+	}
+	return false
 }
 
 func asciiLower(b byte) byte {
