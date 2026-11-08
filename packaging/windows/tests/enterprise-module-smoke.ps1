@@ -563,6 +563,37 @@ namespace DefenseClaw.Windows.Tests
             if ([int]$changed.schema_version -ne 2 -or -not [bool]$changed.ok) {
                 throw 'standalone JSON writer did not publish changed content'
             }
+            # GAP-0899: -Kind AdminFile publishes the file already carrying
+            # the canonical owner and a protected SYSTEM and Administrators
+            # access list, so no guardian pass can find it drifted. The plain
+            # write above keeps the folder's inherited access list.
+            $adminPath = Microsoft.PowerShell.Management\Join-Path $jsonRoot 'admin.json'
+            Write-DefenseClawJsonAtomic `
+                -Value ([ordered]@{ schema_version = 3; ok = $true }) `
+                -Path $adminPath `
+                -Kind AdminFile
+            $adminAcl = Get-Acl -LiteralPath $adminPath -ErrorAction Stop
+            $adminOwner = $adminAcl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            if ($adminOwner -cne $script:AdministratorsSID) {
+                throw "admin JSON write published owner $adminOwner, want $($script:AdministratorsSID)"
+            }
+            if (-not $adminAcl.AreAccessRulesProtected) {
+                throw 'admin JSON write published an inherited access list'
+            }
+            $adminTrustees = @($adminAcl.Access | Microsoft.PowerShell.Core\ForEach-Object {
+                $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            } | Microsoft.PowerShell.Utility\Sort-Object -Unique)
+            $wantTrustees = @($script:SystemSID, $script:AdministratorsSID) | Microsoft.PowerShell.Utility\Sort-Object -Unique
+            if (($adminTrustees -join ';') -cne ($wantTrustees -join ';')) {
+                throw "admin JSON write published trustees $($adminTrustees -join ',')"
+            }
+            if (-not ([Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($adminPath)) |
+                    Microsoft.PowerShell.Utility\ConvertFrom-Json).ok) {
+                throw 'admin JSON write did not publish its content'
+            }
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $jsonRoot -Filter 'admin.json.new.*' -Force).Count -ne 0) {
+                throw 'admin JSON write left its staging file behind'
+            }
         }
         finally {
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile $previousProfile

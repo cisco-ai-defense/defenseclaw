@@ -10359,9 +10359,19 @@ function Move-DefenseClawNonImageFileReplacing {
 }
 
 function Write-DefenseClawJsonAtomic {
+    <#
+        Publishes JSON through a sibling and an atomic replace. -Kind AdminFile
+        stamps the sibling with the canonical owner and protected access list
+        before the replace (the stamp the hook guardian enforces), so the
+        published file is never visible with the creator's owner (SYSTEM) or a
+        DACL inherited from its folder. A write that stamps after the replace
+        leaves that window open, and a guardian pass inside it repairs the file
+        and makes the next ensure report guardian_repaired_drift (GAP-0899).
+    #>
     param(
         [Parameter(Mandatory)]$Value,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateSet('AdminFile')][string]$Kind
     )
     New-DefenseClawDirectory -Path ([IO.Path]::GetDirectoryName($Path))
     $temporary = "$Path.new.$([Guid]::NewGuid().ToString('N'))"
@@ -10375,6 +10385,12 @@ function Write-DefenseClawJsonAtomic {
             $json,
             [Text.UTF8Encoding]::new($false)
         )
+        if (-not [string]::IsNullOrEmpty($Kind)) {
+            Set-DefenseClawPathAcl `
+                -Path $temporary `
+                -Kind $Kind `
+                -GatewayServiceSID $script:AdministratorsSID
+        }
         # A ReadOnly, Hidden or System attribute on the file being replaced
         # makes the replacing move fail with access denied.
         [void](Clear-DefenseClawRestrictiveFileAttributes -Path $Path)
@@ -15085,7 +15101,7 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
     Assert-DefenseClawOwnedServiceOrAbsent `
         -Name $GatewayServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath
-    Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Value ([ordered]@{
+    Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Kind AdminFile -Value ([ordered]@{
         schema_version = $script:SchemaVersion
         deployment_mode = 'managed_enterprise'
         installed = $true
@@ -15096,10 +15112,6 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
         hashes = [ordered]@{}
         profile = 'standalone'
     })
-    Set-DefenseClawPathAcl `
-        -Path $Layout.MetadataPath `
-        -Kind AdminFile `
-        -GatewayServiceSID $script:AdministratorsSID
     Microsoft.PowerShell.Utility\Write-Warning -Message (
         "DefenseClaw enterprise repair: rebuilding the deployment metadata: $unreadable"
     )
@@ -18116,7 +18128,7 @@ function Initialize-DefenseClawCodexRequirementsAclBackup {
         existed = [bool]$exists
         sha256 = $sha256
         security_descriptor = $securityDescriptor
-    }) -Path $Layout.CodexRequirementsAclBackupPath
+    }) -Path $Layout.CodexRequirementsAclBackupPath -Kind AdminFile
     [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
 }
 
@@ -18324,7 +18336,7 @@ function Write-DefenseClawAgentApplicationControlAttestation {
         attested_by_sid = [string]$identity.User.Value
         attested_at = [DateTime]::UtcNow.ToString('o')
         certification_required = $true
-    }) -Path $Layout.AgentApplicationControlAttestationPath
+    }) -Path $Layout.AgentApplicationControlAttestationPath -Kind AdminFile
     [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
 }
 
@@ -18503,7 +18515,7 @@ function Write-DefenseClawStandaloneAgentApplicationControlAttestation {
         attested_by_sid = [string]$identity.User.Value
         attested_at = [DateTime]::UtcNow.ToString('o')
         certification_required = $true
-    }) -Path $Layout.AgentApplicationControlAttestationPath
+    }) -Path $Layout.AgentApplicationControlAttestationPath -Kind AdminFile
     $written = Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
     if (-not [string]::IsNullOrEmpty(
         [string]$written.claude_effective_policy_stale_reason)) {
@@ -44757,7 +44769,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             )) `
             -ManagedHooksActivation $managedHooksActivation `
             -ApprovedPolicySources $approvedPolicySources
-        Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath
+        Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath -Kind AdminFile
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
         Set-DefenseClawStandaloneSecretsAcls `
             -Layout $Layout `
@@ -44859,11 +44871,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             $newMetadata.updated_at = [DateTime]::UtcNow.ToString('o')
             Write-DefenseClawJsonAtomic `
                 -Value $newMetadata `
-                -Path $Layout.MetadataPath
-            Set-DefenseClawPathAcl `
                 -Path $Layout.MetadataPath `
-                -Kind AdminFile `
-                -GatewayServiceSID $script:AdministratorsSID
+                -Kind AdminFile
             # Only a freshly reconciling guardian authorizes gateway demand
             # start. A queued gateway failure restart is now safe to run.
             Set-DefenseClawServiceStartMode `
@@ -44944,11 +44953,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $newMetadata.updated_at = [DateTime]::UtcNow.ToString('o')
                 Write-DefenseClawJsonAtomic `
                     -Value $newMetadata `
-                    -Path $Layout.MetadataPath
-                Set-DefenseClawPathAcl `
                     -Path $Layout.MetadataPath `
-                    -Kind AdminFile `
-                    -GatewayServiceSID $script:AdministratorsSID
+                    -Kind AdminFile
             }
         }
         # -NoStart intentionally leaves all managed services disabled. Enabling them
@@ -47991,7 +47997,7 @@ function Invoke-DefenseClawUninstallLifecycle {
                 $tombstone.Remove('product_version')
             }
         }
-        Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath
+        Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath -Kind AdminFile
         Set-DefenseClawPreservedStateAcls `
             -Layout $Layout `
             -GatewayServiceSID $gatewaySID `

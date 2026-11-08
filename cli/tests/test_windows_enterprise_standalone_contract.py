@@ -2129,6 +2129,77 @@ foreach ($rollback in @($false, $true)) {
     )
 
 
+def test_an_admin_file_json_write_is_stamped_before_it_is_published(tmp_path: Path) -> None:
+    """GAP-0899: a lifecycle write of deployment.json (and the other install
+    records the hook guardian enforces) published the file first and stamped
+    it after. In that gap it carried the owner of the creating account (SYSTEM)
+    and the access list of its folder, a guardian pass inside it repaired the
+    file, and the next ensure warned guardian_repaired_drift and was not a
+    no-op. With -Kind AdminFile the staging file is stamped, then replaces
+    the destination, so the published file is never unprotected. A write
+    without -Kind keeps the plain publish."""
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    functions = "\n".join(
+        _function_body(module, name)
+        for name in (
+            "Write-DefenseClawJsonAtomic",
+            "Clear-DefenseClawRestrictiveFileAttributes",
+        )
+    )
+    harness = tmp_path / "admin-file-publish.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + functions
+        + r"""
+$script:AdministratorsSID = 'S-1-5-32-544'
+$root = '__ROOT__'
+$destination = Join-Path $root 'deployment.json'
+$global:Events = [System.Collections.Generic.List[string]]::new()
+function New-DefenseClawDirectory { param([string]$Path) }
+function Assert-DefenseClawNoReparsePath { param([string]$Path) }
+function Set-DefenseClawPathAcl {
+    param([string]$Path, [string]$Kind, [string]$GatewayServiceSID)
+    $held = ([IO.File]::ReadAllText($destination) | ConvertFrom-Json).generation
+    $global:Events.Add("stamp kind=$Kind sid=$GatewayServiceSID staging=$($Path -ne $destination) destination=$held")
+}
+function Move-DefenseClawNonImageFileReplacing {
+    param([string]$Source, [string]$Destination)
+    $global:Events.Add('publish')
+    [IO.File]::Move($Source, $Destination, $true)
+}
+[IO.File]::WriteAllText($destination, '{"generation": "old"}')
+Write-DefenseClawJsonAtomic -Value ([ordered]@{ generation = 'new' }) -Path $destination -Kind AdminFile
+Write-DefenseClawJsonAtomic -Value ([ordered]@{ generation = 'plain' }) -Path $destination
+[pscustomobject]@{
+    events = @($global:Events)
+    content = ([IO.File]::ReadAllText($destination) | ConvertFrom-Json).generation
+    leftovers = @(Get-ChildItem -LiteralPath $root -Filter 'deployment.json.new.*' -Force).Count
+} | ConvertTo-Json -Compress
+""".replace("__ROOT__", str(tmp_path)),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["events"] == [
+        "stamp kind=AdminFile sid=S-1-5-32-544 staging=True destination=old",
+        "publish",
+        "publish",
+    ], result
+    assert result["content"] == "plain" and result["leftovers"] == 0, result
+
+
 def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) -> None:
     """GAP-0629: deployment.json overwritten with text. Reading it refused
     nothing: it ran takeown + icacls /reset, which left the file's DACL
@@ -2374,8 +2445,10 @@ function Test-DefenseClawDeploymentMetadataPresent {
 function Test-DefenseClawServiceExists { param($Name) return $true }
 function Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath) }
 function Write-DefenseClawJsonAtomic {
-    param($Path, $Value)
+    param($Path, $Value, $Kind)
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 10))
+    # GAP-0899: the rebuilt record is stamped by its own publish, not after it.
+    if ($Kind -eq 'AdminFile') { $global:Stamps++ }
 }
 function Set-DefenseClawPathAcl { param($Path, $Kind, $GatewayServiceSID) $global:Stamps++ }
 function Assert-DefenseClawPathAcl {
