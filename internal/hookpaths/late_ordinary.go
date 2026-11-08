@@ -53,6 +53,17 @@ import (
 // A protected target spelled in a way the scan cannot see is a detection
 // miss and belongs to the hook-path detection work (#1189).
 func LateOrdinaryCall(connector string, payload []byte) bool {
+	return LateOrdinaryCallAt("", connector, payload)
+}
+
+// LateOrdinaryCallAt is LateOrdinaryCall for an account whose home is given:
+// every home-relative answer (the protected folders and authorized-keys files,
+// the hard-link identities, the home itself) is told against home, not against
+// the home of the process. A shell hook replaces HOME with a scratch folder
+// before it runs the helper, so the helper of such a hook must be given the
+// account home it saved, or a hard link to a protected file is not found
+// (GAP-0850). An empty home is the home of the process.
+func LateOrdinaryCallAt(home, connector string, payload []byte) bool {
 	if runtime.GOOS == "windows" || len(payload) == 0 || len(payload) > MaxPayloadBytes {
 		return false
 	}
@@ -77,7 +88,7 @@ func LateOrdinaryCall(connector string, payload []byte) bool {
 		json.Unmarshal(argsRaw, &args) != nil || !filepath.IsAbs(cwd) {
 		return false
 	}
-	scan, ok := newLateScan(cwd)
+	scan, ok := newLateScan(cwd, home)
 	if !ok {
 		return false
 	}
@@ -101,7 +112,7 @@ func LateOrdinaryCall(connector string, payload []byte) bool {
 			if !filepath.IsAbs(workdir) {
 				workdir = filepath.Join(cwd, workdir)
 			}
-			if scan, ok = newLateScan(workdir); !ok {
+			if scan, ok = newLateScan(workdir, home); !ok {
 				return false
 			}
 		}
@@ -177,9 +188,14 @@ type lateEntry struct {
 // lateMaxCwds bounds the working directories one call may visit.
 const lateMaxCwds = 8
 
-func newLateScan(cwd string) (*lateScan, bool) {
-	home, err := os.UserHomeDir()
-	if err != nil || !filepath.IsAbs(home) {
+func newLateScan(cwd, home string) (*lateScan, bool) {
+	if home == "" {
+		var err error
+		if home, err = os.UserHomeDir(); err != nil {
+			return nil, false
+		}
+	}
+	if !filepath.IsAbs(home) {
 		return nil, false
 	}
 	realHome, err := pathEvalSymlinks(home)
