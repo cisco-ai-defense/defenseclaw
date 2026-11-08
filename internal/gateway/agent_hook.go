@@ -3618,7 +3618,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
 			Args:                     trustedArgs,
-			CWD:                      agentHookTrustedActionCWDReported(ctx, req.CWD, req.ReportedCWD, toolCWD),
+			CWD:                      agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD),
 			ActiveHome:               hookActiveHome(ctx),
 			CurrentWindowsDrive:      reportedWindowsDrive(req.ReportedCWD),
 			ToolResourceIdentity:     resourceIdentity,
@@ -4097,7 +4097,7 @@ func agentHookConflictSource(
 			candidate := base
 			args, toolCWD := agentHookTrustedActionArgs(req.ConnectorName, req.ToolName, raw)
 			candidate.Args = args
-			candidate.CWD = agentHookTrustedActionCWDReported(ctx, req.CWD, req.ReportedCWD, toolCWD)
+			candidate.CWD = agentHookTrustedActionCWDReported(ctx, req.ConnectorName, req.CWD, req.ReportedCWD, toolCWD)
 			if dialectHint {
 				candidate.DialectHint = agentHookWindowsShellDialect(candidate)
 			}
@@ -4106,20 +4106,16 @@ func agentHookConflictSource(
 	}
 }
 
-// agentHookTrustedActionCWD is the working directory of a structured tool
-// call: the one the call names, mapped like the request's (host-sanitized,
-// or to the host directory a sandbox path is mounted from, "" when it has
-// none), else the request's. A relative directory is resolved against the
-// session's first; one the gateway cannot place ("~" or no session
-// directory) is none.
-func agentHookTrustedActionCWD(ctx context.Context, requestCWD, toolCWD string) string {
-	return agentHookTrustedActionCWDReported(ctx, requestCWD, "", toolCWD)
-}
-
-// agentHookTrustedActionCWDReported is agentHookTrustedActionCWD with the
-// directory the hook payload reported (before the gateway resolved it), for
-// a managed peer whose directory the service account cannot resolve.
-func agentHookTrustedActionCWDReported(ctx context.Context, requestCWD, reportedCWD, toolCWD string) string {
+// agentHookTrustedActionCWDReported is the working directory of a structured
+// tool call: the one the call names, mapped like the request cwd
+// (host-sanitized, or to the host directory a sandbox path is mounted from,
+// "" when it has none), else the request cwd. A relative directory is
+// resolved against the session cwd first; one the gateway cannot place ("~"
+// or no session directory) is none. reportedCWD is the directory the hook
+// payload reported (before the gateway resolved it), for a managed peer whose
+// directory the service account cannot resolve.
+func agentHookTrustedActionCWDReported(ctx context.Context, connectorName, requestCWD, reportedCWD, toolCWD string) string {
+	toolCWD = agentCleanedToolCWD(ctx, connectorName, requestCWD, reportedCWD, toolCWD)
 	if toolCWD == "" && requestCWD != "" {
 		return requestCWD
 	}
@@ -4133,6 +4129,32 @@ func agentHookTrustedActionCWDReported(ctx context.Context, requestCWD, reported
 		base = reportedCWD
 	}
 	return managedPeerLexicalCWD(ctx, base, toolCWD)
+}
+
+// agentCleanedToolCWD is the directory a tool call starts in when its agent
+// cleans the directory it was given as text before it starts the process:
+// Codex exec_command resolves workdir "lnk/.." to the folder that holds lnk,
+// whatever lnk is (observed on Codex 0.159, GAP-0903 review 1). The call is
+// then placed there, not in the folder the file system reaches through lnk;
+// a directory whose agent hands it to the system unchanged keeps its spelling
+// and is read by the file system (agentHookToolCWD). A directory the text
+// join cannot place (no absolute base, or a base that itself has a parent
+// step) is returned as given.
+func agentCleanedToolCWD(ctx context.Context, connectorName, requestCWD, reportedCWD, toolCWD string) string {
+	if !hookpaths.WorkdirCleanedByAgent(connectorName) || toolCWD == "" || strings.HasPrefix(toolCWD, "~") {
+		return toolCWD
+	}
+	if _, sandboxed := sandboxHookView(ctx); sandboxed {
+		return toolCWD
+	}
+	base := requestCWD
+	if base == "" {
+		base = reportedCWD
+	}
+	if !filepath.IsAbs(toolCWD) && (!filepath.IsAbs(base) || hasParentElement(base)) {
+		return toolCWD
+	}
+	return hookpaths.CleanedDirectory(base, toolCWD)
 }
 
 // managedPeerLexicalCWD is the directory a managed hook peer's tool call

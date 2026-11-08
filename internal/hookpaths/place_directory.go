@@ -23,6 +23,20 @@ func JoinDirectoryText(base, dir string) string {
 	return base + string(filepath.Separator) + dir
 }
 
+// WorkdirCleanedByAgent reports a connector whose agent cleans a tool call
+// workdir as text before it starts the process, so the parent step of
+// lnk/.. never reaches the file system: Codex exec_command (observed on
+// Codex 0.159: workdir "lnk/.." ran in the folder that holds lnk).
+func WorkdirCleanedByAgent(connector string) bool {
+	return strings.EqualFold(strings.TrimSpace(connector), "codex")
+}
+
+// CleanedDirectory places a workdir the way such an agent does: joined to
+// the folder the call starts in and cleaned as text.
+func CleanedDirectory(base, dir string) string {
+	return filepath.Clean(JoinDirectoryText(base, dir))
+}
+
 // PlaceDirectory is the absolute folder a call runs in, from the folder it
 // starts in (empty for an absolute dir) and the directory it names. A
 // directory with a parent step is read as the file system reads it: each

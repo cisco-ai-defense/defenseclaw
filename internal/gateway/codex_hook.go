@@ -884,7 +884,7 @@ func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
 	if workdir == "" {
 		return req.CWD
 	}
-	return agentHookTrustedActionCWD(ctx, req.CWD, workdir)
+	return agentHookTrustedActionCWDReported(ctx, "codex", req.CWD, "", workdir)
 }
 
 func codexToolName(req codexHookRequest) string {
