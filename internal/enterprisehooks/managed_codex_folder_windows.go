@@ -125,18 +125,7 @@ func windowsCodexMachineFolderUntrusted(folder string, cause error) error {
 // standalone status path (the CLI process of an administrator carries no
 // standalone profile in its environment, so this does not test for one).
 func WindowsCodexMachineFolderLink() (string, error) {
-	selector, err := windowsManagedRuntimeSelectorPath("codex")
-	if err != nil {
-		return "", err
-	}
-	state, link, err := inspectWindowsManagedPolicyDirectoryNoFollow(filepath.Dir(selector))
-	if err != nil {
-		return "", err
-	}
-	if state != windowsManagedPolicyDirKept {
-		return "", nil
-	}
-	return link, nil
+	return WindowsManagedConnectorFolderLink("codex")
 }
 
 // windowsManagedPolicyMissingChain lists the folders of path that do not
