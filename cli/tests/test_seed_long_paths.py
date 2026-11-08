@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -72,7 +73,7 @@ def _failing_copytree(match: str):
 
     def copytree(src, dst, *args, **kwargs):
         if match in str(dst):
-            os.makedirs(dst)
+            os.makedirs(dst, exist_ok=True)
             with open(os.path.join(dst, "partial.txt"), "w", encoding="utf-8") as handle:
                 handle.write("x")
             raise OSError(3, "The system cannot find the path specified", str(dst))
@@ -121,6 +122,7 @@ class SeedLongPathTests(unittest.TestCase):
         self.assertEqual(len(report.warnings), 1, msg=report.warnings)
         self.assertIn(dest, report.warnings[0])
         self.assertFalse(os.path.lexists(dest))
+        self.assertEqual([n for n in os.listdir(os.path.dirname(dest)) if n.startswith(".splunk-bridge")], [])
 
     def test_guardrail_profile_copy_failure_is_still_an_error(self):
         data_dir = os.path.join(self.tmp, "home")
@@ -190,6 +192,88 @@ class SeedLongPathTests(unittest.TestCase):
         with self.assertRaises(OSError):
             long_paths.copytree(self.bundle, dest)
         self.assertTrue(os.path.isdir(dest))
+
+    def test_two_runs_seeding_at_once_keep_the_first_complete_copy(self):
+        real = shutil.copytree
+        lock = threading.Lock()
+        both_entered = threading.Event()
+        first_done = threading.Event()
+        entered: list[int] = []
+        errors: list[BaseException] = []
+        dest = os.path.join(self.tmp, "destination")
+        # A flat source: shutil.copytree calls itself for every subfolder.
+        flat = os.path.join(self.tmp, "flat")
+        os.makedirs(flat)
+        with open(os.path.join(flat, "needed.txt"), "w", encoding="utf-8") as handle:
+            handle.write("needed")
+
+        def ordered(src, dst, *args, **kwargs):
+            with lock:
+                entered.append(1)
+                order = len(entered)
+                if order == 2:
+                    both_entered.set()
+            if order == 1:
+                self.assertTrue(both_entered.wait(10))
+                try:
+                    return real(src, dst, *args, **kwargs)
+                finally:
+                    first_done.set()
+            self.assertTrue(first_done.wait(10))
+            return real(src, dst, *args, **kwargs)
+
+        def seed():
+            try:
+                long_paths.copytree(flat, dest)
+            except BaseException as exc:  # noqa: BLE001 - reported through the assertion below
+                errors.append(exc)
+
+        with patch("defenseclaw.long_paths.shutil.copytree", side_effect=ordered):
+            workers = [threading.Thread(target=seed) for _ in range(2)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(30)
+
+        self.assertEqual(errors, [])
+        with open(os.path.join(dest, "needed.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "needed")
+        self.assertEqual([n for n in os.listdir(self.tmp) if n.startswith(".destination")], [])
+
+    def test_a_destination_created_while_the_copy_runs_is_not_removed(self):
+        dest = os.path.join(self.tmp, "destination")
+
+        def create_then_copy(src, dst, *args, **kwargs):
+            os.makedirs(dest)
+            with open(os.path.join(dest, "operator-data.txt"), "w", encoding="utf-8") as handle:
+                handle.write("keep")
+            raise OSError(5, "refused", str(dst))
+
+        with patch("defenseclaw.long_paths.shutil.copytree", side_effect=create_then_copy):
+            long_paths.copytree(self.bundle, dest)
+
+        self.assertTrue(os.path.isfile(os.path.join(dest, "operator-data.txt")))
+        self.assertEqual([n for n in os.listdir(self.tmp) if n.startswith(".destination")], [])
+
+    def test_a_partial_copy_that_cannot_be_removed_is_never_taken_for_a_seed(self):
+        data_dir = os.path.join(self.tmp, "home")
+        with (
+            patch("defenseclaw.long_paths.shutil.copytree", side_effect=_failing_copytree("splunk-bridge")),
+            patch("defenseclaw.long_paths.shutil.rmtree", return_value=None),
+        ):
+            first = bootstrap_env(_cfg_for(data_dir))
+        dest = os.path.join(os.path.realpath(data_dir), "splunk-bridge")
+
+        self.assertEqual(len(first.warnings), 1, msg=first.warnings)
+        self.assertIn("could not be removed", first.warnings[0])
+        self.assertFalse(os.path.lexists(dest))
+
+        second = bootstrap_env(_cfg_for(data_dir))
+
+        self.assertFalse(second.splunk_bridge_preserved)
+        with open(_deep_file(dest), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), _DEEP_BODY)
+        self.assertFalse(os.path.exists(os.path.join(dest, "partial.txt")))
 
     def test_display_drops_the_extended_prefix(self):
         self.assertEqual(long_paths.display("\\\\?\\C:\\a\\b: denied"), "C:\\a\\b: denied")
