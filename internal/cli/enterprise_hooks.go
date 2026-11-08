@@ -3604,6 +3604,20 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	var previousRun enterpriseHookReconcileRun
 	legacyRepairRetryNeeded := false
 	legacyRepairRetryDelay := time.Duration(0)
+	// A failure that lasts (a link at a vendor folder waits for an administrator)
+	// is logged on its first pass and counted on the retries that follow.
+	var repeatFolds guardianRepeatFolds
+	logReconcileFailure := func(reason string, err error) {
+		line := fmt.Sprintf("[hook-guardian] reconcile after %s failed: %s\n", reason, err)
+		if reason == "interval" {
+			line = fmt.Sprintf("[hook-guardian] interval reconcile failed: %s\n", err)
+		}
+		repeatFolds.emit(cmd.ErrOrStderr(), time.Now(), "reconcile", err.Error(), "the same reconcile failure", line)
+	}
+	logRepairRetry := func(delay time.Duration) {
+		repeatFolds.emit(cmd.ErrOrStderr(), time.Now(), "retry", "retry", "the repair retry",
+			fmt.Sprintf("[hook-guardian] repair incomplete; retrying in %s\n", delay))
+	}
 	repairRetryNeeded := func() bool {
 		if legacyWatch {
 			return legacyRepairRetryNeeded
@@ -3874,7 +3888,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			legacyRepairRetryDelay = enterpriseHookWatchNextRepairRetryDelay(legacyRepairRetryDelay)
 			resetEnterpriseHookWatchTimer(repairRetry, legacyRepairRetryDelay)
 			repairRetryPending = true
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", legacyRepairRetryDelay)
+			logRepairRetry(legacyRepairRetryDelay)
 			return
 		}
 		due, needed := repairRetries.nextDue()
@@ -3888,9 +3902,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		resetEnterpriseHookWatchTimer(repairRetry, delay)
 		repairRetryPending = true
 		repairRetryDue = due
-		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", delay.Round(time.Millisecond))
+		logRepairRetry(delay.Round(time.Millisecond))
 	}
 	cancelRepairRetry := func() {
+		// A pass that needs no retry is a pass that succeeded: print the counted
+		// repeats and let the next failure show again.
+		repeatFolds.reset(cmd.ErrOrStderr())
 		if !repairRetryPending {
 			return
 		}
@@ -4100,7 +4117,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		interrupted, err := reconcileWatchPass("interval")
 		if err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
+			logReconcileFailure("interval", err)
 		}
 		if interrupted {
 			return false
@@ -4212,7 +4229,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 					}
 				}
 				if err != nil && !errors.Is(err, context.Canceled) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
+					logReconcileFailure(reason, err)
 				}
 				if interrupted {
 					// An interrupted pass did not publish its result. Preserve
@@ -4260,12 +4277,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			repairRetryDue = time.Time{}
 			if legacyWatch {
 				if _, err := reconcile("retry"); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after retry failed: %s\n", err)
+					logReconcileFailure("retry", err)
 				}
 			} else {
 				interrupted, err := reconcileWatchPass("retry")
 				if err != nil && !errors.Is(err, context.Canceled) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after retry failed: %s\n", err)
+					logReconcileFailure("retry", err)
 				}
 				if interrupted {
 					continue
