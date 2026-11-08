@@ -4626,7 +4626,11 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 			return
 		}
 		connectors := make(map[string]bool)
+		ancestors := make(map[string]bool)
 		for _, issue := range issues {
+			if issue.Ancestor != "" {
+				ancestors[issue.Ancestor] = true
+			}
 			if len(issue.Connectors) == 0 && issue.Connector != "" {
 				connectors[issue.Connector] = true
 			}
@@ -4640,6 +4644,16 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		sort.Strings(names)
 		details["watch_roots_unavailable"] = len(issues)
+		if len(ancestors) > 0 {
+			// Folders other accounts can write: doctor and status name them
+			// with the chmod that restores admission scanning (GAP-0905).
+			folders := make([]string, 0, len(ancestors))
+			for folder := range ancestors {
+				folders = append(folders, folder)
+			}
+			sort.Strings(folders)
+			details["admission_root_writable_folders"] = folders
+		}
 		details["admission_scanning_off"] = names
 		s.health.SetWatcher(StateDegraded, "admission scanning is off for one or more connector roots; the gateway log names each root", details)
 	})

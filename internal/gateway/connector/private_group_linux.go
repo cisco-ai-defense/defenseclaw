@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -75,9 +76,13 @@ func ownerPrivateGroupStrictFor(path string, info os.FileInfo, aclJudged bool) b
 		return false
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return false
-	}
+	return ok && privateGroupNameServiceAgrees(name, stat)
+}
+
+// privateGroupNameServiceAgrees is the name-service half of the strict proof:
+// getent finds the group under the account's name and gid with no member but
+// its owner, and the account with the same uid and primary group.
+func privateGroupNameServiceAgrees(name string, stat *syscall.Stat_t) bool {
 	uid, gid := strconv.FormatUint(uint64(stat.Uid), 10), strconv.FormatUint(uint64(stat.Gid), 10)
 	group, ok := privateGroupEntry("group", gid)
 	if !ok || len(group) != 4 || group[0] != name || group[2] != gid {
@@ -90,6 +95,54 @@ func ownerPrivateGroupStrictFor(path string, info os.FileInfo, aclJudged bool) b
 	}
 	account, ok := privateGroupEntry("passwd", name)
 	return ok && len(account) >= 4 && account[0] == name && account[2] == uid && account[3] == gid
+}
+
+// privateGroupNameServiceTTL is how long ownerPrivateGroupCached remembers the
+// name service answer for an account. An answer of any kind (also a refusal
+// after a failed or timed out getent) is kept, so a check that runs on every
+// watcher event starts at most two processes a minute (GAP-0905).
+const privateGroupNameServiceTTL = time.Minute
+
+var (
+	privateGroupNow   = time.Now
+	privateGroupCache = struct {
+		sync.Mutex
+		answers map[[3]string]privateGroupAnswer
+	}{answers: map[[3]string]privateGroupAnswer{}}
+)
+
+type privateGroupAnswer struct {
+	agrees  bool
+	expires time.Time
+}
+
+// ownerPrivateGroupCached is the strict proof for a check that runs often: the
+// local files and the ACL are judged on every call, the name service half once
+// per account and privateGroupNameServiceTTL. A member a directory service
+// adds still refuses; where getent is missing or fails, the folder is not
+// private.
+func ownerPrivateGroupCached(path string, info os.FileInfo) bool {
+	name, ok := ownerPrivateGroupName(path, info, false)
+	if !ok {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+	key := [3]string{name, strconv.FormatUint(uint64(stat.Uid), 10), strconv.FormatUint(uint64(stat.Gid), 10)}
+	now := privateGroupNow()
+	privateGroupCache.Lock()
+	answer, found := privateGroupCache.answers[key]
+	privateGroupCache.Unlock()
+	if found && now.Before(answer.expires) {
+		return answer.agrees
+	}
+	agrees := privateGroupNameServiceAgrees(name, stat)
+	privateGroupCache.Lock()
+	privateGroupCache.answers[key] = privateGroupAnswer{agrees: agrees, expires: privateGroupNow().Add(privateGroupNameServiceTTL)}
+	privateGroupCache.Unlock()
+	return agrees
 }
 
 // privateGroupEntry returns the colon fields of the one record getent finds.

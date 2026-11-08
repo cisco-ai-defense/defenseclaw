@@ -24,6 +24,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import shlex
 import shutil
 import socket
 import sys
@@ -799,6 +800,22 @@ def _format_uptime(ms: object) -> str:
     return f"{mins}m" if mins else "<1m"
 
 
+def _watch_root_fix_hint(details: dict) -> str:
+    """Name the folders other accounts can write and the chmod that fixes them.
+
+    The gateway lists them as ``admission_root_writable_folders`` when a linked
+    skill root is refused for a group or other write bit on its route (GAP-0905).
+    Empty when it listed none.
+    """
+    folders = details.get("admission_root_writable_folders")
+    if not isinstance(folders, list):
+        return ""
+    quoted = [shlex.quote(item) for item in folders if isinstance(item, str) and item and item.isprintable()]
+    if not quoted:
+        return ""
+    return f"{', '.join(quoted)} can be written by another account; run: chmod go-w {' '.join(quoted)}"
+
+
 def _print_watch_root_coverage(health: dict) -> None:
     """Name connectors whose skill or plugin admission root is unavailable."""
     watcher = health.get("watcher")
@@ -808,7 +825,9 @@ def _print_watch_root_coverage(health: dict) -> None:
     names = details.get("admission_scanning_off")
     connectors = ", ".join(name for name in names if isinstance(name, str)) if isinstance(names, list) else ""
     suffix = f" for {connectors}" if connectors else ""
-    _status_row("Admission scan", ux._style(f"off{suffix}; see gateway log and defenseclaw doctor", fg="yellow"))
+    hint = _watch_root_fix_hint(details)
+    follow = f"{hint}; see gateway log and defenseclaw doctor" if hint else "see gateway log and defenseclaw doctor"
+    _status_row("Admission scan", ux._style(f"off{suffix}; {follow}", fg="yellow"))
 
 
 def _sidecar_running_detail(health: dict, host: str, port: object) -> str:

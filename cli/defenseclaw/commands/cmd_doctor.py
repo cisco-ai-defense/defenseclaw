@@ -5747,11 +5747,16 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     connectors = [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
                     severity = _watch_root_coverage_severity(cfg, connectors)
                     label = ", ".join(connectors) if connectors else "configured connectors"
+                    from defenseclaw.commands.cmd_status import _watch_root_fix_hint
+
+                    hint = _watch_root_fix_hint(details)
                     _emit(
                         severity,
                         f"  └─ {sub}",
                         f"admission scanning is off for {label}; "
-                        f"{unavailable} root(s) unavailable; the gateway log names each root",
+                        f"{unavailable} root(s) unavailable; "
+                        + (f"{hint}; " if hint else "")
+                        + "the gateway log names each root",
                         r=r,
                     )
                     continue

@@ -331,10 +331,15 @@ type InstallWatcher struct {
 }
 
 // RootCoverageIssue is a configured asset root whose admission scan is off.
-// Health exposes only counts and connector names; the gateway log names paths.
+// Health exposes counts, connector names and, when another account can write a
+// folder of the link route, that folder (Ancestor); the gateway log names the
+// root paths.
 type RootCoverageIssue struct {
 	Kind, Path, Connector, Reason string
-	Connectors                    []string
+	// Ancestor is the folder of the root's link route that another account
+	// can write (skillrootsafe.WritableAncestorError), else empty.
+	Ancestor   string
+	Connectors []string
 }
 
 // RootConsumer names a connector that loads a watched skill or plugin root.
@@ -392,7 +397,12 @@ func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
 		if len(connectors) > 0 {
 			connector = connectors[0]
 		}
-		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Connectors: append([]string(nil), connectors...), Reason: cause.Error()}
+		ancestor := ""
+		var writable *skillrootsafe.WritableAncestorError
+		if errors.As(cause, &writable) {
+			ancestor = writable.Ancestor
+		}
+		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Connectors: append([]string(nil), connectors...), Reason: cause.Error(), Ancestor: ancestor}
 	}
 	current := w.rootCoverage[key]
 	changed := hadPrevious != (cause != nil) || (cause != nil &&

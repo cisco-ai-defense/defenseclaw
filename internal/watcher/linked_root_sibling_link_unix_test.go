@@ -147,7 +147,7 @@ func TestLinkedAgentRootThroughAPrivateGroupFolderIsWatched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !connector.OwnerPrivateGroupLocal(dotfiles, info) {
+	if !connector.OwnerPrivateGroupCached(dotfiles, info) {
 		t.Skip("the test account has no private group")
 	}
 	if err := watchLinkedRoot(t, root); err != nil {

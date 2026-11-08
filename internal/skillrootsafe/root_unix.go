@@ -17,8 +17,10 @@ import (
 
 const maxRootLinks = 32
 
-// ownerPrivateGroup is the private-group proof (tests replace it).
-var ownerPrivateGroup = connector.OwnerPrivateGroupLocal
+// ownerPrivateGroup is the private-group proof (tests replace it). It asks the
+// name service too: a member a directory service adds to the group can write
+// the folder, so the local account files alone are not proof.
+var ownerPrivateGroup = connector.OwnerPrivateGroupCached
 
 func fileUID(info os.FileInfo) (uint32, bool) {
 	stat, ok := info.Sys().(*syscall.Stat_t)

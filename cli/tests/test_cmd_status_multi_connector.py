@@ -843,6 +843,24 @@ class TestStatusHeaderAndConfigProblems(unittest.TestCase):
         self.assertEqual(row.call_args.args[0], "Admission scan")
         self.assertIn("off for claudecode", row.call_args.args[1])
 
+    def test_gap0905_status_names_the_writable_folder_and_the_chmod(self):
+        details = {
+            "watch_roots_unavailable": 1,
+            "admission_scanning_off": ["claudecode"],
+            "admission_root_writable_folders": ["/home/u/my dotfiles", "/home/u/shared"],
+        }
+        with patch.object(cmd_status, "_status_row") as row:
+            cmd_status._print_watch_root_coverage({"watcher": {"details": details}})
+        text = row.call_args.args[1]
+        self.assertIn("off for claudecode", text)
+        self.assertIn("'/home/u/my dotfiles', /home/u/shared can be written by another account", text)
+        self.assertIn("chmod go-w '/home/u/my dotfiles' /home/u/shared", text)
+
+    def test_gap0905_hint_ignores_malformed_folder_lists(self):
+        for value in (None, "/home/u/x", 7, [], [None, 3, "", "/home/u/x\x1b[31m"]):
+            with self.subTest(value=value):
+                self.assertEqual(cmd_status._watch_root_fix_hint({"admission_root_writable_folders": value}), "")
+
     def test_header_names_version_and_footer_skips_status_itself(self):
         from defenseclaw import __version__
 

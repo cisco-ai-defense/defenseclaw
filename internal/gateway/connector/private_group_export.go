@@ -22,11 +22,12 @@ func OwnerPrivateGroup(path string, info os.FileInfo) bool {
 	return ownerPrivateGroupStrictAfterACL(path, info)
 }
 
-// OwnerPrivateGroupLocal is the local-files proof of OwnerPrivateGroup: the
-// group and account files, os/user, and no access ACL on path (an ACL fails
-// it). It starts no process, so a check that runs on every watcher event can
-// ask it for each folder of a path (GAP-0905); it cannot see a member only a
-// directory service adds, so the managed setter keeps OwnerPrivateGroup.
-func OwnerPrivateGroupLocal(path string, info os.FileInfo) bool {
-	return ownerPrivateGroup(path, info)
+// OwnerPrivateGroupCached is OwnerPrivateGroup for a check that runs on every
+// watcher event (GAP-0905). The local files and the ACL are judged on each
+// call; the name service answer (getent, every nsswitch source) is remembered
+// per account for a minute, so a member only a directory service adds still
+// refuses, and the check starts at most two processes a minute. False off
+// Linux, and for anything unreadable, timed out or ambiguous.
+func OwnerPrivateGroupCached(path string, info os.FileInfo) bool {
+	return ownerPrivateGroupCached(path, info)
 }
