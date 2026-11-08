@@ -2388,12 +2388,15 @@ def _real_dir_chain(root: str, path: str) -> bool:
     raw_root = os.path.normcase(str(Path(root if os.path.isabs(root) else os.path.abspath(root))))
     folded_root = _normalized(root)
     target = path if os.path.isabs(path) else os.path.abspath(path)
-    if _normalized(target) == folded_root:
-        return True
-    if not _below(folded_root, target):
-        return False
     parts = Path(target).parts
     dotdot = ".." in parts
+    folded_target = _normalized(target)
+    # A path that folds to the root is the root only when nothing in it can redirect:
+    # root/link/.. leaves by the link before the .. is read, so it is walked like the rest.
+    if folded_target == folded_root and not dotdot:
+        return True
+    if folded_target != folded_root and not _below(folded_root, target):
+        return False
     current = Path(parts[0])
     inside = False
     for part in parts[1:]:
