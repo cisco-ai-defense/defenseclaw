@@ -1607,18 +1607,6 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 		return
 	}
 	state, err := loadOpenCodePortsRecord(env.P(path))
-	// The record's unknown list is the last guardian pass's snapshot, and the
-	// pass rewrites it only while OpenCode is on the machine policy. An entry
-	// for an account the host no longer has is not a finding: there is nothing
-	// for an administrator to repair, and the next pass drops it.
-	lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	unknown := make([]enterprisehooks.UnixOpenCodeServicePortUnknown, 0, len(state.Unknown))
-	for _, entry := range state.Unknown {
-		if !env.accountAbsent(lookupCtx, entry.User) {
-			unknown = append(unknown, entry)
-		}
-	}
 	if err != nil {
 		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
 			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
@@ -1640,6 +1628,7 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 			"OpenCode service port %d was named by the files of uids %s when the guardian's record was built, so no account is given it; to release it: sudo %s %d --yes",
 			entry.Port, strings.Join(uids, ", "), env.lifecycleCommand("opencode-port-clear"), entry.Port))
 	}
+	unknown := env.openCodePortsStillUnknown(state.Unknown)
 	if len(unknown) > 0 {
 		names := make([]string, 0, len(unknown))
 		for _, entry := range unknown {
@@ -1649,6 +1638,50 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 			"the guardian could not read or write the OpenCode service port file of these accounts as the account; each keeps its recorded port, nothing in the record changes, and other accounts are not affected: %s",
 			strings.Join(names, "; ")))
 	}
+}
+
+// openCodePortsStillUnknown drops from the record unknown list the entries
+// whose account the host proves gone. The list is the last guardian pass
+// snapshot, and the pass rewrites it only while OpenCode is on the machine
+// policy, so the entry of an account deleted since then stays until a later
+// pass and would read as a finding with nothing to repair. An entry the host
+// cannot prove gone stays, so a live directory account is never hidden by an
+// inconclusive lookup miss.
+func (env *Env) openCodePortsStillUnknown(entries []enterprisehooks.UnixOpenCodeServicePortUnknown) []enterprisehooks.UnixOpenCodeServicePortUnknown {
+	if len(entries) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	enumeration := enterprisehooks.LoadUnixEnumeratorState(env.P(filepath.Join(filepath.Dir(env.Layout.ManifestPath), enumeratorStateFile)))
+	kept := make([]enterprisehooks.UnixOpenCodeServicePortUnknown, 0, len(entries))
+	for _, entry := range entries {
+		if !env.openCodePortAccountGone(ctx, entry, enumeration) {
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
+// openCodePortAccountGone reports whether the account an unknown entry
+// recorded (name and uid) no longer exists. The name now answering with
+// another uid is proof: the recorded account lost it. A lookup miss alone is
+// not, because getent gives the same answer for a live directory account while
+// the directory does not answer, and on macOS the local node does not see
+// directory accounts. A miss counts only with the proof the guardian target
+// warnings require: a fresh read of the whole search policy, or the enumerator
+// confirmation (UnixMissConfirmed).
+func (env *Env) openCodePortAccountGone(ctx context.Context, entry enterprisehooks.UnixOpenCodeServicePortUnknown, enumeration *enterprisehooks.UnixEnumeratorState) bool {
+	account, found, ok := env.lookupPlainAccount(ctx, entry.User)
+	if !ok {
+		return false
+	}
+	if found {
+		return account.UID != entry.UID
+	}
+	return guardianAccountConfirmedGone(entry.User, entry.UID) ||
+		guardianFreshAccountRecordGone(ctx, entry.User) ||
+		enterprisehooks.UnixMissConfirmed(enumeration, entry.User, "opencode")
 }
 
 // openCodePortsRecordGeteuid is os.Geteuid (tests replace it).

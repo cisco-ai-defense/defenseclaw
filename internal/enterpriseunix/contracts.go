@@ -967,22 +967,31 @@ func directoryLookupsFailing(warnings []enterprisestatus.Message) bool {
 	return false
 }
 
-// accountAbsent reports whether the host's own account lookup also finds no
-// account named user (getent passwd on Linux, the local directory node on
-// macOS). An account that still exists, a lookup that fails, or a name that
-// is not a plain account name keeps the target a guardian_target_failed.
-func (env *Env) accountAbsent(ctx context.Context, user string) bool {
+// lookupPlainAccount asks the host own account lookup for user (getent passwd
+// on Linux, the local directory node on macOS). ok is false when there is no
+// lookup, user is not a plain account name or the lookup failed: the answer
+// then says nothing.
+func (env *Env) lookupPlainAccount(ctx context.Context, user string) (account Account, found, ok bool) {
 	user = strings.TrimSpace(user)
 	if env.Accounts == nil || !plainAccountName(user) {
-		return false
+		return Account{}, false, false
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, found, err := env.Accounts.Lookup(lookupCtx, user)
-	return err == nil && !found
+	account, found, err := env.Accounts.Lookup(lookupCtx, user)
+	return account, found, err == nil
+}
+
+// accountAbsent reports whether the host own account lookup also finds no
+// account named user. An account that still exists, a lookup that fails, or a
+// name that is not a plain account name keeps the target a
+// guardian_target_failed.
+func (env *Env) accountAbsent(ctx context.Context, user string) bool {
+	_, found, ok := env.lookupPlainAccount(ctx, user)
+	return ok && !found
 }
 
 // plainAccountName accepts the account names Linux and macOS create: no
