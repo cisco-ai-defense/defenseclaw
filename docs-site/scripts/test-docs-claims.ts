@@ -1163,7 +1163,7 @@ describe('1.0.4 operator routes and limits', () => {
 
   it('describes the per-user fail-mode setter the CLI accepts (GAP-1411, GAP-1601)', () => {
     const cmd = source('cli/defenseclaw/commands/cmd_guardrail.py');
-    assert.ok(cmd.includes('"On a per-user install an explicit saved mode wins. When unset, the gateway-outage mode follows the "'));
+    assert.ok(cmd.includes('"On a per-user install an explicit saved mode wins (OpenClaw under the strict policy stays closed); a "'));
     const cli = page('reference/cli.mdx');
     assert.ok(!cli.includes('so a value is refused with exit 1'));
     assert.ok(cli.includes('`open` or `closed` saves your choice, which wins over the policy tier'));
