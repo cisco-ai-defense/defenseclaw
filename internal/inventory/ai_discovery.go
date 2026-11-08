@@ -2469,6 +2469,8 @@ func parseMCPConfigForNames(path, connector string) ([]config.MCPServerEntry, er
 		return config.ReadMCPFromOpenCodeConfig(path)
 	case mcpShapeClaudeDesktop:
 		return config.ReadMCPFromJSONCPaths(path, []string{"mcpServers"})
+	case mcpShapeOpenClaw:
+		return config.ReadMCPFromOpenClawConfig(path)
 	case mcpShapeNestedServers:
 		return config.ReadMCPFromJSONCPaths(path, []string{"mcp", "servers"})
 	default:
@@ -2486,6 +2488,7 @@ const (
 	mcpShapeOpenCode      = "opencode"
 	mcpShapeClaudeDesktop = "claude_desktop"
 	mcpShapeNestedServers = "mcp_servers_nested"
+	mcpShapeOpenClaw      = "openclaw" // openclaw.json is JSON5 (GAP-0907)
 	mcpShapeDotMCP        = "dot_mcp"
 	// mcpShapeClaudeState is ~/.claude.json read by readClaudeDiscoveryState
 	// (every profile but Secure Client).
@@ -2532,7 +2535,9 @@ func mcpConfigShape(path, connector string) string {
 		// deploymentMode and coworkUserFilesPath. Read as a bare map, each of
 		// those keys was listed as a server (cowork-1-0-8 GAP-0026).
 		return mcpShapeClaudeDesktop
-	case base == "openclaw.json" || (base == "config.json" && filepath.Base(filepath.Dir(path)) == ".zeptoclaw"):
+	case base == "openclaw.json":
+		return mcpShapeOpenClaw
+	case base == "config.json" && filepath.Base(filepath.Dir(path)) == ".zeptoclaw":
 		// Read as a bare map, every top-level key was listed as a server.
 		return mcpShapeNestedServers
 	default:

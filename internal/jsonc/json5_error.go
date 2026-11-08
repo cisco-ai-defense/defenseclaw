@@ -100,6 +100,14 @@ func locate(data []byte, at int) (line, column int, near string) {
 	}
 	line, lineStart := 1, 0
 	for i := 0; i < at; i++ {
+		if isJSON5LineSeparator(data[i:]) {
+			// U+2028 and U+2029 end a line in JSON5, as the rewrite reads them.
+			if i+3 <= at {
+				line++
+				lineStart = i + 3
+			}
+			continue
+		}
 		switch data[i] {
 		case '\n':
 			line++
@@ -117,8 +125,11 @@ func locate(data []byte, at int) (line, column int, near string) {
 	}
 	column = utf8.RuneCount(data[lineStart:at]) + 1
 	rest := data[at:]
-	if end := bytes.IndexAny(rest, "\r\n"); end >= 0 {
-		rest = rest[:end]
+	for i := range rest {
+		if rest[i] == '\r' || rest[i] == '\n' || isJSON5LineSeparator(rest[i:]) {
+			rest = rest[:i]
+			break
+		}
 	}
 	if len(rest) > 24 {
 		rest = rest[:24]

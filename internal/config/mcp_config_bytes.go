@@ -45,6 +45,18 @@ func ParseMCPFromJSONCPaths(data []byte, paths ...[]string) ([]MCPServerEntry, e
 	return readMCPFromAnyPaths(doc, paths...)
 }
 
+// ParseMCPFromOpenClawConfig parses the servers of an openclaw.json document.
+// OpenClaw reads the file as JSON5, so comments, trailing commas, bare keys,
+// single quotes and hexadecimal numbers are all valid in it; the servers are
+// under mcp.servers (GAP-0907).
+func ParseMCPFromOpenClawConfig(data []byte) ([]MCPServerEntry, error) {
+	var doc map[string]any
+	if err := jsonc.UnmarshalJSON5(data, &doc); err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, []string{"mcp", "servers"})
+}
+
 // ParseMCPFromAmpSettings parses an Amp settings document (amp.mcpServers).
 func ParseMCPFromAmpSettings(data []byte) ([]MCPServerEntry, error) {
 	return ParseMCPFromJSONCPaths(data, []string{"amp.mcpServers"})

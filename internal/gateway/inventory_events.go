@@ -686,7 +686,7 @@ func readMCPServersUnderHomeForOS(connectorName, home, goos string) [][]config.M
 		}, ".hermes/config.yaml")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".hermes/mcp.json")
 	case "openclaw":
-		tryFile(config.ReadMCPFromDotMCPJSON, ".openclaw/openclaw.json")
+		tryFile(config.ReadMCPFromOpenClawConfig, ".openclaw/openclaw.json")
 	case "antigravity":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/config/mcp_config.json")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".agents/mcp_config.json")
