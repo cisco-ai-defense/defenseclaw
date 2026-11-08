@@ -60,6 +60,10 @@ func windowsConnectorUserRuntimeLeaves(name string) ([]string, error) {
 	return leaves, nil
 }
 
+// windowsConnectorUserRuntimeBeforeLockClear runs, while the folder is pinned,
+// right before the privileged lock-entry write; a seam for tests.
+var windowsConnectorUserRuntimeBeforeLockClear = func() {}
+
 // RemoveWindowsConnectorUserRuntime removes, for one account and one
 // machine-scope connector (Claude Code, Codex or Cursor) a roster change took
 // off the roster, what that connector's managed install wrote into the
@@ -72,6 +76,15 @@ func windowsConnectorUserRuntimeLeaves(name string) ([]string, error) {
 // junction at the folder, at hooks or at an entry is left as found. A missing
 // folder or file is not an error. The machine enrollment is not touched; the
 // guardian revoked it first, so the account's hook already fails closed.
+//
+// It holds the account's runtime transaction lock (the one an install and a
+// managed-policy removal hold), so a connector admitted again between the
+// plan and the run cannot lose a file the install has just written. A folder
+// that holds a per-user DefenseClaw install (windowsPerUserInstallLeftover) is
+// left as found, as RemoveWindowsManagedUserRuntime leaves it: its files may
+// be that install's. The lock entry is cleared while the folder is still
+// pinned, so the folder cannot be swapped for a junction between the link
+// check and the privileged write.
 func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorName string) error {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	leaves, err := windowsConnectorUserRuntimeLeaves(name)
@@ -93,6 +106,11 @@ func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorNam
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) {
 		return fmt.Errorf("enterprise hooks: refusing to clean %s, which is not below the profile %s", dataDir, home)
 	}
+	unlock, err := lockWindowsUserRuntimeTransaction(sid.String())
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	linked := fmt.Errorf("enterprise hooks: %s is reached through a link or junction; left as found", dataDir)
 	if err := inventoryDACLRejectLinkBelow(home, rel); errors.Is(err, errInventoryDACLLink) {
 		return linked
@@ -108,6 +126,9 @@ func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorNam
 	}
 	if !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
 		return fmt.Errorf("enterprise hooks: refusing to clean %s, which is not a plain folder", dataDir)
+	}
+	if windowsPerUserInstallLeftover(dataDir) != "" {
+		return nil
 	}
 	pin, err := openWindowsUserStatePin(home, rel)
 	if errors.Is(err, errInventoryDACLLink) {
@@ -133,29 +154,46 @@ func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorNam
 		if !pinned.IsDir() || pinned.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(pinned, opened) {
 			return fmt.Errorf("enterprise hooks: refusing to clean %s, which changed while it was opened", dataDir)
 		}
-		return removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(pin.Fd()), name, leaves)
+		if err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(pin.Fd()), name, leaves); err != nil {
+			return err
+		}
+		// The connector's entry of the hook contract lock goes last, through
+		// the lock's own owner-bound writer (it claims the entry and removes
+		// exactly that one, and removes nothing when the entry names another
+		// gateway). The folder is still pinned, without delete sharing, so it
+		// cannot be replaced; the link check is repeated right before the
+		// privileged write all the same. A missing lock is not an error.
+		// Writing the account's protected file as LocalSystem needs the
+		// restore privilege that helper provides.
+		windowsConnectorUserRuntimeBeforeLockClear()
+		if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
+			return errors.Join(err, linked)
+		}
+		lock, err := root.Lstat("hook_contract_lock.json")
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !lock.Mode().IsRegular() {
+			return fmt.Errorf("enterprise hooks: refusing to change %s, which is not a regular file", filepath.Join(dataDir, "hook_contract_lock.json"))
+		}
+		return RunWithWindowsAdministratorOwnerRestorePrivilege(func() error {
+			if err := connector.ClearManagedHookContractLockEntryForOwner(
+				dataDir, name, sid.String(), managed.StandaloneWindowsGatewaySvc,
+			); err != nil {
+				return fmt.Errorf("enterprise hooks: clear connector %s hook contract lock: %w", name, err)
+			}
+			return nil
+		})
 	}()
 	root.Close()
 	pin.Close()
 	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
 		return errors.Join(removeErr, linked)
 	}
-	if removeErr != nil {
-		return removeErr
-	}
-	// The connector's entry of the hook contract lock goes last, through the
-	// lock's own owner-bound writer (it claims the entry and removes exactly
-	// that one, and removes nothing when the entry names another gateway). A
-	// missing lock is not an error. Writing the account's protected file as
-	// LocalSystem needs the restore privilege that helper provides.
-	return RunWithWindowsAdministratorOwnerRestorePrivilege(func() error {
-		if err := connector.ClearManagedHookContractLockEntryForOwner(
-			dataDir, name, sid.String(), managed.StandaloneWindowsGatewaySvc,
-		); err != nil {
-			return fmt.Errorf("enterprise hooks: clear connector %s hook contract lock: %w", name, err)
-		}
-		return nil
-	})
+	return removeErr
 }
 
 // removeWindowsConnectorUserRuntimeEntries removes the named leaves and the
