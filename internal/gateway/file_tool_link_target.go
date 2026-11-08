@@ -126,6 +126,19 @@ func linkTargetCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact
 	return typed || applyPatchCommandPath(facts, candidate)
 }
 
+// windowsActiveHomeMutation reports a typed write or append whose resolved
+// target is a drive-letter path inside the active home. The rule scan reads
+// the call as the tool sent it, with the path's separators escaped, so the
+// rules never see that path in the spelling the typed facts give it; the
+// target is scanned here instead, on every platform the hook decision can run.
+func windowsActiveHomeMutation(candidate actionfacts.PathFact, home string) bool {
+	if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
+		return false
+	}
+	return actionfacts.DriveLetterPath(candidate.Resolved) &&
+		activeHomeAsTilde(candidate.Resolved, home) != candidate.Resolved
+}
+
 // hasApplyPatchCommand reports an apply_patch command in the parsed action,
 // whichever tool carried the shell text.
 func hasApplyPatchCommand(facts actionfacts.Facts) bool {
@@ -165,7 +178,7 @@ func fileToolLinkTargetFindings(
 		if !linkTargetCandidate(facts, candidate, typed) {
 			continue
 		}
-		if !filepath.IsAbs(candidate.Resolved) {
+		if !filepath.IsAbs(candidate.Resolved) && !windowsActiveHomeMutation(candidate, request.Input.ActiveHome) {
 			continue
 		}
 		for _, finding := range scanRuleGeneration(
