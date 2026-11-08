@@ -22,6 +22,13 @@ var perUserListenerClass = daemon.ClassifyPerUserListener
 // another account's process holds this account's gateway port.
 const foreignListenerReasonPrefix = "another account's process"
 
+// unprovenListenerReasonPrefix starts the reason of a call blocked because a
+// listener on this account's gateway port did not answer as this account's
+// own gateway and DefenseClaw could not prove it is that gateway. It does not
+// say whose process it is: only a listener whose owner was read names another
+// account's process.
+const unprovenListenerReasonPrefix = "the listener on this account's gateway port did not answer, and DefenseClaw could not prove it is this account's own gateway"
+
 // perUserForeignListener returns the PID of another account's process that
 // holds this per-user hook's gateway port, or 0. The hook then sends it no
 // token or payload (GAP-1343): on Windows such a listener collected every
@@ -45,7 +52,8 @@ func perUserForeignListener(opts Options) int {
 // perUserPeerUnverifiedReason is the reason of a per-user call whose
 // connected listener the transport refused: it names the other account's
 // process while it holds the port, and still says what happened once it has
-// closed or unbound.
+// closed or unbound. A listener it could not read the owner of is not called
+// another account's.
 func perUserPeerUnverifiedReason(opts Options) string {
 	if pid := perUserForeignListener(opts); pid > 0 {
 		return foreignListenerReason(opts.APIAddr, pid)
@@ -53,8 +61,7 @@ func perUserPeerUnverifiedReason(opts Options) string {
 	if reason := perUserRootGatewayReason(opts); reason != "" {
 		return reason
 	}
-	return foreignListenerReasonPrefix + ", or a listener whose owner DefenseClaw could not prove, took this " +
-		"account's gateway connection on " + opts.APIAddr + ", so DefenseClaw sent it nothing. " +
+	return unprovenListenerReasonPrefix + " (" + opts.APIAddr + "), so DefenseClaw sent it nothing. " +
 		"Check this account's gateway with `defenseclaw-gateway status`"
 }
 
@@ -113,6 +120,7 @@ func PerUserPeerRefusalOutput(err error, apiAddr, dataDir string) string {
 
 func perUserPeerRefusal(reason string) bool {
 	return strings.HasPrefix(reason, foreignListenerReasonPrefix) ||
+		strings.HasPrefix(reason, unprovenListenerReasonPrefix) ||
 		strings.HasPrefix(reason, daemon.RootGatewayListenerReason)
 }
 

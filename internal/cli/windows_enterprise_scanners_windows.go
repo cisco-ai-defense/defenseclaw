@@ -815,8 +815,18 @@ func settleUnprovenWindowsScannerRuntimeAdmission(action string, opts *windowsEn
 // latter, so its upgrade or repair installs and proves the scanner runtime
 // as a run without the overrides does (W2B-G-win review loop round 2).
 func windowsScannerRuntimeCertificationRun(opts *windowsEnterpriseLifecycleOptions) bool {
-	return opts != nil && ((windowsEnterpriseCertificationScope(opts) && !windowsEnterpriseOverridesNameProduction(opts)) ||
+	return opts != nil && (windowsEnterpriseOutsideProductionScope(opts) ||
 		strings.TrimSpace(opts.certificationCodexHome) != "" || opts.allowUnsigned)
+}
+
+// windowsEnterpriseOutsideProductionScope reports a run whose root or service
+// name overrides name a certification scope, not the production layout. Such a
+// run has its own deployment, so what it proves or writes is not a proof for
+// the production deployment: the approved config source check leaves the
+// production approved copy, digest and proof alone for it (GAP-0854). A run
+// whose overrides all equal the production defaults is the production run.
+func windowsEnterpriseOutsideProductionScope(opts *windowsEnterpriseLifecycleOptions) bool {
+	return windowsEnterpriseCertificationScope(opts) && !windowsEnterpriseOverridesNameProduction(opts)
 }
 
 // windowsEnterpriseProductionRoots are the production standalone install

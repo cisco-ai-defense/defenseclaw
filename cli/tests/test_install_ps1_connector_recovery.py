@@ -1228,6 +1228,8 @@ function Wait-UninstallCleanup {{}}
 function Resume-InterruptedRun {{}}
 function Save-BinarySnapshot {{}}
 function Protect-UvDirectory {{}}
+function Resolve-UvCacheDir([string]$CacheDir) {{ return $CacheDir }}
+function Assert-UvBuildPathFits([string]$CacheDir) {{}}
 function Get-Cosign {{ return '' }}
 function Assert-InstallRoom([long]$Bytes, [string]$Purpose) {{
     if ($Purpose -eq 'the final Python environment') {{ throw 'verified local target ready' }}

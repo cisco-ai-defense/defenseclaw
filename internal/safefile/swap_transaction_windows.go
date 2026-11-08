@@ -6,6 +6,7 @@
 package safefile
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -38,21 +39,42 @@ func warnSwapTransactionFallback() {
 	})
 }
 
-// swapRequiresPlainRename keeps executable images out of a file transaction.
-// When the source cannot be read, retain the original plain rename behavior.
-// Windows can refuse an outside process launch while an image is transacted.
+// swapRequiresPlainRename keeps Windows program images out of a file
+// transaction. Data may also start with MZ, so inspect the PE signature and
+// image header before choosing the plain path. If the stage cannot be read,
+// retain the original plain rename behavior. Windows can refuse an outside
+// process launch while an image is transacted.
 func swapRequiresPlainRename(path string) bool {
 	file, err := os.Open(path)
 	if err != nil {
 		return true
 	}
 	defer file.Close()
-	var header [2]byte
-	n, err := io.ReadFull(file, header[:])
-	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
-		return true
+	var dos [0x40]byte
+	if _, err := file.ReadAt(dos[:], 0); err != nil {
+		return !errors.Is(err, io.EOF)
 	}
-	return n == len(header) && header == [2]byte{'M', 'Z'}
+	if dos[0] != 'M' || dos[1] != 'Z' {
+		return false
+	}
+	// e_lfanew names the PE signature after the DOS header. ReadAt avoids
+	// allocating from an offset supplied by the staged file.
+	offset := int64(binary.LittleEndian.Uint32(dos[0x3c:]))
+	if offset < int64(len(dos)) {
+		return false
+	}
+	var image [26]byte // PE signature, COFF header, optional-header magic.
+	if _, err := file.ReadAt(image[:], offset); err != nil {
+		return !errors.Is(err, io.EOF)
+	}
+	if image[0] != 'P' || image[1] != 'E' || image[2] != 0 || image[3] != 0 {
+		return false
+	}
+	if binary.LittleEndian.Uint16(image[20:22]) < 2 || binary.LittleEndian.Uint16(image[22:24])&0x2 == 0 {
+		return false
+	}
+	magic := binary.LittleEndian.Uint16(image[24:26])
+	return magic == 0x10b || magic == 0x20b
 }
 
 // renameTransacted opens the staged file as part of tx, then renames through

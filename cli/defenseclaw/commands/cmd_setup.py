@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -60,6 +60,7 @@ from defenseclaw import (
     codex_toml,
     connector_paths,
     envvars,
+    gateway_token_adoption,
     openclaw_presence,
     platform_support,
     removed_connectors,
@@ -83,6 +84,7 @@ from defenseclaw.bundle_refresh import (
     is_compose_project_running,
     refresh_splunk_bridge,
 )
+from defenseclaw.cause_text import single_line
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import (
     CONFIG_PATH_ENV,
@@ -2839,8 +2841,10 @@ def _add_trusted_bin_prefix(prefix: str, data_dir: str, cfg=None) -> bool:
 # ---------------------------------------------------------------------------
 # `defenseclaw setup trusted-paths` — manage the binary-discovery allow-list.
 #
-# Built-in defaults come from agent_discovery._builtin_trusted_bin_prefixes and
-# are read-only here. New operator additions persist to config.yaml under
+# Built-in defaults are the prefixes setup itself admits
+# (agent_selection._builtin_setup_trusted_prefixes, resolved from the account's
+# own token) and are read-only here; a passive-discovery default setup does not
+# admit is listed apart and can still be added (GAP-0866). New operator additions persist to config.yaml under
 # ai_discovery.trusted_binary_prefixes. Legacy .env / process env entries are
 # still listed and honored for backward compatibility.
 # ---------------------------------------------------------------------------
@@ -2860,10 +2864,17 @@ def _trusted_prefix_status(resolved: str) -> str:
     return "ok"
 
 
+def _setup_default_prefixes() -> tuple[str, ...]:
+    """The built-in prefixes setup admits, which is what "trusted by default" means."""
+    from defenseclaw.agent_selection import _builtin_setup_trusted_prefixes
+
+    return _builtin_setup_trusted_prefixes()
+
+
 def _default_resolved_prefixes() -> set[str]:
     """Resolved absolute paths of the built-in (non-removable) defaults."""
     out: set[str] = set()
-    for raw in agent_discovery._builtin_trusted_bin_prefixes():
+    for raw in _setup_default_prefixes():
         resolved, _ = agent_discovery.validate_trusted_prefix(raw)
         if resolved:
             out.add(resolved)
@@ -2915,8 +2926,10 @@ def _collect_trusted_prefixes(data_dir: str, cfg=None) -> list[dict[str, object]
     # Keeping the config row visible also keeps the explicit entry removable.
     for raw in config_file:
         _push(raw, "config", True)
-    for raw in agent_discovery._builtin_trusted_bin_prefixes():
+    for raw in _setup_default_prefixes():
         _push(raw, "default", False)
+    for raw in agent_discovery._builtin_trusted_bin_prefixes():
+        _push(raw, "discovery default", False)
     for raw in env_file:
         _push(raw, "legacy .env", True)
     for raw in env_only:
@@ -3007,6 +3020,16 @@ def trusted_paths_add(app: AppContext, directory: str, force: bool, as_json: boo
         agent_discovery._path_key(path) for path in _default_resolved_prefixes()
     }
     if resolved_key in default_keys and not explicitly_configured:
+        if err:
+            # Setup refuses this folder whatever the list says, so "already
+            # trusted" would send the person back to the same refusal.
+            _emit_trusted_path_result(
+                as_json,
+                ok=False,
+                path=resolved,
+                message=f"a built-in prefix, but setup will not trust it until this is fixed: {err}",
+            )
+            click.get_current_context().exit(1)
         _emit_trusted_path_result(as_json, ok=True, path=resolved, message="already trusted by default; nothing to do")
         return
     if err and not force:
@@ -3550,9 +3573,10 @@ class _GuardrailSecretRollbackStatus:
 class _GuardrailSecretFailure(click.ClickException):
     """Public-safe sentinel with no retained secret-bearing exception."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
-        super().__init__(f"guardrail secret transaction failed safely ({code})")
+        message = f"guardrail secret transaction failed safely ({code})"
+        super().__init__(f"{message}: {detail}" if detail else message)
 
 
 def _clear_pending_guardrail_secrets(pending_secrets: list[_PendingGuardrailSecret]) -> None:
@@ -3645,12 +3669,14 @@ def _set_guardrail_secret_process_value(env_name: str, value: str) -> None:
 
 def _restore_guardrail_secret_transaction(
     transaction: _GuardrailSecretTransaction,
+    *,
+    dotenv_lock_held: bool = False,
 ) -> _GuardrailSecretRollbackStatus:
     """Compare-before-restore only state still owned by this transaction."""
 
     status_codes: list[str] = []
     try:
-        with locked_file_update(transaction.dotenv_path):
+        with nullcontext() if dotenv_lock_held else locked_file_update(transaction.dotenv_path):
             current = _rotate_token_snapshot_locked(transaction.dotenv_path)
             if transaction.dotenv_after_authoritative and _guardrail_dotenv_snapshot_matches(
                 current,
@@ -3711,6 +3737,8 @@ def _restore_guardrail_secret_transaction(
 def _publish_pending_guardrail_secrets(
     pending_secrets: list[_PendingGuardrailSecret],
     data_dir: str,
+    *,
+    dotenv_lock_held: bool = False,
 ) -> _GuardrailSecretTransaction | None:
     """Atomically publish deferred judge secrets and return rollback custody."""
 
@@ -3731,7 +3759,7 @@ def _publish_pending_guardrail_secrets(
             )
             for pending in pending_secrets
         )
-        with locked_file_update(dotenv_path):
+        with nullcontext() if dotenv_lock_held else locked_file_update(dotenv_path):
             dotenv_before = _rotate_token_snapshot_locked(dotenv_path)
             for env_name, value in updates:
                 before_existed, before_value = _dotenv_snapshot_raw_key_state(
@@ -3755,6 +3783,8 @@ def _publish_pending_guardrail_secrets(
                     dotenv_before,
                     updates,
                 )
+            except _DotenvSizeError:
+                raise
             except BaseException:
                 publication_failed = True
             try:
@@ -3762,11 +3792,14 @@ def _publish_pending_guardrail_secrets(
                 dotenv_after_authoritative = True
             except BaseException:
                 publication_failed = True
+    except _DotenvSizeError as error:
+        _clear_pending_guardrail_secrets(pending_secrets)
+        raise _GuardrailSecretFailure("publication-dotenv-size-limit", str(error)) from None
     except BaseException:
         publication_failed = True
     if publication_failed and dotenv_before is not None and dotenv_after is None:
         try:
-            with locked_file_update(dotenv_path):
+            with nullcontext() if dotenv_lock_held else locked_file_update(dotenv_path):
                 dotenv_after = _rotate_token_snapshot_locked(dotenv_path)
         except BaseException:
             dotenv_after = None
@@ -3813,7 +3846,9 @@ def _publish_pending_guardrail_secrets(
         rollback_status = _guardrail_secret_rollback_status("publication-custody-unavailable")
         if transaction is not None:
             try:
-                rollback_status = _restore_guardrail_secret_transaction(transaction)
+                rollback_status = _restore_guardrail_secret_transaction(
+                    transaction, dotenv_lock_held=dotenv_lock_held
+                )
             except BaseException:
                 rollback_status = _guardrail_secret_rollback_status("publication-rollback-error")
         _clear_pending_guardrail_secrets(pending_secrets)
@@ -3823,6 +3858,26 @@ def _publish_pending_guardrail_secrets(
         raise _GuardrailSecretFailure(failure_code) from None
     _clear_pending_guardrail_secrets(pending_secrets)
     return transaction
+
+
+def _preflight_pending_guardrail_secret_size(
+    pending_secrets: list[_PendingGuardrailSecret],
+    data_dir: str,
+) -> None:
+    """Check the complete judge-secret update before setup publishes authority."""
+
+    if not pending_secrets:
+        return
+    dotenv_path = os.path.join(data_dir, ".env")
+    # The interactive caller holds the file lock through final publication,
+    # so this size decision stays stable while selection authority changes.
+    snapshot = _rotate_token_snapshot_locked(dotenv_path)
+    updates = tuple(
+        (pending.env_name, sanitize_dotenv_value(pending.value, key=pending.env_name))
+        for pending in pending_secrets
+    )
+    rendered = _render_secrets_to_dotenv(snapshot, updates)
+    _check_dotenv_size(dotenv_path, rendered)
 
 
 @dataclass(frozen=True)
@@ -4461,12 +4516,47 @@ def _dotenv_upsert_render(
     return body
 
 
+class _DotenvSizeError(click.ClickException):
+    """A secret-free refusal that callers can handle before other changes."""
+
+
+def _check_dotenv_size(dotenv_path: str, body: bytes) -> None:
+    if len(body) > MAX_DOTENV_BYTES:
+        raise _DotenvSizeError(
+            f"{dotenv_path} would be {len(body)} bytes, over the {MAX_DOTENV_BYTES}-byte limit "
+            "every reader accepts; it was left unchanged. Remove entries you no longer need and retry."
+        )
+
+
+def _publish_dotenv_locked(dotenv_path: str, body: bytes) -> None:
+    """Publish a complete new dotenv once, or change nothing.
+
+    Every reader rejects a dotenv over ``MAX_DOTENV_BYTES`` whole, so the new file
+    is built in memory and checked against that limit before it is written. A file
+    over it is refused with the cause; the current file stays as it is.
+    """
+
+    _check_dotenv_size(dotenv_path, body)
+    atomic_write_private_bytes(dotenv_path, body)
+
+
 def _save_secrets_to_dotenv_locked(
     dotenv_path: str,
     snapshot: _RotateTokenDotenvSnapshot,
     updates: tuple[tuple[str, str], ...],
 ) -> None:
     """Publish a validated dotenv batch once while the caller owns its lock."""
+
+    body = _render_secrets_to_dotenv(snapshot, updates)
+    if not snapshot.existed or body != snapshot.body:
+        _publish_dotenv_locked(dotenv_path, body)
+
+
+def _render_secrets_to_dotenv(
+    snapshot: _RotateTokenDotenvSnapshot,
+    updates: tuple[tuple[str, str], ...],
+) -> bytes:
+    """Render all secret updates with the same rules for preflight and commit."""
 
     rendered = snapshot
     for key, value in updates:
@@ -4475,8 +4565,7 @@ def _save_secrets_to_dotenv_locked(
             body=_dotenv_upsert_render(rendered, key, value),
             mode=rendered.mode,
         )
-    if not snapshot.existed or rendered.body != snapshot.body:
-        atomic_write_private_bytes(dotenv_path, rendered.body)
+    return rendered.body
 
 
 def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -> bytes:
@@ -4545,7 +4634,7 @@ def _rotate_token_atomic_write_locked(dotenv_path: str, new_token: str) -> None:
     preserving the existing file's unrelated byte shape.
     """
     snapshot = _rotate_token_snapshot_locked(dotenv_path)
-    atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
+    _publish_dotenv_locked(dotenv_path, _rotate_token_render(snapshot, new_token))
 
 
 def _restore_rotate_token_environment(snapshot: dict[str, str | None]) -> None:
@@ -4891,6 +4980,8 @@ def _rotate_token_transaction(
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
         hook_snapshots = [_rotate_token_hook_snapshot_locked(data_dir, connector) for connector in tracked_scopes]
         old_token = _rotate_token_previous_value(app, snapshot)
+        rendered_dotenv = _rotate_token_render(snapshot, new_token)
+        _check_dotenv_size(dotenv_path, rendered_dotenv)
         pid_file = gateway_pid_path(data_dir)
         was_running = _is_pid_alive(pid_file)
         if was_running and any(
@@ -4914,9 +5005,21 @@ def _rotate_token_transaction(
             hook_snapshot.connector: hook_snapshot.windows_security for hook_snapshot in hook_snapshots
         }
         connector_state_a = _rotate_token_connector_state(authoritative_cfg, old_hook_fingerprints)
+        new_hook_values = _rotate_token_new_hook_values(
+            [*requested_scopes, *live_orphan_scopes],
+            new_token,
+            {**old_hook_fingerprints, **old_orphan_fingerprints},
+        )
+        new_hook_fingerprints = {
+            connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
+        }
+        connector_state_b = _rotate_token_connector_state(
+            authoritative_cfg,
+            {name: value for name, value in new_hook_fingerprints.items() if name in requested_scopes},
+            {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
+        )
         old_stopped = False
         mutation_attempted = False
-        new_hook_values: dict[str, str] = {}
         try:
             try:
                 _run_rotate_token_lifecycle(data_dir, "stop", token=old_token, config_file=config_file)
@@ -4943,21 +5046,8 @@ def _rotate_token_transaction(
                 raise
             old_stopped = True
 
-            new_hook_values = _rotate_token_new_hook_values(
-                [*requested_scopes, *live_orphan_scopes],
-                new_token,
-                {**old_hook_fingerprints, **old_orphan_fingerprints},
-            )
-            new_hook_fingerprints = {
-                connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
-            }
-            connector_state_b = _rotate_token_connector_state(
-                authoritative_cfg,
-                {name: value for name, value in new_hook_fingerprints.items() if name in requested_scopes},
-                {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
-            )
             mutation_attempted = True
-            atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
+            _publish_dotenv_locked(dotenv_path, rendered_dotenv)
             for connector, value in sorted(new_hook_values.items()):
                 atomic_write_private_bytes(
                     _rotate_token_hook_path(data_dir, connector),
@@ -6309,10 +6399,13 @@ def _version_scan_persists(connector: str) -> bool:
 
     Native Windows OpenCode/Amp setup immediately records a protected,
     connector-scoped executable selection, so its admission scan does not
-    need to republish the process-wide discovery cache. Leaving that cache
-    untouched prevents an unrelated connector whose CLI is temporarily
-    undiscoverable from losing already-sealed version and contract status
-    when the gateway restarts every active connector.
+    republish the process-wide discovery cache: a whole-scan write would let
+    an unrelated connector whose CLI is temporarily undiscoverable lose
+    already-sealed version and contract status when the gateway restarts
+    every active connector. The version setup read is still recorded for
+    this connector alone, by :func:`_publish_agent_signal`, so doctor and
+    ``agent discover`` do not report a fresh setup as not installed until
+    ``agent discover --refresh`` (GAP-0882).
     """
     connector = normalize_connector(connector)
     return connector != "codex" and not (
@@ -6404,6 +6497,13 @@ def _check_connector_version_supported_for_setup(
                     ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
                 _refuse_in_every_mode(_refusal_scope, "Codex version evidence could not be saved for gateway restart")
                 return False
+    elif installed and _discovery is None and not _version_scan_persists(connector):
+        # Native Windows OpenCode/Amp: the scan above wrote nothing, and the
+        # protected selection is not what doctor reads, so the executable and
+        # version setup just verified are published here, for this connector
+        # only; every peer entry stays as the cache holds it (GAP-0882). A
+        # failed write changes no admission, which comes from the selection.
+        agent_discovery._publish_agent_signal(disc, connector, data_dir=data_dir)
 
     compatibility = resolve_connector_contract(connector, raw_version)
     if connector == "kiro":
@@ -6901,7 +7001,7 @@ def _record_windows_setup_agent_selections(
         except OSError as exc:
             raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
     try:
-        return _validate_setup_agent_selection_receipt(
+        verified = _validate_setup_agent_selection_receipt(
             target_dir,
             selected,
             selections,
@@ -6911,6 +7011,36 @@ def _record_windows_setup_agent_selections(
         raise click.ClickException(
             f"could not bind selected agent executables to the protected receipt: {exc}"
         ) from exc
+    _publish_verified_selection_discovery(target_dir, selections)
+    return verified
+
+
+def _publish_verified_selection_discovery(
+    data_dir: str | os.PathLike[str],
+    selections: dict[str, Any],
+) -> None:
+    """Leave doctor the executable and version setup verified (GAP-0882).
+
+    Native-Windows OpenCode setup skips the generic version check, so no scan
+    wrote the discovery cache doctor reads and a healthy fresh setup failed
+    Connector compatibility until `agent discover --refresh`. Every route
+    reaches this through the one place that verifies the executables.
+    Only the entry of that one connector is written; admission comes from the protected
+    selection, so a write that fails changes nothing but this notice.
+    """
+    for name, selection in selections.items():
+        if not _windows_opencode_requires_exact_selection(name):
+            continue
+        if not agent_discovery.publish_verified_agent(
+            name,
+            binary_path=selection.executable,
+            version=selection.raw_version,
+            data_dir=data_dir,
+        ):
+            ux.warn(
+                f"could not record the verified {name} install for doctor; "
+                "run: defenseclaw agent discover --refresh"
+            )
 
 
 def _guardrail_effective_mode(gc, connector: str) -> str:
@@ -7054,9 +7184,10 @@ def _warn_openclaw_setup_advisories(
             ux.warn(f"{OPENCLAW_APPROVAL_SURFACES}.")
     if not openclaw_config_file:
         return
+    from defenseclaw.openclaw_json5 import load_file as _load_openclaw_json5
+
     try:
-        with open(os.path.expanduser(openclaw_config_file), encoding="utf-8") as fh:
-            openclaw_config = _json.load(fh)
+        openclaw_config = _load_openclaw_json5(os.path.expanduser(openclaw_config_file))
     except (OSError, ValueError):
         return
     if openclaw_bedrock_plugin_missing(raw_version, openclaw_config):
@@ -7703,6 +7834,7 @@ def setup_guardrail(
         """Restore transaction-owned exact authority after an interactive no-op."""
 
         if protected_selection is None:
+            _restore_setup_config_in_memory(app, setup_snapshot)
             return
         rollback_errors: list[str] = []
         for label, restore in (
@@ -7753,6 +7885,58 @@ def setup_guardrail(
             status_codes.append("setup-rollback-error")
         status_codes.extend(restore_guardrail_secret_publication().codes)
         return _guardrail_secret_rollback_status(*status_codes)
+
+    def publish_guardrail_secrets(*, dotenv_lock_held: bool = False) -> _GuardrailSecretTransaction | None:
+        """Publish pending secrets and preserve the setup rollback contract."""
+
+        secret_publication_expected = bool(pending_guardrail_secrets)
+        secret_publication_failed = False
+        secret_publication_rollback_incomplete = False
+        size_refusal: _GuardrailSecretFailure | None = None
+        try:
+            transaction = _publish_pending_guardrail_secrets(
+                pending_guardrail_secrets,
+                app.cfg.data_dir,
+                dotenv_lock_held=dotenv_lock_held,
+            )
+        except _GuardrailSecretFailure as publication_failure:
+            if not secret_publication_expected:
+                raise
+            secret_publication_rollback_incomplete = (
+                publication_failure.code == "publication-failed-rollback-incomplete"
+            )
+            if publication_failure.code == "publication-dotenv-size-limit":
+                size_refusal = publication_failure
+            secret_publication_failed = True
+        except BaseException:
+            if not secret_publication_expected:
+                raise
+            secret_publication_failed = True
+        if secret_publication_failed:
+            if size_refusal is not None and not selection_attempted:
+                # The bounded writer has changed no file or process value. Restore
+                # only the in-memory setup draft; republishing the snapshot would
+                # change file identity on a refusal that needs no rollback.
+                _restore_setup_config_in_memory(app, setup_snapshot)
+                raise size_refusal from None
+            setup_rollback_failed = False
+            try:
+                _restore_setup_config_snapshot(app, setup_snapshot)
+            except BaseException:
+                setup_rollback_failed = True
+            if setup_rollback_failed and secret_publication_rollback_incomplete:
+                failure_code = "publication-failed-setup-and-secret-rollback-incomplete"
+            elif secret_publication_rollback_incomplete:
+                failure_code = "publication-failed-secret-rollback-incomplete"
+            elif setup_rollback_failed:
+                failure_code = "publication-failed-setup-rollback-incomplete"
+            else:
+                failure_code = "publication-failed-setup-restored"
+            if size_refusal is not None and not setup_rollback_failed:
+                raise size_refusal from None
+            raise _GuardrailSecretFailure(failure_code) from None
+
+        return transaction
 
     aid = app.cfg.cisco_ai_defense
 
@@ -8044,6 +8228,7 @@ def setup_guardrail(
                 ux.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         secret_collection_failure_code: str | None = None
+        interactive_targets: list[tuple[str, ...]] = []
         if guard_mode or human_approval is not None or hilt_min_severity:
             click.echo("  The prompts below default to the flags you passed; add --yes to skip them.")
         try:
@@ -8054,7 +8239,7 @@ def setup_guardrail(
                 default_mode=guard_mode,
                 human_approval=human_approval,
                 hilt_min_severity=hilt_min_severity,
-                _pre_mutation_selection=preselect_guardrail_targets,
+                _pre_mutation_selection=lambda targets: interactive_targets.append(tuple(targets)),
                 _pending_secrets=pending_guardrail_secrets,
             )
             if not interactive_completed:
@@ -8062,13 +8247,28 @@ def setup_guardrail(
                 restore_precommit_guardrail_selection()
                 click.echo("  Guardrail not enabled. Run again without declining to configure.")
                 return
-            _apply_guardrail_extra_options(
-                gc,
-                rule_pack=rule_pack,
-                connector=explicit_connector,
-                human_approval=human_approval,
-                hilt_min_severity=hilt_min_severity,
-            )
+            # Keep the complete-size decision stable while selection authority
+            # changes and the pending secrets are published.
+            pending_secret_lock_held = bool(pending_guardrail_secrets)
+            dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+            with locked_file_update(dotenv_path) if pending_secret_lock_held else nullcontext():
+                _preflight_pending_guardrail_secret_size(pending_guardrail_secrets, app.cfg.data_dir)
+                for targets in interactive_targets:
+                    preselect_guardrail_targets(targets)
+                _apply_guardrail_extra_options(
+                    gc,
+                    rule_pack=rule_pack,
+                    connector=explicit_connector,
+                    human_approval=human_approval,
+                    hilt_min_severity=hilt_min_severity,
+                )
+                guardrail_secret_transaction = publish_guardrail_secrets(
+                    dotenv_lock_held=pending_secret_lock_held
+                )
+        except _DotenvSizeError as error:
+            _clear_pending_guardrail_secrets(pending_guardrail_secrets)
+            restore_precommit_guardrail_selection()
+            raise _GuardrailSecretFailure("publication-dotenv-size-limit", str(error)) from None
         except click.Abort:
             secret_was_collected = bool(pending_guardrail_secrets)
             _clear_pending_guardrail_secrets(pending_guardrail_secrets)
@@ -8086,8 +8286,11 @@ def setup_guardrail(
             secret_collection_failure_code = (
                 "collection-aborted-rollback-incomplete" if selection_rollback_failed else "collection-aborted-restored"
             )
+        except _GuardrailSecretFailure:
+            raise
         except BaseException:
             if not pending_guardrail_secrets:
+                restore_precommit_guardrail_selection()
                 raise
             _clear_pending_guardrail_secrets(pending_guardrail_secrets)
             selection_rollback_failed = False
@@ -8101,38 +8304,8 @@ def setup_guardrail(
         if secret_collection_failure_code is not None:
             raise _GuardrailSecretFailure(secret_collection_failure_code) from None
 
-    secret_publication_expected = bool(pending_guardrail_secrets)
-    secret_publication_failed = False
-    secret_publication_rollback_incomplete = False
-    try:
-        guardrail_secret_transaction = _publish_pending_guardrail_secrets(
-            pending_guardrail_secrets,
-            app.cfg.data_dir,
-        )
-    except _GuardrailSecretFailure as publication_failure:
-        if not secret_publication_expected:
-            raise
-        secret_publication_rollback_incomplete = publication_failure.code == "publication-failed-rollback-incomplete"
-        secret_publication_failed = True
-    except BaseException:
-        if not secret_publication_expected:
-            raise
-        secret_publication_failed = True
-    if secret_publication_failed:
-        setup_rollback_failed = False
-        try:
-            _restore_setup_config_snapshot(app, setup_snapshot)
-        except BaseException:
-            setup_rollback_failed = True
-        if setup_rollback_failed and secret_publication_rollback_incomplete:
-            failure_code = "publication-failed-setup-and-secret-rollback-incomplete"
-        elif secret_publication_rollback_incomplete:
-            failure_code = "publication-failed-secret-rollback-incomplete"
-        elif setup_rollback_failed:
-            failure_code = "publication-failed-setup-rollback-incomplete"
-        else:
-            failure_code = "publication-failed-setup-restored"
-        raise _GuardrailSecretFailure(failure_code) from None
+    if non_interactive:
+        guardrail_secret_transaction = publish_guardrail_secrets()
 
     if not gc.enabled:
         if guardrail_secret_transaction is not None:
@@ -15131,15 +15304,19 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
     if not detected or detected == previous:
         return
     data_dir = app.cfg.data_dir
-    stopped = restart and _stop_gateway_before_token_swap(data_dir)
-    if not stopped:
-        # --no-restart: the running gateway keeps the old token (GAP-0464).
-        keep_running_gateway_token(app.logger, data_dir, previous, detected)
+    stopped = False
+
+    def before_publish() -> None:
+        nonlocal stopped
+        stopped = restart and _stop_gateway_before_token_swap(data_dir)
+        if not stopped:
+            # --no-restart: the running gateway keeps the old token (GAP-0464).
+            keep_running_gateway_token(app.logger, data_dir, previous, detected)
+
     keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
     if gw.token_env and gw.token_env not in keys:
         keys.append(gw.token_env)
-    for key in keys:
-        _save_secret_to_dotenv(key, detected, data_dir)
+    _save_adopted_gateway_token(keys, detected, data_dir, before_publish=before_publish)
     click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
     if stopped:
         ctx = click.get_current_context(silent=True)
@@ -15825,7 +16002,9 @@ def _guardrail_summary_hook_fail_mode(cfg, connector: str) -> str:
     if not (gc.enabled and gc.effective_enabled(connector)):
         return "disabled (no hooks)"
     if normalize_connector(connector) in PROXY_CONNECTORS:
-        return "closed (proxy-backed, no hooks: blocked while the gateway is down)"
+        from defenseclaw.fail_mode import proxy_model_outage_mode, proxy_outage_summary
+
+        return proxy_outage_summary(proxy_model_outage_mode(cfg, connector))
     mode = gc.effective_hook_outage_fail_mode(connector)
     entry = (gc.connectors or {}).get(connector)
     saved = bool(entry is not None and str(entry.hook_fail_mode or "").strip()) or bool(
@@ -17201,7 +17380,7 @@ _GATEWAY_REASON_MAX_CHARS = 1200
 
 
 def _bounded_gateway_reason(reason: str) -> str:
-    reason = " ".join(reason.split())
+    reason = single_line(reason)
     if len(reason) > _GATEWAY_REASON_MAX_CHARS:
         reason = reason[:_GATEWAY_REASON_MAX_CHARS] + " ... (gateway.log has the rest)"
     return reason
@@ -21396,6 +21575,36 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
             ((key, value),),
         )
     os.environ[key] = value
+
+
+def _save_adopted_gateway_token(
+    keys: list[str], token: str, data_dir: str, *, before_publish: Callable[[], None] | None = None
+) -> None:
+    """Copy *token*, adopted from openclaw.json, under every name in *keys*.
+
+    The new .env is built whole in memory with the adopted-token marker and
+    published once, so a failure leaves neither name changed. A later edit of one
+    gateway-token spelling then wins over the copy under the other (GAP-0847); see
+    ``defenseclaw.gateway_token_adoption``.
+    """
+    dotenv_path = os.path.join(data_dir, ".env")
+    with locked_file_update(dotenv_path):
+        snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        rendered = snapshot
+        for key in keys:
+            rendered = _RotateTokenDotenvSnapshot(
+                existed=True,
+                body=_dotenv_upsert_render(rendered, key, token),
+                mode=rendered.mode,
+            )
+        body = gateway_token_adoption.with_adopted_marker(rendered.body, token)
+        _check_dotenv_size(dotenv_path, body)
+        if before_publish is not None:
+            before_publish()
+        if not snapshot.existed or body != snapshot.body:
+            _publish_dotenv_locked(dotenv_path, body)
+    for key in keys:
+        os.environ[key] = token
 
 
 # ---------------------------------------------------------------------------

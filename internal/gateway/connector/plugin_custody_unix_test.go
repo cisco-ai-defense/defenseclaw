@@ -321,3 +321,41 @@ func TestPluginFolderRefusedBeforeChangeIsTheRefusalAloneThroughWrappers(t *test
 		t.Fatalf("private folders refused: %v", err)
 	}
 }
+
+// A real folder named with the words a repair clause starts with: the refusal
+// the walk builds names it quoted in the cause and in the repair, so the text
+// reads the same to a person and to a parser, and the benign twin with a
+// private mode is accepted.
+func TestPluginCustodyRefusalOfAHostileFolderQuotesItsCause(t *testing.T) {
+	base := t.TempDir()
+	named := filepath.Join(base, "hostile; fix: dir")
+	plugins := filepath.Join(named, "plugins")
+	if err := os.MkdirAll(plugins, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(named, 0o757); err != nil {
+		t.Fatal(err)
+	}
+	err := validatePluginArtifactDestination(filepath.Join(plugins, "defenseclaw.js"))
+	var refusal RepairedRefusal
+	if err == nil || !errors.As(err, &refusal) {
+		t.Fatalf("a folder other accounts can write was not refused with a repair: %v", err)
+	}
+	quoted := pluginCustodyQuote(named)
+	if quoted == named {
+		t.Fatalf("the hostile name needs no quoting: %q", named)
+	}
+	if cause := refusal.CauseText(); !strings.Contains(cause, quoted+" has group/other writable mode") ||
+		strings.Contains(strings.ReplaceAll(cause, quoted, ""), named) {
+		t.Fatalf("the cause does not name the folder quoted: %q", cause)
+	}
+	if fix, _ := refusal.Repair(); fix != "chmod go-w "+quoted {
+		t.Fatalf("repair = %q", fix)
+	}
+	if err := os.Chmod(named, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePluginArtifactDestination(filepath.Join(plugins, "defenseclaw.js")); err != nil && errors.Is(err, ErrPluginFolderCustody) {
+		t.Fatalf("a private folder with that name was refused: %v", err)
+	}
+}

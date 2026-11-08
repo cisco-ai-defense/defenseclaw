@@ -483,8 +483,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if !rotationTransaction {
 			err = explainForeignListenerAtReadiness(cfg, err)
 		}
-		return fmt.Errorf("start daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
-			gatewayStartFailureDiskNote(config.DefaultDataPath()))
+		return gatewayReadinessFailure("start daemon readiness", err, d.LogFile())
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
 	removeRunningGatewayToken(config.DefaultDataPath())
@@ -906,8 +905,7 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		err = gatewayExitedBeforeReadinessError(err, d.LogFile(), logOffset)
 		err = explainForeignListenerAtReadiness(cfg, err)
-		return fmt.Errorf("restart daemon readiness: %w (check %s for errors)%s", err, d.LogFile(),
-			gatewayStartFailureDiskNote(config.DefaultDataPath()))
+		return gatewayReadinessFailure("restart daemon readiness", err, d.LogFile())
 	}
 	clearGatewayColdStartState(config.DefaultDataPath())
 	removeRunningGatewayToken(config.DefaultDataPath())
@@ -1448,6 +1446,8 @@ func readDotEnv(path string) map[string]string {
 		return nil
 	}
 	env := make(map[string]string)
+	// An adopted gateway token copy never shadows the one the operator saved.
+	shadowed := envvars.ShadowedAdoptedGatewayTokens(data)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || line[0] == '#' {
@@ -1458,6 +1458,9 @@ func readDotEnv(path string) map[string]string {
 			continue
 		}
 		key, value = strings.TrimSpace(key), strings.TrimSpace(value)
+		if shadowed.Has(key) {
+			continue
+		}
 		if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
 			value = value[1 : len(value)-1]
 		}

@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -53,6 +54,17 @@ import (
 // A protected target spelled in a way the scan cannot see is a detection
 // miss and belongs to the hook-path detection work (#1189).
 func LateOrdinaryCall(connector string, payload []byte) bool {
+	return LateOrdinaryCallAt("", connector, payload)
+}
+
+// LateOrdinaryCallAt is LateOrdinaryCall for an account whose home is given:
+// every home-relative answer (the protected folders and authorized-keys files,
+// the hard-link identities, the home itself) is told against home, not against
+// the home of the process. A shell hook replaces HOME with a scratch folder
+// before it runs the helper, so the helper of such a hook must be given the
+// account home it saved, or a hard link to a protected file is not found
+// (GAP-0850). An empty home is the home of the process.
+func LateOrdinaryCallAt(home, connector string, payload []byte) bool {
 	if runtime.GOOS == "windows" || len(payload) == 0 || len(payload) > MaxPayloadBytes {
 		return false
 	}
@@ -77,7 +89,7 @@ func LateOrdinaryCall(connector string, payload []byte) bool {
 		json.Unmarshal(argsRaw, &args) != nil || !filepath.IsAbs(cwd) {
 		return false
 	}
-	scan, ok := newLateScan(cwd)
+	scan, ok := newLateScan(cwd, home)
 	if !ok {
 		return false
 	}
@@ -98,10 +110,7 @@ func LateOrdinaryCall(connector string, payload []byte) bool {
 			if json.Unmarshal(raw, &workdir) != nil || workdir == "" || strings.HasPrefix(workdir, "~") {
 				return false
 			}
-			if !filepath.IsAbs(workdir) {
-				workdir = filepath.Join(cwd, workdir)
-			}
-			if scan, ok = newLateScan(workdir); !ok {
+			if scan, ok = newLateScan(lateAt(cwd, workdir), home); !ok {
 				return false
 			}
 		}
@@ -162,8 +171,12 @@ type lateScan struct {
 	chain  []string // every folder the shell may have stood in so far
 	orSeen bool     // a "||" since the last ";": a later "&&" may run without the cd before it
 	home   string
-	seen   map[string]lateEntry
-	reach  lateReach // what is protected, found when a link or a hard link needs it
+	// indexHomes: the homes whose protected files the scan indexes, the home
+	// first. A given home that is no folder adds the other homes the call
+	// can mean (lateFallbackHomes).
+	indexHomes []string
+	seen       map[string]lateEntry
+	reach      lateReach // what is protected, found when a link or a hard link needs it
 }
 
 // lateEntry is what the scan found at one path: whether the entry is
@@ -177,20 +190,94 @@ type lateEntry struct {
 // lateMaxCwds bounds the working directories one call may visit.
 const lateMaxCwds = 8
 
-func newLateScan(cwd string) (*lateScan, bool) {
-	home, err := os.UserHomeDir()
-	if err != nil || !filepath.IsAbs(home) {
-		return nil, false
-	}
-	realHome, err := pathEvalSymlinks(home)
-	if err != nil {
-		return nil, false
+func newLateScan(cwd, home string) (*lateScan, bool) {
+	given := home != ""
+	if !given {
+		var err error
+		if home, err = os.UserHomeDir(); err != nil {
+			return nil, false
+		}
 	}
 	realCWD, err := pathEvalSymlinks(cwd)
 	if err != nil || lateNamesProtected(realCWD) || realCWD == string(filepath.Separator) {
 		return nil, false
 	}
-	return &lateScan{cwds: []string{realCWD}, chain: []string{realCWD}, home: realHome, seen: map[string]lateEntry{}}, true
+	realHome, ok := lateUsableHome(home)
+	indexHomes := []string{realHome}
+	// A home that was given but is no folder (a relative path, a missing
+	// path, a regular file) holds no protected file of its own. The protected
+	// files the call can reach are then those of the homes it can mean: the
+	// account database home (the scan tells that one) and the others
+	// lateFallbackHomes lists. Their identities are indexed as for a usable
+	// home, so a hard link to a protected file stays closed and a hard link
+	// to an ordinary file stays ordinary.
+	if !ok && given {
+		current, err := user.Current()
+		if err != nil {
+			return nil, false
+		}
+		if realHome, ok = lateUsableHome(current.HomeDir); ok {
+			indexHomes = lateFallbackHomes(home, realCWD, realHome)
+		}
+	}
+	if !ok {
+		return nil, false
+	}
+	return &lateScan{cwds: []string{realCWD}, chain: []string{realCWD}, home: realHome, indexHomes: indexHomes, seen: map[string]lateEntry{}}, true
+}
+
+// lateFallbackHomes lists the homes whose protected files an unusable given
+// home leaves open, the account database home first: the home of the
+// process, and the given home read against the folder the call runs in when
+// it is a relative path (by file system rules, a link before a parent step
+// included). Only folders are listed, each once.
+func lateFallbackHomes(given, cwd, account string) []string {
+	homes := []string{account}
+	candidates := []string{}
+	if env, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, env)
+	}
+	if !filepath.IsAbs(given) {
+		candidates = append(candidates, lateAt(cwd, given))
+	}
+	for _, candidate := range candidates {
+		if real, ok := lateUsableHome(candidate); ok && !slices.Contains(homes, real) {
+			homes = append(homes, real)
+		}
+	}
+	return homes
+}
+
+// lateAt places a path that may be relative at the folder a call runs in,
+// as text. It is the only way the late scan joins a relative path (a
+// workdir, a saved home) to a folder: filepath.Join would drop a parent step
+// before any link is resolved, which names another folder than the file
+// system does when a link comes before the "..". The result is resolved
+// component by component, a link before a parent step included, by
+// pathEvalSymlinks (newLateScan, lateUsableHome); an operand word is walked
+// the same way by lateScan.walk, which closes on any parent step.
+func lateAt(base, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return base + string(filepath.Separator) + path
+}
+
+// lateUsableHome resolves a home by file system rules (a parent step or a
+// trailing slash included) and reports it only when it is an absolute path
+// to a folder.
+func lateUsableHome(home string) (string, bool) {
+	if !filepath.IsAbs(home) {
+		return "", false
+	}
+	real, err := pathEvalSymlinks(home)
+	if err != nil {
+		return "", false
+	}
+	if info, err := pathStat(real); err != nil || !info.IsDir() {
+		return "", false
+	}
+	return real, true
 }
 
 // lateNamesProtected reports text that names, in any case, the SSH folder,

@@ -90,6 +90,10 @@ type answerWatchdog struct {
 	visibleOutage                func() ([]byte, []byte, int)
 	exit                         func(int)
 	deliveryReceipt              func(bool, bool)
+	// revoke reads the call's patch targets once more after finish wrote an
+	// allow, and replaces it with a block when one changed (hookexec,
+	// GAP-0488, GAP-0073). It reports whether it did.
+	revoke func(stdout, stderr io.Writer) (int, bool)
 
 	// installCheck is the install look of a call whose fallback is not
 	// closed: the .install.lock of a per-user call's data directory
@@ -842,12 +846,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	}
 	if w.failureLogged {
 		if w.failureLogDone != nil {
-			timer := time.NewTimer(answerWatchdogLogWait)
-			select {
-			case <-w.failureLogDone:
-			case <-timer.C:
-			}
-			timer.Stop()
+			waitForLog(w.failureLogDone)
 		}
 		w.exit(w.fallbackCode)
 		return
@@ -858,12 +857,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		defer close(logged)
 		logFailure()
 	}()
-	timer := time.NewTimer(answerWatchdogLogWait)
-	select {
-	case <-logged:
-	case <-timer.C:
-	}
-	timer.Stop()
+	waitForLog(logged)
 	// Production exits here; the lock is never released, so the call's own
 	// output cannot follow the answer.
 	w.exit(w.fallbackCode)
@@ -905,6 +899,20 @@ func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int)
 	w.visibleOutage = nil
 }
 
+// waitForLog waits for the watchdog's hook-failures row (done) for at most
+// answerWatchdogLogWait. The bound runs on the proof clock like the other
+// post-deadline bounds of a call, so a test decides whether it is spent
+// instead of racing the host for a file append (GAP-0859); a release build
+// runs the system clock.
+func waitForLog(done <-chan struct{}) {
+	expired, stop := proofclock.NewTimer(answerWatchdogLogWait)
+	defer stop()
+	select {
+	case <-done:
+	case <-expired:
+	}
+}
+
 // installLockHeldWithin is installLockHeld bounded by wait: a look that
 // takes longer counts as a held lock.
 func installLockHeldWithin(home string, wait time.Duration) bool {
@@ -919,12 +927,12 @@ func installLockHeldWithin(home string, wait time.Duration) bool {
 func heldWithin(check func() bool, wait time.Duration) bool {
 	held := make(chan bool, 1)
 	go func() { held <- check() }()
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	expired, stop := proofclock.NewTimer(wait)
+	defer stop()
 	select {
 	case h := <-held:
 		return h
-	case <-timer.C:
+	case <-expired:
 		return true
 	}
 }
@@ -1035,8 +1043,16 @@ func (w *answerWatchdog) finish(code int) int {
 	w.finished = true
 	_, _ = w.stderr.Write(w.err.Bytes())
 	_, _ = w.stdout.Write(w.out.Bytes())
+	closed := w.failureClosed
+	if code == 0 && w.revoke != nil {
+		// The agent reads the answer when this hook exits, so a target that
+		// changed while the answer was written is still refused.
+		if revoked, ok := w.revoke(w.stdout, w.stderr); ok {
+			code, closed = revoked, true
+		}
+	}
 	if w.deliveryReceipt != nil {
-		w.deliveryReceipt(true, w.failureClosed)
+		w.deliveryReceipt(true, closed)
 	}
 	return code
 }
@@ -1083,12 +1099,7 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 		logged = done
 	}
 	if logged != nil {
-		timer := time.NewTimer(answerWatchdogLogWait)
-		select {
-		case <-logged:
-		case <-timer.C:
-		}
-		timer.Stop()
+		waitForLog(logged)
 	}
 	if w.deliveryReceipt != nil {
 		w.deliveryReceipt(false, true)
@@ -1100,6 +1111,13 @@ func (w *answerWatchdog) answerLate() (code int, ok bool) {
 // w.mu is held.
 func (w *answerWatchdog) lateAnswerOwedLocked() bool {
 	return !w.fired && !w.finished && !w.answeredInTime.Load() && w.lateAnswerDue()
+}
+
+// setRevoke registers the check finish runs after it writes an allow.
+func (w *answerWatchdog) setRevoke(revoke func(stdout, stderr io.Writer) (int, bool)) {
+	w.mu.Lock()
+	w.revoke = revoke
+	w.mu.Unlock()
 }
 
 func (w *answerWatchdog) setDeliveryReceipt(receipt func(bool, bool)) {

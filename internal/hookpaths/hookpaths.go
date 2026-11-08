@@ -41,9 +41,10 @@ const CWDKey = "\x00cwd"
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
 
-// PatchCompleteKey is positive hook-side proof that every apply_patch
-// directive was parsed and each target was resolved in the user's filesystem
-// view. The gateway may be unable to repeat that walk under ProtectHome.
+// PatchCompleteKey is positive hook-side proof that every apply_patch (or
+// Hermes V4A patch) directive was parsed and each target was resolved in the
+// user's filesystem view. The gateway may be unable to repeat that walk
+// under ProtectHome.
 const PatchCompleteKey = "\x00patch-complete"
 
 // ActionDecisionKey carries the user's hook reading of a shell command:
@@ -557,7 +558,7 @@ func expandStaticShellWord(word *syntax.Word, env expand.Environ, haveHome bool)
 	if shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
-	fields, err := expand.Fields(&expand.Config{Env: env}, word)
+	fields, err := shellparse.Fields(&expand.Config{Env: env}, word)
 	if err != nil || len(fields) != 1 {
 		return "", false
 	}
@@ -833,6 +834,14 @@ func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) 
 func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bool, memo *TargetMemo) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
+	}
+	if base != "" && runtime.GOOS == "windows" {
+		// base is set only for the target of a link: spell it so the walk
+		// follows the file the link reaches (GAP-0855).
+		var ok bool
+		if path, ok = windowsLinkTarget(base, path); !ok {
+			return "", nil, linkDepth, false
+		}
 	}
 	current := base
 	absolute := filepath.IsAbs(path)
@@ -1239,6 +1248,22 @@ func hookShellDialect(connector, tool string) actionfacts.Dialect {
 // so the map lists that call's targets and the limit alone does not make it
 // incomplete. Any other reason still does.
 func ResolveConnector(connector, surface, event string, payload []byte) string {
+	return resolveConnector(connector, surface, event, payload, nil)
+}
+
+// ResolveConnectorWatch is ResolveConnector and also returns the watch of
+// the patch targets the evidence attests complete, nil when it attests none.
+// The hook reads those targets again with it after the gateway has answered,
+// without decoding the evidence it sent.
+func ResolveConnectorWatch(connector, surface, event string, payload []byte) (string, *PatchTargetWatch) {
+	var watch *PatchTargetWatch
+	evidence := resolveConnector(connector, surface, event, payload, &watch)
+	return evidence, watch
+}
+
+// resolveConnector is ResolveConnector; a non-nil watch receives the watch of
+// the evidence it returns.
+func resolveConnector(connector, surface, event string, payload []byte, watch **PatchTargetWatch) string {
 	defer HookCall()()
 	if len(payload) > MaxPayloadBytes {
 		return incompleteEvidence("")
@@ -1318,7 +1343,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				// calls; the gateway judges each (GAP-1016, agent-hook), so
 				// each is described and the maps are merged.
 				if list, isList := calls.([]any); isList && len(list) > 1 {
-					return resolveCopilotCalls(connector, surface, event, envelope, list)
+					return resolveCopilotCalls(connector, surface, event, envelope, list, watch)
 				}
 				return incompleteEvidence("")
 			}
@@ -1390,11 +1415,35 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			args = clean
 		}
 	}
+	// A Hermes V4A patch is a native file tool, not shell: the gateway judges
+	// each file its headers name as a write_file or delete of that file
+	// (connector.HermesTrustedWriteViews). List and resolve those files as
+	// the apply_patch targets are (GAP-0488).
+	var hermesV4A, hermesV4AKnown bool
+	var hermesV4ATargets []string
 	if tool == "patch" && strings.EqualFold(strings.TrimSpace(connector), "hermes") {
 		// The gateway judges a Hermes replace patch as the edit it makes:
 		// describe that call, as write_file is described (GAP-0680).
 		if edit, ok := hermesReplaceEditArgs(args); ok {
 			tool, args = "edit", edit
+		} else {
+			hermesV4ATargets, hermesV4A, hermesV4AKnown = hermesV4APatchTargets(args, cwd, home)
+		}
+	}
+	// A V4A target that reaches a protected key file is the client's positive
+	// protected-target decision, which a gateway behind ProtectHome keeps.
+	hermesV4AProtected := false
+	protected := newProtectedFiles(home)
+	if hermesV4AKnown {
+		// The files that are no key file are dropped only for a target that
+		// reaches a protected file at all, so an ordinary target reads none
+		// of them.
+		for _, target := range hermesV4ATargets {
+			if protectedReachPath(target, protected, filepath.Join(home, ".ssh")) &&
+				protectedReachPath(target, protected.keysOnlyWith(home, nil), filepath.Join(home, ".ssh")) {
+				hermesV4AProtected = true
+				break
+			}
 		}
 	}
 	input := actionfacts.Input{Tool: tool, Args: args, CWD: cwd, ActiveHome: home}
@@ -1433,7 +1482,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var globFacts, walkFacts map[string]string
 	var unprovenReason string
-	var protectedDecision bool
+	protectedDecision := hermesV4AProtected
 	var noDereferenceTouchSafe bool
 	// identities is the file-identity evidence for InstructionIdentityKey:
 	// every existing instruction file a write target names.
@@ -1441,6 +1490,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var identities, fileIdentities []string
 	writeIdentities := make(map[string]string)
 	instructions := NewInstructionFiles(cwd, home, nil)
+	// One reading of each instruction directory and file serves the target
+	// identities below and the sighting of the reached directories.
+	reads := &scanReads{}
+	instructions.reads = reads
 	noteIdentity := func(resolved string) {
 		// Every instruction name of the target's file (GAP-1127).
 		named := instructions.Identities(resolved)
@@ -1698,10 +1751,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		replacedLinks = movedOntoLinkEntriesOf(destinations, noTarget)
 	}
+	// A native patch call names its files in the call, not in a shell command.
+	nativePatch := isApplyPatchToolName(tool) || hermesV4A
 	targets := map[string]string{CWDKey: cwd}
 	// The fixed part counts the truncation marker, so setting it never
 	// exceeds the budget.
-	protected := newProtectedFiles(home)
 	size := 2 + len(jsonString(CWDKey)) + 1 + len(jsonString(cwd)) + 1 + len(jsonString(TruncatedKey)) + 1 + 3 +
 		len(jsonString(BudgetKey)) + 1 + 3 + 1
 	// overBudget is set when an operand or fact is left out only because the
@@ -1784,6 +1838,22 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			// may be replaced, not followed (sed -i on the link).
 			if state, inState := links.stateTarget(filepath.Dir(resolutionPath), home, protected); inState {
 				resolved = filepath.Join(state, filepath.Base(resolutionPath))
+			}
+		}
+		if ok && nativePatch && !entryOnly {
+			// A hard link keeps its own name while it is a state file: a
+			// managed gateway cannot compare the identity of a file in the
+			// user's project, so the target map names the state file the
+			// patch target is (the full active-state set, read fresh; GAP-0488,
+			// GAP-0073). An ordinary single-link target costs one stat. Where
+			// the state cannot be proved the target is left unresolved, so
+			// the patch is not attested.
+			state, same, complete := ResolveActiveStateIdentity(resolved, home)
+			switch {
+			case !complete:
+				ok = false
+			case same:
+				resolved = state
 			}
 		}
 		if !ok {
@@ -1921,6 +1991,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
+	if hermesV4A {
+		// The V4A headers, read as Hermes reads them, are the whole target
+		// list; the apply_patch envelope reading does not apply.
+		patchTargets, patchKnown = hermesV4ATargets, hermesV4AKnown
+	}
 	truncated = truncated || !patchKnown
 	patchListed := patchKnown && len(patchTargets) > 0
 	for _, target := range patchTargets {
@@ -1941,7 +2016,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			}
 		}
 	}
-	if isApplyPatchToolName(tool) && patchListed {
+	if (isApplyPatchToolName(tool) || hermesV4A) && patchListed {
 		entry := len(jsonString(PatchCompleteKey)) + 1 + len(jsonString("1")) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
 			return incompleteEvidence(cwd)
@@ -2104,7 +2179,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 	}
 	for _, directories := range [][]string{append(slices.Clone(reached), InstructionDirectories(cwd, home)...), reached} {
-		value := reachedEvidence(directories)
+		value := reads.reachedEvidence(directories)
 		if value == "" {
 			continue
 		}
@@ -2124,6 +2199,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	encoded, err := json.Marshal(targets)
 	if err != nil || len(encoded) > maxEncodedTargets {
 		return incompleteEvidence(cwd)
+	}
+	if watch != nil {
+		*watch = patchTargetWatchOf(targets, home)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
@@ -2283,6 +2361,63 @@ func sameAliasValue(a, b json.RawMessage) bool {
 	return bytes.Equal(compactA.Bytes(), compactB.Bytes())
 }
 
+// PatchTargetWatch reads the targets of a patch the hook attested complete
+// (PatchCompleteKey in the evidence the hook sent the gateway) again. Behind
+// ProtectHome the gateway cannot read a patch target a second time, so the
+// hook is the only party that can, after the gateway has answered and again
+// once the answer is written. It is nil for evidence that does not attest a
+// complete patch, and a nil watch never reports a change.
+type PatchTargetWatch struct {
+	targets map[string]string
+	home    string
+	// protected is read at the first Changed, which is after the gateway
+	// answered, so it is never older than that answer.
+	protectedOnce sync.Once
+	protected     protectedFiles
+}
+
+// patchTargetWatchOf returns the watch of the final evidence map targets, or
+// nil when it does not attest a complete patch. Only the targets it lists as
+// absolute paths are kept.
+func patchTargetWatchOf(targets map[string]string, home string) *PatchTargetWatch {
+	if targets[PatchCompleteKey] != "1" {
+		return nil
+	}
+	watch := &PatchTargetWatch{targets: make(map[string]string, len(targets)), home: home}
+	for path, attested := range targets {
+		if filepath.IsAbs(path) {
+			watch.targets[path] = attested
+		}
+	}
+	return watch
+}
+
+// Changed reports that a listed target no longer reads as attested: it
+// resolves to another file than it did, to a protected key file, or, by file
+// identity, to a file of the active DefenseClaw state (a link, a hard link or
+// a swap made since). Only where a target leads is compared, never the
+// identity of the file at the path against the first reading: an editor that
+// saves the same ordinary path again has not changed the patch.
+func (w *PatchTargetWatch) Changed() bool {
+	if w == nil {
+		return false
+	}
+	w.protectedOnce.Do(func() { w.protected = newProtectedFiles(w.home) })
+	links := shellLinks{known: true}
+	for path, attested := range w.targets {
+		resolved, ok := links.resolve(path, w.protected)
+		if !ok || resolved != attested || w.protected.has(resolved) {
+			return true
+		}
+		// Read fresh and complete: a state file made since the proof, or one
+		// the walk could not see, must refuse the patch.
+		if _, state, complete := ResolveActiveStateIdentity(resolved, w.home); state || !complete {
+			return true
+		}
+	}
+	return false
+}
+
 // incompleteEvidence is the header for a tool call whose write operands
 // could not be listed. The gateway must not treat it as complete.
 // resolveCopilotCalls describes each call of a Copilot toolCalls envelope as
@@ -2290,7 +2425,7 @@ func sameAliasValue(a, b json.RawMessage) bool {
 // TruncatedKey is set when any call's map is incomplete, and PatchCompleteKey
 // only when every apply_patch call is complete. A call that is not one fully
 // named call, or a merged map over the bounds, is incomplete.
-func resolveCopilotCalls(connector, surface, event string, envelope map[string]json.RawMessage, calls []any) string {
+func resolveCopilotCalls(connector, surface, event string, envelope map[string]json.RawMessage, calls []any, watch **PatchTargetWatch) string {
 	if len(calls) > MaxWriteTargets {
 		return incompleteEvidence("")
 	}
@@ -2354,6 +2489,15 @@ func resolveCopilotCalls(connector, surface, event string, envelope map[string]j
 	encoded, err := json.Marshal(merged)
 	if err != nil || len(encoded) > maxEncodedTargets || len(merged) > 2*MaxWriteTargets+6 {
 		return incompleteEvidence(cwd)
+	}
+	if watch != nil {
+		// Every target of every call is watched, taken from the merged map
+		// the hook sends: a complete attestation always comes with its watch.
+		home, err := os.UserHomeDir()
+		if err != nil && merged[PatchCompleteKey] == "1" {
+			return incompleteEvidence(cwd)
+		}
+		*watch = patchTargetWatchOf(merged, home)
 	}
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }

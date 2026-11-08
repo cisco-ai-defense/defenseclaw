@@ -3241,7 +3241,11 @@ def opencode_custody_text(unsafe: list[PluginCustodyPath]) -> OpenCodeCustodyAdv
     def quote(paths: list[PluginCustodyPath]) -> str:
         return " ".join(shlex.quote(path) for path in paths)
 
-    named = unsafe[0] if len(unsafe) == 1 else f"{unsafe[0]} (and {', '.join(unsafe[1:])})"
+    # Written the way the repair writes them, so a name that holds the words a
+    # repair clause starts with, a comma or a space cannot blur the sentence.
+    first, *rest = (shlex.quote(path) for path in unsafe)
+    others = ", ".join(rest)
+    named = first if not rest else f"{first} (and {others})"
     links = [path for path in unsafe if "link" in path.problems]
     chmod = [path for path in unsafe if "mode" in path.problems]
     # On Linux the group bits of a path with an access list are its mask, so
@@ -4700,9 +4704,14 @@ def _next_jsonc_significant_char(raw: str, index: int) -> str:
 
 
 def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
+    """Parse openclaw.json as JSON5, the way OpenClaw and the gateway sidecar do.
+
+    ``None`` when the file is missing, unreadable, or neither JSON nor JSON5.
+    """
+    from defenseclaw import openclaw_json5
+
     try:
-        with open(_expand(config_file), encoding="utf-8") as f:
-            return json.load(f)
+        return openclaw_json5.load_file(_expand(config_file))
     except (OSError, ValueError):
         return None
 
@@ -5140,20 +5149,21 @@ def _read_mcp_servers_from_openclaw_json(
     except UnicodeError:
         _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
         return []
-    data: dict[str, Any] | None = None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        try:
-            import json5  # type: ignore[import-untyped]
+    from defenseclaw import openclaw_json5
 
-            data = json5.loads(raw)
-        except Exception:
-            _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
-            return []
+    data: dict[str, Any] | None
+    try:
+        data = openclaw_json5.loads(raw)
+    except ValueError:
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return []
     if not isinstance(data, dict):
         return []
-    servers = data.get("mcp", {}).get("servers")
+    mcp = data.get("mcp")
+    if mcp is not None and not isinstance(mcp, dict):
+        _record_mcp_source_diagnostic(diagnostic_sink, path, "malformed")
+        return []
+    servers = (mcp or {}).get("servers")
     if not isinstance(servers, dict):
         return []
     return _parse_mcp_servers_dict(servers)

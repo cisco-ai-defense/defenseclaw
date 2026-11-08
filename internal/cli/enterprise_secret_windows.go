@@ -89,13 +89,7 @@ var (
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
-	windowsSecretLifecycleLockPath = func() (string, error) {
-		roots, err := windowsManagedLayout.roots(managed.ProfileStandalone)
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(roots.LifecycleDir, "lifecycle.lock"), nil
-	}
+	windowsSecretLifecycleLockPath = windowsStandaloneLifecycleLockPath
 	// windowsSecretLifecycleLock takes the lock once; acquireWindowsLockWithin
 	// waits windowsSecretInstallerLockWait around it.
 	windowsSecretLifecycleLock = tryWindowsEnterpriseLifecycleLock

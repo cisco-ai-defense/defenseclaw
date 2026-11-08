@@ -53,6 +53,18 @@ def _set_windows_identity(setenv, home: Path) -> None:
         setenv(name, value)
 
 
+@pytest.fixture
+def own_pids_outside_fake_listings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the pid and parent pid of this test process out of any fake process listing.
+
+    The Windows Hermes probe skips its own pid and parent pid, and the tests
+    feed it listings with small fixed pids; a runner whose pytest process or
+    parent holds one of them would see that row skipped.
+    """
+    monkeypatch.setattr(os, "getpid", lambda: 900001)
+    monkeypatch.setattr(os, "getppid", lambda: 900002)
+
+
 @pytest.fixture(autouse=True)
 def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
     """Keep tests away from the developer's real Windows profile.

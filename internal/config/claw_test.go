@@ -1462,3 +1462,48 @@ func TestClaudeStateMCPServersRefusesAServerListThatDoesNotParse(t *testing.T) {
 		t.Errorf("per-user reader: %+v, %v; want the file skipped", lenient, err)
 	}
 }
+
+// OpenClaw reads openclaw.json as JSON5. A file it runs on must still name the
+// workspace and extra skill directories the scanner watches, and a file that
+// is neither JSON nor JSON5 keeps the defaults.
+func TestSkillDirs_OpenClawReadsJSON5Config(t *testing.T) {
+	for name, tc := range map[string]struct {
+		body          string
+		wantWorkspace bool
+	}{
+		"strict JSON": {`{"agents":{"defaults":{"workspace":"WS"}},"skills":{"load":{"extraDirs":["EXTRA"]}}}`, true},
+		"JSON5 with comments, bare keys, single quotes and trailing commas": {
+			"// OpenClaw accepts JSON5\n{ agents: { defaults: { workspace: 'WS', }, }, skills: { load: { extraDirs: ['EXTRA',], }, }, gateway: { port: 0x7077 }, }\n", true,
+		},
+		"broken file keeps the defaults": {"{ agents: { defaults: { workspace: 'WS' ", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			workspace := filepath.Join(homeDir, "custom-workspace")
+			extra := filepath.Join(homeDir, "extra-skills")
+			// The paths sit inside quoted strings, so a Windows path needs its
+			// backslashes doubled to be the same path after JSON or JSON5 reads it.
+			escape := func(p string) string { return strings.ReplaceAll(p, `\`, `\\`) }
+			body := strings.NewReplacer("WS", escape(workspace), "EXTRA", escape(extra)).Replace(tc.body)
+			configFile := filepath.Join(homeDir, "openclaw.json")
+			if err := os.WriteFile(configFile, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg := &Config{}
+			cfg.Claw.Mode = "openclaw"
+			cfg.Claw.HomeDir = homeDir
+			cfg.Claw.ConfigFile = configFile
+
+			dirs := cfg.SkillDirs()
+			if got := containsPath(dirs, filepath.Join(workspace, "skills")); got != tc.wantWorkspace {
+				t.Errorf("workspace skills dir listed = %v, want %v; dirs %v", got, tc.wantWorkspace, dirs)
+			}
+			if got := containsPath(dirs, extra); got != tc.wantWorkspace {
+				t.Errorf("extra dir listed = %v, want %v; dirs %v", got, tc.wantWorkspace, dirs)
+			}
+			if !containsPath(dirs, filepath.Join(homeDir, "skills")) {
+				t.Errorf("home skills dir missing; dirs %v", dirs)
+			}
+		})
+	}
+}

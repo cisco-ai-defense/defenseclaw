@@ -14,8 +14,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -918,13 +922,17 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 			"runtime-provenance-error",
 		), true
 	}
-	if decision, disabled := a.runtimeAssetDisableDecision(targetType, probe.SkillName, connector, runtimeSurface); disabled {
+	paths := []string{probe.SourcePath}
+	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
+		paths = probe.SourcePaths
+	}
+	cfg := a.requestConfig(ctx)
+	if decision, disabled := a.runtimeAssetDisableDecision(ctx, cfg, targetType, probe.SkillName, connector, runtimeSurface, paths); disabled {
 		return decision, true
 	}
 	if probe.RuntimeDisableOnly {
 		return config.AssetPolicyDecision{}, false
 	}
-	cfg := a.requestConfig(ctx)
 	if cfg == nil {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -932,14 +940,15 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		return decision, true
 	}
 	if targetType == "plugin" && !cfg.SecureClientIntegration() {
-		if decision, blocked := a.pluginJournalBlockDecision(probe.SkillName, connector, runtimeSurface); blocked {
+		if decision, blocked := a.pluginJournalBlockDecision(ctx, cfg, probe.SkillName, connector, runtimeSurface, paths); blocked {
 			return decision, true
 		}
 		probe.DeclaredNames = append(probe.DeclaredNames, deniedPluginMarketplaceNames(cfg, probe.SkillName)...)
 	}
-	paths := []string{probe.SourcePath}
+	if decision, unavailable := a.unavailableRootDecision(cfg, targetType, connector, runtimeSurface, probe.SkillName, paths); unavailable {
+		return decision, true
+	}
 	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
-		paths = probe.SourcePaths
 		if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
 			return decision, true
 		}
@@ -947,7 +956,7 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		// declares the name) answers to that folder's runtime disable.
 		for _, path := range probe.SourcePaths {
 			if folder := filepath.Base(path); !config.SameAssetName(folder, probe.SkillName) {
-				if decision, disabled := a.runtimeAssetDisableDecision(targetType, folder, connector, runtimeSurface); disabled {
+				if decision, disabled := a.runtimeAssetDisableDecision(ctx, cfg, targetType, folder, connector, runtimeSurface, []string{path}); disabled {
 					return decision, true
 				}
 			}
@@ -965,6 +974,97 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		last = decision
 	}
 	return last, false
+}
+
+// unavailableRootDecision holds a named skill or plugin only when its
+// connector's admission root is unavailable and policy requires fail closed.
+// Balanced and permissive hosts keep working; watcher health names the gap.
+func (a *APIServer) unavailableRootDecision(
+	cfg *config.Config, targetType, connector, surface, name string, paths []string,
+) (config.AssetPolicyDecision, bool) {
+	if a == nil || a.rootCoverage == nil || cfg == nil || cfg.SecureClientIntegration() ||
+		(!managed.IsManagedEnterprise(cfg.DeploymentMode) && cfg.HookPolicyTierForConnector(connector) != config.HookPolicyTierStrict) {
+		return config.AssetPolicyDecision{}, false
+	}
+	for _, issue := range a.rootCoverage() {
+		if issue.Kind != targetType || (issue.Connector != "" && issue.Connector != connector &&
+			!slices.Contains(issue.Connectors, connector)) {
+			continue
+		}
+		root, rootErr := filepath.Abs(issue.Path)
+		resolvedRoot, rootResolved := "", false
+		if rootErr == nil {
+			resolvedRoot, rootResolved = unavailableRootCanonicalPath(root)
+		}
+		provenOutside := rootResolved
+		for _, path := range paths {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				provenOutside = false
+				break
+			}
+			if !filepath.IsAbs(path) {
+				provenOutside = false
+				break
+			}
+			// Parent elements and Windows device or stream forms do not prove
+			// that a source is outside an unavailable root.
+			if hasParentElement(path) || runtime.GOOS == "windows" &&
+				(strings.HasPrefix(path, `\\?\`) || strings.HasPrefix(path, `\\.\`) ||
+					strings.Contains(path[len(filepath.VolumeName(path)):], ":")) {
+				provenOutside = false
+				break
+			}
+			resolvedPath, pathResolved := unavailableRootCanonicalPath(path)
+			if !pathResolved || rootErr == nil && unavailableRootContainsPath(root, path) ||
+				rootResolved && unavailableRootContainsPath(resolvedRoot, resolvedPath) {
+				provenOutside = false
+				break
+			}
+		}
+		if provenOutside {
+			continue
+		}
+		return runtimeAssetDisableBlockDecision(targetType, name, connector, surface,
+			fmt.Sprintf("%s %q cannot be checked while admission scanning is off for a connector root; see watcher health", targetType, name),
+			"watch-root-unavailable"), true
+	}
+	return config.AssetPolicyDecision{}, false
+}
+
+// unavailableRootCanonicalPath resolves each existing component. A missing
+// suffix can be appended to a resolved parent, but a dangling link or any
+// other unresolved component cannot prove a source is outside the root.
+func unavailableRootCanonicalPath(path string) (string, bool) {
+	for candidate := filepath.Clean(path); ; candidate = filepath.Dir(candidate) {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err == nil {
+			suffix, err := filepath.Rel(candidate, path)
+			if err != nil {
+				return "", false
+			}
+			return filepath.Join(resolved, suffix), true
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", false
+		}
+		if _, err := os.Lstat(candidate); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return "", false
+		}
+		if parent := filepath.Dir(candidate); parent == candidate {
+			return "", false
+		}
+	}
+}
+
+func unavailableRootContainsPath(root, path string) bool {
+	if insideHome(root, path) {
+		return true
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(root), filepath.Clean(path))
+	}
+	return filepath.Clean(root) == filepath.Clean(path)
 }
 
 // runtimeSkillPathDecision is the asset_policy decision for one folder a
@@ -1104,7 +1204,7 @@ func runtimeSkillAssetTargetType(probe skillRuntimeProbe) string {
 	}
 }
 
-func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, runtimeSurface string) (config.AssetPolicyDecision, bool) {
+func (a *APIServer) runtimeAssetDisableDecision(ctx context.Context, cfg *config.Config, targetType, name, connector, runtimeSurface string, paths []string) (config.AssetPolicyDecision, bool) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return config.AssetPolicyDecision{}, false
@@ -1122,9 +1222,44 @@ func (a *APIServer) runtimeAssetDisableDecision(targetType, name, connector, run
 	if !disabled {
 		return config.AssetPolicyDecision{}, false
 	}
+	if a != nil && a.store != nil && connector != "" && len(paths) > 0 {
+		if entry, err := a.store.GetActionForConnector(targetType, name, connector); err == nil &&
+			entry != nil && entry.Actions.Runtime == "disable" &&
+			slices.Contains(a.policyHoldIgnoredFields(ctx, cfg, connector, entry, paths), "runtime") {
+			return config.AssetPolicyDecision{}, false
+		}
+	}
 	return runtimeAssetDisableBlockDecision(targetType, name, connector, runtimeSurface,
 		fmt.Sprintf("%s %q is runtime-disabled for connector %q", targetType, name, connector),
 		"runtime-disable"), true
+}
+
+// policyHoldIgnoredFields are the fields of the policy hold on entry that do
+// not cover paths. A policy hold sits on the row of the asset name but was
+// written for the copies still denied; a path that resolves outside all of
+// them is another copy of the name that an allow rule admitted. Secure Client
+// keeps the journal decision of main, so it ignores no field. A held copy
+// this process cannot inspect is present, unknown: the strict tier and a
+// managed deployment keep the hold, and the other tiers run the call with a
+// warning and an audit row.
+func (a *APIServer) policyHoldIgnoredFields(ctx context.Context, cfg *config.Config, connector string, entry *audit.ActionEntry, paths []string) []string {
+	if cfg == nil || cfg.SecureClientIntegration() {
+		return nil
+	}
+	scope := watcher.PolicyHoldIgnoredFields(entry, paths)
+	if len(scope.Ignored) == 0 {
+		return nil
+	}
+	if len(scope.Unknown) > 0 {
+		if watcher.PolicyHoldStrict(cfg, connector) {
+			return nil
+		}
+		detail := fmt.Sprintf("a policy hold names a copy this gateway cannot inspect (%s); the call names another path and runs: strict and managed profiles keep the hold",
+			strings.Join(scope.Unknown, ","))
+		fmt.Fprintf(os.Stderr, "[gateway] warning: connector %s: %s\n", connector, detail)
+		a.logAssetPolicyAudit(ctx, connector, strings.TrimSpace(entry.TargetType)+":"+entry.TargetName, "action=allow source=policy-hold-unknown-copy "+detail)
+	}
+	return scope.Ignored
 }
 
 // claudeCodePluginAssetDecision refuses a Claude Code tool call that runs
@@ -1323,7 +1458,7 @@ func (a *APIServer) claudeCodeToolPlugins(ctx context.Context, req claudeCodeHoo
 // marketplace folder, so `plugin quarantine` alone left /plugin:command
 // running (GAP-0270). `plugin restore` clears the file action, which lifts
 // this refusal.
-func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface string) (config.AssetPolicyDecision, bool) {
+func (a *APIServer) pluginJournalBlockDecision(ctx context.Context, cfg *config.Config, name, connector, runtimeSurface string, paths []string) (config.AssetPolicyDecision, bool) {
 	if a == nil || a.store == nil || strings.TrimSpace(name) == "" {
 		return config.AssetPolicyDecision{}, false
 	}
@@ -1341,9 +1476,11 @@ func (a *APIServer) pluginJournalBlockDecision(name, connector, runtimeSurface s
 			continue
 		}
 		reason, source := fmt.Sprintf("plugin %q is blocked by install admission", entry.TargetName), "install-block"
+		ignored := a.policyHoldIgnoredFields(ctx, cfg, connector, &entry, paths)
 		switch {
-		case entry.Actions.Install == "block" || entry.Actions.Runtime == "disable":
-		case entry.Actions.File == "quarantine":
+		case entry.Actions.Install == "block" && !slices.Contains(ignored, "install") ||
+			entry.Actions.Runtime == "disable" && !slices.Contains(ignored, "runtime"):
+		case entry.Actions.File == "quarantine" && !slices.Contains(ignored, "file"):
 			// Worded as a disabled plugin for the agent (runtime-disable,
 			// agentAssetPolicySubject); the audit reason says quarantined.
 			reason, source = fmt.Sprintf("plugin %q is quarantined", entry.TargetName), "runtime-disable"

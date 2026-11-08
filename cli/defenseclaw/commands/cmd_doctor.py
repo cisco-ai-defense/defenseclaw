@@ -62,9 +62,18 @@ from types import SimpleNamespace
 
 import click
 
-from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
+from defenseclaw import (
+    codex_toml,
+    credential_provenance,
+    envvars,
+    gateway_token_adoption,
+    legacy_connector,
+    rulepack_validation,
+    ux,
+)
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.audit_time_order import audit_time_order
+from defenseclaw.cause_text import single_line
 from defenseclaw.config import gateway_home_for_data_dir, gateway_pid_path
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
@@ -1817,6 +1826,13 @@ def _doctor_managed(cfg) -> bool:
     return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
 
 
+def _watch_root_coverage_severity(cfg, connectors: list[str]) -> str:
+    if _doctor_managed(cfg):
+        return "fail"
+    tier = getattr(getattr(cfg, "guardrail", None), "hook_policy_tier", None)
+    return "fail" if callable(tier) and any(tier(name) == "strict" for name in connectors) else "warn"
+
+
 def _root_owned_file(path: str) -> bool:
     """Whether *path* is a regular file owned by root while doctor runs as another account."""
     try:
@@ -2527,6 +2543,8 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
     path = os.path.join(normalized_data_dir, ".env")
     try:
         body = read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+        # The daemon leaves out an adopted copy that a one-spelling edit outdated.
+        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -2539,7 +2557,7 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
             except UnicodeError:
                 continue
             canonical_key = _known_gateway_token_env(key)
-            if not canonical_key:
+            if not canonical_key or gateway_token_adoption.is_shadowed(shadowed, canonical_key):
                 continue
             value = raw_value.strip()
             if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {b'"', b"'"}:
@@ -5723,6 +5741,20 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     continue
                 state = raw_state.strip() or "unknown"
                 normalized_state = state.lower()
+                unavailable = details.get("watch_roots_unavailable") if isinstance(details, dict) else None
+                if sub == "watcher" and isinstance(unavailable, int) and unavailable > 0:
+                    names = details.get("admission_scanning_off")
+                    connectors = [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
+                    severity = _watch_root_coverage_severity(cfg, connectors)
+                    label = ", ".join(connectors) if connectors else "configured connectors"
+                    _emit(
+                        severity,
+                        f"  └─ {sub}",
+                        f"admission scanning is off for {label}; "
+                        f"{unavailable} root(s) unavailable; the gateway log names each root",
+                        r=r,
+                    )
+                    continue
                 if normalized_state in ("running", "healthy"):
                     if expected is False and sub in {
                         "gateway",
@@ -12265,12 +12297,14 @@ _RECORDED_REASON_CAUSE_LIMIT = 400
 def _bounded_recorded_reason(reason: object, repair: str = "") -> str:
     """The gateway's recorded reason, bounded, followed by its repair as recorded.
 
-    The reason is prose: its whitespace is collapsed and it is bounded. The
-    repair arrives as fields of its own (``_connectors_not_started_repairs``),
-    never found inside the reason, and holds paths and accounts inside quotes,
-    where a run of spaces is part of the argument, so it is shown exactly.
+    The reason is bounded and folded to one line; spaces inside a line are
+    kept, because the reason names folders and accounts unquoted and a run of
+    spaces can be part of a name (GAP-0881). The repair arrives as fields of
+    its own (``_connectors_not_started_repairs``), never found inside the
+    reason, and holds paths and accounts inside quotes, where a run of spaces
+    is part of the argument, so it is shown exactly.
     """
-    text = " ".join(str(reason).split())
+    text = single_line(reason)
     if len(text) > _RECORDED_REASON_CAUSE_LIMIT:
         text = text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
     return text + repair
@@ -12832,12 +12866,20 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
 
     label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
     if "openclaw" in connectors:
-        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+        from defenseclaw.openclaw_plugin_config import (
+            configured_openclaw_plugin_config_issue,
+            openclaw_plugin_config_unreadable,
+        )
 
         if issue := configured_openclaw_plugin_config_issue(cfg):
             _emit(
                 "fail", label, issue,
-                remediation="run `defenseclaw setup openclaw` to migrate the plugin config, then rerun doctor",
+                remediation=(
+                    "fix the syntax error in openclaw.json at the position above (OpenClaw reads JSON5), "
+                    "then rerun doctor"
+                    if openclaw_plugin_config_unreadable(issue)
+                    else "run `defenseclaw setup openclaw` to migrate the plugin config, then rerun doctor"
+                ),
                 r=r,
             )
             return
@@ -18961,12 +19003,22 @@ def _check_hook_contract_lock(
             str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
         )
     )
+    # The version the agent reports now. Doctor does not rediscover a protected
+    # agent: after an update the lock value is the old version, next to the
+    # executable mismatch (GAP-0158).
+    current_version, current_proven = (
+        ("", False) if protected_setup_agent else _agent_version_now(data_dir, connector)
+    )
     detail = f"contract={contract or '?'} status={status or '?'}"
     if raw_version:
         detail += f" {'agent_cli' if connector == 'cursor' else 'agent'}={raw_version}"
-        if protected_setup_agent:
-            # Doctor does not rediscover a protected agent: after an update this
-            # is the old version, next to the executable mismatch (GAP-0158).
+        if not (
+            current_proven
+            and stable_agent_version(connector, current_version) == stable_agent_version(connector, raw_version)
+        ):
+            # Every connector row says the same thing (GAP-0823): the lock value is
+            # unlabeled only when the agent just reported it. Otherwise it is what
+            # setup recorded, and `agent_updated=` below names a newer one.
             detail += " (recorded at setup)"
     if normalized:
         detail += f" normalized={normalized}"
@@ -19036,7 +19088,6 @@ def _check_hook_contract_lock(
         windows_protected_authority_invalid = setup_agent_lock_executable_invariant(data_dir, connector, entry)
         if windows_protected_authority_invalid:
             detail += f" exact_setup_executable_evidence=invalid:{windows_protected_authority_invalid}"
-    current_version = "" if protected_setup_agent else _discovered_agent_version(data_dir, connector)
     if protected_setup_agent:
         detail += f" agent_executable={entry['agent_executable']}"
     if connector == "cursor":
@@ -19204,8 +19255,28 @@ def _check_hook_runtime_integrity(cfg, connector: str, r: _DoctorResult) -> None
         )
 
 
-def _discovered_agent_version(data_dir: str, connector: str) -> str:
-    return str(_discovered_agent_signal(data_dir, connector).get("version") or "").strip()
+def _agent_version_now(data_dir: str, connector: str) -> tuple[str, bool]:
+    """The agent version for a row, and whether the agent itself just reported it.
+
+    The Connector compatibility row re-reads the version with the bounded
+    ``--version`` probe, shared by every row of a Doctor run, because the
+    discovery cache and the hook contract lock keep the version from before an
+    agent update. The Hook contract row reads it the same way (GAP-0823). A probe
+    that cannot run leaves the cached version, flagged as not proven.
+    """
+
+    from defenseclaw.doctor_health import read_run_discovery, recheck_installed_versions
+
+    try:
+        checked = recheck_installed_versions(read_run_discovery(data_dir), (connector,), data_dir)
+        agents = getattr(checked.discovery, "agents", None)
+        signal = agents.get(connector) if isinstance(agents, dict) else None
+        found = str(getattr(signal, "version", "") or "").strip()
+        if found and connector not in checked.unchecked:
+            return found, True
+    except Exception:  # noqa: BLE001 - a probe problem leaves the cached version.
+        pass
+    return str(_discovered_agent_signal(data_dir, connector).get("version") or "").strip(), False
 
 
 def _discovered_agent_path(data_dir: str, connector: str) -> str:

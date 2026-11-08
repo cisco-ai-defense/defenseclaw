@@ -99,7 +99,7 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	LinkWalkFacts(command, cwd, home)
 }
 
-// gap0749ResolveReaderCalls is every function ResolveConnector calls with the
+// gap0749ResolveReaderCalls is every function resolveConnector calls with the
 // command text, and the readers of gap0749ResolveReaders that run it.
 // TestGAP0749ResolveReadersCoverResolve fails when the two differ.
 var gap0749ResolveReaderCalls = []string{
@@ -118,7 +118,7 @@ var gap0749ResolveReaderCalls = []string{
 
 // TestGAP0749ResolveReadersCoverResolve: the argv readers a bounded sweep
 // runs on the forms it does not send through Resolve are the readers
-// ResolveConnector runs. A reader added to ResolveConnector must be added to
+// resolveConnector runs. A reader added to resolveConnector must be added to
 // gap0749ResolveReaders (and the list above) before this passes, so a bounded
 // sweep cannot fall behind Resolve. clientStatementBudgetExceeded only
 // counts statements of the facts and is not an argv reader.
@@ -132,7 +132,7 @@ func TestGAP0749ResolveReadersCoverResolve(t *testing.T) {
 	found := false
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "ResolveConnector" {
+		if !ok || fn.Name.Name != "resolveConnector" {
 			continue
 		}
 		found = true
@@ -164,16 +164,16 @@ func TestGAP0749ResolveReadersCoverResolve(t *testing.T) {
 		})
 	}
 	if !found {
-		t.Fatal("ResolveConnector is not in hookpaths.go")
+		t.Fatal("resolveConnector is not in hookpaths.go")
 	}
 	for name := range called {
 		if !slices.Contains(gap0749ResolveReaderCalls, name) {
-			t.Errorf("ResolveConnector reads the command with %s; add it to gap0749ResolveReaders and gap0749ResolveReaderCalls", name)
+			t.Errorf("resolveConnector reads the command with %s; add it to gap0749ResolveReaders and gap0749ResolveReaderCalls", name)
 		}
 	}
 	for _, name := range gap0749ResolveReaderCalls {
 		if !called[name] {
-			t.Errorf("gap0749ResolveReaders runs %s, which ResolveConnector no longer calls with the command: drop it", name)
+			t.Errorf("gap0749ResolveReaders runs %s, which resolveConnector no longer calls with the command: drop it", name)
 		}
 	}
 }

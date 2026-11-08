@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -65,6 +66,12 @@ type enrolledWatchSet struct {
 	skippedProfiles int
 	// roots maps each watched folder to the connector that owns it.
 	roots map[string]string
+	// consumers lists every enrolled connector that loads each root, even
+	// when several connectors share one watched folder.
+	consumers []watcher.RootConsumer
+	// connectors names each enrolled connector, once, even when it has no
+	// folder to watch: it still depends on any explicit gateway.watcher dir.
+	connectors []string
 	// mcp is every enrolled user's MCP servers, tagged with the connector
 	// and the user home.
 	mcp []config.MCPServerEntry
@@ -149,12 +156,15 @@ func (m *enrolledMCPServers) set(entries []config.MCPServerEntry) {
 }
 
 func (e enrolledWatchSet) dirsKey() string {
-	parts := make([]string, 0, len(e.roots)+len(e.skillDirs)+len(e.pluginDirs))
+	parts := make([]string, 0, len(e.roots)+len(e.skillDirs)+len(e.pluginDirs)+len(e.consumers))
 	if e.skippedProfiles > 0 {
 		parts = append(parts, fmt.Sprintf("skipped:%d", e.skippedProfiles))
 	}
 	for root, name := range e.roots {
 		parts = append(parts, strings.ToLower(root)+"="+name)
+	}
+	for _, consumer := range e.consumers {
+		parts = append(parts, consumer.Kind+":"+strings.ToLower(consumer.Path)+"="+consumer.Connector)
 	}
 	for _, dir := range e.skillDirs {
 		parts = append(parts, "s:"+strings.ToLower(dir))
@@ -274,8 +284,11 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 		if !ok {
 			continue
 		}
+		if !slices.Contains(set.connectors, target.connector) {
+			set.connectors = append(set.connectors, target.connector)
+		}
 		skillDirs, pluginDirs := connector.ComponentDirsForHome(conn, serviceHome, target.home)
-		add := func(dirs []string, seen map[string]bool, out *[]string) {
+		add := func(dirs []string, seen map[string]bool, out *[]string, kind string) {
 			for _, userDir := range dirs {
 				if managed.RequireWindowsGatewayPathOutsideUserProfiles(userDir) != nil {
 					set.skippedProfiles++
@@ -283,6 +296,7 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 				}
 				key := strings.ToLower(userDir)
 				if seen[key] {
+					set.consumers = append(set.consumers, watcher.RootConsumer{Kind: kind, Path: userDir, Connector: target.connector})
 					continue
 				}
 				info, err := stat(userDir)
@@ -295,16 +309,17 @@ func resolveEnrolledWatchSetWithStat(cfg *config.Config, reg *connector.Registry
 				}
 				seen[key] = true
 				*out = append(*out, userDir)
+				set.consumers = append(set.consumers, watcher.RootConsumer{Kind: kind, Path: userDir, Connector: target.connector})
 				if _, owned := set.roots[userDir]; !owned {
 					set.roots[userDir] = target.connector
 				}
 			}
 		}
 		if wcfg.Skill.Enabled {
-			add(skillDirs, seenSkill, &set.skillDirs)
+			add(skillDirs, seenSkill, &set.skillDirs, "skill")
 		}
 		if wcfg.Plugin.Enabled {
-			add(pluginDirs, seenPlugin, &set.pluginDirs)
+			add(pluginDirs, seenPlugin, &set.pluginDirs, "plugin")
 		}
 		// A server is the user's and the connector's: another user's (or
 		// connector's) server with the same name is admitted on its own.
@@ -532,10 +547,13 @@ func enrolledRootPrecedence(connectorName string) int {
 // set's roots, each owned by the connector that reported it.
 func (e *enrolledWatchSet) addProjectRoots(roots []projectSkillRoot) {
 	for _, root := range roots {
+		e.consumers = append(e.consumers, watcher.RootConsumer{Kind: "skill", Path: root.Path, Connector: root.Connector})
 		if e.roots == nil {
 			e.roots = map[string]string{}
 		}
-		e.roots[root.Path] = root.Connector
+		if _, owned := e.roots[root.Path]; !owned {
+			e.roots[root.Path] = root.Connector
+		}
 	}
 }
 

@@ -488,6 +488,7 @@ def test_hook_binary_from_another_release_is_named() -> None:
         assert cmd_doctor._hook_binary_release_check(hook, "1.0.1")[:2] == ("warn", f"{hook} did not report its release")
 
 
+@pytest.mark.usefixtures("own_pids_outside_fake_listings")
 def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
     # GAP-1298: with no Hermes process for the account there is nothing to reload.
     from defenseclaw.doctor_hooks import WindowsHookCheck
@@ -615,6 +616,7 @@ def test_disk_full_audit_writes_read_plainly(tmp_path) -> None:
 
 
 
+@pytest.mark.usefixtures("own_pids_outside_fake_listings")
 def test_windows_hermes_check_reads_python_command_lines() -> None:
     # GAP-1605: DefenseClaw's own TUI is a python.exe; only a Hermes command line is a host.
     listing = '"pwsh.exe","4100"\n"python.exe","4400"\n"uv.exe","4500"\n'
@@ -657,6 +659,7 @@ def test_windows_command_lines_prefer_the_native_reader() -> None:
         assert lines == {"4400": "python.exe -m defenseclaw.main tui", "4600": None, "4800": ""}
 
 
+@pytest.mark.usefixtures("own_pids_outside_fake_listings")
 def test_windows_hermes_check_skips_other_accounts_in_an_all_accounts_listing() -> None:
     # Get-Process without -IncludeUserName lists every account: a process this
     # account may not open is another account's, not a Hermes host of ours.
@@ -671,6 +674,7 @@ def test_windows_hermes_check_skips_other_accounts_in_an_all_accounts_listing() 
         assert cmd_doctor._hermes_host_running_windows("#all-accounts\n" + listing) is True
 
 
+@pytest.mark.usefixtures("own_pids_outside_fake_listings")
 def test_windows_hermes_check_falls_back_to_get_process(monkeypatch) -> None:
     # GAP-1298: tasklist prints "ERROR: Access denied" for a standard user over SSH.
     import subprocess

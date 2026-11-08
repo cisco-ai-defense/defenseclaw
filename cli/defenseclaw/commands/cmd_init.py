@@ -135,7 +135,8 @@ def refuse_first_run_when_managed() -> None:
     help=(
         "Saves your choice for a gateway outage: 'open' lets calls run with a warning "
         "and an audit entry, 'closed' blocks them. A saved choice wins over the policy "
-        "tier. Omitted, nothing is saved: default and permissive policy open an outage, "
+        "tier, except OpenClaw under the strict policy and ZeptoClaw model requests, "
+        "which stay closed. Omitted, nothing is saved: default and permissive policy open an outage, "
         "strict closes it. Every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
         "transport and missing-token failures closed."
@@ -2806,7 +2807,19 @@ def _render_first_run_report(report, renderer, *, connectors: list[str] | None =
             f"  {proxy} runs alone: defenseclaw setup <connector> --replace for a hook agent"
             f" replaces {proxy}'s guardrail"
         )
-        renderer.echo(f"  {proxy} model calls fail while the DefenseClaw gateway is down (fail-closed)")
+        closed = _proxy_model_outage_closed(report, _proxy_connector_name(report, connectors))
+        if closed is None:
+            renderer.echo(
+                f"  {proxy} model calls follow the gateway-outage mode while the DefenseClaw gateway is down:"
+                " defenseclaw guardrail fail-mode"
+            )
+        elif closed:
+            renderer.echo(f"  {proxy} model calls fail while the DefenseClaw gateway is down (fail-closed)")
+        else:
+            renderer.echo(
+                f"  {proxy} model calls continue with a warning while the DefenseClaw gateway is down"
+                " (strict policy blocks them: defenseclaw guardrail use-pack strict)"
+            )
         if platform_support.host_os() in {"linux", "darwin"}:
             renderer.echo(
                 f"  Nothing starts the gateway for {proxy}: after a reboot or defenseclaw-gateway stop,"
@@ -2870,6 +2883,22 @@ def _proxy_connector_label(report, connectors: list[str] | None) -> str:
         if platform_support.is_proxy_connector(name):
             return _PROXY_LABELS.get(name, name)
     return ""
+
+
+def _proxy_connector_name(report, connectors: list[str] | None) -> str:
+    names = connectors or ([report.connector] if report.connector else [])
+    return next((name for name in names if platform_support.is_proxy_connector(name)), "")
+
+
+def _proxy_model_outage_closed(report, name: str) -> bool | None:
+    """Whether the model requests of a proxy connector are blocked while the gateway is down (None: unknown)."""
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.fail_mode import proxy_model_outage_mode
+
+    try:
+        return proxy_model_outage_mode(cfg_mod.load(data_dir=report.data_dir), name) == "closed"
+    except Exception:  # noqa: BLE001 - the line is advisory.
+        return None
 
 
 def _closed_fail_mode_connectors(report, connectors: list[str] | None) -> list[str]:

@@ -55,6 +55,10 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
         model=model,
         hook_fail_mode=hook_fail_mode,
     )
+    guardrail_cfg.effective_hook_outage_fail_mode = lambda connector="": guardrail_cfg.hook_fail_mode
+    guardrail_cfg._managed_outage_install = lambda: False
+    guardrail_cfg.hook_fail_mode_resolution = lambda connector="": (guardrail_cfg.hook_fail_mode, "config:guardrail.hook_fail_mode")
+    guardrail_cfg.hook_policy_tier = lambda connector="": "default"
     cfg = SimpleNamespace(
         guardrail=guardrail_cfg,
         data_dir="/tmp/dc",
@@ -256,11 +260,10 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("defenseclaw guardrail fail-mode closed", result.output)
         self.assertNotIn("use-pack strict", result.output)
 
-    def test_status_shows_a_proxy_connector_closed_whatever_hook_fail_mode_says(self):
-        # GAP-1646: ZeptoClaw and OpenClaw are proxy-backed, so their proxy
-        # refuses calls while the gateway is down; status said Fail=open and
-        # warned that "its hooks allow calls that policy blocks".
-        for connector in ("zeptoclaw", "openclaw"):
+    def test_status_shows_a_proxy_connector_by_its_outage_behaviour(self):
+        # GAP-1646, GAP-0824: ZeptoClaw model requests are refused while the gateway is down; OpenClaw
+        # follows the outage mode (here a saved open). Neither warns that "its hooks allow calls".
+        for connector, want in (("zeptoclaw", "closed"), ("openclaw", "open")):
             app = make_ctx(enabled=True, connector=connector, hook_fail_mode="open")
             app.cfg.guardrail.mode = "action"
             result = CliRunner().invoke(cmd_guardrail.status_cmd, [], obj=app)
@@ -269,8 +272,9 @@ class StatusCommandTests(unittest.TestCase):
             self.assertNotIn("hooks allow calls", result.output)
             result = CliRunner().invoke(cmd_guardrail.status_cmd, ["--json"], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertIn('"fail_mode": "closed"', result.output)
-            self.assertNotIn('"fail_mode": "open"', result.output)
+            self.assertIn(f'"fail_mode": "{want}"', result.output)
+            other = "open" if want == "closed" else "closed"
+            self.assertNotIn(f'"fail_mode": "{other}"', result.output)
 
     def test_status_flags_fail_open_connector_an_action_profile_enforces(self):
         # GAP-1282: base mode observe, a guardrail profile puts the connector

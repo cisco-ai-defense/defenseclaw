@@ -2592,7 +2592,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		}
 		// The enumerator restarted with the new install publishes its first
 		// record a few seconds later; the result below reads that record.
+		scanDeadline := env.Now().Add(env.InstallScanTimeout)
 		l.awaitInstallScan(ctx)
+		// The enumerator rewrites targets.yaml after the config changes (a
+		// connector roster change); the guardian reconciles it, and removes
+		// the hook files of a removed connector, within the same bound.
+		l.awaitGuardianCatchUp(ctx, scanDeadline, activationStarted)
 	}
 	// The change succeeds only when the gateway runs it. A config.yaml
 	// replaced during the run is confirmed by its follow-up transaction, and

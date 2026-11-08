@@ -1044,7 +1044,7 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// the outage mode, as the shell hook does (GAP-0295).
 			opts.answerWatch.restartWindowContact(opts, sp, failMode, check)
 		}
-		tryCtx, release := connectBy(ctx, connectDeadline, onConnect)
+		tryCtx, release := connectBy(withPerUserGatewayHomes(ctx, func() []string { return perUserRecordHomes(opts) }), connectDeadline, onConnect)
 		check, _ = tryCtx.Value(perUserPeerCheckKey{}).(*perUserPeerCheck)
 		releases = append(releases, release)
 		resp, err := sendHookRequest(tryCtx, opts, sp, payload, token)
@@ -1265,6 +1265,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
+		if errors.Is(err, errPerUserListenerUnanswered) && !opts.ManagedEnterprise {
+			return failPerUserListenerUnanswered(opts, sp, failMode)
+		}
 		if errors.Is(err, errPerUserPeerUnverified) {
 			// A deadline on the peer check is a local verification failure,
 			// not a verified gateway that gave no HTTP status.
@@ -1396,7 +1399,38 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failResponse(opts, sp, answeredFailMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
+	if delivery == nil {
+		// The answer is complete: release the connection before the targets
+		// are read again, so the reading is the last step before the answer.
+		_ = resp.Body.Close()
+	}
+	patchWatch := opts.requestFacts.watch()
+	if patchWatch.Changed() {
+		// The gateway judged the patch targets the hook read before the
+		// request; one leads elsewhere now. Behind ProtectHome only this hook
+		// can read it again (GAP-0488, GAP-0073).
+		return failResponse(opts, sp, "closed", "a patch target changed after DefenseClaw reviewed it")
+	}
 	code := sp.decide(opts, body)
+	if code == 0 && patchWatch != nil && gatewayAllowed(body) {
+		// The allow is written to the agent by the answer watchdog after this
+		// returns, or already is; the agent reads it only when this hook
+		// exits. Read the targets once more after the write and revoke the
+		// allow (a failure exit and a block answer) when one changed.
+		revoke := func(stdout, stderr io.Writer) (int, bool) {
+			if !patchWatch.Changed() {
+				return 0, false
+			}
+			revoked := opts
+			revoked.answerWatch, revoked.Stdout, revoked.Stderr = nil, stdout, stderr
+			return failResponse(revoked, sp, "closed", "a patch target changed while DefenseClaw answered"), true
+		}
+		if opts.answerWatch != nil {
+			opts.answerWatch.setRevoke(revoke)
+		} else if revoked, ok := revoke(opts.Stdout, opts.Stderr); ok {
+			code = revoked
+		}
+	}
 	if opts.oversizedReview && validUniqueGatewayResponse(body) {
 		var verdict struct {
 			Action string `json:"action"`
@@ -1444,6 +1478,14 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		*requestHandedOff = true
 	}
 	return code
+}
+
+// gatewayAllowed reports a gateway answer whose action lets the call run.
+func gatewayAllowed(body []byte) bool {
+	var verdict struct {
+		Action string `json:"action"`
+	}
+	return json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert")
 }
 
 // failAfterErrorStatus fails a call the gateway answered with the error
@@ -1720,6 +1762,9 @@ func sendHookRequest(
 type hookRequestFacts struct {
 	once   sync.Once
 	header http.Header
+	// patchWatch reads the patch targets the evidence attests again, nil when
+	// it attests none.
+	patchWatch *hookpaths.PatchTargetWatch
 }
 
 // set adds the call's facts to header; a nil hookRequestFacts computes them
@@ -1731,21 +1776,33 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 	}
 	f.once.Do(func() {
 		f.header = make(http.Header)
-		setHookRequestFacts(f.header, opts, payload)
+		f.patchWatch = setHookRequestFacts(f.header, opts, payload)
 	})
 	for name, values := range f.header {
 		header[name] = slices.Clone(values)
 	}
 }
 
-func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
+// watch is the watch of the patch targets the write evidence the call sent
+// the gateway attests, nil when it attests none.
+func (f *hookRequestFacts) watch() *hookpaths.PatchTargetWatch {
+	if f == nil {
+		return nil
+	}
+	return f.patchWatch
+}
+
+// setHookRequestFacts sets the facts of the call on header and returns the
+// watch of the patch targets its write evidence attests.
+func setHookRequestFacts(header http.Header, opts Options, payload []byte) (patchWatch *hookpaths.PatchTargetWatch) {
 	startupEvent := hookpaths.IsSessionStartEvent(opts.Event)
 	if opts.ManagedEnterprise && !opts.SecureClient &&
 		(runtime.GOOS != "windows" || startupEvent) {
 		// The surface and bound event are the ones this call sends the
 		// gateway (HookDialectHeader, X-DefenseClaw-Copilot-Event), so the
 		// evidence reads the body in the dialect the gateway judges.
-		if resolved := hookpaths.ResolveConnector(opts.Connector, hookDialect(opts), opts.Event, payload); resolved != "" {
+		var resolved string
+		if resolved, patchWatch = hookpaths.ResolveConnectorWatch(opts.Connector, hookDialect(opts), opts.Event, payload); resolved != "" {
 			header.Set(hookpaths.Header, resolved)
 		}
 	}
@@ -1755,6 +1812,7 @@ func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
 			header.Set(assetfacts.Header, value)
 		}
 	}
+	return patchWatch
 }
 
 // setUserIdentityHeaders reports which end user this hook is running as.

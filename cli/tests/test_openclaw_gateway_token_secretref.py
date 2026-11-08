@@ -234,7 +234,7 @@ def test_setup_guardrail_adopt_token_uses_an_env_ref(tmp_path, token_env, monkey
     token_env(ENV_VALUE)
     cfg = _openclaw_cfg(tmp_path, ENV_REF)
     with (
-        patch.object(cmd_setup, "_save_secret_to_dotenv") as save,
+        patch.object(cmd_setup, "_save_adopted_gateway_token") as save,
         patch.object(cmd_setup, "keep_running_gateway_token"),
     ):
         cmd_setup._adopt_openclaw_gateway_token(SimpleNamespace(cfg=cfg, logger=None))

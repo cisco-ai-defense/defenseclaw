@@ -91,6 +91,10 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory(prefix="doctor-win-hooks-")
+        # The version row probes the agent it finds; a real one on the PATH of this host must not be run.
+        candidates = patch("defenseclaw.inventory.agent_discovery._binary_candidates_for_agent", return_value=())
+        candidates.start()
+        self.addCleanup(candidates.stop)
         self.root = Path(self.temp.name)
         self.profile = self.root / "Disposable Profile"
         self.install = self.profile / "DefenseClaw Install"

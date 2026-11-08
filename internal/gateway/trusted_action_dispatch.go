@@ -204,6 +204,10 @@ type trustedActionRequest struct {
 	// a line break as another file directive. Its write views require the
 	// narrower patch-target proof, including in guest-directory views.
 	patchTarget bool
+	// strictPatchLinks is set for a patch target judged in the strict policy
+	// tier: a target the managed hook resolved through a link is not trusted
+	// there (hermesClientPatchTarget).
+	strictPatchLinks bool
 	// Sandbox absolute targets are guest names; their host-directory views
 	// carry the filesystem proof.
 	patchHostView   bool
@@ -7804,7 +7808,7 @@ func trustedBashStaticWordValue(word *syntax.Word) (string, bool) {
 	if word == nil || trustedBashWordMayExpandHome(word) || shellparse.MinBraceFields(word) > 1 {
 		return "", false
 	}
-	fields, err := expand.Fields(&expand.Config{}, word)
+	fields, err := shellparse.Fields(&expand.Config{}, word)
 	if err != nil || len(fields) != 1 || strings.TrimSpace(fields[0]) != fields[0] {
 		return "", false
 	}
@@ -8058,7 +8062,7 @@ func trustedBashStaticFields(call *syntax.CallExpr) ([]string, bool) {
 		if uint64(len(fields))+shellparse.MinBraceFields(word) > 256 {
 			return nil, false
 		}
-		expanded, err := expand.Fields(&expand.Config{}, word)
+		expanded, err := shellparse.Fields(&expand.Config{}, word)
 		if err != nil {
 			if len(fields) == 0 {
 				return nil, false

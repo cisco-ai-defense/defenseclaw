@@ -46,7 +46,13 @@ from typing import Any
 
 import yaml
 
-from defenseclaw import connector_paths, credential_provenance, envvars, legacy_connector
+from defenseclaw import (
+    connector_paths,
+    credential_provenance,
+    envvars,
+    gateway_token_adoption,
+    legacy_connector,
+)
 from defenseclaw.config_writer import ManagedConfigWriteError
 
 # Back-compat re-exports — internal-but-imported-by-tests helpers that
@@ -2191,6 +2197,14 @@ class GatewayConfig:
            resort because plaintext secrets in YAML are discouraged
            (and ``_warn_plaintext_secrets`` already nags about it).
 
+        When ``.env`` holds both gateway-token spellings with different
+        values, the earlier name in this order wins, except that a copy the
+        gateway adopted from ``openclaw.json`` (recorded by the marker comment
+        in ``.env``, see ``defenseclaw.gateway_token_adoption``) never shadows a
+        value the operator saved under the other spelling: the load leaves the
+        adopted copy out. ``defenseclaw keys set`` on either name replaces every
+        spelling already saved.
+
         Returns the empty string when no token is reachable; callers
         gate on the truthiness, so empty == "unauthenticated".
         """
@@ -3064,8 +3078,33 @@ class GuardrailConfig:
         setter's runtime check read for them (GAP-1354, GAP-1730).
         :meth:`effective_hook_fail_mode` already resolves it (a managed mode,
         an explicit saved mode, else the connector's policy tier).
+
+        OpenClaw plugin tool inspection and model requests are in-process:
+        a strict policy stays closed even when an older saved hook setting says
+        open, on a host that is not managed (the Go rule in
+        ``EffectiveHookOutageFailModeForConnector``).
         """
-        return self.effective_hook_fail_mode(connector)
+        mode, source = self.hook_fail_mode_resolution(connector)
+        if (
+            mode == "open"
+            and source.startswith("config:")
+            and connector_paths.normalize(connector) == "openclaw"
+            and not self._managed_outage_install()
+            and self.hook_policy_tier(connector) == "strict"
+        ):
+            return "closed"
+        return mode
+
+    def _managed_outage_install(self) -> bool:
+        """Whether the outage mode is the administrator's, not the policy tier's (Go managed.IsManagedEnterprise)."""
+        owner = getattr(self, "_owner", None)
+        cfg = owner() if callable(owner) else None
+        if cfg is not None and getattr(cfg, "guardrail", None) is self:
+            if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+                return True
+            if cfg.managed_outside_secure_client():
+                return True
+        return self.secure_client_hook_fail_modes()
 
     def hook_policy_tier(self, connector: str = "") -> str:
         """The connector's policy tier: its rule pack's posture (strict, default or permissive).
@@ -7703,6 +7742,8 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     managed_host: bool | None = None
     try:
         body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
+        # An adopted gateway token copy never shadows the one the operator saved.
+        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -7737,6 +7778,12 @@ def _load_dotenv_into_os(data_dir: str) -> None:
                 seen_keys.add(key)
                 current = os.environ.get(key)
                 injected = current is None or credential_provenance.holds_injected_value(data_dir, key, current)
+                if gateway_token_adoption.is_shadowed(shadowed, key):
+                    # A long-lived process (the TUI) may hold the adopted copy an
+                    # earlier load injected.
+                    if current is not None and injected:
+                        del os.environ[key]
+                    continue
                 if injected:
                     os.environ[key] = value
                 credential_provenance.note_dotenv_candidate(

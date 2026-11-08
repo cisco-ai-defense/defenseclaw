@@ -15,14 +15,22 @@ import (
 // a tool definition, the content of any result or any other field names no
 // result and takes no notice.
 
-// toolResultID is the call id one tool-result message carries. itemRef is set
-// only for a Responses function_call_output, the one adapter whose id form
-// differs from the id OpenClaw gave the call ("<call id>|<item id>"): it is the
-// full id rebuilt from the request own function_call item of that call, and is
-// empty unless exactly one such item names the call.
+// toolResultID is the call id one tool-result message carries. Two fields are
+// set only for a Responses function_call_output, the one adapter whose id form
+// differs from the id OpenClaw gave the call ("<call id>|<item id>"). itemRef
+// is the full id rebuilt from the request own function_call item of that call,
+// and is empty unless exactly one such item names the call. callOnly is true
+// when the request carries no item id for the call at all: OpenClaw replays a
+// function_call without its id unless it replays the reasoning item too, so
+// the result then names the call part and nothing else. items counts the
+// function_call items of the request that name the call: with several, the
+// result is visibly ambiguous between them, and a block of the call part is
+// dropped quietly rather than left for a later replay of the result to claim.
 type toolResultID struct {
-	id      string
-	itemRef string
+	id       string
+	itemRef  string
+	callOnly bool
+	items    int
 }
 
 // toolResultIDs returns the call id of every tool-result message of the
@@ -61,9 +69,11 @@ func toolResultIDs(body []byte) []toolResultID {
 	// Responses: input[] items of a tool call output carry it in call_id. That
 	// is the call part of the id OpenClaw gave the call; the item part sits on
 	// the function_call item of the same request, so a function_call_output is
-	// tied to the full id only when exactly one function_call item names its
-	// call. Two items of one call part, or none, leave the result without the
-	// full id and it matches nothing but an id equal to its call_id.
+	// tied to the full id when exactly one function_call item names its call.
+	// When no item of the call carries an id, the result is the call part
+	// alone (callOnly), and only when the request carries at most one item of
+	// the call. Several items of one call part, named or not, leave the result
+	// with neither, and it matches nothing but an id equal to its call_id.
 	input := objectItems(root["input"])
 	itemsOfCall := map[string][]string{}
 	for _, item := range input {
@@ -80,8 +90,20 @@ func toolResultIDs(body []byte) []toolResultID {
 			continue
 		}
 		r := toolResultID{id: callID}
-		if items := itemsOfCall[callID]; typ == "function_call_output" && len(items) == 1 && items[0] != "" {
-			r.itemRef = callID + "|" + items[0]
+		if items := itemsOfCall[callID]; typ == "function_call_output" {
+			r.items = len(items)
+			named := 0
+			for _, item := range items {
+				if item != "" {
+					named++
+				}
+			}
+			switch {
+			case len(items) == 1 && items[0] != "":
+				r.itemRef = callID + "|" + items[0]
+			case named == 0 && len(items) <= 1:
+				r.callOnly = true
+			}
 		}
 		ids = append(ids, r)
 	}
@@ -127,9 +149,13 @@ func objectItems(v any) []map[string]any {
 // was recorded for. The id must equal the recorded id. The one provider form
 // that differs is the Responses function_call_output: OpenClaw names a
 // Responses call "<call id>|<item id>" and sends back only the call id, so that
-// result matches through the full id its request rebuilds (itemRef) and never
-// through the call part alone, which a sibling item of the same call part also
-// carries. A recorded id with "|" is otherwise matched only by itself.
+// result matches through the full id its request rebuilds (itemRef), or through
+// the call part when the request names no item of the call (callOnly). A
+// request that names an item of the call, or several, never matches through the
+// call part, and a sibling item of the same call part is told from the block
+// by the inspect-side memory, which keys calls by call part. A recorded id with
+// "|" is otherwise matched only by itself.
 func (n openClawBlockNotice) isResultOf(r toolResultID) bool {
-	return r.id == n.callID || (r.itemRef != "" && r.itemRef == n.callID)
+	return r.id == n.callID || (r.itemRef != "" && r.itemRef == n.callID) ||
+		(r.callOnly && noticeCallKey(n.callID) == r.id)
 }

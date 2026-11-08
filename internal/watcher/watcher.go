@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -48,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 )
 
 // InstallType distinguishes between skill and MCP install events.
@@ -127,9 +129,13 @@ type WebhookDispatcher interface {
 }
 
 type InstallWatcher struct {
-	cfg        *config.Config
-	skillDirs  []string
-	pluginDirs []string
+	cfg            *config.Config
+	skillDirs      []string
+	pluginDirs     []string
+	rootCoverageMu sync.RWMutex
+	rootNotifyMu   sync.Mutex
+	rootCoverage   map[string]RootCoverageIssue
+	onRootCoverage func([]RootCoverageIssue)
 	// managedArtifacts are exact connector-owned plugin files. They remain
 	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
 	// not inspect or quarantine DefenseClaw's own bridge artifact.
@@ -237,6 +243,10 @@ type InstallWatcher struct {
 	// that holds it (GAP-0132). Empty means every root belongs to
 	// watcherConnectorName.
 	rootConnectors []rootConnector
+	// rootConsumers retains every connector that loads a watched root. The
+	// event owner above stays singular, while root coverage applies to all
+	// consumers of a shared skill or plugin folder.
+	rootConsumers map[string][]string
 	// assetOwners names the account of each enrolled home, longest home
 	// first (SetAssetOwners).
 	assetOwners []AssetOwner
@@ -318,6 +328,88 @@ type InstallWatcher struct {
 	// first rescan cycle ended (mcpStartup applies until then).
 	pollMCP        bool
 	firstCycleDone atomic.Bool
+}
+
+// RootCoverageIssue is a configured asset root whose admission scan is off.
+// Health exposes only counts and connector names; the gateway log names paths.
+type RootCoverageIssue struct {
+	Kind, Path, Connector, Reason string
+	Connectors                    []string
+}
+
+// RootConsumer names a connector that loads a watched skill or plugin root.
+type RootConsumer struct {
+	Kind, Path, Connector string
+}
+
+// SetRootCoverageHandler publishes changes to the gateway's watcher health.
+// Call before Run starts.
+func (w *InstallWatcher) SetRootCoverageHandler(handler func([]RootCoverageIssue)) {
+	w.onRootCoverage = handler
+}
+
+// RootCoverageIssues returns a snapshot for runtime admission checks.
+func (w *InstallWatcher) RootCoverageIssues() []RootCoverageIssue {
+	w.rootCoverageMu.RLock()
+	defer w.rootCoverageMu.RUnlock()
+	issues := make([]RootCoverageIssue, 0, len(w.rootCoverage))
+	for _, issue := range w.rootCoverage {
+		issue.Connectors = append([]string(nil), issue.Connectors...)
+		issues = append(issues, issue)
+	}
+	sort.Slice(issues, func(i, j int) bool { return issues[i].Path < issues[j].Path })
+	return issues
+}
+
+func (w *InstallWatcher) setRootCoverage(kind, path string, cause error) {
+	if w == nil || w.secureClientActive() {
+		return
+	}
+	w.rootNotifyMu.Lock()
+	defer w.rootNotifyMu.Unlock()
+	key := kind + "\x00" + filepath.Clean(path)
+	w.rootCoverageMu.Lock()
+	previous, hadPrevious := w.rootCoverage[key]
+	if cause == nil {
+		if hadPrevious {
+			delete(w.rootCoverage, key)
+		}
+	} else {
+		if w.rootCoverage == nil {
+			w.rootCoverage = make(map[string]RootCoverageIssue)
+		}
+		connectors := w.rootConsumers[kind+"\x00"+w.rootCoveragePath(path)]
+		if len(connectors) == 0 {
+			connector := w.connectorForPath(path)
+			if connector == "" && w.cfg != nil {
+				connector = w.cfg.Guardrail.Connector
+			}
+			if connector != "" {
+				connectors = []string{connector}
+			}
+		}
+		connector := ""
+		if len(connectors) > 0 {
+			connector = connectors[0]
+		}
+		w.rootCoverage[key] = RootCoverageIssue{Kind: kind, Path: path, Connector: connector, Connectors: append([]string(nil), connectors...), Reason: cause.Error()}
+	}
+	current := w.rootCoverage[key]
+	changed := hadPrevious != (cause != nil) || (cause != nil &&
+		(previous.Kind != current.Kind || previous.Path != current.Path || previous.Connector != current.Connector ||
+			previous.Reason != current.Reason || !slices.Equal(previous.Connectors, current.Connectors)))
+	w.rootCoverageMu.Unlock()
+	if !changed {
+		return
+	}
+	if cause != nil {
+		fmt.Fprintf(os.Stderr, "[watch] warning: %s admission scanning is off for connectors %s root %s: %v\n", kind, strings.Join(current.Connectors, ", "), path, cause)
+	} else {
+		fmt.Fprintf(os.Stderr, "[watch] %s admission scanning resumed for root %s\n", kind, path)
+	}
+	if w.onRootCoverage != nil {
+		w.onRootCoverage(w.RootCoverageIssues())
+	}
 }
 
 type rootConnector struct {
@@ -450,6 +542,33 @@ func (w *InstallWatcher) SetRootConnectors(roots map[string]string) {
 	sort.Slice(w.rootConnectors, func(i, j int) bool {
 		return len(w.rootConnectors[i].root) > len(w.rootConnectors[j].root)
 	})
+}
+
+// SetRootConsumers records all connectors that load each watched root. Call
+// before Run, alongside SetRootConnectors for the event owner.
+func (w *InstallWatcher) SetRootConsumers(consumers []RootConsumer) {
+	w.rootConsumers = make(map[string][]string)
+	for _, consumer := range consumers {
+		connector := strings.ToLower(strings.TrimSpace(consumer.Connector))
+		if connector == "" || strings.TrimSpace(consumer.Path) == "" {
+			continue
+		}
+		key := consumer.Kind + "\x00" + w.rootCoveragePath(consumer.Path)
+		if !slices.Contains(w.rootConsumers[key], connector) {
+			w.rootConsumers[key] = append(w.rootConsumers[key], connector)
+		}
+	}
+}
+
+func (w *InstallWatcher) rootCoveragePath(path string) string {
+	cleaned, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		cleaned = filepath.Clean(path)
+	}
+	if runtime.GOOS == "windows" {
+		cleaned = strings.ToLower(cleaned)
+	}
+	return cleaned
 }
 
 // SetMCPServerSource replaces where admission and the rescan read the MCP
@@ -1021,13 +1140,25 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	watchWake := make(chan struct{}, 1)
 	var nestedMu sync.Mutex
 	watchAsync := false
-	w.addWatch = func(dir string) { addDirWatches(fsw, dir, 0, watchedDirs) }
+	w.addWatch = func(dir string) {
+		if w.secureClientActive() {
+			addDirWatchesLegacy(fsw, dir, 0, watchedDirs)
+		} else {
+			for _, root := range w.pluginDirs {
+				if watcherPathAtOrBelow(dir, root) && !sameWatcherPath(dir, root) &&
+					unlinkedSkillTreePath(root, dir) != nil {
+					return
+				}
+			}
+			addDirWatches(fsw, dir, 0, watchedDirs)
+		}
+	}
 	w.addContentWatch = func(dir string) {
 		if !w.secureClientActive() {
 			for _, root := range w.skillDirs {
 				if watcherPathAtOrBelow(dir, root) {
 					if err := unlinkedSkillTreePath(root, dir); err != nil {
-						fmt.Fprintf(os.Stderr, "[watch] skill content directory %s: %v\n", dir, err)
+						w.setRootCoverage("skill", root, err)
 						return
 					}
 				}
@@ -1072,7 +1203,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return
 		}
 		if info, statErr := pathidentity.StatPinned(dir); statErr == nil {
-			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info}
+			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info, checked: time.Now()}
 		}
 	}
 	// rewatchRoot watches a root again once the folder at its path is not
@@ -1080,31 +1211,49 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	rewatchRoot := func(key string, root watchedRoot) {
 		info, statErr := os.Stat(root.dir)
 		if statErr != nil || !info.IsDir() {
+			if statErr == nil {
+				statErr = fmt.Errorf("watched root is not a directory: %s", root.dir)
+			}
+			root.failed, root.checked = true, time.Now()
+			roots[key] = root
+			w.setRootCoverage(root.kind, root.dir, statErr)
 			return
 		}
 		_, watching := watchedDirs[key]
-		if os.SameFile(info, root.info) && (watching || root.failed) {
+		same := os.SameFile(info, root.info)
+		if same && watching && !root.failed && time.Since(root.checked) < time.Second {
+			return
+		}
+		if !w.secureClientActive() {
+			if err := unlinkedSkillTreePath(root.dir, root.dir); err != nil {
+				nestedMu.Lock()
+				forgetDirWatches(fsw, root.absolute, watchedDirs)
+				forgetNestedWatchKeys(root.absolute, nestedWatches)
+				nestedMu.Unlock()
+				root.info, root.failed, root.checked = info, true, time.Now()
+				roots[key] = root
+				w.setRootCoverage(root.kind, root.dir, err)
+				return
+			}
+		}
+		root.checked = time.Now()
+		if same && watching && !root.failed {
+			roots[key] = root
+			w.setRootCoverage(root.kind, root.dir, nil)
 			return
 		}
 		nestedMu.Lock()
 		forgetDirWatches(fsw, root.absolute, watchedDirs)
 		forgetNestedWatchKeys(root.absolute, nestedWatches)
 		nestedMu.Unlock()
-		if root.kind == "skill" {
-			if err := unlinkedSkillTreePath(root.dir, root.dir); err != nil {
-				root.info, root.failed = info, true
-				roots[key] = root
-				fmt.Fprintf(os.Stderr, "[watch] replaced skill root %s: %v (skipping)\n", root.dir, err)
-				return
-			}
-		}
 		root.info, root.failed = info, false
 		if addErr := fsw.Add(root.dir); addErr != nil {
 			root.failed = true
 			roots[key] = root
-			fmt.Fprintf(os.Stderr, "[watch] %s dir %s was replaced; watch it again: %v\n", root.kind, root.dir, addErr)
+			w.setRootCoverage(root.kind, root.dir, addErr)
 			return
 		}
+		w.setRootCoverage(root.kind, root.dir, nil)
 		roots[key] = root
 		watchedDirs[key] = struct{}{}
 		fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", root.kind, root.dir)
@@ -1129,7 +1278,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return false
 		}
 		watchRoot := ensureAndWatchLegacy
-		if kind == "skill" && !w.secureClientActive() {
+		if !w.secureClientActive() {
 			watchRoot = ensureAndWatch
 		}
 		created, err := watchRoot(fsw, dir)
@@ -1141,19 +1290,18 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 		}
 		if err != nil {
+			w.setRootCoverage(kind, dir, err)
 			if errors.Is(err, errWatchDirNotCreated) {
 				missingDirs = append(missingDirs, [2]string{dir, kind})
-				fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (watching it once it exists)\n", kind, dir, err)
 				return false
 			}
-			if kind == "skill" && !w.secureClientActive() {
+			if !w.secureClientActive() {
 				missingDirs = append(missingDirs, [2]string{dir, kind})
-				fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (retrying when safe)\n", dir, err)
 				return false
 			}
-			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
 			return false
 		}
+		w.setRootCoverage(kind, dir, nil)
 		watchedDirs[key] = struct{}{}
 		rememberRoot(key, dir, absolute, kind)
 		watched++
@@ -1168,8 +1316,13 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			// (skills/synced/<account>/<skill>); watch those folders too so
 			// a newly synced skill is scanned on arrival (GAP-1409).
 			synced := filepath.Join(dir, "synced")
-			if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
-				addDirWatches(fsw, synced, 1, watchedDirs)
+			if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 &&
+				(w.secureClientActive() || unlinkedSkillTreePath(dir, synced) == nil) {
+				if w.secureClientActive() {
+					addDirWatchesLegacy(fsw, synced, 1, watchedDirs)
+				} else {
+					addDirWatches(fsw, synced, 1, watchedDirs)
+				}
 			}
 		}
 	}
@@ -1180,7 +1333,11 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		w.watchExistingPluginFolders(dir)
 		if w.cacheLayoutPlugins(dir) &&
 			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
-			addClaudeCacheWatches(fsw, dir, watchedDirs)
+			if w.secureClientActive() {
+				addDirWatchesLegacy(fsw, dir, 2, watchedDirs)
+			} else {
+				addClaudeCacheWatches(fsw, dir, watchedDirs)
+			}
 		}
 	}
 
@@ -1319,9 +1476,13 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						continue
 					}
 					copyRoot, copied := w.cachePluginCopyRoot(event.Name)
-					if info, statErr := os.Stat(event.Name); statErr == nil &&
+					if info, statErr := os.Lstat(event.Name); statErr == nil &&
 						info.IsDir() && depth < 3 {
-						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+						if w.secureClientActive() {
+							addDirWatchesLegacy(fsw, event.Name, 2, watchedDirs)
+						} else {
+							addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+						}
 						if !copied {
 							w.queueExistingClaudePlugins(ctx, event.Name, depth)
 						}
@@ -1364,11 +1525,19 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				case 0:
 					// The synced folder itself: watch it and its account
 					// folders; the event below expands it into its skills.
-					addDirWatches(fsw, event.Name, 1, watchedDirs)
+					if w.secureClientActive() {
+						addDirWatchesLegacy(fsw, event.Name, 1, watchedDirs)
+					} else {
+						addDirWatches(fsw, event.Name, 1, watchedDirs)
+					}
 				case 1:
 					// A new account folder: watch it and queue the skills
 					// already inside (they can land before the watch).
-					addDirWatches(fsw, event.Name, 0, watchedDirs)
+					if w.secureClientActive() {
+						addDirWatchesLegacy(fsw, event.Name, 0, watchedDirs)
+					} else {
+						addDirWatches(fsw, event.Name, 0, watchedDirs)
+					}
 					children, _ := os.ReadDir(event.Name)
 					for _, child := range children {
 						if child.IsDir() && !strings.HasPrefix(child.Name(), ".") {
@@ -1430,8 +1599,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 						missingDirs = append(missingDirs, entry)
 						continue
 					}
-					if entry[1] == "skill" && !w.secureClientActive() {
+					if !w.secureClientActive() {
 						if err := unlinkedSkillTreePath(entry[0], entry[0]); err != nil {
+							w.setRootCoverage(entry[1], entry[0], err)
 							missingDirs = append(missingDirs, entry)
 							continue
 						}
@@ -1507,6 +1677,7 @@ type watchedRoot struct {
 	dir, absolute, kind string
 	info                os.FileInfo
 	failed              bool // the folder now there could not be watched
+	checked             time.Time
 }
 
 // admitReplacedRoot watches the folders of a skill or plugin root that was
@@ -1517,7 +1688,8 @@ func (w *InstallWatcher) admitReplacedRoot(ctx context.Context, fsw *fsnotify.Wa
 		w.watchIncompleteSkillFolders(root)
 		w.watchSkillContents(root)
 		synced := filepath.Join(root, "synced")
-		if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 {
+		if depth, ok := w.claudeSyncedDepth(synced); ok && depth == 0 &&
+			unlinkedSkillTreePath(root, synced) == nil {
 			addDirWatches(fsw, synced, 1, watched)
 		}
 	} else {
@@ -1766,7 +1938,7 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		return nil
 	}
 	for _, root := range w.skillDirs {
-		discover, _ := hermesSkillsDiscover(root)
+		discover, _ := hermesSkillsDiscover(root, !w.secureClientActive())
 		if discover == nil || !watcherPathAtOrBelow(path, root) {
 			continue
 		}
@@ -1864,7 +2036,7 @@ func (w *InstallWatcher) watchIncompleteSkillFolders(root string) {
 	if _, _, recursive := w.recursiveSkillRoot(root); recursive {
 		return
 	}
-	if discover, _ := hermesSkillsDiscover(root); discover != nil {
+	if discover, _ := hermesSkillsDiscover(root, !w.secureClientActive()); discover != nil {
 		return
 	}
 	entries, err := os.ReadDir(root)
@@ -1927,7 +2099,7 @@ func (w *InstallWatcher) changedSkillFolder(path string) (string, bool) {
 			return "", false
 		}
 		skill := filepath.Join(rootAbs, parts[0])
-		discover, _ := hermesSkillsDiscover(root)
+		discover, _ := hermesSkillsDiscover(root, !w.secureClientActive())
 		if (recursive && sameWatcherPath(root, recursiveRoot)) ||
 			discover != nil {
 			// Recursive roots resolve the nearest marked skill, not the
@@ -2115,7 +2287,10 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
 	w.admissionNotes.Delete(evt.Path)
-	defer func() { w.settleAdmissionIssue(evt, res) }()
+	defer func() {
+		w.settleAdmissionIssue(evt, res)
+		w.releaseHeldOnAdmission(evt, res)
+	}()
 	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
 		return AdmissionResult{
 			Event:   evt,
@@ -2166,31 +2341,24 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	cfg := decisionPolicy.Config
 	connector := w.eventConnector(evt)
-	assetDecision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
-		TargetType:     targetType,
-		Name:           evt.Name,
-		DeclaredNames:  declaredAssetNames(cfg, evt),
-		Connector:      connector,
-		SourcePath:     evt.Path,
-		RuntimeSurface: "watcher",
-	}))
+	// A root several connectors load applies each one scoped asset rules.
+	assetDecision, assetConnector, assetDenying := w.rootAssetPolicy(cfg, evt, connector)
 	if assetDecision.Enabled && assetDecision.RawAction == "block" {
 		if assetDecision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
-			if err := w.enforceBlockWith(ctx, evt, true, ""); err != nil && !w.secureClientActive() {
-				// skill list and skill info say the quarantine of a
-				// denied asset failed, as they do for a scan verdict;
-				// they said quarantined (GAP-0133).
-				w.journalFailedQuarantine(evt, targetType, err)
-			}
+			// skill list and skill info say the quarantine of a denied
+			// asset failed, as they do for a scan verdict; they said
+			// quarantined (GAP-0133). An asset that stays in its folder,
+			// because the move failed or an operator-restored copy is
+			// kept, is held for the connector whose rule denied it too.
+			w.journalPolicyDenied(cfg, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), assetDenying)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: assetDecision.Reason}
 			return res
 		}
-		w.logAssetPolicyWouldBlock(ctx, evt, targetType, connector, assetDecision)
+		w.logAssetPolicyWouldBlock(ctx, evt, targetType, assetConnector, assetDecision)
 	}
-
 	if res, done := w.legacyAllowPathMismatch(ctx, cfg, evt, targetType); done {
 		return res
 	}
@@ -2364,14 +2532,11 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// the scan ran applies as the pre-scan check applies it; the lists
 	// alone missed it (GAP-1155).
 	if post := decisionPolicy.Config; post != nil {
-		if decision := post.EvaluateAssetPolicy(w.withMCPDefinition(post, evt, config.AssetPolicyInput{
-			TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(post, evt),
-			Connector: connector, SourcePath: evt.Path, RuntimeSurface: "watcher",
-		})); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
+		if decision, _, denying := w.rootAssetPolicy(post, evt, connector); decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s post-scan", targetType, decision.Reason, decision.Source))
 			scanID := w.logScanID(ctx, evt, result, "blocked")
-			w.enforceBlock(ctx, evt)
+			w.journalPolicyDenied(post, evt, targetType, w.enforceBlockWith(ctx, evt, true, ""), denying)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{
 				ScanID: scanID,
@@ -3155,7 +3320,11 @@ func blockedPathGone(path string) bool {
 // journalFailedQuarantine records on the journal that the quarantine of a
 // blocked asset failed (err), or that its link was removed: install block,
 // with the reason skill list and skill info show.
-func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType string, err error) {
+//
+// A root several connectors load is journaled for the owner and for each
+// connector in also (the one whose rule denied the asset), so the denying
+// connector is never left without the action.
+func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType string, err error, also ...string) {
 	if w.store == nil {
 		return
 	}
@@ -3163,9 +3332,374 @@ func (w *InstallWatcher) journalFailedQuarantine(evt InstallEvent, targetType st
 	if errors.Is(err, errLinkRemoved) {
 		reason = err.Error()
 	}
-	scope := w.journalScope(w.eventConnector(evt))
 	rowType, rowName := journalTarget(evt, targetType)
-	_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", reason)
+	scopes := []string{w.journalScope(w.eventConnector(evt))}
+	for _, connector := range also {
+		if scope := w.journalScope(connector); !slices.Contains(scopes, scope) {
+			scopes = append(scopes, scope)
+		}
+	}
+	for _, scope := range scopes {
+		_ = w.store.SetActionFieldForConnector(rowType, rowName, scope, "install", "block", reason)
+	}
+}
+
+// policyDenialMarkPrefix opens the tag that ends the journal reason of a hold
+// journalPolicyDenied wrote. The tag lists the fields of the row the hold
+// set and the copies of the asset it was written for, so releasePolicyHolds
+// lifts those fields, and only once the last of those copies is allowed; an
+// install block or runtime disable that was on the row for another reason is
+// not in the list and stays. A journal row is keyed by the asset's name, not
+// by its path, so the copies are recorded in the tag: the row's source path
+// belongs to an earlier block, or to whichever copy was judged last.
+const policyDenialMarkPrefix = " [asset policy: "
+
+// policyHeldCopiesMark separates, in the tag, the held fields from the copies.
+const policyHeldCopiesMark = " copies="
+
+// policyDenialSep follows, in the reason of a row the hold shares with an
+// earlier runtime disable, the reason of that earlier block; releasing the
+// hold puts it back.
+const policyDenialSep = " | asset policy hold: "
+
+// retainedPolicyReason leads the reason of a hold on an operator-restored
+// copy that stays in its folder although a connector rule denies it.
+const retainedPolicyReason = "a restored copy stays in its folder while an asset policy rule denies it"
+
+func policyDenialMark(fields, copies []string) string {
+	return policyDenialMarkPrefix + strings.Join(fields, ",") + policyHeldCopiesMark + strings.Join(copies, ",") + "]"
+}
+
+// parsePolicyHold returns the fields and the copies a journal reason records
+// as held by a policy hold, or nil when the reason carries no tag.
+func parsePolicyHold(reason string) (fields, copies []string) {
+	i := strings.LastIndex(reason, policyDenialMarkPrefix)
+	if i < 0 || !strings.HasSuffix(reason, "]") {
+		return nil, nil
+	}
+	body, list, found := strings.Cut(strings.TrimSuffix(reason[i+len(policyDenialMarkPrefix):], "]"), policyHeldCopiesMark)
+	if found && list != "" {
+		copies = strings.Split(list, ",")
+	}
+	return strings.Split(body, ","), copies
+}
+
+// policyCopyKey names one copy of an asset in a hold tag: its absolute,
+// cleaned path (folded on Windows, as sameWatcherPath does), encoded so that
+// no path can end or split the tag.
+func policyCopyKey(path string) string {
+	abs, err := filepath.Abs(strings.TrimSpace(path))
+	if err != nil {
+		abs = strings.TrimSpace(path)
+	}
+	abs = filepath.Clean(abs)
+	if runtime.GOOS == "windows" {
+		abs = strings.ToLower(abs)
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(abs))
+}
+
+// livePolicyCopies are the copies of a tag other than skip whose folder is
+// not absent; a copy that is gone leaves nothing to run and holds nothing. A
+// copy this process cannot look at (a private parent folder) is present,
+// unknown, and stays.
+func livePolicyCopies(copies []string, skip string) []string {
+	var live []string
+	for _, key := range copies {
+		raw, err := base64.RawURLEncoding.DecodeString(key)
+		if key != skip && err == nil && !policyCopyGone(string(raw)) && !slices.Contains(live, key) {
+			live = append(live, key)
+		}
+	}
+	return live
+}
+
+// policyPriorReason is the reason of the block a hold shares its row with
+// (policyDenialSep), or "".
+func policyPriorReason(reason string) string {
+	if i := strings.Index(reason, policyDenialSep); i >= 0 {
+		return reason[:i]
+	}
+	return ""
+}
+
+func actionFieldValue(entry *audit.ActionEntry, field string) string {
+	if entry == nil {
+		return ""
+	}
+	switch field {
+	case "install":
+		return entry.Actions.Install
+	case "runtime":
+		return entry.Actions.Runtime
+	case "file":
+		return entry.Actions.File
+	}
+	return ""
+}
+
+// policyRuntimeScope is the journal row that carries a connector's runtime
+// disable from a policy hold: the connector's own row. OpenClaw's install
+// journal is the global row (journalScope), which every other connector's
+// runtime check falls back to, so a runtime disable written there would block
+// an unrelated connector's skill of the same name.
+func policyRuntimeScope(connector string) string {
+	return strings.ToLower(strings.TrimSpace(connector))
+}
+
+// policyHoldScopes are the journal rows a policy hold of evt may sit in: the
+// install row and the runtime row of the owner and of every consumer.
+func (w *InstallWatcher) policyHoldScopes(evt InstallEvent) []string {
+	var scopes []string
+	for _, connector := range w.rootConsumersOf(evt, w.eventConnector(evt)) {
+		for _, scope := range []string{w.journalScope(connector), policyRuntimeScope(connector)} {
+			if !slices.Contains(scopes, scope) {
+				scopes = append(scopes, scope)
+			}
+		}
+	}
+	return scopes
+}
+
+// journalPolicyDenied records, after enforceBlockWith (err is its result) on
+// an asset an asset_policy rule denied (cfg is the policy generation that
+// decided the denial, so the tier that holds the root owner is the one that
+// denied, not the config the process started with), that the asset is still in its
+// folder: because the quarantine failed (err), or because the files of an
+// operator restore are kept while the install block stands. Every connector
+// in denying (each one whose rule denied the copy, as each loads it) gets the
+// install block and, on its own row, the runtime disable. A root owner whose
+// own rules allow the copy is not held for another connector denial in the
+// balanced and permissive tiers, where it runs the ordinary skill; the strict
+// tier and a managed deployment hold it too.
+// Without the runtime disable a denial by the
+// default (default_action deny) rule, which the hook evaluates only when
+// runtime_detection is on, left the surviving skill callable. A block already
+// on a row for another reason (install, runtime or file) is left as it is: not
+// claimed, not re-pinned to this copy, not lifted with the hold. A runtime
+// enable is no block and the hold replaces it. releasePolicyHolds lifts what the hold set when the denial goes; an
+// operator enable clears it too. A removed link, or an asset that is gone,
+// leaves nothing to run and no runtime disable.
+func (w *InstallWatcher) journalPolicyDenied(cfg *config.Config, evt InstallEvent, targetType string, err error, denying []string) {
+	if w.store == nil || w.secureClientActive() {
+		return
+	}
+	var reason string
+	switch {
+	case errors.Is(err, errLinkRemoved):
+		w.journalFailedQuarantine(evt, targetType, err, denying...)
+		return
+	case err != nil:
+		reason = quarantineFailedReason + err.Error()
+	case (evt.Type == InstallSkill || evt.Type == InstallPlugin) && assetStillThere(evt.Path):
+		reason = retainedPolicyReason
+	default:
+		return
+	}
+	type holdRow struct {
+		scope  string
+		fields []string
+	}
+	var rows []holdRow
+	add := func(scope, field string) {
+		for i := range rows {
+			if rows[i].scope == scope {
+				rows[i].fields = append(rows[i].fields, field)
+				return
+			}
+		}
+		rows = append(rows, holdRow{scope, []string{field}})
+	}
+	owner := w.eventConnector(evt)
+	var connectors []string
+	if len(denying) == 0 || PolicyHoldStrict(cfg, owner) {
+		connectors = []string{owner}
+	}
+	for _, connector := range denying {
+		if connector != "" && !containsFold(connectors, connector) {
+			connectors = append(connectors, connector)
+		}
+	}
+	var installScopes []string
+	for _, connector := range connectors {
+		if scope := w.journalScope(connector); !slices.Contains(installScopes, scope) {
+			installScopes = append(installScopes, scope)
+			add(scope, "install")
+		}
+	}
+	for _, connector := range connectors {
+		if scope := policyRuntimeScope(connector); scope != "" {
+			add(scope, "runtime")
+		}
+	}
+	name := evt.Name
+	for _, row := range rows {
+		prev, _ := w.store.GetActionForConnector(targetType, name, row.scope)
+		owned, prevCopies := parsePolicyHold(reasonOf(prev))
+		copies := append(livePolicyCopies(prevCopies, policyCopyKey(evt.Path)), policyCopyKey(evt.Path))
+		// A field already at its protective value that no hold of ours set is an
+		// earlier block (an operator, a scan verdict, a failed quarantine). The
+		// hold does not claim it, rebind its source path or lift it later. Any
+		// other value, a runtime enable among them, is not a block and the hold
+		// replaces it.
+		independent := func(field string) bool {
+			value := actionFieldValue(prev, field)
+			return value != "" && value == policyProtectiveValue(field) && !slices.Contains(owned, field)
+		}
+		earlier := false
+		for _, field := range []string{"install", "runtime", "file"} {
+			earlier = earlier || independent(field)
+		}
+		// An earlier block pinned to another copy keeps that path, since an
+		// allow rule for this copy would otherwise lift it. The row then holds
+		// only the runtime disable (it covers every copy of the name), and holds
+		// nothing when that disable is the earlier block.
+		pinnedElsewhere := earlier && prev.SourcePath != "" && !sameWatcherPath(prev.SourcePath, evt.Path)
+		var claim []string
+		for _, field := range row.fields {
+			if !independent(field) && (!pinnedElsewhere || field == "runtime") {
+				claim = append(claim, field)
+			}
+		}
+		for _, field := range owned {
+			if !slices.Contains(claim, field) && actionFieldValue(prev, field) != "" {
+				claim = append(claim, field)
+			}
+		}
+		if len(claim) == 0 {
+			continue
+		}
+		rowReason := reason + policyDenialMark(claim, copies)
+		if prior := policyPriorReason(reasonOf(prev)); prior != "" {
+			rowReason = prior + policyDenialSep + rowReason
+		} else if earlier && owned == nil && reasonOf(prev) != "" {
+			rowReason = prev.Reason + policyDenialSep + rowReason
+		}
+		for _, field := range claim {
+			value := "block"
+			if field == "runtime" {
+				value = "disable"
+			}
+			_ = w.store.SetActionFieldForConnector(targetType, name, row.scope, field, value, rowReason)
+		}
+		if !pinnedElsewhere {
+			_ = w.store.SetSourcePathForConnector(targetType, name, row.scope, evt.Path)
+		}
+	}
+}
+
+// policyProtectiveValue is the value of a journal action field that blocks
+// the asset, or empty for a field that holds no block.
+func policyProtectiveValue(field string) string {
+	switch field {
+	case "install":
+		return "block"
+	case "runtime":
+		return "disable"
+	case "file":
+		return "quarantine"
+	}
+	return ""
+}
+
+func reasonOf(entry *audit.ActionEntry) string {
+	if entry == nil {
+		return ""
+	}
+	return entry.Reason
+}
+
+func assetStillThere(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+// policyCopyGone reports a held copy whose folder is absent, as opposed to
+// one this process cannot look at.
+func policyCopyGone(path string) bool {
+	_, err := os.Lstat(path)
+	return pathAbsent(err)
+}
+
+// policyHeldScopes are the journal rows of the owner and of every consumer of
+// the root holding evt that hold something a journalPolicyDenied wrote for
+// this copy. A row pinned to another copy by an earlier block still counts:
+// the hold is the copy's own.
+func (w *InstallWatcher) policyHeldScopes(evt InstallEvent) []string {
+	if w.secureClientActive() || w.store == nil || (evt.Type != InstallSkill && evt.Type != InstallPlugin) {
+		return nil
+	}
+	var scopes []string
+	for _, scope := range w.policyHoldScopes(evt) {
+		entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
+		if err != nil || entry == nil {
+			continue
+		}
+		fields, copies := parsePolicyHold(entry.Reason)
+		if !slices.Contains(copies, policyCopyKey(evt.Path)) {
+			continue
+		}
+		for _, field := range fields {
+			if actionFieldValue(entry, field) != "" {
+				scopes = append(scopes, scope)
+				break
+			}
+		}
+	}
+	return scopes
+}
+
+// releasePolicyHolds lifts, from the owner and from every consumer, what a
+// policy denial set on an asset that stayed in its folder, once no connector
+// rule denies it: an allow rule for it (a global one or one scoped to the
+// denying connector) or a policy that no longer denies. Without it an allow
+// rule cleared only the owner row and the allowed skill stayed blocked for
+// the denying connector. A block or disable that was on a row before the
+// hold stays, and so does the hold itself while another copy of the same name
+// is still denied.
+func (w *InstallWatcher) releasePolicyHolds(evt InstallEvent) {
+	for _, scope := range w.policyHeldScopes(evt) {
+		entry, err := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope)
+		if err != nil || entry == nil {
+			continue
+		}
+		fields, copies := parsePolicyHold(entry.Reason)
+		if others := livePolicyCopies(copies, policyCopyKey(evt.Path)); len(others) > 0 {
+			// Another copy of the name is still denied: its hold stays whole,
+			// and only this copy leaves the tag.
+			reason := entry.Reason[:strings.LastIndex(entry.Reason, policyDenialMarkPrefix)] + policyDenialMark(fields, others)
+			for _, field := range fields {
+				if value := actionFieldValue(entry, field); value != "" {
+					_ = w.store.SetActionFieldForConnector(string(evt.Type), evt.Name, scope, field, value, reason)
+				}
+			}
+			continue
+		}
+		var cleared []string
+		for _, field := range fields {
+			if actionFieldValue(entry, field) == "" {
+				continue
+			}
+			if err := w.store.ClearActionFieldForConnector(string(evt.Type), evt.Name, scope, field); err == nil {
+				cleared = append(cleared, field)
+			}
+		}
+		if len(cleared) == 0 {
+			continue
+		}
+		if rest, _ := w.store.GetActionForConnector(string(evt.Type), evt.Name, scope); rest != nil {
+			if prior := policyPriorReason(entry.Reason); prior != "" {
+				for _, field := range []string{"runtime", "install", "file"} {
+					if value := actionFieldValue(rest, field); value != "" {
+						_ = w.store.SetActionFieldForConnector(string(evt.Type), evt.Name, scope, field, value, prior)
+						break
+					}
+				}
+			}
+		}
+		_ = w.logger.LogAction(string(audit.ActionEnable), evt.Path,
+			fmt.Sprintf("type=%s released: no asset policy rule denies it; cleared %s connector=%s", evt.Type, strings.Join(cleared, " "), scope))
+	}
 }
 
 // quarantineFailedReason and errLinkRemoved lead the journal reason of a
@@ -3329,6 +3863,9 @@ func (w *InstallWatcher) quarantineAssetWith(ctx context.Context, evt InstallEve
 func (w *InstallWatcher) resolvedLinkedRoot(path string, roots []string) (string, []string) {
 	for _, root := range roots {
 		resolved, err := filepath.EvalSymlinks(root)
+		if !w.secureClientActive() {
+			resolved, err = skillrootsafe.Resolve(root, watcherEvalSymlinks)
+		}
 		if err != nil || sameWatcherPath(resolved, root) {
 			continue
 		}
@@ -3389,8 +3926,11 @@ func (w *InstallWatcher) releaseAllowListed(evt InstallEvent, reason string) {
 		return
 	}
 	var cleared []string
+	held, _ := parsePolicyHold(entry.Reason)
 	for field, value := range map[string]string{"runtime": entry.Actions.Runtime, "install": entry.Actions.Install} {
-		if value == "" {
+		// A field a policy hold set is lifted by releasePolicyHolds, which
+		// keeps it while another copy of the name is still denied.
+		if value == "" || slices.Contains(held, field) {
 			continue
 		}
 		if err := w.store.ClearActionFieldForConnector(string(evt.Type), evt.Name, scope, field); err == nil {
@@ -3420,6 +3960,39 @@ func (w *InstallWatcher) allowRuleReleases(ctx context.Context, evt InstallEvent
 	cfg := w.liveConfig()
 	out := w.evaluateAdmission(ctx, w.admissionInputFor(cfg, evt, string(evt.Type), connector))
 	return out != nil && out.Verdict == "allowed" && w.allowedAuditReason(out.Reason) == "allow-listed"
+}
+
+// policyDenies reports whether a connector rule that loads evt's root denies
+// it under the live config.
+func (w *InstallWatcher) policyDenies(evt InstallEvent) bool {
+	decision, _, _ := w.rootAssetPolicy(w.liveConfig(), evt, w.eventConnector(evt))
+	return decision.Enabled && decision.RawAction == "block" && decision.Action == "block"
+}
+
+// policyHoldReleases reports a skill or plugin whose owner or consumer row
+// still holds it after an asset-policy denial although no connector rule
+// denies it now, so the rescan admits it again and lifts the hold.
+func (w *InstallWatcher) policyHoldReleases(evt InstallEvent) bool {
+	return len(w.policyHeldScopes(evt)) > 0 && !w.policyDenies(evt)
+}
+
+// releaseHeldOnAdmission lifts a policy hold once admission has reached a
+// verdict that lets the asset run: a scan that has not finished, one that was
+// interrupted, and a block all keep it, since until then nothing but the hold
+// stops a skill that stayed in its folder (the hook evaluates the default
+// skill rules only with runtime_detection on).
+func (w *InstallWatcher) releaseHeldOnAdmission(evt InstallEvent, res AdmissionResult) {
+	if res.Interrupted {
+		return
+	}
+	switch res.Verdict {
+	case VerdictAllowed, VerdictClean, VerdictWarning:
+	default:
+		return
+	}
+	if len(w.policyHeldScopes(evt)) > 0 && !w.policyDenies(evt) {
+		w.releasePolicyHolds(evt)
+	}
 }
 
 // quarantinedCopyIsBack reports a skill or plugin at a path that holds an
@@ -4035,13 +4608,25 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 	if w != nil && !w.secureClientActive() && !errors.Is(err, enforce.ErrQuarantineRemovalDeferred) {
 		w.admissionNotes.Store(evt.Path, AdmissionIssue{Kind: AdmissionNotQuarantined, Detail: err.Error()})
 	}
+	// A rejected asset with a link inside is not moved, because quarantine does
+	// not follow links, and its files stay where they are. The runtime disable
+	// is applied by the gateway after admission, so the watcher cannot say it
+	// was applied: the alert names the reason and keeps the HIGH severity of a
+	// failed quarantine until the disable is confirmed elsewhere (GAP-0826).
+	// Secure Client keeps the failed-quarantine record unchanged.
+	alertTitle := "Quarantine failed; inspect the source and quarantine copy"
+	auditDetail := fmt.Sprintf("type=%s quarantine failed; inspect the source and quarantine copy: %v", evt.Type, err)
+	if errors.Is(err, enforce.ErrLinkedAssetContent) && w != nil && !w.secureClientActive() {
+		alertTitle = "Rejected " + evt.Type.String() + " is not quarantined: its files contain a link, which quarantine does not follow; the files stay in place, confirm the asset is disabled in its runtime"
+		auditDetail = fmt.Sprintf("type=%s not quarantined, its files contain a link and stay in place; confirm the asset is disabled in its runtime: %v", evt.Type, err)
+	}
 	if w != nil && w.logger != nil {
 		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
 		if !w.secureClientActive() {
 			envelope := audit.EnvelopeFromContext(ctx)
 			envelope.Connector = w.eventConnector(evt)
 			alertCtx := audit.ContextWithEnvelope(ctx, envelope)
-			_ = w.logger.LogAlertCtx(alertCtx, "watcher", "HIGH", "Quarantine failed; inspect the source and quarantine copy", map[string]any{
+			_ = w.logger.LogAlertCtx(alertCtx, "watcher", "HIGH", alertTitle, map[string]any{
 				"asset_type": evt.Type.String(), "asset_name": evt.Name,
 				"path": evt.Path, "error": err.Error(), "connector": w.eventConnector(evt),
 			})
@@ -4050,7 +4635,7 @@ func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, evt InstallE
 			Action:   string(audit.ActionWatcherBlock),
 			Target:   evt.Path,
 			Actor:    "defenseclaw",
-			Details:  fmt.Sprintf("type=%s quarantine failed; inspect the source and quarantine copy: %v", evt.Type, err),
+			Details:  auditDetail,
 			Severity: "HIGH",
 		})
 	}
@@ -4370,14 +4955,13 @@ func underVendorSystemRoot(absolute string) bool {
 // missing root (for example under a parent only an administrator may write).
 var errWatchDirNotCreated = errors.New("create dir")
 
-// ensureAndWatch creates and watches a skill root only when its existing
-// ancestors and the final root have no links. It returns folders it created.
+// ensureAndWatch creates and watches an asset root after validating any
+// account-owned links in its existing path. It returns folders it created.
 func ensureAndWatch(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	return ensureAndWatchWithCheck(fsw, dir, true)
 }
 
-// ensureAndWatchLegacy retains the existing watch behavior for plugins and
-// Secure Client. Skill roots outside Secure Client use ensureAndWatch.
+// ensureAndWatchLegacy retains the existing Secure Client watch behavior.
 func ensureAndWatchLegacy(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	return ensureAndWatchWithCheck(fsw, dir, false)
 }
@@ -4390,8 +4974,7 @@ func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool)
 	if checkLinks {
 		for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
 			if _, err := os.Lstat(current); err == nil {
-				resolved, resolveErr := filepath.EvalSymlinks(current)
-				if resolveErr != nil || !sameWatcherPath(canonicalSkillSystemPath(current), resolved) {
+				if _, resolveErr := skillrootsafe.Resolve(current, watcherEvalSymlinks); resolveErr != nil {
 					return nil, fmt.Errorf("linked or unavailable skill root: %s", dir)
 				}
 				break
@@ -4518,10 +5101,38 @@ func addDirWatches(
 	maxDepth int,
 	watched map[string]struct{},
 ) {
+	addDirWatchesWithRootLink(fsw, root, maxDepth, watched, true)
+}
+
+// Secure Client retains the plain WalkDir behavior for a linked final root.
+func addDirWatchesLegacy(
+	fsw *fsnotify.Watcher,
+	root string,
+	maxDepth int,
+	watched map[string]struct{},
+) {
+	addDirWatchesWithRootLink(fsw, root, maxDepth, watched, false)
+}
+
+func addDirWatchesWithRootLink(
+	fsw *fsnotify.Watcher,
+	root string,
+	maxDepth int,
+	watched map[string]struct{},
+	allowRootLink bool,
+) {
 	root = filepath.Clean(root)
-	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	walkRoot := root
+	if allowRootLink {
+		var err error
+		walkRoot, err = trustedWalkRoot(root)
 		if err != nil {
-			if path == root {
+			return
+		}
+	}
+	_ = filepath.WalkDir(walkRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if path == walkRoot {
 				return fs.SkipAll
 			}
 			return fs.SkipDir
@@ -4532,7 +5143,7 @@ func addDirWatches(
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fs.SkipDir
 		}
-		relative, relErr := filepath.Rel(root, path)
+		relative, relErr := filepath.Rel(walkRoot, path)
 		if relErr != nil || relative == ".." ||
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return fs.SkipDir
@@ -4546,9 +5157,13 @@ func addDirWatches(
 		if depth > maxDepth {
 			return fs.SkipDir
 		}
-		key := strings.ToLower(filepath.Clean(path))
+		logical, mapErr := logicalWalkPath(root, walkRoot, path)
+		if mapErr != nil {
+			return fs.SkipDir
+		}
+		key := strings.ToLower(filepath.Clean(logical))
 		if _, exists := watched[key]; !exists {
-			if addErr := fsw.Add(path); addErr == nil {
+			if addErr := fsw.Add(logical); addErr == nil {
 				watched[key] = struct{}{}
 			}
 		}

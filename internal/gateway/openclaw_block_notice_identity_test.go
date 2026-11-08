@@ -109,7 +109,7 @@ func TestGAP0644ResponsesResultIDIsTheCallPartOfTheRecordedID(t *testing.T) {
 	}{
 		{"call_abc|fc_123", "call_abc", "fc_123", true},  // the call part, tied to the item of its own request
 		{"call_abc|fc_123", "call_abc", "fc_999", false}, // a sibling item of the same call part
-		{"call_abc|fc_123", "call_abc", "", false},       // no item to tie it to
+		{"call_abc|fc_123", "call_abc", "", true},        // the replayed call carries no item id: the call part is the call
 		{"call_abc|fc_123", "call_abc|fc_123", "", true}, // the full id sent back
 		{"call_abc", "call_abc", "fc_1", true},
 		{"call_abc|fc_1", "call_abd", "fc_1", false},

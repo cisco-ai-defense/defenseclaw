@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -187,7 +188,7 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 				if err := os.WriteFile(source, versions[(swaps+1)%2], 0o600); err != nil {
 					t.Fatal(err)
 				}
-				result, err := CompareAndSwapFile(source, destination,
+				result, err := compareAndSwapOwnedForTest(source, destination,
 					SwapExpectation{Exists: true, Data: versions[swaps%2]}, 64, nil)
 				if err != nil || !result.Swapped || !result.Replaced {
 					close(stop)
@@ -225,6 +226,78 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 			requireNoSwapLeftoversForTest(t, dir, "hooks.json")
 		})
 	}
+}
+
+// Codex requirements may retain an administrator's MZ key. Its rendered TOML
+// is data even when those are the first bytes. A deletion-sharing reader must
+// still find the old or new requirements on its first open during publication.
+func TestCompareAndSwapFileKeepsMZRequirementsAtTheNameThroughout(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "requirements.toml")
+	versions := [][]byte{
+		[]byte("MZ = 'retained'\nmode = 'old'\n# " + strings.Repeat("a", 128) + "\n"),
+		[]byte("MZ = 'retained'\nmode = 'new'\n# " + strings.Repeat("b", 128) + "\n"),
+	}
+	if err := os.WriteFile(destination, versions[0], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	failure := make(chan error, 1)
+	var reads atomic.Int64
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			data, err := readForSwapReaderTest(destination, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE)
+			reads.Add(1)
+			if err != nil || (!bytes.Equal(data, versions[0]) && !bytes.Equal(data, versions[1])) {
+				failure <- fmt.Errorf("requirements read %q: %v", data, err)
+				return
+			}
+		}
+	}()
+	swaps := 0
+	for deadline := time.Now().Add(4 * time.Second); swaps < 400 && time.Now().Before(deadline); swaps++ {
+		source := filepath.Join(dir, fmt.Sprintf("source-%d.tmp", swaps))
+		if err := os.WriteFile(source, versions[(swaps+1)%2], 0o600); err != nil {
+			close(stop)
+			<-done
+			t.Fatal(err)
+		}
+		result, err := compareAndSwapOwnedForTest(source, destination,
+			SwapExpectation{Exists: true, Data: versions[swaps%2]}, len(versions[0]), nil)
+		if err != nil || !result.Swapped || !result.Replaced {
+			close(stop)
+			<-done
+			t.Fatalf("requirements swap %d: %+v err=%v", swaps, result, err)
+		}
+		select {
+		case err := <-failure:
+			close(stop)
+			<-done
+			t.Fatalf("requirements reader after %d swaps: %v", swaps+1, err)
+		default:
+		}
+	}
+	close(stop)
+	<-done
+	select {
+	case err := <-failure:
+		t.Fatalf("requirements reader after %d swaps: %v", swaps, err)
+	default:
+	}
+	if reads.Load() == 0 {
+		t.Fatal("the requirements reader never ran")
+	}
+	if data, err := os.ReadFile(destination); err != nil || !bytes.Equal(data, versions[swaps%2]) {
+		t.Fatalf("final requirements %q err=%v", data, err)
+	}
+	requireNoSwapLeftoversForTest(t, dir, "requirements.toml")
 }
 
 func TestCompareAndSwapFileReaderRetriesTransientOpens(t *testing.T) {
@@ -307,7 +380,7 @@ func TestCompareAndSwapFileLetsReadersReadWhileItCompares(t *testing.T) {
 	}
 	source := writeSwapSourceForTest(t, dir, "new")
 	inspected := false
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16,
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16,
 		func(*os.File) error {
 			inspected = true
 			for _, reader := range swapReaderShares {
@@ -372,7 +445,7 @@ func TestCompareAndSwapFileWaitsForAReaderThatDoesNotShareDeletion(t *testing.T)
 				_ = reader.Close()
 			}()
 			source := writeSwapSourceForTest(t, dir, "new")
-			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+			result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 			<-released
 			if test.swapped {
 				if err != nil || !result.Swapped {

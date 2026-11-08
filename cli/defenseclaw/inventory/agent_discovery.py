@@ -2512,25 +2512,35 @@ def _windows_acl_write_error(path: str) -> str | None:
     return None
 
 
-def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
-    """Check the executable and every ancestor through its trusted prefix."""
+def _windows_acl_chain_error(resolved: str, prefix: str) -> str | None:
+    """Why the executable or an ancestor through *prefix* is not trusted, or None.
+
+    The reason names the folder or file that failed, so a refusal can say which
+    one to fix instead of reporting only that the path is not trusted.
+    """
     current = resolved
     prefix_key = _path_key(prefix)
     seen: set[str] = set()
     while current:
         key = _path_key(current)
         if key in seen:
-            return False
+            return f"{current}: the path loops back on itself"
         seen.add(key)
-        if _windows_acl_write_error(current) is not None:
-            return False
+        problem = _windows_acl_write_error(current)
+        if problem is not None:
+            return f"{current}: {problem}"
         if key == prefix_key:
-            return True
+            return None
         parent = os.path.dirname(current)
         if parent == current:
-            return False
+            return f"{resolved} is not below {prefix}"
         current = parent
-    return False
+    return f"{resolved} is not below {prefix}"
+
+
+def _windows_acl_chain_is_safe(resolved: str, prefix: str) -> bool:
+    """Check the executable and every ancestor through its trusted prefix."""
+    return _windows_acl_chain_error(resolved, prefix) is None
 
 
 def _trusted_prefix_dir_mode_error(path: str, st: os.stat_result) -> str | None:
@@ -3795,8 +3805,11 @@ def _publish_agent_signal(
     read after this scan read its own is newer still and stays (the read,
     compare and write are one locked step, so a scan that ends late cannot put
     back what a later reading found, however the scans overlapped). A missing or unreadable cache has nothing to keep
-    and takes the scan; a cache past its time limit is left alone: it is no longer
-    read, and the next discovery scans again (GAP-0752).
+    and takes the scan, and so does one past its time limit: no one reads it
+    any more, so none of its entries is evidence to keep, and the scan (which
+    reads every enrolled peer) is the refresh `agent discover --refresh` would
+    write (GAP-0752, GAP-0882). A scan that lacks a catalog entry is not a
+    cache anyone could read, so it is never written whole.
     """
     signal = disc.agents.get(name)
     if signal is None:
@@ -3807,29 +3820,86 @@ def _publish_agent_signal(
             payload = _read_cache_payload(path)
             if payload is not None:
                 scanned = _parse_rfc3339(str(payload.get("scanned_at") or ""))
-                if scanned is None or _now_utc() - scanned > timedelta(seconds=CACHE_TTL_SECONDS):
-                    return False
-                for peer, fresh in disc.agents.items():
-                    cached_peer = payload["agents"].get(peer)
-                    if (
-                        peer != name
-                        and not _scan_read_version(fresh)
-                        and not _entry_executable_changed(cached_peer)
-                        and not _entry_selected_elsewhere(cached_peer, fresh)
-                    ):
-                        continue
-                    read_at = _signal_observed_at(fresh, disc)
-                    if _cached_entry_is_newer(cached_peer, payload, read_at):
-                        continue
-                    payload["agents"][peer] = _entry_for_cache(fresh, fresh.observed_at or disc.scanned_at)
-                body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-                atomic_write_private_bytes(path, body.encode("utf-8"))
-                return True
+                if scanned is not None and _now_utc() - scanned <= timedelta(seconds=CACHE_TTL_SECONDS):
+                    for peer, fresh in disc.agents.items():
+                        cached_peer = payload["agents"].get(peer)
+                        if (
+                            peer != name
+                            and not _scan_read_version(fresh)
+                            and not _entry_executable_changed(cached_peer)
+                            and not _entry_selected_elsewhere(cached_peer, fresh)
+                        ):
+                            continue
+                        read_at = _signal_observed_at(fresh, disc)
+                        if _cached_entry_is_newer(cached_peer, payload, read_at):
+                            continue
+                        payload["agents"][peer] = _entry_for_cache(fresh, fresh.observed_at or disc.scanned_at)
+                    body = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+                    atomic_write_private_bytes(path, body.encode("utf-8"))
+                    return True
     except (OSError, TypeError, ValueError):
         return False
-    # Nothing readable to keep: the scan is the cache (written outside the
+    # Nothing current to keep: the scan is the cache (written outside the
     # lock above, which the full write takes itself).
+    if not set(DISCOVERABLE_CONNECTORS) <= set(disc.agents):
+        return False
     return _write_cache(disc, data_dir=data_dir)
+
+
+def publish_verified_agent(
+    name: str,
+    *,
+    binary_path: str,
+    version: str,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Record the executable and version a setup verified for one connector.
+
+    Native Windows OpenCode setup selects its executable through the protected
+    selection and runs no discovery scan, so the cache doctor reads never heard
+    of the install and doctor failed a healthy fresh setup until
+    ``agent discover --refresh`` (GAP-0882). This writes that one entry the way
+    a scan would have: a readable cache keeps every other entry as it is
+    (:func:`_publish_agent_signal`); a missing, unreadable or expired one is
+    replaced by a scan of the host that carries the verified entry. Admission
+    never comes from this cache, so nothing that goes wrong here (a write, or
+    the host scan that stands in for a missing cache) may refuse a setup whose
+    executable the protected selection already verified: every failure is a
+    False return and the caller names the refresh step.
+    """
+    if not binary_path or not version:
+        return False
+    try:
+        return _publish_verified_agent(name, binary_path, version, data_dir)
+    except Exception:  # noqa: BLE001 - optional doctor evidence; see the docstring.
+        return False
+
+
+def _publish_verified_agent(
+    name: str,
+    binary_path: str,
+    version: str,
+    data_dir: str | os.PathLike[str] | None,
+) -> bool:
+    config_path = _agent_config_path(name, include_workspace_config=False)
+    verified = AgentSignal(
+        name=name,
+        installed=True,
+        config_path=config_path,
+        binary_path=binary_path,
+        version=version,
+        error="",
+        configured=bool(config_path),
+        identity=_executable_identity(binary_path),
+        observed_at=_format_rfc3339(_now_utc()),
+    )
+    if _read_cache(data_dir=data_dir) is not None:
+        solo = AgentDiscovery(scanned_at=verified.observed_at, agents={name: verified}, cache_hit=False)
+        if _publish_agent_signal(solo, name, data_dir=data_dir):
+            return True
+    scan = discover_with_probes([], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False)
+    scan.agents[name] = verified
+    return _publish_agent_signal(scan, name, data_dir=data_dir)
 
 
 def _cache_path(*, data_dir: str | os.PathLike[str] | None = None) -> Path:

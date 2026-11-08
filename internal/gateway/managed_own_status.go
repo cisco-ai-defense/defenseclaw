@@ -156,12 +156,11 @@ func (a *APIServer) ownWindowsConnectorStates(cfg *config.Config, sid, name stri
 	scan := a.ownUnprotectedAgents(cfg, ownStatusCaller{sid: sid, name: name})
 	states := make(map[string]any)
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
-		state := map[string]any{"protected": false, "state": "not confirmed"}
+		state := ownNotConfirmed(ownCauseWindowsUnchecked)
 		if decided, ok := scan.state(connector); ok {
 			state = decided
 		} else if connector == enterprisepolicy.ConnectorClaudeCode {
-			state["protected"] = true
-			state["state"] = "protected"
+			state = ownProtected()
 		}
 		states[connector] = state
 	}
@@ -211,34 +210,38 @@ func (a *APIServer) ownConnectorStates(cfg *config.Config, uid, name string) map
 		return false
 	}
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
-		state := map[string]any{"protected": false, "state": "not confirmed"}
 		if decided, ok := scan.state(connector); ok {
 			states[connector] = decided
 			continue
 		}
 		if view != nil && (view.admitted == nil || view.admitted[connector]) {
 			if proof, ok := view.connectors[connector]; ok {
-				protected := !rootDenied && !proof.shared && !proof.allAccounts && !proof.accounts[name] &&
-					(!strict || callerUID == 0 || strictExempt || enrolled(""))
-				state["protected"] = protected
-				if protected {
-					state["state"] = "protected"
-				} else if rootDenied || proof.shared || proof.allAccounts || proof.accounts[name] || guardian != nil {
-					state["state"] = "not protected"
+				unproven := proof.shared || proof.allAccounts || proof.accounts[name]
+				switch {
+				case !rootDenied && !unproven && (!strict || callerUID == 0 || strictExempt || enrolled("")):
+					states[connector] = ownProtected()
+				case rootDenied:
+					states[connector] = ownNotProtected(ownCauseRootDenied)
+				case unproven:
+					states[connector] = ownNotProtected(ownCauseUnprovenSource)
+				case guardian != nil:
+					states[connector] = ownNotProtected(ownCauseNotEnrolled)
+				default:
+					states[connector] = ownNotConfirmed(ownCauseNoGuardianRecord)
 				}
-				states[connector] = state
 				continue
 			}
 		}
-		if guardian != nil || rootDenied {
-			if !rootDenied && enrolled(connector) {
-				state["protected"] = true
-				state["state"] = "protected"
-			} else {
-				state["state"] = "not protected"
-			}
+		switch {
+		case rootDenied:
+			states[connector] = ownNotProtected(ownCauseRootDenied)
+		case guardian == nil:
+			states[connector] = ownNotConfirmed(ownCauseNoGuardianRecord)
+		case enrolled(connector):
+			states[connector] = ownProtected()
+		default:
+			states[connector] = ownNotProtected(ownCauseNoSetup)
 		}
-		states[connector] = state
 	}
 	return states
 }

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -172,6 +173,10 @@ func TestWindowsCursorMachineGuardRebuildConcurrentWriterKeepsEverySave(t *testi
 		}()
 		_, rebuildErr := RestoreWindowsCursorManagedAdapter(hook)
 		if err := <-done; err != nil {
+			var errno syscall.Errno
+			if errors.As(err, &errno) {
+				t.Fatalf("iteration %d: administrator save: Win32 error %d: %v", iteration, errno, err)
+			}
 			t.Fatalf("iteration %d: administrator save: %v", iteration, err)
 		}
 		after, err := os.ReadFile(paths.Hooks)

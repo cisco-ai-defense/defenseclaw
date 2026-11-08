@@ -1871,6 +1871,42 @@ function Assert-InstallRoom([long]$Extra, [string]$ForWhat) {
         ([double]($data + $Extra + 100MB) / 1MB), ([double]$data / 1MB), ([double]$Extra / 1MB), ([double]$free / 1MB))
 }
 
+# uv builds win-unicode-console, the one locked dependency without a wheel,
+# from its source archive inside the uv cache folder. Python creates the files
+# of that build only below the 260-character Windows path limit (the ending NUL
+# counts) unless long paths are enabled, and the longest one is 151 characters
+# below the cache folder, separator included:
+#   sdists-v9\pypi\win-unicode-console\0.5\<16>\src\build\bdist.win-amd64\wheel\.\
+#   win_unicode_console-0.5-py3.12.egg-info\dependency_links.txt
+# A profile of about 98 characters stopped there with WinError 206 and no word
+# on the path (GAP-0865). The folder is not moved for the user: a cache outside
+# the profile would be shared ground that a build runs code from.
+$UvBuildPathReserve = 151
+$WindowsPathLimit = 259
+
+function Test-LongPathsEnabled {
+    try {
+        $key = Get-ItemProperty -LiteralPath "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -ErrorAction Stop
+        return ([int]$key.LongPathsEnabled -eq 1)
+    } catch { return $false }
+}
+
+function Resolve-UvCacheDir([string]$CacheDir) {
+    # A relative UV_CACHE_DIR means the folder under PowerShell's location,
+    # which is where the native uv starts; [Environment]::CurrentDirectory (what
+    # GetFullPath uses) is the process folder and can differ after Set-Location.
+    # Measure and hand uv the one absolute folder (GAP-0865).
+    return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($CacheDir)
+}
+
+function Assert-UvBuildPathFits([string]$CacheDir) {
+    # Before anything is created, so a refusal changes nothing (GAP-0865).
+    $cache = [IO.Path]::GetFullPath($CacheDir).TrimEnd("\")
+    if ($cache.Length + $UvBuildPathReserve -le $WindowsPathLimit) { return }
+    if (Test-LongPathsEnabled) { return }
+    Die ("The uv cache folder $cache is {0} characters long. uv builds one package (win-unicode-console) from source in it and needs {1} more, which is past the Windows limit of 260 characters, so the install would stop with WinError 206 (the filename or extension is too long). Nothing was changed. Pick a short folder that only your account can write to, for example C:\dcuv, and run the installer again with it: `$env:UV_CACHE_DIR = 'C:\dcuv'. Windows long path support (LongPathsEnabled, set by an administrator) lifts the limit as well. Remove the folder yourself when you no longer need it" -f $cache.Length, $UvBuildPathReserve)
+}
+
 function Write-KeptUvCache {
     # A failed first install keeps only uv's download cache: say how large it
     # is and how to remove it (GAP-1883). Get-TreeSize, not Measure-Object:
@@ -5639,6 +5675,8 @@ function Invoke-Install {
     # data dir, so `uninstall --all` leaves nothing of them in AppData.
     if (-not $env:UV_CACHE_DIR) { $env:UV_CACHE_DIR = Join-Path $DataDir ".uv\cache" }
     if (-not $env:UV_PYTHON_INSTALL_DIR) { $env:UV_PYTHON_INSTALL_DIR = Join-Path $DataDir ".uv\python" }
+    $env:UV_CACHE_DIR = Resolve-UvCacheDir $env:UV_CACHE_DIR
+    Assert-UvBuildPathFits $env:UV_CACHE_DIR
     Protect-UvDirectory -Create
     # uv's defaults (60 s to compile one file, 30 s per download read) fail
     # on a Windows host busy with Defender and other accounts (GAP-1776).

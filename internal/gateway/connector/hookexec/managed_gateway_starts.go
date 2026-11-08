@@ -482,6 +482,7 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 		})
 	}}
 	ctx, peerCheck := withPerUserPeerCheck(ctx)
+	peerCheck.by = deadline
 	tryCtx, cancel := context.WithCancelCause(httptrace.WithClientTrace(ctx, trace))
 	go func() {
 		timer := time.NewTimer(time.Until(deadline))

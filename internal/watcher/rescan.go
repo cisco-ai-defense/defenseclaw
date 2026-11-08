@@ -479,14 +479,19 @@ func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
 // IsRoot alone resolves only the service account's own Hermes home, so each
 // user's category folders (devops, software-development) were rescanned as
 // skills and logged a failed scan every cycle (GAP-0285). trustBundled is
-// false for a profile root: its manifest and Hermes checkout belong to that
-// account, which could mark its own skill bundled, so every skill there is
-// rescanned.
-func hermesSkillsDiscover(dir string) (discover func(string, int) ([]hermesskills.Entry, error), trustBundled bool) {
+// true only for a trusted root whose skill tree matches a digest pinned in
+// DefenseClaw. An account-controlled manifest alone does not prove a bundle.
+func hermesSkillsDiscover(dir string, trusted bool) (discover func(string, int) ([]hermesskills.Entry, error), trustBundled bool) {
 	switch {
 	case hermesskills.IsRoot(dir):
+		if trusted {
+			return hermesskills.DiscoverTrusted, true
+		}
 		return hermesskills.Discover, true
 	case hermesskills.IsProfileRoot(dir):
+		if trusted {
+			return hermesskills.DiscoverTrusted, true
+		}
 		return hermesskills.DiscoverProfileRoot, false
 	}
 	return nil, false
@@ -505,11 +510,11 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 		}
 		if !w.secureClientActive() {
 			if err := unlinkedSkillTreePath(dir, dir); err != nil {
-				fmt.Fprintf(os.Stderr, "[rescan] enumerate skills dir %s: %v\n", dir, err)
+				w.setRootCoverage("skill", dir, err)
 				continue
 			}
 		}
-		if discover, trustBundled := hermesSkillsDiscover(dir); discover != nil {
+		if discover, trustBundled := hermesSkillsDiscover(dir, !w.secureClientActive()); discover != nil {
 			entries, err := discover(dir, hermesskills.DefaultDirectoryLimit)
 			if !w.secureClientActive() && errors.Is(err, hermesskills.ErrDirectoryLimit) {
 				entries, err = discover(dir, hermesskills.FullScanDirectoryLimit)
@@ -602,11 +607,25 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	}
 
 	for _, dir := range w.pluginDirs {
+		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if !w.secureClientActive() {
+			if err := unlinkedSkillTreePath(dir, dir); err != nil {
+				w.setRootCoverage("plugin", dir, err)
+				continue
+			}
+		}
 		// Claude Code's plugin roots, and a Codex plugin cache, whose
 		// marketplace folders hold <plugin>/<version> and are not plugins
 		// themselves (GAP-1573).
 		if connector := w.connectorForPath(dir); connector == "claudecode" ||
 			(w.cacheLayoutPlugins(dir) && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache")) {
+			if w.secureClientActive() && strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
+				if info, err := os.Lstat(dir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+					continue
+				}
+			}
 			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
 				if w.isOwnPlugin(plugin) || w.inClaudePluginStaging(plugin, claudeStagingGrace) {
 					continue
@@ -894,11 +913,15 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 	if !strings.EqualFold(filepath.Base(root), "cache") {
 		return nil
 	}
+	walkRoot, err := trustedWalkRoot(root)
+	if err != nil {
+		return nil
+	}
 
 	var out []string
-	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	_ = filepath.WalkDir(walkRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
-			if path == root {
+			if path == walkRoot {
 				return filepath.SkipAll
 			}
 			return filepath.SkipDir
@@ -909,7 +932,7 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 		if entry.Type()&os.ModeSymlink != 0 {
 			return filepath.SkipDir
 		}
-		relative, relErr := filepath.Rel(root, path)
+		relative, relErr := filepath.Rel(walkRoot, path)
 		if relErr != nil || relative == ".." ||
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			return filepath.SkipDir
@@ -928,7 +951,10 @@ func enumerateClaudeWatcherPlugins(root string) []string {
 		// exactly that directory and never let a nested dependency manifest
 		// manufacture a second plugin identity.
 		if depth == 3 || depth == 1 && isCachePluginCopy(path) {
-			out = append(out, path)
+			logical, mapErr := logicalWalkPath(root, walkRoot, path)
+			if mapErr == nil {
+				out = append(out, logical)
+			}
 			return filepath.SkipDir
 		}
 		if entry.Name() != "." && strings.HasPrefix(entry.Name(), ".") {
@@ -1100,7 +1126,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 	deltas := compareSnapshots(baseline, currentSnap)
 
 	scan, reason := shouldRescan(baseline, currentSnap, fingerprint, w.cfg.Watch.RescanContentGated)
-	if !scan && w.allowRuleReleases(ctx, evt) {
+	if !scan && (w.allowRuleReleases(ctx, evt) || w.policyHoldReleases(evt)) {
 		fmt.Fprintf(os.Stderr, "[rescan] %s %s is allowed by a rule and still blocked; running install admission\n", evt.Type, evt.Name)
 		w.notifyAdmission(w.runAdmission(ctx, evt))
 		return rescanScanned

@@ -1563,6 +1563,12 @@ class TestCheckConnectorHooks(unittest.TestCase):
 class TestCheckHookContractLock(unittest.TestCase):
     """Doctor surfaces the deterministic hook contract selected at setup."""
 
+    def setUp(self) -> None:
+        # The version row probes the agent it finds; a real one on the PATH of this host must not be run.
+        candidates = patch("defenseclaw.inventory.agent_discovery._binary_candidates_for_agent", return_value=())
+        candidates.start()
+        self.addCleanup(candidates.stop)
+
     def _cfg(self, data_dir: str) -> MagicMock:
         cfg = MagicMock()
         cfg.data_dir = data_dir
@@ -1650,8 +1656,8 @@ class TestCheckHookContractLock(unittest.TestCase):
                     )
                 r = _DoctorResult()
                 with patch(
-                    "defenseclaw.commands.cmd_doctor._discovered_agent_version",
-                    return_value=discovered,
+                    "defenseclaw.commands.cmd_doctor._agent_version_now",
+                    return_value=(discovered, True),
                 ):
                     _check_hook_contract_lock(self._cfg(tmp), connector, r, platform_name="linux")
                 check = r.checks[-1]
@@ -1816,8 +1822,8 @@ class TestCheckHookContractLock(unittest.TestCase):
                     fh,
                 )
             with patch(
-                "defenseclaw.commands.cmd_doctor._discovered_agent_version",
-                return_value="1.18.9",  # below the floor: an update to a newer version is not drift
+                "defenseclaw.commands.cmd_doctor._agent_version_now",
+                return_value=("1.18.9", True),  # below the floor: an update to a newer version is not drift
             ) as discovered_version:
                 r = _DoctorResult()
                 _check_hook_contract_lock(self._cfg(tmp), "opencode", r, platform_name="linux")

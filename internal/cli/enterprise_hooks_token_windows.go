@@ -220,7 +220,7 @@ func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathToken
 }
 
 func validateEnterpriseWindowsTokenLocation(dataDir, path, label string) error {
-	serviceAccount := os.Getenv(managed.WindowsServiceAccountEnv)
+	serviceAccount := managed.GatewayServiceAccount()
 	if err := managed.ValidateTrustedServiceRuntimeDir(dataDir, "managed data_dir", serviceAccount); err != nil {
 		return fmt.Errorf("enterprise hooks: %w", err)
 	}

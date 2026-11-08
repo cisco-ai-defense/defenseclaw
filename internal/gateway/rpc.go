@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"time"
 )
 
 // DisableSkill tells the gateway to disable a skill by key.
@@ -131,9 +133,42 @@ func (c *Client) setPluginEnabled(ctx context.Context, pluginName string, enable
 	}
 	_, err = c.Request(ctx, "config.patch", params)
 	if err != nil {
+		// OpenClaw applies a config.patch and then reports it, and the apply
+		// can outlast the caller deadline (10.6 s measured on macOS). When
+		// the deadline ran out, read the config back: if it holds the state
+		// asked for, the patch was applied and is not a failure (GAP-0826).
+		if ctx.Err() != nil && c.pluginStateApplied(ctx, pluginName, enabled) {
+			return nil
+		}
 		return fmt.Errorf("gateway: config.patch plugin %q: %w", pluginName, err)
 	}
 	return nil
+}
+
+// pluginConfirmTimeout bounds the config read-back after a config.patch whose
+// caller deadline expired.
+const pluginConfirmTimeout = 5 * time.Second
+
+// pluginStateApplied reports whether the gateway config now holds the state
+// setPluginEnabled asked for: plugins.entries.<name>.enabled equal to enabled,
+// and the name in plugins.allow exactly when enabling. ctx is already done, so
+// the read uses a fresh, short deadline; an unreadable config is "not applied".
+func (c *Client) pluginStateApplied(ctx context.Context, pluginName string, enabled bool) bool {
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pluginConfirmTimeout)
+	defer cancel()
+	resp, err := c.GetConfig(readCtx)
+	if err != nil {
+		return false
+	}
+	var snapshot configGetResponse
+	if json.Unmarshal(resp, &snapshot) != nil || snapshot.Config == nil || snapshot.Config.Plugins == nil {
+		return false
+	}
+	entry, ok := snapshot.Config.Plugins.Entries[pluginName]
+	if !ok || entry.Enabled == nil || *entry.Enabled != enabled {
+		return false
+	}
+	return slices.Contains(snapshot.Config.Plugins.Allow, pluginName) == enabled
 }
 
 // DisablePlugin tells the gateway to disable a plugin by name.

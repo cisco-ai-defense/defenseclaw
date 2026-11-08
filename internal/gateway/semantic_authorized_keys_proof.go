@@ -1192,8 +1192,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// cwd) is placed in the client's cwd, as the client keyed it.
 		target = hookpaths.OperandPath(target, clientCWD)
 		if request.patchTarget && (request.SandboxGuestCWD == "" || request.patchHostView) {
-			if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
-				return true
+			// A managed gateway cannot walk the user's project (ProtectHome).
+			// The managed hook walked every V4A header target as the user
+			// under the same patch-target rule and attested the complete
+			// patch; a target it found to be no link is judged by the checks
+			// below, as a write_file target is (GAP-0488). Any other target
+			// is walked here, and fails closed where it cannot be.
+			if !hermesClientPatchTarget(request, clientTargets, clientCWD, target) {
+				if _, ok := hookpaths.ResolvePatchWriteTarget(target); !ok {
+					return true
+				}
 			}
 		}
 		// Only the event cwd can interpret the process-dependent alias.
@@ -2109,4 +2117,43 @@ func interpreterCommentStart(code string, i int, language string) bool {
 	default:
 		return false
 	}
+}
+
+// hermesClientPatchTarget reports that the managed hook proved one Hermes V4A
+// patch target: behind ProtectHome only, in a complete map the hook keyed in
+// clientCWD that attests every patch target (hookpaths.PatchCompleteKey), with
+// the target resolved to a file. The hook lists a V4A target only after its
+// own patch-target walk accepted it, and names the file the target leads to
+// (a link to an ordinary file is that file, a link to a key or state file is
+// that file), which the checks below judge as they judge a write_file target.
+// A link that changes after the hook read it is refused by the hook itself
+// (hookpaths.PatchTargetWatch, after the answer and again once it is written).
+// The strict policy tier does not trust a link it cannot read again: there
+// only a target resolved to itself is proved (request.strictPatchLinks).
+//
+// The file a listed target leads to is proved with it. The file-tool link
+// resolver (fileToolLinkTargetFacts) judges that file as a path of its own, and
+// it is the very file the hook named for the target, so it needs no second walk
+// the gateway cannot make (GAP-0797 with GAP-0488). In the strict tier a link
+// is already refused at its own name, so the file behind it is not proved there.
+func hermesClientPatchTarget(request trustedActionRequest, clientTargets map[string]string, clientCWD, target string) bool {
+	if !request.ProtectedHomeHook || !filepath.IsAbs(clientCWD) || !filepath.IsAbs(target) ||
+		clientTargets[hookpaths.CWDKey] != clientCWD ||
+		clientTargets[hookpaths.PatchCompleteKey] != "1" ||
+		clientTargets[hookpaths.TruncatedKey] != "" ||
+		clientTargets[hookpaths.UnprovenReasonKey] != "" {
+		return false
+	}
+	if clientTargets[target] != "" {
+		return !request.strictPatchLinks || clientTargets[target] == target
+	}
+	if request.strictPatchLinks {
+		return false
+	}
+	for listed, resolved := range clientTargets {
+		if resolved == target && filepath.IsAbs(listed) {
+			return true
+		}
+	}
+	return false
 }

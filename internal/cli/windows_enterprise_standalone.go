@@ -921,9 +921,12 @@ func runWindowsEnterpriseStandaloneAction(
 // healWindowsEnterpriseApprovedSourceOnSuccess runs the approved config source
 // check for a lifecycle run that ended with no error on an installed
 // deployment and delivered no signed bundle. It reports whether the check
-// added an error.
+// added an error. The check works on the approved copy, digest and proof of the
+// production deployment, so a certification-scope run (its own roots or service
+// names) does not run it: its success is no lifecycle run of the production
+// deployment (GAP-0854).
 func healWindowsEnterpriseApprovedSourceOnSuccess(result *enterprisestatus.Result, opts *windowsEnterpriseLifecycleOptions) bool {
-	if len(result.Errors) != 0 || !result.Installed || opts.bundle != nil {
+	if len(result.Errors) != 0 || !result.Installed || opts.bundle != nil || windowsEnterpriseOutsideProductionScope(opts) {
 		return false
 	}
 	windowsEnterpriseHealApprovedSource(result)

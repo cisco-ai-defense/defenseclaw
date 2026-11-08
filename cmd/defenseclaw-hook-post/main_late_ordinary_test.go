@@ -49,6 +49,7 @@ func TestGAP0518HookPostLateOrdinaryNoAnswerExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", home)
+	t.Setenv(hookPostAccountHomeEnv, home)
 	words := make([]string, 2000)
 	for i := range words {
 		words[i] = "lo" + strings.Repeat("x", i%5) + "." + string(rune('a'+i%26)) + itoa(i)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -1979,11 +1980,13 @@ func ResolveActiveStateHardlinkTarget(value, home string) (string, bool) {
 }
 
 // The identity index of one active state tree is built at most once per
-// activeStateIndexTTL and shared by every operand and request in that time,
-// so a command naming many ordinary hard links costs one bounded walk. The
-// walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
+// activeStateIndexTTL and shared by every shell operand and request in that
+// time, so a command naming many ordinary hard links costs one bounded walk.
+// The walk stops after activeStateIndexEntries entries or activeStateIndexBudget,
 // well inside every hook deadline; a file it did not reach is not mapped (no
-// block), which never refuses ordinary work.
+// block), which never refuses ordinary shell work. A native patch target is
+// judged by ResolveActiveStateIdentity instead, which neither caches nor
+// treats an unfinished walk as an answer (GAP-0488, GAP-0073).
 var (
 	activeStateIndexEntries = 4096
 	activeStateIndexBudget  = 250 * time.Millisecond
@@ -1993,6 +1996,11 @@ var (
 		sync.Mutex
 		byRoot map[string]activeStateIdentityIndex
 	}
+	// The identity walk of a patch target has no entry bound and a time bound
+	// only: it runs for an existing multiply linked target, never answers
+	// from a partial view, and a state too large to read in the time is not
+	// proved.
+	activeStateExactBudget = 2 * time.Second
 )
 
 type activeStateIdentity struct {
@@ -2020,50 +2028,305 @@ func activeStateIdentities(activeRoot string) []activeStateIdentity {
 	if activeStateIndex.byRoot == nil {
 		activeStateIndex.byRoot = make(map[string]activeStateIdentityIndex)
 	}
-	files := walkActiveStateIdentities(activeRoot, now.Add(activeStateIndexBudget))
+	activeStateIndexWalks.Add(1)
+	var files []activeStateIdentity
+	walkActiveStateFiles(activeRoot, activeStateIndexEntries, now.Add(activeStateIndexBudget), func(relative string, info os.FileInfo) bool {
+		files = append(files, activeStateIdentity{relative: relative, info: info})
+		return false
+	})
 	activeStateIndex.byRoot[activeRoot] = activeStateIdentityIndex{built: now, files: files}
 	return files
 }
 
-func walkActiveStateIdentities(activeRoot string, deadline time.Time) []activeStateIdentity {
-	activeStateIndexWalks.Add(1)
-	var files []activeStateIdentity
-	visited := 0
-	exhausted := func() bool {
-		visited++
-		return visited > activeStateIndexEntries || time.Now().After(deadline)
+// ResolveActiveStateIdentity reports whether resolved, an existing write
+// target the caller has already resolved, is by file identity a file of the
+// active DefenseClaw state, and which one. It answers from the whole state,
+// read again whenever any directory of it changed (activeStateViewOf), and
+// only for a regular file with a second link: any other target cannot alias a
+// state file and costs one stat. complete is false when the view could not
+// see all of the state before it found the file (a directory it could not
+// list, a name it could not stat, or the time bound). What it did not see is
+// unknown, and a caller that would otherwise allow must treat that as not
+// proved (GAP-0488, GAP-0073).
+func ResolveActiveStateIdentity(resolved, home string) (state string, same, complete bool) {
+	info, err := pathStat(resolved)
+	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
+		return "", false, true
 	}
-	add := func(path, relative string) {
-		if info, err := pathStat(path); err == nil && info.Mode().IsRegular() {
+	activeRoot := filepath.Join(home, ".defenseclaw")
+	files, complete := activeStateViewOf(activeRoot)
+	for _, file := range files {
+		if os.SameFile(info, file.info) {
+			return filepath.Join(activeRoot, filepath.FromSlash(file.relative)), true, true
+		}
+	}
+	return "", false, complete
+}
+
+// The view of the active state is the regular files of the tree and the
+// fingerprint (identity, modification and change time) of every directory and
+// link that led to them. A view is kept in memory only when it is complete,
+// small, and every fingerprint is older than activeStateViewGuard when the
+// walk began: a later change to a directory then moves its change time, which
+// no one can set back, so a view whose fingerprints are all unchanged is the
+// state as it is now. A directory changed within the guard, a platform
+// without change times and a large tree are walked again on every call. The
+// hook is a short-lived process, so the kept view serves the reads of one
+// call (the proof, the read after the answer, the read after it is written).
+const (
+	activeStateViewGuard   = 50 * time.Millisecond
+	activeStateViewFiles   = 4096
+	activeStateViewWatches = 256
+)
+
+var activeStateViews struct {
+	sync.Mutex
+	byRoot map[string]activeStateView
+}
+
+type activeStateView struct {
+	files   []activeStateIdentity
+	watches []activeStateWatch
+}
+
+// activeStateWatch is the fingerprint of one path of the walk: info is nil
+// for a path that was absent.
+type activeStateWatch struct {
+	path string
+	info os.FileInfo
+}
+
+func activeStateViewOf(activeRoot string) (files []activeStateIdentity, complete bool) {
+	activeStateViews.Lock()
+	view, kept := activeStateViews.byRoot[activeRoot]
+	activeStateViews.Unlock()
+	if kept {
+		if view.unchanged() {
+			return view.files, true
+		}
+		activeStateViews.Lock()
+		delete(activeStateViews.byRoot, activeRoot)
+		activeStateViews.Unlock()
+	}
+	started := time.Now()
+	settleLimit := activeStateSettleLimit(started)
+	walk := &activeStateWalk{
+		limit:    math.MaxInt,
+		deadline: started.Add(activeStateExactBudget),
+		record:   true,
+		visit: func(relative string, info os.FileInfo) bool {
 			files = append(files, activeStateIdentity{relative: relative, info: info})
+			return false
+		},
+	}
+	complete = walk.run(activeRoot)
+	if complete && len(files) <= activeStateViewFiles && len(walk.watches) <= activeStateViewWatches && walk.settledBefore(settleLimit) {
+		activeStateViews.Lock()
+		if activeStateViews.byRoot == nil || len(activeStateViews.byRoot) >= 4 {
+			activeStateViews.byRoot = make(map[string]activeStateView)
+		}
+		activeStateViews.byRoot[activeRoot] = activeStateView{files: files, watches: walk.watches}
+		activeStateViews.Unlock()
+	}
+	return files, complete
+}
+
+// activeStateSettleLimit is the instant every fingerprint of a kept view must
+// precede. Where the kernel stamps changes from a clock the process can read
+// (filesystemClockNow) it is that clock present tick: a path stamped in an
+// earlier tick gets a later stamp when it changes again, whatever the delay,
+// so the view cannot miss the change. Elsewhere it is the walk start less
+// activeStateViewGuard. It is read before the walk, so a path changed after it
+// is never kept.
+func activeStateSettleLimit(started time.Time) time.Time {
+	if tick, ok := filesystemClockNow(); ok && tick.Before(started) {
+		return tick
+	}
+	return started.Add(-activeStateViewGuard)
+}
+
+// unchanged reports that every path of the view reads as it did.
+func (v activeStateView) unchanged() bool {
+	for _, watch := range v.watches {
+		now, err := pathStat(watch.path)
+		if watch.info == nil {
+			if err == nil || !activeStateNameAbsent(err) {
+				return false
+			}
+			continue
+		}
+		if err != nil || !os.SameFile(watch.info, now) || !watch.info.ModTime().Equal(now.ModTime()) {
+			return false
+		}
+		before, beforeOK := statChangeTime(watch.info)
+		after, afterOK := statChangeTime(now)
+		if !beforeOK || !afterOK || !before.Equal(after) {
+			return false
 		}
 	}
+	return true
+}
+
+// maxActiveStateDepth bounds the directories one walk descends into, so a
+// link loop in the state ends the walk as not proved instead of running it.
+const maxActiveStateDepth = 64
+
+// activeStateWalk is one pass over the regular files of the active state.
+type activeStateWalk struct {
+	limit    int
+	deadline time.Time
+	visit    func(relative string, info os.FileInfo) bool
+	record   bool // keep the fingerprint of every directory and link read
+	watches  []activeStateWatch
+	visited  int
+	stopped  bool          // visit accepted a file
+	over     bool          // the entry or time bound was reached
+	partial  bool          // some of the state could not be seen
+	linked   []os.FileInfo // directories reached through a link, walked once
+}
+
+// walkActiveStateFiles visits the regular files of the active state in the
+// order of activeStateFiles and activeStateTrees until visit returns true. A
+// link to a directory is followed. It reports whether the view was complete:
+// false when it stopped at the entry or time bound, or could not list a
+// directory or stat a name, so what it did not see is unknown.
+func walkActiveStateFiles(activeRoot string, limit int, deadline time.Time, visit func(relative string, info os.FileInfo) bool) (complete bool) {
+	return (&activeStateWalk{limit: limit, deadline: deadline, visit: visit}).run(activeRoot)
+}
+
+func (w *activeStateWalk) run(activeRoot string) (complete bool) {
+	w.watch(activeRoot)
 	for _, name := range activeStateFiles {
-		if exhausted() {
-			return files
+		if w.file(filepath.Join(activeRoot, name), name, 0); w.stopped {
+			return true
 		}
-		add(filepath.Join(activeRoot, name), name)
 	}
 	for _, tree := range activeStateTrees {
-		stopped := false
-		_ = pathWalkDir(filepath.Join(activeRoot, tree), func(path string, entry fs.DirEntry, walkErr error) error {
-			if exhausted() {
-				stopped = true
-				return fs.SkipAll
-			}
-			if walkErr != nil || entry.IsDir() {
-				return nil
-			}
-			if relative, err := filepath.Rel(activeRoot, path); err == nil {
-				add(path, filepath.ToSlash(relative))
-			}
-			return nil
-		})
-		if stopped {
-			break
+		path := filepath.Join(activeRoot, filepath.FromSlash(tree))
+		if parent := filepath.Dir(path); parent != activeRoot {
+			w.watch(parent)
+		}
+		if w.directory(path, tree, 0); w.stopped {
+			return true
 		}
 	}
-	return files
+	return !w.partial
+}
+
+// watch keeps the fingerprint of path when the walk records them.
+func (w *activeStateWalk) watch(path string) {
+	if !w.record {
+		return
+	}
+	info, err := pathStat(path)
+	w.keep(path, info, err)
+}
+
+func (w *activeStateWalk) keep(path string, info os.FileInfo, err error) {
+	switch {
+	case !w.record:
+	case err == nil:
+		w.watches = append(w.watches, activeStateWatch{path: path, info: info})
+	case activeStateNameAbsent(err):
+		w.watches = append(w.watches, activeStateWatch{path: path})
+	default:
+		w.partial = true
+	}
+}
+
+// settledBefore reports that every fingerprint kept is of a path last changed
+// before limit, with a change time the platform reports.
+func (w *activeStateWalk) settledBefore(limit time.Time) bool {
+	for _, watch := range w.watches {
+		if watch.info == nil {
+			continue
+		}
+		changed, ok := statChangeTime(watch.info)
+		if !ok || !changed.Before(limit) || !watch.info.ModTime().Before(limit) {
+			return false
+		}
+	}
+	return true
+}
+
+// enter counts one entry against the bounds.
+func (w *activeStateWalk) enter() bool {
+	if w.over || w.stopped {
+		return false
+	}
+	w.visited++
+	if w.visited > w.limit || time.Now().After(w.deadline) {
+		w.over, w.partial = true, true
+		return false
+	}
+	return true
+}
+
+func (w *activeStateWalk) file(path, relative string, depth int) {
+	if !w.enter() {
+		return
+	}
+	info, err := pathLstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		// A link is state where it leads, so it is read again with the view.
+		info, err = pathStat(path)
+		w.keep(path, info, err)
+	}
+	switch {
+	case err != nil:
+		if !activeStateNameAbsent(err) {
+			w.partial = true
+		}
+	case info.IsDir():
+		for _, seen := range w.linked {
+			if os.SameFile(seen, info) {
+				return
+			}
+		}
+		w.linked = append(w.linked, info)
+		w.directory(path, relative, depth+1)
+	case info.Mode().IsRegular():
+		if w.visit(relative, info) {
+			w.stopped = true
+		}
+	}
+}
+
+func (w *activeStateWalk) directory(path, relative string, depth int) {
+	if depth > maxActiveStateDepth {
+		w.partial = true
+		return
+	}
+	// The fingerprint is taken before the listing: a change after it moves it.
+	w.watch(path)
+	// Whatever a failed listing returned is still visited: a file found in it
+	// is a positive answer, and the failure makes the rest unknown.
+	entries, err := pathReadDir(path)
+	if err != nil && !activeStateNameAbsent(err) {
+		w.partial = true
+	}
+	for _, entry := range entries {
+		// path is clean and a listed name holds no separator, so joining by
+		// hand reads the same path as filepath.Join without cleaning it.
+		child, name := path+string(filepath.Separator)+entry.Name(), relative+"/"+entry.Name()
+		if entry.IsDir() {
+			if w.enter() {
+				w.directory(child, name, depth+1)
+			}
+		} else {
+			w.file(child, name, depth)
+		}
+		if w.over || w.stopped {
+			return
+		}
+	}
+}
+
+// activeStateNameAbsent reports an error that says no file is there: a name
+// that does not exist, a parent that is no directory, or a link loop. Any
+// other error (permission, I/O, a network share) leaves the name unknown.
+func activeStateNameAbsent(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP)
 }
 
 // actionPosixNestedShellMention scans each static shell -c or env -S body as

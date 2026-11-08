@@ -54,6 +54,13 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)
 		os.Exit(1)
 	}
+	// A test that moves the home but not the per-user roots (%APPDATA%)
+	// must not reach the real vendor config of the account (GAP-0887).
+	finishUserRoots, err := testenv.IsolateUserRoots()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
+		os.Exit(1)
+	}
 	restore := isolateTestHost()
 	// guardTestMachine first: guardTestProcessState marks the helper
 	// children it starts.
@@ -63,7 +70,7 @@ func TestMain(m *testing.M) {
 	processErr, sandboxErr := checkProcess(), checkSandbox()
 	restore()
 	cleanupHermes()
-	for _, err := range []error{processErr, sandboxErr, checkMachine()} {
+	for _, err := range []error{processErr, sandboxErr, checkMachine(), finishUserRoots()} {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			if code == 0 {

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -44,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	fleetmanager "github.com/defenseclaw/defenseclaw/internal/fleet/manager"
@@ -3965,17 +3967,17 @@ func watcherConnectors(reg *connector.Registry, cfg *config.Config) []connector.
 
 // resolveWatcherDirsForConnectors is resolveWatcherDirs over every connector:
 // the union of their folders, each discovered folder tagged with the first
-// connector that lists it (roots). Explicit gateway.watcher dirs apply once
-// and are not tagged.
-func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs, pluginDirs []string, roots map[string]string, src watcherDirSources) {
-	if len(conns) == 0 {
-		skillDirs, pluginDirs, src = resolveWatcherDirs(cfg, nil, wcfg)
-		return skillDirs, pluginDirs, nil, src
-	}
+// connector that lists it for events and every connector that loads it for
+// root coverage. Explicit gateway.watcher dirs apply once and keep the
+// primary connector for events, but they replace every connector's own
+// folders, so every configured connector is a consumer of each of them. With
+// no active connector the standalone machine policy's connectors still are.
+func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Connector, wcfg config.GatewayWatcherConfig) (skillDirs, pluginDirs []string, roots map[string]string, src watcherDirSources, consumers []watcher.RootConsumer) {
 	roots = map[string]string{}
 	seenSkill, seenPlugin := map[string]bool{}, map[string]bool{}
-	add := func(out *[]string, seen map[string]bool, dirs []string, owner string, tag bool) {
+	add := func(out *[]string, seen map[string]bool, dirs []string, kind, owner string, tag bool) {
 		for _, dir := range dirs {
+			consumers = append(consumers, watcher.RootConsumer{Kind: kind, Path: dir, Connector: owner})
 			key := filepath.Clean(dir)
 			if runtime.GOOS == "windows" {
 				key = strings.ToLower(key)
@@ -3990,16 +3992,120 @@ func resolveWatcherDirsForConnectors(cfg *config.Config, conns []connector.Conne
 			}
 		}
 	}
+	if len(conns) == 0 {
+		skillDirs, pluginDirs, src = resolveWatcherDirs(cfg, nil, wcfg)
+	}
 	for i, conn := range conns {
 		skills, plugins, connSrc := resolveWatcherDirs(cfg, conn, wcfg)
 		if i == 0 {
 			src = connSrc
 		}
 		owner := strings.ToLower(strings.TrimSpace(conn.Name()))
-		add(&skillDirs, seenSkill, skills, owner, connSrc.Skill != watcherDirsFromConfig)
-		add(&pluginDirs, seenPlugin, plugins, owner, connSrc.Plugin != watcherDirsFromConfig)
+		add(&skillDirs, seenSkill, skills, "skill", owner, connSrc.Skill != watcherDirsFromConfig)
+		add(&pluginDirs, seenPlugin, plugins, "plugin", owner, connSrc.Plugin != watcherDirsFromConfig)
 	}
-	return skillDirs, pluginDirs, roots, src
+	// A connector the standalone machine policy protects without running it
+	// as an active connector still loads the explicit folders, so it is a
+	// consumer of each of them too.
+	have := map[string]bool{}
+	for _, conn := range conns {
+		have[strings.ToLower(strings.TrimSpace(conn.Name()))] = true
+	}
+	for _, name := range protectedConnectorNames(cfg) {
+		if have[name] {
+			continue
+		}
+		have[name] = true
+		explicit := func(kind string, dirs []string) {
+			for _, dir := range dirs {
+				consumers = append(consumers, watcher.RootConsumer{Kind: kind, Path: dir, Connector: name})
+				// With no active connector the first protected one (the
+				// roster is sorted) owns the explicit folders' events, as the
+				// primary connector does otherwise; without an owner its
+				// connector-scoped asset rules never apply there.
+				if len(conns) == 0 && roots[dir] == "" {
+					roots[dir] = name
+				}
+			}
+		}
+		if src.Skill == watcherDirsFromConfig {
+			explicit("skill", skillDirs)
+		}
+		if src.Plugin == watcherDirsFromConfig {
+			explicit("plugin", pluginDirs)
+		}
+	}
+	return skillDirs, pluginDirs, roots, src, consumers
+}
+
+// protectedConnectorNames is the connectors a standalone managed gateway
+// protects, which is wider than the active ones: it adds those named only
+// under enterprise.machine_policy.connectors. None outside that profile.
+func protectedConnectorNames(cfg *config.Config) []string {
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return nil
+	}
+	return enterprisepolicy.StandaloneConnectors(cfg)
+}
+
+// explicitRootConsumers is the consumers of the explicit gateway.watcher
+// folders, which an enrolled watcher keeps watching.
+func explicitRootConsumers(consumers []watcher.RootConsumer, src watcherDirSources) []watcher.RootConsumer {
+	var explicit []watcher.RootConsumer
+	for _, consumer := range consumers {
+		if consumer.Kind == "skill" && src.Skill == watcherDirsFromConfig ||
+			consumer.Kind == "plugin" && src.Plugin == watcherDirsFromConfig {
+			explicit = append(explicit, consumer)
+		}
+	}
+	return explicit
+}
+
+// enrolledRootOwners is the event owner of each root an enrolled watcher
+// watches: the enrolled users folders, plus the explicit gateway.watcher
+// folders that resolveWatcherDirsForConnectors gave an owner. An enrolled
+// folder keeps its owner when both name the same path.
+func enrolledRootOwners(enrolled *enrolledWatchSet, roots map[string]string, consumers []watcher.RootConsumer, src watcherDirSources) map[string]string {
+	out := maps.Clone(enrolled.roots)
+	for _, consumer := range explicitRootConsumers(consumers, src) {
+		owner := roots[consumer.Path]
+		if owner == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		if _, ok := out[consumer.Path]; !ok {
+			out[consumer.Path] = owner
+		}
+	}
+	return out
+}
+
+// enrolledRootConsumers is every connector that loads each root an enrolled
+// watcher watches: the enrolled users' folders, plus the explicit
+// gateway.watcher dirs it keeps watching, which every configured connector
+// loads. The gateway's own connector folders are not watched there.
+func enrolledRootConsumers(enrolled *enrolledWatchSet, consumers []watcher.RootConsumer, src watcherDirSources) []watcher.RootConsumer {
+	out := slices.Clone(enrolled.consumers)
+	explicit := explicitRootConsumers(consumers, src)
+	have := map[watcher.RootConsumer]bool{}
+	for _, consumer := range explicit {
+		have[consumer] = true
+	}
+	out = append(out, explicit...)
+	// Every enrolled connector loads the explicit folders as well, whether
+	// or not the gateway config lists it.
+	for _, consumer := range explicit {
+		for _, name := range enrolled.connectors {
+			extra := watcher.RootConsumer{Kind: consumer.Kind, Path: consumer.Path, Connector: name}
+			if !have[extra] {
+				have[extra] = true
+				out = append(out, extra)
+			}
+		}
+	}
+	return out
 }
 
 // absoluteDirs returns dirs without its relative entries.
@@ -4181,7 +4287,7 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	// install has no connector paths to watch.
 	reg := connector.NewDefaultRegistry()
 	conns := watcherConnectors(reg, s.currentConfig())
-	skillDirs, pluginDirs, roots, src := resolveWatcherDirsForConnectors(s.currentConfig(), conns, wcfg)
+	skillDirs, pluginDirs, roots, src, consumers := resolveWatcherDirsForConnectors(s.currentConfig(), conns, wcfg)
 	skippedProfileRoots := false
 	watchPathAllowed := func(path string) bool {
 		if path == "" {
@@ -4266,12 +4372,16 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 	freshProjectRoots = filterWatchDirs(freshProjectRoots)
 	var enrolledProjectRoots []projectSkillRoot
 	for _, root := range projectRoots {
+		if enrolled != nil {
+			enrolledProjectRoots = append(enrolledProjectRoots, root)
+		} else {
+			consumers = append(consumers, watcher.RootConsumer{Kind: "skill", Path: root.Path, Connector: root.Connector})
+		}
 		if slices.ContainsFunc(skillDirs, func(dir string) bool { return projectRootKey(dir) == projectRootKey(root.Path) }) {
 			continue
 		}
 		skillDirs = append(append([]string(nil), skillDirs...), root.Path)
 		if enrolled != nil {
-			enrolledProjectRoots = append(enrolledProjectRoots, root)
 			continue
 		}
 		if roots == nil {
@@ -4414,7 +4524,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		return snapshot
 	})
 	if enrolled != nil {
-		w.SetRootConnectors(enrolled.roots)
+		w.SetRootConnectors(enrolledRootOwners(enrolled, roots, consumers, src))
+		w.SetRootConsumers(enrolledRootConsumers(enrolled, consumers, src))
 		w.SetAssetOwners(enrolled.owners)
 		publishScanAssetOwners(enrolled.owners)
 		w.SetMCPServerSource(enrolled.live.list)
@@ -4429,7 +4540,8 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		// Retries a server whose admission could not run at the poll.
 		w.SetMCPDiscoveryPoll(true)
 	} else {
-		if len(conns) > 1 || len(projectRoots) > 0 {
+		w.SetRootConsumers(consumers)
+		if len(conns) != 1 || len(projectRoots) > 0 {
 			// Each folder belongs to the connector that lists it, so its
 			// events, rule pack and enforcement are that connector's
 			// (GAP-0392).
@@ -4496,13 +4608,41 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		watcherState = StateDegraded
 		watcherDetail = "skill and plugin folders inside user profiles are not watched by the LocalSystem gateway"
 	}
-	s.health.SetWatcher(watcherState, watcherDetail, watcherDetails(map[string]interface{}{
+	baseWatcherDetails := watcherDetails(map[string]interface{}{
 		"skill_dirs":         len(skillDirs),
 		"plugin_dirs":        len(pluginDirs),
 		"skill_take_action":  wcfg.Skill.TakeAction,
 		"plugin_take_action": wcfg.Plugin.TakeAction,
 		"mcp_take_action":    wcfg.MCP.TakeAction,
-	}))
+	})
+	s.health.SetWatcher(watcherState, watcherDetail, baseWatcherDetails)
+	w.SetRootCoverageHandler(func(issues []watcher.RootCoverageIssue) {
+		details := make(map[string]interface{}, len(baseWatcherDetails)+2)
+		for key, value := range baseWatcherDetails {
+			details[key] = value
+		}
+		if len(issues) == 0 {
+			s.health.SetWatcher(watcherState, watcherDetail, details)
+			return
+		}
+		connectors := make(map[string]bool)
+		for _, issue := range issues {
+			if len(issue.Connectors) == 0 && issue.Connector != "" {
+				connectors[issue.Connector] = true
+			}
+			for _, name := range issue.Connectors {
+				connectors[name] = true
+			}
+		}
+		names := make([]string, 0, len(connectors))
+		for name := range connectors {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		details["watch_roots_unavailable"] = len(issues)
+		details["admission_scanning_off"] = names
+		s.health.SetWatcher(StateDegraded, "admission scanning is off for one or more connector roots; the gateway log names each root", details)
+	})
 
 	if enrolled != nil {
 		go s.pollEnrolledWatchSet(watchCtx, reg, wcfg, *enrolled, enrolledProjectRoots, w, changed)
@@ -4564,7 +4704,7 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 	}
 
 	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
 		if err := s.client.DisableSkill(ctx, r.Event.Name); err != nil {
@@ -4706,6 +4846,12 @@ func formatEnforcementMessage(subjectType, subjectName, severity string, finding
 	return sb.String()
 }
 
+// watcherGatewayDisableTimeout bounds the disable of a rejected skill, plugin
+// or MCP server at the gateway. OpenClaw reports a config.patch only after it
+// applied it, which took 10.6 s on macOS, so a 10 s deadline logged a disable
+// that took effect as failed (GAP-0826).
+const watcherGatewayDisableTimeout = 30 * time.Second
+
 func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 	if !s.currentConfig().Gateway.Watcher.Plugin.TakeAction {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin %s verdict=%s (take_action=false, logging only)\n",
@@ -4725,7 +4871,7 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 	}
 
 	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
 		if err := s.client.DisablePlugin(ctx, r.Event.Name); err != nil {
@@ -4765,7 +4911,7 @@ func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
 	}
 
 	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), watcherGatewayDisableTimeout)
 		defer cancel()
 
 		if err := s.client.BlockMCPServer(ctx, r.Event.Name); err != nil {
@@ -8919,6 +9065,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.initGuardrailProfiles(api.scannerCfg)
 	}
 	api.projectSkills = &s.projectSkills
+	api.rootCoverage = func() []watcher.RootCoverageIssue {
+		if current := s.installWatcher.Load(); current != nil {
+			return current.RootCoverageIssues()
+		}
+		return nil
+	}
 	api.hookMCP = &s.hookMCP
 	s.setAPIServer(api)
 	defer s.setAPIServer(nil)

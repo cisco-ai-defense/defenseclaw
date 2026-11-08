@@ -1,13 +1,14 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""The proxy connectors fail closed on a gateway outage, and every surface says so (GAP-1957).
+"""The proxy connectors and a gateway outage: every surface says what the gateway does (GAP-1957, GAP-0824).
 
-OpenClaw and ZeptoClaw have no hooks: their model and tool calls go through
-the gateway, so while it is down they are refused whatever
-``guardrail.hook_fail_mode`` holds. ``status`` (the shared fail-mode report)
-and the setup summary must say closed, as ``guardrail fail-mode`` and the
-reference page do; a hook connector's summary shows its effective mode.
+OpenClaw and ZeptoClaw have no hooks. ZeptoClaw model requests are refused
+while the gateway is down. OpenClaw follows the outage mode the gateway
+resolves: open on the default and permissive packs, closed on strict and for
+an explicit closed. ``status`` (the shared fail-mode report) and the setup
+summary say so, as ``guardrail fail-mode`` and the reference page do; a hook
+connector's summary shows its effective mode.
 """
 
 from __future__ import annotations
@@ -35,24 +36,60 @@ def cfg(tmp_path, monkeypatch):
     return c
 
 
-@pytest.mark.parametrize("proxy", ["openclaw", "zeptoclaw"])
 @pytest.mark.parametrize("saved", ["", "open", "closed"])
-def test_status_reports_a_proxy_connector_closed_whatever_hook_fail_mode_says(cfg, proxy, saved):
-    cfg.claw.mode = proxy
-    cfg.guardrail.connector = proxy
+def test_status_reports_zeptoclaw_closed_whatever_hook_fail_mode_says(cfg, saved):
+    cfg.claw.mode = "zeptoclaw"
+    cfg.guardrail.connector = "zeptoclaw"
     if saved:
-        cfg.guardrail.connectors[proxy] = PerConnectorGuardrailConfig(hook_fail_mode=saved)
-    report = connector_fail_mode_report(cfg, proxy, inspect_effective_policy=False)
+        cfg.guardrail.connectors["zeptoclaw"] = PerConnectorGuardrailConfig(hook_fail_mode=saved)
+    report = connector_fail_mode_report(cfg, "zeptoclaw", inspect_effective_policy=False)
     assert report["effective"] == "closed"
     assert report["provenance"] == "proxy-backed"
     assert report["desired"] == "closed"
+    assert report["note"] == "no hooks: blocked while the gateway is down"
+
+
+@pytest.mark.parametrize(
+    ("pack", "saved", "want"),
+    [
+        ("default", "", "open"),
+        ("permissive", "", "open"),
+        ("default", "open", "open"),
+        ("default", "closed", "closed"),
+        ("strict", "", "closed"),
+        # A strict policy stays closed over an older saved open (Go EffectiveHookOutageFailModeForConnector).
+        ("strict", "open", "closed"),
+    ],
+)
+def test_status_reports_the_openclaw_outage_mode_the_gateway_resolves(cfg, pack, saved, want):
+    # GAP-0824: the default pack continues with a warning; only strict, managed or an explicit closed block.
+    cfg.claw.mode = "openclaw"
+    cfg.guardrail.connector = "openclaw"
+    cfg.guardrail.rule_pack = pack
+    if saved:
+        cfg.guardrail.connectors["openclaw"] = PerConnectorGuardrailConfig(hook_fail_mode=saved)
+    report = connector_fail_mode_report(cfg, "openclaw", inspect_effective_policy=False)
+    assert report["effective"] == want
+    assert report["desired"] == want
+    assert report["provenance"] == "proxy-backed"
+    assert ("continue with a warning" in report["note"]) is (want == "open")
+    assert cmd_setup._guardrail_summary_hook_fail_mode(cfg, "openclaw").startswith(f"{want} (proxy-backed")
+
+
+def test_a_managed_openclaw_stays_closed_over_a_saved_open(cfg):
+    cfg.claw.mode = "openclaw"
+    cfg.guardrail.connector = "openclaw"
+    cfg.deployment_mode = "managed_enterprise"
+    cfg.enterprise_profile = "standalone"
+    report = connector_fail_mode_report(cfg, "openclaw", inspect_effective_policy=False)
+    assert report["effective"] == "closed"
 
 
 @pytest.mark.parametrize("proxy", ["openclaw", "zeptoclaw"])
 def test_setup_summary_shows_the_proxy_outage_behaviour(cfg, proxy):
     cfg.claw.mode = proxy
     cfg.guardrail.connector = proxy
-    cfg.guardrail.hook_fail_mode = "open"
+    cfg.guardrail.hook_fail_mode = "closed"
     assert cmd_setup._guardrail_summary_hook_fail_mode(cfg, proxy).startswith("closed (proxy-backed")
 
 

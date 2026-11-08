@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -114,7 +115,8 @@ func runCall(args []string, input io.Reader, output io.Writer, peer *hookexec.Pe
 	// Tell the gateway how long this request waits for its answer, so a
 	// tool-call judge answers inside it (#1395).
 	request.Headers[hookexec.HookAnswerWithinHeader] = strconv.FormatInt(timeout.Milliseconds(), 10)
-	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(context.Background(), peer), timeout)
+	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(
+		hookexec.WithPerUserGatewayDataDir(context.Background(), os.Getenv(hookPostDataDirEnv)), peer), timeout)
 	defer cancel()
 	response, err := hookexec.PostPerUserHook(ctx, opts.apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
@@ -171,6 +173,30 @@ const hookPostDeadlineEnv = "_DC_HOOK_POST_DEADLINE_MS"
 // helper (the parent of its own hooks folder), where a gateway start or
 // restart holds its start lock.
 const hookPostDataDirEnv = "_DC_HOOK_POST_DATA_DIR"
+
+// hookPostAccountHomeEnv is the account home the shell hook saved before it
+// replaced HOME with a scratch folder for its own run (_hardening.sh). The
+// late-call scan tells the protected folders and files against it
+// (GAP-0850).
+const hookPostAccountHomeEnv = "_DC_HOOK_POST_ACCOUNT_HOME"
+
+// accountHome is the home of the account the hook runs for, not the scratch
+// HOME the shell hook gives this process: the home the shell saved, exactly
+// as it got it, else the account database entry of the user. The saved value
+// is not rewritten here. The scan resolves it by file system rules (a parent
+// step through a link, a trailing slash). A value that is no folder holds no
+// protected file; the scan then tells the account database home and indexes
+// the other homes the call can mean (hookpaths.LateOrdinaryCallAt). Empty
+// (the home of the process) only when neither is known.
+func accountHome() string {
+	if home := os.Getenv(hookPostAccountHomeEnv); home != "" {
+		return home
+	}
+	if current, err := user.Current(); err == nil && filepath.IsAbs(current.HomeDir) {
+		return current.HomeDir
+	}
+	return ""
+}
 
 func requestTimeout(maxTime int) time.Duration {
 	limit := time.Duration(maxTime) * time.Second
@@ -298,6 +324,16 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 			return hookexec.PerUserPostRestartOutageExit
 		}
 		return hookexec.PerUserPostOutageExit
+	case hookexec.PerUserPostListenerUnanswered(err):
+		// This account's recorded gateway holds the listener and took no
+		// accept for the whole wait (a stopped or frozen gateway): nothing was
+		// sent, and it is no process of another account. The shell reads it
+		// as the outage, as the native hook does, for every event but a tool
+		// call that does not plainly name nothing protected.
+		if lateOrdinary(call) || nonToolGateEvent(call) {
+			return hookexec.PerUserPostLateOrdinaryExit
+		}
+		return hookexec.PerUserPostNoAnswerExit
 	case hookexec.PerUserPostPeerUnverified(err):
 		// Nothing of the call was sent: the one failure the OpenCode and
 		// Amp plugins send again (GAP-2083). The shell hook reads the
@@ -356,7 +392,29 @@ func lateOrdinary(call postedCall) bool {
 	default:
 		return false
 	}
-	return hookpaths.LateOrdinaryCall(connector, []byte(call.body))
+	return hookpaths.LateOrdinaryCallAt(accountHome(), connector, []byte(call.body))
+}
+
+// nonToolGateEvent reports a Claude Code or Codex call that names an event
+// which is not a tool gate (a post-tool batch, a prompt, a session event).
+// Any other connector, or an event it cannot read, is not one.
+func nonToolGateEvent(call postedCall) bool {
+	var connector string
+	switch {
+	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
+		connector = "claudecode"
+	case strings.Contains(call.path, "codex"):
+		connector = "codex"
+	default:
+		return false
+	}
+	var event struct {
+		Name string `json:"hook_event_name"`
+	}
+	if json.Unmarshal([]byte(call.body), &event) != nil || strings.TrimSpace(event.Name) == "" {
+		return false
+	}
+	return !hookexec.ToolGateEvent(connector, event.Name)
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {
