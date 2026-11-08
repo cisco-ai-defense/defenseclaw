@@ -104,16 +104,26 @@ var (
 	privateGroupSSSDDir      = "/etc/sssd"
 	privateGroupUserdbDirs   = []string{"/etc/userdb", "/run/userdb", "/run/host/userdb", "/var/lib/userdb", "/usr/lib/userdb", "/var/lib/systemd/home"}
 	privateGroupUserdbSocks  = "/run/systemd/userdb"
-	// The directories pam_group reads its rules from: the local one, and the
-	// vendor directory Linux-PAM falls back to where no local group.conf exists
-	// (its build option vendordir; /usr/etc on SUSE-style layouts, /usr/lib,
-	// /usr/share or the defaults tree elsewhere). Each holds group.conf and
-	// group.d/*.conf.
-	privateGroupPAMConfigDirs = []string{
-		"/etc/security", "/usr/etc/security", "/usr/lib/security", "/usr/share/security",
+	// Where pam_group reads its rules from. The local directory is read first:
+	// the module falls back to the vendor group.conf only where the local
+	// group.conf does not exist (Linux-PAM vendordir; /usr/share/pam is its
+	// default, /usr/etc and /usr/lib are common distribution choices). The
+	// vendor list is a floor, not the answer: the build-time directory is also
+	// read out of the installed module (privateGroupPAMModuleDirs). Each
+	// directory holds group.conf and group.d/*.conf.
+	privateGroupPAMLocalDir   = "/etc/security"
+	privateGroupPAMVendorDirs = []string{
+		"/usr/share/pam/security", "/usr/etc/security", "/usr/lib/security", "/usr/share/security",
 		"/usr/share/defaults/etc/security",
 	}
+	// Where the pam_group module itself lives (glob patterns).
+	privateGroupPAMModuleDirs = []string{
+		"/lib/security", "/lib64/security", "/usr/lib/security", "/usr/lib64/security",
+		"/lib/*/security", "/usr/lib/*/security",
+	}
 )
+
+const privateGroupPAMModuleMaxBytes = 8 << 20
 
 // The Varlink services in privateGroupUserdbSocks that cannot add an account
 // or a group membership of their own: the dynamic service users of units (ids
@@ -192,10 +202,15 @@ func privateGroupSourcesAreLocal() bool {
 }
 
 // privateGroupPAMAddsGroups reports whether pam_group has a rule to read: any
-// line in a group.conf or group.d/*.conf of privateGroupPAMConfigDirs, local or
-// vendor, that is not blank or a comment. Whether the PAM stack loads the
-// module is not asked; a rule file in any place the module reads is reason
-// enough to refuse. A file or directory that cannot be read counts as a rule.
+// line in a group.conf or group.d/*.conf it reads that is not blank or a
+// comment. Whether the PAM stack loads the module is not asked; a rule file in
+// any place the module reads is reason enough to refuse. A file or directory
+// that cannot be read counts as a rule. The module reads the vendor group.conf
+// only where the local one does not exist, so a local group.conf, even an empty
+// or commented one, shadows the vendor file; group.d is read in every
+// directory. The directories are the vendor floor plus those compiled into the
+// installed module; a module that is there but names no group.conf cannot be
+// told apart from one that reads somewhere unlisted, so it counts as a rule.
 func privateGroupPAMAddsGroups() bool {
 	hasRule := func(path string) bool {
 		data, err := os.ReadFile(path)
@@ -209,8 +224,21 @@ func privateGroupPAMAddsGroups() bool {
 		}
 		return false
 	}
-	for _, dir := range privateGroupPAMConfigDirs {
-		if hasRule(filepath.Join(dir, "group.conf")) {
+	vendorDirs, ok := privateGroupPAMVendorSources()
+	if !ok {
+		return true
+	}
+	localConf := filepath.Join(privateGroupPAMLocalDir, "group.conf")
+	_, err := os.Lstat(localConf)
+	if err != nil && !os.IsNotExist(err) {
+		return true
+	}
+	vendorConfRead := err != nil
+	if !vendorConfRead && hasRule(localConf) {
+		return true
+	}
+	for i, dir := range append([]string{privateGroupPAMLocalDir}, vendorDirs...) {
+		if i > 0 && vendorConfRead && hasRule(filepath.Join(dir, "group.conf")) {
 			return true
 		}
 		groupDir := filepath.Join(dir, "group.d")
@@ -221,6 +249,57 @@ func privateGroupPAMAddsGroups() bool {
 		}
 	}
 	return false
+}
+
+// privateGroupPAMVendorSources returns the vendor directories pam_group may
+// read: privateGroupPAMVendorDirs plus every directory the installed module
+// names for group.conf or group.d. false when a module is there that cannot be
+// read or names no group.conf path.
+func privateGroupPAMVendorSources() ([]string, bool) {
+	seen := map[string]bool{filepath.Clean(privateGroupPAMLocalDir): true}
+	var dirs []string
+	add := func(dir string) {
+		if dir = filepath.Clean(dir); !seen[dir] {
+			seen[dir] = true
+			dirs = append(dirs, dir)
+		}
+	}
+	for _, dir := range privateGroupPAMVendorDirs {
+		add(dir)
+	}
+	for _, pattern := range privateGroupPAMModuleDirs {
+		matches, err := filepath.Glob(filepath.Join(pattern, "pam_group.so"))
+		if err != nil {
+			return nil, false
+		}
+		for _, module := range matches {
+			info, err := os.Stat(module)
+			if err != nil || info.Size() > privateGroupPAMModuleMaxBytes {
+				return nil, false
+			}
+			data, err := os.ReadFile(module)
+			if err != nil {
+				return nil, false
+			}
+			named := false
+			for _, text := range bytes.Split(data, []byte{0}) {
+				path := string(text)
+				if !strings.HasPrefix(path, "/") {
+					continue
+				}
+				if strings.HasSuffix(path, "/group.conf") {
+					named = true
+					add(filepath.Dir(path))
+				} else if i := strings.Index(path, "/group.d"); i > 0 && (path[i:] == "/group.d" || strings.HasPrefix(path[i:], "/group.d/")) {
+					add(path[:i])
+				}
+			}
+			if !named {
+				return nil, false
+			}
+		}
+	}
+	return dirs, true
 }
 
 func privateGroupSourceIsLocal(source string) bool {

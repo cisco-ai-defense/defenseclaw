@@ -60,12 +60,14 @@ func privateGroupSourcesFixture(t *testing.T) (string, os.FileInfo, string) {
 	resetPrivateGroupSources(t, files)
 	oldPasswd, oldGroup, oldGetent := privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent
 	oldNsswitch, oldSSSD, oldUserdb := privateGroupNsswitchFile, privateGroupSSSDDir, privateGroupUserdbDirs
-	oldSocks, oldPAMDirs := privateGroupUserdbSocks, privateGroupPAMConfigDirs
+	oldSocks, oldPAMLocal, oldPAMVendor, oldPAMModules := privateGroupUserdbSocks, privateGroupPAMLocalDir, privateGroupPAMVendorDirs, privateGroupPAMModuleDirs
 	privateGroupPasswdFile, privateGroupGroupFile = passwd, groupFile
 	privateGroupNsswitchFile, privateGroupSSSDDir = nsswitch, filepath.Join(files, "sssd")
 	privateGroupUserdbDirs = []string{filepath.Join(files, "userdb"), filepath.Join(files, "host-userdb"), filepath.Join(files, "absent")}
 	privateGroupUserdbSocks = filepath.Join(files, "run", "systemd", "userdb")
-	privateGroupPAMConfigDirs = []string{filepath.Join(files, "security"), filepath.Join(files, "vendor", "security")}
+	privateGroupPAMLocalDir = filepath.Join(files, "security")
+	privateGroupPAMVendorDirs = []string{filepath.Join(files, "vendor", "security")}
+	privateGroupPAMModuleDirs = []string{filepath.Join(files, "pam-modules")}
 	privateGroupGetent = func(database, key string) (string, bool) {
 		t.Errorf("the per-event proof started getent %s %s", database, key)
 		return "", false
@@ -74,7 +76,7 @@ func privateGroupSourcesFixture(t *testing.T) (string, os.FileInfo, string) {
 		privateGroupLookupUser, privateGroupLookupGroup = oldUser, oldLookupGroup
 		privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent = oldPasswd, oldGroup, oldGetent
 		privateGroupNsswitchFile, privateGroupSSSDDir, privateGroupUserdbDirs = oldNsswitch, oldSSSD, oldUserdb
-		privateGroupUserdbSocks, privateGroupPAMConfigDirs = oldSocks, oldPAMDirs
+		privateGroupUserdbSocks, privateGroupPAMLocalDir, privateGroupPAMVendorDirs, privateGroupPAMModuleDirs = oldSocks, oldPAMLocal, oldPAMVendor, oldPAMModules
 	})
 	return dir, info, files
 }
@@ -84,7 +86,7 @@ func privateGroupSourcesFixture(t *testing.T) (string, os.FileInfo, string) {
 // service, and a group.conf with every rule commented out.
 func resetPrivateGroupSources(t *testing.T, files string) {
 	t.Helper()
-	for _, dir := range []string{"sssd", "userdb", "host-userdb", "run", "security", "vendor"} {
+	for _, dir := range []string{"sssd", "userdb", "host-userdb", "run", "security", "vendor", "pam-modules", "opt"} {
 		if err := os.RemoveAll(filepath.Join(files, dir)); err != nil {
 			t.Fatal(err)
 		}
@@ -205,7 +207,47 @@ func TestOwnerPrivateGroupLocalSourcesNeedsLocalAccountsOnly(t *testing.T) {
 			writeSourceFile(t, filepath.Join(files, "vendor", "security", "group.conf"), "# *;*;*;Al0000-2400;devs\n")
 		}, want: true},
 		{name: "an unreadable vendor group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			if err := os.Remove(filepath.Join(files, "security", "group.conf")); err != nil {
+				t.Fatal(err)
+			}
 			if err := os.MkdirAll(filepath.Join(files, "vendor", "security", "group.conf"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "an active vendor group.conf shadowed by a commented local group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "vendor", "security", "group.conf"), "*;*;*;Al0000-2400;devs\n")
+		}, want: true},
+		{name: "an active vendor group.conf shadowed by an empty local group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "security", "group.conf"), "")
+			writeSourceFile(t, filepath.Join(files, "vendor", "security", "group.conf"), "*;*;*;Al0000-2400;devs\n")
+		}, want: true},
+		{name: "an unreadable local group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			if err := os.Remove(filepath.Join(files, "security", "group.conf")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(files, "security", "group.conf"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a module naming a directory with an active group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			if err := os.Remove(filepath.Join(files, "security", "group.conf")); err != nil {
+				t.Fatal(err)
+			}
+			writePAMModule(t, files, filepath.Join(files, "opt", "pamx", "security", "group.conf"))
+			writeSourceFile(t, filepath.Join(files, "opt", "pamx", "security", "group.conf"), "*;*;*;Al0000-2400;devs\n")
+		}},
+		{name: "a module naming a directory with a commented group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			writePAMModule(t, files, filepath.Join(files, "security", "group.conf"))
+		}, want: true},
+		{name: "a module naming a directory with an active group.d file", content: stockNsswitch, extra: func(t *testing.T) {
+			writePAMModule(t, files, filepath.Join(files, "security", "group.conf"), filepath.Join(files, "opt", "pamx", "security", "group.d"))
+			writeSourceFile(t, filepath.Join(files, "opt", "pamx", "security", "group.d", "devs.conf"), "*;*;me;Al0000-2400;devs\n")
+		}},
+		{name: "a module that names no group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			writePAMModule(t, files, "/etc/passwd")
+		}},
+		{name: "a module that cannot be read", content: stockNsswitch, extra: func(t *testing.T) {
+			if err := os.MkdirAll(filepath.Join(files, "pam-modules", "pam_group.so"), 0o755); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -330,5 +372,29 @@ func TestOwnerPrivateGroupLocalSourcesChecksSupplementaryGroupSource(t *testing.
 	writeSourceFile(t, filepath.Join(files, "nsswitch.conf"), "passwd: files\ngroup: files\ninitgroups: files\n")
 	if !ownerPrivateGroupLocalSources(dir, info) {
 		t.Fatal("a local initgroups source was refused")
+	}
+}
+
+// writePAMModule puts a fake pam_group.so in the fixture module directory whose
+// binary holds the given path strings, NUL separated, as a real module holds
+// its compiled-in configuration paths.
+func writePAMModule(t *testing.T, files string, paths ...string) {
+	t.Helper()
+	data := []byte("\x7fELF\x00pam_group\x00")
+	for _, path := range paths {
+		data = append(data, []byte(path+"\x00")...)
+	}
+	writeSourceFile(t, filepath.Join(files, "pam-modules", "pam_group.so"), string(data))
+}
+
+// GAP-0905 review 5 MF1e: the production vendor list names the Linux-PAM
+// default vendor directory, so a rule there refuses.
+func TestPrivateGroupPAMVendorDefaultsNameLinuxPAMVendordir(t *testing.T) {
+	found := false
+	for _, dir := range privateGroupPAMVendorDirs {
+		found = found || dir == "/usr/share/pam/security"
+	}
+	if !found {
+		t.Fatalf("vendor directories %v omit the Linux-PAM default /usr/share/pam/security", privateGroupPAMVendorDirs)
 	}
 }
