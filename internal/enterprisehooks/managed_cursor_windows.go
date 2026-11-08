@@ -209,6 +209,17 @@ func windowsCursorManagedTransactionFor(
 	return withWindowsCursorManagedTransaction
 }
 
+// windowsCursorManagedFolderKept reports a link, or something that is no
+// folder, kept at the Cursor folder or on its path (standalone only). It
+// resolves the folder and touches nothing.
+func windowsCursorManagedFolderKept() (bool, error) {
+	paths, err := windowsCursorManagedPaths()
+	if err != nil {
+		return false, err
+	}
+	return windowsCursorManagedRootNotFollowed(paths.Root)
+}
+
 // windowsCursorManagedRootNotFollowed reports, on the standalone profile, that
 // a link or a non-folder sits at the Cursor folder or on its path. The caller
 // then treats every Cursor artifact as absent; nothing behind the link is read.
@@ -2994,7 +3005,14 @@ func CaptureWindowsCursorManagedPolicySnapshot(
 	opts WindowsCursorManagedPolicyTeardownOptions,
 ) (WindowsCursorManagedPolicyTeardownSnapshot, error) {
 	var snapshot WindowsCursorManagedPolicyTeardownSnapshot
-	err := withWindowsCursorManagedTeardownTransaction(func() error {
+	// A link kept at the Cursor folder holds nothing of ours to expect: the
+	// snapshot reads empty and an enrolled target is not a mismatch
+	// (GAP-0829).
+	kept, err := windowsCursorManagedFolderKept()
+	if err != nil {
+		return snapshot, err
+	}
+	err = withWindowsCursorManagedTeardownTransaction(func() error {
 		currentArtifacts, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -3004,7 +3022,7 @@ func CaptureWindowsCursorManagedPolicySnapshot(
 			return err
 		}
 		if !artifacts.active {
-			if len(opts.Targets) != 0 {
+			if len(opts.Targets) != 0 && !kept {
 				return errors.New("enterprise hooks: expected Cursor managed policy is absent")
 			}
 			snapshot = windowsCursorManagedTeardownSnapshot(artifacts)
@@ -3072,7 +3090,13 @@ func PrepareWindowsCursorManagedPolicyTeardown(
 	persist func(WindowsCursorManagedPolicyTeardownSnapshot) error,
 ) (WindowsCursorManagedPolicyTeardownSnapshot, error) {
 	var captured WindowsCursorManagedPolicyTeardownSnapshot
-	err := withWindowsCursorManagedTeardownTransaction(func() error {
+	// See CaptureWindowsCursorManagedPolicySnapshot: a kept link is not a
+	// missing enrollment (GAP-0829).
+	kept, err := windowsCursorManagedFolderKept()
+	if err != nil {
+		return captured, err
+	}
+	err = withWindowsCursorManagedTeardownTransaction(func() error {
 		artifacts, err := snapshotWindowsCursorManagedArtifacts()
 		if err != nil {
 			return err
@@ -3086,7 +3110,7 @@ func PrepareWindowsCursorManagedPolicyTeardown(
 				return err
 			}
 			captured = windowsCursorManagedTeardownSnapshot(artifacts)
-		} else if len(opts.Targets) != 0 {
+		} else if len(opts.Targets) != 0 && !kept {
 			return errors.New("enterprise hooks: expected Cursor managed policy is absent")
 		} else {
 			captured = windowsCursorManagedTeardownSnapshot(artifacts)
