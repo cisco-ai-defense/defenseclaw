@@ -378,6 +378,14 @@ func weakVendorFolders(opts Options, connectors []string) (*recordedPolicyPaths,
 		if err != nil {
 			continue
 		}
+		// Devin branches kept on purpose (g877b review S6). A 1.0.9 install writes
+		// nothing into the Devin or pre-rename Devin folders (GAP-0787), so these
+		// branches are reachable only on a host where a 1.0.5 to 1.0.8 install recorded
+		// a Cascade file there: the supported 1.0.5-1.0.8 to 1.0.9 upgrade on the
+		// Windows standalone profile. 1.0.0 to 1.0.4 never wrote it and a fresh 1.0.9
+		// install has no record, so nothing else reaches them. They go with the
+		// Cascade withdrawal in 1.1 (devin_cascade.go), when no upgrade from 1.0.5 to
+		// 1.0.8 remains supported.
 		if name != ConnectorDevinCascade && len(paths) > 1 {
 			paths = paths[:1]
 		}
