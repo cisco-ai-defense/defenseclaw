@@ -141,6 +141,33 @@ def _policy_row(monkeypatch, cfg_failure: str | None):
 
 
 RESOLVER_COMMAND = "bash defenseclaw-upgrade.sh --yes"
+WINDOWS_ROUTE = "running the install command again"
+
+
+def _repair_route() -> str:
+    """The per-user repair this platform's Policy row names."""
+    return WINDOWS_ROUTE if os.name == "nt" else RESOLVER_COMMAND
+
+
+class _NtOs:
+    """The os module as a Windows host answers it for ``os.name``."""
+
+    name = "nt"
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+
+@pytest.fixture
+def as_windows(monkeypatch) -> None:
+    monkeypatch.setattr(cmd_doctor, "os", _NtOs())
+
+
+@pytest.fixture
+def per_user_install(monkeypatch) -> None:
+    from defenseclaw import upgrade_shim
+
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -148,7 +175,7 @@ def _no_explicit_gateway(monkeypatch) -> None:
     monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)
 
 
-def test_missing_gateway_executable_names_a_command_that_can_run(install_home, monkeypatch) -> None:
+def test_missing_gateway_executable_names_a_command_that_can_run(install_home, per_user_install, monkeypatch) -> None:
     monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", lambda: None)
     failure: list[str] = []
     assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
@@ -157,12 +184,14 @@ def test_missing_gateway_executable_names_a_command_that_can_run(install_home, m
 
     assert check["status"] == "warn"
     assert "executable is installed" in check["detail"]
-    assert RESOLVER_COMMAND in check["remediation"]
+    assert _repair_route() in check["remediation"]
     assert "defenseclaw upgrade" not in check["remediation"]
     assert "policy digest --json" not in check["remediation"]
 
 
-def test_unverified_gateway_executable_names_the_permission_fix_and_the_repair(install_home, monkeypatch) -> None:
+def test_unverified_gateway_executable_names_the_permission_fix_and_the_repair(
+    install_home, per_user_install, monkeypatch
+) -> None:
     def refuse():
         raise OSError("refusing to run /x/defenseclaw-gateway: writable by another account")
 
@@ -174,12 +203,14 @@ def test_unverified_gateway_executable_names_the_permission_fix_and_the_repair(i
 
     assert "writable by another account" in check["detail"]
     assert "writable only by this account" in check["remediation"]
-    assert RESOLVER_COMMAND in check["remediation"]
+    assert _repair_route() in check["remediation"]
     assert "defenseclaw upgrade" not in check["remediation"]
     assert "policy digest --json" not in check["remediation"]
 
 
-def test_explicit_gateway_path_that_is_absent_names_the_variable(install_home, tmp_path, monkeypatch) -> None:
+def test_explicit_gateway_path_that_is_absent_names_the_variable(
+    install_home, per_user_install, tmp_path, monkeypatch
+) -> None:
     absent = tmp_path / "gone" / "defenseclaw-gateway"
     monkeypatch.setenv("DEFENSECLAW_GATEWAY_BIN", str(absent))
     monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", gateway.resolve_gateway_binary)
@@ -195,7 +226,7 @@ def test_explicit_gateway_path_that_is_absent_names_the_variable(install_home, t
     assert "defenseclaw upgrade" not in check["remediation"]
 
 
-def test_installed_gateway_that_cannot_start_names_the_repair(install_home, monkeypatch) -> None:
+def test_installed_gateway_that_cannot_start_names_the_repair(install_home, per_user_install, monkeypatch) -> None:
     def cannot_start(*_args, **_kwargs):
         raise OSError(8, "Exec format error")
 
@@ -206,8 +237,90 @@ def test_installed_gateway_that_cannot_start_names_the_repair(install_home, monk
     check = _policy_row(monkeypatch, failure[0])
 
     assert "/trusted/defenseclaw-gateway" in check["detail"]
-    assert RESOLVER_COMMAND in check["remediation"]
+    assert _repair_route() in check["remediation"]
     assert "policy digest --json" not in check["remediation"]
+
+
+def test_windows_hint_names_the_install_command_not_the_posix_resolver(
+    install_home, per_user_install, as_windows, monkeypatch
+) -> None:
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", lambda: None)
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    remediation = _policy_row(monkeypatch, failure[0])["remediation"]
+
+    assert WINDOWS_ROUTE in remediation
+    assert RESOLVER_COMMAND not in remediation
+
+
+def test_packaged_windows_install_ignores_the_override_so_the_row_names_the_install_command(
+    install_home, tmp_path, as_windows, per_user_install, monkeypatch
+) -> None:
+    # The packaged runtime ignores DEFENSECLAW_GATEWAY_BIN and its sibling is
+    # missing: setting or unsetting the variable changes nothing, so the row
+    # must name the repair of the package.
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_BIN", str(tmp_path / "elsewhere" / "defenseclaw-gateway.exe"))
+    monkeypatch.setattr(gateway, "packaged_windows_install_root", lambda: str(tmp_path / "install"))
+    monkeypatch.setattr(gateway, "packaged_windows_gateway_path", lambda: None)
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", gateway.resolve_gateway_binary)
+    assert gateway.resolve_gateway_binary() is None
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    remediation = _policy_row(monkeypatch, failure[0])["remediation"]
+
+    assert "DEFENSECLAW_GATEWAY_BIN" not in remediation
+    assert WINDOWS_ROUTE in remediation
+
+
+@pytest.mark.parametrize("kind", ["missing", "unverified"])
+def test_managed_install_names_the_administrator_route_not_the_per_user_resolver(
+    install_home, monkeypatch, kind
+) -> None:
+    # defenseclaw-upgrade.sh refuses a managed computer, so naming it clears nothing.
+    from defenseclaw import upgrade_shim
+
+    lifecycle = "/opt/defenseclaw/bin/defenseclaw-gateway enterprise linux"
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "/etc/defenseclaw/managed-runtime.json")
+    monkeypatch.setattr(upgrade_shim, "managed_lifecycle_command", lambda: lifecycle)
+    if kind == "missing":
+        monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", lambda: None)
+    else:
+        def refuse():
+            raise OSError("refusing to run /x/defenseclaw-gateway: writable by another account")
+
+        monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", refuse)
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    remediation = _policy_row(monkeypatch, failure[0])["remediation"]
+
+    assert "managed by your organization" in remediation
+    assert "IT department" in remediation
+    assert f"sudo {lifecycle} status" in remediation
+    assert "defenseclaw-upgrade.sh" not in remediation
+    assert "install command" not in remediation
+    assert "policy digest --json" not in remediation
+
+
+def test_managed_install_with_an_override_still_ends_in_a_step_that_clears_the_row(
+    install_home, tmp_path, monkeypatch
+) -> None:
+    from defenseclaw import upgrade_shim
+
+    monkeypatch.setattr(upgrade_shim, "managed_deployment", lambda: "/etc/defenseclaw/managed-runtime.json")
+    monkeypatch.setattr(upgrade_shim, "managed_lifecycle_command", lambda: "")
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_BIN", str(tmp_path / "gone" / "defenseclaw-gateway"))
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", gateway.resolve_gateway_binary)
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    remediation = _policy_row(monkeypatch, failure[0])["remediation"]
+
+    assert "DEFENSECLAW_GATEWAY_BIN" in remediation
+    assert "IT department" in remediation
+    assert "defenseclaw-upgrade.sh" not in remediation
 
 
 def test_gateway_command_that_times_out_keeps_the_diagnose_command(install_home, monkeypatch) -> None:
