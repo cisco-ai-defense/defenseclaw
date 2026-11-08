@@ -106,9 +106,9 @@ var windowsCodexMachineFolderTrust = func(folder string) error {
 // windowsCodexMachineFolderUntrusted names, once, an existing Codex
 // machine-policy folder that is not trusted, with the fix. The guardian does
 // not take it over; the same named error returns on every pass until an
-// administrator runs Setup /repair, which does.
+// administrator repairs the deployment with Setup, which does.
 func windowsCodexMachineFolderUntrusted(folder string, cause error) error {
-	fix := "as an administrator, run Setup /repair, which takes the folder over with the owner and protection Setup gives it; the guardian does not take over a folder that already exists"
+	fix := "as an administrator, run " + managed.WindowsSetupCommand("/repair") + " in PowerShell, which takes the folder over with the owner and protection Setup gives it; the guardian does not take over a folder that already exists. " + managed.WindowsSetupSource
 	text := fmt.Sprintf("the Codex machine-policy folder %s exists but is not trusted: %v", folder, cause)
 	managed.EmitResilienceEventOnce(folder, managed.MarkerBoundary, map[string]string{
 		"path":   folder,
@@ -143,7 +143,7 @@ func windowsCodexMachineFolderWarn(folder, link string, cause error) error {
 		fix = fmt.Sprintf("as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target); the guardian then recreates the folder on its next pass", link)
 		text = fmt.Sprintf("a link or a non-folder sits at %s on the path of the Codex machine-policy folder %s; DefenseClaw does not follow, change or remove it, so the folder cannot be recreated", link, folder)
 	} else {
-		fix = "as an administrator, run Setup /repair, or create the folder again"
+		fix = "as an administrator, run " + managed.WindowsSetupCommand("/repair") + " in PowerShell, or create the folder again. " + managed.WindowsSetupSource
 		text = fmt.Sprintf("the Codex machine-policy folder %s is missing and could not be recreated: %v", folder, cause)
 	}
 	managed.EmitResilienceEventOnce(folder, managed.MarkerBoundary, map[string]string{

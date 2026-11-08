@@ -158,7 +158,7 @@ func TestEnsureWindowsStandaloneCodexMachineFolderNamesAFailedCreation(t *testin
 	for pass := 0; pass < 2; pass++ {
 		_, err := EnsureWindowsStandaloneCodexMachineFolder()
 		if err == nil || !errors.Is(err, ErrWindowsCodexMachineFolderUnavailable) ||
-			!strings.Contains(err.Error(), "access is denied") || !strings.Contains(err.Error(), "Setup /repair") {
+			!strings.Contains(err.Error(), "access is denied") || !strings.Contains(err.Error(), " /repair") {
 			t.Fatalf("pass %d: the failure is not named with its fix: %v", pass, err)
 		}
 	}
@@ -202,7 +202,7 @@ func TestEnsureWindowsStandaloneCodexMachineFolderNamesAnUntrustedExistingFolder
 	for pass := 0; pass < 3; pass++ {
 		result, err := EnsureWindowsStandaloneCodexMachineFolder()
 		if err == nil || !errors.Is(err, ErrWindowsCodexMachineFolderUnavailable) ||
-			!strings.Contains(err.Error(), "owner is not trusted") || !strings.Contains(err.Error(), "Setup /repair") ||
+			!strings.Contains(err.Error(), "owner is not trusted") || !strings.Contains(err.Error(), " /repair") ||
 			!strings.Contains(err.Error(), f.selectorDir) {
 			t.Fatalf("pass %d: an untrusted existing folder was not named with its fix: %v", pass, err)
 		}
