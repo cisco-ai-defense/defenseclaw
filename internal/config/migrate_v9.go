@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/internal/cfgtxn"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/policy/regodata"
@@ -1548,9 +1549,9 @@ func appendDotEnvKey(path, key, value string) (undo func() error, err error) {
 // nonempty assignment wins; an empty assignment is replaced so the inline
 // v8 fallback remains available after migration.
 func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
-	lines := bytes.Split(existing, []byte("\n"))
+	lines := envvars.DotEnvLines(existing)
 	for i, line := range lines {
-		entry := strings.TrimSpace(string(line))
+		entry := strings.TrimSpace(line)
 		if entry == "" || strings.HasPrefix(entry, "#") {
 			continue
 		}
@@ -1559,25 +1560,13 @@ func DotEnvWithKey(existing []byte, key, value string) ([]byte, bool) {
 			continue
 		}
 		current = strings.TrimSpace(current)
-		if current != "" && current != "\"\"" && current != "''" {
+		if current != "" && current != `""` && current != `''` {
 			return existing, false
 		}
-		equals := bytes.IndexByte(line, '=')
-		updated := append([]byte(nil), line[:equals+1]...)
-		updated = append(updated, value...)
-		if bytes.HasSuffix(line, []byte("\r")) {
-			updated = append(updated, '\r')
-		}
-		lines[i] = updated
-		return bytes.Join(lines, []byte("\n")), true
+		lines[i] = line[:strings.IndexByte(line, '=')+1] + value
+		return envvars.SerializeDotEnv(existing, lines), true
 	}
-	var out bytes.Buffer
-	out.Write(existing)
-	if len(existing) > 0 && !bytes.HasSuffix(existing, []byte("\n")) {
-		out.WriteByte('\n')
-	}
-	fmt.Fprintf(&out, "%s=%s\n", key, value)
-	return out.Bytes(), true
+	return envvars.SerializeDotEnv(existing, append(lines, key+"="+value)), true
 }
 
 // ---------------------------------------------------------------------------

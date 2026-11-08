@@ -255,38 +255,103 @@ def _one_ending(body: bytes, ending: bytes) -> bool:
     return body.count(b"\n") == body.count(ending)
 
 
-@pytest.mark.parametrize("final_newline", [True, False], ids=["final-newline", "no-final-newline"])
-@pytest.mark.parametrize("writer", ["adoption", "secret-save", "rotation"])
-def test_every_python_writer_converges_a_mixed_dotenv_to_one_ending(tmp_path, writer, final_newline):
+def _seed(tmp_path, body: bytes):
     path = tmp_path / ".env"
-    seed = MIXED_ENV if final_newline else MIXED_ENV.rstrip(b"\n")
-    path.write_bytes(seed)
+    path.write_bytes(body)
     path.chmod(0o600)
+    return path
+
+
+def _write_with(writer: str, tmp_path, path):
+    from defenseclaw import migrations
+    from defenseclaw.commands import cmd_keys
+    from defenseclaw.dotenv_utils import persist_env_var
+
     if writer == "adoption":
         _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
     elif writer == "secret-save":
         _save_secret_to_dotenv("DEFENSECLAW_LLM_KEY", "changed", str(tmp_path))
-    else:
+    elif writer == "rotation":
         cmd_setup._rotate_token_atomic_write(str(path), NEW_TOKEN)
-    body = path.read_bytes()
-    assert _one_ending(body, b"\r\n")
-    if final_newline:
-        assert body.endswith(b"\r\n")
-    lines = body.decode().split("\r\n")
-    assert "OTHER=1" in lines
-    assert "LAST=2" in lines
-    if writer == "secret-save":
-        assert "DEFENSECLAW_LLM_KEY=changed" in lines
+    elif writer == "keys-remove":
+        assert cmd_keys._remove_dotenv_key(str(path), "OTHER")
+    elif writer == "secret-ref-cleanup":
+        assert cmd_setup._drop_secret_ref_gateway_tokens_at(str(path))
+    elif writer == "rewrite-all":
+        cmd_setup._write_dotenv(str(path), {"DEFENSECLAW_LLM_KEY": "changed", "OTHER": "1"})
+    elif writer == "migration-update":
+        assert migrations._dotenv_update_keys(str(path), updates={"DEFENSECLAW_LLM_KEY": "changed"})
+    elif writer == "migration-remove":
+        assert migrations._dotenv_update_keys(str(path), removes=("OTHER",))
     else:
+        persist_env_var(path, "DEFENSECLAW_LLM_KEY", "changed")
+
+
+WRITERS = [
+    "adoption",
+    "secret-save",
+    "rotation",
+    "keys-remove",
+    "secret-ref-cleanup",
+    "rewrite-all",
+    "migration-update",
+    "migration-remove",
+    "persist-env-var",
+]
+SECRET_REF_ENV = MIXED_ENV.replace(
+    f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\n".encode(),
+    b"DEFENSECLAW_GATEWAY_TOKEN={'source': 'env', 'id': 'SOME_REF'}\n",
+)
+
+
+@pytest.mark.parametrize("final_newline", [True, False], ids=["final-newline", "no-final-newline"])
+@pytest.mark.parametrize("writer", WRITERS)
+def test_every_python_writer_normalizes_a_mixed_dotenv_to_one_lf_ending(tmp_path, writer, final_newline):
+    seed = SECRET_REF_ENV if writer == "secret-ref-cleanup" else MIXED_ENV
+    path = _seed(tmp_path, seed if final_newline else seed.rstrip(b"\n"))
+    _write_with(writer, tmp_path, path)
+    body = path.read_bytes()
+    assert b"\r" not in body and body.endswith(b"\n")
+    lines = body.decode().split("\n")
+    if writer not in ("rewrite-all", "keys-remove", "migration-remove"):
+        assert "OTHER=1" in lines
+    if writer != "keys-remove":
+        assert "LAST=2" in lines or writer == "rewrite-all"
+    if writer in ("secret-save", "migration-update", "persist-env-var"):
+        assert "DEFENSECLAW_LLM_KEY=changed" in lines
+    elif writer in ("adoption", "rotation"):
         assert f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}" in lines
         assert _resolved_after_load(tmp_path) == NEW_TOKEN
+    elif writer == "keys-remove":
+        assert "OTHER=1" not in lines and "LAST=2" in lines and "DEFENSECLAW_LLM_KEY=keep" in lines
+    elif writer == "secret-ref-cleanup":
+        assert not any(line.startswith("DEFENSECLAW_GATEWAY_TOKEN=") for line in lines)
+        assert "DEFENSECLAW_LLM_KEY=keep" in lines and "OTHER=1" in lines
+    elif writer == "migration-remove":
+        assert "OTHER=1" not in lines and "DEFENSECLAW_LLM_KEY=keep" in lines
 
 
-def test_a_dotenv_without_crlf_stays_lf_after_every_python_writer(tmp_path):
-    path = tmp_path / ".env"
-    path.write_bytes(MIXED_ENV.replace(b"\r\n", b"\n"))
-    path.chmod(0o600)
-    _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
-    _save_secret_to_dotenv("DEFENSECLAW_LLM_KEY", "changed", str(tmp_path))
-    cmd_setup._rotate_token_atomic_write(str(path), NEW_TOKEN)
+@pytest.mark.parametrize("writer", WRITERS)
+def test_every_python_writer_keeps_an_entirely_crlf_dotenv_crlf(tmp_path, writer):
+    seed = SECRET_REF_ENV if writer == "secret-ref-cleanup" else MIXED_ENV
+    path = _seed(tmp_path, seed.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    _write_with(writer, tmp_path, path)
+    body = path.read_bytes()
+    assert body.endswith(b"\r\n")
+    assert body.count(b"\n") == body.count(b"\r\n")
+
+
+@pytest.mark.parametrize("writer", WRITERS)
+def test_every_python_writer_keeps_an_lf_dotenv_lf(tmp_path, writer):
+    seed = SECRET_REF_ENV if writer == "secret-ref-cleanup" else MIXED_ENV
+    path = _seed(tmp_path, seed.replace(b"\r\n", b"\n"))
+    _write_with(writer, tmp_path, path)
     assert b"\r" not in path.read_bytes()
+
+
+def test_keys_remove_leaves_one_ending_in_a_mixed_dotenv(tmp_path):
+    from defenseclaw.commands import cmd_keys
+
+    path = _seed(tmp_path, MIXED_ENV)
+    assert cmd_keys._remove_dotenv_key(str(path), "OTHER")
+    assert path.read_bytes() == b"DEFENSECLAW_LLM_KEY=keep\n" + f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\n".encode() + b"LAST=2\n"

@@ -469,12 +469,12 @@ def _dotenv_names(dotenv_path: str) -> list[str]:
 
 
 def _remove_dotenv_key(dotenv_path: str, env_name: str) -> bool:
-    """Drop every ``env_name=`` line from the dotenv file; keep all other bytes."""
+    """Drop every ``env_name=`` line from the dotenv file; keep every other line."""
     import os
 
     from defenseclaw.commands.cmd_setup import _rotate_token_snapshot_locked
     from defenseclaw.config import locked_file_update
-    from defenseclaw.file_permissions import atomic_write_private_bytes
+    from defenseclaw.file_permissions import atomic_write_private_bytes, serialize_dotenv
 
     wanted = env_name.encode("utf-8")
     if os.name == "nt":
@@ -495,7 +495,7 @@ def _remove_dotenv_key(dotenv_path: str, env_name: str) -> bool:
                 continue
             kept.append(line)
         if removed:
-            atomic_write_private_bytes(dotenv_path, b"".join(kept))
+            atomic_write_private_bytes(dotenv_path, serialize_dotenv(kept, snapshot.body))
         return removed
 
 

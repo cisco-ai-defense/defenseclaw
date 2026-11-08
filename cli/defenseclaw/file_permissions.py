@@ -31,7 +31,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
@@ -808,23 +808,35 @@ def dotenv_key_is_valid(key: str) -> bool:
     )
 
 
-def dotenv_line_ending(body: bytes) -> bytes:
-    """The line ending DefenseClaw writes into a ``.env`` that holds *body*.
+def dotenv_line_ending(existing: bytes | None) -> bytes:
+    """The line ending DefenseClaw writes into a ``.env`` that now holds *existing*.
 
-    One per file, on every OS: CRLF when the file already holds a CRLF line,
-    otherwise LF. The readers accept both.
+    One per file, on every OS: CRLF only when the file is entirely CRLF,
+    otherwise LF (also for a new or empty file). The readers accept both.
     """
-    return b"\r\n" if b"\r\n" in body else b"\n"
+    body = existing or b""
+    lf = body.count(b"\n")
+    return b"\r\n" if lf and lf == body.count(b"\r\n") else b"\n"
 
 
-def dotenv_with_line_ending(body: bytes, newline: bytes) -> bytes:
-    """*body* with every CRLF or LF line ending replaced by *newline*.
+def serialize_dotenv(lines: Iterable[bytes], existing: bytes | None) -> bytes:
+    """The one serializer every DefenseClaw ``.env`` writer ends with.
 
-    Every writer ends its render with this, so a file that already mixes both
-    endings (an older writer produced such files) leaves the writer with one.
+    Each of *lines* is written without whatever line ending it carried and
+    with the single ending :func:`dotenv_line_ending` picks from *existing*, the
+    bytes being replaced. A file an older writer left half CRLF and half LF
+    therefore leaves the first write with one ending. Byte-exact rollback
+    restores do not use it: they put the earlier bytes back as they were.
     """
-    unix = body.replace(b"\r\n", b"\n")
-    return unix if newline == b"\n" else unix.replace(b"\n", newline)
+    newline = dotenv_line_ending(existing)
+    out: list[bytes] = []
+    for line in lines:
+        for terminator in (b"\r\n", b"\n", b"\r"):
+            if line.endswith(terminator):
+                line = line[: -len(terminator)]
+                break
+        out.append(line + newline)
+    return b"".join(out)
 
 
 def dotenv_key_is_process_control(key: str) -> bool:

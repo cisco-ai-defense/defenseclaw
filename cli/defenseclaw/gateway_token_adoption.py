@@ -22,7 +22,7 @@ import hashlib
 import os
 
 from defenseclaw.connector_paths import is_secret_ref_text
-from defenseclaw.file_permissions import dotenv_line_ending, dotenv_with_line_ending
+from defenseclaw.file_permissions import serialize_dotenv
 
 GATEWAY_TOKEN_NAMES = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
 _MARKER = b"# defenseclaw: adopted gateway token sha256="
@@ -52,12 +52,8 @@ def with_adopted_marker(body: bytes, token: str) -> bytes:
     The caller checks the whole result against ``MAX_DOTENV_BYTES`` before it
     publishes anything.
     """
-    newline = dotenv_line_ending(body)
     kept = [line for line in body.splitlines(keepends=True) if not line.strip().startswith(_MARKER)]
-    out = b"".join(kept)
-    if out and not out.endswith((b"\r", b"\n")):
-        out += newline
-    return dotenv_with_line_ending(out + marker_line(token) + newline, newline)
+    return serialize_dotenv([*kept, marker_line(token)], body)
 
 
 def shadowed_names(body: bytes) -> set[str]:

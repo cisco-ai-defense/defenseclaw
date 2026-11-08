@@ -140,11 +140,11 @@ from defenseclaw.file_permissions import (
     delete_file_durable,
     dotenv_key_is_valid,
     dotenv_line_ending,
-    dotenv_with_line_ending,
     open_regular_file_no_follow,
     read_regular_file_no_follow,
     reject_reparse_path,
     root_owned_private_regular_file,
+    serialize_dotenv,
     trusted_runtime_owner,
     windows_acl_custody_confidentiality_error,
     windows_acl_custody_write_error,
@@ -2776,8 +2776,12 @@ def _write_dotenv_locked(path: str, entries: dict[str, str]) -> None:
     creation. Tighten the open descriptor before writing so repeat runs also
     converge on POSIX 0600 or the equivalent protected Windows DACL.
     """
-    body = "".join(f"{key}={sanitize_dotenv_value(value, key=key)}\n" for key, value in sorted(entries.items()))
-    atomic_write_private_bytes(path, body.encode("utf-8"))
+    lines = [f"{key}={sanitize_dotenv_value(value, key=key)}".encode() for key, value in sorted(entries.items())]
+    # A symlink or special file is refused by the write below, not read here.
+    existing = None
+    if os.path.isfile(path) and not os.path.islink(path):
+        existing, _mode = _snapshot_dotenv(path)
+    atomic_write_private_bytes(path, serialize_dotenv(lines, existing))
 
 
 def _load_config_for_data_dir(data_dir: str):
@@ -4504,18 +4508,13 @@ def _dotenv_upsert_render(
         if separator and compared_key == requested_key:
             if replaced:
                 continue
-            terminator = line[len(line.rstrip(b"\r\n")) :]
-            lines.append(key_bytes + b"=" + safe_value + terminator)
+            lines.append(key_bytes + b"=" + safe_value)
             replaced = True
             continue
         lines.append(line)
-    body = b"".join(lines)
-    newline = dotenv_line_ending(snapshot.body)
     if not replaced:
-        if body and not body.endswith((b"\r", b"\n")):
-            body += newline
-        body += key_bytes + b"=" + safe_value + newline
-    return dotenv_with_line_ending(body, newline)
+        lines.append(key_bytes + b"=" + safe_value)
+    return serialize_dotenv(lines, snapshot.body)
 
 
 class _DotenvSizeError(click.ClickException):
@@ -4600,11 +4599,7 @@ def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -
         return key in token_keys
 
     lines = [line for line in snapshot.body.splitlines(keepends=True) if not is_token_line(line)]
-    body = b"".join(lines)
-    newline = dotenv_line_ending(snapshot.body)
-    if body and not body.endswith((b"\r", b"\n")):
-        body += newline
-    return dotenv_with_line_ending(body + token_prefix + safe_token + newline, newline)
+    return serialize_dotenv([*lines, token_prefix + safe_token], snapshot.body)
 
 
 def _rotate_token_restore_locked(
@@ -21555,7 +21550,7 @@ def _drop_secret_ref_gateway_tokens_at(dotenv_path: str) -> str:
                 continue
             kept.append(line)
         if removed:
-            atomic_write_private_bytes(dotenv_path, b"".join(kept))
+            atomic_write_private_bytes(dotenv_path, serialize_dotenv(kept, snapshot.body))
     return _SECRET_REF_TOKEN_DROPPED if removed else ""
 
 
