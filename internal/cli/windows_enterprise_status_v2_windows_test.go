@@ -468,3 +468,53 @@ func TestWindowsStatusV2MachinePolicyCoverageNeedsTheGuardianState(t *testing.T)
 	}
 	contracttest.Compile(t).Validate(t, "lifecycle-result.schema.json", document)
 }
+
+// GAP-0856. While a link sits at the Codex machine-policy folder, status and
+// verify carry one named warning with the command that removes it; no link, or
+// no Codex machine policy, carries none.
+func TestWindowsStatusNamesALinkAtTheCodexFolderOnce(t *testing.T) {
+	previous := windowsEnterpriseCodexFolderLink
+	t.Cleanup(func() { windowsEnterpriseCodexFolderLink = previous })
+	const link = `C:\ProgramData\OpenAI\Codex`
+	newResult := func(codex bool) *enterprisestatus.Result {
+		result := &enterprisestatus.Result{Action: "status", MachinePolicy: map[string]enterprisestatus.MachinePolicyState{}}
+		if codex {
+			result.MachinePolicy["codex"] = windowsEnterpriseMachinePolicy(true)
+		}
+		return result
+	}
+	count := func(result *enterprisestatus.Result) int {
+		n := 0
+		for _, warning := range result.Warnings {
+			if warning.Code == "codex_machine_folder_link" {
+				n++
+			}
+		}
+		return n
+	}
+
+	windowsEnterpriseCodexFolderLink = func() string { return link }
+	result := newResult(true)
+	noteWindowsEnterpriseCodexFolderLink(result)
+	noteWindowsEnterpriseCodexFolderLink(result)
+	if count(result) != 1 {
+		t.Fatalf("the link was named %d times, want once: %+v", count(result), result.Warnings)
+	}
+	message := result.Warnings[0].Message
+	if !strings.Contains(message, `cmd /c rmdir "`+link+`"`) || !strings.Contains(message, "link only, not its target") {
+		t.Fatalf("the warning does not carry the fix: %s", message)
+	}
+
+	result = newResult(false)
+	noteWindowsEnterpriseCodexFolderLink(result)
+	if count(result) != 0 {
+		t.Fatalf("a deployment without Codex machine policy was warned: %+v", result.Warnings)
+	}
+
+	windowsEnterpriseCodexFolderLink = func() string { return "" }
+	result = newResult(true)
+	noteWindowsEnterpriseCodexFolderLink(result)
+	if count(result) != 0 {
+		t.Fatalf("no link, but a warning: %+v", result.Warnings)
+	}
+}

@@ -105,6 +105,32 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 	return in
 }
 
+// windowsEnterpriseCodexFolderLink is the link that sits on the path of the
+// Codex machine-policy folder, "" when none. A seam for tests.
+var windowsEnterpriseCodexFolderLink = func() string {
+	link, _ := enterprisehooks.WindowsCodexMachineFolderLink()
+	return link
+}
+
+// noteWindowsEnterpriseCodexFolderLink names, for status and verify, a link at
+// the Codex machine-policy folder with the command that removes it. The hook
+// guardian never writes through the link, so it logs the refusal on every
+// retry and cannot recreate or repair the folder until an administrator
+// removes it (GAP-0856).
+func noteWindowsEnterpriseCodexFolderLink(result *enterprisestatus.Result) {
+	if _, configured := result.MachinePolicy["codex"]; !configured || windowsEnterpriseResultHasWarning(result, "codex_machine_folder_link") {
+		return
+	}
+	link := windowsEnterpriseCodexFolderLink()
+	if link == "" {
+		return
+	}
+	result.AddWarning("codex_machine_folder_link", fmt.Sprintf("a link or a non-folder sits at %s on the path of the Codex machine-policy folder; "+
+		"DefenseClaw does not follow, change or remove it, so the hook guardian cannot recreate or repair the folder and Codex is not protected until it is gone; "+
+		"as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target); the guardian then recreates the folder on its next pass",
+		link, link))
+}
+
 // readWindowsEnterpriseStatusV2Manifest lists the manifest's targets without
 // their accounts. Every Windows row names enabled explicitly, as
 // readWindowsEnterpriseStandaloneEnrollmentAt counts them.
@@ -137,6 +163,9 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 // (as on Linux and macOS).
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	publish := result.Action == "status" || result.Action == "verify"
+	if publish {
+		noteWindowsEnterpriseCodexFolderLink(result)
+	}
 	in := windowsEnterpriseStatusV2Read()
 	applyWindowsEnterpriseCoworkStatus(result, in.cfg)
 	var coverage map[string]string
