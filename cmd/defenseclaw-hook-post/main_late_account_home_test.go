@@ -50,7 +50,6 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 		t.Fatal(err)
 	}
 	t.Setenv("HOME", scratch)
-	t.Setenv(hookPostAccountHomeEnv, home)
 	names := make([]string, 5000)
 	for i := range names {
 		names[i] = "f" + itoa(i)
@@ -79,23 +78,28 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 		return runMain([]string{"hook-post", "--api-addr", addr, "--max-time", "1", "--curl-output"},
 			bytes.NewReader(frame), new(bytes.Buffer), new(bytes.Buffer))
 	}
-	for _, path := range []string{"/api/v1/codex/hook", "/api/v1/claude-code/hook"} {
-		for _, tc := range []struct {
-			name, command string
-			want          int
-		}{
-			{"hard link to the keys", "touch hl-keys", hookexec.PerUserPostNoAnswerExit},
-			{"hard link first operand", "touch hl-keys " + long, hookexec.PerUserPostNoAnswerExit},
-			{"hard link last operand", "touch " + long + " hl-keys", hookexec.PerUserPostNoAnswerExit},
-			{"hard link by absolute path", "touch " + filepath.Join(project, "hl-keys"), hookexec.PerUserPostNoAnswerExit},
-			{"ordinary late call", "touch " + long, hookexec.PerUserPostLateOrdinaryExit},
-			{"hard link of an ordinary file", "touch hl-plain", hookexec.PerUserPostLateOrdinaryExit},
-		} {
-			t.Run(strings.TrimPrefix(path, "/api/v1/")+" "+tc.name, func(t *testing.T) {
-				if got := post(path, tc.command); got != tc.want {
-					t.Fatalf("exit %d, want %d", got, tc.want)
-				}
-			})
+	// The shell saves its HOME as it got it, so a trailing slash is the same
+	// valid home and must not send the scan to the account entry.
+	for _, saved := range []string{home, home + "/"} {
+		for _, path := range []string{"/api/v1/codex/hook", "/api/v1/claude-code/hook"} {
+			for _, tc := range []struct {
+				name, command string
+				want          int
+			}{
+				{"hard link to the keys", "touch hl-keys", hookexec.PerUserPostNoAnswerExit},
+				{"hard link first operand", "touch hl-keys " + long, hookexec.PerUserPostNoAnswerExit},
+				{"hard link last operand", "touch " + long + " hl-keys", hookexec.PerUserPostNoAnswerExit},
+				{"hard link by absolute path", "touch " + filepath.Join(project, "hl-keys"), hookexec.PerUserPostNoAnswerExit},
+				{"ordinary late call", "touch " + long, hookexec.PerUserPostLateOrdinaryExit},
+				{"hard link of an ordinary file", "touch hl-plain", hookexec.PerUserPostLateOrdinaryExit},
+			} {
+				t.Run(strings.TrimPrefix(path, "/api/v1/")+" "+tc.name+" saved "+saved[len(home):]+".", func(t *testing.T) {
+					t.Setenv(hookPostAccountHomeEnv, saved)
+					if got := post(path, tc.command); got != tc.want {
+						t.Fatalf("exit %d, want %d", got, tc.want)
+					}
+				})
+			}
 		}
 	}
 }
@@ -110,8 +114,15 @@ func TestAccountHomeIsTheSavedHomeThenTheAccountEntry(t *testing.T) {
 	if err != nil || !filepath.IsAbs(current.HomeDir) {
 		t.Skip("no account entry for the current user")
 	}
-	// A relative or unclean value is not a home: the account entry decides.
-	for _, bad := range []string{"", "relative/home", saved + "/../other", saved + "/"} {
+	// A trailing slash or doubled separator is the same home, cleaned.
+	for _, same := range []string{saved + "/", saved + "//", saved + "/./"} {
+		t.Setenv(hookPostAccountHomeEnv, same)
+		if got := accountHome(); got != saved {
+			t.Errorf("home %q gave %q, want %q", same, got, saved)
+		}
+	}
+	// A relative value or a parent step is not a home: the account entry decides.
+	for _, bad := range []string{"", "relative/home", saved + "/../other"} {
 		t.Setenv(hookPostAccountHomeEnv, bad)
 		if got := accountHome(); got != current.HomeDir {
 			t.Errorf("home %q gave %q, want the account entry %q", bad, got, current.HomeDir)
