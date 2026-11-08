@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -193,5 +194,67 @@ func TestGatewayTokenHintsNameTheStepThatReachesTheDaemon(t *testing.T) {
 				t.Errorf("%s hint lacks %q: %s", name, want, text)
 			}
 		}
+	}
+}
+
+// A token the file already holds can be rotated while the wait after its
+// rejection runs. The wait ends when the file changes, so the rotated token is
+// the next attempt even though the backoff has grown to seconds (GAP-0847).
+func TestConnectWithRetryAttemptsARotatedPersistedTokenWithoutWaitingOutTheBackoff(t *testing.T) {
+	gw, u := newTokenGateway(t, "fresh-token")
+	home := t.TempDir()
+	writeOpenClawJSON(t, home, "{gateway:{auth:{mode:'token',token:'stale-token'}}}")
+	client := newTokenClient(t, u, home, "stale-token")
+	client.cfg.ReconnectMs = 2500
+	client.cfg.MaxReconnectMs = 60000
+	configPath := filepath.Join(home, ".openclaw", "openclaw.json")
+	rotated := make(chan error, 1)
+	var once sync.Once
+	client.OnConnectError = func(_ error, _ string) {
+		once.Do(func() {
+			rotated <- os.WriteFile(configPath, []byte("{gateway:{auth:{mode:'token',token:'fresh-token'}}}"), 0o600)
+		})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- client.ConnectWithRetry(ctx) }()
+	select {
+	case err := <-rotated:
+		if err != nil {
+			t.Fatalf("rotate the token: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first attempt was not rejected")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ConnectWithRetry: %v", err)
+		}
+	case <-time.After(900 * time.Millisecond):
+		t.Fatalf("the rotated token was not tried within 900ms of a 10ms watch interval; sent %v", gw.seen())
+	}
+	if got := client.RefreshedToken(); got != "fresh-token" {
+		t.Errorf("RefreshedToken() = %q, want the rotated token", got)
+	}
+}
+
+// Benign twin: a rejected token that the file still holds changes nothing, so
+// the retry waits out its backoff and no extra attempt is made.
+func TestConnectWithRetryKeepsTheBackoffWhenThePersistedTokenIsUnchanged(t *testing.T) {
+	gw, u := newTokenGateway(t, "fresh-token")
+	home := t.TempDir()
+	writeOpenClawJSON(t, home, "{gateway:{auth:{mode:'token',token:'stale-token'}}}")
+	client := newTokenClient(t, u, home, "stale-token")
+	client.cfg.ReconnectMs = 2500
+	client.cfg.MaxReconnectMs = 60000
+	ctx, cancel := context.WithTimeout(context.Background(), 1200*time.Millisecond)
+	defer cancel()
+	if err := client.ConnectWithRetry(ctx); err == nil {
+		t.Fatal("ConnectWithRetry connected with a token the gateway rejects")
+	}
+	if got := gw.seen(); len(got) != 1 {
+		t.Errorf("attempts = %v, want exactly one while the file token is unchanged", got)
 	}
 }

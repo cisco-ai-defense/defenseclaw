@@ -735,7 +735,15 @@ func (c *Client) ConnectWithRetry(ctx context.Context) error {
 			// persists a token, so retrying every few seconds only fills
 			// both logs. Retry slowly, and at once when a token appears.
 			wait = max(wait, c.tokenNotPersistedRetryEvery())
+		}
+		switch {
+		case hint == openClawTokenNotPersistedHint:
 			wake = c.persistedTokenAppeared
+		case c.shouldRefreshToken(err):
+			// A rejected token can be rotated while the wait runs, so the
+			// wait ends when openclaw.json holds a token other than the one
+			// just rejected, whatever backoff has grown to.
+			wake = c.persistedTokenChanged
 		}
 		fmt.Fprintf(os.Stderr, "[gateway] connect failed (attempt #%d): %v (retry in %s)\n",
 			attempt, err, wait)
@@ -819,21 +827,30 @@ func (c *Client) persistedTokenAppeared() bool {
 	return ok || errors.Is(err, errOpenClawTokenUnreadable)
 }
 
-// adoptPersistedToken makes the gateway token persisted in openclaw.json the
-// one the next connect attempt sends. It reports whether that changed the
-// token; a token equal to the current one, or none DefenseClaw can read,
-// changes nothing.
-func (c *Client) adoptPersistedToken() bool {
+// persistedTokenChanged reports that openclaw.json holds a readable gateway
+// token other than the one this client sends: the operator rotated it after
+// the last rejection.
+func (c *Client) persistedTokenChanged() bool {
 	if c.cfg.ClawHome == "" {
 		return false
 	}
 	token, ok, _ := readOpenClawGatewayToken(c.cfg.ClawHome)
+	return ok && token != c.cfg.Token
+}
+
+// adoptPersistedToken makes the gateway token persisted in openclaw.json the
+// one the next connect attempt sends. A token equal to the current one, or
+// none DefenseClaw can read, changes nothing.
+func (c *Client) adoptPersistedToken() {
+	if c.cfg.ClawHome == "" {
+		return
+	}
+	token, ok, _ := readOpenClawGatewayToken(c.cfg.ClawHome)
 	if !ok || token == c.cfg.Token {
-		return false
+		return
 	}
 	fmt.Fprintf(os.Stderr, "[gateway] openclaw.json now holds a gateway token; trying it\n")
 	c.adoptOpenClawToken(token)
-	return true
 }
 
 // adoptOpenClawToken makes token, read from openclaw.json, the gateway token
