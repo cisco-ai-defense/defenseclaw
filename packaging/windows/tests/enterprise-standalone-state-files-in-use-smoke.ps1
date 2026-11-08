@@ -57,10 +57,30 @@ $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO
 Start-Sleep -Milliseconds $HoldMilliseconds
 $stream.Dispose()
 '@)
+        # Holds a file open the way an elevated program with backup rights
+        # can: ordinary read sharing (no delete sharing), whatever the access
+        # list says. It is how a CI runner holds a SYSTEM-only file.
+        $backupReaderScript = [IO.Path]::Combine($Root, 'reader-backup.ps1')
+        [IO.File]::WriteAllText($backupReaderScript, @'
+param([string]$Path, [string]$Ready, [int]$HoldMilliseconds, [string]$Share = 'Read')
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class DcsfBackupOpen {
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  public static IntPtr Open(string p) { IntPtr h = CreateFileW(p, 0x80000000u, 1u, IntPtr.Zero, 3u, 0x02000000u, IntPtr.Zero); if (h == new IntPtr(-1)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); return h; }
+  public static void Close(IntPtr h) { CloseHandle(h); }
+}
+"@
+$handle = [DcsfBackupOpen]::Open($Path)
+[IO.File]::WriteAllText($Ready, 'ready')
+Start-Sleep -Milliseconds $HoldMilliseconds
+[DcsfBackupOpen]::Close($handle)
+'@)
         try {
-            function Start-TestReader([string]$Path, [int]$HoldMilliseconds, [string]$Share = 'Read') {
+            function Start-TestReader([string]$Path, [int]$HoldMilliseconds, [string]$Share = 'Read', [string]$ScriptPath = $readerScript) {
                 $ready = [IO.Path]::Combine($Root, 'ready-' + [Guid]::NewGuid().ToString('N'))
-                $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Path "{1}" -Ready "{2}" -HoldMilliseconds {3} -Share "{4}"' -f $readerScript, $Path, $ready, $HoldMilliseconds, $Share
+                $arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -Path "{1}" -Ready "{2}" -HoldMilliseconds {3} -Share "{4}"' -f $ScriptPath, $Path, $ready, $HoldMilliseconds, $Share
                 $process = Microsoft.PowerShell.Management\Start-Process `
                     -FilePath $engine `
                     -ArgumentList $arguments `
@@ -392,7 +412,13 @@ public static class DcsfListedRestartManager {
             }
             if ($canOpenRestricted) {
                 # SYSTEM can open its own file, so the case cannot be set up.
-                [Console]::Error.WriteLine('SKIP restricted-file rows: this account can open a SYSTEM-only file')
+                # The skip is said on stdout, and a CI runner (an elevated
+                # administrator) must never skip: that would hide a regression.
+                $reason = 'SKIP restricted-file rows: this account (' + [Security.Principal.WindowsIdentity]::GetCurrent().Name + ') can open a file whose access list names only SYSTEM'
+                [Console]::Out.WriteLine($reason)
+                if ($env:GITHUB_ACTIONS -eq 'true' -or $env:CI -eq 'true') {
+                    $failures.Add($reason + ' on CI; run this smoke as an elevated administrator')
+                }
             }
             else {
                 $script:InstallTreeUseRecheckMilliseconds = 500
@@ -412,6 +438,15 @@ public static class DcsfListedRestartManager {
                         -GatewayServiceName DefenseClawGateway `
                         -GuardianServiceName DefenseClawHookGuardian
                 }
+                # The SYSTEM-only file itself held by a program (a backup-rights
+                # open, read sharing): refused, the file named, the hint said.
+                $holder = Start-TestReader $restricted 120000 'Read' $backupReaderScript
+                Test-Refused 'purge with the SYSTEM-only file held open' { Invoke-Preflight $layout } (
+                    '^uninstall_in_use: a program has hook-guardian\\opencode-service-ports\.json open \(it is probably running as SYSTEM.*Associated Handles.*\) in ' +
+                    [regex]::Escape([string]$layout.StateRoot) + ', which the purge deletes.*nothing was changed\. ')
+                Test-StateIntact 'refused purge with the SYSTEM-only file held' $layout
+                Stop-TestReader $holder
+                Test-Accepted 'purge after the SYSTEM-only file holder closed' { Invoke-Preflight $layout }
                 if (-not [IO.File]::Exists($restricted)) {
                     $failures.Add('the check removed the SYSTEM-only file')
                 }
@@ -445,7 +480,7 @@ public static class DcsfUnnamedRestartManager {
             try {
                 function script:Initialize-DefenseClawNativeSecurity { return [DcsfUnnamedRestartManager] }
                 Test-Refused 'purge with a holder that has no process id' { Invoke-Preflight $layout } (
-                    '^uninstall_in_use: a program has runtime\\audit\.db open in ' + [regex]::Escape([string]$layout.StateRoot) +
+                    '^uninstall_in_use: a program has runtime\\audit\.db open \(it is probably running as SYSTEM.*Associated Handles.*\) in ' + [regex]::Escape([string]$layout.StateRoot) +
                     ', which the purge deletes.*nothing was changed\. ')
                 $stopped = [Collections.Generic.HashSet[int]]::new()
                 [void]$stopped.Add(0)
@@ -458,8 +493,57 @@ public static class DcsfUnnamedRestartManager {
                         -Layout $layout `
                         -GatewayServiceName DefenseClawGateway `
                         -GuardianServiceName DefenseClawHookGuardian
-                } '^uninstall_in_use: a program holds a file in '
+                } '^uninstall_in_use: a program \(it is probably running as SYSTEM.*Associated Handles.*\) holds a file in '
                 Test-StateIntact 'refusals for a holder with no process id' $layout
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
+            }
+
+            # GAP-0878: how the answer of the DELETE open of a file Restart
+            # Manager could not open is read (the real classifier). Deletable
+            # (0) and gone (2, 3: the guardian renames its staging file between
+            # the walk and the probe) are no holder; a sharing violation (32)
+            # is one; every other answer throws, and a caller that fails closed
+            # then refuses.
+            $nativeType = Initialize-DefenseClawNativeSecurity
+            foreach ($answer in 0, 2, 3) {
+                try {
+                    if ($nativeType::DeleteProbeFindsHolder($answer, 'x') -ne $false) {
+                        $failures.Add("a DELETE answer of $answer was taken for a holder")
+                    }
+                }
+                catch {
+                    $failures.Add("a DELETE answer of $answer threw instead of meaning no holder: $($_.Exception.Message)")
+                }
+            }
+            if ($nativeType::DeleteProbeFindsHolder(32, 'x') -ne $true) {
+                $failures.Add('a sharing violation was not taken for a holder')
+            }
+            foreach ($answer in 1, 5, 19, 87) {
+                try {
+                    [void]$nativeType::DeleteProbeFindsHolder($answer, 'C:\scratch\sample.json')
+                    $failures.Add("a DELETE answer of $answer did not throw")
+                }
+                catch {
+                    if ($_.Exception.Message -notmatch 'cannot read, and this account cannot delete, C:\\scratch\\sample\.json') {
+                        $failures.Add("a DELETE answer of ${answer} threw an unexpected message: $($_.Exception.Message)")
+                    }
+                }
+            }
+            # The throw reaches a fail-closed caller as a refusal, with the
+            # state untouched.
+            if (-not ('DcsfCannotDeleteRestartManager' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition 'public static class DcsfCannotDeleteRestartManager { public static object[] GetFileHolders(string[] paths) { throw new System.ComponentModel.Win32Exception(5, "Restart Manager cannot read, and this account cannot delete, " + paths[0]); } }'
+            }
+            $layout = New-TestState 'cannot-delete'
+            $savedNative = ${function:Initialize-DefenseClawNativeSecurity}
+            try {
+                function script:Initialize-DefenseClawNativeSecurity { return [DcsfCannotDeleteRestartManager] }
+                Test-Refused 'purge with a file that can be neither queried nor deleted' { Invoke-Preflight $layout } (
+                    '^uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw data files \(.*cannot read, and this account cannot delete, .*\); ' +
+                    'nothing was changed; run the uninstall again$')
+                Test-StateIntact 'refusal for a file that can be neither queried nor deleted' $layout
             }
             finally {
                 Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative

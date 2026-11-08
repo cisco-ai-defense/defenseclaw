@@ -4739,7 +4739,6 @@ namespace $nativeNamespace
             const uint FILE_READ_ATTRIBUTES = 0x00000080;
             const uint DELETE = 0x00010000;
             const int ERROR_ACCESS_DENIED = 5;
-            const int ERROR_SHARING_VIOLATION = 32;
             System.Collections.Generic.List<string> queryable =
                 new System.Collections.Generic.List<string>(paths.Length);
             bool unnamedHolder = false;
@@ -4750,17 +4749,8 @@ namespace $nativeNamespace
                     queryable.Add(path);
                     continue;
                 }
-                int answer = GetDirectoryOpenError(path, DELETE);
-                if (answer == 0)
-                    continue;
-                if (answer == ERROR_SHARING_VIOLATION)
-                {
+                if (DeleteProbeFindsHolder(GetDirectoryOpenError(path, DELETE), path))
                     unnamedHolder = true;
-                    continue;
-                }
-                throw new Win32Exception(
-                    answer,
-                    "Restart Manager cannot read, and this account cannot delete, " + path);
             }
             FileHolder[] found = queryable.Count == 0
                 ? new FileHolder[0]
@@ -4771,6 +4761,34 @@ namespace $nativeNamespace
             Array.Copy(found, all, found.Length);
             all[found.Length] = FileHolder.NewUnnamed();
             return all;
+        }
+
+        // GAP-0878: what the answer of the DELETE open of a set-aside file
+        // means. 0: deletable, no holder in the purge's way. 2 or 3: the file
+        // went away between the walk and the probe (the guardian renames its
+        // staging file), and a file that is gone cannot be held. 32: a program
+        // holds it without sharing delete. Anything else is a file this
+        // account can neither query nor delete, which throws so that a caller
+        // that fails closed refuses.
+        //
+        // A holder with no process id cannot be matched to DefenseClaw's own
+        // services or to this lifecycle. No DefenseClaw service keeps a
+        // SYSTEM-only file open without sharing delete (the 56-file survey of
+        // GAP-0878); a future SYSTEM-only file that a service holds that way
+        // would refuse the uninstall until the service stops, so such a file
+        // must be opened with delete sharing.
+        public static bool DeleteProbeFindsHolder(int answer, string path)
+        {
+            const int ERROR_FILE_NOT_FOUND = 2;
+            const int ERROR_PATH_NOT_FOUND = 3;
+            const int ERROR_SHARING_VIOLATION = 32;
+            if (answer == 0 || answer == ERROR_FILE_NOT_FOUND || answer == ERROR_PATH_NOT_FOUND)
+                return false;
+            if (answer == ERROR_SHARING_VIOLATION)
+                return true;
+            throw new Win32Exception(
+                answer,
+                "Restart Manager cannot read, and this account cannot delete, " + path);
         }
 
         private static FileHolder[] QueryRestartManager(string[] paths)
@@ -9918,6 +9936,10 @@ function Format-DefenseClawProcessInUse {
 # holder has open by asking about at most the second number one at a time.
 $script:StateFileInUseCheckLimit = 16384
 $script:StateFileInUseNameLimit = 256
+# GAP-0878: said about a holder this account cannot name (it has no process
+# id): a SYSTEM process holds a SYSTEM-only file, and no tool of this account
+# lists its handles by process.
+$script:UnnamedFileHolderHint = 'it is probably running as SYSTEM, which this account cannot query; to find it, open Resource Monitor (resmon.exe), CPU tab, Associated Handles, and search for the file name'
 
 function Test-DefenseClawUnnamedFileHolder {
     # GAP-0878: a holder of a file this account cannot query has no process
@@ -10131,11 +10153,12 @@ function Get-DefenseClawStateFileHolderText {
                 -Id ([int]$holder.Id) `
                 -UserName ([string]$holder.UserName) `
                 -Parent ([string]$holder.Parent)
+            $hint = if ([int]$holder.Id -le 0) { ' (' + $script:UnnamedFileHolderHint + ')' } else { '' }
             if ([string]::IsNullOrEmpty([string]$holder.File)) {
-                $text + ' has a file open'
+                $text + ' has a file open' + $hint
             }
             else {
-                $text + ' has ' + [string]$holder.File + ' open'
+                $text + ' has ' + [string]$holder.File + ' open' + $hint
             }
         })
     return ($named -join '; ')
@@ -25339,7 +25362,8 @@ function Assert-DefenseClawHookNotHeld {
         Microsoft.PowerShell.Utility\Start-Sleep -Seconds 1
     }
     $named = @($holders | Microsoft.PowerShell.Core\ForEach-Object {
-            if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
+            if ([int]$_.Id -le 0) { [string]$_.Name }
+            elseif ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
             else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
         })
     throw ("hook_in_use: {0} has {1} open, so Setup could not replace it; this run stopped and replaced nothing. Next step: close that program (for example an antivirus scan or an editor), then {2} (an MDM retries exit 1618 on its own)" -f ($named -join ', '), $Layout.HookPath, (Format-DefenseClawRerunStep -SameSetupCommand))
@@ -41322,7 +41346,9 @@ function Get-DefenseClawInstallRootHolders {
             })
         foreach ($holder in $found) {
             if (Test-DefenseClawUnnamedFileHolder -Holder $holder) {
-                $named['unnamed'] = Format-DefenseClawProcessInUse -Name ([string]$holder.AppName) -Id 0
+                $named['unnamed'] = Format-DefenseClawProcessInUse `
+                    -Name ([string]$holder.AppName + ' (' + $script:UnnamedFileHolderHint + ')') `
+                    -Id 0
                 continue
             }
             $id = [int]$holder.ProcessId

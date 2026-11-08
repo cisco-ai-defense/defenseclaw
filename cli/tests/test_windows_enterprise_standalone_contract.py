@@ -752,8 +752,20 @@ def test_restart_manager_is_never_asked_about_a_file_the_account_cannot_open() -
     query = native.index("QueryRestartManager(queryable.ToArray())", delete)
     assert gate < first < delete < query
     assert "RmRegisterResources" not in native[gate:query]
-    # A file that can be neither queried nor deleted still fails closed.
-    assert "this account cannot delete" in native[delete:query]
+    # The probe's answer is classified in one place: gone (2, 3) and deletable
+    # (0) are no holder, a sharing violation (32) is one, anything else throws
+    # and so fails closed (behaviour in the smoke's classification rows).
+    classify = native.index("public static bool DeleteProbeFindsHolder(int answer, string path)")
+    classified = native[classify : native.index("private static FileHolder[] QueryRestartManager", classify)]
+    assert "answer == ERROR_FILE_NOT_FOUND" in classified and "answer == ERROR_PATH_NOT_FOUND" in classified
+    assert "throw new Win32Exception(" in classified and "this account cannot delete" in classified
+    assert "DeleteProbeFindsHolder(GetDirectoryOpenError(path, DELETE), path)" in native[delete - 40 : query]
+    # An unnamed holder is told how to be found, and the hook probe never
+    # prints it as process id 0.
+    assert "Associated Handles" in module and "$script:UnnamedFileHolderHint" in _function_body(
+        module, "Get-DefenseClawStateFileHolderText"
+    )
+    assert "[int]$_.Id -le 0" in _function_body(module, "Assert-DefenseClawHookNotHeld")
     for name in (
         "Get-DefenseClawStateFileHolders",
         "Get-DefenseClawStateFileHolderText",
