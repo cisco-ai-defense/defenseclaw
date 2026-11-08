@@ -5873,11 +5873,16 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     connectors = [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
                     severity = _watch_root_coverage_severity(cfg, connectors)
                     label = ", ".join(connectors) if connectors else "configured connectors"
+                    from defenseclaw.commands.cmd_status import _watch_root_fix_hint
+
+                    hint = _watch_root_fix_hint(details)
                     _emit(
                         severity,
                         f"  └─ {sub}",
                         f"admission scanning is off for {label}; "
-                        f"{unavailable} root(s) unavailable; the gateway log names each root",
+                        f"{unavailable} root(s) unavailable; "
+                        + (f"{hint}; " if hint else "")
+                        + "the gateway log names each root",
                         r=r,
                     )
                     continue
@@ -5898,6 +5903,16 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     detail = state
                     if sub == "guardrail" and isinstance(details, dict):
                         detail += f" ({_guardrail_health_mode(details)})"
+                    if sub == "watcher" and isinstance(details, dict):
+                        from defenseclaw.commands.cmd_status import _watch_root_rescan_hint
+
+                        rescan = _watch_root_rescan_hint(details)
+                        if rescan:
+                            # Admission scanning is on; the root is watched closely
+                            # while pam_group could add an account to the folder
+                            # group (GAP-0905).
+                            _emit("warn", f"  └─ {sub}", f"{state}, {rescan}", r=r)
+                            continue
                     unverified = details.get("project_skill_roots_unverified") if isinstance(details, dict) else None
                     if sub == "watcher" and isinstance(unverified, int) and unverified > 0:
                         # A managed Windows gateway could not verify a project

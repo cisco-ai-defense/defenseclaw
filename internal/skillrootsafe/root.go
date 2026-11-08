@@ -20,9 +20,31 @@ import (
 // resolution may use the existing plain-directory proof, needed by a Windows
 // service with access only to an enrolled user's skills folder.
 func Resolve(path string, eval func(string) (string, error)) (string, error) {
+	resolved, _, err := resolve(path, eval)
+	return resolved, err
+}
+
+// ResolveWithWarnings is Resolve plus the folders of a linked route that the
+// root was admitted through on the strength of a private group alone: group
+// writable folders whose group is the private group of their owner, on a host
+// where pam_group is loaded and so can add an account to that group at login
+// (GAP-0905). The caller admits the root and watches it closely (every change
+// under it is scanned again), and tells the user to remove the group write
+// bit. Empty for a plain root and for a route with no group-writable folder.
+func ResolveWithWarnings(path string, eval func(string) (string, error)) (string, []string, error) {
+	resolved, folders, err := resolve(path, eval)
+	if err != nil {
+		return "", nil, err
+	}
+	return resolved, groupWritableWarnings(folders), nil
+}
+
+// resolve is Resolve plus the folders a linked route passes only because of a
+// private group, before pam_group is asked.
+func resolve(path string, eval func(string) (string, error)) (string, []string, error) {
 	absolute, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if eval == nil {
 		eval = filepath.EvalSymlinks
@@ -31,12 +53,12 @@ func Resolve(path string, eval func(string) (string, error)) (string, error) {
 	resolved, err := eval(absolute)
 	if err != nil {
 		if errors.Is(err, fs.ErrPermission) && UnlinkedAncestors(canonical) {
-			return canonical, nil
+			return canonical, nil, nil
 		}
-		return "", err
+		return "", nil, err
 	}
 	if samePath(canonical, resolved) {
-		return resolved, nil
+		return resolved, nil, nil
 	}
 	return acceptLinkedRoot(canonical, resolved)
 }
@@ -88,6 +110,19 @@ func canonicalSystemPath(path string) string {
 		return filepath.Join(resolved, strings.TrimPrefix(path, alias+string(filepath.Separator)))
 	}
 	return path
+}
+
+// WritableAncestorError names the folder of a linked skill root that an
+// account other than the owner can write, so the root is not trusted: a link
+// target could be replaced through it.
+type WritableAncestorError struct {
+	Ancestor string
+	Mode     os.FileMode
+}
+
+func (e *WritableAncestorError) Error() string {
+	return fmt.Sprintf("%s is writable by another account (mode %04o); remove its group and other write bits (chmod go-w) to restore admission scanning",
+		e.Ancestor, e.Mode.Perm())
 }
 
 func unsafeRoot(path string) error { return fmt.Errorf("linked or unavailable skill root: %s", path) }
