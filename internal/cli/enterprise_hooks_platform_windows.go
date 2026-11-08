@@ -54,6 +54,11 @@ var enterpriseHookCodexRequirementsLayoutResolver = resolveWindowsCodexRequireme
 var enterpriseHookCodexRuntimeRegistryReader = connector.ResolveWindowsCodexManagedRuntimeRegistry
 var enterpriseHookCodexRequirementsRemover = connector.RemoveWindowsCodexMachineRequirements
 var enterpriseHookCodexRequirementsReconciler = connector.ReconcileWindowsCodexMachineRequirements
+
+// enterpriseHookCodexFolderEnsurer recreates a missing Codex machine-policy
+// folder, and the vendor folder above it, before the reconcile validates it
+// (GAP-0856). Standalone only, and only for a configured Codex connector.
+var enterpriseHookCodexFolderEnsurer = enterprisehooks.EnsureWindowsStandaloneCodexMachineFolder
 var enterpriseHookCodexTargetsPublisher = connector.PublishWindowsCodexManagedRuntimeTargets
 var enterpriseHookClaudePolicyEnsurer = enterprisehooks.EnsureWindowsStandaloneClaudeManagedPolicy
 var enterpriseHookClaudePolicyRestorer = enterprisehooks.RestoreWindowsClaudeManagedPolicyDrift
@@ -392,6 +397,18 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	)
 	var deferredCodexErr error
 	if cfg.StandaloneEnterprise() && configured["codex"] && (err != nil || !currentCodex.Active) {
+		// The reconcile validates the machine-policy folder and creates none of
+		// it, so a folder or vendor parent deleted after Setup made every pass
+		// fail the same way and nothing recreated it. A link on the path is
+		// named once and refused, as Install, ensure and repair refuse it.
+		ensured, folderErr := enterpriseHookCodexFolderEnsurer()
+		if folderErr != nil {
+			return fmt.Errorf("ensure configured Codex machine requirements: %w", folderErr)
+		}
+		if len(ensured.Created) != 0 {
+			fmt.Fprintf(os.Stderr, "[hook-guardian] recreated the missing Codex machine-policy folder %s (created: %s)\n",
+				ensured.Folder, strings.Join(ensured.Created, ", "))
+		}
 		codexOpts.CodexTargetEnabled = true
 		report, reconcileErr := enterpriseHookCodexRequirementsReconciler(codexOpts)
 		if reconcileErr != nil {
