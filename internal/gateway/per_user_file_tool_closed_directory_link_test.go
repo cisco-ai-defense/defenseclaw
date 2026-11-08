@@ -131,3 +131,80 @@ func TestPerUserWriteThroughALinkIntoAClosedSSHDirectoryStaysBlocked(t *testing.
 		})
 	}
 }
+
+// A shell command can open a closed directory before it writes, so a link
+// into one is not judged by its link text: the append through a hidden inner
+// link to the key file stays blocked in every profile, while the same link
+// written by a file tool (which cannot open the directory) is judged by text.
+func TestPerUserShellWriteThroughALinkIntoAClosedDirectoryStaysBlockedWhenTheCommandOpensIt(t *testing.T) {
+	for _, command := range []string{
+		"chmod u+x closed && printf marker >> ./alias",
+		"chmod 700 closed; printf marker >> alias",
+	} {
+		for _, profile := range []string{"default", "permissive", "strict"} {
+			t.Run(profile+"/"+command, func(t *testing.T) {
+				perUserNoClientEvidence(t)
+				row := sudoersHookRow{"claudecode", "closed directory reopened by the command", func(project string) map[string]any {
+					ssh := filepath.Join(filepath.Dir(project), ".ssh")
+					if err := os.Mkdir(ssh, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(ssh, "authorized_keys"), []byte("# keys\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					closed := filepath.Join(project, "closed")
+					if err := os.Mkdir(closed, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(filepath.Join(ssh, "authorized_keys"), filepath.Join(closed, "inner")); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(filepath.Join(closed, "inner"), filepath.Join(project, "alias")); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Chmod(closed, 0); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
+					return sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": command}))(project)
+				}}
+				if blocked, _, body := postSudoersHook(t, row, profile, false); !blocked {
+					t.Fatalf("append through a link the command reopens allowed in %s: %.600s", profile, body)
+				}
+			})
+		}
+	}
+}
+
+// The benign twin: a file-tool Write through the same two links, with an
+// ordinary file behind the inner link, is no key write and stays allowed in
+// the balanced profiles (the tool cannot open the directory, so the link text
+// decides). A shell command through an unresolvable link keeps the verdict it
+// has on the base: the command may open the directory first.
+func TestPerUserWriteThroughAChainOfLinksIntoAnOrdinaryClosedDirectoryIsAllowed(t *testing.T) {
+	for _, profile := range []string{"default", "permissive"} {
+		t.Run(profile, func(t *testing.T) {
+			perUserNoClientEvidence(t)
+			row := sudoersHookRow{"claudecode", "closed directory chain, ordinary file", func(project string) map[string]any {
+				closed := filepath.Join(project, "closed")
+				if err := os.Mkdir(closed, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(project, "notes.txt"), filepath.Join(closed, "inner")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join(closed, "inner"), filepath.Join(project, "alias")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(closed, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
+				return sudoersClaudeCall("Write", sudoersFixed(map[string]any{"file_path": "./alias", "content": "hello\n"}))(project)
+			}}
+			if blocked, _, body := postSudoersHook(t, row, profile, false); blocked {
+				t.Fatalf("ordinary file behind a chain of links blocked in %s: %.600s", profile, body)
+			}
+		})
+	}
+}
