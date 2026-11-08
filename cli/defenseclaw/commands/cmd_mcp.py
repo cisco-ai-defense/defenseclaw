@@ -224,7 +224,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     undiscoverable: list[str] = []
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
     failed_rows: list[tuple[str, str, str, MCPServerEntry | None]] = []
-    held_after_failed_scan: list[tuple[str, str]] = []
+    held_after_failed_scan: list[tuple[str, str, str, MCPServerEntry | None]] = []
     not_loaded: list[tuple[str, MCPServerEntry]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
@@ -274,7 +274,10 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             name for name in by_name
             if _blocked_after_failed_scan(actions_map.get(name))
         ]
-        held_after_failed_scan.extend((connector, name) for name in held)
+        held_after_failed_scan.extend(
+            (connector, name, (failed_map.get(name) or {}).get("error", ""), by_name.get(name))
+            for name in held
+        )
         failed_rows.extend(
             (connector, name, row.get("error", ""), by_name.get(name))
             for name, row in failed_map.items() if name not in held
@@ -309,29 +312,21 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     if held_after_failed_scan:
         # GAP-1855: the gateway blocked these when their admission scan
         # failed. A new "mcp scan" reports a verdict but does not release
-        # that block, so the hint names what does.
+        # that block, and neither does "mcp unblock" where the tier fails
+        # closed on an unscannable server: the hint names the cause and the
+        # allow that does release the call (GAP-0921).
         ux.warn(
             f"{len(held_after_failed_scan)} MCP server(s) are blocked because their admission scan failed: "
-            + ", ".join(f"{name} ({connector})" for connector, name in held_after_failed_scan)
+            + ", ".join(f"{name} ({connector})" for connector, name, _, _ in held_after_failed_scan)
         )
         interval = getattr(getattr(app.cfg, "watch", None), "rescan_interval_min", 60)
-        # A managed device refuses ``mcp unblock``: its user asks the
+        # A managed device refuses ``mcp allow``: its user asks the
         # administrator to allow the server in the managed MCP policy.
         managed_device = asset_lists.is_managed_standalone(app.cfg)
-        for connector, name in held_after_failed_scan[:_FAILED_SCAN_HINT_LIMIT]:
-            if managed_device:
-                ux.subhead(
-                    f"{name} ({connector}): a new scan does not release this block. "
-                    "Ask your administrator to allow it in the managed MCP policy "
-                    "(asset_policy.mcp.allowed); the gateway also admits it again at its next rescan "
-                    f"(watch.rescan_interval_min, every {interval} min) once the scan succeeds"
-                )
-                continue
+        for connector, name, error, entry in held_after_failed_scan[:_FAILED_SCAN_HINT_LIMIT]:
             ux.subhead(
-                f"{name} ({connector}): a new scan does not release this block. "
-                f"Release it now: defenseclaw mcp unblock {shlex.quote(name)} --connector {connector}; "
-                f"otherwise the gateway admits it again at its next rescan "
-                f"(watch.rescan_interval_min, every {interval} min) once the scan succeeds"
+                f"{name} ({connector}): "
+                + _held_after_failed_scan_next_step(name, connector, error, entry, managed_device, interval)
             )
     if not_loaded:
         # GAP-2514: the agent skips these entries, so they are not live.
@@ -888,6 +883,38 @@ def _mcp_scan_command(name: str, connector: str = "", url: str | None = None) ->
     if _mcp_url_needs_allow_private(url):
         cmd += " --allow-private"
     return cmd
+
+
+def _held_after_failed_scan_next_step(
+    name: str, connector: str, error: str, entry: MCPServerEntry | None, managed: bool, interval: int,
+) -> str:
+    """Say why a server is held after a failed admission scan and what allows it (GAP-0921).
+
+    The cause is the refusal its definition shows, else the stored scan error.
+    The strict tier and a managed policy fail closed on a server they cannot
+    scan, so neither a new scan nor ``mcp unblock`` releases its calls; the
+    allow does: ``mcp allow`` for the user, the managed MCP policy for a
+    managed device.
+    """
+    from defenseclaw.scanner.mcp import mcp_scan_refusal, mcp_scannable_fix
+
+    refusal = mcp_scan_refusal(entry, managed) if entry is not None else None
+    detail = (error or "").strip().splitlines()[0][:120] if (error or "").strip() else ""
+    cause = refusal or detail or "the scanner could not scan it"
+    text = (
+        f"its admission scan failed ({cause}), and the strict tier and managed policies fail closed on that, "
+        "so a new scan does not release the call. "
+    )
+    if managed:
+        text += "Ask your administrator to allow it in the managed MCP policy (asset_policy.mcp.allowed)"
+    else:
+        text += f"Allow it: defenseclaw mcp allow {shlex.quote(name)} --connector {connector}"
+        if refusal and entry is not None:
+            text += f"; or give it a definition a scan can start: {mcp_scannable_fix(name, entry, connector)}"
+    return (
+        text + "; the gateway also admits it again at its next rescan "
+        f"(watch.rescan_interval_min, every {interval} min) once the scan succeeds"
+    )
 
 
 def _failed_scan_next_step(
