@@ -991,12 +991,25 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 // it.
 var unixAgentVersionAttemptTimeout = unixAgentVersionTimeout
 
+// unixAgentVersionRetryDelay is the wait before the first retry of a run that
+// ended without a version and without timing out; the second retry waits
+// twice as long. Tests shorten it.
+var unixAgentVersionRetryDelay = 250 * time.Millisecond
+
+// unixAgentVersionMaxAttempts is the most runs of one candidate per probe.
+const unixAgentVersionMaxAttempts = 3
+
 // execUnixAgentVersion runs candidate --version with a minimal environment
 // and a timeout. The caller must already run as the target user. A run that
 // times out is retried once at once: a cold start right after install, when
 // the enumerator probes every connector for every user together, can take
 // most of the timeout (agy took 4.85 s cold and 0.15 s warm), and the next
-// cycle is five minutes away.
+// cycle is five minutes away. A run that failed (exited with an error status,
+// was killed, or printed nothing at all, as an agent can while the host is
+// busy applying a policy change) is retried after a short wait, at most
+// unixAgentVersionMaxAttempts runs in all and two timeouts, so a readable
+// agent is not reported unverified for a moment's failure. A CLI that answers
+// with something that is not a version is not run again.
 func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string) string {
 	info, err := os.Stat(candidate)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
@@ -1005,18 +1018,56 @@ func execUnixAgentVersion(ctx context.Context, candidate, home, stateEnv string)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		version, timedOut := runUnixAgentVersion(ctx, candidate, home, stateEnv)
-		if version != "" || !timedOut || ctx.Err() != nil {
+	timeouts := 0
+	delay := unixAgentVersionRetryDelay
+	for attempt := 0; attempt < unixAgentVersionMaxAttempts; attempt++ {
+		version, run := runUnixAgentVersion(ctx, candidate, home, stateEnv)
+		if version != "" || ctx.Err() != nil {
 			return version
 		}
+		switch run {
+		case unixVersionRunTimedOut:
+			if timeouts++; timeouts >= 2 {
+				return ""
+			}
+			continue
+		case unixVersionRunFailed:
+		default:
+			// The CLI answered with something that is not a version: it
+			// will not answer differently a moment later.
+			return ""
+		}
+		if attempt+1 == unixAgentVersionMaxAttempts {
+			break
+		}
+		wait := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			wait.Stop()
+			return ""
+		case <-wait.C:
+		}
+		delay *= 2
 	}
 	return ""
 }
 
-// runUnixAgentVersion is one `--version` run; timedOut reports that it hit
-// its own timeout.
-func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv string) (version string, timedOut bool) {
+// unixVersionRun is how one `--version` run ended when it gave no version.
+type unixVersionRun int
+
+const (
+	// unixVersionRunAnswered: the CLI ran and answered, with a version or
+	// with something else.
+	unixVersionRunAnswered unixVersionRun = iota
+	// unixVersionRunTimedOut: the run hit its own timeout.
+	unixVersionRunTimedOut
+	// unixVersionRunFailed: the run could not start, exited with an error
+	// status or was killed, or printed nothing.
+	unixVersionRunFailed
+)
+
+// runUnixAgentVersion is one `--version` run and how it ended.
+func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv string) (version string, run unixVersionRun) {
 	ctx, cancel := context.WithTimeout(parent, unixAgentVersionAttemptTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, candidate, "--version")
@@ -1032,7 +1083,7 @@ func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv strin
 	if stateEnv != "" {
 		scratch, err := os.MkdirTemp("", "dc-agent-probe-")
 		if err != nil {
-			return "", false
+			return "", unixVersionRunFailed
 		}
 		defer os.RemoveAll(scratch)
 		cmd.Env = append(cmd.Env, stateEnv+"="+scratch, "TMPDIR="+scratch)
@@ -1050,11 +1101,22 @@ func runUnixAgentVersion(parent context.Context, candidate, home, stateEnv strin
 	// The apply worker can end during an interrupted transaction. Keep the
 	// version command tied to that worker so it cannot survive as an
 	// unaccounted-for launch after its parent process disappears.
-	_ = processutil.RunTree(cmd)
+	runErr := processutil.RunTree(cmd)
 	first, _, _ := strings.Cut(out.buf.String(), "\n")
 	if version := ExtractUnixAgentVersion(first); version != "" {
-		return version, false
+		return version, unixVersionRunAnswered
 	}
 	first, _, _ = strings.Cut(errOut.buf.String(), "\n")
-	return ExtractUnixAgentVersion(first), errors.Is(ctx.Err(), context.DeadlineExceeded)
+	if version := ExtractUnixAgentVersion(first); version != "" {
+		return version, unixVersionRunAnswered
+	}
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
+		return "", unixVersionRunTimedOut
+	case runErr != nil && !errors.Is(runErr, errUnixAgentVersionOutput):
+		return "", unixVersionRunFailed
+	case out.buf.Len() == 0 && errOut.buf.Len() == 0:
+		return "", unixVersionRunFailed
+	}
+	return "", unixVersionRunAnswered
 }
