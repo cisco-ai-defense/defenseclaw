@@ -825,7 +825,7 @@ finally {
     # in its own process), and a harness that cleans the scratch folder after
     # it would fail on them. The owner of a file may always rewrite its access
     # list, so give Administrators the tree back first; no privilege is needed.
-    & "$env:SystemRoot\System32\icacls.exe" $root /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q 2>&1 | Out-Null
+    & "$env:SystemRoot\System32\icacls.exe" $root /grant '*S-1-5-32-544:F' /T /C /Q 2>&1 | Out-Null
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root) {
         $leftBehind = $true
