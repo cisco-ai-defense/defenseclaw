@@ -6372,11 +6372,16 @@ def test_vendor_folder_link_refusal_runs_first_for_standalone_install_like_actio
     ):
         assert "Assert-DefenseClawVendorMachineFoldersNotLinked" not in _psm1_function(module, name), name
     refusal = _psm1_function(module, "Assert-DefenseClawVendorMachineFoldersNotLinked")
-    assert refusal.count("Get-DefenseClawVendorMachineFolderLink -Directory $folder.Path") == 1
-    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in refusal
+    assert refusal.count("Get-DefenseClawVendorMachineFolderLinks -Layout $Layout") == 1
+    listing = _psm1_function(module, "Get-DefenseClawVendorMachineFolderLinks")
+    assert listing.count("Get-DefenseClawVendorMachineFolderLink -Directory $folder.Path") == 1
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in listing
     for folder in ("'Codex'", "'Cursor'", "'Claude Code'"):
-        assert folder in refusal
-    assert 'cmd /c rmdir `"$link`"' in refusal
+        assert folder in listing
+    assert 'cmd /c rmdir `"$($_.Link)`"' in _psm1_function(module, "Format-DefenseClawVendorMachineFolderLinkFix")
+    walk = _psm1_function(module, "Get-DefenseClawVendorMachineFolderLink")
+    assert "[IO.File]::GetAttributes($current)" in walk  # no-follow: a dangling junction is found
+    assert "Test-Path" not in walk
 
     # The snapshot names the same links before it takes anything back.
     go = read(ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go")
@@ -6391,7 +6396,10 @@ def test_rollback_skips_codex_files_behind_a_link_and_reads_the_user_sid_label()
     """GAP-0900: a rollback never writes through a link that appeared on the Codex
     folder after the transaction opened (it names the link and goes on, so the
     services come back), and the acceptance of a completed guardian reconcile with
-    failed accounts reads the "user (SID)" label Windows has used since 1.0.5."""
+    failed accounts reads the "user (SID)" label Windows has used since 1.0.5. The
+    skips are the rollback's alone (-RollbackRestore, passed by the restore check
+    only): every forward path keeps failing closed on a link. Secure Client keeps
+    the lines it had."""
     module = read(MODULE)
     restore = _psm1_function(module, "Restore-DefenseClawTransaction")
     shared = restore[restore.index("        if ($isSharedCodexFile) {") :]
@@ -6400,18 +6408,43 @@ def test_rollback_skips_codex_files_behind_a_link_and_reads_the_user_sid_label()
     assert link < skip < shared.index("Assert-DefenseClawCodexMachinePolicyDirectory")
     assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded" in shared[link:skip]
     assert 'cmd /c rmdir `"$restoreCodexLink`"' in shared[link:skip]
-
-    # The rest of the rollback reads nothing through the link either: the ACL stamp
-    # of the restored files and the deployment assertion of a servicing transaction.
     assert "-SkipCodexMachineState:$restoreCodexLinked" in restore
+
+    # The assertion: a dedicated switch, passed by one caller (the restore check),
+    # not -ServicingTransaction, which the install commit and the static validation
+    # of a forward run pass too.
     deployment = _psm1_function(module, "Assert-DefenseClawEnterpriseDeployment")
-    assert "if ($ServicingTransaction -and $codexTargetEnabled) {" in deployment
+    assert "[switch]$RollbackRestore" in deployment
+    assert "if ($RollbackRestore -and $codexTargetEnabled) {" in deployment
+    assert "$ServicingTransaction -and $codexTargetEnabled" not in deployment
     assert deployment.count("Get-DefenseClawVendorMachineFolderLink") == 1
-    assert "if ($codexFolderLink -eq '') {\n        [void](Invoke-DefenseClawCodexRequirementsCommand" in deployment
+    assert module.count("-RollbackRestore `\n") == 1
+    ready = _psm1_function(module, "Assert-DefenseClawRestoredTransactionReadyForActivation")
+    assert "        -ServicingTransaction `\n        -RollbackRestore `\n" in ready
+    # The lines Secure Client runs are the ones it always ran, byte for byte; the
+    # new code only brackets them.
+    for kept in (
+        "    if ($codexTargetEnabled) {\n        Assert-DefenseClawCodexMachinePolicyDirectory `\n            -Path $Layout.CodexVendorDirectory\n"
+        "        Assert-DefenseClawCodexMachinePolicyDirectory `\n            -Path $Layout.CodexMachinePolicyDirectory\n"
+        "        Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout\n"
+        "        Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout\n"
+        "        [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)\n    }\n    else {\n",
+        "    [void](Invoke-DefenseClawCodexRequirementsCommand `\n        -Layout $Layout `\n"
+        "        -GatewayServiceName $GatewayServiceName `\n"
+        "        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))\n",
+    ):
+        assert kept in deployment, kept
+    assert "if ($codexFolderLink -eq '') {\n    if ($codexTargetEnabled) {" in deployment
 
     attributable = _psm1_function(module, "Test-DefenseClawGuardianReportErrorsAttributable")
     assert "(?<connector>[^@\\s]+)@(?<account>.+?)(?: \\((?<sid>S-1-[0-9-]+)\\))?: " in attributable
-    assert "'^last guardian reconcile failed for (\\S+): '" not in attributable
+    standalone = attributable.index("if (Test-DefenseClawStandaloneProfile) {")
+    assert standalone < attributable.index("(?<account>.+?)") < attributable.index("'^last guardian reconcile failed for (\\S+): '")
+
+    # The error of a failed action names the link the rollback met.
+    lifecycle = _psm1_function(module, "Invoke-DefenseClawInstallLikeLifecycle")
+    assert "$operationError = Add-DefenseClawVendorMachineFolderLinkFix -ErrorRecord $operationError -Layout $Layout" in lifecycle
+    assert lifecycle.count("throw $operationError") == 2
 
 
 def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:

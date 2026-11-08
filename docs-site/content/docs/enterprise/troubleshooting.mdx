@@ -680,7 +680,7 @@ A failure that is not a link still fails the whole pass and is retried: the Code
 
 If the Codex folder exists but is not trusted (a standard user created it after the folder was deleted, or its owner or protection changed), the guardian does not take it over. It names the folder once and stays closed for Codex until an administrator runs Setup `/repair`, which takes the folder over.
 
-Setup `/repair`, `/ensure`, `/upgrade` and `/install` over an existing install refuse such a link before they stop anything. They exit 1603 with `transaction_pending` false and all four services running, and the error names each link and the `cmd /c rmdir "<link>"` that removes it. Run the same command again once the link is gone.
+Setup `/repair`, `/ensure`, `/upgrade` and `/install` (a fresh install too) refuse a link on the path of the Codex, Cursor or Claude Code machine-policy folder before they stop anything. They exit 1603 with `transaction_pending` false and all four services running, and the error names each link and the `cmd /c rmdir "<link>"` that removes it. Run the same command again once the link is gone.
 
 **Fix.** As an administrator run `cmd /c rmdir "<link>"` with the path the warning names. It removes the link and not what the link points to. The guardian recreates the folder within a minute. For an untrusted folder, run Setup `/repair`.
 
