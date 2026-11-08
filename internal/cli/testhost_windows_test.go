@@ -836,6 +836,11 @@ func isolateTestDeploymentReaders(dir string) {
 		return enterpriseHookGuardianState{}, false, nil
 	})
 	sandboxSeam("windowsEnterpriseUserCleanupsForStatus", &windowsEnterpriseUserCleanupsForStatus, func() ([]enterpriseHookUserCleanup, error) { return nil, nil })
+	// The off-roster markers live in the computer's own hook runtime folder,
+	// and the removed-connectors record in its guardian state folder.
+	sandboxSeam("enterpriseHookWindowsOffRosterPublisher", &enterpriseHookWindowsOffRosterPublisher, func(string, bool) error { return nil })
+	sandboxSeam("windowsConnectorOffRosterRead", &windowsConnectorOffRosterRead, func(string) (bool, error) { return false, nil })
+	sandboxSeam("windowsEnterpriseRemovedConnectorsForStatus", &windowsEnterpriseRemovedConnectorsForStatus, func() ([]managed.RemovedConnector, error) { return nil, nil })
 	sandboxSeam("windowsEnterpriseAgentSettingsNotices", &windowsEnterpriseAgentSettingsNotices, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseNativeOTLPNotices", &windowsEnterpriseNativeOTLPNotices, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseAmpMachineFolderProblems", &windowsEnterpriseAmpMachineFolderProblems, func() []string { return nil })
