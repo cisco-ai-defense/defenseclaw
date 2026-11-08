@@ -259,10 +259,17 @@ func TestGatewayReadinessFailureKeepsTheCompleteRepairForALongFolder(t *testing.
 	for len(long) < 3000 {
 		long += "/" + strings.Repeat("b", 200)
 	}
-	for _, folder := range []string{"/home/u/" + strings.Repeat("a", 180), long} {
+	// Components made of apostrophes: the shell-quoted copy of the folder in the
+	// repair command is about four times as long as the folder.
+	quoted := "/home/u"
+	for len(quoted) < 3300 {
+		quoted += "/" + strings.Repeat("\x27", 200)
+	}
+	for _, folder := range []string{"/home/u/" + strings.Repeat("a", 180), long, quoted} {
 		logPath := filepath.Join(t.TempDir(), "gateway.log")
+		command := "\x27" + strings.ReplaceAll(folder, "\x27", "\x27\\\x27\x27") + "\x27"
 		repair := "audit: database directory " + folder + " is group- or other-writable; as the account that owns it, " +
-			"run: chmod go-w \x27" + folder + "\x27, then run: defenseclaw-gateway restart"
+			"run: chmod go-w " + command + ", then run: defenseclaw-gateway restart"
 		if err := os.WriteFile(logPath, []byte("Error: failed to open audit store: "+repair+"\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -270,7 +277,7 @@ func TestGatewayReadinessFailureKeepsTheCompleteRepairForALongFolder(t *testing.
 		for _, prefix := range []string{"start daemon readiness", "restart daemon readiness"} {
 			msg := gatewayReadinessFailure(prefix, cause, logPath).Error()
 			if !strings.Contains(msg, "database directory "+folder+" is group- or other-writable") ||
-				!strings.Contains(msg, "chmod go-w \x27"+folder+"\x27") {
+				!strings.Contains(msg, "chmod go-w "+command) {
 				t.Errorf("%d-byte folder: %s lost the folder or the chmod repair", len(folder), prefix)
 			}
 			if !strings.HasSuffix(msg, "then run: defenseclaw-gateway restart") {

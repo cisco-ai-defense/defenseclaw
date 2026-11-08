@@ -56,10 +56,6 @@ func reportGatewayStillStarting(_ error, pid int, logPath string, cfg *config.Co
 // reads back.
 const gatewayLogExitReasonMaxBytes = 64 << 10
 
-// gatewayRepairReasonMaxBytes bounds a cause that ends with its repair step:
-// room for two paths of 4096 bytes and the words around them.
-const gatewayRepairReasonMaxBytes = 12 << 10
-
 // gatewayLogSize is where this start's gateway.log output begins (the log is
 // opened for append), so an older run's error is never reported.
 func gatewayLogSize(path string) int64 {
@@ -118,16 +114,12 @@ func gatewayLogExitReason(path string, offset int64) string {
 			reason = destination + " (" + reason + ")"
 		}
 	}
-	switch {
-	case gatewayRepairStepEnding.MatchString(reason):
-		// A cause that ends with its repair names the folder and the command
-		// that fixes it. Both carry a full path (up to PATH_MAX each), so the
-		// message stays whole; only a pathological one keeps its start and the
-		// end with the repair and the command that follows it.
-		if len(reason) > gatewayRepairReasonMaxBytes {
-			reason = strings.ToValidUTF8(reason[:200], "") + "..." + strings.ToValidUTF8(reason[len(reason)-197:], "")
-		}
-	case len(reason) > 400:
+	// A cause that ends with its repair names the folder and the command that
+	// fixes it. The folder appears twice and the second copy is shell quoted (an
+	// apostrophe becomes four bytes), so the length depends on the path. It is
+	// never cut: the log read above already bounds it, and a cut would drop the
+	// folder or the command the operator needs. Other causes keep 400 bytes.
+	if len(reason) > 400 && !gatewayRepairStepEnding.MatchString(reason) {
 		reason = strings.ToValidUTF8(reason[:400], "") + "..."
 	}
 	return reason
