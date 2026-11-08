@@ -12,8 +12,11 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -53,6 +56,11 @@ func TestHeldSkillFolderReadThroughALinkIsRefused(t *testing.T) {
 	link(filepath.Join(root, "held"), "lnk-held")
 	link(filepath.Join(proj, "lnk-held"), "lnk-chain")
 	link(root, "lnk-root")
+	if err := os.MkdirAll(filepath.Join(root, "held", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link(filepath.Join(root, "held", "sub"), "lnk-sub")
+	link(filepath.Join(root, "ordinary"), "lnk-ordinary-up")
 	link(filepath.Join(root, "ordinary"), "lnk-ordinary")
 	link(filepath.Join(root, "held-later"), "lnk-dangling")
 	if err := enforce.NewPolicyEngine(store).Disable("skill", "held", "quarantine failed"); err != nil {
@@ -82,6 +90,11 @@ func TestHeldSkillFolderReadThroughALinkIsRefused(t *testing.T) {
 		"shell after cd":  {"Bash", "command", "cd " + proj + " && head -n 3 lnk-chain/SKILL.md"},
 		"dangling link":   {"Read", "file_path", filepath.Join(proj, "lnk-dangling", "SKILL.md")},
 		"grep in the dir": {"Grep", "path", filepath.Join(proj, "lnk-held")},
+		// A parent segment after a link leaves the folder the link leads to.
+		"link then parent":          {"Read", "file_path", filepath.Join(proj, "lnk-sub") + "/../SKILL.md"},
+		"relative link then parent": {"Read", "file_path", "lnk-sub/../SKILL.md"},
+		"shell link then parent":    {"Bash", "command", "cat " + filepath.Join(proj, "lnk-sub") + "/../SKILL.md"},
+		"two parents from the sub":  {"Read", "file_path", filepath.Join(proj, "lnk-sub") + "/../../held/SKILL.md"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if !decide(tc.tool, tc.key, tc.value) {
@@ -94,6 +107,10 @@ func TestHeldSkillFolderReadThroughALinkIsRefused(t *testing.T) {
 		"direct other skill":    {"Read", "file_path", filepath.Join(root, "ordinary", "SKILL.md")},
 		"project file":          {"Read", "file_path", filepath.Join(proj, "notes.txt")},
 		"shell in the project":  {"Bash", "command", "ls -la " + proj},
+		// The same spelling through a link to a skill that is not held, and
+		// a parent segment that returns to the project.
+		"other skill then parent": {"Read", "file_path", filepath.Join(proj, "lnk-ordinary-up") + "/../ordinary/SKILL.md"},
+		"parent in the project":   {"Read", "file_path", filepath.Join(proj, "nested", "..", "notes.txt")},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if decide(tc.tool, tc.key, tc.value) {
@@ -118,5 +135,73 @@ func TestReportedSkillLinksAreTakenOnlyInASkillRoot(t *testing.T) {
 	}, []string{root})
 	if len(got) != 2 || got[0].Dir != inRoot || got[1].Dir != filepath.Join(root, "other") || got[1].Name != "other" || !got[1].Linked {
 		t.Fatalf("refs = %#v, want the folder in the root added once", got)
+	}
+}
+
+// A gateway that cannot enter the project (a service account against a private
+// home) judges the folders the hook reports. A held folder is refused whatever
+// number of ordinary links come before it in the call, and a call that reaches
+// more linked folders than the report can carry is refused as unproven.
+func TestReportedSkillLinksAreAllJudged(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the project folder cannot be made unreadable here")
+	}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".claude", "skills")
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var paths, targets []string
+	for i := 0; i < 70; i++ {
+		name := fmt.Sprintf("ordinary-%02d", i)
+		if i == 69 {
+			name = "held"
+		}
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(proj, fmt.Sprintf("link-%02d", i))
+		if err := os.Symlink(dir, link); err != nil {
+			t.Skipf("cannot create a link here: %v", err)
+		}
+		paths = append(paths, link+"/SKILL.md")
+		targets = append(targets, dir)
+	}
+	if err := enforce.NewPolicyEngine(store).Disable("skill", "held", "quarantine failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(proj, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(proj, 0o700) })
+	api := &APIServer{store: store, logger: logger, scannerCfg: &config.Config{AssetPolicy: config.DefaultAssetPolicy()}}
+	decide := func(links []string, paths []string) (bool, string) {
+		t.Helper()
+		claims, _ := assetfacts.Decode(assetfacts.Encode(assetfacts.Facts{SkillLinks: links}))
+		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
+		ctx = context.WithValue(ctx, claimedAssetFactsContextKey{}, claims)
+		decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", ToolName: "Bash", CWD: proj,
+			ToolInput: map[string]interface{}{"command": "cat " + strings.Join(paths, " ")},
+		})
+		return matched && decision.Action == "block", decision.Reason
+	}
+	// 20 ordinary links then the held one, all reported: refused for the held one.
+	if blocked, _ := decide(append(append([]string{}, targets[:20]...), targets[69]), append(append([]string{}, paths[:20]...), paths[69])); !blocked {
+		t.Fatal("a held folder after 20 ordinary linked folders was allowed")
+	}
+	// Only ordinary folders reported: allowed.
+	if blocked, reason := decide(targets[:20], paths[:20]); blocked {
+		t.Fatalf("ordinary linked folders were refused: %s", reason)
+	}
+	// 70 linked folders: the report is cut, the call is refused as unproven.
+	if blocked, _ := decide(targets, paths); !blocked {
+		t.Fatal("a call past the bound of reported linked folders was allowed")
 	}
 }
