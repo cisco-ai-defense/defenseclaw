@@ -32419,9 +32419,11 @@ function Get-DefenseClawGuardianRowMachineFolderLink {
 # (never the process environment). A smoke points it at scratch paths.
 $script:DefenseClawVendorFolderRoots = @($script:ProgramData, $script:ProgramFiles)
 
-# True for the length of a standalone Uninstall (set at the entry of
-# Invoke-DefenseClawEnterpriseLifecycle for every action). The adoption gate
-# explains a guardian row that failed on a vendor-folder link only then.
+# True for the length of a standalone Uninstall only: the entry of
+# Invoke-DefenseClawEnterpriseLifecycle sets it from the action and the profile,
+# so Repair, Reconcile, Ensure, Upgrade and Secure Client leave it false. The
+# adoption gate explains a guardian row that failed on a vendor-folder link
+# only while it is true.
 $script:DefenseClawVendorLinkExcuse = $false
 
 function Get-DefenseClawStandaloneManifestAdoption {
