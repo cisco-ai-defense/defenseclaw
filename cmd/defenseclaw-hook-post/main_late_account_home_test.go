@@ -113,13 +113,21 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 		}
 	}
 	// A saved value that is no usable home (missing folder, relative path, a
-	// regular file) holds no protected file. The scan then tells the account
-	// database home, and as the identities of the protected files of the
-	// saved home are unknown, any hard-linked regular file stays closed
-	// (exit 9). An ordinary late call that names no hard link keeps the
-	// outage-mode exit 12: balanced mode does not block ordinary work.
-	for _, saved := range []string{filepath.Join(root, "missing"), filepath.Join(root, "missing", "deeper"), "relative/home",
-		filepath.Join(project, "plain.txt")} {
+	// regular file) holds no protected file of its own. The scan then indexes
+	// the homes the call can mean (the account database home, the home of the
+	// process, a relative value read against the folder of the call), so a
+	// hard link to the keys stays closed (exit 9) and a hard link to an
+	// ordinary file keeps the outage-mode exit 12: balanced mode does not
+	// block ordinary work. The test account database home is not the decoy
+	// home, so the cells stand the decoy home in as the home of the process,
+	// except the relative value that names it from the folder of the call.
+	for _, saved := range []struct{ label, home, process string }{
+		{"missing", filepath.Join(root, "missing"), home},
+		{"deeper missing", filepath.Join(root, "missing", "deeper"), home},
+		{"relative missing", "relative/home", home},
+		{"regular file", filepath.Join(project, "plain.txt"), home},
+		{"relative to the call", "..", scratch},
+	} {
 		for _, path := range []string{"/api/v1/codex/hook", "/api/v1/claude-code/hook"} {
 			for _, tc := range []struct {
 				name, command string
@@ -129,13 +137,14 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 				{"hard link first operand", "touch hl-keys " + long, hookexec.PerUserPostNoAnswerExit},
 				{"hard link last operand", "touch " + long + " hl-keys", hookexec.PerUserPostNoAnswerExit},
 				{"hard link by absolute path", "touch " + filepath.Join(project, "hl-keys"), hookexec.PerUserPostNoAnswerExit},
-				{"hard link of an ordinary file", "touch hl-plain", hookexec.PerUserPostNoAnswerExit},
+				{"hard link of an ordinary file", "touch hl-plain", hookexec.PerUserPostLateOrdinaryExit},
 				{"ordinary late call", "touch " + long, hookexec.PerUserPostLateOrdinaryExit},
 			} {
-				t.Run(strings.TrimPrefix(path, "/api/v1/")+" "+tc.name+" unusable saved home "+filepath.Base(saved), func(t *testing.T) {
-					t.Setenv(hookPostAccountHomeEnv, saved)
+				t.Run(strings.TrimPrefix(path, "/api/v1/")+" "+tc.name+" unusable saved home "+saved.label, func(t *testing.T) {
+					t.Setenv(hookPostAccountHomeEnv, saved.home)
+					t.Setenv("HOME", saved.process)
 					if got := post(path, tc.command); got != tc.want {
-						t.Fatalf("home %q: exit %d, want %d", saved, got, tc.want)
+						t.Fatalf("home %q: exit %d, want %d", saved.home, got, tc.want)
 					}
 				})
 			}
