@@ -473,10 +473,12 @@ def uninstall_cmd(
 
 _LEGACY_SETUP_PHASE = "DefenseClaw Setup 0.8.x removal"
 _SETUP_LEFTOVERS_PHASE = "Setup leftovers removal"
+_EARLIER_FOLDER_RECORDS_PHASE = "Earlier data folder records removal"
 # Phases that end "failed" without stopping the uninstall: what stayed, and the step for each reason.
 _PHASE_LEFT_HEADINGS = {
     _LEGACY_SETUP_PHASE: "DefenseClaw Setup 0.8.x was not removed completely",
     _SETUP_LEFTOVERS_PHASE: "The folders DefenseClaw Setup left were not removed completely",
+    _EARLIER_FOLDER_RECORDS_PHASE: "Records Setup wrote in an earlier data folder were not removed",
 }
 
 
@@ -1332,6 +1334,10 @@ _CONNECTOR_HOOK_SCRIPTS = {
 }
 _CONNECTOR_SETUP_RECORDS = {"hermes": ("hermes-home-setup.json",)}
 _HOOK_SCRIPT_MARKER = b"# defenseclaw-managed-hook v"
+# A backup record carries the agent file's bytes, so it can be large.
+_BACKUP_RECORD_MAX_BYTES = 8 * 1024 * 1024
+# What the agent-config restore keeps beside a backup record (agent_config_restore.go).
+_BACKUP_COMPANION_SUFFIXES = (".last-good", ".restore-notice", ".restore-notice-seen")
 # Records of the folder as a whole: its hook contract lock and the records of the
 # config and install home the hooks run under. They go once no connector's
 # credential, backup or script is left in the folder.
@@ -1342,7 +1348,7 @@ _FOLDER_RECORDS = (
 )
 
 
-def _remove_earlier_folder_connector_records(plan: UninstallPlan) -> None:
+def _remove_earlier_folder_connector_records(plan: UninstallPlan) -> list[str]:
     """Remove the connector records `config set data_dir` left in the folders it moved away from.
 
     A move copies the scoped hook credentials, the hook contract lock and the
@@ -1350,41 +1356,116 @@ def _remove_earlier_folder_connector_records(plan: UninstallPlan) -> None:
     install home keeps the records Setup wrote before the first move. Teardown
     reads and removes the folder config.yaml names, so those copies stayed
     after a teardown that reported itself verified: a credential in a folder no
-    install uses (GAP-0915). Only what DefenseClaw wrote, by name, as a regular
-    file this account owns, in a real folder, for a connector this uninstall
-    tore down; the folder, the config, the audit store and every other file stay.
+    install uses (GAP-0915). Only what DefenseClaw wrote, by name and shape, as
+    a regular file this account owns, in a real folder this account owns, for a
+    connector this uninstall tore down; the folder, the config, the audit store
+    and every other file stay. Returns what DefenseClaw wrote and could not
+    remove, one line each, so the caller does not report a clean uninstall.
     """
     names = tuple(name for name in plan.connectors if name in _MOVED_RECORD_CONNECTORS)
+    stayed: list[str] = []
     if not names:
-        return
+        return stayed
     for folder in plan.record_dirs:
         if config_module._same_folder(folder, plan.records_dir):
             continue
-        removed = _remove_connector_records_in(folder, names)
+        removed, left = _remove_connector_records_in(folder, names)
+        stayed.extend(left)
         if removed:
             ux.ok(f"removed {removed} connector record(s) the earlier data folder {folder} still held")
+    return stayed
 
 
-def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> int:
+def _account_owned_regular_file(path: str) -> bool:
+    """Whether *path* is a regular file, not a link, that this account owns."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or _is_reparse_path(path):
+        return False
+    if os.name == "nt":
+        from defenseclaw.file_permissions import windows_guard_private_file_error
+
+        return windows_guard_private_file_error(path) is None
+    return info.st_uid == os.geteuid()
+
+
+def _account_owned_real_dir(path: str) -> bool:
+    """Whether *path* is a folder, not a link, that this account owns."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(path):
+        return False
+    return os.name == "nt" or info.st_uid == os.geteuid()
+
+
+def _backup_record_stem(logical_name: str) -> str:
+    """The file name managed_backup.go gives a backup record for a logical name."""
+    stem = re.sub(r"[/\\: ]", "_", logical_name)
+    return stem or "config"
+
+
+def _setup_backup_record_stem(path: str, connector: str) -> str:
+    """The stem of a backup record Setup wrote at *path* for *connector*, else "".
+
+    Setup writes ``<stem>.json`` with the connector, a logical name that gives
+    the file name, the pristine digest and the capture time; a ``.json`` file
+    of any other shape or name is the account's own and is not read as ours.
+    """
+    name = os.path.basename(path)
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(_BACKUP_RECORD_MAX_BYTES + 1)
+        document = json.loads(raw) if len(raw) <= _BACKUP_RECORD_MAX_BYTES else None
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(document, dict) or document.get("connector") != connector:
+        return ""
+    logical = document.get("logical_name")
+    if (
+        not isinstance(logical, str)
+        or not isinstance(document.get("pristine_sha256"), str)
+        or not isinstance(document.get("captured_at"), str)
+        or isinstance(document.get("version"), bool)
+        or not isinstance(document.get("version"), int)
+    ):
+        return ""
+    stem = _backup_record_stem(logical)
+    return stem if name == f"{stem}.json" else ""
+
+
+def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
+    """Remove *names*' records from one earlier folder; return the count removed and what stayed."""
     removed = 0
+    stayed: list[str] = []
+    if not os.path.lexists(folder):
+        return removed, stayed
+    if not _account_owned_real_dir(folder):
+        # Replaced since the plan was read: nothing under it is ours to follow.
+        return removed, [f"{folder} (not a folder this account owns, so it was not entered)"]
     hooks = os.path.join(folder, "hooks")
     backups = os.path.join(folder, "connector_backups")
 
     def drop(path: str) -> None:
+        """Remove a file DefenseClaw wrote; say so when it cannot be removed."""
         nonlocal removed
+        if not os.path.lexists(path):
+            return
+        if not _account_owned_regular_file(path):
+            stayed.append(f"{path} (a link, or a file another account owns)")
+            return
         try:
-            info = os.lstat(path)
-            if not stat.S_ISREG(info.st_mode) or _is_reparse_path(path):
-                return
-            if os.name != "nt" and info.st_uid != os.geteuid():
-                return
             os.unlink(path)
-        except OSError:
+        except OSError as exc:
+            stayed.append(f"{path} ({exc.strerror or exc})")
             return
         removed += 1
 
     def real_dir(path: str) -> bool:
-        return os.path.isdir(path) and _real_dir_chain(folder, path)
+        return _account_owned_real_dir(path) and _real_dir_chain(folder, path)
 
     for name in names:
         if real_dir(hooks):
@@ -1395,26 +1476,34 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> int:
         for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
             drop(os.path.join(folder, record))
         backup = os.path.join(backups, name)
-        if real_dir(backup):
+        if real_dir(backups) and real_dir(backup):
             try:
                 entries = sorted(os.listdir(backup))
             except OSError:
                 entries = []
+            stems = {}
             for entry in entries:
-                # What a setup stores: the backup record and the last known good copy.
-                if entry.endswith((".json", ".last-good")):
-                    drop(os.path.join(backup, entry))
+                path = os.path.join(backup, entry)
+                if entry.endswith(".json") and _account_owned_regular_file(path):
+                    stem = _setup_backup_record_stem(path, name)
+                    if stem:
+                        stems[stem] = path
+            for stem, path in stems.items():
+                drop(path)
+                # Beside a record Setup wrote: the last known good copy and the restore notice.
+                for suffix in _BACKUP_COMPANION_SUFFIXES:
+                    drop(os.path.join(backup, stem + suffix))
             with contextlib.suppress(OSError):
                 os.rmdir(backup)
     if _connector_state_remains(folder):
-        return removed
+        return removed, stayed
     for record in _FOLDER_RECORDS:
         drop(os.path.join(folder, record))
     for path in (hooks, backups):
         if real_dir(path):
             with contextlib.suppress(OSError):
                 os.rmdir(path)
-    return removed
+    return removed, stayed
 
 
 def _is_generated_hook_script(path: str) -> bool:
@@ -1429,14 +1518,24 @@ def _is_generated_hook_script(path: str) -> bool:
 
 
 def _connector_state_remains(folder: str) -> bool:
-    """Whether the folder still holds a credential, backup or hook script of a connector."""
-    try:
-        for entry in os.listdir(os.path.join(folder, "hooks")):
+    """Whether the folder still holds a credential, backup or hook script of a connector.
+
+    The hooks folder and the backups folder are looked at on their own: a
+    folder with no hooks left can still hold another connector's backup.
+    """
+    for name in ("hooks", "connector_backups"):
+        try:
+            entries = os.listdir(os.path.join(folder, name))
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True  # not readable: keep the shared records
+        if name == "connector_backups" and entries:
+            return True
+        for entry in entries:
             if (entry.startswith(".hook-") and entry.endswith(".token")) or entry.endswith("-hook.sh"):
                 return True
-        return bool(os.listdir(os.path.join(folder, "connector_backups")))
-    except OSError:
-        return False
+    return False
 
 
 def _quarantined_copies(data_dir: str) -> tuple[str, ...]:
@@ -2983,7 +3082,16 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("ACP editor entries", lambda: _remove_acp_editor_entries(plan))
     if plan.connectors and len(plan.record_dirs) > 1:
         # After the teardown: no agent registration names these copies any more.
-        _remove_earlier_folder_connector_records(plan)
+        earlier_stayed = _remove_earlier_folder_connector_records(plan)
+        if earlier_stayed:
+            phases.append(
+                ExecutionPhaseResult(
+                    _EARLIER_FOLDER_RECORDS_PHASE,
+                    "failed",
+                    "; ".join(earlier_stayed),
+                    ("remove what is named above (it can hold a hook credential), then run the command again",),
+                )
+            )
     # until 1.1: read what a removed connector left before its backups move:
     # their records name the agent configs outside the data folder.
     from defenseclaw.removed_connectors import backup_dirs, leftovers

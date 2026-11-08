@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from unittest.mock import patch
 
 import pytest
 from defenseclaw.commands import cmd_uninstall
@@ -23,6 +25,21 @@ def _write(path, text="x\n", mode=0o600):
     return path
 
 
+def _backup_record(connector, logical):
+    """A backup record as Setup writes it (managed_backup.go)."""
+    return json.dumps(
+        {
+            "version": 1,
+            "connector": connector,
+            "logical_name": logical,
+            "path": f"/agent/{logical}",
+            "existed": True,
+            "pristine_sha256": "00" * 32,
+            "captured_at": "2026-11-08T00:00:00Z",
+        }
+    ) + "\n"
+
+
 def _connector_records(folder, connector="hermes", script="hermes-hook.sh"):
     """What a setup and the move after it leave in a folder, for one connector."""
     return {
@@ -31,8 +48,14 @@ def _connector_records(folder, connector="hermes", script="hermes-hook.sh"):
         "config_record": _write(folder / "hooks" / ".config-record", f"{folder}/config.yaml\n"),
         "home_record": _write(folder / "hooks" / ".install-home-record", f"{folder}\n"),
         "lock": _write(folder / "hook_contract_lock.json", "{}\n"),
-        "backup": _write(folder / "connector_backups" / connector / "config.yaml.json", "{}\n"),
-        "allowlist_backup": _write(folder / "connector_backups" / connector / "shell-hooks-allowlist.json.json", "{}\n"),
+        "backup": _write(
+            folder / "connector_backups" / connector / "config.yaml.json", _backup_record(connector, "config.yaml")
+        ),
+        "allowlist_backup": _write(
+            folder / "connector_backups" / connector / "shell-hooks-allowlist.json.json",
+            _backup_record(connector, "shell-hooks-allowlist.json"),
+        ),
+        "last_good": _write(folder / "connector_backups" / connector / "config.yaml.last-good", "agent: x\n"),
         "setup": _write(folder / f"{connector}-home-setup.json", "{}\n"),
     }
 
@@ -144,3 +167,104 @@ def test_the_plan_names_the_install_home_records_it_removes(tmp_path, capsys):
     # With the wipe, the install home goes whole, so the line is not added.
     cmd_uninstall._render_plan(cmd_uninstall.replace(plan, remove_data_dir=True), dry_run=True)
     assert "install home records" not in capsys.readouterr().out
+
+
+def test_a_user_json_file_beside_a_backup_record_stays(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    records = _connector_records(first)
+    backups = first / "connector_backups" / "hermes"
+    personal = _write(backups / "personal.json", '{"mine": true}\n')
+    other_connector = _write(backups / "elsewhere.json", _backup_record("cursor", "elsewhere"))
+    renamed = _write(backups / "copy.json", _backup_record("hermes", "config.yaml"))
+    keep = _write(backups / "notes.last-good", "the user's copy\n")
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert stayed == []
+    assert not records["backup"].exists() and not records["last_good"].exists()
+    for path in (personal, other_connector, renamed, keep):
+        assert path.is_file(), path.name
+    # The user's files keep the folder-level records with them.
+    assert records["lock"].is_file()
+
+
+def test_a_linked_earlier_folder_is_not_entered(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    records = _connector_records(elsewhere)
+    for child in list(first.iterdir()):
+        child.unlink()
+    first.rmdir()
+    first.symlink_to(elsewhere, target_is_directory=True)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert all(path.exists() for path in records.values())
+    assert len(stayed) == 1 and str(first) in stayed[0]
+
+
+def test_a_record_that_cannot_be_removed_is_reported(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    records = _connector_records(first)
+    records["token"].parent.chmod(0o500)
+    try:
+        stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+    finally:
+        records["token"].parent.chmod(0o700)
+
+    if os.geteuid() != 0:
+        assert records["token"].is_file()
+        assert any(str(records["token"]) in line for line in stayed), stayed
+    # The shared records stay while a credential is left.
+    assert records["lock"].is_file()
+
+
+def test_a_linked_credential_is_reported_not_followed(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    records = _connector_records(first)
+    outside = _write(tmp_path / "outside-token", TOKEN + "\n")
+    records["token"].unlink()
+    records["token"].symlink_to(outside)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert outside.is_file() and records["token"].is_symlink()
+    assert any(str(records["token"]) in line for line in stayed), stayed
+
+
+def test_another_connectors_backup_keeps_the_shared_records_when_no_hooks_folder_is_left(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    records = _connector_records(first)
+    for path in (records["script"], records["config_record"], records["home_record"]):
+        path.unlink()
+    (first / "hooks" / ".hook-hermes.token").unlink()
+    (first / "hooks").rmdir()
+    other = _write(first / "connector_backups" / "cursor" / "config.yaml.json", _backup_record("cursor", "config.yaml"))
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert stayed == []
+    assert other.is_file() and records["lock"].is_file()
+    assert not records["backup"].exists()
+
+
+def test_the_uninstall_fails_and_names_what_stayed(tmp_path):
+    plan, home, first, second = _plan(tmp_path)
+    records = _connector_records(first)
+    outside = _write(tmp_path / "outside-token", TOKEN + "\n")
+    records["token"].unlink()
+    records["token"].symlink_to(outside)
+
+    with (
+        patch.object(cmd_uninstall, "_validate_plan"),
+        patch.object(cmd_uninstall, "_connector_teardown"),
+        patch.object(cmd_uninstall, "_turn_guardrail_off"),
+        patch.object(cmd_uninstall, "_print_removed_connector_leftovers"),
+        patch.object(cmd_uninstall, "_render_execution_result"),
+    ):
+        result = cmd_uninstall._execute_plan(plan)
+
+    assert not result.succeeded
+    left = cmd_uninstall._phases_left(result)
+    assert [phase.name for phase in left] == [cmd_uninstall._EARLIER_FOLDER_RECORDS_PHASE]
+    assert str(records["token"]) in left[0].detail
