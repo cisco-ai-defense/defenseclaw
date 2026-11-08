@@ -1481,7 +1481,10 @@ func TestSkillDirs_OpenClawReadsJSON5Config(t *testing.T) {
 			homeDir := t.TempDir()
 			workspace := filepath.Join(homeDir, "custom-workspace")
 			extra := filepath.Join(homeDir, "extra-skills")
-			body := strings.NewReplacer("WS", workspace, "EXTRA", extra).Replace(tc.body)
+			// The paths sit inside quoted strings, so a Windows path needs its
+			// backslashes doubled to be the same path after JSON or JSON5 reads it.
+			escape := func(p string) string { return strings.ReplaceAll(p, `\`, `\\`) }
+			body := strings.NewReplacer("WS", escape(workspace), "EXTRA", escape(extra)).Replace(tc.body)
 			configFile := filepath.Join(homeDir, "openclaw.json")
 			if err := os.WriteFile(configFile, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
