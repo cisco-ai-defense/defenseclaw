@@ -157,6 +157,15 @@ func TestFileToolThroughLinkGetsDirectPathVerdictInEveryConnector(t *testing.T) 
 		input                         func(string) any
 	}{
 		{"codex apply_patch", "codex", "apply_patch", "block", func(p string) any { return map[string]any{"command": patch(p)} }},
+		{"codex shell apply_patch Update File", "codex", "Bash", "block", func(p string) any {
+			return map[string]any{"command": "apply_patch <<'PATCH'\n" + patch(p) + "PATCH\n"}
+		}},
+		{"codex shell apply_patch Add File", "codex", "Bash", "block", func(p string) any {
+			return map[string]any{"command": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: " + p + "\n+b\n*** End Patch\nPATCH\n"}
+		}},
+		{"codex shell apply_patch Move to", "codex", "Bash", "block", func(p string) any {
+			return map[string]any{"command": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: " + filepath.Join(project, "notes.txt") + "\n*** Move to: " + p + "\n@@\n-a\n+b\n*** End Patch\nPATCH\n"}
+		}},
 		{"claudecode Edit", "claudecode", "Edit", "block", func(p string) any {
 			return map[string]any{"file_path": p, "old_string": "a", "new_string": "b"}
 		}},

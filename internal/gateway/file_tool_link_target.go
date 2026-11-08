@@ -10,22 +10,27 @@ import (
 )
 
 // fileToolLinkTargetFacts keeps the exact file operation of every connector
-// attached to both the name the file tool received and the file reached
-// through an existing link, so a link gets the path verdict the name of its
-// target gets, whatever the connector or body shape (GAP-0797). The resolved
-// target the hook client reports is preferred; a per-user gateway can also
-// resolve a path locally when that evidence is absent. Only file tools that
-// follow their final path reach this function.
+// attached to both the name the call received and the file reached through
+// an existing link, so a link gets the path verdict the name of its target
+// gets, whatever the connector or body shape (GAP-0797). The resolved target
+// the hook client reports is preferred; a per-user gateway can also resolve a
+// path locally when that evidence is absent. The class is the write target
+// of an operation that follows its final path: every path of a typed file
+// tool, and every file an apply_patch envelope names whether the connector
+// sends it as its own tool or as a shell command with a here-document
+// (GAP-0831). Other shell commands are not part of this class.
 func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionRequest) actionfacts.Facts {
-	if !actionfacts.PathTool(request.Input.Tool) || !facts.Authoritative() || !facts.EnforcementEligible() {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		return facts
+	}
+	typed := actionfacts.PathTool(request.Input.Tool)
+	if !typed && !hasApplyPatchCommand(facts) {
 		return facts
 	}
 	originalPaths := len(facts.Paths)
 	for index := 0; index < originalPaths; index++ {
 		candidate := facts.Paths[index]
-		switch candidate.Access {
-		case actionfacts.PathAccessRead, actionfacts.PathAccessWrite, actionfacts.PathAccessAppend:
-		default:
+		if !linkTargetCandidate(facts, candidate, typed) {
 			continue
 		}
 		spelling := candidate.Resolved
@@ -55,6 +60,38 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 	return facts
 }
 
+// linkTargetCandidate reports whether a path fact is a file operation that
+// follows its final path and so reaches the file a link names: the read,
+// write or append of a typed file tool, or a path of an apply_patch command.
+func linkTargetCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact, typed bool) bool {
+	switch candidate.Access {
+	case actionfacts.PathAccessRead, actionfacts.PathAccessWrite, actionfacts.PathAccessAppend:
+	default:
+		return false
+	}
+	return typed || applyPatchCommandPath(facts, candidate)
+}
+
+// hasApplyPatchCommand reports an apply_patch command in the parsed action,
+// whichever tool carried the shell text.
+func hasApplyPatchCommand(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.Executable == "apply_patch" {
+			return true
+		}
+	}
+	return false
+}
+
+func applyPatchCommandPath(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+	for _, command := range facts.Commands {
+		if command.ID == candidate.CommandID {
+			return command.Executable == "apply_patch"
+		}
+	}
+	return false
+}
+
 // The rule scan sees only the call's lexical arguments. These typed file
 // facts supply the exact resolved target too, so a link receives the same
 // path rule as a direct file call. The usual typed path and proof filters
@@ -65,14 +102,13 @@ func fileToolLinkTargetFindings(
 	facts actionfacts.Facts,
 	options ruleScanOptions,
 ) []RuleFinding {
-	if !actionfacts.PathTool(request.Input.Tool) || !facts.Authoritative() || !facts.EnforcementEligible() {
+	typed := actionfacts.PathTool(request.Input.Tool)
+	if !facts.Authoritative() || !facts.EnforcementEligible() || !typed && !hasApplyPatchCommand(facts) {
 		return nil
 	}
 	var findings []RuleFinding
 	for _, candidate := range facts.Paths {
-		switch candidate.Access {
-		case actionfacts.PathAccessRead, actionfacts.PathAccessWrite, actionfacts.PathAccessAppend:
-		default:
+		if !linkTargetCandidate(facts, candidate, typed) {
 			continue
 		}
 		if !filepath.IsAbs(candidate.Resolved) {
