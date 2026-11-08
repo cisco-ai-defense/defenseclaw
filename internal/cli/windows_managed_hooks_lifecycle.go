@@ -340,6 +340,9 @@ func runWindowsManagedHooksLifecycleWithStagedRetire(
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return fail(err)
 		}
+		if err := windowsManagedHooksRefuseLinkedVendorFolders(); err != nil {
+			return fail(err)
+		}
 		if err := windowsManagedHooksVendorFolderTakeBack(); err != nil {
 			return fail(err)
 		}
@@ -2342,6 +2345,41 @@ var windowsManagedHooksVendorFolderTakeBack = func() error {
 		}
 	}
 	return nil
+}
+
+// windowsManagedHooksRefuseLinkedVendorFolders refuses a capture while a link
+// sits on the path of the machine folder of Codex, Cursor or Claude Code. Setup
+// refuses the same links before it stops anything (the module's
+// Assert-DefenseClawVendorMachineFoldersNotLinked); this is the snapshot's own
+// answer for a link that appears after that, so the run fails on a named link
+// with the command that removes it and not on a trust error about the folder
+// (GAP-0900). Nothing is opened or followed. Standalone only; replaceable in
+// tests.
+var windowsManagedHooksRefuseLinkedVendorFolders = func() error {
+	if !windowsManagedHooksStandaloneProcess() {
+		return nil
+	}
+	var found, fixes []string
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		link := enterpriseHookVendorFolderLink(connectorName)
+		if link == "" {
+			continue
+		}
+		label := enterpriseHookConnectorLabels[connectorName]
+		if label == "" {
+			label = connectorName
+		}
+		found = append(found, fmt.Sprintf("%s: %s", label, link))
+		fixes = append(fixes, fmt.Sprintf("cmd /c rmdir \"%s\"", link))
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"DefenseClaw does not follow a link in the machine-policy folder of an agent. A link sits on the path of: %s. "+
+			"As an administrator, remove only the link (the folder it points to is not changed) with: %s, then run the same command again",
+		strings.Join(found, "; "), strings.Join(fixes, "; "),
+	)
 }
 
 func captureWindowsManagedHooksLifecycleSelectors() (

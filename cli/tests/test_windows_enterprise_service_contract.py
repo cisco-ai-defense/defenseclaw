@@ -6333,6 +6333,49 @@ def test_purge_removes_only_the_vendor_folders_it_recorded() -> None:
         assert "removeEmptyWindowsClaudeManagedSettingsFolders" not in read(go_file), go_file.name
 
 
+def test_vendor_folder_link_refusal_runs_first_for_standalone_install_like_actions() -> None:
+    """GAP-0900: a link on the path of the Codex, Cursor or Claude Code machine
+    folder stops Install, Upgrade and Repair before a root, a recovery lane or a
+    service is touched, through the one link check the uninstall also uses. The
+    uninstall and the reconcile do not call it, and the snapshot refuses the
+    same links by name."""
+    module = read(MODULE)
+    assert "Get-DefenseClawCodexMachineFolderLink" not in module  # one check, not a Codex twin
+    dispatcher = _psm1_function(module, "Invoke-DefenseClawEnterpriseLifecycle")
+    call = "Assert-DefenseClawVendorMachineFoldersNotLinked -Layout $layout -Action $Action"
+    assert dispatcher.count("Assert-DefenseClawVendorMachineFoldersNotLinked") == 1
+    at = dispatcher.index(call)
+    for later in (
+        "$preLayoutRecovery = Invoke-DefenseClawPreLayoutRecovery",
+        "$pendingRecovery = Recover-DefenseClawPendingTransaction",
+        "Initialize-DefenseClawTransactionManagedRoot",
+        "New-DefenseClawLayoutDirectories",
+        "return Invoke-DefenseClawInstallLikeLifecycle",
+    ):
+        assert at < dispatcher.index(later), later
+    assert dispatcher[:at].rstrip().endswith("if ($Action -in @('Install', 'Upgrade', 'Repair')) {")
+    for name in (
+        "Invoke-DefenseClawUninstallLifecycle",
+        "Invoke-DefenseClawReconcileLifecycle",
+        "New-DefenseClawTransaction",
+    ):
+        assert "Assert-DefenseClawVendorMachineFoldersNotLinked" not in _psm1_function(module, name), name
+    refusal = _psm1_function(module, "Assert-DefenseClawVendorMachineFoldersNotLinked")
+    assert refusal.count("Get-DefenseClawVendorMachineFolderLink -Directory $folder.Path") == 1
+    assert "if (-not (Test-DefenseClawStandaloneProfile)) {" in refusal
+    for folder in ("'Codex'", "'Cursor'", "'Claude Code'"):
+        assert folder in refusal
+    assert 'cmd /c rmdir `"$link`"' in refusal
+
+    # The snapshot names the same links before it takes anything back.
+    go = read(ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go")
+    capture = go[go.index('case "capture":') :]
+    assert capture.index("windowsManagedHooksRefuseLinkedVendorFolders()") < capture.index(
+        "windowsManagedHooksVendorFolderTakeBack()"
+    )
+    assert "if !windowsManagedHooksStandaloneProcess() {" in go[go.index("var windowsManagedHooksRefuseLinkedVendorFolders") :]
+
+
 def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
     """GAP-0773 / GAP-0758 round 4: only the uninstall keeps a link at the Codex
     machine-policy folder. The snapshot skip, the removal option and the kept
@@ -6347,7 +6390,7 @@ def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
     transaction = _psm1_function(module, "New-DefenseClawTransaction")
     assert "[switch]$SkipLinkedCodexMachineState" in transaction
     assert "if ($SkipLinkedCodexMachineState) {" in transaction
-    assert "$codexFolderLink = Get-DefenseClawCodexMachineFolderLink -Layout $Layout" in transaction
+    assert "$codexFolderLink = Get-DefenseClawVendorMachineFolderLink -Directory ([string]$Layout.CodexMachinePolicyDirectory)" in transaction
     # The loop skips only a destination that sits directly in the linked folder,
     # and still snapshots the others (the ownership and ACL-backup files).
     skip = transaction[transaction.index("if ($codexFolderLink -ne '' -and [string]::Equals("):]

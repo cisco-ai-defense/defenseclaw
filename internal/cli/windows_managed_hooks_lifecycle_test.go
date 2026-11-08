@@ -1651,3 +1651,50 @@ func TestWindowsManagedHooksGuardianRefusalNamesADeletedLocalAccount(t *testing.
 		}
 	}
 }
+
+func TestWindowsManagedHooksCaptureRefusesALinkAtAVendorFolderByName(t *testing.T) {
+	previousStandalone := windowsManagedHooksStandaloneProcess
+	previousLink := enterpriseHookVendorFolderLink
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneProcess = previousStandalone
+		enterpriseHookVendorFolderLink = previousLink
+	})
+	links := map[string]string{}
+	enterpriseHookVendorFolderLink = func(connectorName string) string { return links[connectorName] }
+	run := func(standalone bool) error {
+		windowsManagedHooksStandaloneProcess = func() bool { return standalone }
+		return windowsManagedHooksRefuseLinkedVendorFolders()
+	}
+	if err := run(true); err != nil {
+		t.Fatalf("no link: %v", err)
+	}
+	for _, tc := range []struct{ connector, label, link string }{
+		{"codex", "Codex", `C:\ProgramData\OpenAI\Codex`},
+		{"cursor", "Cursor", `C:\ProgramData\Cursor`},
+		{"claudecode", "Claude Code", `C:\Program Files\ClaudeCode`},
+	} {
+		t.Run(tc.connector, func(t *testing.T) {
+			links[tc.connector] = tc.link
+			t.Cleanup(func() { delete(links, tc.connector) })
+			err := run(true)
+			if err == nil {
+				t.Fatalf("a link at the %s folder was not refused", tc.label)
+			}
+			for _, want := range []string{tc.label + ": " + tc.link, `cmd /c rmdir "` + tc.link + `"`, "remove only the link"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error %q does not contain %q", err, want)
+				}
+			}
+			// Secure Client keeps its behaviour: the snapshot reads the folder and fails (or not) as before.
+			if err := run(false); err != nil {
+				t.Fatalf("Secure Client was refused: %v", err)
+			}
+		})
+	}
+	links["cursor"] = `C:\ProgramData\Cursor`
+	links["claudecode"] = `C:\Program Files\ClaudeCode`
+	err := run(true)
+	if err == nil || !strings.Contains(err.Error(), "Cursor: C:\\ProgramData\\Cursor") || !strings.Contains(err.Error(), "Claude Code: C:\\Program Files\\ClaudeCode") {
+		t.Fatalf("two links were not both named: %v", err)
+	}
+}
