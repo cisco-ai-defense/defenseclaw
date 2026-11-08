@@ -158,6 +158,13 @@ func (a *APIServer) ownWindowsConnectorStates(cfg *config.Config, sid, name stri
 		}
 		states[connector] = state
 	}
+	// A connector an administrator took off the roster is "not managed
+	// (removed from roster)", never protected and never pending.
+	for name, row := range ownRemovedConnectorStates(cfg, a.configDataDir(), sid) {
+		if _, configured := states[name]; !configured {
+			states[name] = row
+		}
+	}
 	return states
 }
 
