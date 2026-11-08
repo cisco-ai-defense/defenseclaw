@@ -4359,7 +4359,7 @@ func planHermesAllowlistApprovals(path string, approvals []interface{}, command 
 		_, requiredEvent := events[event]
 		owned, _ := entry[hermesAllowlistOwnerField].(bool)
 		_, recognized := recognizedCommands[entryCommand]
-		if owned && !recognized && hermesMovedHomeCommand(entryCommand, command) {
+		if owned && !recognized && hermesRelocatedHookCommand(entryCommand, command) {
 			// DefenseClaw's approval from before a true move of the home is
 			// replaced like any historical command (rel-1-0-2 GAP-0642).
 			recognized = true
@@ -4466,7 +4466,7 @@ func removeHermesOwnedApprovals(path, command string, backup *managedFileBackup,
 	// ours is DefenseClaw's hook command for this home, or the same hook
 	// script of this install at the home the account had before a move.
 	ours := func(entryCommand string) bool {
-		return entryCommand == command || hermesMovedHomeCommand(entryCommand, command)
+		return entryCommand == command || hermesRelocatedHookCommand(entryCommand, command)
 	}
 	approvals := document["approvals"].([]interface{})
 	kept := make([]interface{}, 0, len(approvals))
@@ -4538,22 +4538,9 @@ func hermesMovedHomeCommand(entryCommand, command string) bool {
 	if runtime.GOOS == "windows" || entryCommand == command {
 		return false
 	}
-	unquote := func(word string) (string, bool) {
-		word = strings.TrimSpace(word)
-		if len(word) >= 2 && strings.HasPrefix(word, "'") && strings.HasSuffix(word, "'") {
-			return word[1 : len(word)-1], true
-		}
-		return word, false
-	}
-	script, quoted := unquote(command)
-	moved, movedQuoted := unquote(entryCommand)
-	if quoted != movedQuoted {
+	script, moved, ok := hermesHookScriptPaths(entryCommand, command)
+	if !ok {
 		return false
-	}
-	for _, p := range []string{script, moved} {
-		if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "'\x00\r\n") {
-			return false
-		}
 	}
 	home := filepath.Clean(userHomeDir())
 	rel, err := filepath.Rel(home, script)
@@ -4565,9 +4552,73 @@ func hermesMovedHomeCommand(entryCommand, command string) bool {
 	if !filepath.IsAbs(previous) || previous == filepath.Dir(previous) || managedPathWithin(previous, home) || managedPathWithin(home, previous) {
 		return false
 	}
-	if _, err := os.Lstat(moved); err == nil && !defenseClawHookFile(moved) {
+	return hermesScriptAbsentOrDefenseClaws(moved)
+}
+
+// hermesMovedStoreCommand is hermesMovedHomeCommand for a move of the data
+// directory (defenseclaw config set data_dir) instead of the home: the marked
+// approval names the same generated hook script, hooks/hermes-hook.sh, below
+// the data directory the account had before. The move copies the connector
+// records and seals and leaves the old folder and the allowlist as they were,
+// so Setup, repair and teardown read their own earlier approval as a tampered
+// command and refused every run, which left the gateway down after the advised
+// restart (GAP-0914). Same identity test as a moved home: the script name at
+// the same place below any other absolute root, nothing at that path or a
+// DefenseClaw-generated script there; no record of the old folder is needed,
+// because a second move leaves approvals that name any earlier folder. Any
+// other command on a marked entry keeps the refusal.
+func hermesMovedStoreCommand(entryCommand, command string) bool {
+	if runtime.GOOS == "windows" || entryCommand == command {
 		return false
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+	}
+	script, moved, ok := hermesHookScriptPaths(entryCommand, command)
+	if !ok {
+		return false
+	}
+	tail := string(filepath.Separator) + "hooks" + string(filepath.Separator) + hermesHookScriptName
+	if !strings.HasSuffix(script, tail) || !strings.HasSuffix(moved, tail) || len(moved) == len(tail) {
+		return false
+	}
+	return hermesScriptAbsentOrDefenseClaws(moved)
+}
+
+// hermesRelocatedHookCommand reports whether a marked approval names
+// DefenseClaw's hook script of this install at the place it had before a move
+// of the home or of the data directory.
+func hermesRelocatedHookCommand(entryCommand, command string) bool {
+	return hermesMovedHomeCommand(entryCommand, command) || hermesMovedStoreCommand(entryCommand, command)
+}
+
+// hermesHookScriptPaths returns the script paths of command and entryCommand
+// when both are one absolute, clean path in the same shell-word form (bare or
+// single-quoted) with no character that could end the word.
+func hermesHookScriptPaths(entryCommand, command string) (script, moved string, ok bool) {
+	unquote := func(word string) (string, bool) {
+		word = strings.TrimSpace(word)
+		if len(word) >= 2 && strings.HasPrefix(word, "'") && strings.HasSuffix(word, "'") {
+			return word[1 : len(word)-1], true
+		}
+		return word, false
+	}
+	script, quoted := unquote(command)
+	moved, movedQuoted := unquote(entryCommand)
+	if quoted != movedQuoted {
+		return "", "", false
+	}
+	for _, p := range []string{script, moved} {
+		if !filepath.IsAbs(p) || filepath.Clean(p) != p || strings.ContainsAny(p, "'\x00\r\n") {
+			return "", "", false
+		}
+	}
+	return script, moved, true
+}
+
+// hermesScriptAbsentOrDefenseClaws is false for a file at path that is not a
+// DefenseClaw-generated hook script, or that cannot be examined.
+func hermesScriptAbsentOrDefenseClaws(path string) bool {
+	if _, err := os.Lstat(path); err == nil {
+		return defenseClawHookFile(path)
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return false
 	}
 	return true
