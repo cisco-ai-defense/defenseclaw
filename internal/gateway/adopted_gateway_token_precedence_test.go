@@ -156,3 +156,65 @@ func TestAdoptionPublishesAMaximumSizeDotenvAndRefusesOneByteOver(t *testing.T) 
 		})
 	}
 }
+
+// The adoption keeps the line ending the file has: every line CRLF in a CRLF
+// file and every line LF in an LF file, never a mix. The token reads back from
+// both.
+func TestAdoptionWritesOneLineEndingAndTheTokenReadsBack(t *testing.T) {
+	for _, tc := range []struct{ name, eol string }{
+		{"lf", "\n"},
+		{"crlf", "\r\n"},
+	} {
+		for _, final := range []bool{true, false} {
+			name := tc.name
+			if !final {
+				name += " without final newline"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+				t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+				dir := t.TempDir()
+				envPath := filepath.Join(dir, ".env")
+				before := strings.Join([]string{"DEFENSECLAW_LLM_KEY=keep", "DEFENSECLAW_GATEWAY_TOKEN=old-token", "# note"}, tc.eol)
+				if final {
+					before += tc.eol
+				}
+				if err := os.WriteFile(envPath, []byte(before), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := persistRefreshedToken(dir, "adopted-token"); err != nil {
+					t.Fatal(err)
+				}
+				body, err := os.ReadFile(envPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				text := string(body)
+				if !strings.HasSuffix(text, tc.eol) || strings.Count(text, "\n") != strings.Count(text, tc.eol) {
+					t.Fatalf("not one %q line ending throughout: %q", tc.eol, text)
+				}
+				lines := strings.Split(strings.TrimSuffix(text, tc.eol), tc.eol)
+				for _, want := range []string{
+					"DEFENSECLAW_LLM_KEY=keep",
+					"DEFENSECLAW_GATEWAY_TOKEN=adopted-token",
+					"OPENCLAW_GATEWAY_TOKEN=adopted-token",
+					envvars.AdoptedGatewayTokenMarker("adopted-token"),
+				} {
+					n := 0
+					for _, line := range lines {
+						if line == want {
+							n++
+						}
+					}
+					if n != 1 {
+						t.Fatalf("want one line %q, found %d in %q", want, n, text)
+					}
+				}
+				got, err := EnsureGatewayToken(envPath)
+				if err != nil || got != "adopted-token" {
+					t.Fatalf("token = %q, %v, want the adopted token", got, err)
+				}
+			})
+		}
+	}
+}

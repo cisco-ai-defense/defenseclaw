@@ -218,8 +218,25 @@ def test_the_two_token_save_is_one_publish_and_an_interrupted_one_leaves_the_fil
     monkeypatch.setattr(cmd_setup, "atomic_write_private_bytes", counting)
     _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
     assert len(published) == 1
-    text = published[0].decode()
-    assert text.count(f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}\n") == 1
-    assert text.count(f"OPENCLAW_GATEWAY_TOKEN={NEW_TOKEN}\n") == 1
-    assert "DEFENSECLAW_LLM_KEY=keep" in text
+    # The file keeps the line ending it had (write_text gives CRLF on Windows),
+    # so the lines are compared without it.
+    lines = published[0].decode().splitlines()
+    assert lines.count(f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
+    assert lines.count(f"OPENCLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
+    assert "DEFENSECLAW_LLM_KEY=keep" in lines
+    assert _resolved_after_load(tmp_path) == NEW_TOKEN
+
+
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+def test_the_token_save_writes_one_line_ending_whatever_the_os(tmp_path, ending):
+    path = tmp_path / ".env"
+    path.write_bytes(ending.join([b"DEFENSECLAW_LLM_KEY=keep", f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}".encode(), b""]))
+    path.chmod(0o600)
+    _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+    body = path.read_bytes()
+    assert body.endswith(ending)
+    assert body.count(b"\n") == body.count(ending)
+    lines = body.decode().split(ending.decode())[:-1]
+    assert lines.count(f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
+    assert lines.count(f"OPENCLAW_GATEWAY_TOKEN={NEW_TOKEN}") == 1
     assert _resolved_after_load(tmp_path) == NEW_TOKEN

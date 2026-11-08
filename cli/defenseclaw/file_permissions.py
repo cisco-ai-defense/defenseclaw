@@ -808,6 +808,15 @@ def dotenv_key_is_valid(key: str) -> bool:
     )
 
 
+def dotenv_line_ending(body: bytes) -> bytes:
+    """The line ending DefenseClaw writes into a ``.env`` that holds *body*.
+
+    One per file, on every OS: CRLF when the file already holds a CRLF line,
+    otherwise LF. The readers accept both.
+    """
+    return b"\r\n" if b"\r\n" in body else b"\n"
+
+
 def dotenv_key_is_process_control(key: str) -> bool:
     """Return whether a dotenv key can redirect or inject a child process."""
     normalized = key.strip().upper()

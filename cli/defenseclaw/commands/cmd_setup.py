@@ -139,6 +139,7 @@ from defenseclaw.file_permissions import (
     darwin_acl_write_error,
     delete_file_durable,
     dotenv_key_is_valid,
+    dotenv_line_ending,
     open_regular_file_no_follow,
     read_regular_file_no_follow,
     reject_reparse_path,
@@ -3656,7 +3657,7 @@ def _dotenv_restore_raw_key_render(
             restored = True
     body = b"".join(lines)
     if existed and not restored:
-        newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
+        newline = dotenv_line_ending(snapshot.body)
         if body and not body.endswith((b"\r", b"\n")):
             body += newline
         body += key_bytes + b"=" + (value or b"") + newline
@@ -4508,7 +4509,7 @@ def _dotenv_upsert_render(
             continue
         lines.append(line)
     body = b"".join(lines)
-    newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
+    newline = dotenv_line_ending(snapshot.body)
     if not replaced:
         if body and not body.endswith((b"\r", b"\n")):
             body += newline
@@ -4599,7 +4600,7 @@ def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -
 
     lines = [line for line in snapshot.body.splitlines(keepends=True) if not is_token_line(line)]
     body = b"".join(lines)
-    newline = b"\r\n" if b"\r\n" in snapshot.body else b"\n"
+    newline = dotenv_line_ending(snapshot.body)
     if body and not body.endswith((b"\r", b"\n")):
         body += newline
     return body + token_prefix + safe_token + newline
