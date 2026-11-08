@@ -264,6 +264,7 @@ func (c *ClaudeCodeConnector) RestoreHooksAfterRollback(opts SetupOpts) (int, er
 	var witness claudeCodeRollbackWitness
 	var backup, proof, authorized atomicTransformArtifactState
 	restore, restored := false, 0
+	var hold func([]byte) error
 	err := withFileLock(path, func() error {
 		return atomicTransformFileV2(path, opts.DataDir, 0o600, atomicTransformV2Options{
 			preserveExistingProtection: true,
@@ -311,9 +312,13 @@ func (c *ClaudeCodeConnector) RestoreHooksAfterRollback(opts SetupOpts) (int, er
 				return atomicTransformResult{Data: current, Remove: !exists}, nil
 			}
 			_, restored, _ = claudeCodeRollbackConversion(opts, path)(backup.data)
+			hold = holdManagedExactRestore(opts.DataDir, c.Name(), path, current)
 			return atomicTransformResult{Data: backup.data}, nil
 		})
 	})
+	if err == nil && hold != nil {
+		err = hold(backup.data)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("rollback protection for Claude Code could not be verified or restored; retained recovery evidence: %w", err)
 	}

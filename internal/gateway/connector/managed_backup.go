@@ -314,6 +314,40 @@ func updateManagedFileBackupPostHashValue(
 	return writeManagedFileBackup(backupPath, b)
 }
 
+// holdManagedExactRestore is for a DefenseClaw writer that rewrites an agent
+// file outside setup, such as the rollback conversion of hook entries into
+// the form an earlier release owns (and its undo). before is the file as the
+// writer read it. When the connector's record says the file holds exactly
+// the bytes DefenseClaw last committed, the returned function records the
+// bytes the writer commits as the new committed output, so the saved
+// pre-setup copy still comes back byte for byte when the rollback restores
+// the file. A file with no record, no post hash, or any other bytes (an
+// edit, a drifted record) gets a function that records nothing: its
+// entries are removed one by one and the operator's bytes stay.
+func holdManagedExactRestore(dataDir, connectorName, path string, before []byte) func(after []byte) error {
+	b, ok := managedFileBackupFor(dataDir, connectorName, path)
+	if !ok || b.PostSHA256 == "" || b.PostSHA256 != sha256Hex(before) {
+		return func([]byte) error { return nil }
+	}
+	return func(after []byte) error {
+		return updateManagedFileBackupPostHashValue(dataDir, connectorName, b.LogicalName, path, sha256Hex(after))
+	}
+}
+
+// managedFileBackupFor returns connectorName's record for the agent file at
+// path. A store that cannot be read yields no record.
+func managedFileBackupFor(dataDir, connectorName, path string) (managedFileBackup, bool) {
+	var found managedFileBackup
+	ok := false
+	_ = forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		if strings.EqualFold(b.Connector, connectorName) && sameManagedTargetPath(b.Path, path) {
+			found, ok = b, true
+		}
+		return nil
+	})
+	return found, ok
+}
+
 func managedFileSnapshotHash(data []byte, exists bool) string {
 	if !exists {
 		return managedBackupMissingHash

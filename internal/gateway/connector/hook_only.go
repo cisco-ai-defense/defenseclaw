@@ -6244,11 +6244,19 @@ func decodeJSONObject(path string, data []byte) (map[string]interface{}, error) 
 }
 
 func writeJSONObject(path string, cfg map[string]interface{}) error {
+	_, err := writeJSONObjectBytes(path, cfg)
+	return err
+}
+
+// writeJSONObjectBytes writes cfg as indented JSON and returns the bytes it
+// committed.
+func writeJSONObjectBytes(path string, cfg map[string]interface{}) ([]byte, error) {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return atomicWriteFile(path, append(data, '\n'), 0o600)
+	data = append(data, '\n')
+	return data, atomicWriteFile(path, data, 0o600)
 }
 
 func ensureJSONObject(obj map[string]interface{}, key string) map[string]interface{} {

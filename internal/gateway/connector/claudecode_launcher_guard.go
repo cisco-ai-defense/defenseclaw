@@ -389,6 +389,8 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 		return 0, err
 	}
 	converted := 0
+	var hold func([]byte) error
+	var committed []byte
 	err = withFileLock(settingsPath, func() error {
 		return transformClaudeCodeRollback(settingsPath, opts,
 			func(current []byte, exists bool) (atomicTransformResult, error) {
@@ -403,9 +405,13 @@ func (c *ClaudeCodeConnector) ConvertHooksForRollback(opts SetupOpts) (int, erro
 					return atomicTransformResult{}, fmt.Errorf("keep a copy of the settings: %w", err)
 				}
 				converted = changed
+				hold, committed = holdManagedExactRestore(opts.DataDir, c.Name(), settingsPath, current), out
 				return atomicTransformResult{Data: out}, nil
 			})
 	})
+	if err == nil && hold != nil {
+		err = hold(committed)
+	}
 	if err != nil {
 		return 0, fmt.Errorf("rewrite Claude Code hooks in %s: %w", settingsPath, err)
 	}

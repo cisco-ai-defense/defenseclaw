@@ -4,9 +4,14 @@
 package connector
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookguard"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // Releases before 1.0.9 own the per-user Windows Devin command only in the
@@ -81,4 +86,47 @@ func convertDevinHookForms(hooks map[string]interface{}, pairs map[string][][2]s
 		}
 	}
 	return changed
+}
+
+// convertDevinHooksFile applies convertDevinHookForms to one Devin hooks
+// file under its lock, keeps a copy of it before a rollback conversion, and
+// returns how many handlers it rewrote. A file that holds exactly the bytes
+// DefenseClaw last committed keeps its exact restore (holdManagedExactRestore):
+// the converted bytes are recorded as the committed output, so a rollback
+// that finds the file unedited puts the saved pre-setup bytes back.
+func convertDevinHooksFile(path, dataDir, connectorName string, pairs map[string][][2]string, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return 0, nil
+	}
+	converted := 0
+	err := withFileLockMode(path, false, func() error {
+		data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		cfg, err := readDevinJSONObject(path)
+		if err != nil {
+			return err
+		}
+		converted = convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier)
+		if converted == 0 {
+			return nil
+		}
+		if keepCopy != nil {
+			sum := sha256.Sum256([]byte(strings.ToLower(path)))
+			if err := keepCopy(dataDir, "devin-"+hex.EncodeToString(sum[:6])+".before-rollback.json", data); err != nil {
+				return fmt.Errorf("keep a copy of the Devin hooks: %w", err)
+			}
+		}
+		hold := holdManagedExactRestore(dataDir, connectorName, path, data)
+		after, err := writeDevinHooksFileBytes(path, cfg)
+		if err != nil {
+			return err
+		}
+		return hold(after)
+	})
+	return converted, err
 }
