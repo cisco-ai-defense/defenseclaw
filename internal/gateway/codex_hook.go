@@ -235,6 +235,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	// folder, before the call is judged (GAP-1388).
 	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.Source, callCWD)
 	ctx = a.withInstructionStartup(ctx, "codex", req.SessionID, startup)
+	a.mcpSessionStarted(ctx, "codex", req.SessionID, req.HookEventName, req.Source)
 	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "codex") && !a.codexEnabled() {
