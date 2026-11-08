@@ -18,6 +18,7 @@ import "strings"
 func LinkedPathFact(operand PathFact, physical string) PathFact {
 	linked := operand
 	linked.Linked = true
+	linked.LinkedFrom = operand.Resolved
 	linked.Absolute = true
 	canonical := physical
 	if windowsPhysicalPath(physical) {

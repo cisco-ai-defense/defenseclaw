@@ -51,5 +51,8 @@ func TestLinkedPathFactKeepsAPOSIXPathAsItIs(t *testing.T) {
 		if got.Flavor != PathFlavorPOSIX || !got.Linked || !got.Absolute {
 			t.Fatalf("operand fields changed: %+v", got)
 		}
+		if got.LinkedFrom != operand.Resolved {
+			t.Fatalf("the fact names operand %q, want %q", got.LinkedFrom, operand.Resolved)
+		}
 	}
 }
