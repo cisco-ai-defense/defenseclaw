@@ -640,6 +640,88 @@ def configured_store_dir() -> str:
     return configured
 
 
+STORE_HISTORY_FILE = "previous-data-dirs.json"
+_STORE_HISTORY_MAX_FOLDERS = 16
+_STORE_HISTORY_MAX_BYTES = 64 * 1024
+
+
+def _store_history_path() -> str:
+    return os.path.join(os.fspath(default_data_path()), STORE_HISTORY_FILE)
+
+
+def _account_private_regular_file(path: str, info: os.stat_result) -> bool:
+    """Whether *path* is a regular file only this account can read or change."""
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if os.name == "nt":
+        from defenseclaw.file_permissions import windows_guard_private_file_error
+
+        return windows_guard_private_file_error(path) is None
+    return info.st_uid == os.geteuid() and not info.st_mode & 0o077
+
+
+def previous_store_dirs() -> tuple[str, ...]:
+    """The folders ``config set data_dir`` moved the stores away from, oldest first.
+
+    A move carries the connector records and seals and leaves every other
+    record Setup wrote (ACP ownership records, probe and created-folder
+    records, the OpenClaw backup index, removed-connector state) in the
+    folder it was written in. The install home keeps this list so uninstall
+    can look in each of those folders, not only in the current one and the
+    install home (GAP-0874). The list only says where to look: every reader
+    still proves ownership of each record it finds. A list that is a link,
+    open to other accounts, oversized or malformed names nothing, and so does a
+    managed runtime.
+    """
+    path = _store_history_path()
+    try:
+        if _install_home_binding()[2]:
+            return ()  # a managed runtime keeps its own folder
+        info = os.lstat(path)
+        if not _account_private_regular_file(path, info):
+            return ()
+        document = json.loads(
+            read_regular_file_no_follow(path, max_bytes=_STORE_HISTORY_MAX_BYTES, expected_stat=info)
+        )
+    except (OSError, ValueError, NotImplementedError):
+        return ()
+    folders = document.get("folders") if isinstance(document, dict) else None
+    if not isinstance(folders, list):
+        return ()
+    found: dict[str, None] = {}
+    for folder in folders[:_STORE_HISTORY_MAX_FOLDERS]:
+        if isinstance(folder, str) and os.path.isabs(folder) and os.path.isdir(folder) and not os.path.islink(folder):
+            found[folder] = None
+    return tuple(found)
+
+
+def remember_previous_store(old_dir: str) -> list[str]:
+    """Add the folder a data_dir move leaves behind to the list in the install home; return warning notes.
+
+    The install home is always searched, so it is never listed. The newest
+    ``_STORE_HISTORY_MAX_FOLDERS`` folders are kept.
+    """
+    if _is_admin_process() or not old_dir or not os.path.isabs(old_dir):
+        return []
+    try:
+        home = os.fspath(default_data_path())
+        if _same_folder(old_dir, home) or not os.path.isdir(old_dir):
+            return []
+        from defenseclaw.file_permissions import atomic_write_private_bytes
+
+        # Folders that no longer exist are dropped; an unreadable list starts again.
+        kept = [folder for folder in previous_store_dirs() if not _same_folder(folder, old_dir)]
+        kept.append(old_dir)
+        body = json.dumps({"folders": kept[-_STORE_HISTORY_MAX_FOLDERS:]}, indent=2).encode() + b"\n"
+        atomic_write_private_bytes(_store_history_path(), body, protect_parent=False)
+    except (OSError, ValueError, NotImplementedError) as exc:
+        return [
+            f"warning: the old data_dir {old_dir} could not be added to the list uninstall searches ({exc}); "
+            "its setup records stay there until you remove them"
+        ]
+    return []
+
+
 def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
     """The PID-record home of a store the install-home config itself names.
 

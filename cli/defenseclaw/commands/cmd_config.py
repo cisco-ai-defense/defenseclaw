@@ -1268,6 +1268,7 @@ def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
         return []
     new_data_dir = str(cfg.data_dir or "")
     notes = _carry_connector_records(old_data_dir, new_data_dir)
+    notes.extend(config_module.remember_previous_store(old_data_dir))
     if not cfg.guardrail.secure_client_hook_fail_modes():
         notes.extend(_carry_hook_credentials(
             old_data_dir, new_data_dir,
