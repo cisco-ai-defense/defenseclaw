@@ -620,6 +620,26 @@ def _install_home_binding() -> tuple[str, str | None, bool]:
     return home, configured, managed or _is_managed_enterprise_mode(os.environ.get(DEPLOYMENT_MODE_ENV))
 
 
+def configured_store_dir() -> str:
+    """The data_dir the active config.yaml names when it is a folder other than the install home, else "".
+
+    ``defenseclaw config set data_dir`` moves the stores, hooks and connector
+    records (hook scripts, setup receipts, rollback markers) to that folder,
+    while config.yaml, gateway.pid and the Python environment stay in the
+    install home. A caller that reads or tears down connector records must
+    use this folder: the install home holds none of them, so the hook
+    commands it computes there are not the ones Setup wrote (GAP-0874). A
+    managed runtime keeps its own folder, so it returns "".
+    """
+    try:
+        home, configured, managed = _install_home_binding()
+    except (OSError, KeyError, NotImplementedError):
+        return ""
+    if managed or not configured or _same_folder(configured, home):
+        return ""
+    return configured
+
+
 def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
     """The PID-record home of a store the install-home config itself names.
 
