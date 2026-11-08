@@ -2099,8 +2099,9 @@ def _outage_open_note(app: AppContext, calls: str) -> str:
 
 
 _PER_USER_OUTAGE_RULE = (
-    "On a per-user install an explicit saved mode wins (OpenClaw under the strict policy stays closed); a "
-    "managed computer or Secure Client uses the administrator mode. When unset, the gateway-outage mode follows the "
+    "On a per-user install an explicit saved mode wins (except OpenClaw under the strict policy and "
+    "ZeptoClaw model requests, which stay closed); a managed computer or Secure Client uses the "
+    "administrator mode. When unset, the gateway-outage mode follows the "
     "policy tier: the default (balanced) and permissive rule packs let a call run with a warning while "
     "the gateway is not running, strict blocks it. "
     "Every other failure (an error or unusable gateway answer, a missing token, an install or upgrade) blocks."

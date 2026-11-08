@@ -3125,6 +3125,9 @@ class TestInitFailModeFlag(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--help"])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.assertIn("--fail-mode", result.output)
+        # A saved choice wins over the policy tier, except the two cases that stay closed.
+        text = " ".join(result.output.split())
+        self.assertIn("except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed", text)
 
     def test_fail_mode_closed_persists_to_config(self):
         result = self._invoke([

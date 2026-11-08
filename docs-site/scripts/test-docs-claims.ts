@@ -1163,12 +1163,33 @@ describe('1.0.4 operator routes and limits', () => {
 
   it('describes the per-user fail-mode setter the CLI accepts (GAP-1411, GAP-1601)', () => {
     const cmd = source('cli/defenseclaw/commands/cmd_guardrail.py');
-    assert.ok(cmd.includes('"On a per-user install an explicit saved mode wins (OpenClaw under the strict policy stays closed); a "'));
+    assert.ok(cmd.includes('"On a per-user install an explicit saved mode wins (except OpenClaw under the strict policy and "\n    "ZeptoClaw model requests, which stay closed); a managed computer or Secure Client uses the "'));
     const cli = page('reference/cli.mdx');
     assert.ok(!cli.includes('so a value is refused with exit 1'));
-    assert.ok(cli.includes('`open` or `closed` saves your choice, which wins over the policy tier (except OpenClaw under the strict policy, which stays closed despite a saved `open`)'));
+    assert.ok(cli.includes('`open` or `closed` saves your choice, which wins over the policy tier (except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed despite a saved `open`)'));
     const failModes = page('reference/fail-modes.mdx');
-    assert.ok(failModes.includes('wins over the policy tier on a per-user install, with one exception: OpenClaw under the strict policy stays closed even when `open` is saved'));
+    assert.ok(failModes.includes('wins over the policy tier on a per-user install, with two exceptions that stay closed even when `open` is saved: OpenClaw under the strict policy (its plugin tool inspection runs in-process) and ZeptoClaw model requests (a proxy connector with no hooks).'));
+    assert.ok(failModes.includes('an explicit saved mode wins (except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed);'));
+  });
+
+  it('qualifies every "a saved choice wins" claim in the first-run table, quickstart and init help (GAP-0884)', () => {
+    const exception = 'except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed';
+    const firstRun = page('get-started/first-run.mdx');
+    assert.ok(firstRun.includes('a saved choice wins over the policy, ' + exception + '. Omitted'));
+    assert.ok(firstRun.includes('(except OpenClaw under the strict policy and ZeptoClaw model requests, which stay closed despite a saved `open`)'));
+    assert.ok(!firstRun.includes('a saved choice wins over the policy. Omitted'));
+    const quickstart = page('get-started/quickstart.mdx');
+    assert.ok(quickstart.includes('Two cases stay closed even with a saved `open`: OpenClaw under the strict policy, and ZeptoClaw model requests'));
+    assert.ok(!quickstart.includes('OpenClaw is the one exception'));
+    const init = source('cli/defenseclaw/commands/cmd_init.py');
+    assert.ok(init.includes('"tier, except OpenClaw under the strict policy and ZeptoClaw model requests, "\n        "which stay closed. Omitted,'));
+    assert.ok(!init.includes('A saved choice wins over the policy "\n        "tier. Omitted'));
+    const quick = source('cli/defenseclaw/commands/cmd_quickstart.py');
+    assert.ok(quick.includes('"over the policy tier, except OpenClaw under the strict policy and ZeptoClaw model "\n        "requests, which stay closed. Omitted, nothing'));
+    assert.ok(!quick.includes('"over the policy tier. Omitted, nothing'));
+    // The ZeptoClaw limit the exception names is documented on the connector page.
+    assert.ok(page('connectors/zeptoclaw.mdx').includes('While the gateway is down, requests are blocked'));
+    assert.ok(page('reference/fail-modes.mdx').includes('ZeptoClaw model requests remain blocked.'));
   });
 
   it('pins the workspace route for older Kiro IDEs', () => {
