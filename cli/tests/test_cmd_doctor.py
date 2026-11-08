@@ -1164,6 +1164,25 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("/home/u/dotfiles is group-writable and pam_group is loaded", watcher["detail"])
         self.assertIn("chmod g-w /home/u/dotfiles", watcher["detail"])
 
+    def test_gap0905_doctor_names_both_folders_when_one_root_is_off_and_another_is_watched_closely(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {
+            "state": "degraded",
+            "details": {
+                "watch_roots_unavailable": 1,
+                "admission_scanning_off": ["claudecode"],
+                "admission_root_writable_folders": ["/home/u/shared-dotfiles"],
+                "admission_root_rescan_folders": ["/home/u/dotfiles"],
+            },
+        }
+        watcher = self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")
+        self.assertIn("/home/u/shared-dotfiles can be written by another account", watcher["detail"])
+        self.assertIn("chmod go-w /home/u/shared-dotfiles", watcher["detail"])
+        self.assertIn("/home/u/dotfiles is group-writable and pam_group is loaded", watcher["detail"])
+        self.assertIn("chmod g-w /home/u/dotfiles", watcher["detail"])
+        self.assertIn("the gateway log names each root", watcher["detail"])
+
     def test_gap0905_doctor_passes_a_running_watcher_without_the_warning(self):
         cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
         health = self._complete_sidecar_health()

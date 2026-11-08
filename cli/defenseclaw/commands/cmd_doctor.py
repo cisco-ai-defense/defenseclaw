@@ -5873,15 +5873,19 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
                     connectors = [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
                     severity = _watch_root_coverage_severity(cfg, connectors)
                     label = ", ".join(connectors) if connectors else "configured connectors"
-                    from defenseclaw.commands.cmd_status import _watch_root_fix_hint
+                    from defenseclaw.commands.cmd_status import _watch_root_fix_hint, _watch_root_rescan_hint
 
                     hint = _watch_root_fix_hint(details)
+                    # Another root can be admitted but watched closely at the
+                    # same time (GAP-0905): name it too.
+                    rescan = _watch_root_rescan_hint(details)
                     _emit(
                         severity,
                         f"  └─ {sub}",
                         f"admission scanning is off for {label}; "
                         f"{unavailable} root(s) unavailable; "
                         + (f"{hint}; " if hint else "")
+                        + (f"another root is on, watched closely: {rescan}; " if rescan else "")
                         + "the gateway log names each root",
                         r=r,
                     )

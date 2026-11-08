@@ -9,6 +9,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func stubRootRouteWarnings(t *testing.T, folders []string) {
 	t.Cleanup(func() { rootRouteWarnings = old })
 }
 
-func runWarnedWatcher(t *testing.T, folders []string) (*InstallWatcher, string, chan []RootWarning) {
+func newWarnedWatcher(t *testing.T, folders []string) (*InstallWatcher, string, chan []RootWarning) {
 	t.Helper()
 	cfg, store, logger, root := setupTestEnv(t)
 	cfg.Watch.RescanEnabled = false
@@ -32,11 +33,50 @@ func runWarnedWatcher(t *testing.T, folders []string) (*InstallWatcher, string, 
 	warnings := make(chan []RootWarning, 8)
 	w := New(cfg, []string{root}, nil, store, logger, nil, nil)
 	w.SetRootWarningHandler(func(current []RootWarning) { warnings <- current })
+	return w, root, warnings
+}
+
+func runWarnedWatcher(t *testing.T, folders []string) (*InstallWatcher, string, chan []RootWarning) {
+	t.Helper()
+	w, root, warnings := newWarnedWatcher(t, folders)
+	startWatcher(t, w)
+	return w, root, warnings
+}
+
+func startWatcher(t *testing.T, w *InstallWatcher) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
-	return w, root, warnings
+}
+
+// pathScanner records the paths it is asked to scan.
+type pathScanner struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (s *pathScanner) Name() string               { return "skill-scanner" }
+func (s *pathScanner) Version() string            { return "fake-1" }
+func (s *pathScanner) SupportedTargets() []string { return []string{"skill"} }
+
+func (s *pathScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	s.mu.Lock()
+	s.paths = append(s.paths, target)
+	s.mu.Unlock()
+	return &scanner.ScanResult{Scanner: "skill-scanner", Target: target, Timestamp: time.Now().UTC()}, nil
+}
+
+func (s *pathScanner) scanned(dir string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, path := range s.paths {
+		if filepath.Clean(path) == filepath.Clean(dir) {
+			return true
+		}
+	}
+	return false
 }
 
 func addSkill(t *testing.T, root, name string) {
@@ -52,9 +92,14 @@ func addSkill(t *testing.T, root, name string) {
 
 // GAP-0905: a root admitted through group-writable folders of a private group
 // while pam_group is loaded is published as a warning that names the folder,
-// and every change under it asks for a rescan.
+// and with periodic rescan off a change under it still runs a scan of the
+// root: a skill that admission did not see is scanned when another one changes.
 func TestRootThroughGroupWritableFoldersIsRescannedOnEveryChange(t *testing.T) {
-	w, root, warnings := runWarnedWatcher(t, []string{"/home/u/dotfiles"})
+	w, root, warnings := newWarnedWatcher(t, []string{"/home/u/dotfiles"})
+	addSkill(t, root, "before")
+	probe := &pathScanner{}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return probe }
+	startWatcher(t, w)
 	select {
 	case current := <-warnings:
 		if len(current) != 1 || current[0].Path != root || len(current[0].Folders) != 1 || current[0].Folders[0] != "/home/u/dotfiles" {
@@ -66,26 +111,31 @@ func TestRootThroughGroupWritableFoldersIsRescannedOnEveryChange(t *testing.T) {
 	if len(w.RootCoverageIssues()) != 0 {
 		t.Fatalf("a warned root is admitted, not unavailable: %+v", w.RootCoverageIssues())
 	}
-	for _, name := range []string{"one", "two"} {
-		addSkill(t, root, name)
+	time.Sleep(500 * time.Millisecond)
+	addSkill(t, root, "after")
+	deadline := time.After(10 * time.Second)
+	for !probe.scanned(filepath.Join(root, "before")) {
 		select {
-		case <-w.rescanNow:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("a change under the warned root (%s) asked for no rescan", name)
+		case <-deadline:
+			t.Fatal("a change under the warned root ran no scan of the root")
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }
 
 // A root with no group-writable folder on its route is watched as before: no
-// warning and no extra rescan.
+// warning and no extra rescan, with periodic rescan off.
 func TestRootWithoutGroupWritableFoldersAsksNoExtraRescan(t *testing.T) {
-	w, root, _ := runWarnedWatcher(t, nil)
+	w, root, _ := newWarnedWatcher(t, nil)
+	addSkill(t, root, "before")
+	probe := &pathScanner{}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return probe }
+	startWatcher(t, w)
 	time.Sleep(500 * time.Millisecond)
-	addSkill(t, root, "one")
-	select {
-	case <-w.rescanNow:
-		t.Fatal("a change under an ordinary root asked for a rescan")
-	case <-time.After(1500 * time.Millisecond):
+	addSkill(t, root, "after")
+	time.Sleep(1500 * time.Millisecond)
+	if probe.scanned(filepath.Join(root, "before")) {
+		t.Fatal("a change under an ordinary root rescanned a skill that did not change")
 	}
 	if len(w.RootWarnings()) != 0 {
 		t.Fatalf("root warnings = %+v, want none", w.RootWarnings())
