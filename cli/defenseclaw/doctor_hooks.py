@@ -3057,10 +3057,12 @@ def unix_hermes_hook_problem(config_path: str, script_path: str, *, check_approv
         for event, entries in hooks.items():
             if event in _HERMES_REQUIRED_HOOKS or not isinstance(entries, list):
                 continue
+            # Setup removes an extra event's entry by the same identity test, so a command it
+            # did not write (padded, quoted another way, with arguments) is the user's, as above.
             if any(
-                _handler_targets_defenseclaw(entry, "hermes")
-                # A command with a blank at either end is kept for the user, as above.
-                and (entry["command"] == entry["command"].strip())
+                isinstance(entry, dict)
+                and isinstance(entry.get("command"), str)
+                and hermes_command_written(entry["command"], current)
                 for entry in entries
             ):
                 raise _InspectionError("stale", f"unexpected Hermes event {event} contains a DefenseClaw handler")

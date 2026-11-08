@@ -113,3 +113,29 @@ def test_the_restart_step_of_a_hermes_setup_prints_the_kept_entry_notice(tmp_pat
 
     cmd_setup._restart_services(str(tmp_path), connector="hermes", notice_connectors=["hermes"])
     assert len(warned) == 1 and "kept hook entries" in warned[0] and "pre_tool_call" in warned[0], warned
+
+
+@pytest.mark.parametrize("event", ["pre_tool_call", "some_future_event"])
+def test_a_double_quoted_copy_of_the_command_is_kept_beside_the_setup_written_entry(tmp_path, event):
+    config, script, command = _registration(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"][event] = [{"command": chr(34) + command + chr(34), "timeout": 30}, *document["hooks"].get(event, [])]
+    for required in _HERMES_REQUIRED_HOOKS:
+        document["hooks"][required] = [
+            {**entry, "command": "\x27" + command + "\x27"} if entry["command"] == command else entry
+            for entry in document["hooks"][required]
+        ]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert unix_hermes_hook_problem(str(config), str(script), check_approvals=False) == ("", "")
+
+
+def test_an_extra_event_with_the_setup_written_single_quoted_command_is_still_reported(tmp_path):
+    config, script, command = _registration(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["some_future_event"] = [{"command": "\x27" + command + "\x27", "timeout": 30}]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    state, problem = unix_hermes_hook_problem(str(config), str(script), check_approvals=False)
+
+    assert state == "stale" and "some_future_event" in problem
