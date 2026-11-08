@@ -3546,6 +3546,7 @@ func writeWindowsEnterpriseStandaloneSummary(output io.Writer, result *enterpris
 	}
 	if result.Action == "status" || result.Action == "verify" {
 		writeWindowsEnterpriseEnrollmentAccounts(output, result.Enrollment.Accounts)
+		writeWindowsEnterpriseRemovedConnectors(output, result.Enrollment.RemovedConnectors)
 		writeWindowsEnterpriseEnrollmentExclusions(output, result.Enrollment)
 		if line := enterprisestatus.ConnectorsLine(result.Connectors); line != "" {
 			fmt.Fprintf(output, "  %s\n", line)
@@ -3986,6 +3987,9 @@ func readWindowsEnterpriseStandaloneEnrollmentAt(manifestPath, runtimeDir string
 			}
 		}
 		enrollment.Accounts = windowsEnterpriseEnrollmentAccounts(state.Results)
+	}
+	if removed, err := windowsEnterpriseRemovedConnectorsForStatus(); err == nil {
+		enrollment.RemovedConnectors = windowsEnterpriseRemovedConnectorAccounts(removed)
 	}
 	return enrollment, nil
 }

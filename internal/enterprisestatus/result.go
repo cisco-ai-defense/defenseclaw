@@ -132,6 +132,18 @@ type Enrollment struct {
 	// from one that is not enrolled yet (GAP-1243).
 	ExcludedUsers  []string `json:"excluded_users,omitempty"`
 	ExcludedGroups []string `json:"excluded_groups,omitempty"`
+	// RemovedConnectors names, per account, the connectors an administrator
+	// took off the roster that the account had been enrolled for (Windows
+	// standalone). Each is "not managed (removed from roster)": neither
+	// protected nor pending, and its leftover hook calls are allowed.
+	RemovedConnectors []RemovedConnectorAccount `json:"removed_connectors,omitempty"`
+}
+
+// RemovedConnectorAccount is one account and its removed connectors.
+type RemovedConnectorAccount struct {
+	Account    string            `json:"account"`
+	SID        string            `json:"sid,omitempty"`
+	Connectors map[string]string `json:"connectors"`
 }
 
 // EnrollmentAccount is one enrolled account and the state of each of its
