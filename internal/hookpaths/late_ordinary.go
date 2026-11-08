@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/json"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -173,8 +174,12 @@ type lateScan struct {
 	chain  []string // every folder the shell may have stood in so far
 	orSeen bool     // a "||" since the last ";": a later "&&" may run without the cd before it
 	home   string
-	seen   map[string]lateEntry
-	reach  lateReach // what is protected, found when a link or a hard link needs it
+	// indexless: the identities of the protected files are unknown (the home
+	// the scan was given is no folder), so a hard-linked regular file is
+	// never ordinary.
+	indexless bool
+	seen      map[string]lateEntry
+	reach     lateReach // what is protected, found when a link or a hard link needs it
 }
 
 // lateEntry is what the scan found at one path: whether the entry is
@@ -189,24 +194,54 @@ type lateEntry struct {
 const lateMaxCwds = 8
 
 func newLateScan(cwd, home string) (*lateScan, bool) {
-	if home == "" {
+	given := home != ""
+	if !given {
 		var err error
 		if home, err = os.UserHomeDir(); err != nil {
 			return nil, false
 		}
 	}
-	if !filepath.IsAbs(home) {
-		return nil, false
+	realHome, ok := lateUsableHome(home)
+	// A home that was given but is no folder (a relative path, a missing
+	// path, a regular file) holds no protected file to index. The scan then
+	// tells the account database home and, because the identities of the
+	// protected files of the home it was given are unknown, treats every
+	// hard-linked regular file as not ordinary: a protected hard link stays
+	// closed, and a call that names no hard link stays ordinary.
+	indexless := false
+	if !ok && given {
+		current, err := user.Current()
+		if err != nil {
+			return nil, false
+		}
+		realHome, ok = lateUsableHome(current.HomeDir)
+		indexless = true
 	}
-	realHome, err := pathEvalSymlinks(home)
-	if err != nil {
+	if !ok {
 		return nil, false
 	}
 	realCWD, err := pathEvalSymlinks(cwd)
 	if err != nil || lateNamesProtected(realCWD) || realCWD == string(filepath.Separator) {
 		return nil, false
 	}
-	return &lateScan{cwds: []string{realCWD}, chain: []string{realCWD}, home: realHome, seen: map[string]lateEntry{}}, true
+	return &lateScan{cwds: []string{realCWD}, chain: []string{realCWD}, home: realHome, indexless: indexless, seen: map[string]lateEntry{}}, true
+}
+
+// lateUsableHome resolves a home by file system rules (a parent step or a
+// trailing slash included) and reports it only when it is an absolute path
+// to a folder.
+func lateUsableHome(home string) (string, bool) {
+	if !filepath.IsAbs(home) {
+		return "", false
+	}
+	real, err := pathEvalSymlinks(home)
+	if err != nil {
+		return "", false
+	}
+	if info, err := pathStat(real); err != nil || !info.IsDir() {
+		return "", false
+	}
+	return real, true
 }
 
 // lateNamesProtected reports text that names, in any case, the SSH folder,
@@ -332,6 +367,9 @@ func (s *lateScan) lookup(path string) lateEntry {
 	}
 	hardLinked := info.Mode().IsRegular() && linkCount(found.real, info) > 1
 	found.ok = (!linked && !hardLinked) || !s.reachesProtected(found.real, info)
+	if hardLinked && s.indexless {
+		found.ok = false
+	}
 	return found
 }
 
