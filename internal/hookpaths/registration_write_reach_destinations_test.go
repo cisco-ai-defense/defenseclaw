@@ -61,7 +61,7 @@ func TestRegistrationWriteReachDestinationRoles(t *testing.T) {
 		{"loop reads hooks", "for f in " + bin + "/defenseclaw-hook-*; do cat \"$f\"; done", false},
 		{"loop copies hooks away", "for f in " + bin + "/defenseclaw-hook-*; do cp \"$f\" " + root + "/backup; done", false},
 	} {
-		if got := RegistrationWriteReach(tc.command, root, home, names); got != tc.want {
+		if got := len(RegistrationWriteReached(tc.command, root, home, names)) > 0; got != tc.want {
 			t.Errorf("%s: %q reached %v, want %v", tc.name, tc.command, got, tc.want)
 		}
 	}

@@ -58,7 +58,7 @@ func TestRegistrationWriteReachSpellings(t *testing.T) {
 		{"rsync -a " + root + "/src/ " + plugins + "/", false},
 		{"rsync -a --delete " + root + "/src/ " + root + "/dist/", false},
 	} {
-		if got := RegistrationWriteReach(tc.command, root, home, names); got != tc.want {
+		if got := len(RegistrationWriteReached(tc.command, root, home, names)) > 0; got != tc.want {
 			t.Errorf("%q: reached %v, want %v", tc.command, got, tc.want)
 		}
 	}

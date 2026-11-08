@@ -109,6 +109,9 @@ func agentHookConfigFoldCase() bool {
 type agentHookConfigGuard struct {
 	cwd, home, physicalHome string
 	files                   []gatewayconnector.AgentHookConfigFile
+	// placeCache holds the places of each spelling already resolved in this
+	// call: the owner checks walk the whole registration set per path.
+	placeCache map[string][]string
 }
 
 // shellMentionsRegistryPath is a cheap prefilter. Every component comes from
@@ -290,6 +293,18 @@ func agentHookConfigRegistrationPaths(g *agentHookConfigGuard) []string {
 // places are the absolute spellings of a target: as written (~ and the
 // working directory applied), and the file it reaches through links.
 func (g *agentHookConfigGuard) places(raw string) []string {
+	if cached, ok := g.placeCache[raw]; ok {
+		return cached
+	}
+	resolved := g.resolvePlaces(raw)
+	if g.placeCache == nil {
+		g.placeCache = make(map[string][]string)
+	}
+	g.placeCache[raw] = resolved
+	return resolved
+}
+
+func (g *agentHookConfigGuard) resolvePlaces(raw string) []string {
 	target := strings.TrimSpace(raw)
 	if target == "" || strings.ContainsRune(target, 0) {
 		return nil
@@ -1170,17 +1185,11 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 
 // agentHookConfigReachedPaths lists the registered paths a statement writes,
 // split into installed DefenseClaw artifacts (and the folders that hold them)
-// and the other registration documents. The whole set is read once; the
-// per-path reads that tell the two apart run only for a statement that
-// reaches it, whatever spelling (brace, glob, loop, find) names the path.
+// and the other registration documents. The set is narrowed by halves in one
+// reader, so only a statement that reaches it pays more than one read,
+// whatever spelling (brace, glob, loop, find) names the path.
 func agentHookConfigReachedPaths(part hookpaths.PlacedStatement, guard *agentHookConfigGuard, registered []string) (owned, other []string) {
-	if !hookpaths.RegistrationWriteReach(part.Command, part.Dir, guard.home, registered) {
-		return nil, nil
-	}
-	for _, path := range registered {
-		if !hookpaths.RegistrationWriteReach(part.Command, part.Dir, guard.home, []string{path}) {
-			continue
-		}
+	for _, path := range hookpaths.RegistrationWriteReached(part.Command, part.Dir, guard.home, registered) {
 		if guard.ownedFile(path) || guard.ownedFolder(path) {
 			owned = append(owned, path)
 		} else {
