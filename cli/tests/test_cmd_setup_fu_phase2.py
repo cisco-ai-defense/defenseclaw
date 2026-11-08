@@ -466,6 +466,74 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     selected.assert_called_once()
                     self.assertEqual(len(dotenv.read_bytes()), MAX_DOTENV_BYTES)
 
+    def test_interactive_secret_preflight_holds_dotenv_lock_through_publication(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        self._seed_map("opencode")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "action"
+        gc.judge.enabled = False
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        dotenv = Path(self.tmp_dir, ".env")
+        added_line = f"{env_name}={secret_value}\n".encode()
+        original = b"#" + b"x" * (MAX_DOTENV_BYTES - len(added_line) - 2) + b"\n"
+        atomic_write_private_bytes(str(dotenv), original)
+        original_preflight = cmd_setup._preflight_pending_guardrail_secret_size
+        writer_attempted = threading.Event()
+        writer_finished = threading.Event()
+        writer_errors: list[BaseException] = []
+
+        def competing_writer():
+            writer_attempted.set()
+            try:
+                # This update fits before the pending secret, but not after it.
+                cmd_setup._save_secret_to_dotenv("A", "b", self.tmp_dir)
+            except BaseException as error:
+                writer_errors.append(error)
+            finally:
+                writer_finished.set()
+
+        writer = threading.Thread(target=competing_writer, daemon=True)
+
+        def preflight_then_start_writer(*args, **kwargs):
+            original_preflight(*args, **kwargs)
+            writer.start()
+            self.assertTrue(writer_attempted.wait(5))
+            # With no held lock, the competing update completes before
+            # selection; with one lock, it waits for secret publication.
+            writer_finished.wait(2)
+
+        late = AssertionError("publication must precede setup and lifecycle")
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            _guardrail_judge_secret_wizard(Path(self.tmp_dir, "hook_contract_lock.json"), env_name, secret_value)
+            as selected,
+            patch.object(
+                cmd_setup,
+                "_preflight_pending_guardrail_secret_size",
+                side_effect=preflight_then_start_writer,
+            ),
+            patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+            patch.object(cmd_setup, "_check_guardrail_setup_connector_versions", return_value=True),
+            patch.object(cmd_setup, "execute_guardrail_setup", return_value=(True, [])),
+            patch.object(cmd_setup, "_restart_services", side_effect=late),
+        ):
+            os.environ.pop(env_name, None)
+            result = _invoke(["guardrail", "--connector", "opencode", "--no-restart"], self.app, catch=True)
+
+        writer.join(5)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        selected.assert_called_once()
+        self.assertTrue(writer_finished.is_set())
+        self.assertEqual(len(writer_errors), 1)
+        self.assertIsInstance(writer_errors[0], cmd_setup._DotenvSizeError)
+        self.assertEqual(len(dotenv.read_bytes()), MAX_DOTENV_BYTES)
+        self.assertIn(added_line, dotenv.read_bytes())
+        self.assertNotIn(b"A=b\n", dotenv.read_bytes())
+
     def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
         receipt = os.path.join(self.tmp_dir, "agent_selection.json")
         prior = b'{"prior":"receipt"}\n'
