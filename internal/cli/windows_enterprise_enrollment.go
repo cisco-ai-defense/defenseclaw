@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // windowsEnterpriseEnrollmentAccounts lists each enrolled account and the
@@ -112,6 +113,57 @@ func writeWindowsEnterpriseEnrollmentAccounts(output io.Writer, accounts []enter
 		if account.Reason != "" {
 			fmt.Fprintf(output, "    %s\n", account.Reason)
 		}
+	}
+}
+
+// windowsEnterpriseRemovedConnectorAccounts groups the record by account: the
+// connectors an administrator took off the roster that each account had been
+// enrolled for, each "not managed (removed from roster)". They are kept apart
+// from the enrolled accounts, so nothing that counts or lists enrolled
+// accounts takes a removed connector for one that is enrolled or pending.
+func windowsEnterpriseRemovedConnectorAccounts(removed []managed.RemovedConnector) []enterprisestatus.RemovedConnectorAccount {
+	var accounts []enterprisestatus.RemovedConnectorAccount
+	index := map[string]int{}
+	for _, entry := range removed {
+		sid := strings.TrimSpace(entry.SID)
+		key := strings.ToUpper(sid)
+		i, ok := index[key]
+		if !ok {
+			label := strings.TrimSpace(entry.User)
+			if label == "" {
+				label = strings.TrimSpace(entry.UserHome)
+			}
+			if label == "" {
+				label = sid
+			}
+			accounts = append(accounts, enterprisestatus.RemovedConnectorAccount{Account: label, SID: sid, Connectors: map[string]string{}})
+			i = len(accounts) - 1
+			index[key] = i
+		}
+		accounts[i].Connectors[strings.ToLower(strings.TrimSpace(entry.Connector))] = managed.NotManagedRemovedFromRoster
+	}
+	sort.Slice(accounts, func(a, b int) bool { return accounts[a].SID < accounts[b].SID })
+	return accounts
+}
+
+// writeWindowsEnterpriseRemovedConnectors prints one line per account with
+// the connectors removed from the roster.
+func writeWindowsEnterpriseRemovedConnectors(output io.Writer, accounts []enterprisestatus.RemovedConnectorAccount) {
+	for _, account := range accounts {
+		label := account.Account
+		if account.SID != "" && account.SID != label {
+			label += " (" + account.SID + ")"
+		}
+		names := make([]string, 0, len(account.Connectors))
+		for name := range account.Connectors {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		states := make([]string, 0, len(names))
+		for _, name := range names {
+			states = append(states, name+" "+account.Connectors[name])
+		}
+		fmt.Fprintf(output, "  Account %s: %s\n", label, strings.Join(states, ", "))
 	}
 }
 

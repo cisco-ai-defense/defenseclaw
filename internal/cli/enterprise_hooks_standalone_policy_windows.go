@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -566,8 +567,27 @@ func windowsStandaloneRevokedUserCleanupConnector(name string) bool {
 	return windowsStandalonePerUserCleanupConnector(name) || enterprisehooks.WindowsMachineScopeUserRuntimeConnector(name)
 }
 
-// enterpriseHookWindowsConnectorUserRuntimeRemover is replaceable in tests.
-var enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
+// enterpriseHookWindowsConnectorUserRuntimeRemover and
+// enterpriseHookWindowsRemovedConnectorRecorder are replaceable in tests.
+var (
+	enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
+	enterpriseHookWindowsRemovedConnectorRecorder    = recordWindowsStandaloneRemovedConnector
+)
+
+// recordWindowsStandaloneRemovedConnector writes the removed-connectors record
+// for a machine-scope connector whose per-user files the cleanup removed, when
+// the loaded config no longer publishes the connector: the administrator took
+// it off the roster. A connector the config still publishes was dropped for
+// this account alone (it is excluded, or the agent is gone), which is not a
+// roster removal and is not recorded.
+func recordWindowsStandaloneRemovedConnector(entry enterpriseHookUserCleanup) error {
+	if cfg == nil || enterprisepolicy.StandaloneConnectorPublished(cfg, entry.Connector) {
+		return nil
+	}
+	return recordEnterpriseHookRemovedConnector(cfg.DataDir, managed.RemovedConnector{
+		Connector: entry.Connector, SID: entry.SID, User: entry.User, UserHome: entry.UserHome,
+	}, time.Now())
+}
 
 // enterpriseHookStandalonePlatformRevokeUsers removes DefenseClaw's own hook
 // registrations and plugins (Amp, Antigravity, Copilot, Devin, Hermes,
@@ -579,6 +599,14 @@ var enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWin
 func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.Writer, manifest enterprisehooks.Manifest) error {
 	if cfg == nil || !cfg.StandaloneEnterprise() || !enterprisehooks.WindowsStandaloneProcess() {
 		return nil
+	}
+	// A connector back on the roster for an account, or an account that is
+	// gone, ends its removed-connectors record first.
+	if err := pruneEnterpriseHookRemovedConnectors(cfg.DataDir, manifest,
+		func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) },
+		func(sid string) bool { return enterpriseHookWindowsUserProfileRemoved(sid) },
+		time.Now()); err != nil {
+		fmt.Fprintf(stderr, "defenseclaw: enterprise removed connectors record: %v\n", err)
 	}
 	return reconcileEnterpriseHookUserCleanups(
 		ctx,
@@ -648,6 +676,9 @@ func attemptWindowsStandaloneUserCleanup(
 		// in; no session token is needed and none is waited for (GAP-0916).
 		if err := enterpriseHookWindowsConnectorUserRuntimeRemover(home, entry.SID, entry.DataDir, entry.Connector); err != nil {
 			return enterpriseHookUserCleanupFailed, err
+		}
+		if err := enterpriseHookWindowsRemovedConnectorRecorder(entry); err != nil {
+			return enterpriseHookUserCleanupFailed, fmt.Errorf("record the removed connector: %w", err)
 		}
 		return enterpriseHookUserCleanupDone, nil
 	}
