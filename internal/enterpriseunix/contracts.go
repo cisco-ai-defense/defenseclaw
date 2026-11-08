@@ -555,6 +555,78 @@ func (l *lifecycle) awaitInstallScan(ctx context.Context) bool {
 	}
 }
 
+// guardianCatchUpPending reports whether the guardian is still reconciling
+// what this change wrote: its credential attestation does not yet name the
+// current targets.yaml (the enumerator rewrites it after the config changes,
+// for example a connector roster change), or a per-user cleanup this change
+// started (recorded at or after since, with no failed attempt) is still on
+// the guardian ledger. A ledger that is not published, or an attestation that
+// is wrong in another way, is not waited for: describe reports it.
+func (l *lifecycle) guardianCatchUpPending(since time.Time) bool {
+	env := l.env
+	if data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile)), 4<<20); err == nil {
+		if problem, _ := env.attestationProblem(data); problem == guardianManifestNotReconciled {
+			return true
+		}
+	}
+	data, err := readBounded(env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianUserCleanupFile)), 4<<20)
+	if err != nil {
+		return false
+	}
+	var ledger struct {
+		Pending []struct {
+			RecordedAt string `json:"recorded_at"`
+			LastError  string `json:"last_error"`
+		} `json:"pending"`
+	}
+	if json.Unmarshal(data, &ledger) != nil {
+		return false
+	}
+	for _, entry := range ledger.Pending {
+		if recorded, err := time.Parse(time.RFC3339Nano, entry.RecordedAt); err == nil && !recorded.Before(since) && strings.TrimSpace(entry.LastError) == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// awaitGuardianCatchUp waits, until deadline (the end of the install scan
+// wait, so a change never waits longer than InstallScanTimeout for both), for
+// the running guardian to reconcile the targets.yaml this change produced and
+// to finish the per-user cleanups the change started. A roster change that
+// removes a connector ended with coverage_complete=false and
+// guardian_reconcile_pending / guardian_cleanup_pending because the result was
+// read seconds before the guardian finished (GAP-0842). A guardian that does
+// not finish in time leaves those warnings, which name the transient.
+func (l *lifecycle) awaitGuardianCatchUp(ctx context.Context, deadline, since time.Time) bool {
+	env := l.env
+	for _, unit := range env.Services.Units() {
+		if unit.Kind == "guardian" && !env.Services.Active(ctx, unit) {
+			return false
+		}
+	}
+	start := env.Now()
+	nextProgress := start
+	for {
+		if !l.guardianCatchUpPending(since) {
+			return true
+		}
+		now := env.Now()
+		if !now.Before(deadline) {
+			return false
+		}
+		if env.Progress != nil && !now.Before(nextProgress) {
+			env.Progress(fmt.Sprintf("waiting for the hook guardian to reconcile the new targets (%s)", now.Sub(start).Round(time.Second)))
+			nextProgress = now.Add(installScanProgressEvery)
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(env.PollInterval):
+		}
+	}
+}
+
 // describeUnprotectedAgents reports the agents the enumerator found
 // uncovered (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one

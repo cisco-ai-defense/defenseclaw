@@ -214,8 +214,9 @@ func sortEnterpriseHookUserCleanups(entries []enterpriseHookUserCleanup) {
 
 // runEnterpriseHookUserCleanups attempts every entry and returns the ones
 // still to clean. A failed attempt records its error; an entry that is only
-// waiting for its user to sign in is carried unchanged, so a waiting ledger
-// is not rewritten on every reconcile.
+// waiting for its user to sign in, or whose attempt was cut short by a
+// cancelled pass, is carried unchanged, so a waiting ledger is not rewritten
+// on every reconcile and an interrupted cleanup is not delayed.
 func runEnterpriseHookUserCleanups(
 	ctx context.Context,
 	entries []enterpriseHookUserCleanup,
@@ -232,6 +233,15 @@ func runEnterpriseHookUserCleanups(
 			continue
 		}
 		outcome, err := attempt(ctx, entry)
+		if outcome != enterpriseHookUserCleanupDone && ctx.Err() != nil {
+			// The pass was cancelled while the attempt ran (a newer pass
+			// superseded it, or the service is stopping). The attempt did not
+			// fail on its own: record no error, so the next pass retries at
+			// once instead of after the retry interval.
+			remaining = append(remaining, entry)
+			result.Pending = append(result.Pending, label)
+			continue
+		}
 		switch outcome {
 		case enterpriseHookUserCleanupDone:
 			result.Removed = append(result.Removed, label)
