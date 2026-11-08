@@ -139,6 +139,7 @@ from defenseclaw.doctor_hooks import (
     validate_windows_copilot_hook_registration,
     validate_windows_hook_registration,
 )
+from defenseclaw.doctor_recovery import REPAIR_IDENTITY_COMMAND
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 from defenseclaw.file_permissions import (
@@ -4758,9 +4759,10 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
             check_id="doctor.identity.device-key",
             reason_code=health.reason_code,
             remediation=(
-                "restore device.key from a trusted backup, or run: defenseclaw doctor --fix --fix-id "
-                "doctor.identity.device-key.initialize (it asks first, moves those files aside and "
-                "mints a new identity)"
+                f"restore device.key from a trusted backup, or run: {REPAIR_IDENTITY_COMMAND} "
+                "(it asks first, moves those files aside and mints a new identity; check that no init is "
+                "running), or defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize "
+                "(the same repair)"
             ),
         )
         return
@@ -16842,6 +16844,7 @@ def _fix_device_key_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
         apply_device_key_recovery,
         inspect_device_key,
         plan_missing_device_key,
+        set_aside_identity_leftovers,
     )
 
     # The declarative engine deliberately passes assume_yes=False for
@@ -16884,13 +16887,11 @@ def _fix_device_key_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
         default=False,
     ):
         return ("skip", "declined by user")
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    for path in leftovers:
-        # Kept, not deleted: a continuity-aware review can still use them.
-        try:
-            os.replace(path, f"{path}.orphaned-{stamp}")
-        except OSError as exc:
-            return ("fail", f"could not move {path} aside: {exc}")
+    try:
+        # Kept, not deleted (*.orphaned-*): a continuity-aware review can still use them.
+        set_aside_identity_leftovers(target, data_dir)
+    except OSError as exc:
+        return ("fail", f"could not move the provenance files aside: {exc}")
     plan = plan_missing_device_key(target, data_dir=data_dir)
     try:
         result = apply_device_key_recovery(plan, approved=True, unattended=False)

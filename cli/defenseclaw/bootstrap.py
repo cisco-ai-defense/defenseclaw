@@ -53,6 +53,7 @@ from defenseclaw.connector_paths import (
     opencode_custody_text,
     opencode_unsafe_plugin_paths,
 )
+from defenseclaw.doctor_recovery import REPAIR_IDENTITY_COMMAND
 from defenseclaw.gateway_path import path_gateway
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
@@ -644,7 +645,7 @@ def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> None:
     cfg.save()
 
 
-def bootstrap_env(cfg: Config, logger: Logger | None = None, *, fresh_home: bool = False) -> BootstrapReport:
+def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     """Initialize ``~/.defenseclaw/`` and related state.
 
     Safe to call repeatedly. Each step is idempotent:
@@ -657,10 +658,6 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None, *, fresh_home: bool
     Returns a :class:`BootstrapReport` describing what happened so the
     caller can render a user-facing summary. Never raises for
     recoverable failures — those are collected into ``report.errors``.
-
-    ``fresh_home`` is True when the run found the home new (no config.yaml
-    and a data folder no setup finished in); it lets the device identity step repair a half-created identity (see
-    ``_ensure_device_key``).
     """
     from defenseclaw.config import config_path
     from defenseclaw.db import Store
@@ -718,9 +715,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None, *, fresh_home: bool
 
     # --- gateway defaults (OpenClaw token detection) ---
     try:
-        report.openclaw_token_detected = _apply_gateway_defaults(
-            cfg, report.is_new_config, logger, report, fresh_home=fresh_home
-        )
+        report.openclaw_token_detected = _apply_gateway_defaults(cfg, report.is_new_config, logger, report)
     except Exception as exc:  # pragma: no cover — defensive
         report.errors.append(f"gateway defaults: {exc}")
 
@@ -882,88 +877,6 @@ def hold_init_lock() -> Iterator[InitLocks]:
         yield locks
 
 
-def home_found_without_config() -> bool:
-    """Whether no setup of the data home can have finished: no config.yaml where this run reads
-    its config and none in the default home.
-
-    DEFENSECLAW_CONFIG moves the active config path while the data folder keeps
-    its device identity, so an absent active config alone does not show that
-    the folder is new.  Call this before the run saves any config; the data
-    folder itself is judged by :func:`begin_data_folder_init`.
-    """
-
-    from defenseclaw import config as cfg_mod
-
-    return not any(
-        os.path.lexists(path)
-        for path in (cfg_mod.config_path(), os.path.join(cfg_mod.default_data_path(), "config.yaml"))
-    )
-
-
-# Every init records, in the data folder it initializes, the config path it ran with.
-_INIT_CONFIGS = "init.configs"
-_INIT_CONFIGS_MAX = 32
-# What a data folder holds before any init has done work in it: the init lock and the
-# files of a device identity (or what a creation cut short leaves of them).
-_UNTOUCHED_FOLDER_NAMES = frozenset({"init.lock", "device.key", "device.key.provenance", "device.provenance.secret"})
-
-
-def begin_data_folder_init(data_dir: str | os.PathLike[str]) -> bool:
-    """Judge whether the data folder is one no setup ever finished in, then record this run's config.
-
-    Absence of config.yaml at the two paths :func:`home_found_without_config`
-    checks does not make a folder new: a finished setup can keep its config at
-    an earlier override path while its device identity stays in this folder.
-    A folder is judged new only when either (a) it holds nothing but the init
-    lock and device-identity files, or (b) it carries the record that earlier
-    inits of this folder left (the config path each ran with) and none of those
-    configs exists any more.  A folder with other content and no record (made
-    by a build that left none, or whose record is gone) is never judged new, so
-    keyless identity files in it wait for the attended Doctor repair.  The
-    caller still requires the exact shape of an interrupted creation before it
-    sets anything aside.
-
-    Call once per run, after the folder is locked and before the run writes
-    anything else there.  Failing to write the record never fails the run: the
-    next run then finds no record and keeps any leftover protected.
-    """
-
-    from defenseclaw import config as cfg_mod
-    from defenseclaw.file_permissions import atomic_write_private_bytes
-
-    folder = os.fspath(data_dir)
-    record = os.path.join(folder, _INIT_CONFIGS)
-    entries: set[str] = set()
-    with contextlib.suppress(OSError):
-        entries = {os.path.normcase(name) for name in os.listdir(folder)}
-    recorded = _read_init_configs(record)
-    if recorded is None:
-        new_folder = entries <= _UNTOUCHED_FOLDER_NAMES
-    else:
-        new_folder = not any(os.path.lexists(path) for path in recorded)
-    active = os.path.abspath(os.fspath(cfg_mod.config_path()))
-    if active not in (recorded or []):
-        lines = [*(recorded or []), active][-_INIT_CONFIGS_MAX:]
-        with contextlib.suppress(OSError):
-            atomic_write_private_bytes(record, ("\n".join(lines) + "\n").encode("utf-8"))
-    return new_folder
-
-
-def _read_init_configs(record: str) -> list[str] | None:
-    """The config paths recorded in *record*; None when there is no usable record."""
-
-    try:
-        info = os.lstat(record)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024:
-            return None
-        with open(record, encoding="utf-8") as handle:
-            lines = [line.strip() for line in handle.read().splitlines()]
-    except (OSError, ValueError):
-        return None
-    paths = [line for line in lines if line]
-    return paths or None
-
-
 def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     """Run the first-run setup flow while holding the init lock of the data home."""
 
@@ -1011,7 +924,6 @@ def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRu
     # operator-controlled config path merely because its target is unavailable.
     was_config_absent = not os.path.lexists(cfg_mod.config_path())
     new_config = was_config_absent
-    fresh_home = home_found_without_config()
     if not new_config:
         try:
             cfg_mod.require_v8_config()
@@ -1344,8 +1256,6 @@ def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRu
             connector_mode_warnings=connector_mode_warnings,
         )
 
-    fresh_home = begin_data_folder_init(cfg.data_dir) and fresh_home
-
     try:
         cfg.save()
         setup.append(
@@ -1390,10 +1300,19 @@ def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRu
         # ordinary v8 setup mutations.
         logger = Logger.no_runtime() if new_config else Logger.from_config(cfg)
 
-        bootstrap = bootstrap_env(cfg, logger, fresh_home=fresh_home)
+        bootstrap = bootstrap_env(cfg, logger)
         if bootstrap.errors:
             setup.extend(
-                StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix --dry-run") for e in bootstrap.errors
+                StepResult(
+                    "Bootstrap",
+                    "fail",
+                    e,
+                    # A device key gone with its provenance files is never replaced by init itself.
+                    REPAIR_IDENTITY_COMMAND
+                    if "continuity-evidence-present" in e
+                    else "defenseclaw doctor --fix --dry-run",
+                )
+                for e in bootstrap.errors
             )
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
@@ -2990,8 +2909,6 @@ def _apply_gateway_defaults(
     is_new_config: bool,
     logger: Logger | None = None,
     report: BootstrapReport | None = None,
-    *,
-    fresh_home: bool = False,
 ) -> bool:
     """Sync gateway host/port/token from ``openclaw.json`` and dotenv.
 
@@ -3060,6 +2977,6 @@ def _apply_gateway_defaults(
 
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
-    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir, fresh_home=fresh_home)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
 
     return token_configured
