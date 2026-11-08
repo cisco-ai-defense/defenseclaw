@@ -441,3 +441,60 @@ def test_a_link_to_an_account_file_beside_the_backup_records_does_not_fail_the_u
     assert (first / "connector_backups" / "hermes" / "personal.json").is_symlink() and mine.is_file()
     assert not records["backup"].exists() and not records["token"].exists()
     assert records["lock"].is_file(), "the folder still holds the account file, so the shared records stay"
+
+
+def test_a_path_that_folds_to_the_root_through_a_link_is_not_a_real_chain(tmp_path):
+    root = tmp_path / "home"
+    (root / "a").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "deep").mkdir(parents=True)
+    (root / "link").symlink_to(elsewhere / "deep", target_is_directory=True)
+
+    assert not cmd_uninstall._real_dir_chain(str(root), str(root / "link" / ".."))
+    assert not cmd_uninstall._real_dir_chain(str(root), str(root / "a" / "link" / ".." / ".."))
+    assert cmd_uninstall._real_dir_chain(str(root), str(root / "a" / ".."))
+    assert cmd_uninstall._real_dir_chain(str(root), str(root))
+
+
+def _probe_record_for(home, recorded_path):
+    """The record agent discovery writes for a probe-created entry, read at its recorded spelling."""
+    from defenseclaw.inventory import agent_discovery as ad
+
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir(exist_ok=True)
+    record = data_dir / ad.PROBE_STATE_RECORD
+    record.write_text(json.dumps({"paths": {recorded_path: ad.probe_state_fingerprint(recorded_path)}, "dirs": []}))
+    return data_dir
+
+
+def test_a_probe_entry_recorded_through_a_link_before_dotdot_is_not_removed_after_the_link_moves(tmp_path, monkeypatch):
+    home = (tmp_path / "home").resolve()
+    (home / "stage").mkdir(parents=True)
+    victim = _write(home / "victim.txt", "probe made this\n")
+    (home / "link").symlink_to(home / "stage", target_is_directory=True)
+    recorded = str(home / "link" / ".." / "victim.txt")
+    data_dir = _probe_record_for(home, recorded)
+    outside = tmp_path / "outside"
+    (outside / "deep").mkdir(parents=True)
+    unrelated = _write(outside / "victim.txt", "probe made this\n")
+    os.utime(unrelated, ns=(victim.stat().st_atime_ns, victim.stat().st_mtime_ns))
+    (home / "link").unlink()
+    (home / "link").symlink_to(outside / "deep", target_is_directory=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    cmd_uninstall._remove_probe_created_state(str(data_dir))
+
+    assert unrelated.is_file(), "a file outside the home folder was removed"
+
+
+def test_a_probe_entry_recorded_through_a_real_folder_before_dotdot_is_removed(tmp_path, monkeypatch):
+    home = (tmp_path / "home").resolve()
+    (home / "stage").mkdir(parents=True)
+    victim = _write(home / "victim.txt", "probe made this\n")
+    recorded = str(home / "stage" / ".." / "victim.txt")
+    data_dir = _probe_record_for(home, recorded)
+    monkeypatch.setenv("HOME", str(home))
+
+    cmd_uninstall._remove_probe_created_state(str(data_dir))
+
+    assert not victim.exists()
