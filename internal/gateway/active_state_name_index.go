@@ -201,6 +201,21 @@ func clientResolvedPathTargets(targets map[string]string) map[string]string {
 		}
 		paths[spelling] = physical
 	}
+	// A link into a directory the user cannot open has no physical answer;
+	// the client lists the file its link text leads to instead
+	// (hookpaths.LinkTextFactPrefix), which is judged by its name.
+	for key, text := range targets {
+		spelling, ok := strings.CutPrefix(key, hookpaths.LinkTextFactPrefix)
+		if !ok || !strings.HasPrefix(spelling, "/") || !strings.HasPrefix(text, "/") {
+			continue
+		}
+		if _, answered := paths[spelling]; !answered {
+			if paths == nil {
+				paths = map[string]string{}
+			}
+			paths[spelling] = text
+		}
+	}
 	return paths
 }
 
