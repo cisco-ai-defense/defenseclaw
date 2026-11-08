@@ -124,6 +124,14 @@ const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 // operand its own facts place as such a move destination.
 const ReplacedLinkFactPrefix = "\x00replaced-link:"
 
+// LinkTextFactPrefix keys a write operand whose link walk the user could not
+// finish because a directory on the way is closed to them (mode 0750 root:
+// /etc/sudoers.d): the value is the file the link text leads to, read from
+// the links the user can read, up to the closed directory. The answer of the
+// operand itself stays empty (unresolved); a gateway uses this one only to
+// judge the path by its name, as it judges the same name written directly.
+const LinkTextFactPrefix = "\x00link-text:"
+
 // InPlaceEntryFactPrefix keys a sed -i or perl -i operand whose directory
 // entry lies in the DefenseClaw state tree once its directory is followed
 // through links (stateEntry); the value is that entry. The editor replaces
@@ -824,6 +832,67 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 	writeTargetWalks.Add(1)
 	resolved, _, _, ok := walkWritePath("", path, linkDepth, false, false)
 	return resolved, ok
+}
+
+// linkTextWritePath follows the links of a write operand that the user can
+// read, as far as the user can see. A directory closed to the user (stat
+// fails with a permission error) ends the walk, and the rest of the name is
+// taken as written: the answer is the file the link text leads to. It is used
+// only when the full walk (resolveWritePath) failed, so an operand the user
+// can resolve keeps the physical answer. ok is false for a link loop, a
+// dot-dot after a component whose type is unknown, a Windows host, or any
+// failure other than a closed or missing directory.
+func linkTextWritePath(path string) (string, bool) {
+	if runtime.GOOS == "windows" {
+		return "", false
+	}
+	return linkTextWalk("", path, 0)
+}
+
+func linkTextWalk(base, path string, linkDepth int) (string, bool) {
+	if linkDepth > maxWriteTargetLinkDepth {
+		return "", false
+	}
+	current := base
+	if filepath.IsAbs(path) {
+		current = string(filepath.Separator)
+	} else if !filepath.IsAbs(base) {
+		return "", false
+	}
+	parts := strings.Split(path, "/")
+	for index, part := range parts {
+		switch part {
+		case "", ".":
+		case "..":
+			current = filepath.Dir(current)
+		default:
+			candidate := filepath.Join(current, part)
+			info, err := pathLstat(candidate)
+			switch {
+			case err == nil && info.Mode()&os.ModeSymlink != 0:
+				link, err := pathReadlink(candidate)
+				if err != nil || ProcCWDWriteOperand(candidate) {
+					return "", false
+				}
+				next, ok := linkTextWalk(current, link, linkDepth+1)
+				if !ok {
+					return "", false
+				}
+				current = next
+			case err == nil:
+				current = candidate
+			case os.IsNotExist(err) || os.IsPermission(err):
+				rest := parts[index+1:]
+				if slices.Contains(rest, "..") {
+					return "", false
+				}
+				return filepath.Join(append([]string{candidate}, rest...)...), true
+			default:
+				return "", false
+			}
+		}
+	}
+	return filepath.Clean(current), true
 }
 
 // windowsMountPointLink reports a Windows directory junction (mount point).
@@ -1925,6 +1994,12 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				resolved = state
 			}
 		}
+		linkText := ""
+		if !ok && aliasKnown && !entryOnly {
+			if text, reached := linkTextWritePath(resolutionPath); reached && text != filepath.Clean(path) {
+				linkText = text
+			}
+		}
 		if !ok {
 			resolved = ""
 		}
@@ -1935,6 +2010,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 		size += entry
 		targets[path] = resolved
+		if linkText != "" {
+			key := LinkTextFactPrefix + path
+			if cost := len(jsonString(key)) + 1 + len(jsonString(linkText)) + 1; size+cost <= maxEncodedTargets {
+				targets[key] = linkText
+				size += cost
+			}
+		}
 		if entryOnly {
 			key := ReplacedLinkFactPrefix + path
 			if cost := len(jsonString(key)) + 1 + len(jsonString("1")) + 1; size+cost <= maxEncodedTargets {
@@ -2710,6 +2792,10 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, InPlaceEntryFactPrefix) && (!filepath.IsAbs(value) ||
 			!filepath.IsAbs(strings.TrimPrefix(key, InPlaceEntryFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, LinkTextFactPrefix) && (!filepath.IsAbs(value) ||
+			!filepath.IsAbs(strings.TrimPrefix(key, LinkTextFactPrefix))) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, ReplacedLinkFactPrefix) && (value != "1" ||

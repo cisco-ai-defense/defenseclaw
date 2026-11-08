@@ -53,6 +53,16 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 			physical, _ = request.targetMemo.ResolveWriteTarget(spelling)
 		}
 		if !filepath.IsAbs(physical) {
+			// The user could not open a directory on the way of the link:
+			// the file its link text leads to is judged by name.
+			for _, key := range []string{spelling, candidate.Resolved, candidate.Normalized, candidate.Value} {
+				if text := request.ResolvedWriteTargets[hookpaths.LinkTextFactPrefix+key]; filepath.IsAbs(text) {
+					physical = text
+					break
+				}
+			}
+		}
+		if !filepath.IsAbs(physical) {
 			physical = spelling
 		}
 		if filepath.Clean(physical) == filepath.Clean(spelling) && !placed {
