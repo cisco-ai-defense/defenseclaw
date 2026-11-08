@@ -1314,6 +1314,131 @@ def _remove_acp_editor_entries_in(data_dir: str, entries: tuple[tuple[str, str, 
         cmd_acp._write_entry_records(data_dir, remaining)
 
 
+# The connectors whose setup leaves a scoped hook credential and a backup of the
+# agent settings in the folder it ran in, and `config set data_dir` copies both
+# into the new folder and leaves the originals. OpenClaw keeps its own backup
+# index and pristine copies (read per folder above), and a removed connector's
+# backups go with the removed-connector listing.
+_MOVED_RECORD_CONNECTORS = (
+    "amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode",
+)
+# The hook script a Unix setup generates for a connector, and the other
+# per-connector record it writes beside the hooks.
+_CONNECTOR_HOOK_SCRIPTS = {
+    "claudecode": "claude-code-hook.sh",
+    "codex": "codex-hook.sh",
+    "devin": "devin-hook.sh",
+    "hermes": "hermes-hook.sh",
+}
+_CONNECTOR_SETUP_RECORDS = {"hermes": ("hermes-home-setup.json",)}
+_HOOK_SCRIPT_MARKER = b"# defenseclaw-managed-hook v"
+# Records of the folder as a whole: its hook contract lock and the records of the
+# config and install home the hooks run under. They go once no connector's
+# credential, backup or script is left in the folder.
+_FOLDER_RECORDS = (
+    "hook_contract_lock.json",
+    os.path.join("hooks", ".config-record"),
+    os.path.join("hooks", ".install-home-record"),
+)
+
+
+def _remove_earlier_folder_connector_records(plan: UninstallPlan) -> None:
+    """Remove the connector records `config set data_dir` left in the folders it moved away from.
+
+    A move copies the scoped hook credentials, the hook contract lock and the
+    connector backups to the new folder and leaves the originals, and the
+    install home keeps the records Setup wrote before the first move. Teardown
+    reads and removes the folder config.yaml names, so those copies stayed
+    after a teardown that reported itself verified: a credential in a folder no
+    install uses (GAP-0915). Only what DefenseClaw wrote, by name, as a regular
+    file this account owns, in a real folder, for a connector this uninstall
+    tore down; the folder, the config, the audit store and every other file stay.
+    """
+    names = tuple(name for name in plan.connectors if name in _MOVED_RECORD_CONNECTORS)
+    if not names:
+        return
+    for folder in plan.record_dirs:
+        if config_module._same_folder(folder, plan.records_dir):
+            continue
+        removed = _remove_connector_records_in(folder, names)
+        if removed:
+            ux.ok(f"removed {removed} connector record(s) the earlier data folder {folder} still held")
+
+
+def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> int:
+    removed = 0
+    hooks = os.path.join(folder, "hooks")
+    backups = os.path.join(folder, "connector_backups")
+
+    def drop(path: str) -> None:
+        nonlocal removed
+        try:
+            info = os.lstat(path)
+            if not stat.S_ISREG(info.st_mode) or _is_reparse_path(path):
+                return
+            if os.name != "nt" and info.st_uid != os.geteuid():
+                return
+            os.unlink(path)
+        except OSError:
+            return
+        removed += 1
+
+    def real_dir(path: str) -> bool:
+        return os.path.isdir(path) and _real_dir_chain(folder, path)
+
+    for name in names:
+        if real_dir(hooks):
+            drop(os.path.join(hooks, f".hook-{name}.token"))
+            script = _CONNECTOR_HOOK_SCRIPTS.get(name)
+            if script and _is_generated_hook_script(os.path.join(hooks, script)):
+                drop(os.path.join(hooks, script))
+        for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
+            drop(os.path.join(folder, record))
+        backup = os.path.join(backups, name)
+        if real_dir(backup):
+            try:
+                entries = sorted(os.listdir(backup))
+            except OSError:
+                entries = []
+            for entry in entries:
+                # What a setup stores: the backup record and the last known good copy.
+                if entry.endswith((".json", ".last-good")):
+                    drop(os.path.join(backup, entry))
+            with contextlib.suppress(OSError):
+                os.rmdir(backup)
+    if _connector_state_remains(folder):
+        return removed
+    for record in _FOLDER_RECORDS:
+        drop(os.path.join(folder, record))
+    for path in (hooks, backups):
+        if real_dir(path):
+            with contextlib.suppress(OSError):
+                os.rmdir(path)
+    return removed
+
+
+def _is_generated_hook_script(path: str) -> bool:
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISREG(info.st_mode) or _is_reparse_path(path):
+            return False
+        with open(path, "rb") as stream:
+            return _HOOK_SCRIPT_MARKER in stream.read(512)
+    except OSError:
+        return False
+
+
+def _connector_state_remains(folder: str) -> bool:
+    """Whether the folder still holds a credential, backup or hook script of a connector."""
+    try:
+        for entry in os.listdir(os.path.join(folder, "hooks")):
+            if (entry.startswith(".hook-") and entry.endswith(".token")) or entry.endswith("-hook.sh"):
+                return True
+        return bool(os.listdir(os.path.join(folder, "connector_backups")))
+    except OSError:
+        return False
+
+
 def _quarantined_copies(data_dir: str) -> tuple[str, ...]:
     """The quarantined skill and plugin copies under data_dir/quarantine."""
     root = os.path.join(data_dir, "quarantine")
@@ -2721,6 +2846,11 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             f"  • {ux.bold('earlier data_dir:')} {folder}: the setup records left there are read and removed; "
             "this uninstall does not remove that folder"
         )
+    if plan.store_dir and plan.connectors and not plan.remove_data_dir:
+        ux.echo(
+            f"  • {ux.bold('install home records:')} {plan.data_dir}: the hook credential, hook contract lock and "
+            "connector backups copied from there to the data_dir are removed; the config and the rest stay"
+        )
     if plan.remove_data_dir and plan.data_dir:
         from defenseclaw.removed_connectors import backup_dirs, kept_backups_root
 
@@ -2851,6 +2981,9 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     if plan.acp_entries:
         # Before data removal: the records that prove the entries are there.
         run_phase("ACP editor entries", lambda: _remove_acp_editor_entries(plan))
+    if plan.connectors and len(plan.record_dirs) > 1:
+        # After the teardown: no agent registration names these copies any more.
+        _remove_earlier_folder_connector_records(plan)
     # until 1.1: read what a removed connector left before its backups move:
     # their records name the agent configs outside the data folder.
     from defenseclaw.removed_connectors import backup_dirs, leftovers
