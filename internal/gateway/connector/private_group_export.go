@@ -22,12 +22,14 @@ func OwnerPrivateGroup(path string, info os.FileInfo) bool {
 	return ownerPrivateGroupStrictAfterACL(path, info)
 }
 
-// OwnerPrivateGroupCached is OwnerPrivateGroup for a check that runs on every
-// watcher event (GAP-0905). The local files and the ACL are judged on each
-// call; the name service answer (getent, every nsswitch source) is remembered
-// per account for a minute, so a member only a directory service adds still
-// refuses, and the check starts at most two processes a minute. False off
-// Linux, and for anything unreadable, timed out or ambiguous.
-func OwnerPrivateGroupCached(path string, info os.FileInfo) bool {
-	return ownerPrivateGroupCached(path, info)
+// OwnerPrivateGroupLocalSources is OwnerPrivateGroup for a check that runs on
+// every watcher event (GAP-0905). It starts no process and remembers nothing:
+// the account files, the ACL and the nsswitch sources are read on each call.
+// True only when the group is the private group of its owner and the host takes
+// its accounts and groups from local files alone, because the name service
+// cannot list every account that has the group as its primary group. A host
+// with a directory service refuses group write on the route. False off Linux,
+// and for anything unreadable or ambiguous.
+func OwnerPrivateGroupLocalSources(path string, info os.FileInfo) bool {
+	return ownerPrivateGroupLocalSources(path, info)
 }

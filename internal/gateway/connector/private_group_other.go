@@ -14,5 +14,5 @@ func ownerPrivateGroup(string, os.FileInfo) bool { return false }
 // Group write on non-Linux Unix remains untrusted for the managed setter too.
 func ownerPrivateGroupStrictAfterACL(string, os.FileInfo) bool { return false }
 
-// The cached proof is false off Linux as well.
-func ownerPrivateGroupCached(string, os.FileInfo) bool { return false }
+// The local-sources proof is false off Linux as well.
+func ownerPrivateGroupLocalSources(string, os.FileInfo) bool { return false }

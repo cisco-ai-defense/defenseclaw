@@ -13,9 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -97,52 +97,111 @@ func privateGroupNameServiceAgrees(name string, stat *syscall.Stat_t) bool {
 	return ok && len(account) >= 4 && account[0] == name && account[2] == uid && account[3] == gid
 }
 
-// privateGroupNameServiceTTL is how long ownerPrivateGroupCached remembers the
-// name service answer for an account. An answer of any kind (also a refusal
-// after a failed or timed out getent) is kept, so a check that runs on every
-// watcher event starts at most two processes a minute (GAP-0905).
-const privateGroupNameServiceTTL = time.Minute
-
+// The files that say where this host gets its accounts and groups from
+// (tests point them elsewhere).
 var (
-	privateGroupNow   = time.Now
-	privateGroupCache = struct {
-		sync.Mutex
-		answers map[[3]string]privateGroupAnswer
-	}{answers: map[[3]string]privateGroupAnswer{}}
+	privateGroupNsswitchFile = "/etc/nsswitch.conf"
+	privateGroupSSSDDir      = "/etc/sssd"
+	privateGroupUserdbDirs   = []string{"/etc/userdb", "/run/userdb", "/var/lib/userdb", "/usr/lib/userdb", "/var/lib/systemd/home"}
 )
 
-type privateGroupAnswer struct {
-	agrees  bool
-	expires time.Time
+// ownerPrivateGroupLocalSources is the proof for a check that runs on every
+// watcher event (GAP-0905). A private group lets nobody else in only when no
+// other account can have it as its primary group, and the name service cannot
+// be asked that: getent lists a directory service accounts only when the
+// service enumerates, and an account that is not a listed member still writes
+// through its primary gid. So the folder is private only when the local files
+// are the whole answer: ownerPrivateGroup holds, and nsswitch.conf names no
+// source for accounts or groups but the local files (privateGroupSourcesAreLocal).
+// Nothing is remembered between calls, so a source added later refuses on the
+// next call. False off Linux, and for anything unreadable or ambiguous.
+func ownerPrivateGroupLocalSources(path string, info os.FileInfo) bool {
+	return ownerPrivateGroup(path, info) && privateGroupSourcesAreLocal()
 }
 
-// ownerPrivateGroupCached is the strict proof for a check that runs often: the
-// local files and the ACL are judged on every call, the name service half once
-// per account and privateGroupNameServiceTTL. A member a directory service
-// adds still refuses; where getent is missing or fails, the folder is not
-// private.
-func ownerPrivateGroupCached(path string, info os.FileInfo) bool {
-	name, ok := ownerPrivateGroupName(path, info, false)
-	if !ok {
+// privateGroupSourcesAreLocal reports whether /etc/passwd and /etc/group are
+// everything the passwd and group databases are made of: each is listed once in
+// nsswitch.conf with sources that serve only this host. sss counts only where
+// no sssd configuration is readable (it has no domain then). systemd counts only
+// where no userdb or homed record files exist. Any other source (ldap, nis,
+// winbind, extrausers, db, ...), a missing line or an unreadable file is not
+// local.
+func privateGroupSourcesAreLocal() bool {
+	data, err := os.ReadFile(privateGroupNsswitchFile)
+	if err != nil {
 		return false
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return false
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(data), "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		database, sources, found := strings.Cut(line, ":")
+		database = strings.TrimSpace(database)
+		if !found || (database != "passwd" && database != "group") {
+			continue
+		}
+		if seen[database] {
+			return false
+		}
+		seen[database] = true
+		listed := 0
+		for _, source := range strings.Fields(sources) {
+			if strings.HasPrefix(source, "[") && strings.HasSuffix(source, "]") {
+				continue
+			}
+			if !privateGroupSourceIsLocal(source) {
+				return false
+			}
+			listed++
+		}
+		if listed == 0 {
+			return false
+		}
 	}
-	key := [3]string{name, strconv.FormatUint(uint64(stat.Uid), 10), strconv.FormatUint(uint64(stat.Gid), 10)}
-	now := privateGroupNow()
-	privateGroupCache.Lock()
-	answer, found := privateGroupCache.answers[key]
-	privateGroupCache.Unlock()
-	if found && now.Before(answer.expires) {
-		return answer.agrees
+	return seen["passwd"] && seen["group"]
+}
+
+func privateGroupSourceIsLocal(source string) bool {
+	switch source {
+	case "files", "compat":
+		return true
+	case "sss":
+		return !privateGroupDirHasEntry(privateGroupSSSDDir, func(name string) bool {
+			return name == "sssd.conf"
+		}) && !privateGroupDirHasEntry(filepath.Join(privateGroupSSSDDir, "conf.d"), func(name string) bool {
+			return strings.HasSuffix(name, ".conf")
+		})
+	case "systemd":
+		for _, dir := range privateGroupUserdbDirs {
+			if privateGroupDirHasEntry(dir, func(name string) bool {
+				for _, suffix := range []string{".user", ".group", ".membership", ".identity"} {
+					if strings.HasSuffix(name, suffix) {
+						return true
+					}
+				}
+				return false
+			}) {
+				return false
+			}
+		}
+		return true
 	}
-	agrees := privateGroupNameServiceAgrees(name, stat)
-	privateGroupCache.Lock()
-	privateGroupCache.answers[key] = privateGroupAnswer{agrees: agrees, expires: privateGroupNow().Add(privateGroupNameServiceTTL)}
-	privateGroupCache.Unlock()
-	return agrees
+	return false
+}
+
+// privateGroupDirHasEntry reports whether dir holds an entry the match accepts.
+// A directory that is not there holds none; one that cannot be read counts as
+// holding one, so the answer stays on the refusing side.
+func privateGroupDirHasEntry(dir string, match func(name string) bool) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return !os.IsNotExist(err)
+	}
+	for _, entry := range entries {
+		if match(entry.Name()) {
+			return true
+		}
+	}
+	return false
 }
 
 // privateGroupEntry returns the colon fields of the one record getent finds.
