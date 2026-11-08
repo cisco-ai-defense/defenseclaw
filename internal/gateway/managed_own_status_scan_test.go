@@ -128,7 +128,7 @@ func TestOwnStatusWithoutTheGatewayCopyIsNotProtected(t *testing.T) {
 	api := ownStatusUnprotectedFixture(t, nil, nil)
 	ownStatusUnprotectedAgents = readManagedUnprotectedAgents
 	row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode")
-	state, _ := row["state"].(string)
+	state := ownRowText(row)
 	if row["protected"] != false || strings.HasPrefix(state, "protected") {
 		t.Fatalf("OpenCode row without a gateway copy = %#v, want not protected", row)
 	}

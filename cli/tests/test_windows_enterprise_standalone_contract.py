@@ -755,11 +755,13 @@ def test_restart_manager_is_never_asked_about_a_file_the_account_cannot_open() -
     # The probe's answer is classified in one place: gone (2, 3) and deletable
     # (0) are no holder, a sharing violation (32) is one, anything else throws
     # and so fails closed (behaviour in the smoke's classification rows).
-    classify = native.index("public static bool DeleteProbeFindsHolder(int answer, string path)")
+    classify = native.index("public static bool DeleteProbeFindsHolder(int answer, string path, string privilegeNote)")
     classified = native[classify : native.index("private static FileHolder[] QueryRestartManager", classify)]
     assert "answer == ERROR_FILE_NOT_FOUND" in classified and "answer == ERROR_PATH_NOT_FOUND" in classified
     assert "throw new Win32Exception(" in classified and "this account cannot delete" in classified
-    assert "DeleteProbeFindsHolder(GetDirectoryOpenError(path, DELETE), path)" in native[delete - 40 : query]
+    # The probe's open now runs inside the call-scoped privilege block (GAP-0890).
+    assert "answer = GetDirectoryOpenError(path, DELETE);" in native[first:query]
+    assert "DeleteProbeFindsHolder(answer, path, missing)" in native[delete:query]
     # An unnamed holder is told how to be found, and the hook probe never
     # prints it as process id 0.
     assert "Associated Handles" in module and "$script:UnnamedFileHolderHint" in _function_body(
@@ -779,6 +781,63 @@ def test_restart_manager_is_never_asked_about_a_file_the_account_cannot_open() -
     assert holders.index("Test-DefenseClawUnnamedFileHolder") < holders.index("$Excluded.Contains")
     install = _function_body(module, "Get-DefenseClawInstallRootHolders")
     assert install.count("foreach ($id in @($ExcludedProcessIds))") == 0
+
+
+def test_the_unreadable_file_probe_and_the_state_deletion_enable_privileges_for_one_call_only() -> None:
+    """GAP-0890: an elevated Administrator and a CI runner hold backup and
+    restore disabled, so the backup-semantics DELETE probe and the plain
+    deletion of a SYSTEM-only file were denied. Both now run under the
+    existing thread-bound privilege scope (a duplicate of the token that the
+    using block drops, the process token never changed), take-ownership is not
+    enabled for the probe, and the standalone-only deletion fallback acts only
+    after access denied, on the exact StateRoot or InstallRoot, and logs each
+    deleted path (behaviour in enterprise-standalone-state-files-in-use-smoke.ps1
+    and the native cells)."""
+
+    module = _text(MODULE)
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    probe = native.index("DeleteProbeFindsHolder(answer, path, missing)")
+    scope = native.rindex("using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true, true))", 0, probe)
+    assert "GetDirectoryOpenError(path, DELETE)" in native[scope:probe]
+    assert "MissingPrivilegeSuffix(scope)" in native[scope:probe]
+    # No process-wide enable: the scope works on SetThreadToken with a duplicate.
+    scope_class = native[native.index("class UninstallFilePrivilegeScope") : native.index("[DllImport", native.index("class UninstallFilePrivilegeScope"))]
+    assert "SetThreadToken(IntPtr.Zero, privilegedToken)" in scope_class and "privilegedToken" in scope_class
+    assert "if (!skipTakeOwnership)" in scope_class
+    # A failed revert of the thread token stops the process with a named reason
+    # (review S1); the privileged branch of the native query is standalone only
+    # (review S4); the deletion fallback enables backup and restore only (S3).
+    assert "FailClosedAfterRevertFailure(restoreError)" in scope_class
+    assert "Environment.FailFast(message)" in native and "privilege_revert_failed" in native
+    gate_off = native.index("if (!StandaloneHolderProbe)")
+    assert native.index("return QueryRestartManager(paths);", gate_off) < native.index("GetPlainOpenError(path, FILE_READ_ATTRIBUTES)", gate_off)
+    init = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    assert init.count("StandaloneHolderProbe = [bool](Test-DefenseClawStandaloneProfile)") == 2
+    assert "public static string[] DeleteTreePrivileged(string root, List<string> deleted)" in native
+    assert "DeleteTreePrivilegedCore(root, deleted, true)" in native and "DeleteTreePrivilegedCore(root, null, false)" in native
+    assert "new UninstallFilePrivilegeScope(true, backupRestoreOnly)" in native
+    # The two-argument probe classifier is gone (nothing in production called it).
+    assert "DeleteProbeFindsHolder(int answer, string path)" not in native
+    deleter = _function_body(module, "Remove-DefenseClawStateTreePrivileged")
+    for guard in (
+        "Test-DefenseClawStandaloneProfile",
+        "$Label -cne 'StateRoot' -and $Label -cne 'InstallRoot'",
+        "Test-DefenseClawAccessDeniedError",
+        "[StringComparison]::OrdinalIgnoreCase",
+        "defenseclaw_repair",
+        "Write-DefenseClawLifecycleLogDiagnostic",
+        "DeleteTreePrivileged($Target, $deleted)",
+    ):
+        assert guard in deleter, guard
+    assert deleter.index("Test-DefenseClawStandaloneProfile") < deleter.index("Initialize-DefenseClawNativeSecurity")
+    tree = _function_body(module, "Remove-DefenseClawManagedTree")
+    assert tree.index("Assert-DefenseClawManagedTreeNoReparse") < tree.index("Remove-DefenseClawStateTreePrivileged")
+    assert tree.index("Remove-Item") < tree.index("Remove-DefenseClawStateTreePrivileged")
+    # The rollback retry root is checked again right before the privileged pass (S6).
+    before_fallback = tree[: tree.index("Remove-DefenseClawStateTreePrivileged -Root")]
+    assert before_fallback.rindex("Test-DefenseClawManagedTreeRetryRoot") > before_fallback.index("$lastError")
+    # The path passed to the native call is the checked root (S3).
+    assert "$targetPlain" in deleter and deleter.index("$targetPlain") < deleter.index("DeleteTreePrivileged($Target, $deleted)")
 
 
 # The standalone PowerShell smokes run inside disposable scratch directories
@@ -1460,6 +1519,7 @@ def test_a_failed_exact_root_cleanup_names_the_programs_that_hold_its_files(tmp_
             "ConvertTo-DefenseClawBoundedDiagnostic",
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
+            "Test-DefenseClawUnnamedFileHolder",
             "Get-DefenseClawNamespaceRootCleanupHolderText",
         ],
         _FAKE_RENAME_NATIVE
@@ -1513,6 +1573,7 @@ def test_a_committed_retirement_defers_only_to_a_holder_it_finds(tmp_path) -> No
             "Test-DefenseClawInstallRootInUseException",
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
+            "Test-DefenseClawUnnamedFileHolder",
             "Get-DefenseClawInstallRootRenameDenial",
             "Invoke-DefenseClawCommittedInstallRootRetirement",
         ],
@@ -1607,6 +1668,7 @@ def test_an_uninstall_refuses_a_lasting_install_root_holder_before_its_commit(tm
         [
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
+            "Test-DefenseClawUnnamedFileHolder",
             "Assert-DefenseClawStandaloneInstallRootNotHeld",
         ],
         _FAKE_RENAME_NATIVE
@@ -2129,6 +2191,77 @@ foreach ($rollback in @($false, $true)) {
     )
 
 
+def test_an_admin_file_json_write_is_stamped_before_it_is_published(tmp_path: Path) -> None:
+    """GAP-0899: a lifecycle write of deployment.json (and the other install
+    records the hook guardian enforces) published the file first and stamped
+    it after. In that gap it carried the owner of the creating account (SYSTEM)
+    and the access list of its folder, a guardian pass inside it repaired the
+    file, and the next ensure warned guardian_repaired_drift and was not a
+    no-op. With -Kind AdminFile the staging file is stamped, then replaces
+    the destination, so the published file is never unprotected. A write
+    without -Kind keeps the plain publish."""
+    import json
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    module = _text(MODULE)
+    functions = "\n".join(
+        _function_body(module, name)
+        for name in (
+            "Write-DefenseClawJsonAtomic",
+            "Clear-DefenseClawRestrictiveFileAttributes",
+        )
+    )
+    harness = tmp_path / "admin-file-publish.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + functions
+        + r"""
+$script:AdministratorsSID = 'S-1-5-32-544'
+$root = '__ROOT__'
+$destination = Join-Path $root 'deployment.json'
+$global:Events = [System.Collections.Generic.List[string]]::new()
+function New-DefenseClawDirectory { param([string]$Path) }
+function Assert-DefenseClawNoReparsePath { param([string]$Path) }
+function Set-DefenseClawPathAcl {
+    param([string]$Path, [string]$Kind, [string]$GatewayServiceSID)
+    $held = ([IO.File]::ReadAllText($destination) | ConvertFrom-Json).generation
+    $global:Events.Add("stamp kind=$Kind sid=$GatewayServiceSID staging=$($Path -ne $destination) destination=$held")
+}
+function Move-DefenseClawNonImageFileReplacing {
+    param([string]$Source, [string]$Destination)
+    $global:Events.Add('publish')
+    [IO.File]::Move($Source, $Destination, $true)
+}
+[IO.File]::WriteAllText($destination, '{"generation": "old"}')
+Write-DefenseClawJsonAtomic -Value ([ordered]@{ generation = 'new' }) -Path $destination -Kind AdminFile
+Write-DefenseClawJsonAtomic -Value ([ordered]@{ generation = 'plain' }) -Path $destination
+[pscustomobject]@{
+    events = @($global:Events)
+    content = ([IO.File]::ReadAllText($destination) | ConvertFrom-Json).generation
+    leftovers = @(Get-ChildItem -LiteralPath $root -Filter 'deployment.json.new.*' -Force).Count
+} | ConvertTo-Json -Compress
+""".replace("__ROOT__", str(tmp_path)),
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["events"] == [
+        "stamp kind=AdminFile sid=S-1-5-32-544 staging=True destination=old",
+        "publish",
+        "publish",
+    ], result
+    assert result["content"] == "plain" and result["leftovers"] == 0, result
+
+
 def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) -> None:
     """GAP-0629: deployment.json overwritten with text. Reading it refused
     nothing: it ran takeown + icacls /reset, which left the file's DACL
@@ -2374,8 +2507,10 @@ function Test-DefenseClawDeploymentMetadataPresent {
 function Test-DefenseClawServiceExists { param($Name) return $true }
 function Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath) }
 function Write-DefenseClawJsonAtomic {
-    param($Path, $Value)
+    param($Path, $Value, $Kind)
     [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Depth 10))
+    # GAP-0899: the rebuilt record is stamped by its own publish, not after it.
+    if ($Kind -eq 'AdminFile') { $global:Stamps++ }
 }
 function Set-DefenseClawPathAcl { param($Path, $Kind, $GatewayServiceSID) $global:Stamps++ }
 function Assert-DefenseClawPathAcl {

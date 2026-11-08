@@ -497,8 +497,9 @@ else {
         }
     }
     function Write-DefenseClawJsonAtomic {
-        param($Value, [string]$Path)
+        param($Value, [string]$Path, [string]$Kind)
         [IO.File]::WriteAllText($Path, ($Value | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($false))
+        if ($Kind) { $script:AclStamps.Add("$Kind $Path") }
     }
     function Set-DefenseClawPathAcl {
         param([string]$Path, [string]$Kind, [string]$GatewayServiceSID)

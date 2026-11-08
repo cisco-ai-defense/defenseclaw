@@ -945,9 +945,15 @@ func writeWindowsEnterpriseLifecycleLog(directory string, result *enterprisestat
 }
 
 func rotateWindowsEnterpriseLog(path string) {
+	shiftWindowsEnterpriseLogGenerations(path)
+	_ = os.Rename(path, path+".1")
+}
+
+// shiftWindowsEnterpriseLogGenerations drops the oldest generation of a log
+// and moves each of the others one up, leaving path.1 free.
+func shiftWindowsEnterpriseLogGenerations(path string) {
 	_ = os.Remove(fmt.Sprintf("%s.%d", path, windowsEnterpriseLogGenerates-1))
 	for generation := windowsEnterpriseLogGenerates - 2; generation >= 1; generation-- {
 		_ = os.Rename(fmt.Sprintf("%s.%d", path, generation), fmt.Sprintf("%s.%d", path, generation+1))
 	}
-	_ = os.Rename(path, path+".1")
 }

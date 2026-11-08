@@ -468,3 +468,68 @@ func TestWindowsStatusV2MachinePolicyCoverageNeedsTheGuardianState(t *testing.T)
 	}
 	contracttest.Compile(t).Validate(t, "lifecycle-result.schema.json", document)
 }
+
+// GAP-0856, GAP-0879. While a link sits at the machine-policy folder of Codex,
+// Cursor or Claude Code, status and verify carry one named warning per
+// connector with the command that removes it; no link, or no machine policy
+// for the connector, carries none.
+func TestWindowsStatusNamesALinkAtAVendorFolderOnce(t *testing.T) {
+	previous := windowsEnterpriseVendorFolderLink
+	t.Cleanup(func() { windowsEnterpriseVendorFolderLink = previous })
+	links := map[string]string{
+		"codex":      `C:\ProgramData\OpenAI\Codex`,
+		"cursor":     `C:\ProgramData\Cursor`,
+		"claudecode": `C:\Program Files\ClaudeCode\managed-settings.d`,
+	}
+	codes := map[string]string{"codex": "codex_machine_folder_link", "cursor": "cursor_machine_folder_link", "claudecode": "claudecode_machine_folder_link"}
+	newResult := func(connectors ...string) *enterprisestatus.Result {
+		result := &enterprisestatus.Result{Action: "status", MachinePolicy: map[string]enterprisestatus.MachinePolicyState{}}
+		for _, name := range connectors {
+			result.MachinePolicy[name] = windowsEnterpriseMachinePolicy(true)
+		}
+		return result
+	}
+	count := func(result *enterprisestatus.Result, code string) int {
+		n := 0
+		for _, warning := range result.Warnings {
+			if warning.Code == code {
+				n++
+			}
+		}
+		return n
+	}
+
+	windowsEnterpriseVendorFolderLink = func(connectorName string) string { return links[connectorName] }
+	result := newResult("codex", "cursor", "claudecode")
+	noteWindowsEnterpriseVendorFolderLinks(result)
+	noteWindowsEnterpriseVendorFolderLinks(result)
+	for name, code := range codes {
+		if count(result, code) != 1 {
+			t.Fatalf("%s: the link was named %d times, want once: %+v", name, count(result, code), result.Warnings)
+		}
+	}
+	for _, warning := range result.Warnings {
+		var name string
+		for connectorName, code := range codes {
+			if warning.Code == code {
+				name = connectorName
+			}
+		}
+		if !strings.Contains(warning.Message, `cmd /c rmdir "`+links[name]+`"`) || !strings.Contains(warning.Message, "link only, not its target") {
+			t.Fatalf("%s: the warning does not carry the fix: %s", name, warning.Message)
+		}
+	}
+
+	result = newResult("claudecode")
+	noteWindowsEnterpriseVendorFolderLinks(result)
+	if count(result, codes["codex"]) != 0 || count(result, codes["cursor"]) != 0 || count(result, codes["claudecode"]) != 1 {
+		t.Fatalf("only the connector with a machine policy is warned: %+v", result.Warnings)
+	}
+
+	windowsEnterpriseVendorFolderLink = func(string) string { return "" }
+	result = newResult("codex", "cursor", "claudecode")
+	noteWindowsEnterpriseVendorFolderLinks(result)
+	if len(result.Warnings) != 0 {
+		t.Fatalf("no link, but a warning: %+v", result.Warnings)
+	}
+}

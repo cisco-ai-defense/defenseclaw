@@ -7,6 +7,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -827,5 +828,318 @@ func TestWindowsTargetIssueNamesTheAccountOfASIDOnlyRow(t *testing.T) {
 	unknown := enterpriseHookReconcileRow{SID: "S-1-5-21-111-222-333-1001", Connector: "codex"}
 	if got := enterpriseHookTargetIssueLabel(unknown); got != "codex@S-1-5-21-111-222-333-1001" {
 		t.Fatalf("unresolvable SID label = %q", got)
+	}
+}
+
+// GAP-0856. A configured Codex connector gets its machine-policy folder, and
+// the vendor parent above it, recreated before the reconcile validates it. An
+// unconfigured connector gets nothing created, Secure Client is unchanged, and
+// a folder that cannot be recreated stops the step with the named error
+// instead of a reconcile that fails on every pass.
+func TestWindowsGuardianEnsuresTheCodexFolderOnlyForAConfiguredCodex(t *testing.T) {
+	const hookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	cases := []struct {
+		name        string
+		profile     string
+		connector   string
+		ensureErr   error
+		wantEnsured int
+		wantReconcs int
+		wantErr     bool
+	}{
+		{name: "standalone, Codex configured", profile: managed.ProfileStandalone, connector: "codex", wantEnsured: 1, wantReconcs: 1},
+		{name: "standalone, Codex not configured", profile: managed.ProfileStandalone, connector: "claudecode"},
+		{name: "standalone, Cursor only", profile: managed.ProfileStandalone, connector: "cursor"},
+		{name: "standalone, Codex configured, folder cannot be recreated", profile: managed.ProfileStandalone, connector: "codex",
+			ensureErr: errors.New("a link sits at the folder"), wantEnsured: 1, wantErr: true},
+		{name: "Secure Client, Codex configured", profile: managed.ProfileSecureClient, connector: "codex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			previousCfg := cfg
+			previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+			previousClaudeEnsurer, previousCursorEnsurer := enterpriseHookClaudePolicyEnsurer, enterpriseHookCursorPolicyEnsurer
+			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+			previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+			previousCodexReconciler, previousCodexRemover := enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexRequirementsRemover
+			previousCodexPublisher, previousFolder := enterpriseHookCodexTargetsPublisher, enterpriseHookCodexFolderEnsurer
+			previousClaudeIdentity, previousCursorIdentity := enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier
+			t.Cleanup(func() {
+				cfg = previousCfg
+				enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+				enterpriseHookClaudePolicyEnsurer, enterpriseHookCursorPolicyEnsurer = previousClaudeEnsurer, previousCursorEnsurer
+				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+				enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+				enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexRequirementsRemover = previousCodexReconciler, previousCodexRemover
+				enterpriseHookCodexTargetsPublisher, enterpriseHookCodexFolderEnsurer = previousCodexPublisher, previousFolder
+				enterpriseHookClaudePolicyIdentityVerifier, enterpriseHookCursorPolicyIdentityVerifier = previousClaudeIdentity, previousCursorIdentity
+			})
+			cfg = &config.Config{
+				DeploymentMode: managed.DeploymentModeManagedEnterprise,
+				Enterprise:     config.EnterpriseConfig{Profile: tc.profile},
+				Guardrail:      config.GuardrailConfig{Connector: tc.connector},
+			}
+			var order []string
+			enterpriseHookCodexFolderEnsurer = func() (enterprisehooks.WindowsCodexMachineFolderEnsure, error) {
+				order = append(order, "ensure")
+				return enterprisehooks.WindowsCodexMachineFolderEnsure{Folder: `C:\ProgramData\OpenAI\Codex`, Created: []string{`C:\ProgramData\OpenAI`, `C:\ProgramData\OpenAI\Codex`}}, tc.ensureErr
+			}
+			active := false
+			enterpriseHookCodexRequirementsReconciler = func(opts connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+				order = append(order, "reconcile")
+				active = true
+				return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+			}
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, false, nil }
+			enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				return nil, false, nil
+			}
+			enterpriseHookClaudePolicyEnsurer = func(connector.SetupOpts) error { return nil }
+			enterpriseHookCursorPolicyEnsurer = func(connector.SetupOpts) error { return nil }
+			enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+				return connector.WindowsCodexMachineRequirementsOptions{HookBinary: hookBinary, GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway"}, nil
+			}
+			enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return connector.WindowsCodexManagedRuntimeRegistry{Active: active}, nil
+			}
+			enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+			enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+			enterpriseHookCodexTargetsPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+				return nil
+			}
+			enterpriseHookClaudePolicyIdentityVerifier = func(string, string, string) error { return nil }
+			enterpriseHookCursorPolicyIdentityVerifier = func(string, string, string) error { return nil }
+			enterpriseHookCodexRequirementsRemover = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+				return connector.WindowsCodexMachineRequirementsReport{OK: true, SafeToRemoveBinary: true}, nil
+			}
+			err := syncEnterpriseHookManagedMachineEnrollments(enterprisehooks.Manifest{}, "127.0.0.1:32109", false)
+			ensured := strings.Count(strings.Join(order, ","), "ensure")
+			reconciled := strings.Count(strings.Join(order, ","), "reconcile")
+			if tc.wantErr {
+				if err == nil || !errors.Is(err, tc.ensureErr) || !strings.Contains(err.Error(), "ensure configured Codex machine requirements") {
+					t.Fatalf("a folder that cannot be recreated was not reported by name: %v", err)
+				}
+			}
+			if ensured != tc.wantEnsured || reconciled != tc.wantReconcs {
+				t.Fatalf("ensure x%d reconcile x%d (order %v), want ensure x%d reconcile x%d: %v",
+					ensured, reconciled, order, tc.wantEnsured, tc.wantReconcs, err)
+			}
+			if tc.wantEnsured > 0 && tc.wantReconcs > 0 && !slices.Equal(order, []string{"ensure", "reconcile"}) {
+				t.Fatalf("the folder must be ensured before the reconcile validates it: %v", order)
+			}
+		})
+	}
+}
+
+// GAP-0862. A failure of the Claude Code or Codex step of the guardian
+// pre-pass (a link at the Codex machine folder, a Claude policy that cannot be
+// repaired) is named for that connector and the pass still returns it, but the
+// later connectors run: the stale Cursor enrollment is revoked in the same pass.
+func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t *testing.T) {
+	const hookBinary = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
+	linkErr := fmt.Errorf("%w: a link sits at C:\\ProgramData\\OpenAI\\Codex; as an administrator, remove the link with: cmd /c rmdir", enterprisehooks.ErrWindowsCodexMachineFolderUnavailable)
+	claudeErr := errors.New("the Claude Code policy folder is a link")
+	cases := []struct {
+		name       string
+		codexLink  bool
+		codexFails bool
+		claudeFail bool
+		wantNamed  []string
+		wantTyped  bool
+		// Secure Client keeps its old behaviour: the first failing step fails the
+		// pass, the later steps do not run, and nothing is typed even when a link
+		// sits at the folder.
+		secureClient    bool
+		claudeReadFails bool
+	}{
+		{name: "no failure"},
+		{name: "Secure Client: the first failing step fails the pass, no later step, no typing", secureClient: true, claudeReadFails: true,
+			wantNamed: []string{"read the Claude Code policy"}},
+		// A link alone is a typed failure of the Codex connector: the pass goes on,
+		// and the guardian fails the Codex rows by name (GAP-0879).
+		{name: "link at the Codex folder", codexLink: true, wantTyped: true, wantNamed: []string{"ensure configured Codex machine requirements", "cmd /c rmdir"}},
+		{name: "Codex folder cannot be recreated (no link)", codexFails: true, wantNamed: []string{"ensure configured Codex machine requirements", "access is denied"}},
+		{name: "Claude Code policy cannot be repaired", claudeFail: true, wantNamed: []string{"ensure configured Claude machine policy", "the Claude Code policy folder is a link"}},
+		{name: "link at the Codex folder and a Claude Code failure", codexLink: true, claudeFail: true, wantNamed: []string{"ensure configured Claude machine policy", "ensure configured Codex machine requirements"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			previousCfg := cfg
+			previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+			previousClaudeEnsurer, previousCursorEnsurer := enterpriseHookClaudePolicyEnsurer, enterpriseHookCursorPolicyEnsurer
+			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+			previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+			previousCodexReconciler, previousFolder := enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexFolderEnsurer
+			previousCodexPublisher := enterpriseHookCodexTargetsPublisher
+			t.Cleanup(func() {
+				cfg = previousCfg
+				enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+				enterpriseHookClaudePolicyEnsurer, enterpriseHookCursorPolicyEnsurer = previousClaudeEnsurer, previousCursorEnsurer
+				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+				enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+				enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexFolderEnsurer = previousCodexReconciler, previousFolder
+				enterpriseHookCodexTargetsPublisher = previousCodexPublisher
+			})
+			profile := managed.ProfileStandalone
+			if tc.secureClient {
+				profile = managed.ProfileSecureClient
+			}
+			cfg = &config.Config{
+				DeploymentMode: managed.DeploymentModeManagedEnterprise,
+				Enterprise:     config.EnterpriseConfig{Profile: profile},
+				Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{
+					"claudecode": {}, "codex": {}, "cursor": {},
+				}},
+			}
+			previousLink := enterpriseHookVendorFolderLink
+			t.Cleanup(func() { enterpriseHookVendorFolderLink = previousLink })
+			enterpriseHookVendorFolderLink = func(connectorName string) string {
+				if tc.secureClient {
+					return `C:\ProgramData\` + connectorName
+				}
+				if tc.codexLink && connectorName == "codex" {
+					return `C:\ProgramData\OpenAI\Codex`
+				}
+				return ""
+			}
+			enterpriseHookCodexFolderEnsurer = func() (enterprisehooks.WindowsCodexMachineFolderEnsure, error) {
+				if tc.codexLink {
+					return enterprisehooks.WindowsCodexMachineFolderEnsure{}, linkErr
+				}
+				if tc.codexFails {
+					return enterprisehooks.WindowsCodexMachineFolderEnsure{}, fmt.Errorf("%w: access is denied", enterprisehooks.ErrWindowsCodexMachineFolderUnavailable)
+				}
+				return enterprisehooks.WindowsCodexMachineFolderEnsure{Folder: `C:\ProgramData\OpenAI\Codex`}, nil
+			}
+			codexActive, reconciled := false, 0
+			enterpriseHookCodexRequirementsReconciler = func(connector.WindowsCodexMachineRequirementsOptions) (connector.WindowsCodexMachineRequirementsReport, error) {
+				reconciled++
+				codexActive = true
+				return connector.WindowsCodexMachineRequirementsReport{OK: true}, nil
+			}
+			enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+				return connector.WindowsCodexMachineRequirementsOptions{HookBinary: hookBinary, GatewayAddr: "127.0.0.1:32109", GatewayServiceName: "DefenseClawGateway"}, nil
+			}
+			enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return connector.WindowsCodexManagedRuntimeRegistry{Active: codexActive}, nil
+			}
+			enterpriseHookCodexTargetsPublisher = func(connector.WindowsCodexMachineRequirementsOptions, []connector.WindowsCodexManagedRuntimeTarget) error {
+				return nil
+			}
+			claudeActive := false
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) {
+				if tc.claudeReadFails {
+					return nil, false, errors.New("read the Claude Code policy: access is denied")
+				}
+				return nil, claudeActive, nil
+			}
+			enterpriseHookClaudePolicyEnsurer = func(connector.SetupOpts) error {
+				if tc.claudeFail {
+					return claudeErr
+				}
+				claudeActive = true
+				return nil
+			}
+			enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+			// Cursor is active and holds one enrollment the manifest does not authorize.
+			stale := enterprisehooks.WindowsCursorManagedRuntimeTarget{SID: "S-1-5-21-1-2-3-1018", DataDir: `C:\Users\gone\.defenseclaw`}
+			var published [][]enterprisehooks.WindowsCursorManagedRuntimeTarget
+			enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				return []enterprisehooks.WindowsCursorManagedRuntimeTarget{stale}, true, nil
+			}
+			enterpriseHookCursorPolicyEnsurer = func(connector.SetupOpts) error { return nil }
+			enterpriseHookCursorPolicyTargetsPublisher = func(targets []enterprisehooks.WindowsCursorManagedRuntimeTarget) error {
+				published = append(published, append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), targets...))
+				return nil
+			}
+			err := syncEnterpriseHookManagedMachineEnrollments(enterprisehooks.Manifest{}, "127.0.0.1:32109", false)
+			if tc.secureClient {
+				if len(published) != 0 || err == nil || enterpriseHookLinkFailures(err) != nil {
+					t.Fatalf("Secure Client must return at the first failing step: published %v err %v", published, err)
+				}
+			} else if len(published) != 1 || len(published[0]) != 0 {
+				t.Fatalf("the stale Cursor enrollment was not revoked in this pass: published %v (err %v)", published, err)
+			}
+			if len(tc.wantNamed) == 0 {
+				if err != nil {
+					t.Fatalf("a pass with no failure returned %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("a failed connector step was not reported: the pass must stay fail-closed for it")
+			}
+			for _, want := range tc.wantNamed {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("the pass error does not name %q: %v", want, err)
+				}
+			}
+			if (tc.codexLink || tc.codexFails) && (!errors.Is(err, enterprisehooks.ErrWindowsCodexMachineFolderUnavailable) || reconciled != 0) {
+				t.Fatalf("a Codex folder that is not usable: reconciled %d times, error %v", reconciled, err)
+			}
+			if typed := enterpriseHookLinkFailures(err) != nil; typed != tc.wantTyped {
+				t.Fatalf("typed link failure = %v, want %v: only a link and nothing else may let the pass go on: %v", typed, tc.wantTyped, err)
+			}
+			if tc.claudeFail && !errors.Is(err, claudeErr) {
+				t.Fatalf("the Claude Code failure was lost: %v", err)
+			}
+		})
+	}
+}
+
+// Secure Client, deferred Codex error. A Codex registry that cannot be read is
+// deferred so an independent Cursor step still runs: when Cursor passes, the
+// pass returns the deferred Codex error after it; when Cursor fails, the Cursor
+// error wins. Nothing is typed, as before.
+func TestWindowsGuardianPrePassSecureClientReturnsTheDeferredCodexErrorAfterCursor(t *testing.T) {
+	codexErr := errors.New("read the Codex registry: access is denied")
+	cursorErr := errors.New("read the Cursor policy: access is denied")
+	for _, tc := range []struct {
+		name       string
+		cursorFail bool
+		want       error
+		notWant    error
+	}{
+		{name: "Cursor passes: the deferred Codex error is returned after it", want: codexErr},
+		{name: "Cursor fails: the Cursor error wins", cursorFail: true, want: cursorErr, notWant: codexErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousCfg := cfg
+			previousClaudeReader, previousClaudePublisher := enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher
+			previousCursorReader, previousCursorPublisher := enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher
+			previousCodexLayout, previousCodexReader := enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader
+			previousLink := enterpriseHookVendorFolderLink
+			t.Cleanup(func() {
+				cfg = previousCfg
+				enterpriseHookClaudePolicyTargetsReader, enterpriseHookClaudePolicyTargetsPublisher = previousClaudeReader, previousClaudePublisher
+				enterpriseHookCursorPolicyTargetsReader, enterpriseHookCursorPolicyTargetsPublisher = previousCursorReader, previousCursorPublisher
+				enterpriseHookCodexRequirementsLayoutResolver, enterpriseHookCodexRuntimeRegistryReader = previousCodexLayout, previousCodexReader
+				enterpriseHookVendorFolderLink = previousLink
+			})
+			cfg = &config.Config{
+				DeploymentMode: managed.DeploymentModeManagedEnterprise,
+				Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileSecureClient},
+			}
+			enterpriseHookVendorFolderLink = func(string) string { return `C:\ProgramData\Cursor` }
+			enterpriseHookCodexRequirementsLayoutResolver = func(string) (connector.WindowsCodexMachineRequirementsOptions, error) {
+				return connector.WindowsCodexMachineRequirementsOptions{HookBinary: `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`}, nil
+			}
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, false, nil }
+			enterpriseHookClaudePolicyTargetsPublisher = func([]string) error { return nil }
+			enterpriseHookCodexRuntimeRegistryReader = func(string) (connector.WindowsCodexManagedRuntimeRegistry, error) {
+				return connector.WindowsCodexManagedRuntimeRegistry{}, codexErr
+			}
+			enterpriseHookCursorPolicyTargetsReader = func() ([]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error) {
+				if tc.cursorFail {
+					return nil, false, cursorErr
+				}
+				return nil, false, nil
+			}
+			enterpriseHookCursorPolicyTargetsPublisher = func([]enterprisehooks.WindowsCursorManagedRuntimeTarget) error { return nil }
+			err := syncEnterpriseHookManagedMachineEnrollments(enterprisehooks.Manifest{}, "127.0.0.1:32109", true)
+			if !errors.Is(err, tc.want) || (tc.notWant != nil && errors.Is(err, tc.notWant)) || enterpriseHookLinkFailures(err) != nil {
+				t.Fatalf("Secure Client returned %v, want %v (not typed)", err, tc.want)
+			}
+		})
 	}
 }

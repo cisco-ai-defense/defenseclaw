@@ -516,8 +516,16 @@ for name, row in roster.items():
         problems.append("connector %s has the unknown state %r in the JSON answer, want one of %s" % (name, row["state"], list(valid_states)))
     elif (row["state"] == "protected") != row["protected"]:
         problems.append("connector %s has protected=%s but state %r in the JSON answer" % (name, row["protected"], row["state"]))
+    elif not isinstance(row.get("reason", ""), str) or not isinstance(row.get("next_step", ""), str) or not isinstance(row.get("reason_code", ""), str):
+        problems.append("connector %s has a reason, reason_code or next_step that is not text in the JSON answer" % name)
+    elif row["protected"] != (not row.get("reason")) or (row.get("reason") and not row.get("next_step")):
+        problems.append("connector %s is %s with reason %r and next step %r in the JSON answer, want a reason and a next step exactly when it is not protected" % (name, row["state"], row.get("reason"), row.get("next_step")))
     else:
-        states[name] = row["state"]
+        # The text row is the state, then the reason and the next step (showOwnStatus).
+        shown = row["state"]
+        if row.get("reason"):
+            shown += ": " + row["reason"].strip().rstrip(". ") + ". " + row["next_step"].strip().rstrip(". ")
+        states[name] = shown
 lines = text.splitlines()
 first = next((i for i, line in enumerate(lines) if re.match(r"  Account +\S", line)), None)
 last = next((i for i, line in enumerate(lines) if re.match(r"  Cowork +\S", line)), None)

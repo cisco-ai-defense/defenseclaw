@@ -27,6 +27,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -145,8 +146,31 @@ func (a *APIServer) skillSourcePaths(ctx context.Context, connector, cwd string,
 		return slices.ContainsFunc(claimed, func(c string) bool { return sameCleanPath(c, dir) })
 	}
 	var paths []string
+	facts := resolvedWritesFromContext(ctx)
 	for _, root := range assetfacts.SkillRoots(connector, hookActiveHome(ctx), cwd) {
 		dir := filepath.Join(root, name)
+		if reason, _ := a.projectSkills.refusal(root, time.Now()); reason != "" {
+			selected := false
+			for key, selectedName := range facts {
+				if !strings.HasPrefix(key, hookpaths.ProjectSkillSelectedPrefix) || !config.SameAssetName(selectedName, name) {
+					continue
+				}
+				selectedDir := strings.TrimPrefix(key, hookpaths.ProjectSkillSelectedPrefix)
+				if projectRootKey(filepath.Dir(selectedDir)) == projectRootKey(root) {
+					paths = append(paths, selectedDir)
+					selected = true
+				}
+			}
+			// A named folder visible to this gateway is positive evidence too.
+			// An absent folder cannot make an unrelated selection inherit the
+			// refused root's decision.
+			if !selected {
+				if info, err := os.Lstat(dir); err == nil && (info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+					paths = append(paths, dir)
+				}
+			}
+			continue
+		}
 		if gatewaySkillPathCheck(dir) != nil {
 			continue
 		}
@@ -500,15 +524,18 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 	if a == nil || !a.projectSkills.isActive() || strings.TrimSpace(cwd) == "" || isSandboxHookRequest(ctx) {
 		return
 	}
-	if gatewaySkillPathCheck(cwd) != nil {
-		return
-	}
 	cfg := a.liveConfig()
 	if cfg == nil || cfg.SecureClientIntegration() {
 		return
 	}
 	home := hookActiveHome(ctx)
 	if home == "" || home == unresolvedCallerHome {
+		return
+	}
+	if watcherUsesEnrolledUserDirs(cfg) || gatewaySkillPathCheck(cwd) != nil {
+		a.noteExcludedProjectSkillFolders(ctx, connector, home, cwd)
+	}
+	if gatewaySkillPathCheck(cwd) != nil {
 		return
 	}
 	if gatewaySkillPathCheck(home) != nil {
@@ -543,6 +570,79 @@ func (a *APIServer) noteProjectSkillFolders(ctx context.Context, connector, cwd 
 		}
 		a.projectSkills.add(connector, folder)
 	}
+}
+
+// noteExcludedProjectSkillFolders records only adverse facts from the
+// calling user's hook. The managed Windows service cannot inspect profile
+// folders itself and does not add them to the install watcher. The candidate
+// list is rebuilt from the verified caller home and cwd, so a header cannot
+// name a different user's project root.
+func (a *APIServer) noteExcludedProjectSkillFolders(ctx context.Context, connector, home, cwd string) {
+	facts := resolvedWritesFromContext(ctx)
+	for _, folder := range enrolledProjectSkillCandidates(connector, home, cwd) {
+		finding := ""
+		for key, value := range facts {
+			if strings.HasPrefix(key, hookpaths.ProjectSkillRootUnverifiedPrefix) &&
+				projectRootKey(strings.TrimPrefix(key, hookpaths.ProjectSkillRootUnverifiedPrefix)) == projectRootKey(folder) {
+				finding = value
+				break
+			}
+		}
+		var reason string
+		switch finding {
+		case hookpaths.ProjectSkillRootOutsideProfile:
+			reason = "the project skill folder resolves outside the caller's profile"
+		case hookpaths.ProjectSkillRootSharedWritable:
+			reason = "another user can write the project skill folder"
+		case hookpaths.ProjectSkillRootUnreadable:
+			reason = "the calling user could not verify the project skill folder"
+		default:
+			// A missing adverse fact cannot clear a refusal. The caller's
+			// positive inspection, or a gateway inspection where permitted,
+			// can retire a repaired root's caller finding.
+			if prior, _, callerFinding := a.projectSkills.refusalWithPolicyMode(folder, time.Now()); prior != "" && callerFinding {
+				if (callerVerifiedProjectSkillRoot(facts, folder) ||
+					gatewayVerifiedProjectSkillRoot(home, folder)) && a.projectSkills.clearCallerRefusal(folder) && a.health != nil {
+					a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, len(a.projectSkills.unverifiedFolders()))
+				}
+			}
+			continue
+		}
+		if previous, _ := a.projectSkills.refusal(folder, time.Now()); previous == reason {
+			continue
+		}
+		a.projectSkills.refuseWithPolicyMode(folder, reason, time.Now(), true)
+		fmt.Fprintf(os.Stderr, "[watcher] project skill folder %s could not be verified and is not watched; its skills are refused: %s\n", folder, reason)
+		if a.health != nil {
+			a.health.SetWatcherDetail(projectSkillRootsUnverifiedDetail, len(a.projectSkills.unverifiedFolders()))
+		}
+	}
+}
+
+func callerVerifiedProjectSkillRoot(facts map[string]string, folder string) bool {
+	for key, value := range facts {
+		if value == "1" && strings.HasPrefix(key, hookpaths.ProjectSkillRootVerifiedPrefix) &&
+			projectRootKey(strings.TrimPrefix(key, hookpaths.ProjectSkillRootVerifiedPrefix)) == projectRootKey(folder) {
+			return true
+		}
+	}
+	return false
+}
+
+func gatewayVerifiedProjectSkillRoot(home, folder string) bool {
+	if gatewaySkillPathCheck(folder) != nil {
+		return false
+	}
+	realHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return false
+	}
+	realFolder, err := filepath.EvalSymlinks(folder)
+	if err != nil || !insideHome(realHome, realFolder) {
+		return false
+	}
+	info, err := os.Stat(realFolder)
+	return err == nil && info.IsDir()
 }
 
 // projectSkillLstat is os.Lstat; tests stand in for a service account that
@@ -625,21 +725,24 @@ const projectSkillRootsUnverifiedDetail = "project_skill_roots_unverified"
 // running or about to (the watcher restarts to watch the folder), so it is
 // not loaded unscanned (GAP-1063).
 func (a *APIServer) projectSkillScanPending(targetType, connector, surface string, paths []string) (config.AssetPolicyDecision, bool) {
-	if a == nil || a.store == nil || targetType != "skill" || !a.projectSkills.isActive() {
+	if a == nil || targetType != "skill" || !a.projectSkills.isActive() {
 		return config.AssetPolicyDecision{}, false
 	}
 	for _, path := range paths {
-		// A hidden folder is not enumerated by the rescan, so it never gets
-		// a baseline to wait for.
-		if strings.TrimSpace(path) == "" || strings.HasPrefix(filepath.Base(path), ".") {
+		if strings.TrimSpace(path) == "" {
 			continue
 		}
 		dir := filepath.Dir(path)
-		if reason, _ := a.projectSkills.refusal(dir, time.Now()); reason != "" {
-			name := filepath.Base(path)
-			return runtimeAssetDisableBlockDecision("skill", name, connector, surface,
-				fmt.Sprintf("skill %q in %s is refused: DefenseClaw could not verify this project skill folder (%s)", name, dir, reason),
-				"project-skill-unverified"), true
+		if decision, refused := a.projectSkillRefusalDecision(path, filepath.Base(path), connector, surface); refused {
+			return decision, true
+		}
+		// A hidden folder is not enumerated by the rescan, so it never gets
+		// a baseline to wait for. A recorded root refusal still applies.
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			continue
+		}
+		if a.store == nil {
+			continue
 		}
 		if root, ok := a.projectSkills.registeredPath(dir); ok {
 			// The watcher records the skills under the folder as it was
@@ -677,4 +780,17 @@ func (a *APIServer) projectSkillScanPending(targetType, connector, surface strin
 		return runtimeAssetDisableBlockDecision("skill", name, connector, surface, reason, "project-skill-pending"), true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+func (a *APIServer) projectSkillRefusalDecision(path, name, connector, surface string) (config.AssetPolicyDecision, bool) {
+	if a == nil || !a.projectSkills.isActive() {
+		return config.AssetPolicyDecision{}, false
+	}
+	root, reason := a.projectSkills.refusalForPath(path)
+	if reason == "" {
+		return config.AssetPolicyDecision{}, false
+	}
+	return runtimeAssetDisableBlockDecision("skill", name, connector, surface,
+		fmt.Sprintf("skill %q in %s is refused: DefenseClaw could not verify this project skill folder (%s)", name, root, reason),
+		"project-skill-unverified"), true
 }

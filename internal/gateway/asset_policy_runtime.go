@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -63,6 +64,9 @@ type skillRuntimeProbe struct {
 	// on SkillName by default; operators wanting to constrain by path
 	// must use AssetPolicyRule.SourcePathContains.
 	SourcePath string
+	// ProjectDir resolves relative source paths for project skill admission.
+	// SourcePath itself remains unchanged for policy and audit records.
+	ProjectDir string
 	// RawName preserves the unnormalized input the SkillName was
 	// derived from when path-stripping occurred (e.g. SkillName came
 	// from filepath.Base on a "/path/to/<name>/SKILL.md") or when a
@@ -446,6 +450,7 @@ func (a *APIServer) codexMCPServerName(ctx context.Context, req codexHookRequest
 func (a *APIServer) claudeCodeSkillAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	a.noteProjectSkillFolders(ctx, "claudecode", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	probe.ProjectDir = req.CWD
 	if !probe.Matched {
 		if saved := claudeCodeCoworkSkillProbe(req); saved.Matched && coworkInspected(a.requestConfig(ctx)) {
 			return a.evaluateRuntimeSkillAssetPolicy(ctx, "claudecode", req.HookEventName, saved)
@@ -597,6 +602,7 @@ func (a *APIServer) claudeCodeMCPPromptAssetDecisions(ctx context.Context, req c
 func (a *APIServer) codexSkillAssetDecision(ctx context.Context, req codexHookRequest) (config.AssetPolicyDecision, bool) {
 	a.noteProjectSkillFolders(ctx, "codex", req.CWD)
 	probe := skillProbeFromFields(req.ToolName, req.ToolInput, req.Payload)
+	probe.ProjectDir = req.CWD
 	if !probe.Matched {
 		return a.skillFolderAccessDecision(ctx, "codex", req.HookEventName, req.CWD, req.ToolName, req.ToolInput)
 	}
@@ -949,9 +955,6 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 		return decision, true
 	}
 	if strings.TrimSpace(probe.SourcePath) == "" && len(probe.SourcePaths) > 0 {
-		if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, paths); pending {
-			return decision, true
-		}
 		// A folder of another name that the call loads (its SKILL.md
 		// declares the name) answers to that folder's runtime disable.
 		for _, path := range probe.SourcePaths {
@@ -961,6 +964,29 @@ func (a *APIServer) runtimeSkillAssetPolicyDecision(
 				}
 			}
 		}
+	}
+	if targetType == "skill" && !cfg.SecureClientIntegration() {
+		for _, path := range paths {
+			if absolute := projectSkillAbsolutePath(path, probe.ProjectDir); absolute != "" {
+				if decision, refused := a.projectSkillRefusalDecision(absolute, probe.SkillName, connector, runtimeSurface); refused {
+					return decision, true
+				}
+			}
+		}
+		if probe.SourcePath != "" {
+			if decision, refused := a.projectSkillSelectedRefusalDecision(
+				ctx, probe.SkillName, connector, runtimeSurface,
+			); refused {
+				return decision, true
+			}
+		}
+	}
+	admissionPaths := make([]string, len(paths))
+	for i, path := range paths {
+		admissionPaths[i] = projectSkillAdmissionFolder(path, probe.ProjectDir, resolvedWritesFromContext(ctx), cfg.SecureClientIntegration())
+	}
+	if decision, pending := a.projectSkillScanPending(targetType, connector, runtimeSurface, admissionPaths); pending {
+		return decision, true
 	}
 	var last config.AssetPolicyDecision
 	for _, path := range paths {
@@ -1032,6 +1058,30 @@ func (a *APIServer) unavailableRootDecision(
 	return config.AssetPolicyDecision{}, false
 }
 
+// projectSkillSelectedRefusalDecision uses the caller's selected-folder fact
+// when an explicit source uses a spelling the gateway cannot associate with
+// an excluded profile root. The hook binds the fact to the explicit path in
+// the caller's filesystem view before it sends the fact, and sends one only
+// for a folder that the caller's own profile does not hold privately. The
+// gateway applies the fact for every spelling of the source: a path under a
+// user skill folder can be a link to a refused target, which only the caller
+// can tell.
+func (a *APIServer) projectSkillSelectedRefusalDecision(
+	ctx context.Context, name, connector, surface string,
+) (config.AssetPolicyDecision, bool) {
+	for key, selectedName := range resolvedWritesFromContext(ctx) {
+		if !strings.HasPrefix(key, hookpaths.ProjectSkillSelectedPrefix) ||
+			!config.SameAssetName(selectedName, name) {
+			continue
+		}
+		selected := strings.TrimPrefix(key, hookpaths.ProjectSkillSelectedPrefix)
+		if decision, refused := a.projectSkillRefusalDecision(selected, name, connector, surface); refused {
+			return decision, true
+		}
+	}
+	return config.AssetPolicyDecision{}, false
+}
+
 // unavailableRootCanonicalPath resolves each existing component. A missing
 // suffix can be appended to a resolved parent, but a dangling link or any
 // other unresolved component cannot prove a source is outside the root.
@@ -1065,6 +1115,54 @@ func unavailableRootContainsPath(root, path string) bool {
 		return strings.EqualFold(filepath.Clean(root), filepath.Clean(path))
 	}
 	return filepath.Clean(root) == filepath.Clean(path)
+}
+
+// projectSkillAbsolutePath resolves a source spelling for project admission.
+func projectSkillAbsolutePath(path, cwd string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	if !filepath.IsAbs(path) {
+		if !filepath.IsAbs(cwd) {
+			return ""
+		}
+		path = filepath.Join(cwd, path)
+	}
+	return filepath.Clean(path)
+}
+
+// projectSkillAdmissionFolder maps the path spellings a skill call accepts to
+// the folder that owns its manifest. It only affects project admission; the
+// raw source path remains available to asset rules and audit records.
+func projectSkillAdmissionFolder(path, cwd string, facts map[string]string, secureClient bool) string {
+	path = projectSkillAbsolutePath(path, cwd)
+	if path == "" {
+		return ""
+	}
+	if secureClient {
+		if strings.EqualFold(filepath.Base(path), "SKILL.md") {
+			return filepath.Dir(path)
+		}
+		return path
+	}
+	if strings.EqualFold(filepath.Base(path), "SKILL.md") {
+		selected := false
+		for key := range facts {
+			if strings.HasPrefix(key, hookpaths.ProjectSkillSelectedPrefix) &&
+				sameCleanPath(strings.TrimPrefix(key, hookpaths.ProjectSkillSelectedPrefix), path) {
+				selected = true
+				break
+			}
+		}
+		if !selected {
+			if gatewaySkillPathCheck(path) != nil {
+				path = filepath.Dir(path)
+			} else if info, err := os.Stat(path); err != nil || !info.IsDir() {
+				path = filepath.Dir(path)
+			}
+		}
+	}
+	return path
 }
 
 // runtimeSkillPathDecision is the asset_policy decision for one folder a
@@ -1959,7 +2057,7 @@ func isMCPPromptPlaceholder(value string) bool {
 
 func skillProbeFromFields(toolName string, toolInput, payload map[string]interface{}) skillRuntimeProbe {
 	toolName = strings.TrimSpace(toolName)
-	if name, sourcePath, rawName := skillFromMap(payload); name != "" {
+	if name, sourcePath, rawName := assetfacts.SkillSelection(payload); name != "" {
 		return skillRuntimeProbe{
 			SkillName:  name,
 			RawName:    rawName,
@@ -1969,7 +2067,7 @@ func skillProbeFromFields(toolName string, toolInput, payload map[string]interfa
 			Matched:    true,
 		}
 	}
-	if name, sourcePath, rawName := skillFromMap(toolInput); name != "" {
+	if name, sourcePath, rawName := assetfacts.SkillSelection(toolInput); name != "" {
 		return skillRuntimeProbe{
 			SkillName:  name,
 			RawName:    rawName,
@@ -2020,7 +2118,7 @@ func nativeSkillToolProbe(connector, toolName string, toolInput map[string]inter
 	if i := strings.LastIndex(bare, ":"); i >= 0 {
 		bare = bare[i+1:]
 	}
-	name := normalizeSkillRuntimeName(bare)
+	name := assetfacts.SkillRuntimeName(bare)
 	if name == "" {
 		return skillRuntimeProbe{}
 	}
@@ -2028,11 +2126,11 @@ func nativeSkillToolProbe(connector, toolName string, toolInput map[string]inter
 		TargetType: "skill",
 		SkillName:  name,
 		ToolName:   strings.TrimSpace(toolName),
-		RawName:    skillRawNameIfNormalized(raw, name),
+		RawName:    assetfacts.SkillRawNameIfNormalized(raw, name),
 		Surface:    "hook",
 		Matched:    true,
 	}
-	if qualified := normalizeSkillRuntimeName(raw); qualified != "" && !config.SameAssetName(qualified, name) {
+	if qualified := assetfacts.SkillRuntimeName(raw); qualified != "" && !config.SameAssetName(qualified, name) {
 		probe.DeclaredNames = []string{qualified}
 	}
 	return probe
@@ -2043,15 +2141,11 @@ func nativeSkillToolProbe(connector, toolName string, toolInput map[string]inter
 // skill is the first token, written as "$<skill-name>". Codex does not emit a
 // Skill tool call or a synthetic skill_name field for this path.
 func codexSkillProbeFromPrompt(prompt string) skillRuntimeProbe {
-	fields := strings.Fields(strings.TrimSpace(prompt))
-	if len(fields) == 0 || !strings.HasPrefix(fields[0], "$") {
+	name := hookpaths.CodexSelectedSkillName(prompt)
+	if name == "" {
 		return skillRuntimeProbe{}
 	}
-	raw := fields[0]
-	name := strings.TrimPrefix(raw, "$")
-	if !validNativeSkillSelectionName(name) {
-		return skillRuntimeProbe{}
-	}
+	raw := "$" + name
 	return skillRuntimeProbe{
 		TargetType: "skill",
 		SkillName:  name,
@@ -2081,108 +2175,19 @@ func validNativeSkillSelectionName(name string) bool {
 	return true
 }
 
-// skillFromMap returns (normalizedName, sourcePath, rawName).
-// rawName is the original input string when normalization stripped a
-// path (e.g. "/path/to/foo/SKILL.md" -> "foo"); empty otherwise.
-// Callers propagate this so audit/OTel can show the agent's literal
-// input alongside the registry-matching name.
-func skillFromMap(values map[string]interface{}) (string, string, string) {
-	if values == nil {
-		return "", "", ""
-	}
-	sourcePath := firstMapString(values, "skill_path", "skillPath", "source_path", "sourcePath")
-	rawName := firstMapString(values, "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId")
-	if rawName != "" {
-		normalized := normalizeSkillRuntimeName(rawName)
-		return normalized, sourcePath, skillRawNameIfNormalized(rawName, normalized)
-	}
-	for _, key := range []string{"skill", "skill_info", "skillInfo", "source_skill", "sourceSkill"} {
-		if v, ok := values[key]; ok {
-			if nestedName, nestedPath, nestedRaw := skillFromValue(v); nestedName != "" {
-				if sourcePath == "" {
-					sourcePath = nestedPath
-				}
-				return nestedName, sourcePath, nestedRaw
-			}
-		}
-	}
-	if sourcePath != "" {
-		normalized := normalizeSkillRuntimeName(sourcePath)
-		return normalized, sourcePath, skillRawNameIfNormalized(sourcePath, normalized)
-	}
-	return "", "", ""
-}
-
-func skillFromValue(value interface{}) (string, string, string) {
-	switch v := value.(type) {
-	case string:
-		normalized := normalizeSkillRuntimeName(v)
-		return normalized, pathIfLooksLikePath(v), skillRawNameIfNormalized(v, normalized)
-	case map[string]interface{}:
-		sourcePath := firstMapString(v, "path", "source_path", "sourcePath", "skill_path", "skillPath")
-		raw := firstMapString(v, "name", "key", "id", "skill_name", "skillName", "skill_key", "skillKey", "skill_id", "skillId")
-		if raw == "" && sourcePath != "" {
-			raw = sourcePath
-		}
-		normalized := normalizeSkillRuntimeName(raw)
-		return normalized, sourcePath, skillRawNameIfNormalized(raw, normalized)
-	default:
-		return "", "", ""
-	}
-}
-
-// skillRawNameIfNormalized returns raw only when normalization changed
-// the input (path-stripping, quote-stripping, "@" prefix removal). The
-// caller uses a non-empty rawName to flag "agent supplied a value that
-// did not match the registry verbatim — audit may want to see the raw
-// form to detect allowlist-bypass attempts via crafted skill paths".
-func skillRawNameIfNormalized(raw, normalized string) string {
-	if strings.TrimSpace(raw) == "" {
-		return ""
-	}
-	if raw == normalized {
-		return ""
-	}
-	return raw
-}
-
 func skillFromToolName(toolName string) string {
 	toolName = strings.TrimSpace(toolName)
 	if strings.HasPrefix(toolName, "skill__") {
 		parts := strings.Split(toolName, "__")
 		if len(parts) >= 3 && strings.TrimSpace(parts[1]) != "" {
-			return normalizeSkillRuntimeName(parts[1])
+			return assetfacts.SkillRuntimeName(parts[1])
 		}
 	}
 	if strings.HasPrefix(toolName, "skill:") {
 		parts := strings.SplitN(toolName, ":", 3)
 		if len(parts) >= 2 && strings.TrimSpace(parts[1]) != "" {
-			return normalizeSkillRuntimeName(parts[1])
+			return assetfacts.SkillRuntimeName(parts[1])
 		}
-	}
-	return ""
-}
-
-func normalizeSkillRuntimeName(value string) string {
-	name := strings.Trim(strings.TrimSpace(value), `"'`)
-	if name == "" {
-		return ""
-	}
-	if strings.ContainsAny(name, `/\`) {
-		path := filepath.Clean(name)
-		if strings.EqualFold(filepath.Base(path), "SKILL.md") {
-			path = filepath.Dir(path)
-		}
-		name = filepath.Base(path)
-	}
-	name = strings.TrimPrefix(name, "@")
-	return strings.TrimSpace(name)
-}
-
-func pathIfLooksLikePath(value string) string {
-	value = strings.Trim(strings.TrimSpace(value), `"'`)
-	if strings.ContainsAny(value, `/\`) {
-		return value
 	}
 	return ""
 }

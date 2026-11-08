@@ -123,3 +123,55 @@ func TestLauncherStatusSaysWhyEveryNotProtectedConnectorIsNotProtected(t *testin
 		}
 	}
 }
+
+// The gateway keeps each row state to one word and sends the reason and the
+// next step in their own fields. `defenseclaw status` prints them after the
+// state, and `defenseclaw status --json` hands the answer on unchanged, so a
+// script that matches the state keeps working.
+func TestLauncherStatusKeepsJSONStateAndPrintsSeparateReason(t *testing.T) {
+	previousSocket, previousFetch := ownProfileExplainSocket, ownStatusFetch
+	t.Cleanup(func() { ownProfileExplainSocket, ownStatusFetch = previousSocket, previousFetch })
+	ownProfileExplainSocket = func() string { return "/run/defenseclaw/hook.sock" }
+	answer := `{"own":true,"managed":true,"account":{"uid":"507","name":"alice"},` +
+		`"claude_code":{"protected":true},"connectors":{"claudecode":{"protected":true,"state":"protected"},` +
+		`"hermes":{"protected":false,"state":"not protected","reason_code":"no_setup","reason":"DefenseClaw has not set up protection for this agent on your account","next_step":"Install it, or ask IT"},` +
+		`"opencode":{"protected":false,"state":"not confirmed","reason_code":"scan_unknown","reason":"DefenseClaw has no recent protection check for this computer","next_step":"Run defenseclaw status again in a few minutes, and ask IT if it stays this way"}},` +
+		`"cowork":{"protected":true,"state":"protected","reason_code":"cowork_hooks","reason":"Cowork runs the Claude Code hooks your organization manages"}}`
+	ownStatusFetch = func(context.Context, string) (int, []byte, error) { return http.StatusOK, []byte(answer), nil }
+	run := func(args ...string) string {
+		var ran []string
+		root := launcherTestRoot(&ran)
+		var stdout, stderr bytes.Buffer
+		root.SetOut(&stdout)
+		root.SetErr(&stderr)
+		if code := executeLauncherInTest(t, root, args); code != 0 {
+			t.Fatalf("%v = %d\nstdout %s\nstderr %s", args, code, stdout.String(), stderr.String())
+		}
+		return stdout.String()
+	}
+	text := run("status")
+	for _, want := range []string{
+		"  Claude Code   protected\n",
+		"  Hermes        not protected: DefenseClaw has not set up protection for this agent on your account. Install it, or ask IT\n",
+		"  OpenCode      not confirmed: DefenseClaw has no recent protection check for this computer. Run defenseclaw status again in a few minutes, and ask IT if it stays this way\n",
+		"  Cowork        protected: Cowork runs the Claude Code hooks your organization manages\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status lacks %q:\n%s", want, text)
+		}
+	}
+	var out struct {
+		Connectors map[string]ownStatusRow `json:"connectors"`
+	}
+	if err := json.Unmarshal([]byte(run("status", "--json")), &out); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]string{"claudecode": "protected", "hermes": "not protected", "opencode": "not confirmed"} {
+		if got := out.Connectors[name].State; got != want {
+			t.Fatalf("status --json %s state = %q, want %q", name, got, want)
+		}
+	}
+	if row := out.Connectors["hermes"]; row.ReasonCode != "no_setup" || row.Reason == "" || row.NextStep == "" {
+		t.Fatalf("status --json hermes row = %+v, want the reason code, reason and next step in their own fields", row)
+	}
+}

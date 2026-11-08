@@ -3088,11 +3088,25 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	// Revoke removed/disabled SIDs before touching any target runtime. This
 	// makes stale enrollment fail closed even when a later repair fails.
+	// A link at a connector's vendor folder fails that connector's targets
+	// below, by name, and does not stop the pass: the other connectors are
+	// revoked and applied, and the manifest is activated (GAP-0879).
+	var linkRows map[string]string
 	if err := enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, false); err != nil {
-		return run, fmt.Errorf(
-			"enterprise hooks reconcile: revoke stale protected enrollments: %w",
-			err,
-		)
+		linkFailures := enterpriseHookLinkFailures(err)
+		if linkFailures == nil {
+			return run, fmt.Errorf(
+				"enterprise hooks reconcile: revoke stale protected enrollments: %w",
+				err,
+			)
+		}
+		linkRows = linkFailures.rowErrors()
+		// The row names the link; the cause (access denied, a trust failure) is
+		// logged once, so a real failure next to a link stays visible.
+		for _, failure := range linkFailures.Failures {
+			enterpriseHookLinkCauseFolds.emit(os.Stderr, time.Now(), "link:"+failure.Connector, failure.Cause.Error(),
+				"the same link cause", failure.causeLine())
+		}
 	}
 	// Remove DefenseClaw's own per-user registrations for revoked users (as
 	// each user), and record the cleanups of signed-out users, before this
@@ -3193,6 +3207,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			// rows, by name, so the other accounts keep their protection and
 			// the administrator lifecycle goes on (GAP-0585).
 			err = errors.New(enterpriseHookAccountForeignLinkFailure)
+		}
+		if err == nil {
+			if linkRow, linked := linkRows[strings.ToLower(strings.TrimSpace(target.Connector))]; linked {
+				// The vendor folder of this connector is a link: nothing is
+				// written through it, and this connector's rows fail by name.
+				err = errors.New(linkRow)
+			}
 		}
 		if err == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
@@ -3451,6 +3472,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	)
 	if enrollmentErr == nil {
 		enrollmentErr = enterpriseHookReconcileSyncEnrollments(enrollmentManifest, apiAddr, true)
+		if linkFailures := enterpriseHookLinkFailures(enrollmentErr); linkFailures != nil && linkFailures.coveredBy(linkRows) {
+			// The pre-pass failed the rows of every connector named here, so the
+			// failed rows carry the failure. A link that appeared after the
+			// pre-pass has no failed row: the pass stays failed.
+			enrollmentErr = nil
+		}
 	}
 	stateErr := writeEnterpriseHookGuardianState(
 		cfg.DataDir,
@@ -3604,6 +3631,28 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	var previousRun enterpriseHookReconcileRun
 	legacyRepairRetryNeeded := false
 	legacyRepairRetryDelay := time.Duration(0)
+	// A failure that lasts (a link at a vendor folder waits for an administrator)
+	// is logged on its first pass and counted on the retries that follow.
+	// Only the standalone Windows guardian folds; every other guardian logs each line.
+	logReconcileFailure := func(reason string, err error) {
+		line := fmt.Sprintf("[hook-guardian] reconcile after %s failed: %s\n", reason, err)
+		if reason == "interval" {
+			line = fmt.Sprintf("[hook-guardian] interval reconcile failed: %s\n", err)
+		}
+		if !enterpriseHookFoldRepeats() {
+			fmt.Fprint(cmd.ErrOrStderr(), line)
+			return
+		}
+		enterpriseHookRepeatFolds.emit(cmd.ErrOrStderr(), time.Now(), "reconcile", err.Error(), "the same reconcile failure", line)
+	}
+	logRepairRetry := func(delay time.Duration) {
+		line := fmt.Sprintf("[hook-guardian] repair incomplete; retrying in %s\n", delay)
+		if !enterpriseHookFoldRepeats() {
+			fmt.Fprint(cmd.ErrOrStderr(), line)
+			return
+		}
+		enterpriseHookRepeatFolds.emit(cmd.ErrOrStderr(), time.Now(), "retry", "retry", "the repair retry", line)
+	}
 	repairRetryNeeded := func() bool {
 		if legacyWatch {
 			return legacyRepairRetryNeeded
@@ -3874,7 +3923,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			legacyRepairRetryDelay = enterpriseHookWatchNextRepairRetryDelay(legacyRepairRetryDelay)
 			resetEnterpriseHookWatchTimer(repairRetry, legacyRepairRetryDelay)
 			repairRetryPending = true
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", legacyRepairRetryDelay)
+			logRepairRetry(legacyRepairRetryDelay)
 			return
 		}
 		due, needed := repairRetries.nextDue()
@@ -3888,9 +3937,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		resetEnterpriseHookWatchTimer(repairRetry, delay)
 		repairRetryPending = true
 		repairRetryDue = due
-		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", delay.Round(time.Millisecond))
+		logRepairRetry(delay.Round(time.Millisecond))
 	}
 	cancelRepairRetry := func() {
+		// A pass that needs no retry is a pass that succeeded: print the counted
+		// repeats and let the next failure show again.
+		enterpriseHookRepeatFolds.reset(cmd.ErrOrStderr())
 		if !repairRetryPending {
 			return
 		}
@@ -4100,7 +4152,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		interrupted, err := reconcileWatchPass("interval")
 		if err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
+			logReconcileFailure("interval", err)
 		}
 		if interrupted {
 			return false
@@ -4212,7 +4264,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 					}
 				}
 				if err != nil && !errors.Is(err, context.Canceled) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
+					logReconcileFailure(reason, err)
 				}
 				if interrupted {
 					// An interrupted pass did not publish its result. Preserve
@@ -4260,12 +4312,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			repairRetryDue = time.Time{}
 			if legacyWatch {
 				if _, err := reconcile("retry"); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after retry failed: %s\n", err)
+					logReconcileFailure("retry", err)
 				}
 			} else {
 				interrupted, err := reconcileWatchPass("retry")
 				if err != nil && !errors.Is(err, context.Canceled) {
-					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after retry failed: %s\n", err)
+					logReconcileFailure("retry", err)
 				}
 				if interrupted {
 					continue

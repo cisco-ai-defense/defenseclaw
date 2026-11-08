@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -455,7 +456,7 @@ func TestGAP0613UnavailableRootAliasesStayCovered(t *testing.T) {
 						{"outside", filepath.Join(home, "outside", "ordinary"), false},
 					} {
 						t.Run(source.name, func(t *testing.T) {
-							name, path, _ := skillFromMap(map[string]interface{}{"skill_name": "ordinary", "skill_path": source.path})
+							name, path, _ := assetfacts.SkillSelection(map[string]interface{}{"skill_name": "ordinary", "skill_path": source.path})
 							if name != "ordinary" || path != source.path {
 								t.Fatalf("hook source changed: %q %q", name, path)
 							}

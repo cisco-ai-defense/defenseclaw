@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -313,12 +314,12 @@ func claudeCodeCoworkSkillProbe(req claudeCodeHookRequest) skillRuntimeProbe {
 		return skillRuntimeProbe{}
 	}
 	raw := firstMapString(req.ToolInput, "skill_name", "skillName", "name", "title")
-	name := normalizeSkillRuntimeName(raw)
+	name := assetfacts.SkillRuntimeName(raw)
 	if name == "" {
 		return skillRuntimeProbe{}
 	}
 	return skillRuntimeProbe{
-		TargetType: "skill", SkillName: name, RawName: skillRawNameIfNormalized(raw, name),
+		TargetType: "skill", SkillName: name, RawName: assetfacts.SkillRawNameIfNormalized(raw, name),
 		ToolName: coworkSaveSkillTool, Surface: "hook", Matched: true,
 	}
 }

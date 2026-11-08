@@ -105,6 +105,42 @@ func readWindowsEnterpriseStatusV2Inputs() windowsEnterpriseStatusV2Inputs {
 	return in
 }
 
+// windowsEnterpriseVendorFolderLink is the link that sits on the path of the
+// machine-policy folder of a connector, "" when none. A seam for tests.
+var windowsEnterpriseVendorFolderLink = func(connectorName string) string {
+	link, _ := enterprisehooks.WindowsManagedConnectorFolderLink(connectorName)
+	return link
+}
+
+// windowsEnterpriseLinkedConnectors are the connectors whose machine-policy
+// folder a link can keep, with the name used in the warning.
+var windowsEnterpriseLinkedConnectors = []struct{ connector, label, code string }{
+	{"codex", "Codex", "codex_machine_folder_link"},
+	{"cursor", "Cursor", "cursor_machine_folder_link"},
+	{"claudecode", "Claude Code", "claudecode_machine_folder_link"},
+}
+
+// noteWindowsEnterpriseVendorFolderLinks names, for status and verify, a link at
+// the machine-policy folder of Codex, Cursor or Claude Code with the command
+// that removes it. The hook guardian never writes through the link: it fails
+// the targets of that connector and cannot recreate or repair the folder until
+// an administrator removes it (GAP-0856, GAP-0879).
+func noteWindowsEnterpriseVendorFolderLinks(result *enterprisestatus.Result) {
+	for _, entry := range windowsEnterpriseLinkedConnectors {
+		if _, configured := result.MachinePolicy[entry.connector]; !configured || windowsEnterpriseResultHasWarning(result, entry.code) {
+			continue
+		}
+		link := windowsEnterpriseVendorFolderLink(entry.connector)
+		if link == "" {
+			continue
+		}
+		result.AddWarning(entry.code, fmt.Sprintf("a link or a non-folder sits at %s on the path of the %s machine-policy folder; "+
+			"DefenseClaw does not follow, change or remove it, so the hook guardian cannot recreate or repair the folder and %s is not protected until it is gone; "+
+			"as an administrator, remove the link with: cmd /c rmdir \"%s\" (it removes the link only, not its target); the guardian then recreates the folder on its next pass",
+			link, entry.label, entry.label, link))
+	}
+}
+
 // readWindowsEnterpriseStatusV2Manifest lists the manifest's targets without
 // their accounts. Every Windows row names enabled explicitly, as
 // readWindowsEnterpriseStandaloneEnrollmentAt counts them.
@@ -137,6 +173,9 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 // (as on Linux and macOS).
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	publish := result.Action == "status" || result.Action == "verify"
+	if publish {
+		noteWindowsEnterpriseVendorFolderLinks(result)
+	}
 	in := windowsEnterpriseStatusV2Read()
 	applyWindowsEnterpriseCoworkStatus(result, in.cfg)
 	var coverage map[string]string

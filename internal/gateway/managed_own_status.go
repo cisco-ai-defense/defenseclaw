@@ -113,23 +113,17 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 			claudeCode, _ = row["protected"].(bool)
 		}
 	}
-	cowork := map[string]any{}
-	if last, found := ownLastCoworkEvent(ctx, auditDB, self, name); found {
-		cowork["last_event_at"] = last.UTC().Format(time.RFC3339)
-	}
+	cowork := ownCoworkRow(true, "protected", "cowork_hooks", "Cowork runs the Claude Code hooks your organization manages")
 	switch {
 	case !claudeCode && claudeConfigured:
-		cowork["protected"] = false
-		cowork["state"] = "not confirmed: Claude Code policy or enrollment is not verified for this account"
+		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
 	case !claudeCode:
-		cowork["protected"] = false
-		cowork["state"] = "not protected: your organization has not turned DefenseClaw on for Claude Code on this computer"
+		cowork = ownCoworkRow(false, "not protected", "claude_code_off", "your organization has not turned DefenseClaw on for Claude Code on this computer")
 	case desktopRefused:
-		cowork["protected"] = false
-		cowork["state"] = "refused: your organization does not allow this Claude Desktop version, so DefenseClaw refuses its Cowork calls"
-	default:
-		cowork["protected"] = true
-		cowork["state"] = "protected: Cowork runs the Claude Code hooks your organization manages"
+		cowork = ownCoworkRow(false, "refused", "desktop_version_refused", "your organization does not allow this Claude Desktop version, so DefenseClaw refuses its Cowork calls")
+	}
+	if last, found := ownLastCoworkEvent(ctx, auditDB, self, name); found {
+		cowork["last_event_at"] = last.UTC().Format(time.RFC3339)
 	}
 	answer := map[string]any{
 		"own":         true,

@@ -5,8 +5,10 @@ package gateway
 
 import (
 	"path/filepath"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // fileToolLinkTargetFacts keeps the exact file operation of every connector
@@ -36,30 +38,80 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 		if !linkTargetCandidate(facts, candidate, typed) {
 			continue
 		}
-		spelling := candidate.Resolved
-		if !filepath.IsAbs(spelling) {
+		spelling, placed, reported := linkTargetSpelling(request, candidate)
+		if spelling == "" {
 			continue
 		}
 		physical := ""
-		for _, key := range []string{candidate.Resolved, candidate.Normalized, candidate.Value} {
+		for _, key := range []string{spelling, candidate.Resolved, candidate.Normalized, candidate.Value} {
 			if target := request.ResolvedWriteTargets[key]; filepath.IsAbs(target) {
 				physical = target
 				break
 			}
 		}
-		if physical == "" && !request.SkipLocalFilesystemResolution {
+		if physical == "" && !reported && !request.SkipLocalFilesystemResolution {
 			physical, _ = request.targetMemo.ResolveWriteTarget(spelling)
 		}
-		if !filepath.IsAbs(physical) || filepath.Clean(physical) == filepath.Clean(spelling) {
+		if !filepath.IsAbs(physical) {
+			physical = spelling
+		}
+		if filepath.Clean(physical) == filepath.Clean(spelling) && !placed {
 			continue
 		}
 		linked := actionfacts.LinkedPathFact(candidate, physical)
 		if linked.Resolved == candidate.Resolved {
 			continue
 		}
+		// A path that was only placed in the working directory names the
+		// file itself, not a link to another one.
+		linked.Linked = filepath.Clean(physical) != filepath.Clean(spelling)
+		if placed && linked.Flavor != actionfacts.PathFlavorWindows {
+			// The path is now an absolute one of the host that placed it.
+			linked.Flavor = actionfacts.PathFlavorPOSIX
+		}
 		facts.Paths = append(facts.Paths, linked)
 	}
 	return facts
+}
+
+// linkTargetSpelling is the absolute spelling a path fact names. A relative
+// path is placed in the working directory of the call: the one the gateway
+// received, else the one the managed hook client ran the call in. A managed
+// gateway behind ProtectHome cannot resolve a project in the home of the
+// user, so it receives none of its own; the path stayed relative to nothing
+// and was never followed to the file a link reaches, where the absolute
+// spelling of the same link was (IB17). placed is true for a relative path,
+// which had no absolute fact until now. reported is true when the directory
+// is only the one the client reported, outside the home and project root the
+// gateway may walk: the spelling then only looks up the evidence the client
+// keyed by it and is never walked locally, so a known protected target
+// blocks wherever the project lives (GAP-0831). The spelling is empty when
+// no working directory places it.
+func linkTargetSpelling(request trustedActionRequest, candidate actionfacts.PathFact) (spelling string, placed, reported bool) {
+	if filepath.IsAbs(candidate.Resolved) {
+		return candidate.Resolved, false, false
+	}
+	// Without a working directory the analysis keeps a literal relative
+	// path as written and leaves it unresolved, with the flavor of a typed
+	// file tool unknown. A path with shell syntax in it, or one the analysis
+	// refused, is not a literal one.
+	if candidate.Flavor != actionfacts.PathFlavorPOSIX && candidate.Flavor != actionfacts.PathFlavorUnknown ||
+		candidate.Absolute || candidate.Resolved != "" ||
+		candidate.Normalized == "" || candidate.Value == "" ||
+		strings.HasPrefix(candidate.Value, "~") || strings.ContainsAny(candidate.Value, "$`\x00") {
+		return "", false, false
+	}
+	cwd := request.Input.CWD
+	if !filepath.IsAbs(cwd) {
+		var ok bool
+		if cwd, ok = protectedHomeClientDirectory(request); !ok {
+			if cwd, ok = protectedHomeReportedDirectory(request); !ok {
+				return "", false, false
+			}
+			reported = true
+		}
+	}
+	return hookpaths.OperandPath(candidate.Value, cwd), true, reported
 }
 
 // linkTargetCandidate reports whether a path fact is a file operation that

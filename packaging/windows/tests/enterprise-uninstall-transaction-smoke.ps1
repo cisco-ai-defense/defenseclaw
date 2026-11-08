@@ -1527,7 +1527,8 @@ targets:
         function script:Write-DefenseClawJsonAtomic {
             param(
                 [Parameter(Mandatory)]$Value,
-                [Parameter(Mandatory)][string]$Path
+                [Parameter(Mandatory)][string]$Path,
+                [string]$Kind
             )
             $isPurgeIntent = (
                 $script:HarnessState.ContainsKey('layout') -and

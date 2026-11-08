@@ -679,6 +679,7 @@ function Get-DefenseClawPolicyBlockEvent {
 
 function Initialize-DefenseClawNativeSecurity {
     if ($null -ne $script:DefenseClawNativeSecurityType) {
+        $script:DefenseClawNativeSecurityType::StandaloneHolderProbe = [bool](Test-DefenseClawStandaloneProfile)
         return $script:DefenseClawNativeSecurityType
     }
     # Never trust a predictable type name in an ambient elevated PowerShell
@@ -1053,6 +1054,14 @@ namespace $nativeNamespace
             // token holds them and skips the ones a user-rights policy removed,
             // so the caller can fall back from restore to take-ownership.
             internal UninstallFilePrivilegeScope(bool bestEffort)
+                : this(bestEffort, false)
+            {
+            }
+
+            // skipTakeOwnership (with bestEffort) enables backup and restore
+            // only, for a caller that opens or deletes through backup
+            // semantics and never changes an owner (GAP-0890).
+            internal UninstallFilePrivilegeScope(bool bestEffort, bool skipTakeOwnership)
             {
                 this.bestEffort = bestEffort;
                 System.Threading.Thread.BeginThreadAffinity();
@@ -1101,7 +1110,8 @@ namespace $nativeNamespace
                     {
                         EnablePrivilege("SeBackupPrivilege");
                         RestoreEnabled = EnablePrivilege("SeRestorePrivilege");
-                        TakeOwnershipEnabled = EnablePrivilege("SeTakeOwnershipPrivilege");
+                        if (!skipTakeOwnership)
+                            TakeOwnershipEnabled = EnablePrivilege("SeTakeOwnershipPrivilege");
                     }
                     else
                     {
@@ -1183,13 +1193,16 @@ namespace $nativeNamespace
 
             public void Dispose()
             {
+                // failRevertForTest makes both reverts "fail" so the smoke can
+                // show the fail-closed exit; it is never set outside a test.
+                bool injected = failRevertForTest;
                 int restoreError = 0;
-                if (active && !SetThreadToken(
+                if (active && (injected || !SetThreadToken(
                         IntPtr.Zero,
-                        hadPreviousToken ? previousToken : IntPtr.Zero))
-                    restoreError = Marshal.GetLastWin32Error();
-                if (restoreError != 0 && !RevertToSelf())
-                    restoreError = Marshal.GetLastWin32Error();
+                        hadPreviousToken ? previousToken : IntPtr.Zero)))
+                    restoreError = injected ? 1 : Marshal.GetLastWin32Error();
+                if (restoreError != 0 && !injected)
+                    restoreError = RevertToSelf() ? 0 : Marshal.GetLastWin32Error();
                 active = false;
                 if (privilegedToken != IntPtr.Zero)
                     CloseHandle(privilegedToken);
@@ -1198,11 +1211,32 @@ namespace $nativeNamespace
                 privilegedToken = IntPtr.Zero;
                 previousToken = IntPtr.Zero;
                 System.Threading.Thread.EndThreadAffinity();
+                // Neither SetThreadToken nor RevertToSelf took the privileged
+                // duplicate off this thread. A thrown exception can be
+                // swallowed by a caller that goes on running with it, so the
+                // lifecycle stops at once with a named reason (GAP-0890 review
+                // S1). Nothing after the failed revert is changed.
                 if (restoreError != 0)
-                    throw new Win32Exception(
-                        restoreError,
-                        "restore installer thread token after uninstall ACL recovery failed");
+                    FailClosedAfterRevertFailure(restoreError);
             }
+        }
+
+        private static bool failRevertForTest = false;
+
+        private static void FailClosedAfterRevertFailure(int error)
+        {
+            string message =
+                "privilege_revert_failed: the DefenseClaw lifecycle could not remove a temporary " +
+                "privileged token from its thread (Win32 error " + error + "), so it stopped at once; " +
+                "nothing further was changed; run the uninstall again";
+            try
+            {
+                Console.Error.WriteLine(message);
+            }
+            catch (Exception)
+            {
+            }
+            Environment.FailFast(message);
         }
 
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -3108,10 +3142,30 @@ namespace $nativeNamespace
         // nothing is thrown for one entry.
         public static string[] DeleteTreePrivileged(string root)
         {
+            return DeleteTreePrivilegedCore(root, null, false);
+        }
+
+        // GAP-0890: deleted, when given, receives the path of each entry whose
+        // deletion was requested (links are named as links), so the caller can
+        // log every privileged deletion.
+        //
+        // This overload enables backup and restore only (GAP-0890 review S3):
+        // the delete opens each entry with backup semantics for DELETE and the
+        // listing (backup traverses and lists, restore grants DELETE) and
+        // never rewrites an owner or an access list, so take-ownership, which
+        // the one-argument overload keeps for the forced-uninstall path, is
+        // not asked for.
+        public static string[] DeleteTreePrivileged(string root, List<string> deleted)
+        {
+            return DeleteTreePrivilegedCore(root, deleted, true);
+        }
+
+        private static string[] DeleteTreePrivilegedCore(string root, List<string> deleted, bool backupRestoreOnly)
+        {
             List<string> failures = new List<string>();
-            using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true))
+            using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true, backupRestoreOnly))
             {
-                DeleteEntryPrivileged(root, failures, 0);
+                DeleteEntryPrivileged(root, failures, 0, deleted);
                 string missing = MissingPrivilegeSuffix(scope);
                 if (missing.Length != 0)
                 {
@@ -3125,7 +3179,8 @@ namespace $nativeNamespace
         private static void DeleteEntryPrivileged(
             string path,
             List<string> failures,
-            int depth)
+            int depth,
+            List<string> deleted)
         {
             const uint DELETE = 0x00010000;
             const uint SYNCHRONIZE = 0x00100000;
@@ -3212,7 +3267,8 @@ namespace $nativeNamespace
                         DeleteEntryPrivileged(
                             System.IO.Path.Combine(path, name),
                             failures,
-                            depth + 1);
+                            depth + 1,
+                            deleted);
                 }
                 if ((attributes & FILE_ATTRIBUTE_READONLY) != 0)
                 {
@@ -3232,6 +3288,11 @@ namespace $nativeNamespace
                         disposition,
                         (uint)disposition.Length))
                     failures.Add(path + ": delete failed (" + Marshal.GetLastWin32Error() + ")");
+                else if (deleted != null)
+                    deleted.Add(
+                        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                            ? path + " (link, not followed)"
+                            : path);
             }
             finally
             {
@@ -4732,10 +4793,19 @@ namespace $nativeNamespace
         // (Unnamed). Any other answer is a file this account can neither query
         // nor delete, which throws: a caller that fails closed refuses, and
         // one that does not finds no holder, as for any Restart Manager error.
+        public static bool StandaloneHolderProbe;
+
         public static FileHolder[] GetFileHolders(string[] paths)
         {
             if (paths == null || paths.Length == 0)
                 return new FileHolder[0];
+            // The unreadable-file handling below is for the standalone
+            // profile only. Initialize-DefenseClawNativeSecurity sets the flag
+            // from the profile on every call; the Secure Client profile keeps
+            // asking Restart Manager about every path exactly as before
+            // (GAP-0890 review S4).
+            if (!StandaloneHolderProbe)
+                return QueryRestartManager(paths);
             const uint FILE_READ_ATTRIBUTES = 0x00000080;
             const uint DELETE = 0x00010000;
             const int ERROR_ACCESS_DENIED = 5;
@@ -4749,7 +4819,25 @@ namespace $nativeNamespace
                     queryable.Add(path);
                     continue;
                 }
-                if (DeleteProbeFindsHolder(GetDirectoryOpenError(path, DELETE), path))
+                // The probe opens with backup semantics, which bypass the
+                // access list only while backup or restore is enabled; an
+                // elevated Administrator (and a CI runner) holds both disabled.
+                // They are enabled for this one open, on a thread-bound
+                // duplicate of the token that is dropped by the using block
+                // whether the open throws or not, so the process token is
+                // never changed (GAP-0890). Backup and restore are both
+                // enabled where the token holds them: the documented grant of
+                // DELETE access is restore, and Server 2025 also grants it
+                // with backup alone, so asking for both works on every build.
+                // Take-ownership is not needed and not enabled.
+                int answer;
+                string missing;
+                using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true, true))
+                {
+                    answer = GetDirectoryOpenError(path, DELETE);
+                    missing = MissingPrivilegeSuffix(scope);
+                }
+                if (DeleteProbeFindsHolder(answer, path, missing))
                     unnamedHolder = true;
             }
             FileHolder[] found = queryable.Count == 0
@@ -4777,7 +4865,11 @@ namespace $nativeNamespace
         // GAP-0878); a future SYSTEM-only file that a service holds that way
         // would refuse the uninstall until the service stops, so such a file
         // must be opened with delete sharing.
-        public static bool DeleteProbeFindsHolder(int answer, string path)
+        // privilegeNote names the privileges the token did not hold, so a
+        // refusal for a token that cannot delete the file says why (the
+        // account is not an administrator, or a user-rights policy removed
+        // them) and is never taken for "no holder".
+        public static bool DeleteProbeFindsHolder(int answer, string path, string privilegeNote)
         {
             const int ERROR_FILE_NOT_FOUND = 2;
             const int ERROR_PATH_NOT_FOUND = 3;
@@ -4788,7 +4880,8 @@ namespace $nativeNamespace
                 return true;
             throw new Win32Exception(
                 answer,
-                "Restart Manager cannot read, and this account cannot delete, " + path);
+                "Restart Manager cannot read, and this account cannot delete, " + path +
+                    " (Win32 error " + answer + ")" + (privilegeNote ?? String.Empty));
         }
 
         private static FileHolder[] QueryRestartManager(string[] paths)
@@ -4872,6 +4965,7 @@ namespace $nativeNamespace
             throw 'DefenseClaw native security helper did not compile its exact generated type'
         }
         $script:DefenseClawNativeSecurityType = $nativeType
+        $nativeType::StandaloneHolderProbe = [bool](Test-DefenseClawStandaloneProfile)
     }
     catch {
         # A compiler blocked by application control: name the policy from its
@@ -10359,9 +10453,19 @@ function Move-DefenseClawNonImageFileReplacing {
 }
 
 function Write-DefenseClawJsonAtomic {
+    <#
+        Publishes JSON through a sibling and an atomic replace. -Kind AdminFile
+        stamps the sibling with the canonical owner and protected access list
+        before the replace (the stamp the hook guardian enforces), so the
+        published file is never visible with the creator's owner (SYSTEM) or a
+        DACL inherited from its folder. A write that stamps after the replace
+        leaves that window open, and a guardian pass inside it repairs the file
+        and makes the next ensure report guardian_repaired_drift (GAP-0899).
+    #>
     param(
         [Parameter(Mandatory)]$Value,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        [ValidateSet('AdminFile')][string]$Kind
     )
     New-DefenseClawDirectory -Path ([IO.Path]::GetDirectoryName($Path))
     $temporary = "$Path.new.$([Guid]::NewGuid().ToString('N'))"
@@ -10375,6 +10479,12 @@ function Write-DefenseClawJsonAtomic {
             $json,
             [Text.UTF8Encoding]::new($false)
         )
+        if (-not [string]::IsNullOrEmpty($Kind)) {
+            Set-DefenseClawPathAcl `
+                -Path $temporary `
+                -Kind $Kind `
+                -GatewayServiceSID $script:AdministratorsSID
+        }
         # A ReadOnly, Hidden or System attribute on the file being replaced
         # makes the replacing move fail with access denied.
         [void](Clear-DefenseClawRestrictiveFileAttributes -Path $Path)
@@ -15085,7 +15195,7 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
     Assert-DefenseClawOwnedServiceOrAbsent `
         -Name $GatewayServiceName `
         -ExpectedGatewayPath $Layout.GatewayPath
-    Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Value ([ordered]@{
+    Write-DefenseClawJsonAtomic -Path $Layout.MetadataPath -Kind AdminFile -Value ([ordered]@{
         schema_version = $script:SchemaVersion
         deployment_mode = 'managed_enterprise'
         installed = $true
@@ -15096,10 +15206,6 @@ function Repair-DefenseClawUnreadableDeploymentMetadata {
         hashes = [ordered]@{}
         profile = 'standalone'
     })
-    Set-DefenseClawPathAcl `
-        -Path $Layout.MetadataPath `
-        -Kind AdminFile `
-        -GatewayServiceSID $script:AdministratorsSID
     Microsoft.PowerShell.Utility\Write-Warning -Message (
         "DefenseClaw enterprise repair: rebuilding the deployment metadata: $unreadable"
     )
@@ -18116,7 +18222,7 @@ function Initialize-DefenseClawCodexRequirementsAclBackup {
         existed = [bool]$exists
         sha256 = $sha256
         security_descriptor = $securityDescriptor
-    }) -Path $Layout.CodexRequirementsAclBackupPath
+    }) -Path $Layout.CodexRequirementsAclBackupPath -Kind AdminFile
     [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
 }
 
@@ -18324,7 +18430,7 @@ function Write-DefenseClawAgentApplicationControlAttestation {
         attested_by_sid = [string]$identity.User.Value
         attested_at = [DateTime]::UtcNow.ToString('o')
         certification_required = $true
-    }) -Path $Layout.AgentApplicationControlAttestationPath
+    }) -Path $Layout.AgentApplicationControlAttestationPath -Kind AdminFile
     [void](Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout)
 }
 
@@ -18503,7 +18609,7 @@ function Write-DefenseClawStandaloneAgentApplicationControlAttestation {
         attested_by_sid = [string]$identity.User.Value
         attested_at = [DateTime]::UtcNow.ToString('o')
         certification_required = $true
-    }) -Path $Layout.AgentApplicationControlAttestationPath
+    }) -Path $Layout.AgentApplicationControlAttestationPath -Kind AdminFile
     $written = Get-DefenseClawAgentApplicationControlAttestation -Layout $Layout
     if (-not [string]::IsNullOrEmpty(
         [string]$written.claude_effective_policy_stale_reason)) {
@@ -19285,6 +19391,9 @@ function Assert-DefenseClawCreatedFolderRemovable {
 # creates and protects the folder; this never creates it. Best effort.
 function Write-DefenseClawLifecycleLogDiagnostic {
     param([Parameter(Mandatory)][string]$Message)
+    # $script:LifecycleLogDiagnosticWritten says whether this call reached the
+    # log, for a caller that must leave a record some other way (GAP-0890).
+    $script:LifecycleLogDiagnosticWritten = $false
     try {
         $directory = [IO.Path]::Combine([string]$script:WindowsDirectory, 'Logs', 'DefenseClaw')
         if (-not [IO.Directory]::Exists($directory)) {
@@ -19301,6 +19410,7 @@ function Write-DefenseClawLifecycleLogDiagnostic {
         $stream = [IO.FileStream]::new($path, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::ReadWrite)
         try {
             $stream.Write($bytes, 0, $bytes.Length)
+            $script:LifecycleLogDiagnosticWritten = $true
         }
         finally {
             $stream.Dispose()
@@ -19321,6 +19431,7 @@ function Write-DefenseClawLifecycleLogDiagnostic {
 # (Get-DefenseClawStandaloneCreatedFolderPreview).
 $script:DefenseClawCreatedFoldersKept = [Collections.Generic.List[string]]::new()
 $script:DefenseClawCreatedFolderLogToLifecycleLog = $false
+$script:LifecycleLogDiagnosticWritten = $false
 
 function Get-DefenseClawCreatedFoldersKept {
     return [string[]]@($script:DefenseClawCreatedFoldersKept)
@@ -37526,6 +37637,24 @@ function Remove-DefenseClawManagedTree {
             }
         }
     }
+    if ($null -ne $lastError -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
+        # Last resort, after the attempts above and the rollback holder wait:
+        # the rollback retry window checks the recorded root identity and
+        # descriptor before every delete, and the privileged pass does too
+        # (GAP-0890 review S6). It runs here so a root that the wait would have
+        # returned on is never reached.
+        if ($RetryHeldFileMilliseconds -gt 0 -and
+            -not (Test-DefenseClawManagedTreeRetryRoot `
+                -Path $safe `
+                -ExpectedIdentity $ExpectedRootIdentity `
+                -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
+            return
+        }
+        if (Remove-DefenseClawStateTreePrivileged -Root $safe -Target $target -Label $Label -ErrorRecord $lastError) {
+            return
+        }
+    }
     if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
         if ($strict) {
             throw $lastError
@@ -41543,6 +41672,105 @@ function Test-DefenseClawFileInUseError {
     return $false
 }
 
+function Test-DefenseClawAccessDeniedError {
+    # Whether a failed deletion failed because the account has no right on the
+    # file: access denied (0x80070005), not a sharing violation.
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    if ($exception -is [Management.Automation.ActionPreferenceStopException] -and
+        $null -ne $exception.ErrorRecord) {
+        $exception = $exception.ErrorRecord.Exception
+    }
+    while ($null -ne $exception) {
+        if ($exception -is [UnauthorizedAccessException] -or [int]$exception.HResult -eq -2147024891) {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Remove-DefenseClawStateTreePrivileged {
+    <#
+        GAP-0890: the plain deletion of DefenseClaw's own tree got access
+        denied for a file that only SYSTEM may open (hook-guardian\
+        opencode-service-ports.json), because an Administrator's backup and
+        restore privileges are disabled in its token. This deletes the tree
+        once more through the native no-follow privileged delete, which
+        enables backup and restore for the call only on a thread-bound
+        duplicate of the token (the process token is never changed),
+        deletes a link as the link and never enters it, and rewrites no
+        access list. It acts only for the standalone profile, only after an
+        access-denied failure, and only on the exact StateRoot or InstallRoot
+        of the standalone profile; any other path, label or profile returns
+        $false and changes nothing. Every deleted path is logged as a
+        defenseclaw_repair event. Returns $true when Root is gone.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    if ($Label -cne 'StateRoot' -and $Label -cne 'InstallRoot') {
+        return $false
+    }
+    if (-not (Test-DefenseClawAccessDeniedError -ErrorRecord $ErrorRecord)) {
+        return $false
+    }
+    $roots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+    $own = [IO.Path]::GetFullPath([string]$(if ($Label -ceq 'StateRoot') { $roots.StateRoot } else { $roots.InstallRoot })).TrimEnd('\')
+    $full = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if (-not [string]::Equals($full, $own, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    # The path handed to the native call must be the root just checked, or its
+    # extended-length form (a tree with names Win32 normalizes is removed that
+    # way); nothing else is deleted (GAP-0890 review S3).
+    $targetPlain = if ($Target.StartsWith('\\?\', [StringComparison]::Ordinal)) { $Target.Substring(4) } else { $Target }
+    if (-not [string]::Equals([IO.Path]::GetFullPath($targetPlain).TrimEnd('\'), $full, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $deleted = [Collections.Generic.List[string]]::new()
+    $failures = @()
+    $logMissing = $false
+    try {
+        $native = Initialize-DefenseClawNativeSecurity
+        $failures = @($native::DeleteTreePrivileged($Target, $deleted))
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "privileged deletion of $full failed: $($_.Exception.Message)"
+    }
+    foreach ($entry in $deleted) {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+            path   = [string]$entry
+            reason = "deleted after access denied, with backup and restore privileges enabled for this call only: $($ErrorRecord.Exception.Message)"
+        }
+        # The warning stream is not kept by the CLI or Setup; the lifecycle
+        # log is, so each privileged deletion is named there too.
+        Write-DefenseClawLifecycleLogDiagnostic -Message (
+            'defenseclaw_repair path=' + [string]$entry +
+            ': deleted after access denied, with backup and restore privileges enabled for this call only')
+        if (-not $script:LifecycleLogDiagnosticWritten) {
+            $logMissing = $true
+        }
+    }
+    if ($logMissing) {
+        # The lifecycle log folder is missing or not writable: the
+        # defenseclaw_repair warnings above are the record, said once.
+        Microsoft.PowerShell.Utility\Write-Warning -Message (
+            'defenseclaw_repair: the lifecycle log could not be written, so the ' +
+            "$($deleted.Count) privileged deletion(s) under $full are named only in the defenseclaw_repair warnings")
+    }
+    foreach ($failure in $failures) {
+        Microsoft.PowerShell.Utility\Write-Verbose "privileged deletion left: $failure"
+    }
+    return (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $full))
+}
+
 function Remove-DefenseClawPurgedStateRoot {
     <#
         Deletes StateRoot after the services stopped. Standalone retries a
@@ -44757,7 +44985,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             )) `
             -ManagedHooksActivation $managedHooksActivation `
             -ApprovedPolicySources $approvedPolicySources
-        Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath
+        Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath -Kind AdminFile
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
         Set-DefenseClawStandaloneSecretsAcls `
             -Layout $Layout `
@@ -44859,11 +45087,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             $newMetadata.updated_at = [DateTime]::UtcNow.ToString('o')
             Write-DefenseClawJsonAtomic `
                 -Value $newMetadata `
-                -Path $Layout.MetadataPath
-            Set-DefenseClawPathAcl `
                 -Path $Layout.MetadataPath `
-                -Kind AdminFile `
-                -GatewayServiceSID $script:AdministratorsSID
+                -Kind AdminFile
             # Only a freshly reconciling guardian authorizes gateway demand
             # start. A queued gateway failure restart is now safe to run.
             Set-DefenseClawServiceStartMode `
@@ -44944,11 +45169,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 $newMetadata.updated_at = [DateTime]::UtcNow.ToString('o')
                 Write-DefenseClawJsonAtomic `
                     -Value $newMetadata `
-                    -Path $Layout.MetadataPath
-                Set-DefenseClawPathAcl `
                     -Path $Layout.MetadataPath `
-                    -Kind AdminFile `
-                    -GatewayServiceSID $script:AdministratorsSID
+                    -Kind AdminFile
             }
         }
         # -NoStart intentionally leaves all managed services disabled. Enabling them
@@ -47991,7 +48213,7 @@ function Invoke-DefenseClawUninstallLifecycle {
                 $tombstone.Remove('product_version')
             }
         }
-        Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath
+        Write-DefenseClawJsonAtomic -Value $tombstone -Path $Layout.MetadataPath -Kind AdminFile
         Set-DefenseClawPreservedStateAcls `
             -Layout $Layout `
             -GatewayServiceSID $gatewaySID `
