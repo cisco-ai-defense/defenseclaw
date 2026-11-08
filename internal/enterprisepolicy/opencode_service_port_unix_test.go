@@ -321,11 +321,18 @@ func TestSetOpenCodeServicePortRefusesASharedGroupFolder(t *testing.T) {
 // reachableHome returns a new home directly beneath /tmp, so every folder
 // above it is searchable by another account (a t.TempDir parent is mode 0700,
 // and so is the per-user TMPDIR of macOS, and would hide the folders the test
-// opens).
+// opens). The home gets the group of the test account: a new entry takes the
+// group of the folder it is made in on macOS and BSD (and in a setgid folder on
+// Linux), which would be the group of /tmp, not one the second account holds,
+// and the group-write cases would then be refused for the wrong reason.
 func reachableHome(t *testing.T) string {
 	t.Helper()
 	home, err := os.MkdirTemp("/tmp", "opencode-port-home-")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(home, -1, os.Getegid()); err != nil {
+		_ = os.RemoveAll(home)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(home, 0o700); _ = os.RemoveAll(home) })
