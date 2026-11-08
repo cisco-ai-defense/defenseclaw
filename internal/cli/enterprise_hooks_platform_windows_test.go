@@ -946,8 +946,15 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 		claudeFail bool
 		wantNamed  []string
 		wantTyped  bool
+		// Secure Client keeps its old behaviour: the first failing step fails the
+		// pass, the later steps do not run, and nothing is typed even when a link
+		// sits at the folder.
+		secureClient    bool
+		claudeReadFails bool
 	}{
 		{name: "no failure"},
+		{name: "Secure Client: the first failing step fails the pass, no later step, no typing", secureClient: true, claudeReadFails: true,
+			wantNamed: []string{"read the Claude Code policy"}},
 		// A link alone is a typed failure of the Codex connector: the pass goes on,
 		// and the guardian fails the Codex rows by name (GAP-0879).
 		{name: "link at the Codex folder", codexLink: true, wantTyped: true, wantNamed: []string{"ensure configured Codex machine requirements", "cmd /c rmdir"}},
@@ -973,9 +980,13 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 				enterpriseHookCodexRequirementsReconciler, enterpriseHookCodexFolderEnsurer = previousCodexReconciler, previousFolder
 				enterpriseHookCodexTargetsPublisher = previousCodexPublisher
 			})
+			profile := managed.ProfileStandalone
+			if tc.secureClient {
+				profile = managed.ProfileSecureClient
+			}
 			cfg = &config.Config{
 				DeploymentMode: managed.DeploymentModeManagedEnterprise,
-				Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+				Enterprise:     config.EnterpriseConfig{Profile: profile},
 				Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{
 					"claudecode": {}, "codex": {}, "cursor": {},
 				}},
@@ -983,6 +994,9 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 			previousLink := enterpriseHookVendorFolderLink
 			t.Cleanup(func() { enterpriseHookVendorFolderLink = previousLink })
 			enterpriseHookVendorFolderLink = func(connectorName string) string {
+				if tc.secureClient {
+					return `C:\ProgramData\` + connectorName
+				}
 				if tc.codexLink && connectorName == "codex" {
 					return `C:\ProgramData\OpenAI\Codex`
 				}
@@ -1013,7 +1027,12 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 				return nil
 			}
 			claudeActive := false
-			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) { return nil, claudeActive, nil }
+			enterpriseHookClaudePolicyTargetsReader = func() ([]string, bool, error) {
+				if tc.claudeReadFails {
+					return nil, false, errors.New("read the Claude Code policy: access is denied")
+				}
+				return nil, claudeActive, nil
+			}
 			enterpriseHookClaudePolicyEnsurer = func(connector.SetupOpts) error {
 				if tc.claudeFail {
 					return claudeErr
@@ -1034,7 +1053,11 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 				return nil
 			}
 			err := syncEnterpriseHookManagedMachineEnrollments(enterprisehooks.Manifest{}, "127.0.0.1:32109", false)
-			if len(published) != 1 || len(published[0]) != 0 {
+			if tc.secureClient {
+				if len(published) != 0 || err == nil || enterpriseHookLinkFailures(err) != nil {
+					t.Fatalf("Secure Client must return at the first failing step: published %v err %v", published, err)
+				}
+			} else if len(published) != 1 || len(published[0]) != 0 {
 				t.Fatalf("the stale Cursor enrollment was not revoked in this pass: published %v (err %v)", published, err)
 			}
 			if len(tc.wantNamed) == 0 {

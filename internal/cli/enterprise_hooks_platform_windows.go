@@ -315,8 +315,15 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
-	var claudeErr, codexErr, cursorErr error
+	// Secure Client keeps the order and the first-failure return it always had:
+	// the connector steps below collect their errors, the typing of a link
+	// failure and the continuation past a failed step are standalone only.
+	standalone := cfg.StandaloneEnterprise()
+	var claudeErr, codexErr, cursorErr, deferredCodexErr error
 	defer func() {
+		if !standalone {
+			return
+		}
 		resultErr = classifyEnterpriseHookConnectorErrors(enterpriseHookVendorFolderLink, []enterpriseHookConnectorStepError{
 			{Connector: "claudecode", Err: claudeErr}, {Connector: "codex", Err: codexErr}, {Connector: "cursor", Err: cursorErr},
 		}, resultErr)
@@ -407,12 +414,14 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		}
 		return nil
 	}()
+	if !standalone && claudeErr != nil {
+		return claudeErr
+	}
 
 	codexErr = func() error {
 		currentCodex, err := enterpriseHookCodexRuntimeRegistryReader(
 			codexOpts.HookBinary,
 		)
-		var deferredCodexErr error
 		if cfg.StandaloneEnterprise() && configured["codex"] && (err != nil || !currentCodex.Active) {
 			// The reconcile validates the machine-policy folder and creates none of
 			// it, so a folder or vendor parent deleted after Setup made every pass
@@ -480,8 +489,16 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				return err
 			}
 		}
-		return deferredCodexErr
+		return nil
 	}()
+	if !standalone && codexErr != nil {
+		return codexErr
+	}
+	if standalone && codexErr == nil {
+		// A deferred Codex error (the registry could not be read) is a failure
+		// of the Codex step too; Secure Client returns it after Cursor ran.
+		codexErr = deferredCodexErr
+	}
 
 	cursorErr = func() error {
 		currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
@@ -558,6 +575,12 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		}
 		return nil
 	}()
+	if !standalone {
+		if cursorErr != nil {
+			return cursorErr
+		}
+		return deferredCodexErr
+	}
 	return nil
 }
 
