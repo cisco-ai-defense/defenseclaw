@@ -45,3 +45,30 @@ func nativeOperandsCoverTarget(facts Facts, files int, target string) bool {
 	}
 	return false
 }
+
+// nativeReachedFiles returns the files a native write to target reaches: the
+// target itself and, when the gateway found that an operand of the call is
+// reached through an existing link (PathFact.Linked, from the hook client's
+// evidence or a local lookup), the physical file of each such link. A content
+// proof judges the text against every one of them, so a write through a link
+// to a protected file gets the verdict the write by the protected name gets.
+// A link fact belongs to the call, not to one of its files; a call that
+// writes several files reads each against every physical file it reached,
+// which can only add a proof to a call that holds protected text.
+func nativeReachedFiles(facts Facts, target string) []string {
+	files := []string{target}
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		return files
+	}
+	for _, candidate := range facts.Paths {
+		if !candidate.Linked || candidate.Flavor != PathFlavorPOSIX ||
+			candidate.Access != PathAccessWrite && candidate.Access != PathAccessAppend ||
+			!strings.HasPrefix(candidate.Resolved, "/") {
+			continue
+		}
+		if physical := path.Clean(candidate.Resolved); physical != target {
+			files = append(files, physical)
+		}
+	}
+	return files
+}
