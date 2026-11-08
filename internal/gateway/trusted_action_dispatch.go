@@ -321,7 +321,9 @@ func dispatchTrustedAction(
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
-	request.Input.ClientResolvedTargets = clientResolvedPathTargets(request.ResolvedWriteTargets)
+	request.Input.ClientResolvedTargets = withLocalWriteAnswers(
+		request, clientResolvedPathTargets(request.ResolvedWriteTargets),
+	)
 	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
 	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)

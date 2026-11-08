@@ -35,8 +35,11 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	}
 	writes := nativeFileWrites(input.Tool, input.Args)
 	for _, write := range writes {
-		canonical, absolute := nativeAbsoluteTarget(write.target, "")
-		if !write.whole || !absolute || canonical != write.target ||
+		// A relative name (a link in the project) is placed in the working
+		// directory of the call, as the tool does; an absolute one must
+		// already be canonical.
+		canonical, absolute := nativeAbsoluteTarget(write.target, input.CWD)
+		if !write.whole || !absolute || strings.HasPrefix(write.target, "/") && canonical != write.target ||
 			!nativeOperandsCoverTarget(facts, len(writes), canonical) {
 			continue
 		}
