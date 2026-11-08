@@ -353,3 +353,190 @@ func TestResolvedMCPDefinitionMemoryExpiresAndIsBounded(t *testing.T) {
 		t.Fatal("forgetting one account session dropped another account")
 	}
 }
+
+func allowedURLConfig(managedMode bool, mode string) *config.Config {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = mode
+	cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{URL: removedDeniedURL}}
+	if managedMode {
+		cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		cfg.Enterprise.Profile = "standalone"
+	}
+	return cfg
+}
+
+// A server found nowhere cannot be checked against an allowed list that pins
+// an endpoint either: with asset_policy enabled the call gets the same
+// verdict as under an endpoint deny (a warning in the default tier, a block
+// in a managed one, the asset_policy mode for the allowed list), and nothing
+// changes while the policy is off or the rule does not pin an endpoint.
+func TestUnknownMCPServerUnderAnEndpointAllowedList(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+	writeClaudeServers(t, home, project, `{}`)
+	call := func(cfg *config.Config) (config.AssetPolicyDecision, bool) {
+		return claudeMCPCall(&APIServer{scannerCfg: cfg}, ctx, project, "s1", "mcp__never-seen__count_words")
+	}
+
+	decision, matched := call(allowedURLConfig(false, config.AssetPolicyModeAction))
+	wantUnknownWarning(t, "default tier", decision, matched)
+	decision, matched = call(allowedURLConfig(true, config.AssetPolicyModeAction))
+	if !matched || decision.Action != "block" || decision.Source != "mcp-definition-unproven" {
+		t.Fatalf("managed: matched=%v decision=%+v, want a block", matched, decision)
+	}
+	decision, matched = call(allowedURLConfig(true, config.AssetPolicyModeObserve))
+	if !matched || decision.Action != "allow" || decision.Source != "mcp-definition-unproven" || !decision.WouldBlock {
+		t.Fatalf("managed with asset_policy in observe mode: matched=%v decision=%+v, want an allow with the warning", matched, decision)
+	}
+	strict := allowedURLConfig(false, config.AssetPolicyModeAction)
+	strict.Guardrail.RulePack = "strict"
+	decision, matched = call(strict)
+	if !matched || decision.Action != "block" || decision.Source != "mcp-definition-unproven" {
+		t.Fatalf("strict: matched=%v decision=%+v, want a block", matched, decision)
+	}
+
+	// Benign twins.
+	off := allowedURLConfig(true, config.AssetPolicyModeAction)
+	off.AssetPolicy.Enabled = false
+	if decision, matched = call(off); matched {
+		t.Fatalf("policy off: matched=%v decision=%+v, want no verdict", matched, decision)
+	}
+	nameOnly := allowedURLConfig(true, config.AssetPolicyModeAction)
+	nameOnly.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: "never-seen"}}
+	if decision, matched = call(nameOnly); matched {
+		t.Fatalf("name-only allowed rule: matched=%v decision=%+v, want no verdict", matched, decision)
+	}
+	other := allowedURLConfig(true, config.AssetPolicyModeAction)
+	other.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: "another-server", URL: removedDeniedURL}}
+	if decision, matched = call(other); matched {
+		t.Fatalf("allowed rule of another server: matched=%v decision=%+v, want no verdict", matched, decision)
+	}
+}
+
+// More denied definitions than the memory holds for one account do not let
+// the last one run once its entry is gone, in any tier: the session is marked,
+// and a name it cannot resolve is refused. Another session, and a session
+// that stayed within the memory, keep the ordinary verdicts.
+func TestDeniedMCPServerPastTheMemoryLimitStaysDenied(t *testing.T) {
+	servers := map[string]any{}
+	for i := 0; i < mcpResolvedDeniedPerHome; i++ {
+		servers[fmt.Sprintf("denied%d", i)] = map[string]any{"type": "http", "url": removedDeniedURL}
+	}
+	servers["wiki"] = map[string]any{"type": "http", "url": removedDeniedURL}
+	for name, cfg := range map[string]*config.Config{"default tier": deniedURLConfig(), "managed": managedURLDenyConfig()} {
+		t.Run(name, func(t *testing.T) {
+			api := &APIServer{scannerCfg: cfg}
+			home, project := t.TempDir(), t.TempDir()
+			ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+			write := func() {
+				t.Helper()
+				data, err := json.Marshal(map[string]any{"projects": map[string]any{filepath.ToSlash(project): map[string]any{"mcpServers": servers}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(home, ".claude.json"), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write()
+			for i := 0; i < mcpResolvedDeniedPerHome; i++ {
+				decision, matched := claudeMCPCall(api, ctx, project, "s1", fmt.Sprintf("mcp__denied%d__count_words", i))
+				wantDenyBlock(t, fmt.Sprintf("denied call %d", i), decision, matched)
+			}
+			decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+			wantDenyBlock(t, "configured denied server past the limit", decision, matched)
+			delete(servers, "wiki")
+			defer func() { servers["wiki"] = map[string]any{"type": "http", "url": removedDeniedURL} }()
+			write()
+			decision, matched = claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+			if !matched || decision.Action != "block" || decision.Source != "mcp-definition-unproven" {
+				t.Fatalf("removed denied server past the limit: matched=%v decision=%+v, want a block", matched, decision)
+			}
+			if name == "default tier" {
+				decision, matched = claudeMCPCall(api, ctx, project, "other-session", "mcp__wiki__count_words")
+				wantUnknownWarning(t, "another session of the same account", decision, matched)
+			}
+		})
+	}
+}
+
+// The mark of a lost denied definition belongs to its session, expires with
+// the TTL, is dropped when the session starts again, and is bounded.
+func TestResolvedMCPMemoryMarksASessionThatLostADeniedDefinition(t *testing.T) {
+	var memory mcpResolvedDefinitions
+	now := time.Now()
+	entry := config.MCPServerEntry{Name: "notes", URL: removedDeniedURL}
+	for i := 0; i < mcpResolvedDeniedPerHome; i++ {
+		if !memory.remember("claudecode", "/home/a", "s1", "/work", fmt.Sprintf("denied%d", i), entry, true, now) {
+			t.Fatalf("denied definition %d refused below the limit", i)
+		}
+	}
+	if memory.lostDenied("claudecode", "/home/a", "s1", now) {
+		t.Fatal("a session within the limit was marked")
+	}
+	if memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, now) {
+		t.Fatal("a denied definition past the limit was kept")
+	}
+	if !memory.lostDenied("claudecode", "/home/a", "s1", now) {
+		t.Fatal("the session that lost a denied definition was not marked")
+	}
+	if memory.lostDenied("claudecode", "/home/a", "s2", now) || memory.lostDenied("codex", "/home/a", "s1", now) || memory.lostDenied("claudecode", "/home/b", "s1", now) {
+		t.Fatal("the mark leaked to another session, connector or account")
+	}
+	if memory.lostDenied("claudecode", "/home/a", "s1", now.Add(2*mcpResolvedTTL)) {
+		t.Fatal("the mark outlived the TTL")
+	}
+	memory.remember("claudecode", "/home/a", "s1", "/work", "one-too-many", entry, true, now)
+	memory.forgetSession("claudecode", "/home/a", "s1")
+	if memory.lostDenied("claudecode", "/home/a", "s1", now) {
+		t.Fatal("a session that started again kept its mark")
+	}
+	for i := 0; i < mcpResolvedLostLimit+10; i++ {
+		memory.mu.Lock()
+		memory.markLostLocked("claudecode", "/home/a", fmt.Sprintf("flood%d", i), now.Add(time.Duration(i)*time.Second))
+		memory.mu.Unlock()
+	}
+	if len(memory.lost) > mcpResolvedLostLimit {
+		t.Fatalf("%d marks kept, want at most %d", len(memory.lost), mcpResolvedLostLimit)
+	}
+}
+
+// A config edit that only renames the entry (a Codex tool name folds both
+// spellings into one) does not make the live connection benign when a rule
+// denies the old name.
+func TestRenamedCodexServerKeepsTheDenyOfItsOldName(t *testing.T) {
+	for name, cfg := range map[string]*config.Config{"default tier": deniedURLConfig(), "managed": managedURLDenyConfig()} {
+		t.Run(name, func(t *testing.T) {
+			cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "acme-notes"}}
+			api := &APIServer{scannerCfg: cfg}
+			home, project := t.TempDir(), t.TempDir()
+			ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
+			path := filepath.Join(home, ".codex", "config.toml")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			write := func(server string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("[mcp_servers.\""+server+"\"]\nurl = \""+removedOtherURL+"\"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			call := func(session string) (config.AssetPolicyDecision, bool) {
+				return api.codexMCPAssetDecision(ctx, codexHookRequest{
+					HookEventName: "PreToolUse", SessionID: session, ToolName: "mcp__acme_notes__count_words", CWD: project,
+				})
+			}
+			write("acme-notes")
+			decision, matched := call("s1")
+			wantDenyBlock(t, "configured name", decision, matched)
+			write("acme.notes")
+			decision, matched = call("s1")
+			wantDenyBlock(t, "after a rename with the same endpoint", decision, matched)
+			// Benign twin: a session that began after the edit connects to
+			// the renamed server, which no rule denies.
+			decision, matched = call("s2")
+			wantNotBlocked(t, "new session after the rename", decision, matched)
+		})
+	}
+}

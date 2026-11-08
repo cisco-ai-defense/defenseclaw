@@ -27,12 +27,16 @@ const mcpResolvedTTL = 24 * time.Hour
 // pushed out by the others: losing it is what let a denied server run once
 // its entry was gone. Only a definition read from an agent config is
 // remembered, so the bounds follow the size of the configs, not the number of
-// names a tool call can make up.
+// names a tool call can make up. A denied definition that still does not fit
+// is not forgotten silently: its session is marked (mcpResolvedLostLimit
+// marks are kept), and a name that session cannot resolve afterwards may be
+// the one that was lost.
 const (
 	mcpResolvedLimit         = 2048
 	mcpResolvedPerHome       = 256
-	mcpResolvedDeniedLimit   = 1024
-	mcpResolvedDeniedPerHome = 256
+	mcpResolvedDeniedLimit   = 4096
+	mcpResolvedDeniedPerHome = 1024
+	mcpResolvedLostLimit     = 1024
 )
 
 // mcpResolvedDefinitions remembers, per connector, account home, agent
@@ -48,6 +52,9 @@ const (
 type mcpResolvedDefinitions struct {
 	mu      sync.Mutex
 	entries map[string]mcpResolvedDefinition
+	// lost holds the sessions (connector, account and session id) for which a
+	// denied definition did not fit, with the time of their last use.
+	lost map[string]time.Time
 }
 
 type mcpResolvedDefinition struct {
@@ -93,11 +100,55 @@ func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name st
 		m.expireLocked(now)
 	}
 	if (!known || denied && !kept.denied) && !m.hasRoomLocked(home, denied, key) {
+		if denied {
+			m.markLostLocked(connector, home, session, now)
+		}
 		return false
 	}
 	m.entries[key] = mcpResolvedDefinition{
 		entry: entry, denied: denied, connector: strings.ToLower(connector), home: home, session: session, seen: now,
 	}
+	return true
+}
+
+func mcpLostKey(connector, home, session string) string {
+	return strings.ToLower(connector) + "\x00" + home + "\x00" + session
+}
+
+// markLostLocked records that a denied definition of the session could not be
+// kept. The oldest mark makes room when the marks are full.
+func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session string, now time.Time) {
+	if m.lost == nil {
+		m.lost = map[string]time.Time{}
+	}
+	key := mcpLostKey(connector, home, session)
+	if _, ok := m.lost[key]; !ok && len(m.lost) >= mcpResolvedLostLimit {
+		oldest, oldestAt := "", now
+		for other, at := range m.lost {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = other, at
+			}
+		}
+		delete(m.lost, oldest)
+	}
+	m.lost[key] = now
+}
+
+// lostDenied reports whether a denied definition of the session did not fit
+// in the memory within the TTL, and renews the mark.
+func (m *mcpResolvedDefinitions) lostDenied(connector, home, session string, now time.Time) bool {
+	key := mcpLostKey(connector, home, session)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	at, ok := m.lost[key]
+	if !ok {
+		return false
+	}
+	if now.Sub(at) > mcpResolvedTTL {
+		delete(m.lost, key)
+		return false
+	}
+	m.lost[key] = now
 	return true
 }
 
@@ -150,6 +201,7 @@ func (m *mcpResolvedDefinitions) forgetSession(connector, home, session string) 
 			delete(m.entries, key)
 		}
 	}
+	delete(m.lost, mcpLostKey(connector, home, session))
 }
 
 func (m *mcpResolvedDefinitions) expireLocked(now time.Time) {
@@ -160,10 +212,13 @@ func (m *mcpResolvedDefinitions) expireLocked(now time.Time) {
 	}
 }
 
-// sameMCPDefinition reports whether two entries reach or start the same
-// server.
+// sameMCPDefinition reports whether two entries are the same server under the
+// same configured name: where it points or how it starts, and the name the
+// lists and the registry know it by. An edit that only renames the entry is a
+// change too, because a rule can deny the old name.
 func sameMCPDefinition(a, b config.MCPServerEntry) bool {
-	return strings.TrimSpace(a.URL) == strings.TrimSpace(b.URL) &&
+	return strings.TrimSpace(a.Name) == strings.TrimSpace(b.Name) &&
+		strings.TrimSpace(a.URL) == strings.TrimSpace(b.URL) &&
 		strings.TrimSpace(a.Command) == strings.TrimSpace(b.Command) &&
 		strings.TrimSpace(a.Transport) == strings.TrimSpace(b.Transport) &&
 		slices.Equal(a.Args, b.Args)
