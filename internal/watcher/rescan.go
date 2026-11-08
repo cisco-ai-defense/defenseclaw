@@ -524,6 +524,15 @@ func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
 	return false
 }
 
+// admitsUnderWarnedRoot reports a skill or plugin without a baseline under a
+// root watched closely. The root was admitted through folders another account
+// of the private group may write, so what a rescan finds there is admitted
+// like a new install: a flagged skill left in place after its scan would be
+// an unenforced allow (GAP-0905).
+func (w *InstallWatcher) admitsUnderWarnedRoot(evt InstallEvent) bool {
+	return evt.Type != InstallMCP && w.rootWarned(evt.Path)
+}
+
 // hermesSkillsDiscover returns how to list dir's Hermes skills, or nil when
 // dir is not a Hermes skills root: this process's own root, or a user
 // profile's root that the managed gateway watches for every enrolled user.
@@ -1098,9 +1107,11 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				}
 				return rescanScanned
 			}
-			if w.admitsAtStartup(evt) {
+			if w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) {
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
+				// The same under a root watched closely: its first scan
+				// enforces the verdict, whichever rescan found it (GAP-0905).
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)
