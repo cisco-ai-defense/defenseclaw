@@ -80,6 +80,7 @@ func TestManagedGuardianRepairAuditNamesTheRestoredElement(t *testing.T) {
 	for _, invalid := range []string{
 		`{"user":"alice","uid":1001,"connector":"hermes","element":"\n"}`,
 		`{"user":"alice","uid":1001,"connector":"hermes","element":"` + strings.Repeat("x", 300) + `"}`,
+		`{"user":"alice","uid":1001,"connector":"hermes","element":"hook entry","change":"overwritten"}`,
 	} {
 		if status := send(invalid); status != http.StatusBadRequest {
 			t.Fatalf("invalid element report status=%d, want 400", status)
@@ -88,6 +89,9 @@ func TestManagedGuardianRepairAuditNamesTheRestoredElement(t *testing.T) {
 	for _, body := range []string{
 		`{"user":"alice","uid":1001,"connector":"hermes","element":"hook runtime file hermes-hook.sh"}`,
 		`{"user":"alice","uid":1001,"connector":"hermes","element":"hook entry"}`,
+		`{"user":"alice","uid":1001,"connector":"hermes","element":"hook runtime file hermes-hook.sh","change":"appended"}`,
+		`{"user":"alice","uid":1001,"connector":"hermes","element":"hook entry","change":"edited"}`,
+		`{"user":"alice","uid":1001,"connector":"hermes","element":"hook runtime file hermes-hook.sh","change":"deleted"}`,
 		`{"user":"alice","uid":1001,"connector":"opencode"}`,
 	} {
 		if status := send(body); status != http.StatusNoContent {
@@ -108,9 +112,12 @@ func TestManagedGuardianRepairAuditNamesTheRestoredElement(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"restored hook runtime file hermes-hook.sh for user alice": "hermes",
-		"restored hook entry for user alice":                       "hermes",
-		"re-installed hook entries after deletion for user alice":  "opencode",
+		"restored hook runtime file hermes-hook.sh for user alice":                  "hermes",
+		"restored hook entry for user alice":                                        "hermes",
+		"restored hook runtime file hermes-hook.sh after an append for user alice":  "hermes",
+		"restored hook entry after an edit for user alice":                          "hermes",
+		"restored hook runtime file hermes-hook.sh after a deletion for user alice": "hermes",
+		"re-installed hook entries for user alice":                                  "opencode",
 	}
 	if len(details) != len(want) {
 		t.Fatalf("repair events = %v, want %v", details, want)

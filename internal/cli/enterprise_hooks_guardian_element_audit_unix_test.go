@@ -43,7 +43,7 @@ func TestGuardianAuditReportNamesTheRestoredElement(t *testing.T) {
 		response := enterpriseHookWorkerResponse{Version: enterpriseHookWorkerProtocolVersion}
 		for _, target := range request.Targets {
 			response.Targets = append(response.Targets, enterpriseHookWorkerTargetResult{
-				Index: target.Index, OK: true, Repaired: true, RestoredElements: []string{"hook runtime file hermes-hook.sh"},
+				Index: target.Index, OK: true, Repaired: true, RestoredElements: []string{"hook runtime file hermes-hook.sh"}, RestoredChanges: []string{"appended"},
 				Result: &enterprisehooks.InstallResult{
 					Connector: target.Options.ConnectorName, UserHome: target.Options.UserHome,
 					HookContractLockUpdatedAt: "lock", HookContractEntryUpdatedAt: "entry",
@@ -64,24 +64,32 @@ func TestGuardianAuditReportNamesTheRestoredElement(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 	requests := make(chan struct {
-		path, user, connector, element string
-		uid                            int
+		path, user, connector, element, change string
+		uid                                    int
 	}, 1)
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var report struct {
-			User, Connector, Element string
-			UID                      int
+			User, Connector, Element, Change string
+			UID                              int
 		}
 		_ = json.NewDecoder(r.Body).Decode(&report)
 		requests <- struct {
-			path, user, connector, element string
-			uid                            int
-		}{r.URL.Path, report.User, report.Connector, report.Element, report.UID}
+			path, user, connector, element, change string
+			uid                                    int
+		}{r.URL.Path, report.User, report.Connector, report.Element, report.Change, report.UID}
 		w.WriteHeader(http.StatusNoContent)
 	})}
 	t.Cleanup(func() { _ = server.Close() })
 	go func() { _ = server.Serve(listener) }()
 	enterpriseHookStandaloneHookTransport = func() (string, int, error) { return socket, 995, nil }
+	enterpriseHookForeignCleanupState.Lock()
+	enterpriseHookForeignCleanupState.now = false
+	enterpriseHookForeignCleanupState.Unlock()
+	t.Cleanup(func() {
+		enterpriseHookForeignCleanupState.Lock()
+		enterpriseHookForeignCleanupState.now = false
+		enterpriseHookForeignCleanupState.Unlock()
+	})
 	run, err := runEnterpriseHookReconcileOnce(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -90,9 +98,17 @@ func TestGuardianAuditReportNamesTheRestoredElement(t *testing.T) {
 	if run.Repairs != 1 {
 		t.Fatalf("repairs=%d, want one", run.Repairs)
 	}
+	// The restore makes the foreign-hook cleanup due at once (it did not run
+	// here: the fixture is not a standalone guardian).
+	enterpriseHookForeignCleanupState.Lock()
+	cleanupRequested := enterpriseHookForeignCleanupState.now
+	enterpriseHookForeignCleanupState.Unlock()
+	if !cleanupRequested {
+		t.Fatal("a pass that restored an element did not make the foreign-hook cleanup due")
+	}
 	select {
 	case got := <-requests:
-		if got.path != "/api/v1/managed/guardian-repair" || got.user != "alice" || got.uid != uid || got.connector != "hermes" || got.element != "hook runtime file hermes-hook.sh" {
+		if got.path != "/api/v1/managed/guardian-repair" || got.user != "alice" || got.uid != uid || got.connector != "hermes" || got.element != "hook runtime file hermes-hook.sh" || got.change != "appended" {
 			t.Fatalf("audit report = %+v", got)
 		}
 	default:

@@ -4,6 +4,7 @@
 package enterprisehooks
 
 import (
+	"bytes"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -48,4 +49,73 @@ func KnownHookElement(name string) bool {
 	}
 	file, ok := strings.CutPrefix(name, hookElementFilePrefix)
 	return ok && file != "." && file != ".." && hookElementFileName.MatchString(file)
+}
+
+// The kinds of change the guardian names for a protected element it put back,
+// read from the element before and after the repair.
+const (
+	// HookChangeDeleted is an element that was missing or had material
+	// removed from it.
+	HookChangeDeleted = "deleted"
+	// HookChangeAppended is an element that held material the render does not.
+	HookChangeAppended = "appended"
+	// HookChangeEdited is an element whose material was changed.
+	HookChangeEdited = "edited"
+)
+
+// KnownHookChange says whether name is a change kind the guardian names. A
+// worker runs as the user, so a kind it reports is kept only in this form.
+func KnownHookChange(name string) bool {
+	return name == HookChangeDeleted || name == HookChangeAppended || name == HookChangeEdited
+}
+
+// ClassifyHookElementChange names what happened to an element that was put
+// back: before is its content when the repair began (existed says it was
+// there), after is its content when the repair ended. A file that was missing,
+// or that lost lines, was deleted from; a file that gained lines or bytes was
+// appended to; anything else was edited. The repair put back what the file
+// lacked or took away what it held in excess, which is what names the change.
+func ClassifyHookElementChange(before []byte, existed bool, after []byte) string {
+	switch {
+	case !existed:
+		return HookChangeDeleted
+	case bytes.Equal(before, after):
+		return HookChangeEdited
+	case len(before) < len(after) && (bytes.HasPrefix(after, before) || bytes.HasSuffix(after, before)):
+		return HookChangeDeleted
+	case len(before) > len(after) && (bytes.HasPrefix(before, after) || bytes.HasSuffix(before, after)):
+		return HookChangeAppended
+	}
+	// A repair that only added lines undid a deletion and one that only took
+	// lines away undid an append; one that did a good deal more of the one
+	// than the other (a config reset to a stub) did the same. Lines swapped
+	// for lines are an edit.
+	lost, gained := lineDifference(before, after)
+	switch {
+	case gained > 0 && gained >= 2*lost:
+		return HookChangeDeleted
+	case lost > 0 && lost >= 2*gained:
+		return HookChangeAppended
+	}
+	return HookChangeEdited
+}
+
+// lineDifference counts the lines before has that after lacks (lost by the
+// repair) and the lines after has that before lacks (gained by it).
+func lineDifference(before, after []byte) (lost, gained int) {
+	counts := map[string]int{}
+	for _, line := range strings.Split(string(before), "\n") {
+		counts[line]++
+	}
+	for _, line := range strings.Split(string(after), "\n") {
+		if counts[line] > 0 {
+			counts[line]--
+		} else {
+			gained++
+		}
+	}
+	for _, left := range counts {
+		lost += left
+	}
+	return lost, gained
 }
