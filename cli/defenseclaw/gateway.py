@@ -1954,10 +1954,28 @@ def packaged_windows_install_root() -> str | None:
 
 
 
-#: Start of the ``failure`` reason when no gateway executable can be run at all
-#: (missing or failing the custody check), so a caller can tell that cause from
-#: a gateway that ran and failed.
-NO_TRUSTED_GATEWAY_EXECUTABLE = "no trusted defenseclaw-gateway executable"
+#: Start of the ``failure`` reason of :func:`local_policy_digest` for each way
+#: the gateway executable itself cannot run, so a caller can tell those causes
+#: (which need the install or its permissions corrected, not the digest command
+#: run again) from a gateway that ran and failed.
+GATEWAY_EXECUTABLE_MISSING = "no trusted defenseclaw-gateway executable is installed"
+GATEWAY_EXECUTABLE_UNVERIFIED = "no trusted defenseclaw-gateway executable could be verified"
+GATEWAY_EXECUTABLE_NOT_STARTED = "the gateway executable could not be started"
+
+
+def gateway_executable_problem(reason: str) -> str | None:
+    """``"missing"``, ``"unverified"`` or ``"not-started"`` when *reason* (a
+    :func:`local_policy_digest` failure) says the gateway executable cannot
+    run at all; None for a gateway that ran and failed."""
+
+    for problem, prefix in (
+        ("missing", GATEWAY_EXECUTABLE_MISSING),
+        ("unverified", GATEWAY_EXECUTABLE_UNVERIFIED),
+        ("not-started", GATEWAY_EXECUTABLE_NOT_STARTED),
+    ):
+        if reason.startswith(prefix):
+            return problem
+    return None
 
 
 def local_policy_digest(cfg: Any, *, timeout: float = 60, failure: list[str] | None = None) -> dict | None:
@@ -1979,9 +1997,9 @@ def local_policy_digest(cfg: Any, *, timeout: float = 60, failure: list[str] | N
     try:
         binary = resolve_trusted_gateway_binary()
     except OSError as exc:
-        return unavailable(f"{NO_TRUSTED_GATEWAY_EXECUTABLE} could be verified ({exc})")
+        return unavailable(f"{GATEWAY_EXECUTABLE_UNVERIFIED} ({exc})")
     if not binary:
-        return unavailable(f"{NO_TRUSTED_GATEWAY_EXECUTABLE} is installed")
+        return unavailable(GATEWAY_EXECUTABLE_MISSING)
     env = dict(os.environ)
     data_dir = getattr(cfg, "data_dir", "") or ""
     if data_dir:
@@ -1997,8 +2015,10 @@ def local_policy_digest(cfg: Any, *, timeout: float = 60, failure: list[str] | N
             env=env,
             check=False,
         )
-    except (OSError, subprocess.SubprocessError):
-        return unavailable("the gateway policy digest command could not run")
+    except OSError as exc:
+        return unavailable(f"{GATEWAY_EXECUTABLE_NOT_STARTED}: {binary} ({exc})")
+    except subprocess.SubprocessError as exc:
+        return unavailable(f"the gateway policy digest command did not finish ({exc})")
     if proc.returncode != 0:
         detail = " ".join((proc.stderr or proc.stdout or "").split())[:200]
         return unavailable(
