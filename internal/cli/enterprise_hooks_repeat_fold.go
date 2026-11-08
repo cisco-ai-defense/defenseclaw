@@ -20,6 +20,12 @@ const guardianRepeatRefresh = 15 * time.Minute
 // watch loop and the reconcile run both write to it.
 var enterpriseHookRepeatFolds guardianRepeatFolds
 
+// enterpriseHookLinkCauseFolds folds the cause of a typed link failure. A pass
+// that fails only on a link succeeds, which resets enterpriseHookRepeatFolds,
+// so the cause has its own state: it is printed again only when it changes or
+// after guardianRepeatRefresh.
+var enterpriseHookLinkCauseFolds guardianRepeatFolds
+
 // enterpriseHookFoldRepeats reports whether this guardian folds repeated
 // lines: the standalone Windows guardian only. Secure Client and the other
 // platforms log every line, as they always did. A seam for tests.
