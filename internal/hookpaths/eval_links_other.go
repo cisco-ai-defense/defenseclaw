@@ -5,6 +5,6 @@
 
 package hookpaths
 
-// followMountPoints is path: only Windows has links that
-// filepath.EvalSymlinks leaves unfollowed.
-func followMountPoints(path string) (string, error) { return path, nil }
+// evalLinks is pathEvalSymlinks: only Windows has links that
+// filepath.EvalSymlinks does not follow.
+func evalLinks(name string) (string, error) { return pathEvalSymlinks(name) }
