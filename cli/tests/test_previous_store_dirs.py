@@ -17,6 +17,8 @@ def home(tmp_path, monkeypatch):
     folder = tmp_path / ".defenseclaw"
     folder.mkdir(mode=0o700)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(folder))
+    # An elevated process writes no list, and the Windows CI runner is elevated: run as the user.
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
     return folder
 
 
@@ -36,6 +38,15 @@ def test_a_move_lists_the_folder_it_leaves_and_never_the_install_home(tmp_path, 
     assert config_module.remember_previous_store(two) == []
     assert config_module.remember_previous_store(one) == []
     assert config_module.previous_store_dirs() == (two, one)
+
+
+def test_an_elevated_process_writes_no_list(tmp_path, home, monkeypatch):
+    (one,) = _folders(tmp_path, 1)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: True)
+    assert config_module.remember_previous_store(one) == []
+    assert not (home / config_module.STORE_HISTORY_FILE).exists()
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    assert config_module.previous_store_dirs() == ()
 
 
 def test_the_list_keeps_the_newest_folders_and_drops_folders_that_are_gone(tmp_path, home):
