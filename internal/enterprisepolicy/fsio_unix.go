@@ -963,6 +963,8 @@ type VendorFolderProblem struct {
 	Message       string
 	Reprotectable bool
 	Blocker       string
+	// UnrecordedFile marks a problem that is a file, not a folder (windows).
+	UnrecordedFile bool
 }
 
 // InspectRecordedVendorFolders reports nothing off Windows.
@@ -972,9 +974,6 @@ func InspectRecordedVendorFolders(Options, []string) []VendorFolderProblem { ret
 func ReprotectRecordedVendorFolders(Options, []string) ([]ReprotectedFolder, []VendorFolderProblem) {
 	return nil, nil
 }
-
-// VendorFolderProblemFor reports nothing off Windows.
-func VendorFolderProblemFor(Options, string) *VendorFolderProblem { return nil }
 
 // reclaimRefusesContentDrift is the Windows standalone rule for vendor
 // folders; no unix vendor folder is taken over or kept, so it is false.

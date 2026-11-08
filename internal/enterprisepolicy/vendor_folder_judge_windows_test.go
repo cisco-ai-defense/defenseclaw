@@ -345,7 +345,7 @@ func TestInspectRecordedVendorFoldersReportsNothingOffStandalone(t *testing.T) {
 			if healed, blocked := ReprotectRecordedVendorFolders(opts, []string{tc.request}); len(healed) != 0 || len(blocked) != 0 {
 				t.Fatalf("Secure Client runs the safe transaction: %+v %+v", healed, blocked)
 			}
-			if VendorFolderProblemFor(opts, tc.connector) != nil {
+			if len(InspectRecordedVendorFolders(opts, []string{tc.connector})) != 0 {
 				t.Fatalf("Secure Client reports a vendor folder")
 			}
 			verify, _ := VerifyAll(opts, []string{tc.request})

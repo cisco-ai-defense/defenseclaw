@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -313,18 +314,20 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 // DefenseClaw did not create that holds its recorded file and lets another
 // account delete or replace that file (or, for a vendor that loads every file
 // in it, add one) leaves the connector uncovered, with the folder, the unsafe
-// entry and the fix named (GAP-0756, GAP-0760). Standalone Windows only.
+// entry and the fix named (GAP-0756, GAP-0760). So does a vendor policy file
+// DefenseClaw has no record of that another account can change and the publish
+// cannot move aside (GAP-0930). Standalone Windows only.
 func noteVendorFolderProblem(opts Options, name string, state *State) {
-	problem := VendorFolderProblemFor(opts, name)
-	if problem == nil {
-		return
-	}
-	for _, conflict := range state.Conflicts {
-		if conflict == problem.Message {
-			return
+	var prepend []string
+	for _, problem := range InspectRecordedVendorFolders(opts, []string{name}) {
+		if !slices.Contains(state.Conflicts, problem.Message) && !slices.Contains(prepend, problem.Message) {
+			prepend = append(prepend, problem.Message)
 		}
 	}
-	state.Conflicts = append([]string{problem.Message}, state.Conflicts...)
+	if len(prepend) == 0 {
+		return
+	}
+	state.Conflicts = append(prepend, state.Conflicts...)
 	state.finish()
 }
 
