@@ -60,18 +60,48 @@ $stream.Dispose()
         # Holds a file open the way an elevated program with backup rights
         # can: ordinary read sharing (no delete sharing), whatever the access
         # list says. It is how a CI runner holds a SYSTEM-only file.
+        if (-not ('DcsfPrivileges' -as [type])) {
+            Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class DcsfPrivileges {
+  [StructLayout(LayoutKind.Sequential)] struct LUID { public uint Lo; public int Hi; }
+  [StructLayout(LayoutKind.Sequential)] struct TP { public uint Count; public LUID Luid; public uint Attr; }
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr p, uint a, out IntPtr t);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool LookupPrivilegeValueW(string s, string n, out LUID l);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool AdjustTokenPrivileges(IntPtr t, bool d, ref TP n, uint l, IntPtr p, IntPtr r);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  public static void Set(string privilege, bool enabled) { IntPtr t; if (!OpenProcessToken(GetCurrentProcess(), 0x28, out t)) return; LUID l; if (LookupPrivilegeValueW(null, privilege, out l)) { TP n = new TP(); n.Count = 1; n.Luid = l; n.Attr = enabled ? 2u : 0u; AdjustTokenPrivileges(t, false, ref n, 0, IntPtr.Zero, IntPtr.Zero); } CloseHandle(t); }
+}
+'@
+        }
+        # Backup, restore and take-ownership of this process, as "Name=State".
+        function Get-TestPrivilegeState {
+            return (@(& "$env:SystemRoot\System32\whoami.exe" /priv | Microsoft.PowerShell.Core\ForEach-Object {
+                        if ($_ -match '^(SeBackupPrivilege|SeRestorePrivilege|SeTakeOwnershipPrivilege)\s.*\s(Enabled|Disabled)\s*$') { '{0}={1}' -f $Matches[1], $Matches[2] }
+                    }) -join ';')
+        }
         $backupReaderScript = [IO.Path]::Combine($Root, 'reader-backup.ps1')
         [IO.File]::WriteAllText($backupReaderScript, @'
 param([string]$Path, [string]$Ready, [int]$HoldMilliseconds, [string]$Share = 'Read')
 Add-Type -TypeDefinition @"
 using System; using System.Runtime.InteropServices;
 public static class DcsfBackupOpen {
+  [StructLayout(LayoutKind.Sequential)] struct LUID { public uint Lo; public int Hi; }
+  [StructLayout(LayoutKind.Sequential)] struct TP { public uint Count; public LUID Luid; public uint Attr; }
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr p, uint a, out IntPtr t);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool LookupPrivilegeValueW(string s, string n, out LUID l);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool AdjustTokenPrivileges(IntPtr t, bool d, ref TP n, uint l, IntPtr p, IntPtr r);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  public static void Enable(string privilege) { IntPtr t; if (!OpenProcessToken(GetCurrentProcess(), 0x28, out t)) return; LUID l; if (LookupPrivilegeValueW(null, privilege, out l)) { TP n = new TP(); n.Count = 1; n.Luid = l; n.Attr = 2u; AdjustTokenPrivileges(t, false, ref n, 0, IntPtr.Zero, IntPtr.Zero); } CloseHandle(t); }
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
   public static IntPtr Open(string p) { IntPtr h = CreateFileW(p, 0x80000000u, 1u, IntPtr.Zero, 3u, 0x02000000u, IntPtr.Zero); if (h == new IntPtr(-1)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); return h; }
   public static void Close(IntPtr h) { CloseHandle(h); }
 }
 "@
+[DcsfBackupOpen]::Enable('SeBackupPrivilege')
+[DcsfBackupOpen]::Enable('SeRestorePrivilege')
 $handle = [DcsfBackupOpen]::Open($Path)
 [IO.File]::WriteAllText($Ready, 'ready')
 Start-Sleep -Milliseconds $HoldMilliseconds
@@ -403,6 +433,16 @@ public static class DcsfListedRestartManager {
             $restricted = [IO.Path]::Combine($guardianDirectory, 'opencode-service-ports.json')
             [IO.File]::WriteAllText($restricted, 'state')
             & "$env:SystemRoot\System32\icacls.exe" $restricted /inheritance:r /grant:r '*S-1-5-18:F' | Out-Null
+            # The privileges that would let this account open the file anyway are
+            # disabled for the rest of this smoke, so the rows below behave the
+            # same on a CI runner, in an elevated prompt and over ssh.
+            foreach ($privilegeName in 'SeBackupPrivilege', 'SeRestorePrivilege', 'SeTakeOwnershipPrivilege') {
+                [DcsfPrivileges]::Set($privilegeName, $false)
+            }
+            $privilegeState = Get-TestPrivilegeState
+            if ($privilegeState -match '=Enabled') {
+                $failures.Add("the test privileges could not be disabled: $privilegeState")
+            }
             $canOpenRestricted = $true
             try {
                 [IO.File]::Open($restricted, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite).Dispose()
@@ -449,6 +489,21 @@ public static class DcsfListedRestartManager {
                 Test-Accepted 'purge after the SYSTEM-only file holder closed' { Invoke-Preflight $layout }
                 if (-not [IO.File]::Exists($restricted)) {
                     $failures.Add('the check removed the SYSTEM-only file')
+                }
+                # GAP-0890: everything above ran with the backup and restore
+                # privileges disabled in this process (the state of an elevated
+                # Administrator and of a CI runner), whatever token the host
+                # gave. The probe enabled them for its own opens only: the
+                # process token is unchanged, and this thread is no longer
+                # impersonating a privileged token (a backup-semantics DELETE
+                # open of the SYSTEM-only file is denied again).
+                $nativeForProbe = Initialize-DefenseClawNativeSecurity
+                $afterState = Get-TestPrivilegeState
+                if ($afterState -cne $privilegeState) {
+                    $failures.Add("the privilege state of the process changed: before '$privilegeState', after '$afterState'")
+                }
+                if ([int]$nativeForProbe::GetDirectoryOpenError($restricted, [uint32]0x10000) -ne 5) {
+                    $failures.Add('the probe left its privileged thread token in place: a backup-semantics DELETE open of the SYSTEM-only file succeeded afterwards')
                 }
                 # The access list is unchanged.
                 $restrictedAcl = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $restricted).GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
@@ -526,9 +581,21 @@ public static class DcsfUnnamedRestartManager {
                     $failures.Add("a DELETE answer of $answer did not throw")
                 }
                 catch {
-                    if ($_.Exception.Message -notmatch 'cannot read, and this account cannot delete, C:\\scratch\\sample\.json') {
+                    if ($_.Exception.Message -notmatch ('cannot read, and this account cannot delete, C:\\scratch\\sample\.json \(Win32 error ' + $answer + '\)')) {
                         $failures.Add("a DELETE answer of ${answer} threw an unexpected message: $($_.Exception.Message)")
                     }
+                }
+            }
+            # A token that holds neither privilege (not an administrator, or a
+            # user-rights policy removed them) is refused with the privileges
+            # named, never taken for "no holder".
+            try {
+                [void]$nativeType::DeleteProbeFindsHolder(5, 'C:\scratch\sample.json', ' (SeBackupPrivilege, SeRestorePrivilege missing)')
+                $failures.Add('an access-denied probe answer with missing privileges did not throw')
+            }
+            catch {
+                if ($_.Exception.Message -notmatch '\(Win32 error 5\) \(SeBackupPrivilege, SeRestorePrivilege missing\)') {
+                    $failures.Add("the missing privileges were not named: $($_.Exception.Message)")
                 }
             }
             # The throw reaches a fail-closed caller as a refusal, with the
@@ -547,6 +614,86 @@ public static class DcsfUnnamedRestartManager {
             }
             finally {
                 Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
+            }
+
+            # GAP-0890: the privileged deletion of DefenseClaw's own tree after
+            # an access-denied failure. It acts for the standalone profile on
+            # the exact StateRoot and InstallRoot only, removes a link as the
+            # link without entering it, rewrites no access list, and logs
+            # every path it deleted. The process privileges stay disabled.
+            if (-not $canOpenRestricted) {
+                $savedProgramFiles = $script:ProgramFiles
+                try {
+                    $privLayout = New-TestState 'privdel'
+                    $script:ProgramData = [IO.Path]::Combine($Root, 'privdel', 'PD')
+                    $script:ProgramFiles = [IO.Path]::Combine($Root, 'privdel', 'PF')
+                    $denied = [Management.Automation.ErrorRecord]::new([UnauthorizedAccessException]::new('Access to the path is denied.'), 'denied', [Management.Automation.ErrorCategory]::PermissionDenied, $null)
+                    $inUseError = [Management.Automation.ErrorRecord]::new([IO.IOException]::new('The process cannot access the file.'), 'inuse', [Management.Automation.ErrorCategory]::WriteError, $null)
+                    $guardianFolder = [IO.Path]::Combine($privLayout.StateRoot, 'hook-guardian')
+                    [void][IO.Directory]::CreateDirectory($guardianFolder)
+                    $secret = [IO.Path]::Combine($guardianFolder, 'opencode-service-ports.json')
+                    [IO.File]::WriteAllText($secret, 'state')
+                    & "$env:SystemRoot\System32\icacls.exe" $secret /inheritance:r /grant:r '*S-1-5-18:F' | Out-Null
+                    # A junction and a directory symbolic link inside StateRoot
+                    # that point at a folder outside it, with a decoy there.
+                    $outside = [IO.Path]::Combine($Root, 'privdel', 'outside')
+                    [void][IO.Directory]::CreateDirectory($outside)
+                    $decoy = [IO.Path]::Combine($outside, 'decoy.txt')
+                    [IO.File]::WriteAllText($decoy, 'decoy')
+                    $decoyHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash
+                    $junction = [IO.Path]::Combine($privLayout.StateRoot, 'junction')
+                    $symlink = [IO.Path]::Combine($privLayout.StateRoot, 'symlink')
+                    & "$env:SystemRoot\System32\cmd.exe" /c mklink /J "$junction" "$outside" | Out-Null
+                    & "$env:SystemRoot\System32\cmd.exe" /c mklink /D "$symlink" "$outside" 2>&1 | Out-Null
+                    $symlinkMade = [bool](Microsoft.PowerShell.Management\Get-Item -LiteralPath $symlink -Force -ErrorAction SilentlyContinue)
+                    $refusals = @(
+                        @{ Name = 'a label that is not StateRoot or InstallRoot'; Label = 'Other'; Error = $denied; Root = $privLayout.StateRoot },
+                        @{ Name = 'an error that is not access denied'; Label = 'StateRoot'; Error = $inUseError; Root = $privLayout.StateRoot },
+                        @{ Name = 'a folder that is not the exact StateRoot'; Label = 'StateRoot'; Error = $denied; Root = $guardianFolder },
+                        @{ Name = 'a vendor folder'; Label = 'StateRoot'; Error = $denied; Root = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex') }
+                    )
+                    foreach ($case in $refusals) {
+                        if (Remove-DefenseClawStateTreePrivileged -Root $case.Root -Target $case.Root -Label $case.Label -ErrorRecord $case.Error) {
+                            $failures.Add("the privileged deletion acted on $($case.Name)")
+                        }
+                    }
+                    if (-not [IO.File]::Exists($secret)) {
+                        $failures.Add('a refused privileged deletion removed the SYSTEM-only file')
+                    }
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                    if (Remove-DefenseClawStateTreePrivileged -Root $privLayout.StateRoot -Target $privLayout.StateRoot -Label StateRoot -ErrorRecord $denied) {
+                        $failures.Add('the privileged deletion acted for the Secure Client profile')
+                    }
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                    if (-not [IO.File]::Exists($secret)) {
+                        $failures.Add('the Secure Client profile lost the SYSTEM-only file')
+                    }
+                    $privilegesBefore = Get-TestPrivilegeState
+                    $done = Remove-DefenseClawStateTreePrivileged -Root $privLayout.StateRoot -Target $privLayout.StateRoot -Label StateRoot -ErrorRecord $denied
+                    if (-not $done -or [IO.Directory]::Exists($privLayout.StateRoot)) {
+                        $failures.Add('the privileged deletion did not remove the StateRoot with the SYSTEM-only file and the links')
+                    }
+                    if ((Get-TestPrivilegeState) -cne $privilegesBefore) {
+                        $failures.Add('the privileged deletion left the process privileges changed')
+                    }
+                    if (-not [IO.File]::Exists($decoy) -or (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash -cne $decoyHash) {
+                        $failures.Add('the privileged deletion followed a link and changed the folder it points to')
+                    }
+                    $events = @(Get-DefenseClawResilienceEvents)
+                    $expectedLines = @('opencode-service-ports.json', 'junction (link, not followed)')
+                    if ($symlinkMade) {
+                        $expectedLines += 'symlink (link, not followed)'
+                    }
+                    foreach ($expected in $expectedLines) {
+                        if (@($events | Microsoft.PowerShell.Core\Where-Object { $_ -like "*defenseclaw_repair*$expected*" }).Count -lt 1) {
+                            $failures.Add("the privileged deletion logged no defenseclaw_repair line for $expected")
+                        }
+                    }
+                }
+                finally {
+                    $script:ProgramFiles = $savedProgramFiles
+                    $script:ProgramData = $savedProgramData
+                }
             }
 
             # The Secure Client profile has no data-file check.

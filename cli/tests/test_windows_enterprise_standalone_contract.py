@@ -759,13 +759,52 @@ def test_restart_manager_is_never_asked_about_a_file_the_account_cannot_open() -
     classified = native[classify : native.index("private static FileHolder[] QueryRestartManager", classify)]
     assert "answer == ERROR_FILE_NOT_FOUND" in classified and "answer == ERROR_PATH_NOT_FOUND" in classified
     assert "throw new Win32Exception(" in classified and "this account cannot delete" in classified
-    assert "DeleteProbeFindsHolder(GetDirectoryOpenError(path, DELETE), path)" in native[delete - 40 : query]
+    # The probe's open now runs inside the call-scoped privilege block (GAP-0890).
+    assert "answer = GetDirectoryOpenError(path, DELETE);" in native[first:query]
+    assert "DeleteProbeFindsHolder(answer, path, missing)" in native[delete:query]
     # An unnamed holder is told how to be found, and the hook probe never
     # prints it as process id 0.
     assert "Associated Handles" in module and "$script:UnnamedFileHolderHint" in _function_body(
         module, "Get-DefenseClawStateFileHolderText"
     )
     assert "[int]$_.Id -le 0" in _function_body(module, "Assert-DefenseClawHookNotHeld")
+
+
+def test_the_unreadable_file_probe_and_the_state_deletion_enable_privileges_for_one_call_only() -> None:
+    """GAP-0890: an elevated Administrator and a CI runner hold backup and
+    restore disabled, so the backup-semantics DELETE probe and the plain
+    deletion of a SYSTEM-only file were denied. Both now run under the
+    existing thread-bound privilege scope (a duplicate of the token that the
+    using block drops, the process token never changed), take-ownership is not
+    enabled for the probe, and the standalone-only deletion fallback acts only
+    after access denied, on the exact StateRoot or InstallRoot, and logs each
+    deleted path (behaviour in enterprise-standalone-state-files-in-use-smoke.ps1
+    and the native cells)."""
+
+    module = _text(MODULE)
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    probe = native.index("DeleteProbeFindsHolder(answer, path, missing)")
+    scope = native.rindex("using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true, true))", 0, probe)
+    assert "GetDirectoryOpenError(path, DELETE)" in native[scope:probe]
+    assert "MissingPrivilegeSuffix(scope)" in native[scope:probe]
+    # No process-wide enable: the scope works on SetThreadToken with a duplicate.
+    scope_class = native[native.index("class UninstallFilePrivilegeScope") : native.index("[DllImport", native.index("class UninstallFilePrivilegeScope"))]
+    assert "SetThreadToken(IntPtr.Zero, privilegedToken)" in scope_class and "privilegedToken" in scope_class
+    assert "if (!skipTakeOwnership)" in scope_class
+    deleter = _function_body(module, "Remove-DefenseClawStateTreePrivileged")
+    for guard in (
+        "Test-DefenseClawStandaloneProfile",
+        "$Label -cne 'StateRoot' -and $Label -cne 'InstallRoot'",
+        "Test-DefenseClawAccessDeniedError",
+        "[StringComparison]::OrdinalIgnoreCase",
+        "defenseclaw_repair",
+        "DeleteTreePrivileged($Target, $deleted)",
+    ):
+        assert guard in deleter, guard
+    assert deleter.index("Test-DefenseClawStandaloneProfile") < deleter.index("Initialize-DefenseClawNativeSecurity")
+    tree = _function_body(module, "Remove-DefenseClawManagedTree")
+    assert tree.index("Assert-DefenseClawManagedTreeNoReparse") < tree.index("Remove-DefenseClawStateTreePrivileged")
+    assert tree.index("Remove-Item") < tree.index("Remove-DefenseClawStateTreePrivileged")
     for name in (
         "Get-DefenseClawStateFileHolders",
         "Get-DefenseClawStateFileHolderText",

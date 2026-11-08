@@ -1053,6 +1053,14 @@ namespace $nativeNamespace
             // token holds them and skips the ones a user-rights policy removed,
             // so the caller can fall back from restore to take-ownership.
             internal UninstallFilePrivilegeScope(bool bestEffort)
+                : this(bestEffort, false)
+            {
+            }
+
+            // skipTakeOwnership (with bestEffort) enables backup and restore
+            // only, for a caller that opens or deletes through backup
+            // semantics and never changes an owner (GAP-0890).
+            internal UninstallFilePrivilegeScope(bool bestEffort, bool skipTakeOwnership)
             {
                 this.bestEffort = bestEffort;
                 System.Threading.Thread.BeginThreadAffinity();
@@ -1101,7 +1109,8 @@ namespace $nativeNamespace
                     {
                         EnablePrivilege("SeBackupPrivilege");
                         RestoreEnabled = EnablePrivilege("SeRestorePrivilege");
-                        TakeOwnershipEnabled = EnablePrivilege("SeTakeOwnershipPrivilege");
+                        if (!skipTakeOwnership)
+                            TakeOwnershipEnabled = EnablePrivilege("SeTakeOwnershipPrivilege");
                     }
                     else
                     {
@@ -3108,10 +3117,18 @@ namespace $nativeNamespace
         // nothing is thrown for one entry.
         public static string[] DeleteTreePrivileged(string root)
         {
+            return DeleteTreePrivileged(root, null);
+        }
+
+        // GAP-0890: deleted, when given, receives the path of each entry whose
+        // deletion was requested (links are named as links), so the caller can
+        // log every privileged deletion.
+        public static string[] DeleteTreePrivileged(string root, List<string> deleted)
+        {
             List<string> failures = new List<string>();
             using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true))
             {
-                DeleteEntryPrivileged(root, failures, 0);
+                DeleteEntryPrivileged(root, failures, 0, deleted);
                 string missing = MissingPrivilegeSuffix(scope);
                 if (missing.Length != 0)
                 {
@@ -3125,7 +3142,8 @@ namespace $nativeNamespace
         private static void DeleteEntryPrivileged(
             string path,
             List<string> failures,
-            int depth)
+            int depth,
+            List<string> deleted)
         {
             const uint DELETE = 0x00010000;
             const uint SYNCHRONIZE = 0x00100000;
@@ -3212,7 +3230,8 @@ namespace $nativeNamespace
                         DeleteEntryPrivileged(
                             System.IO.Path.Combine(path, name),
                             failures,
-                            depth + 1);
+                            depth + 1,
+                            deleted);
                 }
                 if ((attributes & FILE_ATTRIBUTE_READONLY) != 0)
                 {
@@ -3232,6 +3251,11 @@ namespace $nativeNamespace
                         disposition,
                         (uint)disposition.Length))
                     failures.Add(path + ": delete failed (" + Marshal.GetLastWin32Error() + ")");
+                else if (deleted != null)
+                    deleted.Add(
+                        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                            ? path + " (link, not followed)"
+                            : path);
             }
             finally
             {
@@ -4749,7 +4773,25 @@ namespace $nativeNamespace
                     queryable.Add(path);
                     continue;
                 }
-                if (DeleteProbeFindsHolder(GetDirectoryOpenError(path, DELETE), path))
+                // The probe opens with backup semantics, which bypass the
+                // access list only while backup or restore is enabled; an
+                // elevated Administrator (and a CI runner) holds both disabled.
+                // They are enabled for this one open, on a thread-bound
+                // duplicate of the token that is dropped by the using block
+                // whether the open throws or not, so the process token is
+                // never changed (GAP-0890). Backup and restore are both
+                // enabled where the token holds them: the documented grant of
+                // DELETE access is restore, and Server 2025 also grants it
+                // with backup alone, so asking for both works on every build.
+                // Take-ownership is not needed and not enabled.
+                int answer;
+                string missing;
+                using (UninstallFilePrivilegeScope scope = new UninstallFilePrivilegeScope(true, true))
+                {
+                    answer = GetDirectoryOpenError(path, DELETE);
+                    missing = MissingPrivilegeSuffix(scope);
+                }
+                if (DeleteProbeFindsHolder(answer, path, missing))
                     unnamedHolder = true;
             }
             FileHolder[] found = queryable.Count == 0
@@ -4779,6 +4821,15 @@ namespace $nativeNamespace
         // must be opened with delete sharing.
         public static bool DeleteProbeFindsHolder(int answer, string path)
         {
+            return DeleteProbeFindsHolder(answer, path, String.Empty);
+        }
+
+        // privilegeNote names the privileges the token did not hold, so a
+        // refusal for a token that cannot delete the file says why (the
+        // account is not an administrator, or a user-rights policy removed
+        // them) and is never taken for "no holder".
+        public static bool DeleteProbeFindsHolder(int answer, string path, string privilegeNote)
+        {
             const int ERROR_FILE_NOT_FOUND = 2;
             const int ERROR_PATH_NOT_FOUND = 3;
             const int ERROR_SHARING_VIOLATION = 32;
@@ -4788,7 +4839,8 @@ namespace $nativeNamespace
                 return true;
             throw new Win32Exception(
                 answer,
-                "Restart Manager cannot read, and this account cannot delete, " + path);
+                "Restart Manager cannot read, and this account cannot delete, " + path +
+                    " (Win32 error " + answer + ")" + (privilegeNote ?? String.Empty));
         }
 
         private static FileHolder[] QueryRestartManager(string[] paths)
@@ -37477,6 +37529,11 @@ function Remove-DefenseClawManagedTree {
             }
         }
     }
+    if ($null -ne $lastError -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe) -and
+        (Remove-DefenseClawStateTreePrivileged -Root $safe -Target $target -Label $Label -ErrorRecord $lastError)) {
+        return
+    }
     if ($RetryHeldFileMilliseconds -gt 0 -and
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
         # An executing hook answers AccessDenied even to SYSTEM. Extend the
@@ -41553,6 +41610,82 @@ function Test-DefenseClawFileInUseError {
         $exception = $exception.InnerException
     }
     return $false
+}
+
+function Test-DefenseClawAccessDeniedError {
+    # Whether a failed deletion failed because the account has no right on the
+    # file: access denied (0x80070005), not a sharing violation.
+    param([Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord)
+    $exception = $ErrorRecord.Exception
+    if ($exception -is [Management.Automation.ActionPreferenceStopException] -and
+        $null -ne $exception.ErrorRecord) {
+        $exception = $exception.ErrorRecord.Exception
+    }
+    while ($null -ne $exception) {
+        if ($exception -is [UnauthorizedAccessException] -or [int]$exception.HResult -eq -2147024891) {
+            return $true
+        }
+        $exception = $exception.InnerException
+    }
+    return $false
+}
+
+function Remove-DefenseClawStateTreePrivileged {
+    <#
+        GAP-0890: the plain deletion of DefenseClaw's own tree got access
+        denied for a file that only SYSTEM may open (hook-guardian\
+        opencode-service-ports.json), because an Administrator's backup and
+        restore privileges are disabled in its token. This deletes the tree
+        once more through the native no-follow privileged delete, which
+        enables backup and restore for the call only on a thread-bound
+        duplicate of the token (the process token is never changed),
+        deletes a link as the link and never enters it, and rewrites no
+        access list. It acts only for the standalone profile, only after an
+        access-denied failure, and only on the exact StateRoot or InstallRoot
+        of the standalone profile; any other path, label or profile returns
+        $false and changes nothing. Every deleted path is logged as a
+        defenseclaw_repair event. Returns $true when Root is gone.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][Management.Automation.ErrorRecord]$ErrorRecord
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $false
+    }
+    if ($Label -cne 'StateRoot' -and $Label -cne 'InstallRoot') {
+        return $false
+    }
+    if (-not (Test-DefenseClawAccessDeniedError -ErrorRecord $ErrorRecord)) {
+        return $false
+    }
+    $roots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+    $own = [IO.Path]::GetFullPath([string]$(if ($Label -ceq 'StateRoot') { $roots.StateRoot } else { $roots.InstallRoot })).TrimEnd('\')
+    $full = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if (-not [string]::Equals($full, $own, [StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+    $deleted = [Collections.Generic.List[string]]::new()
+    $failures = @()
+    try {
+        $native = Initialize-DefenseClawNativeSecurity
+        $failures = @($native::DeleteTreePrivileged($Target, $deleted))
+    }
+    catch {
+        Microsoft.PowerShell.Utility\Write-Verbose "privileged deletion of $full failed: $($_.Exception.Message)"
+    }
+    foreach ($entry in $deleted) {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+            path   = [string]$entry
+            reason = "deleted after access denied, with backup and restore privileges enabled for this call only: $($ErrorRecord.Exception.Message)"
+        }
+    }
+    foreach ($failure in $failures) {
+        Microsoft.PowerShell.Utility\Write-Verbose "privileged deletion left: $failure"
+    }
+    return (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $full))
 }
 
 function Remove-DefenseClawPurgedStateRoot {
