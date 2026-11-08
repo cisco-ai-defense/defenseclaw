@@ -184,9 +184,9 @@ const hookPostAccountHomeEnv = "_DC_HOOK_POST_ACCOUNT_HOME"
 // as it got it, else the account database entry of the user. The saved value
 // is not rewritten here. The scan resolves it by file system rules (a parent
 // step through a link, a trailing slash). A value that is no folder holds no
-// protected file; the scan then tells the account database home and keeps
-// every hard-linked file closed (hookpaths.LateOrdinaryCallAt). Empty (the
-// home of the process) only when neither is known.
+// protected file; the scan then tells the account database home and indexes
+// the other homes the call can mean (hookpaths.LateOrdinaryCallAt). Empty
+// (the home of the process) only when neither is known.
 func accountHome() string {
 	if home := os.Getenv(hookPostAccountHomeEnv); home != "" {
 		return home

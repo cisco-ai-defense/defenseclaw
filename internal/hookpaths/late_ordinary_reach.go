@@ -95,7 +95,10 @@ func (s *lateScan) follow(path string) (string, bool) {
 // the scan ran out of or for a protected file it could not read.
 func (s *lateScan) reachesProtected(real string, info os.FileInfo) bool {
 	if !s.reach.haveKeys {
-		s.reach.keys, s.reach.haveKeys = newProtectedFiles(s.home), true
+		for _, home := range s.indexHomes {
+			s.reach.keys = append(s.reach.keys, newProtectedFiles(home)...)
+		}
+		s.reach.haveKeys = true
 	}
 	for _, key := range s.reach.keys {
 		if key.info != nil && os.SameFile(info, key.info) {
@@ -125,28 +128,30 @@ func (s *lateScan) reachesProtected(real string, info os.FileInfo) bool {
 	return false
 }
 
-// listRoots finds the folders of the home that carry a protected name, among
-// the first lateHomeEntries entries it can read.
+// listRoots finds the folders of the homes that carry a protected name, among
+// the first lateHomeEntries entries of each it can read.
 func (s *lateScan) listRoots() {
 	s.reach.haveRoots = true
-	entries, _ := pathReadDir(s.home)
-	if len(entries) > lateHomeEntries {
-		entries = entries[:lateHomeEntries]
-	}
-	for _, entry := range entries {
-		if !lateNamesProtected(entry.Name()) {
-			continue
+	for _, home := range s.indexHomes {
+		entries, _ := pathReadDir(home)
+		if len(entries) > lateHomeEntries {
+			entries = entries[:lateHomeEntries]
 		}
-		real, err := pathEvalSymlinks(filepath.Join(s.home, entry.Name()))
-		if err != nil {
-			continue
+		for _, entry := range entries {
+			if !lateNamesProtected(entry.Name()) {
+				continue
+			}
+			real, err := pathEvalSymlinks(filepath.Join(home, entry.Name()))
+			if err != nil {
+				continue
+			}
+			info, err := pathLstat(real)
+			if err != nil {
+				continue
+			}
+			s.reach.roots = append(s.reach.roots, info)
+			s.reach.rootPaths = append(s.reach.rootPaths, real)
 		}
-		info, err := pathLstat(real)
-		if err != nil {
-			continue
-		}
-		s.reach.roots = append(s.reach.roots, info)
-		s.reach.rootPaths = append(s.reach.rootPaths, real)
 	}
 }
 

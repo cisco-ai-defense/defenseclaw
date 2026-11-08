@@ -174,12 +174,12 @@ type lateScan struct {
 	chain  []string // every folder the shell may have stood in so far
 	orSeen bool     // a "||" since the last ";": a later "&&" may run without the cd before it
 	home   string
-	// indexless: the identities of the protected files are unknown (the home
-	// the scan was given is no folder), so a hard-linked regular file is
-	// never ordinary.
-	indexless bool
-	seen      map[string]lateEntry
-	reach     lateReach // what is protected, found when a link or a hard link needs it
+	// indexHomes: the homes whose protected files the scan indexes, the home
+	// first. A given home that is no folder adds the other homes the call
+	// can mean (lateFallbackHomes).
+	indexHomes []string
+	seen       map[string]lateEntry
+	reach      lateReach // what is protected, found when a link or a hard link needs it
 }
 
 // lateEntry is what the scan found at one path: whether the entry is
@@ -201,30 +201,53 @@ func newLateScan(cwd, home string) (*lateScan, bool) {
 			return nil, false
 		}
 	}
+	realCWD, err := pathEvalSymlinks(cwd)
+	if err != nil || lateNamesProtected(realCWD) || realCWD == string(filepath.Separator) {
+		return nil, false
+	}
 	realHome, ok := lateUsableHome(home)
+	indexHomes := []string{realHome}
 	// A home that was given but is no folder (a relative path, a missing
-	// path, a regular file) holds no protected file to index. The scan then
-	// tells the account database home and, because the identities of the
-	// protected files of the home it was given are unknown, treats every
-	// hard-linked regular file as not ordinary: a protected hard link stays
-	// closed, and a call that names no hard link stays ordinary.
-	indexless := false
+	// path, a regular file) holds no protected file of its own. The protected
+	// files the call can reach are then those of the homes it can mean: the
+	// account database home (the scan tells that one) and the others
+	// lateFallbackHomes lists. Their identities are indexed as for a usable
+	// home, so a hard link to a protected file stays closed and a hard link
+	// to an ordinary file stays ordinary.
 	if !ok && given {
 		current, err := user.Current()
 		if err != nil {
 			return nil, false
 		}
-		realHome, ok = lateUsableHome(current.HomeDir)
-		indexless = true
+		if realHome, ok = lateUsableHome(current.HomeDir); ok {
+			indexHomes = lateFallbackHomes(home, realCWD, realHome)
+		}
 	}
 	if !ok {
 		return nil, false
 	}
-	realCWD, err := pathEvalSymlinks(cwd)
-	if err != nil || lateNamesProtected(realCWD) || realCWD == string(filepath.Separator) {
-		return nil, false
+	return &lateScan{cwds: []string{realCWD}, chain: []string{realCWD}, home: realHome, indexHomes: indexHomes, seen: map[string]lateEntry{}}, true
+}
+
+// lateFallbackHomes lists the homes whose protected files an unusable given
+// home leaves open, the account database home first: the home of the
+// process, and the given home read against the folder the call runs in when
+// it is a relative path. Only folders are listed, each once.
+func lateFallbackHomes(given, cwd, account string) []string {
+	homes := []string{account}
+	candidates := []string{}
+	if env, err := os.UserHomeDir(); err == nil {
+		candidates = append(candidates, env)
 	}
-	return &lateScan{cwds: []string{realCWD}, chain: []string{realCWD}, home: realHome, indexless: indexless, seen: map[string]lateEntry{}}, true
+	if !filepath.IsAbs(given) {
+		candidates = append(candidates, filepath.Join(cwd, given))
+	}
+	for _, candidate := range candidates {
+		if real, ok := lateUsableHome(candidate); ok && !slices.Contains(homes, real) {
+			homes = append(homes, real)
+		}
+	}
+	return homes
 }
 
 // lateUsableHome resolves a home by file system rules (a parent step or a
@@ -367,9 +390,6 @@ func (s *lateScan) lookup(path string) lateEntry {
 	}
 	hardLinked := info.Mode().IsRegular() && linkCount(found.real, info) > 1
 	found.ok = (!linked && !hardLinked) || !s.reachesProtected(found.real, info)
-	if hardLinked && s.indexless {
-		found.ok = false
-	}
 	return found
 }
 
