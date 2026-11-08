@@ -6,6 +6,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -14,6 +15,17 @@ import (
 // guardianRepeatRefresh is how long a failure line is folded before it is
 // printed again, so a failure that lasts for days still shows in the log.
 const guardianRepeatRefresh = 15 * time.Minute
+
+// enterpriseHookRepeatFolds is the one fold state of the guardian process: the
+// watch loop and the reconcile run both write to it.
+var enterpriseHookRepeatFolds guardianRepeatFolds
+
+// enterpriseHookFoldRepeats reports whether this guardian folds repeated
+// lines: the standalone Windows guardian only. Secure Client and the other
+// platforms log every line, as they always did. A seam for tests.
+var enterpriseHookFoldRepeats = func() bool {
+	return runtime.GOOS == "windows" && cfg != nil && cfg.StandaloneEnterprise()
+}
 
 // guardianRepeatFolds keeps the hook guardian log from repeating one failure
 // on every retry. While an administrator action is needed (a link at a vendor

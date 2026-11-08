@@ -16,6 +16,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // GAP-0879. A link at one connector's vendor folder fails that connector's
@@ -23,7 +24,7 @@ import (
 // and applied, and the manifest is activated, so a later uninstall can adopt it.
 // A failure that is not a link still fails the pass.
 func TestEnterpriseHookReconcileFailsOnlyTheLinkedConnectorsRows(t *testing.T) {
-	for _, shape := range []string{"link at the Codex folder", "a failure that is no link"} {
+	for _, shape := range []string{"link at the Codex folder", "a failure that is no link", "a link that appears after the pre-pass"} {
 		t.Run(shape, func(t *testing.T) {
 			stubEarlierReleaseClosedMachineRegistration(t)
 			restoreEnterpriseHooksLifecycleTestState(t)
@@ -120,12 +121,30 @@ func TestEnterpriseHookReconcileFailsOnlyTheLinkedConnectorsRows(t *testing.T) {
 				if shape == "a failure that is no link" {
 					return errors.New("ensure configured Codex machine requirements: access is denied")
 				}
+				if shape == "a link that appears after the pre-pass" && !publishExact {
+					return nil
+				}
 				return &enterpriseHookConnectorLinkFailures{Failures: []enterpriseHookConnectorLinkFailure{
 					{Connector: "codex", Link: link, Cause: errors.New("ensure configured Codex machine requirements: a link sits at " + link)},
 				}}
 			}
 
+			var skips int
+			previousReport := managed.ReportResilienceEvent
+			managed.ReportResilienceEvent = func(marker string, _ map[string]string) {
+				if marker == managed.MarkerSkip {
+					skips++
+				}
+			}
+			t.Cleanup(func() { managed.ReportResilienceEvent = previousReport })
 			run, err := runEnterpriseHookReconcileOnce(context.Background())
+			if shape == "a link that appears after the pre-pass" {
+				// No row was failed for the link, so the publish failure must keep the pass failed.
+				if err != nil || run.StateErr == nil || !strings.Contains(run.StateErr.Error(), "publish exact protected enrollment set") || run.Failures != 0 {
+					t.Fatalf("a link after the pre-pass must keep the pass failed: err=%v stateErr=%v failures=%d", err, run.StateErr, run.Failures)
+				}
+				return
+			}
 			if shape == "a failure that is no link" {
 				if err == nil || !strings.Contains(err.Error(), "revoke stale protected enrollments") || len(run.Rows) != 0 || len(installed) != 0 {
 					t.Fatalf("a failure that is no link must still fail the pass before any row: err=%v rows=%d installed=%v", err, len(run.Rows), installed)
@@ -157,6 +176,10 @@ func TestEnterpriseHookReconcileFailsOnlyTheLinkedConnectorsRows(t *testing.T) {
 			}
 			if store["claudecode"][strings.ToUpper(stale.sid)] {
 				t.Fatalf("the stale Claude Code enrollment survived the pass: %v", store.sorted("claudecode"))
+			}
+			// The failed rows are logged once per streak, not on every pass.
+			if _, err := runEnterpriseHookReconcileOnce(context.Background()); err != nil || skips != 2 {
+				t.Fatalf("a second pass with the same failed rows logged %d skip lines in total, want 2 (one per row, once)", skips)
 			}
 			state, exists, err := loadEnterpriseHookGuardianState(dataDir)
 			if err != nil || !exists || state.Manifest != manifestPath || state.FailureCount != 2 || state.SuccessCount != 2 || state.TargetCount != 4 {

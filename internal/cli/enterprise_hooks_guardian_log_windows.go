@@ -51,6 +51,10 @@ func init() {
 // windowsGuardianLogLimit. A process that does not write a service log
 // (a one-shot command run by hand) has no variable and rotates nothing.
 func capWindowsGuardianLog(stderr io.Writer) {
+	// The Secure Client guardian log is not touched.
+	if cfg == nil || !cfg.StandaloneEnterprise() {
+		return
+	}
 	path := strings.TrimSpace(os.Getenv(windowsGuardianServiceLogEnv))
 	if path == "" || !filepath.IsAbs(path) {
 		return
