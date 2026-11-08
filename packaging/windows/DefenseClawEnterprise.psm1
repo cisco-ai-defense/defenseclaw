@@ -38200,9 +38200,13 @@ function Test-DefenseClawGuardianReportErrorsAttributable {
     $countsPattern = '^(?:last guardian reconcile|protected guardian authorization|protected guardian activation) is incomplete \((\d+) succeeded, (\d+) pending, (\d+) total\)$'
     foreach ($entry in @($errorsProperty.Value)) {
         $text = ([string]$entry).Trim()
-        $failed = [regex]::Match($text, '^last guardian reconcile failed for (\S+): ')
+        # Windows names the account of a row as "user (SID)" (GAP-2290); a row
+        # whose account is unknown is named by its SID alone. Either way the
+        # key is connector@SID, as the rows above.
+        $failed = [regex]::Match($text, '^last guardian reconcile failed for (?<connector>[^@\s]+)@(?<account>.+?)(?: \((?<sid>S-1-[0-9-]+)\))?: ')
         if ($failed.Success) {
-            if (-not $failedLabels.ContainsKey($failed.Groups[1].Value)) {
+            $who = if ($failed.Groups['sid'].Success) { $failed.Groups['sid'].Value } else { $failed.Groups['account'].Value }
+            if (-not $failedLabels.ContainsKey($failed.Groups['connector'].Value + '@' + $who)) {
                 return $false
             }
             continue
