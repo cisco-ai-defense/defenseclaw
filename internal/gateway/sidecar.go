@@ -8672,16 +8672,19 @@ func unversionedAgentAdmissionError(dataDir, name, agentVersion, reason string) 
 // too slowly is started once first (GAP-2520). An agent installed where
 // another account can write is reinstalled, not closed (GAP-2479). A plugin
 // folder another account can write is fixed with the command its refusal
-// names, then the gateway is restarted (GAP-0730).
+// names, then the gateway is restarted (GAP-0730). An openclaw.json that is
+// not valid JSON5 is fixed in the file named, then the gateway is restarted
+// (GAP-0907).
 func refreshRefusalNextStep(err error) string {
 	switch {
 	case errors.As(err, new(agentVersionUnread)):
 		return ", then run: defenseclaw upgrade"
 	case errors.Is(err, connector.ErrAgentVersionProbeTimeout):
 		return "; the agent answered too slowly (a cold first start or a busy host): start it once from this account and let it finish, then run: defenseclaw upgrade"
-	case errors.Is(err, connector.ErrPluginFolderCustody):
-		// The refusal names the folders and the command that clears it; a
-		// closed agent or an upgrade changes neither (GAP-0730).
+	case errors.Is(err, connector.ErrPluginFolderCustody), errors.Is(err, connector.ErrOpenClawConfigSyntax):
+		// The refusal names the folders and the command that clears it, or
+		// the file, line and text of an openclaw.json that is not JSON5; a
+		// closed agent or an upgrade changes neither (GAP-0730, GAP-0907).
 		return "; then run: defenseclaw-gateway restart"
 	case errors.Is(err, connector.ErrAgentInstallNotTrusted):
 		return "; the agent is installed where another account can write: install it where only administrators or this account can write, or remove that write access, then run: defenseclaw upgrade"

@@ -28,6 +28,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 
@@ -209,9 +210,9 @@ func dropDefenseClawPluginApprovalsFile(configPath string) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", configPath, err)
 		}
-		cfg := map[string]interface{}{}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return fmt.Errorf("parse %s: %w", configPath, err)
+		cfg, err := parseOpenClawConfig(configPath, data)
+		if err != nil {
+			return err
 		}
 		if !dropDefenseClawPluginApprovals(cfg) {
 			return nil
@@ -383,8 +384,8 @@ func openClawConfigRegistersDefenseClaw(configPath string) bool {
 	if err != nil {
 		return false
 	}
-	cfg := map[string]interface{}{}
-	if json.Unmarshal(data, &cfg) != nil {
+	cfg, err := parseOpenClawConfig(configPath, data)
+	if err != nil {
 		return false
 	}
 	plugins, _ := cfg["plugins"].(map[string]interface{})
@@ -551,11 +552,15 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
 	return withFileLock(configPath, func() error {
 		cfg := map[string]interface{}{}
+		var before map[string]interface{}
 		original, readErr := os.ReadFile(configPath)
 		if readErr == nil && len(original) > 0 {
-			if err := json.Unmarshal(original, &cfg); err != nil {
-				return fmt.Errorf("parse %s: %w", configPath, err)
+			parsed, err := parseOpenClawConfig(configPath, original)
+			if err != nil {
+				return err
 			}
+			cfg = parsed
+			before, _ = parseOpenClawConfig(configPath, original)
 		} else if readErr != nil && !os.IsNotExist(readErr) {
 			return fmt.Errorf("read %s: %w", configPath, readErr)
 		}
@@ -623,6 +628,12 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 			dropDefenseClawPluginApprovals(cfg)
 		}
 
+		// The file already says everything this patch would write: leave it
+		// as the user wrote it, comments and all, instead of rewriting it as
+		// plain JSON on every gateway start.
+		if before != nil && reflect.DeepEqual(before, cfg) {
+			return nil
+		}
 		out, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
 			return fmt.Errorf("marshal %s: %w", configPath, err)
@@ -656,9 +667,9 @@ func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool) error
 		return fmt.Errorf("read openclaw.json: %w", err)
 	}
 
-	cfg := map[string]interface{}{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("parse openclaw.json: %w", err)
+	cfg, err := parseOpenClawConfig(configPath, data)
+	if err != nil {
+		return err
 	}
 
 	plugins, _ := cfg["plugins"].(map[string]interface{})
@@ -799,8 +810,7 @@ func (c *OpenClawConnector) VerifyClean(opts SetupOpts) error {
 	// Check openclaw.json for defenseclaw entries
 	configPath := filepath.Join(openClawHome(), "openclaw.json")
 	if data, err := os.ReadFile(configPath); err == nil {
-		var cfg map[string]interface{}
-		if json.Unmarshal(data, &cfg) == nil {
+		if cfg, err := parseOpenClawConfig(configPath, data); err == nil {
 			if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
 				if entries, ok := plugins["entries"].(map[string]interface{}); ok {
 					if openClawEntryHasDefenseClawKeys(entries["defenseclaw"]) {
