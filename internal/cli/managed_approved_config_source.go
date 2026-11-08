@@ -50,7 +50,7 @@ import (
 // follows it is recorded more than one generation after the proof. Repair over
 // a hand edit puts the copy back only when copy, record and proof agree and
 // the hand edit directly follows the proven generation
-// (managedApprovedConfigProven). Setup /repair checks that in Go before it
+// (approvedConfigProofGap). Setup /repair checks that in Go before it
 // starts the installer; the installer checks the same rule itself
 // (Assert-DefenseClawApprovedConfigProven), so a direct run of
 // install-enterprise.ps1 stops at the same point before it changes anything.
@@ -267,62 +267,73 @@ func writeManagedApprovedProof(installDir, digest string, generation uint64) err
 // directly follows the generation the proof names. Otherwise the copy is one
 // nothing proves current (an earlier release applied a config in place without
 // publishing it, or a build that knows nothing of the proof applied another
-// config after it), and the error says why.
+// config after it), and the error says which check failed.
 func unprovenApprovedConfigSourceForHandEdit(installDir, configPath string) error {
 	state, err := configwrite.ReadGenerationState(configPath)
 	if err != nil || !configwrite.IsHandEditActor(state.Actor) {
 		return nil
 	}
-	if managedApprovedConfigProven(installDir, state) {
+	gap := approvedConfigProofGap(installDir, state)
+	if gap == "" {
 		return nil
 	}
 	return errors.New("config.yaml is recorded as a hand edit, and nothing proves that the approved config source " +
-		"Repair would put back is the config the last lifecycle run applied")
+		"Repair would put back is the config the last lifecycle run applied (" + gap + ")")
 }
 
-// managedApprovedConfigProven reports whether the approved copy, the digest
+// approvedConfigProofGap is "" when the approved copy, the digest
 // deployment.json records for it and the proof file all name one config, and
-// whether handEdit, the generation record that calls config.yaml a hand edit,
-// directly follows the generation the proof names and replaced
-// the very config the proof covers. Any config recorded in between (a
-// lifecycle apply by a build that does not write the proof) makes the gap
-// larger. The number alone is not enough: a generation record that was lost
-// starts its counter over, so a later config written after the reset can
-// carry the number that looks like the proof is current. The record links
-// each generation to the config digest it replaced (previous_config_sha256);
-// a hand edit that replaced another config, or a record with no readable
-// predecessor, leaves the proof stale. The PowerShell installer makes the
-// same check (Assert-DefenseClawApprovedConfigProven).
-func managedApprovedConfigProven(installDir string, handEdit configwrite.GenerationState) bool {
+// handEdit, the generation record that calls config.yaml a hand edit,
+// directly follows the generation the proof names and replaced the very
+// config the proof covers. Otherwise it names the first check that failed. Any
+// config recorded in between (a lifecycle apply by a build that does not write
+// the proof) makes the gap larger. The number alone is not enough: a
+// generation record that was lost starts its counter over, so a later config
+// written after the reset can carry the number that looks like the proof is
+// current. The record links each generation to the config digest it replaced
+// (previous_config_sha256); a hand edit that replaced another config, or a
+// record with no readable predecessor, leaves the proof stale. The PowerShell
+// installer makes the same check (Assert-DefenseClawApprovedConfigProven).
+func approvedConfigProofGap(installDir string, handEdit configwrite.GenerationState) string {
 	recordPath := filepath.Join(installDir, managedDeploymentRecordFile)
 	copyPath := filepath.Join(installDir, managedApprovedConfigFile)
 	for _, path := range []string{recordPath, copyPath} {
 		if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
-			return false
+			return filepath.Base(path) + " is missing or not a regular file"
 		}
 	}
 	rawRecord, err := readBoundedConfigFile(recordPath, managedApprovedRecordMaxBytes)
 	if err != nil {
-		return false
+		return "the deployment record cannot be read"
 	}
 	var record struct {
 		Sources map[string]string `json:"approved_policy_sources"`
 	}
 	if json.Unmarshal(rawRecord, &record) != nil {
-		return false
+		return "the deployment record cannot be read"
 	}
 	digest := record.Sources[managedApprovedConfigKey]
 	if !managedConfigSHA256Pattern.MatchString(digest) {
-		return false
+		return "the deployment record names no approved config digest"
 	}
 	body, err := readBoundedConfigFile(copyPath, managedApprovedRecordMaxBytes)
 	if err != nil || configwrite.SHA256Hex(body) != digest {
-		return false
+		return "the approved copy is not the config the deployment record names"
 	}
 	provenDigest, provenGeneration, ok := readManagedApprovedProof(filepath.Join(installDir, managedApprovedProofFile))
-	return ok && provenDigest == digest &&
-		handEdit.Generation > provenGeneration && handEdit.Generation-provenGeneration == 1 &&
-		strings.EqualFold(strings.TrimPrefix(handEdit.PreviousConfigSHA256, "sha256:"), digest)
+	switch {
+	case !ok:
+		return "no lifecycle run of this release has proven the approved copy"
+	case provenDigest != digest:
+		return "the proof names another config than the approved copy"
+	case handEdit.Generation <= provenGeneration:
+		return "the proof names a later config generation than the hand edit"
+	case handEdit.Generation-provenGeneration != 1:
+		return fmt.Sprintf("%d config generations were recorded after the proof", handEdit.Generation-provenGeneration-1)
+	case !strings.EqualFold(strings.TrimPrefix(handEdit.PreviousConfigSHA256, "sha256:"), digest):
+		return "the hand edit replaced a config other than the approved copy"
+	}
+	return ""
 }
 
 func publishManagedApprovedConfigSource(installDir, configPath string, installed []byte, mode approvedPublishMode) (approvedPublishResult, error) {
