@@ -1,7 +1,7 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !windows
+//go:build !windows && !race
 
 package gateway
 
@@ -18,11 +18,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 	"github.com/google/uuid"
 )
+
+// The three open-loop tests below measure wall-clock throughput: the managed
+// gateway has to answer a steady stream inside the hook window of 3.5 s. A
+// race build is several times slower and would measure the detector, not the
+// gateway, so they are built without -race. The rate and queue logic that
+// decides which calls are admitted is proven in every build, race included,
+// on an injected clock (TestSandboxAccountBudgetSchedule). CI runs these
+// three in the non-race "Unix Standalone Lifecycle (macos-latest darwin
+// gateway and cli)" step, which runs every !windows test of internal/gateway
+// without -race (go test -count=1 -run <those tests> ./internal/gateway).
 
 // TestGAP0490OpenLoopSandboxStream drives the relayed hook the way the sandbox
 // hook does (a proposal, then its delivery receipt) at a steady 22 calls a
@@ -86,12 +95,8 @@ func runGAP0490OpenLoop(t *testing.T, sandboxes, perSecond int, duration time.Du
 	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
-	// The hook waits 3.5 s for its answer; a race build on a loaded runner is
-	// several times slower, so there it waits what the rendered hook waits.
-	wait := 3500 * time.Millisecond
-	if hookAnswerRaceBuild {
-		wait, _ = connector.SandboxHookAttemptBudgets()
-	}
+	// The hook waits 3.5 s for its answer.
+	const wait = 3500 * time.Millisecond
 	post := func(token string, body []byte, receipt bool) (int, []byte, error) {
 		ctx, cancel := context.WithTimeout(t.Context(), wait)
 		defer cancel()
