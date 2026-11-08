@@ -527,6 +527,7 @@ if [[ "${PURGE}" == "true" ]]; then
       if [[ "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
         printf '[uninstall] and will SCRUB DefenseClaw entries from each user'\''s:\n'
         printf '  ~/.codex/config.toml\n  ~/.claude/settings.json\n  ~/.cursor/hooks.json\n'
+        printf '  ~/.copilot/hooks/defenseclaw.json\n'
         printf '  ~/.config/amp/plugins/defenseclaw.ts (exact backup authority required)\n'
         printf '  (non-DefenseClaw entries preserved)\n'
       fi
