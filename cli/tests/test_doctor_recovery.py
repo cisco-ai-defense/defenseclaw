@@ -603,8 +603,7 @@ def test_device_key_recovery_revalidates_custody_before_each_publication(
     result = apply_device_key_recovery(plan, approved=True)
 
     assert result.status is RecoveryApplyStatus.CREATED
-    # The pending marker, the secret, the sentinel and the key.
-    assert calls == 4
+    assert calls == 3
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink replacement regression")
@@ -818,7 +817,7 @@ def test_injected_windows_audit_backend_uses_create_new_payload_publication(
     os.name == "nt",
     reason="injected Windows backend is for non-Windows hosts; native recovery tests cover Windows",
 )
-def test_injected_windows_device_backend_uses_four_private_create_new_writes(
+def test_injected_windows_device_backend_uses_three_private_create_new_writes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -831,13 +830,11 @@ def test_injected_windows_device_backend_uses_four_private_create_new_writes(
 
     assert result.status is RecoveryApplyStatus.CREATED
     assert [Path(path).name for path, _payload, _private in writes] == [
-        "device.identity.creating",
         "device.provenance.secret",
         "device.key.provenance",
         "device.key",
     ]
     assert all(private for _path, _payload, private in writes)
-    assert not (data_dir / "device.identity.creating").exists()
 
 
 def test_windows_publication_adapter_uses_native_create_new_and_security_checks(

@@ -33,7 +33,7 @@ import click
 from defenseclaw import connector_paths, long_paths, platform_support, terminal_checkbox, ux
 
 if TYPE_CHECKING:
-    from defenseclaw.bootstrap import StepResult
+    from defenseclaw.bootstrap import InitLocks, StepResult
     from defenseclaw.config import Config
 from defenseclaw.config import gateway_pid_path
 from defenseclaw.context import AppContext, pass_ctx
@@ -408,9 +408,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.bootstrap import InitLockError, hold_init_lock
 
     try:
-        with hold_init_lock():
+        with hold_init_lock() as locks:
             _run_plain_init(
                 app,
+                locks,
                 skip_install=skip_install,
                 enable_guardrail=enable_guardrail,
                 non_interactive=non_interactive,
@@ -424,6 +425,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
 def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
     app: AppContext,
+    locks: InitLocks,
     *,
     skip_install: bool,
     enable_guardrail: bool,
@@ -500,6 +502,10 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
 
         for step in apply_first_run_ports(cfg, api_port or 0, proxy_port or 0, new_config=False):
             click.echo(f"  {step.name}: " + ux._style(f"{step.detail}; run {step.next_command}", fg="yellow"))
+
+    # The identity and the stores live in the data folder the config names, which
+    # may not be the home locked so far. Lock it before anything is changed there.
+    locks.take(cfg.data_dir)
 
     cfg.environment = env
     if cfg.claw.mode.strip():
@@ -3469,11 +3475,12 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bo
     older unprovenanced key must remain visible to Doctor as legacy rather than
     being blessed after the fact.
 
-    The files of an identity whose creation never finished (a crash or a
-    killed init; see set_aside_abandoned_identity) are set aside and the
-    identity is created again, so such a home is never a dead end. Any other
-    keyless provenance file is still continuity evidence and still refuses.
-    ``fresh_home`` says this init found no config.yaml.
+    On a home this init found without a config.yaml (``fresh_home``), the
+    files of an identity whose creation never finished (a crash or a killed
+    init; see set_aside_abandoned_identity) are set aside and the identity is
+    created again, so such a home is never a dead end. On any other home a
+    keyless provenance file is continuity evidence and still refuses; Doctor's
+    attended repair handles it.
     """
     raw_path = os.fspath(path)
     raw_data_dir = os.fspath(data_dir) if data_dir is not None else None
@@ -3516,13 +3523,13 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bo
         _device_identity_paths_equal,
         apply_device_key_recovery,
         plan_missing_device_key,
-        set_aside_abandoned_identity,
     )
 
     if os.path.lexists(target):
-        # Drops a pending marker a finished creation did not get to delete.
-        set_aside_abandoned_identity(target, identity_root, fresh_home=False)
-        return
+        if fresh_home:
+            _set_aside_abandoned_identity(target, identity_root)
+        if os.path.lexists(target):
+            return
     try:
         common = os.path.commonpath((target, identity_root))
     except ValueError as exc:
@@ -3541,12 +3548,8 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bo
             "cannot safely create device identity (data-dir-path-is-indirect)"
         )
     _prepare_device_identity_directories(identity_root, target_parent)
-    try:
-        set_aside_abandoned_identity(target, identity_root, fresh_home=fresh_home)
-    except OSError as exc:
-        raise click.ClickException(
-            "cannot safely create device identity (abandoned-identity-set-aside-failed)"
-        ) from exc
+    if fresh_home:
+        _set_aside_abandoned_identity(target, identity_root)
 
     plan = plan_missing_device_key(target, data_dir=identity_root)
     if plan.disposition is not RecoveryDisposition.READY:
@@ -3563,6 +3566,19 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bo
         raise click.ClickException(
             f"could not create device identity ({result.reason_code})"
         )
+
+
+def _set_aside_abandoned_identity(target: str, identity_root: str) -> None:
+    """Set aside the leftovers of an unfinished identity creation on a fresh home."""
+
+    from defenseclaw.doctor_recovery import set_aside_abandoned_identity
+
+    try:
+        set_aside_abandoned_identity(target, identity_root, fresh_home=True)
+    except OSError as exc:
+        raise click.ClickException(
+            "cannot safely create device identity (abandoned-identity-set-aside-failed)"
+        ) from exc
 
 
 def _resolve_openclaw_gateway(
@@ -3722,7 +3738,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
 
-    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir, fresh_home=is_new_config)
 
     click.echo(f"  Gateway:       {cfg.gateway.host}:{cfg.gateway.port} (connector: {connector})")
     # Plan B2 / S0.2: the sidecar synthesizes a CSPRNG token on first
