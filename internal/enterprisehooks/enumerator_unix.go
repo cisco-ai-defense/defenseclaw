@@ -678,7 +678,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			}
 		}
 		if check.State == HomeAvailable && !discoveryFailed && (opts.DiscoverSurfaces != nil || opts.Discover != nil) {
-			versions = carryVerifiedAgentVersions(opts.State, name, home,
+			versions = carryVerifiedAgentVersions(opts.State, name, home, UnixAgentOwner{UID: account.UID, Home: home, HomeInode: check.Inode},
 				append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...), versions, reasons, sources, opts.Logger)
 		}
 		if discoveryFailed {
