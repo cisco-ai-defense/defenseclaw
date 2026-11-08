@@ -539,6 +539,26 @@ func mcpScannerMessage(text string) string {
 	return text
 }
 
+// MCPLocalLauncherRefusal is the scanner's refusal of a local server's
+// launcher from the command alone, in the words of the Python scanner
+// (cli/defenseclaw/scanner/mcp.py _stdio_scan_command_error): a command path,
+// or any launcher but the bare npx or uvx. "" when the launcher is one a scan
+// starts. A scan never starts anything else, so the verdict needs no process.
+func MCPLocalLauncherRefusal(command string) string {
+	command = strings.TrimSpace(command)
+	switch base := strings.ToLower(command); {
+	case command == "":
+		return ""
+	case strings.ContainsAny(command, `/\`):
+		return fmt.Sprintf("command %q is a path, and paths are never an allowlisted stdio launcher: "+
+			"the scanner starts only the bare names npx or uvx from PATH", command)
+	case base != "npx" && base != "uvx":
+		return fmt.Sprintf("command %q is not an allowlisted stdio launcher (allowed: npx, uvx): "+
+			"a scan starts only npm or PyPI packages through npx or uvx, never another program", command)
+	}
+	return ""
+}
+
 // MCPRefusedLauncher reports a failed MCP scan whose scanner refused the
 // server's local launcher (rel-1-0-6:GAP-0258), and the launcher it names
 // when that is a bare program name ("" for a path or none). That refusal is
@@ -579,6 +599,16 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		// Only the managed Windows scanner runtime can start a server as
 		// its user; nothing else may start it with the gateway's rights.
 		return nil, refusedMCPScan(fmt.Errorf("scanner: MCP server %q of an enrolled user starts only as that user, through the managed Windows scanner runtime", s.ServerEntry.Name))
+	}
+	if entry := s.ServerEntry; entry != nil && entry.Home != "" && entry.RunAsSID == "" && entry.URL == "" {
+		// A local server of an enrolled account that a gateway lists without
+		// a way to start it as its user (managed Linux and macOS, GAP-0925):
+		// the launcher is refused from the definition, and nothing starts,
+		// where the name lookup of the scanner CLI would read the service
+		// account's files, not the user's.
+		if reason := MCPLocalLauncherRefusal(entry.Command); reason != "" {
+			return nil, refusedMCPScan(fmt.Errorf("scan failed: refusing to scan local MCP server %q: %s", entry.Name, reason))
+		}
 	}
 	if entry := s.ServerEntry; entry != nil && entry.RunAsSID == "" {
 		// The gateway neither reads nor starts anything at the paths of an

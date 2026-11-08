@@ -20,6 +20,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/mcpkey"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 // MCPAdmissionQuery names the MCP server a tool call reaches.
@@ -65,6 +66,14 @@ const (
 	MCPScanIssueAddress = "address"
 )
 
+// MCPLauncherRefused reports a local server the scanner refuses from its
+// definition alone: its launcher is anything but the bare npx or uvx. The
+// refusal is a function of the definition, so nothing has to start for a
+// gateway that cannot start the server as its user to record it.
+func MCPLauncherRefused(server config.MCPServerEntry) bool {
+	return strings.TrimSpace(server.URL) == "" && mcpScanIssue(server) == MCPScanIssueLauncher
+}
+
 // mcpScanIssue names why the scanner refuses server, from its definition
 // alone: the scanner stays the judge, this only words the refusal.
 func mcpScanIssue(server config.MCPServerEntry) string {
@@ -78,11 +87,7 @@ func mcpScanIssue(server config.MCPServerEntry) string {
 	if command == "" {
 		return ""
 	}
-	base := strings.ToLower(command)
-	if strings.ContainsAny(base, `/\`) {
-		return MCPScanIssueLauncher
-	}
-	if base != "npx" && base != "uvx" {
+	if scanner.MCPLocalLauncherRefusal(command) != "" {
 		return MCPScanIssueLauncher
 	}
 	return ""
