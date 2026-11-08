@@ -450,12 +450,12 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				}
 				if !report.OK || !report.SafeToRemoveBinary ||
 					report.SurvivingOwnedPathReferences != 0 {
-					return fmt.Errorf("Codex machine requirements removal was not reference-clean")
+					return errors.New("enterprise hooks: Codex machine requirements removal was not reference-clean")
 				}
 			}
 		} else if publishExact {
 			if !currentCodex.Active {
-				return fmt.Errorf("Codex managed policy is absent after target runtime installation")
+				return errors.New("enterprise hooks: Codex managed policy is absent after target runtime installation")
 			}
 			if err := enterpriseHookCodexTargetsPublisher(codexOpts, desiredCodex); err != nil {
 				return err
