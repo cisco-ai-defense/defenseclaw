@@ -20,6 +20,14 @@ import (
 // run again.
 var ownReasonedRow = regexp.MustCompile(`^not (protected|confirmed): \S.{30,}`)
 
+// text is the sentence the launcher prints after the state.
+func (c ownCause) text() string {
+	if c.next == "" {
+		return c.reason
+	}
+	return c.reason + ". " + c.next
+}
+
 // ownRowText is the sentence the launcher prints for a row: the state, then
 // the reason and the next step when the row has them.
 func ownRowText(row map[string]any) string {
@@ -138,6 +146,11 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 		Code: enterprisehooks.UnprotectedCodeAgentUnprotected, Reason: "running copy has no resolved account"}
 	noReason := unprotectedAgentFor("alice", 5001, "opencode", "", "")
 	codeOnly := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, "")
+	// A recorded reason that is only punctuation or space says nothing.
+	dotOnly := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, ".")
+	dotsAndSpace := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, " .\t. \n")
+	// A reason with a trailing period still shows its words.
+	periodEnded := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeAgentUnprotected, "the plugin folder is not writable by the agent.")
 	// The enumerator records this reason with no action when version discovery fails.
 	scanIncomplete := unprotectedAgentFor("alice", 5001, "opencode", enterprisehooks.UnprotectedCodeInstallScanIncomplete,
 		"the account's agent versions and private installs could not be inspected this cycle")
@@ -159,6 +172,12 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 			want: map[string]string{"opencode": "not protected: " + ownCauseNoUnprotectedReason.text()}},
 		{name: "scan entry with a code and no recorded reason", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{codeOnly},
 			want: map[string]string{"opencode": "not protected: " + ownCauseNoUnprotectedReason.text()}},
+		{name: "scan entry whose reason is only a period", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{dotOnly},
+			want: map[string]string{"opencode": "not protected: " + ownCauseNoUnprotectedReason.text()}},
+		{name: "scan entry whose reason is only periods and space", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{dotsAndSpace},
+			want: map[string]string{"opencode": "not protected: " + ownCauseNoUnprotectedReason.text()}},
+		{name: "scan entry whose reason ends with a period", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{periodEnded},
+			want: map[string]string{"opencode": "not protected: the plugin folder is not writable by the agent. " + ownScanNextStep}},
 		{name: "scan entry whose reason names no action", uid: "5001", user: "alice", view: proven, scan: []enterprisehooks.UnprotectedAgent{scanIncomplete},
 			want: map[string]string{"opencode": "not protected: " + scanIncomplete.Reason + ". " + ownScanNextStep}},
 		{name: "root denied", uid: "0", user: "root", view: proven, configure: rootDeny,

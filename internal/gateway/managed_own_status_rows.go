@@ -3,7 +3,10 @@
 
 package gateway
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // Every connector row of an own-status answer that is not "protected" says
 // why and what the account holder can do next. The launcher prints the row
@@ -74,18 +77,23 @@ const (
 	ownScanNextStep = ownRetryNextStep
 )
 
-// text is the sentence the launcher prints after the state.
-func (c ownCause) text() string {
-	if c.next == "" {
-		return c.reason
-	}
-	return c.reason + ". " + c.next
+// ownScanReason is a recorded scan reason as the row shows it: free text with
+// the surrounding space and the closing sentence punctuation removed, so a
+// reason that is only punctuation is empty.
+func ownScanReason(reason string) string {
+	return strings.TrimFunc(reason, func(r rune) bool { return r == '.' || unicode.IsSpace(r) })
 }
 
 // ownScanCause is the cause of a row the scan lists as unprotected for the
-// account: the recorded reasons (free text) and ownScanNextStep.
+// account: the recorded reasons (free text) and ownScanNextStep. A reason that
+// is empty once normalized gives the no-reason cause, so the row always has
+// its reason field.
 func ownScanCause(reasons string) ownCause {
-	return ownCause{"scan_unprotected", strings.TrimRight(reasons, ". "), ownScanNextStep}
+	reasons = ownScanReason(reasons)
+	if reasons == "" {
+		return ownCauseNoUnprotectedReason
+	}
+	return ownCause{"scan_unprotected", reasons, ownScanNextStep}
 }
 
 func ownRow(protected bool, state string, cause ownCause) map[string]any {
