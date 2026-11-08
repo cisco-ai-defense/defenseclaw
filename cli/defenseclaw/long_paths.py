@@ -38,16 +38,17 @@ def copytree(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> str:
 
     *dst* must not exist, as for ``shutil.copytree``; a destination that exists,
     or that appears while this call copies, raises ``FileExistsError`` and is
-    never changed, replaced or reported as a seed.
+    never reported as a seed.
 
     The copy is made in a hidden folder this call created next to *dst* (a name
-    already in use is never reused) and is moved to *dst* only when it is
-    complete, so *dst* is never a partial copy. On POSIX, where renaming a folder
-    over an empty folder replaces it, this call first creates *dst* itself with
-    ``mkdir`` (which cannot succeed over anything that exists) and renames onto
-    that empty folder it owns; Windows refuses a rename onto an existing folder.
-    A failure removes only the folders this call created. A raised error names
-    the paths without the extended-path prefix.
+    already in use is never reused) and is moved to *dst* with one rename only
+    when it is complete. Until that rename *dst* does not exist, so another init
+    never sees an empty or partial *dst* and takes it for a finished seed. The
+    system refuses a rename onto a folder that holds anything, and *dst* is
+    checked once more just before it; the only folder the rename can replace is
+    an empty one that another run created in the instant between that check and
+    the rename, which holds no data. A failure removes only the folder this call
+    created. A raised error names the paths without the extended-path prefix.
     """
 
     final = extended(dst)
@@ -55,22 +56,20 @@ def copytree(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> str:
         raise FileExistsError(errno.EEXIST, "File exists", display(final))
     parent = os.path.dirname(final) or os.curdir
     staging = ""
-    claimed = False
     try:
         os.makedirs(parent, exist_ok=True)
         staging = _new_staging(parent, os.path.basename(final))
         shutil.copytree(extended(src), staging, dirs_exist_ok=True)
-        if os.name != "nt":
-            os.mkdir(final)
-            claimed = True
-        os.rename(staging, final)
+        if os.path.lexists(final):
+            raise FileExistsError(errno.EEXIST, "File exists", display(final))
+        try:
+            os.rename(staging, final)
+        except OSError as exc:
+            if exc.errno in (errno.EEXIST, errno.ENOTEMPTY) and os.path.lexists(final):
+                raise FileExistsError(errno.EEXIST, "File exists", display(final)) from exc
+            raise
     except (OSError, shutil.Error) as exc:
         left = _remove(staging) if staging else False
-        if claimed:
-            try:
-                os.rmdir(final)
-            except OSError:
-                pass
         message = display(str(exc))
         if left:
             message += f" (the partial copy {display(staging)} could not be removed)"
