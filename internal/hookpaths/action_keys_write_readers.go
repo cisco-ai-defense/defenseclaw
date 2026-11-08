@@ -517,12 +517,10 @@ func actionClientPerlInPlace(call *syntax.CallExpr, cwd, home string, protected 
 			code = false
 			continue
 		}
-		if value == "-e" {
-			code = true
-			continue
-		}
-		if strings.HasPrefix(value, "-") {
-			inPlace = inPlace || strings.Contains(value, "i")
+		if strings.HasPrefix(value, "-") && value != "-" && !strings.HasPrefix(value, "--") {
+			editing, wantsCode := perlOptionCluster(value[1:])
+			inPlace = inPlace || editing
+			code = wantsCode
 			continue
 		}
 		if inPlace && protectedReachPath(OperandPath(value, cwd), protected, ssh) {
@@ -530,6 +528,26 @@ func actionClientPerlInPlace(call *syntax.CallExpr, cwd, home string, protected 
 		}
 	}
 	return false
+}
+
+// perlOptionCluster reads one perl option word (without its leading dash):
+// -i starts the in-place edit and its backup suffix, so a letter after it is
+// not an option; -e/-E end the cluster and take the next word as code when
+// nothing follows them; -M/-m/-I/-F/-x/-C/-d/-D/-V/-X take the rest of the
+// word as their value, so an "i" inside a module or directory name is not an
+// in-place edit.
+func perlOptionCluster(cluster string) (inPlace, wantsCode bool) {
+	for index, option := range cluster {
+		switch option {
+		case 'i':
+			return true, false
+		case 'e', 'E':
+			return false, index+1 == len(cluster)
+		case 'M', 'm', 'I', 'F', 'x', 'C', 'd', 'D', 'V', 'X':
+			return false, false
+		}
+	}
+	return false, false
 }
 
 func actionClientPipelineRemoval(file *syntax.File, cwd, home string, protected protectedFiles, ssh string) bool {

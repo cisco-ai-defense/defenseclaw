@@ -8207,7 +8207,7 @@
                   "tool_call_only": true,
                   "pattern": "a^",
                   "title": "Turn off the agent's DefenseClaw hooks",
-                  "severity": "HIGH",
+                  "severity": "CRITICAL",
                   "confidence": 0.98,
                   "tags": [
                     "cognitive-tampering",
