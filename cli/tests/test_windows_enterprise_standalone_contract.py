@@ -733,6 +733,42 @@ def test_standalone_purge_refuses_open_data_files_before_teardown() -> None:
         assert 'DllImport("rstrtmgr.dll"' in native and name in native
 
 
+def test_restart_manager_is_never_asked_about_a_file_the_account_cannot_open() -> None:
+    """GAP-0878: Restart Manager opens each file as the calling account, and
+    one SYSTEM-only DefenseClaw file (hook-guardian\\opencode-service-ports.json)
+    failed the holder list of the whole batch with access denied, so an
+    Administrator purge and Setup /uninstall were refused 1603 uninstall_in_use
+    with nothing held. The one native query (every in-use check goes through it)
+    sets such a file aside, asks the purge's own question (an open for DELETE)
+    and reports a sharing violation as a holder with no process id; the three
+    consumers keep that holder past their process and service exclusions
+    (behaviour in enterprise-standalone-state-files-in-use-smoke.ps1)."""
+
+    module = _text(MODULE)
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    gate = native.index("GetFileHolders(string[] paths)")
+    first = native.index("GetPlainOpenError(path, FILE_READ_ATTRIBUTES)", gate)
+    delete = native.index("GetDirectoryOpenError(path, DELETE)", first)
+    query = native.index("QueryRestartManager(queryable.ToArray())", delete)
+    assert gate < first < delete < query
+    assert "RmRegisterResources" not in native[gate:query]
+    # A file that can be neither queried nor deleted still fails closed.
+    assert "this account cannot delete" in native[delete:query]
+    for name in (
+        "Get-DefenseClawStateFileHolders",
+        "Get-DefenseClawStateFileHolderText",
+        "Get-DefenseClawInstallRootHolders",
+    ):
+        body = _function_body(module, name)
+        assert "UnnamedFileHolder" in body or "FileHolderKey" in body, name
+    # Process id 0 is what a stopped service reports, so the exclusions must
+    # not be what drops the unnamed holder.
+    holders = _function_body(module, "Get-DefenseClawStateFileHolders")
+    assert holders.index("Test-DefenseClawUnnamedFileHolder") < holders.index("$Excluded.Contains")
+    install = _function_body(module, "Get-DefenseClawInstallRootHolders")
+    assert install.count("foreach ($id in @($ExcludedProcessIds))") == 0
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).

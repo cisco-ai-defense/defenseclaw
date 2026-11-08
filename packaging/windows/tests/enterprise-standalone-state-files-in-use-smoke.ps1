@@ -370,6 +370,101 @@ public static class DcsfListedRestartManager {
                 Stop-TestReader $running
             }
 
+            # GAP-0878: a DefenseClaw file this account cannot open (its
+            # access list names only SYSTEM, as hook-guardian\opencode-service-ports.json
+            # does) made Restart Manager fail the holder list of every file
+            # with access denied, so an administrator's uninstall was refused
+            # although nothing held a file. Real Restart Manager, real files:
+            # such a file no longer fails the check, nobody holding it is no
+            # holder, and a real reader of another file is still named.
+            $layout = New-TestState 'restricted'
+            $guardianDirectory = [IO.Path]::Combine($layout.StateRoot, 'hook-guardian')
+            [void][IO.Directory]::CreateDirectory($guardianDirectory)
+            $restricted = [IO.Path]::Combine($guardianDirectory, 'opencode-service-ports.json')
+            [IO.File]::WriteAllText($restricted, 'state')
+            & "$env:SystemRoot\System32\icacls.exe" $restricted /inheritance:r /grant:r '*S-1-5-18:F' | Out-Null
+            $canOpenRestricted = $true
+            try {
+                [IO.File]::Open($restricted, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite).Dispose()
+            }
+            catch [UnauthorizedAccessException] {
+                $canOpenRestricted = $false
+            }
+            if ($canOpenRestricted) {
+                # SYSTEM can open its own file, so the case cannot be set up.
+                [Console]::Error.WriteLine('SKIP restricted-file rows: this account can open a SYSTEM-only file')
+            }
+            else {
+                $script:InstallTreeUseRecheckMilliseconds = 500
+                Test-Accepted 'purge with a SYSTEM-only file and no holder' { Invoke-Preflight $layout }
+                $reader = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
+                Test-Refused 'purge with a SYSTEM-only file and an audit.db reader' { Invoke-Preflight $layout } (
+                    '^uninstall_in_use: ' + [regex]::Escape($engineName) + ' \(pid ' + $reader.Id +
+                    ', account [^,)]+(, started by [^)]+)?\) has runtime\\audit\.db open in ')
+                Stop-TestReader $reader
+                Test-Accepted 'purge after the reader closed, SYSTEM-only file still there' { Invoke-Preflight $layout }
+                Test-Accepted 'install-root check with a SYSTEM-only file in the install folder' {
+                    $restrictedInstall = [IO.Path]::Combine($layout.BinDirectory, 'restricted.bin')
+                    [IO.File]::WriteAllText($restrictedInstall, 'state')
+                    & "$env:SystemRoot\System32\icacls.exe" $restrictedInstall /inheritance:r /grant:r '*S-1-5-18:F' | Out-Null
+                    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+                        -Layout $layout `
+                        -GatewayServiceName DefenseClawGateway `
+                        -GuardianServiceName DefenseClawHookGuardian
+                }
+                if (-not [IO.File]::Exists($restricted)) {
+                    $failures.Add('the check removed the SYSTEM-only file')
+                }
+                # The access list is unchanged.
+                $restrictedAcl = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $restricted).GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
+                    Microsoft.PowerShell.Core\ForEach-Object { $_.IdentityReference.Value }
+                if (@($restrictedAcl).Count -ne 1 -or @($restrictedAcl)[0] -cne 'S-1-5-18') {
+                    $failures.Add("the SYSTEM-only file's access list changed: $(@($restrictedAcl) -join ', ')")
+                }
+            }
+
+            # The holder of a file this account cannot query has no process
+            # id: it is refused and named without one, and neither the
+            # excluded process ids (a stopped service is process id 0) nor the
+            # service names remove it. The native answer is replaced here
+            # because holding a SYSTEM-only file needs SYSTEM (the native
+            # cell holds a real one).
+            if (-not ('DcsfUnnamedRestartManager' -as [type])) {
+                Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+public class DcsfUnnamedHolder { public uint ProcessId { get; set; } public string ServiceName { get; set; } public string AppName { get; set; } public long StartFileTime { get; set; } public bool Unnamed { get; set; } }
+public static class DcsfUnnamedRestartManager {
+    public static object[] GetFileHolders(string[] paths) {
+        return new object[] { new DcsfUnnamedHolder { ProcessId = 0, ServiceName = "", AppName = "a program", StartFileTime = 0, Unnamed = true } };
+    }
+}
+'@
+            }
+            $layout = New-TestState 'unnamed'
+            $script:InstallTreeUseRecheckMilliseconds = 200
+            $savedNative = ${function:Initialize-DefenseClawNativeSecurity}
+            try {
+                function script:Initialize-DefenseClawNativeSecurity { return [DcsfUnnamedRestartManager] }
+                Test-Refused 'purge with a holder that has no process id' { Invoke-Preflight $layout } (
+                    '^uninstall_in_use: a program has runtime\\audit\.db open in ' + [regex]::Escape([string]$layout.StateRoot) +
+                    ', which the purge deletes.*nothing was changed\. ')
+                $stopped = [Collections.Generic.HashSet[int]]::new()
+                [void]$stopped.Add(0)
+                $seen = Get-DefenseClawStateFileHolders -Layout $layout -Paths @([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) -Excluded $stopped -ServiceNames @('DefenseClawGateway')
+                if ($seen.Count -ne 1) {
+                    $failures.Add("a holder with no process id was removed by process id 0 in the excluded set: $($seen.Count) holders")
+                }
+                Test-Refused 'install-root check with a holder that has no process id' {
+                    Assert-DefenseClawStandaloneInstallTreeNotInUse `
+                        -Layout $layout `
+                        -GatewayServiceName DefenseClawGateway `
+                        -GuardianServiceName DefenseClawHookGuardian
+                } '^uninstall_in_use: a program holds a file in '
+                Test-StateIntact 'refusals for a holder with no process id' $layout
+            }
+            finally {
+                Microsoft.PowerShell.Management\Set-Item -Path function:script:Initialize-DefenseClawNativeSecurity -Value $savedNative
+            }
+
             # The Secure Client profile has no data-file check.
             $reader = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient

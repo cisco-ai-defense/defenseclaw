@@ -4644,6 +4644,9 @@ namespace $nativeNamespace
             public long StartFileTime { get; private set; }
             public string AppName { get; private set; }
             public string ServiceName { get; private set; }
+            // A program that holds a file this account cannot query
+            // (GAP-0878): it has no process id here.
+            public bool Unnamed { get; private set; }
 
             internal FileHolder(
                 uint processId,
@@ -4655,6 +4658,13 @@ namespace $nativeNamespace
                 StartFileTime = startFileTime;
                 AppName = appName ?? String.Empty;
                 ServiceName = serviceName ?? String.Empty;
+            }
+
+            internal static FileHolder NewUnnamed()
+            {
+                FileHolder holder = new FileHolder(0, 0, "a program", String.Empty);
+                holder.Unnamed = true;
+                return holder;
             }
         }
 
@@ -4681,13 +4691,90 @@ namespace $nativeNamespace
             return 0;
         }
 
+        // The Win32 error opening a file for one right the way Restart
+        // Manager does, as an ordinary open: no backup semantics, which let
+        // an elevated administrator open a file whose access list names only
+        // SYSTEM. 0 when it opens.
+        private static int GetPlainOpenError(string path, uint desiredAccess)
+        {
+            const uint FILE_SHARE_ALL = 0x00000007;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            IntPtr handle = CreateFileW(
+                path,
+                desiredAccess,
+                FILE_SHARE_ALL,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                IntPtr.Zero);
+            if (handle == new IntPtr(-1))
+                return Marshal.GetLastWin32Error();
+            CloseHandle(handle);
+            return 0;
+        }
+
         // The processes the Windows Restart Manager reports with one of
         // these files open (GAP-0136). It names every holder, whichever
-        // account or session runs it, without opening the files.
+        // account or session runs it.
+        //
+        // GAP-0878: Restart Manager opens each file as the calling account,
+        // and one file that account cannot open to read its attributes (a
+        // DefenseClaw file whose access list names only SYSTEM, such as
+        // hook-guardian\opencode-service-ports.json) fails the holder list of
+        // the whole batch with access denied. An administrator's uninstall was
+        // refused for that, although nothing held any file. Such a file is
+        // not given to Restart Manager. It is asked what the purge asks: can
+        // this account open it for DELETE with every sharing mode allowed and
+        // backup semantics, as the deletion does? Yes: nothing holds it in the
+        // purge's way. A sharing violation: a program holds it without
+        // sharing delete, and that is returned as a holder with no process id
+        // (Unnamed). Any other answer is a file this account can neither query
+        // nor delete, which throws: a caller that fails closed refuses, and
+        // one that does not finds no holder, as for any Restart Manager error.
         public static FileHolder[] GetFileHolders(string[] paths)
         {
             if (paths == null || paths.Length == 0)
                 return new FileHolder[0];
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint DELETE = 0x00010000;
+            const int ERROR_ACCESS_DENIED = 5;
+            const int ERROR_SHARING_VIOLATION = 32;
+            System.Collections.Generic.List<string> queryable =
+                new System.Collections.Generic.List<string>(paths.Length);
+            bool unnamedHolder = false;
+            foreach (string path in paths)
+            {
+                if (GetPlainOpenError(path, FILE_READ_ATTRIBUTES) != ERROR_ACCESS_DENIED)
+                {
+                    queryable.Add(path);
+                    continue;
+                }
+                int answer = GetDirectoryOpenError(path, DELETE);
+                if (answer == 0)
+                    continue;
+                if (answer == ERROR_SHARING_VIOLATION)
+                {
+                    unnamedHolder = true;
+                    continue;
+                }
+                throw new Win32Exception(
+                    answer,
+                    "Restart Manager cannot read, and this account cannot delete, " + path);
+            }
+            FileHolder[] found = queryable.Count == 0
+                ? new FileHolder[0]
+                : QueryRestartManager(queryable.ToArray());
+            if (!unnamedHolder)
+                return found;
+            FileHolder[] all = new FileHolder[found.Length + 1];
+            Array.Copy(found, all, found.Length);
+            all[found.Length] = FileHolder.NewUnnamed();
+            return all;
+        }
+
+        private static FileHolder[] QueryRestartManager(string[] paths)
+        {
             uint session;
             int status = RmStartSession(out session, 0, new StringBuilder(64));
             if (status != 0)
@@ -9809,6 +9896,11 @@ function Format-DefenseClawProcessInUse {
         [string]$UserName,
         [string]$Parent
     )
+    # A holder with no process id (GAP-0878) is named without one; the Intune
+    # launcher then has no pid to wait for.
+    if ($Id -le 0) {
+        return $Name
+    }
     $text = '{0} (pid {1}' -f $Name, $Id
     if (-not [string]::IsNullOrEmpty($UserName)) {
         $text += ', account ' + $UserName
@@ -9826,6 +9918,24 @@ function Format-DefenseClawProcessInUse {
 # holder has open by asking about at most the second number one at a time.
 $script:StateFileInUseCheckLimit = 16384
 $script:StateFileInUseNameLimit = 256
+
+function Test-DefenseClawUnnamedFileHolder {
+    # GAP-0878: a holder of a file this account cannot query has no process
+    # id, so the process and service exclusions below do not apply to it.
+    param([Parameter(Mandatory)]$Holder)
+    $property = $Holder.PSObject.Properties['Unnamed']
+    return ($null -ne $property -and [bool]$property.Value)
+}
+
+function Get-DefenseClawFileHolderKey {
+    # The process id and start time (a reused id is another program), or one
+    # key for the holders with no process id.
+    param([Parameter(Mandatory)]$Holder)
+    if (Test-DefenseClawUnnamedFileHolder -Holder $Holder) {
+        return 'unnamed'
+    }
+    return ('{0}/{1}' -f [int]$Holder.ProcessId, [int64]$Holder.StartFileTime)
+}
 
 function Get-DefenseClawStateRootFiles {
     <#
@@ -9902,8 +10012,9 @@ function Get-DefenseClawStateFileHolders {
     $native = Initialize-DefenseClawNativeSecurity
     $found = @(try {
             $native::GetFileHolders($Paths) | Microsoft.PowerShell.Core\Where-Object {
-                -not $Excluded.Contains([int]$_.ProcessId) -and
-                -not ($ServiceNames -contains [string]$_.ServiceName)
+                (Test-DefenseClawUnnamedFileHolder -Holder $_) -or (
+                    -not $Excluded.Contains([int]$_.ProcessId) -and
+                    -not ($ServiceNames -contains [string]$_.ServiceName))
             }
         }
         catch {
@@ -9924,6 +10035,16 @@ function Get-DefenseClawStateFileHolders {
     }
     $install = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\') + '\'
     foreach ($holder in $found) {
+        if (Test-DefenseClawUnnamedFileHolder -Holder $holder) {
+            $holders['unnamed'] = [pscustomobject]@{
+                Id = 0
+                Name = [string]$holder.AppName
+                UserName = ''
+                Parent = ''
+                File = ''
+            }
+            continue
+        }
         $id = [int]$holder.ProcessId
         $process = $images[$id]
         # GAP-2265: a holder that is no longer running holds nothing. Under
@@ -9992,7 +10113,7 @@ function Get-DefenseClawStateFileHolderText {
         $asked++
         $found = @(try { $native::GetFileHolders([string[]]@($path)) } catch { })
         foreach ($holder in $found) {
-            $key = '{0}/{1}' -f [int]$holder.ProcessId, [int64]$holder.StartFileTime
+            $key = Get-DefenseClawFileHolderKey -Holder $holder
             if ($Holders.ContainsKey($key) -and [string]::IsNullOrEmpty([string]$Holders[$key].File)) {
                 $Holders[$key].File = if ($path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) {
                     $path.Substring($root.Length)
@@ -41126,9 +41247,6 @@ function Get-DefenseClawInstallRootHolders {
     $root = [IO.Path]::GetFullPath($InstallRoot).TrimEnd('\') + '\'
     $excluded = [Collections.Generic.HashSet[int]]::new()
     [void]$excluded.Add([int]$PID)
-    foreach ($id in @($ExcludedProcessIds)) {
-        [void]$excluded.Add([int]$id)
-    }
     if ($SelfUninstallCallerPID -gt 0) {
         [void]$excluded.Add([int]$SelfUninstallCallerPID)
     }
@@ -41203,6 +41321,10 @@ function Get-DefenseClawInstallRootHolders {
                 Microsoft.PowerShell.Utility\Write-Verbose "Restart Manager could not list the programs that hold files in ${root}: $($_.Exception.Message)"
             })
         foreach ($holder in $found) {
+            if (Test-DefenseClawUnnamedFileHolder -Holder $holder) {
+                $named['unnamed'] = Format-DefenseClawProcessInUse -Name ([string]$holder.AppName) -Id 0
+                continue
+            }
             $id = [int]$holder.ProcessId
             if ($excluded.Contains($id) -or $named.Contains([string]$id)) {
                 continue
@@ -41225,7 +41347,7 @@ function Get-DefenseClawInstallRootHolders {
     if ($IncludeProcessId) {
         return @($named.GetEnumerator() | Microsoft.PowerShell.Core\ForEach-Object {
             [pscustomobject]@{
-                Id = [int]$_.Key
+                Id = $(if ($_.Key -ceq 'unnamed') { 0 } else { [int]$_.Key })
                 Description = [string]$_.Value
             }
         })
