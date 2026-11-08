@@ -19,10 +19,14 @@ import uuid
 from defenseclaw.file_permissions import windows_extended_path
 
 
+def _windows() -> bool:
+    return os.name == "nt"
+
+
 def extended(path: str | os.PathLike[str]) -> str:
     """Return *path* unlimited by ``MAX_PATH`` on Windows, unchanged elsewhere."""
 
-    if os.name != "nt":
+    if not _windows():
         return os.fspath(path)
     return windows_extended_path(path)
 
@@ -48,7 +52,8 @@ def copytree(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> str:
     checked once more just before it; the only folder the rename can replace is
     an empty one that another run created in the instant between that check and
     the rename, which holds no data. A failure removes only the folder this call
-    created. A raised error names the paths without the extended-path prefix.
+    created. A raised error keeps the class of the failure and names the paths
+    without the extended-path prefix.
     """
 
     final = extended(dst)
@@ -73,10 +78,25 @@ def copytree(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> str:
         message = display(str(exc))
         if left:
             message += f" (the partial copy {display(staging)} could not be removed)"
-        if os.name == "nt" or left:
-            raise OSError(message) from exc
+        if _windows() or left:
+            raise _same_kind(exc, message) from exc
         raise
     return os.fspath(dst)
+
+
+def _same_kind(exc: OSError, message: str) -> OSError:
+    """Return an error of the same class and errno as exc that carries message.
+
+    Callers and tests tell a refused destination (FileExistsError) from any
+    other failure by class, so rewording the message must not change it.
+    """
+
+    try:
+        clean = type(exc)(message)
+    except Exception:  # a subclass with a non-standard constructor
+        clean = OSError(message)
+    clean.errno = exc.errno
+    return clean
 
 
 def _new_staging(parent: str, leaf: str) -> str:
