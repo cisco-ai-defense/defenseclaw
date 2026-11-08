@@ -402,6 +402,11 @@ func TestUnknownMCPServerUnderAnEndpointAllowedList(t *testing.T) {
 	if decision, matched = call(off); matched {
 		t.Fatalf("policy off: matched=%v decision=%+v, want no verdict", matched, decision)
 	}
+	noDetection := allowedURLConfig(true, config.AssetPolicyModeAction)
+	noDetection.AssetPolicy.MCP.RuntimeDetection.Enabled = false
+	if decision, matched = call(noDetection); matched {
+		t.Fatalf("runtime detection off: matched=%v decision=%+v, want no verdict", matched, decision)
+	}
 	nameOnly := allowedURLConfig(true, config.AssetPolicyModeAction)
 	nameOnly.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: "never-seen"}}
 	if decision, matched = call(nameOnly); matched {
