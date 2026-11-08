@@ -1021,10 +1021,16 @@ def _print_agents(
         header = ux._style(f"{enabled_count} configured; hooks refuse the root-run gateway", fg="yellow")
     _status_row("Agents", header)
     if "openclaw" in actives and _is_enabled("openclaw"):
-        from defenseclaw.openclaw_plugin_config import configured_openclaw_plugin_config_issue
+        from defenseclaw.openclaw_plugin_config import (
+            configured_openclaw_plugin_config_issue,
+            openclaw_plugin_config_unreadable,
+        )
 
         if issue := configured_openclaw_plugin_config_issue(cfg):
-            ux.warn(f"{issue}; OpenClaw may skip reload. Run defenseclaw setup openclaw.")
+            if openclaw_plugin_config_unreadable(issue):
+                ux.warn(f"{issue}. Fix the syntax error in openclaw.json (OpenClaw reads JSON5).")
+            else:
+                ux.warn(f"{issue}; OpenClaw may skip reload. Run defenseclaw setup openclaw.")
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
     if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:

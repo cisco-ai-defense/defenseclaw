@@ -128,8 +128,10 @@ func readOpenclawConfig(configFile string) (*openclawConfig, error) {
 		return nil, err
 	}
 
+	// OpenClaw reads openclaw.json as JSON5, so a file it runs on must not
+	// read as empty here (GAP-0846).
 	var oc openclawConfig
-	if err := json.Unmarshal(data, &oc); err != nil {
+	if err := json.Unmarshal(jsonc.JSON5ToJSON(data), &oc); err != nil {
 		return nil, err
 	}
 	return &oc, nil

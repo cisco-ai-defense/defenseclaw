@@ -7075,9 +7075,10 @@ def _warn_openclaw_setup_advisories(
             ux.warn(f"{OPENCLAW_APPROVAL_SURFACES}.")
     if not openclaw_config_file:
         return
+    from defenseclaw.openclaw_json5 import load_file as _load_openclaw_json5
+
     try:
-        with open(os.path.expanduser(openclaw_config_file), encoding="utf-8") as fh:
-            openclaw_config = _json.load(fh)
+        openclaw_config = _load_openclaw_json5(os.path.expanduser(openclaw_config_file))
     except (OSError, ValueError):
         return
     if openclaw_bedrock_plugin_missing(raw_version, openclaw_config):
