@@ -17,17 +17,26 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
-// openCodePortLocalDatabase is the read of every local account database NSS
-// uses (tests replace it).
-var openCodePortLocalDatabase = unixidentity.LocalDatabaseAccounts
+// openCodePortLocalUIDs is the read of every uid the local account databases
+// hold, duplicate names included (tests replace it).
+var openCodePortLocalUIDs = unixidentity.LocalDatabaseUIDs
+
+// openCodePortDirectoryShowsUnused is the check that the directory sources
+// answer, so that their "no such account" is a fact (tests replace it).
+var openCodePortDirectoryShowsUnused = unixidentity.DirectoryShowsUIDUnused
 
 // UIDHasAccount reports whether any account of the host holds uid. It asks
 // every source: the host account lookup by uid (getent on Linux, so NSS
 // backends such as altfiles and systemd-userdb are included; the search
 // policy and the local node with dscl on macOS) and the local account
-// databases. One source that lists the uid is enough. A source that cannot
-// answer is an error, never "no account": a caller that wants proof the uid is
-// unused treats the error as no proof.
+// databases, every uid of them. One source that lists the uid is enough.
+// "No account" needs affirmative evidence from every source: the local
+// databases are all readable and none holds the uid, and the directory
+// sources show they answer (unixidentity.DirectoryShowsUIDUnused), because
+// getent exit 2 and an empty dscl answer are also what a directory that
+// cannot be reached gives. A source that cannot answer is an error, never "no
+// account": a caller that wants proof the uid is unused treats the error as no
+// proof.
 func (e *Env) UIDHasAccount(ctx context.Context, uid int) (bool, error) {
 	if uid < 0 {
 		return false, fmt.Errorf("uid %d is not a user id", uid)
@@ -62,7 +71,7 @@ func (e *Env) UIDHasAccount(ctx context.Context, uid int) (bool, error) {
 			failed = append(failed, query[0]+": "+answerText(err))
 		}
 	}
-	local, err := openCodePortLocalDatabase(ctx)
+	local, err := openCodePortLocalUIDs(ctx)
 	if err != nil {
 		failed = append(failed, "local account database: "+err.Error())
 	}
@@ -70,6 +79,9 @@ func (e *Env) UIDHasAccount(ctx context.Context, uid int) (bool, error) {
 		if held == uid {
 			return true, nil
 		}
+	}
+	if err := openCodePortDirectoryShowsUnused(ctx, uid); err != nil {
+		failed = append(failed, "directory: "+err.Error())
 	}
 	if len(failed) > 0 {
 		return false, fmt.Errorf("the account lookup did not answer (%s)", strings.Join(failed, "; "))

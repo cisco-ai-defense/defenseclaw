@@ -105,7 +105,7 @@ func TestStatusNamesContestedOpenCodePorts(t *testing.T) {
 	}
 }
 
-func openCodeUnknownEnv(t *testing.T, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown, runner *fakeRunner, local map[string]int) *Env {
+func openCodeUnknownEnv(t *testing.T, unknown []enterprisehooks.UnixOpenCodeServicePortUnknown, runner *fakeRunner, local []int) *Env {
 	t.Helper()
 	root := t.TempDir()
 	env := &Env{GOOS: "linux", Root: root, Layout: mustLayout(t, "linux"), Runner: runner}
@@ -116,12 +116,15 @@ func openCodeUnknownEnv(t *testing.T, unknown []enterprisehooks.UnixOpenCodeServ
 	if err := os.WriteFile(record, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	previousLoad, previousLocal := loadOpenCodePortsRecord, openCodePortLocalDatabase
-	t.Cleanup(func() { loadOpenCodePortsRecord, openCodePortLocalDatabase = previousLoad, previousLocal })
+	previousLoad, previousLocal, previousDirectory := loadOpenCodePortsRecord, openCodePortLocalUIDs, openCodePortDirectoryShowsUnused
+	t.Cleanup(func() {
+		loadOpenCodePortsRecord, openCodePortLocalUIDs, openCodePortDirectoryShowsUnused = previousLoad, previousLocal, previousDirectory
+	})
 	loadOpenCodePortsRecord = func(string) (enterprisehooks.UnixOpenCodeServicePortsState, error) {
 		return enterprisehooks.UnixOpenCodeServicePortsState{Exists: true, Unknown: unknown}, nil
 	}
-	openCodePortLocalDatabase = func(context.Context) (map[string]int, error) { return local, nil }
+	openCodePortLocalUIDs = func(context.Context) ([]int, error) { return local, nil }
+	openCodePortDirectoryShowsUnused = func(context.Context, int) error { return nil }
 	return env
 }
 
@@ -148,7 +151,7 @@ const staleClearCommand = "sudo /opt/defenseclaw/bin/defenseclaw-gateway enterpr
 // it; it is a warning, never an error.
 func TestStatusReportsAnOpenCodePortRecordWithNoAccount(t *testing.T) {
 	unknown := []enterprisehooks.UnixOpenCodeServicePortUnknown{{UID: 1234, User: "gone", Reason: "home does not answer", Path: "/home/gone/.config/opencode/service.json"}}
-	env := openCodeUnknownEnv(t, unknown, &fakeRunner{replies: noAccountReply("1234")}, map[string]int{"root": 0})
+	env := openCodeUnknownEnv(t, unknown, &fakeRunner{replies: noAccountReply("1234")}, []int{0})
 	messages, errs := openCodeUnknownWarnings(t, env)
 	if len(messages) != 1 || errs != 0 {
 		t.Fatalf("want one warning and no error, got %q, %d errors", messages, errs)
@@ -168,7 +171,7 @@ func TestStatusKeepsTheOpenCodePortRecordWarningWhenTheNameIsReusedByAnotherUID(
 		"getent passwd 1234":  {result: CommandResult{ExitCode: 2}, err: errors.New("exit 2")},
 		"getent passwd alice": {result: CommandResult{Stdout: []byte("alice:x:5678:5678::/home/alice:/bin/bash\n")}},
 	}}
-	env := openCodeUnknownEnv(t, unknown, runner, map[string]int{"alice": 5678})
+	env := openCodeUnknownEnv(t, unknown, runner, []int{5678})
 	messages, _ := openCodeUnknownWarnings(t, env)
 	if len(messages) != 1 || !strings.Contains(messages[0], "(no account found)") || !strings.Contains(messages[0], staleClearCommand) {
 		t.Fatalf("the warning of the old uid went away: %q", messages)
@@ -183,15 +186,27 @@ func TestStatusDoesNotCallALiveOrUnconfirmedOpenCodePortAccountGone(t *testing.T
 	unknown := []enterprisehooks.UnixOpenCodeServicePortUnknown{{UID: 1234, User: "kim", Reason: "home does not answer", Path: "/home/kim/.config/opencode/service.json", Fix: "sudo -u kim opencode service set port 25001"}}
 	cases := map[string]struct {
 		replies map[string]fakeReply
-		local   map[string]int
+		local   []int
+		mutate  func()
 	}{
 		"nss answers":   {replies: map[string]fakeReply{"getent passwd 1234": {result: CommandResult{Stdout: []byte("kim:x:1234:1234::/home/kim:/bin/bash\n")}}}},
-		"altfiles only": {replies: noAccountReply("1234"), local: map[string]int{"kim": 1234}},
+		"altfiles only": {replies: noAccountReply("1234"), local: []int{1234}},
 		"lookup fails":  {replies: map[string]fakeReply{"getent passwd 1234": {result: CommandResult{ExitCode: 1}, err: errors.New("exit 1")}}},
+		// getent exit 2 is also what a directory that cannot be reached
+		// gives: without proof it answers, the account is not called gone.
+		"directory cannot answer": {replies: noAccountReply("1234"), mutate: func() {
+			openCodePortDirectoryShowsUnused = func(context.Context, int) error { return errors.New("SSSD is offline") }
+		}},
+		"local database unreadable": {replies: noAccountReply("1234"), mutate: func() {
+			openCodePortLocalUIDs = func(context.Context) ([]int, error) { return nil, errors.New("altfiles unreadable") }
+		}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			env := openCodeUnknownEnv(t, unknown, &fakeRunner{replies: tc.replies}, tc.local)
+			if tc.mutate != nil {
+				tc.mutate()
+			}
 			messages, errs := openCodeUnknownWarnings(t, env)
 			if len(messages) != 1 || errs != 0 {
 				t.Fatalf("want one warning and no error, got %q, %d errors", messages, errs)
@@ -207,26 +222,57 @@ func TestStatusDoesNotCallALiveOrUnconfirmedOpenCodePortAccountGone(t *testing.T
 }
 
 func TestUIDHasAccountTreatsAMissingAnswerAsNoProof(t *testing.T) {
+	stub := func(t *testing.T, local []int, localErr, directoryErr error) {
+		t.Helper()
+		previousLocal, previousDirectory := openCodePortLocalUIDs, openCodePortDirectoryShowsUnused
+		t.Cleanup(func() { openCodePortLocalUIDs, openCodePortDirectoryShowsUnused = previousLocal, previousDirectory })
+		openCodePortLocalUIDs = func(context.Context) ([]int, error) { return local, localErr }
+		openCodePortDirectoryShowsUnused = func(context.Context, int) error { return directoryErr }
+	}
 	t.Run("macOS search policy lists the uid", func(t *testing.T) {
-		previous := openCodePortLocalDatabase
-		t.Cleanup(func() { openCodePortLocalDatabase = previous })
-		openCodePortLocalDatabase = func(context.Context) (map[string]int, error) { return nil, nil }
+		stub(t, nil, nil, nil)
 		runner := &fakeRunner{replies: map[string]fakeReply{"dscl /Search -search /Users UniqueID 700": {result: CommandResult{Stdout: []byte("dirkim\tUniqueID = (700)\n")}}}}
 		env := &Env{GOOS: "darwin", Runner: runner}
 		if has, err := env.UIDHasAccount(context.Background(), 700); err != nil || !has {
 			t.Fatalf("a directory account was not found: %v %v", has, err)
 		}
 		if has, err := env.UIDHasAccount(context.Background(), 701); err != nil || has {
-			t.Fatalf("an empty dscl answer is no account: %v %v", has, err)
+			t.Fatalf("an empty dscl answer with the directory answering is no account: %v %v", has, err)
 		}
 	})
-	t.Run("an unreadable local database is no proof", func(t *testing.T) {
-		previous := openCodePortLocalDatabase
-		t.Cleanup(func() { openCodePortLocalDatabase = previous })
-		openCodePortLocalDatabase = func(context.Context) (map[string]int, error) { return nil, errors.New("unreadable") }
+	t.Run("macOS with a directory node offline is no proof", func(t *testing.T) {
+		stub(t, nil, nil, errors.New("Open Directory node /Active Directory/CORP is offline"))
+		env := &Env{GOOS: "darwin", Runner: &fakeRunner{}}
+		if has, err := env.UIDHasAccount(context.Background(), 701); err == nil || has {
+			t.Fatalf("an empty dscl answer while a directory is offline was taken as no account: %v %v", has, err)
+		}
+	})
+	t.Run("Linux exit 2 while the directory cannot answer is no proof", func(t *testing.T) {
+		stub(t, nil, nil, errors.New("SSSD is offline"))
 		env := &Env{GOOS: "linux", Runner: &fakeRunner{replies: noAccountReply("1234")}}
 		if has, err := env.UIDHasAccount(context.Background(), 1234); err == nil || has {
 			t.Fatalf("got %v %v, want an error", has, err)
+		}
+	})
+	t.Run("a uid in a local database NSS misses is an account", func(t *testing.T) {
+		stub(t, []int{5, 1234}, nil, nil)
+		env := &Env{GOOS: "linux", Runner: &fakeRunner{replies: noAccountReply("1234")}}
+		if has, err := env.UIDHasAccount(context.Background(), 1234); err != nil || !has {
+			t.Fatalf("got %v %v, want an account", has, err)
+		}
+	})
+	t.Run("an unreadable local database is no proof", func(t *testing.T) {
+		stub(t, nil, errors.New("unreadable"), nil)
+		env := &Env{GOOS: "linux", Runner: &fakeRunner{replies: noAccountReply("1234")}}
+		if has, err := env.UIDHasAccount(context.Background(), 1234); err == nil || has {
+			t.Fatalf("got %v %v, want an error", has, err)
+		}
+	})
+	t.Run("every source answering with no uid is no account", func(t *testing.T) {
+		stub(t, []int{0, 1000}, nil, nil)
+		env := &Env{GOOS: "linux", Runner: &fakeRunner{replies: noAccountReply("1234")}}
+		if has, err := env.UIDHasAccount(context.Background(), 1234); err != nil || has {
+			t.Fatalf("got %v %v, want a clean miss", has, err)
 		}
 	})
 	t.Run("no runner", func(t *testing.T) {
