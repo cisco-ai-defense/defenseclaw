@@ -227,9 +227,12 @@ type simpleLoopBind struct {
 	// fork marks a variable other than USER and LOGNAME, read once for each
 	// word of its list (simpleForkLoopBind).
 	fork bool
-	// ifs holds the IFS values a read loop can read with (simpleIFSValues, or
-	// the one IFS= the read itself sets); empty for a for loop.
-	ifs []string
+	// read marks a while read loop. Its IFS is the one the read sets for itself
+	// (ownIFS, ifs), or what readIFS finds: the value the walk holds where the
+	// loop starts and the assignments of outerIFS.
+	read, ownIFS bool
+	ifs          []string
+	outerIFS     []*syntax.Assign
 	// rebound is where the body may hold another value of the variable than
 	// the loop gave it (simpleReboundSpans).
 	rebound []simpleSpan
@@ -295,6 +298,9 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	}
 	childScope := func(kind byte, walk func() bool) bool { return namedScope(kind, "", walk) }
 	var loopBinds []simpleLoopBind
+	// enclosingLoops are the for and while loops being flattened, outermost
+	// first, through the functions they call.
+	var enclosingLoops []syntax.Node
 	// skippable counts the right sides of && and || around the statement
 	// being flattened.
 	skippable := 0
@@ -449,7 +455,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				word = hereString
 			}
 			pipeInput, hereString = nil, nil
-			bind, forks := simpleReadLoopBind(typed, word, file)
+			bind, forks := simpleReadLoopBind(typed, word, file, enclosingLoops)
 			// The condition runs before the variable has its first word.
 			if !flattenAll(typed.Cond) {
 				return true, false
@@ -460,6 +466,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				defer func() { loopBinds = outer }()
 				kind, name = forkedLoopScopeKind, bind.name
 			}
+			enclosingLoops = append(enclosingLoops, typed)
+			defer func() { enclosingLoops = enclosingLoops[:len(enclosingLoops)-1] }()
 			return true, namedScope(kind, name, func() bool { return flattenAll(typed.Do) })
 		case *syntax.ForClause:
 			switch iteration := typed.Loop.(type) {
@@ -489,11 +497,13 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(iteration) {
 				outer := loopBinds
 				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true,
-					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value),
+					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, simpleDeclaredFunctions(file)),
 					token:   simplePlaceholderToken(typed.Do, iteration.Name.Value, source)})
 				defer func() { loopBinds = outer }()
 				kind, name = forkedLoopScopeKind, iteration.Name.Value
 			}
+			enclosingLoops = append(enclosingLoops, typed)
+			defer func() { enclosingLoops = enclosingLoops[:len(enclosingLoops)-1] }()
 			return true, namedScope(kind, name, func() bool { return flattenAll(typed.Do) })
 		case *syntax.CaseClause:
 			if !allSimple && !inertPOSIXWords(typed.Word) ||
