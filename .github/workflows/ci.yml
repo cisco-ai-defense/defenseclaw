@@ -1152,12 +1152,15 @@ jobs:
         # answers inside the hook window. Every gateway test in the race shards
         # is built with -race, and the matrix pattern above does not select
         # them, so they run here, after the make step so nothing else loads
-        # the runner. Each carries its own same-run control (the same stream
-        # to a handler that only answers) and skips, naming it, only on a
-        # runner that cannot carry the offered load.
+        # the runner. Each measures the rate it really issued on its absolute
+        # schedule and fails INCONCLUSIVE below 95% of the required rate; each
+        # carries its own same-run control (the same stream to a handler that
+        # only answers) and skips, naming it, only on a runner that cannot
+        # answer the offered load. The Cadence tests run the judgement against
+        # a stand-in with a rate cap.
         if: ${{ !cancelled() && matrix.part == 'packages' }}
         timeout-minutes: 5
-        run: go test -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes)$' ./internal/gateway
+        run: go test -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+)$' ./internal/gateway
 
   # The Secure Client profile hook hardening flow (a synthetic target home and
   # a TCP fake gateway) runs only on macOS. Linux has only the standalone
