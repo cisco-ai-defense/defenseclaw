@@ -408,11 +408,25 @@ try {
                     }
                 }).AddArgument($hook).AddArgument($state).AddArgument($native)
             $sampling = $sampler.BeginInvoke()
-            Start-Sleep -Milliseconds 300
+            # The runspace can take seconds to start on a loaded runner, so wait
+            # for the sampler to prove it is running (its first 1000 opens, bounded
+            # at 10 s) instead of a fixed sleep. The checks below run only beside a
+            # running sampler; the assertions after them are unchanged.
+            $samplerWait = [Diagnostics.Stopwatch]::StartNew()
+            while ($state.samples -lt 1000 -and -not $sampling.IsCompleted -and $samplerWait.Elapsed.TotalSeconds -lt 10) {
+                Start-Sleep -Milliseconds 20
+            }
+            $samplerReady = $state.samples -ge 1000
+            if (-not $samplerReady) {
+                $samplerErrors = @($sampler.Streams.Error | ForEach-Object { "$_" }) -join "; "
+                $failures.Add("holdcheck: the sampler had made $($state.samples) opens after $([int]$samplerWait.Elapsed.TotalSeconds) s (finished: $($sampling.IsCompleted)); its errors: [$samplerErrors]")
+            }
             $holdLayout = @{ HookPath = $hook; InstallRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($hook)) }
             try {
-                foreach ($check in 1..5) {
-                    Assert-DefenseClawHookNotHeld -Layout $holdLayout -TimeoutSeconds 5
+                if ($samplerReady) {
+                    foreach ($check in 1..5) {
+                        Assert-DefenseClawHookNotHeld -Layout $holdLayout -TimeoutSeconds 5
+                    }
                 }
             }
             finally {
