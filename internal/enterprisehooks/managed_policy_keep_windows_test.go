@@ -434,3 +434,43 @@ func TestWindowsManagedConnectorFolderKept(t *testing.T) {
 		}
 	})
 }
+
+// GAP-0829: an enrolled Cursor account is not a missing policy when a link
+// keeps the folder. The teardown's capture and prepare read the folder as
+// empty and go on; without the link the same call still refuses, and a link
+// at another connector's folder does not excuse it.
+func TestCursorTeardownWithAnEnrolledTargetKeepsALinkedFolder(t *testing.T) {
+	enrolled := WindowsCursorManagedPolicyTeardownOptions{Targets: []WindowsCursorManagedRuntimeTarget{{
+		SID: "S-1-5-21-1-2-3-1017", DataDir: `C:\Users\alice\.defenseclaw`,
+	}}}
+	f := useKeptFixture(t, true, func(f keptFixture) []string { return []string{f.cursor} })
+	plant(t, filepath.Join(f.cursor, windowsCursorManagedStateFile), `not DefenseClaw state`)
+	persisted := 0
+	snapshot, err := PrepareWindowsCursorManagedPolicyTeardown(enrolled,
+		func(WindowsCursorManagedPolicyTeardownSnapshot) error { persisted++; return nil })
+	if err != nil || persisted != 1 || snapshot.PolicyActive {
+		t.Fatalf("prepare with an enrolled target behind a link: err %v, persisted %d, snapshot %+v; want an empty snapshot persisted once", err, persisted, snapshot)
+	}
+	if snapshot, err = CaptureWindowsCursorManagedPolicySnapshot(enrolled); err != nil || snapshot.PolicyActive {
+		t.Fatalf("capture with an enrolled target behind a link: err %v, snapshot %+v", err, snapshot)
+	}
+	if data, _ := os.ReadFile(filepath.Join(f.cursor, windowsCursorManagedStateFile)); string(data) != "not DefenseClaw state" {
+		t.Errorf("the file behind the link changed: %q", data)
+	}
+
+	// No link: an enrolled target with no policy is a mismatch and still refuses.
+	useKeptFixture(t, true, nil)
+	if _, err := PrepareWindowsCursorManagedPolicyTeardown(enrolled, func(WindowsCursorManagedPolicyTeardownSnapshot) error { return nil }); err == nil ||
+		!strings.Contains(err.Error(), "expected Cursor managed policy is absent") {
+		t.Errorf("prepare with an enrolled target and no policy = %v, want the refusal", err)
+	}
+	if _, err := CaptureWindowsCursorManagedPolicySnapshot(enrolled); err == nil ||
+		!strings.Contains(err.Error(), "expected Cursor managed policy is absent") {
+		t.Errorf("capture with an enrolled target and no policy = %v, want the refusal", err)
+	}
+	// A link at the Claude Code folder does not excuse Cursor.
+	useKeptFixture(t, true, func(f keptFixture) []string { return []string{f.claudeDir} })
+	if _, err := PrepareWindowsCursorManagedPolicyTeardown(enrolled, func(WindowsCursorManagedPolicyTeardownSnapshot) error { return nil }); err == nil {
+		t.Error("a link at the Claude Code folder excused a Cursor mismatch")
+	}
+}
