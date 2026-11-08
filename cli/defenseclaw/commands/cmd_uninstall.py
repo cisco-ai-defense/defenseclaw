@@ -1427,6 +1427,17 @@ def _backup_record_stem(logical_name: str) -> str:
     return stem or "config"
 
 
+# The logical names Setup gives the agent files it backs up for these connectors
+# (captureManagedFileBackup in internal/gateway/connector); a record is <stem>.json.
+_SETUP_BACKUP_RECORD_FILES = frozenset(
+    _backup_record_stem(logical) + ".json"
+    for logical in (
+        "config", "config.yaml", "config.toml", "config.json", "settings", "settings.json",
+        "hooks.json", "managed_config.toml", "shell-hooks-allowlist.json",
+    )
+)
+
+
 def _setup_backup_record_stem(path: str, connector: str) -> str:
     """The stem of a backup record Setup wrote at *path* for *connector*, else "".
 
@@ -1513,8 +1524,10 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
             stems = {}
             for entry in entries:
                 path = os.path.join(backup, entry)
-                if entry.endswith(".json") and _is_reparse_path(path):
-                    # Setup writes regular files: a link here cannot be told from a record, and is not followed.
+                if entry in _SETUP_BACKUP_RECORD_FILES and _is_reparse_path(path):
+                    # Setup writes regular files: a link at the name of one of its records is not followed and
+                    # is reported. A link under any other name belongs to the account (a link to a file of its own
+                    # kept beside the records); it stays, and the folder with it, so the shared records stay too.
                     stayed.append(f"{path} (a link, so it was not followed)")
                 elif entry.endswith(".json") and _account_owned_regular_file(path):
                     stem = _setup_backup_record_stem(path, name)
@@ -2365,21 +2378,37 @@ def _below(root: str, path: str) -> bool:
 
 
 def _real_dir_chain(root: str, path: str) -> bool:
-    """Report whether path and each folder up to root is a real folder."""
-    root = _normalized(root)
-    current = os.path.abspath(path)
-    while _normalized(current) != root:
-        try:
-            info = os.lstat(current)
-        except OSError:
-            return False
-        if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(current):
-            return False
-        parent = os.path.dirname(current)
-        if parent == current:
-            return False
-        current = parent
-    return True
+    """Report whether path and each folder below root on the way to it is a real folder.
+
+    The path is read as written, a ".." included: the system follows a link
+    before it reads the ".." after it, so folding it into the component
+    before it would pass a path that a link has redirected. A path that
+    wanders out of root by ".." is not below it.
+    """
+    raw_root = os.path.normcase(str(Path(root if os.path.isabs(root) else os.path.abspath(root))))
+    folded_root = _normalized(root)
+    target = path if os.path.isabs(path) else os.path.abspath(path)
+    if _normalized(target) == folded_root:
+        return True
+    if not _below(folded_root, target):
+        return False
+    parts = Path(target).parts
+    dotdot = ".." in parts
+    current = Path(parts[0])
+    inside = False
+    for part in parts[1:]:
+        current = current / part
+        if inside:
+            try:
+                info = os.lstat(current)
+            except OSError:
+                return False
+            if not stat.S_ISDIR(info.st_mode) or _is_reparse_path(str(current)):
+                return False
+            continue
+        key = os.path.normcase(str(current))
+        inside = key == raw_root or (not dotdot and key == folded_root)
+    return inside
 
 
 def _sha256_file(path: str) -> str:

@@ -355,3 +355,89 @@ def test_a_linked_backup_folder_of_a_connector_is_reported(tmp_path):
 
     assert (outside / records["backup"].name).is_file()
     assert any(str(first / "connector_backups" / "hermes") in line for line in stayed), stayed
+
+
+def _recorded_folder_with_dotdot(tmp_path):
+    """A recorded earlier folder written old-parent/link/../state, read through the real move-history list."""
+    from defenseclaw import config
+
+    home, current = tmp_path / ".defenseclaw", tmp_path / "current"
+    for folder in (home, current):
+        folder.mkdir(exist_ok=True)
+    base = tmp_path / "old-parent"
+    (base / "state").mkdir(parents=True)
+    (base / "link").mkdir()
+    earlier = base / "link" / ".." / "state"
+    history = home / config.STORE_HISTORY_FILE
+    history.write_text(json.dumps({"folders": [str(earlier)]}))
+    history.chmod(0o600)
+    return home, current, base, earlier
+
+
+def _previous_stores(home):
+    from defenseclaw import config
+
+    with (
+        patch.object(config, "default_data_path", return_value=home),
+        patch.object(config, "_install_home_binding", return_value=(str(home), None, False)),
+    ):
+        return config.previous_store_dirs()
+
+
+def test_a_link_before_dotdot_in_a_recorded_folder_does_not_redirect_cleanup(tmp_path):
+    home, current, base, earlier = _recorded_folder_with_dotdot(tmp_path)
+    unrelated = tmp_path / "unrelated-parent"
+    (unrelated / "child").mkdir(parents=True)
+    records = _connector_records(unrelated / "state")
+    base.joinpath("link").rmdir()
+    base.joinpath("link").symlink_to(unrelated / "child", target_is_directory=True)
+    plan = cmd_uninstall.UninstallPlan(
+        data_dir=str(home), store_dir=str(current), previous_stores=_previous_stores(home), connectors=("hermes",)
+    )
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert all(path.exists() for path in records.values()), f"records deleted through {earlier}"
+    assert len(stayed) == 1 and str(base / "link") in stayed[0], stayed
+
+
+def test_a_recorded_folder_with_dotdot_through_real_folders_is_cleaned(tmp_path):
+    home, current, base, _earlier = _recorded_folder_with_dotdot(tmp_path)
+    records = _connector_records(base / "state")
+    plan = cmd_uninstall.UninstallPlan(
+        data_dir=str(home), store_dir=str(current), previous_stores=_previous_stores(home), connectors=("hermes",)
+    )
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert stayed == []
+    assert not records["token"].exists() and not records["lock"].exists()
+
+
+def test_a_probe_folder_reached_through_a_link_before_dotdot_is_not_a_real_chain(tmp_path):
+    root = tmp_path / "home"
+    (root / "a").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "deep").mkdir(parents=True)
+    (root / "link").symlink_to(elsewhere / "deep", target_is_directory=True)
+
+    assert not cmd_uninstall._real_dir_chain(str(root), str(root / "link" / ".." / "a"))
+    assert not cmd_uninstall._real_dir_chain(str(root), str(root / "a" / ".." / ".." / "elsewhere"))
+    assert cmd_uninstall._real_dir_chain(str(root), str(root / "a" / ".." / "a"))
+    assert cmd_uninstall._real_dir_chain(str(root), str(root / "a"))
+
+
+def test_a_link_to_an_account_file_beside_the_backup_records_does_not_fail_the_uninstall(tmp_path):
+    plan, _home, first, _second = _plan(tmp_path)
+    records = _connector_records(first)
+    mine = _write(tmp_path / "personal.json", "personal notes\n")
+    (first / "connector_backups" / "hermes" / "personal.json").symlink_to(mine)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+    result = _run_plan_phases(plan)
+
+    assert stayed == [], stayed
+    assert result.succeeded, cmd_uninstall._phases_left(result)
+    assert (first / "connector_backups" / "hermes" / "personal.json").is_symlink() and mine.is_file()
+    assert not records["backup"].exists() and not records["token"].exists()
+    assert records["lock"].is_file(), "the folder still holds the account file, so the shared records stay"
