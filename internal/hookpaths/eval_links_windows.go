@@ -6,7 +6,6 @@
 package hookpaths
 
 import (
-	"os"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -17,10 +16,7 @@ import (
 // share that has not answered is asked first, as for any read of a path a
 // hook call names.
 func followMountPoints(path string) (string, error) {
-	if networkPathUnanswered(path) {
-		return "", networkShareError("finalpath", path)
-	}
-	file, err := os.Open(path)
+	file, err := pathOpen(path)
 	if err != nil {
 		return "", err
 	}
