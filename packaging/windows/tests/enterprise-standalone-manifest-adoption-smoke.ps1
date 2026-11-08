@@ -335,6 +335,8 @@ try {
             }
             $previousVendorRoots = $script:DefenseClawVendorFolderRoots
             $script:DefenseClawVendorFolderRoots = @($vendorRoot)
+            $previousVendorExcuse = $script:DefenseClawVendorLinkExcuse
+            $script:DefenseClawVendorLinkExcuse = $true
             try {
                 $codexRow = [pscustomobject]@{
                     user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
@@ -362,6 +364,21 @@ try {
                 if (-not [bool]$adoption.ok) {
                     $failures.Add("a Cursor folder link refused adoption: $($adoption.reason)")
                 }
+                # Only an uninstall keeps a link. Upgrade, Repair, Reconcile and Ensure still
+                # refuse the adoption of a manifest while a guardian row fails on a vendor-folder
+                # link: the same rows as above, with the uninstall flag off.
+                $script:DefenseClawVendorLinkExcuse = $false
+                foreach ($vendorRow in @($codexRow, $cursorRow)) {
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $vendorRow)
+                    Assert-TestSyncRefuses "vendor folder link outside an uninstall ($($vendorRow.connector))" failure-free reconcile
+                    $adoption = Get-DefenseClawStandaloneManifestAdoption `
+                        -Layout $layout -GatewayServiceName DefenseClawGateway `
+                        -Activation $activation -InstalledManifestSHA256 $republishedSHA256
+                    if ([bool]$adoption.ok) {
+                        $failures.Add("a $($vendorRow.connector) folder link was explained outside an uninstall")
+                    }
+                }
+                $script:DefenseClawVendorLinkExcuse = $true
                 Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $codexRow, $otherFailure)
                 Assert-TestSyncRefuses 'machine folder link next to another failure' 'failure-free reconcile'
                 # The same refusal for a path that is no link now is a stale failure.
@@ -385,6 +402,7 @@ try {
             }
             finally {
                 $script:DefenseClawVendorFolderRoots = $previousVendorRoots
+                $script:DefenseClawVendorLinkExcuse = $previousVendorExcuse
                 foreach ($link in @($cursorLink, $ciscoLink, $outsideLink)) {
                     & cmd.exe /c rmdir "$link" | Out-Null
                 }
