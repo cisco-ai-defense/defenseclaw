@@ -118,6 +118,28 @@ func windowsCodexMachineFolderUntrusted(folder string, cause error) error {
 	return fmt.Errorf("%w: %s; %s", ErrWindowsCodexMachineFolderUnavailable, text, fix)
 }
 
+// WindowsCodexMachineFolderLink returns the link, or non-folder, that sits on
+// the path of the Codex machine-policy folder, found without opening or
+// following anything, and "" when there is none. It names nothing and creates
+// nothing, so a status check can ask it as often as it likes. Standalone only.
+func WindowsCodexMachineFolderLink() (string, error) {
+	if !windowsEnterpriseStandaloneProcess() {
+		return "", nil
+	}
+	selector, err := windowsManagedRuntimeSelectorPath("codex")
+	if err != nil {
+		return "", err
+	}
+	state, link, err := inspectWindowsManagedPolicyDirectoryNoFollow(filepath.Dir(selector))
+	if err != nil {
+		return "", err
+	}
+	if state != windowsManagedPolicyDirKept {
+		return "", nil
+	}
+	return link, nil
+}
+
 // windowsManagedPolicyMissingChain lists the folders of path that do not
 // exist yet, parents first.
 func windowsManagedPolicyMissingChain(path string) []string {
