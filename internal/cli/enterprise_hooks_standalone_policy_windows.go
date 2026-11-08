@@ -566,8 +566,24 @@ func windowsStandaloneRevokedUserCleanupConnector(name string) bool {
 	return windowsStandalonePerUserCleanupConnector(name) || enterprisehooks.WindowsMachineScopeUserRuntimeConnector(name)
 }
 
-// enterpriseHookWindowsConnectorUserRuntimeRemover is replaceable in tests.
-var enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
+// enterpriseHookWindowsConnectorUserRuntimeRemover and
+// enterpriseHookWindowsOffRosterPublisher are replaceable in tests.
+var (
+	enterpriseHookWindowsConnectorUserRuntimeRemover = enterprisehooks.RemoveWindowsConnectorUserRuntime
+	enterpriseHookWindowsOffRosterPublisher          = enterprisehooks.PublishWindowsConnectorOffRoster
+)
+
+// publishWindowsStandaloneOffRosterMarkers publishes, for Claude Code and
+// Codex, whether the loaded config leaves the connector off the roster; a
+// failure is logged and the previous marker stays, which only keeps the hook's
+// existing refusal.
+func publishWindowsStandaloneOffRosterMarkers(stderr io.Writer, published func(string) bool) {
+	for _, name := range []string{"claudecode", "codex"} {
+		if err := enterpriseHookWindowsOffRosterPublisher(name, !published(name)); err != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise off-roster marker for %s: %v\n", name, err)
+		}
+	}
+}
 
 // enterpriseHookStandalonePlatformRevokeUsers removes DefenseClaw's own hook
 // registrations and plugins (Amp, Antigravity, Copilot, Devin, Hermes,
@@ -585,6 +601,9 @@ func enterpriseHookStandalonePlatformRevokeUsers(ctx context.Context, stderr io.
 	// config no longer publishes is recorded for each account the guardian's
 	// last pass or its ledger held a row of it for.
 	published := func(name string) bool { return enterprisepolicy.StandaloneConnectorPublished(cfg, name) }
+	// The hook of a running agent is told the connector is off the roster
+	// through a marker it can read as the user.
+	publishWindowsStandaloneOffRosterMarkers(stderr, published)
 	if err := pruneEnterpriseHookRemovedConnectors(cfg.DataDir, manifest, published,
 		func(sid string) bool { return enterpriseHookWindowsUserProfileRemoved(sid) },
 		time.Now()); err != nil {

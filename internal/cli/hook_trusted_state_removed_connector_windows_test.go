@@ -12,35 +12,50 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
 
-// GAP-0916: a Claude Code or Codex hook call from a running agent after the
-// administrator removed the connector from the roster (its machine policy is
-// gone) is allowed with no gateway contact, as the Cursor tombstone allows it.
-// While the connector is on the roster, an account that is not enrolled for it
-// keeps the "not enrolled yet" refusal, and Secure Client keeps its behaviour.
-func TestEnterpriseManagedRuntimeAbsenceNoopAllowsARemovedStandaloneConnector(t *testing.T) {
-	previous := standaloneEnterpriseHookCheck
-	t.Cleanup(func() { standaloneEnterpriseHookCheck = previous })
+// GAP-0916: a Claude Code or Codex hook call from a running agent is allowed
+// with no gateway contact only when the administrator took the connector off
+// the roster: its machine policy is gone, the guardian has published it as off
+// the roster, and the hot-config undo closure is neither held nor unreadable.
+// A failed undo (closure), a lifecycle window or any connector still on the
+// roster keeps the refusal, and Secure Client keeps its behaviour.
+func TestEnterpriseManagedRuntimeAbsenceNoopAllowsOnlyAConnectorRemovedFromTheRoster(t *testing.T) {
+	previousCheck, previousClosure, previousRead := standaloneEnterpriseHookCheck, windowsStandaloneHooksHeldClosed, windowsConnectorOffRosterRead
+	t.Cleanup(func() {
+		standaloneEnterpriseHookCheck, windowsStandaloneHooksHeldClosed, windowsConnectorOffRosterRead = previousCheck, previousClosure, previousRead
+	})
 	exe := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
-	for _, tc := range []struct {
-		name       string
-		connector  string
-		standalone bool
-		active     bool
-		registered bool
-		resolveErr error
-		want       bool
-	}{
-		{name: "claudecode removed", connector: "claudecode", standalone: true, want: true},
-		{name: "codex removed", connector: "codex", standalone: true, want: true},
-		{name: "claudecode on the roster, account unregistered", connector: "claudecode", standalone: true, active: true},
-		{name: "codex on the roster, account unregistered", connector: "codex", standalone: true, active: true},
-		{name: "registered account", connector: "codex", standalone: true, active: true, registered: true},
-		{name: "unreadable runtime state", connector: "claudecode", standalone: true, resolveErr: errors.New("tampered")},
-		{name: "secure client", connector: "claudecode", standalone: false},
-		{name: "a per-user connector", connector: "copilot", standalone: true},
+	type row struct {
+		name         string
+		connector    string
+		standalone   bool
+		active       bool
+		registered   bool
+		resolveErr   error
+		closureHeld  bool
+		closureErr   error
+		offRoster    bool
+		offRosterErr error
+		want         bool
+	}
+	for _, tc := range []row{
+		{name: "claudecode removed and clean", connector: "claudecode", standalone: true, offRoster: true, want: true},
+		{name: "codex removed and clean", connector: "codex", standalone: true, offRoster: true, want: true},
+		{name: "closure held (failed undo), claudecode", connector: "claudecode", standalone: true, offRoster: true, closureHeld: true},
+		{name: "closure held (failed undo), codex", connector: "codex", standalone: true, offRoster: true, closureHeld: true},
+		{name: "closure unreadable", connector: "claudecode", standalone: true, offRoster: true, closureHeld: true, closureErr: errors.New("access is denied")},
+		{name: "lifecycle window: policy absent, connector on the roster (no marker)", connector: "claudecode", standalone: true},
+		{name: "lifecycle window, codex", connector: "codex", standalone: true},
+		{name: "marker unreadable or damaged", connector: "codex", standalone: true, offRosterErr: errors.New("changed")},
+		{name: "policy active, account unregistered", connector: "claudecode", standalone: true, active: true, offRoster: true},
+		{name: "registered account", connector: "codex", standalone: true, active: true, registered: true, offRoster: true},
+		{name: "unreadable runtime state", connector: "claudecode", standalone: true, offRoster: true, resolveErr: errors.New("tampered")},
+		{name: "secure client", connector: "claudecode", standalone: false, offRoster: true},
+		{name: "a per-user connector", connector: "copilot", standalone: true, offRoster: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			standaloneEnterpriseHookCheck = func(string) bool { return tc.standalone }
+			windowsStandaloneHooksHeldClosed = func() (bool, error) { return tc.closureHeld, tc.closureErr }
+			windowsConnectorOffRosterRead = func(string) (bool, error) { return tc.offRoster, tc.offRosterErr }
 			nativeEnterpriseHookRuntimeSnapshot.Lock()
 			nativeEnterpriseHookRuntimeSnapshot.prepared = true
 			nativeEnterpriseHookRuntimeSnapshot.executable = exe
