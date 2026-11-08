@@ -6,6 +6,7 @@
 package safefile
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -424,6 +425,33 @@ func TestCompareAndSwapFileRetriesTransactionalConflict(t *testing.T) {
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
 }
 
+func TestCompareAndSwapFileTransactsMZPrefixedRequirementsData(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "requirements.toml")
+	old := []byte("MZ = 'retained'\nmode = 'old'\n")
+	newData := []byte("MZ = 'retained'\nmode = 'new'\n")
+	if err := os.WriteFile(destination, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, string(newData))
+	previousTx, previousPlain := swapTransactedRename, swapRenameReplace
+	defer func() { swapTransactedRename, swapRenameReplace = previousTx, previousPlain }()
+	transacted, plain := 0, 0
+	swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
+		transacted++
+		return renameTransacted(from, to, flags, tx)
+	}
+	swapRenameReplace = func(from, to string, class, flags uint32) error {
+		plain++
+		return renameReplace(from, to, class, flags)
+	}
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: old}, len(newData), nil)
+	if err != nil || !result.Swapped || transacted != 1 || plain != 0 {
+		t.Fatalf("requirements publication: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"requirements.toml": string(newData)})
+}
+
 func TestCompareAndSwapFileRollsBackUncommittedRename(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "hooks.json")
@@ -515,10 +543,18 @@ func TestCompareAndSwapFileRechecksIdentityAfterEncryptedStageFallback(t *testin
 func TestCompareAndSwapFileLeavesProgramImagesOutsideTransactions(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "program.exe")
-	if err := os.WriteFile(destination, []byte("MZold"), 0o600); err != nil {
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	source := writeSwapSourceForTest(t, dir, "MZnew")
+	imagePath, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := os.ReadFile(imagePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, string(image))
 	previous, previousTx := swapRenameReplace, swapTransactedRename
 	defer func() { swapRenameReplace, swapTransactedRename = previous, previousTx }()
 	transacted := false
@@ -529,14 +565,18 @@ func TestCompareAndSwapFileLeavesProgramImagesOutsideTransactions(t *testing.T) 
 	swapRenameReplace = func(from, to string, class, flags uint32) error {
 		return renameReplace(from, to, class, flags)
 	}
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("MZold")}, 16, nil)
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped {
 		t.Fatalf("CAS publication: result=%+v err=%v", result, err)
 	}
 	if transacted {
 		t.Fatal("program image replacement ran in a file transaction")
 	}
-	requireSwapDirForTest(t, dir, map[string]string{"program.exe": "MZnew"})
+	published, err := os.ReadFile(destination)
+	if err != nil || !bytes.Equal(published, image) {
+		t.Fatalf("published program image differs from source: size=%d err=%v", len(published), err)
+	}
+	requireNoSwapLeftoversForTest(t, dir, "program.exe")
 }
 
 func TestCompareAndSwapFilePublishesEmptyNonImage(t *testing.T) {
