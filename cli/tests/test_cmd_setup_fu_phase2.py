@@ -391,6 +391,81 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             before,
         )
 
+    def test_windows_opencode_guardrail_checks_complete_dotenv_before_selection(self):
+        from defenseclaw.file_permissions import MAX_DOTENV_BYTES
+
+        pristine = copy.deepcopy(self.app.cfg)
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable-value"
+        added_line = f"{env_name}={secret_value}\n".encode()
+        for extra_byte in (1, 0):
+            with self.subTest(extra_byte=extra_byte):
+                self.app.cfg = copy.deepcopy(pristine)
+                self._seed_map("opencode")
+                gc = self.app.cfg.guardrail
+                gc.enabled = True
+                gc.mode = "action"
+                gc.judge.enabled = False
+                dotenv = Path(self.tmp_dir, ".env")
+                config = Path(self.cfg_path)
+                receipt = Path(self.tmp_dir, "agent_selection.json")
+                lock = Path(self.tmp_dir, "hook_contract_lock.json")
+                unverified = Path(self.tmp_dir, "agent_selection_unverified.json")
+                original = b"#" + b"x" * (MAX_DOTENV_BYTES + extra_byte - len(added_line) - 2) + b"\n"
+                atomic_write_private_bytes(str(dotenv), original)
+                atomic_write_private_bytes(str(config), b"prior-config-marker\n")
+                records, errors = record_test_setup_agent_selections(self.tmp_dir, ("opencode",))
+                self.assertTrue(records)
+                self.assertFalse(errors)
+                atomic_write_private_bytes(str(lock), b'{"version":2,"connectors":{}}\n')
+                atomic_write_private_bytes(
+                    str(unverified),
+                    b'{"unverified":{"opencode":{"detail":"prior probe","at":"2026-01-01T00:00:00Z"}}}\n',
+                )
+                paths = (dotenv, config, receipt, lock, unverified)
+                before = {
+                    path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+                    for path in paths
+                }
+                late = AssertionError("size refusal must precede setup and lifecycle")
+                with (
+                    patch.dict(os.environ, {}, clear=False),
+                    _guardrail_judge_secret_wizard(lock, env_name, secret_value) as selected,
+                    patch.object(cmd_setup, "_refuse_guardrail_for_connector_not_set_up"),
+                    patch.object(
+                        cmd_setup,
+                        "_check_guardrail_setup_connector_versions",
+                        side_effect=late if extra_byte else None,
+                        return_value=True,
+                    ),
+                    patch.object(
+                        cmd_setup,
+                        "execute_guardrail_setup",
+                        side_effect=late if extra_byte else None,
+                        return_value=(True, []),
+                    ),
+                    patch.object(cmd_setup, "_restart_services", side_effect=late),
+                ):
+                    os.environ.pop(env_name, None)
+                    result = _invoke(["guardrail", "--connector", "opencode", "--no-restart"], self.app, catch=True)
+
+                if extra_byte:
+                    self.assertNotEqual(result.exit_code, 0)
+                    self.assertIn(f"over the {MAX_DOTENV_BYTES}-byte limit", result.output)
+                    self.assertNotIn(secret_value, _click_result_exception_diagnostics(result))
+                    selected.assert_not_called()
+                    self.assertEqual(
+                        {
+                            path: (path.read_bytes(), path.stat().st_ino, path.stat().st_mtime_ns)
+                            for path in paths
+                        },
+                        before,
+                    )
+                else:
+                    self.assertEqual(result.exit_code, 0, msg=result.output)
+                    selected.assert_called_once()
+                    self.assertEqual(len(dotenv.read_bytes()), MAX_DOTENV_BYTES)
+
     def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
         receipt = os.path.join(self.tmp_dir, "agent_selection.json")
         prior = b'{"prior":"receipt"}\n'
@@ -1321,7 +1396,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         )
 
                     self.assertEqual(result.exit_code, 0 if cancellation == "decline" else 1)
-                    selected.assert_called_once()
+                    selected.assert_not_called()
                     secret_write.assert_not_called()
                     generic.assert_not_called()
                     self.assertEqual(self.app.cfg.guardrail, prior_gc)
@@ -1417,7 +1492,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                             )
 
                         self.assertEqual(result.exit_code, 1)
-                        selected.assert_called_once()
+                        selected.assert_not_called()
                         secret_writer.assert_not_called()
                         save.assert_not_called()
                         log_action.assert_not_called()
@@ -2005,7 +2080,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 def fail_post_snapshots(path):
                     nonlocal snapshot_calls
                     snapshot_calls += 1
-                    if snapshot_calls > 1:
+                    if snapshot_calls > 2:
                         raise RuntimeError(secret_value)
                     return original_snapshot(path)
 
@@ -2067,7 +2142,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     secret_writer.assert_called_once()
                     setup_restore.assert_called_once()
                     log_action.assert_not_called()
-                    self.assertEqual(snapshot_calls, 3)
+                    self.assertEqual(snapshot_calls, 4)
                     self.assertEqual(self.app.cfg.guardrail, prior_gc)
                     for path, body in prior_files.items():
                         self.assertEqual(path.read_bytes(), body)
@@ -2703,7 +2778,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     for path, body in prior_files.items():
                         self.assertEqual(path.read_bytes(), body)
 
-    def test_windows_opencode_interactive_refusal_precedes_judge_secret_path(self):
+    def test_windows_opencode_interactive_refusal_precedes_secret_publication(self):
         gc = self.app.cfg.guardrail
         gc.enabled = False
         gc.connector = "openclaw"
@@ -2724,11 +2799,23 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         }
         for path, body in prior_files.items():
             atomic_write_private_bytes(str(path), body)
-        forbidden = AssertionError("exact selection refusal must precede interactive policy prompts")
+        forbidden = AssertionError("exact selection refusal must precede file and lifecycle changes")
+
+        def choose(label, *_args, **_kwargs):
+            if "Select mode" in label or "Select engine" in label:
+                return "1"
+            raise forbidden
+
+        def confirm_choice(label, *_args, **_kwargs):
+            if "Enable guardrail?" in label:
+                return True
+            if "Configure advanced options?" in label:
+                return False
+            raise forbidden
 
         def refuse(_data_dir, connectors, **_kwargs):
             self.assertEqual(tuple(connectors), ("opencode",))
-            self.assertEqual(gc, prior_gc)
+            self.assertEqual(gc.connector, "opencode")
             self.assertEqual(config_path.read_bytes(), prior_files[config_path])
             self.assertEqual(secret_path.read_bytes(), prior_files[secret_path])
             atomic_write_private_bytes(str(receipt_path), b"partial receipt\n")
@@ -2737,23 +2824,23 @@ class TestPerConnectorWriteSurface(_BaseSetup):
 
         with (
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
-            patch(
-                "defenseclaw.commands.cmd_setup._select_connector_interactive",
-                return_value="opencode",
-            ) as connector_choice,
+            patch("defenseclaw.commands.cmd_setup._select_connector_interactive", return_value="opencode") as connector_choice,
+            patch("defenseclaw.commands.cmd_setup._prompt_hook_fail_mode"),
+            patch("defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement"),
+            patch("defenseclaw.commands.cmd_setup.click.prompt", side_effect=choose) as prompt,
+            patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=confirm_choice) as confirmed,
             patch(
                 "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
                 side_effect=refuse,
             ) as selected,
-            patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=forbidden) as confirm,
             patch(
-                "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
-                side_effect=forbidden,
-            ) as judge_config,
-            patch(
-                "defenseclaw.commands.cmd_setup._prompt_and_save_secret",
+                "defenseclaw.commands.cmd_setup._publish_pending_guardrail_secrets",
                 side_effect=forbidden,
             ) as secret_write,
+            patch(
+                "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                side_effect=forbidden,
+            ) as execute,
         ):
             result = _invoke(
                 ["guardrail", "--no-restart"],
@@ -2764,10 +2851,11 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("interactive exact SST selection refused", result.output)
         connector_choice.assert_called_once()
+        self.assertEqual(prompt.call_count, 2)
+        self.assertEqual(confirmed.call_count, 2)
         selected.assert_called_once()
-        confirm.assert_not_called()
-        judge_config.assert_not_called()
         secret_write.assert_not_called()
+        execute.assert_not_called()
         self.assertEqual(self.app.cfg.guardrail, prior_gc)
         for path, body in prior_files.items():
             self.assertEqual(path.read_bytes(), body)
