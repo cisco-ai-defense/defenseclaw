@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -156,12 +158,41 @@ func typedTargetRuleText(resolved, home string) string {
 		return text
 	}
 	if rest, ok := strings.CutPrefix(text, "~/"); ok {
-		return "~/" + strings.ToLower(rest)
+		return "~/" + windowsNameFold(rest)
 	}
 	if match := windowsUserPath.FindStringSubmatch(text); match != nil {
-		return match[1] + "/Users/" + match[2] + "/" + strings.ToLower(match[3])
+		return match[1] + "/Users/" + match[2] + "/" + windowsNameFold(match[3])
 	}
 	return text
+}
+
+// windowsNameFold spells a Windows name in the lower case the rules write.
+// Windows compares names through upper case, so a letter that is not ASCII
+// but upper-cases or case-folds to an ASCII letter (long s, Kelvin sign,
+// dotless i) names the same file as that letter. strings.ToLower alone leaves
+// those letters as they are, and the ASCII-only rule expressions miss them.
+func windowsNameFold(name string) string {
+	ascii := true
+	for index := 0; index < len(name) && ascii; index++ {
+		ascii = name[index] < utf8.RuneSelf
+	}
+	if ascii {
+		return strings.ToLower(name)
+	}
+	return strings.Map(func(r rune) rune {
+		if r < unicode.MaxASCII {
+			return unicode.ToLower(r)
+		}
+		if upper := unicode.ToUpper(r); upper < unicode.MaxASCII {
+			return unicode.ToLower(upper)
+		}
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < unicode.MaxASCII {
+				return unicode.ToLower(folded)
+			}
+		}
+		return unicode.ToLower(r)
+	}, name)
 }
 
 // hasApplyPatchCommand reports an apply_patch command in the parsed action,

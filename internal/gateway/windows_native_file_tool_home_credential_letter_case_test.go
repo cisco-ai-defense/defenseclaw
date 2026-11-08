@@ -56,6 +56,53 @@ func TestWindowsNativeFileToolWriteOfActiveHomeCredentialFileIsJudgedInAnyLetter
 	}
 }
 
+// A letter that is not ASCII but is the same letter in the case-insensitive
+// comparison a Windows file system makes (long s, Kelvin sign, dotless i) names
+// the same credential file, so it gets the verdict of the plain spelling. The
+// ordinary neighbours spelled the same way, and a read, keep theirs.
+func TestWindowsNativeFileToolWriteOfActiveHomeCredentialFileIsJudgedWithCaseEquivalentLetters(t *testing.T) {
+	const home = "C:\\Users\\alice.smith"
+	protected := []struct{ plain, variant string }{
+		{".git-credentials", ".git-credential\u017f"},
+		{".git-credentials", ".GIT-CREDENTIAL\u017f"},
+		{".git-credentials", ".g\u0131t-credentials"},
+		{".aws\\credentials", ".aw\u017f\\credentials"},
+		{".aws\\credentials", ".AWS\\CREDENTIAL\u017f"},
+		{".aws\\credentials", ".AW\u017f\\CREDENTIAL\u017f"},
+		{".kube\\config", ".\u212aube\\config"},
+		{".docker\\config.json", ".DOC\u212aER\\CONFIG.JSON"},
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-home-credential-equivalent-letters-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, pair := range protected {
+			plainAction, plainRules := windowsFileToolVerdict(t, connector, "Write", home, home+"\\"+pair.plain)
+			if len(plainRules) == 0 {
+				t.Fatalf("%s: plain write of %s matches no rule", profile, pair.plain)
+			}
+			for _, tool := range []string{"Write", "Edit"} {
+				file := home + "\\" + pair.variant
+				action, rules := windowsFileToolVerdict(t, connector, tool, home, file)
+				if action != plainAction || !sameRules(rules, plainRules) {
+					t.Errorf("%s %s %q: %s %v, want %s %v", profile, tool, file, action, rules, plainAction, plainRules)
+				}
+			}
+		}
+	}
+	const connector = "windows-native-home-credential-equivalent-letters-neighbours"
+	installToolCallCorpusProfileConnector(t, connector, "default")
+	for _, ordinary := range []string{"notes\u017f.txt", "\u212aeys.txt", "Project\\\u017fcript.md", ".git-credential\u017f.example", ".aw\u017f\\config.bak", "\u0131ndex.html"} {
+		if action, rules := windowsFileToolVerdict(t, connector, "Write", home, home+"\\"+ordinary); action != "allow" {
+			t.Errorf("Write of %s: %s %v, want allow", ordinary, action, rules)
+		}
+	}
+	for _, file := range []string{home + "\\.git-credential\u017f", home + "\\.aw\u017f\\credential\u017f"} {
+		if action, _ := windowsFileToolVerdict(t, connector, "Read", home, file); action == "block" {
+			t.Errorf("Read of %s blocked, want the alert it had", file)
+		}
+	}
+}
+
 // Ordinary files whose names differ only in letter case from a neighbour of a
 // credential file, a read of a credential file in another case, and a write in
 // a home that only starts like the active one keep the verdict they had.
