@@ -1483,25 +1483,33 @@ func agentHookConfigGitGlobReach(spec, worktree string, guard *agentHookConfigGu
 func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string {
 	// GIT_WORK_TREE=dir (or GIT_DIR=dir/.git) before the command names the
 	// worktree as --work-tree=dir does, whether the assignment is written
-	// before git or passed through env or a process wrapper.
-	rest, workTree := argv, ""
-	for depth := 0; depth < 4 && len(rest) > 0; depth++ {
+	// before git or passed through env or a process wrapper. env -i and
+	// env -u drop what was assigned before them, as env does. Every pass
+	// consumes at least one word, so the peel ends with the argv.
+	rest, workTreeVar, gitDirVar := argv, "", ""
+	for len(rest) > 0 {
 		for len(rest) > 0 && agentHookConfigAssignment(rest[0]) {
 			name, value, _ := strings.Cut(rest[0], "=")
 			switch name {
 			case "GIT_WORK_TREE":
-				workTree = value
+				workTreeVar = value
 			case "GIT_DIR":
-				if workTree == "" && filepath.Base(value) == ".git" {
-					workTree = filepath.Dir(value)
-				}
+				gitDirVar = value
 			}
 			rest = rest[1:]
 		}
 		if len(rest) == 0 {
 			break
 		}
-		if child, directory, wrapper := agentHookConfigEnvChild(rest); wrapper {
+		if child, directory, unset, wrapper := agentHookConfigEnvChild(rest); wrapper {
+			for _, name := range unset {
+				if name == "*" || name == "GIT_WORK_TREE" {
+					workTreeVar = ""
+				}
+				if name == "*" || name == "GIT_DIR" {
+					gitDirVar = ""
+				}
+			}
 			if directory != "" {
 				if !filepath.IsAbs(directory) {
 					directory = filepath.Join(guard.cwd, directory)
@@ -1514,6 +1522,10 @@ func agentHookConfigGitTarget(argv []string, guard *agentHookConfigGuard) string
 		} else {
 			break
 		}
+	}
+	workTree := workTreeVar
+	if workTree == "" && filepath.Base(gitDirVar) == ".git" {
+		workTree = filepath.Dir(gitDirVar)
 	}
 	if len(rest) != len(argv) {
 		if len(rest) > 0 && filepath.Base(rest[0]) == "git" {
@@ -2147,39 +2159,84 @@ var agentHookConfigWrapperOptionArgs = map[string][]string{
 
 // agentHookConfigEnvChild reads one env call and returns the words it runs:
 // the NAME=value assignments it passes (kept in front, in the order
-// agentHookConfigGitTarget reads) followed by the command, plus the folder
-// -C/--chdir starts it in. An option the reader does not know (-S, a split
-// string) is not a wrapper read, so the call is left as it is.
-func agentHookConfigEnvChild(argv []string) (child []string, directory string, wrapper bool) {
+// agentHookConfigGitTarget reads) followed by the command, the folder
+// -C/--chdir starts it in, and the variables it drops from the environment it
+// received first (-u NAME; "*" for -i or a lone -). Options end at the first
+// assignment or --, as env reads them. An option the reader does not know
+// (-S, a split string) is not a wrapper read, so the call is left as it is.
+func agentHookConfigEnvChild(argv []string) (child []string, directory string, unset []string, wrapper bool) {
 	if len(argv) == 0 || strings.ToLower(filepath.Base(argv[0])) != "env" {
-		return nil, "", false
+		return nil, "", nil, false
 	}
 	var assigned []string
-	index := 1
-	for ; index < len(argv); index++ {
+	optionsEnded := false
+	for index := 1; index < len(argv); index++ {
 		word := argv[index]
 		switch {
-		case word == "--" || word == "-" || word == "-i" || word == "--ignore-environment" || word == "-0" || word == "--null" || word == "-v" || word == "--debug":
-		case word == "-u" || word == "--unset":
-			index++
-		case word == "-C" || word == "--chdir":
+		case optionsEnded && agentHookConfigAssignment(word):
+			assigned = append(assigned, word)
+		case optionsEnded:
+			return append(assigned, argv[index:]...), directory, unset, true
+		case word == "--":
+			optionsEnded = true
+		case word == "-" || word == "--ignore-environment":
+			unset = append(unset, "*")
+		case word == "--null" || word == "--debug":
+		case word == "--unset" || word == "--chdir":
 			if index+1 >= len(argv) {
-				return nil, "", false
+				return nil, "", nil, false
 			}
 			index++
-			directory = argv[index]
+			if word == "--unset" {
+				unset = append(unset, argv[index])
+			} else {
+				directory = argv[index]
+			}
 		case strings.HasPrefix(word, "--chdir="):
 			directory = strings.TrimPrefix(word, "--chdir=")
 		case strings.HasPrefix(word, "--unset="):
+			unset = append(unset, strings.TrimPrefix(word, "--unset="))
+		case strings.HasPrefix(word, "--"):
+			return nil, "", nil, false
 		case strings.HasPrefix(word, "-"):
-			return nil, "", false
+			// A short cluster: -i -0 -v flags, and -u/-C taking the rest
+			// of the word or the next word.
+			cluster := word[1:]
+			for position := 0; position < len(cluster); position++ {
+				letter := cluster[position]
+				if letter == 'i' {
+					unset = append(unset, "*")
+					continue
+				}
+				if letter == '0' || letter == 'v' {
+					continue
+				}
+				if letter != 'u' && letter != 'C' {
+					return nil, "", nil, false
+				}
+				value := cluster[position+1:]
+				if value == "" {
+					if index+1 >= len(argv) {
+						return nil, "", nil, false
+					}
+					index++
+					value = argv[index]
+				}
+				if letter == 'u' {
+					unset = append(unset, value)
+				} else {
+					directory = value
+				}
+				break
+			}
 		case agentHookConfigAssignment(word):
+			optionsEnded = true
 			assigned = append(assigned, word)
 		default:
-			return append(assigned, argv[index:]...), directory, true
+			return append(assigned, argv[index:]...), directory, unset, true
 		}
 	}
-	return assigned, directory, true
+	return assigned, directory, unset, true
 }
 
 // agentHookConfigWrapperChild reads one literal process wrapper (timeout,
