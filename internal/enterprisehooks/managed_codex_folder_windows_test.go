@@ -180,3 +180,46 @@ func TestEnsureWindowsStandaloneCodexMachineFolderIsStandaloneOnly(t *testing.T)
 		t.Fatalf("Secure Client recorded a created folder: %q", *f.recorded)
 	}
 }
+
+// A Codex machine-policy folder that exists but is not trusted (a standard user
+// made it after an administrator deleted it, or its owner or protection
+// drifted) is not taken over by the guardian: it is named once with the fix
+// (Setup /repair), changed in no way, and the same named error returns on every
+// pass, so the reconcile stays closed and the log carries one warning.
+func TestEnsureWindowsStandaloneCodexMachineFolderNamesAnUntrustedExistingFolderOnce(t *testing.T) {
+	f := useKeptFixture(t, true, nil)
+	events := captureCodexFolderEvents(t)
+	if err := os.MkdirAll(f.selectorDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(f.selectorDir, "squatter.txt")
+	if err := os.WriteFile(marker, []byte("planted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := windowsManagedPolicyDirTrustCheck
+	windowsManagedPolicyDirTrustCheck = func(string) error { return errors.New("owner is not trusted") }
+	t.Cleanup(func() { windowsManagedPolicyDirTrustCheck = previous })
+	for pass := 0; pass < 3; pass++ {
+		result, err := EnsureWindowsStandaloneCodexMachineFolder()
+		if err == nil || !errors.Is(err, ErrWindowsCodexMachineFolderUnavailable) ||
+			!strings.Contains(err.Error(), "owner is not trusted") || !strings.Contains(err.Error(), "Setup /repair") ||
+			!strings.Contains(err.Error(), f.selectorDir) {
+			t.Fatalf("pass %d: an untrusted existing folder was not named with its fix: %v", pass, err)
+		}
+		if len(result.Created) != 0 {
+			t.Fatalf("pass %d: created %q over an existing folder", pass, result.Created)
+		}
+	}
+	if len(events.boundary) != 1 || events.boundary[0]["fix"] == "" || len(events.repair) != 0 || len(*f.recorded) != 0 {
+		t.Fatalf("boundary warnings = %d, repair events = %d, records = %q; want one warning with a fix, nothing else",
+			len(events.boundary), len(events.repair), *f.recorded)
+	}
+	if body, err := os.ReadFile(marker); err != nil || string(body) != "planted" {
+		t.Fatalf("the guardian changed the untrusted folder: %v %q", err, body)
+	}
+	// Once an administrator has repaired it, the same call is quiet again.
+	windowsManagedPolicyDirTrustCheck = func(string) error { return nil }
+	if _, err := EnsureWindowsStandaloneCodexMachineFolder(); err != nil {
+		t.Fatalf("a trusted folder is still refused: %v", err)
+	}
+}
