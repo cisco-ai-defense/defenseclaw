@@ -22,6 +22,7 @@ import hashlib
 import os
 
 from defenseclaw.connector_paths import is_secret_ref_text
+from defenseclaw.file_permissions import MAX_DOTENV_BYTES
 
 GATEWAY_TOKEN_NAMES = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
 _MARKER = b"# defenseclaw: adopted gateway token sha256="
@@ -46,13 +47,19 @@ def is_shadowed(shadowed: set[str], key: str) -> bool:
 
 
 def with_adopted_marker(body: bytes, token: str) -> bytes:
-    """*body* with every marker line replaced by one that records *token*."""
+    """*body* with every marker line replaced by one that records *token*.
+
+    The marker is provenance only. When recording it would push the file past the
+    size every reader accepts (``MAX_DOTENV_BYTES``) the file is returned without
+    one: an unmarked file behaves as before, an unreadable one loses the token.
+    """
     newline = b"\r\n" if b"\r\n" in body else b"\n"
     kept = [line for line in body.splitlines(keepends=True) if not line.strip().startswith(_MARKER)]
     out = b"".join(kept)
     if out and not out.endswith((b"\r", b"\n")):
         out += newline
-    return out + marker_line(token) + newline
+    marked = out + marker_line(token) + newline
+    return marked if len(marked) <= MAX_DOTENV_BYTES else out
 
 
 def shadowed_names(body: bytes) -> set[str]:

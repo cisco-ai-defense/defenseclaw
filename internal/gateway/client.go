@@ -45,6 +45,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // Client connects to the OpenClaw gateway WebSocket and provides RPC methods
@@ -1106,8 +1107,12 @@ func updateEnvFileToken(path, newToken string) error {
 	for len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	lines = append(lines, envvars.AdoptedGatewayTokenMarker(newToken))
 	out := strings.Join(lines, "\n") + "\n"
+	// The marker is provenance only: leave it out rather than push the file past
+	// the size every reader accepts, which would make the token unreadable.
+	if marked := out + envvars.AdoptedGatewayTokenMarker(newToken) + "\n"; len(marked) <= safefile.MaxDotEnvBytes {
+		out = marked
+	}
 
 	return managed.WriteServiceRuntimeFile(
 		managed.PinnedDeploymentMode(), path, "gateway dotenv", []byte(out),

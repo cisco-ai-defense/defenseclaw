@@ -62,7 +62,15 @@ from types import SimpleNamespace
 
 import click
 
-from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
+from defenseclaw import (
+    codex_toml,
+    credential_provenance,
+    envvars,
+    gateway_token_adoption,
+    legacy_connector,
+    rulepack_validation,
+    ux,
+)
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.audit_time_order import audit_time_order
 from defenseclaw.config import gateway_home_for_data_dir, gateway_pid_path
@@ -2527,6 +2535,8 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
     path = os.path.join(normalized_data_dir, ".env")
     try:
         body = read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+        # The daemon leaves out an adopted copy that a one-spelling edit outdated.
+        shadowed = gateway_token_adoption.shadowed_names(body)
         for raw_line in body.splitlines():
             line = raw_line.strip()
             if not line or line.startswith(b"#"):
@@ -2539,7 +2549,7 @@ def _gateway_dotenv_tokens(data_dir: str) -> dict[str, str]:
             except UnicodeError:
                 continue
             canonical_key = _known_gateway_token_env(key)
-            if not canonical_key:
+            if not canonical_key or gateway_token_adoption.is_shadowed(shadowed, canonical_key):
                 continue
             value = raw_value.strip()
             if len(value) >= 2 and value[:1] == value[-1:] and value[:1] in {b'"', b"'"}:
