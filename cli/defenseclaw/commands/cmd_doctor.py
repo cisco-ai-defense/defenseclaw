@@ -1910,14 +1910,22 @@ def _root_owned_under(directory: str, names: list[str]) -> str:
 # link, is changed: find does not follow a link at the path itself, -execdir
 # runs the change inside the folder find is walking, chown -h changes a link
 # rather than its target, and -xdev keeps the walk of a returned folder on its
-# own volume. Go renders the same step in ``rootOwnedAgentConfigStep``.
+# own volume. Only the owner change runs under sudo. The access repair that
+# follows is a plain find run by the account, so a name the account swaps for a
+# link after find checked it cannot send a privileged chmod to a target outside
+# the home: the account can only change what it already owns. It touches only
+# its own items that lack owner access. Go renders the same step in
+# ``rootOwnedAgentConfigStep``.
 _ROOT_AGENT_CONFIG_RETURN_SCRIPT = (
     "for p; do d=${p%/*}; b=${p##*/}; "
     + "(cd -P \"$d\" 2>/dev/null && [ \"$(/bin/pwd -P)\" = \"$d\" ] "
     + "|| { echo \"skipped $p: its folder is a link or moved\" >&2; exit 0; }; "
     + "[ -e \"$b\" ] || exit 0; "
     + "sudo find -P \"./$b\" -xdev -user root \\( -type d -o -type f -links 1 \\) "
-    + "-execdir chown -h \"$(id -un)\" {} \\; -execdir chmod u+rwX {} \\;) || exit 1; done"
+    + "-execdir chown -h \"$(id -un)\" {} \\; && "
+    + "find -P \"./$b\" -xdev -user \"$(id -un)\" "
+    + "\\( \\( -type f ! -perm -u=rw \\) -o \\( -type d ! -perm -u=rwx \\) \\) "
+    + "-exec chmod u+rwX {} \\;) || exit 1; done"
 )
 
 

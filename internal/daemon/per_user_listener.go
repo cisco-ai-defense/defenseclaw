@@ -164,13 +164,20 @@ func rootOwnedAgentConfigPaths(dataDir string) []string {
 // root-owned file with a single hard link, is changed: find does not follow a
 // link at the path itself, -execdir runs the change inside the folder find is
 // walking, chown -h changes a link rather than its target, and -xdev keeps the
-// walk of a returned folder on its own volume. A path that fails the check is
-// skipped with a message; a failed sudo ends the chain.
+// walk of a returned folder on its own volume. Only the owner change runs under
+// sudo. The access repair that follows is a plain find run by the account, so a
+// name the account swaps for a link after find checked it cannot send a
+// privileged chmod to a target outside the home: the account can only change
+// what it already owns. It touches only its own items that lack owner access. A
+// path that fails the check is skipped with a message; a failed sudo ends the
+// chain.
 const rootOwnedAgentConfigReturnScript = `for p; do d=${p%/*}; b=${p##*/}; ` +
 	`(cd -P "$d" 2>/dev/null && [ "$(/bin/pwd -P)" = "$d" ] || { echo "skipped $p: its folder is a link or moved" >&2; exit 0; }; ` +
 	`[ -e "$b" ] || exit 0; ` +
 	`sudo find -P "./$b" -xdev -user root \( -type d -o -type f -links 1 \) ` +
-	`-execdir chown -h "$(id -un)" {} \; -execdir chmod u+rwX {} \;) || exit 1; done`
+	`-execdir chown -h "$(id -un)" {} \; && ` +
+	`find -P "./$b" -xdev -user "$(id -un)" \( \( -type f ! -perm -u=rw \) -o \( -type d ! -perm -u=rwx \) \) ` +
+	`-exec chmod u+rwX {} \;) || exit 1; done`
 
 // rootOwnedAgentConfigStep is the chain step that returns the paths.
 func rootOwnedAgentConfigStep(paths []string) string {

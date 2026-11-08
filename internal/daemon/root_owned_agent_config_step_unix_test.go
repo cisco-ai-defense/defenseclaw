@@ -177,3 +177,112 @@ func TestRootOwnedAgentConfigReturnStepWalksTheFolderItChecked(t *testing.T) {
 		})
 	}
 }
+
+// TestRootOwnedAgentConfigReturnStepKeepsTheAccessRepairOutOfSudo swaps the
+// returned file or folder for a link to an outside path at the moment find runs
+// its owner change, and records every chmod the step runs. The access repair
+// must never run under sudo (a privileged chmod follows the link), and it must
+// not reach the swapped name at all. The unswapped twin still repairs a returned
+// item that lacks owner access, as the account.
+func TestRootOwnedAgentConfigReturnStepKeepsTheAccessRepairOutOfSudo(t *testing.T) {
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find is not available")
+	}
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name   string
+		path   string // the path handed to the step, relative to the home
+		folder bool   // the path is a folder, not a file
+		swap   bool   // the account swaps the name for a link when find runs the owner change
+	}{
+		{"file swapped for a link", ".claude/settings.json", false, true},
+		{"folder swapped for a link", ".copilot/hooks", true, true},
+		{"file with no owner access is repaired by the account", ".claude/settings.json", false, false},
+		{"folder with no owner access is repaired by the account", ".copilot/hooks", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			home := filepath.Join(base, "home")
+			outside := filepath.Join(base, "outside")
+			target := filepath.Join(home, filepath.FromSlash(tc.path))
+			if tc.folder {
+				for _, item := range []string{target, outside} {
+					if err := os.MkdirAll(item, 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+			} else {
+				for _, item := range []string{target, outside} {
+					if err := os.MkdirAll(filepath.Dir(item), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(item, []byte("{}\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			// No owner access; a folder keeps read and search so the stand-in
+			// sudo, which is not root, can walk it.
+			mode := os.FileMode(0o000)
+			if tc.folder {
+				mode = 0o500
+			}
+			if err := os.Chmod(target, mode); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(target, 0o700) })
+
+			bin := t.TempDir()
+			sudoLog := filepath.Join(base, "sudo.log")
+			chmodLog := filepath.Join(base, "chmod.log")
+			swapped := target + "-moved"
+			sudo := "#!/bin/sh\n" +
+				"echo \"$*\" >> " + sudoLog + "\n" +
+				"n=$#; while [ $n -gt 0 ]; do a=$1; shift; [ \"$a\" = root ] && a=" + me.Username + "; set -- \"$@\" \"$a\"; n=$((n-1)); done\n" +
+				"SUDO_ACTIVE=1 exec \"$@\"\n"
+			chown := "#!/bin/sh\n"
+			if tc.swap {
+				chown += "[ -e \x27" + swapped + "\x27 ] || { mv \x27" + target + "\x27 \x27" + swapped + "\x27 && ln -s \x27" + outside + "\x27 \x27" + target + "\x27; }\n"
+			}
+			chmod := "#!/bin/sh\necho \"sudo=$SUDO_ACTIVE $*\" >> " + chmodLog + "\n/bin/chmod \"$@\"\n"
+			for name, body := range map[string]string{"sudo": sudo, "chown": chown, "chmod": chmod} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("sh", "-c", rootOwnedAgentConfigReturnScript, "sh", target)
+			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home}
+			// A swapped folder makes find fail on the link, which stops the
+			// chain: also safe, so only the unswapped twin must succeed.
+			if out, err := cmd.CombinedOutput(); err != nil && !tc.swap {
+				t.Fatalf("step failed: %v\n%s", err, out)
+			}
+
+			if raw, err := os.ReadFile(sudoLog); err != nil || !strings.Contains(string(raw), "chown -h") {
+				t.Fatalf("the owner change never ran under sudo: %v %q", err, raw)
+			} else if strings.Contains(string(raw), "chmod") {
+				t.Fatalf("a permission change ran under sudo: %q", raw)
+			}
+			raw, _ := os.ReadFile(chmodLog)
+			if strings.Contains(string(raw), "sudo=1") {
+				t.Fatalf("a permission change ran privileged: %q", raw)
+			}
+			if tc.swap {
+				if strings.TrimSpace(string(raw)) != "" {
+					t.Fatalf("the permission change reached the swapped name: %q", raw)
+				}
+				return
+			}
+			if want := "sudo= u+rwX ./" + filepath.Base(tc.path); strings.TrimSpace(string(raw)) != want {
+				t.Fatalf("the account did not repair the returned item: %q, want %q", raw, want)
+			}
+		})
+	}
+}

@@ -364,3 +364,83 @@ def test_the_return_step_walks_the_folder_it_checked_when_a_parent_is_swapped_fo
     folders = log.read_text().split()
     assert folders, "the owner change never ran"
     assert all(folder.startswith(os.fspath(link) + "-moved") for folder in folders), folders
+
+
+@pytest.mark.skipif(shutil.which("find") is None, reason="find is not available")
+@pytest.mark.parametrize(
+    ("path", "folder", "swap"),
+    [
+        (".claude/settings.json", False, True),
+        (".copilot/hooks", True, True),
+        (".claude/settings.json", False, False),
+        (".copilot/hooks", True, False),
+    ],
+    ids=["file-swapped", "folder-swapped", "file-repaired", "folder-repaired"],
+)
+def test_the_return_step_keeps_the_access_repair_out_of_sudo(tmp_path, path, folder, swap):
+    """A name swapped for a link when find runs the owner change must not reach a privileged chmod."""
+    import getpass
+
+    from defenseclaw.commands import cmd_doctor
+
+    base = tmp_path.resolve()
+    home = base / "home"
+    outside = base / "outside"
+    target = home / path
+    if folder:
+        target.mkdir(parents=True)
+        outside.mkdir()
+    else:
+        _write(target.parent, target.name, 0o600)
+        outside.write_text("{}\n")
+    # No owner access; a folder keeps read and search so the stand-in sudo, which is not root, can walk it.
+    target.chmod(0o500 if folder else 0o000)
+    fake = base / "bin"
+    fake.mkdir()
+    sudo_log = base / "sudo.log"
+    chmod_log = base / "chmod.log"
+    moved = os.fspath(target) + "-moved"
+    swap_line = ""
+    if swap:
+        swap_line = f"[ -e {shlex.quote(moved)} ] || {{ mv {shlex.quote(os.fspath(target))} {shlex.quote(moved)} && ln -s {shlex.quote(os.fspath(outside))} {shlex.quote(os.fspath(target))}; }}"
+    scripts = {
+        "sudo": "\n".join(
+            [
+                "#!/bin/sh",
+                f"echo \"$*\" >> {sudo_log}",
+                "n=$#; while [ $n -gt 0 ]; do a=$1; shift; "
+                f"[ \"$a\" = root ] && a={getpass.getuser()}; set -- \"$@\" \"$a\"; n=$((n-1)); done",
+                "SUDO_ACTIVE=1 exec \"$@\"",
+                "",
+            ]
+        ),
+        "chown": f"#!/bin/sh\n{swap_line}\n",
+        "chmod": f"#!/bin/sh\necho \"sudo=$SUDO_ACTIVE $*\" >> {chmod_log}\n/bin/chmod \"$@\"\n",
+    }
+    for name, body in scripts.items():
+        (fake / name).write_text(body)
+        (fake / name).chmod(0o755)
+
+    try:
+        step = cmd_doctor._root_agent_config_return_step([os.fspath(target)])
+        done = subprocess.run(
+            ["sh", "-c", step],
+            env={"PATH": os.fspath(fake) + ":/usr/bin:/bin", "HOME": os.fspath(home)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        target.chmod(0o700)
+
+    if not swap:
+        assert done.returncode == 0, done.stderr
+    # A swapped folder makes find fail on the link, which stops the chain: also safe.
+    sudo_calls = sudo_log.read_text()
+    assert "chown -h" in sudo_calls and "chmod" not in sudo_calls
+    chmods = chmod_log.read_text() if chmod_log.exists() else ""
+    assert "sudo=1" not in chmods
+    if swap:
+        assert chmods.strip() == ""
+    else:
+        assert chmods.strip() == f"sudo= u+rwX ./{Path(path).name}"
