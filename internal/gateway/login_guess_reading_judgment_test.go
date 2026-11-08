@@ -60,7 +60,7 @@ func TestLoginGuessReadingIsJudgedOnlyWhereItMayReachState(t *testing.T) {
 		{"an argument of a managed hook", "echo marker \x27alice\x27", true, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			if got := loginGuessReadingMayProveStateWrite(request(row.managed), row.text, project); got != row.want {
+			if got := loginGuessReadingMayProveStateWrite(request(row.managed), actionfacts.SimpleCommand{Text: row.text}, project); got != row.want {
 				t.Errorf("%q: judged = %v, want %v", row.text, got, row.want)
 			}
 		})

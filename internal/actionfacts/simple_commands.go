@@ -38,10 +38,16 @@ type SimpleCommand struct {
 	// original action decides the protected-write class for that value.
 	UnresolvedBoundVariable bool
 	// LoginGuess means this reading holds a value USER or LOGNAME has only as
-	// the guess that the login is the last element of the home. A rule over
-	// the command's words must not read it (the shell may hold another
-	// login); it only proves a write to protected state.
+	// the guess that the login is the last element of the home, or the value
+	// one word of a for or while-read list gives its variable in one iteration
+	// (simpleForkLoopBinds). A rule over the words of the command must not read
+	// it (the shell may hold another login or run another iteration); it only
+	// proves a write to protected state.
 	LoginGuess bool
+	// LoopReading marks a LoginGuess reading that is one iteration of a loop
+	// variable. Its path is spelled in the reading, so a managed hook client
+	// has no evidence keyed for it: the text decides whether it can name state.
+	LoopReading bool
 	// UnboundUser means Text names USER or LOGNAME after a binding the walk
 	// cannot follow (read, a loop, eval): the value is unknown, not the
 	// login the home spells. A reader may keep the guess that the name is
@@ -67,6 +73,9 @@ type simpleShellState struct {
 	// locals holds, innermost last, the caller value of each name a
 	// function body made local; the body end restores it.
 	locals []simpleLocal
+	// forked marks a state in which a forked loop variable holds the value of
+	// one list word (simpleForkLoopBinds), until the loop ends.
+	forked bool
 }
 
 // simpleLocal is the caller value of name saved by a local declaration in
@@ -85,7 +94,7 @@ const (
 func (s simpleShellState) clone() simpleShellState {
 	copy := simpleShellState{cwd: s.cwd, cwdUnknown: s.cwdUnknown,
 		dirStack: slices.Clone(s.dirStack), vars: make(map[string]string, len(s.vars)),
-		locals: slices.Clone(s.locals)}
+		locals: slices.Clone(s.locals), forked: s.forked}
 	for name, value := range s.vars {
 		copy.vars[name] = value
 	}
@@ -250,10 +259,19 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			parent := previousScope[:index]
 			body, ran := states[previousScope]
 			switch previousScope[index+1] {
-			case 'c', 'u', 'o':
+			case 'c', 'u', 'o', forkedLoopScopeKind:
 				if ran {
 					merged := append(simpleScopeStates(states, parent), body...)
 					merged = simpleJoinForgottenUserVars(merged, body)
+					if previousScope[index+1] == forkedLoopScopeKind {
+						// Like USER and LOGNAME, the name of such a loop has the
+						// value of its last iteration, which the walk does not read.
+						for i := range merged {
+							merged[i] = merged[i].clone()
+							merged[i].forked = false
+							simpleForgetUserVars(merged[i].vars, simpleForkedNames(parts))
+						}
+					}
 					for name, kind := range loopScopeKinds {
 						if previousScope[index+1] == kind {
 							// A loop leaves its name the value of its last
@@ -289,6 +307,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		if variants == nil {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
 		}
+		variants = simpleForkLoopBinds(variants, part.binds)
+		forkedRead := simpleReadsForkedName(part.text, part.binds)
 		file, parsed := shellparse.Parse(part.text)
 		if !parsed || len(file.Stmts) != 1 {
 			return []SimpleCommand{{EvaluationFailure: "parse"}}
@@ -365,6 +385,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			call, _ := stmt.Cmd.(*syntax.CallExpr)
 			command := SimpleCommand{Text: text, CWD: state.cwd,
 				ZshHistoryBuiltin:       simpleZshHistoryCall(call, effective, interpreter),
+				LoginGuess:              state.forked && forkedRead,
+				LoopReading:             state.forked && forkedRead,
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative}
@@ -379,6 +401,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				if reading := resolve(unprefixed); strings.TrimSpace(reading) != "" {
 					alone := SimpleCommand{Text: reading, CWD: state.cwd,
 						ZshHistoryBuiltin:       command.ZshHistoryBuiltin,
+						LoginGuess:              command.LoginGuess,
+						LoopReading:             command.LoopReading,
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
 						AbsoluteOnly:            command.AbsoluteOnly}
@@ -1303,6 +1327,9 @@ func evalCodeBindsUser(text string, depth int) []string {
 // value the walk can follow (rel-1-0-6:GAP-0630, GAP-0681 review 7).
 func simpleApplyLoopBinds(vars map[string]string, binds []simpleLoopBind, login map[string]string) {
 	for _, bind := range binds {
+		if bind.fork {
+			continue
+		}
 		active, hasLogin := login[bind.name]
 		reads := hasLogin && len(bind.items) == 0
 		for _, word := range bind.items {
