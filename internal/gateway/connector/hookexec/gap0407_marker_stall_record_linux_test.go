@@ -82,8 +82,11 @@ func TestGAP0407MarkerStallKeepsOrdinaryBlockRecord(t *testing.T) {
 		t.Fatal("hook did not exit within budget")
 	}
 	reader.Close() // release any pending marker write before returning
-	w.failureLog.mu.Lock()
-	w.failureLog.mu.Unlock()
+	// Wait for a record write that is still in flight to finish.
+	func() {
+		w.failureLog.mu.Lock()
+		defer w.failureLog.mu.Unlock()
+	}()
 	if !claudeBlocked(runResult{code: got.code, stdout: got.out}) {
 		t.Fatalf("hook answer was not a block: code=%d out=%q", got.code, got.out)
 	}

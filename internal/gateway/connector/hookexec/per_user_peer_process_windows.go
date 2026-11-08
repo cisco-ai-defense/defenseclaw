@@ -31,7 +31,3 @@ func perUserConnectedPeerPIDWithin(ctx context.Context, client, server *net.TCPA
 	pid, err := connectedManagedGatewayPIDForEndpoints(clientEndpoint, serverEndpoint)
 	return int(pid), err == nil && ctx.Err() == nil
 }
-
-func perUserListenerOwners(context.Context, *net.TCPAddr) ([]perUserPeerProcess, bool) {
-	return nil, false
-}
