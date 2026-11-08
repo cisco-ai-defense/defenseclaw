@@ -237,20 +237,18 @@ func TestWindowsGoOwnedRemovalKeepsOnlyTheLinkedDevinFolder(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			// DefenseClaw publishes into the legacy file only when it exists
-			// (a pre-rename app reads only it), and into the Devin file only
-			// when it exists or the legacy one does not, so an administrator's
-			// file is in both folders first.
+			// Releases 1.0.5 to 1.0.8 wrote DefenseClaw's Cascade refusal into
+			// both files, after an administrator's own content. DefenseClaw
+			// publishes nothing now and only withdraws it, so the upgrade case
+			// is planted as that release left it.
 			for _, path := range []string{devinPath, legacyPath} {
 				if err := createProtectedDir(filepath.Dir(path)); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(path, []byte(`{"version":1,"hooks":{}}`), 0o644); err != nil {
+				planted := earlierReleaseCascadeFile(t, opts, path, `{"version":1,"hooks":{}}`)
+				if err := os.WriteFile(path, []byte(planted), 0o644); err != nil {
 					t.Fatal(err)
 				}
-			}
-			if _, err := (devinCascadeTarget{}).Reconcile(opts); err != nil {
-				t.Fatalf("publish DefenseClaw's Cascade entries: %v", err)
 			}
 			owned := func(path string) bool {
 				t.Helper()
