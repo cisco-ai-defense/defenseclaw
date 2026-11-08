@@ -103,27 +103,33 @@ func TestListenersHeldOnlyByTheRecordedGateway(t *testing.T) {
 		// hidden adds a process whose descriptor list is permission-denied.
 		shared []int
 		hidden bool
+		// private lists the inodes only a second thread of a second process
+		// holds, in a descriptor table of its own (the leader holds none).
+		private []int
 	}{
-		{"loopback listener of the gateway", []string{listen(loop, 11)}, nil, []int{11}, false, true, nil, false},
-		{"wildcard listener of the gateway", []string{listen(anyV4, 11)}, nil, []int{11}, false, true, nil, false},
-		{"dual-stack listener of the gateway", nil, []string{listen(anyV6, 11)}, []int{11}, false, true, nil, false},
-		{"mapped listener of the gateway", nil, []string{listen(mapped, 11)}, []int{11}, false, true, nil, false},
-		{"loopback and wildcard both of the gateway", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, true, nil, false},
-		{"listener of another process of the account", []string{listen(loop, 11)}, nil, []int{99}, false, false, nil, false},
-		{"gateway holds one, another process the other", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11}, false, false, nil, false},
-		{"no listener", nil, nil, []int{11}, false, false, nil, false},
-		{"listener on another port", []string{"0: 0100007F:1234 00000000:0000 0A 0 0 0 1000 0 11"}, nil, []int{11}, false, false, nil, false},
-		{"an established row is not a listener", []string{"0: 0100007F:4A1A 0100007F:CB20 01 0 0 0 1000 0 11"}, nil, []int{11}, false, false, nil, false},
-		{"descriptors of the process unreadable", []string{listen(loop, 11)}, nil, nil, true, false, nil, false},
-		{"another process of the account also holds the listener", []string{listen(loop, 11)}, nil, []int{11}, false, false, []int{11}, false},
-		{"another process holds only the wildcard listener", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, false, []int{12}, false},
-		{"another process holds an unrelated socket", []string{listen(loop, 11)}, nil, []int{11}, false, true, []int{77}, false},
-		{"a process of the account the kernel will not let us read, like an sshd child", []string{listen(loop, 11)}, nil, []int{11}, false, true, nil, true},
+		{"loopback listener of the gateway", []string{listen(loop, 11)}, nil, []int{11}, false, true, nil, false, nil},
+		{"wildcard listener of the gateway", []string{listen(anyV4, 11)}, nil, []int{11}, false, true, nil, false, nil},
+		{"dual-stack listener of the gateway", nil, []string{listen(anyV6, 11)}, []int{11}, false, true, nil, false, nil},
+		{"mapped listener of the gateway", nil, []string{listen(mapped, 11)}, []int{11}, false, true, nil, false, nil},
+		{"loopback and wildcard both of the gateway", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, true, nil, false, nil},
+		{"listener of another process of the account", []string{listen(loop, 11)}, nil, []int{99}, false, false, nil, false, nil},
+		{"gateway holds one, another process the other", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11}, false, false, nil, false, nil},
+		{"no listener", nil, nil, []int{11}, false, false, nil, false, nil},
+		{"listener on another port", []string{"0: 0100007F:1234 00000000:0000 0A 0 0 0 1000 0 11"}, nil, []int{11}, false, false, nil, false, nil},
+		{"an established row is not a listener", []string{"0: 0100007F:4A1A 0100007F:CB20 01 0 0 0 1000 0 11"}, nil, []int{11}, false, false, nil, false, nil},
+		{"descriptors of the process unreadable", []string{listen(loop, 11)}, nil, nil, true, false, nil, false, nil},
+		{"another process of the account also holds the listener", []string{listen(loop, 11)}, nil, []int{11}, false, false, []int{11}, false, nil},
+		{"another process holds only the wildcard listener", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, false, []int{12}, false, nil},
+		{"another process holds an unrelated socket", []string{listen(loop, 11)}, nil, []int{11}, false, true, []int{77}, false, nil},
+		{"a thread of another process holds the listener in a table of its own", []string{listen(loop, 11)}, nil, []int{11}, false, false, nil, false, []int{11}},
+		{"a thread of another process holds only the wildcard listener in a table of its own", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, false, nil, false, []int{12}},
+		{"a thread of another process holds an unrelated socket in a table of its own", []string{listen(loop, 11)}, nil, []int{11}, false, true, nil, false, []int{77}},
+		{"a process of the account the kernel will not let us read, like an sshd child", []string{listen(loop, 11)}, nil, []int{11}, false, true, nil, true, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			procRoot := t.TempDir()
 			if !tc.other {
-				fds := filepath.Join(procRoot, strconv.Itoa(gateway), "fd")
+				fds := filepath.Join(procRoot, strconv.Itoa(gateway), "task", strconv.Itoa(gateway), "fd")
 				if err := os.MkdirAll(fds, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -136,11 +142,15 @@ func TestListenersHeldOnlyByTheRecordedGateway(t *testing.T) {
 			if len(tc.shared) != 0 {
 				writeHeldSockets(t, procRoot, 5151, tc.shared)
 			}
+			if len(tc.private) != 0 {
+				writeThreadSockets(t, procRoot, 5353, 5353, nil)
+				writeThreadSockets(t, procRoot, 5353, 5354, tc.private)
+			}
 			if tc.hidden {
 				if os.Geteuid() == 0 {
 					t.Skip("root reads every descriptor list")
 				}
-				hidden := filepath.Join(procRoot, "5252", "fd")
+				hidden := filepath.Join(procRoot, "5252", "task", "5252", "fd")
 				if err := os.MkdirAll(hidden, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -159,7 +169,14 @@ func TestListenersHeldOnlyByTheRecordedGateway(t *testing.T) {
 // writeHeldSockets gives a fake process the socket descriptors inodes.
 func writeHeldSockets(t *testing.T, procRoot string, pid int, inodes []int) {
 	t.Helper()
-	fds := filepath.Join(procRoot, strconv.Itoa(pid), "fd")
+	writeThreadSockets(t, procRoot, pid, pid, inodes)
+}
+
+// writeThreadSockets gives thread tid of a fake process the socket descriptors
+// inodes; the process is listed even when its own thread holds none.
+func writeThreadSockets(t *testing.T, procRoot string, pid, tid int, inodes []int) {
+	t.Helper()
+	fds := filepath.Join(procRoot, strconv.Itoa(pid), "task", strconv.Itoa(tid), "fd")
 	if err := os.MkdirAll(fds, 0o755); err != nil {
 		t.Fatal(err)
 	}

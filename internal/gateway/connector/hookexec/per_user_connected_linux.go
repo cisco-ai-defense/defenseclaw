@@ -170,25 +170,39 @@ func readListenerInodes(procNet, table string, keys []string) ([]string, bool) {
 	return inodes, scanner.Err() == nil
 }
 
-// socketInodesOf lists the socket inodes process pid holds open, from its
-// descriptor folder.
+// socketInodesOf lists the socket inodes process pid holds open, from the
+// descriptor folder of each of its threads. Threads usually share one
+// descriptor table, but a thread can own a private copy (unshare with
+// CLONE_FILES) that keeps a socket open after the leader closed it, and the
+// leader folder /proc/<pid>/fd shows only the leader table, so every thread
+// folder is read. A thread that exits while the list is read is skipped.
 func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
-	dir := filepath.Join(procRoot, strconv.Itoa(pid), "fd")
-	entries, err := os.ReadDir(dir)
+	taskDir := filepath.Join(procRoot, strconv.Itoa(pid), "task")
+	threads, err := os.ReadDir(taskDir)
 	if err != nil {
 		return nil, err
 	}
 	held := make(map[string]bool)
-	for _, entry := range entries {
-		target, err := os.Readlink(filepath.Join(dir, entry.Name()))
+	for _, thread := range threads {
+		dir := filepath.Join(taskDir, thread.Name(), "fd")
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue // closed while listing
+			if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+				continue // thread gone
 			}
 			return nil, err
 		}
-		if inode, ok := strings.CutPrefix(target, "socket:["); ok {
-			held[strings.TrimSuffix(inode, "]")] = true
+		for _, entry := range entries {
+			target, err := os.Readlink(filepath.Join(dir, entry.Name()))
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					continue // closed while listing
+				}
+				return nil, err
+			}
+			if inode, ok := strings.CutPrefix(target, "socket:["); ok {
+				held[strings.TrimSuffix(inode, "]")] = true
+			}
 		}
 	}
 	return held, nil
