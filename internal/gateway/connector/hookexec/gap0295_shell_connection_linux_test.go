@@ -52,7 +52,7 @@ func TestGAP0295ShellFreshStartUsesConnectionTime(t *testing.T) {
 	dataDir := t.TempDir()
 	record, err := json.Marshal(map[string]any{
 		"pid": pid, "executable": strings.TrimSuffix(executable, " (deleted)"), "data_dir": dataDir,
-		"start_time": time.Now().Add(-time.Second).Unix(), "start_identity": identity,
+		"start_time": time.Now().Add(-time.Second).Unix(), "start_identity": recordedStart(t, pid),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -43,17 +43,24 @@ func procTables(t *testing.T, tcp, tcp6 []string) string {
 	return dir
 }
 
+// recordedStart is the start_identity the gateway writes for process pid: the
+// same text, from the same helper, that the gateway and the hook compare.
+func recordedStart(t *testing.T, pid int) string {
+	t.Helper()
+	identity, ok := procidentity.Recorded(pid)
+	if !ok {
+		t.Fatalf("no start identity for process %d", pid)
+	}
+	return identity
+}
+
 // recordGateway writes the gateway.pid record of this account in a new data
 // folder, naming process pid, and returns the folder.
 func recordGateway(t *testing.T, pid int, mutate func(*gatewayRecord)) string {
 	t.Helper()
 	dir := t.TempDir()
-	identity, ok := procidentity.Of(pid)
-	if !ok {
-		t.Fatalf("no start identity for process %d", pid)
-	}
 	record := gatewayRecord{PID: pid, Executable: "/usr/local/bin/defenseclaw-gateway", DataDir: dir,
-		StartTime: time.Now().Unix(), StartIdentity: identity}
+		StartTime: time.Now().Unix(), StartIdentity: recordedStart(t, pid)}
 	if mutate != nil {
 		mutate(&record)
 	}
@@ -268,8 +275,16 @@ func TestFrozenListenerIsOwnOnlyWhenItIsTheRecordedGateway(t *testing.T) {
 // ends, the strict tier blocks them with the outage text, and a tool call
 // that names a protected file stays blocked in every tier.
 func TestFrozenOwnGatewayFollowsTheOutageMode(t *testing.T) {
-	project := lateOrdinaryProject(t)
 	addr, dataDir := recordedFrozenGateway(t)
+	assertFrozenGatewayFollowsOutageMode(t, addr, dataDir)
+}
+
+// assertFrozenGatewayFollowsOutageMode runs the calls of a Claude Code turn
+// against a listener at addr that takes no accept and that the gateway.pid
+// record in dataDir names as this account's gateway.
+func assertFrozenGatewayFollowsOutageMode(t *testing.T, addr, dataDir string) {
+	t.Helper()
+	project := lateOrdinaryProject(t)
 	for _, tc := range []struct {
 		name    string
 		event   string
@@ -281,6 +296,8 @@ func TestFrozenOwnGatewayFollowsTheOutageMode(t *testing.T) {
 		{"ordinary call, strict tier", "PreToolUse", lateOrdinaryPayload(t, project, "echo hi"), "closed", true},
 		{"link to keys, open tier", "PreToolUse", lateOrdinaryPayload(t, project, "cat keylink"), "open", true},
 		{"direct keys path, open tier", "PreToolUse", lateOrdinaryPayload(t, project, "cat ../.ssh/authorized_keys"), "open", true},
+		{"prompt submit, open tier", "UserPromptSubmit", `{"hook_event_name":"UserPromptSubmit","prompt":"hello"}`, "open", false},
+		{"prompt submit, strict tier", "UserPromptSubmit", `{"hook_event_name":"UserPromptSubmit","prompt":"hello"}`, "closed", true},
 		{"post-tool event, open tier", "PostToolBatch", `{"hook_event_name":"PostToolBatch"}`, "open", false},
 		{"post-tool event, strict tier", "PostToolBatch", `{"hook_event_name":"PostToolBatch"}`, "closed", true},
 	} {

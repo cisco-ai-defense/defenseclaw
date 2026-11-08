@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -450,12 +451,12 @@ func (d *Daemon) verifyStartIdentityForAuthenticatedMigration(info pidInfo) bool
 	// it cannot always be reproduced after upgrade. Its StartTime was captured
 	// immediately before cmd.Start. Bind that launch lower bound to the native
 	// kernel start second within a five-second window.
-	nativeIdentity, err := darwinProcessStartIdentity(info.PID)
-	if err != nil {
+	nativeIdentity, ok := procidentity.Recorded(info.PID)
+	if !ok {
 		return false
 	}
-	secondsText, _, ok := strings.Cut(nativeIdentity, ".")
-	if !ok {
+	secondsText, _, cut := strings.Cut(nativeIdentity, ".")
+	if !cut {
 		return false
 	}
 	nativeSeconds, err := strconv.ParseInt(secondsText, 10, 64)
