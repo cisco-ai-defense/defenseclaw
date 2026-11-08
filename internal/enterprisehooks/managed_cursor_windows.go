@@ -1181,7 +1181,8 @@ type windowsCursorManagedRebuildWrite struct {
 // again before it is read back.
 func (item *windowsCursorManagedRebuildWrite) write() (bool, error) {
 	result, err := windowsCursorManagedFileSwap(windowsCursorManagedSwap{
-		path: item.preimage.path, expect: item.preimage, data: item.data, limit: item.limit,
+		class: safefile.PublishDefenseClawOwned,
+		path:  item.preimage.path, expect: item.preimage, data: item.data, limit: item.limit,
 	})
 	if !result.swapped {
 		return false, err
@@ -1217,7 +1218,8 @@ func (item *windowsCursorManagedRebuildWrite) undo() error {
 		return removeWindowsCursorManagedFileIfUnchanged(path, item.data, nil, item.limit)
 	}
 	_, err := windowsCursorManagedFileSwap(windowsCursorManagedSwap{
-		path: path, expect: windowsManagedFileSnapshot{path: path, existed: true, data: item.data},
+		class: safefile.PublishDefenseClawOwned,
+		path:  path, expect: windowsManagedFileSnapshot{path: path, existed: true, data: item.data},
 		data: item.preimage.data, limit: item.limit, metadata: &item.metadata,
 	})
 	if err != nil && !errors.Is(err, errWindowsCursorManagedConcurrentChange) {

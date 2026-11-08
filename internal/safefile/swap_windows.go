@@ -89,6 +89,16 @@ type SwapResult struct {
 	ReplacedMetadata *FileMetadata
 }
 
+// PublicationClass selects the Windows rename mode from the file's writers.
+// A file with external writers cannot reserve its name in a transaction:
+// ordinary editors have no way to retry a transactional conflict.
+type PublicationClass uint8
+
+const (
+	PublishDefenseClawOwned PublicationClass = iota + 1
+	PublishSharedWithExternalWriters
+)
+
 // CompareAndSwapFile moves source to destination only while destination
 // holds expected. Writers that do not take the caller's lock, an
 // administrator's editor or the agent itself, can save between a read and a
@@ -100,22 +110,23 @@ type SwapResult struct {
 //   - Before that handle closes, a second handle on the same file takes over.
 //     It still refuses writers, so the compared bytes cannot change, and it
 //     shares deletion so that the swap can replace the file.
-//   - For non-image files, the swap submits the POSIX-semantics rename in a
-//     file transaction, so an outside pathname open sees the old or new file.
-//     On volumes without transactions it uses the guarded one-step rename;
-//     a concurrent opener may need to retry there. Just before publication it
+//   - For DefenseClaw-owned non-image files, the swap submits the
+//     POSIX-semantics rename in a file transaction, so an outside pathname
+//     open sees the old or new file. Files with external writers use the
+//     guarded one-step rename, as do volumes without transactions; a
+//     concurrent opener may need to retry there. Just before publication it
 //     opens destination again and checks that it still names the held file,
 //     so a POSIX-semantics replacement,
 //     deletion or rename by another process after the comparison is refused
 //     as a race; only one that lands in the instant between that check and
 //     the rename is not.
 //
-// Readers keep reading throughout. Cursor (Node) and Codex (Rust) share
-// deletion and are never refused. Windows refuses a reader that does not
-// share deletion for the instant of the rename, as it does for any atomic
-// replacement (ReplaceFileW included), and never during the comparison. A
-// reader that has the file open without sharing deletion makes the swap wait
-// for it, with the old file in place.
+// Open readers keep reading throughout. A fresh open of an owned non-image
+// file sees the old or new name during a transaction. A fresh open of a
+// shared file can receive a transient name or sharing error during the
+// ordinary replacement and follows the documented bounded-retry contract.
+// A reader that has the file open without sharing deletion makes the swap
+// wait for it, with the old file in place.
 //
 // expected.Metadata, when set, is compared too. Share modes do not stop an
 // owner, access list or attribute change, so SwapResult.ReplacedMetadata
@@ -125,13 +136,18 @@ type SwapResult struct {
 // Any other file than expected returns ErrSwapRaced with destination
 // untouched and source left for the caller to remove. inspect, when set, runs
 // on the locked current file before the comparison, so a caller can read its
-// metadata or refuse it.
+// metadata or refuse it. class is required and describes whether another
+// program can save this destination.
 func CompareAndSwapFile(
 	source, destination string,
 	expected SwapExpectation,
 	limit int,
 	inspect func(*os.File) error,
+	class PublicationClass,
 ) (SwapResult, error) {
+	if class != PublishDefenseClawOwned && class != PublishSharedWithExternalWriters {
+		return SwapResult{}, errors.New("safefile: publication class is required")
+	}
 	current, err := lockFileForSwap(destination, windows.GENERIC_READ|windows.READ_CONTROL)
 	if err != nil {
 		return SwapResult{}, err
@@ -165,7 +181,7 @@ func CompareAndSwapFile(
 			result.ReplacedMetadata = &metadata
 		}
 	}
-	if err := replaceHeldFile(source, destination, held, readReplaced); err != nil {
+	if err := replaceHeldFile(source, destination, held, readReplaced, class); err != nil {
 		if errors.Is(err, ErrSwapRaced) {
 			return SwapResult{}, err
 		}
@@ -282,17 +298,18 @@ func holdMatchedFileForReplace(
 }
 
 // replaceHeldFile renames source over destination while destination still
-// names held. The transacted path checks identity with a read-attributes
-// handle, then publishes the staged file in one transaction. Its rollback
-// leaves the old name intact if a reader refuses deletion. Volumes without
-// transactions use a DELETE-access destination handle to exclude such readers
-// while the guarded one-step rename runs.
+// names held. The owned-file transacted path checks identity with a
+// read-attributes handle, then publishes the staged file in one transaction.
+// Its rollback leaves the old name intact if a reader refuses deletion.
+// Shared files and volumes without transactions use a DELETE-access
+// destination handle to exclude such readers while the guarded one-step
+// rename runs.
 //
 // beforeRename runs just before each publication attempt, while held still
 // names the file at destination.
-func replaceHeldFile(source, destination string, held *os.File, beforeRename func()) error {
+func replaceHeldFile(source, destination string, held *os.File, beforeRename func(), class PublicationClass) error {
 	deadline := time.Now().Add(swapLockTimeout)
-	useTransaction := !swapRequiresPlainRename(source)
+	useTransaction := class == PublishDefenseClawOwned && !swapRequiresPlainRename(source)
 	for {
 		target, err := openFileForReplace(destination, useTransaction)
 		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {

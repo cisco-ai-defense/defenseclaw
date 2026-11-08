@@ -41,7 +41,8 @@ func TestPublishSharedFileKeepsTheAccessListOverAnInheritingFile(t *testing.T) {
 			base := SharedFile{Path: path, Exists: true, Data: []byte("a = 1\n"), Metadata: metadata}
 			var want FileMetadata
 			_, swapped, err := PublishSharedFile(SharedPublish{
-				Base: base, CompareMetadata: true, Data: []byte("b = 1\n"), Limit: 1 << 20,
+				Class: PublishDefenseClawOwned,
+				Base:  base, CompareMetadata: true, Data: []byte("b = 1\n"), Limit: 1 << 20,
 				TempPattern: ".swap-inherit-*",
 				Protect: func(temp string) error {
 					if err := ApplyFileMetadata(temp, metadata); err != nil {

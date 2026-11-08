@@ -188,7 +188,7 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 				if err := os.WriteFile(source, versions[(swaps+1)%2], 0o600); err != nil {
 					t.Fatal(err)
 				}
-				result, err := CompareAndSwapFile(source, destination,
+				result, err := compareAndSwapOwnedForTest(source, destination,
 					SwapExpectation{Exists: true, Data: versions[swaps%2]}, 64, nil)
 				if err != nil || !result.Swapped || !result.Replaced {
 					close(stop)
@@ -269,7 +269,7 @@ func TestCompareAndSwapFileKeepsMZRequirementsAtTheNameThroughout(t *testing.T) 
 			<-done
 			t.Fatal(err)
 		}
-		result, err := CompareAndSwapFile(source, destination,
+		result, err := compareAndSwapOwnedForTest(source, destination,
 			SwapExpectation{Exists: true, Data: versions[swaps%2]}, len(versions[0]), nil)
 		if err != nil || !result.Swapped || !result.Replaced {
 			close(stop)
@@ -380,7 +380,7 @@ func TestCompareAndSwapFileLetsReadersReadWhileItCompares(t *testing.T) {
 	}
 	source := writeSwapSourceForTest(t, dir, "new")
 	inspected := false
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16,
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16,
 		func(*os.File) error {
 			inspected = true
 			for _, reader := range swapReaderShares {
@@ -445,7 +445,7 @@ func TestCompareAndSwapFileWaitsForAReaderThatDoesNotShareDeletion(t *testing.T)
 				_ = reader.Close()
 			}()
 			source := writeSwapSourceForTest(t, dir, "new")
-			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+			result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 			<-released
 			if test.swapped {
 				if err != nil || !result.Swapped {

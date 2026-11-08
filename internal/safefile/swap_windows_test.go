@@ -12,9 +12,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func compareAndSwapOwnedForTest(source, destination string, expected SwapExpectation, limit int, inspect func(*os.File) error) (SwapResult, error) {
+	return CompareAndSwapFile(source, destination, expected, limit, inspect, PublishDefenseClawOwned)
+}
 
 func writeSwapSourceForTest(t *testing.T, dir string, data string) string {
 	t.Helper()
@@ -114,7 +119,7 @@ func TestCompareAndSwapFileReplacesOnlyTheExpectedFile(t *testing.T) {
 				}
 			}
 			source := writeSwapSourceForTest(t, dir, "new")
-			result, err := CompareAndSwapFile(source, destination, test.expected, 4, nil)
+			result, err := compareAndSwapOwnedForTest(source, destination, test.expected, 4, nil)
 			if test.swapped {
 				if err != nil || !result.Swapped || result.Replaced != (test.onDisk != nil) {
 					t.Fatalf("swap: %+v err=%v", result, err)
@@ -145,7 +150,7 @@ func TestCompareAndSwapFileInspectRefuses(t *testing.T) {
 	source := writeSwapSourceForTest(t, dir, "new")
 	refused := errors.New("refused")
 	inspected := ""
-	_, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16,
+	_, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16,
 		func(file *os.File) error {
 			inspected = file.Name()
 			return refused
@@ -171,7 +176,7 @@ func TestCompareAndSwapFileWaitsForAnOpenWriter(t *testing.T) {
 	}
 	defer writer.Close()
 	source := writeSwapSourceForTest(t, dir, "new")
-	if _, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil); err == nil {
+	if _, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil); err == nil {
 		t.Fatal("the swap replaced a file another writer has open for writing")
 	}
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "old", "source.tmp": "new"})
@@ -292,7 +297,7 @@ func TestCompareAndSwapFileRefusesAFileChangedBeforeTheReplace(t *testing.T) {
 			previous := swapBeforeReplace
 			swapBeforeReplace = func(path string) { test.change(t, dir, path) }
 			defer func() { swapBeforeReplace = previous }()
-			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+			result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 			if !errors.Is(err, ErrSwapRaced) || result.Swapped {
 				t.Fatalf("swap over a changed file: %+v err=%v", result, err)
 			}
@@ -329,7 +334,7 @@ func TestCompareAndSwapFileRefusesWritersUntilItReplaces(t *testing.T) {
 		}
 	}
 	defer func() { swapBeforeReplace = previous }()
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped || !result.Replaced {
 		t.Fatalf("swap: %+v err=%v", result, err)
 	}
@@ -362,7 +367,7 @@ func TestCompareAndSwapFileUsesPOSIXReplacementFlags(t *testing.T) {
 		}
 		return renameTransacted(from, to, flags, tx)
 	}
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped || calls != 1 {
 		t.Fatalf("CAS publication: result=%+v calls=%d err=%v", result, calls, err)
 	}
@@ -392,7 +397,7 @@ func TestCompareAndSwapFileTransactsNonImagePublication(t *testing.T) {
 		plain++
 		return renameReplace(from, to, class, flags)
 	}
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped {
 		t.Fatalf("CAS publication: result=%+v err=%v", result, err)
 	}
@@ -423,11 +428,76 @@ func TestCompareAndSwapFileKeepsTransactionAfterNameConflict(t *testing.T) {
 		plain++
 		return renameReplace(from, to, class, flags)
 	}
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped || transacted != 2 || plain != 0 {
 		t.Fatalf("CAS publication: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
+}
+
+// A file edited outside DefenseClaw uses the ordinary one-step replacement.
+// Its editor may need to retry normal sharing errors, but must not encounter
+// a transaction reservation on the destination name.
+func TestCompareAndSwapFileSharedClassAllowsAnExternalSave(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, "product")
+	admin := filepath.Join(dir, "admin.tmp")
+	if err := os.WriteFile(admin, []byte("administrator"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previousBefore, previousTx, previousPlain := swapBeforeReplace, swapTransactedRename, swapRenameReplace
+	defer func() {
+		swapBeforeReplace, swapTransactedRename, swapRenameReplace = previousBefore, previousTx, previousPlain
+	}()
+	var firstSave error
+	transacted, plain := 0, 0
+	swapBeforeReplace = func(string) { firstSave = os.Rename(admin, destination) }
+	swapTransactedRename = func(string, string, uint32, windows.Handle) error {
+		transacted++
+		return errors.New("a shared file entered a transaction")
+	}
+	swapRenameReplace = func(from, to string, class, flags uint32) error {
+		plain++
+		return renameReplace(from, to, class, flags)
+	}
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")},
+		16, nil, PublishSharedWithExternalWriters)
+	if transacted != 0 {
+		t.Fatalf("shared publication opened %d transactions", transacted)
+	}
+	if firstSave == nil {
+		if !errors.Is(err, ErrSwapRaced) || result.Swapped || plain != 0 {
+			t.Fatalf("administrator save won: swap=%+v plain=%d err=%v", result, plain, err)
+		}
+	} else {
+		if !errors.Is(firstSave, windows.ERROR_SHARING_VIOLATION) &&
+			!errors.Is(firstSave, windows.ERROR_ACCESS_DENIED) &&
+			!errors.Is(firstSave, windows.ERROR_LOCK_VIOLATION) {
+			t.Fatalf("administrator save received %v", firstSave)
+		}
+		if err != nil || !result.Swapped || plain != 1 {
+			t.Fatalf("product publication: swap=%+v plain=%d err=%v", result, plain, err)
+		}
+		for attempt := 0; ; attempt++ {
+			firstSave = os.Rename(admin, destination)
+			if firstSave == nil {
+				break
+			}
+			if attempt >= 100 || (!errors.Is(firstSave, windows.ERROR_SHARING_VIOLATION) &&
+				!errors.Is(firstSave, windows.ERROR_ACCESS_DENIED) &&
+				!errors.Is(firstSave, windows.ERROR_LOCK_VIOLATION)) {
+				t.Fatalf("administrator retry: %v", firstSave)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	if data, err := os.ReadFile(destination); err != nil || string(data) != "administrator" {
+		t.Fatalf("administrator's saved bytes = %q, err=%v", data, err)
+	}
 }
 
 func TestCompareAndSwapFileTransactsMZPrefixedRequirementsData(t *testing.T) {
@@ -450,7 +520,7 @@ func TestCompareAndSwapFileTransactsMZPrefixedRequirementsData(t *testing.T) {
 		plain++
 		return renameReplace(from, to, class, flags)
 	}
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: old}, len(newData), nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: old}, len(newData), nil)
 	if err != nil || !result.Swapped || transacted != 1 || plain != 0 {
 		t.Fatalf("requirements publication: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
 	}
@@ -473,7 +543,7 @@ func TestCompareAndSwapFileRollsBackUncommittedRename(t *testing.T) {
 		}
 		return rollback
 	}
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if !errors.Is(err, rollback) || result.Swapped {
 		t.Fatalf("CAS rollback: result=%+v err=%v", result, err)
 	}
@@ -506,7 +576,7 @@ func TestCompareAndSwapFileFallsBackWhenTransactionsUnavailable(t *testing.T) {
 				plain++
 				return renameReplace(from, to, class, flags)
 			}
-			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+			result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 			if err != nil || !result.Swapped || transacted != 1 || plain != 1 {
 				t.Fatalf("CAS fallback: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
 			}
@@ -538,7 +608,7 @@ func TestCompareAndSwapFileRechecksIdentityAfterEncryptedStageFallback(t *testin
 		plain++
 		return renameReplace(from, to, class, flags)
 	}
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if !errors.Is(err, ErrSwapRaced) || result.Swapped || transacted != 1 || plain != 0 {
 		t.Fatalf("CAS fallback race: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
 	}
@@ -570,7 +640,7 @@ func TestCompareAndSwapFileLeavesProgramImagesOutsideTransactions(t *testing.T) 
 	swapRenameReplace = func(from, to string, class, flags uint32) error {
 		return renameReplace(from, to, class, flags)
 	}
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped {
 		t.Fatalf("CAS publication: result=%+v err=%v", result, err)
 	}
@@ -591,7 +661,7 @@ func TestCompareAndSwapFilePublishesEmptyNonImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := writeSwapSourceForTest(t, dir, "")
-	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 	if err != nil || !result.Swapped {
 		t.Fatalf("CAS publication: result=%+v err=%v", result, err)
 	}
@@ -670,7 +740,7 @@ func TestCompareAndSwapFileWithoutPOSIXRenames(t *testing.T) {
 				}
 				return windows.ERROR_SHARING_VIOLATION
 			}
-			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+			result, err := compareAndSwapOwnedForTest(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
 			if !errors.Is(err, ErrSwapUnsupported) || result.Swapped || moves != 1 {
 				t.Fatalf("unsupported CAS publication: result=%+v moves=%d err=%v", result, moves, err)
 			}
