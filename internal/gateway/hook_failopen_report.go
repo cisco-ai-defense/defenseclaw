@@ -333,8 +333,9 @@ func (s *Sidecar) watchHookFailureCalls(ctx context.Context) {
 				events = nil
 				continue
 			}
-			if filepath.Base(event.Name) != hookFailuresFile && filepath.Base(event.Name) != hookFailuresDroppedFile &&
-				!(event.Op&fsnotify.Create != 0 && filepath.Base(event.Name) == "logs") {
+			base := filepath.Base(event.Name)
+			logsCreated := event.Op&fsnotify.Create != 0 && base == "logs"
+			if base != hookFailuresFile && base != hookFailuresDroppedFile && !logsCreated {
 				continue
 			}
 		case _, open := <-errorsCh:
