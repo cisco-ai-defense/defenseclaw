@@ -194,3 +194,151 @@ func TestFlaggedSkillUnderADefaultModeLinkedRootIsQuarantined(t *testing.T) {
 		t.Fatalf("the flagged skill stayed in its folder (stat err %v)", err)
 	}
 }
+
+// flaggedByNameScanner reports a critical finding for the skill folders named
+// in flagged and a clean result for every other one, and signals each scan.
+type flaggedByNameScanner struct {
+	flagged map[string]bool
+	scanned chan string
+}
+
+func (s *flaggedByNameScanner) Name() string               { return "skill-scanner" }
+func (s *flaggedByNameScanner) Version() string            { return "fake-1" }
+func (s *flaggedByNameScanner) SupportedTargets() []string { return []string{"skill"} }
+
+func (s *flaggedByNameScanner) Scan(_ context.Context, target string) (*scanner.ScanResult, error) {
+	result := &scanner.ScanResult{Scanner: "skill-scanner", Target: target, Timestamp: time.Now().UTC()}
+	if s.flagged[filepath.Base(target)] {
+		result.Findings = []scanner.Finding{{
+			ID: "finding", RuleID: "TRUST-IGNORE-PREVIOUS", Severity: scanner.SeverityCritical, Title: "critical finding",
+		}}
+	}
+	select {
+	case s.scanned <- target:
+	default:
+	}
+	return result, nil
+}
+
+// waitScanned waits until the scanner is asked to scan the skill folder name
+// (by its resolved path under a linked root).
+func (s *flaggedByNameScanner) waitScanned(t *testing.T, name string) {
+	t.Helper()
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case target := <-s.scanned:
+			if filepath.Base(target) == name {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("skill %s was not scanned", name)
+		}
+	}
+}
+
+// waitGone waits until path no longer exists (the skill was taken out).
+func waitGone(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		_, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("%s was scanned and flagged but stayed in the admitted root", path)
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+// GAP-0905: with periodic rescan off, a flagged skill that was in a root
+// watched closely before the watcher started is scanned when another skill
+// changes, and the verdict is enforced like an install: it is taken out of the
+// folder, not only scanned. A clean skill beside it stays.
+func TestWarnedRootRescanTakesOutAFlaggedSkillThatWasAlreadyThere(t *testing.T) {
+	w, root, warnings := newWarnedWatcher(t, []string{"/home/u/dotfiles"})
+	w.cfg.Gateway.Watcher.Skill.TakeAction = true
+	addSkill(t, root, "before")
+	addSkill(t, root, "fine")
+	probe := &flaggedByNameScanner{flagged: map[string]bool{"before": true}, scanned: make(chan string, 16)}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return probe }
+	startWatcher(t, w)
+	select {
+	case <-warnings:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the warned root was not published")
+	}
+	time.Sleep(500 * time.Millisecond)
+	addSkill(t, root, "after")
+	probe.waitScanned(t, "before")
+	waitGone(t, filepath.Join(root, "before"))
+	probe.waitScanned(t, "fine")
+	time.Sleep(300 * time.Millisecond)
+	if _, err := os.Lstat(filepath.Join(root, "fine")); err != nil {
+		t.Fatalf("a clean skill under the warned root was taken out: %v", err)
+	}
+}
+
+// The same flagged skill under a root with no group-writable folder is not
+// rescanned by a change elsewhere (no extra cycle), and a flagged skill that
+// is already admitted stays as before: only roots watched closely enforce.
+func TestOrdinaryRootRescanLeavesAnUntouchedSkillAlone(t *testing.T) {
+	w, root, _ := newWarnedWatcher(t, nil)
+	w.cfg.Gateway.Watcher.Skill.TakeAction = true
+	addSkill(t, root, "before")
+	probe := &flaggedByNameScanner{flagged: map[string]bool{"before": true}, scanned: make(chan string, 16)}
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return probe }
+	startWatcher(t, w)
+	time.Sleep(500 * time.Millisecond)
+	addSkill(t, root, "after")
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Lstat(filepath.Join(root, "before")); err != nil {
+		t.Fatalf("an untouched skill under an ordinary root was taken out: %v", err)
+	}
+}
+
+// GAP-0905 on the reported layout: ~/.claude linked into a 0775 private-group
+// dotfiles tree. With the real private-group proof the root is admitted, the
+// PAM-loaded warning is supplied by the fixture, and a flagged skill that was
+// already there is taken out of the linked folder by the warned rescan.
+func TestWarnedLinkedRootRescanTakesOutAFlaggedSkillThatWasAlreadyThere(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Watch.RescanEnabled = false
+	cfg.Gateway.Watcher.Skill.TakeAction = true
+	home, root, physical := linkedAgentSkills(t)
+	dotfiles := filepath.Join(home, "dotfiles")
+	for _, dir := range []string{dotfiles, filepath.Dir(physical), physical} {
+		if err := os.Chmod(dir, 0o775); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := rootRouteWarnings(root, watcherEvalSymlinks); err != nil {
+		t.Skipf("the test account has no private group on local accounts: %v", err)
+	}
+	stubRootRouteWarnings(t, []string{dotfiles})
+	addSkill(t, physical, "before")
+	probe := &flaggedByNameScanner{flagged: map[string]bool{"before": true}, scanned: make(chan string, 16)}
+	w := New(cfg, []string{root}, nil, store, logger, nil, nil)
+	w.scannerFactory = func(InstallEvent) scanner.Scanner { return probe }
+	warned := make(chan []RootWarning, 8)
+	w.SetRootWarningHandler(func(current []RootWarning) { warned <- current })
+	startWatcher(t, w)
+	select {
+	case current := <-warned:
+		if len(current) != 1 {
+			t.Fatalf("root warnings = %+v, want one", current)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the linked root warning was not published")
+	}
+	time.Sleep(500 * time.Millisecond)
+	addSkill(t, physical, "after")
+	probe.waitScanned(t, "before")
+	waitGone(t, filepath.Join(physical, "before"))
+}
