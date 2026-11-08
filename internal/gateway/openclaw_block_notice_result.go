@@ -22,11 +22,15 @@ import (
 // and is empty unless exactly one such item names the call. callOnly is true
 // when the request carries no item id for the call at all: OpenClaw replays a
 // function_call without its id unless it replays the reasoning item too, so
-// the result then names the call part and nothing else.
+// the result then names the call part and nothing else. items counts the
+// function_call items of the request that name the call: with several, the
+// result is visibly ambiguous between them, and a block of the call part is
+// dropped quietly rather than left for a later replay of the result to claim.
 type toolResultID struct {
 	id       string
 	itemRef  string
 	callOnly bool
+	items    int
 }
 
 // toolResultIDs returns the call id of every tool-result message of the
@@ -87,6 +91,7 @@ func toolResultIDs(body []byte) []toolResultID {
 		}
 		r := toolResultID{id: callID}
 		if items := itemsOfCall[callID]; typ == "function_call_output" {
+			r.items = len(items)
 			named := 0
 			for _, item := range items {
 				if item != "" {
