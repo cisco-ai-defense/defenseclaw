@@ -4157,7 +4157,15 @@ func managedPeerLexicalCWD(ctx context.Context, requestCWD, toolCWD string) stri
 	}
 	if dir == "" {
 		dir = strings.TrimSpace(requestCWD)
-	} else if !filepath.IsAbs(dir) {
+	}
+	// The gateway cannot follow links in the home, so a directory with a
+	// parent step (project/lnk/.. is the folder lnk points out of) is not
+	// placed here: the hook client resolved it as the user and keyed its
+	// evidence there (hookpaths.CWDKey).
+	if hasParentElement(dir) {
+		return ""
+	}
+	if toolCWD = strings.TrimSpace(toolCWD); toolCWD != "" && !filepath.IsAbs(dir) {
 		base := strings.TrimSpace(requestCWD)
 		if base == "" || !filepath.IsAbs(base) || hasParentElement(base) {
 			return ""
@@ -4191,7 +4199,7 @@ func agentHookToolCWD(ctx context.Context, requestCWD, toolCWD string) string {
 			}
 			return hookCWDForContext(ctx, path.Join(sandboxCWD, toolCWD))
 		}
-		toolCWD = filepath.Join(requestCWD, toolCWD)
+		toolCWD = hookpaths.JoinDirectoryText(requestCWD, toolCWD)
 	}
 	return hookCWDForContext(ctx, toolCWD)
 }

@@ -1437,7 +1437,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			return incompleteEvidence("")
 		}
 	}
-	cwd = filepath.Clean(cwd)
+	cwd = PlaceDirectory("", cwd)
 	var toolArgs map[string]json.RawMessage
 	_ = json.Unmarshal(args, &toolArgs)
 	// Codex exec_command runs in tool_input.workdir, which can differ from
@@ -1450,11 +1450,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				strings.HasPrefix(workdir, "~") || strings.IndexByte(workdir, 0) >= 0 {
 				return incompleteEvidence(cwd)
 			}
-			if filepath.IsAbs(workdir) {
-				cwd = filepath.Clean(workdir)
-			} else {
-				cwd = filepath.Join(cwd, workdir)
-			}
+			cwd = PlaceDirectory(cwd, workdir)
 		}
 	}
 	home, err := os.UserHomeDir()
