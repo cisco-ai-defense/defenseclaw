@@ -506,6 +506,58 @@ public static class DcsfListedRestartManager {
                 if ([int]$nativeForProbe::GetDirectoryOpenError($restricted, [uint32]0x10000) -ne 5) {
                     $failures.Add('the probe left its privileged thread token in place: a backup-semantics DELETE open of the SYSTEM-only file succeeded afterwards')
                 }
+                # Review S4 (Secure Client pin): the unreadable-file handling is
+                # standalone only. Under the Secure Client profile the native
+                # query asks Restart Manager about every path exactly as before,
+                # so the SYSTEM-only file still fails the batch there, while the
+                # standalone profile answers.
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                $nativeSecureClient = Initialize-DefenseClawNativeSecurity
+                try {
+                    [void]$nativeSecureClient::GetFileHolders([string[]]@($restricted))
+                    $failures.Add('the Secure Client profile used the standalone unreadable-file handling')
+                }
+                catch {
+                    if ($_.Exception.Message -notmatch 'Restart Manager holder list failed') {
+                        $failures.Add("the Secure Client profile did not get the original Restart Manager failure: $($_.Exception.Message)")
+                    }
+                }
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                $nativeStandalone = Initialize-DefenseClawNativeSecurity
+                try {
+                    [void]$nativeStandalone::GetFileHolders([string[]]@($restricted))
+                }
+                catch {
+                    $failures.Add("the standalone profile did not handle the SYSTEM-only file: $($_.Exception.Message)")
+                }
+                # Review S1: when the privileged thread token cannot be taken
+                # off the thread, the process stops at once with a named reason
+                # instead of throwing where a caller might swallow it. The
+                # revert failure is injected in a child process.
+                $moduleFile = [string](Microsoft.PowerShell.Core\Get-Module -Name DefenseClawEnterprise).Path
+                $childScript = [IO.Path]::Combine($Root, 'revert-failure-child.ps1')
+                [IO.File]::WriteAllText($childScript, @"
+`$ErrorActionPreference = 'Stop'
+`$module = Import-Module -Name '$($moduleFile.Replace("'", "''"))' -Force -PassThru
+& `$module {
+    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+    `$native = Initialize-DefenseClawNativeSecurity
+    `$native.GetField('failRevertForTest', [Reflection.BindingFlags]'NonPublic,Static').SetValue(`$null, `$true)
+    [void]`$native::GetFileHolders([string[]]@('$($restricted.Replace("'", "''"))'))
+}
+'THE-PROCESS-SURVIVED'
+"@)
+                $childStdout = [IO.Path]::Combine($Root, 'revert-failure-child.out')
+                $childStderr = [IO.Path]::Combine($Root, 'revert-failure-child.err')
+                $childProcess = Microsoft.PowerShell.Management\Start-Process -FilePath $engine -ArgumentList ('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $childScript) -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $childStdout -RedirectStandardError $childStderr
+                $childExit = $childProcess.ExitCode
+                $childOutput = [IO.File]::ReadAllText($childStdout) + [IO.File]::ReadAllText($childStderr)
+                if ($childExit -eq 0 -or $childOutput -match 'THE-PROCESS-SURVIVED') {
+                    $failures.Add("a failed token revert did not stop the process (exit $childExit)")
+                }
+                if ($childOutput -notmatch 'privilege_revert_failed') {
+                    $failures.Add("a failed token revert did not name its reason: $childOutput")
+                }
                 # The access list is unchanged.
                 $restrictedAcl = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $restricted).GetAccessRules($true, $false, [Security.Principal.SecurityIdentifier]) |
                     Microsoft.PowerShell.Core\ForEach-Object { $_.IdentityReference.Value }
@@ -565,7 +617,7 @@ public static class DcsfUnnamedRestartManager {
             $nativeType = Initialize-DefenseClawNativeSecurity
             foreach ($answer in 0, 2, 3) {
                 try {
-                    if ($nativeType::DeleteProbeFindsHolder($answer, 'x') -ne $false) {
+                    if ($nativeType::DeleteProbeFindsHolder($answer, 'x', '') -ne $false) {
                         $failures.Add("a DELETE answer of $answer was taken for a holder")
                     }
                 }
@@ -573,12 +625,12 @@ public static class DcsfUnnamedRestartManager {
                     $failures.Add("a DELETE answer of $answer threw instead of meaning no holder: $($_.Exception.Message)")
                 }
             }
-            if ($nativeType::DeleteProbeFindsHolder(32, 'x') -ne $true) {
+            if ($nativeType::DeleteProbeFindsHolder(32, 'x', '') -ne $true) {
                 $failures.Add('a sharing violation was not taken for a holder')
             }
             foreach ($answer in 1, 5, 19, 87) {
                 try {
-                    [void]$nativeType::DeleteProbeFindsHolder($answer, 'C:\scratch\sample.json')
+                    [void]$nativeType::DeleteProbeFindsHolder($answer, 'C:\scratch\sample.json', '')
                     $failures.Add("a DELETE answer of $answer did not throw")
                 }
                 catch {
@@ -654,10 +706,12 @@ public static class DcsfUnnamedRestartManager {
                         @{ Name = 'a label that is not StateRoot or InstallRoot'; Label = 'Other'; Error = $denied; Root = $privLayout.StateRoot },
                         @{ Name = 'an error that is not access denied'; Label = 'StateRoot'; Error = $inUseError; Root = $privLayout.StateRoot },
                         @{ Name = 'a folder that is not the exact StateRoot'; Label = 'StateRoot'; Error = $denied; Root = $guardianFolder },
-                        @{ Name = 'a vendor folder'; Label = 'StateRoot'; Error = $denied; Root = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex') }
+                        @{ Name = 'a vendor folder'; Label = 'StateRoot'; Error = $denied; Root = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex') },
+                        @{ Name = 'a target that is not the checked root'; Label = 'StateRoot'; Error = $denied; Root = $privLayout.StateRoot; Target = $guardianFolder }
                     )
                     foreach ($case in $refusals) {
-                        if (Remove-DefenseClawStateTreePrivileged -Root $case.Root -Target $case.Root -Label $case.Label -ErrorRecord $case.Error) {
+                        $caseTarget = if ($case.ContainsKey('Target')) { $case.Target } else { $case.Root }
+                        if (Remove-DefenseClawStateTreePrivileged -Root $case.Root -Target $caseTarget -Label $case.Label -ErrorRecord $case.Error) {
                             $failures.Add("the privileged deletion acted on $($case.Name)")
                         }
                     }
@@ -699,6 +753,30 @@ public static class DcsfUnnamedRestartManager {
                         if (@($events | Microsoft.PowerShell.Core\Where-Object { $_ -like "*defenseclaw_repair*$expected*" }).Count -lt 1) {
                             $failures.Add("the privileged deletion logged no defenseclaw_repair line for $expected")
                         }
+                    }
+                    # Review S5: with no lifecycle log folder the deletion
+                    # still leaves a record (the warnings, and one that says the
+                    # log could not be written).
+                    $noLogLayout = New-TestState 'privdel2'
+                    $script:ProgramData = [IO.Path]::Combine($Root, 'privdel2', 'PD')
+                    $script:ProgramFiles = [IO.Path]::Combine($Root, 'privdel2', 'PF')
+                    $script:WindowsDirectory = [IO.Path]::Combine($Root, 'privdel2', 'WIN')
+                    [void][IO.Directory]::CreateDirectory($script:WindowsDirectory)
+                    $guardian2 = [IO.Path]::Combine($noLogLayout.StateRoot, 'hook-guardian')
+                    [void][IO.Directory]::CreateDirectory($guardian2)
+                    $secret2 = [IO.Path]::Combine($guardian2, 'opencode-service-ports.json')
+                    [IO.File]::WriteAllText($secret2, 'state')
+                    & "$env:SystemRoot\System32\icacls.exe" $secret2 /inheritance:r /grant:r '*S-1-5-18:F' | Out-Null
+                    $denied2 = [Management.Automation.ErrorRecord]::new([UnauthorizedAccessException]::new('Access to the path is denied.'), 'denied', [Management.Automation.ErrorCategory]::PermissionDenied, $null)
+                    $done2 = Remove-DefenseClawStateTreePrivileged -Root $noLogLayout.StateRoot -Target $noLogLayout.StateRoot -Label StateRoot -ErrorRecord $denied2 -WarningVariable noLogWarnings -WarningAction SilentlyContinue
+                    if (-not $done2 -or [IO.Directory]::Exists($noLogLayout.StateRoot)) {
+                        $failures.Add('the privileged deletion without a lifecycle log folder did not remove the StateRoot')
+                    }
+                    if (@($noLogWarnings | Microsoft.PowerShell.Core\Where-Object { "$_" -like '*lifecycle log could not be written*' }).Count -ne 1) {
+                        $failures.Add('the privileged deletion without a lifecycle log folder left no record that the log was not written')
+                    }
+                    if (@($noLogWarnings | Microsoft.PowerShell.Core\Where-Object { "$_" -like '*defenseclaw_repair*opencode-service-ports.json*' }).Count -lt 1) {
+                        $failures.Add('the privileged deletion without a lifecycle log folder named no path in the warnings')
                     }
                 }
                 finally {
