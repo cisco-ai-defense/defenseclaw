@@ -908,8 +908,8 @@ func mcpConnectorResolvesByName(connector string) bool {
 // what its session resolved before (a gateway restart, a new session, or a
 // server the agent loads from outside the files read here). A rule of the
 // denied list that pins where a server points cannot be checked against it,
-// and neither can an endpoint rule of the allowed list while asset_policy is
-// enabled, so the call is refused in a strict or managed deployment and
+// and neither can an endpoint rule of the allowed list while asset_policy and
+// its runtime detection for MCP are enabled, so the call is refused in a strict or managed deployment and
 // allowed with a warning in the default and permissive tiers, as for a server
 // whose admission is pending (GAP-0861). The allowed list follows
 // asset_policy.mode. When lost is set, a denied definition of the session did
@@ -923,7 +923,10 @@ func unknownMCPDefinitionDecision(cfg *config.Config, connector string, probe mc
 		return config.AssetPolicyDecision{}, false
 	}
 	denyPins := rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName)
-	allowPins := cfg.AssetPolicy.Enabled && rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName)
+	// The allowed list follows runtime detection, as in unprovenMCPDefinitionDecision.
+	detection, _ := cfg.AssetRuntimeDetectionFor("mcp")
+	allowPins := cfg.AssetPolicy.Enabled && detection.Enabled &&
+		rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Allowed, connector, probe.ServerName)
 	if !denyPins && !allowPins {
 		return config.AssetPolicyDecision{}, false
 	}
