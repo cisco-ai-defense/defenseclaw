@@ -32,8 +32,8 @@ import (
 //     authorized-keys file or a DefenseClaw, OpenClaw or ZeptoClaw folder
 //     or file in any case (the text carries "ssh", "authorized",
 //     "defenseclaw", "openclaw" or "zeptoclaw", or a hidden folder name
-//     with "claw" or "defense" in it), is "..", or reaches the root or the
-//     user's home itself; an ordinary word such as claw or defense is not
+//     with "claw" or "defense" in it), or reaches the root or the user's
+//     home itself; an ordinary word such as claw or defense is not
 //     a name, because a protected file is a place and a place is told by
 //     its folder, its link or its state-folder name, not by one word;
 //   - a path word, or a folder in front of it, is a link whose way to its
@@ -45,7 +45,10 @@ import (
 //     same file as one in a protected folder (late_ordinary_reach.go). A
 //     link or a hard link whose whole way and identity are ordinary is as
 //     ordinary as its target, because a program that reads or writes through
-//     it touches only that target. A program may
+//     it touches only that target. A ".." step goes to the parent of the
+//     physical folder in front of it, as the file system does (a link in
+//     front of it is already followed), so the place it reaches is judged
+//     like any other. A program may
 //     read a path out of any word (-ofile, of=file, --out=file, a:file), so
 //     every part of a word that can start a value is looked at, not only
 //     the word;
@@ -190,6 +193,15 @@ type lateEntry struct {
 // lateMaxCwds bounds the working directories one call may visit.
 const lateMaxCwds = 8
 
+// accountHomeDir is the home of the account database; a test replaces it.
+var accountHomeDir = func() (string, error) {
+	current, err := user.Current()
+	if err != nil {
+		return "", err
+	}
+	return current.HomeDir, nil
+}
+
 func newLateScan(cwd, home string) (*lateScan, bool) {
 	given := home != ""
 	if !given {
@@ -212,16 +224,26 @@ func newLateScan(cwd, home string) (*lateScan, bool) {
 	// home, so a hard link to a protected file stays closed and a hard link
 	// to an ordinary file stays ordinary.
 	if !ok && given {
-		current, err := user.Current()
+		account, err := accountHomeDir()
 		if err != nil {
 			return nil, false
 		}
-		if realHome, ok = lateUsableHome(current.HomeDir); ok {
+		if realHome, ok = lateUsableHome(account); ok {
 			indexHomes = lateFallbackHomes(home, realCWD, realHome)
 		}
 	}
 	if !ok {
 		return nil, false
+	}
+	if !given {
+		// The home of the process is not always the account home (a hook
+		// run with a scratch HOME): the protected files of both are indexed,
+		// so a hard link to the account's keys file is found either way.
+		if current, err := accountHomeDir(); err == nil {
+			if account, usable := lateUsableHome(current); usable && !slices.Contains(indexHomes, account) {
+				indexHomes = append(indexHomes, account)
+			}
+		}
 	}
 	return &lateScan{cwds: []string{realCWD}, chain: []string{realCWD}, home: realHome, indexHomes: indexHomes, seen: map[string]lateEntry{}}, true
 }
@@ -255,7 +277,8 @@ func lateFallbackHomes(given, cwd, account string) []string {
 // system does when a link comes before the "..". The result is resolved
 // component by component, a link before a parent step included, by
 // pathEvalSymlinks (newLateScan, lateUsableHome); an operand word is walked
-// the same way by lateScan.walk, which closes on any parent step.
+// the same way by lateScan.walk, which steps a ".." to the parent of the
+// physical folder in front of it.
 func lateAt(base, path string) string {
 	if filepath.IsAbs(path) {
 		return path
@@ -300,17 +323,17 @@ func lateNamesProtected(text string) bool {
 	return false
 }
 
-// path reports a path word that is ordinary: no protected name, no ".."
-// component, no link on the way or at its end (an existing regular file with
+// path reports a path word that is ordinary: no protected name, no link on
+// the way or at its end (an existing regular file with
 // a second hard link included), and not the root or the home itself or one
 // of their parents. A name that does not exist yet is ordinary.
 func (s *lateScan) path(word string) bool { return s.check(word, true) }
 
 // textWord checks a word a program takes as text (an echo word, a grep
 // pattern, an ls ignore pattern): it is no path, so a plain word is not told
-// by its name (echo openclaw), but a word that is a link, a hard link or
-// ".." is still not ordinary, and a word with a slash is a path and is
-// told by its name as well.
+// by its name (echo openclaw), but a word that is a link or a hard link to
+// a protected place is still not ordinary, and a word with a slash is a path
+// and is told by its name as well.
 func (s *lateScan) textWord(word string) bool {
 	return len(word) <= 4096 && s.check(word, strings.Contains(word, "/"))
 }
@@ -342,7 +365,14 @@ func (s *lateScan) walk(cwd, word string) bool {
 		case "", ".":
 			continue
 		case "..":
-			return false
+			// current is a physical path here (the scan starts at the resolved
+			// working directory and replaces every link by its end), so the
+			// parent of a folder is the place the file system steps to.
+			if info, err := pathLstat(current); err != nil || !info.IsDir() {
+				return false
+			}
+			current = filepath.Dir(current)
+			continue
 		}
 		entry := s.entry(filepath.Join(current, name))
 		if !entry.ok {
@@ -1004,8 +1034,8 @@ func (s *lateScan) word(program, text string) bool {
 // space-separated part of it (a quoted word may hold several), the part
 // after any "=", ":", ",", "@", "+" or "%" (--out=file, of=file, a:file),
 // and for a short option the value attached to it (-ofile, -vofile,
-// -f/path). A part that is a link, a hard link or ".." makes the call not
-// ordinary; a part that is no file is ordinary.
+// -f/path). A part that is a link or a hard link to a protected place makes
+// the call not ordinary; a part that is no file is ordinary.
 func lateCandidates(program, text string) []string {
 	parts := []string{text}
 	if fields := strings.Fields(text); len(fields) != 1 || fields[0] != text {
