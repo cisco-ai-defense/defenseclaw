@@ -55,9 +55,10 @@ func TestGAP0644OnlyTheBlockedCallResultTakesTheNotice(t *testing.T) {
 	}
 }
 
-// The id of a result must equal the recorded id: no lossy forms, no caps, no
-// case folding, no trimming, and no prefix. Chat Completions, Anthropic,
-// Bedrock and Gemini send the id back as it was recorded.
+// The id of a result must equal the recorded id or its replay form, the letters
+// and digits OpenClaw keeps of it (at most 40): no case folding, no trimming,
+// no other cap and no prefix. Chat Completions, Anthropic, Bedrock and Gemini
+// send the id back as it was recorded or in that replay form.
 func TestGAP0644ResultIDMustEqualTheRecordedID(t *testing.T) {
 	chat := func(id string) string {
 		return `{"messages":[{"role":"tool","tool_call_id":"` + id + `","content":"blocked"}]}`
@@ -70,7 +71,11 @@ func TestGAP0644ResultIDMustEqualTheRecordedID(t *testing.T) {
 		{"call_abc|fc_123", "call_abc|fc_123", true}, // the full id sent back
 		{"call_abc|fc_123", "call_abc", false},       // the head of a Responses id is another call here
 		{"call.abc|fc_1", "call_abc", false},         // punctuation replaced: not the same id
-		{"call.abc", "callabc", false},               // letters and digits only: not the same id
+		{"call.abc", "callabc", true},                // the replay form: letters and digits only
+		{"call.abc", "call-abc", false},              // punctuation replaced, not dropped: not the replay form
+		{"call_abc", "callabc", true},                // the replay form of an id with an underscore
+		{"call_abc", "Callabc", false},               // the replay form keeps case
+		{"call_abc", " callabc", false},              // and takes no spaces
 		{"toolu_01ABCDEFGHIJ", "toolu01A", false},    // not the id
 		{"abcdefghijklmnop", "abcdefghi", false},     // nine-character prefix
 		{"call_abc", "call_abd", false},              // a different call

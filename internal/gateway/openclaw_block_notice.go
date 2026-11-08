@@ -37,10 +37,14 @@ import (
 // (stream or not). Nothing else names a call: no text of the result, of the
 // user or of the model, no tool name. The body is decoded first and only the
 // id field of each tool-result message is read, so the same words in any other
-// place name no call. A call id the provider rewrote before replay (a length
-// cap, a new id for a repeated id) matches nothing and the notice waits until
-// it expires: the line is UX only, so when the tie is unknown nothing is
-// shown. A Responses id is "<call id>|<item id>" and the result carries the
+// place name no call. OpenClaw rewrites an id before it replays the call to
+// some providers (Anthropic Messages, Chat Completions, Bedrock Converse): only
+// letters and digits are kept and the id is cut to 40 characters, so
+// "toolu_bdrk_01ab" comes back as "toolubdrk01ab". The result is tied to the
+// block when its id is that replay form of the recorded id, and two calls whose
+// ids have one replay form are ambiguous (see replayToolCallID). A new id for a
+// repeated id matches nothing and the notice waits until it expires: the line
+// is UX only, so when the tie is unknown nothing is shown. A Responses id is "<call id>|<item id>" and the result carries the
 // call id alone; OpenClaw drops the item id from the replayed call unless it
 // replays the reasoning too, so the result is tied to the block by the call id
 // when the request names no item of the call, and every inspected call is
@@ -120,6 +124,37 @@ func noticeCallKey(id string) string {
 	return id
 }
 
+// replayToolCallID is the form OpenClaw replays a tool call id in to a provider
+// that takes only letters and digits (its "strict" tool call id mode, used for
+// the Anthropic Messages, Chat Completions and Bedrock Converse transcripts):
+// every other character is dropped and the rest is cut to 40 characters, and an
+// id with nothing left becomes a fixed word. A provider id that is already in
+// that form replays unchanged. Only the first use of an id in a transcript
+// gets this form; a repeated id gets a hash or counter suffix, which no longer
+// names the call, so it is not matched.
+func replayToolCallID(id string) string {
+	b := make([]byte, 0, len(id))
+	for i := 0; i < len(id); i++ {
+		if c := id[i]; c >= 0x30 && c <= 0x39 || c >= 0x41 && c <= 0x5a || c >= 0x61 && c <= 0x7a {
+			b = append(b, c)
+		}
+	}
+	switch {
+	case len(b) == 0:
+		return "sanitizedtoolid"
+	case len(b) > 40:
+		b = b[:40]
+	}
+	return string(b)
+}
+
+// noticeSeenKey is the key under which the inspect side remembers a call: the
+// call part of its id in replay form, so two calls that no result can tell
+// apart (the same id, or ids with one replay form) share a key.
+func noticeSeenKey(id string) string {
+	return replayToolCallID(noticeCallKey(id))
+}
+
 var openClawBlockNotices struct {
 	mu      sync.Mutex
 	entries []openClawBlockNotice
@@ -194,7 +229,7 @@ func recordOpenClawToolCall(callID, session string, blockLine *string) {
 	defer openClawBlockNotices.mu.Unlock()
 	now := openClawToolOutcomeNow()
 	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, now)
-	key := noticeCallKey(callID)
+	key := noticeSeenKey(callID)
 	seen := openClawBlockNotices.seen[:0]
 	used := false
 	for _, c := range openClawBlockNotices.seen {
@@ -211,7 +246,7 @@ func recordOpenClawToolCall(callID, session string, blockLine *string) {
 
 	recorded := false
 	for i := range entries {
-		if noticeCallKey(entries[i].callID) == key {
+		if noticeSeenKey(entries[i].callID) == key {
 			entries[i].ambiguous = true
 			recorded = recorded || entries[i].session == session
 		}
