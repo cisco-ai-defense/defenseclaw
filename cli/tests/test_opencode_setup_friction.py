@@ -118,7 +118,7 @@ class _Host:
         monkeypatch.setattr(bootstrap, "_windows_port_claims", lambda: self.windows)
         monkeypatch.setattr(bootstrap, "_api_port_claim_dir", lambda: str(self.claim_dir))
         monkeypatch.setattr(bootstrap, "_windows_own_sid", lambda: f"S-1-5-21-1-2-3-{self.account}")
-        monkeypatch.setattr(opencode_service.os, "getuid", lambda: self.account)
+        monkeypatch.setattr(opencode_service.os, "getuid", lambda: self.account, raising=False)
         monkeypatch.setattr(bootstrap, "_api_port_free", lambda _host, port: port not in self.listening)
         if not windows:
             monkeypatch.setattr(
