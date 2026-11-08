@@ -10,12 +10,13 @@ comparison was unavailable.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from types import SimpleNamespace
 
 import pytest
 from defenseclaw import gateway
-from defenseclaw.commands import cmd_doctor
+from defenseclaw.commands import cmd_doctor, cmd_setup, cmd_setup_cowork
 
 
 class _Recorder:
@@ -118,3 +119,74 @@ def test_doctor_policy_row_passes_when_digests_match(monkeypatch) -> None:
     )
 
     assert result.checks[0]["status"] == "pass"
+
+
+def _policy_row(monkeypatch, cfg_failure: str | None):
+    applied = "sha256:" + "a" * 64
+
+    def unavailable(_cfg, *, failure=None):
+        failure.append(cfg_failure)
+
+    monkeypatch.setattr(cmd_doctor, "_local_policy_digest", unavailable)
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_policy_state(
+        SimpleNamespace(),
+        result,
+        live_health={"policy": {"effective_digest": applied, "config_generation": 3}},
+    )
+    return result.checks[0]
+
+
+def test_missing_gateway_executable_names_a_command_that_can_run(install_home, monkeypatch) -> None:
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", lambda: None)
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    check = _policy_row(monkeypatch, failure[0])
+
+    assert check["status"] == "warn"
+    assert "executable is installed" in check["detail"]
+    assert "defenseclaw upgrade" in check["remediation"]
+    assert "policy digest --json" not in check["remediation"]
+
+
+def test_unverified_gateway_executable_names_a_command_that_can_run(install_home, monkeypatch) -> None:
+    def refuse():
+        raise OSError("refusing to run /x/defenseclaw-gateway: writable by another account")
+
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", refuse)
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    check = _policy_row(monkeypatch, failure[0])
+
+    assert "writable by another account" in check["detail"]
+    assert "defenseclaw upgrade" in check["remediation"]
+    assert "policy digest --json" not in check["remediation"]
+
+
+def test_failing_gateway_command_keeps_the_diagnose_command(monkeypatch) -> None:
+    check = _policy_row(monkeypatch, "the gateway policy digest command failed: load config")
+
+    assert "policy digest --json" in check["remediation"]
+
+
+@pytest.mark.parametrize("moved", [True, False])
+def test_cowork_hooks_render_runs_the_gateway_in_the_install_home(install_home, tmp_path, monkeypatch, moved) -> None:
+    store = tmp_path / "dc16n" if moved else install_home
+    store.mkdir(exist_ok=True)
+    (install_home / "config.yaml").write_text(f"data_dir: {store}\n", encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def run(_argv, **kwargs):
+        seen.update(kwargs["env"])
+        return subprocess.CompletedProcess([], 1, json.dumps({"error": "stop", "reason": "stop"}), "")
+
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_resolution", lambda: ("/trusted/defenseclaw-gateway", ""))
+    monkeypatch.setattr("defenseclaw.pinned_exec.run_pinned_executable", run)
+
+    with pytest.raises(Exception, match="stop"):
+        cmd_setup_cowork._render_hooks(SimpleNamespace(data_dir=str(store)))
+
+    assert seen["DEFENSECLAW_HOME"] == str(install_home)
+    assert os.path.exists(os.path.join(seen["DEFENSECLAW_HOME"], "config.yaml"))

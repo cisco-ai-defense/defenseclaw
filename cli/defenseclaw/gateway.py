@@ -1954,6 +1954,12 @@ def packaged_windows_install_root() -> str | None:
 
 
 
+#: Start of the ``failure`` reason when no gateway executable can be run at all
+#: (missing or failing the custody check), so a caller can tell that cause from
+#: a gateway that ran and failed.
+NO_TRUSTED_GATEWAY_EXECUTABLE = "no trusted defenseclaw-gateway executable"
+
+
 def local_policy_digest(cfg: Any, *, timeout: float = 60, failure: list[str] | None = None) -> dict | None:
     """Compute effective_policy_digest from disk with the installed gateway
     (``defenseclaw-gateway policy digest --json``); None when it cannot.
@@ -1972,10 +1978,10 @@ def local_policy_digest(cfg: Any, *, timeout: float = 60, failure: list[str] | N
 
     try:
         binary = resolve_trusted_gateway_binary()
-    except OSError:
-        return unavailable("no trusted defenseclaw-gateway executable could be verified")
+    except OSError as exc:
+        return unavailable(f"{NO_TRUSTED_GATEWAY_EXECUTABLE} could be verified ({exc})")
     if not binary:
-        return unavailable("no trusted defenseclaw-gateway executable is installed")
+        return unavailable(f"{NO_TRUSTED_GATEWAY_EXECUTABLE} is installed")
     env = dict(os.environ)
     data_dir = getattr(cfg, "data_dir", "") or ""
     if data_dir:
