@@ -942,13 +942,18 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 	cases := []struct {
 		name       string
 		codexLink  bool
+		codexFails bool
 		claudeFail bool
 		wantNamed  []string
+		wantTyped  bool
 	}{
 		{name: "no failure"},
-		{name: "link at the Codex folder", codexLink: true, wantNamed: []string{"ensure configured Codex machine requirements", "cmd /c rmdir"}},
+		// A link alone is a typed failure of the Codex connector: the pass goes on,
+		// and the guardian fails the Codex rows by name (GAP-0879).
+		{name: "link at the Codex folder", codexLink: true, wantTyped: true, wantNamed: []string{"ensure configured Codex machine requirements", "cmd /c rmdir"}},
+		{name: "Codex folder cannot be recreated (no link)", codexFails: true, wantNamed: []string{"ensure configured Codex machine requirements", "access is denied"}},
 		{name: "Claude Code policy cannot be repaired", claudeFail: true, wantNamed: []string{"ensure configured Claude machine policy", "the Claude Code policy folder is a link"}},
-		{name: "both fail", codexLink: true, claudeFail: true, wantNamed: []string{"ensure configured Claude machine policy", "ensure configured Codex machine requirements"}},
+		{name: "link at the Codex folder and a Claude Code failure", codexLink: true, claudeFail: true, wantNamed: []string{"ensure configured Claude machine policy", "ensure configured Codex machine requirements"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -975,9 +980,20 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 					"claudecode": {}, "codex": {}, "cursor": {},
 				}},
 			}
+			previousLink := enterpriseHookVendorFolderLink
+			t.Cleanup(func() { enterpriseHookVendorFolderLink = previousLink })
+			enterpriseHookVendorFolderLink = func(connectorName string) string {
+				if tc.codexLink && connectorName == "codex" {
+					return `C:\ProgramData\OpenAI\Codex`
+				}
+				return ""
+			}
 			enterpriseHookCodexFolderEnsurer = func() (enterprisehooks.WindowsCodexMachineFolderEnsure, error) {
 				if tc.codexLink {
 					return enterprisehooks.WindowsCodexMachineFolderEnsure{}, linkErr
+				}
+				if tc.codexFails {
+					return enterprisehooks.WindowsCodexMachineFolderEnsure{}, fmt.Errorf("%w: access is denied", enterprisehooks.ErrWindowsCodexMachineFolderUnavailable)
 				}
 				return enterprisehooks.WindowsCodexMachineFolderEnsure{Folder: `C:\ProgramData\OpenAI\Codex`}, nil
 			}
@@ -1035,8 +1051,11 @@ func TestWindowsGuardianPrePassRevokesACursorEnrollmentBehindAFailedConnector(t 
 					t.Fatalf("the pass error does not name %q: %v", want, err)
 				}
 			}
-			if tc.codexLink && (!errors.Is(err, enterprisehooks.ErrWindowsCodexMachineFolderUnavailable) || reconciled != 0) {
-				t.Fatalf("a link at the Codex folder: reconciled %d times, error %v", reconciled, err)
+			if (tc.codexLink || tc.codexFails) && (!errors.Is(err, enterprisehooks.ErrWindowsCodexMachineFolderUnavailable) || reconciled != 0) {
+				t.Fatalf("a Codex folder that is not usable: reconciled %d times, error %v", reconciled, err)
+			}
+			if typed := enterpriseHookLinkFailures(err) != nil; typed != tc.wantTyped {
+				t.Fatalf("typed link failure = %v, want %v: only a link and nothing else may let the pass go on: %v", typed, tc.wantTyped, err)
 			}
 			if tc.claudeFail && !errors.Is(err, claudeErr) {
 				t.Fatalf("the Claude Code failure was lost: %v", err)

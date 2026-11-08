@@ -265,3 +265,21 @@ func TestWindowsCodexMachineFolderLinkFindsALinkWithoutNamingIt(t *testing.T) {
 		})
 	}
 }
+
+// The generic lookup finds the link of Cursor and Claude Code too, and names
+// nothing.
+func TestWindowsManagedConnectorFolderLinkFindsEveryVendorFolderLink(t *testing.T) {
+	f := useKeptFixture(t, false, func(fixture keptFixture) []string {
+		return []string{fixture.cursor, fixture.claudeDir, fixture.selectorDir}
+	})
+	events := captureCodexFolderEvents(t)
+	for connectorName, want := range map[string]string{"cursor": f.cursor, "claudecode": f.claudeDir, "codex": f.selectorDir} {
+		got, err := WindowsManagedConnectorFolderLink(connectorName)
+		if err != nil || got != want {
+			t.Fatalf("%s: link = %q (err %v), want %q", connectorName, got, err, want)
+		}
+	}
+	if len(events.boundary) != 0 {
+		t.Fatalf("the lookup named %d links, want none", len(events.boundary))
+	}
+}

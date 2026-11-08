@@ -174,13 +174,31 @@ func WindowsManagedConnectorFolderKept(connectorName string) (string, error) {
 		return "", err
 	}
 	folder := filepath.Dir(path)
-	state, kept, err := inspectWindowsManagedPolicyDirectoryNoFollow(folder)
+	kept, err := WindowsManagedConnectorFolderLink(connectorName)
+	if err != nil || kept == "" {
+		return "", err
+	}
+	noteWindowsManagedPolicyFolderKept(folder, kept)
+	return kept, nil
+}
+
+// WindowsManagedConnectorFolderLink returns the link, or non-folder, that sits
+// on the path of a connector's machine folder, found without opening or
+// following anything, and "" when there is none. It names nothing and creates
+// nothing, so a status check or the guardian can ask as often as it likes. The
+// callers are standalone paths (the CLI process of an administrator carries no
+// standalone profile in its environment, so this does not test for one).
+func WindowsManagedConnectorFolderLink(connectorName string) (string, error) {
+	path, err := windowsManagedRuntimeSelectorPath(connectorName)
+	if err != nil {
+		return "", err
+	}
+	state, link, err := inspectWindowsManagedPolicyDirectoryNoFollow(filepath.Dir(path))
 	if err != nil {
 		return "", fmt.Errorf("enterprise hooks: inspect %s machine folder: %w", connectorName, err)
 	}
 	if state != windowsManagedPolicyDirKept {
 		return "", nil
 	}
-	noteWindowsManagedPolicyFolderKept(folder, kept)
-	return kept, nil
+	return link, nil
 }

@@ -3088,11 +3088,19 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	}
 	// Revoke removed/disabled SIDs before touching any target runtime. This
 	// makes stale enrollment fail closed even when a later repair fails.
+	// A link at a connector's vendor folder fails that connector's targets
+	// below, by name, and does not stop the pass: the other connectors are
+	// revoked and applied, and the manifest is activated (GAP-0879).
+	var linkRows map[string]string
 	if err := enterpriseHookReconcileSyncEnrollments(manifest, apiAddr, false); err != nil {
-		return run, fmt.Errorf(
-			"enterprise hooks reconcile: revoke stale protected enrollments: %w",
-			err,
-		)
+		linkFailures := enterpriseHookLinkFailures(err)
+		if linkFailures == nil {
+			return run, fmt.Errorf(
+				"enterprise hooks reconcile: revoke stale protected enrollments: %w",
+				err,
+			)
+		}
+		linkRows = linkFailures.rowErrors()
 	}
 	// Remove DefenseClaw's own per-user registrations for revoked users (as
 	// each user), and record the cleanups of signed-out users, before this
@@ -3193,6 +3201,13 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			// rows, by name, so the other accounts keep their protection and
 			// the administrator lifecycle goes on (GAP-0585).
 			err = errors.New(enterpriseHookAccountForeignLinkFailure)
+		}
+		if err == nil {
+			if linkRow, linked := linkRows[strings.ToLower(strings.TrimSpace(target.Connector))]; linked {
+				// The vendor folder of this connector is a link: nothing is
+				// written through it, and this connector's rows fail by name.
+				err = errors.New(linkRow)
+			}
 		}
 		if err == nil && target.IsDeferred() &&
 			!previousProtection.PreviouslyProtected {
@@ -3451,6 +3466,10 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	)
 	if enrollmentErr == nil {
 		enrollmentErr = enterpriseHookReconcileSyncEnrollments(enrollmentManifest, apiAddr, true)
+		if enterpriseHookLinkFailures(enrollmentErr) != nil {
+			// The failed rows of the linked connector carry the failure.
+			enrollmentErr = nil
+		}
 	}
 	stateErr := writeEnterpriseHookGuardianState(
 		cfg.DataDir,

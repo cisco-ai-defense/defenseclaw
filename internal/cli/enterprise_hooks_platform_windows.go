@@ -315,8 +315,12 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
-	var claudeErr, codexErr error
-	defer func() { resultErr = joinEnterpriseHookConnectorErrors(claudeErr, codexErr, resultErr) }()
+	var claudeErr, codexErr, cursorErr error
+	defer func() {
+		resultErr = classifyEnterpriseHookConnectorErrors(enterpriseHookVendorFolderLink, []enterpriseHookConnectorStepError{
+			{Connector: "claudecode", Err: claudeErr}, {Connector: "codex", Err: codexErr}, {Connector: "cursor", Err: cursorErr},
+		}, resultErr)
+	}()
 	configured := windowsEnterpriseConfiguredMachinePolicies()
 	desiredClaude, desiredCodex, err := windowsEnterpriseDesiredEnrollments(manifest)
 	if err != nil {
@@ -479,97 +483,90 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		return deferredCodexErr
 	}()
 
-	currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
-	if err != nil && cfg.StandaloneEnterprise() && configured["cursor"] {
-		// The protected state can outlive a deleted or changed adapter or
-		// hooks.json. Rebuild both from that state, then read its enrollment
-		// before pre-sync can publish a smaller target set.
-		restored, restoreErr := enterpriseHookCursorPolicyRestorer(codexOpts.HookBinary)
-		if restoreErr != nil {
-			return fmt.Errorf("restore configured Cursor machine policy: %w", errors.Join(err, restoreErr))
-		}
-		if restored {
-			currentCursor, cursorActive, err = enterpriseHookCursorPolicyTargetsReader()
-		}
-	}
-	if err != nil {
-		if (!cfg.StandaloneEnterprise() || !configured["cursor"]) &&
-			(publishExact || len(desiredCursor) == 0) {
-			return err
-		}
-		currentCursor = nil
-		cursorActive = false
-	}
-	if cfg.StandaloneEnterprise() {
-		switch {
-		case configured["cursor"] && !cursorActive:
-			if err := enterpriseHookCursorPolicyEnsurer(connector.SetupOpts{
-				APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
-			}); err != nil {
-				return fmt.Errorf("ensure configured Cursor machine policy: %w", err)
+	cursorErr = func() error {
+		currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
+		if err != nil && cfg.StandaloneEnterprise() && configured["cursor"] {
+			// The protected state can outlive a deleted or changed adapter or
+			// hooks.json. Rebuild both from that state, then read its enrollment
+			// before pre-sync can publish a smaller target set.
+			restored, restoreErr := enterpriseHookCursorPolicyRestorer(codexOpts.HookBinary)
+			if restoreErr != nil {
+				return fmt.Errorf("restore configured Cursor machine policy: %w", errors.Join(err, restoreErr))
 			}
-			currentCursor, cursorActive, err = enterpriseHookCursorPolicyTargetsReader()
-			if err != nil {
-				return fmt.Errorf("read ensured Cursor machine policy: %w", err)
+			if restored {
+				currentCursor, cursorActive, err = enterpriseHookCursorPolicyTargetsReader()
 			}
-			if !cursorActive {
-				return errors.New("configured Cursor machine policy did not become active")
-			}
-		case !configured["cursor"] && cursorActive:
-			if err := enterpriseHookCursorPolicyDeactivator(); err != nil {
-				return fmt.Errorf("deactivate removed Cursor connector: %w", err)
+		}
+		if err != nil {
+			if (!cfg.StandaloneEnterprise() || !configured["cursor"]) &&
+				(publishExact || len(desiredCursor) == 0) {
+				return err
 			}
 			currentCursor = nil
 			cursorActive = false
 		}
-	}
-	if publishExact {
-		if len(desiredCursor) > 0 && !cursorActive {
-			return fmt.Errorf("Cursor enterprise policy is absent after target runtime installation")
-		}
-		if cursorActive || len(desiredCursor) == 0 {
-			if err := enterpriseHookCursorPolicyTargetsPublisher(desiredCursor); err != nil {
-				return err
+		if cfg.StandaloneEnterprise() {
+			switch {
+			case configured["cursor"] && !cursorActive:
+				if err := enterpriseHookCursorPolicyEnsurer(connector.SetupOpts{
+					APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
+				}); err != nil {
+					return fmt.Errorf("ensure configured Cursor machine policy: %w", err)
+				}
+				currentCursor, cursorActive, err = enterpriseHookCursorPolicyTargetsReader()
+				if err != nil {
+					return fmt.Errorf("read ensured Cursor machine policy: %w", err)
+				}
+				if !cursorActive {
+					return errors.New("configured Cursor machine policy did not become active")
+				}
+			case !configured["cursor"] && cursorActive:
+				if err := enterpriseHookCursorPolicyDeactivator(); err != nil {
+					return fmt.Errorf("deactivate removed Cursor connector: %w", err)
+				}
+				currentCursor = nil
+				cursorActive = false
 			}
 		}
-		return nil
-	}
-	if !cursorActive {
-		return nil
-	}
-	desiredCursorBySID := make(map[string]string, len(desiredCursor))
-	for _, target := range desiredCursor {
-		desiredCursorBySID[strings.ToUpper(target.SID)] = target.DataDir
-	}
-	retainedCursor := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(currentCursor))
-	for _, target := range currentCursor {
-		dataDir, ok := desiredCursorBySID[strings.ToUpper(target.SID)]
-		if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
-			retainedCursor = append(retainedCursor, target)
+		if publishExact {
+			if len(desiredCursor) > 0 && !cursorActive {
+				return fmt.Errorf("Cursor enterprise policy is absent after target runtime installation")
+			}
+			if cursorActive || len(desiredCursor) == 0 {
+				if err := enterpriseHookCursorPolicyTargetsPublisher(desiredCursor); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
-	}
-	if err := enterpriseHookCursorPolicyTargetsPublisher(retainedCursor); err != nil {
-		return err
-	}
+		if !cursorActive {
+			return nil
+		}
+		desiredCursorBySID := make(map[string]string, len(desiredCursor))
+		for _, target := range desiredCursor {
+			desiredCursorBySID[strings.ToUpper(target.SID)] = target.DataDir
+		}
+		retainedCursor := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(currentCursor))
+		for _, target := range currentCursor {
+			dataDir, ok := desiredCursorBySID[strings.ToUpper(target.SID)]
+			if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
+				retainedCursor = append(retainedCursor, target)
+			}
+		}
+		if err := enterpriseHookCursorPolicyTargetsPublisher(retainedCursor); err != nil {
+			return err
+		}
+		return nil
+	}()
 	return nil
 }
 
-// joinEnterpriseHookConnectorErrors is the one error a pass reports when
-// more than one connector step failed: each failure stays named, in order.
-func joinEnterpriseHookConnectorErrors(errs ...error) error {
-	var failed []error
-	for _, err := range errs {
-		if err != nil {
-			failed = append(failed, err)
-		}
-	}
-	switch len(failed) {
-	case 0:
-		return nil
-	case 1:
-		return failed[0]
-	}
-	return errors.Join(failed...)
+// enterpriseHookVendorFolderLink is the link that keeps the machine vendor
+// folder of a connector (Codex, Cursor, Claude Code), found now without
+// opening or following anything, "" when none. A seam for tests.
+var enterpriseHookVendorFolderLink = func(connectorName string) string {
+	link, _ := enterprisehooks.WindowsManagedConnectorFolderLink(connectorName)
+	return link
 }
 
 func windowsEnterpriseDesiredCursorEnrollments(
