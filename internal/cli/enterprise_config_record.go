@@ -279,13 +279,18 @@ func managedConfigHandEditOptions(path string, raw []byte, approvedSHA256, step 
 }
 
 // writeFileKeepingDACL replaces path with data, giving the new file the
-// DACL of sibling before it is renamed into place, so it is never readable
-// by more than sibling is. Each write stages in its own exclusively created
-// file beside path: two lifecycle runs that finish at the same time shared
-// path+".tmp" before, so one could publish the other's bytes or fail on a
-// staging file the other had already renamed (GAP-1404).
+// owner, group and DACL of sibling before it is renamed into place, so it is
+// never readable by more than sibling is and is never visible with the
+// owner of the account that wrote it. A record the hook guardian keeps at
+// the canonical owner (deployment.json, config.yaml) that was published with
+// the creator's owner (SYSTEM under Setup) was put back by the guardian a
+// few seconds later, and the next ensure reported guardian_repaired_drift
+// and was not a no-op (GAP-0899). Each write stages in its own exclusively
+// created file beside path: two lifecycle runs that finish at the same time
+// shared path+".tmp" before, so one could publish the other's bytes or fail
+// on a staging file the other had already renamed (GAP-1404).
 func writeFileKeepingDACL(path string, data []byte, sibling string) error {
-	restore, err := keepConfigDACL(sibling)
+	restore, err := keepConfigSecurity(sibling)
 	if err != nil {
 		return err
 	}
