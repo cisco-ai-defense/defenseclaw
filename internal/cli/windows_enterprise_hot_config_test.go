@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -1994,15 +1995,13 @@ func TestWindowsEnterpriseEnsureHealsAStaleApprovedConfigSource(t *testing.T) {
 	}
 }
 
-// GAP-0854: the lock the check takes at the end of a lifecycle run is the
-// lifecycle.lock of the lifecycle root, where every other step and the
-// installer take it, not a file in the install state folder that holds the
-// approved copy. In the install state folder there is no lock file, so the
-// proof of a copy that already is the installed config was never written after
-// a Repair, a restart ensure or a no-op ensure, and the next Repair over a
-// single hand edit was refused. The lock here is the real one: it fails
-// without the file, as the computer does.
-func TestWindowsEnterpriseApprovedSourceCheckTakesTheLifecycleRootLock(t *testing.T) {
+// stageApprovedSourceWithoutProof stages a deployment whose approved copy and
+// digest are the installed config B and whose proof of it is missing (the state
+// after a Repair, a restart ensure or a no-op ensure before GAP-0854), with the
+// install state folder apart from the lifecycle root that holds the real
+// lifecycle.lock. It returns the layout and the lifecycle root.
+func stageApprovedSourceWithoutProof(t *testing.T) (managed.StandaloneLayout, string) {
+	t.Helper()
 	const record = `{"installed":true,"profile":"standalone","approved_policy_sources":{"config":"%s"}}`
 	newHotConfigHost(t, approvedSourceConfigB, approvedSourceConfigB)
 	layout, _ := windowsEnterpriseHotConfigLayout()
@@ -2020,11 +2019,6 @@ func TestWindowsEnterpriseApprovedSourceCheckTakesTheLifecycleRootLock(t *testin
 	windowsManagedLayout.roots = func(string) (winpath.EnterpriseRoots, error) {
 		return winpath.EnterpriseRoots{LifecycleDir: lifecycleRoot}, nil
 	}
-	var locks []string
-	windowsEnterpriseHotConfigLock = func(path string) (func(), error) {
-		locks = append(locks, path)
-		return acquireWindowsEnterpriseLifecycleLock(path)
-	}
 	// A transaction published copy and digest for the installed B; only the
 	// proof of it is missing.
 	for name, body := range map[string]string{
@@ -2036,7 +2030,109 @@ func TestWindowsEnterpriseApprovedSourceCheckTakesTheLifecycleRootLock(t *testin
 		}
 	}
 	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	return layout, lifecycleRoot
+}
 
+// installStateFolderFiles reads every file of the install state folder, by name.
+func installStateFolderFiles(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{}
+	for _, entry := range entries {
+		raw, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[entry.Name()] = string(raw)
+	}
+	return files
+}
+
+// GAP-0854 review 1: the approved config source check works on the approved
+// copy, digest and proof of the production deployment. A successful ensure or
+// repair of a certification scope (its own roots or service names) has its own
+// deployment, so it writes none of them and takes no lock; a hand edit repair
+// of the production deployment stays refused. Roots and names that equal the
+// production defaults are the production run: they leave the proof.
+func TestWindowsEnterpriseApprovedSourceProofFollowsOnlyTheProductionScope(t *testing.T) {
+	productionInstall, productionState := t.TempDir(), t.TempDir()
+	cases := []struct {
+		name       string
+		opts       windowsEnterpriseLifecycleOptions
+		production bool
+	}{
+		{name: "no overrides", production: true},
+		{name: "production roots and names spelled out", opts: windowsEnterpriseLifecycleOptions{
+			installRoot: productionInstall, stateRoot: productionState,
+			gatewayServiceName: strings.ToUpper(managed.StandaloneWindowsGatewaySvc), guardianServiceName: windowsStandaloneGuardianService,
+		}, production: true},
+		{name: "certification roots", opts: windowsEnterpriseLifecycleOptions{
+			installRoot: t.TempDir(), stateRoot: t.TempDir(),
+		}},
+		{name: "certification state root only", opts: windowsEnterpriseLifecycleOptions{stateRoot: t.TempDir()}},
+		{name: "certification service name only", opts: windowsEnterpriseLifecycleOptions{gatewayServiceName: "DefenseClawCertGateway"}},
+		{name: "production install root with a certification guardian", opts: windowsEnterpriseLifecycleOptions{
+			installRoot: productionInstall, guardianServiceName: "DefenseClawCertGuardian",
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			layout, _ := stageApprovedSourceWithoutProof(t)
+			rootsSeam, healSeam, lockSeam := windowsEnterpriseProductionRoots, windowsEnterpriseHealApprovedSource, windowsEnterpriseHotConfigLock
+			t.Cleanup(func() {
+				windowsEnterpriseProductionRoots, windowsEnterpriseHealApprovedSource, windowsEnterpriseHotConfigLock = rootsSeam, healSeam, lockSeam
+			})
+			windowsEnterpriseProductionRoots = func() (string, string, error) { return productionInstall, productionState, nil }
+			windowsEnterpriseHealApprovedSource = healWindowsStandaloneApprovedConfigSource
+			locks := 0
+			windowsEnterpriseHotConfigLock = func(path string) (func(), error) {
+				locks++
+				return lockSeam(path)
+			}
+			before := installStateFolderFiles(t, layout.LifecycleDir)
+
+			opts := tc.opts
+			result := &enterprisestatus.Result{Installed: true}
+			if healWindowsEnterpriseApprovedSourceOnSuccess(result, &opts) || len(result.Errors) != 0 || len(result.Warnings) != 0 {
+				t.Fatalf("the check failed a successful run: %+v", result)
+			}
+			handEditAfter(t, layout.ConfigPath, approvedSourceConfigB)
+			err := unprovenApprovedConfigSourceForHandEdit(layout.LifecycleDir, layout.ConfigPath)
+			after := installStateFolderFiles(t, layout.LifecycleDir)
+			if tc.production {
+				if locks != 1 || reflect.DeepEqual(before, after) || err != nil {
+					t.Fatalf("production run: locks %d, proof written %v, hand edit repair: %v", locks, !reflect.DeepEqual(before, after), err)
+				}
+				return
+			}
+			if locks != 0 || !reflect.DeepEqual(before, after) {
+				t.Fatalf("certification run touched the production approved source: locks %d, before %v, after %v", locks, before, after)
+			}
+			if err == nil {
+				t.Fatal("a hand edit of the production deployment was repairable on the proof of a certification run")
+			}
+		})
+	}
+}
+
+// GAP-0854: the lock the check takes at the end of a lifecycle run is the
+// lifecycle.lock of the lifecycle root, where every other step and the
+// installer take it, not a file in the install state folder that holds the
+// approved copy. In the install state folder there is no lock file, so the
+// proof of a copy that already is the installed config was never written after
+// a Repair, a restart ensure or a no-op ensure, and the next Repair over a
+// single hand edit was refused. The lock here is the real one: it fails
+// without the file, as the computer does.
+func TestWindowsEnterpriseApprovedSourceCheckTakesTheLifecycleRootLock(t *testing.T) {
+	layout, lifecycleRoot := stageApprovedSourceWithoutProof(t)
+	var locks []string
+	windowsEnterpriseHotConfigLock = func(path string) (func(), error) {
+		locks = append(locks, path)
+		return acquireWindowsEnterpriseLifecycleLock(path)
+	}
 	result := &enterprisestatus.Result{}
 	healWindowsStandaloneApprovedConfigSource(result)
 	if len(result.Errors) != 0 || len(result.Warnings) != 0 {
