@@ -36,28 +36,41 @@ def display(text: str) -> str:
 def copytree(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> str:
     """``shutil.copytree`` that is not limited by ``MAX_PATH`` on Windows.
 
-    The copy is made in a hidden folder this call creates next to *dst* and is
-    moved to *dst* only when it is complete. A failure removes that folder and
-    nothing else, so *dst* is never a partial copy and a destination another
-    run created (or created while this one copied) is never touched. When
-    another run published *dst* first, that copy is kept and returned. A raised
-    error names the paths without the extended-path prefix.
+    *dst* must not exist, as for ``shutil.copytree``; a destination that exists,
+    or that appears while this call copies, raises ``FileExistsError`` and is
+    never changed, replaced or reported as a seed.
+
+    The copy is made in a hidden folder this call created next to *dst* (a name
+    already in use is never reused) and is moved to *dst* only when it is
+    complete, so *dst* is never a partial copy. On POSIX, where renaming a folder
+    over an empty folder replaces it, this call first creates *dst* itself with
+    ``mkdir`` (which cannot succeed over anything that exists) and renames onto
+    that empty folder it owns; Windows refuses a rename onto an existing folder.
+    A failure removes only the folders this call created. A raised error names
+    the paths without the extended-path prefix.
     """
 
     final = extended(dst)
     if os.path.lexists(final):
         raise FileExistsError(errno.EEXIST, "File exists", display(final))
-    staging = os.path.join(os.path.dirname(final), f".{os.path.basename(final)}.seed-{uuid.uuid4().hex[:8]}")
+    parent = os.path.dirname(final) or os.curdir
+    staging = ""
+    claimed = False
     try:
-        os.makedirs(os.path.dirname(final), exist_ok=True)
-        os.mkdir(staging)
+        os.makedirs(parent, exist_ok=True)
+        staging = _new_staging(parent, os.path.basename(final))
         shutil.copytree(extended(src), staging, dirs_exist_ok=True)
+        if os.name != "nt":
+            os.mkdir(final)
+            claimed = True
         os.rename(staging, final)
     except (OSError, shutil.Error) as exc:
-        left = _remove(staging)
-        if os.path.isdir(final) and not os.path.islink(final) and not left:
-            # Another run published a complete copy while this one copied.
-            return os.fspath(dst)
+        left = _remove(staging) if staging else False
+        if claimed:
+            try:
+                os.rmdir(final)
+            except OSError:
+                pass
         message = display(str(exc))
         if left:
             message += f" (the partial copy {display(staging)} could not be removed)"
@@ -65,6 +78,19 @@ def copytree(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> str:
             raise OSError(message) from exc
         raise
     return os.fspath(dst)
+
+
+def _new_staging(parent: str, leaf: str) -> str:
+    """Create and return an empty hidden folder in *parent* that nothing else owns."""
+
+    for _ in range(8):
+        path = os.path.join(parent, f".{leaf}.seed-{uuid.uuid4().hex[:8]}")
+        try:
+            os.mkdir(path)
+        except FileExistsError:
+            continue
+        return path
+    raise FileExistsError(errno.EEXIST, "no unused staging folder name", display(parent))
 
 
 def rmtree(path: str | os.PathLike[str]) -> None:
