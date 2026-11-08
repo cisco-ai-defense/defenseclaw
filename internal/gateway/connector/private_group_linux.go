@@ -104,17 +104,26 @@ var (
 	privateGroupSSSDDir      = "/etc/sssd"
 	privateGroupUserdbDirs   = []string{"/etc/userdb", "/run/userdb", "/run/host/userdb", "/var/lib/userdb", "/usr/lib/userdb", "/var/lib/systemd/home"}
 	privateGroupUserdbSocks  = "/run/systemd/userdb"
-	privateGroupPAMGroupConf = "/etc/security/group.conf"
-	privateGroupPAMGroupDir  = "/etc/security/group.d"
+	// The directories pam_group reads its rules from: the local one, and the
+	// vendor directory Linux-PAM falls back to where no local group.conf exists
+	// (its build option vendordir; /usr/etc on SUSE-style layouts, /usr/lib,
+	// /usr/share or the defaults tree elsewhere). Each holds group.conf and
+	// group.d/*.conf.
+	privateGroupPAMConfigDirs = []string{
+		"/etc/security", "/usr/etc/security", "/usr/lib/security", "/usr/share/security",
+		"/usr/share/defaults/etc/security",
+	}
 )
 
 // The Varlink services in privateGroupUserdbSocks that cannot add an account
 // or a group membership of their own: the dynamic service users of units (ids
 // in the dynamic range, group equal to user), the multiplexer that fans a
-// lookup out to the other services, and the glibc bridge, whose answers come
-// from the nsswitch sources this check reads. Any other service (homed,
+// lookup out to the other services, the glibc bridge, whose answers come from
+// the nsswitch sources this check reads, and the drop-in service, which only
+// serves the record files in privateGroupUserdbDirs (checked below). Any other service (homed,
 // machined, a vendor provider) is a source of accounts this check cannot list.
 var privateGroupBuiltinUserdbServices = map[string]bool{
+	"io.systemd.DropIn":            true,
 	"io.systemd.DynamicUser":       true,
 	"io.systemd.Multiplexer":       true,
 	"io.systemd.NameServiceSwitch": true,
@@ -183,9 +192,10 @@ func privateGroupSourcesAreLocal() bool {
 }
 
 // privateGroupPAMAddsGroups reports whether pam_group has a rule to read: any
-// line in group.conf or group.d that is not blank or a comment. Whether the
-// PAM stack loads the module is not asked; a rule file is reason enough to
-// refuse. A file that cannot be read counts as a rule.
+// line in a group.conf or group.d/*.conf of privateGroupPAMConfigDirs, local or
+// vendor, that is not blank or a comment. Whether the PAM stack loads the
+// module is not asked; a rule file in any place the module reads is reason
+// enough to refuse. A file or directory that cannot be read counts as a rule.
 func privateGroupPAMAddsGroups() bool {
 	hasRule := func(path string) bool {
 		data, err := os.ReadFile(path)
@@ -199,12 +209,18 @@ func privateGroupPAMAddsGroups() bool {
 		}
 		return false
 	}
-	if hasRule(privateGroupPAMGroupConf) {
-		return true
+	for _, dir := range privateGroupPAMConfigDirs {
+		if hasRule(filepath.Join(dir, "group.conf")) {
+			return true
+		}
+		groupDir := filepath.Join(dir, "group.d")
+		if privateGroupDirHasEntry(groupDir, func(name string) bool {
+			return strings.HasSuffix(name, ".conf") && hasRule(filepath.Join(groupDir, name))
+		}) {
+			return true
+		}
 	}
-	return privateGroupDirHasEntry(privateGroupPAMGroupDir, func(name string) bool {
-		return strings.HasSuffix(name, ".conf") && hasRule(filepath.Join(privateGroupPAMGroupDir, name))
-	})
+	return false
 }
 
 func privateGroupSourceIsLocal(source string) bool {

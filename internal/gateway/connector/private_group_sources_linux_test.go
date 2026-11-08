@@ -60,12 +60,12 @@ func privateGroupSourcesFixture(t *testing.T) (string, os.FileInfo, string) {
 	resetPrivateGroupSources(t, files)
 	oldPasswd, oldGroup, oldGetent := privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent
 	oldNsswitch, oldSSSD, oldUserdb := privateGroupNsswitchFile, privateGroupSSSDDir, privateGroupUserdbDirs
-	oldSocks, oldPAMConf, oldPAMDir := privateGroupUserdbSocks, privateGroupPAMGroupConf, privateGroupPAMGroupDir
+	oldSocks, oldPAMDirs := privateGroupUserdbSocks, privateGroupPAMConfigDirs
 	privateGroupPasswdFile, privateGroupGroupFile = passwd, groupFile
 	privateGroupNsswitchFile, privateGroupSSSDDir = nsswitch, filepath.Join(files, "sssd")
 	privateGroupUserdbDirs = []string{filepath.Join(files, "userdb"), filepath.Join(files, "host-userdb"), filepath.Join(files, "absent")}
 	privateGroupUserdbSocks = filepath.Join(files, "run", "systemd", "userdb")
-	privateGroupPAMGroupConf, privateGroupPAMGroupDir = filepath.Join(files, "security", "group.conf"), filepath.Join(files, "security", "group.d")
+	privateGroupPAMConfigDirs = []string{filepath.Join(files, "security"), filepath.Join(files, "vendor", "security")}
 	privateGroupGetent = func(database, key string) (string, bool) {
 		t.Errorf("the per-event proof started getent %s %s", database, key)
 		return "", false
@@ -74,7 +74,7 @@ func privateGroupSourcesFixture(t *testing.T) (string, os.FileInfo, string) {
 		privateGroupLookupUser, privateGroupLookupGroup = oldUser, oldLookupGroup
 		privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent = oldPasswd, oldGroup, oldGetent
 		privateGroupNsswitchFile, privateGroupSSSDDir, privateGroupUserdbDirs = oldNsswitch, oldSSSD, oldUserdb
-		privateGroupUserdbSocks, privateGroupPAMGroupConf, privateGroupPAMGroupDir = oldSocks, oldPAMConf, oldPAMDir
+		privateGroupUserdbSocks, privateGroupPAMConfigDirs = oldSocks, oldPAMDirs
 	})
 	return dir, info, files
 }
@@ -84,7 +84,7 @@ func privateGroupSourcesFixture(t *testing.T) (string, os.FileInfo, string) {
 // service, and a group.conf with every rule commented out.
 func resetPrivateGroupSources(t *testing.T, files string) {
 	t.Helper()
-	for _, dir := range []string{"sssd", "userdb", "host-userdb", "run", "security"} {
+	for _, dir := range []string{"sssd", "userdb", "host-userdb", "run", "security", "vendor"} {
 		if err := os.RemoveAll(filepath.Join(files, dir)); err != nil {
 			t.Fatal(err)
 		}
@@ -159,10 +159,14 @@ func TestOwnerPrivateGroupLocalSourcesNeedsLocalAccountsOnly(t *testing.T) {
 			writeSourceFile(t, filepath.Join(files, "host-userdb", "200123.user"), "{}\n")
 		}},
 		{name: "the built-in userdb services only", content: stockNsswitch, extra: func(t *testing.T) {
-			for _, name := range []string{"io.systemd.Multiplexer", "io.systemd.NameServiceSwitch"} {
+			for _, name := range []string{"io.systemd.Multiplexer", "io.systemd.NameServiceSwitch", "io.systemd.DropIn"} {
 				writeSourceFile(t, filepath.Join(files, "run", "systemd", "userdb", name), "")
 			}
 		}, want: true},
+		{name: "the drop-in service with a record in its directory", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "run", "systemd", "userdb", "io.systemd.DropIn"), "")
+			writeSourceFile(t, filepath.Join(files, "userdb", "bob.user"), "{}\n")
+		}},
 		{name: "a homed userdb service", content: stockNsswitch, extra: func(t *testing.T) {
 			writeSourceFile(t, filepath.Join(files, "run", "systemd", "userdb", "io.systemd.Home"), "")
 		}},
@@ -183,13 +187,30 @@ func TestOwnerPrivateGroupLocalSourcesNeedsLocalAccountsOnly(t *testing.T) {
 		{name: "initgroups from the local files", content: stockNsswitch + "initgroups: files\n", want: true},
 		{name: "initgroups from the local files and systemd", content: stockNsswitch + "initgroups: files [SUCCESS=merge] systemd\n", want: true},
 		{name: "a pam_group rule", content: stockNsswitch, extra: func(t *testing.T) {
-			writeSourceFile(t, privateGroupPAMGroupConf, "*;*;*;Al0000-2400;devs\n")
+			writeSourceFile(t, filepath.Join(files, "security", "group.conf"), "*;*;*;Al0000-2400;devs\n")
 		}},
 		{name: "a pam_group rule in group.d", content: stockNsswitch, extra: func(t *testing.T) {
-			writeSourceFile(t, filepath.Join(privateGroupPAMGroupDir, "devs.conf"), "# header\n*;*;me;Al0000-2400;devs\n")
+			writeSourceFile(t, filepath.Join(files, "security", "group.d", "devs.conf"), "# header\n*;*;me;Al0000-2400;devs\n")
+		}},
+		{name: "a vendor pam_group rule with no local group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			if err := os.Remove(filepath.Join(files, "security", "group.conf")); err != nil {
+				t.Fatal(err)
+			}
+			writeSourceFile(t, filepath.Join(files, "vendor", "security", "group.conf"), "*;*;*;Al0000-2400;devs\n")
+		}},
+		{name: "a vendor pam_group rule in group.d", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "vendor", "security", "group.d", "devs.conf"), "*;*;me;Al0000-2400;devs\n")
+		}},
+		{name: "a commented vendor group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "vendor", "security", "group.conf"), "# *;*;*;Al0000-2400;devs\n")
+		}, want: true},
+		{name: "an unreadable vendor group.conf", content: stockNsswitch, extra: func(t *testing.T) {
+			if err := os.MkdirAll(filepath.Join(files, "vendor", "security", "group.conf"), 0o755); err != nil {
+				t.Fatal(err)
+			}
 		}},
 		{name: "a commented group.d file", content: stockNsswitch, extra: func(t *testing.T) {
-			writeSourceFile(t, filepath.Join(privateGroupPAMGroupDir, "devs.conf"), "# *;*;me;Al0000-2400;devs\n")
+			writeSourceFile(t, filepath.Join(files, "security", "group.d", "devs.conf"), "# *;*;me;Al0000-2400;devs\n")
 		}, want: true},
 		{name: "an unrelated userdb file", content: stockNsswitch, extra: func(t *testing.T) {
 			writeSourceFile(t, filepath.Join(files, "userdb", "README"), "x\n")
