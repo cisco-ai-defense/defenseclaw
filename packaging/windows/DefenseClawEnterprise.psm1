@@ -41853,7 +41853,7 @@ function Test-DefenseClawNuclearRealDirectoryPath {
 
 # True when <profile>\.defenseclaw is a real folder (no reparse point in its path) that
 # holds the managed runtime's own evidence: an immutable runtime generation
-# (hooks\.managed-runtime-<connector>-<id>.json) or a hook contract lock bound
+# (hooks\.managed-runtime-<connector>-<id>.json, GitHub Copilot's too) or a hook contract lock bound
 # to a managed gateway service. A per-user DefenseClaw install never writes
 # either, so its data is not taken by the managed purge.
 function Test-DefenseClawNuclearManagedUserDataFolder {
@@ -41872,7 +41872,7 @@ function Test-DefenseClawNuclearManagedUserDataFolder {
                     -File `
                     -Filter '.managed-runtime-*.json' `
                     -ErrorAction SilentlyContinue)) {
-                if ([string]$bundle.Name -cmatch '^\.managed-runtime-(claudecode|codex|cursor)-[^\\/]+\.json$' -and
+                if ([string]$bundle.Name -cmatch '^\.managed-runtime-(claudecode|codex|cursor|copilot)-[^\\/]+\.json$' -and
                     ($bundle.Attributes -band $reparse) -eq 0) {
                     return $true
                 }
