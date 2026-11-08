@@ -1351,7 +1351,7 @@ def _check_sandbox(
             r=r,
             check_id="doctor.sandbox.gateway-binary",
             reason_code="sandbox-gateway-missing",
-            remediation="run 'defenseclaw upgrade' to install the gateway binary",
+            remediation=_install_repair_hint("the gateway"),
         )
         return
     if prefetched is not None:
@@ -4916,12 +4916,12 @@ def _check_component_connector_compatibility(
 _DOCS_URL = "https://cisco-ai-defense.github.io/defenseclaw/docs"
 
 
-def _scanner_repair_hint() -> str:
-    """The command that repairs the skill-scanner launcher of this install.
+def _install_repair_hint(what: str) -> str:
+    """The command that repairs *what* (a part of this install).
 
-    On macOS and Linux the release upgrade resolver reconciles the launcher
-    with the managed virtualenv, at the installed version too (the built-in
-    ``defenseclaw upgrade`` stops early when the version is already current);
+    On macOS and Linux the release upgrade resolver reinstalls the release at
+    the installed version too (the built-in ``defenseclaw upgrade`` stops early
+    when the version is already current, so it cannot repair a missing part);
     on Windows, running the install command again does (from 1.0 the 0.8.x
     Setup package and its ``/repair`` are retired).
     """
@@ -4932,9 +4932,15 @@ def _scanner_repair_hint() -> str:
             f"({_DOCS_URL}/get-started/windows/install-lifecycle/#repair)"
         )
     return (
-        "repair the launcher with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
+        f"repair {what} with the release upgrade resolver, `bash defenseclaw-upgrade.sh --yes` "
         f"(get and verify it as {_DOCS_URL}/get-started/upgrade/ shows)"
     )
+
+
+def _scanner_repair_hint() -> str:
+    """The command that repairs the skill-scanner launcher of this install."""
+
+    return _install_repair_hint("the launcher")
 
 
 def _scanner_version_note(dist: str, expected: str) -> tuple[str, str]:
@@ -13808,6 +13814,35 @@ def _policy_dir_remediation(cfg, error: str) -> str:
     )
 
 
+def _policy_digest_unavailable_remediation(reason: str) -> str:
+    """The next step for a Policy row whose local digest could not be computed.
+
+    Running ``defenseclaw-gateway policy digest --json`` shows why a gateway that
+    ran and failed did; it cannot help when the executable itself is missing,
+    refused by the custody check, or not startable, so those name the step that
+    corrects the executable (the cause is in the row detail).
+    """
+
+    from defenseclaw.gateway import gateway_executable_problem
+
+    again = "then run `defenseclaw doctor` again"
+    part = "the gateway"
+    problem = gateway_executable_problem(reason)
+    if problem is None:
+        return f"Run `defenseclaw-gateway policy digest --json` to see why the digest cannot be computed, {again}"
+    if os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip():
+        return (
+            "DEFENSECLAW_GATEWAY_BIN points at a gateway that cannot run: set it to the installed "
+            f"defenseclaw-gateway, or unset it, {again}"
+        )
+    if problem == "unverified":
+        return (
+            "Make the gateway executable the cause names, and every directory above it, writable only by this "
+            f"account (or root), {again}; if it is damaged, {_install_repair_hint(part)}"
+        )
+    return f"{_install_repair_hint(part)}, {again}"
+
+
 def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> None:
     """The effective policy the gateway applied: its generation and digest.
 
@@ -13893,19 +13928,8 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     digest_failure: list[str] = []
     local = _local_policy_digest(cfg, failure=digest_failure)
     if local is None:
-        from defenseclaw.gateway import NO_TRUSTED_GATEWAY_EXECUTABLE
-
         cause = f" ({digest_failure[0]})" if digest_failure else ""
-        if digest_failure and digest_failure[0].startswith(NO_TRUSTED_GATEWAY_EXECUTABLE):
-            # The digest command cannot run at all, so running it would not help.
-            remediation = (
-                "Run `defenseclaw upgrade` to install or repair the gateway binary, then run `defenseclaw doctor` again"
-            )
-        else:
-            remediation = (
-                "Run `defenseclaw-gateway policy digest --json` to see why the digest cannot be computed, "
-                "then run `defenseclaw doctor` again"
-            )
+        remediation = _policy_digest_unavailable_remediation(digest_failure[0] if digest_failure else "")
         _emit(
             "warn",
             label,

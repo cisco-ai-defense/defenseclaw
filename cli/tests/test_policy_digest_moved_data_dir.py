@@ -9,9 +9,12 @@ comparison was unavailable.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -137,6 +140,14 @@ def _policy_row(monkeypatch, cfg_failure: str | None):
     return result.checks[0]
 
 
+RESOLVER_COMMAND = "bash defenseclaw-upgrade.sh --yes"
+
+
+@pytest.fixture(autouse=True)
+def _no_explicit_gateway(monkeypatch) -> None:
+    monkeypatch.delenv("DEFENSECLAW_GATEWAY_BIN", raising=False)
+
+
 def test_missing_gateway_executable_names_a_command_that_can_run(install_home, monkeypatch) -> None:
     monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", lambda: None)
     failure: list[str] = []
@@ -146,11 +157,12 @@ def test_missing_gateway_executable_names_a_command_that_can_run(install_home, m
 
     assert check["status"] == "warn"
     assert "executable is installed" in check["detail"]
-    assert "defenseclaw upgrade" in check["remediation"]
+    assert RESOLVER_COMMAND in check["remediation"]
+    assert "defenseclaw upgrade" not in check["remediation"]
     assert "policy digest --json" not in check["remediation"]
 
 
-def test_unverified_gateway_executable_names_a_command_that_can_run(install_home, monkeypatch) -> None:
+def test_unverified_gateway_executable_names_the_permission_fix_and_the_repair(install_home, monkeypatch) -> None:
     def refuse():
         raise OSError("refusing to run /x/defenseclaw-gateway: writable by another account")
 
@@ -161,8 +173,114 @@ def test_unverified_gateway_executable_names_a_command_that_can_run(install_home
     check = _policy_row(monkeypatch, failure[0])
 
     assert "writable by another account" in check["detail"]
-    assert "defenseclaw upgrade" in check["remediation"]
+    assert "writable only by this account" in check["remediation"]
+    assert RESOLVER_COMMAND in check["remediation"]
+    assert "defenseclaw upgrade" not in check["remediation"]
     assert "policy digest --json" not in check["remediation"]
+
+
+def test_explicit_gateway_path_that_is_absent_names_the_variable(install_home, tmp_path, monkeypatch) -> None:
+    absent = tmp_path / "gone" / "defenseclaw-gateway"
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_BIN", str(absent))
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", gateway.resolve_gateway_binary)
+    failure: list[str] = []
+
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    check = _policy_row(monkeypatch, failure[0])
+    assert str(absent) in check["detail"]
+    assert "could not be started" in check["detail"]
+    assert "DEFENSECLAW_GATEWAY_BIN" in check["remediation"]
+    assert "policy digest --json" not in check["remediation"]
+    assert "defenseclaw upgrade" not in check["remediation"]
+
+
+def test_installed_gateway_that_cannot_start_names_the_repair(install_home, monkeypatch) -> None:
+    def cannot_start(*_args, **_kwargs):
+        raise OSError(8, "Exec format error")
+
+    monkeypatch.setattr(gateway.subprocess, "run", cannot_start)
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    check = _policy_row(monkeypatch, failure[0])
+
+    assert "/trusted/defenseclaw-gateway" in check["detail"]
+    assert RESOLVER_COMMAND in check["remediation"]
+    assert "policy digest --json" not in check["remediation"]
+
+
+def test_gateway_command_that_times_out_keeps_the_diagnose_command(install_home, monkeypatch) -> None:
+    def hang(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("defenseclaw-gateway", 60)
+
+    monkeypatch.setattr(gateway.subprocess, "run", hang)
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+
+    check = _policy_row(monkeypatch, failure[0])
+
+    assert "did not finish" in check["detail"]
+    assert "policy digest --json" in check["remediation"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the release upgrade resolver is a POSIX shell script")
+def test_named_repair_command_reinstalls_a_missing_gateway_at_the_current_version(
+    install_home, tmp_path, monkeypatch
+) -> None:
+    # The command the Policy row names must change something when the gateway
+    # is missing and the install is already at the latest release.
+    monkeypatch.setattr(gateway, "resolve_trusted_gateway_binary", lambda: None)
+    failure: list[str] = []
+    assert gateway.local_policy_digest(SimpleNamespace(data_dir=str(install_home)), failure=failure) is None
+    remediation = _policy_row(monkeypatch, failure[0])["remediation"]
+    named = re.search(r"`bash defenseclaw-upgrade\.sh([^`]*)`", remediation)
+    assert named, remediation
+
+    version = "1.0.9"
+    installer = tmp_path / "install.sh"
+    ran = tmp_path / "installer-ran"
+    installer.write_text(f"#!/bin/bash\nreadonly DC_VERSION=\"{version}\"\necho \"$@\" > {ran}\n", encoding="utf-8")
+    checksum = hashlib.sha256(installer.read_bytes()).hexdigest()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "curl").write_text(
+        "#!/bin/sh\n"
+        "out=; prev=; url=\n"
+        "for a in \"$@\"; do [ \"$prev\" = -o ] && out=$a; prev=$a; url=$a; done\n"
+        "case \"$*\" in *-fsSI*)\n"
+        f"  printf \"HTTP/2 302\\r\\nlocation: https://github.com/x/releases/tag/{version}\\r\\n\\r\\n\"; exit 0;;\n"
+        "esac\n"
+        "case \"$url\" in\n"
+        f"  */install.sh) cp {installer} \"$out\";;\n"
+        f"  */checksums.txt) printf \"%s  install.sh\\n\" {checksum} > \"$out\";;\n"
+        "  *) exit 22;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "cosign").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    # The install is current: the gateway that is still on disk reports the latest release.
+    present = home / ".local" / "bin" / "defenseclaw-gateway"
+    present.write_text(f"#!/bin/sh\necho defenseclaw-gateway {version}\n", encoding="utf-8")
+    present.chmod(0o755)
+    for tool in (bin_dir / "curl", bin_dir / "cosign"):
+        tool.chmod(0o755)
+    system_path = os.environ["PATH"]
+    env = {**os.environ, "HOME": str(home), "PATH": f"{bin_dir}{os.pathsep}{system_path}"}
+    env.pop("DEFENSECLAW_REPO", None)
+    env.pop("DEFENSECLAW_UPGRADE_LOCAL_DIR", None)
+    script = Path(__file__).resolve().parents[2] / "scripts" / "defenseclaw-upgrade.sh"
+
+    result = subprocess.run(
+        ["bash", str(script), *named.group(1).split()],
+        capture_output=True, text=True, check=False, env=env, timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "up to date" not in result.stdout
+    assert ran.exists(), "the named repair command did not run the installer at the current version"
 
 
 def test_failing_gateway_command_keeps_the_diagnose_command(monkeypatch) -> None:
