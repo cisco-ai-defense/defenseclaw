@@ -3408,12 +3408,6 @@ func readingReachesLink(reading, cwd, home string) bool {
 	for _, edit := range inPlaceStateOperands(reading, cwd, home, KnownUser{}) {
 		operands = append(operands, edit.path)
 	}
-	input := actionfacts.Input{Tool: "Bash", Command: reading, CWD: cwd, ActiveHome: home}
-	for _, candidate := range actionfacts.Analyze(input).Paths {
-		if candidate.Resolved != "" && (candidate.Access == actionfacts.PathAccessWrite || candidate.Access == actionfacts.PathAccessAppend) {
-			operands = append(operands, candidate.Resolved)
-		}
-	}
 	for _, operand := range operands {
 		path := OperandPath(operand, cwd)
 		if resolved, ok := ResolveWriteTarget(path); !ok || resolved != filepath.Clean(path) {
