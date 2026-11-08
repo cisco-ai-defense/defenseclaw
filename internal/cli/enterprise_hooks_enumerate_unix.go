@@ -553,6 +553,15 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 			versions[name] = version
 		}
 	}
+	sources := map[string]string{}
+	for name, source := range response.VersionSources {
+		// Only a path the worker could have run: absolute, clean, bounded.
+		// The enumerator accepts it only as one of the connector own CLI
+		// candidates (see carryVerifiedAgentVersions).
+		if wanted[name] && versions[name] != "" && len(source) <= 512 && filepath.IsAbs(source) && filepath.Clean(source) == source {
+			sources[name] = source
+		}
+	}
 	reasons := map[string]string{}
 	for name, reason := range response.Reasons {
 		if wanted[name] {
@@ -608,7 +617,7 @@ func enterpriseHooksEnumerateDiscoverAll(ctx context.Context, account unixidenti
 		privateInstalls = append(privateInstalls, install)
 	}
 	privateInstalls = append(privateInstalls, incompletes...)
-	return enterprisehooks.UnixDiscovery{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: privateInstalls}, nil
+	return enterprisehooks.UnixDiscovery{Versions: versions, Reasons: reasons, VersionSources: sources, Surfaces: surfaces, PrivateInstalls: privateInstalls}, nil
 }
 
 // enterpriseHookSessionUIDs lists uids with a live login session:

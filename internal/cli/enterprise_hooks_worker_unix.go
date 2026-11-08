@@ -389,6 +389,9 @@ type enterpriseHookWorkerResponse struct {
 	Targets  []enterpriseHookWorkerTargetResult `json:"targets,omitempty"`
 	Versions map[string]string                  `json:"versions,omitempty"`
 	Reasons  map[string]string                  `json:"reasons,omitempty"`
+	// VersionSources is, per connector, the CLI whose live run supplied the
+	// version (user-influenced; the parent validates it).
+	VersionSources map[string]string `json:"version_sources,omitempty"`
 	// Surfaces are the discovered app and extension installs per connector
 	// (user-influenced; the parent validates them).
 	Surfaces        map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
@@ -621,8 +624,8 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 // enterpriseHookWorkerDiscoverSurfaces and
 // enterpriseHookWorkerDiscoverKiroIDE are replaceable in tests.
 var (
-	enterpriseHookWorkerDiscoverVersion              = enterprisehooks.DiscoverUnixAgentVersion
-	enterpriseHookWorkerDiscoverVersionInAccountHome = enterprisehooks.DiscoverUnixAgentVersionInAccountHome
+	enterpriseHookWorkerDiscoverVersion              = enterprisehooks.DiscoverUnixAgentVersionFrom
+	enterpriseHookWorkerDiscoverVersionInAccountHome = enterprisehooks.DiscoverUnixAgentVersionInAccountHomeFrom
 	enterpriseHookWorkerDiscoverStaticVersion        = enterprisehooks.DiscoverUnixAgentVersionStatically
 	enterpriseHookWorkerDiscoverSurfaces             = enterprisehooks.DiscoverUnixAgentSurfaces
 	enterpriseHookWorkerDiscoverKiroIDE              = enterprisehooks.DiscoverUnixKiroIDEForms
@@ -1917,6 +1920,7 @@ type enterpriseHookWorkerDiscovery struct {
 	mu          sync.Mutex
 	versions    map[string]string
 	reasons     map[string]string
+	sources     map[string]string
 	surfaces    map[string][]connector.AgentSurface
 	unlisted    []enterprisehooks.PrivateAgentInstall
 	installs    []enterprisehooks.PrivateAgentInstall
@@ -1939,6 +1943,7 @@ func enterpriseHookWorkerDiscoverWithin(ctx context.Context, request enterpriseH
 	found := &enterpriseHookWorkerDiscovery{
 		versions: map[string]string{},
 		reasons:  map[string]string{},
+		sources:  map[string]string{},
 		surfaces: map[string][]connector.AgentSurface{},
 		finished: map[string]bool{},
 	}
@@ -1966,13 +1971,13 @@ func enterpriseHookWorkerDiscover(ctx context.Context, request enterpriseHookWor
 		if name == "" {
 			continue
 		}
-		var version, reason string
+		var version, reason, source string
 		if request.StaticDiscovery {
 			version, reason = enterpriseHookWorkerDiscoverStaticVersion(ctx, request.Home, name)
 		} else if name == "hermes" {
-			version, reason = enterpriseHookWorkerDiscoverVersionInAccountHome(ctx, request.Home, name)
+			version, reason, source = enterpriseHookWorkerDiscoverVersionInAccountHome(ctx, request.Home, name)
 		} else {
-			version, reason = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
+			version, reason, source = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
 		}
 		// Host apps are never run; an engine CLI bundled in one is run
 		// only outside a static (untrusted-home) discovery.
@@ -1985,6 +1990,9 @@ func enterpriseHookWorkerDiscover(ctx context.Context, request enterpriseHookWor
 		found.mu.Lock()
 		if version != "" {
 			found.versions[name] = version
+			if source != "" {
+				found.sources[name] = source
+			}
 		} else if reason != "" {
 			found.reasons[name] = reason
 		}
@@ -2011,15 +2019,19 @@ func (found *enterpriseHookWorkerDiscovery) response(connectors []string) enterp
 	found.mu.Lock()
 	defer found.mu.Unlock()
 	response := enterpriseHookWorkerResponse{
-		Versions: make(map[string]string, len(found.versions)),
-		Reasons:  make(map[string]string, len(found.reasons)),
-		Surfaces: make(map[string][]connector.AgentSurface, len(found.surfaces)),
+		Versions:       make(map[string]string, len(found.versions)),
+		Reasons:        make(map[string]string, len(found.reasons)),
+		VersionSources: make(map[string]string, len(found.sources)),
+		Surfaces:       make(map[string][]connector.AgentSurface, len(found.surfaces)),
 	}
 	for name, version := range found.versions {
 		response.Versions[name] = version
 	}
 	for name, reason := range found.reasons {
 		response.Reasons[name] = reason
+	}
+	for name, source := range found.sources {
+		response.VersionSources[name] = source
 	}
 	for name, surfaces := range found.surfaces {
 		response.Surfaces[name] = append([]connector.AgentSurface(nil), surfaces...)

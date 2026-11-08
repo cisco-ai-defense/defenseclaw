@@ -134,17 +134,17 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 		}
 		return result(opts), nil
 	}
-	enterpriseHookWorkerDiscoverVersion = func(_ context.Context, home, connector string, allowExec bool) (string, string) {
+	enterpriseHookWorkerDiscoverVersion = func(_ context.Context, home, connector string, allowExec bool) (string, string, string) {
 		if connector == "codex" && allowExec {
-			return "0.142.0", ""
+			return "0.142.0", "", ""
 		}
-		return "", "not installed"
+		return "", "not installed", ""
 	}
-	enterpriseHookWorkerDiscoverVersionInAccountHome = func(_ context.Context, _, connector string) (string, string) {
+	enterpriseHookWorkerDiscoverVersionInAccountHome = func(_ context.Context, _, connector string) (string, string, string) {
 		if connector == "hermes" {
-			return "0.21.5", ""
+			return "0.21.5", "", ""
 		}
-		return "", "not installed"
+		return "", "not installed", ""
 	}
 	enterpriseHookWorkerDiscoverStaticVersion = func(_ context.Context, home, connector string) (string, string) {
 		if connector == "hermes" {
@@ -171,14 +171,14 @@ func TestEnterpriseHookWorkerHelperProcess(t *testing.T) {
 	if mode == "blocked-private" || mode == "blocked-version" {
 		// A file system call that never returns and never observes the
 		// context (GAP-1413: macOS held an open() in the home walk).
-		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string) {
+		enterpriseHookWorkerDiscoverVersion = func(_ context.Context, _, connector string, _ bool) (string, string, string) {
 			switch {
 			case connector == "hermes":
-				return "0.21.5", ""
+				return "0.21.5", "", ""
 			case connector == "codex" && mode == "blocked-version":
 				select {}
 			}
-			return "", "not installed"
+			return "", "not installed", ""
 		}
 		enterpriseHookWorkerDiscoverSurfaces = func(context.Context, string, string, bool) ([]connector.AgentSurface, bool) {
 			return nil, true

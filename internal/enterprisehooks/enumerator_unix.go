@@ -118,8 +118,12 @@ type UnixDiscoverFunc func(ctx context.Context, account unixidentity.Account, co
 // reasons for connectors without one, and the connector's app and
 // extension installs.
 type UnixDiscovery struct {
-	Versions        map[string]string
-	Reasons         map[string]string
+	Versions map[string]string
+	Reasons  map[string]string
+	// VersionSources names, per connector, the CLI whose live run supplied
+	// its version. A version with no entry here came from package metadata
+	// or a stamp and is bound to no executable.
+	VersionSources  map[string]string
 	Surfaces        map[string][]connector.AgentSurface
 	PrivateInstalls []PrivateAgentInstall
 }
@@ -647,7 +651,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				User: name, UID: account.UID, GID: account.GID, Home: home, HomeInode: check.Inode,
 			})
 		}
-		var versions, reasons map[string]string
+		var versions, reasons, sources map[string]string
 		var surfaces map[string][]connector.AgentSurface
 		var privateInstalls []PrivateAgentInstall
 		discoveryFailed := false
@@ -660,7 +664,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				noteDiscoveryError(name, err)
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
-			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
+			versions, reasons, sources, surfaces = found.Versions, found.Reasons, found.VersionSources, found.Surfaces
 			privateInstalls = found.PrivateInstalls
 			surfacesKnown = err == nil
 		} else if check.State == HomeAvailable && opts.Discover != nil {
@@ -675,7 +679,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		if check.State == HomeAvailable && !discoveryFailed && (opts.DiscoverSurfaces != nil || opts.Discover != nil) {
 			versions = carryVerifiedAgentVersions(opts.State, name, home,
-				append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...), versions, reasons, opts.Logger)
+				append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...), versions, reasons, sources, opts.Logger)
 		}
 		if discoveryFailed {
 			// The worker also owns the private-install scan for per-user
