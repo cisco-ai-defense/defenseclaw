@@ -187,7 +187,10 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
     assert "DC_TEST_NATIVE_GATEWAY" in workflow
-    assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
+    needs = "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-frozen-gateway, go-pinned]"
+    assert needs in workflow
+    # The frozen-gateway tests run alone in their own required job.
+    assert 'test "$FROZEN_GATEWAY_RESULT" = success' in workflow
     assert 'test "$AUDIT_RESULT" = success' in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
     assert "go tool cover -func=coverage.out" in workflow
