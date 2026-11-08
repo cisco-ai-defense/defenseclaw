@@ -70,7 +70,12 @@ func policyFileSwapError(path string, err error) error {
 func atomicWriteOver(_ Options, path string, base policyFileBase, data []byte) error {
 	return atomicWriteSDDLWith(path, data, publicFileSDDL, func(tmp string) error {
 		policyFileSwapHook(path)
-		_, err := safefile.CompareAndSwapFile(tmp, path, policyFileExpectation(path, base), policyFileLimit, nil)
+		class := safefile.PublishSharedWithExternalWriters
+		if base.owned {
+			class = safefile.PublishDefenseClawOwned
+		}
+		_, err := safefile.CompareAndSwapFile(tmp, path, policyFileExpectation(path, base), policyFileLimit, nil,
+			class)
 		if err == nil {
 			forgetPolicyFileRead(path)
 		}

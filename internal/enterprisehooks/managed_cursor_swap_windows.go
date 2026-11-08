@@ -20,7 +20,8 @@ import (
 // windowsCursorManagedSwap is one compare-and-swap write of a Cursor
 // enterprise artifact.
 type windowsCursorManagedSwap struct {
-	path string
+	path  string
+	class safefile.PublicationClass
 	// expect is the file the write may replace. The swap publishes data only
 	// while path still holds exactly that file; any other file is newer and
 	// is kept (errWindowsCursorManagedConcurrentChange).
@@ -91,6 +92,7 @@ func swapWindowsCursorManagedFile(request windowsCursorManagedSwap) (windowsCurs
 		return setWindowsManagedPolicyProtection(temp, false, userReadable)
 	}
 	publish := safefile.SharedPublish{
+		Class:       request.class,
 		Base:        safefile.SharedFile{Path: path, Exists: request.expect.existed, Data: request.expect.data},
 		Data:        request.data,
 		Limit:       request.limit,
@@ -245,6 +247,7 @@ func writeWindowsCursorSharedHooks(base safefile.SharedFile, edit safefile.Share
 		return safefile.SharedWriteResult{Published: err == nil, Left: safefile.SharedFile{Path: base.Path}}, err
 	}
 	request := windowsCursorManagedSwap{
+		class:     safefile.PublishSharedWithExternalWriters,
 		path:      base.Path,
 		expect:    windowsManagedFileSnapshot{path: base.Path, existed: base.Exists, data: base.Data},
 		data:      edit.Data,
@@ -300,6 +303,7 @@ func keepWindowsCursorHooksReadable(written safefile.SharedWriteResult) (safefil
 		}
 		metadata := windowsCursorManagedFileMetadataOf(current.Metadata)
 		_, err = windowsCursorManagedFileSwap(windowsCursorManagedSwap{
+			class:          safefile.PublishSharedWithExternalWriters,
 			path:           path,
 			expect:         windowsManagedFileSnapshot{path: path, existed: true, data: current.Data},
 			expectMetadata: &metadata,
