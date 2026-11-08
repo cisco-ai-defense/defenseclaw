@@ -255,3 +255,23 @@ func TestClassifyEnterpriseHookConnectorErrors(t *testing.T) {
 		t.Fatalf("a pass-level error: %v", err)
 	}
 }
+
+// The guardian log line of a link failure names the link and the fix for every
+// connector, not only Codex.
+func TestEnterpriseHookLinkCauseLineCarriesTheFixForEveryConnector(t *testing.T) {
+	for connectorName, link := range map[string]string{
+		"codex":      `C:\ProgramData\OpenAI\Codex`,
+		"cursor":     `C:\ProgramData\Cursor`,
+		"claudecode": `C:\Program Files\ClaudeCode\managed-settings.d`,
+	} {
+		line := enterpriseHookConnectorLinkFailure{Connector: connectorName, Link: link, Cause: errors.New("access is denied")}.causeLine()
+		for _, want := range []string{connectorName, link, `cmd /c rmdir "` + link + `"`, "access is denied"} {
+			if !strings.Contains(line, want) {
+				t.Fatalf("%s: the log line lacks %q: %s", connectorName, want, line)
+			}
+		}
+		if !strings.HasSuffix(line, "\n") || strings.Count(line, "\n") != 1 {
+			t.Fatalf("%s: not exactly one line: %q", connectorName, line)
+		}
+	}
+}

@@ -83,6 +83,14 @@ func (failures *enterpriseHookConnectorLinkFailures) coveredBy(rows map[string]s
 	return len(failures.Failures) > 0
 }
 
+// causeLine is the guardian log line for a link failure: the link, the fix and
+// the cause, the same for every connector.
+func (failure enterpriseHookConnectorLinkFailure) causeLine() string {
+	return fmt.Sprintf("[hook-guardian] the %s machine folder is a link (%s); its targets fail and the others go on. "+
+		"Fix: as an administrator, run cmd /c rmdir \"%s\" (it removes the link only, not its target). Cause: %s\n",
+		failure.Connector, failure.Link, failure.Link, failure.Cause)
+}
+
 // rowErrors maps each failed connector to the error text of its rows.
 func (failures *enterpriseHookConnectorLinkFailures) rowErrors() map[string]string {
 	rows := make(map[string]string, len(failures.Failures))
