@@ -7,26 +7,25 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
-// A listener this account cannot prove (here one that never accepts, so its
-// owner is never proven within the verifier bound of 3 s) is refused with exit 8. The shell hook reads the
+// A listener this account cannot prove (here one of another account that never
+// accepts, started through passwordless sudo, so its owner is never proven
+// within the verifier bound of 3 s) is refused with exit 8. The shell hook reads the
 // root-gateway diagnosis from this helper stdout, whichever layout the data
 // folder has: the helper hands the diagnosis the API address of the call and
 // the data folder the shell named, and prints exactly what it returns. The
 // gateway CLI hook-post prints the same text through the same function.
 func TestHookPostPrintsTheRootGatewayDiagnosisOnARefusedListener(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	addr := listener.Addr().String()
+	addr := startForeignFrozenListener(t)
 	dataDir := t.TempDir()
 	t.Setenv(hookPostDataDirEnv, dataDir)
 
@@ -65,15 +64,11 @@ func TestHookPostPrintsTheRootGatewayDiagnosisOnARefusedListener(t *testing.T) {
 // With no root-run gateway to name, the real function prints nothing and the
 // shell keeps its generic text.
 func TestHookPostPrintsNothingForAListenerThatIsNoRootGateway(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
+	addr := startForeignFrozenListener(t)
 	t.Setenv(hookPostDataDirEnv, t.TempDir())
 	frame := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00{}\x00")
 	var out bytes.Buffer
-	args := []string{"hook-post", "--api-addr", listener.Addr().String(), "--max-time", "5", "--curl-output"}
+	args := []string{"hook-post", "--api-addr", addr, "--max-time", "5", "--curl-output"}
 	if got := runMain(args, bytes.NewReader(frame), &out, io.Discard); got != hookexec.PerUserPostPeerUnverifiedExit || out.Len() != 0 {
 		t.Fatalf("exit %d, stdout %q, want the refused-listener status and no text", got, out.String())
 	}
@@ -99,5 +94,48 @@ func TestParseHookPostFlagsTakesWhatTheRequestUses(t *testing.T) {
 		if (err == nil) != tc.ok || got != tc.want {
 			t.Errorf("parseHookPostFlags(%v) = %+v, %v, want %+v (ok %v)", tc.args, got, err, tc.want, tc.ok)
 		}
+	}
+}
+
+// This account own listener that accepts nothing (a frozen gateway) is not a
+// listener of another account: nothing is sent, no root-gateway text is
+// printed, and the helper reports it like a gateway that is up and late. An
+// ordinary tool call gets the late-ordinary status, which the shell reads as
+// the outage, and any other call the no-answer status, which stays closed.
+func TestHookPostReadsAFrozenOwnListenerAsNoAnswer(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	home := t.TempDir()
+	project := filepath.Join(home, "proj")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv(hookPostDataDirEnv, t.TempDir())
+	previous := peerRefusalOutput
+	t.Cleanup(func() { peerRefusalOutput = previous })
+	peerRefusalOutput = func(error, string, string) string {
+		t.Error("a frozen own listener was diagnosed as a refused listener")
+		return ""
+	}
+	ordinary := fmt.Sprintf(`{"hook_event_name":"PreToolUse","cwd":%q,"tool_name":"Bash","tool_input":{"command":"echo hi"}}`, project)
+	for _, tc := range []struct {
+		name, body string
+		want       int
+	}{
+		{"ordinary tool call", ordinary, hookexec.PerUserPostLateOrdinaryExit},
+		{"event that is not a tool call", "{}", hookexec.PerUserPostNoAnswerExit},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			frame := []byte("DCPOST1\x00/api/v1/claude-code/hook\x00" + tc.body + "\x00")
+			var out bytes.Buffer
+			args := []string{"hook-post", "--api-addr", listener.Addr().String(), "--max-time", "5", "--curl-output"}
+			if got := runMain(args, bytes.NewReader(frame), &out, io.Discard); got != tc.want || out.Len() != 0 {
+				t.Fatalf("exit %d, stdout %q, want status %d and no text", got, out.String(), tc.want)
+			}
+		})
 	}
 }
