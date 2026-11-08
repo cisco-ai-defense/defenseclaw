@@ -119,7 +119,7 @@ func (l *lifecycle) describeHookContracts(ctx context.Context) {
 		stateFailed[enterprisehooks.CredentialAttestationTarget{Connector: result.Connector, User: result.User, UserHome: result.UserHome}.Key()] = true
 		missingTarget := targetAccountMissingError(result.Error) || targetHomeUnavailableError(result.Error)
 		freshGone := missingTarget && guardianFreshAccountRecordGone(ctx, result.User)
-		if missingTarget && (freshGone || l.accountAbsent(ctx, result.User)) {
+		if missingTarget && (freshGone || l.env.accountAbsent(ctx, result.User)) {
 			// An account that does not resolve, or whose home went with it, is
 			// not a protection failure.
 			// Say it is gone only when the enumerator confirmed it: a directory
@@ -957,10 +957,6 @@ func userHomePathRefusal(reason, home string) bool {
 	return false
 }
 
-// accountAbsent reports whether the host's own account lookup also finds no
-// account named user (getent passwd on Linux, the local directory node on
-// macOS). An account that still exists, a lookup that fails, or a name that
-// is not a plain account name keeps the target a guardian_target_failed.
 // directoryLookupsFailing reports the directory_lookups_failing warning.
 func directoryLookupsFailing(warnings []enterprisestatus.Message) bool {
 	for _, warning := range warnings {
@@ -971,9 +967,13 @@ func directoryLookupsFailing(warnings []enterprisestatus.Message) bool {
 	return false
 }
 
-func (l *lifecycle) accountAbsent(ctx context.Context, user string) bool {
+// accountAbsent reports whether the host's own account lookup also finds no
+// account named user (getent passwd on Linux, the local directory node on
+// macOS). An account that still exists, a lookup that fails, or a name that
+// is not a plain account name keeps the target a guardian_target_failed.
+func (env *Env) accountAbsent(ctx context.Context, user string) bool {
 	user = strings.TrimSpace(user)
-	if l.env.Accounts == nil || !plainAccountName(user) {
+	if env.Accounts == nil || !plainAccountName(user) {
 		return false
 	}
 	if ctx == nil {
@@ -981,7 +981,7 @@ func (l *lifecycle) accountAbsent(ctx context.Context, user string) bool {
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	_, found, err := l.env.Accounts.Lookup(lookupCtx, user)
+	_, found, err := env.Accounts.Lookup(lookupCtx, user)
 	return err == nil && !found
 }
 

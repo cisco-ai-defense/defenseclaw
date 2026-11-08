@@ -102,3 +102,43 @@ func TestStatusNamesContestedOpenCodePorts(t *testing.T) {
 		}
 	}
 }
+
+// The record's unknown list is the last guardian pass's snapshot. An entry for
+// an account the host no longer has is not reported (nothing to repair, the
+// next pass drops it); an entry for an account that still exists is, with its
+// own clear-it step, and the account that is gone does not hide it.
+func TestStatusDropsOpenCodePortUnknownEntriesOfDeletedAccounts(t *testing.T) {
+	root := t.TempDir()
+	env := &Env{GOOS: "linux", Root: root, Layout: mustLayout(t, "linux"),
+		Accounts: &fakeAccounts{accounts: map[string]Account{"kept": {Name: "kept", UID: 1002}}}}
+	record := env.P(filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName))
+	if err := os.MkdirAll(filepath.Dir(record), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := loadOpenCodePortsRecord
+	t.Cleanup(func() { loadOpenCodePortsRecord = previous })
+	gone := enterprisehooks.UnixOpenCodeServicePortUnknown{UID: 1001, User: "gone", Reason: "its home is not available", Path: "/home/gone/.config/opencode/service.json", Fix: "clear gone"}
+	kept := enterprisehooks.UnixOpenCodeServicePortUnknown{UID: 1002, User: "kept", Reason: "not a regular file", Path: "/home/kept/.config/opencode/service.json", Fix: "clear kept"}
+	serve := func(entries ...enterprisehooks.UnixOpenCodeServicePortUnknown) {
+		loadOpenCodePortsRecord = func(string) (enterprisehooks.UnixOpenCodeServicePortsState, error) {
+			return enterprisehooks.UnixOpenCodeServicePortsState{Exists: true, Unknown: entries}, nil
+		}
+	}
+
+	serve(gone)
+	if codes := openCodeRecordWarnings(t, env); len(codes) != 0 {
+		t.Fatalf("a deleted account's stale entry is reported: %v", codes)
+	}
+	serve(kept)
+	if msg := openCodeRecordWarnings(t, env)["opencode_port_account_unknown"]; !strings.Contains(msg, "kept (uid 1002)") || !strings.Contains(msg, "clear kept") {
+		t.Fatalf("an existing account's entry is not reported with its clear step: %q", msg)
+	}
+	serve(gone, kept)
+	msg := openCodeRecordWarnings(t, env)["opencode_port_account_unknown"]
+	if !strings.Contains(msg, "kept (uid 1002)") || strings.Contains(msg, "gone") {
+		t.Fatalf("a deleted account must not be listed beside a live one: %q", msg)
+	}
+}

@@ -504,7 +504,7 @@ func (l *lifecycle) targetsNotMoved(ctx context.Context, attestation enterpriseh
 		// The lookup alone does not prove an account gone: it does not see
 		// every directory account the guardian resolves (dscl reads only
 		// the local node on macOS), so the guardian must have resolved none.
-		if protected[protectedTargetKey(target.Connector, target.User, target.UserHome)] && (target.UID >= 0 || !l.accountAbsent(ctx, target.User)) {
+		if protected[protectedTargetKey(target.Connector, target.User, target.UserHome)] && (target.UID >= 0 || !l.env.accountAbsent(ctx, target.User)) {
 			held = append(held, target.Label())
 		} else {
 			skipped = append(skipped, target.Label())

@@ -1607,7 +1607,18 @@ func (env *Env) warnOpenCodePortsRecord(r *enterprisestatus.Result) {
 		return
 	}
 	state, err := loadOpenCodePortsRecord(env.P(path))
-	unknown := state.Unknown
+	// The record's unknown list is the last guardian pass's snapshot, and the
+	// pass rewrites it only while OpenCode is on the machine policy. An entry
+	// for an account the host no longer has is not a finding: there is nothing
+	// for an administrator to repair, and the next pass drops it.
+	lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	unknown := make([]enterprisehooks.UnixOpenCodeServicePortUnknown, 0, len(state.Unknown))
+	for _, entry := range state.Unknown {
+		if !env.accountAbsent(lookupCtx, entry.User) {
+			unknown = append(unknown, entry)
+		}
+	}
 	if err != nil {
 		r.AddWarning("opencode_port_record_unreadable", fmt.Sprintf(
 			"the guardian's OpenCode service ports record %s cannot be read (%v), so no account gets a new OpenCode port; ports already in service.json files are kept. Remove it to rebuild it on the next pass: sudo rm %s",
