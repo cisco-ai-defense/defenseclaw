@@ -25,7 +25,7 @@ func TestOwnStateTextGivesEveryNotProtectedRowAReasonAndNextStep(t *testing.T) {
 		{"bare not protected with a space", " not protected ", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ownStateText(tc.state, tc.protected)
+			got := ownStateText(ownStatusRow{State: tc.state, Protected: tc.protected})
 			if !strings.HasPrefix(got, "not ") || !strings.Contains(got, ": your gateway did not say why") ||
 				!strings.Contains(got, "ask IT") || !strings.Contains(got, "defenseclaw status") {
 				t.Fatalf("ownStateText(%q) = %q, want a reason and the next step", tc.state, got)
@@ -44,11 +44,37 @@ func TestOwnStateTextKeepsProtectedAndReasonedRows(t *testing.T) {
 		"not confirmed: the record is old. Run defenseclaw status again": "not confirmed: the record is old. Run defenseclaw status again",
 	} {
 		protected := strings.HasPrefix(state, "protected")
-		if got := ownStateText(state, protected); got != want {
+		if got := ownStateText(ownStatusRow{State: state, Protected: protected}); got != want {
 			t.Fatalf("ownStateText(%q) = %q, want %q", state, got, want)
 		}
 	}
-	if got := ownStateText("", true); got != "protected" {
+	if got := ownStateText(ownStatusRow{Protected: true}); got != "protected" {
 		t.Fatalf("a protected row with no text = %q", got)
+	}
+}
+
+// The state is one word and the gateway sends the reason and the next step in
+// their own fields; the row prints them after the state, once, with no double
+// full stop.
+func TestOwnStateTextJoinsStateReasonAndNextStep(t *testing.T) {
+	for name, tc := range map[string]struct {
+		row  ownStatusRow
+		want string
+	}{
+		"reason and next step": {ownStatusRow{State: "not protected", ReasonCode: "no_setup", Reason: "DefenseClaw has not set up protection for this agent on your account", NextStep: "Ask IT"},
+			"not protected: DefenseClaw has not set up protection for this agent on your account. Ask IT"},
+		"trailing full stops": {ownStatusRow{State: "not confirmed", Reason: "the record is old. ", NextStep: "Run defenseclaw status again."},
+			"not confirmed: the record is old. Run defenseclaw status again"},
+		"reason without next step": {ownStatusRow{State: "refused", Reason: "this version is not allowed"},
+			"refused: this version is not allowed"},
+		"protected with a reason": {ownStatusRow{Protected: true, State: "protected", Reason: "Cowork runs the managed hooks"},
+			"protected: Cowork runs the managed hooks"},
+		"protected": {ownStatusRow{Protected: true, State: "protected"}, "protected"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := ownStateText(tc.row); got != tc.want {
+				t.Fatalf("ownStateText(%+v) = %q, want %q", tc.row, got, tc.want)
+			}
+		})
 	}
 }

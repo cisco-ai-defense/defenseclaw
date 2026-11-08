@@ -29,15 +29,22 @@ type ownStatusView struct {
 	ClaudeCode struct {
 		Protected bool `json:"protected"`
 	} `json:"claude_code"`
-	Connectors map[string]struct {
-		Protected bool   `json:"protected"`
-		State     string `json:"state"`
-	} `json:"connectors"`
-	Cowork struct {
-		Protected   bool   `json:"protected"`
-		State       string `json:"state"`
+	Connectors map[string]ownStatusRow `json:"connectors"`
+	Cowork     struct {
+		ownStatusRow
 		LastEventAt string `json:"last_event_at"`
 	} `json:"cowork"`
+}
+
+// ownStatusRow is one connector or Cowork row. State is one of protected, not
+// protected, not confirmed (refused for Cowork); Reason and NextStep carry the
+// text a not-protected row shows after it.
+type ownStatusRow struct {
+	Protected  bool   `json:"protected"`
+	State      string `json:"state"`
+	ReasonCode string `json:"reason_code"`
+	Reason     string `json:"reason"`
+	NextStep   string `json:"next_step"`
 }
 
 // showOwnStatus prints the caller's own protection state on a managed
@@ -90,11 +97,11 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 	fmt.Fprintln(out, "This computer is managed by your organization.")
 	fmt.Fprintf(out, "  Account       %s\n", account)
 	if row, ok := view.Connectors["claudecode"]; ok {
-		fmt.Fprintf(out, "  Claude Code   %s\n", ownStateText(row.State, row.Protected))
+		fmt.Fprintf(out, "  Claude Code   %s\n", ownStateText(row))
 	} else if view.Connectors == nil {
 		// Older gateways use the legacy Claude Code field and do not send
 		// a connector roster.
-		fmt.Fprintf(out, "  Claude Code   %s\n", ownStateText("", view.ClaudeCode.Protected))
+		fmt.Fprintf(out, "  Claude Code   %s\n", ownStateText(ownStatusRow{Protected: view.ClaudeCode.Protected}))
 	}
 	names := make([]string, 0, len(view.Connectors))
 	for name := range view.Connectors {
@@ -105,9 +112,9 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 	sort.Strings(names)
 	for _, name := range names {
 		row := view.Connectors[name]
-		fmt.Fprintf(out, "  %-13s %s\n", ownConnectorLabel(name), ownStateText(row.State, row.Protected))
+		fmt.Fprintf(out, "  %-13s %s\n", ownConnectorLabel(name), ownStateText(row))
 	}
-	fmt.Fprintf(out, "  Cowork        %s\n", ownStateText(view.Cowork.State, view.Cowork.Protected))
+	fmt.Fprintf(out, "  Cowork        %s\n", ownStateText(view.Cowork.ownStatusRow))
 	fmt.Fprintf(out, "  Last Cowork   %s\n", last)
 	fmt.Fprintln(out)
 	for _, line := range ownStatusNextSteps() {
@@ -121,21 +128,28 @@ func showOwnStatus(cmd *cobra.Command, asJSON bool) error {
 // carries a reason and the next step, whatever the gateway sent.
 const ownStateNoReason = "your gateway did not say why. Run defenseclaw status again in a few minutes, and ask IT if it stays this way"
 
-// ownStateText is the text of one status row: the gateway state when it says
-// why, "protected" for a protected row with no text, and the bare "not
-// protected" or "not confirmed" (or no text) completed with a reason and the
-// next step.
-func ownStateText(state string, protected bool) string {
-	state = strings.TrimSpace(state)
+// ownStateText is the text of one status row: the state followed by the
+// reason and the next step the gateway sent, "protected" for a protected row
+// with no text, and the bare "not protected" or "not confirmed" (or no state)
+// completed with a generic reason and the next step. Any other state with no
+// reason prints as sent.
+func ownStateText(row ownStatusRow) string {
+	state, reason, next := strings.TrimSpace(row.State), strings.TrimSpace(row.Reason), strings.TrimSpace(row.NextStep)
 	switch {
-	case state == "" && protected:
+	case state == "" && row.Protected:
 		return "protected"
 	case state == "":
 		return "not protected: " + ownStateNoReason
-	case state == "not protected" || state == "not confirmed":
+	case reason == "" && (state == "not protected" || state == "not confirmed"):
 		return state + ": " + ownStateNoReason
+	case reason == "":
+		return state
 	}
-	return state
+	text := state + ": " + strings.TrimRight(reason, ". ")
+	if next != "" {
+		text += ". " + strings.TrimRight(next, ". ")
+	}
+	return text
 }
 
 func ownConnectorLabel(name string) string {
