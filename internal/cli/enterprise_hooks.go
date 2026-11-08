@@ -5334,31 +5334,70 @@ func writeEnterpriseHookGuardianState(
 	if successes+pending+failures != len(rows) {
 		return fmt.Errorf("hook guardian reconcile rows have inconsistent target dispositions")
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	nowTime := time.Now().UTC()
+	now := nowTime.Format(time.RFC3339Nano)
 	previous, _, err := loadEnterpriseHookGuardianAuthorization(dataDir)
 	if err != nil {
 		return err
 	}
 	protected := mergeProtectedEnterpriseHookTargets(previous.ProtectedTargets, rows)
+	healthy := complete && failures == 0 && successes+pending == len(rows)
 	authorization := enterpriseHookGuardianAuthorization{
 		Version:          1,
 		UpdatedAt:        now,
-		OK:               complete && failures == 0 && successes+pending == len(rows),
+		OK:               healthy,
 		TargetCount:      len(rows),
 		SuccessCount:     successes,
 		FailureCount:     failures,
 		PendingCount:     pending,
 		ProtectedTargets: protected,
 	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    now,
+		Manifest:     strings.TrimSpace(manifest),
+		OK:           healthy,
+		TargetCount:  len(rows),
+		SuccessCount: successes,
+		FailureCount: failures,
+		PendingCount: pending,
+		Results:      rows,
+	}
+	// The activation receipt is the final commit point. It binds the exact
+	// manifest bytes and random reconcile identity to the already-published v1
+	// pair without making those rollback-compatible files unreadable to the
+	// prior binary.
+	activation := enterpriseHookGuardianActivation{
+		Version:          enterpriseHookGuardianActivationVersion,
+		UpdatedAt:        now,
+		ReconcileID:      reconcileID,
+		Manifest:         strings.TrimSpace(manifest),
+		ManifestSHA256:   manifestSHA256,
+		OK:               healthy,
+		TargetCount:      len(rows),
+		SuccessCount:     successes,
+		FailureCount:     failures,
+		PendingCount:     pending,
+		ProtectedTargets: protected,
+	}
+
+	authorizationDir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
+	if err != nil {
+		return err
+	}
+	// An unchanged outcome keeps its published generation: the three records
+	// stay as they are, so a status reader never meets a rewrite for a pass
+	// that decided nothing new (GAP-0912). A changed outcome, a record that
+	// does not read back as trusted and coherent, and a generation old
+	// enough to near the freshness limit are all republished.
+	if enterpriseHookGuardianGenerationCurrent(dataDir, nowTime, authorization, state, activation) {
+		return nil
+	}
 	authorizationData, err := json.MarshalIndent(authorization, "", "  ")
 	if err != nil {
 		return err
 	}
 	authorizationData = append(authorizationData, '\n')
-	authorizationDir, err := prepareEnterpriseHookAuthorizationDir(dataDir)
-	if err != nil {
-		return err
-	}
 	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
 	if err := writeEnterpriseHookProtectedFile(authorizationPath, authorizationData); err != nil {
 		return fmt.Errorf("write %s: %w", authorizationPath, err)
@@ -5373,17 +5412,6 @@ func writeEnterpriseHookGuardianState(
 		return err
 	}
 
-	state := enterpriseHookGuardianState{
-		Version:      1,
-		UpdatedAt:    now,
-		Manifest:     strings.TrimSpace(manifest),
-		OK:           complete && failures == 0 && successes+pending == len(rows),
-		TargetCount:  len(rows),
-		SuccessCount: successes,
-		FailureCount: failures,
-		PendingCount: pending,
-		Results:      rows,
-	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err
@@ -5409,23 +5437,6 @@ func writeEnterpriseHookGuardianState(
 		}
 	}
 
-	// The activation receipt is the final commit point. It binds the exact
-	// manifest bytes and random reconcile identity to the already-published v1
-	// pair without making those rollback-compatible files unreadable to the
-	// prior binary.
-	activation := enterpriseHookGuardianActivation{
-		Version:          enterpriseHookGuardianActivationVersion,
-		UpdatedAt:        now,
-		ReconcileID:      reconcileID,
-		Manifest:         strings.TrimSpace(manifest),
-		ManifestSHA256:   manifestSHA256,
-		OK:               complete && failures == 0 && successes+pending == len(rows),
-		TargetCount:      len(rows),
-		SuccessCount:     successes,
-		FailureCount:     failures,
-		PendingCount:     pending,
-		ProtectedTargets: protected,
-	}
 	activationData, err := json.MarshalIndent(activation, "", "  ")
 	if err != nil {
 		return err
@@ -5445,6 +5456,74 @@ func writeEnterpriseHookGuardianState(
 		return err
 	}
 	return nil
+}
+
+// enterpriseHookGuardianRepublishAfter is how old an unchanged generation of
+// the guardian records may get before the guardian publishes it again. The
+// readers refuse records older than managed.HookGuardianMaxAge, and the guardian
+// reconciles at least once a minute, so half of that limit keeps the records
+// fresh with room for a missed pass.
+const enterpriseHookGuardianRepublishAfter = managed.HookGuardianMaxAge / 2
+
+// enterpriseHookGuardianGenerationCurrent reports whether the records on disk
+// already say what this pass decided: the three read back trusted, name one
+// generation, are younger than enterpriseHookGuardianRepublishAfter and
+// match the candidates in everything but the generation stamp (timestamp and
+// reconcile ID). When it reports true it has not written anything.
+func enterpriseHookGuardianGenerationCurrent(
+	dataDir string,
+	now time.Time,
+	authorization enterpriseHookGuardianAuthorization,
+	state enterpriseHookGuardianState,
+	activation enterpriseHookGuardianActivation,
+) bool {
+	publishedState, exists, err := loadEnterpriseHookGuardianState(dataDir)
+	if err != nil || !exists {
+		return false
+	}
+	publishedAuthorization, exists, err := loadEnterpriseHookGuardianAuthorization(dataDir)
+	if err != nil || !exists {
+		return false
+	}
+	publishedActivation, exists, err := loadEnterpriseHookGuardianActivation(dataDir)
+	if err != nil || !exists {
+		return false
+	}
+	if publishedState.UpdatedAt != publishedAuthorization.UpdatedAt ||
+		publishedActivation.UpdatedAt != publishedAuthorization.UpdatedAt {
+		return false
+	}
+	stamped, err := time.Parse(time.RFC3339Nano, publishedActivation.UpdatedAt)
+	if err != nil || stamped.After(now) || now.Sub(stamped) >= enterpriseHookGuardianRepublishAfter {
+		return false
+	}
+	// The loaders hand back an empty list where the writer had none.
+	canonical := func(rows []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
+		if rows == nil {
+			return []enterpriseHookReconcileRow{}
+		}
+		return rows
+	}
+	authorization.UpdatedAt = publishedAuthorization.UpdatedAt
+	authorization.ProtectedTargets = canonical(authorization.ProtectedTargets)
+	publishedAuthorization.ProtectedTargets = canonical(publishedAuthorization.ProtectedTargets)
+	state.UpdatedAt = publishedState.UpdatedAt
+	state.Results = canonical(state.Results)
+	publishedState.Results = canonical(publishedState.Results)
+	activation.UpdatedAt, activation.ReconcileID = publishedActivation.UpdatedAt, publishedActivation.ReconcileID
+	activation.ProtectedTargets = canonical(activation.ProtectedTargets)
+	publishedActivation.ProtectedTargets = canonical(publishedActivation.ProtectedTargets)
+	return sameEnterpriseHookRecord(authorization, publishedAuthorization) &&
+		sameEnterpriseHookRecord(state, publishedState) &&
+		sameEnterpriseHookRecord(activation, publishedActivation)
+}
+
+// sameEnterpriseHookRecord compares two records by what they serialize to,
+// which is what a reader of the file sees.
+func sameEnterpriseHookRecord(a, b any) bool {
+	left, leftErr := json.Marshal(a)
+	right, rightErr := json.Marshal(b)
+	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
 }
 
 // prepareEnterpriseHookAuthorizationDir creates (or re-hardens) the
@@ -5721,21 +5800,31 @@ func readEnterpriseHookBoundedFile(
 // safefile.RetryPublishedRead). Only those transient results repeat: a
 // record that stays swapped fails closed after the bound, naming the file; a
 // link, a file of another type or a failed trust check (owner, ACL) is
-// refused at once. A missing record is reported as absent, not as an error.
-// trust may be nil.
+// refused at once. A record that is missing on the first look is reported as
+// absent, not as an error; one that was seen and then goes missing is a
+// replacement in flight and is never reported as absent. trust may be nil.
 func readEnterpriseHookPublishedRecord(path, label string, maxBytes int64, trust func(string) error) ([]byte, bool, error) {
 	var data []byte
 	exists := false
+	observed := false
 	err := safefile.RetryPublishedRead(func() error {
 		data, exists = nil, false
 		info, err := pathidentity.LstatPinned(path)
 		if errors.Is(err, os.ErrNotExist) {
+			if observed {
+				// The record was there on an earlier attempt of this read. A
+				// name that is missing now is a replacement in flight: repeat,
+				// and fail closed naming the record if it never returns. It
+				// must not turn into silent absence.
+				exists = true
+				return fmt.Errorf("%s disappeared while it was being replaced: %s: %w", label, path, safefile.ErrReadIdentityChanged)
+			}
 			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("inspect %s %s: %w", label, path, err)
 		}
-		exists = true
+		exists, observed = true, true
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return fmt.Errorf("%s is not a regular file: %s", label, path)
 		}
@@ -5745,6 +5834,10 @@ func readEnterpriseHookPublishedRecord(path, label string, maxBytes int64, trust
 			}
 		}
 		read, err := readEnterpriseHookBoundedFile(path, info, maxBytes, label)
+		if errors.Is(err, os.ErrNotExist) && !errors.Is(err, safefile.ErrReadIdentityChanged) {
+			// The name was checked a moment ago; it is being replaced.
+			err = fmt.Errorf("%w: %w", err, safefile.ErrReadIdentityChanged)
+		}
 		if err != nil {
 			return fmt.Errorf("read %s %s: %w", label, path, err)
 		}

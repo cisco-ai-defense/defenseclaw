@@ -9,9 +9,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
@@ -162,5 +165,95 @@ func TestGuardianActivationStatusReadSurvivesTheGuardianRewrite(t *testing.T) {
 	got, exists, err := loadEnterpriseHookGuardianActivation(dataDir)
 	if err != nil || !exists || got.ReconcileID != activation.ReconcileID {
 		t.Fatalf("activation read during rewrites = %+v, exists=%t, %v; want the record", got, exists, err)
+	}
+}
+
+func TestPublishedRecordReadNeverTurnsAnObservedRecordIntoAbsence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "record.json")
+	if err := os.WriteFile(path, []byte(`{"v":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := 0
+	restore := pathidentity.SetPinnedStatHookForTest(func(checked string) {
+		if checked != path {
+			return
+		}
+		checks++
+		if checks == 1 {
+			if err := os.Remove(path); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	defer restore()
+	data, exists, err := readEnterpriseHookPublishedRecord(path, "hook guardian activation", 1024, nil)
+	if err == nil || data != nil || !exists {
+		t.Fatalf("record seen then gone = %q, exists=%t, %v; want a refusal, not absence", data, exists, err)
+	}
+	if !errors.Is(err, safefile.ErrReadIdentityChanged) ||
+		!strings.Contains(err.Error(), "hook guardian activation") || !strings.Contains(err.Error(), path) {
+		t.Fatalf("seen-then-gone error = %v; want it to name the record and its path", err)
+	}
+}
+
+func publishTestGuardianGeneration(t *testing.T, dataDir string, rows []enterpriseHookReconcileRow, failures int) {
+	t.Helper()
+	if err := writeEnterpriseHookGuardianState(dataDir, "targets.yaml", strings.Repeat("a", sha256.Size*2), rows, failures, true); err != nil {
+		t.Fatalf("write guardian records: %v", err)
+	}
+}
+
+func TestGuardianGenerationIsRepublishedOnlyWhenItChangesOrAges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
+	}
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnership })
+	dataDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
+	rows := []enterpriseHookReconcileRow{{User: "alice", Connector: "codex", OK: true}}
+	publishTestGuardianGeneration(t, dataDir, rows, 0)
+	first, _, err := loadEnterpriseHookGuardianActivation(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := func() (enterpriseHookGuardianAuthorization, enterpriseHookGuardianState, enterpriseHookGuardianActivation) {
+		state, _, _ := loadEnterpriseHookGuardianState(dataDir)
+		authorization, _, _ := loadEnterpriseHookGuardianAuthorization(dataDir)
+		activation := first
+		activation.UpdatedAt, activation.ReconcileID = "other", strings.Repeat("c", 32)
+		authorization.UpdatedAt, state.UpdatedAt = "other", "other"
+		return authorization, state, activation
+	}
+	published, _ := time.Parse(time.RFC3339Nano, first.UpdatedAt)
+
+	authorization, state, activation := candidate()
+	if !enterpriseHookGuardianGenerationCurrent(dataDir, published.Add(time.Second), authorization, state, activation) {
+		t.Fatal("an identical, young generation was not kept")
+	}
+	if enterpriseHookGuardianGenerationCurrent(dataDir, published.Add(enterpriseHookGuardianRepublishAfter), authorization, state, activation) {
+		t.Fatal("a generation at the republish age was kept; the freshness limit would be near")
+	}
+	state.Results = []enterpriseHookReconcileRow{{User: "alice", Connector: "codex", OK: true, Error: "x"}}
+	if enterpriseHookGuardianGenerationCurrent(dataDir, published.Add(time.Second), authorization, state, activation) {
+		t.Fatal("a changed state row was kept")
+	}
+	authorization, state, activation = candidate()
+	activation.ManifestSHA256 = strings.Repeat("d", sha256.Size*2)
+	if enterpriseHookGuardianGenerationCurrent(dataDir, published.Add(time.Second), authorization, state, activation) {
+		t.Fatal("a changed manifest was kept")
+	}
+	authorization, state, activation = candidate()
+	if err := os.Remove(filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile)); err != nil {
+		t.Fatal(err)
+	}
+	if enterpriseHookGuardianGenerationCurrent(dataDir, published.Add(time.Second), authorization, state, activation) {
+		t.Fatal("a missing activation record was kept; it must be repaired")
+	}
+	publishTestGuardianGeneration(t, dataDir, rows, 0)
+	if again, exists, err := loadEnterpriseHookGuardianActivation(dataDir); err != nil || !exists || again.ReconcileID == first.ReconcileID {
+		t.Fatalf("the repaired generation = %+v, exists=%t, %v; want a new published activation", again, exists, err)
 	}
 }
