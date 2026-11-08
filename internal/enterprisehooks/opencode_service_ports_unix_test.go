@@ -289,3 +289,57 @@ func TestClearUnixOpenCodeContestedPortRacingAGuardianPass(t *testing.T) {
 		}
 	}
 }
+
+// GAP-0904: the removal of a stale unknown entry changes nothing else, and
+// refuses while the uid still has an account, when the check does not answer
+// and when the uid is not listed.
+func TestClearUnixOpenCodeUnknownLockedRefusesALiveUID(t *testing.T) {
+	root := trustedTestDir(t)
+	current := uint32(os.Getuid())
+	previous := unixManifestTestOwnerAllowed
+	unixManifestTestOwnerAllowed = func(uid uint32) bool { return uid == current }
+	t.Cleanup(func() { unixManifestTestOwnerAllowed = previous })
+	if err := validateRootOwnedDirChain(root); err != nil {
+		t.Skipf("test directory chain cannot hold the record: %v", err)
+	}
+	path := filepath.Join(root, UnixOpenCodeServicePortsFileName)
+	state := UnixOpenCodeServicePortsState{Ports: map[int]int{1001: 25001, 1234: 25002}, Users: map[int]string{1234: "gone"},
+		Unknown:   []UnixOpenCodeServicePortUnknown{{UID: 1001, User: "live", Reason: "r"}, {UID: 1234, User: "gone", Reason: "r"}},
+		Contested: []UnixOpenCodeContestedPort{{Port: 26000, UIDs: []int{1003, 1004}}}, ImportDone: true}
+	if err := WriteUnixOpenCodeServicePortsFull(path, state); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	answer := func(has bool, err error) func(int) (bool, error) {
+		return func(int) (bool, error) { return has, err }
+	}
+	for name, run := range map[string]func() error{
+		"live uid": func() error {
+			_, err := ClearUnixOpenCodeUnknownLocked(path, 1234, time.Second, answer(true, nil))
+			return err
+		},
+		"lookup fails": func() error {
+			_, err := ClearUnixOpenCodeUnknownLocked(path, 1234, time.Second, answer(false, os.ErrDeadlineExceeded))
+			return err
+		},
+		"uid is not listed": func() error {
+			_, err := ClearUnixOpenCodeUnknownLocked(path, 4321, time.Second, answer(false, nil))
+			return err
+		},
+	} {
+		if err := run(); err == nil {
+			t.Fatalf("%s: the removal was not refused", name)
+		}
+		if after, _ := os.ReadFile(path); string(after) != string(before) {
+			t.Fatalf("%s: a refused removal changed the record", name)
+		}
+	}
+	removed, err := ClearUnixOpenCodeUnknownLocked(path, 1234, time.Second, answer(false, nil))
+	if err != nil || removed.User != "gone" {
+		t.Fatalf("removal: %+v %v", removed, err)
+	}
+	got, err := LoadUnixOpenCodeServicePortsFull(path)
+	if err != nil || len(got.Unknown) != 1 || got.Unknown[0].UID != 1001 || got.Ports[1234] != 25002 || len(got.Contested) != 1 || !got.ImportDone {
+		t.Fatalf("after removal: %+v %v", got, err)
+	}
+}

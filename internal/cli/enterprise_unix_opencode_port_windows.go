@@ -23,3 +23,15 @@ func newUnixOpenCodePortClearCommand(string) *cobra.Command {
 		},
 	}
 }
+
+// newUnixOpenCodePortUnknownClearCommand: no OpenCode port record on Windows
+// yet; the action is not offered there.
+func newUnixOpenCodePortUnknownClearCommand(string) *cobra.Command {
+	return &cobra.Command{
+		Use:    "opencode-port-unknown-clear <uid>",
+		Hidden: true,
+		RunE: func(*cobra.Command, []string) error {
+			return errors.New("opencode-port-unknown-clear is not available on this platform")
+		},
+	}
+}
