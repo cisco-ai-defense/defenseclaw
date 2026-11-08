@@ -30,28 +30,33 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 
 // verifyPerUserConnectedTupleIn waits for the gateway to accept the held
 // connection. A connection still unaccepted at the end of the wait proves
-// nothing about the process that will accept it, but when every listener on
-// the server port belongs to this account the socket can only be accepted by
-// this account: it is the gateway of this account, stopped or frozen, and
-// the error says so (errPerUserListenerUnanswered). A listener of another
-// account, one that cannot be read, or a port nobody lists stays unverified.
+// nothing about the process that will accept it: the error is
+// errPerUserNotAccepted, and the transport reads who holds the listener
+// (classifyUnaccepted, listenersHeldOnlyBy).
 func verifyPerUserConnectedTupleIn(procNet string, self int, wait time.Duration, client, server *net.TCPAddr) error {
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	err := awaitPerUserLinuxSocket(ctx, self, func() (int, error) {
 		return findConnectedTCPUID(procNet, client, server)
 	})
-	if errors.Is(err, errConnectedSocketNotAccepted) && listenersAreOwnedBy(procNet, self, server) {
-		return fmt.Errorf("%w: %w", errPerUserListenerUnanswered, err)
+	if errors.Is(err, errConnectedSocketNotAccepted) {
+		return fmt.Errorf("%w: %w", errPerUserNotAccepted, err)
 	}
 	return err
 }
 
-// listenersAreOwnedBy reports whether the kernel lists at least one listening
-// socket that can take a connection to server and every one is owned by uid.
-// A dual-stack IPv6 listener appears in tcp6, so both tables are read; a
-// socket bound to the wildcard address counts for the loopback server.
-func listenersAreOwnedBy(procNet string, uid int, server *net.TCPAddr) bool {
+// listenersHeldOnlyByPID is listenersHeldOnlyBy on the live socket tables.
+func listenersHeldOnlyByPID(pid int, server *net.TCPAddr) bool {
+	return listenersHeldOnlyBy(procSelfNet, "/proc", pid, server)
+}
+
+// listenersHeldOnlyBy reports whether the kernel lists at least one listening
+// socket that can take a connection to server and every one is a socket that
+// process pid holds open. A dual-stack IPv6 listener appears in tcp6, so both
+// tables are read; a socket bound to the wildcard address counts for the
+// loopback server. Any other holder of the port, even one of the same
+// account, an unreadable table or descriptor list, or no listener, is false.
+func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr) bool {
 	key, table, err := procTCPEndpoint(server)
 	if err != nil {
 		return false
@@ -65,29 +70,42 @@ func listenersAreOwnedBy(procNet string, uid int, server *net.TCPAddr) bool {
 		keys["tcp"] = nil
 		keys["tcp6"] = append(keys["tcp6"], key)
 	}
-	found := false
+	var inodes []string
 	for _, name := range []string{"tcp", "tcp6"} {
-		owned, seen, ok := readListenerOwners(procNet, name, keys[name], uid)
-		if !ok || !owned {
+		found, ok := readListenerInodes(procNet, name, keys[name])
+		if !ok {
 			return false
 		}
-		found = found || seen
+		inodes = append(inodes, found...)
 	}
-	return found
+	if len(inodes) == 0 {
+		return false
+	}
+	held, ok := socketInodesOf(procRoot, pid)
+	if !ok {
+		return false
+	}
+	for _, inode := range inodes {
+		if !held[inode] {
+			return false
+		}
+	}
+	return true
 }
 
-// readListenerOwners reads one socket table and reports whether every
-// listening row on one of keys has the owner uid, whether there was any, and
-// whether the table could be read (tcp6 may be missing from a host).
-func readListenerOwners(procNet, table string, keys []string, uid int) (owned, seen, ok bool) {
+// readListenerInodes reads one socket table and returns the socket inode of
+// every listening row on one of keys, and whether the table could be read
+// (tcp6 may be missing from a host).
+func readListenerInodes(procNet, table string, keys []string) ([]string, bool) {
 	if len(keys) == 0 {
-		return true, false, true
+		return nil, true
 	}
 	file, err := os.Open(filepath.Join(procNet, table))
 	if err != nil {
-		return true, false, table == "tcp6" && os.IsNotExist(err)
+		return nil, table == "tcp6" && os.IsNotExist(err)
 	}
 	defer file.Close()
+	var inodes []string
 	scanner := bufio.NewScanner(file)
 	scanner.Scan() // header
 	for scanner.Scan() {
@@ -96,17 +114,33 @@ func readListenerOwners(procNet, table string, keys []string, uid int) (owned, s
 			continue
 		}
 		for _, key := range keys {
-			if !strings.EqualFold(fields[1], key) {
-				continue
+			if strings.EqualFold(fields[1], key) {
+				inodes = append(inodes, fields[9])
 			}
-			owner, err := strconv.Atoi(fields[7])
-			if err != nil || owner != uid {
-				return false, true, true
-			}
-			seen = true
 		}
 	}
-	return true, seen, scanner.Err() == nil
+	return inodes, scanner.Err() == nil
+}
+
+// socketInodesOf lists the socket inodes process pid holds open, from its
+// descriptor folder.
+func socketInodesOf(procRoot string, pid int) (map[string]bool, bool) {
+	dir := filepath.Join(procRoot, strconv.Itoa(pid), "fd")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, false
+	}
+	held := make(map[string]bool)
+	for _, entry := range entries {
+		target, err := os.Readlink(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if inode, ok := strings.CutPrefix(target, "socket:["); ok {
+			held[strings.TrimSuffix(inode, "]")] = true
+		}
+	}
+	return held, true
 }
 
 // Connect can finish before the gateway accepts the same held socket. Until

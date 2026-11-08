@@ -7,15 +7,20 @@ package hookexec
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
 
 func shortConnectedWait(t *testing.T, wait time.Duration) {
@@ -38,83 +43,118 @@ func procTables(t *testing.T, tcp, tcp6 []string) string {
 	return dir
 }
 
-func TestListenersAreOwnedByTheCallingAccountOnly(t *testing.T) {
-	self := os.Geteuid()
-	other := self + 1
+// recordGateway writes the gateway.pid record of this account in a new data
+// folder, naming process pid, and returns the folder.
+func recordGateway(t *testing.T, pid int, mutate func(*gatewayRecord)) string {
+	t.Helper()
+	dir := t.TempDir()
+	identity, ok := procidentity.Of(pid)
+	if !ok {
+		t.Fatalf("no start identity for process %d", pid)
+	}
+	record := gatewayRecord{PID: pid, Executable: "/usr/local/bin/defenseclaw-gateway", DataDir: dir,
+		StartTime: time.Now().Unix(), StartIdentity: identity}
+	if mutate != nil {
+		mutate(&record)
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gateway.pid"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// otherProcess starts a process of this account that is not the listener of
+// the test: the stand-in for a process the record could name instead.
+func otherProcess(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Skipf("no second process: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	return cmd.Process.Pid
+}
+
+// The listeners of a port are the gateway's only when the process the record
+// names holds every one of them: a socket of the same account that another
+// process holds, a mix, or nothing found is no proof.
+func TestListenersHeldOnlyByTheRecordedGateway(t *testing.T) {
+	const gateway = 4242
 	server := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 18970}
 	const loop = "0100007F:4A1A"
 	const anyV4 = "00000000:4A1A"
 	const anyV6 = "00000000000000000000000000000000:4A1A"
 	const mapped = "0000000000000000FFFF00000100007F:4A1A"
-	listen := func(key string, uid int) string {
-		return fmt.Sprintf("0: %s 00000000:0000 0A 0 0 0 %d 0 100", key, uid)
+	listen := func(key string, inode int) string {
+		return fmt.Sprintf("0: %s 00000000:0000 0A 0 0 0 1000 0 %d", key, inode)
 	}
 	for _, tc := range []struct {
-		name string
-		tcp  []string
-		tcp6 []string
-		want bool
+		name  string
+		tcp   []string
+		tcp6  []string
+		held  []int
+		other bool
+		want  bool
 	}{
-		{"own loopback listener", []string{listen(loop, self)}, nil, true},
-		{"own wildcard listener", []string{listen(anyV4, self)}, nil, true},
-		{"own dual-stack listener", nil, []string{listen(anyV6, self)}, true},
-		{"own mapped listener", nil, []string{listen(mapped, self)}, true},
-		{"foreign loopback listener", []string{listen(loop, other)}, nil, false},
-		{"foreign wildcard listener", []string{listen(anyV4, other)}, nil, false},
-		{"foreign dual-stack listener", nil, []string{listen(anyV6, other)}, false},
-		{"own loopback with a foreign wildcard", []string{listen(loop, self), listen(anyV4, other)}, nil, false},
-		{"no listener", nil, nil, false},
-		{"listener on another port", []string{"0: 0100007F:1234 00000000:0000 0A 0 0 0 " + fmt.Sprint(self) + " 0 100"}, nil, false},
-		{"an established row is not a listener", []string{"0: 0100007F:4A1A 0100007F:CB20 01 0 0 0 " + fmt.Sprint(self) + " 0 100"}, nil, false},
+		{"loopback listener of the gateway", []string{listen(loop, 11)}, nil, []int{11}, false, true},
+		{"wildcard listener of the gateway", []string{listen(anyV4, 11)}, nil, []int{11}, false, true},
+		{"dual-stack listener of the gateway", nil, []string{listen(anyV6, 11)}, []int{11}, false, true},
+		{"mapped listener of the gateway", nil, []string{listen(mapped, 11)}, []int{11}, false, true},
+		{"loopback and wildcard both of the gateway", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11, 12}, false, true},
+		{"listener of another process of the account", []string{listen(loop, 11)}, nil, []int{99}, false, false},
+		{"gateway holds one, another process the other", []string{listen(loop, 11), listen(anyV4, 12)}, nil, []int{11}, false, false},
+		{"no listener", nil, nil, []int{11}, false, false},
+		{"listener on another port", []string{"0: 0100007F:1234 00000000:0000 0A 0 0 0 1000 0 11"}, nil, []int{11}, false, false},
+		{"an established row is not a listener", []string{"0: 0100007F:4A1A 0100007F:CB20 01 0 0 0 1000 0 11"}, nil, []int{11}, false, false},
+		{"descriptors of the process unreadable", []string{listen(loop, 11)}, nil, nil, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := listenersAreOwnedBy(procTables(t, tc.tcp, tc.tcp6), self, server); got != tc.want {
-				t.Fatalf("listenersAreOwnedBy = %v, want %v", got, tc.want)
+			procRoot := t.TempDir()
+			if !tc.other {
+				fds := filepath.Join(procRoot, strconv.Itoa(gateway), "fd")
+				if err := os.MkdirAll(fds, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for i, inode := range tc.held {
+					if err := os.Symlink(fmt.Sprintf("socket:[%d]", inode), filepath.Join(fds, strconv.Itoa(i+3))); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if got := listenersHeldOnlyBy(procTables(t, tc.tcp, tc.tcp6), procRoot, gateway, server); got != tc.want {
+				t.Fatalf("listenersHeldOnlyBy = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-// A connection nobody accepts is told apart by who listens: this account own
-// listener is its gateway, stopped or frozen; a listener of another account,
-// or none, stays an unverified peer.
-func TestUnacceptedConnectionIsUnansweredOnlyForAnOwnListener(t *testing.T) {
+// A connection nobody accepts proves nothing by itself: the wait ends with
+// the not-accepted error, never with a foreign or an own verdict. A socket
+// another account accepted is a different, final answer.
+func TestUnacceptedConnectionEndsAsNotAcceptedAlone(t *testing.T) {
 	self := os.Geteuid()
 	client := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 52000}
 	server := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0x4A1A}
 	queued := "1: 0100007F:4A1A 0100007F:CB20 01 0 0 0 0 0 0"
-	for _, tc := range []struct {
-		name      string
-		listener  string
-		unanswred bool
-	}{
-		{"own listener", fmt.Sprintf("0: 0100007F:4A1A 00000000:0000 0A 0 0 0 %d 0 100", self), true},
-		{"foreign listener", fmt.Sprintf("0: 0100007F:4A1A 00000000:0000 0A 0 0 0 %d 0 100", self+1), false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := procTables(t, []string{tc.listener, queued}, nil)
-			err := verifyPerUserConnectedTupleIn(dir, self, 80*time.Millisecond, client, server)
-			if err == nil {
-				t.Fatal("an unaccepted connection was verified")
-			}
-			if got := errors.Is(err, errPerUserListenerUnanswered); got != tc.unanswred {
-				t.Fatalf("unanswered = %v, want %v: %v", got, tc.unanswred, err)
-			}
-		})
+	own := fmt.Sprintf("0: 0100007F:4A1A 00000000:0000 0A 0 0 0 %d 0 100", self)
+	err := verifyPerUserConnectedTupleIn(procTables(t, []string{own, queued}, nil), self, 80*time.Millisecond, client, server)
+	if !errors.Is(err, errPerUserNotAccepted) || errors.Is(err, errPerUserListenerUnanswered) {
+		t.Fatalf("a queued connection did not end as not accepted: %v", err)
 	}
-	t.Run("accepted by another account", func(t *testing.T) {
-		accepted := fmt.Sprintf("1: 0100007F:4A1A 0100007F:CB20 01 0 0 0 %d 0 101", self+1)
-		own := fmt.Sprintf("0: 0100007F:4A1A 00000000:0000 0A 0 0 0 %d 0 100", self)
-		err := verifyPerUserConnectedTupleIn(procTables(t, []string{own, accepted}, nil), self, 80*time.Millisecond, client, server)
-		if err == nil || errors.Is(err, errPerUserListenerUnanswered) {
-			t.Fatalf("a socket accepted by another account was not refused as foreign: %v", err)
-		}
-	})
+	accepted := fmt.Sprintf("1: 0100007F:4A1A 0100007F:CB20 01 0 0 0 %d 0 101", self+1)
+	err = verifyPerUserConnectedTupleIn(procTables(t, []string{own, accepted}, nil), self, 80*time.Millisecond, client, server)
+	if err == nil || errors.Is(err, errPerUserNotAccepted) {
+		t.Fatalf("a socket accepted by another account was not refused as foreign: %v", err)
+	}
 }
 
-// frozenGateway is a listener of this account that accepts nothing: what a
+// frozenListener is a listener of this account that accepts nothing: what a
 // SIGSTOPped gateway looks like to the kernel.
-func frozenGateway(t *testing.T) string {
+func frozenListener(t *testing.T) string {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -124,29 +164,64 @@ func frozenGateway(t *testing.T) string {
 	return listener.Addr().String()
 }
 
-func TestFrozenOwnGatewayTransportErrorIsNeitherForeignNorAnOutage(t *testing.T) {
+// recordedFrozenGateway is a frozen listener that the record of this account
+// names as its gateway (the test process stands for it).
+func recordedFrozenGateway(t *testing.T) (addr, dataDir string) {
+	t.Helper()
+	return frozenListener(t), recordGateway(t, os.Getpid(), nil)
+}
+
+// The transport tells the three holders of a listener that takes no accept
+// apart: this account's recorded gateway is an unanswered own listener; a
+// process of this account that is not the recorded gateway, a gateway the
+// record no longer describes, and a folder with no record all stay unverified.
+func TestFrozenListenerIsOwnOnlyWhenItIsTheRecordedGateway(t *testing.T) {
 	shortConnectedWait(t, 150*time.Millisecond)
-	addr := frozenGateway(t)
-	_, err := PostPerUserHook(context.Background(), addr, "/api/v1/claude-code/hook", nil, []byte("{}"))
-	if err == nil {
-		t.Fatal("a frozen gateway answered")
-	}
-	if !PerUserPostListenerUnanswered(err) {
-		t.Fatalf("not classified as an unanswered own listener: %v", err)
-	}
-	if PerUserPostPeerUnverified(err) || PerUserPostOutage(err) || PerUserPostNoAnswer(err) || gatewayRestartShaped(err) {
-		t.Fatalf("an unanswered own listener was classified as foreign or an outage: %v", err)
+	decoy := otherProcess(t)
+	for _, tc := range []struct {
+		name   string
+		dir    func(t *testing.T) string
+		wantOK bool
+	}{
+		{"recorded gateway", func(t *testing.T) string { return recordGateway(t, os.Getpid(), nil) }, true},
+		{"record names another process of the account", func(t *testing.T) string { return recordGateway(t, decoy, nil) }, false},
+		{"record of a process that was replaced", func(t *testing.T) string {
+			return recordGateway(t, os.Getpid(), func(r *gatewayRecord) { r.StartIdentity = "not-this-process" })
+		}, false},
+		{"record for another folder", func(t *testing.T) string {
+			return recordGateway(t, os.Getpid(), func(r *gatewayRecord) { r.DataDir = "/elsewhere" })
+		}, false},
+		{"no record", func(t *testing.T) string { return t.TempDir() }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr := frozenListener(t)
+			ctx := WithPerUserGatewayDataDir(context.Background(), tc.dir(t))
+			_, err := PostPerUserHook(ctx, addr, "/api/v1/claude-code/hook", nil, []byte("{}"))
+			if err == nil {
+				t.Fatal("a frozen listener answered")
+			}
+			if got := PerUserPostListenerUnanswered(err); got != tc.wantOK {
+				t.Fatalf("unanswered own listener = %v, want %v: %v", got, tc.wantOK, err)
+			}
+			if tc.wantOK {
+				if PerUserPostPeerUnverified(err) || PerUserPostOutage(err) || PerUserPostNoAnswer(err) || gatewayRestartShaped(err) {
+					t.Fatalf("an unanswered own listener was classified as foreign or an outage: %v", err)
+				}
+			} else if !PerUserPostPeerUnverified(err) {
+				t.Fatalf("a listener that is not the recorded gateway was not refused as unverified: %v", err)
+			}
+		})
 	}
 }
 
 // A frozen gateway of this account is an outage, not a listener of another
-// account: the default tiers let an ordinary call and a post-tool event run
-// with the outage warning, the strict tier blocks them with the outage text,
-// and a tool call that names a protected file stays blocked in every tier.
+// account, at the production wait: the default tiers let an ordinary call and
+// a post-tool event run with the outage warning before the restart budget
+// ends, the strict tier blocks them with the outage text, and a tool call
+// that names a protected file stays blocked in every tier.
 func TestFrozenOwnGatewayFollowsTheOutageMode(t *testing.T) {
-	shortConnectedWait(t, 150*time.Millisecond)
 	project := lateOrdinaryProject(t)
-	addr := frozenGateway(t)
+	addr, dataDir := recordedFrozenGateway(t)
 	for _, tc := range []struct {
 		name    string
 		event   string
@@ -162,7 +237,53 @@ func TestFrozenOwnGatewayFollowsTheOutageMode(t *testing.T) {
 		{"post-tool event, strict tier", "PostToolBatch", `{"hook_event_name":"PostToolBatch"}`, "closed", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client, err := NewPerUserGatewayHTTPClient(2*time.Second, addr)
+			client, err := NewPerUserGatewayHTTPClient(10*time.Second, addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now()
+			result := run(t, "claudecode", nil, func(opts *Options) {
+				opts.APIAddr = addr
+				opts.HTTPClient = client
+				opts.Event = tc.event
+				opts.Home = dataDir
+				opts.FailMode = "open"
+				opts.OutageFailModeNow = func() string { return tc.mode }
+				opts.Stdin = strings.NewReader(tc.payload)
+			})
+			output := result.stdout + result.stderr
+			if strings.Contains(output, "another account") || strings.Contains(output, "could not prove") {
+				t.Fatalf("a frozen gateway of this account was blamed on another process: %q", output)
+			}
+			if got := nativeOutageBlocked(result); got != tc.blocks {
+				t.Fatalf("blocks=%v, want %v: code=%d stdout=%.400q stderr=%.400q", got, tc.blocks, result.code, result.stdout, result.stderr)
+			}
+			if tc.blocks && !strings.Contains(output, "did not answer") {
+				t.Fatalf("the block does not say the gateway did not answer: %q", output)
+			}
+			if elapsed := time.Since(started); elapsed > gatewayRestartBudget+500*time.Millisecond {
+				t.Fatalf("the call ended after %s, past the restart budget %s", elapsed, gatewayRestartBudget)
+			}
+		})
+	}
+}
+
+// A listener of this account that is not the recorded gateway stays blocked
+// in every fail mode at the production wait: nothing proves it is the gateway,
+// whoever the account is.
+func TestUnrecordedListenerOfThisAccountStaysBlockedInEveryMode(t *testing.T) {
+	project := lateOrdinaryProject(t)
+	decoy := otherProcess(t)
+	addr := frozenListener(t)
+	dataDir := recordGateway(t, decoy, nil)
+	for _, tc := range []struct {
+		name, event, payload string
+	}{
+		{"ordinary call", "PreToolUse", lateOrdinaryPayload(t, project, "echo hi")},
+		{"post-tool event", "PostToolBatch", `{"hook_event_name":"PostToolBatch"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewPerUserGatewayHTTPClient(10*time.Second, addr)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -170,19 +291,13 @@ func TestFrozenOwnGatewayFollowsTheOutageMode(t *testing.T) {
 				opts.APIAddr = addr
 				opts.HTTPClient = client
 				opts.Event = tc.event
+				opts.Home = dataDir
 				opts.FailMode = "open"
-				opts.OutageFailModeNow = func() string { return tc.mode }
+				opts.OutageFailModeNow = func() string { return "open" }
 				opts.Stdin = strings.NewReader(tc.payload)
 			})
-			output := result.stdout + result.stderr
-			if strings.Contains(output, "another account") {
-				t.Fatalf("a frozen gateway of this account was blamed on another account: %q", output)
-			}
-			if got := nativeOutageBlocked(result); got != tc.blocks {
-				t.Fatalf("blocks=%v, want %v: code=%d stdout=%.400q stderr=%.400q", got, tc.blocks, result.code, result.stdout, result.stderr)
-			}
-			if tc.blocks && !strings.Contains(output, "did not answer") {
-				t.Fatalf("the block does not say the gateway did not answer: %q", output)
+			if !nativeOutageBlocked(result) || strings.Contains(result.stdout+result.stderr, "did not answer in time") {
+				t.Fatalf("a listener that is not the recorded gateway was not kept closed: code=%d stdout=%.300q stderr=%.300q", result.code, result.stdout, result.stderr)
 			}
 		})
 	}
@@ -195,7 +310,8 @@ func TestAnsweringGatewayStillAllowsTheCall(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"action":"allow","raw_action":"allow"}`))
 	})
-	reply, err := PostPerUserHook(context.Background(), addr, "/api/v1/claude-code/hook", nil, []byte("{}"))
+	ctx := WithPerUserGatewayDataDir(context.Background(), recordGateway(t, os.Getpid(), nil))
+	reply, err := PostPerUserHook(ctx, addr, "/api/v1/claude-code/hook", nil, []byte("{}"))
 	if err != nil || reply.Status != http.StatusOK {
 		t.Fatalf("an answering gateway was refused: status=%d err=%v", reply.Status, err)
 	}

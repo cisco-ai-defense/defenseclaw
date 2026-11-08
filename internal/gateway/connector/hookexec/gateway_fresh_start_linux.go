@@ -174,33 +174,8 @@ func captureFreshGatewayOwner(check *perUserPeerCheck, client, server *net.TCPAd
 }
 
 func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {
-	if dataDir == "" || !filepath.IsAbs(dataDir) {
-		return perUserPeerProcess{}, false
-	}
-	f, err := os.OpenFile(filepath.Join(dataDir, "gateway.pid"), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return perUserPeerProcess{}, false
-	}
-	defer f.Close()
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 16<<10 {
-		return perUserPeerProcess{}, false
-	}
-	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
-		return perUserPeerProcess{}, false
-	}
-	var record struct {
-		PID           int    `json:"pid"`
-		Executable    string `json:"executable"`
-		DataDir       string `json:"data_dir"`
-		StartTime     int64  `json:"start_time"`
-		StartIdentity string `json:"start_identity"`
-	}
-	decoder := json.NewDecoder(io.LimitReader(f, 16<<10+1))
-	var trailing any
-	if decoder.Decode(&record) != nil || decoder.Decode(&trailing) != io.EOF ||
-		record.PID <= 0 || record.StartIdentity == "" || record.DataDir != dataDir ||
-		record.Executable == "" || record.StartTime <= 0 {
+	record, ok := readGatewayRecord(dataDir)
+	if !ok {
 		return perUserPeerProcess{}, false
 	}
 	start, ok := procidentity.StartTime(record.PID)

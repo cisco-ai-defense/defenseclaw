@@ -115,7 +115,8 @@ func runCall(args []string, input io.Reader, output io.Writer, peer *hookexec.Pe
 	// Tell the gateway how long this request waits for its answer, so a
 	// tool-call judge answers inside it (#1395).
 	request.Headers[hookexec.HookAnswerWithinHeader] = strconv.FormatInt(timeout.Milliseconds(), 10)
-	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(context.Background(), peer), timeout)
+	ctx, cancel := context.WithTimeout(hookexec.WithPerUserPeerRecord(
+		hookexec.WithPerUserGatewayDataDir(context.Background(), os.Getenv(hookPostDataDirEnv)), peer), timeout)
 	defer cancel()
 	response, err := hookexec.PostPerUserHook(ctx, opts.apiAddr, request.Path, request.Headers, []byte(request.Body))
 	if err != nil {
@@ -324,13 +325,12 @@ func runMain(args []string, input io.Reader, output, errOutput io.Writer) int {
 		}
 		return hookexec.PerUserPostOutageExit
 	case hookexec.PerUserPostListenerUnanswered(err):
-		// The listener of this account took the connection into its queue and
-		// accepted nothing for the whole wait (a stopped or frozen gateway):
-		// the owner is proven, and nothing was sent. It is not the process of
-		// another account; the shell reads it like a gateway that is up and
-		// late, an ordinary tool call following the outage mode and every
-		// other call staying closed.
-		if lateOrdinary(call) {
+		// This account's recorded gateway holds the listener and took no
+		// accept for the whole wait (a stopped or frozen gateway): nothing was
+		// sent, and it is no process of another account. The shell reads it
+		// as the outage, as the native hook does, for every event but a tool
+		// call that does not plainly name nothing protected.
+		if lateOrdinary(call) || nonToolGateEvent(call) {
 			return hookexec.PerUserPostLateOrdinaryExit
 		}
 		return hookexec.PerUserPostNoAnswerExit
@@ -393,6 +393,28 @@ func lateOrdinary(call postedCall) bool {
 		return false
 	}
 	return hookpaths.LateOrdinaryCallAt(accountHome(), connector, []byte(call.body))
+}
+
+// nonToolGateEvent reports a Claude Code or Codex call that names an event
+// which is not a tool gate (a post-tool batch, a prompt, a session event).
+// Any other connector, or an event it cannot read, is not one.
+func nonToolGateEvent(call postedCall) bool {
+	var connector string
+	switch {
+	case strings.Contains(call.path, "claude-code") || strings.Contains(call.path, "claudecode"):
+		connector = "claudecode"
+	case strings.Contains(call.path, "codex"):
+		connector = "codex"
+	default:
+		return false
+	}
+	var event struct {
+		Name string `json:"hook_event_name"`
+	}
+	if json.Unmarshal([]byte(call.body), &event) != nil || strings.TrimSpace(event.Name) == "" {
+		return false
+	}
+	return !hookexec.ToolGateEvent(connector, event.Name)
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {
