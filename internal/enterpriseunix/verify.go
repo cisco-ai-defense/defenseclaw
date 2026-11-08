@@ -1057,12 +1057,15 @@ func (l *lifecycle) ledgerProblem() string {
 			}
 		}
 		problem, torn := env.attestationProblem(data)
-		if torn && attempt == 5 && problem == guardianManifestNotReconciled && l.manifestJustChanged() {
+		if torn && attempt == 5 && (problem == guardianManifestNotReconciled || problem == guardianLedgerNotAttested) && l.manifestJustChanged() {
 			// An apply, ensure or enumerator cycle has just rewritten
 			// targets.yaml, and the guardian reconciles it within about a
 			// minute while it keeps enforcing the targets it last reconciled.
-			// Keep the wait guidance (GAP-0691), but report incomplete
-			// coverage until the guardian attests the new roster.
+			// Both torn states of that reconcile are named (the attestation
+			// still names the old targets.yaml, or the new ledger is out and
+			// its attestation is not): the same states the ensure catch-up
+			// wait holds for. Keep the wait guidance (GAP-0691), but report
+			// incomplete coverage until the guardian attests the new roster.
 			l.noteGuardianCatchingUp()
 			return problem
 		}
