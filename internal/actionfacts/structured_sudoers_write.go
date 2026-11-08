@@ -74,11 +74,33 @@ func clientResolvedSudoersTarget(target, cwd string, clientDirs []string, resolv
 		return false
 	}
 	for _, dir := range append([]string{cwd}, clientDirs...) {
-		if exactSudoersWriteTarget(resolved[OperandPath(target, dir)]) {
+		if exactSudoersWriteTarget(resolved[OperandPath(target, dir)]) ||
+			exactSudoersWriteTarget(resolved[posixOperandPath(target, dir)]) {
 			return true
 		}
 	}
 	return exactSudoersWriteTarget(resolved[target])
+}
+
+// posixOperandPath is OperandPath for a client that keys POSIX paths with
+// slashes whatever system the gateway runs on: the sudoers files are POSIX
+// paths, and a client that placed a link on one (an agent running in WSL, a
+// POSIX client of a Windows gateway) keys the operand that way. On a POSIX
+// host it equals OperandPath. Path semantics are decided by the form of the
+// path, not by the gateway system, so the proof does not depend on the OS
+// that reads it.
+func posixOperandPath(name, cwd string) string {
+	absolute := func(value string) bool { return strings.HasPrefix(value, "/") }
+	if !strings.Contains(name, "/../") && !strings.HasSuffix(name, "/..") {
+		if !absolute(name) && absolute(cwd) {
+			return path.Join(cwd, name)
+		}
+		return path.Clean(name)
+	}
+	if absolute(name) || !absolute(cwd) {
+		return name
+	}
+	return cwd + "/" + name
 }
 
 // OperandPath is the key the hook client gives a file operand in its path
