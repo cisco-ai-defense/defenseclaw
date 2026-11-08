@@ -2177,7 +2177,8 @@ func matchesGlobalLDPreload(
 
 // globalLDPreloadInstallPrerequisite proves a system-wide loader injection
 // only when a closed literal producer writes one absolute shared-object path
-// to the active preload file, or one exact profile fragment exports that path.
+// to the active preload file, or one exact profile fragment exports that path,
+// or a native file-tool call writes either (ExactGlobalLDPreloadFileWrite).
 // Merely reading either location, clearing it during remediation, setting
 // process-local LD_PRELOAD, or writing opaque/dynamic content is insufficient.
 func globalLDPreloadInstallPrerequisite(
@@ -2187,9 +2188,7 @@ func globalLDPreloadInstallPrerequisite(
 	if !facts.Authoritative() || !facts.EnforcementEligible() {
 		return false
 	}
-	if actionfacts.ExactGlobalLDPreloadProfileWrite(input, facts) {
-		return true
-	}
+	typed := actionfacts.ExactGlobalLDPreloadFileWrite(input, facts)
 	for _, target := range facts.Paths {
 		preloadFile := matchesGlobalLDPreload(facts, target)
 		profileFragment := actionfacts.ExactGlobalLDPreloadProfilePath(
@@ -2197,6 +2196,11 @@ func globalLDPreloadInstallPrerequisite(
 		) && target.Access == actionfacts.PathAccessWrite
 		if !preloadFile && !profileFragment {
 			continue
+		}
+		// A native file-tool write has no producer command: the text it
+		// writes is proven from its own arguments, for the file it targets.
+		if typed {
+			return true
 		}
 		destination, ok := integrityCommandByID(facts, target.CommandID)
 		if !ok || !integrityCommandMutatesPath(destination, target) ||

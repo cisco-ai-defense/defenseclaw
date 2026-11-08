@@ -25,80 +25,47 @@ const (
 	PAMAuthenticationBypassLiteralInsertion PAMAuthenticationBypassProof = "literal_insertion"
 )
 
-// ExactPAMAuthenticationBypass recognizes only the reviewed structured Write
-// and Edit contracts used by coding agents. It does not inspect shell command
-// text, resolve paths, read files, or retain attacker-controlled values.
+// ExactPAMAuthenticationBypass recognizes the text a native file-tool call
+// (nativeFileWrites: a whole-file write, an edit, a multi-edit or a patch,
+// whatever the tool calls its arguments) puts into a protected PAM
+// configuration file. It does not inspect shell command text, read files, or
+// retain attacker-controlled values.
 func ExactPAMAuthenticationBypass(input Input) (PAMAuthenticationBypassProof, bool) {
-	if input.Command != "" || len(input.Argv) != 0 ||
-		strings.TrimSpace(input.Tool) != input.Tool {
+	if input.Command != "" || len(input.Argv) != 0 {
 		return "", false
 	}
-
-	object, problem := exactJSONObject(input.Args)
-	if problem.status != "" {
-		return "", false
+	for _, write := range nativeFileWrites(input.Tool, input.Args) {
+		target, ok := nativeAbsoluteTarget(write.target, input.CWD)
+		if !ok || !exactProtectedPAMPath(target) {
+			continue
+		}
+		newLines, newValid := exactPAMLines(target, write.added)
+		if !newValid {
+			continue
+		}
+		if write.whole {
+			if hasExactPAMPermitAuthLine(newLines) {
+				return PAMAuthenticationBypassFullReplacement, true
+			}
+			continue
+		}
+		var oldLines []exactPAMLine
+		if write.replaced != "" {
+			var oldValid bool
+			if oldLines, oldValid = exactPAMLines(target, write.replaced); !oldValid {
+				continue
+			}
+		}
+		if addsExactPAMPermitAuthLine(oldLines, newLines) {
+			return PAMAuthenticationBypassLiteralInsertion, true
+		}
 	}
-
-	switch {
-	case strings.EqualFold(input.Tool, "Write"):
-		if len(object) != 2 || !exactPAMObjectKeys(object, "file_path", "content") {
-			return "", false
-		}
-		target, pathOK := object["file_path"].(string)
-		content, contentOK := object["content"].(string)
-		if !pathOK || !contentOK || !exactProtectedPAMPath(target) {
-			return "", false
-		}
-		lines, ok := exactPAMLines(target, content)
-		if !ok || !hasExactPAMPermitAuthLine(lines) {
-			return "", false
-		}
-		return PAMAuthenticationBypassFullReplacement, true
-
-	case strings.EqualFold(input.Tool, "Edit"):
-		if len(object) != 4 || !exactPAMObjectKeys(
-			object,
-			"file_path",
-			"old_string",
-			"new_string",
-			"replace_all",
-		) {
-			return "", false
-		}
-		target, pathOK := object["file_path"].(string)
-		oldText, oldOK := object["old_string"].(string)
-		newText, newOK := object["new_string"].(string)
-		replaceAll, replaceAllOK := object["replace_all"].(bool)
-		if !pathOK || !oldOK || !newOK || !replaceAllOK || !replaceAll ||
-			oldText == "" || oldText == newText || !exactProtectedPAMPath(target) {
-			return "", false
-		}
-		oldLines, oldValid := exactPAMLines(target, oldText)
-		newLines, newValid := exactPAMLines(target, newText)
-		if !oldValid || !newValid || !addsExactPAMPermitAuthLine(oldLines, newLines) {
-			return "", false
-		}
-		return PAMAuthenticationBypassLiteralInsertion, true
-	default:
-		return "", false
-	}
+	return "", false
 }
 
 type exactPAMLine struct {
 	fingerprint string
 	permitAuth  bool
-}
-
-func exactPAMObjectKeys(object map[string]any, expected ...string) bool {
-	if len(object) != len(expected) {
-		return false
-	}
-	for _, key := range expected {
-		if _, ok := object[key]; !ok {
-			return false
-		}
-	}
-	return true
 }
 
 func exactProtectedPAMPath(value string) bool {
