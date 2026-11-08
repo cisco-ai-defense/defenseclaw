@@ -3016,6 +3016,11 @@ func printConnectorsNotStarted(snap gateway.HealthSnapshot) {
 				Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, reason)
 			continue
 		}
+		if cause := guardrailNotStartedCause(snap.Guardrail.Details, name); cause != "" {
+			fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced: %s; then run: defenseclaw setup %s\n",
+				Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, cause, name)
+			continue
+		}
 		fmt.Printf("  %s %s (%s) was skipped: its setup failed, so it is not enforced. "+
 			"See gateway.log for the reason, then run: defenseclaw setup %s\n",
 			Style("!", "fg=yellow", "bold"), friendlyConnectorName(name), name, name)
