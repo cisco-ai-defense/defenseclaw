@@ -113,3 +113,41 @@ func TestContentRulesJudgeAWriteThroughALinkLikeTheProtectedName(t *testing.T) {
 		}
 	}
 }
+
+// TestContentRulesJudgeEachFileOfAPatchByTheFileItsOwnLinkReaches pins that a
+// multi-file patch is judged file by file: ordinary text added to a plain
+// project file stays allowed when another file of the same patch is a link to
+// a protected file that receives only a comment, and the protected text added
+// through the link is still blocked beside an ordinary file.
+func TestContentRulesJudgeEachFileOfAPatchByTheFileItsOwnLinkReaches(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	notes := filepath.Join(project, "notes.txt")
+	link := filepath.Join(project, "named-link")
+	for _, c := range []struct {
+		name, physical, protectedLine, rule string
+	}{
+		{"profile fragment", "/etc/profile.d/bash_completion.sh", "export LD_PRELOAD=/usr/local/lib/libreview.so", "persistence.global_ld_preload_install"},
+		{"pam service", "/etc/pam.d/sshd", "auth sufficient pam_permit.so", "tamper.pam_permit_authentication_bypass"},
+	} {
+		patch := func(notesLine, linkLine string) string {
+			return "*** Begin Patch\n*** Update File: " + notes + "\n@@\n # base\n+" + notesLine +
+				"\n*** Update File: " + link + "\n@@\n # base\n+" + linkLine + "\n*** End Patch\n"
+		}
+		for _, row := range []struct {
+			name, notesLine, linkLine string
+			blocked                   bool
+		}{
+			{"protected text in the ordinary file, comment in the link", c.protectedLine, "# harmless review comment", false},
+			{"comment in the ordinary file, protected text in the link", "# harmless review comment", c.protectedLine, true},
+		} {
+			t.Run(c.name+"/"+row.name, func(t *testing.T) {
+				body := string(mustJSON(t, sudoersClaudeCall("apply_patch", sudoersFixed(map[string]any{"command": patch(row.notesLine, row.linkLine)}))(project)))
+				got := overLimitHostHookWithEvidence(t, "codex", home, body, linkEvidence(t, body, link, c.physical))
+				blocked := overLimitHookAction(t, got) == "block"
+				if blocked != row.blocked || strings.Contains(got, c.rule) != row.blocked {
+					t.Fatalf("blocked=%t, want %t by %s: %.600s", blocked, row.blocked, c.rule, got)
+				}
+			})
+		}
+	}
+}
