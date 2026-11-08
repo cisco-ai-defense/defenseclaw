@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -135,6 +137,92 @@ func TestLoopVariableNearFormsReachState(t *testing.T) {
 					}
 					if !row.protected && block {
 						t.Errorf("%s %s managed=%t pack=%q: %.120s = %.200s, want ordinary allow", row.name, connector, managed, pack, row.command, got)
+					}
+				}
+			}
+		}
+	}
+}
+
+// rel-1-0-6:GAP-0880, GAP-0885 review 2: every distinct word of a list is read
+// (a link named in a late position, the login after many path words), the
+// readings of the statements before a rebinding of the variable stay, a
+// comment names no evidence, and a read that drops a trailing delimiter reads
+// the value it drops it from. Ordinary commands keep their verdict.
+func TestLoopVariableOrderLinksAndDelimiters(t *testing.T) {
+	home, project, parent := g235bBinderFixture(t)
+	active := filepath.Base(home)
+	ordinaryDir := filepath.Join(home, "aliasdi")
+	if err := os.MkdirAll(ordinaryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{filepath.Join(ordinaryDir, "config.yaml"), filepath.Join(home, "statealia")} {
+		if err := os.WriteFile(name, []byte("ordinary\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths := func(count int) string {
+		var words []string
+		for index := 0; index < count; index++ {
+			words = append(words, fmt.Sprintf("x%02d.txt", index))
+		}
+		return strings.Join(words, " ") + " "
+	}
+	write := `sed -i s/a/b/ ` + parent + `$u/.defenseclaw/config.yaml`
+	ordinary := `sed -i s/a/b/ ` + parent + `$u/notes.txt`
+	fileBody := `sed -i s/a/b/ ` + parent + `$u/statealias`
+	fileReading := `sed -i s/a/b/ '` + parent + active + `/statealias'`
+	redirectBody := `printf x > ` + parent + `$u/statealias`
+	redirectReading := `printf x > '` + parent + active + `/statealias'`
+	dirBody := `sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml`
+	dirReading := `sed -i s/a/b/ '` + parent + active + `/aliasdir/config.yaml'`
+	rows := []struct {
+		name, command string
+		protected     bool
+	}{
+		{"fifth-plain-directory-link", `for d in a b c d aliasdir; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, true},
+		{"fifth-plain-file-link", `for f in a b c d statealias; do sed -i s/a/b/ ` + home + `/$f; done`, true},
+		{"fiftieth-plain-directory-link", `for d in ` + paths(0) + strings.Repeat("p ", 49) + `aliasdir; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, true},
+		{"login-after-forty-seven-path-words", `for u in ` + paths(47) + `$USER; do ` + write + `; done`, true},
+		{"login-after-forty-eight-path-words", `for u in ` + paths(48) + `$USER; do ` + write + `; done`, true},
+		{"fifth-plain-ordinary", `for d in a b c d ordinary; do sed -i s/a/b/ ` + home + `/$d/notes.txt; done`, false},
+		{"for-rebind-after-write", `for u in $USER; do ` + write + `; u=ordinary; done`, true},
+		{"for-export-after-write", `for u in $USER; do ` + write + `; export u=ordinary; done`, true},
+		{"for-read-after-write", `for u in $USER; do ` + write + `; read u; done`, true},
+		{"for-function-after-write", `f() { u=ordinary; }; for u in $USER; do ` + write + `; f; done`, true},
+		{"for-declared-function-in-body", `for u in $USER; do f() { u=ordinary; }; ` + write + `; done`, true},
+		{"for-prefix-assignment-before", `for u in $USER; do u=ordinary true; ` + write + `; done`, true},
+		{"while-rebind-after-write", `echo $USER | while read u; do ` + write + `; u=ordinary; done`, true},
+		{"while-ifs-after-loop", `echo $USER | while read u; do ` + write + `; done; IFS=x`, true},
+		{"while-inert-ifs-function", `f() { IFS=x; }; echo $USER | while read u; do ` + write + `; done`, true},
+		{"for-rebind-before-ordinary", `for u in $USER; do u=ordinary; ` + ordinary + `; done`, false},
+		{"for-read-before-ordinary", `for u in $USER; do read u; ` + ordinary + `; done`, false},
+		{"while-ordinary", `echo $USER | while read u; do ` + ordinary + `; done`, false},
+		{"comment-file-link-control", `for u in $USER; do ` + fileBody + `; done`, true},
+		{"comment-file-link", `for u in $USER; do ` + fileBody + `; done # ` + fileReading, true},
+		{"comment-redirect-link", `for u in $USER; do ` + redirectBody + `; done # ` + redirectReading, true},
+		{"comment-directory-link", `for u in $USER; do ` + dirBody + `; done # ` + dirReading, true},
+		{"trailing-delimiter-ordinary-directory", `echo aliasdir | while IFS=r read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, false},
+		{"second-delimiter-keeps-file-link", `echo statealias | while IFS=s read -r f; do sed -i s/a/b/ ` + home + `/$f; done`, true},
+		{"trailing-delimiter-ordinary-file", `echo statealiax | while IFS=x read -r f; do sed -i s/a/b/ ` + home + `/$f; done`, false},
+		{"empty-delimiter-directory-link", `echo aliasdir | while IFS= read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, true},
+		{"other-delimiter-directory-link", `echo aliasdir | while IFS=: read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, true},
+		{"trailing-delimiter-state-name", `echo .defenseclawx | while IFS=x read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`, true},
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		for _, managed := range []bool{false, true} {
+			for _, pack := range []string{"", "permissive", "strict"} {
+				for _, row := range rows {
+					if !row.protected && pack == "strict" {
+						continue
+					}
+					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
+					block := strings.HasPrefix(got, `{"action":"block"`)
+					if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
+						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", row.name, connector, managed, pack, got)
+					}
+					if !row.protected && block {
+						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want ordinary allow", row.name, connector, managed, pack, got)
 					}
 				}
 			}

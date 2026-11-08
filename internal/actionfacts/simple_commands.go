@@ -334,6 +334,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		nextVariants := make([]simpleShellState, 0, len(variants))
 		emitted := make(map[SimpleCommand]bool)
 		for _, prior := range variants {
+			if simpleReboundReading(prior, part) {
+				continue
+			}
 			state := prior.clone()
 			simpleApplyLoopBinds(state.vars, part.binds, login)
 			if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && len(call.Args) == 0 && len(call.Assigns) != 0 && len(stmt.Redirs) == 0 {
@@ -2332,4 +2335,22 @@ func simplePrefixBindsUser(call *syntax.CallExpr, effective map[string]string) b
 	}
 	_, _, nested, _ := simpleNestedScript(call, effective, nil, nil)
 	return nested
+}
+
+// simpleReboundReading reports a state that holds a word of a forked loop for
+// a statement that runs after code that can bind the variable again. The
+// state that left the variable unread stays, so the statement is read as it
+// was before the loop, and the statements before the binding keep the word.
+func simpleReboundReading(state simpleShellState, part sequenceStatement) bool {
+	for _, name := range state.forked {
+		for index := len(part.binds) - 1; index >= 0; index-- {
+			if bind := part.binds[index]; bind.fork && bind.name == name {
+				if bind.reboundAt(part.sourceStart) {
+					return true
+				}
+				break
+			}
+		}
+	}
+	return false
 }
