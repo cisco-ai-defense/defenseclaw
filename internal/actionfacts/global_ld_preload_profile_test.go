@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestExactGlobalLDPreloadProfileWrite(t *testing.T) {
+func TestExactGlobalLDPreloadFileWrite(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		tool string
@@ -61,7 +61,7 @@ func TestExactGlobalLDPreloadProfileWrite(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			input := Input{Tool: test.tool, Args: json.RawMessage(test.args)}
 			facts := Analyze(input)
-			if got := ExactGlobalLDPreloadProfileWrite(input, facts); got != test.want {
+			if got := ExactGlobalLDPreloadFileWrite(input, facts); got != test.want {
 				t.Fatalf("got=%t want=%t facts=%+v", got, test.want, facts)
 			}
 		})
