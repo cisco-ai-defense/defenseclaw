@@ -1954,19 +1954,34 @@ def packaged_windows_install_root() -> str | None:
 
 
 
-def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
+def local_policy_digest(cfg: Any, *, timeout: float = 60, failure: list[str] | None = None) -> dict | None:
     """Compute effective_policy_digest from disk with the installed gateway
-    (``defenseclaw-gateway policy digest --json``); None when it cannot."""
+    (``defenseclaw-gateway policy digest --json``); None when it cannot.
+
+    The gateway reads config.yaml from the install home, which is not the
+    data_dir once ``defenseclaw config set data_dir`` moved the store, so it
+    is started with :func:`gateway_home_for_data_dir`, the home the running
+    gateway uses (GAP-0844). When *failure* is given, the reason the digest
+    was unavailable is appended to it, for the caller to name.
+    """
+
+    def unavailable(reason: str) -> None:
+        if failure is not None:
+            failure.append(reason)
+        return None
+
     try:
         binary = resolve_trusted_gateway_binary()
     except OSError:
-        return None
+        return unavailable("no trusted defenseclaw-gateway executable could be verified")
     if not binary:
-        return None
+        return unavailable("no trusted defenseclaw-gateway executable is installed")
     env = dict(os.environ)
     data_dir = getattr(cfg, "data_dir", "") or ""
     if data_dir:
-        env["DEFENSECLAW_HOME"] = data_dir
+        from defenseclaw.config import gateway_home_for_data_dir
+
+        env["DEFENSECLAW_HOME"] = gateway_home_for_data_dir(data_dir)
     try:
         proc = subprocess.run(
             [binary, "policy", "digest", "--json"],
@@ -1977,11 +1992,18 @@ def local_policy_digest(cfg: Any, *, timeout: float = 60) -> dict | None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
+        return unavailable("the gateway policy digest command could not run")
     if proc.returncode != 0:
-        return None
+        detail = " ".join((proc.stderr or proc.stdout or "").split())[:200]
+        return unavailable(
+            f"the gateway policy digest command failed: {detail}"
+            if detail
+            else "the gateway policy digest command failed"
+        )
     try:
         report = json.loads(proc.stdout)
     except ValueError:
-        return None
-    return report if isinstance(report, dict) and report.get("effective_digest") else None
+        return unavailable("the gateway policy digest command printed no JSON")
+    if isinstance(report, dict) and report.get("effective_digest"):
+        return report
+    return unavailable("the gateway policy digest command reported no digest")

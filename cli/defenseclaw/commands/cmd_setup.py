@@ -92,6 +92,7 @@ from defenseclaw.config import (
     config_path_for_data_dir,
     enable_all_runtime_planes,
     enable_user_runtime_planes,
+    gateway_home_for_data_dir,
     gateway_pid_path,
     locked_config_yaml,
     locked_file_update,
@@ -13977,7 +13978,7 @@ def _agent_settings_refusal(
     if not executable:
         return ""
     data_dir = str(cfg.data_dir)
-    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    env = {**os.environ, "DEFENSECLAW_HOME": gateway_home_for_data_dir(data_dir)}
     if connector == "codex":
         selected_root = _selected_codex_setup_root()
         env["CODEX_HOME"] = selected_root
@@ -14131,8 +14132,8 @@ def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str
     if not executable:
         return [], "no verified defenseclaw-gateway executable is installed"
     data_dir = str(cfg.data_dir)
-    # The gateway reads config.yaml of this data directory, not of $HOME.
-    env = {**os.environ, "DEFENSECLAW_HOME": data_dir}
+    # The gateway reads the install-home config.yaml that names this data directory.
+    env = {**os.environ, "DEFENSECLAW_HOME": gateway_home_for_data_dir(data_dir)}
     try:
         result = run_pinned_executable(
             [executable, "connector", "prune-orphans", "--connector", connector, "--data-dir", data_dir, "--json"],
