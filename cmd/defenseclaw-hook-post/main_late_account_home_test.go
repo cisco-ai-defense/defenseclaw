@@ -49,6 +49,9 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 	if err := os.Link(filepath.Join(project, "plain.txt"), filepath.Join(project, "hl-plain")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Symlink(project, filepath.Join(root, "proj-link")); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HOME", scratch)
 	names := make([]string, 5000)
 	for i := range names {
@@ -78,9 +81,16 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 		return runMain([]string{"hook-post", "--api-addr", addr, "--max-time", "1", "--curl-output"},
 			bytes.NewReader(frame), new(bytes.Buffer), new(bytes.Buffer))
 	}
-	// The shell saves its HOME as it got it, so a trailing slash is the same
-	// valid home and must not send the scan to the account entry.
-	for _, saved := range []string{home, home + "/"} {
+	// The shell saves its HOME as it got it, so a trailing slash or a parent
+	// step is the same valid home by file system rules (a link on the way
+	// included) and must not send the scan to another home.
+	for _, saved := range []struct{ label, home string }{
+		{"plain", home},
+		{"trailing slash", home + "/"},
+		{"parent step", filepath.Join(root, "h", "proj") + "/.."},
+		{"parent step by name", home + "/../h"},
+		{"parent step through a link", filepath.Join(root, "proj-link") + "/.."},
+	} {
 		for _, path := range []string{"/api/v1/codex/hook", "/api/v1/claude-code/hook"} {
 			for _, tc := range []struct {
 				name, command string
@@ -93,10 +103,25 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 				{"ordinary late call", "touch " + long, hookexec.PerUserPostLateOrdinaryExit},
 				{"hard link of an ordinary file", "touch hl-plain", hookexec.PerUserPostLateOrdinaryExit},
 			} {
-				t.Run(strings.TrimPrefix(path, "/api/v1/")+" "+tc.name+" saved "+saved[len(home):]+".", func(t *testing.T) {
-					t.Setenv(hookPostAccountHomeEnv, saved)
+				t.Run(strings.TrimPrefix(path, "/api/v1/")+" "+tc.name+" saved "+saved.label, func(t *testing.T) {
+					t.Setenv(hookPostAccountHomeEnv, saved.home)
 					if got := post(path, tc.command); got != tc.want {
 						t.Fatalf("exit %d, want %d", got, tc.want)
+					}
+				})
+			}
+		}
+	}
+	// A saved value that is no usable home (missing folder, relative path)
+	// keeps the late call closed, a protected target or not; it never sends
+	// the scan to another home.
+	for _, saved := range []string{filepath.Join(root, "missing"), filepath.Join(root, "missing", "deeper"), "relative/home"} {
+		for _, path := range []string{"/api/v1/codex/hook", "/api/v1/claude-code/hook"} {
+			for _, command := range []string{"touch hl-keys", "touch " + long} {
+				t.Run(strings.TrimPrefix(path, "/api/v1/")+" unusable saved home", func(t *testing.T) {
+					t.Setenv(hookPostAccountHomeEnv, saved)
+					if got := post(path, command); got != hookexec.PerUserPostNoAnswerExit {
+						t.Fatalf("home %q: exit %d, want %d", saved, got, hookexec.PerUserPostNoAnswerExit)
 					}
 				})
 			}
@@ -106,26 +131,20 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 
 func TestAccountHomeIsTheSavedHomeThenTheAccountEntry(t *testing.T) {
 	saved := filepath.Join(t.TempDir(), "saved")
-	t.Setenv(hookPostAccountHomeEnv, saved)
-	if got := accountHome(); got != saved {
-		t.Fatalf("saved home = %q, want %q", got, saved)
+	// The saved value is handed on as it is: the scan resolves it, or closes.
+	for _, same := range []string{saved, saved + "/", saved + "/../saved", "relative/home"} {
+		t.Setenv(hookPostAccountHomeEnv, same)
+		if got := accountHome(); got != same {
+			t.Errorf("saved home %q gave %q, want it unchanged", same, got)
+		}
 	}
 	current, err := user.Current()
 	if err != nil || !filepath.IsAbs(current.HomeDir) {
 		t.Skip("no account entry for the current user")
 	}
-	// A trailing slash or doubled separator is the same home, cleaned.
-	for _, same := range []string{saved + "/", saved + "//", saved + "/./"} {
-		t.Setenv(hookPostAccountHomeEnv, same)
-		if got := accountHome(); got != saved {
-			t.Errorf("home %q gave %q, want %q", same, got, saved)
-		}
-	}
-	// A relative value or a parent step is not a home: the account entry decides.
-	for _, bad := range []string{"", "relative/home", saved + "/../other"} {
-		t.Setenv(hookPostAccountHomeEnv, bad)
-		if got := accountHome(); got != current.HomeDir {
-			t.Errorf("home %q gave %q, want the account entry %q", bad, got, current.HomeDir)
-		}
+	// Only a shell that saved nothing sends the scan to the account entry.
+	t.Setenv(hookPostAccountHomeEnv, "")
+	if got := accountHome(); got != current.HomeDir {
+		t.Errorf("no saved home gave %q, want the account entry %q", got, current.HomeDir)
 	}
 }
