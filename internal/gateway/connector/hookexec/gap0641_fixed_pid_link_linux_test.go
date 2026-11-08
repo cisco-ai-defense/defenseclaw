@@ -198,11 +198,7 @@ func TestGAP0641FixedPIDProcFDManagedOutageAllows(t *testing.T) {
 	}
 }
 
-// The shared reader proves this call ordinary (the payload test above), but the
-// restart-window scan (GAP-0518) does not step through a dot-dot component, and
-// the open tier needs both: the call stays closed at the deadline, as on the
-// release base.
-func TestGAP0641FixedPIDProcCWDOSSDeadlineStaysClosedWithoutBothScans(t *testing.T) {
+func TestGAP0641FixedPIDProcCWDOSSDeadlineAllows(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux proc path")
 	}
@@ -226,8 +222,8 @@ func TestGAP0641FixedPIDProcCWDOSSDeadlineStaysClosedWithoutBothScans(t *testing
 		opts.OutageFailModeNow = func() string { return "open" }
 		opts.Stdin = strings.NewReader(string(gap0641Payload(runner, "cat "+path)))
 	})
-	if !nativeOutageBlocked(result) {
-		t.Errorf("fixed-PID cwd with a dot-dot step was allowed at OSS deadline: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	if nativeOutageBlocked(result) {
+		t.Errorf("ordinary fixed-PID cwd was blocked at OSS deadline: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 	}
 }
 

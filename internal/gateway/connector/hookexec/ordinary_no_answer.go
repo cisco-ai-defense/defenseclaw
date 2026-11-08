@@ -8,6 +8,7 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -16,20 +17,36 @@ import (
 // OrdinaryNoAnswerPayload reports that a verified late call has no protected
 // candidate in the shared path reader. Unknown input keeps the closed answer.
 //
-// The home is the one the agent runs with ($HOME, as the other late-call scan
-// reads it, hookpaths.LateOrdinaryCall); the account record is the fallback
-// when HOME is unset. Reading only the account record let a call that names
-// the protected files of $HOME pass as ordinary wherever the two differ.
+// The protected files of every home the call can mean are read: the home the
+// agent runs with ($HOME, as the other late-call scan reads it,
+// hookpaths.LateOrdinaryCall) and the account database home. They are one
+// folder for an ordinary user, and differ when the hook runs with another
+// HOME; a call that names a protected file of either is not ordinary.
 func OrdinaryNoAnswerPayload(body []byte) bool {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		account, accountErr := osuser.Current()
-		if accountErr != nil {
+	var homes []string
+	if home, err := os.UserHomeDir(); err == nil {
+		homes = append(homes, home)
+	}
+	if account, err := osuser.Current(); err == nil {
+		homes = append(homes, account.HomeDir)
+	}
+	return ordinaryNoAnswerPayloadInHomes(body, homes)
+}
+
+// ordinaryNoAnswerPayloadInHomes is ordinary only when the call names no
+// protected file of any of the absolute homes; a list with none is not.
+func ordinaryNoAnswerPayloadInHomes(body []byte, homes []string) bool {
+	var seen []string
+	for _, home := range homes {
+		if !filepath.IsAbs(home) || slices.Contains(seen, home) {
+			continue
+		}
+		seen = append(seen, home)
+		if !ordinaryNoAnswerPayloadInHome(body, home) {
 			return false
 		}
-		home = account.HomeDir
 	}
-	return ordinaryNoAnswerPayloadInHome(body, home)
+	return len(seen) != 0
 }
 
 func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
