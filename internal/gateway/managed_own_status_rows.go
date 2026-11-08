@@ -43,6 +43,9 @@ const (
 	// per-connector hook proof for any connector but Claude Code.
 	ownCauseWindowsUnchecked = "your account's status cannot check this agent. " +
 		"Ask IT to run the administrator status for this computer"
+	// ownScanNextStep follows the recorded reason of every row the scan lists
+	// as unprotected for the account, whatever the reason says.
+	ownScanNextStep = "Run defenseclaw status again in a few minutes, and ask IT if it stays this way"
 	// ownCauseNoUnprotectedReason: the scan lists the agent as unprotected
 	// but recorded no reason text.
 	ownCauseNoUnprotectedReason = "the administrator status lists this agent as unprotected for your account. Ask IT"
