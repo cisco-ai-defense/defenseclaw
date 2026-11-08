@@ -354,7 +354,7 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(entries))
 	for i, e := range entries {
 		switch {
-		case claimed[i] && !e.ambiguous && !(replayed[i] && e.replayAmbiguous):
+		case claimed[i] && !e.ambiguous && (!replayed[i] || !e.replayAmbiguous):
 			taken = append(taken, e)
 		case claimed[i] || dropped[i]:
 		default:
