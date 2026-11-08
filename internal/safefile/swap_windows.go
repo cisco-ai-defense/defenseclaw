@@ -311,11 +311,11 @@ func replaceHeldFile(source, destination string, held *os.File, beforeRename fun
 					if useTransaction {
 						var unavailable bool
 						unavailable, err = swapRenameInTransaction(source, destination, flags)
-						if unavailable || errors.Is(err, windows.ERROR_TRANSACTIONAL_CONFLICT) || posixRenameUnsupported(err) || errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
+						if unavailable || posixRenameUnsupported(err) || errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
 							// Recheck identity under the plain path's DELETE-access
-							// guard before attempting the non-transactional rename. A
-							// conflicting external save must not keep the transaction
-							// reservation active through repeated attempts.
+							// guard before attempting the non-transactional rename.
+							// A name conflict retains the transaction route: the plain
+							// rename can leave a first-open name gap for a reader.
 							useTransaction = false
 							warnSwapTransactionFallback()
 							_ = target.Close()

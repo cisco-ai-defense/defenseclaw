@@ -402,7 +402,7 @@ func TestCompareAndSwapFileTransactsNonImagePublication(t *testing.T) {
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
 }
 
-func TestCompareAndSwapFileFallsBackAfterTransactionalConflict(t *testing.T) {
+func TestCompareAndSwapFileKeepsTransactionAfterNameConflict(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "hooks.json")
 	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
@@ -412,16 +412,19 @@ func TestCompareAndSwapFileFallsBackAfterTransactionalConflict(t *testing.T) {
 	previousTx, previousPlain := swapTransactedRename, swapRenameReplace
 	defer func() { swapTransactedRename, swapRenameReplace = previousTx, previousPlain }()
 	transacted, plain := 0, 0
-	swapTransactedRename = func(string, string, uint32, windows.Handle) error {
+	swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
 		transacted++
-		return windows.ERROR_TRANSACTIONAL_CONFLICT
+		if transacted == 1 {
+			return windows.ERROR_TRANSACTIONAL_CONFLICT
+		}
+		return renameTransacted(from, to, flags, tx)
 	}
 	swapRenameReplace = func(from, to string, class, flags uint32) error {
 		plain++
 		return renameReplace(from, to, class, flags)
 	}
 	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
-	if err != nil || !result.Swapped || transacted != 1 || plain != 1 {
+	if err != nil || !result.Swapped || transacted != 2 || plain != 0 {
 		t.Fatalf("CAS publication: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
 	}
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})

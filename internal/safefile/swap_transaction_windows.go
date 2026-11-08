@@ -35,7 +35,7 @@ const swapTransactionTimeoutMS = 30_000
 
 func warnSwapTransactionFallback() {
 	swapTransactionWarning.Do(func() {
-		log.Print("defenseclaw: WARNING: transactional file replacement could not complete; compare-and-swap uses ordinary Windows replacement, so concurrent pathname opens may need retry")
+		log.Print("defenseclaw: WARNING: transactional file replacement is unavailable; compare-and-swap uses ordinary Windows replacement, so concurrent pathname opens may need retry")
 	})
 }
 
