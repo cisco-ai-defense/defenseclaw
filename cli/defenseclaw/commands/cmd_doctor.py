@@ -65,6 +65,7 @@ import click
 from defenseclaw import codex_toml, credential_provenance, envvars, legacy_connector, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.audit_time_order import audit_time_order
+from defenseclaw.cause_text import single_line
 from defenseclaw.config import gateway_home_for_data_dir, gateway_pid_path
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACT_MANIFEST,
@@ -12286,12 +12287,14 @@ _RECORDED_REASON_CAUSE_LIMIT = 400
 def _bounded_recorded_reason(reason: object, repair: str = "") -> str:
     """The gateway's recorded reason, bounded, followed by its repair as recorded.
 
-    The reason is prose: its whitespace is collapsed and it is bounded. The
-    repair arrives as fields of its own (``_connectors_not_started_repairs``),
-    never found inside the reason, and holds paths and accounts inside quotes,
-    where a run of spaces is part of the argument, so it is shown exactly.
+    The reason is bounded and folded to one line; spaces inside a line are
+    kept, because the reason names folders and accounts unquoted and a run of
+    spaces can be part of a name (GAP-0881). The repair arrives as fields of
+    its own (``_connectors_not_started_repairs``), never found inside the
+    reason, and holds paths and accounts inside quotes, where a run of spaces
+    is part of the argument, so it is shown exactly.
     """
-    text = " ".join(str(reason).split())
+    text = single_line(reason)
     if len(text) > _RECORDED_REASON_CAUSE_LIMIT:
         text = text[:_RECORDED_REASON_CAUSE_LIMIT] + "…"
     return text + repair
