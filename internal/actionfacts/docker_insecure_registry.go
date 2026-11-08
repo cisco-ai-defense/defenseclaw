@@ -35,17 +35,19 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	}
 	writes := nativeFileWrites(input.Tool, input.Args)
 	for _, write := range writes {
-		canonical, absolute := nativeAbsoluteTarget(write.target, "")
-		if !write.whole || !absolute || canonical != write.target ||
-			!nativeOperandsCoverTarget(facts, len(writes), canonical) {
-			continue
-		}
 		content := write.added
-		if content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
+		if !write.whole || content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
 			strings.ContainsRune(content, 0) {
 			continue
 		}
-		for _, file := range nativeReachedFiles(facts, canonical) {
+		// The name the call gives must itself be the canonical absolute
+		// spelling; a relative name or a link is placed by the client.
+		files := nativeClientReachedFiles(input, write.target)
+		if canonical, absolute := nativeAbsoluteTarget(write.target, ""); absolute && canonical == write.target &&
+			nativeOperandsCoverTarget(facts, len(writes), canonical) {
+			files = append(nativeReachedFiles(facts, canonical), files...)
+		}
+		for _, file := range files {
 			if EtcSpelling(file) == dockerDaemonConfigPath &&
 				writeToolNamesItsFile(input) &&
 				exactDockerInsecureRegistryDocument(content) {
