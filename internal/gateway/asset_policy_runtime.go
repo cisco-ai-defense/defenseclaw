@@ -683,7 +683,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 			decision, probe = earlier, *res.earlier
 		}
 	}
-	a.rememberResolvedMCP(connector, res, denied, earlierDenied)
+	a.rememberResolvedMCP(cfg, connector, res, denied, earlierDenied)
 	if (res.unknown || res.lost) && decision.RawAction != "block" {
 		if unknown, ok := unknownMCPDefinitionDecision(cfg, connector, probe, res.unknown, res.lost); ok {
 			decision = unknown
@@ -730,16 +730,7 @@ func mcpProbeDecision(ctx context.Context, cfg *config.Config, connector string,
 	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor("mcp")
 	decision, unproven := unprovenMCPDefinitionDecision(ctx, cfg, connector, probe)
 	if !unproven {
-		input := config.AssetPolicyInput{
-			TargetType:     "mcp",
-			Name:           probe.ServerName,
-			Connector:      connector,
-			URL:            probe.URL,
-			Command:        probe.Command,
-			Args:           probe.Args,
-			Transport:      probe.Transport,
-			RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
-		}
+		input := mcpPolicyInput(connector, probe)
 		if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
 			return config.AssetPolicyDecision{}
 		}
@@ -765,6 +756,29 @@ func mcpProbeDecision(ctx context.Context, cfg *config.Config, connector string,
 		decision.WouldBlock = true
 	}
 	return decision
+}
+
+// mcpPolicyInput is the input the asset policy judges an MCP probe on.
+func mcpPolicyInput(connector string, probe mcpRuntimeProbe) config.AssetPolicyInput {
+	return config.AssetPolicyInput{
+		TargetType:     "mcp",
+		Name:           probe.ServerName,
+		Connector:      connector,
+		URL:            probe.URL,
+		Command:        probe.Command,
+		Args:           probe.Args,
+		Transport:      probe.Transport,
+		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
+	}
+}
+
+// mcpDeniedRuleID is the identity (mcpRuleID) of the rule of the denied list
+// that matches the probe, "" when none does.
+func mcpDeniedRuleID(cfg *config.Config, connector string, probe mcpRuntimeProbe) string {
+	if verdict, rule := cfg.AssetListDecision(mcpPolicyInput(connector, probe)); verdict == config.AssetListDeny {
+		return mcpRuleID(rule)
+	}
+	return ""
 }
 
 // mcpDeniedDecision reports a verdict from the denied list.
@@ -801,7 +815,10 @@ type mcpResolution struct {
 	// in the config nor in what the session resolved before.
 	unknown bool
 	// lost is set when the session had a denied definition under this name
-	// that did not fit in the memory, whatever the config lists for it now.
+	// that did not fit in the memory, and the rule that matched it is still
+	// in the denied list, whatever the config lists for the name now. It is
+	// also set, for a name a denied rule covers, in a session that could not
+	// record every such definition.
 	lost bool
 	// track is set when the session memory is used; home and name key it.
 	track bool
@@ -826,15 +843,16 @@ func mcpProbeWithEntry(probe mcpRuntimeProbe, entry config.MCPServerEntry, byCon
 // rememberResolvedMCP keeps the definition a session was judged on, so a
 // later call finds it once the config no longer lists it. A definition that
 // the denied list matched is kept in place of a later one.
-func (a *APIServer) rememberResolvedMCP(connector string, res mcpResolution, denied, earlierDenied bool) {
+func (a *APIServer) rememberResolvedMCP(cfg *config.Config, connector string, res mcpResolution, denied, earlierDenied bool) {
 	if !res.track || !res.found {
 		return
 	}
-	entry := res.entry
+	entry, probe := res.entry, res.probe
 	if res.earlier != nil && earlierDenied {
-		entry, denied = res.earlierEntry, true
+		entry, probe, denied = res.earlierEntry, *res.earlier, true
 	}
-	a.mcpResolved.remember(connector, res.home, res.probe.SessionID, res.probe.WorkspaceDir, res.name, entry, denied, time.Now())
+	a.mcpResolved.remember(connector, res.home, res.probe.SessionID, res.probe.WorkspaceDir, res.name, entry, denied,
+		func() string { return mcpDeniedRuleID(cfg, connector, probe) }, time.Now())
 }
 
 // resolveMCPProbeEndpoint fills a name-only hook probe (mcp__<server>__<tool>)
@@ -892,7 +910,11 @@ func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Con
 	default:
 		res.unknown = true
 	}
-	res.lost = res.track && a.mcpResolved.lostDenied(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, time.Now())
+	if res.track {
+		denied := cfg.AssetPolicy.MCP.Denied
+		held, overflow := a.mcpResolved.lostDenied(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, denied, time.Now())
+		res.lost = held || overflow && rulesScopeServer(denied, connector, probe.ServerName)
+	}
 	return res
 }
 
@@ -918,9 +940,11 @@ func mcpConnectorResolvesByName(connector string) bool {
 // asset_policy.mode.
 //
 // The server is lost when a denied definition of this very name, in this
-// session, did not fit in the memory. The live connection is the denied one
-// whatever the config lists now (an edit, a removal), so while a rule of the
-// denied list covers the name the call is refused in every tier and profile.
+// session, did not fit in the memory and the rule that matched it is still in
+// the denied list. The live connection is the denied one whatever the config
+// lists now (an edit, a removal), so the call is refused in every tier and
+// profile. A rule that has left the list releases it: the connection is judged
+// on the policy in force now.
 //
 // The denied list applies whatever asset_policy.enabled says, like the
 // explicit deny. Secure Client keeps main (#1092).
@@ -929,7 +953,7 @@ func unknownMCPDefinitionDecision(cfg *config.Config, connector string, probe mc
 		!mcpConnectorResolvesByName(connector) {
 		return config.AssetPolicyDecision{}, false
 	}
-	covered := lost && rulesScopeServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName)
+	covered := lost
 	denyPins := unknown && rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName)
 	// The allowed list follows runtime detection, as in unprovenMCPDefinitionDecision.
 	detection, _ := cfg.AssetRuntimeDetectionFor("mcp")
