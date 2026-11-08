@@ -42,9 +42,27 @@ $scratchSecurity.SetSecurityDescriptorSddlForm(
 Microsoft.PowerShell.Security\Set-Acl -LiteralPath $scratch -AclObject $scratchSecurity
 $roots = [Collections.Generic.List[string]]::new()
 $roots.Add($scratch)
+# An administrator's object is owned by the group BUILTIN\Administrators. A GitHub
+# runner (and any host whose "Default owner for objects created by members of
+# the Administrators group" is "Object creator") leaves what an elevated user
+# creates owned by that user, with an access entry for the user, which the trust
+# rules rightly treat as another account's. The fixtures set the owner and take
+# the inherited entries again, so they are the same on every host.
+function Set-AdministratorsOwner {
+    param([Parameter(Mandatory)][string]$Path)
+    $result = & icacls.exe $Path /setowner '*S-1-5-32-544' 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "icacls /setowner Administrators on $Path failed: $result" }
+    $result = & icacls.exe $Path /reset 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "icacls /reset on $Path failed: $result" }
+}
+function New-AdministratorDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    [void][IO.Directory]::CreateDirectory($Path)
+    Set-AdministratorsOwner -Path $Path
+}
 function New-StandIn {
     $path = [IO.Path]::Combine($scratch, [Guid]::NewGuid().ToString('N'))
-    [void][IO.Directory]::CreateDirectory($path)
+    New-AdministratorDirectory -Path $path
     return $path
 }
 $failures = [Collections.Generic.List[string]]::new()
@@ -52,7 +70,7 @@ try {
     foreach ($standalone in @($true, $false)) {
         $vendor = New-StandIn
         $codex = [IO.Path]::Combine($vendor, 'Codex')
-        [void][IO.Directory]::CreateDirectory($codex)
+        New-AdministratorDirectory -Path $codex
         $inherited = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
         $result = & $module {
             param($Vendor, $Codex, $Standalone)
@@ -143,10 +161,11 @@ try {
     )) {
         $ownVendor = New-StandIn
         $ownCodex = [IO.Path]::Combine($ownVendor, 'Codex')
-        [void][IO.Directory]::CreateDirectory($ownCodex)
+        New-AdministratorDirectory -Path $ownCodex
         foreach ($name in $row.Files) {
             $path = [IO.Path]::Combine($ownCodex, $name)
             [IO.File]::WriteAllBytes($path, [byte[]]@())
+            Set-AdministratorsOwner -Path $path
             if ($row.Owner -ne '' -and $name -like '.defenseclaw-*') {
                 $ownerResult = & icacls.exe $path /setowner $row.Owner 2>&1
                 if ($LASTEXITCODE -ne 0) {

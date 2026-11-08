@@ -59,6 +59,7 @@ func TestWindowsReclaimNeverTakesOverAFolderHoldingDefenseClawFilesOnStandalone(
 					if err := os.WriteFile(filepath.Join(dir, "50-defenseclaw.json"), []byte("{}"), 0o600); err != nil {
 						t.Fatal(err)
 					}
+					setAdministratorsOwner(t, filepath.Join(dir, "50-defenseclaw.json"))
 				}
 				previous := reclaimRefusesContentDrift
 				reclaimRefusesContentDrift = func() bool { return tc.standalone }
