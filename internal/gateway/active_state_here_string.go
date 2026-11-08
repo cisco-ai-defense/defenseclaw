@@ -35,7 +35,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	// keeps the word whole; both are judged.
 	seen := map[string]bool{}
 	for _, split := range []bool{true, false} {
-		twin, ok := hereStringPipeTwin(command, facts.ActiveHome, split)
+		twin, ok := hereStringPipeTwin(command, facts.ActiveHome, split, request.Input.LoopBindsStraightLine)
 		if !ok || seen[twin] {
 			continue
 		}
@@ -53,8 +53,9 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 // command as `printf '%s\n' WORD | CMD`, keeping CMD's other redirections.
 // With split, an xargs reader of a fixed word is judged as the call it
 // makes with the word's line split the way xargs splits it
-// (xargsStaticCallTwin).
-func hereStringPipeTwin(command, home string, split bool) (string, bool) {
+// (xargsStaticCallTwin). straight is Input.LoopBindsStraightLine: it tells which
+// read name <<< word statements bind their word.
+func hereStringPipeTwin(command, home string, split, straight bool) (string, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
 		return "", false
@@ -63,7 +64,7 @@ func hereStringPipeTwin(command, home string, split bool) (string, bool) {
 	// read name <<< word sets name in this shell: its twin is the assignment
 	// name=word, which the pipe twin would lose (the reader of a pipe is a
 	// subshell). The default IFS and the builtin are needed for that.
-	readBinds := actionfacts.ReadBindsHereString(file)
+	readBinds := actionfacts.ReadBindsHereString(file, straight)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok || refused {

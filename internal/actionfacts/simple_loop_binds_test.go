@@ -18,6 +18,10 @@ import (
 // for each word of its list that the walk can read, with the value rules of
 // an assignment. The reading of the statement that leaves it unread stays.
 func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
+	// hereStringRows are the rows whose read of a here-string word binds the
+	// variable for certain.
+	hereStringRows := map[string]bool{"read from a here-string": true, "read with -r": true,
+		"read declared as a function after the loop": true, "read of a here-string outside a loop": true}
 	const state = "sed -i x '/r/home/.defenseclaw/config.yaml'"
 	const other = "sed -i x '/r/other/.defenseclaw/config.yaml'"
 	for _, row := range []struct {
@@ -114,8 +118,10 @@ func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
 				got = append(got, simple.Text)
 				for _, want := range row.want {
 					// The reading of an iteration only proves a state write;
-					// a statement whose name the body binds is an ordinary one.
-					if simple.Text == want && !strings.Contains(row.command, "<<<") && simple.LoginGuess == (simple.Text == state && strings.Contains(row.command, "u=home")) {
+					// a statement whose name the body binds is an ordinary one, as
+					// is the one after a read of a here-string word.
+					ordinary := simple.Text == state && strings.Contains(row.command, "u=home") || hereStringRows[row.name]
+					if simple.Text == want && simple.LoginGuess == ordinary {
 						t.Errorf("%q: LoginGuess = %v", simple.Text, simple.LoginGuess)
 					}
 				}

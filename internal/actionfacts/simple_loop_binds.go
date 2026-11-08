@@ -329,17 +329,18 @@ func simpleHereStringRead(call *syntax.CallExpr, redirs []*syntax.Redirect, orde
 }
 
 // readsHereString reports a call of read that runs the builtin with the
-// default IFS: no function of that name can replace it (shadows) and the call
-// does not spell IFS.
+// default IFS: no function of that name can replace it (shadows) and no IFS
+// reaches it (ifsReaches).
 func (order *simpleScriptOrder) readsHereString(call *syntax.CallExpr) bool {
-	return !order.ifs && !order.shadows("read", call)
+	return !order.ifsReaches(call) && !order.shadows("read", call)
 }
 
 // ReadBindsHereString returns a test for a call of read whose here-string
 // word is the value of its variable: the builtin runs, with the default IFS.
 // It reads file once, so it stays right while the caller rewrites statements.
-func ReadBindsHereString(file *syntax.File) func(call *syntax.CallExpr) bool {
-	return newSimpleScriptOrder(file).readsHereString
+// straight is Input.LoopBindsStraightLine.
+func ReadBindsHereString(file *syntax.File, straight bool) func(call *syntax.CallExpr) bool {
+	return newSimpleScriptOrder(file, straight).readsHereString
 }
 
 // HereStringRead returns the variable and value of a call read [-r|-s] name
@@ -402,26 +403,147 @@ type simpleScriptOrder struct {
 	// ifs is set when the call spells the name IFS anywhere: its words then
 	// split by a delimiter the walk does not know.
 	ifs bool
+	// straight is the straight-line reading (Input.LoopBindsStraightLine):
+	// only a top-level statement before a call can replace a builtin of it or
+	// set its IFS. top holds the declarations of such statements, and steps
+	// the statements among them that spell IFS, in source order.
+	straight bool
+	top      map[*syntax.FuncDecl]bool
+	steps    []simpleIFSStep
 }
 
-func newSimpleScriptOrder(file *syntax.File) *simpleScriptOrder {
-	order := &simpleScriptOrder{}
+// simpleIFSStep is the IFS a straight-line reading holds after a top-level
+// statement that spells the name: value, and exact false when the statement
+// does more with it than set it (unset, eval, read IFS, an array or an
+// append), so that no value is known.
+type simpleIFSStep struct {
+	end   int
+	value string
+	exact bool
+}
+
+func newSimpleScriptOrder(file *syntax.File, straight bool) *simpleScriptOrder {
+	order := &simpleScriptOrder{straight: straight}
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.FuncDecl:
 			order.funcs = append(order.funcs, node)
 		case *syntax.ForClause, *syntax.WhileClause:
 			order.loops = append(order.loops, node)
-		case *syntax.Lit:
-			order.ifs = order.ifs || simpleSpellsIFS(node.Value)
-		case *syntax.SglQuoted:
-			order.ifs = order.ifs || simpleSpellsIFS(node.Value)
-		case *syntax.ParamExp:
-			order.ifs = order.ifs || node.Param != nil && node.Param.Value == "IFS"
+		default:
+			order.ifs = order.ifs || simpleNodeSpellsIFS(node)
 		}
 		return true
 	})
+	if straight {
+		order.top = make(map[*syntax.FuncDecl]bool)
+		value, exact := "", true
+		for _, stmt := range file.Stmts {
+			switch cmd := stmt.Cmd.(type) {
+			case *syntax.FuncDecl:
+				order.top[cmd] = true
+			case *syntax.CallExpr, *syntax.DeclClause:
+				if simpleSpellsIFSIn(stmt) {
+					value, exact = simpleIFSAfter(stmt, value, exact)
+					order.steps = append(order.steps, simpleIFSStep{end: int(stmt.End().Offset()), value: value, exact: exact})
+				}
+			}
+		}
+	}
 	return order
+}
+
+// simpleNodeSpellsIFS reports a node that is the name IFS.
+func simpleNodeSpellsIFS(node syntax.Node) bool {
+	switch node := node.(type) {
+	case *syntax.Lit:
+		return simpleSpellsIFS(node.Value)
+	case *syntax.SglQuoted:
+		return simpleSpellsIFS(node.Value)
+	case *syntax.ParamExp:
+		return node.Param != nil && node.Param.Value == "IFS"
+	}
+	return false
+}
+
+// simpleSpellsIFSIn reports code that spells the name IFS anywhere.
+func simpleSpellsIFSIn(root syntax.Node) bool {
+	spells := false
+	syntax.Walk(root, func(node syntax.Node) bool {
+		spells = spells || simpleNodeSpellsIFS(node)
+		return !spells
+	})
+	return spells
+}
+
+// simpleIFSAfter returns the IFS after a top-level statement that spells the
+// name, given the one before it: the value an assignment (IFS=x, export
+// IFS=x) sets, and no known value (exact false) for any other statement,
+// which may do more with it (unset, eval, read IFS, a command with an IFS
+// argument). The default is written as the empty value, which strips nothing a
+// word of a loop spells.
+func simpleIFSAfter(stmt *syntax.Stmt, value string, exact bool) (string, bool) {
+	if stmt.Background || stmt.Coprocess {
+		return value, false
+	}
+	set := func(assign *syntax.Assign) {
+		switch {
+		case assign.Name == nil || assign.Name.Value != "IFS":
+		case assign.Naked:
+		case assign.Append || assign.Array != nil || assign.Index != nil:
+			exact = false
+		case assign.Value == nil:
+			value = ""
+		default:
+			if static, known := simpleStaticWord(assign.Value, nil); known {
+				value = static
+			} else {
+				exact = false
+			}
+		}
+	}
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.CallExpr:
+		if len(cmd.Args) == 0 {
+			for _, assign := range cmd.Assigns {
+				set(assign)
+			}
+			return value, exact
+		}
+	case *syntax.DeclClause:
+		for _, assign := range cmd.Args {
+			set(assign)
+		}
+		return value, exact
+	}
+	return value, false
+}
+
+// straightIFS returns the IFS that the top-level statements ending before the
+// offset leave, and whether it is known. A script read in full (not the
+// straight-line reading) knows none.
+func (order *simpleScriptOrder) straightIFS(before int) (value string, exact bool) {
+	if !order.straight {
+		return "", false
+	}
+	value, exact = "", true
+	for _, step := range order.steps {
+		if step.end > before {
+			break
+		}
+		value, exact = step.value, step.exact
+	}
+	return value, exact
+}
+
+// ifsReaches reports a call whose IFS may not be the default: the call spells
+// IFS, or, in the straight-line reading, a top-level statement before it does.
+// Otherwise it spells it anywhere in the script.
+func (order *simpleScriptOrder) ifsReaches(call syntax.Node) bool {
+	if !order.straight {
+		return order.ifs
+	}
+	return simpleSpellsIFSIn(call) || slices.ContainsFunc(order.steps, func(step simpleIFSStep) bool { return step.end <= int(call.Pos().Offset()) })
 }
 
 // simpleSpellsIFS reports text with IFS as a name of its own: not inside a
@@ -458,10 +580,18 @@ func (order *simpleScriptOrder) inFunction(node syntax.Node) bool {
 // runs the call (the next pass), and any in the action when the call is in a
 // function body (the function may be called after the declaration). A
 // declaration after the call, outside every such loop, replaces nothing the
-// call runs.
+// call runs. In the straight-line reading only a declaration that is a
+// top-level statement before the call replaces it: a declaration in a
+// function body, a branch or a loop, or after the call, is not followed.
 func (order *simpleScriptOrder) shadows(name string, call syntax.Node) bool {
 	for _, decl := range order.funcs {
 		if decl.Name == nil || decl.Name.Value != name {
+			continue
+		}
+		if order.straight {
+			if order.top[decl] && decl.Pos().Offset() < call.Pos().Offset() {
+				return true
+			}
 			continue
 		}
 		if decl.Pos().Offset() < call.Pos().Offset() || order.inFunction(call) ||
@@ -864,12 +994,17 @@ func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Word, order *sim
 	if text, static := simpleStaticWord(input, nil); static && strings.Contains(text, "\\") {
 		return simpleLoopBind{}, false
 	}
-	// A read with an IFS of its own reads with that one; any other read has
-	// the IFS the walk holds where the loop starts (readIFS).
-	bind := simpleLoopBind{name: name, items: []*syntax.Word{input}, fork: true, read: true, ownIFS: own,
+	// A read with an IFS of its own reads with that one. In the straight-line
+	// reading any other read has the IFS the top-level statements before the
+	// loop leave, when they leave a known one. Else it has the IFS the walk
+	// holds where the loop starts, and the ones the code around it can set
+	// (readIFS).
+	bind := simpleLoopBind{name: name, items: []*syntax.Word{input}, fork: true, read: true, fixedIFS: own,
 		rebound: simpleReboundSpans(loop.Do, name, order)}
 	if own {
 		bind.ifs = []string{ifs}
+	} else if value, exact := order.straightIFS(int(loop.Pos().Offset())); exact {
+		bind.fixedIFS, bind.ifs = true, []string{value}
 	} else {
 		bind.outerIFS = simpleEnclosingIFS(order, loops, loop)
 	}
@@ -910,7 +1045,7 @@ func simpleEchoWord(input *syntax.Stmt) *syntax.Word {
 }
 
 // readIFS returns the IFS values a read can have where the walk starts the
-// loop: the one IFS= the read sets for itself, or the value the walk holds
+// loop: the one IFS the read has (fixedIFS), or the value the walk holds
 // for the state (the default, written as an empty value here, which strips
 // nothing a word of the loop spells) and every static value an enclosing loop
 // or function assigns, which an earlier pass may have left. Code the walk has
@@ -920,7 +1055,7 @@ func (bind simpleLoopBind) readIFS(vars map[string]string) []string {
 	if !bind.read {
 		return nil
 	}
-	if bind.ownIFS {
+	if bind.fixedIFS {
 		return bind.ifs
 	}
 	sets := []string{vars["IFS"]}

@@ -313,19 +313,27 @@ func TestLoopVariableCertainBindingsAndReachingIFS(t *testing.T) {
 		{"ifs-in-a-function-declared-after", readWrite + `; f() { IFS=x; }`, false},
 		{"ifs-in-a-function-declared-before", `f() { IFS=x; }; ` + readWrite, false},
 	}
+	// strictOnly are the rows whose binding comes from code the shell may never
+	// run before the loop (a branch, a loop that runs again, a function the loop
+	// calls). The default and permissive tiers follow only the top-level
+	// statements before the loop and allow them; the strict tier blocks them
+	// (TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict).
+	strictOnly := map[string]bool{"ifs-in-a-branch": true, "ifs-in-a-loop-that-runs-again": true,
+		"read-declared-in-a-loop-that-runs-again": true, "ifs-in-a-function-the-loop-calls": true}
 	for _, connector := range []string{"claudecode", "codex"} {
 		for _, managed := range []bool{false, true} {
 			for _, pack := range []string{"", "permissive", "strict"} {
 				for _, row := range rows {
-					if !row.protected && pack == "strict" {
+					protected := row.protected && (pack == "strict" || !strictOnly[row.name])
+					if !protected && pack == "strict" {
 						continue
 					}
 					got := postSelfProtectionPackCell(t, home, project, connector, pack, managed, false, row.command)
 					block := strings.HasPrefix(got, `{"action":"block"`)
-					if row.protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
+					if protected && (!block || !strings.Contains(got, "tamper.detector_state_write")) {
 						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want protected block", row.name, connector, managed, pack, got)
 					}
-					if !row.protected && block {
+					if !protected && block {
 						t.Errorf("%s %s managed=%t pack=%q: = %.200s, want ordinary allow", row.name, connector, managed, pack, got)
 					}
 				}
