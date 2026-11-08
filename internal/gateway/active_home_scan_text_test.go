@@ -22,7 +22,13 @@ func TestActiveHomeAsTilde(t *testing.T) {
 		{"nested path unchanged", "echo x >> /mnt/home/a.b/.netrc", "/home/a.b", "echo x >> /mnt/home/a.b/.netrc"},
 		{"home itself unchanged", "ls /home/a.b", "/home/a.b", "ls /home/a.b"},
 		{"no home unchanged", "echo x >> /home/a.b/.netrc", "", "echo x >> /home/a.b/.netrc"},
-		{"windows home unchanged", `type C:\Users\a.b\.netrc`, `C:\Users\a.b`, `type C:\Users\a.b\.netrc`},
+		{"windows home", "C:/Users/a.b/.netrc", `C:\Users\a.b`, "~/.netrc"},
+		{"windows home letter case", "c:/USERS/A.B/.netrc and C:/Users/a.b/x", "C:/Users/a.b/", "~/.netrc and ~/x"},
+		{"windows home of the usual shape", "C:/Users/alice/.netrc", `C:\Users\alice`, "~/.netrc"},
+		{"windows longer name unchanged", "C:/Users/a.bc/.netrc", `C:\Users\a.b`, "C:/Users/a.bc/.netrc"},
+		{"windows other drive unchanged", "D:/Users/a.b/.netrc", `C:\Users\a.b`, "D:/Users/a.b/.netrc"},
+		{"windows nested unchanged", "C:/x/C:/Users/a.b/.netrc", `C:\Users\a.b`, "C:/x/C:/Users/a.b/.netrc"},
+		{"windows backslash text unchanged", `type C:\Users\a.b\.netrc`, `C:\Users\a.b`, `type C:\Users\a.b\.netrc`},
 	} {
 		if got := activeHomeAsTilde(tc.text, tc.home); got != tc.want {
 			t.Errorf("%s: activeHomeAsTilde(%q, %q) = %q, want %q", tc.name, tc.text, tc.home, got, tc.want)
