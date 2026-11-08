@@ -139,6 +139,11 @@ func checkOpenCodeServiceConfigFolders(_, path string, _ bool) (sealed []string,
 // folder of another account fails here and is refused. The bit is read back:
 // a file system that ignores it is not a seal.
 func openCodeSealSharedFolder(path string, info os.FileInfo) (bool, error) {
+	// A link has no mode of its own to judge (macOS reports 0755 where Linux
+	// reports 0777), so it is refused before the mode is read.
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("%s is a link; it is not sealed", path)
+	}
 	if info.Mode()&os.ModeSticky != 0 || openCodePerm(path, info)&0o020 == 0 {
 		return false, nil
 	}

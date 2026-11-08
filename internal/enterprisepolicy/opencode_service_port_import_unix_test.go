@@ -84,7 +84,7 @@ func TestReadOpenCodeServicePortSealsAGroupWritableFolderBeforeReading(t *testin
 			if err := os.Chmod(home, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			open := layout.build(t, home)
+			open := resolvedFolders(t, layout.build(t, home))
 			port, sealed, err := ReadOpenCodeServicePortSealed(home)
 			if err != nil || port != 25001 {
 				t.Fatalf("a private-group layout did not import: port=%d err=%v", port, err)
@@ -163,7 +163,7 @@ func asOtherAccount(t *testing.T, script string, args ...string) {
 
 const otherAccountPrelude = `import os, sys
 gid = int(sys.argv[1])
-os.setgroups([gid])
+os.setgroups([65534, gid])
 os.setgid(65534)
 os.setuid(65534)
 `
