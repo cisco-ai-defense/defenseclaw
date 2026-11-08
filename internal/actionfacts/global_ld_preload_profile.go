@@ -18,7 +18,9 @@ const globalLDPreloadFilePath = "/etc/ld.so.preload"
 // patch, whatever the tool calls its arguments) installs a system-wide loader
 // injection: an absolute shared-object path in /etc/ld.so.preload, or one
 // active `export LD_PRELOAD=/absolute/library.so` line in a direct
-// /etc/profile.d shell fragment. It retains neither the path nor the text.
+// /etc/profile.d shell fragment, in the file the call names or the file an
+// existing link reaches (nativeReachedFiles). It retains neither the path nor
+// the text.
 func ExactGlobalLDPreloadFileWrite(input Input, facts Facts) bool {
 	if input.Command != "" || len(input.Argv) != 0 ||
 		!facts.Authoritative() || !facts.EnforcementEligible() {
@@ -30,14 +32,16 @@ func ExactGlobalLDPreloadFileWrite(input Input, facts Facts) bool {
 		if !ok || !nativeOperandsCoverTarget(facts, len(writes), target) {
 			continue
 		}
-		switch {
-		case EtcSpelling(target) == globalLDPreloadFilePath:
-			if addsGlobalLDPreloadEntry(write) {
-				return true
-			}
-		case ExactGlobalLDPreloadProfilePath(target):
-			if addsGlobalLDPreloadExport(write) {
-				return true
+		for _, file := range nativeReachedFiles(facts, target) {
+			switch {
+			case EtcSpelling(file) == globalLDPreloadFilePath:
+				if addsGlobalLDPreloadEntry(write) {
+					return true
+				}
+			case ExactGlobalLDPreloadProfilePath(file):
+				if addsGlobalLDPreloadExport(write) {
+					return true
+				}
 			}
 		}
 	}

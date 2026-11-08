@@ -109,7 +109,7 @@ func TestExactPAMAuthenticationBypassAgentHazardPositives(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, ok := ExactPAMAuthenticationBypass(pamBypassInput(t, test.tool, test.args))
+			got, ok := exactPAMOfCall(pamBypassInput(t, test.tool, test.args))
 			if !ok || got != test.want {
 				t.Fatalf("proof=(%q,%t), want=(%q,true)", got, ok, test.want)
 			}
@@ -207,7 +207,7 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if proof, ok := ExactPAMAuthenticationBypass(test.input); ok {
+			if proof, ok := exactPAMOfCall(test.input); ok {
 				t.Fatalf("near miss minted %q proof", proof)
 			}
 		})
@@ -222,7 +222,7 @@ func TestExactPAMAuthenticationBypassRejectsDuplicateAndMalformedJSON(t *testing
 		{Tool: "Write", Args: json.RawMessage(`[]`)},
 	}
 	for _, input := range inputs {
-		if proof, ok := ExactPAMAuthenticationBypass(input); ok {
+		if proof, ok := exactPAMOfCall(input); ok {
 			t.Fatalf("invalid JSON minted %q proof from %s", proof, input.Args)
 		}
 	}
@@ -230,7 +230,7 @@ func TestExactPAMAuthenticationBypassRejectsDuplicateAndMalformedJSON(t *testing
 
 func TestPAMAuthenticationBypassProofDoesNotRetainInputValues(t *testing.T) {
 	input := pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so\n")
-	proof, ok := ExactPAMAuthenticationBypass(input)
+	proof, ok := exactPAMOfCall(input)
 	if !ok {
 		t.Fatal("expected proof")
 	}
@@ -252,7 +252,7 @@ func FuzzExactPAMAuthenticationBypassFailClosed(f *testing.F) {
 	f.Fuzz(func(t *testing.T, tool, target, content string) {
 		input := pamWriteInput(t, target, content)
 		input.Tool = tool
-		proof, ok := ExactPAMAuthenticationBypass(input)
+		proof, ok := exactPAMOfCall(input)
 		if !ok {
 			return
 		}
@@ -286,4 +286,9 @@ func clonePAMArgs(input map[string]any) map[string]any {
 		output[key] = value
 	}
 	return output
+}
+
+// exactPAMOfCall judges a call with the facts the gateway analyzes it into.
+func exactPAMOfCall(input Input) (PAMAuthenticationBypassProof, bool) {
+	return ExactPAMAuthenticationBypass(input, Analyze(input))
 }

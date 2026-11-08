@@ -4734,12 +4734,12 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		codeOwnedDetection:          true,
 	},
 	"tamper.pam_permit_authentication_bypass": {
-		proves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
-			_, ok := actionfacts.ExactPAMAuthenticationBypass(input)
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactPAMAuthenticationBypass(input, facts)
 			return ok
 		},
-		boundedSubgraphProves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
-			_, ok := actionfacts.ExactPAMAuthenticationBypass(input)
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactPAMAuthenticationBypass(input, facts)
 			return ok
 		},
 		requiresExactDetectionProof: true,

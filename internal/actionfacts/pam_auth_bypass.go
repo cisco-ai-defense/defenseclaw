@@ -28,37 +28,56 @@ const (
 // ExactPAMAuthenticationBypass recognizes the text a native file-tool call
 // (nativeFileWrites: a whole-file write, an edit, a multi-edit or a patch,
 // whatever the tool calls its arguments) puts into a protected PAM
-// configuration file. It does not inspect shell command text, read files, or
-// retain attacker-controlled values.
-func ExactPAMAuthenticationBypass(input Input) (PAMAuthenticationBypassProof, bool) {
+// configuration file, named directly or reached through an existing link the
+// facts record (PathFact.Linked). It does not inspect shell command text, read
+// files, or retain attacker-controlled values.
+func ExactPAMAuthenticationBypass(input Input, facts Facts) (PAMAuthenticationBypassProof, bool) {
 	if input.Command != "" || len(input.Argv) != 0 {
 		return "", false
 	}
-	for _, write := range nativeFileWrites(input.Tool, input.Args) {
+	writes := nativeFileWrites(input.Tool, input.Args)
+	for _, write := range writes {
 		target, ok := nativeAbsoluteTarget(write.target, input.CWD)
-		if !ok || !exactProtectedPAMPath(target) {
+		if !ok {
 			continue
 		}
-		newLines, newValid := exactPAMLines(target, write.added)
-		if !newValid {
-			continue
+		files := []string{target}
+		if nativeOperandsCoverTarget(facts, len(writes), target) {
+			files = nativeReachedFiles(facts, target)
 		}
-		if write.whole {
-			if hasExactPAMPermitAuthLine(newLines) {
-				return PAMAuthenticationBypassFullReplacement, true
-			}
-			continue
-		}
-		var oldLines []exactPAMLine
-		if write.replaced != "" {
-			var oldValid bool
-			if oldLines, oldValid = exactPAMLines(target, write.replaced); !oldValid {
-				continue
+		for _, file := range files {
+			if proof, proven := pamBypassProof(file, write); proven {
+				return proof, true
 			}
 		}
-		if addsExactPAMPermitAuthLine(oldLines, newLines) {
-			return PAMAuthenticationBypassLiteralInsertion, true
+	}
+	return "", false
+}
+
+// pamBypassProof judges the text of one write against one protected file.
+func pamBypassProof(file string, write nativeFileWrite) (PAMAuthenticationBypassProof, bool) {
+	if !exactProtectedPAMPath(file) {
+		return "", false
+	}
+	newLines, newValid := exactPAMLines(file, write.added)
+	if !newValid {
+		return "", false
+	}
+	if write.whole {
+		if hasExactPAMPermitAuthLine(newLines) {
+			return PAMAuthenticationBypassFullReplacement, true
 		}
+		return "", false
+	}
+	var oldLines []exactPAMLine
+	if write.replaced != "" {
+		var oldValid bool
+		if oldLines, oldValid = exactPAMLines(file, write.replaced); !oldValid {
+			return "", false
+		}
+	}
+	if addsExactPAMPermitAuthLine(oldLines, newLines) {
+		return PAMAuthenticationBypassLiteralInsertion, true
 	}
 	return "", false
 }
