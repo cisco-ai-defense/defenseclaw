@@ -26,11 +26,18 @@ import (
 // function_call items of the request that name the call: with several, the
 // result is visibly ambiguous between them, and a block of the call part is
 // dropped quietly rather than left for a later replay of the result to claim.
+//
+// replays is true for the adapters whose request OpenClaw builds with the
+// strict tool call id form (Chat Completions, Anthropic Messages, Bedrock
+// Converse): their result carries the replay form of the recorded id (see
+// replayToolCallID). A Responses result and a Gemini result carry the id as
+// recorded, so the replay form never matches them.
 type toolResultID struct {
 	id       string
 	itemRef  string
 	callOnly bool
 	items    int
+	replays  bool
 }
 
 // toolResultIDs returns the call id of every tool-result message of the
@@ -43,9 +50,9 @@ func toolResultIDs(body []byte) []toolResultID {
 		return nil
 	}
 	var ids []toolResultID
-	add := func(v any) {
+	add := func(v any, replays bool) {
 		if id, _ := v.(string); id != "" {
-			ids = append(ids, toolResultID{id: id})
+			ids = append(ids, toolResultID{id: id, replays: replays})
 		}
 	}
 
@@ -55,14 +62,14 @@ func toolResultIDs(body []byte) []toolResultID {
 	// a Bedrock toolResult part in toolUseId.
 	for _, msg := range objectItems(root["messages"]) {
 		if role, _ := msg["role"].(string); isToolRole(role) {
-			add(msg["tool_call_id"])
+			add(msg["tool_call_id"], true)
 		}
 		for _, part := range objectItems(msg["content"]) {
 			if typ, _ := part["type"].(string); strings.EqualFold(strings.TrimSpace(typ), "tool_result") {
-				add(part["tool_use_id"])
+				add(part["tool_use_id"], true)
 			}
 			if res, ok := part["toolResult"].(map[string]any); ok {
-				add(res["toolUseId"])
+				add(res["toolUseId"], true)
 			}
 		}
 	}
@@ -112,7 +119,7 @@ func toolResultIDs(body []byte) []toolResultID {
 		for _, part := range objectItems(content["parts"]) {
 			for _, key := range []string{"functionResponse", "function_response"} {
 				if fr, ok := part[key].(map[string]any); ok {
-					add(fr["id"])
+					add(fr["id"], false)
 				}
 			}
 		}
@@ -159,10 +166,13 @@ func objectItems(v any) []map[string]any {
 // replays an Anthropic Messages, Chat Completions or Bedrock Converse call with
 // only the letters and digits of its id, so the result carries "toolubdrk01ab"
 // for the call "toolu_bdrk_01ab". Only that exact form matches, never a trimmed,
-// re-cased or otherwise altered id. Two calls with one replay form share an
-// inspect-side key and are ambiguous.
+// re-cased or otherwise altered id, and only from a result of an adapter that
+// replays ids in that form (toolResultID.replays): a Responses result carries
+// the id as recorded, so another call whose id happens to equal the replay
+// form of this one is not this call. Two calls with one replay form are
+// ambiguous to those adapters only (openClawBlockNotice.replayAmbiguous).
 func (n openClawBlockNotice) isResultOf(r toolResultID) bool {
-	return r.id == n.callID || r.id == replayToolCallID(n.callID) ||
+	return r.id == n.callID || (r.replays && r.id == replayToolCallID(n.callID)) ||
 		(r.itemRef != "" && r.itemRef == n.callID) ||
 		(r.callOnly && noticeCallKey(n.callID) == r.id)
 }
