@@ -181,16 +181,29 @@ const hookPostAccountHomeEnv = "_DC_HOOK_POST_ACCOUNT_HOME"
 
 // accountHome is the home of the account the hook runs for, not the scratch
 // HOME the shell hook gives this process: the home the shell saved when it
-// is an absolute clean path, else the account database entry of the user.
-// Empty (the home of the process) only when neither is known.
+// is an absolute path (a trailing slash or a doubled separator is the same
+// home and is cleaned; a path with a parent step is not a home), else the
+// account database entry of the user. Empty (the home of the process) only
+// when neither is known.
 func accountHome() string {
-	if home := os.Getenv(hookPostAccountHomeEnv); filepath.IsAbs(home) && filepath.Clean(home) == home {
-		return home
+	if home := os.Getenv(hookPostAccountHomeEnv); filepath.IsAbs(home) && !hasParentStep(home) {
+		return filepath.Clean(home)
 	}
 	if current, err := user.Current(); err == nil && filepath.IsAbs(current.HomeDir) {
 		return current.HomeDir
 	}
 	return ""
+}
+
+// hasParentStep reports a ".." element, which a lexical clean would resolve
+// differently from the file system when a folder on the way is a link.
+func hasParentStep(path string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func requestTimeout(maxTime int) time.Duration {
