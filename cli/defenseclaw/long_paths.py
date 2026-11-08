@@ -11,9 +11,10 @@ result does not depend on the profile length or on that machine setting.
 
 from __future__ import annotations
 
+import errno
 import os
 import shutil
-from typing import Any
+import uuid
 
 from defenseclaw.file_permissions import windows_extended_path
 
@@ -32,22 +33,36 @@ def display(text: str) -> str:
     return text.replace("\\\\?\\UNC\\", "\\\\").replace("\\\\?\\", "")
 
 
-def copytree(src: str | os.PathLike[str], dst: str | os.PathLike[str], **kwargs: Any) -> str:
+def copytree(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> str:
     """``shutil.copytree`` that is not limited by ``MAX_PATH`` on Windows.
 
-    A copy that fails part way removes the folder it started, so a later run
-    does not take the partial copy for a seeded one. A raised error names the
-    paths without the extended-path prefix.
+    The copy is made in a hidden folder this call creates next to *dst* and is
+    moved to *dst* only when it is complete. A failure removes that folder and
+    nothing else, so *dst* is never a partial copy and a destination another
+    run created (or created while this one copied) is never touched. When
+    another run published *dst* first, that copy is kept and returned. A raised
+    error names the paths without the extended-path prefix.
     """
 
-    started = not os.path.lexists(dst)
+    final = extended(dst)
+    if os.path.lexists(final):
+        raise FileExistsError(errno.EEXIST, "File exists", display(final))
+    staging = os.path.join(os.path.dirname(final), f".{os.path.basename(final)}.seed-{uuid.uuid4().hex[:8]}")
     try:
-        shutil.copytree(extended(src), extended(dst), **kwargs)
+        os.makedirs(os.path.dirname(final), exist_ok=True)
+        os.mkdir(staging)
+        shutil.copytree(extended(src), staging, dirs_exist_ok=True)
+        os.rename(staging, final)
     except (OSError, shutil.Error) as exc:
-        if started and os.path.isdir(extended(dst)) and not os.path.islink(extended(dst)):
-            rmtree(dst)
-        if os.name == "nt":
-            raise OSError(display(str(exc))) from exc
+        left = _remove(staging)
+        if os.path.isdir(final) and not os.path.islink(final) and not left:
+            # Another run published a complete copy while this one copied.
+            return os.fspath(dst)
+        message = display(str(exc))
+        if left:
+            message += f" (the partial copy {display(staging)} could not be removed)"
+        if os.name == "nt" or left:
+            raise OSError(message) from exc
         raise
     return os.fspath(dst)
 
@@ -56,3 +71,11 @@ def rmtree(path: str | os.PathLike[str]) -> None:
     """Remove *path* and what is below it, ignoring errors, on any path length."""
 
     shutil.rmtree(extended(path), ignore_errors=True)
+
+
+def _remove(path: str) -> bool:
+    """Remove *path*; return True when something of it is still there."""
+
+    if os.path.lexists(path):
+        shutil.rmtree(path, ignore_errors=True)
+    return os.path.lexists(path)
