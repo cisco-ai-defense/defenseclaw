@@ -211,39 +211,97 @@ func registrationLoopReach(file *syntax.File, command, cwd, home string, protect
 		for _, item := range iteration.Items {
 			items = append(items, registrationItemPaths(item, command, cwd, home)...)
 		}
-		for _, stmt := range loop.Do {
-			call, ok := stmt.Cmd.(*syntax.CallExpr)
-			if !ok || len(call.Args) < 2 {
-				continue
-			}
-			program, fixed := StaticWord(call.Args[0], home)
-			if !fixed {
-				continue
-			}
-			switch programBase(program) {
-			case "rm", "unlink", "shred", "mv":
-			default:
-				continue
-			}
-			operands := call.Args[1:]
-			if programBase(program) == "mv" && len(operands) > 1 {
-				operands = operands[:len(operands)-1]
-			}
-			for _, item := range items {
-				values := actionValues{"HOME": home, "PWD": cwd, iteration.Name.Value: item}
-				for _, word := range operands {
-					path, fixed := actionWordValue(word, values, cwd, home)
-					if fixed && path != "" && !strings.HasPrefix(path, "-") &&
-						protectedReachPath(OperandPath(path, cwd), protected, "") {
-						found = true
-						return false
+		for _, item := range items {
+			values := actionValues{"HOME": home, "PWD": cwd, iteration.Name.Value: item}
+			for _, body := range loop.Do {
+				syntax.Walk(body, func(inner syntax.Node) bool {
+					stmt, ok := inner.(*syntax.Stmt)
+					if !ok || found {
+						return !found
 					}
-				}
+					for _, path := range registrationLoopStatementTargets(stmt, values, cwd, home) {
+						if protectedReachPath(OperandPath(path, cwd), protected, "") {
+							found = true
+							return false
+						}
+					}
+					return true
+				})
 			}
 		}
 		return true
 	})
 	return found
+}
+
+// registrationLoopStatementTargets lists the paths one statement of a loop
+// body writes, removes, moves, re-modes or replaces, with the loop name bound
+// to the current item: its output redirects and the target operands of the
+// mutating programs the straight-line reader also knows.
+func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cwd, home string) []string {
+	var targets []string
+	add := func(word *syntax.Word) {
+		path, fixed := actionWordValue(word, values, cwd, home)
+		if fixed && path != "" && !strings.HasPrefix(path, "-") {
+			targets = append(targets, path)
+		}
+	}
+	for _, redirect := range stmt.Redirs {
+		switch redirect.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.AppClob, syntax.RdrAll, syntax.AppAll:
+			add(redirect.Word)
+		}
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) < 2 {
+		return targets
+	}
+	program, fixed := StaticWord(call.Args[0], home)
+	if !fixed {
+		return targets
+	}
+	operands := call.Args[1:]
+	switch programBase(program) {
+	case "rm", "unlink", "shred", "rmdir", "chmod", "chown", "chgrp", "setfacl", "chattr", "truncate", "tee":
+		for _, word := range operands {
+			add(word)
+		}
+	case "mv":
+		sources := operands
+		toDirectory := false
+		for _, word := range operands {
+			value, fixed := StaticWord(word, home)
+			toDirectory = toDirectory || fixed && (value == "-t" || strings.HasPrefix(value, "--target-directory"))
+		}
+		if !toDirectory && len(sources) > 1 {
+			sources = sources[:len(sources)-1]
+		}
+		for _, word := range sources {
+			add(word)
+		}
+	case "cp", "install", "ln":
+		add(operands[len(operands)-1])
+	case "sed", "perl":
+		editing := false
+		for _, word := range operands {
+			value, fixed := StaticWord(word, home)
+			editing = editing || fixed && (strings.HasPrefix(value, "-i") || value == "--in-place" || strings.HasPrefix(value, "--in-place="))
+		}
+		if editing {
+			for _, word := range operands {
+				add(word)
+			}
+		}
+	case "dd":
+		for _, word := range operands {
+			if value, fixed := actionWordValue(word, values, cwd, home); fixed {
+				if target, ok := strings.CutPrefix(value, "of="); ok && target != "" {
+					targets = append(targets, target)
+				}
+			}
+		}
+	}
+	return targets
 }
 
 // registrationFindRsyncReach reads the two tools that empty a folder without
@@ -365,9 +423,14 @@ func registrationInstallReach(words []string, cwd string, protected protectedFil
 		}
 	}
 	if directory == "" && len(operands) >= 2 {
-		directory = operands[len(operands)-1]
+		last := operands[len(operands)-1]
 		operands = operands[:len(operands)-1]
-		if protectedReachPath(OperandPath(directory, cwd), protected, "") {
+		// A last operand that is a folder (or is written with a trailing
+		// separator) receives each source under the source name; only a
+		// plain file name is itself the written target.
+		if info, err := pathStat(OperandPath(last, cwd)); strings.HasSuffix(last, "/") || (err == nil && info.IsDir()) {
+			directory = last
+		} else if protectedReachPath(OperandPath(last, cwd), protected, "") {
 			return true
 		}
 	}

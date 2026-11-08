@@ -66,6 +66,21 @@ func TestAgentHookConfigOwnedTargetSpellings(t *testing.T) {
 		{"unrelated cache removal", `rm -rf ~/.cache/tool`, false},
 		{"brace list of other tools", `rm ~/.local/bin/other-{tool,thing}`, false},
 		{"git glob checkout in a repo without registration files", `cd ` + other + ` && git checkout HEAD -- "*.json"`, false},
+		{"glob loop re-modes hooks", `for f in ~/.local/bin/defenseclaw-hook-*; do chmod 000 "$f"; done`, true},
+		{"one-item loop re-modes a hook", `for f in ~/.local/bin/defenseclaw-hook-user; do chmod 000 "$f"; done`, true},
+		{"glob loop overwrites hooks", `for f in ~/.local/bin/defenseclaw-hook-*; do echo x > "$f"; done`, true},
+		{"glob loop truncates hooks", `for f in ~/.local/bin/defenseclaw-hook-*; do : > "$f"; done`, true},
+		{"loop re-modes other tools", `for f in ~/.local/bin/other-*; do chmod 755 "$f"; done`, false},
+		{"loop overwrites other tools", `for f in ~/.local/bin/other-*; do echo x > "$f"; done`, false},
+		{"install of another tool into the bin folder", `install -m755 build/tool ~/.local/bin/`, false},
+		{"install of another tool into the bin folder without slash", `install -m755 build/tool ~/.local/bin`, false},
+		{"install of another tool with a target folder", `install -t ~/.local/bin build/tool`, false},
+		{"install of a hook-named file into the bin folder", `install -m755 build/defenseclaw-hook-user ~/.local/bin/`, true},
+		{"perl with a module option reads a hook", `perl -MFile::Spec -e 'print while <>' ~/.local/bin/defenseclaw-hook-user`, false},
+		{"perl include option reads a hook", `perl -Ilib/inc -ne 'print' ~/.local/bin/defenseclaw-hook-user`, false},
+		{"perl in place edit of a hook", `perl -pi -e 's/a/b/' ~/.local/bin/defenseclaw-hook-user`, true},
+		{"perl in place edit with a backup suffix", `perl -pi.bak -e 's/a/b/' ~/.local/bin/defenseclaw-hook-user`, true},
+		{"perl in place option before the code option", `perl -i -pe 's/a/b/' ~/.local/bin/defenseclaw-hook-user`, true},
 	}
 	for _, r := range rows {
 		for _, managed := range []bool{false, true} {
