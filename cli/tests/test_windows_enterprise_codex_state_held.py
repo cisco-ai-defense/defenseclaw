@@ -299,6 +299,8 @@ foreach ($name in @('Get-DefenseClawCodexFileHold', 'Close-DefenseClawCodexFileH
 function Get-DefenseClawServiceSID { param([string]$ServiceName) 'S-1-5-80-1' }
 function Test-DefenseClawPathAclCanonical { param($Path, $Kind, $GatewayServiceSID) $true }
 function Test-DefenseClawRestampHeldByOther { param($Path) $false }
+# The delete probe opens through the native helper this harness does not compile; no holder denies delete here.
+function Test-DefenseClawFileDeleteBlocked { param($Path) $false }
 $state = Join-Path $Scratch '.defenseclaw-managed-hooks.state'
 $req = Join-Path $Scratch 'requirements.toml'
 Set-Content -LiteralPath $state -Value 'state' -NoNewline
