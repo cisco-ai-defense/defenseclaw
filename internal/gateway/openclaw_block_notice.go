@@ -367,6 +367,14 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 			next.ServeHTTP(w, r)
 			return
 		}
+		// The line is written into the reply text, so the reply must reach the
+		// writer as plain text. The model client asks for a compressed reply
+		// (undici adds accept-encoding) and the passthrough forwards that
+		// header, so a provider that compresses a stream would send back
+		// bytes the writer cannot rewrite and the line would be lost. Without
+		// the header the proxy transport asks for gzip itself and hands over
+		// the decoded reply, which the client reads as an ordinary reply.
+		r.Header.Del("Accept-Encoding")
 		nw := &openClawNoticeWriter{ResponseWriter: w, notices: notices}
 		lines := make([]string, len(notices))
 		for i, n := range notices {
@@ -375,7 +383,8 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 		nw.prefix = strings.Join(lines, "\n") + "\n\n"
 		next.ServeHTTP(nw, r)
 		nw.finish()
-		fmt.Fprintf(os.Stderr, "[guardrail] openclaw block notice: claimed by %s, shown=%t (mode=%d status=%d)\n", r.URL.Path, nw.applied, nw.mode, nw.status)
+		fmt.Fprintf(os.Stderr, "[guardrail] openclaw block notice: claimed by %s, shown=%t (mode=%d status=%d content_type=%q content_encoding=%q)\n",
+			r.URL.Path, nw.applied, nw.mode, nw.status, w.Header().Get("Content-Type"), w.Header().Get("Content-Encoding"))
 	})
 }
 

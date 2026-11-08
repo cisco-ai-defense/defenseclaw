@@ -139,3 +139,30 @@ func TestGAP0644ResponsesAllowedCallAndOtherCallIDShowNothing(t *testing.T) {
 		t.Fatalf("a look-alike call id took the block: %s", out)
 	}
 }
+
+// Two function_call items of one call part, none with an item id, are two
+// candidate calls to the one result that names the call part: the line waits
+// for a tie it can prove, and a single anonymous item of the same shape (the
+// shape OpenClaw writes) still shows it.
+func TestGAP0644ResponsesSeveralAnonymousItemsOfOneCallShowNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"one anonymous item", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}), true},
+		{"two anonymous items", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}, [2]string{"call_blk9", ""}), false},
+		{"three anonymous items", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}, [2]string{"call_blk9", ""}, [2]string{"call_blk9", ""}), false},
+		{"one anonymous and one named item", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}, [2]string{"call_blk9", "fc_beef"}), false},
+		{"anonymous item beside an anonymous item of another call", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}, [2]string{"call_other", ""}), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetOpenClawBlockNotices(t)
+			rememberOpenClawBlockNotice("exec", responsesBlockedID, noticeTestSession, []string{noticeTestRule}, "matched: ssh authorized_keys write")
+			out, _ := serveNoticeWith(t, noticeServe{path: "/openai/v1/responses", reqBody: tc.body, ctype: "text/event-stream", respBody: responsesReasoningStream()})
+			if got := strings.Contains(out, openClawBlockNoticeMark); got != tc.want {
+				t.Fatalf("line shown = %t, want %t:\n%s", got, tc.want, out)
+			}
+		})
+	}
+}
