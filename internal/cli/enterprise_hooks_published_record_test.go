@@ -257,3 +257,49 @@ func TestGuardianGenerationIsRepublishedOnlyWhenItChangesOrAges(t *testing.T) {
 		t.Fatalf("the repaired generation = %+v, exists=%t, %v; want a new published activation", again, exists, err)
 	}
 }
+
+func TestRestartedGuardianPublishesFreshGenerationForUnchangedOutcome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
+	}
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	originalOwnership := enterpriseHookAuthorizationOwnershipSetter
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnership })
+	wasPublished := enterpriseHookGuardianPublishedByProcess.Load()
+	t.Cleanup(func() { enterpriseHookGuardianPublishedByProcess.Store(wasPublished) })
+	dataDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
+	rows := []enterpriseHookReconcileRow{{User: "alice", Connector: "codex", OK: true}}
+
+	// A previous process published this outcome a moment ago.
+	enterpriseHookGuardianPublishedByProcess.Store(false)
+	publishTestGuardianGeneration(t, dataDir, rows, 0)
+	previous, _, err := loadEnterpriseHookGuardianActivation(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same process finds the same outcome and keeps the generation.
+	publishTestGuardianGeneration(t, dataDir, rows, 0)
+	if same, _, err := loadEnterpriseHookGuardianActivation(dataDir); err != nil || same.ReconcileID != previous.ReconcileID {
+		t.Fatalf("unchanged pass of the same process = %+v, %v; want the generation kept", same, err)
+	}
+	// A restarted guardian is a new process: its first pass publishes a new
+	// reconcile ID and generation although nothing changed, which is what
+	// Setup waits for after it restarts the guardian (GAP-0931).
+	enterpriseHookGuardianPublishedByProcess.Store(false)
+	publishTestGuardianGeneration(t, dataDir, rows, 0)
+	fresh, _, err := loadEnterpriseHookGuardianActivation(dataDir)
+	if err != nil || fresh.ReconcileID == previous.ReconcileID || fresh.UpdatedAt == previous.UpdatedAt {
+		t.Fatalf("first pass after a restart = %+v, %v; want a new reconcile ID and generation than %+v", fresh, err, previous)
+	}
+	state, _, err := loadEnterpriseHookGuardianState(dataDir)
+	if err != nil || state.UpdatedAt != fresh.UpdatedAt {
+		t.Fatalf("state generation = %q, %v; want %q", state.UpdatedAt, err, fresh.UpdatedAt)
+	}
+	// Its later passes keep it again.
+	publishTestGuardianGeneration(t, dataDir, rows, 0)
+	if again, _, err := loadEnterpriseHookGuardianActivation(dataDir); err != nil || again.ReconcileID != fresh.ReconcileID {
+		t.Fatalf("second pass after the restart = %+v, %v; want the generation kept", again, err)
+	}
+}

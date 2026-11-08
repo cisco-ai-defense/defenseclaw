@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -5228,7 +5229,7 @@ type enterpriseHookGuardianActivation struct {
 }
 
 // enterpriseHookGuardianRecords is one read of the three records the
-// guardian rewrites on every pass: its state, the protected authorization and
+// guardian publishes together: its state, the protected authorization and
 // the activation receipt.
 type enterpriseHookGuardianRecords struct {
 	State               enterpriseHookGuardianState
@@ -5276,8 +5277,9 @@ var (
 const enterpriseHookGuardianRecordReads = 20
 
 // loadEnterpriseHookGuardianRecords reads the guardian's records as one
-// reconcile. The guardian rewrites them every minute, and a status or verify
-// that read in the middle of a pass failed although the guardian was healthy
+// reconcile. The guardian republishes them when a pass changes the outcome and
+// at least every few minutes, and a status or verify
+// that read in the middle of a publication failed although the guardian was healthy
 // (MDM detection on Windows flapped in about one run in eight). Re-read
 // briefly until the three name one pass; any other result is returned as
 // read.
@@ -5385,12 +5387,16 @@ func writeEnterpriseHookGuardianState(
 	if err != nil {
 		return err
 	}
-	// An unchanged outcome keeps its published generation: the three records
-	// stay as they are, so a status reader never meets a rewrite for a pass
-	// that decided nothing new (GAP-0912). A changed outcome, a record that
-	// does not read back as trusted and coherent, and a generation old
-	// enough to near the freshness limit are all republished.
-	if enterpriseHookGuardianGenerationCurrent(dataDir, nowTime, authorization, state, activation) {
+	// An unchanged outcome keeps its published generation once this process
+	// has published one: the three records stay as they are, so a status
+	// reader never meets a rewrite for a pass that decided nothing new
+	// (GAP-0912). The first pass of every guardian process always publishes,
+	// because a restart is proved by a new generation (Setup waits for a
+	// reconcile ID it has not seen, GAP-0931). A changed outcome, a record
+	// that does not read back as trusted and coherent, and a generation old
+	// enough to near the freshness limit are republished as well.
+	if enterpriseHookGuardianPublishedByProcess.Load() &&
+		enterpriseHookGuardianGenerationCurrent(dataDir, nowTime, authorization, state, activation) {
 		return nil
 	}
 	authorizationData, err := json.MarshalIndent(authorization, "", "  ")
@@ -5455,8 +5461,15 @@ func writeEnterpriseHookGuardianState(
 	if err := enterpriseHookAuthorizationFileTrustCheck(activationPath); err != nil {
 		return err
 	}
+	enterpriseHookGuardianPublishedByProcess.Store(true)
 	return nil
 }
+
+// enterpriseHookGuardianPublishedByProcess is set once this process has
+// published a complete generation. Until then no pass may keep a generation
+// an earlier process wrote: a consumer that restarts the guardian and waits
+// for a reconcile it has not seen would never get one.
+var enterpriseHookGuardianPublishedByProcess atomic.Bool
 
 // enterpriseHookGuardianRepublishAfter is how old an unchanged generation of
 // the guardian records may get before the guardian publishes it again. The

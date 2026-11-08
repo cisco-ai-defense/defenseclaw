@@ -1629,8 +1629,8 @@ func validateWindowsManagedHooksGuardianActivation(
 	); err != nil {
 		return nil, nil, err
 	}
-	// writeEnterpriseHookGuardianState rewrites all three records on every
-	// reconcile, failures included, with the same counts and timestamp, and
+	// writeEnterpriseHookGuardianState publishes all three records together,
+	// failures included, with the same counts and timestamp, and
 	// OK=false whenever a target failed. Its ProtectedTargets is every active
 	// target (waiting rows included) plus each failed target that was
 	// protected before (the prior successful row is kept, see
