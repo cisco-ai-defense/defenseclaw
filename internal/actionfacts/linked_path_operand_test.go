@@ -21,7 +21,7 @@ func TestExactFileWriteProofsCountOperandsNotLinkedSpellings(t *testing.T) {
 		input Input
 		exact func(Input, Facts) bool
 	}{
-		"global LD_PRELOAD profile": {ldPreload, ExactGlobalLDPreloadProfileWrite},
+		"global LD_PRELOAD profile": {ldPreload, ExactGlobalLDPreloadFileWrite},
 		"docker insecure registry":  {docker, ExactDockerInsecureRegistryWrite},
 	} {
 		facts := Analyze(proof.input)

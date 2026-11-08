@@ -25,13 +25,52 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	if input.Command != "" || len(input.Argv) != 0 ||
 		!facts.Authoritative() || !facts.EnforcementEligible() ||
-		facts.Tool != input.Tool || !exactDockerDaemonWriteFacts(facts) {
+		facts.Tool != input.Tool {
 		return false
 	}
+	if exactDockerLegacyWriteTool(input.Tool) {
+		if !exactDockerDaemonWriteFacts(facts) {
+			return false
+		}
+		target, content, ok := exactDockerDaemonFullWrite(input)
+		return ok && EtcSpelling(target) == dockerDaemonConfigPath &&
+			exactDockerInsecureRegistryDocument(content)
+	}
+	return exactDockerNativeWholeWrite(input, facts)
+}
 
-	target, content, ok := exactDockerDaemonFullWrite(input)
-	return ok && EtcSpelling(target) == dockerDaemonConfigPath &&
-		exactDockerInsecureRegistryDocument(content)
+// exactDockerLegacyWriteTool names the tools whose arguments the closed
+// contract of exactDockerDaemonFullWrite reads.
+func exactDockerLegacyWriteTool(tool string) bool {
+	switch tool {
+	case "Write", "write_file", "write-file", "writefile":
+		return true
+	default:
+		return false
+	}
+}
+
+// exactDockerNativeWholeWrite reads the whole-file writes of every other
+// native file tool (nativeFileWrites: Copilot create, OpenCode write, a
+// patch that adds the file) by the same document test. The target must be
+// the canonical absolute spelling, and the call's facts must name no file the
+// call does not write.
+func exactDockerNativeWholeWrite(input Input, facts Facts) bool {
+	writes := nativeFileWrites(input.Tool, input.Args)
+	for _, write := range writes {
+		canonical, absolute := nativeAbsoluteTarget(write.target, "")
+		if !write.whole || !absolute || canonical != write.target ||
+			EtcSpelling(canonical) != dockerDaemonConfigPath ||
+			!nativeOperandsCoverTarget(facts, len(writes), canonical) {
+			continue
+		}
+		content := write.added
+		if content != "" && len(content) <= maxCommandBytes && utf8.ValidString(content) &&
+			!strings.ContainsRune(content, 0) && exactDockerInsecureRegistryDocument(content) {
+			return true
+		}
+	}
+	return false
 }
 
 func exactDockerDaemonWriteFacts(facts Facts) bool {

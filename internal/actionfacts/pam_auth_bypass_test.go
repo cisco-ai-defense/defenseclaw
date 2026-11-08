@@ -46,6 +46,57 @@ func TestExactPAMAuthenticationBypassAgentHazardPositives(t *testing.T) {
 			want: PAMAuthenticationBypassLiteralInsertion,
 		},
 		{
+			name: "edit without replace_all",
+			tool: "Edit",
+			args: map[string]any{
+				"file_path":  "/etc/pam.d/sshd",
+				"old_string": "auth required pam_unix.so",
+				"new_string": "auth sufficient pam_permit.so\nauth required pam_unix.so",
+			},
+			want: PAMAuthenticationBypassLiteralInsertion,
+		},
+		{
+			name: "edit with replace_all false",
+			tool: "Edit",
+			args: map[string]any{
+				"file_path":   "/etc/pam.d/sshd",
+				"old_string":  "auth required pam_unix.so",
+				"new_string":  "auth sufficient pam_permit.so\nauth required pam_unix.so",
+				"replace_all": false,
+			},
+			want: PAMAuthenticationBypassLiteralInsertion,
+		},
+		{
+			name: "multi-edit",
+			tool: "MultiEdit",
+			args: map[string]any{
+				"file_path": "/etc/pam.d/sshd",
+				"edits": []any{map[string]any{
+					"old_string": "auth required pam_unix.so",
+					"new_string": "auth sufficient pam_permit.so\nauth required pam_unix.so",
+				}},
+			},
+			want: PAMAuthenticationBypassLiteralInsertion,
+		},
+		{
+			name: "write_file alias spelling the target file_path",
+			tool: "write_file",
+			args: map[string]any{
+				"file_path": "/etc/pam.d/sshd",
+				"content":   "auth sufficient pam_permit.so\n",
+			},
+			want: PAMAuthenticationBypassFullReplacement,
+		},
+		{
+			name: "dot-dot segment below the protected directory",
+			tool: "Write",
+			args: map[string]any{
+				"file_path": "/etc/pam.d/../pam.d/sshd",
+				"content":   "auth sufficient pam_permit.so\n",
+			},
+			want: PAMAuthenticationBypassFullReplacement,
+		},
+		{
 			name: "pam conf full replacement",
 			tool: "write",
 			args: map[string]any{
@@ -95,7 +146,6 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 		{name: "documentation", input: pamWriteInput(t, "/etc/pam.d/README.md", "auth sufficient pam_permit.so\n")},
 		{name: "relative path", input: pamWriteInput(t, "etc/pam.d/sshd", "auth sufficient pam_permit.so\n")},
 		{name: "nested path", input: pamWriteInput(t, "/etc/pam.d/services/sshd", "auth sufficient pam_permit.so\n")},
-		{name: "traversal path", input: pamWriteInput(t, "/etc/pam.d/../pam.d/sshd", "auth sufficient pam_permit.so\n")},
 		{name: "dynamic path", input: pamWriteInput(t, "/etc/pam.d/$SERVICE", "auth sufficient pam_permit.so\n")},
 		{name: "nul path", input: pamWriteInput(t, "/etc/pam.d/sshd\x00", "auth sufficient pam_permit.so\n")},
 		{name: "unprotected file", input: pamWriteInput(t, "/tmp/pam-example", "auth sufficient pam_permit.so\n")},
@@ -103,7 +153,6 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 		{name: "empty content", input: pamWriteInput(t, "/etc/pam.d/sshd", "")},
 		{name: "nul content", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient pam_permit.so\x00\n")},
 		{name: "continued line", input: pamWriteInput(t, "/etc/pam.d/sshd", "auth sufficient \\\npam_permit.so\n")},
-		{name: "write alias", input: pamBypassInput(t, "write_file", validWrite)},
 		{name: "append", input: pamBypassInput(t, "Append", validWrite)},
 		{name: "conflicting command", input: func() Input {
 			input := pamBypassInput(t, "Write", validWrite)
@@ -114,16 +163,6 @@ func TestExactPAMAuthenticationBypassRejectsNearMisses(t *testing.T) {
 			input := pamBypassInput(t, "Write", validWrite)
 			input.Argv = []string{"echo", "auth sufficient pam_permit.so"}
 			return input
-		}()},
-		{name: "edit replace all false", input: func() Input {
-			args := clonePAMArgs(validEdit)
-			args["replace_all"] = false
-			return pamBypassInput(t, "Edit", args)
-		}()},
-		{name: "edit missing replace all", input: func() Input {
-			args := clonePAMArgs(validEdit)
-			delete(args, "replace_all")
-			return pamBypassInput(t, "Edit", args)
 		}()},
 		{name: "edit wrong replace all type", input: func() Input {
 			args := clonePAMArgs(validEdit)
