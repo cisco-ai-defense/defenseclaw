@@ -466,8 +466,8 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 36 gateway + 4 audit + 12 remaining-package shards.
-          test "${#coverage_parts[@]}" -eq 52
+          # 36 gateway + 4 audit + 16 remaining-package shards.
+          test "${#coverage_parts[@]}" -eq 56
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
