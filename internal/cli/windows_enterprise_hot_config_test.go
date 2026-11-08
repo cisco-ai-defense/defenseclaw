@@ -506,10 +506,17 @@ func TestWindowsEnterpriseEnsureApprovesTheConfigItApplied(t *testing.T) {
 	}
 
 	// An approved source that cannot be recorded undoes the apply: the
-	// previous config is back and the upgrade transaction runs.
+	// previous config is back and the upgrade transaction runs. The installed
+	// config is the one an earlier ensure recorded, so the undo records the
+	// restore as a new generation through the config writer (a hand edit
+	// would go back unrecorded, outside the writer).
 	host, opts = newHotConfigHost(t, previous, next)
 	host.adopted = true
 	host.approveErr = errors.New("deployment record is locked")
+	recorded := `{"generation":3,"config_sha256":"` + configwrite.SHA256Hex([]byte(previous)) + `"}`
+	if err := os.WriteFile(configwrite.GenerationPath(host.configPath), []byte(recorded), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	stub = &ensureStub{t: t, replies: []map[string]any{installedStatus("status"), installedStatus("Verify"), installedStatus("Upgrade")}}
 	runHotConfigEnsure(t, host, opts, stub)
 	got, _ := os.ReadFile(host.configPath)
