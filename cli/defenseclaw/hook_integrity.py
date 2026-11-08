@@ -368,12 +368,15 @@ def _launcher_paths(command: str) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
-def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[str]]:
-    """The launcher files and hook guards the recorded hook files of *connector* start (per-user Windows)."""
+def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[str], HookProblem | None]:
+    """The launcher files and hook guards the recorded hook files of *connector* start (per-user Windows).
+
+    The third value is the Claude Code guard-chain defect found while reading them, if any.
+    """
 
     if not _is_windows() or str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
         # Managed installs (Secure Client included) keep their own status.
-        return [], []
+        return [], [], None
     launchers: list[str] = []
     guards: list[str] = []
     for path in _hook_config_paths(cfg, connector):
@@ -393,17 +396,17 @@ def _windows_hook_programs(cfg: Any, connector: str) -> tuple[list[str], list[st
                         if parts is not None:
                             _launcher, _inner, guard, approved = parts
                             if not _claude_chain_files_match(guard, approved):
-                                return [HookProblem(
+                                return [], [], HookProblem(
                                     f"the Claude Code hook guard {guard} is missing or changed, "
                                     "so the registered hook cannot check events",
                                     "run `defenseclaw setup claude-code --yes`; it restores the hook guard",
-                                )]
+                                )
         for value in _strings(document):
             launchers += [launcher for launcher in _launcher_paths(value) if launcher not in launchers]
             guard = hook_guard_program(connector, value)
             if guard and guard not in guards:
                 guards.append(guard)
-    return launchers, guards
+    return launchers, guards, None
 
 
 class LauncherReport(NamedTuple):
@@ -434,7 +437,9 @@ def hook_launcher_report(cfg: Any, connector: str) -> LauncherReport:
     never passes it; the installer again records the digest (GAP-0810).
     """
 
-    launchers, guards = _windows_hook_programs(cfg, connector)
+    launchers, guards, chain_problem = _windows_hook_programs(cfg, connector)
+    if chain_problem is not None:
+        return LauncherReport([chain_problem])
     data_dir = str(getattr(cfg, "data_dir", "") or "")
     unverified = ""
     for launcher in launchers:
