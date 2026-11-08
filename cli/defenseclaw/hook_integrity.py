@@ -1214,11 +1214,13 @@ def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) 
 
         native = _claude_per_user_native_registration(cfg)
 
+    written = _hermes_written_command(cfg) if connector == "hermes" and strict else None
+
     def owns(handler: Any) -> bool:
         if native is not None:
             return isinstance(handler, dict) and _claude_native_primary_handler(handler, native)
         return any(
-            _defenseclaw_hook_command(cfg, connector, command, strict=strict)
+            _defenseclaw_hook_command(cfg, connector, command, strict=strict) and (written is None or written(command))
             for command in hook_handler_command_lines(handler, connector)
         )
 
@@ -1261,6 +1263,37 @@ def hermes_approved_pairs(document: Any) -> set[tuple[str, str]]:
         for raw in approvals
         if isinstance(raw, dict) and isinstance(raw.get("event"), str) and isinstance(raw.get("command"), str)
     }
+
+
+def _hermes_written_command(cfg: Any) -> Callable[[str], bool]:
+    """Whether a Hermes hook command is one DefenseClaw wrote, so the tool-guard and approval checks apply to it.
+
+    Setup, repair and teardown own a Hermes hook entry only by identity
+    (hermesHookEntryOwned in internal/gateway/connector/hook_only.go): the
+    current command, or the generated script at an edited path. Any other
+    command, even one that sits under this data directory, belongs to the
+    user: Setup keeps it, does not approve it, and lists it in its notice. The
+    checks used the wider "runs a DefenseClaw hook" test, so they failed a
+    registration Setup had just written because of an entry Setup keeps by
+    design, and repair rolled back (GAP-0873). A registration whose only
+    entry is such a command is reported as unguarded instead. Only per-user
+    Unix installs know the exact command; the Windows and managed
+    registrations stay as they were.
+    """
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    current = {
+        os.path.join(os.path.normpath(root), "hooks", HOOK_SCRIPT_NAMES["hermes"])
+        for root in (data_dir, os.path.realpath(data_dir))
+    }
+
+    def written(command: str) -> bool:
+        split = _split_hook_command(command)
+        if split is not None and split[0] in current and not split[1]:
+            return True
+        return bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
+
+    return written
 
 
 def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:
