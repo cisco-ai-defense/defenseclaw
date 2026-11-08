@@ -228,7 +228,7 @@ func TestRemoveWindowsStandaloneDeletedAccountSelectorTargets(t *testing.T) {
 	}
 }
 
-// rel-1-0-9 g758b review S1. An administrator link at a per-user connector
+// An administrator link at a per-user connector
 // folder of the hook runtime root, with an enrollment.json behind it, is kept
 // and named by the last step of the teardown. Nothing behind it is read or
 // removed, and the step does not fail the uninstall that already committed. A

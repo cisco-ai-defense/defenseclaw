@@ -70,7 +70,7 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 		}
 		// A link at the connector folder is kept and named: nothing behind it is
 		// read, listed or removed, and it does not fail the uninstall that has
-		// already committed (rel-1-0-9 g758b review S1).
+		// already committed.
 		if linked, err := windowsManagedPolicyLinkKept(directory); err != nil {
 			errs = append(errs, err)
 			kept = append(kept, directory)

@@ -1836,7 +1836,7 @@ func TestWindowsManagedHooksKeptLinkIsNamedOnce(t *testing.T) {
 	}
 }
 
-// rel-1-0-9 g758b review S1. After the uninstall committed, the clean check
+// After the uninstall committed, the clean check
 // reads each per-user connector enrollment, and a rollback puts the enrollment
 // back. Both go through the machine folder of the connector, and the read
 // follows a link on that folder: an enrollment.json behind an administrator

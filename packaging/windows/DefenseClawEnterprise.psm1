@@ -32585,7 +32585,7 @@ function Get-DefenseClawGuardianRowMachineFolderLink {
     param($Row)
     # Only an uninstall keeps a link, so only an uninstall explains the row. An
     # Upgrade, Repair, Reconcile or Ensure still refuses the link, and a failed
-    # guardian row on it keeps the adoption refused (rel-1-0-9 g758b review S2).
+    # guardian row on it keeps the adoption refused.
     if ($null -eq $Row -or -not $script:DefenseClawVendorLinkExcuse) {
         return ''
     }
@@ -32617,7 +32617,7 @@ function Get-DefenseClawGuardianRowMachineFolderLink {
         if ($_.Exception.Message -match '^reparse points are not allowed in managed path: (?<link>.+)$') {
             # The walk names the first link on the path, which can be above the
             # vendor root (ProgramData itself a link). Only a link strictly under a
-            # vendor root is the kept vendor folder (rel-1-0-9 g758b review L1).
+            # vendor root is the kept vendor folder.
             $link = [string]$Matches['link']
             foreach ($root in $roots) {
                 if ($link.Replace('/', '\').StartsWith($root.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
