@@ -74,9 +74,14 @@ def links_on_path(path: str, *, include_self: bool = True) -> list[tuple[str, st
     """The links on the way to *path*, outermost first, as (link path, kind).
 
     Every component is looked at with lstat, so a link is seen as a link and
-    never followed. *include_self* False leaves *path* itself out.
+    never followed. The path is read as written: a ".." is not folded into
+    the component before it, because the system follows a link before it
+    reads the ".." that comes after (link/../state is the folder above where
+    link points, not the folder beside it). *include_self* False leaves *path*
+    itself out.
     """
-    full = Path(os.path.abspath(path))
+    written = os.fspath(path)
+    full = Path(written if os.path.isabs(written) else os.path.abspath(written))
     chain = [*reversed(full.parents), full]
     if not include_self:
         chain.pop()
