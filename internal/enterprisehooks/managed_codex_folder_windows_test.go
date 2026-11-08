@@ -223,3 +223,45 @@ func TestEnsureWindowsStandaloneCodexMachineFolderNamesAnUntrustedExistingFolder
 		t.Fatalf("a trusted folder is still refused: %v", err)
 	}
 }
+
+// The status path asks for the link without the standalone profile in its
+// process environment, and the question names nothing and creates nothing.
+func TestWindowsCodexMachineFolderLinkFindsALinkWithoutNamingIt(t *testing.T) {
+	for _, shape := range []string{"link at the folder", "link at the vendor parent", "plain folder", "nothing there"} {
+		t.Run(shape, func(t *testing.T) {
+			f := useKeptFixture(t, false, func(fixture keptFixture) []string {
+				switch shape {
+				case "link at the folder":
+					return []string{fixture.selectorDir}
+				case "link at the vendor parent":
+					return []string{filepath.Dir(fixture.selectorDir)}
+				}
+				return nil
+			})
+			events := captureCodexFolderEvents(t)
+			want := ""
+			switch shape {
+			case "link at the folder":
+				want = f.selectorDir
+			case "link at the vendor parent":
+				want = filepath.Dir(f.selectorDir)
+			case "plain folder":
+				if err := os.MkdirAll(f.selectorDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := WindowsCodexMachineFolderLink()
+			if err != nil || got != want {
+				t.Fatalf("link = %q (err %v), want %q", got, err, want)
+			}
+			if len(events.boundary) != 0 || len(events.repair) != 0 || len(*f.recorded) != 0 {
+				t.Fatalf("the question named or created something: %d %d %q", len(events.boundary), len(events.repair), *f.recorded)
+			}
+			if shape == "nothing there" {
+				if _, err := os.Lstat(f.selectorDir); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("the question created the folder: %v", err)
+				}
+			}
+		})
+	}
+}
