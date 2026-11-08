@@ -1804,6 +1804,77 @@ $failures = & $module {
             if (-not $both.Contains('Cursor: ' + $g900Cursor) -or -not $both.Contains('Claude Code: ' + $g900Claude)) {
                 $failures.Add("GAP-0900: two links were not both named: '$both'")
             }
+
+            # A junction whose target is gone is still a link (Test-Path would read it as
+            # an absent folder): the walk reads the attributes of the link itself.
+            foreach ($link in @($g900Cursor, $g900Claude)) {
+                if ([IO.Directory]::Exists($link)) { [IO.Directory]::Delete($link, $false) }
+            }
+            [void][IO.Directory]::CreateDirectory($g900Cursor)
+            [IO.Directory]::Delete($g900Cursor, $true)
+            $g900Gone = [IO.Path]::Combine($script:ProgramData, 'gone')
+            [void][IO.Directory]::CreateDirectory($g900Gone)
+            [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $g900Cursor -Target $g900Gone)
+            $g900Links.Add($g900Cursor)
+            [IO.Directory]::Delete($g900Gone, $false)
+            if ((Get-DefenseClawVendorMachineFolderLink -Directory $g900Cursor) -cne $g900Cursor) {
+                $failures.Add('GAP-0900: a junction whose target is gone was not found')
+            }
+            $dangling = & $g900Refuses 'Repair'
+            if (-not $dangling.Contains('Cursor: ' + $g900Cursor)) {
+                $failures.Add("GAP-0900: a dangling junction at the Cursor folder was not refused: '$dangling'")
+            }
+            [IO.Directory]::Delete($g900Cursor, $false)
+            $g900Links.Remove($g900Cursor) | Out-Null
+
+            # A symbolic link (not a junction) to a folder, when the account may create one.
+            $g900Sym = [IO.Path]::Combine($script:ProgramData, 'symcursor')
+            $symMade = $false
+            try {
+                [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($script:ProgramData, 'symtarget'))
+                [void](Microsoft.PowerShell.Management\New-Item -ItemType SymbolicLink -Path $g900Sym -Target ([IO.Path]::Combine($script:ProgramData, 'symtarget')))
+                $symMade = $true
+                $g900Links.Add($g900Sym)
+            }
+            catch {
+                $symMade = $false
+            }
+            if ($symMade -and (Get-DefenseClawVendorMachineFolderLink -Directory ([IO.Path]::Combine($g900Sym, 'x'))) -cne $g900Sym) {
+                $failures.Add('GAP-0900: a symbolic link was not found')
+            }
+            if ($symMade) {
+                # Windows PowerShell 5.1 reads a symbolic link whose target is gone as an absent folder.
+                [IO.Directory]::Delete([IO.Path]::Combine($script:ProgramData, 'symtarget'), $false)
+                if ((Get-DefenseClawVendorMachineFolderLink -Directory ([IO.Path]::Combine($g900Sym, 'x'))) -cne $g900Sym) {
+                    $failures.Add('GAP-0900: a symbolic link whose target is gone was not found')
+                }
+            }
+
+            # A link on ProgramData itself, above every vendor folder.
+            $g900PdReal = [IO.Path]::Combine($Scratch, 'PD900real')
+            $g900PdLink = [IO.Path]::Combine($Scratch, 'PD900link')
+            [void][IO.Directory]::CreateDirectory($g900PdReal)
+            [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $g900PdLink -Target $g900PdReal)
+            $g900Links.Add($g900PdLink)
+            $script:ProgramData = $g900PdLink
+            $above = & $g900Refuses 'Install'
+            if (-not $above.Contains($g900PdLink)) {
+                $failures.Add("GAP-0900: a link on ProgramData itself was not named: '$above'")
+            }
+            $script:ProgramData = Microsoft.PowerShell.Management\Join-Path $Scratch 'PD900'
+
+            # Secure Client: the list is empty and the single check finds nothing, even with a link in place.
+            [void](Microsoft.PowerShell.Management\New-Item -ItemType Junction -Path $g900Cursor -Target $g900Target)
+            $g900Links.Add($g900Cursor)
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+            try {
+                if (@(Get-DefenseClawVendorMachineFolderLinks -Layout $g900Layout).Count -ne 0) {
+                    $failures.Add('GAP-0900: Secure Client listed a vendor folder link')
+                }
+            }
+            finally {
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+            }
         }
         finally {
             foreach ($link in $g900Links) {
