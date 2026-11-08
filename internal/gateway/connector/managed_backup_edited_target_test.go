@@ -40,7 +40,8 @@ func TestManagedBackupLaterSetupKeepsEditedTargetOutOfExactRestore(t *testing.T)
 					t.Fatal(err)
 				}
 				if content != "" {
-					if err := os.WriteFile(target, []byte(content), 0o600); err != nil {
+					// The setup writes through the connector writer.
+					if err := atomicWriteFile(target, []byte(content), 0o600); err != nil {
 						t.Fatal(err)
 					}
 				}

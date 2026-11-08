@@ -5307,7 +5307,7 @@ func patchCursorHooksLocked(path, stateDir, hookScript, legacyShellScript string
 		return err
 	}
 	return withFileLock(path, func() error {
-		return atomicTransformFileWithStateDir(path, stateDir, 0o600, func(data []byte, _ bool) (atomicTransformResult, error) {
+		return atomicTransformFileWithStateDir(path, stateDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			cfg, err := decodeJSONObject(path, data)
 			if err != nil {
 				return atomicTransformResult{}, err
@@ -5317,7 +5317,9 @@ func patchCursorHooksLocked(path, stateDir, hookScript, legacyShellScript string
 			if err != nil {
 				return atomicTransformResult{}, err
 			}
-			return atomicTransformResult{Data: append(out, '\n')}, nil
+			out = append(out, '\n')
+			noteManagedSetupTransform(path, data, exists, out)
+			return atomicTransformResult{Data: out}, nil
 		})
 	})
 }
