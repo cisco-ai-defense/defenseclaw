@@ -39,6 +39,7 @@ $root = [IO.Path]::Combine(
 )
 [void][IO.Directory]::CreateDirectory($root)
 $readers = [Collections.Generic.List[Diagnostics.Process]]::new()
+$leftBehind = $false
 try {
     $failures = & $module {
         param([string]$Root, $Readers)
@@ -623,7 +624,10 @@ public static class DcsfUnnamedRestartManager {
             # every path it deleted. The process privileges stay disabled.
             if (-not $canOpenRestricted) {
                 $savedProgramFiles = $script:ProgramFiles
+                $savedWindowsDirectory = $script:WindowsDirectory
                 try {
+                    $script:WindowsDirectory = [IO.Path]::Combine($Root, 'privdel', 'WIN')
+                    [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($script:WindowsDirectory, 'Logs', 'DefenseClaw'))
                     $privLayout = New-TestState 'privdel'
                     $script:ProgramData = [IO.Path]::Combine($Root, 'privdel', 'PD')
                     $script:ProgramFiles = [IO.Path]::Combine($Root, 'privdel', 'PF')
@@ -679,6 +683,13 @@ public static class DcsfUnnamedRestartManager {
                     if (-not [IO.File]::Exists($decoy) -or (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $decoy -Algorithm SHA256).Hash -cne $decoyHash) {
                         $failures.Add('the privileged deletion followed a link and changed the folder it points to')
                     }
+                    $lifecycleLog = [IO.Path]::Combine($script:WindowsDirectory, 'Logs', 'DefenseClaw', 'enterprise-lifecycle.log')
+                    $logged = if ([IO.File]::Exists($lifecycleLog)) { [IO.File]::ReadAllText($lifecycleLog) } else { '' }
+                    foreach ($expected in @('opencode-service-ports.json', 'junction (link, not followed)')) {
+                        if ($logged -notmatch ('defenseclaw_repair path=[^"]*' + [regex]::Escape($expected).Replace('\\', '\\\\'))) {
+                            $failures.Add("the lifecycle log has no defenseclaw_repair line for $expected")
+                        }
+                    }
                     $events = @(Get-DefenseClawResilienceEvents)
                     $expectedLines = @('opencode-service-ports.json', 'junction (link, not followed)')
                     if ($symlinkMade) {
@@ -692,6 +703,7 @@ public static class DcsfUnnamedRestartManager {
                 }
                 finally {
                     $script:ProgramFiles = $savedProgramFiles
+                    $script:WindowsDirectory = $savedWindowsDirectory
                     $script:ProgramData = $savedProgramData
                 }
             }
@@ -808,7 +820,21 @@ finally {
             $reader.WaitForExit()
         }
     }
+    # The SYSTEM-only files this smoke made cannot be deleted by an account
+    # whose backup and restore privileges are disabled (the smoke disables them
+    # in its own process), and a harness that cleans the scratch folder after
+    # it would fail on them. The owner of a file may always rewrite its access
+    # list, so give Administrators the tree back first; no privilege is needed.
+    & "$env:SystemRoot\System32\icacls.exe" $root /grant '*S-1-5-32-544:(OI)(CI)F' /T /C /Q 2>&1 | Out-Null
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+    if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $root) {
+        $leftBehind = $true
+    }
+}
+
+if ($leftBehind) {
+    Microsoft.PowerShell.Utility\Write-Output "FAIL: the scratch folder $root could not be removed"
+    exit 1
 }
 
 if ($failures.Count -gt 0) {
