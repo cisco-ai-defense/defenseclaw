@@ -185,6 +185,24 @@ func clientStateTreeNames(targets map[string]string) map[string]string {
 	return names
 }
 
+// clientResolvedPathTargets keeps the plain path answers (absolute spelling ->
+// absolute physical path) of a resolved target map, not its metadata keys, for
+// the checks of the action facts that judge a write through a link
+// (actionfacts.Input.ClientResolvedTargets).
+func clientResolvedPathTargets(targets map[string]string) map[string]string {
+	var paths map[string]string
+	for spelling, physical := range targets {
+		if !strings.HasPrefix(spelling, "/") || !strings.HasPrefix(physical, "/") {
+			continue
+		}
+		if paths == nil {
+			paths = map[string]string{}
+		}
+		paths[spelling] = physical
+	}
+	return paths
+}
+
 // activeStateTreeHasNameFor is activeStateTreeHasName with the hook
 // client's answer (hookpaths.StateTreeHasName, read as the user) used
 // first: a managed gateway cannot read the home, so its own index counts
