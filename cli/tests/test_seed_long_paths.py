@@ -15,6 +15,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from defenseclaw import long_paths
@@ -193,33 +194,32 @@ class SeedLongPathTests(unittest.TestCase):
             long_paths.copytree(self.bundle, dest)
         self.assertTrue(os.path.isdir(dest))
 
-    def test_two_runs_seeding_at_once_keep_the_first_complete_copy(self):
-        real = shutil.copytree
-        lock = threading.Lock()
-        both_entered = threading.Event()
-        first_done = threading.Event()
-        entered: list[int] = []
-        errors: list[BaseException] = []
-        dest = os.path.join(self.tmp, "destination")
+    def _flat_source(self) -> str:
         # A flat source: shutil.copytree calls itself for every subfolder.
         flat = os.path.join(self.tmp, "flat")
         os.makedirs(flat)
         with open(os.path.join(flat, "needed.txt"), "w", encoding="utf-8") as handle:
             handle.write("needed")
+        return flat
 
-        def ordered(src, dst, *args, **kwargs):
+    def _staging_leftovers(self) -> list[str]:
+        return [n for n in os.listdir(self.tmp) if n.startswith(".destination")]
+
+    def test_two_runs_seeding_at_once_publish_one_complete_copy_and_refuse_the_other(self):
+        real = shutil.copytree
+        lock = threading.Lock()
+        both_entered = threading.Event()
+        entered: list[int] = []
+        errors: list[BaseException] = []
+        dest = os.path.join(self.tmp, "destination")
+        flat = self._flat_source()
+
+        def together(src, dst, *args, **kwargs):
             with lock:
                 entered.append(1)
-                order = len(entered)
-                if order == 2:
+                if len(entered) == 2:
                     both_entered.set()
-            if order == 1:
-                self.assertTrue(both_entered.wait(10))
-                try:
-                    return real(src, dst, *args, **kwargs)
-                finally:
-                    first_done.set()
-            self.assertTrue(first_done.wait(10))
+            self.assertTrue(both_entered.wait(10))
             return real(src, dst, *args, **kwargs)
 
         def seed():
@@ -228,32 +228,105 @@ class SeedLongPathTests(unittest.TestCase):
             except BaseException as exc:  # noqa: BLE001 - reported through the assertion below
                 errors.append(exc)
 
-        with patch("defenseclaw.long_paths.shutil.copytree", side_effect=ordered):
+        with patch("defenseclaw.long_paths.shutil.copytree", side_effect=together):
             workers = [threading.Thread(target=seed) for _ in range(2)]
             for worker in workers:
                 worker.start()
             for worker in workers:
                 worker.join(30)
 
-        self.assertEqual(errors, [])
+        self.assertEqual([type(e) for e in errors], [FileExistsError], msg=errors)
         with open(os.path.join(dest, "needed.txt"), encoding="utf-8") as handle:
             self.assertEqual(handle.read(), "needed")
-        self.assertEqual([n for n in os.listdir(self.tmp) if n.startswith(".destination")], [])
+        self.assertEqual(self._staging_leftovers(), [])
 
-    def test_a_destination_created_while_the_copy_runs_is_not_removed(self):
+    def test_a_staging_name_already_in_use_is_never_reused_or_removed(self):
         dest = os.path.join(self.tmp, "destination")
+        flat = self._flat_source()
+        taken = os.path.join(self.tmp, ".destination.seed-aaaaaaaa")
+        os.makedirs(taken)
+        with open(os.path.join(taken, "prior-data.txt"), "w", encoding="utf-8") as handle:
+            handle.write("prior")
+        names = [SimpleNamespace(hex="aaaaaaaa" + "0" * 24), SimpleNamespace(hex="bbbbbbbb" + "0" * 24)]
 
-        def create_then_copy(src, dst, *args, **kwargs):
+        with patch("defenseclaw.long_paths.uuid.uuid4", side_effect=names):
+            long_paths.copytree(flat, dest)
+
+        with open(os.path.join(taken, "prior-data.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "prior")
+        self.assertFalse(os.path.exists(os.path.join(taken, "needed.txt")))
+        with open(os.path.join(dest, "needed.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "needed")
+        self.assertEqual(self._staging_leftovers(), [".destination.seed-aaaaaaaa"])
+
+    def test_an_empty_destination_created_while_the_copy_runs_is_kept_as_it_is(self):
+        real = shutil.copytree
+        dest = os.path.join(self.tmp, "destination")
+        flat = self._flat_source()
+        made: list[os.stat_result] = []
+
+        def copy_then_competitor_appears(src, dst, *args, **kwargs):
+            result = real(src, dst, *args, **kwargs)
+            os.mkdir(dest)
+            made.append(os.stat(dest))
+            return result
+
+        with patch("defenseclaw.long_paths.shutil.copytree", side_effect=copy_then_competitor_appears):
+            with self.assertRaises(FileExistsError):
+                long_paths.copytree(flat, dest)
+
+        self.assertEqual(os.listdir(dest), [])
+        self.assertEqual(os.stat(dest).st_ino, made[0].st_ino)
+        self.assertEqual(self._staging_leftovers(), [])
+
+    def test_a_partial_destination_created_while_the_copy_runs_is_never_reported_as_a_seed(self):
+        dest = os.path.join(self.tmp, "destination")
+        flat = self._flat_source()
+
+        def competitor_leaves_a_partial_copy(src, dst, *args, **kwargs):
             os.makedirs(dest)
-            with open(os.path.join(dest, "operator-data.txt"), "w", encoding="utf-8") as handle:
-                handle.write("keep")
+            with open(os.path.join(dest, "partial.txt"), "w", encoding="utf-8") as handle:
+                handle.write("x")
             raise OSError(5, "refused", str(dst))
 
-        with patch("defenseclaw.long_paths.shutil.copytree", side_effect=create_then_copy):
-            long_paths.copytree(self.bundle, dest)
+        with patch("defenseclaw.long_paths.shutil.copytree", side_effect=competitor_leaves_a_partial_copy):
+            with self.assertRaises(OSError):
+                long_paths.copytree(flat, dest)
 
-        self.assertTrue(os.path.isfile(os.path.join(dest, "operator-data.txt")))
-        self.assertEqual([n for n in os.listdir(self.tmp) if n.startswith(".destination")], [])
+        self.assertEqual(os.listdir(dest), ["partial.txt"])
+        self.assertEqual(self._staging_leftovers(), [])
+
+    def test_refresh_does_not_report_a_competing_partial_copy_as_refreshed(self):
+        data_dir = os.path.join(self.tmp, "home")
+        dest = os.path.join(data_dir, "splunk-bridge")
+        real = shutil.copytree
+
+        def competitor_leaves_a_partial_copy(src, dst, *args, **kwargs):
+            result = real(src, dst, *args, **kwargs)
+            os.makedirs(dest)
+            with open(os.path.join(dest, "partial.txt"), "w", encoding="utf-8") as handle:
+                handle.write("x")
+            return result
+
+        with patch("defenseclaw.long_paths.shutil.copytree", side_effect=competitor_leaves_a_partial_copy):
+            result = refresh_splunk_bridge(data_dir)
+
+        self.assertTrue(result.errors, msg=result)
+        self.assertFalse(result.refreshed)
+        self.assertEqual(os.listdir(dest), ["partial.txt"])
+
+    def test_a_relative_leaf_destination_is_seeded_in_the_working_directory(self):
+        flat = self._flat_source()
+        previous = os.getcwd()
+        os.chdir(self.tmp)
+        self.addCleanup(os.chdir, previous)
+
+        long_paths.copytree("flat", "destination")
+
+        with open(os.path.join(self.tmp, "destination", "needed.txt"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), "needed")
+        self.assertEqual(self._staging_leftovers(), [])
+        self.assertTrue(os.path.isdir(flat))
 
     def test_a_partial_copy_that_cannot_be_removed_is_never_taken_for_a_seed(self):
         data_dir = os.path.join(self.tmp, "home")
