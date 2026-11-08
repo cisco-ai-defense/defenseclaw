@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"slices"
-	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -61,96 +60,10 @@ func trustedShellCommandInput(input actionfacts.Input) bool {
 // twin of the call): the outermost call, which runs last, decides.
 func markShellProtectedFileFindings(request trustedActionRequest, findings []RuleFinding) []RuleFinding {
 	class := trustedShellCommandInput(request.Input)
-	namesState, namesStateKnown := false, false
 	for index := range findings {
 		findings[index].shellProtectedFile = class && shellProtectedFileRule(findings[index].RuleID)
-		findings[index].namesState = false
-		if canonicalTrustedRuleID(findings[index].RuleID) != evaluationLimitRuleID {
-			continue
-		}
-		if !namesStateKnown {
-			command, _ := trustedBashCommandInput(request.Input)
-			namesState, namesStateKnown = textNamesStateFolder(command), true
-		}
-		findings[index].namesState = namesState
 	}
 	return findings
-}
-
-// textNamesStateFolder reports a command text that names the DefenseClaw
-// state folder (".defenseclaw") as a path component: after a path separator
-// ("~/.defenseclaw", "$HOME/.defenseclaw/config.yaml", a backslash form on
-// Windows), before one (".defenseclaw/config.yaml") or joined to a home root
-// ("Join-Path $HOME .defenseclaw"), also with quotes, escapes or backticks in
-// the name or in any case. A word that only contains the name (an unrelated
-// ".defenseclaw-backup" file, a printed ".defenseclaw") is not the folder. It
-// is the text test of a call no reader could analyse; a name built from
-// variables or patterns, or a bare relative name beside no home root, is not
-// seen (a documented limit of the default and permissive profiles; strict
-// blocks the call).
-func textNamesStateFolder(command string) bool {
-	if !strings.Contains(strings.ToLower(command), "defense") {
-		return false
-	}
-	// A backslash is an escape in one reading and a path separator in the
-	// other ("%USERPROFILE%\.defenseclaw").
-	for _, backslash := range []string{"", "/"} {
-		text := stateQuoteStripper.Replace(strings.ReplaceAll(command, "\\", backslash))
-		if stateFolderComponent(strings.ToLower(text)) {
-			return true
-		}
-	}
-	return false
-}
-
-var stateQuoteStripper = strings.NewReplacer("'", "", "\"", "", "`", "")
-
-// stateHomeRoots are the spellings of the user home that a call joins to the
-// state folder name as a separate word.
-var stateHomeRoots = []string{"~", "$home", "${home}", "$env:home", "$env:userprofile", "$userprofile",
-	"%userprofile%", "%home%", "%homepath%", "$env:homepath"}
-
-// stateFolderComponent reports text that has ".defenseclaw" as a whole path
-// component: neither side continues the name, and a separator or a home root
-// is beside it.
-func stateFolderComponent(text string) bool {
-	const name = ".defenseclaw"
-	for from := 0; ; {
-		at := strings.Index(text[from:], name)
-		if at < 0 {
-			return false
-		}
-		at += from
-		end := at + len(name)
-		from = end
-		var before, after byte
-		if at > 0 {
-			before = text[at-1]
-		}
-		if end < len(text) {
-			after = text[end]
-		}
-		if stateNameByte(before) || stateNameByte(after) {
-			continue
-		}
-		if before == '/' || after == '/' || stateJoinedToHomeRoot(text[:at]) {
-			return true
-		}
-	}
-}
-
-// stateNameByte reports a byte that continues a file name.
-func stateNameByte(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.'
-}
-
-// stateJoinedToHomeRoot reports a prefix whose last word is a home root.
-func stateJoinedToHomeRoot(prefix string) bool {
-	word := strings.TrimRight(prefix, " \t\r\n,")
-	if cut := strings.LastIndexAny(word, " \t\r\n,(;|&"); cut >= 0 {
-		word = word[cut+1:]
-	}
-	return slices.Contains(stateHomeRoots, word)
 }
 
 // selfProtectionRules are the rules that protect DefenseClaw itself: a
@@ -199,13 +112,14 @@ const evaluationLimitRuleID = "ACTION-COMPOUND-LIMIT"
 
 // withoutEnforcingEvaluationLimit returns the findings without the
 // evaluation-limit finding that could block, and whether there was one. A
-// call such a finding blocks has no proven target (one whose text names the
-// DefenseClaw state folder keeps its block, namesState); every other finding
-// (a named or known protected path, a resolved link, self-protection) is
-// kept and decides on its own (rel-1-0-6:GAP-0675 round 10).
+// call such a finding blocks has no proven target: the reader resolved none,
+// and no word of the command text is read as one. Every other finding (a
+// named or known protected path, a resolved link, a write the reader
+// resolves into the DefenseClaw state folder, which is self-protection) is
+// kept and decides on its own (rel-1-0-6:GAP-0675 round 12).
 func withoutEnforcingEvaluationLimit(findings []RuleFinding) ([]RuleFinding, bool) {
 	isLimit := func(finding RuleFinding) bool {
-		return finding.contributesToEnforcement() && !finding.namesState &&
+		return finding.contributesToEnforcement() &&
 			canonicalTrustedRuleID(finding.RuleID) == evaluationLimitRuleID
 	}
 	if !slices.ContainsFunc(findings, isLimit) {

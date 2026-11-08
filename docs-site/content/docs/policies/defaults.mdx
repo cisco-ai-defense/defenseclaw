@@ -130,9 +130,9 @@ target. With the `default` and `permissive` packs, per-user and managed, the cal
 alert that names the rule, an audit record with `decision=alert`, and the LLM judge decides where it
 is configured. With the `strict` pack, managed strict included, action mode blocks it. A finding that
 proves a protected target in the same call (a DefenseClaw state write, a file the call names) decides
-on its own in every profile, and a call the reader cannot analyse that names DefenseClaw's own state
-folder as a path (`~/.defenseclaw`, `$HOME/.defenseclaw/config.yaml`) stays blocked in every profile; a word
-that only contains the name (`.defenseclaw-backup`) is not that folder. **Known limit:** with `default` and `permissive`, a statement the reader
+on its own in every profile; a write the reader resolves into DefenseClaw's own state folder
+(`~/.defenseclaw`) is self-protection and always blocks. A call that only mentions the folder name, next to
+a statement the reader cannot analyse, proves no target and is judged like any other limit-only call. **Known limit:** with `default` and `permissive`, a statement the reader
 cannot analyse can hide a write to a protected file in the same call; use `strict` where that
 matters. In observe mode the call raises the alert and runs. Split a long command into several
 calls, or put it in a script file and run the script.
