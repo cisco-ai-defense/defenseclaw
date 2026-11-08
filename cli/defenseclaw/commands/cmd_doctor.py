@@ -13893,7 +13893,19 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     digest_failure: list[str] = []
     local = _local_policy_digest(cfg, failure=digest_failure)
     if local is None:
+        from defenseclaw.gateway import NO_TRUSTED_GATEWAY_EXECUTABLE
+
         cause = f" ({digest_failure[0]})" if digest_failure else ""
+        if digest_failure and digest_failure[0].startswith(NO_TRUSTED_GATEWAY_EXECUTABLE):
+            # The digest command cannot run at all, so running it would not help.
+            remediation = (
+                "Run `defenseclaw upgrade` to install or repair the gateway binary, then run `defenseclaw doctor` again"
+            )
+        else:
+            remediation = (
+                "Run `defenseclaw-gateway policy digest --json` to see why the digest cannot be computed, "
+                "then run `defenseclaw doctor` again"
+            )
         _emit(
             "warn",
             label,
@@ -13901,10 +13913,7 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             r=r,
             check_id="doctor.policy.comparison-unavailable",
             reason_code="policy-comparison-unavailable",
-            remediation=(
-                "Run `defenseclaw-gateway policy digest --json` to see why the digest cannot be computed, "
-                "then run `defenseclaw doctor` again"
-            ),
+            remediation=remediation,
         )
         return
     pending = [str(key) for key in policy.get("pending_restart") or []]

@@ -86,6 +86,7 @@ def _render_hooks(cfg, *, allow_not_set_up: bool = False) -> dict | None:
     runs. Every other refusal stops setup before anything is written.
     """
     from defenseclaw.commands.cmd_setup import _gateway_lifecycle_resolution
+    from defenseclaw.config import gateway_home_for_data_dir
     from defenseclaw.pinned_exec import UnsafePathError, run_pinned_executable
 
     executable, refused = _gateway_lifecycle_resolution()
@@ -97,6 +98,7 @@ def _render_hooks(cfg, *, allow_not_set_up: bool = False) -> dict | None:
             "Run the DefenseClaw installer, then defenseclaw setup cowork again."
         )
     data_dir = str(cfg.data_dir)
+    # The gateway reads the install-home config.yaml, which names a moved data_dir (GAP-0844).
     try:
         result = run_pinned_executable(
             [executable, "connector", "cowork-plugin", "--data-dir", data_dir, "--json"],
@@ -105,7 +107,7 @@ def _render_hooks(cfg, *, allow_not_set_up: bool = False) -> dict | None:
             shell=False,
             stdin=subprocess.DEVNULL,
             timeout=60,
-            env={**os.environ, "DEFENSECLAW_HOME": data_dir},
+            env={**os.environ, "DEFENSECLAW_HOME": gateway_home_for_data_dir(data_dir)},
         )
     except (UnsafePathError, subprocess.TimeoutExpired, OSError) as exc:
         raise click.ClickException(f"defenseclaw-gateway could not render the Cowork hooks ({exc}).") from exc
