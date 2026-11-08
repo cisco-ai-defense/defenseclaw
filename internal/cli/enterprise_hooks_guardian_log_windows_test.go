@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -47,18 +48,18 @@ func TestCapWindowsGuardianLogRotatesAFileAServiceHoldsOpen(t *testing.T) {
 
 	for generation := 1; generation <= windowsEnterpriseLogGenerates+2; generation++ {
 		write(strings.Repeat("g", 300) + "\n")
-		write("generation " + string(rune(0+generation)) + "\n")
+		write("generation " + strconv.Itoa(generation) + "\n")
 		capWindowsGuardianLog(&stderr)
-		write("after rotation " + string(rune(0+generation)) + "\n")
+		write("after rotation " + strconv.Itoa(generation) + "\n")
 		body, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if string(body) != "after rotation "+string(rune(0+generation))+"\n" {
+		if string(body) != "after rotation "+strconv.Itoa(generation)+"\n" {
 			t.Fatalf("generation %d: the log after the rotation holds %q", generation, body)
 		}
 		moved, err := os.ReadFile(path + ".1")
-		if err != nil || !strings.Contains(string(moved), "generation "+string(rune(0+generation))) {
+		if err != nil || !strings.Contains(string(moved), "generation "+strconv.Itoa(generation)) {
 			t.Fatalf("generation %d: .1 does not hold the rotated lines: %v %q", generation, err, moved)
 		}
 	}
@@ -67,11 +68,11 @@ func TestCapWindowsGuardianLogRotatesAFileAServiceHoldsOpen(t *testing.T) {
 	}
 	// The newest generations are kept and the oldest dropped: at most .1 to .4.
 	for generation := 1; generation < windowsEnterpriseLogGenerates; generation++ {
-		if _, err := os.Stat(path + "." + string(rune(0+generation))); err != nil {
+		if _, err := os.Stat(path + "." + strconv.Itoa(generation)); err != nil {
 			t.Fatalf("generation .%d is missing: %v", generation, err)
 		}
 	}
-	if _, err := os.Stat(path + "." + string(rune(0+windowsEnterpriseLogGenerates))); !os.IsNotExist(err) {
+	if _, err := os.Stat(path + "." + strconv.Itoa(windowsEnterpriseLogGenerates)); !os.IsNotExist(err) {
 		t.Fatalf("a generation beyond the cap exists: %v", err)
 	}
 }
