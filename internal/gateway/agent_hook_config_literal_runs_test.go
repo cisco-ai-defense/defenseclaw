@@ -48,6 +48,16 @@ func TestRV5GX048LiteralRuns(t *testing.T) {
 		{"npx codex model", `npx @openai/codex -c 'model="gpt-5"' exec hi`, false},
 		{"npx claude version", `npx claude-code --version`, false},
 		{"env claude prefix", `env CLAUDE_CONFIG_DIR=/tmp/x claude -p hi`, true},
+		{"timeout with kill-after option off", `timeout -k 5 60 claude --settings '{"disableAllHooks":true}' -p hi`, true},
+		{"timeout with attached signal codex off", `timeout --signal=KILL 60s codex -c features.hooks=false exec hi`, true},
+		{"npx package option claude off", `npx --package=@anthropic-ai/claude-code claude -p hi --settings '{"disableAllHooks":true}'`, true},
+		{"bunx bun option claude off", `bunx --bun @anthropic-ai/claude-code -p hi --settings '{"disableAllHooks":true}'`, true},
+		{"sudo user option claude off", `sudo -u build claude -p hi --settings '{"disableAllHooks":true}'`, true},
+		{"env unset home", `env -u HOME claude -p hi`, true},
+		{"timeout with kill-after option plain", `timeout -k 5 60 claude -p hi`, false},
+		{"timeout with attached signal codex plain", `timeout --signal=KILL 60s codex exec hi`, false},
+		{"npx package option claude version", `npx --package=@anthropic-ai/claude-code claude --version`, false},
+		{"env change directory claude plain", `env -C /tmp claude -p hi`, false},
 		{"env claude real home", `env CLAUDE_CONFIG_DIR=` + filepath.Join(h.home, ".claude") + ` claude -p hi`, false},
 	}
 	for _, r := range rows {
