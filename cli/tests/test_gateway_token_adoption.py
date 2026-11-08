@@ -6,14 +6,14 @@
 from __future__ import annotations
 
 import os
-
-import pytest
 from types import SimpleNamespace
 
+import click
+import pytest
 from defenseclaw import config as config_module
 from defenseclaw import credential_provenance, gateway_token_adoption
-from defenseclaw.commands import cmd_doctor
-from defenseclaw.commands.cmd_setup import _record_adopted_gateway_token
+from defenseclaw.commands import cmd_doctor, cmd_setup
+from defenseclaw.commands.cmd_setup import _save_adopted_gateway_token, _save_secret_to_dotenv
 from defenseclaw.file_permissions import MAX_DOTENV_BYTES
 
 # The line the Go gateway writes for the token "adopted"
@@ -76,12 +76,14 @@ def test_a_shell_export_still_beats_the_file(tmp_path, monkeypatch):
 def test_setup_records_the_token_it_copied_and_a_later_edit_wins(tmp_path):
     (tmp_path / ".env").write_text("DEFENSECLAW_LLM_KEY=keep\nDEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n")
     (tmp_path / ".env").chmod(0o600)
-    _record_adopted_gateway_token("adopted", str(tmp_path))
-    _record_adopted_gateway_token("adopted", str(tmp_path))
+    _save_adopted_gateway_token(list(NAMES), "adopted", str(tmp_path))
+    _save_adopted_gateway_token(list(NAMES), "adopted", str(tmp_path))
     body = (tmp_path / ".env").read_text()
     assert body.count(GO_MARKER) == 1
     assert "DEFENSECLAW_LLM_KEY=keep" in body
     edited = body.replace("OPENCLAW_GATEWAY_TOKEN=adopted", "OPENCLAW_GATEWAY_TOKEN=edited")
+    for name in NAMES:  # the save also set this process environment; the next process starts without it
+        os.environ.pop(name, None)
     assert _resolve(tmp_path, edited) == "edited"
 
 
@@ -104,29 +106,89 @@ def test_doctor_keeps_an_unedited_adopted_token(tmp_path):
     assert (token, name) == ("adopted", "DEFENSECLAW_GATEWAY_TOKEN")
 
 
-def _fill_to_limit(tmp_path, tokens: str, ending: bytes = b"\n") -> None:
+OLD_TOKEN = "old-token"
+NEW_TOKEN = "new-token-one-byte-longer"
+OLD_TOKENS = f"DEFENSECLAW_GATEWAY_TOKEN={OLD_TOKEN}\nOPENCLAW_GATEWAY_TOKEN={OLD_TOKEN}\n"
+
+
+def _dotenv_whose_adoption_is(tmp_path, size: int, ending: bytes) -> bytes:
+    """Write a .env that the NEW_TOKEN adoption turns into exactly *size* bytes; return it."""
+    # Longer token under both spellings, the marker line, and the final newline a file without one gains.
+    gain = 2 * (len(NEW_TOKEN) - len(OLD_TOKEN)) + len(gateway_token_adoption.marker_line(NEW_TOKEN)) + 1
+    if not ending:
+        gain += 1
+    padding = b"#" + b"x" * (size - gain - len(OLD_TOKENS) - 1 - len(ending)) + ending
+    original = OLD_TOKENS.encode() + padding
     path = tmp_path / ".env"
-    padding = b"#" + b"x" * (MAX_DOTENV_BYTES - len(tokens) - 1 - len(ending)) + ending
-    path.write_bytes(tokens.encode() + padding)
+    path.write_bytes(original)
     path.chmod(0o600)
-    assert path.stat().st_size == MAX_DOTENV_BYTES
+    return original
+
+
+def _resolved_after_load(tmp_path) -> str:
+    config_module._load_dotenv_into_os(str(tmp_path))
+    return config_module.GatewayConfig().resolved_token()
 
 
 @pytest.mark.parametrize("ending", [b"\n", b""], ids=["final-newline", "no-final-newline"])
-def test_recording_the_marker_never_makes_an_accepted_dotenv_unreadable(tmp_path, ending):
-    _fill_to_limit(tmp_path, "DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n", ending)
-    _record_adopted_gateway_token("adopted", str(tmp_path))
-    assert (tmp_path / ".env").stat().st_size <= MAX_DOTENV_BYTES
-    config_module._load_dotenv_into_os(str(tmp_path))
-    assert config_module.GatewayConfig().resolved_token() == "adopted"
+def test_adoption_that_lands_exactly_on_the_limit_is_published_and_readable(tmp_path, ending):
+    _dotenv_whose_adoption_is(tmp_path, MAX_DOTENV_BYTES, ending)
+    _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+    assert (tmp_path / ".env").stat().st_size == MAX_DOTENV_BYTES
+    assert _resolved_after_load(tmp_path) == NEW_TOKEN
 
 
-def test_the_marker_still_fits_just_under_the_limit(tmp_path):
-    tokens = "DEFENSECLAW_GATEWAY_TOKEN=adopted\nOPENCLAW_GATEWAY_TOKEN=adopted\n"
-    room = len(gateway_token_adoption.marker_line("adopted")) + 1
+@pytest.mark.parametrize("ending", [b"\n", b""], ids=["final-newline", "no-final-newline"])
+def test_adoption_one_byte_over_the_limit_changes_nothing_and_names_the_cause(tmp_path, ending):
+    original = _dotenv_whose_adoption_is(tmp_path, MAX_DOTENV_BYTES + 1, ending)
+    with pytest.raises(click.ClickException, match=r"over the \d+-byte limit"):
+        _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+    assert (tmp_path / ".env").read_bytes() == original
+    assert _resolved_after_load(tmp_path) == OLD_TOKEN
+    assert "DEFENSECLAW_GATEWAY_TOKEN" not in os.environ or os.environ["DEFENSECLAW_GATEWAY_TOKEN"] == OLD_TOKEN
+
+
+def test_a_single_secret_save_one_byte_over_the_limit_changes_nothing(tmp_path):
+    key, value = "DEFENSECLAW_LLM_KEY", "sk-test"
+    line = f"{key}={value}\n".encode()
+    original = b"#" + b"x" * (MAX_DOTENV_BYTES - len(line) - 2) + b"\n"
+    (tmp_path / ".env").write_bytes(original)
+    (tmp_path / ".env").chmod(0o600)
+    _save_secret_to_dotenv(key, value, str(tmp_path))
+    assert (tmp_path / ".env").stat().st_size == MAX_DOTENV_BYTES
+    (tmp_path / ".env").write_bytes(original)
+    with pytest.raises(click.ClickException, match="over the"):
+        _save_secret_to_dotenv(key, value + "x", str(tmp_path))
+    assert (tmp_path / ".env").read_bytes() == original
+
+
+def test_the_two_token_save_is_one_publish_and_an_interrupted_one_leaves_the_file_as_it_was(tmp_path, monkeypatch):
     path = tmp_path / ".env"
-    path.write_bytes(tokens.encode() + b"#" + b"x" * (MAX_DOTENV_BYTES - len(tokens) - room - 2) + b"\n")
+    path.write_text("DEFENSECLAW_LLM_KEY=keep\n" + OLD_TOKENS)
     path.chmod(0o600)
-    _record_adopted_gateway_token("adopted", str(tmp_path))
-    assert path.stat().st_size == MAX_DOTENV_BYTES
-    assert GO_MARKER in path.read_text()
+    original = path.read_bytes()
+    real = cmd_setup.atomic_write_private_bytes
+
+    def interrupted(*_args, **_kwargs):
+        raise OSError("interrupted")
+
+    monkeypatch.setattr(cmd_setup, "atomic_write_private_bytes", interrupted)
+    with pytest.raises(OSError, match="interrupted"):
+        _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+    assert path.read_bytes() == original
+    assert os.environ.get("DEFENSECLAW_GATEWAY_TOKEN") is None
+
+    published: list[bytes] = []
+
+    def counting(target, body, *args, **kwargs):
+        published.append(body)
+        return real(target, body, *args, **kwargs)
+
+    monkeypatch.setattr(cmd_setup, "atomic_write_private_bytes", counting)
+    _save_adopted_gateway_token(list(NAMES), NEW_TOKEN, str(tmp_path))
+    assert len(published) == 1
+    text = published[0].decode()
+    assert text.count(f"DEFENSECLAW_GATEWAY_TOKEN={NEW_TOKEN}\n") == 1
+    assert text.count(f"OPENCLAW_GATEWAY_TOKEN={NEW_TOKEN}\n") == 1
+    assert "DEFENSECLAW_LLM_KEY=keep" in text
+    assert _resolved_after_load(tmp_path) == NEW_TOKEN

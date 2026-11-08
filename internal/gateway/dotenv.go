@@ -17,11 +17,25 @@
 package gateway
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
+
+// checkDotEnvSize refuses a new .env of size bytes that is over the one limit
+// every dotenv reader enforces (safefile.MaxDotEnvBytes). Every writer builds the
+// complete file first and calls this before publishing, so a refusal changes
+// nothing on disk and names the cause.
+func checkDotEnvSize(path string, size int) error {
+	if size > safefile.MaxDotEnvBytes {
+		return fmt.Errorf("%s would be %d bytes, over the %d-byte limit every reader accepts; it was left unchanged",
+			path, size, safefile.MaxDotEnvBytes)
+	}
+	return nil
+}
 
 // loadDotEnv reads a KEY=VALUE file (one per line).  Blank lines and
 // lines starting with # are ignored.  Values may be optionally quoted.

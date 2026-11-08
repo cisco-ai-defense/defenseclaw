@@ -22,7 +22,6 @@ import hashlib
 import os
 
 from defenseclaw.connector_paths import is_secret_ref_text
-from defenseclaw.file_permissions import MAX_DOTENV_BYTES
 
 GATEWAY_TOKEN_NAMES = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN")
 _MARKER = b"# defenseclaw: adopted gateway token sha256="
@@ -49,21 +48,15 @@ def is_shadowed(shadowed: set[str], key: str) -> bool:
 def with_adopted_marker(body: bytes, token: str) -> bytes:
     """*body* with every marker line replaced by one that records *token*.
 
-    The marker is provenance only. When recording it would push the file past the
-    size every reader accepts (``MAX_DOTENV_BYTES``) the file is returned without
-    one, and without a final newline it did not have if that is what keeps it
-    within the size: an unmarked file behaves as before, an unreadable one loses
-    the token.
+    The caller checks the whole result against ``MAX_DOTENV_BYTES`` before it
+    publishes anything.
     """
     newline = b"\r\n" if b"\r\n" in body else b"\n"
     kept = [line for line in body.splitlines(keepends=True) if not line.strip().startswith(_MARKER)]
     out = b"".join(kept)
-    terminated = out + newline if out and not out.endswith((b"\r", b"\n")) else out
-    marked = terminated + marker_line(token) + newline
-    if len(marked) <= MAX_DOTENV_BYTES:
-        return marked
-    # The final newline is provenance-neutral too: keep the accepted length.
-    return terminated if len(terminated) <= MAX_DOTENV_BYTES else out
+    if out and not out.endswith((b"\r", b"\n")):
+        out += newline
+    return out + marker_line(token) + newline
 
 
 def shadowed_names(body: bytes) -> set[str]:

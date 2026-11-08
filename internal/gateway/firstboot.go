@@ -133,6 +133,10 @@ func appendEnvLine(path, key, value string) error {
 		lines = lines[:len(lines)-1]
 	}
 	lines = append(lines, fmt.Sprintf("%s=%s", key, value), "")
+	out := strings.Join(lines, "\n")
+	if err := checkDotEnvSize(path, len(out)); err != nil {
+		return fmt.Errorf("appendEnvLine: %w", err)
+	}
 
 	// Cold-start dependency: in managed_enterprise mode the write
 	// below goes through managed.WriteServiceRuntimeFile which requires
@@ -149,7 +153,7 @@ func appendEnvLine(path, key, value string) error {
 		managed.PinnedDeploymentMode(),
 		path,
 		"gateway dotenv",
-		[]byte(strings.Join(lines, "\n")),
+		[]byte(out),
 	); err != nil {
 		return fmt.Errorf(
 			"appendEnvLine: %w (cold-start note: on managed_enterprise the "+

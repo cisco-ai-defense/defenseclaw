@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -95,38 +96,62 @@ func TestEnsureGatewayTokenKeepsAnUneditedAdoptedToken(t *testing.T) {
 	}
 }
 
-// A .env at the size every reader accepts stays readable after an adoption: the
-// marker is provenance only and is left out rather than push the file over, and
-// so is the final newline a file at the limit did not have.
-func TestAdoptionKeepsAnAcceptedMaximumSizeDotenvReadable(t *testing.T) {
+// The adoption builds the whole new .env first. A file that comes out at the
+// size every reader accepts is published; one byte over is refused with the
+// cause, the current file stays as it was, and its token still resolves.
+func TestAdoptionPublishesAMaximumSizeDotenvAndRefusesOneByteOver(t *testing.T) {
+	const oldToken, newToken = "old-token", "new-token-one-byte-longer"
+	tokens := "DEFENSECLAW_GATEWAY_TOKEN=" + oldToken + "\nOPENCLAW_GATEWAY_TOKEN=" + oldToken + "\n"
+	// What the adoption adds to the original: the longer token under both spellings and the marker.
+	growth := 2*(len(newToken)-len(oldToken)) + len(envvars.AdoptedGatewayTokenMarker(newToken)) + 1
 	for _, tc := range []struct {
-		name    string
-		ending  string
-		padding int
+		name   string
+		over   int
+		ending string
 	}{
-		{"final newline", "\n", 2},
-		{"no final newline", "", 1},
+		{"exact limit", 0, "\n"},
+		{"exact limit without final newline", 0, ""},
+		{"one byte over", 1, "\n"},
+		{"one byte over without final newline", 1, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
 			t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 			dir := t.TempDir()
 			envPath := filepath.Join(dir, ".env")
-			tokens := "DEFENSECLAW_GATEWAY_TOKEN=old-token\nOPENCLAW_GATEWAY_TOKEN=old-token\n"
-			padding := "#" + strings.Repeat("x", safefile.MaxDotEnvBytes-len(tokens)-tc.padding) + tc.ending
-			if err := os.WriteFile(envPath, []byte(tokens+padding), 0o600); err != nil {
+			// The file is padded so the adopted result is exactly MaxDotEnvBytes + over.
+			// A file with no final newline gains one from the adoption.
+			gain := growth
+			if tc.ending == "" {
+				gain++
+			}
+			pad := safefile.MaxDotEnvBytes + tc.over - gain - len(tokens) - 1 - len(tc.ending)
+			original := []byte(tokens + "#" + strings.Repeat("x", pad) + tc.ending)
+			if err := os.WriteFile(envPath, original, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if err := persistRefreshedToken(dir, "new-token"); err != nil {
-				t.Fatal(err)
+			err := persistRefreshedToken(dir, newToken)
+			after, readErr := os.ReadFile(envPath)
+			if readErr != nil {
+				t.Fatal(readErr)
 			}
-			info, err := os.Stat(envPath)
-			if err != nil || info.Size() > safefile.MaxDotEnvBytes {
-				t.Fatalf("size = %v, %v, want at most %d", info, err, safefile.MaxDotEnvBytes)
+			want := newToken
+			if tc.over > 0 {
+				want = oldToken
+				if err == nil || !strings.Contains(err.Error(), "over the") || !strings.Contains(err.Error(), "limit") {
+					t.Fatalf("err = %v, want a refusal naming the size limit", err)
+				}
+				if string(after) != string(original) {
+					t.Fatalf("a refused adoption changed the .env (%d bytes -> %d)", len(original), len(after))
+				}
+			} else if err != nil {
+				t.Fatalf("persistRefreshedToken: %v", err)
+			} else if len(after) != safefile.MaxDotEnvBytes {
+				t.Fatalf("size = %d, want exactly %d", len(after), safefile.MaxDotEnvBytes)
 			}
 			got, err := EnsureGatewayToken(envPath)
-			if err != nil || got != "new-token" {
-				t.Fatalf("token = %q, %v, want new-token", got, err)
+			if err != nil || got != want {
+				t.Fatalf("token = %q, %v, want %q", got, err, want)
 			}
 		})
 	}
