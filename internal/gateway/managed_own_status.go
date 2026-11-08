@@ -146,12 +146,24 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 
 // ownAccountExcluded reports whether enterprise.enrollment.exclude_users names
 // the caller, as the enumerator matches it: on Linux and macOS the exact
-// account name or decimal uid, on Windows the SID or the account name (the
-// domain may be omitted on either side). Root is never excluded by name:
-// enrollment.root decides its calls.
+// account name or decimal uid; on Windows (windowsProfileEnrollmentDecision)
+// the SID, the profile folder name, the account name, or DOMAIN\account, in
+// any case. A qualified entry selects one domain: it never matches the same
+// short name in another. Root is never excluded by name: enrollment.root
+// decides its calls.
 func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name string) bool {
 	if idKey == "uid" && self == "0" {
 		return false
+	}
+	var names []string
+	if idKey == "sid" {
+		names = []string{self, name}
+		if _, short, qualified := strings.Cut(name, `\`); qualified {
+			names = append(names, short)
+		}
+		if home := userScopedIdentityHome(self); home != "" {
+			names = append(names, accountFolderName(home))
+		}
 	}
 	for _, entry := range enrollment.ExcludeUsers {
 		entry = strings.TrimSpace(entry)
@@ -159,7 +171,7 @@ func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, sel
 		case entry == "":
 		case idKey == "uid" && (entry == self || name != "" && entry == name):
 			return true
-		case idKey == "sid" && (strings.EqualFold(entry, self) || ownStatusSameAccount(entry, name)):
+		case idKey == "sid" && requireSandboxListMatches([]string{entry}, names):
 			return true
 		}
 	}
