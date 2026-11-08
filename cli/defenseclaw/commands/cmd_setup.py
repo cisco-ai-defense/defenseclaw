@@ -4484,6 +4484,22 @@ def _dotenv_upsert_render(
     return body
 
 
+def _publish_dotenv_locked(dotenv_path: str, body: bytes) -> None:
+    """Publish a complete new dotenv once, or change nothing.
+
+    Every reader rejects a dotenv over ``MAX_DOTENV_BYTES`` whole, so the new file
+    is built in memory and checked against that limit before it is written. A file
+    over it is refused with the cause; the current file stays as it is.
+    """
+
+    if len(body) > MAX_DOTENV_BYTES:
+        raise click.ClickException(
+            f"{dotenv_path} would be {len(body)} bytes, over the {MAX_DOTENV_BYTES}-byte limit "
+            "every reader accepts; it was left unchanged. Remove entries you no longer need and retry."
+        )
+    atomic_write_private_bytes(dotenv_path, body)
+
+
 def _save_secrets_to_dotenv_locked(
     dotenv_path: str,
     snapshot: _RotateTokenDotenvSnapshot,
@@ -4499,7 +4515,7 @@ def _save_secrets_to_dotenv_locked(
             mode=rendered.mode,
         )
     if not snapshot.existed or rendered.body != snapshot.body:
-        atomic_write_private_bytes(dotenv_path, rendered.body)
+        _publish_dotenv_locked(dotenv_path, rendered.body)
 
 
 def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -> bytes:
@@ -4568,7 +4584,7 @@ def _rotate_token_atomic_write_locked(dotenv_path: str, new_token: str) -> None:
     preserving the existing file's unrelated byte shape.
     """
     snapshot = _rotate_token_snapshot_locked(dotenv_path)
-    atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
+    _publish_dotenv_locked(dotenv_path, _rotate_token_render(snapshot, new_token))
 
 
 def _restore_rotate_token_environment(snapshot: dict[str, str | None]) -> None:
@@ -4980,7 +4996,7 @@ def _rotate_token_transaction(
                 {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
             )
             mutation_attempted = True
-            atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
+            _publish_dotenv_locked(dotenv_path, _rotate_token_render(snapshot, new_token))
             for connector, value in sorted(new_hook_values.items()):
                 atomic_write_private_bytes(
                     _rotate_token_hook_path(data_dir, connector),
@@ -15202,9 +15218,7 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
     keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
     if gw.token_env and gw.token_env not in keys:
         keys.append(gw.token_env)
-    for key in keys:
-        _save_secret_to_dotenv(key, detected, data_dir)
-    _record_adopted_gateway_token(detected, data_dir)
+    _save_adopted_gateway_token(keys, detected, data_dir)
     click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
     if stopped:
         ctx = click.get_current_context(silent=True)
@@ -21465,16 +21479,29 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
     os.environ[key] = value
 
 
-def _record_adopted_gateway_token(token: str, data_dir: str) -> None:
-    """Mark *token*, copied from openclaw.json into .env, as an adopted copy.
+def _save_adopted_gateway_token(keys: list[str], token: str, data_dir: str) -> None:
+    """Copy *token*, adopted from openclaw.json, under every name in *keys*.
 
-    A later edit of one gateway-token spelling then wins over the copy under the
-    other (GAP-0847); see ``defenseclaw.gateway_token_adoption``.
+    The new .env is built whole in memory with the adopted-token marker and
+    published once, so a failure leaves neither name changed. A later edit of one
+    gateway-token spelling then wins over the copy under the other (GAP-0847); see
+    ``defenseclaw.gateway_token_adoption``.
     """
     dotenv_path = os.path.join(data_dir, ".env")
     with locked_file_update(dotenv_path):
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
-        atomic_write_private_bytes(dotenv_path, gateway_token_adoption.with_adopted_marker(snapshot.body, token))
+        rendered = snapshot
+        for key in keys:
+            rendered = _RotateTokenDotenvSnapshot(
+                existed=True,
+                body=_dotenv_upsert_render(rendered, key, token),
+                mode=rendered.mode,
+            )
+        body = gateway_token_adoption.with_adopted_marker(rendered.body, token)
+        if not snapshot.existed or body != snapshot.body:
+            _publish_dotenv_locked(dotenv_path, body)
+    for key in keys:
+        os.environ[key] = token
 
 
 # ---------------------------------------------------------------------------

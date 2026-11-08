@@ -45,7 +45,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // Client connects to the OpenClaw gateway WebSocket and provides RPC methods
@@ -1107,15 +1106,12 @@ func updateEnvFileToken(path, newToken string) error {
 	for len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	body := strings.Join(lines, "\n")
-	// The marker is provenance only, and so is the final newline when the file is
-	// already at the size every reader accepts: leave them out rather than push the
-	// file past that size, which would make the token unreadable.
-	out := body + "\n"
-	if marked := out + envvars.AdoptedGatewayTokenMarker(newToken) + "\n"; len(marked) <= safefile.MaxDotEnvBytes {
-		out = marked
-	} else if len(out) > safefile.MaxDotEnvBytes && len(body) <= safefile.MaxDotEnvBytes {
-		out = body
+	out := strings.Join(lines, "\n") + "\n" + envvars.AdoptedGatewayTokenMarker(newToken) + "\n"
+	// The whole new file is checked before anything is published: a file over the
+	// size every reader accepts would lose the token, so it is refused and the
+	// current file stays as it is.
+	if err := checkDotEnvSize(path, len(out)); err != nil {
+		return err
 	}
 
 	return managed.WriteServiceRuntimeFile(
