@@ -47,14 +47,14 @@ func nativeOperandsCoverTarget(facts Facts, files int, target string) bool {
 }
 
 // nativeReachedFiles returns the files a native write to target reaches: the
-// target itself and, when the gateway found that an operand of the call is
-// reached through an existing link (PathFact.Linked, from the hook client's
+// target itself and, when the gateway found that the operand naming target is
+// reached through an existing link (PathFact.Linked, from the hook client
 // evidence or a local lookup), the physical file of each such link. A content
 // proof judges the text against every one of them, so a write through a link
 // to a protected file gets the verdict the write by the protected name gets.
-// A link fact belongs to the call, not to one of its files; a call that
-// writes several files reads each against every physical file it reached,
-// which can only add a proof to a call that holds protected text.
+// A link fact belongs to the operand it was added for (PathFact.LinkedFrom),
+// so a call that writes several files judges the text of each write only
+// against the files that write reaches.
 func nativeReachedFiles(facts Facts, target string) []string {
 	files := []string{target}
 	if !facts.Authoritative() || !facts.EnforcementEligible() {
@@ -63,7 +63,9 @@ func nativeReachedFiles(facts Facts, target string) []string {
 	for _, candidate := range facts.Paths {
 		if !candidate.Linked || candidate.Flavor != PathFlavorPOSIX ||
 			candidate.Access != PathAccessWrite && candidate.Access != PathAccessAppend ||
-			!strings.HasPrefix(candidate.Resolved, "/") {
+			!strings.HasPrefix(candidate.Resolved, "/") ||
+			!strings.HasPrefix(candidate.LinkedFrom, "/") ||
+			EtcSpelling(path.Clean(candidate.LinkedFrom)) != EtcSpelling(target) {
 			continue
 		}
 		if physical := path.Clean(candidate.Resolved); physical != target {

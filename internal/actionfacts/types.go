@@ -1203,6 +1203,11 @@ type PathFact struct {
 	// call already names, never a further operand, so a proof that counts
 	// the operands of a call counts it with OperandPaths (GAP-0819).
 	Linked bool
+	// LinkedFrom is, for a Linked fact, the resolved spelling of the operand
+	// whose link reaches this file. A proof that reads the text one write
+	// puts into a file judges it only against the files that write reaches,
+	// never against the file another operand of the same call reaches.
+	LinkedFrom string
 }
 
 // OperandPaths returns the path facts that are operands of the call: every

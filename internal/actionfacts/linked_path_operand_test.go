@@ -31,6 +31,7 @@ func TestExactFileWriteProofsCountOperandsNotLinkedSpellings(t *testing.T) {
 		linked := facts.Paths[0]
 		linked.Value, linked.Normalized, linked.Resolved = "/private"+linked.Value, "/private"+linked.Normalized, "/private"+linked.Resolved
 		linked.Linked = true
+		linked.LinkedFrom = facts.Paths[0].Resolved
 		withLink := facts
 		withLink.Paths = append(append([]PathFact(nil), facts.Paths...), linked)
 		if !proof.exact(proof.input, withLink) {

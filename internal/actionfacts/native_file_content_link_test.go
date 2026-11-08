@@ -18,6 +18,7 @@ func withLinkedFile(t *testing.T, input Input, physical string) Facts {
 		t.Fatalf("want one operand, got %+v", facts.Paths)
 	}
 	linked := operands[0]
+	linked.LinkedFrom = linked.Resolved
 	linked.Value, linked.Normalized, linked.Resolved, linked.Linked = physical, physical, physical, true
 	facts.Paths = append(append([]PathFact(nil), facts.Paths...), linked)
 	return facts
