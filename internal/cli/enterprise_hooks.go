@@ -50,6 +50,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winsession"
 )
 
@@ -1696,29 +1697,18 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 
 func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianState, bool, error) {
 	path := filepath.Join(strings.TrimSpace(dataDir), hookGuardianStateFile)
-	info, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return enterpriseHookGuardianState{}, false, nil
-	}
-	if err != nil {
-		return enterpriseHookGuardianState{}, false, fmt.Errorf("inspect hook guardian state %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return enterpriseHookGuardianState{}, true, fmt.Errorf("hook guardian state is not a regular file: %s", path)
-	}
+	var trust func(string) error
 	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		if err := enterpriseHookGuardianStateFileTrustCheck(path); err != nil {
-			return enterpriseHookGuardianState{}, true, fmt.Errorf("validate hook guardian state %s: %w", path, err)
+		trust = func(path string) error {
+			if err := enterpriseHookGuardianStateFileTrustCheck(path); err != nil {
+				return fmt.Errorf("validate hook guardian state %s: %w", path, err)
+			}
+			return nil
 		}
 	}
-	data, err := readEnterpriseHookBoundedFile(
-		path,
-		info,
-		enterpriseHookGuardianStateMaxBytes,
-		"hook guardian state",
-	)
-	if err != nil {
-		return enterpriseHookGuardianState{}, true, fmt.Errorf("read hook guardian state %s: %w", path, err)
+	data, exists, err := readEnterpriseHookPublishedRecord(path, "hook guardian state", enterpriseHookGuardianStateMaxBytes, trust)
+	if err != nil || !exists {
+		return enterpriseHookGuardianState{}, exists, err
 	}
 	var state enterpriseHookGuardianState
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -5572,27 +5562,14 @@ func previousEnterpriseHookSuccess(
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
-	info, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return enterpriseHookGuardianAuthorization{}, false, nil
-	}
-	if err != nil {
-		return enterpriseHookGuardianAuthorization{}, false, fmt.Errorf("inspect hook guardian authorization %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization is not a regular file: %s", path)
-	}
-	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
-		return enterpriseHookGuardianAuthorization{}, true, err
-	}
-	data, err := readEnterpriseHookBoundedFile(
+	data, exists, err := readEnterpriseHookPublishedRecord(
 		path,
-		info,
-		enterpriseHookGuardianAuthorizationMaxBytes,
 		"hook guardian authorization",
+		enterpriseHookGuardianAuthorizationMaxBytes,
+		enterpriseHookAuthorizationFileTrustCheck,
 	)
-	if err != nil {
-		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("read hook guardian authorization %s: %w", path, err)
+	if err != nil || !exists {
+		return enterpriseHookGuardianAuthorization{}, exists, err
 	}
 	var state enterpriseHookGuardianAuthorization
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -5633,27 +5610,14 @@ func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuar
 
 func loadEnterpriseHookGuardianActivation(dataDir string) (enterpriseHookGuardianActivation, bool, error) {
 	path := filepath.Join(managed.HookGuardianAuthorizationDir(dataDir), hookGuardianActivationFile)
-	info, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return enterpriseHookGuardianActivation{}, false, nil
-	}
-	if err != nil {
-		return enterpriseHookGuardianActivation{}, false, fmt.Errorf("inspect hook guardian activation %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return enterpriseHookGuardianActivation{}, true, fmt.Errorf("hook guardian activation is not a regular file: %s", path)
-	}
-	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
-		return enterpriseHookGuardianActivation{}, true, err
-	}
-	data, err := readEnterpriseHookBoundedFile(
+	data, exists, err := readEnterpriseHookPublishedRecord(
 		path,
-		info,
-		enterpriseHookGuardianAuthorizationMaxBytes,
 		"hook guardian activation",
+		enterpriseHookGuardianAuthorizationMaxBytes,
+		enterpriseHookAuthorizationFileTrustCheck,
 	)
-	if err != nil {
-		return enterpriseHookGuardianActivation{}, true, fmt.Errorf("read hook guardian activation %s: %w", path, err)
+	if err != nil || !exists {
+		return enterpriseHookGuardianActivation{}, exists, err
 	}
 	var activation enterpriseHookGuardianActivation
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -5726,7 +5690,7 @@ func readEnterpriseHookBoundedFile(
 		return nil, err
 	}
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
-		return nil, fmt.Errorf("%s changed identity before open", label)
+		return nil, fmt.Errorf("%s changed identity before open: %w", label, safefile.ErrReadIdentityChanged)
 	}
 	if openedInfo.Size() > maxBytes {
 		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
@@ -5736,7 +5700,7 @@ func readEnterpriseHookBoundedFile(
 		return nil, err
 	}
 	if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() || !os.SameFile(openedInfo, current) {
-		return nil, fmt.Errorf("%s changed identity before read", label)
+		return nil, fmt.Errorf("%s changed identity before read: %w", label, safefile.ErrReadIdentityChanged)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
@@ -5746,6 +5710,48 @@ func readEnterpriseHookBoundedFile(
 		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
 	}
 	return data, nil
+}
+
+// readEnterpriseHookPublishedRecord reads a machine-owned guardian record that
+// the guardian replaces atomically while a status, verify or ensure reader
+// looks at it. The whole sequence (name check, trust check, open, identity
+// check, read) is one attempt; a replacement between its steps, or a sharing
+// violation while the record is swapped in, repeats the attempt with the same
+// bounded policy as the other validated managed reads (GAP-0655,
+// safefile.RetryPublishedRead). Only those transient results repeat: a
+// record that stays swapped fails closed after the bound, naming the file; a
+// link, a file of another type or a failed trust check (owner, ACL) is
+// refused at once. A missing record is reported as absent, not as an error.
+// trust may be nil.
+func readEnterpriseHookPublishedRecord(path, label string, maxBytes int64, trust func(string) error) ([]byte, bool, error) {
+	var data []byte
+	exists := false
+	err := safefile.RetryPublishedRead(func() error {
+		data, exists = nil, false
+		info, err := pathidentity.LstatPinned(path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect %s %s: %w", label, path, err)
+		}
+		exists = true
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file: %s", label, path)
+		}
+		if trust != nil {
+			if err := trust(path); err != nil {
+				return err
+			}
+		}
+		read, err := readEnterpriseHookBoundedFile(path, info, maxBytes, label)
+		if err != nil {
+			return fmt.Errorf("read %s %s: %w", label, path, err)
+		}
+		data = read
+		return nil
+	})
+	return data, exists, err
 }
 
 // A guardian publication can briefly hold a Windows file while replacing it.

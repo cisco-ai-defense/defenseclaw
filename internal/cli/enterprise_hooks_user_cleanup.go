@@ -18,7 +18,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
 // Per-user cleanup of DefenseClaw's own registrations and plugins after a
@@ -301,22 +300,9 @@ func sameEnterpriseHookUserCleanups(left, right []enterpriseHookUserCleanup) boo
 // is an empty ledger.
 func loadEnterpriseHookUserCleanups(dataDir string) ([]enterpriseHookUserCleanup, error) {
 	path := enterpriseHookUserCleanupPath(dataDir)
-	info, err := pathidentity.LstatPinned(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("inspect per-user cleanup ledger %s: %w", path, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("per-user cleanup ledger is not a regular file: %s", path)
-	}
-	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+	data, exists, err := readEnterpriseHookPublishedRecord(path, "per-user cleanup ledger", enterpriseHookUserCleanupMaxBytes, enterpriseHookAuthorizationFileTrustCheck)
+	if err != nil || !exists {
 		return nil, err
-	}
-	data, err := readEnterpriseHookBoundedFile(path, info, enterpriseHookUserCleanupMaxBytes, "per-user cleanup ledger")
-	if err != nil {
-		return nil, fmt.Errorf("read per-user cleanup ledger %s: %w", path, err)
 	}
 	var ledger enterpriseHookUserCleanupLedger
 	decoder := json.NewDecoder(bytes.NewReader(data))
