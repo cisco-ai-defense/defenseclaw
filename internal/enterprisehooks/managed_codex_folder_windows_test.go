@@ -273,7 +273,14 @@ func TestWindowsManagedConnectorFolderLinkFindsEveryVendorFolderLink(t *testing.
 		return []string{fixture.cursor, fixture.claudeDir, fixture.selectorDir}
 	})
 	events := captureCodexFolderEvents(t)
-	for connectorName, want := range map[string]string{"cursor": f.cursor, "claudecode": f.claudeDir, "codex": f.selectorDir} {
+	// The fixture resolves every connector to the Codex folder; this row needs each one's own.
+	folders := map[string]string{"cursor": f.cursor, "claudecode": f.claudeDir, "codex": f.selectorDir}
+	previous := windowsManagedRuntimeSelectorPathResolver
+	t.Cleanup(func() { windowsManagedRuntimeSelectorPathResolver = previous })
+	windowsManagedRuntimeSelectorPathResolver = func(connectorName string) (string, error) {
+		return filepath.Join(folders[connectorName], windowsManagedRuntimeSelectorFile), nil
+	}
+	for connectorName, want := range folders {
 		got, err := WindowsManagedConnectorFolderLink(connectorName)
 		if err != nil || got != want {
 			t.Fatalf("%s: link = %q (err %v), want %q", connectorName, got, err, want)
