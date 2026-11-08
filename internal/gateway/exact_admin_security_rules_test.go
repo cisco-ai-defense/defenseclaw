@@ -71,6 +71,73 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
+			name:   "Docker insecure registry with other settings",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"log-driver":"json-file","insecure-registries":["198.51.100.7:5000"],"debug":true}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry listed twice",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:5000","198.51.100.7:5000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry upper-case scheme",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["HTTP://198.51.100.7:5000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry zero-padded port",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:05000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry through a dot-dot path",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/../docker/daemon.json",
+				"content":   `{"insecure-registries":["http://mirror.local"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry in an Edit fragment",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"log-driver": "json-file"`,
+				"new_string": `"log-driver": "json-file", "insecure-registries": ["http://mirror.local:5000"]`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry in a MultiEdit fragment",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{map[string]any{
+					"old_string": `"debug": true`,
+					"new_string": `"debug": true, "insecure-registries": ["198.51.100.7:5000"]`,
+				}},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
 			name:   "named Kubernetes Secret content read",
 			ruleID: kubernetesNamedSecretReadRuleID,
 			input: actionfacts.Input{
@@ -141,6 +208,40 @@ func TestExactAdministrativeSecurityRuleHardNegatives(t *testing.T) {
 			input: exactStructuredInput(t, "Write", map[string]any{
 				"file_path": "/etc/docker/daemon.json",
 				"content":   `{"insecure-registries":["127.0.0.1:5000"]}`,
+			}),
+		},
+		{
+			name:   "Docker log driver and debug settings",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"content":   `{"log-driver":"json-file","debug":true}`,
+			}),
+		},
+		{
+			name:   "Docker Edit adding a dns list",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug": true`,
+				"new_string": `"debug": true, "dns": ["8.8.8.8", "198.51.100.7"]`,
+			}),
+		},
+		{
+			name:   "Docker Edit adding a loopback registry",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug": true`,
+				"new_string": `"debug": true, "insecure-registries": ["127.0.0.1:5000"]`,
+			}),
+		},
+		{
+			name:   "Docker dot-dot path to another file",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Write", map[string]any{
+				"file_path": "/etc/docker/../daemon.json",
+				"content":   `{"insecure-registries":["198.51.100.7:5000"]}`,
 			}),
 		},
 		{

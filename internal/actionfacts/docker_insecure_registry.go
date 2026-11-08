@@ -16,20 +16,21 @@ import (
 
 const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 
-// ExactDockerInsecureRegistryWrite reports whether one authenticated
-// whole-file write replaces Docker's daemon configuration with a strict JSON
-// document whose only setting lists at least one non-loopback insecure
-// registry in any spelling Docker accepts (host, host:port, IP, IPv6
-// [addr]:port, CIDR, or an http:// or https:// URL). The write is read from
-// the closed argument shapes of every native file tool (nativeFileWrites:
-// Write, the write_file aliases whichever name they give the path, Copilot
-// create, OpenCode write, a patch that adds the file), for the file the call
-// names or the file an existing link reaches. It
-// deliberately returns no path, registry, or content.
-//
-// Substring editors, patch hunks and appends are excluded: their arguments
-// cannot prove that the replacement is the complete final daemon.json
-// document.
+// ExactDockerInsecureRegistryWrite reports whether one authenticated native
+// file-tool call puts a non-loopback insecure registry into Docker's daemon
+// configuration, in any spelling Docker accepts (host, host:port, IP, IPv6
+// [addr]:port, CIDR, or an http:// or https:// URL, any case of the scheme).
+// The call is read from the closed argument shapes of every native file tool
+// (nativeFileWrites: Write, the write_file aliases whichever name they give
+// the path, Copilot create, OpenCode write, Edit, MultiEdit, a patch), for the
+// file the call names, in any spelling that cleans to it, or the file an
+// existing link reaches. A whole-file write is judged as the document it
+// leaves: any other setting the document carries, or a registry it lists
+// twice, does not change the verdict. An edit, a patch hunk or an append
+// cannot show the rest of the file, so it is judged on the text it adds: the
+// insecure-registries list that text spells, less the entries the text it
+// replaces already listed. It deliberately returns no path, registry, or
+// content.
 func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	if input.Command != "" || len(input.Argv) != 0 ||
 		!facts.Authoritative() || !facts.EnforcementEligible() ||
@@ -38,23 +39,19 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	}
 	writes := nativeFileWrites(input.Tool, input.Args)
 	for _, write := range writes {
-		// A relative name (a link in the project) is placed in the working
-		// directory of the call, as the tool does; an absolute one must
-		// already be canonical.
-		canonical, absolute := nativeAbsoluteTarget(write.target, input.CWD)
-		if !write.whole || !absolute || strings.HasPrefix(write.target, "/") && canonical != write.target ||
-			!nativeOperandsCoverTarget(facts, len(writes), canonical) {
+		target, ok := nativeAbsoluteTarget(write.target, input.CWD)
+		if !ok || !nativeOperandsCoverTarget(facts, len(writes), target) {
 			continue
 		}
-		content := write.added
-		if content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
-			strings.ContainsRune(content, 0) {
+		text := write.added
+		if text == "" || len(text) > maxCommandBytes || !utf8.ValidString(text) ||
+			strings.ContainsRune(text, 0) {
 			continue
 		}
-		for _, file := range nativeReachedFiles(facts, canonical) {
+		for _, file := range nativeReachedFiles(facts, target) {
 			if EtcSpelling(file) == dockerDaemonConfigPath &&
 				writeToolNamesItsFile(input) &&
-				exactDockerInsecureRegistryDocument(content) {
+				dockerWriteAddsInsecureRegistry(write) {
 				return true
 			}
 		}
@@ -65,8 +62,8 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 // writeToolNamesItsFile reports whether a Write call names its file the way
 // Claude Code's tool does, file_path: a Write that gives the path another name
 // is a call the tool refuses, not a write of that file. The other tools
-// (write_file aliases, Copilot, OpenCode, patches) take their spellings from
-// nativeFileWrites.
+// (write_file aliases, Copilot, OpenCode, edits, patches) take their spellings
+// from nativeFileWrites.
 func writeToolNamesItsFile(input Input) bool {
 	if input.Tool != "Write" {
 		return true
@@ -76,44 +73,159 @@ func writeToolNamesItsFile(input Input) bool {
 	return problem.status == "" && named
 }
 
-func exactDockerInsecureRegistryDocument(content string) bool {
-	raw := []byte(content)
-	if validateJSONWithStringLimit(raw, maxScalarBytes) != "" {
+// dockerWriteAddsInsecureRegistry judges the text of one write of the daemon
+// configuration: a whole document by the list it holds, a fragment by the list
+// it spells and the entries the replaced text already listed.
+func dockerWriteAddsInsecureRegistry(write nativeFileWrite) bool {
+	if write.whole {
+		entries, ok := dockerDocumentRegistries(write.added)
+		return ok && dockerListAddsInsecureRegistry(entries, nil)
+	}
+	added, ok := dockerFragmentRegistries(write.added)
+	if !ok {
 		return false
+	}
+	kept, _ := dockerFragmentRegistries(write.replaced)
+	return dockerListAddsInsecureRegistry(added, kept)
+}
+
+// dockerListAddsInsecureRegistry reports whether every entry is one the closed
+// grammar can read and at least one is an insecure registry that the entries
+// already in the file (kept) did not list.
+func dockerListAddsInsecureRegistry(entries, kept []string) bool {
+	had := make(map[string]int, len(kept))
+	for _, entry := range kept {
+		had[entry]++
+	}
+	found := false
+	for _, entry := range entries {
+		insecure, valid := exactDockerRegistryEntry(entry)
+		if !valid {
+			return false
+		}
+		if !insecure {
+			continue
+		}
+		if had[entry] > 0 {
+			had[entry]--
+			continue
+		}
+		found = true
+	}
+	return found
+}
+
+// dockerDocumentRegistries reads the insecure-registries list of a complete
+// daemon.json document. Other settings are not read: they do not change what
+// the list does. A repeated key reads as dockerd reads it, the last wins.
+func dockerDocumentRegistries(content string) ([]string, bool) {
+	raw := []byte(content)
+	if issue := validateJSONWithStringLimit(raw, maxScalarBytes); issue != "" &&
+		issue != IssueDuplicateJSONKey {
+		return nil, false
 	}
 	var document map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	if err := decoder.Decode(&document); err != nil || len(document) != 1 {
-		return false
+	if err := decoder.Decode(&document); err != nil {
+		return nil, false
 	}
-	registriesValue, ok := document["insecure-registries"]
+	value, present := document["insecure-registries"]
+	if !present {
+		return nil, true
+	}
+	list, ok := value.([]any)
 	if !ok {
-		return false
+		return nil, false
 	}
-	registries, ok := registriesValue.([]any)
-	if !ok || len(registries) == 0 {
-		return false
-	}
-
-	seen := make(map[string]struct{}, len(registries))
-	foundInsecure := false
-	for _, value := range registries {
-		registry, ok := value.(string)
+	entries := make([]string, 0, len(list))
+	for _, item := range list {
+		entry, ok := item.(string)
 		if !ok {
-			return false
+			return nil, false
 		}
-		if _, duplicate := seen[registry]; duplicate {
-			return false
-		}
-		seen[registry] = struct{}{}
-		insecure, valid := exactDockerRegistryEntry(registry)
-		if !valid {
-			return false
-		}
-		foundInsecure = foundInsecure || insecure
+		entries = append(entries, entry)
 	}
-	return foundInsecure
+	return entries, true
+}
+
+const dockerJSONSpace = " \t\r\n"
+
+// dockerFragmentRegistries reads the entries of every insecure-registries list
+// that a piece of daemon.json text spells, including a list the piece cuts off
+// before its closing bracket. A piece without the key lists nothing. ok is
+// false when a list holds anything but JSON strings.
+func dockerFragmentRegistries(text string) (entries []string, ok bool) {
+	const key = `"insecure-registries"`
+	for offset := 0; ; {
+		found := strings.Index(text[offset:], key)
+		if found < 0 {
+			return entries, true
+		}
+		offset += found + len(key)
+		list, listed, valid := dockerFragmentList(text[offset:])
+		if !valid {
+			return nil, false
+		}
+		if listed {
+			entries = append(entries, list...)
+		}
+	}
+}
+
+// dockerFragmentList reads `: ["a", "b"` after a key. listed is false when
+// what follows the key is not a list.
+func dockerFragmentList(rest string) (entries []string, listed, valid bool) {
+	rest = strings.TrimLeft(rest, dockerJSONSpace)
+	if !strings.HasPrefix(rest, ":") {
+		return nil, false, true
+	}
+	rest = strings.TrimLeft(rest[1:], dockerJSONSpace)
+	if !strings.HasPrefix(rest, "[") {
+		return nil, false, true
+	}
+	rest = rest[1:]
+	for {
+		rest = strings.TrimLeft(rest, dockerJSONSpace)
+		if rest == "" || rest[0] == ']' {
+			return entries, true, true
+		}
+		end := dockerJSONStringEnd(rest)
+		if end < 0 {
+			return nil, true, false
+		}
+		var entry string
+		if json.Unmarshal([]byte(rest[:end]), &entry) != nil {
+			return nil, true, false
+		}
+		entries = append(entries, entry)
+		rest = strings.TrimLeft(rest[end:], dockerJSONSpace)
+		switch {
+		case rest == "" || rest[0] == ']':
+			return entries, true, true
+		case rest[0] == ',':
+			rest = rest[1:]
+		default:
+			return nil, true, false
+		}
+	}
+}
+
+// dockerJSONStringEnd is the length of the JSON string literal that opens
+// text, or -1 when text does not open with a complete one.
+func dockerJSONStringEnd(text string) int {
+	if text == "" || text[0] != '"' {
+		return -1
+	}
+	for index := 1; index < len(text); index++ {
+		switch text[index] {
+		case '\\':
+			index++
+		case '"':
+			return index + 1
+		}
+	}
+	return -1
 }
 
 // exactDockerRegistryEntry classifies one insecure-registries element. Docker
@@ -139,20 +251,19 @@ func exactDockerRegistryEntry(value string) (insecure bool, valid bool) {
 	}
 }
 
+// exactDockerRegistryURL reads an http:// or https:// entry. Docker lower-cases
+// the scheme, so HTTP:// names the same registry; a trailing slash is the
+// empty path.
 func exactDockerRegistryURL(value string) (insecure bool, valid bool) {
-	isHTTP := strings.HasPrefix(value, "http://")
-	isHTTPS := strings.HasPrefix(value, "https://")
-	if !isHTTP && !isHTTPS {
+	scheme, _, _ := strings.Cut(value, "://")
+	scheme = strings.ToLower(scheme)
+	if scheme != "http" && scheme != "https" {
 		return false, false
 	}
 	parsed, err := url.ParseRequestURI(value)
-	if err != nil || parsed.Opaque != "" || parsed.User != nil ||
-		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" ||
-		parsed.RawPath != "" || parsed.Host == "" {
-		return false, false
-	}
-	if (isHTTP && parsed.Scheme != "http") ||
-		(isHTTPS && parsed.Scheme != "https") {
+	if err != nil || parsed.Scheme != scheme || parsed.Opaque != "" || parsed.User != nil ||
+		parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.Path != "" && parsed.Path != "/" || parsed.Host == "" {
 		return false, false
 	}
 	insecure, valid = exactDockerRegistryHost(parsed.Hostname())
@@ -273,15 +384,17 @@ func dockerRegistryNumericHost(value string) bool {
 	return strings.Trim(value, "0123456789.") == ""
 }
 
+// exactDockerRegistryPort reads a port the way Docker does, as a decimal
+// number up to 65535: zero-padded spellings name the same port.
 func exactDockerRegistryPort(port string) bool {
 	if port == "" {
 		return true
 	}
-	if len(port) > 5 || len(port) > 1 && strings.HasPrefix(port, "0") {
+	if len(port) > 16 || port[0] == '-' {
 		return false
 	}
-	value, err := strconv.ParseUint(port, 10, 16)
-	return err == nil && value != 0
+	value, err := strconv.Atoi(port)
+	return err == nil && value <= 65535
 }
 
 func dockerRegistryASCII(value string) bool {
