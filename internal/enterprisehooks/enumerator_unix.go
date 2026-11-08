@@ -1723,6 +1723,15 @@ func UnixMissConfirmed(state *UnixEnumeratorState, user, connector string) bool 
 	return state.Misses[unixRowKey(user, connector)] > 0 || state.Sources[user] == unixSourceFiles
 }
 
+// UnixAccountSeenInLocalDatabase reports whether the enumerator last saw the
+// account in the local account database. A lookup that then finds no such user
+// is definitive there, and the account is gone. Unlike UnixMissConfirmed it
+// ignores the row miss counters, which also count an account that lost the
+// enrollment group filter.
+func UnixAccountSeenInLocalDatabase(state *UnixEnumeratorState, user string) bool {
+	return state != nil && state.Sources[strings.TrimSpace(user)] == unixSourceFiles
+}
+
 func unixRowKey(user, conn string) string {
 	user = strings.TrimSpace(user)
 	conn = strings.ToLower(strings.TrimSpace(conn))

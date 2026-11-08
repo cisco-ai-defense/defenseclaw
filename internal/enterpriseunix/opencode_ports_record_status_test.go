@@ -143,8 +143,8 @@ func TestStatusDropsOpenCodePortUnknownEntriesOnlyOnProofTheAccountIsGone(t *tes
 	}{
 		{name: "deleted local account, enumerator saw it in the local database",
 			entry: unknown(1001, "gone"), state: &enterprisehooks.UnixEnumeratorState{Sources: map[string]string{"gone": "files"}}},
-		{name: "deleted account, enumerator counted a miss for the row",
-			entry: unknown(1001, "gone"), state: &enterprisehooks.UnixEnumeratorState{Misses: map[string]int{"gone\x00opencode": 1}}},
+		{name: "live directory account that lost the enrollment filter, then a lookup miss: the row miss counter is not proof",
+			entry: unknown(1001, "gone"), state: &enterprisehooks.UnixEnumeratorState{Misses: map[string]int{"gone\x00opencode": 1}}, reported: true},
 		{name: "deleted account, fresh read of the search policy",
 			entry: unknown(1001, "gone"), fresh: true},
 		{name: "lookup miss alone: a live directory account while the directory does not answer",
@@ -226,8 +226,72 @@ func TestStatusListsLiveOpenCodePortUnknownEntryBesideAGoneOne(t *testing.T) {
 	}
 }
 
+// passwdRunner answers getent passwd with one entry whose primary group is
+// the shared users group, the layout of an ordinary account.
+type passwdRunner struct{ entry string }
+
+func (r passwdRunner) Run(_ context.Context, name string, args ...string) (CommandResult, error) {
+	if name == "getent" && len(args) == 2 && args[0] == "passwd" {
+		if r.entry == "" {
+			return CommandResult{ExitCode: 2}, errors.New("exit status 2")
+		}
+		return CommandResult{Stdout: []byte(r.entry + "\n")}, nil
+	}
+	return CommandResult{ExitCode: 1}, errors.New("unexpected command " + name)
+}
+
+// The account lookup behind the status proof is the host own, not the service
+// account one: an ordinary account whose primary group is the shared users
+// group (any name that is not its own) still answers with its uid, so a name
+// given to a new uid drops the entry of the old uid, and the entry of an
+// account with the recorded uid stays.
+func TestStatusOpenCodePortUnknownUsesOrdinaryAccountIdentity(t *testing.T) {
+	cases := []struct {
+		name     string
+		entry    string
+		uid      int
+		reported bool
+	}{
+		{name: "name reused by a new uid, shared primary group", entry: "kept:x:2002:100::/home/kept:/bin/bash", uid: 1001},
+		{name: "name reused by a new uid, private primary group", entry: "kept:x:2002:2002::/home/kept:/bin/bash", uid: 1001},
+		{name: "same uid, shared primary group", entry: "kept:x:1001:100::/home/kept:/bin/bash", uid: 1001, reported: true},
+		{name: "no account, no proof", entry: "", uid: 1001, reported: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			previousGone, previousFresh, previousLoad := guardianAccountConfirmedGone, guardianFreshAccountRecordGone, loadOpenCodePortsRecord
+			t.Cleanup(func() {
+				guardianAccountConfirmedGone, guardianFreshAccountRecordGone, loadOpenCodePortsRecord = previousGone, previousFresh, previousLoad
+			})
+			guardianAccountConfirmedGone = func(string, int) bool { return false }
+			guardianFreshAccountRecordGone = func(context.Context, string) bool { return false }
+			env := &Env{GOOS: "linux", Root: t.TempDir(), Layout: mustLayout(t, "linux"), Runner: passwdRunner{entry: tc.entry}}
+			env.Accounts = &linuxAccounts{env: env}
+			record := env.P(filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixOpenCodeServicePortsFileName))
+			if err := os.MkdirAll(filepath.Dir(record), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(record, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loadOpenCodePortsRecord = func(string) (enterprisehooks.UnixOpenCodeServicePortsState, error) {
+				return enterprisehooks.UnixOpenCodeServicePortsState{Exists: true, Unknown: []enterprisehooks.UnixOpenCodeServicePortUnknown{
+					{UID: tc.uid, User: "kept", Reason: "its home is not available", Path: "/home/kept/.config/opencode/service.json", Fix: "clear kept"}}}, nil
+			}
+			msg := openCodeRecordWarnings(t, env)["opencode_port_account_unknown"]
+			if tc.reported != strings.Contains(msg, "kept (uid 1001)") {
+				t.Fatalf("reported=%v, want %v: %q", strings.Contains(msg, "kept (uid 1001)"), tc.reported, msg)
+			}
+		})
+	}
+}
+
 // failingAccounts is an account lookup that never answers.
 type failingAccounts struct{ fakeAccounts }
+
+func (*failingAccounts) ResolveUID(context.Context, string) (int, bool, error) {
+	return 0, false, errors.New("lookup failed")
+}
 
 func (*failingAccounts) Lookup(context.Context, string) (Account, bool, error) {
 	return Account{}, false, errors.New("lookup failed")

@@ -297,6 +297,11 @@ func (a *fakeAccounts) Lookup(_ context.Context, name string) (Account, bool, er
 	return account, ok, nil
 }
 
+func (a *fakeAccounts) ResolveUID(_ context.Context, name string) (int, bool, error) {
+	account, ok := a.accounts[name]
+	return account.UID, ok, nil
+}
+
 func (a *fakeAccounts) Ensure(ctx context.Context, name string) (Account, error) {
 	if account, ok, _ := a.Lookup(ctx, name); ok {
 		return account, nil

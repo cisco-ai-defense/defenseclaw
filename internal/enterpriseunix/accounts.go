@@ -62,6 +62,11 @@ func loginAccountError(account Account, ensure, goos string) error {
 // AccountManager resolves, creates and removes the service account.
 type AccountManager interface {
 	Lookup(ctx context.Context, name string) (Account, bool, error)
+	// ResolveUID answers for any ordinary account of the host, whatever its
+	// primary group is named (Lookup holds the service account to its own
+	// shape): the uid the name resolves to, false when the host has no such
+	// account, an error when the lookup failed.
+	ResolveUID(ctx context.Context, name string) (uid int, found bool, err error)
 	Ensure(ctx context.Context, name string) (Account, error)
 	Remove(ctx context.Context, name string) error
 }
@@ -80,22 +85,37 @@ type linuxAccounts struct {
 	env *Env
 }
 
-func (a *linuxAccounts) Lookup(ctx context.Context, name string) (Account, bool, error) {
+// passwdEntry reads name through getent passwd: the entry fields with its
+// uid and gid, and false when the host has no such account.
+func (a *linuxAccounts) passwdEntry(ctx context.Context, name string) (fields []string, uid, gid int, found bool, err error) {
 	result, err := a.env.Runner.Run(ctx, "getent", "passwd", name)
 	if err != nil {
 		if result.ExitCode == 2 {
-			return Account{}, false, nil
+			return nil, 0, 0, false, nil
 		}
-		return Account{}, false, fmt.Errorf("look up %s: %w", name, err)
+		return nil, 0, 0, false, fmt.Errorf("look up %s: %w", name, err)
 	}
-	fields := strings.Split(strings.TrimSpace(string(result.Stdout)), ":")
+	fields = strings.Split(strings.TrimSpace(string(result.Stdout)), ":")
 	if len(fields) < 7 || fields[0] != name {
-		return Account{}, false, fmt.Errorf("look up %s: malformed passwd entry", name)
+		return nil, 0, 0, false, fmt.Errorf("look up %s: malformed passwd entry", name)
 	}
 	uid, uidErr := strconv.Atoi(fields[2])
 	gid, gidErr := strconv.Atoi(fields[3])
 	if uidErr != nil || gidErr != nil || uid <= 0 || gid <= 0 {
-		return Account{}, false, fmt.Errorf("look up %s: invalid uid/gid %q:%q", name, fields[2], fields[3])
+		return nil, 0, 0, false, fmt.Errorf("look up %s: invalid uid/gid %q:%q", name, fields[2], fields[3])
+	}
+	return fields, uid, gid, true, nil
+}
+
+func (a *linuxAccounts) ResolveUID(ctx context.Context, name string) (int, bool, error) {
+	_, uid, _, found, err := a.passwdEntry(ctx, name)
+	return uid, found, err
+}
+
+func (a *linuxAccounts) Lookup(ctx context.Context, name string) (Account, bool, error) {
+	fields, uid, gid, found, err := a.passwdEntry(ctx, name)
+	if err != nil || !found {
+		return Account{}, false, err
 	}
 	group, err := a.env.Runner.Run(ctx, "getent", "group", strconv.Itoa(gid))
 	if err != nil {
@@ -278,6 +298,10 @@ func (a *dsclAccounts) readAttribute(ctx context.Context, record, key string) (s
 		return "", fmt.Errorf("dscl %s %s: unexpected output %q", record, key, strings.TrimSpace(string(result.Stdout)))
 	}
 	return strings.TrimSpace(value), nil
+}
+
+func (a *dsclAccounts) ResolveUID(ctx context.Context, name string) (int, bool, error) {
+	return a.readID(ctx, "/Users/"+name, "UniqueID")
 }
 
 func (a *dsclAccounts) Lookup(ctx context.Context, name string) (Account, bool, error) {

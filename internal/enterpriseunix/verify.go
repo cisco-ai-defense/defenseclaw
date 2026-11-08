@@ -1668,20 +1668,22 @@ func (env *Env) openCodePortsStillUnknown(entries []enterprisehooks.UnixOpenCode
 // another uid is proof: the recorded account lost it. A lookup miss alone is
 // not, because getent gives the same answer for a live directory account while
 // the directory does not answer, and on macOS the local node does not see
-// directory accounts. A miss counts only with the proof the guardian target
-// warnings require: a fresh read of the whole search policy, or the enumerator
-// confirmation (UnixMissConfirmed).
+// directory accounts. A miss counts only with proof of the account being gone:
+// a fresh read of the whole search policy, or the enumerator having last seen
+// the account in the local account database, where no such user is definitive.
+// The enumerator miss counters are not proof: an account that loses its
+// enrollment group filter counts on the same row as one that is deleted.
 func (env *Env) openCodePortAccountGone(ctx context.Context, entry enterprisehooks.UnixOpenCodeServicePortUnknown, enumeration *enterprisehooks.UnixEnumeratorState) bool {
-	account, found, ok := env.lookupPlainAccount(ctx, entry.User)
+	uid, found, ok := env.accountUID(ctx, entry.User)
 	if !ok {
 		return false
 	}
 	if found {
-		return account.UID != entry.UID
+		return uid != entry.UID
 	}
 	return guardianAccountConfirmedGone(entry.User, entry.UID) ||
 		guardianFreshAccountRecordGone(ctx, entry.User) ||
-		enterprisehooks.UnixMissConfirmed(enumeration, entry.User, "opencode")
+		enterprisehooks.UnixAccountSeenInLocalDatabase(enumeration, entry.User)
 }
 
 // openCodePortsRecordGeteuid is os.Geteuid (tests replace it).

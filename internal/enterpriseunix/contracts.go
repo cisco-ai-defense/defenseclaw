@@ -967,31 +967,40 @@ func directoryLookupsFailing(warnings []enterprisestatus.Message) bool {
 	return false
 }
 
-// lookupPlainAccount asks the host own account lookup for user (getent passwd
-// on Linux, the local directory node on macOS). ok is false when there is no
-// lookup, user is not a plain account name or the lookup failed: the answer
-// then says nothing.
-func (env *Env) lookupPlainAccount(ctx context.Context, user string) (account Account, found, ok bool) {
+// accountAbsent reports whether the host own account lookup also finds no
+// account named user. An account that still exists, a lookup that fails, or a
+// name that is not a plain account name keeps the target a
+// guardian_target_failed.
+func (env *Env) accountAbsent(ctx context.Context, user string) bool {
 	user = strings.TrimSpace(user)
 	if env.Accounts == nil || !plainAccountName(user) {
-		return Account{}, false, false
+		return false
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	account, found, err := env.Accounts.Lookup(lookupCtx, user)
-	return account, found, err == nil
+	_, found, err := env.Accounts.Lookup(lookupCtx, user)
+	return err == nil && !found
 }
 
-// accountAbsent reports whether the host own account lookup also finds no
-// account named user. An account that still exists, a lookup that fails, or a
-// name that is not a plain account name keeps the target a
-// guardian_target_failed.
-func (env *Env) accountAbsent(ctx context.Context, user string) bool {
-	_, found, ok := env.lookupPlainAccount(ctx, user)
-	return ok && !found
+// accountUID asks the host own account lookup which uid the account name user
+// resolves to, for any ordinary account. ok is false when there is no lookup,
+// user is not a plain account name or the lookup failed: the answer then says
+// nothing.
+func (env *Env) accountUID(ctx context.Context, user string) (uid int, found, ok bool) {
+	user = strings.TrimSpace(user)
+	if env.Accounts == nil || !plainAccountName(user) {
+		return 0, false, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	uid, found, err := env.Accounts.ResolveUID(lookupCtx, user)
+	return uid, found, err == nil
 }
 
 // plainAccountName accepts the account names Linux and macOS create: no
