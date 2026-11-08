@@ -221,7 +221,7 @@ def test_the_chain_and_the_row_return_agent_config_files_root_wrote(tmp_path, mo
     assert f" && {step} && defenseclaw-gateway start" in chain
     # The paths enter a step that re-checks each one when it runs, never a bare chown.
     assert "sudo chown " + chr(34) + "$(id -un)" + chr(34) + " " + shlex.quote(os.fspath(files["claude"])) not in chain
-    for token in ("-links 1", "-user root", "-execdir chown -h", "cd -P"):
+    for token in ("-user root", "-execdir perl -e", "cd -P"):
         assert token in step
     assert os.fspath(files["cursor"]) not in chain  # the account still owns it
 
@@ -240,7 +240,7 @@ def test_an_account_owned_home_keeps_the_chain_and_the_row_as_they_were(tmp_path
     monkeypatch.setattr(gateway_module, "resolve_gateway_binary", lambda: "")
 
     assert cmd_doctor._root_owned_agent_config_paths() == []
-    assert "-links 1" not in cmd_doctor._root_leftovers_remedy(_cfg(home))
+    assert "-execdir perl" not in cmd_doctor._root_leftovers_remedy(_cfg(home))
     result = cmd_doctor._DoctorResult(quiet=True)
     cmd_doctor._check_sudo_runtime_leftovers(_cfg(home), result)
     assert result.checks[-1]["status"] == "pass"
@@ -304,7 +304,8 @@ def test_the_return_step_skips_a_folder_swapped_for_a_link_after_the_scan(tmp_pa
 
     assert done.returncode == 0
     assert "skipped" in done.stderr
-    calls = log.read_text().splitlines()
+    # The stand-in's echo expands the perl program's \\n; count the calls by their find.
+    calls = [line for line in log.read_text().splitlines() if line.startswith("find ")]
     assert len(calls) == 1 and "find -P ./settings.json" in calls[0]
 
 
@@ -344,7 +345,7 @@ def test_the_return_step_walks_the_folder_it_checked_when_a_parent_is_swapped_fo
                 "",
             ]
         ),
-        "chown": f'#!/bin/sh\necho "$(/bin/pwd -P)" >> {log}\n',
+        "perl": f'#!/bin/sh\necho "$(/bin/pwd -P)" >> {log}\nexec /usr/bin/perl "$@"\n',
         "chmod": "#!/bin/sh\n",
     }
     for name, body in scripts.items():
@@ -414,7 +415,7 @@ def test_the_return_step_keeps_the_access_repair_out_of_sudo(tmp_path, path, fol
                 "",
             ]
         ),
-        "chown": f"#!/bin/sh\n{swap_line}\n",
+        "perl": f'#!/bin/sh\n{swap_line}\nexec /usr/bin/perl "$@"\n',
         "chmod": f"#!/bin/sh\necho \"sudo=$SUDO_ACTIVE $*\" >> {chmod_log}\n/bin/chmod \"$@\"\n",
     }
     for name, body in scripts.items():
@@ -437,10 +438,68 @@ def test_the_return_step_keeps_the_access_repair_out_of_sudo(tmp_path, path, fol
         assert done.returncode == 0, done.stderr
     # A swapped folder makes find fail on the link, which stops the chain: also safe.
     sudo_calls = sudo_log.read_text()
-    assert "chown -h" in sudo_calls and "chmod" not in sudo_calls
+    assert "-execdir perl" in sudo_calls and "chmod" not in sudo_calls
     chmods = chmod_log.read_text() if chmod_log.exists() else ""
     assert "sudo=1" not in chmods
     if swap:
         assert chmods.strip() == ""
     else:
         assert chmods.strip() == f"sudo= u+rwX ./{Path(path).name}"
+
+
+@pytest.mark.skipif(shutil.which("find") is None or os.geteuid() == 0, reason="needs find and a non-root account")
+@pytest.mark.parametrize("swap", [True, False], ids=["hard-link-swapped-in", "file-untouched"])
+def test_the_return_step_changes_only_the_inode_it_checked(tmp_path, swap):
+    """A hard link to another file put at the checked name when find runs the owner change is skipped.
+
+    The perl stand-in does the swap and then runs the real program, asking for an owner the
+    test account cannot give: only a change that really reaches fchown fails with a permission
+    error, so the untouched twin must reach it and the swapped one must not.
+    """
+    import getpass
+    import subprocess
+
+    from defenseclaw.commands import cmd_doctor
+
+    base = tmp_path.resolve()
+    home = base / "home"
+    target = _write(home / ".claude", "settings.json", 0o600)
+    outside = _write(base, "outside.json", 0o600)
+    fake = base / "bin"
+    fake.mkdir()
+    swap_line = ""
+    if swap:
+        moved = os.fspath(target) + "-moved"
+        swap_line = f"mv {shlex.quote(os.fspath(target))} {shlex.quote(moved)} && ln {shlex.quote(os.fspath(outside))} {shlex.quote(os.fspath(target))}\n"
+    scripts = {
+        "sudo": "\n".join(
+            [
+                "#!/bin/sh",
+                "n=$#; while [ $n -gt 0 ]; do a=$1; shift; "
+                f'[ "$a" = root ] && a={getpass.getuser()}; set -- "$@" "$a"; n=$((n-1)); done',
+                'exec "$@"',
+                "",
+            ]
+        ),
+        "perl": "#!/bin/sh\n" + swap_line + 'prog=$2; from=$3; to=$(($4 + 1)); shift 4\nexec /usr/bin/perl -e "$prog" "$from" "$to" "$@"\n',
+        "chmod": "#!/bin/sh\n",
+    }
+    for name, body in scripts.items():
+        (fake / name).write_text(body)
+        (fake / name).chmod(0o755)
+
+    step = cmd_doctor._root_agent_config_return_step([os.fspath(target)])
+    done = subprocess.run(
+        ["sh", "-c", step],
+        env={"PATH": os.fspath(fake) + ":/usr/bin:/bin", "HOME": os.fspath(home)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    if swap:
+        assert done.returncode == 0, done.stderr
+        assert "skipped ./settings.json" in done.stderr and "not permitted" not in done.stderr
+    else:
+        assert done.returncode != 0
+        assert "./settings.json: Operation not permitted" in done.stderr
