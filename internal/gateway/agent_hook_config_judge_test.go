@@ -25,9 +25,9 @@ func rv3Judge(t *testing.T, conn, profile, cwd string, managed bool, tool string
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = conn
-	if profile == "strict" {
-		installToolCallCorpusProfileConnector(t, conn, "strict")
-		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+	if profile == "strict" || profile == "permissive" {
+		installToolCallCorpusProfileConnector(t, conn, profile)
+		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
 	}
 	if managed {
 		managedEnterpriseActive.Store(true)

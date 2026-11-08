@@ -1151,6 +1151,14 @@ func agentHookConfigFindings(ctx context.Context, request trustedActionRequest, 
 				add(agentHookConfigWriteRuleID, "", target)
 			}
 		}
+		// The command facts carry the words after the assignments, so the
+		// worktree a command-local GIT_DIR / GIT_WORK_TREE names is read
+		// from the statement's own syntax.
+		for _, argv := range agentHookConfigGitAssignedCommands(part.Command, guard.home) {
+			if target := agentHookConfigGitTarget(argv, partGuard); target != "" {
+				add(agentHookConfigWriteRuleID, "", target)
+			}
+		}
 		if reason, target := agentHookConfigPrefixOverrideOne(part.Command, partGuard); reason != "" {
 			add(agentHookConfigDisableRuleID, reason, target)
 		} else if target != "" {
@@ -1268,6 +1276,47 @@ func agentHookConfigExactWords(command actionfacts.CommandFact) []string {
 		}
 	}
 	return words
+}
+
+// agentHookConfigGitAssignedCommands lists the git commands of a statement
+// that carry command-local assignments, each as its assignments followed by
+// its words, the order agentHookConfigGitTarget reads.
+func agentHookConfigGitAssignedCommands(command, home string) [][]string {
+	if !strings.Contains(command, "git") || !strings.Contains(command, "=") {
+		return nil
+	}
+	file, err := syntax.NewParser().Parse(strings.NewReader(command), "")
+	if err != nil {
+		return nil
+	}
+	var out [][]string
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Assigns) == 0 || len(call.Args) < 2 || len(out) >= 8 {
+			return true
+		}
+		var argv []string
+		for _, assignment := range call.Assigns {
+			if assignment.Name == nil || assignment.Value == nil {
+				return true
+			}
+			value, fixed := hookpaths.StaticWord(assignment.Value, home)
+			if !fixed {
+				return true
+			}
+			argv = append(argv, assignment.Name.Value+"="+value)
+		}
+		for _, word := range call.Args {
+			value, fixed := hookpaths.StaticWord(word, home)
+			if !fixed {
+				return true
+			}
+			argv = append(argv, value)
+		}
+		out = append(out, argv)
+		return true
+	})
+	return out
 }
 
 func agentHookConfigGitGlobalSubcommand(argv []string, guard *agentHookConfigGuard) (int, string) {

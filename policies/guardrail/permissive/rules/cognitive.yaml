@@ -120,7 +120,7 @@ rules:
     # regex cannot match alone.
     pattern: 'a^'
     title: "Turn off the agent's DefenseClaw hooks"
-    severity: HIGH
+    severity: CRITICAL
     confidence: 0.98
     tags: [cognitive-tampering, tampering, security-state]
   - id: tamper.agent_hook_config_write
