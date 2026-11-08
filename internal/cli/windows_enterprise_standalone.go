@@ -3268,9 +3268,12 @@ const windowsEnterpriseVendorFolderCode = "vendor_folder_not_held"
 // folder holds nothing DefenseClaw did not account for. Otherwise the action
 // is refused, by name, with the access list unchanged and the administrator's
 // recovery commands in the message, so reporting success never leaves the
-// connector unprotected (GAP-0756, GAP-0760). A fresh install, and a folder
-// with no recorded file (case b), pass: the first publish takes that folder
-// over.
+// connector unprotected (GAP-0756, GAP-0760). The same holds for a vendor
+// policy file DefenseClaw has no record of that another account can change and
+// that the publish cannot move aside (what a purge leaves when it keeps a
+// recorded file of that kind, GAP-0930): the action stops with 1603 and the
+// file's recovery. A fresh install, and a folder with no recorded file and no
+// such file (case b), pass: the first publish takes that folder over.
 func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecycleOptions) error {
 	if !windowsEnterpriseStandalone(opts) {
 		return nil
@@ -3294,11 +3297,19 @@ func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecy
 		return nil
 	}
 	messages := make([]string, 0, len(blocked))
+	var explanations []string
 	for _, problem := range blocked {
 		message := problem.Connector + ": " + problem.Message
 		// The same alert row the guardian pass writes, so a refusal Setup
 		// finds first (or with the guardian stopped) leaves a trail too.
-		details := windowsVendorFolderAlertDetails(problem.Dir, problem.Message)
+		path, explanation := problem.Dir, windowsEnterpriseVendorFolderRefusalWhy
+		if problem.UnrecordedFile {
+			path, explanation = problem.File, windowsEnterpriseUnrecordedFileRefusalWhy
+		}
+		if !slices.Contains(explanations, explanation) {
+			explanations = append(explanations, explanation)
+		}
+		details := windowsVendorFolderAlertDetails(path, problem.Message)
 		details["connector"], details["actor"] = problem.Connector, "defenseclaw-setup"
 		if err := writeWindowsEnterpriseAuditRow(func() error {
 			return windowsEnterpriseVendorFolderAlert("managed-vendor-folder", "managed_vendor_folder_not_protected", details)
@@ -3307,9 +3318,18 @@ func refuseWindowsEnterpriseUntrustedVendorFolders(opts *windowsEnterpriseLifecy
 		}
 		messages = append(messages, message)
 	}
-	return fmt.Errorf("%s (DefenseClaw does not take over a vendor folder it did not create unless it can prove nothing else holds it or has changed it, "+
-		"and does not give a file another account could change a trusted access list back in place): %s", windowsEnterpriseGateRefusal, strings.Join(messages, "; "))
+	return fmt.Errorf("%s (%s): %s", windowsEnterpriseGateRefusal, strings.Join(explanations, "; "), strings.Join(messages, "; "))
 }
+
+// Why the gate refuses: a vendor folder DefenseClaw did not create that holds
+// a file it recorded, and a vendor policy file it has no record of that
+// another account can change (GAP-0930).
+const (
+	windowsEnterpriseVendorFolderRefusalWhy = "DefenseClaw does not take over a vendor folder it did not create unless it can prove nothing else holds it or has changed it, " +
+		"and does not give a file another account could change a trusted access list back in place"
+	windowsEnterpriseUnrecordedFileRefusalWhy = "DefenseClaw does not publish machine policy through a vendor policy file it did not write and another account can change, " +
+		"and does not move aside or replace one an administrator owns"
+)
 
 // applyWindowsEnterpriseVendorFolders reports the same folders in a status,
 // verify or any other result: coverage and security are incomplete while a
