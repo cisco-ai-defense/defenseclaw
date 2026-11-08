@@ -110,7 +110,7 @@ func LateOrdinaryCallAt(home, connector string, payload []byte) bool {
 			if json.Unmarshal(raw, &workdir) != nil || workdir == "" || strings.HasPrefix(workdir, "~") {
 				return false
 			}
-			if scan, ok = newLateScan(lateAt(cwd, workdir), home); !ok {
+			if scan, ok = newLateScan(JoinDirectoryText(cwd, workdir), home); !ok {
 				return false
 			}
 		}
@@ -238,7 +238,7 @@ func lateFallbackHomes(given, cwd, account string) []string {
 		candidates = append(candidates, env)
 	}
 	if !filepath.IsAbs(given) {
-		candidates = append(candidates, lateAt(cwd, given))
+		candidates = append(candidates, JoinDirectoryText(cwd, given))
 	}
 	for _, candidate := range candidates {
 		if real, ok := lateUsableHome(candidate); ok && !slices.Contains(homes, real) {
@@ -246,21 +246,6 @@ func lateFallbackHomes(given, cwd, account string) []string {
 		}
 	}
 	return homes
-}
-
-// lateAt places a path that may be relative at the folder a call runs in,
-// as text. It is the only way the late scan joins a relative path (a
-// workdir, a saved home) to a folder: filepath.Join would drop a parent step
-// before any link is resolved, which names another folder than the file
-// system does when a link comes before the "..". The result is resolved
-// component by component, a link before a parent step included, by
-// pathEvalSymlinks (newLateScan, lateUsableHome); an operand word is walked
-// the same way by lateScan.walk, which closes on any parent step.
-func lateAt(base, path string) string {
-	if filepath.IsAbs(path) {
-		return path
-	}
-	return base + string(filepath.Separator) + path
 }
 
 // lateUsableHome resolves a home by file system rules (a parent step or a
