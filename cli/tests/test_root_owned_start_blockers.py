@@ -447,7 +447,10 @@ def test_the_return_step_keeps_the_access_repair_out_of_sudo(tmp_path, path, fol
         assert chmods.strip() == f"sudo= u+rwX ./{Path(path).name}"
 
 
-@pytest.mark.skipif(shutil.which("find") is None or os.geteuid() == 0, reason="needs find and a non-root account")
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or shutil.which("find") is None or os.geteuid() == 0,
+    reason="needs find and a non-root account",
+)
 @pytest.mark.parametrize("swap", [True, False], ids=["hard-link-swapped-in", "file-untouched"])
 def test_the_return_step_changes_only_the_inode_it_checked(tmp_path, swap):
     """A hard link to another file put at the checked name when find runs the owner change is skipped.
