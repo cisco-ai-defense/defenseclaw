@@ -102,16 +102,32 @@ const UnixVerifiedAgentCarryCycles = 3
 // unixVerifiedAgentsMax bounds the records read back from the state file.
 const unixVerifiedAgentsMax = 4096
 
+// UnixAgentOwner is the account identity a verified version belongs to: the
+// kernel uid, the home path and the home directory inode. It is the identity
+// the enumerator already uses to tell a reused or recreated account from the
+// one it enrolled (sameUnixIdentity), so a user name that is deleted and
+// created again, or a home that is recreated, never inherits the version an
+// earlier account run printed (what a CLI prints can depend on the account
+// that runs it).
+type UnixAgentOwner struct {
+	UID       int    `json:"uid"`
+	Home      string `json:"home"`
+	HomeInode uint64 `json:"home_inode,omitempty"`
+}
+
 // UnixVerifiedAgent is the last version read that worked for one (user,
-// connector) and the stamp of the executable whose run supplied it.
+// connector), the account identity it was read for and the stamp of the
+// executable whose run supplied it.
 type UnixVerifiedAgent struct {
 	Version  string         `json:"version"`
+	Owner    UnixAgentOwner `json:"owner"`
 	Stamp    UnixAgentStamp `json:"stamp"`
 	Failures int            `json:"failures,omitempty"`
 }
 
 func (v UnixVerifiedAgent) valid() bool {
 	return ValidUnixAgentVersion(v.Version) && filepath.IsAbs(v.Stamp.Path) && filepath.Clean(v.Stamp.Path) == v.Stamp.Path &&
+		filepath.IsAbs(v.Owner.Home) && filepath.Clean(v.Owner.Home) == v.Owner.Home &&
 		v.Failures >= 0 && v.Failures <= UnixVerifiedAgentCarryCycles
 }
 
@@ -119,14 +135,15 @@ func (v UnixVerifiedAgent) valid() bool {
 // version read. For each connector it records the version a read returned
 // together with the stamp of the CLI whose run supplied it (sources names that
 // executable per connector; a version from anywhere else is recorded against
-// no file). When a later read finds a CLI installed but prints no version, and
-// that CLI is the same file as the one the recorded read ran, the recorded
-// version stands in, for at most UnixVerifiedAgentCarryCycles cycles in a
+// no file) and the identity of the account it was read for. When a later read
+// finds a CLI installed but prints no version, and that CLI is the same file
+// as the one the recorded read ran, for the same uid, home and home inode, the
+// recorded version stands in, for at most UnixVerifiedAgentCarryCycles cycles in a
 // row. A CLI that never supplied a version, a changed or missing file, a
 // reason with anything but the bare path, or a connector with no record gets
 // no stand-in: it stays unverified, as before. Nothing is marked protected
 // that no read ever verified.
-func carryVerifiedAgentVersions(state *UnixEnumeratorState, user, home string, connectors []string, versions, reasons, sources map[string]string, logf EnumerationLogger) map[string]string {
+func carryVerifiedAgentVersions(state *UnixEnumeratorState, user, home string, owner UnixAgentOwner, connectors []string, versions, reasons, sources map[string]string, logf EnumerationLogger) map[string]string {
 	if state == nil {
 		return versions
 	}
@@ -141,7 +158,7 @@ func carryVerifiedAgentVersions(state *UnixEnumeratorState, user, home string, c
 				if state.VerifiedAgents == nil {
 					state.VerifiedAgents = map[string]UnixVerifiedAgent{}
 				}
-				state.VerifiedAgents[key] = UnixVerifiedAgent{Version: version, Stamp: stamp}
+				state.VerifiedAgents[key] = UnixVerifiedAgent{Version: version, Owner: owner, Stamp: stamp}
 			} else {
 				delete(state.VerifiedAgents, key)
 			}
@@ -152,7 +169,7 @@ func carryVerifiedAgentVersions(state *UnixEnumeratorState, user, home string, c
 		if !recorded {
 			continue
 		}
-		if !UnixAgentInstalledWithoutVersion(reason) {
+		if known.Owner != owner || !UnixAgentInstalledWithoutVersion(reason) {
 			delete(state.VerifiedAgents, key)
 			continue
 		}
