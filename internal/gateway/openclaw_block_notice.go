@@ -65,7 +65,8 @@ import (
 //     nothing.
 //
 // An ambiguous block shows nothing and is consumed silently by the first result
-// that claims it. A notice is taken by one request, so a block is shown once. A
+// that claims it, and so is a block whose call part a request visibly carries
+// in several items (never kept for a later, shorter replay of the same result). A notice is taken by one request, so a block is shown once. A
 // reply with no text to lead with, or in a format that is not rewritten, gives
 // the notice back until it expires, so the line lands on the first reply that
 // can carry it. A reply DefenseClaw wrote itself (it starts with the block
@@ -272,13 +273,24 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	defer openClawBlockNotices.mu.Unlock()
 	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, openClawToolOutcomeNow())
 	claimed := make([]bool, len(entries))
+	// dropped marks a block of the request session whose call part this
+	// request carries in several items, so its result cannot be told apart.
+	// The notice is consumed with nothing shown, so a later replay of the same
+	// result with fewer items cannot attach it to an unrelated reply. One
+	// other item of the call part is a sibling call and drops nothing.
+	dropped := make([]bool, len(entries))
 	for _, r := range ids {
 		claim := -1
 		count := 0
 		for i, e := range entries {
-			if e.isResultOf(r) && e.inSession(session) {
+			if !e.inSession(session) {
+				continue
+			}
+			if e.isResultOf(r) {
 				claim = i
 				count++
+			} else if r.items > 1 && noticeCallKey(e.callID) == r.id {
+				dropped[i] = true
 			}
 		}
 		if count == 1 {
@@ -289,10 +301,11 @@ func takeOpenClawBlockNotices(body []byte, session string) []openClawBlockNotice
 	kept := make([]openClawBlockNotice, 0, len(entries))
 	for i, e := range entries {
 		switch {
-		case !claimed[i]:
-			kept = append(kept, e)
-		case !e.ambiguous:
+		case claimed[i] && !e.ambiguous:
 			taken = append(taken, e)
+		case claimed[i] || dropped[i]:
+		default:
+			kept = append(kept, e)
 		}
 	}
 	openClawBlockNotices.entries = kept

@@ -166,3 +166,55 @@ func TestGAP0644ResponsesSeveralAnonymousItemsOfOneCallShowNothing(t *testing.T)
 		})
 	}
 }
+
+// A result the request ties to no single call (several items of its call part) consumes the block with nothing shown. A
+// later replay of the same result with fewer items, after a different call
+// renewed the session marker, must not attach the line to an unrelated reply.
+func TestGAP0644ResponsesAmbiguousResultStaysQuietOnLaterReplay(t *testing.T) {
+	const responsesDone = `{"id":"r1","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"reply"}]}]}`
+	later := `{"input":[{"type":"function_call_output","call_id":"call_blk9","output":"old result"},{"type":"function_call","call_id":"call_new"},{"type":"function_call_output","call_id":"call_new","output":"new result"}]}`
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"two anonymous items", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}, [2]string{"call_blk9", ""})},
+		{"anonymous and named item", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""}, [2]string{"call_blk9", "fc_beef"})},
+		{"two named items", responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", "fc_beef"}, [2]string{"call_blk9", "fc_0a1b"})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetOpenClawBlockNotices(t)
+			rememberOpenClawBlockNotice("exec", responsesBlockedID, noticeTestSession, []string{noticeTestRule}, "r")
+			for i, body := range []string{tc.body, later} {
+				if i == 1 {
+					observeOpenClawToolCall("call_new|fc_new")
+				}
+				out, _ := serveNoticeWith(t, noticeServe{path: "/openai/v1/responses", session: noticeTestSession, reqBody: body, ctype: "application/json", respBody: responsesDone})
+				if strings.Contains(out, openClawBlockNoticeMark) {
+					t.Fatalf("request %d showed a line for an ambiguous result: %s", i+1, out)
+				}
+			}
+			if openClawBlockNoticesPending() {
+				t.Fatal("the ambiguous block is still pending")
+			}
+		})
+	}
+}
+
+// The benign twins: a result of another call part leaves the block pending for
+// its own result, and one anonymous item (the OpenClaw replay shape) still shows
+// the line on the later request.
+func TestGAP0644ResponsesUnrelatedResultKeepsBlockForItsOwnReplay(t *testing.T) {
+	const responsesDone = `{"id":"r1","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"reply"}]}]}`
+	resetOpenClawBlockNotices(t)
+	rememberOpenClawBlockNotice("exec", responsesBlockedID, noticeTestSession, []string{noticeTestRule}, "r")
+	other := responsesBody("function_call_output", "call_other", [2]string{"call_other", ""}, [2]string{"call_other", ""})
+	out, _ := serveNoticeWith(t, noticeServe{path: "/openai/v1/responses", session: noticeTestSession, reqBody: other, ctype: "application/json", respBody: responsesDone})
+	if strings.Contains(out, openClawBlockNoticeMark) || !openClawBlockNoticesPending() {
+		t.Fatalf("an unrelated ambiguous result touched the block: %s", out)
+	}
+	own := responsesBody("function_call_output", "call_blk9", [2]string{"call_blk9", ""})
+	out, _ = serveNoticeWith(t, noticeServe{path: "/openai/v1/responses", session: noticeTestSession, reqBody: own, ctype: "application/json", respBody: responsesDone})
+	if !strings.Contains(out, openClawBlockNoticeMark) || openClawBlockNoticesPending() {
+		t.Fatalf("the block result did not show the line once: %s", out)
+	}
+}

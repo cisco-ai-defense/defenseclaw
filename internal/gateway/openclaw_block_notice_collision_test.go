@@ -262,17 +262,21 @@ func TestGAP0644ResponsesResultIsTiedToItsOwnItem(t *testing.T) {
 
 // The call part names the function result of the blocked call only: another
 // output type of the same call part is another tool, and a result whose
-// request names several items of the call shows nothing.
+// request names several items of the call shows nothing and consumes the
+// block, so a later replay of the result cannot show it on another reply.
 func TestGAP0644ResponsesResultThatCannotBeTiedToOneItemShowsNothing(t *testing.T) {
-	for _, tc := range []struct{ name, body string }{
-		{"custom tool output, item present", responsesBody("custom_tool_call_output", "call_shared", [2]string{"call_shared", "fc_1"})},
-		{"custom tool output, no item", responsesBody("custom_tool_call_output", "call_shared")},
-		{"two items of one call part", responsesBody("function_call_output", "call_shared", [2]string{"call_shared", "fc_1"}, [2]string{"call_shared", "fc_2"})},
+	for _, tc := range []struct {
+		name, body string
+		consumed   bool
+	}{
+		{"custom tool output, item present", responsesBody("custom_tool_call_output", "call_shared", [2]string{"call_shared", "fc_1"}), false},
+		{"custom tool output, no item", responsesBody("custom_tool_call_output", "call_shared"), false},
+		{"two items of one call part", responsesBody("function_call_output", "call_shared", [2]string{"call_shared", "fc_1"}, [2]string{"call_shared", "fc_2"}), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetOpenClawBlockNotices(t)
 			rememberOpenClawBlockNotice("exec", "call_shared|fc_1", "sess-a", []string{noticeTestRule}, "protected write")
-			if out := serveInSession(t, "sess-a", tc.body); out != noticeChatReply || !openClawBlockNoticesPending() {
+			if out := serveInSession(t, "sess-a", tc.body); out != noticeChatReply || openClawBlockNoticesPending() == tc.consumed {
 				t.Fatalf("a result that is not tied to the blocked item took the notice: served=%v pending=%v", noticeServed(out), openClawBlockNoticesPending())
 			}
 		})
