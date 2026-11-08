@@ -67,8 +67,9 @@ func toolResultIDs(body []byte) []toolResultID {
 	// the function_call item of the same request, so a function_call_output is
 	// tied to the full id when exactly one function_call item names its call.
 	// When no item of the call carries an id, the result is the call part
-	// alone (callOnly). Several items of one call part leave the result with
-	// neither, and it matches nothing but an id equal to its call_id.
+	// alone (callOnly), and only when the request carries at most one item of
+	// the call. Several items of one call part, named or not, leave the result
+	// with neither, and it matches nothing but an id equal to its call_id.
 	input := objectItems(root["input"])
 	itemsOfCall := map[string][]string{}
 	for _, item := range input {
@@ -95,7 +96,7 @@ func toolResultIDs(body []byte) []toolResultID {
 			switch {
 			case len(items) == 1 && items[0] != "":
 				r.itemRef = callID + "|" + items[0]
-			case named == 0:
+			case named == 0 && len(items) <= 1:
 				r.callOnly = true
 			}
 		}
