@@ -327,7 +327,10 @@ try {
             $codexLink = [IO.Path]::Combine($vendorRoot, 'OpenAI', 'Codex')
             $cursorLink = [IO.Path]::Combine($vendorRoot, 'Cursor')
             $ciscoLink = [IO.Path]::Combine($vendorRoot, 'Cisco', 'DefenseClaw', 'etc')
-            foreach ($link in @($codexLink, $cursorLink, $ciscoLink)) {
+            $outsideRoot = [IO.Path]::Combine($Root, 'outside')
+            [void][IO.Directory]::CreateDirectory($outsideRoot)
+            $outsideLink = [IO.Path]::Combine($outsideRoot, 'Codex')
+            foreach ($link in @($codexLink, $cursorLink, $ciscoLink, $outsideLink)) {
                 & cmd.exe /c mklink /J "$link" "$vendorTarget" | Out-Null
             }
             $previousVendorRoots = $script:DefenseClawVendorFolderRoots
@@ -372,16 +375,17 @@ try {
                 }
                 Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $ciscoRow)
                 Assert-TestSyncRefuses 'a link in the DefenseClaw tree' 'failure-free reconcile'
+                # A link that is there, but not under a vendor root (an account folder, say), is not explained.
                 $profileRow = [pscustomobject]@{
                     user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
-                    error = 'enterprise hooks: reparse point in path: C:\Users\alice\.defenseclaw'
+                    error = "enterprise hooks: reparse point in path: $outsideLink"
                 }
                 Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $profileRow)
                 Assert-TestSyncRefuses 'a link outside the vendor roots' 'failure-free reconcile'
             }
             finally {
                 $script:DefenseClawVendorFolderRoots = $previousVendorRoots
-                foreach ($link in @($cursorLink, $ciscoLink)) {
+                foreach ($link in @($cursorLink, $ciscoLink, $outsideLink)) {
                     & cmd.exe /c rmdir "$link" | Out-Null
                 }
             }
