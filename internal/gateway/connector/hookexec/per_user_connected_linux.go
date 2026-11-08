@@ -183,8 +183,9 @@ var errUnreadableLiveThread = errors.New("a live thread of the process has a des
 // leader folder /proc/<pid>/fd shows only the leader table, so every thread
 // folder is read. A thread that exits while the list is read is skipped, and
 // so is the folder of a thread that has exited but is still listed (the
-// leader of a process whose workers run on is a zombie): it holds no
-// descriptors.
+// leader of a process whose workers run on is a zombie) or is exiting (the
+// kernel refuses its folder part-way through, see threadRunsNoMore): it runs
+// no more user code, so it can neither use nor keep a descriptor.
 //
 // A folder (or a link in it) the kernel refuses for a thread that is alive is
 // a thread this account cannot see into. Credentials belong to the thread, so
@@ -217,8 +218,8 @@ func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
 		case errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH):
 			// thread gone
 		case errors.Is(err, os.ErrPermission):
-			denied = err
-			if !threadHasExited(threadDir) {
+			if !threadRunsNoMore(threadDir) {
+				denied = err
 				unreadable++
 				sameIDs = sameIDs && threadHasOwnIDs(threadDir)
 			}
@@ -261,22 +262,42 @@ func socketsOfThread(threadDir string) (map[string]bool, error) {
 	return sockets, nil
 }
 
-// threadHasExited reports whether the task folder is one of a thread that has
-// exited (zombie or dead state) or is gone. A state that cannot be read is a
-// live thread.
-func threadHasExited(threadDir string) bool {
+// pfExiting is the flag the kernel sets on a thread, in the first step of its
+// exit, in the flags field of its stat file (PF_EXITING).
+const pfExiting = 0x4
+
+// threadRunsNoMore reports whether the task folder is one of a thread that
+// will never run user code again: it has exited (zombie or dead state), is
+// gone, or is exiting (PF_EXITING). Such a thread cannot accept on a
+// descriptor, pass it on or keep it, and the kernel closes what it still holds
+// as its exit goes on. The kernel also starts refusing its descriptor folder
+// part-way through the exit, while the thread is still in state R: an
+// exiting hook process of this account that another hook scans looks like a
+// thread this account cannot see into. PF_EXITING is set before that refusal
+// begins and is never cleared, so a refused folder of a thread without it
+// stays a live thread. A state that cannot be read is a live thread.
+func threadRunsNoMore(threadDir string) bool {
 	raw, err := os.ReadFile(filepath.Join(threadDir, "stat"))
 	if err != nil {
 		return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH)
 	}
-	// pid (comm) state ...: comm may hold spaces and parentheses, so the
-	// state follows the last closing parenthesis.
+	// pid (comm) state ppid pgrp session tty tpgid flags ...: comm may hold
+	// spaces and parentheses, so the fields follow the last closing
+	// parenthesis.
 	text := string(raw)
-	end := strings.LastIndexByte(text, ')')
-	if end < 0 || end+2 >= len(text) {
+	end := strings.LastIndex(text, ")")
+	if end < 0 {
 		return false
 	}
-	return text[end+2] == 'Z' || text[end+2] == 'X'
+	fields := strings.Fields(text[end+1:])
+	if len(fields) < 7 {
+		return false
+	}
+	if fields[0] == "Z" || fields[0] == "X" {
+		return true
+	}
+	flags, err := strconv.ParseUint(fields[6], 10, 64)
+	return err == nil && flags&pfExiting != 0
 }
 
 // threadHasOwnIDs reports whether every user and group ID of the thread (real,
