@@ -142,6 +142,13 @@ func TestManagedWindowsOpenCodeContestedMarkCanBeClearedByElevatedAdministrator(
 	}); err != nil {
 		t.Fatal(err)
 	}
+	// An elevated session can hold SeBackupPrivilege enabled (an SSH or
+	// scheduled-task launch does), and Go opens every file with backup
+	// semantics, so the denial below was not observable there. Disable the
+	// backup and restore privileges in the process token for the rest of the
+	// test, as the GitHub runner token has them: the clear must then enable
+	// its own scoped privilege, and the record must still deny a plain read.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 	if _, err := os.ReadFile(path); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("administrator read of SYSTEM-only record = %v", err)
 	}
