@@ -42,12 +42,6 @@ from pathlib import Path
 
 _DEVICE_PROVENANCE_PREFIX = b"defenseclaw-device-provenance-v1:"
 _DEVICE_PROVENANCE_SECRET = "device.provenance.secret"
-# The exact shapes apply_device_key_recovery writes (see
-# set_aside_abandoned_identity).
-_DEVICE_KEY_HEAD = b"-----BEGIN ED25519 PRIVATE KEY-----\n"
-_DEVICE_KEY_TAIL = b"\n-----END ED25519 PRIVATE KEY-----\n"
-_BASE64_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
-_HEX_BYTES = frozenset(b"0123456789abcdef")
 _AUDIT_REQUIRED_TABLES = frozenset({"audit_events", "scan_results", "findings"})
 # PRAGMA quick_check(N) still walks the whole file; N is only the error limit.
 # Bound the walk by time rather than by file size: a few hundred MiB finish in
@@ -610,8 +604,8 @@ def apply_device_key_recovery(
     identity exists before its provenance is durable.  A failure takes back
     what this call published.  A crash, or a file that cannot be taken back,
     leaves continuity evidence without a key, which the next plan blocks; only
-    a fresh home's init sets such leftovers aside
-    (set_aside_abandoned_identity).
+    an attended repair sets such leftovers aside
+    (set_aside_identity_leftovers).
     """
 
     _authorize_plan(plan, RecoveryKind.DEVICE_KEY, approved=approved, unattended=unattended)
@@ -718,48 +712,35 @@ def _discard_files(paths: list[str]) -> bool:
     return gone
 
 
-def set_aside_abandoned_identity(
+# What an attended repair of a device identity whose key is gone is called, in every
+# message that sends the operator to it (init, the guided first run and Doctor).
+REPAIR_IDENTITY_COMMAND = "defenseclaw init --repair-identity"
+
+
+def set_aside_identity_leftovers(
     target: str | os.PathLike[str],
     data_dir: str | os.PathLike[str],
-    *,
-    fresh_home: bool,
 ) -> list[str]:
-    """Set aside the files of a device identity whose creation never finished.
+    """Move aside the provenance files of a device key that is gone; attended repairs only.
 
-    Returns the new names of the files it moved (empty when there is nothing
-    to repair or the evidence is not provably an unfinished creation, in which
-    case the plan keeps refusing as before).  Keyless provenance files are
-    continuity evidence of an identity that may have existed, and whoever can
-    write the home can also write any marker inside it, so nothing stored in
-    the home authorizes setting them aside.  The only proof is that no setup
-    of this data folder ever finished (``fresh_home``): this init found no
-    config.yaml, neither where it reads its config nor in the default home
-    (bootstrap.home_found_without_config), and the folder is one no earlier
-    setup finished in (bootstrap.begin_data_folder_init: the config can be
-    kept at another path while the folder keeps its identity, so the folder is
-    new only when it holds nothing but identity files or when every config
-    path earlier inits recorded is gone).
-    Then every file present must have exactly the
-    shape a creation writes, or a prefix of it (a write cut short, which
-    Windows' CREATE_NEW publication can leave), and be a regular private file.
-    A sentinel that is complete with no key beside it is the same state as a
-    key deleted from a finished setup, so it is never set aside here.  A
-    configured home stays with the
-    attended Doctor repair.
+    The caller is an explicit, confirmed repair: ``REPAIR_IDENTITY_COMMAND`` or
+    Doctor's attended device-key fix.  No init run calls it on its own: a
+    provenance file with no key may be the only trace of an identity that
+    existed, and nothing stored in the data folder can show that it did not.
 
-    Files are renamed to a new ``*.orphaned-*`` name and never deleted, and
-    never over an earlier file.  A key cut short counts as such a leftover; a
-    key the normal validator accepts never does, whatever its last byte is.
+    Returns the new names (empty when there is nothing to move, or when a key
+    is present, which is never touched).  Files are renamed to a new
+    ``*.orphaned-*`` name, never deleted and never over an existing file.
     """
 
     normalized_target, normalized_data = _normalize_device_identity_disk_paths(target, data_dir)
-    if not fresh_home or not normalized_target or not normalized_data:
+    if not normalized_target or not normalized_data or os.path.lexists(normalized_target):
         return []
-    secret = os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET)
-    provenance = normalized_target + ".provenance"
-    leftovers = [path for path in (normalized_target, provenance, secret) if os.path.lexists(path)]
-    if not leftovers or not _is_unfinished_creation(normalized_target, provenance, secret):
-        return []
+    leftovers = [
+        path
+        for path in (normalized_target + ".provenance", os.path.join(normalized_data, _DEVICE_PROVENANCE_SECRET))
+        if os.path.lexists(path)
+    ]
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + f"-{os.getpid()}"
     return [_move_aside(path, stamp) for path in leftovers]
 
@@ -778,62 +759,6 @@ def _move_aside(path: str, stamp: str) -> str:
         except FileExistsError:
             continue
         return aside
-
-
-def _is_unfinished_creation(key: str, provenance: str, secret: str) -> bool:
-    """Whether every identity file present is what a creation writes, or a cut-short part of it."""
-
-    platform = _platform_name()
-    shapes = (
-        # The key is written last, so only a cut-short one can be present.
-        (
-            key,
-            256,
-            lambda data: (
-                _is_creation_prefix(data, _DEVICE_KEY_HEAD, _BASE64_BYTES, 44, _DEVICE_KEY_TAIL, whole=False)
-                and not _valid_device_key_bytes(data)  # a key the normal validator accepts is never cut short
-            ),
-        ),
-        (provenance, 256, lambda data: _is_creation_prefix(data, _DEVICE_PROVENANCE_PREFIX, _HEX_BYTES, 64, b"\n")),
-        (secret, 64, lambda data: len(data) <= 32),
-    )
-    for path, limit, valid in shapes:
-        if not os.path.lexists(path):
-            continue
-        try:
-            if not valid(_read_private_regular_file(path, max_bytes=limit, platform=platform)):
-                return False
-        except OSError:
-            return False
-    # The key is published last, so a complete sentinel with no key beside it
-    # is what a key deleted from a finished setup looks like too.
-    if os.path.lexists(provenance) and not os.path.lexists(key):
-        return os.lstat(provenance).st_size < len(_DEVICE_PROVENANCE_PREFIX) + 64 + 1
-    return True
-
-
-def _is_creation_prefix(
-    data: bytes,
-    head: bytes,
-    body_bytes: frozenset[int],
-    body_length: int,
-    tail: bytes,
-    *,
-    whole: bool = True,
-) -> bool:
-    """Whether data is head + body + tail, or a cut-short start of it.
-
-    ``whole=False`` accepts only a cut-short start, not the complete file.
-    """
-
-    if len(data) <= len(head):
-        return head.startswith(data)
-    if not data.startswith(head):
-        return False
-    body, rest = data[len(head) :][:body_length], data[len(head) + body_length :]
-    if not all(byte in body_bytes for byte in body) or not tail.startswith(rest):
-        return False
-    return whole or len(data) < len(head) + body_length + len(tail)
 
 
 def _roll_back_device_identity(placed: list[tuple[str, str]]) -> list[tuple[str, str]]:

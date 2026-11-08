@@ -68,6 +68,15 @@ def refuse_first_run_when_managed() -> None:
     is_flag=True,
     help="Skip scanner and built-in guardrail availability checks (legacy option name).",
 )
+@click.option(
+    "--repair-identity",
+    is_flag=True,
+    help=(
+        "Repair a device identity whose key is gone but whose provenance files remain (a crashed or "
+        "concurrent first init). Asks first, moves those files aside (kept as *.orphaned-*) and creates a "
+        "new identity; nothing else runs. Check that no other init is running first."
+    ),
+)
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
@@ -245,6 +254,7 @@ def refuse_first_run_when_managed() -> None:
 def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     app: AppContext,
     skip_install: bool,
+    repair_identity: bool,
     enable_guardrail: bool,
     non_interactive: bool,
     yes: bool,
@@ -296,6 +306,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
 
     refuse_first_run_when_managed()
+
+    if repair_identity:
+        _run_repair_identity()
+        return
 
     from defenseclaw.bootstrap import first_run_port_flags_conflict
 
@@ -423,6 +437,52 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         raise click.ClickException(str(exc)) from exc
 
 
+def _run_repair_identity() -> None:
+    """``defenseclaw init --repair-identity``: the explicit repair of a keyless device identity.
+
+    Takes the same init locks as init (the home and the data folder the config names), so it
+    cannot run beside an init. Works with or without a config.yaml: a first init that stopped on
+    the leftovers rolled its config back.
+    """
+
+    from defenseclaw import config as config_module
+    from defenseclaw.bootstrap import InitLockError, hold_init_lock
+
+    if os.path.lexists(config_module.config_path()):
+        try:
+            cfg = config_module.load()
+        except Exception as exc:  # noqa: BLE001 - a hand-edited config must not hide the repair's reason.
+            raise click.ClickException(
+                f"Cannot read config.yaml: {exc}. Fix the file, then run defenseclaw config validate."
+            ) from exc
+    else:
+        cfg = config_module.default_config()
+    target = cfg.gateway.device_key_file or os.path.join(cfg.data_dir, "device.key")
+
+    def confirm(leftovers: list[str]) -> bool:
+        click.echo(f"The device key {target} is missing, but the files of that identity remain:")
+        for item in leftovers:
+            click.echo(f"  {item}")
+        click.echo("If you have a backup of the key, restore it instead.")
+        return click.confirm(
+            "Move those files aside and create a NEW device identity? "
+            "Pairings tied to the old key will not be recoverable.",
+            default=False,
+        )
+
+    try:
+        with hold_init_lock() as locks:
+            locks.take(cfg.data_dir)
+            moved = _repair_device_identity(target, cfg.data_dir, confirm=confirm)
+    except InitLockError as exc:
+        raise click.ClickException(str(exc)) from exc
+    for item in moved:
+        click.echo(f"  Set aside (kept): {item}")
+    click.echo(f"Created a new device identity at {target}.")
+    if not os.path.lexists(config_module.config_path()):
+        click.echo("There is no config.yaml yet; run: defenseclaw init")
+
+
 def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
     app: AppContext,
     locks: InitLocks,
@@ -436,7 +496,6 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
 ) -> None:
     """The plain (non-guided) init; init_cmd holds the init lock around it."""
 
-    from defenseclaw.bootstrap import begin_data_folder_init, home_found_without_config
     from defenseclaw.config import (
         config_path,
         default_config,
@@ -464,7 +523,6 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
 
     cfg_file = config_path()
     is_new_config = not os.path.lexists(cfg_file)
-    fresh_home = is_new_config and home_found_without_config()
     if is_new_config:
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
@@ -508,7 +566,6 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
     # The identity and the stores live in the data folder the config names, which
     # may not be the home locked so far. Lock it before anything is changed there.
     locks.take(cfg.data_dir)
-    fresh_home = begin_data_folder_init(cfg.data_dir) and fresh_home
 
     cfg.environment = env
     if cfg.claw.mode.strip():
@@ -567,7 +624,7 @@ def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
     _show_scanner_defaults(cfg)
 
     ux.banner("Gateway")
-    _setup_gateway_defaults(cfg, logger, is_new_config=is_new_config, fresh_home=fresh_home)
+    _setup_gateway_defaults(cfg, logger, is_new_config=is_new_config)
 
     ux.banner("Guardrail")
     guardrail_ok = False
@@ -3471,21 +3528,9 @@ def _prepare_device_identity_directories(
         current = child
 
 
-def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bool = False) -> None:
-    """Create one new device identity with HMAC-bound provenance.
+def _device_identity_paths(path: str, data_dir: str | None) -> tuple[str, str]:
+    """The checked device key path and identity folder, or a ClickException naming why not."""
 
-    Existing identities are deliberately left untouched. In particular, an
-    older unprovenanced key must remain visible to Doctor as legacy rather than
-    being blessed after the fact.
-
-    On a home this init found new (``fresh_home``: no config.yaml at the paths
-    it reads, and a data folder no setup finished in; see
-    bootstrap.begin_data_folder_init), the files of an identity whose creation
-    never finished (a crash or a killed init; see set_aside_abandoned_identity)
-    are set aside and the identity is created again, so such a home is never a
-    dead end. On any other home a keyless provenance file is continuity
-    evidence and still refuses; Doctor's attended repair handles it.
-    """
     raw_path = os.fspath(path)
     raw_data_dir = os.fspath(data_dir) if data_dir is not None else None
     if raw_data_dir is not None and not os.path.isabs(raw_data_dir):
@@ -3516,24 +3561,16 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bo
                 "cannot safely create device identity "
                 "(device-key-path-not-local-to-data-dir)"
             )
-    target_parent = os.path.dirname(target)
     _validate_device_identity_windows_path_syntax(target, identity_root)
     _validate_device_identity_artifact_layout(target, identity_root)
+    return target, identity_root
 
-    from defenseclaw.doctor_recovery import (
-        RecoveryApplyStatus,
-        RecoveryDisposition,
-        RecoveryRefusedError,
-        _device_identity_paths_equal,
-        apply_device_key_recovery,
-        plan_missing_device_key,
-    )
 
-    if os.path.lexists(target):
-        if fresh_home:
-            _set_aside_abandoned_identity(target, identity_root)
-        if os.path.lexists(target):
-            return
+def _prepare_device_identity_location(target: str, identity_root: str) -> None:
+    """Check that the key sits directly in a direct data folder, and make the folders."""
+
+    from defenseclaw.doctor_recovery import _device_identity_paths_equal
+
     try:
         common = os.path.commonpath((target, identity_root))
     except ValueError as exc:
@@ -3551,15 +3588,34 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bo
         raise click.ClickException(
             "cannot safely create device identity (data-dir-path-is-indirect)"
         )
-    _prepare_device_identity_directories(identity_root, target_parent)
-    if fresh_home:
-        _set_aside_abandoned_identity(target, identity_root)
+    _prepare_device_identity_directories(identity_root, os.path.dirname(target))
+
+
+def _publish_device_identity(target: str, identity_root: str) -> None:
+    """Plan and publish a new identity (all or nothing); refuses when anything of an old one remains."""
+
+    from defenseclaw.doctor_recovery import (
+        REPAIR_IDENTITY_COMMAND,
+        RecoveryApplyStatus,
+        RecoveryDisposition,
+        RecoveryRefusedError,
+        apply_device_key_recovery,
+        plan_missing_device_key,
+    )
 
     plan = plan_missing_device_key(target, data_dir=identity_root)
     if plan.disposition is not RecoveryDisposition.READY:
-        raise click.ClickException(
-            f"cannot safely create device identity ({plan.reason_code})"
-        )
+        message = f"cannot safely create device identity ({plan.reason_code})"
+        if plan.reason_code == "continuity-evidence-present":
+            # Init never replaces a keyless identity on its own: it may be the only trace of one
+            # that existed. Name the explicit repair (the path, what is missing, and when to run it).
+            files = ", ".join(path for path in plan.continuity_paths if os.path.lexists(path))
+            message += (
+                f": the device identity at {target} has no key, but these files of it remain: {files}. "
+                f"Nothing was changed. After checking that no other defenseclaw init is running, run: "
+                f"{REPAIR_IDENTITY_COMMAND}"
+            )
+        raise click.ClickException(message)
     try:
         result = apply_device_key_recovery(plan, approved=True)
     except RecoveryRefusedError as exc:
@@ -3572,17 +3628,60 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None, fresh_home: bo
         )
 
 
-def _set_aside_abandoned_identity(target: str, identity_root: str) -> None:
-    """Set aside the leftovers of an unfinished identity creation on a fresh home."""
+def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
+    """Create one new device identity with HMAC-bound provenance.
 
-    from defenseclaw.doctor_recovery import set_aside_abandoned_identity
+    Existing identities are deliberately left untouched. In particular, an
+    older unprovenanced key must remain visible to Doctor as legacy rather than
+    being blessed after the fact.
 
-    try:
-        set_aside_abandoned_identity(target, identity_root, fresh_home=True)
-    except OSError as exc:
+    A key that is gone while provenance files remain (a crashed init, or a key
+    deleted from a finished setup) is never replaced here: init stops and names
+    ``defenseclaw init --repair-identity`` (see _repair_device_identity).
+    """
+    target, identity_root = _device_identity_paths(path, data_dir)
+    if os.path.lexists(target):
+        return
+    _prepare_device_identity_location(target, identity_root)
+    _publish_device_identity(target, identity_root)
+
+
+def _repair_device_identity(path: str, data_dir: str, *, confirm) -> list[str]:
+    """The explicit repair behind ``defenseclaw init --repair-identity``.
+
+    The key must be absent. If provenance files of it remain, *confirm* (called with their paths)
+    must agree before they are moved aside (kept as ``*.orphaned-*``) and a new identity is created.
+    Returns the new names of the files moved aside.
+    """
+
+    from defenseclaw.doctor_recovery import (
+        RecoveryDisposition,
+        plan_missing_device_key,
+        set_aside_identity_leftovers,
+    )
+
+    target, identity_root = _device_identity_paths(path, data_dir)
+    if os.path.lexists(target):
         raise click.ClickException(
-            "cannot safely create device identity (abandoned-identity-set-aside-failed)"
-        ) from exc
+            f"a device key already exists at {target}; nothing was changed. "
+            "Restore or replace it only from a trusted backup."
+        )
+    _prepare_device_identity_location(target, identity_root)
+    plan = plan_missing_device_key(target, data_dir=identity_root)
+    moved: list[str] = []
+    if plan.disposition is RecoveryDisposition.BLOCKED and plan.reason_code == "continuity-evidence-present":
+        leftovers = [item for item in plan.continuity_paths if os.path.lexists(item)]
+        if not confirm(leftovers):
+            raise click.ClickException("declined; nothing was changed")
+        try:
+            moved = set_aside_identity_leftovers(target, identity_root)
+        except OSError as exc:
+            raise click.ClickException(
+                f"cannot move the provenance files aside ({exc.strerror or type(exc).__name__}); "
+                "the files that were moved are listed by their *.orphaned-* names next to them"
+            ) from exc
+    _publish_device_identity(target, identity_root)
+    return moved
 
 
 def _resolve_openclaw_gateway(
@@ -3686,7 +3785,7 @@ def _validate_gateway_token(env_name: str, token: str) -> None:
         ) from exc
 
 
-def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True, fresh_home: bool = False) -> None:
+def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     """Resolve gateway settings from the active connector and display them.
 
     Only applies connector values (host/port/token) when creating a new config.
@@ -3742,7 +3841,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True, fresh_home:
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
 
-    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir, fresh_home=fresh_home)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
 
     click.echo(f"  Gateway:       {cfg.gateway.host}:{cfg.gateway.port} (connector: {connector})")
     # Plan B2 / S0.2: the sidecar synthesizes a CSPRNG token on first

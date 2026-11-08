@@ -14,10 +14,11 @@ Two inits on one fresh home used to race through the same seeds and device
 identity and leave a provenance file with no key, which every later init then
 refused and the printed Doctor fix could not clear.  Init now holds one lock on
 every data folder it initializes, and a device identity is published all or
-nothing.  Only a home found without a config.yaml sets the leftovers of an
-unfinished creation aside (nothing stored in a home can authorize that) and
-creates the identity again; a keyless provenance file on a configured home
-stays continuity evidence, whatever else sits beside it.
+nothing.  A keyless provenance file is continuity evidence: init never replaces
+it on its own, whatever else the home holds.  It stops, names the path and the
+explicit repair (``defenseclaw init --repair-identity``), and that command, run
+by the operator under the same locks, is what sets the files aside and creates
+the identity again.
 """
 
 from __future__ import annotations
@@ -30,12 +31,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
 from defenseclaw import bootstrap, doctor_recovery
 from defenseclaw.bootstrap import FirstRunOptions, run_first_run
-from defenseclaw.commands.cmd_init import _ensure_device_key
+from defenseclaw.commands.cmd_init import _ensure_device_key, init_cmd
+from defenseclaw.context import AppContext
 from defenseclaw.doctor_recovery import (
+    REPAIR_IDENTITY_COMMAND,
     DeviceKeyHealthStatus,
-    _new_device_key_pem,
     inspect_device_key,
 )
 from defenseclaw.file_lock import locked_file_update
@@ -152,9 +155,30 @@ def test_two_inits_started_together_on_a_fresh_home_both_succeed(tmp_path, monke
     assert _orphans(home) == []
 
 
-def test_a_creation_that_stops_before_the_sentinel_is_repaired_by_the_next_init(tmp_path, monkeypatch):
-    home = _home(tmp_path)
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+def _plain_init(*args: str):
+    return CliRunner().invoke(init_cmd, ["--skip-install", *args], obj=AppContext())
+
+
+def _repair(answer: str = "y\n"):
+    return CliRunner().invoke(init_cmd, ["--repair-identity"], input=answer, obj=AppContext())
+
+
+def _write_private(path: Path, data: bytes) -> None:
+    path.write_bytes(data)
+    protect_private_file(str(path))
+
+
+def _snapshot(home: Path) -> dict[str, bytes]:
+    return {path.name: path.read_bytes() for path in home.iterdir() if path.is_file()}
+
+
+def _identity_files(home: Path) -> dict[str, bytes]:
+    return {name: data for name, data in _snapshot(home).items() if name.startswith("device.")}
+
+
+def _interrupted_first_creation(home: Path, monkeypatch) -> None:
+    """A first init killed after the secret was published: the secret stays, the key never exists."""
+
     real_publish = doctor_recovery._publish_no_replace
 
     def die_before_sentinel(source: str, target: str) -> None:
@@ -171,17 +195,6 @@ def test_a_creation_that_stops_before_the_sentinel_is_repaired_by_the_next_init(
     assert not (home / "device.key").exists()
     assert not (home / "config.yaml").exists()
 
-    second = run_first_run(_options())
-
-    assert second.status != "needs_attention", second.to_dict()
-    assert _valid(home)
-    assert any(name.startswith(SECRET + ".orphaned-") for name in _orphans(home))
-
-
-def _write_private(path: Path, data: bytes) -> None:
-    path.write_bytes(data)
-    protect_private_file(str(path))
-
 
 def _configured_home_without_key(tmp_path: Path, monkeypatch) -> Path:
     home = _home(tmp_path)
@@ -191,98 +204,71 @@ def _configured_home_without_key(tmp_path: Path, monkeypatch) -> Path:
     return home
 
 
-def _refused_with_nothing_moved(report, home: Path, secret_before: bytes) -> None:
-    assert report.status == "needs_attention"
-    assert any("continuity-evidence-present" in step.detail for step in report.setup)
-    assert (home / SECRET).read_bytes() == secret_before
+def _refused_by(plain: bool, home: Path) -> None:
+    """One init on either path stops, names the repair command and the path, and changes nothing."""
+
+    identity_before = _identity_files(home)
+    if plain:
+        result = _plain_init()
+        assert result.exit_code != 0
+        output = result.output
+    else:
+        report = run_first_run(_options())
+        assert report.status == "needs_attention"
+        assert REPAIR_IDENTITY_COMMAND in report.next_commands
+        output = " ".join(step.detail for step in report.setup)
+    assert "continuity-evidence-present" in output
+    assert REPAIR_IDENTITY_COMMAND in output
+    assert str(home / "device.key") in output
+    assert "no other defenseclaw init is running" in output
     assert not (home / "device.key").exists()
     assert _orphans(home) == []
+    assert _identity_files(home) == identity_before
 
 
-def test_keyless_provenance_on_a_configured_home_is_still_refused(tmp_path, monkeypatch):
-    home = _configured_home_without_key(tmp_path, monkeypatch)
-    secret_before = (home / SECRET).read_bytes()
-
-    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
-
-
-def test_a_file_made_from_the_secret_in_a_configured_home_does_not_reset_the_identity(tmp_path, monkeypatch):
-    # Whoever can write the home can compute any proof from the secret it holds.
-    home = _configured_home_without_key(tmp_path, monkeypatch)
-    secret_before = (home / SECRET).read_bytes()
-    prefix = b"defenseclaw-device-identity-creating-v1:"
-    mac = hmac.new(secret_before, prefix, hashlib.sha256).hexdigest().encode("ascii")
-    _write_private(home / "device.identity.creating", prefix + mac + b"\n")
-
-    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
-    assert (home / "device.identity.creating").is_file()
-
-
-def test_a_configured_home_stays_refused_for_a_cut_short_secret_too(tmp_path, monkeypatch):
-    home = _configured_home_without_key(tmp_path, monkeypatch)
-    _write_private(home / SECRET, os.urandom(12))
-    secret_before = (home / SECRET).read_bytes()
-
-    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
-
-
-def test_a_complete_sentinel_with_no_key_and_no_config_is_kept_for_the_attended_repair(tmp_path, monkeypatch):
-    # The same state as a key deleted from a finished setup whose config.yaml is gone.
-    home = _home(tmp_path)
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
-    _leftover_secret_and_sentinel(home)
-    secret_before = (home / SECRET).read_bytes()
-
-    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
-
-
-def test_a_finished_setup_that_lost_its_config_and_key_keeps_its_identity(tmp_path, monkeypatch):
-    home = _configured_home_without_key(tmp_path, monkeypatch)
-    (home / "config.yaml").unlink()
-    secret_before = (home / SECRET).read_bytes()
-
-    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
+# --- a keyless identity is never replaced by init, whatever sits beside it -----------------------
 
 
 @pytest.mark.parametrize("plain", [False, True])
-@pytest.mark.parametrize("cut_short", [False, True])
-def test_a_moved_config_path_does_not_make_a_configured_data_folder_fresh(tmp_path, monkeypatch, plain, cut_short):
-    home = _configured_home_without_key(tmp_path, monkeypatch)
-    if cut_short:  # only a cut-short secret is left, which a fresh home would repair
-        (home / "device.key.provenance").unlink()
+def test_a_crashed_first_init_leaves_a_state_the_next_init_stops_on_and_names_the_repair(
+    tmp_path, monkeypatch, plain
+):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _interrupted_first_creation(home, monkeypatch)
+    secret = (home / SECRET).read_bytes()
+
+    _refused_by(plain, home)
+
+    assert (home / SECRET).read_bytes() == secret
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("shape", ["secret-only", "cut-short-secret", "partial-sentinel", "complete-sentinel"])
+def test_a_keyless_identity_on_a_home_with_no_config_is_never_replaced_by_init(
+    tmp_path, monkeypatch, plain, shape
+):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _leftover_secret_and_sentinel(home)
+    sentinel = home / "device.key.provenance"
+    if shape == "secret-only":
+        sentinel.unlink()
+    elif shape == "cut-short-secret":
+        sentinel.unlink()
         _write_private(home / SECRET, os.urandom(12))
-    secret_before = (home / SECRET).read_bytes()
-    elsewhere = Path(os.path.realpath(tmp_path)) / "elsewhere" / "config.yaml"
-    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(elsewhere))
+    elif shape == "partial-sentinel":
+        _write_private(sentinel, sentinel.read_bytes()[:60])
 
-    if plain:
-        from click.testing import CliRunner
-        from defenseclaw.commands.cmd_init import init_cmd
-        from defenseclaw.context import AppContext
+    _refused_by(plain, home)
 
-        result = CliRunner().invoke(init_cmd, ["--skip-install"], obj=AppContext())
-        assert result.exit_code != 0
-        assert "continuity-evidence-present" in result.output
-    else:
-        _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
-    assert (home / SECRET).read_bytes() == secret_before
-    assert not (home / "device.key").exists()
-    assert _orphans(home) == []
+
+def test_a_keyless_identity_on_a_configured_home_is_never_replaced_by_init(tmp_path, monkeypatch):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+
+    _refused_by(False, home)
+
     assert (home / "config.yaml").is_file()
-
-
-def _init(plain: bool):
-    """One init run on either path: (exit code or report status, a view of the refusal)."""
-
-    if not plain:
-        report = run_first_run(_options())
-        return report.status, any("continuity-evidence-present" in step.detail for step in report.setup)
-    from click.testing import CliRunner
-    from defenseclaw.commands.cmd_init import init_cmd
-    from defenseclaw.context import AppContext
-
-    result = CliRunner().invoke(init_cmd, ["--skip-install"], obj=AppContext())
-    return result.exit_code, "continuity-evidence-present" in result.output
 
 
 def _finished_setup_whose_config_is_elsewhere(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
@@ -298,191 +284,195 @@ def _finished_setup_whose_config_is_elsewhere(tmp_path: Path, monkeypatch) -> tu
     return home, first
 
 
-def _lose_the_key(home: Path, shape: str) -> None:
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("move", ["config-moved", "record-edited", "record-written"])
+@pytest.mark.parametrize("shape", ["secret-only", "partial-sentinel"])
+def test_a_moved_config_or_a_record_written_in_the_folder_never_authorizes_a_replacement(
+    tmp_path, monkeypatch, plain, move, shape
+):
+    # The review's fixtures: a finished setup loses its key, then its config is moved away from the
+    # path it ran with, or a file named init.configs is written (or edited) to list absent paths.
+    home, first = _finished_setup_whose_config_is_elsewhere(tmp_path, monkeypatch)
     (home / "device.key").unlink()
     sentinel = home / "device.key.provenance"
     if shape == "secret-only":
         sentinel.unlink()
-    elif shape == "partial-sentinel":
-        sentinel.write_bytes(sentinel.read_bytes()[:60])
-        protect_private_file(str(sentinel))
-    else:  # the folder carries no record of earlier inits (made by a build that wrote none)
-        sentinel.unlink()
-        (home / "init.configs").unlink()
+    else:
+        _write_private(sentinel, sentinel.read_bytes()[:60])
+    root = Path(os.path.realpath(tmp_path))
+    if move == "config-moved":
+        moved = root / "moved" / "config.yaml"
+        moved.parent.mkdir()
+        first.rename(moved)
+    else:
+        _write_private(home / "init.configs", (str(root / "gone" / "config.yaml") + "\n").encode())
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(root / "second" / "config.yaml"))
+    secret = (home / SECRET).read_bytes()
+
+    _refused_by(plain, home)
+
+    assert (home / SECRET).read_bytes() == secret
+
+
+# --- the explicit repair --------------------------------------------------------------------------
+
+
+def test_the_repair_command_recreates_the_identity_after_a_crashed_first_init(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _interrupted_first_creation(home, monkeypatch)
+    _refused_by(False, home)
+    old_secret = (home / SECRET).read_bytes()
+
+    result = _repair()
+
+    assert result.exit_code == 0, result.output
+    assert _valid(home)
+    assert str(home / "device.key") in result.output
+    assert "defenseclaw init" in result.output  # no config.yaml yet: the next step is named
+    assert (home / SECRET).read_bytes() != old_secret
+    assert [(home / name).read_bytes() for name in _orphans(home)] == [old_secret]
+    again = run_first_run(_options())  # and the stopped init now completes
+    assert again.status != "needs_attention", again.to_dict()
+    assert (home / "config.yaml").is_file()
+    assert _valid(home)
 
 
 @pytest.mark.parametrize("plain", [False, True])
-@pytest.mark.parametrize("shape", ["secret-only", "partial-sentinel", "no-record"])
-def test_a_config_kept_at_an_earlier_override_path_keeps_the_identity_of_its_data_folder(
-    tmp_path, monkeypatch, plain, shape
-):
-    home, first = _finished_setup_whose_config_is_elsewhere(tmp_path, monkeypatch)
-    _lose_the_key(home, shape)
-    before = {path.name: path.read_bytes() for path in home.iterdir() if path.is_file()}
-    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(Path(os.path.realpath(tmp_path)) / "second" / "config.yaml"))
+def test_the_repair_command_clears_the_state_both_init_paths_stopped_on(tmp_path, monkeypatch, plain):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _leftover_secret_and_sentinel(home)
+    _refused_by(plain, home)
 
-    outcome, refused = _init(plain)
+    assert _repair().exit_code == 0
 
-    assert refused, outcome
-    assert outcome in ("needs_attention", 1)
+    assert _valid(home)
+    assert len(_orphans(home)) == 2
+    if plain:
+        (home / "config.yaml").unlink(missing_ok=True)  # the stopped plain run kept the config it saved
+        assert _plain_init().exit_code == 0
+    else:
+        assert run_first_run(_options()).status != "needs_attention"
+    assert _valid(home)
+
+
+def test_the_repair_command_works_on_a_configured_home(tmp_path, monkeypatch):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+    config = (home / "config.yaml").read_bytes()
+
+    result = _repair()
+
+    assert result.exit_code == 0, result.output
+    assert "no config.yaml yet" not in result.output
+    assert _valid(home)
+    assert (home / "config.yaml").read_bytes() == config
+    assert len(_orphans(home)) == 2
+
+
+def test_the_repair_command_asks_first_and_declining_changes_nothing(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _leftover_secret_and_sentinel(home)
+    before = _snapshot(home)
+
+    result = _repair("n\n")
+
+    assert result.exit_code != 0
+    assert "nothing was changed" in result.output
+    assert {name: data for name, data in _snapshot(home).items() if name != "init.lock"} == before
+    assert _orphans(home) == []
     assert not (home / "device.key").exists()
+
+
+def test_the_repair_command_never_touches_a_device_key_that_exists(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    assert run_first_run(_options()).status != "needs_attention"
+    before = _snapshot(home)
+
+    result = _repair()
+
+    assert result.exit_code != 0
+    assert "a device key already exists" in result.output
+    assert _snapshot(home) == before
     assert _orphans(home) == []
-    assert {name: data for name, data in before.items() if name != "init.configs"}.items() <= {
-        path.name: path.read_bytes() for path in home.iterdir() if path.is_file()
-    }.items()
-    assert first.is_file()
 
 
-def test_an_interrupted_first_creation_is_still_repaired_when_the_config_path_is_an_override(tmp_path, monkeypatch):
-    # The benign twin: the folder was only ever initialised by runs that never finished
-    # (a guided run rolls its config back; a plain run keeps it, which is a finished setup).
+def test_the_repair_command_with_nothing_left_over_just_creates_the_identity(tmp_path, monkeypatch):
     home = _home(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
-    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(Path(os.path.realpath(tmp_path)) / "first" / "config.yaml"))
-    real_publish = doctor_recovery._publish_no_replace
 
-    def die_before_sentinel(source: str, target: str) -> None:
-        if target.endswith(".provenance"):
-            raise OSError("process ended before the sentinel was published")
-        real_publish(source, target)
+    result = _repair()
 
-    with monkeypatch.context() as crash:
-        crash.setattr(doctor_recovery, "_publish_no_replace", die_before_sentinel)
-        crash.setattr(doctor_recovery, "_roll_back_device_identity", lambda placed: [])
-        assert run_first_run(_options()).status == "needs_attention"
-    assert (home / SECRET).exists() and not (home / "device.key").exists()
-    assert (home / "audit.db").exists()  # the folder holds more than identity files, so the record decides
-    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(Path(os.path.realpath(tmp_path)) / "second" / "config.yaml"))
-
-    status, refused = _init(False)
-
-    assert not refused
-    assert status != "needs_attention"
+    assert result.exit_code == 0, result.output
     assert _valid(home)
-    assert any(name.startswith(SECRET + ".orphaned-") for name in _orphans(home))
-
-
-def test_the_record_of_earlier_inits_is_kept_to_a_bounded_list_of_paths(tmp_path, monkeypatch):
-    home = _home(tmp_path)
-    for index in range(40):
-        monkeypatch.setenv("DEFENSECLAW_CONFIG", str(home / f"c{index}" / "config.yaml"))
-        bootstrap.begin_data_folder_init(str(home))
-    lines = (home / "init.configs").read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 32
-    assert lines[-1].endswith(os.path.join("c39", "config.yaml"))
-
-
-def test_a_key_the_normal_validator_accepts_is_kept_whatever_its_last_byte_is(tmp_path, monkeypatch):
-    home = _home(tmp_path)
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
-    key = _new_device_key_pem().rstrip(b"\n")
-    secret = os.urandom(32)
-    sentinel = b"defenseclaw-device-provenance-v1:" + hmac.new(secret, key, hashlib.sha256).hexdigest().encode() + b"\n"
-    for name, data in (("device.key", key), (SECRET, secret), ("device.key.provenance", sentinel)):
-        _write_private(home / name, data)
-    assert _valid(home)
-
-    report = run_first_run(_options())
-
-    assert _valid(home)
-    assert (home / "device.key").read_bytes() == key
-    assert (home / SECRET).read_bytes() == secret
     assert _orphans(home) == []
-    assert report.status != "needs_attention", report.to_dict()
 
 
-def _cut_short_creation(home: Path, *, secret_length: int, sentinel_length: int, key_length: int | None) -> None:
-    """The files an interrupted Windows CREATE_NEW publication can leave: each cut anywhere."""
-
-    secret = os.urandom(32)
-    key = _new_device_key_pem()
-    digest = hmac.new(secret, key, hashlib.sha256).hexdigest().encode("ascii")
-    sentinel = b"defenseclaw-device-provenance-v1:" + digest + b"\n"
-    _write_private(home / SECRET, secret[:secret_length])
-    _write_private(home / "device.key.provenance", sentinel[:sentinel_length])
-    if key_length is not None:
-        _write_private(home / "device.key", key[:key_length])
-
-
-@pytest.mark.parametrize(
-    ("secret_length", "sentinel_length", "key_length"),
-    [
-        (0, 0, None),
-        (1, 0, None),
-        (31, 0, None),
-        (32, 5, None),
-        (32, 33, None),
-        (32, 34, None),
-        (32, 97, None),
-        (32, 98, 0),
-        (32, 98, 20),
-        (32, 98, 36),
-        (32, 98, 60),
-        (32, 98, 80),
-    ],
-)
-def test_a_fresh_home_with_a_cut_short_creation_is_repaired_by_init(
-    tmp_path, monkeypatch, secret_length, sentinel_length, key_length
-):
+def test_the_repair_command_takes_the_init_lock(tmp_path, monkeypatch):
     home = _home(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
-    _cut_short_creation(home, secret_length=secret_length, sentinel_length=sentinel_length, key_length=key_length)
-    before = {path.name: path.read_bytes() for path in home.iterdir()}
+    monkeypatch.setattr(bootstrap, "_FIRST_RUN_LOCK_WAIT_SECONDS", 0.2)
+    _leftover_secret_and_sentinel(home)
+    before = _snapshot(home)
 
-    report = run_first_run(_options())
+    with locked_file_update(str(home / "init")):
+        result = _repair()
 
-    assert report.status != "needs_attention", report.to_dict()
-    assert _valid(home)
-    moved = {name.split(".orphaned-")[0]: (home / name).read_bytes() for name in _orphans(home)}
-    assert moved == before
+    assert result.exit_code != 0
+    assert "another defenseclaw init is running" in result.output
+    assert {name: data for name, data in _snapshot(home).items() if name != "init.lock"} == {
+        name: data for name, data in before.items() if name != "init.lock"
+    }
+    assert _orphans(home) == []
 
 
-def test_nothing_is_set_aside_unless_the_home_is_fresh(tmp_path):
+def test_the_repair_command_locks_the_data_folder_the_config_names(tmp_path, monkeypatch):
+    home, data = _home_naming_another_data_dir(tmp_path, monkeypatch)
+    monkeypatch.setattr(bootstrap, "_FIRST_RUN_LOCK_WAIT_SECONDS", 0.2)
+    _leftover_secret_and_sentinel(data)
+
+    with locked_file_update(str(data / "init")):
+        result = _repair()
+
+    assert result.exit_code != 0
+    assert "another defenseclaw init is running" in result.output
+    assert _orphans(data) == []
+
+    assert _repair().exit_code == 0
+    assert _valid(data)
+
+
+def test_doctor_names_the_same_repair_command(tmp_path):
+    from defenseclaw.commands import cmd_doctor
+
+    data = _home(tmp_path)
+    cfg = type("Cfg", (), {})()
+    cfg.data_dir = str(data)
+    cfg.gateway = type("Gw", (), {"device_key_file": str(data / "device.key")})()
+    _leftover_secret_and_sentinel(data)
+    health = cmd_doctor._DoctorResult()
+
+    cmd_doctor._check_device_identity(cfg, health)
+
+    assert REPAIR_IDENTITY_COMMAND in health.checks[-1]["remediation"]
+
+
+def test_attended_set_aside_moves_only_provenance_files_and_only_when_the_key_is_gone(tmp_path):
     home = _home(tmp_path)
     _leftover_secret_and_sentinel(home)
-    before = {path.name: path.read_bytes() for path in home.iterdir()}
+    _write_private(home / "keep.me", b"unrelated")
 
-    moved = doctor_recovery.set_aside_abandoned_identity(str(home / "device.key"), str(home), fresh_home=False)
+    moved = doctor_recovery.set_aside_identity_leftovers(str(home / "device.key"), str(home))
 
-    assert moved == []
-    assert {path.name: path.read_bytes() for path in home.iterdir()} == before
+    assert len(moved) == 2
+    assert sorted(path.name for path in home.iterdir() if not path.name.startswith("device.")) == ["keep.me"]
 
-
-def test_a_fresh_home_keeps_a_complete_key_and_files_that_are_not_a_creation(tmp_path):
-    home = _home(tmp_path)
-    key = _new_device_key_pem()
-    _write_private(home / "device.key", key)
-    _write_private(home / SECRET, os.urandom(32))
-    _write_private(home / "device.key.provenance", b"defenseclaw-device-provenance-v1:" + b"0" * 64 + b"\n")
-
-    _ensure_device_key(str(home / "device.key"), data_dir=str(home), fresh_home=True)
-
-    assert (home / "device.key").read_bytes() == key
-    assert _orphans(home) == []
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [
-        {SECRET: os.urandom(33)},
-        {SECRET: os.urandom(16), "device.key.provenance": b"not a sentinel"},
-        {SECRET: os.urandom(32), "device.key.provenance": b"defenseclaw-device-provenance-v1:" + b"g" * 64},
-        {"device.key.provenance": b"defenseclaw-device-provenance-v1:" + b"0" * 64 + b"\nextra"},
-        {SECRET: os.urandom(32), "device.key": b"-----BEGIN ED25519 PRIVATE KEY-----\n" + b"A" * 43 + b"!"},
-    ],
-)
-def test_unrecognised_files_on_a_fresh_home_are_not_set_aside(tmp_path, bad):
-    home = _home(tmp_path)
-    for name, data in bad.items():
-        _write_private(home / name, data)
-
-    if "device.key" in bad:
-        _ensure_device_key(str(home / "device.key"), data_dir=str(home), fresh_home=True)  # a key is left alone
-    else:
-        with pytest.raises(Exception, match="continuity-evidence-present"):
-            _ensure_device_key(str(home / "device.key"), data_dir=str(home), fresh_home=True)
-
-    assert {path.name: path.read_bytes() for path in home.iterdir()} == bad
+    _ensure_device_key(str(home / "device.key"), data_dir=str(home))
+    before = _snapshot(home)
+    assert doctor_recovery.set_aside_identity_leftovers(str(home / "device.key"), str(home)) == []
+    assert _snapshot(home) == before
 
 
 def test_repeated_set_asides_never_replace_an_earlier_orphan(tmp_path):
@@ -490,10 +480,8 @@ def test_repeated_set_asides_never_replace_an_earlier_orphan(tmp_path):
     kept: dict[str, bytes] = {}
     with patch.object(doctor_recovery.time, "gmtime", return_value=(2026, 11, 8, 12, 0, 0, 6, 312, 0)):
         for _ in range(3):
-            _cut_short_creation(home, secret_length=32, sentinel_length=60, key_length=None)
-            moved = doctor_recovery.set_aside_abandoned_identity(
-                str(home / "device.key"), str(home), fresh_home=True
-            )
+            _leftover_secret_and_sentinel(home)
+            moved = doctor_recovery.set_aside_identity_leftovers(str(home / "device.key"), str(home))
             assert len(moved) == 2
             for path in moved:
                 assert path not in kept
@@ -620,22 +608,6 @@ def test_the_plain_init_path_takes_the_same_lock(tmp_path, monkeypatch):
     assert "another defenseclaw init is running" in result.output
     assert not (home / "config.yaml").exists()
     assert not (home / "device.key").exists()
-
-
-def test_the_plain_init_path_repairs_a_fresh_home_left_half_created(tmp_path, monkeypatch):
-    from click.testing import CliRunner
-    from defenseclaw.commands.cmd_init import init_cmd
-    from defenseclaw.context import AppContext
-
-    home = _home(tmp_path)
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
-    _cut_short_creation(home, secret_length=32, sentinel_length=60, key_length=None)
-
-    result = CliRunner().invoke(init_cmd, ["--skip-install"], obj=AppContext())
-
-    assert result.exit_code == 0, result.output
-    assert _valid(home)
-    assert len(_orphans(home)) == 2
 
 
 def test_a_failed_creation_takes_back_every_file_it_published(tmp_path):
