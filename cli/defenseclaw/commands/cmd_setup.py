@@ -3854,6 +3854,26 @@ def _publish_pending_guardrail_secrets(
     return transaction
 
 
+def _preflight_pending_guardrail_secret_size(
+    pending_secrets: list[_PendingGuardrailSecret],
+    data_dir: str,
+) -> None:
+    """Check the complete judge-secret update before setup publishes authority."""
+
+    if not pending_secrets:
+        return
+    dotenv_path = os.path.join(data_dir, ".env")
+    # This is a read-only preflight. The writer repeats the check while it
+    # owns the file lock, so a concurrent edit cannot bypass the size limit.
+    snapshot = _rotate_token_snapshot_locked(dotenv_path)
+    updates = tuple(
+        (pending.env_name, sanitize_dotenv_value(pending.value, key=pending.env_name))
+        for pending in pending_secrets
+    )
+    rendered = _render_secrets_to_dotenv(snapshot, updates)
+    _check_dotenv_size(dotenv_path, rendered)
+
+
 @dataclass(frozen=True)
 class _RotateTokenHookSnapshot:
     connector: str
@@ -4521,6 +4541,17 @@ def _save_secrets_to_dotenv_locked(
 ) -> None:
     """Publish a validated dotenv batch once while the caller owns its lock."""
 
+    body = _render_secrets_to_dotenv(snapshot, updates)
+    if not snapshot.existed or body != snapshot.body:
+        _publish_dotenv_locked(dotenv_path, body)
+
+
+def _render_secrets_to_dotenv(
+    snapshot: _RotateTokenDotenvSnapshot,
+    updates: tuple[tuple[str, str], ...],
+) -> bytes:
+    """Render all secret updates with the same rules for preflight and commit."""
+
     rendered = snapshot
     for key, value in updates:
         rendered = _RotateTokenDotenvSnapshot(
@@ -4528,8 +4559,7 @@ def _save_secrets_to_dotenv_locked(
             body=_dotenv_upsert_render(rendered, key, value),
             mode=rendered.mode,
         )
-    if not snapshot.existed or rendered.body != snapshot.body:
-        _publish_dotenv_locked(dotenv_path, rendered.body)
+    return rendered.body
 
 
 def _rotate_token_render(snapshot: _RotateTokenDotenvSnapshot, new_token: str) -> bytes:
@@ -7798,6 +7828,7 @@ def setup_guardrail(
         """Restore transaction-owned exact authority after an interactive no-op."""
 
         if protected_selection is None:
+            _restore_setup_config_in_memory(app, setup_snapshot)
             return
         rollback_errors: list[str] = []
         for label, restore in (
@@ -8139,6 +8170,7 @@ def setup_guardrail(
                 ux.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
         secret_collection_failure_code: str | None = None
+        interactive_targets: list[tuple[str, ...]] = []
         if guard_mode or human_approval is not None or hilt_min_severity:
             click.echo("  The prompts below default to the flags you passed; add --yes to skip them.")
         try:
@@ -8149,7 +8181,7 @@ def setup_guardrail(
                 default_mode=guard_mode,
                 human_approval=human_approval,
                 hilt_min_severity=hilt_min_severity,
-                _pre_mutation_selection=preselect_guardrail_targets,
+                _pre_mutation_selection=lambda targets: interactive_targets.append(tuple(targets)),
                 _pending_secrets=pending_guardrail_secrets,
             )
             if not interactive_completed:
@@ -8157,6 +8189,12 @@ def setup_guardrail(
                 restore_precommit_guardrail_selection()
                 click.echo("  Guardrail not enabled. Run again without declining to configure.")
                 return
+            # The wizard has collected every pending judge secret. Reject its
+            # complete dotenv before the native Windows selection publishes
+            # a receipt or changes the unverified-selection record.
+            _preflight_pending_guardrail_secret_size(pending_guardrail_secrets, app.cfg.data_dir)
+            for targets in interactive_targets:
+                preselect_guardrail_targets(targets)
             _apply_guardrail_extra_options(
                 gc,
                 rule_pack=rule_pack,
@@ -8164,6 +8202,10 @@ def setup_guardrail(
                 human_approval=human_approval,
                 hilt_min_severity=hilt_min_severity,
             )
+        except _DotenvSizeError as error:
+            _clear_pending_guardrail_secrets(pending_guardrail_secrets)
+            restore_precommit_guardrail_selection()
+            raise _GuardrailSecretFailure("publication-dotenv-size-limit", str(error)) from None
         except click.Abort:
             secret_was_collected = bool(pending_guardrail_secrets)
             _clear_pending_guardrail_secrets(pending_guardrail_secrets)
@@ -8183,6 +8225,7 @@ def setup_guardrail(
             )
         except BaseException:
             if not pending_guardrail_secrets:
+                restore_precommit_guardrail_selection()
                 raise
             _clear_pending_guardrail_secrets(pending_guardrail_secrets)
             selection_rollback_failed = False
