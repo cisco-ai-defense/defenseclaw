@@ -4223,10 +4223,12 @@ func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHook
 	toolInput := decodeAgentHookToolInput(req.ToolArgs)
 	if strings.EqualFold(req.ConnectorName, "cursor") && canonicalEvent(req.HookEventName) == "beforemcpexecution" {
 		probe := cursorMCPProbeFromPayload(req.Payload, req.ToolName)
+		probe.SessionID = req.SessionID
 		return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 	}
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
 	probe.WorkspaceDir = req.CWD
+	probe.SessionID = req.SessionID
 	// Kiro's servers on a managed Windows gateway are known only from the
 	// record the hook enumerator publishes: they are read again before a
 	// call about to run is decided, and a changed one waits for its own

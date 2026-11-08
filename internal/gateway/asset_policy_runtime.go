@@ -49,6 +49,10 @@ type mcpRuntimeProbe struct {
 	// WorkspaceDir is the agent's working directory from the hook, used to
 	// resolve a name-only probe to the connector's configured server.
 	WorkspaceDir string
+	// SessionID is the agent session the hook belongs to; the definition a
+	// session resolved for a server is remembered for that session only
+	// (GAP-0861).
+	SessionID string
 }
 
 type skillRuntimeProbe struct {
@@ -101,6 +105,7 @@ const (
 func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCodeHookRequest) (config.AssetPolicyDecision, bool) {
 	probe := mcpProbeFromFields(req.MCPServerName, req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	probe.SessionID = req.SessionID
 	rawServer := probe.ServerName
 	probe.ServerName = a.claudeCodePluginMCPServerName(ctx, probe)
 	if decision, refused := unresolvedPluginMCPDefinitionDecision(a.requestConfig(ctx), rawServer, probe); refused {
@@ -404,6 +409,7 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	}
 	probe := mcpProbeFromFields(a.codexMCPServerName(ctx, req), req.ToolName, req.ToolInput)
 	probe.WorkspaceDir = req.CWD
+	probe.SessionID = req.SessionID
 	// A managed Windows gateway knows the enrolled users Codex servers only
 	// from the record the hook enumerator publishes: it is read again before
 	// a call about to run is decided, and an unreadable one refuses the call,
@@ -662,7 +668,66 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 	if !runtimeDetection.Enabled && cfg.SecureClientIntegration() {
 		return config.AssetPolicyDecision{}, false
 	}
-	probe = a.resolveMCPProbeEndpoint(ctx, cfg, connector, probe)
+	res := a.resolveMCPProbeEndpoint(ctx, cfg, connector, probe)
+	probe = res.probe
+	decision := mcpProbeDecision(ctx, cfg, connector, probe)
+	denied, earlierDenied := mcpDeniedDecision(decision), false
+	if res.earlier != nil {
+		// The edit of a config file does not change the connection a running
+		// agent holds, and nothing here shows that it reconnected: a call is
+		// judged on the definition the config lists now and on the one the
+		// session was last judged on, and the stricter verdict holds.
+		earlier := mcpProbeDecision(ctx, cfg, connector, *res.earlier)
+		earlierDenied = mcpDeniedDecision(earlier)
+		if mcpDecisionRank(earlier) > mcpDecisionRank(decision) {
+			decision, probe = earlier, *res.earlier
+		}
+	}
+	a.rememberResolvedMCP(connector, res, denied, earlierDenied)
+	if res.unknown && decision.RawAction != "block" {
+		if unknown, ok := unknownMCPDefinitionDecision(cfg, connector, probe); ok {
+			decision = unknown
+		}
+	}
+	if !decision.Enabled || decision.RawAction != "block" {
+		return decision, false
+	}
+	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", connector, hookEvent)
+	if a.logger != nil {
+		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
+			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason)
+		details = appendHookEvaluationDetails(details, evalCtx)
+		a.logAssetPolicyAudit(ctx, connector, "mcp:"+decision.TargetName, details)
+	}
+	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent, evalCtx)
+	return decision, true
+}
+
+// mcpSessionStarted drops the MCP definitions remembered for a session whose
+// agent starts again (a new process or a resume): it connects to the servers
+// its config lists now, so what it held before no longer says where a call
+// goes. A cleared or compacted conversation keeps its connections and its
+// memory (GAP-0861).
+func (a *APIServer) mcpSessionStarted(ctx context.Context, connector, sessionID, hookEvent, source string) {
+	if canonicalEvent(hookEvent) != "sessionstart" || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "startup", "resume":
+	default:
+		return
+	}
+	home, serviceAccount := callerHomeForAssets(ctx)
+	if serviceAccount && home == "" {
+		return
+	}
+	a.mcpResolved.forgetSession(connector, home, sessionID)
+}
+
+// mcpProbeDecision is the asset policy verdict on a probe whose definition
+// has been resolved; the zero decision when the policy does not apply to it.
+func mcpProbeDecision(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe) config.AssetPolicyDecision {
+	runtimeDetection, _ := cfg.AssetRuntimeDetectionFor("mcp")
 	decision, unproven := unprovenMCPDefinitionDecision(ctx, cfg, connector, probe)
 	if !unproven {
 		input := config.AssetPolicyInput{
@@ -676,7 +741,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 			RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 		}
 		if !runtimeAssetPolicyApplies(cfg, runtimeDetection, probe.Surface, input) {
-			return config.AssetPolicyDecision{}, false
+			return config.AssetPolicyDecision{}
 		}
 		decision = cfg.EvaluateAssetPolicy(input)
 	}
@@ -699,18 +764,74 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		decision.Mode = config.AssetPolicyModeObserve
 		decision.WouldBlock = true
 	}
-	if !decision.Enabled || decision.RawAction != "block" {
-		return decision, false
+	return decision
+}
+
+// mcpDeniedDecision reports a verdict from the denied list.
+func mcpDeniedDecision(decision config.AssetPolicyDecision) bool {
+	return decision.Enabled && decision.RawAction == "block" && decision.Source == "admin-deny"
+}
+
+// mcpDecisionRank orders verdicts by how strongly they hold the call.
+func mcpDecisionRank(decision config.AssetPolicyDecision) int {
+	switch {
+	case !decision.Enabled:
+		return 0
+	case decision.Action == "block":
+		return 2
+	case decision.RawAction == "block":
+		return 1
 	}
-	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", connector, hookEvent)
-	if a.logger != nil {
-		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
-			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason)
-		details = appendHookEvaluationDetails(details, evalCtx)
-		a.logAssetPolicyAudit(ctx, connector, "mcp:"+decision.TargetName, details)
+	return 0
+}
+
+// mcpResolution is how resolveMCPProbeEndpoint found the server of a probe.
+type mcpResolution struct {
+	// probe is judged first: the definition the config lists now, else the
+	// one remembered for the session.
+	probe mcpRuntimeProbe
+	entry config.MCPServerEntry
+	// found is set when probe holds a definition (entry).
+	found bool
+	// earlier is the definition remembered for the session when the config
+	// lists another one for the name now.
+	earlier      *mcpRuntimeProbe
+	earlierEntry config.MCPServerEntry
+	// unknown is set when the server was looked up by name and found neither
+	// in the config nor in what the session resolved before.
+	unknown bool
+	// track is set when the session memory is used; home and name key it.
+	track bool
+	home  string
+	name  string
+}
+
+func mcpProbeWithEntry(probe mcpRuntimeProbe, entry config.MCPServerEntry, byConfiguredName bool) mcpRuntimeProbe {
+	if byConfiguredName && strings.TrimSpace(entry.Name) != "" {
+		// The configured name, not the form the agent tool name carries
+		// (acme_notes for acme-notes in Codex), is what the lists and the
+		// registry name (GAP-0939).
+		probe.ServerName = strings.TrimSpace(entry.Name)
 	}
-	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent, evalCtx)
-	return decision, true
+	probe.URL = strings.TrimSpace(entry.URL)
+	probe.Command = strings.TrimSpace(entry.Command)
+	probe.Args = entry.Args
+	probe.Transport = strings.TrimSpace(entry.Transport)
+	return probe
+}
+
+// rememberResolvedMCP keeps the definition a session was judged on, so a
+// later call finds it once the config no longer lists it. A definition that
+// the denied list matched is kept in place of a later one.
+func (a *APIServer) rememberResolvedMCP(connector string, res mcpResolution, denied, earlierDenied bool) {
+	if !res.track || !res.found {
+		return
+	}
+	entry := res.entry
+	if res.earlier != nil && earlierDenied {
+		entry, denied = res.earlierEntry, true
+	}
+	a.mcpResolved.remember(connector, res.home, res.probe.SessionID, res.probe.WorkspaceDir, res.name, entry, denied, time.Now())
 }
 
 // resolveMCPProbeEndpoint fills a name-only hook probe (mcp__<server>__<tool>)
@@ -726,53 +847,82 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 // never matched at the hook of a managed device (GAP-0576). Secure Client
 // keeps main: enabled gates the lookup, which reads the gateway's own home
 // (issue #1092).
-func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe) mcpRuntimeProbe {
+func (a *APIServer) resolveMCPProbeEndpoint(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe) mcpResolution {
+	res := mcpResolution{probe: probe}
 	if cfg == nil {
-		return probe
+		return res
 	}
 	secureClient := cfg.SecureClientIntegration()
 	if !cfg.AssetPolicy.Enabled && (secureClient || !mcpListsPinEndpoint(cfg.AssetPolicy.MCP)) {
-		return probe
+		return res
 	}
 	if probe.Surface != "hook" || probe.URL != "" || probe.Command != "" || probe.ServerName == "" {
-		return probe
+		return res
 	}
-	var entry config.MCPServerEntry
-	var ok bool
 	if secureClient {
-		entry, ok = cfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName)
-	} else {
-		entry, ok = a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
-	}
-	if !secureClient {
-		// The agent keeps the connection to a server it started after the
-		// entry leaves its config, so the last definition resolved for the
-		// name is the one the call reaches (GAP-0861). Secure Client keeps
-		// main (#1092).
-		home, serviceAccount := callerHomeForAssets(ctx)
-		if !serviceAccount || home != "" {
-			now := time.Now()
-			if ok {
-				a.mcpResolved.remember(connector, home, probe.WorkspaceDir, probe.ServerName, entry, now)
-			} else {
-				entry, ok = a.mcpResolved.recall(connector, home, probe.WorkspaceDir, probe.ServerName, now)
-			}
+		if entry, ok := cfg.LookupMCPServerForConnector(connector, probe.WorkspaceDir, probe.ServerName); ok {
+			res.probe, res.entry, res.found = mcpProbeWithEntry(probe, entry, false), entry, true
 		}
+		return res
 	}
-	if !ok {
-		return probe
+	entry, ok := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
+	// The agent keeps the connection to a server it started after the entry
+	// leaves its config, so what its session resolved for the name before is
+	// the server the call reaches (GAP-0861). Secure Client keeps main
+	// (#1092).
+	home, serviceAccount := callerHomeForAssets(ctx)
+	res.track, res.home, res.name = !serviceAccount || home != "", home, probe.ServerName
+	var kept config.MCPServerEntry
+	var haveKept bool
+	if res.track {
+		kept, haveKept = a.mcpResolved.recall(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, time.Now())
 	}
-	if !secureClient && strings.TrimSpace(entry.Name) != "" {
-		// The configured name, not the form the agent's tool name carries
-		// (acme_notes for acme-notes in Codex), is what the lists and the
-		// registry name (GAP-0939).
-		probe.ServerName = strings.TrimSpace(entry.Name)
+	switch {
+	case ok:
+		res.probe, res.entry, res.found = mcpProbeWithEntry(probe, entry, true), entry, true
+		if haveKept && !sameMCPDefinition(kept, entry) {
+			earlier := mcpProbeWithEntry(probe, kept, true)
+			res.earlier, res.earlierEntry = &earlier, kept
+		}
+	case haveKept:
+		res.probe, res.entry, res.found = mcpProbeWithEntry(probe, kept, true), kept, true
+	default:
+		res.unknown = true
 	}
-	probe.URL = strings.TrimSpace(entry.URL)
-	probe.Command = strings.TrimSpace(entry.Command)
-	probe.Args = entry.Args
-	probe.Transport = strings.TrimSpace(entry.Transport)
-	return probe
+	return res
+}
+
+// mcpConnectorResolvesByName reports a connector whose MCP servers the
+// gateway reads from the caller account, so a name it cannot find there is
+// unknown rather than merely outside what is read.
+func mcpConnectorResolvesByName(connector string) bool {
+	return config.SameConnector(connector, "claudecode") || config.SameConnector(connector, "codex")
+}
+
+// unknownMCPDefinitionDecision is the verdict on a tool call of an MCP server
+// whose definition is found nowhere: not in the agent config, and not among
+// what its session resolved before (a gateway restart, a new session, or a
+// server the agent loads from outside the files read here). A rule of the
+// denied list that pins where a server points cannot be checked against it,
+// so the call is refused in a strict or managed deployment and allowed with a
+// warning in the default and permissive tiers, as for a server whose
+// admission is pending (GAP-0861). It applies whatever asset_policy.enabled
+// says, like the explicit deny. Secure Client keeps main (#1092).
+func unknownMCPDefinitionDecision(cfg *config.Config, connector string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
+	if cfg == nil || cfg.SecureClientIntegration() || probe.Surface != "hook" || probe.ServerName == "" ||
+		!mcpConnectorResolvesByName(connector) ||
+		!rulesPinEndpointForServer(cfg.AssetPolicy.MCP.Denied, connector, probe.ServerName) {
+		return config.AssetPolicyDecision{}, false
+	}
+	reason := fmt.Sprintf("mcp server %q: DefenseClaw found no definition of it in the agent config or earlier in this session, "+
+		"so where it points cannot be checked against asset_policy.mcp.denied", probe.ServerName)
+	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connector, "hook", reason, "mcp-definition-unproven")
+	decision.RegistryStatus = "unknown"
+	if !cfg.MCPAdmissionFailsClosed(connector) {
+		decision.Action = "allow"
+		decision.Mode = config.AssetPolicyModeObserve
+	}
+	return decision, true
 }
 
 // unprovenMCPDefinitionDecision refuses an MCP tool call whose server the
