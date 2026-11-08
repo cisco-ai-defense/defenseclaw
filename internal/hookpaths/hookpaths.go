@@ -467,11 +467,13 @@ func calledFunctions(file *syntax.File, home string) map[string]bool {
 func OperandPath(name, cwd string) string {
 	// Keep the old canonical spelling for ordinary operands. Only dot-dot
 	// needs a raw spelling until the component walk has followed links: a
-	// dot-dot step at any position, also the first (a leading step is
-	// applied to the supplied directory, which may itself be a link).
+	// step inside the operand, and a leading step when the supplied
+	// directory has a link in it (the kernel applies the step to the link
+	// target; with no link the clean join is the same path).
 	slashed := filepath.ToSlash(name)
+	leading := slashed == ".." || strings.HasPrefix(slashed, "../")
 	if !strings.Contains(slashed, "/../") && !strings.HasSuffix(slashed, "/..") &&
-		slashed != ".." && !strings.HasPrefix(slashed, "../") {
+		!(leading && !filepath.IsAbs(name) && directoryHasLink(cwd)) {
 		if !filepath.IsAbs(name) && filepath.IsAbs(cwd) {
 			return filepath.Join(cwd, name)
 		}
@@ -481,6 +483,17 @@ func OperandPath(name, cwd string) string {
 		return name
 	}
 	return cwd + string(filepath.Separator) + name
+}
+
+// directoryHasLink reports an existing absolute directory whose path passes
+// through a link. A directory that does not exist, or a relative one, has no
+// link to read.
+func directoryHasLink(dir string) bool {
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	real, err := pathEvalSymlinks(dir)
+	return err == nil && real != filepath.Clean(dir)
 }
 
 // parseShell parses a command of at most MaxPayloadBytes as bash, or else as

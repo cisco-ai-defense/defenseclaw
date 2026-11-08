@@ -17,59 +17,94 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
 // retargetTransport is the managed hook client talking to the real gateway
-// handler: the gateway answers with the user home locked (it reads nothing in
-// it), then the swap runs at the chosen point after that answer.
+// handler over a loopback connection: the gateway answers with the user home
+// locked (it reads nothing in it), then the swap runs at the chosen point
+// after that answer. The connection is real because the hook asks for a
+// delivery receipt, which an in-process handler cannot give: without it the
+// gateway can only call the answer unconfirmed.
 type retargetTransport struct {
-	api      *APIServer
-	connect  string
-	home     string
-	when     string // "answer" or "close"
-	swap     func()
-	answered string
+	api     *APIServer
+	connect string
+	home    string
+	swap    func()
+
+	once   sync.Once
+	server *httptest.Server
+	inner  *http.Transport
+	mu     sync.Mutex
+	got    bytes.Buffer
+}
+
+func (rt *retargetTransport) start() {
+	rt.once.Do(func() {
+		root := filepath.Dir(rt.home)
+		rt.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r = r.WithContext(withManagedHookPeer(r.Context(), managedHookPeer{Home: rt.home}))
+			_ = os.Chmod(root, 0)
+			rt.api.handleAgentHook(rt.connect).ServeHTTP(w, r)
+		}))
+		rt.inner = &http.Transport{DisableKeepAlives: true}
+	})
+}
+
+func (rt *retargetTransport) close() {
+	if rt.server != nil {
+		rt.server.Close()
+		rt.inner.CloseIdleConnections()
+	}
+}
+
+// answered is the answer body the gateway sent.
+func (rt *retargetTransport) answered() string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	return rt.got.String()
 }
 
 func (rt *retargetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: rt.home}))
-	root := filepath.Dir(rt.home)
-	if err := os.Chmod(root, 0); err != nil {
+	rt.start()
+	forward := req.Clone(req.Context())
+	target := *req.URL
+	target.Scheme, target.Host = "http", rt.server.Listener.Addr().String()
+	forward.URL = &target
+	forward.Host = target.Host
+	resp, err := rt.inner.RoundTrip(forward)
+	// The gateway has judged the call when its answer arrives; give the user
+	// home back before the hook reads it again.
+	_ = os.Chmod(filepath.Dir(rt.home), 0o700)
+	if err != nil {
 		return nil, err
 	}
-	out := httptest.NewRecorder()
-	rt.api.handleAgentHook(rt.connect).ServeHTTP(out, req)
-	if err := os.Chmod(root, 0o700); err != nil {
-		return nil, err
-	}
-	rt.answered = out.Body.String()
-	resp := out.Result()
-	switch {
-	case rt.swap == nil:
-	case rt.when == "close":
-		resp.Body = &retargetCloser{Reader: bytes.NewReader(out.Body.Bytes()), onClose: rt.swap}
-	default:
+	resp.Body = &retargetTee{ReadCloser: resp.Body, rt: rt}
+	// A hook that asks for a delivery receipt keeps the connection open until
+	// it has judged the answer, so "close" has no later moment than "answer"
+	// at which the swap still lands before the hook reads its targets again:
+	// both run the swap as the answer arrives.
+	if rt.swap != nil {
 		rt.swap()
 	}
 	return resp, nil
 }
 
-type retargetCloser struct {
-	io.Reader
-	onClose func()
-	closed  bool
+// retargetTee keeps the answer body for the test to read.
+type retargetTee struct {
+	io.ReadCloser
+	rt *retargetTransport
 }
 
-func (c *retargetCloser) Close() error {
-	if !c.closed {
-		c.closed = true
-		c.onClose()
-	}
-	return nil
+func (t *retargetTee) Read(p []byte) (int, error) {
+	n, err := t.ReadCloser.Read(p)
+	t.rt.mu.Lock()
+	t.rt.got.Write(p[:n])
+	t.rt.mu.Unlock()
+	return n, err
 }
 
 // retargetWriter makes the swap in the Write that carries the answer to the
@@ -139,21 +174,17 @@ func retargetRun(t *testing.T, connector, pack, point, protected string) (stdout
 		body = opencodeV2PatchBody(t, project, "patch", "*** Begin Patch\n*** Update File: link.txt\n@@\n # base\n+changed\n*** End Patch\n")
 		event = "tool.execute.before"
 	}
-	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = connector
-	cfg.Guardrail.RulePack = pack
-	rt := &retargetTransport{
-		api: &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}, connect: connector, home: home, when: point,
-	}
+	// The gateway keeps a durable audit record of the call before it offers
+	// the answer to a hook that asks for a delivery receipt.
+	fixture := newManagedHookAuditFixtureFor(t, connector, nil)
+	fixture.api.scannerCfg.Guardrail.RulePack = pack
+	rt := &retargetTransport{api: fixture.api, connect: connector, home: home}
+	t.Cleanup(rt.close)
 	writer := &retargetWriter{swap: retarget}
 	var stdoutW io.Writer = &writer.Buffer
 	switch point {
 	case "answer", "close", "same":
 		rt.swap = retarget
-		if point == "same" {
-			rt.when = "answer"
-		}
 	case "write":
 		stdoutW = writer
 	}
@@ -170,7 +201,7 @@ func retargetRun(t *testing.T, connector, pack, point, protected string) (stdout
 		ManagedEnterprise: true, Home: hookHome, HookDir: filepath.Join(hookHome, "hooks"),
 		Stdin: strings.NewReader(body), Stdout: stdoutW, Stderr: &stderr, HTTPClient: &http.Client{Transport: rt},
 	})
-	return writer.String(), rt.answered, code, writer.saw
+	return writer.String(), rt.answered(), code, writer.saw
 }
 
 func retargetRefused(code int, stdout string) bool {

@@ -142,23 +142,42 @@ func TestGAP0641LeadingParentFromLinkedWorkingDirectory(t *testing.T) {
 	}
 }
 
-// OperandPath keeps a dot-dot step at any position raw, including the first
-// and the whole operand, and keeps the clean spelling for the rest.
+// OperandPath keeps a dot-dot step inside the operand raw, and a leading one
+// raw when the supplied directory has a link in its path (the kernel applies
+// the step to the link target). With no link in the directory the clean join
+// is the same path, so a leading step stays clean there (also for a directory
+// that does not exist, which a command such as pushd has not entered).
 func TestOperandPathKeepsEveryDotDotStepRaw(t *testing.T) {
-	cwd := filepath.Join(string(filepath.Separator), "work", "dir")
-	for _, row := range []struct{ name, want string }{
-		{"..", cwd + "/.."},
-		{"../x", cwd + "/../x"},
-		{"./../x", cwd + "/./../x"},
-		{"a/../x", cwd + "/a/../x"},
-		{"a/..", cwd + "/a/.."},
-		{"x", cwd + "/x"},
-		{"./x", cwd + "/x"},
-		{"..x", cwd + "/..x"},
-		{".../x", cwd + "/.../x"},
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(root, "real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(root, "linked")
+	if err := os.Symlink(real, linked); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	missing := filepath.Join(root, "missing", "dir")
+	for _, row := range []struct{ cwd, name, want string }{
+		{linked, "..", linked + "/.."},
+		{linked, "../x", linked + "/../x"},
+		{linked, "./../x", linked + "/./../x"},
+		{linked, "a/../x", linked + "/a/../x"},
+		{linked, "a/..", linked + "/a/.."},
+		{linked, "x", linked + "/x"},
+		{linked, "./x", linked + "/x"},
+		{linked, "..x", linked + "/..x"},
+		{linked, ".../x", linked + "/.../x"},
+		{real, "..", root},
+		{real, "../x", root + "/x"},
+		{real, "./../x", real + "/./../x"},
+		{missing, "../x", filepath.Join(root, "missing", "x")},
 	} {
-		if got := filepath.ToSlash(OperandPath(row.name, cwd)); got != filepath.ToSlash(row.want) {
-			t.Errorf("OperandPath(%q)=%q, want %q", row.name, got, row.want)
+		if got := filepath.ToSlash(OperandPath(row.name, row.cwd)); got != filepath.ToSlash(row.want) {
+			t.Errorf("OperandPath(%q, %q)=%q, want %q", row.name, row.cwd, got, row.want)
 		}
 	}
 }
