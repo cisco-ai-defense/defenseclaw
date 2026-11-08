@@ -845,6 +845,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
             ),
+            patch("defenseclaw.commands.cmd_setup.agent_discovery._publish_agent_signal") as publish,
         ):
             accepted = cmd_setup._check_connector_version_supported_for_setup(
                 "opencode",
@@ -860,6 +861,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             data_dir=self.app.cfg.data_dir,
             persist_cache=False,
         )
+        # Only this connector entry is published; the scan itself rewrote nothing (GAP-0882).
+        publish.assert_called_once_with(disc, "opencode", data_dir=self.app.cfg.data_dir)
 
     def test_windows_opencode_single_setup_selects_exact_image_before_state_and_generic(self):
         original_save = self.app.cfg.save
@@ -2923,6 +2926,7 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",
                 return_value="windows",
             ),
+            patch("defenseclaw.commands.cmd_setup.agent_discovery._publish_agent_signal") as publish,
         ):
             accepted = cmd_setup._check_connector_version_supported_for_setup(
                 "amp",
@@ -2938,6 +2942,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
             data_dir=self.app.cfg.data_dir,
             persist_cache=False,
         )
+        # Only this connector entry is published; the scan itself rewrote nothing (GAP-0882).
+        publish.assert_called_once_with(disc, "amp", data_dir=self.app.cfg.data_dir)
 
     def test_guardrail_action_refusal_preserves_modes_and_judge(self):
         self._seed_map("codex", "hermes")
