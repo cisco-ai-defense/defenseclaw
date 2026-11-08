@@ -348,18 +348,22 @@ func holdManagedExactRestore(dataDir, connectorName, path string, before []byte)
 // holdManagedExactRestoreOverRead is holdManagedExactRestore for a writer that
 // reads the file again after before (to keep comments of the operator, say),
 // so before does not bind what it consumed. A span follows the writes the
-// shared writers report: it publishes only when each write found the bytes the
-// rollback left (before, or its previous write) and the file now holds the
-// bytes the caller names. The returned function takes the committed bytes, or
-// nil when the write failed; it always closes the span.
+// shared writers report: each write must find the bytes the rollback left
+// (before, or its previous write), or it is refused (errManagedTargetMoved)
+// and the file stays as it is. The span is open whether or not a record
+// vouches for before, so a save is never replaced either way. It publishes the
+// exact restore only when the record vouches for before, each write found the
+// bytes the rollback left, and the file now holds the bytes the caller names.
+// The returned function takes the committed bytes, or nil when the write
+// failed; it always closes the span.
 func holdManagedExactRestoreOverRead(dataDir, connectorName, path string, before []byte) func(after []byte) error {
 	b, ok := managedExactRestoreRecord(dataDir, connectorName, path, before)
-	if !ok || !beginManagedConversionSpan(path, b.PostSHA256) {
+	if !beginManagedConversionSpan(path, sha256Hex(before)) {
 		return func([]byte) error { return nil }
 	}
 	return func(after []byte) error {
 		span, open := endManagedSetupSpan(path)
-		if after == nil || !open || span.tainted || span.expected != managedFileSnapshotHash(after, true) {
+		if !ok || after == nil || !open || span.tainted || span.expected != managedFileSnapshotHash(after, true) {
 			return nil
 		}
 		if now, info, err := readManagedTarget(path); err != nil || info == nil || !bytes.Equal(now, after) {

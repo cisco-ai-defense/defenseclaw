@@ -87,7 +87,9 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 		return err
 	}
 
-	noteManagedSetupWrite(path, data)
+	if err := noteManagedSetupWrite(path, data); err != nil {
+		return err
+	}
 
 	dir := filepath.Dir(writePath)
 	if err := atomicMkdirAll(dir, 0o755); err != nil {
@@ -148,6 +150,13 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
+	if atomicFileBeforePublish != nil {
+		atomicFileBeforePublish(path)
+	}
+	if err := confirmManagedSetupPublish(path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
 	if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
 		os.Remove(tmpPath)
 		return &atomicPublishError{Path: writePath, Err: publishCause(err)}
@@ -159,6 +168,10 @@ func atomicWriteFileAt(path, writePath string, data []byte, perm os.FileMode, pu
 	}
 	return nil
 }
+
+// atomicFileBeforePublish runs just before the managed-setup check that
+// precedes a replacement; tests save a file there to prove the check holds.
+var atomicFileBeforePublish func(path string)
 
 // atomicFileSyncParent syncs dir after a rename into it. A failure leaves the
 // new file in place; tests replace it to prove callers handle that.

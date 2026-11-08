@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -316,6 +318,64 @@ func TestDevinProjectRollbackConversionHonoursAnEditMadeWhileItRuns(t *testing.T
 			}
 			if len(restored) != 1 || !bytes.Equal(got, pre) {
 				t.Fatalf("untouched file: restored=%v kept=%v file=%q, want the pre-setup bytes %q", restored, kept, got, pre)
+			}
+		})
+	}
+}
+
+// The save can also land after the writer's last journal note and just before
+// the replacement, which is a replacement of the whole file. The writer must
+// not replace a file that is not the one it read: the conversion starts again
+// from the saved bytes and the save stays, in the file and out of the exact
+// restore. An editor that saves under every attempt gets an error, not an
+// overwritten file.
+func TestDevinProjectRollbackConversionDoesNotReplaceAFileSavedBeforePublication(t *testing.T) {
+	toEarlier := devinWindowsHookFormPairs([]string{devinGuardTestLauncher}, false)
+	comment := []byte("// operator note added during rollback\n")
+	for _, saves := range []int{0, 1, devinConversionAttempts} {
+		t.Run(fmt.Sprintf("%d saves before the replacement", saves), func(t *testing.T) {
+			dataDir, root, path, pre := devinProjectSetUp(t)
+			made := 0
+			atomicFileBeforePublish = func(p string) {
+				if made >= saves || !sameManagedTargetPath(p, path) {
+					return
+				}
+				made++
+				old, err := os.ReadFile(path)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				if err := os.WriteFile(path, append(append([]byte{}, comment...), old...), 0o600); err != nil {
+					t.Error(err)
+				}
+			}
+			t.Cleanup(func() { atomicFileBeforePublish = nil })
+			n, err := convertDevinHooksFile(path, dataDir, "devin", toEarlier, true, nil)
+			atomicFileBeforePublish = nil
+			restored, kept, rerr := RestoreManagedFileBackupsForRollback(
+				dataDir, filepath.Join(root, "older-data"), root, map[string]bool{}, "",
+			)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			got, gerr := os.ReadFile(path)
+			if gerr != nil {
+				t.Fatal(gerr)
+			}
+			switch {
+			case saves == 0:
+				if err != nil || n != 3 || len(restored) != 1 || !bytes.Equal(got, pre) {
+					t.Fatalf("untouched file: n=%d err=%v restored=%v file=%q, want the pre-setup bytes", n, err, restored, got)
+				}
+			case saves < devinConversionAttempts:
+				if err != nil || n != 3 || len(restored) != 0 || len(kept) != 1 || !bytes.HasPrefix(got, comment) {
+					t.Fatalf("save before publication: n=%d err=%v restored=%v kept=%v file=%q, want the save kept", n, err, restored, kept, got)
+				}
+			default:
+				if !errors.Is(err, errManagedTargetMoved) || len(restored) != 0 || !bytes.HasPrefix(got, comment) {
+					t.Fatalf("saves under every attempt: err=%v restored=%v file=%q, want a refusal that keeps the saves", err, restored, got)
+				}
 			}
 		})
 	}

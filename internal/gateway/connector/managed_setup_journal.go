@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -50,7 +51,17 @@ type managedSetupSpan struct {
 	// exact restore.
 	later bool
 	base  string
+	// conversion marks a span a rollback conversion opened. Its writes refuse
+	// to replace a file that is not the one the conversion read, so a save
+	// by someone else is never overwritten; found is what the last write
+	// found, checked again just before the file is replaced.
+	conversion bool
+	found      string
 }
+
+// errManagedTargetMoved is a write refused because the file is not the one the
+// writer read: someone saved it in between. The file is left as it is.
+var errManagedTargetMoved = errors.New("the file changed while DefenseClaw was rewriting it; it was left as it is")
 
 var managedSetupSpans = struct {
 	sync.Mutex
@@ -88,7 +99,7 @@ func beginManagedConversionSpan(path, expected string) bool {
 	if _, open := managedSetupSpans.byPath[key]; open {
 		return false
 	}
-	managedSetupSpans.byPath[key] = &managedSetupSpan{expected: expected, base: expected}
+	managedSetupSpans.byPath[key] = &managedSetupSpan{expected: expected, base: expected, conversion: true}
 	return true
 }
 
@@ -107,24 +118,55 @@ func endManagedSetupSpan(path string) (managedSetupSpan, bool) {
 }
 
 // noteManagedSetupWrite is called by a writer before it replaces path with
-// data. The target is read here, not taken from the caller.
-func noteManagedSetupWrite(path string, data []byte) {
+// data. The target is read here, not taken from the caller. A conversion span
+// refuses (errManagedTargetMoved) a target that is not the bytes the rollback
+// left.
+func noteManagedSetupWrite(path string, data []byte) error {
 	managedSetupSpans.Lock()
 	defer managedSetupSpans.Unlock()
 	if len(managedSetupSpans.byPath) == 0 {
-		return
+		return nil
 	}
 	span, ok := managedSetupSpans.byPath[managedSetupSpanKey(path)]
 	if !ok {
-		return
+		return nil
 	}
 	current, info, err := readManagedTarget(path)
 	if err != nil {
+		if span.conversion {
+			return errManagedTargetMoved
+		}
 		span.tainted = true
 		span.expected = managedFileSnapshotHash(data, true)
-		return
+		return nil
 	}
-	span.note(managedFileSnapshotHash(current, info != nil), data)
+	return span.note(managedFileSnapshotHash(current, info != nil), data)
+}
+
+// confirmManagedSetupPublish is called by a writer right before it replaces
+// path: the target must still be what noteManagedSetupWrite found. A save that
+// landed in between taints a setup span, and a conversion span refuses the
+// write. The replacement itself cannot compare the file, so a save in the
+// instant between this check and the replacement is the one case left.
+func confirmManagedSetupPublish(path string) error {
+	managedSetupSpans.Lock()
+	defer managedSetupSpans.Unlock()
+	if len(managedSetupSpans.byPath) == 0 {
+		return nil
+	}
+	span, ok := managedSetupSpans.byPath[managedSetupSpanKey(path)]
+	if !ok {
+		return nil
+	}
+	current, info, err := readManagedTarget(path)
+	if err == nil && managedFileSnapshotHash(current, info != nil) == span.found {
+		return nil
+	}
+	if span.conversion {
+		return errManagedTargetMoved
+	}
+	span.tainted = true
+	return nil
 }
 
 // noteManagedSetupTransform is noteManagedSetupWrite for a writer that already
@@ -139,14 +181,21 @@ func noteManagedSetupTransform(path string, current []byte, exists bool, data []
 	if !ok {
 		return
 	}
-	span.note(managedFileSnapshotHash(current, exists), data)
+	_ = span.note(managedFileSnapshotHash(current, exists), data)
 }
 
-// note records a write of data over a target that held the hash found.
-func (s *managedSetupSpan) note(found string, data []byte) {
-	if found != s.expected && found != s.prior {
+// note records a write of data over a target that held the hash found. A
+// conversion span records nothing and refuses a target it did not leave.
+func (s *managedSetupSpan) note(found string, data []byte) error {
+	matched := found == s.expected || found == s.prior
+	if !matched {
+		if s.conversion {
+			return errManagedTargetMoved
+		}
 		s.tainted = true
 	}
+	s.found = found
 	s.prior = s.expected
 	s.expected = managedFileSnapshotHash(data, true)
+	return nil
 }
