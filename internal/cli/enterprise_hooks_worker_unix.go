@@ -1627,8 +1627,11 @@ func enterpriseHookWorkerContext(parent context.Context, timeout time.Duration, 
 		return nil, nil, nil, err
 	}
 	ctx, cancel = context.WithTimeout(context.WithoutCancel(parent), timeout)
+	// The bound is read here, in the caller, not in the callback: the
+	// callback runs on its own goroutine, possibly after the caller returned.
+	drain := enterpriseHookWorkerInterruptDrain
 	stopDrain = context.AfterFunc(parent, func() {
-		timer := time.NewTimer(enterpriseHookWorkerInterruptDrain)
+		timer := time.NewTimer(drain)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
