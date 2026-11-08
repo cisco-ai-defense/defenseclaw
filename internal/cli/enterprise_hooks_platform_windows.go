@@ -530,7 +530,7 @@ func syncEnterpriseHookManagedMachineEnrollments(
 		}
 		if publishExact {
 			if len(desiredCursor) > 0 && !cursorActive {
-				return fmt.Errorf("Cursor enterprise policy is absent after target runtime installation")
+				return errors.New("enterprise hooks: Cursor enterprise policy is absent after target runtime installation")
 			}
 			if cursorActive || len(desiredCursor) == 0 {
 				if err := enterpriseHookCursorPolicyTargetsPublisher(desiredCursor); err != nil {
