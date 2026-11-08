@@ -338,19 +338,36 @@ func (a *APIServer) skillFolderAccessDecision(
 		refs = assetfacts.SkillFolderRefs(toolInput, home, cwd, caller)
 	}
 	roots := assetfacts.SkillRoots(connector, home, cwd)
-	refs = appendReportedSkillLinks(refs, facts.SkillLinks, roots)
-	if len(refs) == 0 {
-		return config.AssetPolicyDecision{}, false
-	}
 	// A folder a link leads to is spelled as the link resolves, which a root
 	// reached through a link itself (a home on another mount) is not.
 	skillRoots := slices.Clone(roots)
-	if slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked }) {
+	if len(facts.SkillLinks) > 0 || slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked }) {
 		for _, root := range roots {
 			if real := assetfacts.ResolveLinks(root); real != filepath.Clean(root) {
 				skillRoots = append(skillRoots, real)
 			}
 		}
+	}
+	refs = appendReportedSkillLinks(refs, facts.SkillLinks, skillRoots)
+	if facts.SkillLinksTruncated {
+		// The hook names the skill folders a link of the call leads into, up
+		// to a bound. Past it a protected folder cannot be ruled out (fail
+		// closed).
+		name := "skill-links"
+		if len(facts.SkillLinks) > 0 {
+			name = filepath.Base(facts.SkillLinks[0])
+		}
+		decision := runtimeAssetDisableBlockDecision("skill", name, connector, "skill_folder",
+			"the call reaches more skill folders through links than the hook reports, so none of them can be shown not to be held or denied; "+
+				"name fewer skill folders in one call", "skill-links-truncated")
+		decision.RegistryStatus = "unknown"
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+			TargetType: "skill", SkillName: name, ToolName: toolName, Surface: "skill_folder", Matched: true,
+		})
+		return decision, true
+	}
+	if len(refs) == 0 {
+		return config.AssetPolicyDecision{}, false
 	}
 	for _, ref := range refs {
 		if !skillFolderRefIsSkill(ref, skillRoots, len(facts.DeclaredFor(ref.Name)) > 0) {

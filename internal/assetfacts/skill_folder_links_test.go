@@ -142,6 +142,65 @@ func TestSkillFolderRefsLinkToAnotherSkillKeepsItsName(t *testing.T) {
 	}
 }
 
+// A parent segment after a link leaves the folder the link leads to, so the
+// raw spelling reaches a different folder than its cleaned form. The cleaned
+// spelling is not what the filesystem opens.
+func TestSkillFolderRefsFollowLinkThenParentSegment(t *testing.T) {
+	home, root, held := skillTree(t)
+	sub := filepath.Join(held, "sub")
+	other := filepath.Join(root, "ordinary")
+	proj := filepath.Join(home, "proj")
+	for _, dir := range []string{sub, other, proj, filepath.Join(proj, "plain")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linkOrSkip(t, sub, filepath.Join(proj, "via-sub"))
+	linkOrSkip(t, filepath.Join(proj, "via-sub"), filepath.Join(proj, "via-chain"))
+	linkOrSkip(t, other, filepath.Join(proj, "via-other"))
+	sep := string(filepath.Separator)
+	for name, tc := range map[string]string{
+		"absolute":      proj + sep + "via-sub" + sep + ".." + sep + "SKILL.md",
+		"relative":      "via-sub" + sep + ".." + sep + "SKILL.md",
+		"through chain": proj + sep + "via-chain" + sep + ".." + sep + "SKILL.md",
+		"in a command":  "cat " + proj + sep + "via-sub" + sep + ".." + sep + "SKILL.md",
+		"dot first":     proj + sep + "." + sep + "via-sub" + sep + ".." + sep + "SKILL.md",
+	} {
+		t.Run(name, func(t *testing.T) {
+			refs := SkillFolderRefs(map[string]any{"command": tc}, home, proj)
+			if _, ok := linkedRef(refs, held); !ok {
+				t.Fatalf("refs = %#v, want a linked ref to %s", refs, held)
+			}
+		})
+	}
+	// A benign twin: the same shape through a link to another skill reaches the
+	// folder that skill sits in, and a parent segment inside the project reaches
+	// no skill folder at all.
+	if refs := SkillFolderRefs(proj+sep+"via-other"+sep+".."+sep+"ordinary"+sep+"SKILL.md", home, proj); len(refs) != 1 || refs[0].Name != "ordinary" {
+		t.Fatalf("refs = %#v, want only the ordinary skill", refs)
+	}
+	if refs := SkillFolderRefs(proj+sep+"plain"+sep+".."+sep+"notes.txt", home, proj); len(refs) != 0 {
+		t.Fatalf("refs = %#v, want none", refs)
+	}
+}
+
+// The linked folders a claim carries are bounded, and a claim cut at the bound
+// says so, so the gateway does not judge only the folders it was told of.
+func TestSkillLinksPastTheBoundAreSignalled(t *testing.T) {
+	var dirs []string
+	for i := 0; i < maxSkillLinks+6; i++ {
+		dirs = append(dirs, filepath.Join(string(filepath.Separator), "home", "u", ".claude", "skills", "s"+string(rune(0x61+i%26))+string(rune(0x61+i/26))))
+	}
+	facts, ok := Decode(Encode(Facts{SkillLinks: dirs}))
+	if !ok || len(facts.SkillLinks) != maxSkillLinks || !facts.SkillLinksTruncated {
+		t.Fatalf("ok=%t links=%d truncated=%t, want %d links and the signal", ok, len(facts.SkillLinks), facts.SkillLinksTruncated, maxSkillLinks)
+	}
+	facts, ok = Decode(Encode(Facts{SkillLinks: dirs[:maxSkillLinks]}))
+	if !ok || len(facts.SkillLinks) != maxSkillLinks || facts.SkillLinksTruncated {
+		t.Fatalf("ok=%t links=%d truncated=%t, want all links and no signal", ok, len(facts.SkillLinks), facts.SkillLinksTruncated)
+	}
+}
+
 func TestResolveLinksKeepsMissingTail(t *testing.T) {
 	home, _, held := skillTree(t)
 	linkOrSkip(t, held, filepath.Join(home, "lnk"))
