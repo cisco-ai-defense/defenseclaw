@@ -139,8 +139,15 @@ func TestHermesScannerAcceptedManifestsKeepCacheOutOfScansAndBindDeclared(t *tes
 		"yaml-1.2-binary-padding": "%YAML 1.2\n---\nname: p\nx: !!binary YQ==abc\nENTRY",
 		"recursive-merge":         "name: p\nr: &r\n  <<: *r\n  a: 1\nENTRY",
 		"binary-padding":          "name: p\nx: !!binary YQ==abc\nENTRY",
+		"binary-block":            "name: p\nx: !!binary |\n  YQ==\nENTRY",
 		"plain":                   "name: p\nENTRY",
 	}
+	// Whether the scanner loader accepts data after the padding of a binary
+	// value depends on the Python it runs on (accepted up to 3.12, refused
+	// from 3.13), so for these spellings the loader own answer decides what
+	// the manifest declares. Every other spelling is accepted by every
+	// supported Python and must bind its declared entrypoint.
+	interpreterDependent := map[string]bool{"binary-padding": true, "yaml-1.2-binary-padding": true}
 	for name, template := range spellings {
 		t.Run(name, func(t *testing.T) {
 			benign := strings.Replace(template, "ENTRY", "main: lib/run.js\n", 1)
@@ -174,6 +181,20 @@ func TestHermesScannerAcceptedManifestsKeepCacheOutOfScansAndBindDeclared(t *tes
 			entry := filepath.Join(bound, "__pycache__", "provider.cpython-312.pyc")
 			writePluginFile(t, entry, "safe()\n")
 			first := skippedTreeHash(bound, hermesScannerLoader(t))
+			if interpreterDependent[name] {
+				declared, err := hermesScannerLoader(t)(map[string][]byte{"plugin.yaml": []byte(protected)})
+				if err == nil && !slices.Contains(declared, "__pycache__/provider.cpython-312.pyc") {
+					// Text the loader refuses declares nothing, as in a scan:
+					// the scanner reads no cache file, so none is bound.
+					if len(declared) != 0 {
+						t.Fatalf("the loader declared %q, not the cache entrypoint", declared)
+					}
+					if first != "" {
+						t.Fatalf("a manifest the loader refuses declares nothing, yet a cache file was hashed: %q", first)
+					}
+					return
+				}
+			}
 			if first == "" {
 				t.Fatal("declared cache entrypoint was not hashed")
 			}
