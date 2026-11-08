@@ -881,8 +881,10 @@ type ruleScanOptions struct {
 	excludeTrustExploit bool
 	excludedRuleIDs     map[string]struct{}
 	onlyRuleIDs         map[string]struct{}
-	contentScope        ruleContentScope
-	onlyCategory        string
+	// onlyRule, when set, admits only the rules it reports true for.
+	onlyRule     func(ruleID string) bool
+	contentScope ruleContentScope
+	onlyCategory string
 }
 
 func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
@@ -893,6 +895,9 @@ func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
 		if _, allowed := o.onlyRuleIDs[ruleID]; !allowed {
 			return false
 		}
+	}
+	if o.onlyRule != nil && !o.onlyRule(ruleID) {
+		return false
 	}
 	_, excluded := o.excludedRuleIDs[ruleID]
 	return !excluded

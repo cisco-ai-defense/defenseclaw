@@ -211,6 +211,10 @@ type trustedActionRequest struct {
 	recordTelemetry func(trustedActionTelemetry)
 	// Prevent recursive standalone evaluation of an already flattened command.
 	simpleCommandPass bool
+	// stateProofOnly limits the judgment to the rule that proves a write to
+	// DefenseClaw state: a LoginGuess reading of a simple command keeps only
+	// that proof (loginGuessProvedFinding), so no other rule needs to run.
+	stateProofOnly bool
 	// overBudgetOmission, when set, is told that the authorized-keys proof
 	// found only an operand that the client's bounded map left out because
 	// it was full (hookpaths.BudgetKey, GAP-0146).
@@ -596,6 +600,7 @@ func dispatchTrustedActionWith(
 				child.conflictSource = nil
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
+				child.stateProofOnly = simple.LoginGuess
 				parent := request.Input
 				if wholeCommandKnown {
 					parent.Command = wholeCommand
@@ -672,6 +677,9 @@ func dispatchTrustedActionWith(
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
+	}
+	if request.stateProofOnly {
+		options.onlyRule = loginGuessProvesRule
 	}
 	if generation == nil || len(generation.semanticRules) == 0 {
 		var fallbackTelemetry trustedActionTelemetry
@@ -825,6 +833,9 @@ func dispatchTrustedActionWith(
 		for _, candidate := range generation.semanticRules {
 			if ctx.Err() != nil {
 				break
+			}
+			if request.stateProofOnly && !loginGuessProvesRule(candidate.rule.ID) {
+				continue
 			}
 			if budget.spent() && !budget.judged(candidate, viewID) {
 				// Past the budget, only an expression another member of a
@@ -1029,8 +1040,12 @@ func dispatchTrustedActionWith(
 	finalized := finalizeTrustedActionFindings(
 		generation, request, contextFacts, findings,
 	)
-	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
-	finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+	if !request.stateProofOnly {
+		// These two add only SSH-key, private-key and unverified-write
+		// findings, never the state-write proof a stateProofOnly reading keeps.
+		finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
+		finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
+	}
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -4502,7 +4517,14 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 // expanded at run time stays unproven (detection-only) there, as it is in the
 // reading without the guess.
 func loginGuessProvedFinding(finding RuleFinding) bool {
-	return trustedActionFindingKey(finding.RuleID) == canonicalTrustedRuleID("tamper.detector_state_write")
+	return loginGuessProvesRule(finding.RuleID)
+}
+
+// loginGuessProvesRule reports whether ruleID is the rule whose finding a
+// LoginGuess reading may add. Only that rule is judged on the reading
+// (trustedActionRequest.stateProofOnly): the others are discarded unread.
+func loginGuessProvesRule(ruleID string) bool {
+	return trustedActionFindingKey(ruleID) == canonicalTrustedRuleID("tamper.detector_state_write")
 }
 
 // loginGuessReadingMayProveStateWrite reports whether a LoginGuess reading of
@@ -6702,24 +6724,46 @@ func filterTrustedLegacyActionContext(
 	facts actionfacts.Facts,
 	downgradeReadOnlyDataArgs bool,
 ) []RuleFinding {
-	pathMatches, mutationMatches := trustedLegacyPathRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
+	// Each match set is read only by the findings of its category, and the
+	// scan that builds it is the cost of the call: build it on first use, so
+	// a call whose findings need none (or has no finding) pays for none.
+	var (
+		pathMatches, mutationMatches map[string]struct{}
+		pathMatchesKnown             bool
+		commandMatches               map[string]struct{}
+		commandMatchesKnown          bool
+		networkMatches               map[string]struct{}
+		networkMatchesKnown          bool
 	)
-	commandMatches := trustedLegacyCommandRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
-	)
-	networkMatches := trustedLegacyNetworkRuleMatches(
-		generation,
-		input,
-		toolName,
-		facts,
-	)
+	loadPathMatches := func() (map[string]struct{}, map[string]struct{}) {
+		if !pathMatchesKnown {
+			pathMatches, mutationMatches = trustedLegacyPathRuleMatches(generation, input, toolName, facts)
+			pathMatchesKnown = true
+		}
+		return pathMatches, mutationMatches
+	}
+	loadPathOnly := func() map[string]struct{} {
+		path, _ := loadPathMatches()
+		return path
+	}
+	loadMutationMatches := func() map[string]struct{} {
+		_, mutation := loadPathMatches()
+		return mutation
+	}
+	loadCommandMatches := func() map[string]struct{} {
+		if !commandMatchesKnown {
+			commandMatches = trustedLegacyCommandRuleMatches(generation, input, toolName, facts)
+			commandMatchesKnown = true
+		}
+		return commandMatches
+	}
+	loadNetworkMatches := func() map[string]struct{} {
+		if !networkMatchesKnown {
+			networkMatches = trustedLegacyNetworkRuleMatches(generation, input, toolName, facts)
+			networkMatchesKnown = true
+		}
+		return networkMatches
+	}
 	var (
 		readOnlyInspectionKnown bool
 		readOnlyInspection      bool
@@ -6778,11 +6822,11 @@ func filterTrustedLegacyActionContext(
 			// Dedicated command and exfiltration owners still inspect the action.
 			continue
 		case "sensitive-path":
-			if _, ok := pathMatches[finding.RuleID]; ok {
+			if _, ok := loadPathOnly()[finding.RuleID]; ok {
 				filtered = append(filtered, finding)
 			}
 		case "cognitive-file":
-			if _, ok := mutationMatches[finding.RuleID]; ok {
+			if _, ok := loadMutationMatches()[finding.RuleID]; ok {
 				if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 					finding.RuleID,
 					facts,
@@ -6793,7 +6837,7 @@ func filterTrustedLegacyActionContext(
 				filtered = append(filtered, finding)
 			}
 		case "command":
-			if _, ok := commandMatches[finding.RuleID]; ok {
+			if _, ok := loadCommandMatches()[finding.RuleID]; ok {
 				filtered = append(
 					filtered,
 					trustedLegacyProvenCommandFinding(
@@ -6805,7 +6849,7 @@ func filterTrustedLegacyActionContext(
 				)
 			}
 		case "c2":
-			if _, ok := networkMatches[finding.RuleID]; ok {
+			if _, ok := loadNetworkMatches()[finding.RuleID]; ok {
 				if proof, proven := trustedNetworkFindingProofFromActions(
 					generation,
 					finding.RuleID,
@@ -6820,11 +6864,11 @@ func filterTrustedLegacyActionContext(
 		default:
 			switch {
 			case strings.HasPrefix(finding.RuleID, "PATH-"):
-				if _, ok := pathMatches[finding.RuleID]; ok {
+				if _, ok := loadPathOnly()[finding.RuleID]; ok {
 					filtered = append(filtered, finding)
 				}
 			case strings.HasPrefix(finding.RuleID, "COG-"):
-				if _, ok := mutationMatches[finding.RuleID]; ok {
+				if _, ok := loadMutationMatches()[finding.RuleID]; ok {
 					if proof, proven := trustedSemanticOwnerFindingProofFromActions(
 						finding.RuleID,
 						facts,
@@ -6835,7 +6879,7 @@ func filterTrustedLegacyActionContext(
 					filtered = append(filtered, finding)
 				}
 			case strings.HasPrefix(finding.RuleID, "CMD-"):
-				if _, ok := commandMatches[finding.RuleID]; ok {
+				if _, ok := loadCommandMatches()[finding.RuleID]; ok {
 					filtered = append(
 						filtered,
 						trustedLegacyProvenCommandFinding(
@@ -6847,7 +6891,7 @@ func filterTrustedLegacyActionContext(
 					)
 				}
 			case strings.HasPrefix(finding.RuleID, "C2-"):
-				if _, ok := networkMatches[finding.RuleID]; ok {
+				if _, ok := loadNetworkMatches()[finding.RuleID]; ok {
 					if proof, proven := trustedNetworkFindingProofFromActions(
 						generation,
 						finding.RuleID,
