@@ -5,6 +5,7 @@
 package watcher
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -104,6 +105,10 @@ func failedMCPStatus(server config.MCPServerEntry) MCPAdmissionStatus {
 type mcpAdmissionOutcome struct {
 	hash   string
 	failed bool
+	// withoutScan says the definition was allowed before any scan, by an
+	// allow rule or a setting that skips the scan. Such an allow stands only
+	// while that rule or setting does (mcpUnscannedAdmissionLapsed).
+	withoutScan bool
 }
 
 // noteMCPAdmissionOutcome records the outcome of an admission run on snap's
@@ -124,7 +129,8 @@ func (w *InstallWatcher) noteMCPAdmissionOutcome(evt InstallEvent, snap *TargetS
 	if w.mcpOutcomes == nil {
 		w.mcpOutcomes = map[string]mcpAdmissionOutcome{}
 	}
-	w.mcpOutcomes[evt.Path] = mcpAdmissionOutcome{hash: snap.ContentHash, failed: failed}
+	w.mcpOutcomes[evt.Path] = mcpAdmissionOutcome{hash: snap.ContentHash, failed: failed,
+		withoutScan: res.Verdict == VerdictAllowed && res.ScanID == ""}
 }
 
 // mcpDefinitionIsSnapshot reports whether the server still has the definition
@@ -195,7 +201,8 @@ func (w *InstallWatcher) noteMCPBaseline(path, hash, fingerprint string) {
 	if w.mcpOutcomes == nil {
 		w.mcpOutcomes = map[string]mcpAdmissionOutcome{}
 	}
-	w.mcpOutcomes[path] = mcpAdmissionOutcome{hash: hash, failed: mcpFingerprintFailed(fingerprint)}
+	w.mcpOutcomes[path] = mcpAdmissionOutcome{hash: hash, failed: mcpFingerprintFailed(fingerprint),
+		withoutScan: strings.HasSuffix(fingerprint, admittedWithoutScanMark)}
 }
 
 type mcpKnownDefinition struct {
@@ -270,21 +277,31 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		// before its baseline is written: a failure is not pending, and an
 		// allow that replaces a failure is not held by the old failed
 		// baseline (GAP-0775, GAP-0778).
+		decided, unscanned := false, false
 		if hash, hashErr := mcpDefinitionHash(server); hashErr == nil {
 			if outcome, ok := w.mcpOutcome(path, hash); ok {
 				if outcome.failed {
 					return failedMCPStatus(server)
 				}
-				continue
+				decided, unscanned = true, outcome.withoutScan
 			}
 		}
-		if matched && mcpSnapshotFailed(row) {
-			return failedMCPStatus(server)
+		if !decided && matched {
+			if mcpSnapshotFailed(row) {
+				return failedMCPStatus(server)
+			}
+			decided, unscanned = true, strings.HasSuffix(row.ScannerFingerprint, admittedWithoutScanMark)
 		}
-		if matched {
+		// An allow given before any scan is the policy that gave it, not a
+		// verdict on the definition: once the allow rule or the setting is
+		// gone the server has no admission and is pending again, whatever
+		// its baseline or outcome says (GAP-0920).
+		lapsed := decided && unscanned &&
+			w.mcpUnscannedAdmissionLapsed(InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector})
+		if decided && !lapsed {
 			continue
 		}
-		if firstCycle && (!w.mcpStartupListed.Load() || w.listedAtStartup(path)) {
+		if !lapsed && firstCycle && (!w.mcpStartupListed.Load() || w.listedAtStartup(path)) {
 			continue
 		}
 		if !w.takeActionFor(InstallEvent{Type: InstallMCP}) {
@@ -302,6 +319,23 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	}
 	w.AdmitAddedMCPServers(pending)
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
+}
+
+// mcpUnscannedAdmissionLapsed reports an MCP server admitted before any scan
+// (an asset_policy.mcp.allowed rule or admission.mcp.scan_on_install false)
+// that admission no longer allows without one. The allow came from the
+// policy, so removing the rule takes it back at once: the server is admitted
+// again, by a scan that blocks it in a tier that fails closed. Secure Client
+// keeps main (issue #1092).
+func (w *InstallWatcher) mcpUnscannedAdmissionLapsed(evt InstallEvent) bool {
+	return evt.Type == InstallMCP && !w.secureClientActive() && !w.admitsMCPWithoutScan(context.Background(), evt)
+}
+
+// mcpBaselineLapsed is mcpUnscannedAdmissionLapsed for a stored baseline: it
+// records an admission without a scan whose policy is gone.
+func (w *InstallWatcher) mcpBaselineLapsed(evt InstallEvent, baseline *audit.SnapshotRow) bool {
+	return baseline != nil && strings.HasSuffix(baseline.ScannerFingerprint, admittedWithoutScanMark) &&
+		w.mcpUnscannedAdmissionLapsed(evt)
 }
 
 // mcpFailedFromLastRead uses a prior successful listing only to keep a
