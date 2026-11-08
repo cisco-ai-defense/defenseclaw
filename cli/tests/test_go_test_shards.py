@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.go_test_shards import (
     check_exact_cover,
@@ -241,3 +242,29 @@ def test_connector_matrix_parts_balance_on_the_times_of_the_matrix_run() -> None
     # 840 s a part can use of the 14-minute go test limit.
     assert max(weights) < 1.25 * (sum(weights) / len(weights))
     assert max(weights) < 480
+
+
+def test_linux_remaining_package_shards_plan_inside_the_shared_deadline() -> None:
+    root = Path(__file__).resolve().parents[2]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    shard_count = len(workflow["jobs"]["go-test-other"]["strategy"]["matrix"]["shard"])
+    timings = json.loads((root / "scripts/test-timings/go-linux.json").read_text(encoding="utf-8"))
+    prefix = "github.com/defenseclaw/defenseclaw/"
+    packages = sorted(set(timings["packages"]) - {prefix + "internal/audit", prefix + "internal/gateway"})
+    shards = partition_packages(packages, shard_count, timings, root=root)
+
+    def planned(package: str, regex: str) -> float:
+        if not regex:
+            return float(timings["packages"][package])
+        seconds = timings["tests"][package.removeprefix(prefix)]
+        return sum(float(seconds.get(name, seconds["*"])) for name in regex_names(regex))
+
+    # Run 42452817096: shard 9 held internal/cli (315 s) and a connector part
+    # that its recorded times put at 308 s but that took 422 s and more, so the
+    # part was stopped by the 16-minute shard deadline. The recorded times are
+    # now the package wall times of that run. A shard step also spends time
+    # building its race test binaries, which the recorded times leave out (402
+    # s of package time took 540 s), so a shard plans at most 600 of the 960
+    # seconds of the shared deadline.
+    loads = [sum(planned(package, regex) for package, regex in shard) for shard in shards]
+    assert max(loads) <= 600, loads
