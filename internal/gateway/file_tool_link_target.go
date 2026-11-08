@@ -18,7 +18,10 @@ import (
 // of an operation that follows its final path: every path of a typed file
 // tool, and every file an apply_patch envelope names whether the connector
 // sends it as its own tool or as a shell command with a here-document
-// (GAP-0831). Other shell commands are not part of this class.
+// (GAP-0831). Other shell commands are not part of this class. The file a
+// link reaches is spelled like every other path fact: a Windows physical
+// path (back slashes, extended prefix) is judged in the slash form the path
+// rules read (GAP-0855).
 func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionRequest) actionfacts.Facts {
 	if !facts.Authoritative() || !facts.EnforcementEligible() {
 		return facts
@@ -50,11 +53,10 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 		if !filepath.IsAbs(physical) || filepath.Clean(physical) == filepath.Clean(spelling) {
 			continue
 		}
-		linked := candidate
-		linked.Value = physical
-		linked.Normalized = physical
-		linked.Resolved = physical
-		linked.Linked = true
+		linked := actionfacts.LinkedPathFact(candidate, physical)
+		if linked.Resolved == candidate.Resolved {
+			continue
+		}
 		facts.Paths = append(facts.Paths, linked)
 	}
 	return facts
