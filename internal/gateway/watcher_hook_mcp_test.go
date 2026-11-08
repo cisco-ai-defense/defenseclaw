@@ -121,6 +121,48 @@ func TestHookReportedMCPServersCapIsPerAccount(t *testing.T) {
 	}
 }
 
+// reportedMCPHarness is a managed Linux or macOS gateway whose hooks report
+// servers. issue is the ScanIssue its stand-in watcher records for a listed
+// server once scanned is set.
+type reportedMCPHarness struct {
+	api      *APIServer
+	reported *hookReportedMCPServers
+	scanned  bool
+	issue    string
+}
+
+func newReportedMCPHarness() *reportedMCPHarness {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy(), DeploymentMode: "managed_enterprise",
+		Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Gateway.Watcher.Enabled = true
+	h := &reportedMCPHarness{reported: &hookReportedMCPServers{}, issue: watcher.MCPScanIssueLauncher}
+	h.api = &APIServer{scannerCfg: cfg, hookMCP: h.reported}
+	// Stands in for the watcher: a listed server is pending until its scan
+	// is done, and a refused definition is a failed admission.
+	h.api.SetMCPAdmissionStatus(func(connector, server, home, _ string) watcher.MCPAdmissionStatus {
+		servers, _ := h.reported.list()
+		for _, entry := range servers {
+			if entry.Connector == connector && entry.Name == server && entry.Home == home {
+				if !h.scanned {
+					return watcher.MCPAdmissionStatus{Name: server, Pending: true, RetryAfter: 30 * time.Second}
+				}
+				return watcher.MCPAdmissionStatus{Name: server, Failed: true, ScanIssue: h.issue}
+			}
+		}
+		return watcher.MCPAdmissionStatus{}
+	})
+	return h
+}
+
+func (h *reportedMCPHarness) call(home string, server *assetfacts.MCPServer) claudeCodeHookResponse {
+	ctx := context.WithValue(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home}),
+		claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: server})
+	return h.api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "PreToolUse",
+		ToolName: "mcp__" + server.Name + "__ping", ToolInput: map[string]interface{}{}, CWD: home + "/proj"})
+}
+
 // GAP-0925: a local (stdio) server added with claude mcp add whose launcher
 // the scanner refuses (python3, node, a command path) was never listed, so
 // it had no admission record and its calls were allowed on a managed device,
@@ -132,34 +174,9 @@ func TestManagedUnixHookReportedRefusedLauncherServerIsAdmittedAndBlocked(t *tes
 	if runtime.GOOS == "windows" {
 		t.Skip("managed Windows reads the enumerator records instead")
 	}
-	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy(), DeploymentMode: "managed_enterprise",
-		Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = "claudecode"
-	cfg.Gateway.Watcher.Enabled = true
-	reported := &hookReportedMCPServers{}
-	api := &APIServer{scannerCfg: cfg, hookMCP: reported}
-	// Stands in for the watcher: a listed server is pending until its scan
-	// is done, and a refused definition is a failed admission.
-	scanned := false
-	api.SetMCPAdmissionStatus(func(connector, server, home, _ string) watcher.MCPAdmissionStatus {
-		servers, _ := reported.list()
-		for _, entry := range servers {
-			if entry.Connector == connector && entry.Name == server && entry.Home == home {
-				if !scanned {
-					return watcher.MCPAdmissionStatus{Name: server, Pending: true, RetryAfter: 30 * time.Second}
-				}
-				return watcher.MCPAdmissionStatus{Name: server, Failed: true, ScanIssue: watcher.MCPScanIssueLauncher}
-			}
-		}
-		return watcher.MCPAdmissionStatus{}
-	})
-	call := func(home string, server *assetfacts.MCPServer) claudeCodeHookResponse {
-		ctx := context.WithValue(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home}),
-			claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: server})
-		return api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "PreToolUse",
-			ToolName: "mcp__" + server.Name + "__ping", ToolInput: map[string]interface{}{}, CWD: home + "/proj"})
-	}
+	h := newReportedMCPHarness()
+	reported := h.reported
+	call := h.call
 	python := &assetfacts.MCPServer{Name: "localpy", Command: "python3", Args: []string{"/home/eng1/server.py"}}
 	if got := call("/home/eng1", python); got.Action != "block" {
 		t.Fatalf("first call of a reported python3 server: action=%q, want block until admitted", got.Action)
@@ -169,7 +186,7 @@ func TestManagedUnixHookReportedRefusedLauncherServerIsAdmittedAndBlocked(t *tes
 		servers[0].Home != "/home/eng1" || servers[0].Connector != "claudecode" || servers[0].RunAsSID != "" {
 		t.Fatalf("watched servers %+v, want the python3 server of /home/eng1", servers)
 	}
-	scanned = true
+	h.scanned = true
 	later := call("/home/eng1", python)
 	if later.Action != "block" || !strings.Contains(later.Reason, "asset_policy.mcp.allowed") ||
 		!strings.Contains(later.Reason, "launcher") {
@@ -195,5 +212,64 @@ func TestManagedUnixHookReportedRefusedLauncherServerIsAdmittedAndBlocked(t *tes
 		if entry.Home == "/home/eng2" {
 			t.Fatalf("listed %+v, want no server whose launcher a scan starts", entry)
 		}
+	}
+}
+
+// The scanner refuses an npx or uvx server for what its arguments run or
+// leave out, from the definition alone, as it refuses a python3 server for its
+// launcher; the managed gateway lists it the same way, so its calls are blocked
+// with the cause and the administrator step and never fall through to allow
+// (GAP-0925). The servers a scan starts stay with the asset_policy lists.
+func TestManagedUnixHookReportedRefusedArgumentsServerIsAdmittedAndBlocked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"npx -c", []string{"-c", "echo hi"}},
+		{"npx --eval", []string{"--eval=1"}},
+		{"npx -y with -x and a package", []string{"-y", "-x", "pkg"}},
+		{"npx without a package", nil},
+		{"npx with options only", []string{"-y", "--quiet"}},
+		{"uvx --script", []string{"--script", "pkg"}},
+		{"uvx without a package", []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReportedMCPHarness()
+			h.issue = watcher.MCPScanIssueArguments
+			command := "npx"
+			if strings.HasPrefix(tc.name, "uvx") {
+				command = "uvx"
+			}
+			server := &assetfacts.MCPServer{Name: "localargs", Command: command, Args: tc.args}
+			if got := h.call("/home/eng1", server); got.Action != "block" {
+				t.Fatalf("first call: action=%q, want block until admitted", got.Action)
+			}
+			if servers, _ := h.reported.list(); len(servers) != 1 || servers[0].Command != command || servers[0].Home != "/home/eng1" {
+				t.Fatalf("watched servers %+v, want the %s server of /home/eng1", servers, command)
+			}
+			h.scanned = true
+			later := h.call("/home/eng1", server)
+			if later.Action != "block" || !strings.Contains(later.Reason, "asset_policy.mcp.allowed") ||
+				!strings.Contains(later.Reason, "arguments") {
+				t.Fatalf("later call: action=%q reason=%q, want a block naming the arguments and asset_policy.mcp.allowed", later.Action, later.Reason)
+			}
+		})
+	}
+	// Benign twins: the same launchers with a package stay unlisted and allowed.
+	h := newReportedMCPHarness()
+	for _, server := range []*assetfacts.MCPServer{
+		{Name: "twinnpx", Command: "npx", Args: []string{"-y", "@scope/pkg", "--port", "3000"}},
+		{Name: "twinuvx", Command: "uvx", Args: []string{"--from", "git-pkg", "mcp-server-time"}},
+		{Name: "twineq", Command: "npx", Args: []string{"--yes", "pkg@1.2.3"}},
+	} {
+		if got := h.call("/home/eng2", server); got.Action == "block" {
+			t.Fatalf("%s server %v: action=%q reason=%q, want it left to the asset_policy lists", server.Command, server.Args, got.Action, got.Reason)
+		}
+	}
+	if servers, _ := h.reported.list(); len(servers) != 0 {
+		t.Fatalf("listed %+v, want no server whose launcher and arguments a scan starts", servers)
 	}
 }

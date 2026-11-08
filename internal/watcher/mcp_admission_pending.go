@@ -43,8 +43,8 @@ type MCPAdmissionStatus struct {
 	Unavailable bool
 	RetryAfter  time.Duration
 	// ScanIssue says, for a Failed server, why DefenseClaw cannot scan it
-	// when the definition shows it: MCPScanIssueLauncher or
-	// MCPScanIssueAddress. "" when the cause is not known from the
+	// when the definition shows it: MCPScanIssueLauncher,
+	// MCPScanIssueArguments or MCPScanIssueAddress. "" when the cause is not known from the
 	// definition (the hook then points to defenseclaw mcp list).
 	ScanIssue string
 	// Revoked marks a Failed status that is not the listed definition of
@@ -61,17 +61,21 @@ const (
 	// MCPScanIssueLauncher is a local server started by anything but the
 	// bare launchers npx or uvx.
 	MCPScanIssueLauncher = "launcher"
+	// MCPScanIssueArguments is a local server started by npx or uvx whose
+	// arguments the scanner refuses: an execution flag, or no package.
+	MCPScanIssueArguments = "arguments"
 	// MCPScanIssueAddress is a server URL on a loopback, private,
 	// link-local or multicast address, which the scanner never dials.
 	MCPScanIssueAddress = "address"
 )
 
-// MCPLauncherRefused reports a local server the scanner refuses from its
-// definition alone: its launcher is anything but the bare npx or uvx. The
-// refusal is a function of the definition, so nothing has to start for a
-// gateway that cannot start the server as its user to record it.
-func MCPLauncherRefused(server config.MCPServerEntry) bool {
-	return strings.TrimSpace(server.URL) == "" && mcpScanIssue(server) == MCPScanIssueLauncher
+// MCPLocalRefused reports a local server the scanner refuses from its
+// definition alone: a launcher but the bare npx or uvx, or npx or uvx with an
+// execution flag or without a package. The refusal is a function of the
+// definition, so nothing has to start for a gateway that cannot start the
+// server as its user to record it.
+func MCPLocalRefused(server config.MCPServerEntry) bool {
+	return strings.TrimSpace(server.URL) == "" && mcpScanIssue(server) != ""
 }
 
 // mcpScanIssue names why the scanner refuses server, from its definition
@@ -89,6 +93,9 @@ func mcpScanIssue(server config.MCPServerEntry) string {
 	}
 	if scanner.MCPLocalLauncherRefusal(command) != "" {
 		return MCPScanIssueLauncher
+	}
+	if scanner.MCPLocalArgumentsRefusal(command, server.Args) != "" {
+		return MCPScanIssueArguments
 	}
 	return ""
 }

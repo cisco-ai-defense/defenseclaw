@@ -23,13 +23,13 @@ import (
 // and the hooks allowed the server calls unscanned (GAP-2591). The hook runs
 // as the user and sends, with each MCP tool call, the definition it read in
 // the user files (assetfacts); the watcher admits the URL servers it learns
-// that way, and the local (stdio) servers whose launcher the scanner refuses
-// from the definition alone (a python3 or node server, a command path), so
-// the refusal is recorded and the fail-closed tier blocks them like a
-// refused URL server (GAP-0925). A local server with a launcher the scanner
-// would start (npx, uvx) would start under the gateway service account, and
-// nothing on these platforms starts it as its user, so it keeps the
-// asset_policy lists the hooks apply.
+// that way, and the local (stdio) servers the scanner refuses from the
+// definition alone (a python3 or node server, a command path, npx or uvx with
+// an execution flag or without a package), so the refusal is recorded and the
+// fail-closed tier blocks them like a refused URL server (GAP-0925). A local
+// server the scanner would start (npx or uvx with a package) would start
+// under the gateway service account, and nothing on these platforms starts it
+// as its user, so it keeps the asset_policy lists the hooks apply.
 func watcherUsesHookReportedMCP(cfg *config.Config) bool {
 	return runtime.GOOS != "windows" && cfg != nil && cfg.StandaloneEnterprise() && !cfg.SecureClientIntegration()
 }
@@ -101,7 +101,7 @@ func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
 // the server an MCP tool call about to run reaches, as the hook of the
 // calling account defined it, so the pending check that follows refuses the
 // call until the watcher has admitted the server (GAP-2591): a URL server,
-// or a local one whose launcher the scanner refuses (GAP-0925).
+// or a local one the scanner refuses from its definition (GAP-0925).
 func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) {
 	if a == nil || a.hookMCP == nil || !probe.Matched || probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return
@@ -123,7 +123,7 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		Connector: connectorName, Home: home,
 	}
 	if reported.URL == "" {
-		if !watcher.MCPLauncherRefused(entry) {
+		if !watcher.MCPLocalRefused(entry) {
 			return
 		}
 		reported.Command = strings.TrimSpace(entry.Command)
