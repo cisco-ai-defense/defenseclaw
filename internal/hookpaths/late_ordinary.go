@@ -232,7 +232,8 @@ func newLateScan(cwd, home string) (*lateScan, bool) {
 // lateFallbackHomes lists the homes whose protected files an unusable given
 // home leaves open, the account database home first: the home of the
 // process, and the given home read against the folder the call runs in when
-// it is a relative path. Only folders are listed, each once.
+// it is a relative path (by file system rules, a link before a parent step
+// included). Only folders are listed, each once.
 func lateFallbackHomes(given, cwd, account string) []string {
 	homes := []string{account}
 	candidates := []string{}
@@ -240,7 +241,10 @@ func lateFallbackHomes(given, cwd, account string) []string {
 		candidates = append(candidates, env)
 	}
 	if !filepath.IsAbs(given) {
-		candidates = append(candidates, filepath.Join(cwd, given))
+		// Joined as text, not with filepath.Join: Join drops a parent step
+		// before any link is resolved, which names another folder than the
+		// file system does when a link comes before the "..".
+		candidates = append(candidates, cwd+string(filepath.Separator)+given)
 	}
 	for _, candidate := range candidates {
 		if real, ok := lateUsableHome(candidate); ok && !slices.Contains(homes, real) {
