@@ -48,10 +48,8 @@ func TestExactDockerInsecureRegistryWriteRejectsHardNegatives(t *testing.T) {
 		{name: "empty list", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":[]}`)},
 		{name: "wrong value type", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":"http://mirror.local"}`)},
 		{name: "mixed invalid entry", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://mirror.local",7]}`)},
-		{name: "duplicate registry", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://mirror.local","http://mirror.local"]}`)},
 		{name: "duplicate key", input: dockerRegistryRawInput("Write", `{"file_path":"/etc/docker/daemon.json","content":"{\"insecure-registries\":[\"http://mirror.local\"]}","content":"{\"insecure-registries\":[]}"}`)},
 		{name: "duplicate content key", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://mirror.local"],"insecure-registries":[]}`)},
-		{name: "extra daemon setting", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://mirror.local"],"debug":true}`)},
 		{name: "nested setting", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"docker":{"insecure-registries":["http://mirror.local"]}}`)},
 		{name: "json comment", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://mirror.local"] /* unsafe */}`)},
 		{name: "shell prose", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `echo '{"insecure-registries":["http://mirror.local"]}'`)},
@@ -59,7 +57,6 @@ func TestExactDockerInsecureRegistryWriteRejectsHardNegatives(t *testing.T) {
 		{name: "interpolated host", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://${REGISTRY}"]}`)},
 		{name: "template host", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://{{ registry }}"]}`)},
 		{name: "command substitution", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://$(hostname)"]}`)},
-		{name: "uppercase scheme", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["HTTP://mirror.local"]}`)},
 		{name: "ftp scheme", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["ftp://mirror.local"]}`)},
 		{name: "credentials", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://user:password@mirror.local"]}`)},
 		{name: "registry path suffix", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://mirror.local/v2"]}`)},
@@ -73,18 +70,13 @@ func TestExactDockerInsecureRegistryWriteRejectsHardNegatives(t *testing.T) {
 		{name: "ipv6 loopback", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://[::1]:5000"]}`)},
 		{name: "mapped ipv4 loopback", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://[::ffff:127.0.0.1]:5000"]}`)},
 		{name: "unspecified address", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://0.0.0.0"]}`)},
-		{name: "zero port", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://mirror.local:0"]}`)},
-		{name: "leading zero port", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{"insecure-registries":["http://mirror.local:05000"]}`)},
 		{name: "wrong path", input: dockerRegistryInput(t, "Write", "file_path", "/tmp/daemon.json", positive)},
 		{name: "relative path", input: dockerRegistryInput(t, "Write", "file_path", "etc/docker/daemon.json", positive)},
-		{name: "traversal path", input: dockerRegistryInput(t, "Write", "file_path", "/etc/docker/../docker/daemon.json", positive)},
 		{name: "nul path", input: dockerRegistryInput(t, "Write", "file_path", "/etc/docker/daemon.json\x00", positive)},
 		{name: "file path suffix", input: dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath+".example", positive)},
 		{name: "wrong path field", input: dockerRegistryInput(t, "Write", "path", dockerDaemonConfigPath, positive)},
 		{name: "unknown field", input: dockerRegistryRawInput("Write", `{"file_path":"/etc/docker/daemon.json","content":"{\"insecure-registries\":[\"http://mirror.local\"]}","description":"example"}`)},
 		{name: "mode field", input: dockerRegistryRawInput("Write", `{"file_path":"/etc/docker/daemon.json","content":"{\"insecure-registries\":[\"http://mirror.local\"]}","mode":"overwrite"}`)},
-		{name: "substring edit", input: dockerRegistryRawInput("Edit", `{"file_path":"/etc/docker/daemon.json","old_string":"{}","new_string":"{\"insecure-registries\":[\"http://mirror.local\"]}","replace_all":false}`)},
-		{name: "append", input: dockerRegistryInput(t, "append_file", "path", dockerDaemonConfigPath, positive)},
 		{name: "shell", input: Input{Tool: "Bash", Args: json.RawMessage(`{"command":"write insecure registry to /etc/docker/daemon.json"}`)}},
 		{name: "conflicting command", input: func() Input {
 			in := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, positive)
@@ -152,7 +144,7 @@ func FuzzExactDockerInsecureRegistryWriteFailsClosed(f *testing.F) {
 		if !matched {
 			return
 		}
-		if tool != "Write" && tool != "write_file" && tool != "write-file" && tool != "writefile" {
+		if len(nativeFileWrites(tool, input.Args)) == 0 {
 			t.Fatalf("unsupported tool matched: %q", tool)
 		}
 		if !facts.Authoritative() || !facts.EnforcementEligible() ||
@@ -203,6 +195,17 @@ func TestExactDockerInsecureRegistryWriteReadsEverySpelling(t *testing.T) {
 		"::ffff:198.51.100.0/120",
 		"::ffff:0:0/80",
 		"::ffff:198.51.100.7",
+		// Docker lower-cases the scheme and reads the port as a decimal number.
+		"HTTP://198.51.100.7:5000",
+		"HTTPS://Mirror.Example",
+		"Http://198.51.100.7:5000",
+		"http://198.51.100.7:5000/",
+		"http://mirror.example:05000",
+		"198.51.100.7:05000",
+		"198.51.100.7:0005000",
+		"198.51.100.7:+5000",
+		"198.51.100.7:0",
+		"mirror.example:00080",
 	} {
 		content := `{"insecure-registries":[` + jsonString(t, entry) + `]}`
 		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, content)
@@ -245,9 +248,7 @@ func TestExactDockerInsecureRegistryWriteKeepsLoopbackAndBenignAllowed(t *testin
 		"",
 		":5000",
 		"198.51.100.7:",
-		"198.51.100.7:0",
 		"198.51.100.7:70000",
-		"198.51.100.7:05000",
 		"198.51.100.7:5000:5000",
 		"[198.51.100.7]:5000",
 		"[2001:db8::7]",
@@ -271,7 +272,6 @@ func TestExactDockerInsecureRegistryWriteKeepsLoopbackAndBenignAllowed(t *testin
 		"$(hostname):5000",
 		"{{ registry }}:5000",
 		"ftp://mirror.example",
-		"HTTP://mirror.example",
 		"unix:///var/run/registry.sock",
 	} {
 		content := `{"insecure-registries":[` + jsonString(t, entry) + `]}`
@@ -298,6 +298,7 @@ func TestExactDockerInsecureRegistryWriteKeepsLoopbackAndBenignAllowed(t *testin
 // TestExactDockerInsecureRegistryWriteJudgesEveryEntry pins that one remote
 // registry decides the document even when other entries are loopback, and
 // that one entry the grammar cannot prove still leaves the document unproven.
+// A registry listed twice is one registry, as Docker reads it.
 func TestExactDockerInsecureRegistryWriteJudgesEveryEntry(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -312,7 +313,8 @@ func TestExactDockerInsecureRegistryWriteJudgesEveryEntry(t *testing.T) {
 		{"loopback only", `"127.0.0.1:5000","localhost","::1"`, false},
 		{"remote and unprovable entry", `"198.51.100.7:5000","bad_host.example"`, false},
 		{"remote and non-string entry", `"198.51.100.7:5000",7`, false},
-		{"duplicate spelling", `"198.51.100.7:5000","198.51.100.7:5000"`, false},
+		{"duplicate entry", `"198.51.100.7:5000","198.51.100.7:5000"`, true},
+		{"duplicate loopback entry", `"127.0.0.1:5000","127.0.0.1:5000"`, false},
 	} {
 		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath,
 			`{"insecure-registries":[`+test.entries+`]}`)
@@ -329,4 +331,99 @@ func jsonString(t *testing.T, value string) string {
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+// TestExactDockerInsecureRegistryWriteJudgesTheWholeDocument pins that the
+// other settings of a daemon.json, a registry listed twice and a repeated key
+// never decide the verdict: the document is judged by the insecure-registries
+// list dockerd reads from it.
+func TestExactDockerInsecureRegistryWriteJudgesTheWholeDocument(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name, content string
+		want          bool
+	}{
+		{"setting after the list", `{"insecure-registries":["198.51.100.7:5000"],"debug":true}`, true},
+		{"setting before the list", `{"log-driver":"json-file","insecure-registries":["http://198.51.100.7:5000"]}`, true},
+		{"pretty printed with settings", "{\n  \"debug\": true,\n  \"log-driver\": \"json-file\",\n  \"insecure-registries\": [\n    \"198.51.100.7:5000\"\n  ]\n}\n", true},
+		{"settings with an object value", `{"log-opts":{"max-size":"10m"},"insecure-registries":["10.0.0.0/8"]}`, true},
+		{"the same entry twice", `{"insecure-registries":["198.51.100.7:5000","198.51.100.7:5000"]}`, true},
+		{"repeated key, the last holds the registry", `{"insecure-registries":[],"insecure-registries":["198.51.100.7:5000"]}`, true},
+		{"repeated key, the last is empty", `{"insecure-registries":["198.51.100.7:5000"],"insecure-registries":[]}`, false},
+		{"settings and no list", `{"debug":true,"log-driver":"json-file"}`, false},
+		{"settings and a loopback list", `{"debug":true,"insecure-registries":["127.0.0.1:5000"]}`, false},
+		{"settings and an empty list", `{"debug":true,"insecure-registries":[]}`, false},
+		{"list of another type", `{"debug":true,"insecure-registries":"198.51.100.7:5000"}`, false},
+		{"list with a number", `{"insecure-registries":["198.51.100.7:5000",7]}`, false},
+		{"key in another case", `{"Insecure-Registries":["198.51.100.7:5000"]}`, false},
+		{"key one level down", `{"log-opts":{"insecure-registries":["198.51.100.7:5000"]}}`, false},
+		{"array document", `[{"insecure-registries":["198.51.100.7:5000"]}]`, false},
+	} {
+		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, test.content)
+		if got := ExactDockerInsecureRegistryWrite(input, Analyze(input)); got != test.want {
+			t.Errorf("%s: proof=%t, want %t", test.name, got, test.want)
+		}
+	}
+}
+
+// TestExactDockerInsecureRegistryWriteReadsEveryPathSpellingAndEdit pins that
+// the verdict follows the file the call reaches and the registry the call
+// adds, not the way the path is spelled or the tool is shaped: a path that
+// cleans to the daemon configuration, and an edit, multi-edit, patch hunk or
+// append whose added text lists a remote insecure registry.
+func TestExactDockerInsecureRegistryWriteReadsEveryPathSpellingAndEdit(t *testing.T) {
+	t.Parallel()
+	const remote = `{"insecure-registries":["http://198.51.100.7:5000"]}`
+	const list = `"insecure-registries": ["198.51.100.7:5000"]`
+	edit := func(target, oldText, newText string) Input {
+		return nativeCall(t, "Edit", map[string]any{"file_path": target, "old_string": oldText, "new_string": newText})
+	}
+	for _, row := range []struct {
+		name  string
+		input Input
+		want  bool
+	}{
+		{"write with a dot-dot segment", dockerRegistryInput(t, "Write", "file_path", "/etc/docker/../docker/daemon.json", remote), true},
+		{"write with a dot segment", dockerRegistryInput(t, "Write", "file_path", "/etc/./docker/daemon.json", remote), true},
+		{"write with a doubled slash", dockerRegistryInput(t, "Write", "file_path", "/etc//docker/daemon.json", remote), true},
+		{"write climbing out of another directory", dockerRegistryInput(t, "Write", "file_path", "/tmp/x/../../etc/docker/daemon.json", remote), true},
+		{"write_file with a dot-dot segment", dockerRegistryInput(t, "write_file", "path", "/etc/docker/../docker/daemon.json", remote), true},
+		{"relative write in the working directory", func() Input {
+			in := dockerRegistryInput(t, "Write", "file_path", "daemon.json", remote)
+			in.CWD = "/etc/docker"
+			return in
+		}(), true},
+		{"write that cleans to another file", dockerRegistryInput(t, "Write", "file_path", "/etc/docker/../daemon.json", remote), false},
+		{"edit adding the list", edit(dockerDaemonConfigPath, `"log-driver": "json-file"`, `"log-driver": "json-file",`+"\n  "+list), true},
+		{"edit adding a URL entry", edit(dockerDaemonConfigPath, `"debug": true`, `"debug": true, "insecure-registries": ["http://198.51.100.7:5000"]`), true},
+		{"edit with a dot-dot path", edit("/etc/docker/../docker/daemon.json", `"debug": true`, `"debug": true, `+list), true},
+		{"edit whose list is cut off", edit(dockerDaemonConfigPath, `"10.0.0.5:5000"`, `"insecure-registries": ["10.0.0.5:5000", "198.51.100.7:5000"`), true},
+		{"edit adding a whole document", edit(dockerDaemonConfigPath, "{}", remote), true},
+		{"multi-edit", nativeCall(t, "MultiEdit", map[string]any{"file_path": dockerDaemonConfigPath, "edits": []any{
+			map[string]any{"old_string": `"debug": true`, "new_string": `"debug": false`},
+			map[string]any{"old_string": `"log-driver": "json-file"`, "new_string": `"log-driver": "json-file", ` + list},
+		}}), true},
+		{"patch hunk", nativeCall(t, "apply_patch", nativeProofPatch("Update", dockerDaemonConfigPath, "  "+list+"\n")), true},
+		{"patch hunk with a dot-dot path", nativeCall(t, "apply_patch", nativeProofPatch("Update", "/etc/docker/../docker/daemon.json", "  "+list+"\n")), true},
+		{"append", dockerRegistryInput(t, "append_file", "path", dockerDaemonConfigPath, remote), true},
+		{"edit adding a second registry to a listed one", edit(dockerDaemonConfigPath, `"insecure-registries": ["10.0.0.5:5000"]`, `"insecure-registries": ["10.0.0.5:5000", "198.51.100.7:5000"]`), true},
+
+		{"edit adding a setting", edit(dockerDaemonConfigPath, `"debug": true`, `"debug": true, "log-driver": "json-file"`), false},
+		{"edit adding addresses to another list", edit(dockerDaemonConfigPath, `"debug": true`, `"debug": true, "dns": ["8.8.8.8", "198.51.100.7"]`), false},
+		{"edit adding a mirror", edit(dockerDaemonConfigPath, `"debug": true`, `"debug": true, "registry-mirrors": ["https://mirror.example"]`), false},
+		{"edit adding a loopback registry", edit(dockerDaemonConfigPath, `"debug": true`, `"debug": true, "insecure-registries": ["127.0.0.1:5000", "localhost:5000"]`), false},
+		{"edit keeping the listed registry", edit(dockerDaemonConfigPath, list, list+`, "debug": true`), false},
+		{"edit removing the listed registry", edit(dockerDaemonConfigPath, list, `"insecure-registries": []`), false},
+		{"edit naming the key without a list", edit(dockerDaemonConfigPath, `"debug": true`, `"insecure-registries": null`), false},
+		{"edit listing an entry it cannot read", edit(dockerDaemonConfigPath, `"debug": true`, `"insecure-registries": ["bad_host.example", "198.51.100.7:5000"]`), false},
+		{"edit listing a non-string", edit(dockerDaemonConfigPath, `"debug": true`, `"insecure-registries": [7, "198.51.100.7:5000"]`), false},
+		{"edit of another file", edit("/etc/docker/daemon.json.bak", `"debug": true`, `"debug": true, `+list), false},
+		{"edit of a project file", edit("/work/daemon.json", `"debug": true`, `"debug": true, `+list), false},
+		{"patch hunk of another file", nativeCall(t, "apply_patch", nativeProofPatch("Update", "/etc/docker/key.json", "  "+list+"\n")), false},
+		{"patch hunk of ordinary settings", nativeCall(t, "apply_patch", nativeProofPatch("Update", dockerDaemonConfigPath, `  "log-level": "warn"`+"\n")), false},
+	} {
+		if got := ExactDockerInsecureRegistryWrite(row.input, Analyze(row.input)); got != row.want {
+			t.Errorf("%s: proof=%t, want %t", row.name, got, row.want)
+		}
+	}
 }
