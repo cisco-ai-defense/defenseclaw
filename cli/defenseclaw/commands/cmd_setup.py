@@ -40,7 +40,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -3573,9 +3573,10 @@ class _GuardrailSecretRollbackStatus:
 class _GuardrailSecretFailure(click.ClickException):
     """Public-safe sentinel with no retained secret-bearing exception."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
-        super().__init__(f"guardrail secret transaction failed safely ({code})")
+        message = f"guardrail secret transaction failed safely ({code})"
+        super().__init__(f"{message}: {detail}" if detail else message)
 
 
 def _clear_pending_guardrail_secrets(pending_secrets: list[_PendingGuardrailSecret]) -> None:
@@ -3778,6 +3779,8 @@ def _publish_pending_guardrail_secrets(
                     dotenv_before,
                     updates,
                 )
+            except _DotenvSizeError:
+                raise
             except BaseException:
                 publication_failed = True
             try:
@@ -3785,6 +3788,9 @@ def _publish_pending_guardrail_secrets(
                 dotenv_after_authoritative = True
             except BaseException:
                 publication_failed = True
+    except _DotenvSizeError as error:
+        _clear_pending_guardrail_secrets(pending_secrets)
+        raise _GuardrailSecretFailure("publication-dotenv-size-limit", str(error)) from None
     except BaseException:
         publication_failed = True
     if publication_failed and dotenv_before is not None and dotenv_after is None:
@@ -4484,6 +4490,18 @@ def _dotenv_upsert_render(
     return body
 
 
+class _DotenvSizeError(click.ClickException):
+    """A secret-free refusal that callers can handle before other changes."""
+
+
+def _check_dotenv_size(dotenv_path: str, body: bytes) -> None:
+    if len(body) > MAX_DOTENV_BYTES:
+        raise _DotenvSizeError(
+            f"{dotenv_path} would be {len(body)} bytes, over the {MAX_DOTENV_BYTES}-byte limit "
+            "every reader accepts; it was left unchanged. Remove entries you no longer need and retry."
+        )
+
+
 def _publish_dotenv_locked(dotenv_path: str, body: bytes) -> None:
     """Publish a complete new dotenv once, or change nothing.
 
@@ -4492,11 +4510,7 @@ def _publish_dotenv_locked(dotenv_path: str, body: bytes) -> None:
     over it is refused with the cause; the current file stays as it is.
     """
 
-    if len(body) > MAX_DOTENV_BYTES:
-        raise click.ClickException(
-            f"{dotenv_path} would be {len(body)} bytes, over the {MAX_DOTENV_BYTES}-byte limit "
-            "every reader accepts; it was left unchanged. Remove entries you no longer need and retry."
-        )
+    _check_dotenv_size(dotenv_path, body)
     atomic_write_private_bytes(dotenv_path, body)
 
 
@@ -4930,6 +4944,8 @@ def _rotate_token_transaction(
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
         hook_snapshots = [_rotate_token_hook_snapshot_locked(data_dir, connector) for connector in tracked_scopes]
         old_token = _rotate_token_previous_value(app, snapshot)
+        rendered_dotenv = _rotate_token_render(snapshot, new_token)
+        _check_dotenv_size(dotenv_path, rendered_dotenv)
         pid_file = gateway_pid_path(data_dir)
         was_running = _is_pid_alive(pid_file)
         if was_running and any(
@@ -4953,9 +4969,21 @@ def _rotate_token_transaction(
             hook_snapshot.connector: hook_snapshot.windows_security for hook_snapshot in hook_snapshots
         }
         connector_state_a = _rotate_token_connector_state(authoritative_cfg, old_hook_fingerprints)
+        new_hook_values = _rotate_token_new_hook_values(
+            [*requested_scopes, *live_orphan_scopes],
+            new_token,
+            {**old_hook_fingerprints, **old_orphan_fingerprints},
+        )
+        new_hook_fingerprints = {
+            connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
+        }
+        connector_state_b = _rotate_token_connector_state(
+            authoritative_cfg,
+            {name: value for name, value in new_hook_fingerprints.items() if name in requested_scopes},
+            {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
+        )
         old_stopped = False
         mutation_attempted = False
-        new_hook_values: dict[str, str] = {}
         try:
             try:
                 _run_rotate_token_lifecycle(data_dir, "stop", token=old_token, config_file=config_file)
@@ -4982,21 +5010,8 @@ def _rotate_token_transaction(
                 raise
             old_stopped = True
 
-            new_hook_values = _rotate_token_new_hook_values(
-                [*requested_scopes, *live_orphan_scopes],
-                new_token,
-                {**old_hook_fingerprints, **old_orphan_fingerprints},
-            )
-            new_hook_fingerprints = {
-                connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
-            }
-            connector_state_b = _rotate_token_connector_state(
-                authoritative_cfg,
-                {name: value for name, value in new_hook_fingerprints.items() if name in requested_scopes},
-                {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
-            )
             mutation_attempted = True
-            _publish_dotenv_locked(dotenv_path, _rotate_token_render(snapshot, new_token))
+            _publish_dotenv_locked(dotenv_path, rendered_dotenv)
             for connector, value in sorted(new_hook_values.items()):
                 atomic_write_private_bytes(
                     _rotate_token_hook_path(data_dir, connector),
@@ -8184,6 +8199,7 @@ def setup_guardrail(
     secret_publication_expected = bool(pending_guardrail_secrets)
     secret_publication_failed = False
     secret_publication_rollback_incomplete = False
+    size_refusal: _GuardrailSecretFailure | None = None
     try:
         guardrail_secret_transaction = _publish_pending_guardrail_secrets(
             pending_guardrail_secrets,
@@ -8193,12 +8209,20 @@ def setup_guardrail(
         if not secret_publication_expected:
             raise
         secret_publication_rollback_incomplete = publication_failure.code == "publication-failed-rollback-incomplete"
+        if publication_failure.code == "publication-dotenv-size-limit":
+            size_refusal = publication_failure
         secret_publication_failed = True
     except BaseException:
         if not secret_publication_expected:
             raise
         secret_publication_failed = True
     if secret_publication_failed:
+        if size_refusal is not None and not selection_attempted:
+            # The bounded writer has changed no file or process value. Restore
+            # only the in-memory setup draft; republishing the snapshot would
+            # change file identity on a refusal that needs no rollback.
+            _restore_setup_config_in_memory(app, setup_snapshot)
+            raise size_refusal from None
         setup_rollback_failed = False
         try:
             _restore_setup_config_snapshot(app, setup_snapshot)
@@ -8212,6 +8236,8 @@ def setup_guardrail(
             failure_code = "publication-failed-setup-rollback-incomplete"
         else:
             failure_code = "publication-failed-setup-restored"
+        if size_refusal is not None and not setup_rollback_failed:
+            raise size_refusal from None
         raise _GuardrailSecretFailure(failure_code) from None
 
     if not gc.enabled:
@@ -15211,14 +15237,19 @@ def _adopt_openclaw_gateway_token(app: AppContext, *, restart: bool = False) -> 
     if not detected or detected == previous:
         return
     data_dir = app.cfg.data_dir
-    stopped = restart and _stop_gateway_before_token_swap(data_dir)
-    if not stopped:
-        # --no-restart: the running gateway keeps the old token (GAP-0464).
-        keep_running_gateway_token(app.logger, data_dir, previous, detected)
+    stopped = False
+
+    def before_publish() -> None:
+        nonlocal stopped
+        stopped = restart and _stop_gateway_before_token_swap(data_dir)
+        if not stopped:
+            # --no-restart: the running gateway keeps the old token (GAP-0464).
+            keep_running_gateway_token(app.logger, data_dir, previous, detected)
+
     keys = ["DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"]
     if gw.token_env and gw.token_env not in keys:
         keys.append(gw.token_env)
-    _save_adopted_gateway_token(keys, detected, data_dir)
+    _save_adopted_gateway_token(keys, detected, data_dir, before_publish=before_publish)
     click.echo("  Using the OpenClaw gateway token from openclaw.json for DefenseClaw (the two differed).")
     if stopped:
         ctx = click.get_current_context(silent=True)
@@ -21479,7 +21510,9 @@ def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
     os.environ[key] = value
 
 
-def _save_adopted_gateway_token(keys: list[str], token: str, data_dir: str) -> None:
+def _save_adopted_gateway_token(
+    keys: list[str], token: str, data_dir: str, *, before_publish: Callable[[], None] | None = None
+) -> None:
     """Copy *token*, adopted from openclaw.json, under every name in *keys*.
 
     The new .env is built whole in memory with the adopted-token marker and
@@ -21498,6 +21531,9 @@ def _save_adopted_gateway_token(keys: list[str], token: str, data_dir: str) -> N
                 mode=rendered.mode,
             )
         body = gateway_token_adoption.with_adopted_marker(rendered.body, token)
+        _check_dotenv_size(dotenv_path, body)
+        if before_publish is not None:
+            before_publish()
         if not snapshot.existed or body != snapshot.body:
             _publish_dotenv_locked(dotenv_path, body)
     for key in keys:

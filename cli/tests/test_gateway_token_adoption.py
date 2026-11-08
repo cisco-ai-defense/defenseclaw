@@ -148,6 +148,37 @@ def test_adoption_one_byte_over_the_limit_changes_nothing_and_names_the_cause(tm
     assert "DEFENSECLAW_GATEWAY_TOKEN" not in os.environ or os.environ["DEFENSECLAW_GATEWAY_TOKEN"] == OLD_TOKEN
 
 
+@pytest.mark.parametrize("excess", [0, 1], ids=["exact-limit", "one-byte-over"])
+def test_setup_adoption_checks_the_complete_dotenv_before_gateway_stop(tmp_path, monkeypatch, excess):
+    original = _dotenv_whose_adoption_is(tmp_path, MAX_DOTENV_BYTES + excess, b"\n")
+    path = tmp_path / ".env"
+    before = path.stat()
+    events: list[str] = []
+    app = SimpleNamespace(
+        cfg=SimpleNamespace(
+            data_dir=str(tmp_path),
+            claw=SimpleNamespace(config_file="unused"),
+            gateway=SimpleNamespace(resolved_token=lambda: OLD_TOKEN, token_env=""),
+        ),
+        logger=None,
+    )
+    monkeypatch.setattr(cmd_setup, "_detect_openclaw_gateway_token", lambda *_args, **_kwargs: NEW_TOKEN)
+    monkeypatch.setattr(cmd_setup, "_stop_gateway_before_token_swap", lambda _dir: events.append("stop") or True)
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda _dir: events.append("restart"))
+
+    if excess:
+        with pytest.raises(click.ClickException, match=r"over the \d+-byte limit"):
+            cmd_setup._adopt_openclaw_gateway_token(app, restart=True)
+        after = path.stat()
+        assert events == []
+        assert path.read_bytes() == original
+        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    else:
+        cmd_setup._adopt_openclaw_gateway_token(app, restart=True)
+        assert events == ["stop", "restart"]
+        assert path.stat().st_size == MAX_DOTENV_BYTES
+
+
 def test_a_single_secret_save_one_byte_over_the_limit_changes_nothing(tmp_path):
     key, value = "DEFENSECLAW_LLM_KEY", "sk-test"
     line = f"{key}={value}\n".encode()
