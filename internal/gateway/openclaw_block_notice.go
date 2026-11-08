@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,7 +40,12 @@ import (
 // place name no call. A call id the provider rewrote before replay (a length
 // cap, a new id for a repeated id) matches nothing and the notice waits until
 // it expires: the line is UX only, so when the tie is unknown nothing is
-// shown. A provider whose results carry no call id (Ollama, Gemini without
+// shown. A Responses id is "<call id>|<item id>" and the result carries the
+// call id alone; OpenClaw drops the item id from the replayed call unless it
+// replays the reasoning too, so the result is tied to the block by the call id
+// when the request names no item of the call, and every inspected call is
+// remembered by its call id, so a second call under it makes the block
+// ambiguous. A provider whose results carry no call id (Ollama, Gemini without
 // ids) cannot be keyed and shows nothing. An allowed call records nothing.
 //
 // The line is shown only when the tie is unambiguous, and an unclear tie shows
@@ -96,10 +102,21 @@ type openClawBlockNotice struct {
 }
 
 // openClawSeenCall is one tool call the inspect endpoint saw, kept only to
-// tell that a call id was used twice.
+// tell that a call id was used twice. key is the call key of its id.
 type openClawSeenCall struct {
-	callID string
-	at     time.Time
+	key string
+	at  time.Time
+}
+
+// noticeCallKey is the part of a call id that names the call. OpenClaw names a
+// Responses call "<call id>|<item id>" and sends the call id alone back with
+// the result, so two ids with one call key are one call to a result. Any other
+// id is its own key.
+func noticeCallKey(id string) string {
+	if i := strings.Index(id, "|"); i > 0 {
+		return id[:i]
+	}
+	return id
 }
 
 var openClawBlockNotices struct {
@@ -176,15 +193,16 @@ func recordOpenClawToolCall(callID, session string, blockLine *string) {
 	defer openClawBlockNotices.mu.Unlock()
 	now := openClawToolOutcomeNow()
 	entries := pruneOpenClawBlockNotices(openClawBlockNotices.entries, now)
+	key := noticeCallKey(callID)
 	seen := openClawBlockNotices.seen[:0]
 	used := false
 	for _, c := range openClawBlockNotices.seen {
 		if now.Sub(c.at) < openClawSeenCallTTL {
-			used = used || c.callID == callID
+			used = used || c.key == key
 			seen = append(seen, c)
 		}
 	}
-	seen = append(seen, openClawSeenCall{callID: callID, at: now})
+	seen = append(seen, openClawSeenCall{key: key, at: now})
 	if n := len(seen); n > openClawSeenCallCap {
 		seen = seen[n-openClawSeenCallCap:]
 	}
@@ -192,13 +210,13 @@ func recordOpenClawToolCall(callID, session string, blockLine *string) {
 
 	recorded := false
 	for i := range entries {
-		if entries[i].callID == callID {
+		if noticeCallKey(entries[i].callID) == key {
 			entries[i].ambiguous = true
 			recorded = recorded || entries[i].session == session
 		}
 	}
-	// A second block of one id and session adds no entry: the first is already
-	// ambiguous and the pair is consumed by one result.
+	// A second block of one call key and session adds no entry: the first is
+	// already ambiguous and the pair is consumed by one result.
 	if blockLine != nil && !recorded {
 		entries = append(entries, openClawBlockNotice{callID: callID, session: session, line: *blockLine, at: now, ambiguous: used})
 	}
@@ -342,6 +360,10 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 		}
 		notices := takeOpenClawBlockNotices(body, session)
 		if len(notices) == 0 {
+			// A live notice waits and this request did not claim it. The line
+			// names no call, session or text: it only tells a live run which
+			// condition kept the notice off the screen.
+			fmt.Fprintf(os.Stderr, "[guardrail] openclaw block notice: pending, not claimed by %s (session_bound=%t)\n", r.URL.Path, session != "")
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -353,6 +375,7 @@ func openClawBlockNoticeMiddleware(next http.Handler, authorized func(*http.Requ
 		nw.prefix = strings.Join(lines, "\n") + "\n\n"
 		next.ServeHTTP(nw, r)
 		nw.finish()
+		fmt.Fprintf(os.Stderr, "[guardrail] openclaw block notice: claimed by %s, shown=%t (mode=%d status=%d)\n", r.URL.Path, nw.applied, nw.mode, nw.status)
 	})
 }
 
