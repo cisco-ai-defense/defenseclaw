@@ -48,6 +48,9 @@ const (
 // as a remembered definition is.
 type mcpLostSet struct {
 	defs map[string]config.MCPServerEntry
+	// ambiguity says, per key, that the session met more definitions of the
+	// name than are held here.
+	ambiguity map[string]mcpAmbiguity
 	// overflow is set when a definition could not be kept, because the lost
 	// definitions were full.
 	overflow bool
@@ -73,8 +76,28 @@ type mcpResolvedDefinitions struct {
 	lost map[string]*mcpLostSet
 }
 
+// mcpAmbiguity says how far the memory of a name can be trusted to hold the
+// definition the agent connected to. A record that kept one definition and
+// dropped another cannot tell, once the config entry is gone, which of the
+// two the live connection is: it must not give a plain allow where a list
+// decides on where a server points.
+type mcpAmbiguity uint8
+
+const (
+	// mcpOneDefinition: every definition met for the name is held.
+	mcpOneDefinition mcpAmbiguity = iota
+	// mcpSeveralDefinitions: the name met a definition that is not held.
+	mcpSeveralDefinitions
+	// mcpDeniedDefinitionDropped: the name met a definition a denied rule
+	// matched that is not held.
+	mcpDeniedDefinitionDropped
+)
+
 type mcpResolvedDefinition struct {
 	entry config.MCPServerEntry
+	// ambiguity is the record of the definitions met for the name besides
+	// entry.
+	ambiguity mcpAmbiguity
 	// denied is set once a rule of asset_policy.mcp.denied matched this
 	// definition. It is kept, and a later definition read for the same name
 	// does not replace it: the live connection is the one it was judged on.
@@ -93,10 +116,11 @@ func mcpResolvedKey(connector, home, session, cwd, name string) string {
 }
 
 // remember records entry, the definition just read for name, and whether a
-// denied rule matched it. It reports whether the definition is kept in the
-// memory; a denied one that does not fit is held in the lost set of its
-// session.
-func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name string, entry config.MCPServerEntry, denied bool, now time.Time) bool {
+// denied rule matched it. dropped says what the caller leaves out in its
+// favour: a definition of the name it judged this call and does not record. It
+// reports whether the definition is kept in the memory; a denied one that does
+// not fit is held in the lost set of its session.
+func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name string, entry config.MCPServerEntry, denied bool, dropped mcpAmbiguity, now time.Time) bool {
 	if strings.TrimSpace(name) == "" {
 		return false
 	}
@@ -107,10 +131,22 @@ func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name st
 		m.entries = map[string]mcpResolvedDefinition{}
 	}
 	kept, known := m.entries[key]
+	if known {
+		dropped = max(dropped, kept.ambiguity)
+		if !sameMCPDefinition(kept.entry, entry) {
+			// One of the two is not held after this call: the new one when the
+			// kept one stays, the old one when the new one replaces it. Two
+			// denied definitions lose a denied one either way.
+			dropped = max(dropped, mcpSeveralDefinitions)
+			if kept.denied && denied {
+				dropped = mcpDeniedDefinitionDropped
+			}
+		}
+	}
 	if known && kept.denied && !denied {
 		// The live connection is the denied one; the config now says
 		// something else.
-		kept.seen = now
+		kept.seen, kept.ambiguity = now, dropped
 		m.entries[key] = kept
 		return true
 	}
@@ -119,12 +155,12 @@ func (m *mcpResolvedDefinitions) remember(connector, home, session, cwd, name st
 	}
 	if (!known || denied && !kept.denied) && !m.hasRoomLocked(home, denied, key) {
 		if denied {
-			m.markLostLocked(connector, home, session, key, entry, now)
+			m.markLostLocked(connector, home, session, key, entry, dropped, now)
 		}
 		return false
 	}
 	m.entries[key] = mcpResolvedDefinition{
-		entry: entry, denied: denied, connector: strings.ToLower(connector), home: home, session: session, seen: now,
+		entry: entry, denied: denied, ambiguity: dropped, connector: strings.ToLower(connector), home: home, session: session, seen: now,
 	}
 	return true
 }
@@ -135,8 +171,10 @@ func mcpLostKey(connector, home, session string) string {
 
 // markLostLocked holds the denied definition entry, resolved under key, that
 // could not be kept. The first one held for a key stays, as a denied
-// remembered definition does. No room for another one marks the session.
-func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key string, entry config.MCPServerEntry, now time.Time) {
+// remembered definition does; a different one that comes after it is not
+// held, and the key is marked, because the live connection may be either. No
+// room for another one marks the session.
+func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key string, entry config.MCPServerEntry, dropped mcpAmbiguity, now time.Time) {
 	if m.lost == nil {
 		m.lost = map[string]*mcpLostSet{}
 	}
@@ -147,7 +185,11 @@ func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key st
 		m.lost[lostKey] = set
 	}
 	set.at = now
-	if _, held := set.defs[key]; held {
+	if held, isHeld := set.defs[key]; isHeld {
+		if !sameMCPDefinition(held, entry) {
+			dropped = mcpDeniedDefinitionDropped
+		}
+		set.noteAmbiguity(key, dropped)
 		return
 	}
 	if m.lostCountLocked() >= mcpResolvedLostLimit {
@@ -158,6 +200,17 @@ func (m *mcpResolvedDefinitions) markLostLocked(connector, home, session, key st
 		set.defs = map[string]config.MCPServerEntry{}
 	}
 	set.defs[key] = entry
+	set.noteAmbiguity(key, dropped)
+}
+
+func (set *mcpLostSet) noteAmbiguity(key string, level mcpAmbiguity) {
+	if level == mcpOneDefinition {
+		return
+	}
+	if set.ambiguity == nil {
+		set.ambiguity = map[string]mcpAmbiguity{}
+	}
+	set.ambiguity[key] = max(set.ambiguity[key], level)
 }
 
 func (m *mcpResolvedDefinitions) lostCountLocked() int {
@@ -184,6 +237,23 @@ func (m *mcpResolvedDefinitions) lostDenied(connector, home, session, cwd, name 
 		set.at = now
 	}
 	return entry, held, set.overflow
+}
+
+// ambiguity returns, within the TTL, what the memory knows of the definitions
+// the session met for the name besides the one it holds: the strongest of the
+// remembered record and the lost one.
+func (m *mcpResolvedDefinitions) ambiguity(connector, home, session, cwd, name string, now time.Time) mcpAmbiguity {
+	key := mcpResolvedKey(connector, home, session, cwd, name)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var level mcpAmbiguity
+	if kept, ok := m.entries[key]; ok && now.Sub(kept.seen) <= mcpResolvedTTL {
+		level = kept.ambiguity
+	}
+	if set := m.lost[mcpLostKey(connector, home, session)]; set != nil && now.Sub(set.at) <= mcpResolvedTTL {
+		level = max(level, set.ambiguity[key])
+	}
+	return level
 }
 
 // hasRoomLocked reports whether the definition under key, of the kind denied
