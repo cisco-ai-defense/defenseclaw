@@ -3669,12 +3669,14 @@ def _set_guardrail_secret_process_value(env_name: str, value: str) -> None:
 
 def _restore_guardrail_secret_transaction(
     transaction: _GuardrailSecretTransaction,
+    *,
+    dotenv_lock_held: bool = False,
 ) -> _GuardrailSecretRollbackStatus:
     """Compare-before-restore only state still owned by this transaction."""
 
     status_codes: list[str] = []
     try:
-        with locked_file_update(transaction.dotenv_path):
+        with nullcontext() if dotenv_lock_held else locked_file_update(transaction.dotenv_path):
             current = _rotate_token_snapshot_locked(transaction.dotenv_path)
             if transaction.dotenv_after_authoritative and _guardrail_dotenv_snapshot_matches(
                 current,
@@ -3735,6 +3737,8 @@ def _restore_guardrail_secret_transaction(
 def _publish_pending_guardrail_secrets(
     pending_secrets: list[_PendingGuardrailSecret],
     data_dir: str,
+    *,
+    dotenv_lock_held: bool = False,
 ) -> _GuardrailSecretTransaction | None:
     """Atomically publish deferred judge secrets and return rollback custody."""
 
@@ -3755,7 +3759,7 @@ def _publish_pending_guardrail_secrets(
             )
             for pending in pending_secrets
         )
-        with locked_file_update(dotenv_path):
+        with nullcontext() if dotenv_lock_held else locked_file_update(dotenv_path):
             dotenv_before = _rotate_token_snapshot_locked(dotenv_path)
             for env_name, value in updates:
                 before_existed, before_value = _dotenv_snapshot_raw_key_state(
@@ -3795,7 +3799,7 @@ def _publish_pending_guardrail_secrets(
         publication_failed = True
     if publication_failed and dotenv_before is not None and dotenv_after is None:
         try:
-            with locked_file_update(dotenv_path):
+            with nullcontext() if dotenv_lock_held else locked_file_update(dotenv_path):
                 dotenv_after = _rotate_token_snapshot_locked(dotenv_path)
         except BaseException:
             dotenv_after = None
@@ -3842,7 +3846,9 @@ def _publish_pending_guardrail_secrets(
         rollback_status = _guardrail_secret_rollback_status("publication-custody-unavailable")
         if transaction is not None:
             try:
-                rollback_status = _restore_guardrail_secret_transaction(transaction)
+                rollback_status = _restore_guardrail_secret_transaction(
+                    transaction, dotenv_lock_held=dotenv_lock_held
+                )
             except BaseException:
                 rollback_status = _guardrail_secret_rollback_status("publication-rollback-error")
         _clear_pending_guardrail_secrets(pending_secrets)
@@ -3863,8 +3869,8 @@ def _preflight_pending_guardrail_secret_size(
     if not pending_secrets:
         return
     dotenv_path = os.path.join(data_dir, ".env")
-    # This is a read-only preflight. The writer repeats the check while it
-    # owns the file lock, so a concurrent edit cannot bypass the size limit.
+    # The interactive caller holds the file lock through final publication,
+    # so this size decision stays stable while selection authority changes.
     snapshot = _rotate_token_snapshot_locked(dotenv_path)
     updates = tuple(
         (pending.env_name, sanitize_dotenv_value(pending.value, key=pending.env_name))
@@ -7880,6 +7886,58 @@ def setup_guardrail(
         status_codes.extend(restore_guardrail_secret_publication().codes)
         return _guardrail_secret_rollback_status(*status_codes)
 
+    def publish_guardrail_secrets(*, dotenv_lock_held: bool = False) -> _GuardrailSecretTransaction | None:
+        """Publish pending secrets and preserve the setup rollback contract."""
+
+        secret_publication_expected = bool(pending_guardrail_secrets)
+        secret_publication_failed = False
+        secret_publication_rollback_incomplete = False
+        size_refusal: _GuardrailSecretFailure | None = None
+        try:
+            transaction = _publish_pending_guardrail_secrets(
+                pending_guardrail_secrets,
+                app.cfg.data_dir,
+                dotenv_lock_held=dotenv_lock_held,
+            )
+        except _GuardrailSecretFailure as publication_failure:
+            if not secret_publication_expected:
+                raise
+            secret_publication_rollback_incomplete = (
+                publication_failure.code == "publication-failed-rollback-incomplete"
+            )
+            if publication_failure.code == "publication-dotenv-size-limit":
+                size_refusal = publication_failure
+            secret_publication_failed = True
+        except BaseException:
+            if not secret_publication_expected:
+                raise
+            secret_publication_failed = True
+        if secret_publication_failed:
+            if size_refusal is not None and not selection_attempted:
+                # The bounded writer has changed no file or process value. Restore
+                # only the in-memory setup draft; republishing the snapshot would
+                # change file identity on a refusal that needs no rollback.
+                _restore_setup_config_in_memory(app, setup_snapshot)
+                raise size_refusal from None
+            setup_rollback_failed = False
+            try:
+                _restore_setup_config_snapshot(app, setup_snapshot)
+            except BaseException:
+                setup_rollback_failed = True
+            if setup_rollback_failed and secret_publication_rollback_incomplete:
+                failure_code = "publication-failed-setup-and-secret-rollback-incomplete"
+            elif secret_publication_rollback_incomplete:
+                failure_code = "publication-failed-secret-rollback-incomplete"
+            elif setup_rollback_failed:
+                failure_code = "publication-failed-setup-rollback-incomplete"
+            else:
+                failure_code = "publication-failed-setup-restored"
+            if size_refusal is not None and not setup_rollback_failed:
+                raise size_refusal from None
+            raise _GuardrailSecretFailure(failure_code) from None
+
+        return transaction
+
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
@@ -8189,19 +8247,24 @@ def setup_guardrail(
                 restore_precommit_guardrail_selection()
                 click.echo("  Guardrail not enabled. Run again without declining to configure.")
                 return
-            # The wizard has collected every pending judge secret. Reject its
-            # complete dotenv before the native Windows selection publishes
-            # a receipt or changes the unverified-selection record.
-            _preflight_pending_guardrail_secret_size(pending_guardrail_secrets, app.cfg.data_dir)
-            for targets in interactive_targets:
-                preselect_guardrail_targets(targets)
-            _apply_guardrail_extra_options(
-                gc,
-                rule_pack=rule_pack,
-                connector=explicit_connector,
-                human_approval=human_approval,
-                hilt_min_severity=hilt_min_severity,
-            )
+            # Keep the complete-size decision stable while selection authority
+            # changes and the pending secrets are published.
+            pending_secret_lock_held = bool(pending_guardrail_secrets)
+            dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+            with locked_file_update(dotenv_path) if pending_secret_lock_held else nullcontext():
+                _preflight_pending_guardrail_secret_size(pending_guardrail_secrets, app.cfg.data_dir)
+                for targets in interactive_targets:
+                    preselect_guardrail_targets(targets)
+                _apply_guardrail_extra_options(
+                    gc,
+                    rule_pack=rule_pack,
+                    connector=explicit_connector,
+                    human_approval=human_approval,
+                    hilt_min_severity=hilt_min_severity,
+                )
+                guardrail_secret_transaction = publish_guardrail_secrets(
+                    dotenv_lock_held=pending_secret_lock_held
+                )
         except _DotenvSizeError as error:
             _clear_pending_guardrail_secrets(pending_guardrail_secrets)
             restore_precommit_guardrail_selection()
@@ -8223,6 +8286,8 @@ def setup_guardrail(
             secret_collection_failure_code = (
                 "collection-aborted-rollback-incomplete" if selection_rollback_failed else "collection-aborted-restored"
             )
+        except _GuardrailSecretFailure:
+            raise
         except BaseException:
             if not pending_guardrail_secrets:
                 restore_precommit_guardrail_selection()
@@ -8239,49 +8304,8 @@ def setup_guardrail(
         if secret_collection_failure_code is not None:
             raise _GuardrailSecretFailure(secret_collection_failure_code) from None
 
-    secret_publication_expected = bool(pending_guardrail_secrets)
-    secret_publication_failed = False
-    secret_publication_rollback_incomplete = False
-    size_refusal: _GuardrailSecretFailure | None = None
-    try:
-        guardrail_secret_transaction = _publish_pending_guardrail_secrets(
-            pending_guardrail_secrets,
-            app.cfg.data_dir,
-        )
-    except _GuardrailSecretFailure as publication_failure:
-        if not secret_publication_expected:
-            raise
-        secret_publication_rollback_incomplete = publication_failure.code == "publication-failed-rollback-incomplete"
-        if publication_failure.code == "publication-dotenv-size-limit":
-            size_refusal = publication_failure
-        secret_publication_failed = True
-    except BaseException:
-        if not secret_publication_expected:
-            raise
-        secret_publication_failed = True
-    if secret_publication_failed:
-        if size_refusal is not None and not selection_attempted:
-            # The bounded writer has changed no file or process value. Restore
-            # only the in-memory setup draft; republishing the snapshot would
-            # change file identity on a refusal that needs no rollback.
-            _restore_setup_config_in_memory(app, setup_snapshot)
-            raise size_refusal from None
-        setup_rollback_failed = False
-        try:
-            _restore_setup_config_snapshot(app, setup_snapshot)
-        except BaseException:
-            setup_rollback_failed = True
-        if setup_rollback_failed and secret_publication_rollback_incomplete:
-            failure_code = "publication-failed-setup-and-secret-rollback-incomplete"
-        elif secret_publication_rollback_incomplete:
-            failure_code = "publication-failed-secret-rollback-incomplete"
-        elif setup_rollback_failed:
-            failure_code = "publication-failed-setup-rollback-incomplete"
-        else:
-            failure_code = "publication-failed-setup-restored"
-        if size_refusal is not None and not setup_rollback_failed:
-            raise size_refusal from None
-        raise _GuardrailSecretFailure(failure_code) from None
+    if non_interactive:
+        guardrail_secret_transaction = publish_guardrail_secrets()
 
     if not gc.enabled:
         if guardrail_secret_transaction is not None:
