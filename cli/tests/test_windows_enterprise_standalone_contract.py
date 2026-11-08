@@ -3279,6 +3279,8 @@ def test_a_lazy_lock_file_with_an_untrusted_owner_is_still_refused() -> None:
     assert "Get-DefenseClawLazyLockFiles -Layout $layout" in smoke
     assert "untrusted owner, re-stamp does nothing" in smoke
     assert "untrusted owner, re-stamp fails" in smoke
+    # ... and with a real file that BUILTIN\\Users owns, for every lock kind.
+    assert "/setowner" in smoke and "real owner: $kind lock" in smoke
 
 
 def test_codex_vendor_folder_adoption_runs_before_the_snapshot_and_tolerates_defenseclaws_own_lock() -> None:
