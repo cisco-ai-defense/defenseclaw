@@ -6390,6 +6390,14 @@ def test_rollback_skips_codex_files_behind_a_link_and_reads_the_user_sid_label()
     assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded" in shared[link:skip]
     assert 'cmd /c rmdir `"$restoreCodexLink`"' in shared[link:skip]
 
+    # The rest of the rollback reads nothing through the link either: the ACL stamp
+    # of the restored files and the deployment assertion of a servicing transaction.
+    assert "-SkipCodexMachineState:$restoreCodexLinked" in restore
+    deployment = _psm1_function(module, "Assert-DefenseClawEnterpriseDeployment")
+    assert "if ($ServicingTransaction -and $codexTargetEnabled) {" in deployment
+    assert deployment.count("Get-DefenseClawVendorMachineFolderLink") == 1
+    assert "if ($codexFolderLink -eq '') {\n        [void](Invoke-DefenseClawCodexRequirementsCommand" in deployment
+
     attributable = _psm1_function(module, "Test-DefenseClawGuardianReportErrorsAttributable")
     assert "(?<connector>[^@\\s]+)@(?<account>.+?)(?: \\((?<sid>S-1-[0-9-]+)\\))?: " in attributable
     assert "'^last guardian reconcile failed for (\\S+): '" not in attributable

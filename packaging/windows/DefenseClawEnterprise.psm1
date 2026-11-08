@@ -21884,9 +21884,13 @@ function Restore-DefenseClawTransaction {
                 -Layout $Layout `
                 -GatewayServiceName ([string]$snapshot.gateway_service)
         }
+        # GAP-0900: nothing is stamped through a link on the Codex folder either.
+        $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `
+                -Directory ([string]$Layout.CodexMachinePolicyDirectory)) -ne ''
         Set-DefenseClawManagedAcls `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
+            -SkipCodexMachineState:$restoreCodexLinked `
             -AllowTransactionRecordedBrokerAbsence:(
                 $snapshotBrokerAbsent
             )
@@ -33895,7 +33899,23 @@ function Assert-DefenseClawEnterpriseDeployment {
             }
         }
     }
-    if ($codexTargetEnabled) {
+    # GAP-0900: a rollback or recovery (-ServicingTransaction) that finds a link on
+    # the Codex folder does not read the Codex machine policy through it, names the
+    # link, and lets the restored services run; Codex stays unprotected until an
+    # administrator removes the link. Standalone only; every other caller checks.
+    $codexFolderLink = ''
+    if ($ServicingTransaction -and $codexTargetEnabled) {
+        $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `
+            -Directory ([string]$Layout.CodexMachinePolicyDirectory)
+    }
+    if ($codexFolderLink -ne '') {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'rollback'
+            path      = $codexFolderLink
+            reason    = "a link sits on the Codex machine-policy folder; its policy was not checked and Codex is not protected until the link is removed with: cmd /c rmdir `"$codexFolderLink`""
+        }
+    }
+    elseif ($codexTargetEnabled) {
         Assert-DefenseClawCodexMachinePolicyDirectory `
             -Path $Layout.CodexVendorDirectory
         Assert-DefenseClawCodexMachinePolicyDirectory `
@@ -34508,10 +34528,12 @@ function Assert-DefenseClawEnterpriseDeployment {
             -ExpectedStartMode $expectedServiceStartMode
     }
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
-    [void](Invoke-DefenseClawCodexRequirementsCommand `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName `
-        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+    if ($codexFolderLink -eq '') {
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+    }
 
     if ($RequireReadiness) {
         if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
