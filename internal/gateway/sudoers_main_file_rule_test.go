@@ -157,6 +157,10 @@ func sudoersBenignNeighbours() []sudoersHookRow {
 // profile pack, as the per-user gateway or, with managed, as a managed
 // gateway that knows the caller. It returns whether the call was refused,
 // whether the response names the sudoers rule, and the response.
+// sudoersEvidenceRewrite, when set, rewrites the hook client evidence of a
+// default-connector call before the gateway reads it.
+var sudoersEvidenceRewrite func(t *testing.T, evidence string) string
+
 func postSudoersHook(t *testing.T, row sudoersHookRow, profile string, managed bool) (bool, bool, string) {
 	t.Helper()
 	return postSudoersHookPack(t, row, filepath.Join(guardrailPoliciesRoot(t), profile), managed)
@@ -197,7 +201,11 @@ func postSudoersHookPack(t *testing.T, row sudoersHookRow, packDir string, manag
 		req.Header.Set(hookpaths.Header, hookpaths.Resolve([]byte(raw)))
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
 	default:
-		req.Header.Set(hookpaths.Header, hookpaths.Resolve([]byte(raw)))
+		evidence := hookpaths.Resolve([]byte(raw))
+		if sudoersEvidenceRewrite != nil {
+			evidence = sudoersEvidenceRewrite(t, evidence)
+		}
+		req.Header.Set(hookpaths.Header, evidence)
 	}
 	if managed {
 		req = req.WithContext(withManagedHookPeer(req.Context(), managedHookPeer{Home: home}))
