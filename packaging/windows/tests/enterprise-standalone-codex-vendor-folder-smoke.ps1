@@ -29,10 +29,6 @@ trap {
     Microsoft.PowerShell.Utility\Write-Output ('enterprise-standalone-codex-vendor-folder-smoke: FAILED ' + $_.Exception.Message + "`n" + $_.InvocationInfo.PositionMessage + "`n" + $_.ScriptStackTrace)
     throw
 }
-# Windows PowerShell 5.1 loads the access-control type data with this module; it
-# has to be loaded before the first ObjectSecurity object is made, or the
-# autoload at the first Get-Acl fails with "member ... is already present".
-Microsoft.PowerShell.Core\Import-Module -Name Microsoft.PowerShell.Security -ErrorAction Stop
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Microsoft.PowerShell.Utility\Write-Output 'enterprise-standalone-codex-vendor-folder-smoke: SKIP (requires an elevated token)'
@@ -41,14 +37,26 @@ if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Secur
 $module = Microsoft.PowerShell.Core\Import-Module `
     -Name ([IO.Path]::GetFullPath((Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1'))) `
     -Force -PassThru -ErrorAction Stop
+# Windows PowerShell 5.1 on a GitHub runner cannot load the security module's
+# type data into the script scope ("member ... is already present"); the
+# product module's own scope can, which is where the other smokes read and set
+# access lists. These helpers do the same.
+function Get-AclInModule {
+    param([Parameter(Mandatory)][string]$Path)
+    return (& $module { param($p) Microsoft.PowerShell.Security\Get-Acl -LiteralPath $p } $Path)
+}
+function Set-AclInModule {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$Acl)
+    & $module { param($p, $a) Microsoft.PowerShell.Security\Set-Acl -LiteralPath $p -AclObject $a } $Path $Acl
+}
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 $scratch = [IO.Path]::Combine($ScratchRoot, ('dc-smoke-g092-' + [Guid]::NewGuid().ToString('N')))
 [void][IO.Directory]::CreateDirectory($scratch)
 $scratchSecurity = [Security.AccessControl.DirectorySecurity]::new()
 $scratchSecurity.SetSecurityDescriptorSddlForm(
-    (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $programData).Sddl,
+    (Get-AclInModule -Path $programData).Sddl,
     [Security.AccessControl.AccessControlSections]::Access)
-Microsoft.PowerShell.Security\Set-Acl -LiteralPath $scratch -AclObject $scratchSecurity
+Set-AclInModule -Path $scratch -Acl $scratchSecurity
 $roots = [Collections.Generic.List[string]]::new()
 $roots.Add($scratch)
 # An administrator's object is owned by the group BUILTIN\Administrators. A GitHub
@@ -80,7 +88,7 @@ try {
         $vendor = New-StandIn
         $codex = [IO.Path]::Combine($vendor, 'Codex')
         New-AdministratorDirectory -Path $codex
-        $inherited = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $vendor).Sddl
+        $inherited = (Get-AclInModule -Path $vendor).Sddl
         $result = & $module {
             param($Vendor, $Codex, $Standalone)
             if ($Standalone) { function Test-DefenseClawStandaloneProfile { return $true } }
@@ -97,7 +105,7 @@ try {
         }
         elseif ($standalone) {
             foreach ($path in @($vendor, $codex)) {
-                $after = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path
+                $after = Get-AclInModule -Path $path
                 # The vendor folder is stamped protected; Codex below it then
                 # inherits only the trusted entries.
                 if (($path -eq $vendor -and -not $after.AreAccessRulesProtected) -or $after.Sddl -match '\(A;[^;]*;[^;]*DC[^;]*;;;BU\)') {
@@ -122,14 +130,14 @@ try {
 
     # Setup /verify (no -Adopt) checks only: the empty folder keeps the refusal and its access list.
     $verified = New-StandIn
-    $before = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $verified).Sddl
+    $before = (Get-AclInModule -Path $verified).Sddl
     $verifyRefused = & $module {
         param($Path)
         function Test-DefenseClawStandaloneProfile { return $true }
         try { Assert-DefenseClawCodexMachinePolicyDirectory -Path $Path; return $false }
         catch { return $true }
     } $verified
-    $after = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $verified).Sddl
+    $after = (Get-AclInModule -Path $verified).Sddl
     if (-not $verifyRefused -or $after -ne $before) {
         $failures.Add("the check without -Adopt adopted an empty vendor folder (refused=$verifyRefused): $before -> $after")
     }
@@ -228,7 +236,7 @@ try {
     $security.SetSecurityDescriptorSddlForm(
         'O:BAG:BAD:P(A;OICIIO;GA;;;CO)(A;OICIIO;FA;;;BU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)',
         [Security.AccessControl.AccessControlSections]::Owner -bor [Security.AccessControl.AccessControlSections]::Access)
-    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $strict -AclObject $security
+    Set-AclInModule -Path $strict -Acl $security
     $refused = & $module {
         param($Path)
         function Test-DefenseClawStandaloneProfile { return $true }
