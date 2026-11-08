@@ -23,11 +23,18 @@ import (
 // elsewhere). Tests that fake a share turn it on.
 var networkShareLinkWalk = runtime.GOOS == "windows"
 
-// networkLinkHopLimit bounds the links one walk follows. A walk that reaches
-// the bound has not proven the path free of an unasked share (the system
-// follows far more links than this), so it reports the path as unanswered,
-// as a share that did not answer, and never as a completed check.
-const networkLinkHopLimit = 40
+// networkLinkHopLimit bounds the links one walk follows: 40, and no more than
+// the system opens in one path (SystemLinkLimit; macOS refuses a path past 32
+// links, so a walk past 32 there is a path no read can go through, an unread
+// body). A walk that reaches the bound has not proven the path free of an
+// unasked share (the system follows far more links than this on Windows), so
+// it reports the path as unanswered, as a share that did not answer, and
+// never as a completed check.
+var networkLinkHopLimit = min(40, SystemLinkLimit())
+
+// ShareWalkLinkLimit is the links the share walk follows before it reports a
+// path unanswered (networkLinkHopLimit), for tests of the callers.
+func ShareWalkLinkLimit() int { return networkLinkHopLimit }
 
 // trimPathSeparators drops the leading separators of path.
 func trimPathSeparators(path string) string {

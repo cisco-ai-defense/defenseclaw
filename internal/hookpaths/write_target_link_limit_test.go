@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -14,8 +15,8 @@ import (
 // a chain the system opens is resolved to its file, and a chain past the
 // system limit is unresolvable (rel-1-0-9:GAP-0910).
 func TestWriteTargetWalkFollowsAsManyLinksAsTheSystemOpens(t *testing.T) {
-	limit := maxWriteTargetLinkDepth()
-	dir := t.TempDir()
+	limit := SystemLinkLimit()
+	dir := linkFreeTempDir(t)
 	file := filepath.Join(dir, "file")
 	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -64,6 +65,56 @@ func TestWriteTargetWalkFollowsAsManyLinksAsTheSystemOpens(t *testing.T) {
 				t.Errorf("a chain of %d links resolves to %q, want %q", tc.links, resolved, want)
 			}
 		}
+	}
+}
+
+// linkFreeTempDir is a temp folder whose own path crosses no link (macOS
+// keeps /var, and so every temp folder, behind one), so the links a test
+// counts are the ones it makes.
+func linkFreeTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if runtime.GOOS == "windows" {
+		return dir
+	}
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// SystemLinkLimit is the limit of the system the test runs on, not a number
+// the code and the test agree on: one chain longer than any system opens is
+// made, and the most links that open from it are counted. A disagreement
+// fails here, on the runner of the system it is wrong for.
+func TestSystemLinkLimitIsTheLimitTheRunnerOpens(t *testing.T) {
+	const longest = 80
+	dir := linkFreeTempDir(t)
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	name := func(i int) string { return filepath.Join(dir, fmt.Sprintf("hop%03d", i)) }
+	for i := longest; i >= 1; i-- {
+		to := file
+		if i < longest {
+			to = name(i + 1)
+		}
+		if err := os.Symlink(to, name(i)); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+	}
+	// name(i) crosses longest-i+1 links.
+	opens := 0
+	for i := longest; i >= 1; i-- {
+		if _, err := os.Stat(name(i)); err != nil {
+			break
+		}
+		opens = longest - i + 1
+	}
+	if opens != SystemLinkLimit() {
+		t.Fatalf("%s opens a path of at most %d links, SystemLinkLimit is %d", runtime.GOOS, opens, SystemLinkLimit())
 	}
 }
 

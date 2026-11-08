@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -15,12 +16,16 @@ import (
 )
 
 // A sourced script whose folder is reached through more links than the share
-// walk follows (40) is a body the call could not read. It is judged as a
-// body the share budget kept unread is: the strict tier blocks, the default
-// tier allows with the alert. A chain within the bound reads the script, and
+// walk follows (40, or the fewer links the system opens in one path) is a body
+// the call could not read. It is judged as a body the share budget kept
+// unread is: the strict tier blocks, the default tier allows with the alert. A chain within the bound reads the script, and
 // the script that writes a protected file through a link is blocked in both
 // tiers (rel-1-0-9:GAP-0621).
 func TestSourcedScriptBehindTooManyLinksIsJudgedByTheTier(t *testing.T) {
+	// The links the call reads through: the share walk bound, which is never
+	// more than the system opens in one path (40 on Linux and Windows, 32 on
+	// macOS). One more is a path the call could not read.
+	within := hookpaths.ShareWalkLinkLimit()
 	for _, tc := range []struct {
 		name          string
 		links         int
@@ -30,10 +35,10 @@ func TestSourcedScriptBehindTooManyLinksIsJudgedByTheTier(t *testing.T) {
 		defHasAlert   bool
 		strictHasRule string
 	}{
-		{"writer within the bound", 40, "writer.sh", "block", "block", false, ""},
-		{"ordinary within the bound", 40, "safe.sh", "allow", "allow", false, ""},
-		{"writer beyond the bound", 41, "writer.sh", "block", "alert", true, "ACTION-COMPOUND-LIMIT"},
-		{"ordinary beyond the bound", 41, "safe.sh", "block", "alert", true, "ACTION-COMPOUND-LIMIT"},
+		{"writer within the bound", within, "writer.sh", "block", "block", false, ""},
+		{"ordinary within the bound", within, "safe.sh", "allow", "allow", false, ""},
+		{"writer beyond the bound", within + 1, "writer.sh", "block", "alert", true, "ACTION-COMPOUND-LIMIT"},
+		{"ordinary beyond the bound", within + 1, "safe.sh", "block", "alert", true, "ACTION-COMPOUND-LIMIT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home, live := r104ReviewHome(t)
@@ -77,20 +82,27 @@ func TestSourcedScriptBehindTooManyLinksIsJudgedByTheTier(t *testing.T) {
 	}
 }
 
-// linksEveryOSOpens is the links one path may cross on every supported
-// system (Linux stops at 40, Windows at 63).
-const linksEveryOSOpens = 40
-
 // gatewayLinkChain makes n links, the first named by the returned path, each
 // pointing at the next and the last at target. The links are made from the
 // last to the first so each target exists when its link is made: Windows
 // makes a link to a folder a folder link only if the folder is there, and a
 // file link to a folder cannot be opened as one, so a chain made from the
 // first to the last is a chain no read can go through. A chain of up to
-// linksEveryOSOpens links that does not open fails the test, never skips it.
+// the share walk bound that does not open fails the test, never skips it.
 func gatewayLinkChain(t *testing.T, n int, target string) string {
 	t.Helper()
 	dir := t.TempDir()
+	if runtime.GOOS != "windows" {
+		// The temp folder and the target are spelled without a link of their
+		// own (macOS keeps /var behind one), so the chain is the links counted.
+		var err error
+		if dir, err = filepath.EvalSymlinks(dir); err != nil {
+			t.Fatal(err)
+		}
+		if target, err = filepath.EvalSymlinks(target); err != nil {
+			t.Fatal(err)
+		}
+	}
 	name := func(i int) string { return filepath.Join(dir, fmt.Sprintf("hop%03d", i)) }
 	for i := n; i >= 1; i-- {
 		to := target
@@ -101,7 +113,7 @@ func gatewayLinkChain(t *testing.T, n int, target string) string {
 			t.Skipf("symlink unavailable: %v", err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(name(1), "safe.sh")); n <= linksEveryOSOpens && err != nil {
+	if _, err := os.Stat(filepath.Join(name(1), "safe.sh")); n <= hookpaths.ShareWalkLinkLimit() && err != nil {
 		t.Fatalf("a chain of %d links to %s does not open: %v", n, target, err)
 	}
 	return name(1)
