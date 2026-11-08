@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -54,8 +55,10 @@ func listenersHeldOnlyByPID(pid int, server *net.TCPAddr) bool {
 // socket that can take a connection to server and every one is a socket that
 // process pid holds open. A dual-stack IPv6 listener appears in tcp6, so both
 // tables are read; a socket bound to the wildcard address counts for the
-// loopback server. Any other holder of the port, even one of the same
-// account, an unreadable table or descriptor list, or no listener, is false.
+// loopback server, and no other process of this account holds any of those
+// sockets (a forked or inherited listener descriptor shares the accept queue).
+// Any other holder of the port, even one of the same account, an unreadable
+// table or descriptor list, or no listener, is false.
 func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr) bool {
 	key, table, err := procTCPEndpoint(server)
 	if err != nil {
@@ -81,13 +84,58 @@ func listenersHeldOnlyBy(procNet, procRoot string, pid int, server *net.TCPAddr)
 	if len(inodes) == 0 {
 		return false
 	}
-	held, ok := socketInodesOf(procRoot, pid)
-	if !ok {
+	held, err := socketInodesOf(procRoot, pid)
+	if err != nil {
 		return false
 	}
 	for _, inode := range inodes {
 		if !held[inode] {
 			return false
+		}
+	}
+	return heldByNoOtherProcessOfThisAccount(procRoot, pid, inodes)
+}
+
+// heldByNoOtherProcessOfThisAccount reports whether no process other than pid
+// holds one of the socket inodes. Every process of this account is read. A
+// process that cannot be read is skipped when the kernel refuses the read as a
+// permission matter (a non-dumpable process such as an sshd session child, or
+// another account's process) or the process is gone or exiting: such a process
+// is not a copy of the gateway's own descriptors, which a fork keeps readable.
+// Any other read failure leaves the answer open, so it is false.
+func heldByNoOtherProcessOfThisAccount(procRoot string, pid int, inodes []string) bool {
+	entries, err := os.ReadDir(procRoot)
+	if err != nil {
+		return false
+	}
+	self := uint32(os.Geteuid())
+	for _, entry := range entries {
+		other, err := strconv.Atoi(entry.Name())
+		if err != nil || other == pid {
+			continue
+		}
+		dir := filepath.Join(procRoot, entry.Name())
+		info, err := os.Stat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return false
+		}
+		if stat, ok := info.Sys().(*syscall.Stat_t); !ok || stat.Uid != self {
+			continue
+		}
+		held, err := socketInodesOf(procRoot, other)
+		if err != nil {
+			if errors.Is(err, os.ErrPermission) || errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ESRCH) {
+				continue
+			}
+			return false
+		}
+		for _, inode := range inodes {
+			if held[inode] {
+				return false
+			}
 		}
 	}
 	return true
@@ -124,23 +172,26 @@ func readListenerInodes(procNet, table string, keys []string) ([]string, bool) {
 
 // socketInodesOf lists the socket inodes process pid holds open, from its
 // descriptor folder.
-func socketInodesOf(procRoot string, pid int) (map[string]bool, bool) {
+func socketInodesOf(procRoot string, pid int) (map[string]bool, error) {
 	dir := filepath.Join(procRoot, strconv.Itoa(pid), "fd")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, false
+		return nil, err
 	}
 	held := make(map[string]bool)
 	for _, entry := range entries {
 		target, err := os.Readlink(filepath.Join(dir, entry.Name()))
 		if err != nil {
-			continue
+			if errors.Is(err, os.ErrNotExist) {
+				continue // closed while listing
+			}
+			return nil, err
 		}
 		if inode, ok := strings.CutPrefix(target, "socket:["); ok {
 			held[strings.TrimSuffix(inode, "]")] = true
 		}
 	}
-	return held, true
+	return held, nil
 }
 
 // Connect can finish before the gateway accepts the same held socket. Until
