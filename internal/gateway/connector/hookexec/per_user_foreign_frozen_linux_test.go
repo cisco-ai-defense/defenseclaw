@@ -118,7 +118,7 @@ func TestForeignListenerThatAcceptsNothingStaysUnverified(t *testing.T) {
 		opts.OutageFailModeNow = func() string { return "open" }
 		opts.Stdin = strings.NewReader(`{"hook_event_name":"PostToolBatch"}`)
 	})
-	if !nativeOutageBlocked(result) || !strings.Contains(result.stdout+result.stderr, "another account") {
+	if !nativeOutageBlocked(result) || !strings.Contains(result.stdout+result.stderr, unprovenListenerReasonPrefix) {
 		t.Fatalf("the open tier let a call run past a listener of another account: code=%d stdout=%.300q stderr=%.300q", result.code, result.stdout, result.stderr)
 	}
 }
