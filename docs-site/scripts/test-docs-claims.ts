@@ -1166,7 +1166,9 @@ describe('1.0.4 operator routes and limits', () => {
     assert.ok(cmd.includes('"On a per-user install an explicit saved mode wins (OpenClaw under the strict policy stays closed); a "'));
     const cli = page('reference/cli.mdx');
     assert.ok(!cli.includes('so a value is refused with exit 1'));
-    assert.ok(cli.includes('`open` or `closed` saves your choice, which wins over the policy tier'));
+    assert.ok(cli.includes('`open` or `closed` saves your choice, which wins over the policy tier (except OpenClaw under the strict policy, which stays closed despite a saved `open`)'));
+    const failModes = page('reference/fail-modes.mdx');
+    assert.ok(failModes.includes('wins over the policy tier on a per-user install, with one exception: OpenClaw under the strict policy stays closed even when `open` is saved'));
   });
 
   it('pins the workspace route for older Kiro IDEs', () => {
