@@ -312,3 +312,49 @@ func ClearUnixOpenCodeContestedPort(path string, port int, by string, now time.T
 	state.Cleared = append(state.Cleared, UnixOpenCodeContestCleared{Port: port, UIDs: claimants, At: now.UTC().Format(time.RFC3339), By: by})
 	return claimants, WriteUnixOpenCodeServicePortsFull(path, state)
 }
+
+// ClearUnixOpenCodeUnknownLocked removes the unknown entry of uid from the
+// record at path under the guardian reconcile lock (an administrator
+// operation: `enterprise linux|macos opencode-port-unknown-clear`). The
+// entry is the guardian snapshot of an account whose service.json it could not
+// read or write; one whose account is gone has nothing left to repair. The
+// account check runs under the lock, after the entry is found: hasAccount
+// reports whether any account of the host holds uid, and an error from it, like
+// a true answer, refuses and changes nothing. Bindings, contested marks and the
+// clear log stay as they are. It returns the removed entry.
+func ClearUnixOpenCodeUnknownLocked(path string, uid int, wait time.Duration, hasAccount func(uid int) (bool, error)) (UnixOpenCodeServicePortUnknown, error) {
+	unlock, err := LockUnixGuardianReconcile(context.Background(), filepath.Dir(filepath.Clean(path)), wait)
+	if err != nil {
+		return UnixOpenCodeServicePortUnknown{}, err
+	}
+	defer unlock()
+	state, err := LoadUnixOpenCodeServicePortsFull(path)
+	if err != nil {
+		return UnixOpenCodeServicePortUnknown{}, err
+	}
+	if !state.Exists {
+		return UnixOpenCodeServicePortUnknown{}, fmt.Errorf("no OpenCode service ports record at %s", path)
+	}
+	var removed UnixOpenCodeServicePortUnknown
+	found := false
+	kept := make([]UnixOpenCodeServicePortUnknown, 0, len(state.Unknown))
+	for _, entry := range state.Unknown {
+		if entry.UID == uid {
+			removed, found = entry, true
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	if !found {
+		return UnixOpenCodeServicePortUnknown{}, fmt.Errorf("uid %d is not in the unknown list of %s", uid, path)
+	}
+	has, err := hasAccount(uid)
+	if err != nil {
+		return UnixOpenCodeServicePortUnknown{}, fmt.Errorf("cannot confirm that uid %d has no account, so its entry stays: %w", uid, err)
+	}
+	if has {
+		return UnixOpenCodeServicePortUnknown{}, fmt.Errorf("uid %d still resolves to an account on this host, so its entry is not stale and stays; repair the account service.json as the warning says", uid)
+	}
+	state.Unknown = kept
+	return removed, WriteUnixOpenCodeServicePortsFull(path, state)
+}

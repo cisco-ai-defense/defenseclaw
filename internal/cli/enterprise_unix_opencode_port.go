@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -27,6 +28,9 @@ import (
 var (
 	openCodePortClear = func(path string, port int, by string, now time.Time) ([]int, error) {
 		return enterprisehooks.ClearUnixOpenCodeContestedPortLocked(path, port, by, now, 2*time.Minute)
+	}
+	openCodePortUnknownClear = func(path string, uid int, hasAccount func(uid int) (bool, error)) (enterprisehooks.UnixOpenCodeServicePortUnknown, error) {
+		return enterprisehooks.ClearUnixOpenCodeUnknownLocked(path, uid, 2*time.Minute, hasAccount)
 	}
 	openCodePortClearGeteuid    = os.Geteuid
 	openCodePortClearRecordPath = func(goos string) (string, error) {
@@ -106,5 +110,68 @@ clear is logged in the record. Run as root.`,
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "confirm the clear")
+	return cmd
+}
+
+// openCodePortUnknownUIDHasAccount asks the host whether any account holds
+// uid (tests replace it).
+var openCodePortUnknownUIDHasAccount = func(goos string, uid int) (bool, error) {
+	env, err := newUnixLifecycleEnv(goos)
+	if err != nil {
+		return false, err
+	}
+	return env.UIDHasAccount(context.Background(), uid)
+}
+
+// newUnixOpenCodePortUnknownClearCommand is `enterprise linux|macos
+// opencode-port-unknown-clear <uid> --yes`: the administrator removal of the
+// stale unknown entry the guardian record keeps for a uid that no longer has an
+// account (GAP-0904). It refuses while any account source (NSS, altfiles,
+// /etc/passwd, the macOS directory) still holds the uid, and when the lookup
+// does not answer. Root only.
+func newUnixOpenCodePortUnknownClearCommand(platform string) *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "opencode-port-unknown-clear <uid>",
+		Short: "Remove the stale OpenCode port record entry of a uid that has no account",
+		Long: `Remove the unknown entry of one uid from the hook guardian OpenCode port
+record. The guardian keeps that entry for an account whose service.json it
+could not read or write; when the account has since been deleted, status and
+verify report "OpenCode port record for UID <n> (no account found)" and nothing
+is left to repair. The command checks the uid again and refuses while any
+account of the host still holds it, or when the lookup does not answer. The
+recorded port binding and the contested marks stay. Run as root.`,
+		SilenceUsage: true,
+		Args:         cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			uid, err := strconv.Atoi(strings.TrimSpace(args[0]))
+			if err != nil || uid < 0 {
+				return lifecycleFlagError(cmd, fmt.Errorf("%q is not a uid", args[0]))
+			}
+			if !yes {
+				return lifecycleFlagError(cmd, errors.New("removing the OpenCode port record entry of a uid needs --yes"))
+			}
+			if openCodePortClearGeteuid() != 0 {
+				return errors.New("opencode-port-unknown-clear must run as root (sudo)")
+			}
+			goos := runtime.GOOS
+			if platform == "macos" {
+				goos = "darwin"
+			}
+			path, err := openCodePortClearRecordPath(goos)
+			if err != nil {
+				return err
+			}
+			removed, err := openCodePortUnknownClear(path, uid, func(uid int) (bool, error) {
+				return openCodePortUnknownUIDHasAccount(goos, uid)
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "removed the OpenCode port record entry of uid %d (no account found; recorded for %s) from %s; its port binding stays\n", uid, removed.User, path)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "confirm the removal")
 	return cmd
 }
