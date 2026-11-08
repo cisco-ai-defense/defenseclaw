@@ -157,6 +157,23 @@ func TestEnterpriseHookReconcileNeverRepairsARowOfADisabledConnector(t *testing.
 			if row.OK || !strings.Contains(row.Error, "is not enabled") {
 				t.Fatalf("opencode row %+v, want the not-enabled error", row)
 			}
+			if !row.RevokeProtection {
+				t.Fatalf("opencode row %+v, want its protected claim revoked in the same pass", row)
+			}
 		}
+	}
+	// The ledger the gateway reads for credentials no longer carries the
+	// withdrawn connector's row, so its leftover token is refused at once
+	// (GAP-0916); the connector still published keeps its row.
+	authorization, _, err := loadEnterpriseHookGuardianAuthorization(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, protected := range authorization.ProtectedTargets {
+		seen[protected.Connector] = true
+	}
+	if seen["opencode"] || !seen["codex"] {
+		t.Fatalf("protected ledger connectors = %v, want codex only", seen)
 	}
 }
