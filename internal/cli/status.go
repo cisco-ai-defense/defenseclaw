@@ -728,6 +728,11 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 			fmt.Printf("               %s\n", Dim("not enforced: "+reason))
 			continue
 		}
+		if cause := guardrailNotStartedCause(snap.Guardrail.Details, name); cause != "" {
+			fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced: "+
+				cause+"; then run: defenseclaw setup "+name))
+			continue
+		}
 		fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced; "+
 			"see gateway.log, then run: defenseclaw setup "+name))
 	}
@@ -792,6 +797,63 @@ func guardrailAgentSettingsRefusals(details map[string]interface{}) map[string]s
 		}
 	}
 	return refused
+}
+
+// notStartedCauseMaxRunes bounds the recorded reason shown for a skipped connector.
+const notStartedCauseMaxRunes = 400
+
+// guardrailNotStartedCause returns the cause the gateway recorded for skipping
+// the connector name: its reason, bounded, followed by its repair as recorded.
+// It is empty when the gateway recorded no reason. Every place that tells a
+// user a connector is not enforced reads it from here, so none falls back to
+// "see gateway.log" while the gateway has already named the folder and the
+// command (GAP-0832). The details are typed in process and decoded JSON after
+// a round trip.
+func guardrailNotStartedCause(details map[string]interface{}, name string) string {
+	key := strings.ToLower(strings.TrimSpace(name))
+	var reason string
+	switch raw := details[gateway.GuardrailNotStartedReasons].(type) {
+	case map[string]string:
+		reason = raw[key]
+	case map[string]interface{}:
+		reason, _ = raw[key].(string)
+	}
+	reason = strings.Join(strings.Fields(reason), " ")
+	if reason == "" {
+		return ""
+	}
+	if runes := []rune(reason); len(runes) > notStartedCauseMaxRunes {
+		reason = string(runes[:notStartedCauseMaxRunes]) + "…"
+	}
+	var fix, byHand string
+	omitted := 0
+	switch raw := details[gateway.GuardrailNotStartedRepairs].(type) {
+	case map[string]gateway.NotStartedRepair:
+		repair := raw[key]
+		fix, byHand, omitted = repair.Fix, repair.ByHand, repair.OmittedBytes
+	case map[string]interface{}:
+		if repair, ok := raw[key].(map[string]interface{}); ok {
+			fix, _ = repair["fix"].(string)
+			byHand, _ = repair["by_hand"].(string)
+			if count, ok := repair["omitted_bytes"].(float64); ok && count > 0 {
+				omitted = int(count)
+			}
+		}
+	}
+	if fix != "" {
+		reason += "; fix: " + fix
+	}
+	if byHand != "" {
+		if fix != "" {
+			reason += "; then by hand: " + byHand
+		} else {
+			reason += "; by hand: " + byHand
+		}
+	}
+	if omitted > 0 {
+		reason += fmt.Sprintf("; repair omitted: it is %d bytes, too long for this field; the gateway log has it whole", omitted)
+	}
+	return reason
 }
 
 // printConnectorBody renders the per-connector since/mode/counter lines
