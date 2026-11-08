@@ -16885,6 +16885,14 @@ def _restart_services(
         agent_config_notice.wait_for_put_back(data_dir, notice_targets)
         for note in agent_config_notice.put_back_notes(data_dir, notice_targets):
             ux.warn(note)
+        if notice_connectors is not None and "hermes" in notice_targets:
+            # Hook entries a Hermes setup kept: the gateway words this in its own log, which this command does
+            # not show. A global change that bounces the gateway does not repeat it.
+            from defenseclaw.doctor_hooks import hermes_kept_hook_note
+
+            kept_note = hermes_kept_hook_note(data_dir, connector_paths.hermes_config_path())
+            if kept_note:
+                ux.warn(kept_note)
 
     # Multi-connector global change: every active hook connector is affected
     # by the gateway bounce, so enumerate them rather than naming the primary.

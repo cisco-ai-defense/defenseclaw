@@ -1291,18 +1291,25 @@ def _hermes_written_command(cfg: Any, connector: str) -> Callable[[str], bool] |
         os.path.join(os.path.normpath(root), "hooks", HOOK_SCRIPT_NAMES["hermes"])
         for root in (data_dir, os.path.realpath(data_dir))
     }
+    return lambda command: hermes_command_written(command, current)
 
-    def written(command: str) -> bool:
-        if command in current:
-            return True
-        split = _split_hook_command(command)
-        if split is not None and split[0] in current and not split[1]:
-            return True
-        # The edited-path matchers trim blanks, which would claim a command
-        # Setup did not write: a command with a blank at either end belongs to the user.
-        return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
 
-    return written
+def hermes_command_written(command: str, current: set[str]) -> bool:
+    """Whether *command* is one Setup wrote: a *current* command, or the generated script at an edited path.
+
+    The one test behind every Hermes registration check, the Python mirror of
+    hermesHookEntryOwned. A command with a blank at either end, or with
+    arguments, belongs to the user: Setup keeps it and does not count it.
+    """
+
+    if command in current:
+        return True
+    split = _split_hook_command(command)
+    if split is not None and split[0] in current and not split[1]:
+        return True
+    # The edited-path matchers trim blanks, which would claim a command
+    # Setup did not write: a command with a blank at either end belongs to the user.
+    return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
 
 
 def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:

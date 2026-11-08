@@ -47,6 +47,7 @@ from defenseclaw.hook_integrity import (
     LAUNCHER_REINSTALL_STEP,
     claude_launcher_guard_view,
     hermes_approved_pairs,
+    hermes_command_written,
     hook_guard_problem,
 )
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
@@ -3016,6 +3017,9 @@ def unix_hermes_hook_problem(config_path: str, script_path: str, *, check_approv
         if not os.path.isfile(script_path):
             raise _InspectionError("missing", f"Hermes hook script is missing: {script_path}")
         expected = os.path.realpath(script_path)
+        # Setup owns an entry by identity (hermes_command_written): a command it did not write,
+        # a padded one say, is kept for the user and is not a second DefenseClaw handler.
+        current = {os.path.normpath(script_path), expected}
         commands: set[str] = set()
         for event, matcher in _HERMES_REQUIRED_HOOKS.items():
             entries = hooks.get(event)
@@ -3026,10 +3030,7 @@ def unix_hermes_hook_problem(config_path: str, script_path: str, *, check_approv
                 for entry in entries
                 if isinstance(entry, dict)
                 and isinstance(entry.get("command"), str)
-                and (
-                    "hermes-hook.sh" in entry["command"]
-                    or _handler_targets_defenseclaw(entry, "hermes")
-                )
+                and hermes_command_written(entry["command"], current)
             ]
             if len(owned) != 1:
                 raise _InspectionError(
@@ -3056,13 +3057,58 @@ def unix_hermes_hook_problem(config_path: str, script_path: str, *, check_approv
         for event, entries in hooks.items():
             if event in _HERMES_REQUIRED_HOOKS or not isinstance(entries, list):
                 continue
-            if any(_handler_targets_defenseclaw(entry, "hermes") for entry in entries):
+            if any(
+                _handler_targets_defenseclaw(entry, "hermes")
+                # A command with a blank at either end is kept for the user, as above.
+                and (entry["command"] == entry["command"].strip())
+                for entry in entries
+            ):
                 raise _InspectionError("stale", f"unexpected Hermes event {event} contains a DefenseClaw handler")
         if check_approvals:
             _validate_hermes_allowlist(config_path, next(iter(commands)))
     except _InspectionError as exc:
         return exc.state, exc.detail
     return "", ""
+
+
+def hermes_kept_hook_note(data_dir: str, config_path: str) -> str:
+    """The notice `defenseclaw setup hermes` prints for hook entries Setup kept, else "".
+
+    The gateway applies the registration and words the same notice in its own
+    log (warnHermesKeptHookEntries in internal/gateway/connector), which the
+    command that ran Setup does not show. Setup owns an entry by identity
+    (hermes_command_written); every other entry on an event Setup registers is
+    the user content it keeps, and it is listed, never read for what it runs.
+    Per-user Unix only, where the exact command is known.
+    """
+    if os.name == "nt" or not data_dir:
+        return ""
+    try:
+        hooks = _read_config(config_path, "hermes").get("hooks")
+    except _InspectionError:
+        return ""
+    if not isinstance(hooks, dict):
+        return ""
+    script = os.path.join(data_dir, "hooks", "hermes-hook.sh")
+    current = {os.path.normpath(script), os.path.realpath(script)}
+    kept = sorted(
+        event
+        for event in _HERMES_REQUIRED_HOOKS
+        if isinstance(hooks.get(event), list)
+        and any(
+            isinstance(entry, dict)
+            and isinstance(entry.get("command"), str)
+            and not hermes_command_written(entry["command"], current)
+            for entry in hooks[event]
+        )
+    )
+    if not kept:
+        return ""
+    events = ", ".join(kept)
+    return (
+        f"hermes setup: kept hook entries in {config_path} (events: {events}) "
+        "that DefenseClaw did not write; remove any that runs a DefenseClaw hook by hand"
+    )
 
 
 def unix_hook_event_binding_problem(connector: str, config_path: str, script_path: str) -> tuple[str, str]:
