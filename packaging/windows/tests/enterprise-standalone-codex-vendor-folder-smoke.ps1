@@ -29,6 +29,10 @@ trap {
     Microsoft.PowerShell.Utility\Write-Output ('enterprise-standalone-codex-vendor-folder-smoke: FAILED ' + $_.Exception.Message + "`n" + $_.InvocationInfo.PositionMessage + "`n" + $_.ScriptStackTrace)
     throw
 }
+# Windows PowerShell 5.1 loads the access-control type data with this module; it
+# has to be loaded before the first ObjectSecurity object is made, or the
+# autoload at the first Get-Acl fails with "member ... is already present".
+Microsoft.PowerShell.Core\Import-Module -Name Microsoft.PowerShell.Security -ErrorAction Stop
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Microsoft.PowerShell.Utility\Write-Output 'enterprise-standalone-codex-vendor-folder-smoke: SKIP (requires an elevated token)'
