@@ -592,7 +592,7 @@ var readProcMountView = func(dir string) (procMountView, error) {
 	if err != nil {
 		return procMountView{}, err
 	}
-	f, err := os.Open(dir + "/mountinfo")
+	f, err := pathOpen(dir + "/mountinfo")
 	if err != nil {
 		return procMountView{}, err
 	}
