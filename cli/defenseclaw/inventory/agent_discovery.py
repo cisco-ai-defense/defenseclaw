@@ -3862,10 +3862,25 @@ def publish_verified_agent(
     a scan would have: a readable cache keeps every other entry as it is
     (:func:`_publish_agent_signal`); a missing, unreadable or expired one is
     replaced by a scan of the host that carries the verified entry. Admission
-    never comes from this cache, so a write that fails changes none.
+    never comes from this cache, so nothing that goes wrong here (a write, or
+    the host scan that stands in for a missing cache) may refuse a setup whose
+    executable the protected selection already verified: every failure is a
+    False return and the caller names the refresh step.
     """
     if not binary_path or not version:
         return False
+    try:
+        return _publish_verified_agent(name, binary_path, version, data_dir)
+    except Exception:  # noqa: BLE001 - optional doctor evidence; see the docstring.
+        return False
+
+
+def _publish_verified_agent(
+    name: str,
+    binary_path: str,
+    version: str,
+    data_dir: str | os.PathLike[str] | None,
+) -> bool:
     config_path = _agent_config_path(name, include_workspace_config=False)
     verified = AgentSignal(
         name=name,

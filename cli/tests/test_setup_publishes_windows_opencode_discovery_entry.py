@@ -237,6 +237,29 @@ def test_the_real_windows_opencode_setup_with_no_cache_leaves_a_readable_one(tmp
     assert _doctor_status(data_dir) == "supported"
 
 
+@pytest.mark.parametrize("cache", ["missing", "expired"])
+def test_a_failing_host_scan_does_not_refuse_a_verified_windows_opencode_setup(tmp_path, opencode_exe, cache) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    if cache == "expired":
+        _cache_with_cursor(data_dir)
+        _age(data_dir, days=2)
+    with mock.patch.object(ad, "discover_with_probes", side_effect=RuntimeError("scan failed")):
+        result = _drive_windows_setup("opencode", data_dir, verified_exe=opencode_exe)
+
+    # Admission comes from the protected selection; the cache is doctor evidence only.
+    assert result.exit_code == 0, result.output
+    assert "defenseclaw agent discover --refresh" in result.output
+    assert ad._read_cache(data_dir=data_dir) is None
+
+
+def test_a_verified_publish_reports_any_failure_as_false(tmp_path, opencode_exe) -> None:
+    with mock.patch.object(ad, "discover_with_probes", side_effect=OSError("probe denied")):
+        assert ad.publish_verified_agent(
+            "opencode", binary_path=opencode_exe, version="2.2.6", data_dir=tmp_path
+        ) is False
+
+
 def test_an_expired_cache_is_replaced_by_a_windows_amp_publish(tmp_path) -> None:
     # The helper route (Amp) had the same hole: a cache past its limit stayed unreadable.
     _cache_with_cursor(tmp_path)
