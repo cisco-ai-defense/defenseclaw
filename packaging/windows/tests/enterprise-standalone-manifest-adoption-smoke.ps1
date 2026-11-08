@@ -381,6 +381,24 @@ try {
                 $script:DefenseClawVendorLinkExcuse = $true
                 Set-TestGuardian $false $republishedSHA256 3 2 -Results @($linkHealthy, $codexRow, $otherFailure)
                 Assert-TestSyncRefuses 'machine folder link next to another failure' 'failure-free reconcile'
+                # The refusal must be the whole message. A second failure in the same row
+                # (a failure before it, a rollback failure after it, a newline from
+                # errors.Join) is not explained by the link.
+                $codexRefusal = "reparse points are not allowed in Codex machine path: $codexLink"
+                $joinedRefusals = [ordered]@{
+                    'an earlier failure in the prefix' = "write failed: access denied; $codexRefusal"
+                    'a rollback failure after the path' = "enterprise hooks: reconcile Codex machine requirements: $codexRefusal; rollback failed: access denied"
+                    'a second line after the path' = "$codexRefusal`nrollback failed: access denied"
+                    'a failure line before the refusal' = "write failed`n$codexRefusal"
+                }
+                foreach ($joined in $joinedRefusals.GetEnumerator()) {
+                    $joinedRow = [pscustomobject]@{
+                        user = 'alice'; sid = 'S-1-5-21-1-2-3-1018'; connector = 'codex'; ok = $false
+                        error = $joined.Value
+                    }
+                    Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $joinedRow)
+                    Assert-TestSyncRefuses "machine folder link with $($joined.Key)" 'failure-free reconcile'
+                }
                 # The same refusal for a path that is no link now is a stale failure.
                 & cmd.exe /c rmdir "$codexLink" | Out-Null
                 Set-TestGuardian $false $republishedSHA256 2 1 -Results @($linkHealthy, $codexRow)
