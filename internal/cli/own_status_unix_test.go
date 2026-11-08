@@ -85,3 +85,41 @@ func TestLauncherStatusShowsOwnState(t *testing.T) {
 		t.Fatalf("status without a hook socket = %d %s", code, stderr)
 	}
 }
+
+// The reported row: a connector on the roster that is not installed for the
+// account prints its reason and next step in `defenseclaw status`, like the
+// OpenCode row; an older gateway that sends a bare state gets one too.
+func TestLauncherStatusSaysWhyEveryNotProtectedConnectorIsNotProtected(t *testing.T) {
+	previousSocket, previousFetch := ownProfileExplainSocket, ownStatusFetch
+	t.Cleanup(func() { ownProfileExplainSocket, ownStatusFetch = previousSocket, previousFetch })
+	ownProfileExplainSocket = func() string { return "/run/defenseclaw/hook.sock" }
+	answer := `{"own":true,"managed":true,"account":{"uid":"507","name":"alice"},` +
+		`"claude_code":{"protected":true},"connectors":{"claudecode":{"protected":true,"state":"protected"},` +
+		`"hermes":{"protected":false,"state":"not protected: DefenseClaw has not set up protection for this agent on your account. Install it, or ask IT"},` +
+		`"copilot":{"protected":false},"opencode":{"protected":false,"state":"not confirmed"}},` +
+		`"cowork":{"protected":true,"state":"protected: Cowork runs the Claude Code hooks your organization manages"}}`
+	ownStatusFetch = func(context.Context, string) (int, []byte, error) { return http.StatusOK, []byte(answer), nil }
+	var ran []string
+	root := launcherTestRoot(&ran)
+	var stdout, stderr bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetErr(&stderr)
+	if code := executeLauncherInTest(t, root, []string{"status"}); code != 0 {
+		t.Fatalf("status = %d\nstdout %s\nstderr %s", code, stdout.String(), stderr.String())
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		for _, label := range []string{"Hermes", "Copilot", "OpenCode"} {
+			if !strings.HasPrefix(strings.TrimSpace(line), label) {
+				continue
+			}
+			if !strings.Contains(line, "not ") || !strings.Contains(line, ": ") || !strings.Contains(line, "ask IT") && !strings.Contains(line, "Ask IT") {
+				t.Fatalf("%s line says no reason and next step: %q", label, line)
+			}
+		}
+	}
+	for _, want := range []string{"Claude Code   protected\n", "Hermes        not protected: DefenseClaw has not set up protection for this agent on your account."} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("status lacks %q:\n%s", want, stdout.String())
+		}
+	}
+}
