@@ -83,6 +83,10 @@ type InstallEvent struct {
 	// caller snapshotted for this admission (mcpDefinitionHash). Admission
 	// decides and enforces only while the server still has that definition.
 	definitionHash string
+	// remembered is, for an MCP server the agent config no longer lists, the
+	// definition it had when it was last listed (mcpAdmissionDeparted), so
+	// an admission rule pinned to its URL or launcher is judged on it.
+	remembered *config.MCPServerEntry
 }
 
 // admittingSnapshot binds an MCP admission to the definition snap hashed, so
@@ -276,6 +280,12 @@ type InstallWatcher struct {
 	mcpAdmissionMu     sync.RWMutex
 	mcpAdmissionKnown  []mcpKnownDefinition
 	mcpAdmissionListed bool
+	// mcpAdmissionDeparted holds, by key, the servers an earlier listing had
+	// and a later one did not: an agent that dropped the entry can keep the
+	// live connection. An admission the policy gave them stays revocable
+	// through it (GAP-0920). Bounded; a listing that has the key again drops
+	// it. Guarded by mcpAdmissionMu.
+	mcpAdmissionDeparted map[string]mcpKnownDefinition
 	// A slower older list read must not replace a newer completed listing.
 	mcpAdmissionReadSeq  atomic.Uint64
 	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
@@ -602,6 +612,7 @@ func (w *InstallWatcher) SetMCPServerSource(source func() ([]config.MCPServerEnt
 	w.mcpServers = source
 	w.admitNewMCP = source != nil
 	w.mcpAdmissionMu.Lock()
+	w.rememberDepartedMCP(w.mcpAdmissionKnown, nil)
 	w.mcpAdmissionKnown = nil
 	w.mcpAdmissionListed = false
 	w.mcpAdmissionKnownSeq = w.mcpAdmissionReadSeq.Add(1)
@@ -919,13 +930,17 @@ func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
 			}
 			known = append(known, mcpKnownDefinition{
 				server: config.MCPServerEntry{Name: server.Name, Connector: server.Connector,
-					Home: server.Home, Project: server.Project, Bundled: server.Bundled},
+					Home: server.Home, Project: server.Project, Bundled: server.Bundled,
+					URL: server.URL, Command: server.Command, Args: append([]string(nil), server.Args...),
+					Transport: server.Transport},
 				hash:  hash,
+				path:  MCPEventPath(server),
 				issue: mcpScanIssue(server),
 			})
 		}
 		w.mcpAdmissionMu.Lock()
 		if readSeq > w.mcpAdmissionKnownSeq {
+			w.rememberDepartedMCP(w.mcpAdmissionKnown, known)
 			w.mcpAdmissionKnown = known
 			w.mcpAdmissionListed = true
 			w.mcpAdmissionKnownSeq = readSeq
@@ -2734,9 +2749,15 @@ func (w *InstallWatcher) withMCPDefinition(cfg *config.Config, evt InstallEvent,
 	if evt.Type != InstallMCP || cfg == nil || cfg.SecureClientIntegration() {
 		return in
 	}
-	if entry, err := w.lookupMCPServer(evt); err == nil {
-		in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
+	entry, err := w.lookupMCPServer(evt)
+	switch {
+	case err == nil:
+	case evt.remembered != nil:
+		entry = evt.remembered
+	default:
+		return in
 	}
+	in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
 	return in
 }
 
