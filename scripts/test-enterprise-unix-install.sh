@@ -507,7 +507,7 @@ if not isinstance(roster, dict):
 if sorted(roster) != expected:
     problems.append("the JSON roster is %s, want %s" % (sorted(roster), expected))
 # The states the gateway emits for a connector row (managed_own_status.go).
-valid_states = ("protected", "not protected", "not confirmed")
+valid_states = ("protected", "not protected", "not confirmed", "excluded")
 states = {}
 for name, row in roster.items():
     if not isinstance(row, dict) or not isinstance(row.get("protected"), bool) or not isinstance(row.get("state"), str) or not row["state"]:
