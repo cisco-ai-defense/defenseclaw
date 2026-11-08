@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestMain runs the package's tests off the host's Hermes setup
@@ -22,8 +23,17 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)
 		os.Exit(1)
 	}
+	finishUserRoots, err := testenv.IsolateUserRoots()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate the tests from the real per-user folders:", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	cleanup()
+	if err := finishUserRoots(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
 	os.Exit(code)
 }
 
