@@ -191,7 +191,7 @@ func shortCircuitListSequence(source string, compound bool) (string, bool) {
 // and one where a statement could change what another runs (a function
 // definition) or where cutting the text could lose input (a here-document).
 func sequenceStatements(source string, compound bool) (statements []string, reduced, ok bool) {
-	parts, reduced, ok := sequenceStatementDetails(source, compound, false)
+	parts, reduced, ok := sequenceStatementDetails(source, compound, false, false)
 	if !ok {
 		return nil, false, false
 	}
@@ -230,12 +230,14 @@ type simpleLoopBind struct {
 	// fork marks a variable other than USER and LOGNAME, read once for each
 	// word of its list (simpleForkLoopBind).
 	fork bool
-	// read marks a while read loop. Its IFS is the one the read sets for itself
-	// (ownIFS, ifs), or what readIFS finds: the value the walk holds where the
-	// loop starts and the assignments of outerIFS.
-	read, ownIFS bool
-	ifs          []string
-	outerIFS     []*syntax.Assign
+	// read marks a while read loop. Its IFS is the one fixed for it (fixedIFS,
+	// ifs): the one the read sets for itself, or in the straight-line reading
+	// the one a top-level statement before the loop leaves. Any other read has
+	// what readIFS finds: the value the walk holds where the loop starts and the
+	// assignments of outerIFS.
+	read, fixedIFS bool
+	ifs            []string
+	outerIFS       []*syntax.Assign
 	// rebound is where the body may hold another value of the variable than
 	// the loop gave it (simpleReboundSpans).
 	rebound []simpleSpan
@@ -248,7 +250,7 @@ type simpleLoopBind struct {
 // reductions retain ordinary pipelines as a unit; simple-command policy
 // evaluation asks it to expose their individual stages too. Scope identifies
 // statements whose shell directory and variables are shared.
-func sequenceStatementDetails(source string, compound, allSimple bool) (statements []sequenceStatement, reduced, ok bool) {
+func sequenceStatementDetails(source string, compound, allSimple, straight bool) (statements []sequenceStatement, reduced, ok bool) {
 	if source == "" {
 		return nil, false, false
 	}
@@ -276,7 +278,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	var codeOrder *simpleScriptOrder
 	order := func() *simpleScriptOrder {
 		if codeOrder == nil {
-			codeOrder = newSimpleScriptOrder(file)
+			codeOrder = newSimpleScriptOrder(file, straight)
 		}
 		return codeOrder
 	}

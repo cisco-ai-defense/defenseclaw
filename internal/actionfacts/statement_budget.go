@@ -24,7 +24,7 @@ func ShellStatementsOverBudget(command string) bool {
 	if command == "" {
 		return false
 	}
-	statements, _, ok := sequenceStatementDetails(command, true, true)
+	statements, _, ok := sequenceStatementDetails(command, true, true, false)
 	if ok {
 		if len(statements) > maxStatementsAlone {
 			// The semantic splitter also accepts Bash-only syntax. The
@@ -227,7 +227,7 @@ func ShellStatementTexts(command string) ([]string, bool) {
 // command. A function body can be read after its source position, so callers
 // use the offsets only for top-level statements executed in source order.
 func ShellStatementTextsWithOffsets(command string) ([]string, []int, bool) {
-	statements, _, ok := sequenceStatementDetails(command, true, true)
+	statements, _, ok := sequenceStatementDetails(command, true, true, false)
 	if !ok {
 		return nil, nil, false
 	}

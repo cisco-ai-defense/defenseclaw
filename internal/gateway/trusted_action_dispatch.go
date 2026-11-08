@@ -361,6 +361,9 @@ func dispatchTrustedAction(
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
 	request.Input.ClientResolvedTargets = clientResolvedPathTargets(request.ResolvedWriteTargets)
 	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
+	// Only the strict tier follows code the shell may never run into a loop
+	// binding; the other tiers follow the top-level statements before it.
+	request.Input.LoopBindsStraightLine = !request.StrictPolicy
 	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)
 	}
