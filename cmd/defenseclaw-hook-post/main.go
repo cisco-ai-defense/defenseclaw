@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -171,6 +172,26 @@ const hookPostDeadlineEnv = "_DC_HOOK_POST_DEADLINE_MS"
 // helper (the parent of its own hooks folder), where a gateway start or
 // restart holds its start lock.
 const hookPostDataDirEnv = "_DC_HOOK_POST_DATA_DIR"
+
+// hookPostAccountHomeEnv is the account home the shell hook saved before it
+// replaced HOME with a scratch folder for its own run (_hardening.sh). The
+// late-call scan tells the protected folders and files against it
+// (GAP-0850).
+const hookPostAccountHomeEnv = "_DC_HOOK_POST_ACCOUNT_HOME"
+
+// accountHome is the home of the account the hook runs for, not the scratch
+// HOME the shell hook gives this process: the home the shell saved when it
+// is an absolute clean path, else the account database entry of the user.
+// Empty (the home of the process) only when neither is known.
+func accountHome() string {
+	if home := os.Getenv(hookPostAccountHomeEnv); filepath.IsAbs(home) && filepath.Clean(home) == home {
+		return home
+	}
+	if current, err := user.Current(); err == nil && filepath.IsAbs(current.HomeDir) {
+		return current.HomeDir
+	}
+	return ""
+}
 
 func requestTimeout(maxTime int) time.Duration {
 	limit := time.Duration(maxTime) * time.Second
@@ -356,7 +377,7 @@ func lateOrdinary(call postedCall) bool {
 	default:
 		return false
 	}
-	return hookpaths.LateOrdinaryCall(connector, []byte(call.body))
+	return hookpaths.LateOrdinaryCallAt(accountHome(), connector, []byte(call.body))
 }
 
 func runUserHookGuardAt(self string, args []string, input io.Reader, output, errOutput io.Writer) int {
