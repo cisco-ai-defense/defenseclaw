@@ -882,6 +882,23 @@ def hold_init_lock() -> Iterator[InitLocks]:
         yield locks
 
 
+def home_found_without_config() -> bool:
+    """Whether no setup of the data home can have finished: no config.yaml where this run reads
+    its config and none in the default home.
+
+    DEFENSECLAW_CONFIG moves the active config path while the data folder keeps
+    its device identity, so an absent active config alone does not show that
+    the folder is new.  Call this before the run saves any config.
+    """
+
+    from defenseclaw import config as cfg_mod
+
+    return not any(
+        os.path.lexists(path)
+        for path in (cfg_mod.config_path(), os.path.join(cfg_mod.default_data_path(), "config.yaml"))
+    )
+
+
 def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     """Run the first-run setup flow while holding the init lock of the data home."""
 
@@ -929,6 +946,7 @@ def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRu
     # operator-controlled config path merely because its target is unavailable.
     was_config_absent = not os.path.lexists(cfg_mod.config_path())
     new_config = was_config_absent
+    fresh_home = home_found_without_config()
     if not new_config:
         try:
             cfg_mod.require_v8_config()
@@ -1305,7 +1323,7 @@ def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRu
         # ordinary v8 setup mutations.
         logger = Logger.no_runtime() if new_config else Logger.from_config(cfg)
 
-        bootstrap = bootstrap_env(cfg, logger, fresh_home=was_config_absent)
+        bootstrap = bootstrap_env(cfg, logger, fresh_home=fresh_home)
         if bootstrap.errors:
             setup.extend(
                 StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix --dry-run") for e in bootstrap.errors
