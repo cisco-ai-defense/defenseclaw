@@ -1340,12 +1340,14 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// Resolve as the hook client does, so a link to a missing final
 		// file that the redirect would create is covered as well.
 		resolved, ok := hookpaths.ResolveWriteTarget(target)
-		if !ok && !cannotResolveLocally {
+		if !ok && !cannotResolveLocally && nativeFileToolWriteOperand(request.Input, clientCWD, target) {
 			// A directory on the way is closed to the user, so the physical
 			// file cannot be read. The user cannot write through it either
-			// (the kernel refuses), so the write is judged by the file the
-			// link text leads to, as the content proofs judge it: a key file
-			// stays protected, an ordinary file is not a key write.
+			// (the kernel refuses), so a file-tool write is judged by the
+			// file the link text leads to, as the content proofs judge it: a
+			// key file stays protected, an ordinary file is not a key write.
+			// A shell command is not: it can open the directory before it
+			// writes, so its unresolved operand stays unresolved.
 			if text, reached := hookpaths.LinkTextWriteTarget(target); reached {
 				resolved, ok = text, true
 			}
@@ -2162,6 +2164,18 @@ func hermesClientPatchTarget(request trustedActionRequest, clientTargets map[str
 	}
 	for listed, resolved := range clientTargets {
 		if resolved == target && filepath.IsAbs(listed) {
+			return true
+		}
+	}
+	return false
+}
+
+// nativeFileToolWriteOperand reports whether target is a file a native
+// file-tool call (no command) writes. Such a call runs no code of its own, so
+// the permissions it meets at the hook are the ones the write meets.
+func nativeFileToolWriteOperand(input actionfacts.Input, cwd, target string) bool {
+	for _, written := range actionfacts.NativeFileWriteTargets(input) {
+		if actionfacts.OperandPath(written, cwd) == target {
 			return true
 		}
 	}
