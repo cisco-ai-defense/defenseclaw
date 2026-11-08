@@ -81,7 +81,7 @@ func TestOwnStatusMachineWideOpenCodeV1IsNotProtected(t *testing.T) {
 	api := ownStatusUnprotectedFixture(t, []enterprisehooks.UnprotectedAgent{v1}, nil)
 
 	row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode")
-	state, _ := row["state"].(string)
+	state := ownRowText(row)
 	if row["protected"] != false || !strings.HasPrefix(state, "not protected: ") ||
 		!strings.Contains(state, "OpenCode V2") || !strings.Contains(state, "@opencode/cli") {
 		t.Fatalf("V1-only user OpenCode row = %#v, want not protected with the administrator reason and remedy", row)
@@ -94,7 +94,7 @@ func TestOwnStatusMachineWideOpenCodeV1IsNotProtected(t *testing.T) {
 			t.Fatalf("alice %s row = %#v, want protected", connector, row)
 		}
 	}
-	if row := ownStatusConnectorRow(t, api, "5002", "bob", "opencode"); row["protected"] != true || row["state"] != "protected" {
+	if row := ownStatusConnectorRow(t, api, "5002", "bob", "opencode"); row["protected"] != true || ownRowText(row) != "protected" {
 		t.Fatalf("bob has no unprotected entry; his OpenCode row = %#v, want protected", row)
 	}
 }
@@ -105,7 +105,7 @@ func TestOwnStatusOpenCodeV2UserStaysProtected(t *testing.T) {
 	other := unprotectedAgentFor("bob", 5002, "opencode", enterprisehooks.UnprotectedCodeOpenCodeV1, "V1")
 	for name, agents := range map[string][]enterprisehooks.UnprotectedAgent{"empty completed scan": nil, "another user V1 entry": {other}} {
 		api := ownStatusUnprotectedFixture(t, agents, nil)
-		if row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode"); row["protected"] != true || row["state"] != "protected" {
+		if row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode"); row["protected"] != true || ownRowText(row) != "protected" {
 			t.Fatalf("%s: V2 user OpenCode row = %#v, want protected", name, row)
 		}
 	}
@@ -128,7 +128,7 @@ func TestOwnStatusEveryUnprotectedConnectorIsNotProtected(t *testing.T) {
 	named := enterprisehooks.UnprotectedAgent{User: "carol", Connector: "claudecode", Code: enterprisehooks.UnprotectedCodeAgentUnprotected, Reason: "cannot enroll"}
 	api := ownStatusUnprotectedFixture(t, []enterprisehooks.UnprotectedAgent{codex, named}, nil)
 	if row := ownStatusConnectorRow(t, api, "5001", "alice", "codex"); row["protected"] != false ||
-		!strings.Contains(row["state"].(string), "hook contract") {
+		!strings.Contains(ownRowText(row), "hook contract") {
 		t.Fatalf("alice Codex row = %#v, want not protected with the reason", row)
 	}
 	if row := ownStatusConnectorRow(t, api, "5003", "carol", "claudecode"); row["protected"] != false {
@@ -161,7 +161,7 @@ func TestOwnStatusAccountLevelEntryCoversEveryConnector(t *testing.T) {
 func TestOwnStatusUnknownScanIsNotConfirmed(t *testing.T) {
 	api := ownStatusUnprotectedFixture(t, nil, errors.New("record is not trusted"))
 	row := ownStatusConnectorRow(t, api, "5001", "alice", "opencode")
-	if row["protected"] != false || row["state"] != "not confirmed: "+ownCauseScanUnknown {
+	if row["protected"] != false || ownRowText(row) != "not confirmed: "+ownCauseScanUnknown.text() {
 		t.Fatalf("OpenCode row = %#v, want not confirmed", row)
 	}
 	if answer := api.ownStatusAnswer(context.Background(), "uid", "5001", "alice"); answer["claude_code"].(map[string]any)["protected"] != false {
@@ -176,7 +176,7 @@ func TestOwnStatusSeveralInstallsOfOneConnectorShowEachReason(t *testing.T) {
 	ide := unprotectedAgentFor("alice", 5001, "codex", enterprisehooks.UnprotectedCodeAgentUnprotected, "the IDE copy needs a setting")
 	twin := unprotectedAgentFor("alice", 5001, "codex", enterprisehooks.UnprotectedCodeAgentUnprotected, "the CLI copy needs an upgrade")
 	api := ownStatusUnprotectedFixture(t, []enterprisehooks.UnprotectedAgent{cli, ide, twin}, nil)
-	state, _ := ownStatusConnectorRow(t, api, "5001", "alice", "codex")["state"].(string)
+	state := ownRowText(ownStatusConnectorRow(t, api, "5001", "alice", "codex"))
 	if !strings.Contains(state, "CLI copy needs an upgrade") || !strings.Contains(state, "IDE copy needs a setting") ||
 		strings.Count(state, "CLI copy needs an upgrade") != 1 {
 		t.Fatalf("Codex state = %q, want each distinct reason once", state)
@@ -243,7 +243,7 @@ func TestOwnStatusWindowsPrivateClaudeCopyIsNotProtected(t *testing.T) {
 	} {
 		api := windowsOwnStatusAPI(t, []enterprisehooks.UnprotectedAgent{entry}, nil)
 		row, out := windowsOwnStatusRow(t, api, windowsAliceSID, "claudecode")
-		if row["protected"] != false || !strings.Contains(row["state"].(string), "unsupported version") {
+		if row["protected"] != false || !strings.Contains(ownRowText(row), "unsupported version") {
 			t.Fatalf("%s: Claude Code row = %#v, want not protected with the administrator reason", name, row)
 		}
 		if out["claude_code"].(map[string]any)["protected"] != false || out["cowork"].(map[string]any)["protected"] != false {
@@ -264,13 +264,13 @@ func TestOwnStatusWindowsAccountWithoutAnEntryStaysProtected(t *testing.T) {
 	for name, agents := range map[string][]enterprisehooks.UnprotectedAgent{"empty completed scan": nil, "a codex entry": {codex}} {
 		api := windowsOwnStatusAPI(t, agents, nil)
 		row, out := windowsOwnStatusRow(t, api, windowsAliceSID, "claudecode")
-		if row["protected"] != true || row["state"] != "protected" || out["cowork"].(map[string]any)["protected"] != true {
+		if row["protected"] != true || ownRowText(row) != "protected" || out["cowork"].(map[string]any)["protected"] != true {
 			t.Fatalf("%s: Claude Code row = %#v, cowork = %#v, want protected", name, row, out["cowork"])
 		}
 	}
 	api := windowsOwnStatusAPI(t, []enterprisehooks.UnprotectedAgent{codex}, nil)
 	if row, _ := windowsOwnStatusRow(t, api, windowsAliceSID, "codex"); row["protected"] != false ||
-		!strings.Contains(row["state"].(string), "codex copy not verified") {
+		!strings.Contains(ownRowText(row), "codex copy not verified") {
 		t.Fatalf("Codex row = %#v, want not protected with the reason", row)
 	}
 }
@@ -286,7 +286,7 @@ func TestOwnStatusWindowsAccountLevelEntryAndUnknownScan(t *testing.T) {
 	// A missing, old or unmatched scan confirms nothing: not even Claude Code.
 	api = windowsOwnStatusAPI(t, nil, errors.New("the unprotected agents record is missing"))
 	row, out := windowsOwnStatusRow(t, api, windowsAliceSID, "claudecode")
-	if row["protected"] != false || row["state"] != "not confirmed: "+ownCauseScanUnknown ||
+	if row["protected"] != false || ownRowText(row) != "not confirmed: "+ownCauseScanUnknown.text() ||
 		out["claude_code"].(map[string]any)["protected"] != false || out["cowork"].(map[string]any)["protected"] != false {
 		t.Fatalf("unknown scan: Claude Code row = %#v, answer = %#v, want not confirmed", row, out)
 	}
@@ -314,7 +314,7 @@ func TestOwnStatusNameOnlyEntryOfAnUnnamedWindowsCallerIsNotProtected(t *testing
 		"unidentified owner": nameOnly(enterprisehooks.UnprotectedUnknownAccount, "claudecode"),
 	} {
 		row, out := windowsOwnStatusRow(t, unnamed(t, []enterprisehooks.UnprotectedAgent{entry}), windowsAliceSID, "claudecode")
-		if row["protected"] != false || !strings.HasPrefix(row["state"].(string), "not confirmed") ||
+		if row["protected"] != false || !strings.HasPrefix(ownRowText(row), "not confirmed") ||
 			out["claude_code"].(map[string]any)["protected"] != false || out["cowork"].(map[string]any)["protected"] != false {
 			t.Fatalf("%s: Claude Code row = %#v, answer = %#v, want not confirmed", name, row, out)
 		}

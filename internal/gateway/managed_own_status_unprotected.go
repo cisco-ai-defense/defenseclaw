@@ -269,5 +269,5 @@ func ownUnprotectedState(agents []enterprisehooks.UnprotectedAgent) map[string]a
 	if more := len(reasons) - ownUnprotectedReasonsMax; more > 0 {
 		text += fmt.Sprintf("; and %d more", more)
 	}
-	return ownNotProtected(strings.TrimRight(text, ". ") + ". " + ownScanNextStep)
+	return ownNotProtected(ownScanCause(text))
 }
