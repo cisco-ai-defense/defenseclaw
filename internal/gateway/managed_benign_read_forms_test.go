@@ -75,7 +75,7 @@ func r106Reader2CheckWith(t *testing.T, rows []r106Reader2Row, setup func(*testi
 				t.Fatal(err)
 			}
 			// want is one verdict for both cells, or per-user/managed
-			// ("allow/block") where the managed gateway keeps a reading it
+			// ("allow/block", "allow/alert") where the managed gateway keeps a reading it
 			// cannot verify behind ProtectHome.
 			wantPerUser, wantManaged, split := strings.Cut(row.want, "/")
 			if !split {

@@ -30,12 +30,16 @@ func TestBraceBackupCopyInProjectIsAllowed(t *testing.T) {
 // blocks it from the hook client reading of the expanded destination, as a
 // per-user gateway does (rel-1-0-6 GAP-0205). A copy past the brace budget
 // takes the evaluation limit on both before any reader expands it
-// (GAP-0187).
+// (GAP-0187). The limit proves no target, so outside strict an ordinary copy
+// past the budget is not blocked: the per-user gateway allows and the managed
+// one alerts (GAP-0675 lead ruling, see
+// TestEvaluationLimitOnlyCallAlertsOutsideStrict); the protected-link rows
+// above keep their block.
 func TestBraceCopyOntoKeysLinkBlocks(t *testing.T) {
 	r106Reader2Check(t, []r106Reader2Row{
 		{"link by brace", "project", `cp {README.md,keylink}`, "block"},
 		{"link by backup idiom", "project", `echo x > key && cp key{,link}`, "block"},
 		{"link by absolute brace", "project", `cp {P}/{README.md,keylink}`, "block"},
-		{"past the brace budget", "project", `cp a.txt{1..70000} ordinary/`, "block"},
+		{"past the brace budget", "project", `cp a.txt{1..70000} ordinary/`, "allow/alert"},
 	})
 }
