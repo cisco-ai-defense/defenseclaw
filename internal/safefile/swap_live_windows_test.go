@@ -88,13 +88,17 @@ var swapReaderShares = []struct {
 // should share deletion and retry transient open failures." The readers
 // without deletion sharing use that bounded retry; the deletion-sharing
 // reader reports any first-open failure immediately.
+// DC_TEST_CAS_TRACE_PLAIN=1 records the same reader while the transaction
+// fallback is selected, for native diagnosis of the ordinary rename request.
 func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 	for _, reader := range swapReaderShares {
 		t.Run(reader.name, func(t *testing.T) {
-			trace := os.Getenv("DC_TEST_CAS_TRACE") == "1" && reader.share&windows.FILE_SHARE_DELETE != 0
+			forcePlainTrace := os.Getenv("DC_TEST_CAS_TRACE_PLAIN") == "1" && reader.share&windows.FILE_SHARE_DELETE != 0
+			trace := (os.Getenv("DC_TEST_CAS_TRACE") == "1" || forcePlainTrace) && reader.share&windows.FILE_SHARE_DELETE != 0
 			traceOrigin := time.Now()
 			var renameActive atomic.Bool
 			var renameStart, renameEnd, transactedRenames, plainRenames atomic.Int64
+			var renameClass, renameFlags atomic.Uint32
 			if trace {
 				previous, previousTx := swapRenameReplace, swapTransactedRename
 				record := func(transacted bool, rename func() error) error {
@@ -111,9 +115,16 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 					return err
 				}
 				swapRenameReplace = func(from, to string, class, flags uint32) error {
+					renameClass.Store(class)
+					renameFlags.Store(flags)
 					return record(false, func() error { return renameReplace(from, to, class, flags) })
 				}
 				swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
+					if forcePlainTrace {
+						return windows.ERROR_NOT_SUPPORTED
+					}
+					renameClass.Store(windows.FileRenameInfoEx)
+					renameFlags.Store(flags)
 					return record(true, func() error { return renameTransacted(from, to, flags, tx) })
 				}
 				defer func() { swapRenameReplace, swapTransactedRename = previous, previousTx }()
@@ -153,9 +164,9 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 						openedAt := time.Since(traceOrigin).Nanoseconds()
 						data, err, openFailed := readForSwapReaderWithOpenStatusTest(destination, reader.share)
 						if trace && openFailed && err != nil {
-							openTrace = fmt.Sprintf(" open_ns=[%d,%d] rename_ns=[%d,%d] rename_active=%t transacted=%d plain=%d",
+							openTrace = fmt.Sprintf(" open_ns=[%d,%d] rename_ns=[%d,%d] rename_active=%t class=%d flags=%#x transacted=%d plain=%d",
 								openedAt, time.Since(traceOrigin).Nanoseconds(), renameStart.Load(), renameEnd.Load(),
-								renameActive.Load(), transactedRenames.Load(), plainRenames.Load())
+								renameActive.Load(), renameClass.Load(), renameFlags.Load(), transactedRenames.Load(), plainRenames.Load())
 						}
 						return data, err, openFailed
 					}, &retrying, window)
@@ -201,7 +212,8 @@ func TestCompareAndSwapFileKeepsAPolicyAtTheNameThroughout(t *testing.T) {
 				t.Fatalf("after %d swaps and %d reads, an agent loading its policy found no policy: %s", swaps, reads, failure)
 			}
 			if trace {
-				t.Logf("CAS trace: transacted_renames=%d plain_renames=%d", transactedRenames.Load(), plainRenames.Load())
+				t.Logf("CAS trace: class=%d flags=%#x transacted_renames=%d plain_renames=%d",
+					renameClass.Load(), renameFlags.Load(), transactedRenames.Load(), plainRenames.Load())
 			}
 			if reads == 0 {
 				t.Fatal("the reader never ran")
