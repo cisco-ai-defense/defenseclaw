@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -364,5 +365,24 @@ func TestSimpleCommandsReadBashOnlyLoopFromArguments(t *testing.T) {
 				t.Errorf("%s: reading of the state path = %v, want %v", row.command, read, row.reads)
 			}
 		})
+	}
+}
+
+// A call the POSIX reader rejects and the shell parse cannot read in full (here
+// past the state bound) keeps the judgment it had: no evaluation failure
+// reaches the gateway from the added readings.
+func TestSimpleCommandsBashOnlyCallPastTheBoundAddsNoFailure(t *testing.T) {
+	var command strings.Builder
+	for index := 1; index <= 9; index++ {
+		fmt.Fprintf(&command, "if [ -n \"$A%d\" ]; then a%d=1; fi; ", index, index)
+	}
+	command.WriteString("read -r f <<< out.txt; echo m >> \"$f\"")
+	args, err := json.Marshal(map[string]string{"command": command.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := Input{Tool: "Bash", Args: args, ActiveHome: "/r/home", CWD: "/r/home/proj"}
+	if got := SimpleCommands(input, Analyze(input)); len(got) != 0 {
+		t.Errorf("SimpleCommands = %v, want none", got)
 	}
 }
