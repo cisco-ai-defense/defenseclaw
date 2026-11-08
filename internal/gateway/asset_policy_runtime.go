@@ -689,8 +689,12 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		}
 	}
 	a.rememberResolvedMCP(connector, res, denied, earlierDenied)
-	if (res.unknown || res.lost) && decision.RawAction != "block" {
-		if unknown, ok := unknownMCPDefinitionDecision(cfg, connector, probe, res.unknown, res.lost); ok {
+	if res.unknown || res.lost {
+		// A verdict that holds the call stands; one that only observes (a
+		// default deny in observe mode) does not stand for an incomplete
+		// record, so the closed unknown verdict replaces it.
+		if unknown, ok := unknownMCPDefinitionDecision(cfg, connector, probe, res.unknown, res.lost); ok &&
+			mcpDecisionRank(unknown) > mcpDecisionRank(decision) {
 			decision = unknown
 		}
 	}
