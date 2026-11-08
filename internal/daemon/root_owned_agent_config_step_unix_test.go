@@ -21,7 +21,7 @@ func runAgentConfigReturn(t *testing.T, sudoStatus string, paths ...string) (cal
 	t.Helper()
 	bin := t.TempDir()
 	log := filepath.Join(t.TempDir(), "sudo.log")
-	stand := "#!/bin/sh\necho \"$*\" >> " + log + "\nexit " + sudoStatus + "\n"
+	stand := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nexit " + sudoStatus + "\n"
 	if err := os.WriteFile(filepath.Join(bin, "sudo"), []byte(stand), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestRootOwnedAgentConfigReturnStepChecksEachPathWhenItRuns(t *testing.T) {
 		if status != 0 || len(calls) != 1 {
 			t.Fatalf("status %d, sudo calls %v", status, calls)
 		}
-		for _, want := range []string{"find -P ./settings.json", "-user root", "-links 1", "-execdir chown -h"} {
+		for _, want := range []string{"find -P ./settings.json", "-user root", "-execdir perl -e"} {
 			if !strings.Contains(calls[0], want) {
 				t.Fatalf("sudo call lacks %q: %q", want, calls[0])
 			}
@@ -154,8 +154,8 @@ func TestRootOwnedAgentConfigReturnStepWalksTheFolderItChecked(t *testing.T) {
 				"ln -s '" + outside + "' '" + link + "'\n" +
 				"n=$#; while [ $n -gt 0 ]; do a=$1; shift; [ \"$a\" = root ] && a=" + me.Username + "; set -- \"$@\" \"$a\"; n=$((n-1)); done\n" +
 				"exec \"$@\"\n"
-			chown := "#!/bin/sh\necho \"$(/bin/pwd -P)\" >> " + log + "\n"
-			for name, body := range map[string]string{"sudo": sudo, "chown": chown, "chmod": "#!/bin/sh\n"} {
+			perl := "#!/bin/sh\necho \"$(/bin/pwd -P)\" >> " + log + "\nexec /usr/bin/perl \"$@\"\n"
+			for name, body := range map[string]string{"sudo": sudo, "perl": perl, "chmod": "#!/bin/sh\n"} {
 				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -247,12 +247,13 @@ func TestRootOwnedAgentConfigReturnStepKeepsTheAccessRepairOutOfSudo(t *testing.
 				"echo \"$*\" >> " + sudoLog + "\n" +
 				"n=$#; while [ $n -gt 0 ]; do a=$1; shift; [ \"$a\" = root ] && a=" + me.Username + "; set -- \"$@\" \"$a\"; n=$((n-1)); done\n" +
 				"SUDO_ACTIVE=1 exec \"$@\"\n"
-			chown := "#!/bin/sh\n"
+			perl := "#!/bin/sh\n"
 			if tc.swap {
-				chown += "[ -e \x27" + swapped + "\x27 ] || { mv \x27" + target + "\x27 \x27" + swapped + "\x27 && ln -s \x27" + outside + "\x27 \x27" + target + "\x27; }\n"
+				perl += "[ -e \x27" + swapped + "\x27 ] || { mv \x27" + target + "\x27 \x27" + swapped + "\x27 && ln -s \x27" + outside + "\x27 \x27" + target + "\x27; }\n"
 			}
+			perl += "exec /usr/bin/perl \"$@\"\n"
 			chmod := "#!/bin/sh\necho \"sudo=$SUDO_ACTIVE $*\" >> " + chmodLog + "\n/bin/chmod \"$@\"\n"
-			for name, body := range map[string]string{"sudo": sudo, "chown": chown, "chmod": chmod} {
+			for name, body := range map[string]string{"sudo": sudo, "perl": perl, "chmod": chmod} {
 				if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -265,7 +266,7 @@ func TestRootOwnedAgentConfigReturnStepKeepsTheAccessRepairOutOfSudo(t *testing.
 				t.Fatalf("step failed: %v\n%s", err, out)
 			}
 
-			if raw, err := os.ReadFile(sudoLog); err != nil || !strings.Contains(string(raw), "chown -h") {
+			if raw, err := os.ReadFile(sudoLog); err != nil || !strings.Contains(string(raw), "-execdir perl") {
 				t.Fatalf("the owner change never ran under sudo: %v %q", err, raw)
 			} else if strings.Contains(string(raw), "chmod") {
 				t.Fatalf("a permission change ran under sudo: %q", raw)
@@ -282,6 +283,76 @@ func TestRootOwnedAgentConfigReturnStepKeepsTheAccessRepairOutOfSudo(t *testing.
 			}
 			if want := "sudo= u+rwX ./" + filepath.Base(tc.path); strings.TrimSpace(string(raw)) != want {
 				t.Fatalf("the account did not repair the returned item: %q, want %q", raw, want)
+			}
+		})
+	}
+}
+
+// TestRootOwnedAgentConfigReturnStepChangesOnlyTheInodeItChecked puts a hard
+// link to another file at the checked name at the moment find runs the owner
+// change (the stand-in perl does the swap, then runs the real program). The
+// owner change must act on the inode it checked, so the second link is seen and
+// the item is skipped before any chown. The perl stand-in asks for an owner the
+// test account cannot give, so only a change that really reaches fchown fails
+// with a permission error: the untouched twin must reach it, the swapped one
+// must not.
+func TestRootOwnedAgentConfigReturnStepChangesOnlyTheInodeItChecked(t *testing.T) {
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find is not available")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can give the file to any owner")
+	}
+	me, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, swap := range []bool{true, false} {
+		name := "the same file untouched reaches the owner change"
+		if swap {
+			name = "a hard link to another file swapped in is skipped"
+		}
+		t.Run(name, func(t *testing.T) {
+			base, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			home := filepath.Join(base, "home")
+			target := filepath.Join(home, ".claude", "settings.json")
+			outside := filepath.Join(base, "outside.json")
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range []string{target, outside} {
+				if err := os.WriteFile(item, []byte("{}\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bin := t.TempDir()
+			sudo := "#!/bin/sh\n" +
+				"n=$#; while [ $n -gt 0 ]; do a=$1; shift; [ \"$a\" = root ] && a=" + me.Username + "; set -- \"$@\" \"$a\"; n=$((n-1)); done\n" +
+				"exec \"$@\"\n"
+			perl := "#!/bin/sh\n"
+			if swap {
+				perl += "mv \x27" + target + "\x27 \x27" + target + "-moved\x27 && ln \x27" + outside + "\x27 \x27" + target + "\x27\n"
+			}
+			perl += "prog=$2; from=$3; to=$(($4 + 1)); shift 4\nexec /usr/bin/perl -e \"$prog\" \"$from\" \"$to\" \"$@\"\n"
+			for stand, body := range map[string]string{"sudo": sudo, "perl": perl, "chmod": "#!/bin/sh\n"} {
+				if err := os.WriteFile(filepath.Join(bin, stand), []byte(body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cmd := exec.Command("sh", "-c", rootOwnedAgentConfigReturnScript, "sh", target)
+			cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home}
+			out, runErr := cmd.CombinedOutput()
+			if swap {
+				if runErr != nil || !strings.Contains(string(out), "skipped ./settings.json") || strings.Contains(string(out), "not permitted") {
+					t.Fatalf("the swapped-in hard link was not skipped before the owner change: %v\n%s", runErr, out)
+				}
+				return
+			}
+			if runErr == nil || !strings.Contains(string(out), "./settings.json: Operation not permitted") {
+				t.Fatalf("the checked file never reached the owner change: %v\n%s", runErr, out)
 			}
 		})
 	}

@@ -1906,23 +1906,48 @@ def _root_owned_under(directory: str, names: list[str]) -> str:
 # that the folder is the physical in-home one, and runs sudo find on the bare
 # name inside it. sudo keeps the working directory, so replacing the folder or
 # its parent with a link after the check changes nothing about the folder the
-# find walks. Only a root-owned folder, or a root-owned file with a single hard
-# link, is changed: find does not follow a link at the path itself, -execdir
-# runs the change inside the folder find is walking, chown -h changes a link
-# rather than its target, and -xdev keeps the walk of a returned folder on its
-# own volume. Only the owner change runs under sudo. The access repair that
-# follows is a plain find run by the account, so a name the account swaps for a
-# link after find checked it cannot send a privileged chmod to a target outside
-# the home: the account can only change what it already owns. It touches only
-# its own items that lack owner access. Go renders the same step in
-# ``rootOwnedAgentConfigStep``.
+# find walks. find does not follow a link at the path itself, -execdir runs the
+# change inside the folder find is walking, and -xdev keeps the walk of a
+# returned folder on its own volume.
+#
+# The owner change is made on the inode that was checked, not on a name. A name
+# can be swapped between any test of it and the privileged command that uses it
+# (for a link, or for a hard link to a root-owned file outside the home), so
+# find hands each item to a small perl program that opens it without following
+# a link, reads its owner, type and link count from the open descriptor, and
+# changes the owner of that descriptor. A swapped-in link fails the open; a hard
+# link to an outside inode has a second link, so it is skipped; a name swapped
+# after the open changes nothing about the descriptor. perl is therefore
+# required (macOS ships it; the step stops with a message where it is missing).
+#
+# Only the owner change runs under sudo. The access repair that follows is a
+# plain find run by the account, so a name the account swaps for a link cannot
+# send a privileged chmod to a target outside the home: the account can only
+# change what it already owns. It touches only its own items that lack owner
+# access. Go renders the same step in ``rootOwnedAgentConfigStep``; the perl
+# program holds no single quote so the step can hold it in one.
+_ROOT_AGENT_CONFIG_OWNER_PROGRAM = (
+    r"use Fcntl; my ($from, $to, @items) = @ARGV; "
+    r"my $owner = (getpwnam $from)[2]; defined $owner or die "
+    r'"no account named $from\n"; my $rc = 0; '
+    r"for my $item (@items) { "
+    r"sysopen(my $fh, $item, O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY) or do { "
+    r'warn "skipped $item: $!\n"; next }; '
+    r"my @st = stat $fh; "
+    r"if (@st && $st[4] == $owner && (-d _ || (-f _ && $st[3] == 1))) { "
+    r'chown($to, -1, $fh) or do { warn "$item: $!\n"; $rc = 1 } } '
+    r'else { warn "skipped $item: not a $from-owned folder or a file with one link\n" } } exit $rc'
+)
 _ROOT_AGENT_CONFIG_RETURN_SCRIPT = (
-    "for p; do d=${p%/*}; b=${p##*/}; "
+    "command -v perl >/dev/null 2>&1 || "
+    + '{ echo "perl is needed to return these paths by the inode it checks: '
+    + 'install it and run this step again" >&2; exit 1; }; '
+    + "for p; do d=${p%/*}; b=${p##*/}; "
     + "(cd -P \"$d\" 2>/dev/null && [ \"$(/bin/pwd -P)\" = \"$d\" ] "
     + "|| { echo \"skipped $p: its folder is a link or moved\" >&2; exit 0; }; "
     + "[ -e \"$b\" ] || exit 0; "
-    + "sudo find -P \"./$b\" -xdev -user root \\( -type d -o -type f -links 1 \\) "
-    + "-execdir chown -h \"$(id -un)\" {} \\; && "
+    + "sudo find -P \"./$b\" -xdev -user root \\( -type d -o -type f \\) "
+    + "-execdir perl -e '" + _ROOT_AGENT_CONFIG_OWNER_PROGRAM + "' root \"$(id -u)\" {} + && "
     + "find -P \"./$b\" -xdev -user \"$(id -un)\" "
     + "\\( \\( -type f ! -perm -u=rw \\) -o \\( -type d ! -perm -u=rwx \\) \\) "
     + "-exec chmod u+rwX {} \\;) || exit 1; done"
@@ -1931,7 +1956,8 @@ _ROOT_AGENT_CONFIG_RETURN_SCRIPT = (
 
 def _root_agent_config_return_step(paths: list[str]) -> str:
     """The chain step that returns the root-owned agent config paths to this account."""
-    return "sh -c \x27" + _ROOT_AGENT_CONFIG_RETURN_SCRIPT + "\x27 sh " + " ".join(shlex.quote(item) for item in paths)
+    quoted = " ".join(shlex.quote(item) for item in paths)
+    return "sh -c " + shlex.quote(_ROOT_AGENT_CONFIG_RETURN_SCRIPT) + " sh " + quoted
 
 
 def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:

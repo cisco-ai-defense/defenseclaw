@@ -477,7 +477,7 @@ func TestRootLeftoversRemedyReturnsRootOwnedAgentConfigPaths(t *testing.T) {
 	t.Cleanup(func() { rootOwnedAgentConfigsOf = old })
 	rootOwnedAgentConfigsOf = func(string) []string { return nil }
 	plain := RootLeftoversRemedy(home, nil)
-	if strings.Contains(plain, "-links 1") {
+	if strings.Contains(plain, "-execdir perl") {
 		t.Fatalf("chain names agent config paths where root owns none: %q", plain)
 	}
 	paths := []string{"/Users/a b/.claude/settings.json", "/Users/a b/.copilot/hooks"}
@@ -487,7 +487,7 @@ func TestRootLeftoversRemedyReturnsRootOwnedAgentConfigPaths(t *testing.T) {
 	if !strings.Contains(remedy, " && "+step+" && defenseclaw-gateway start") {
 		t.Fatalf("chain does not return the agent config paths before the start: %q", remedy)
 	}
-	for _, want := range []string{"sh -c \x27for p; do", "-links 1", "-user root", "-execdir chown -h", "cd -P", "\x27 sh \x27/Users/a b/.claude/settings.json\x27 \x27/Users/a b/.copilot/hooks\x27"} {
+	for _, want := range []string{"sh -c \x27command -v perl", "-user root", "-execdir perl -e", "cd -P", "\x27 sh \x27/Users/a b/.claude/settings.json\x27 \x27/Users/a b/.copilot/hooks\x27"} {
 		if !strings.Contains(step, want) {
 			t.Fatalf("step lacks %q: %q", want, step)
 		}
