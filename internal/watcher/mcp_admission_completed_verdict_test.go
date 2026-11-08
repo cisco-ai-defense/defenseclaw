@@ -120,6 +120,9 @@ func TestAllowedOutcomeReplacesTheFailedBaselineBeforeItsWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The allow is the administrator rule that decided it without a scan: it
+	// stands while that rule does (GAP-0920).
+	h.w.cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: server.Name, Reason: "reviewed"}}
 	h.w.noteMCPAdmissionOutcome(evt, snap, AdmissionResult{Event: evt, Verdict: VerdictAllowed})
 	if status := statusOf(h, *server); status.Failed || status.Pending {
 		t.Fatalf("after the allow, before the baseline: %+v, want neither failed nor pending", status)
