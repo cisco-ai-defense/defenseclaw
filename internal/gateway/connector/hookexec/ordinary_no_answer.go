@@ -5,6 +5,7 @@ package hookexec
 
 import (
 	"encoding/json"
+	"os"
 	osuser "os/user"
 	"path/filepath"
 	"strings"
@@ -14,9 +15,21 @@ import (
 
 // OrdinaryNoAnswerPayload reports that a verified late call has no protected
 // candidate in the shared path reader. Unknown input keeps the closed answer.
+//
+// The home is the one the agent runs with ($HOME, as the other late-call scan
+// reads it, hookpaths.LateOrdinaryCall); the account record is the fallback
+// when HOME is unset. Reading only the account record let a call that names
+// the protected files of $HOME pass as ordinary wherever the two differ.
 func OrdinaryNoAnswerPayload(body []byte) bool {
-	account, err := osuser.Current()
-	return err == nil && ordinaryNoAnswerPayloadInHome(body, account.HomeDir)
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		account, accountErr := osuser.Current()
+		if accountErr != nil {
+			return false
+		}
+		home = account.HomeDir
+	}
+	return ordinaryNoAnswerPayloadInHome(body, home)
 }
 
 func ordinaryNoAnswerPayloadInHome(body []byte, home string) bool {
