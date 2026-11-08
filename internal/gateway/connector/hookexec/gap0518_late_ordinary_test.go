@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/proofclock/proofclocktest"
 )
 
 // lateOrdinaryProject is a project in a user's home with a link, a hard link
@@ -57,6 +59,25 @@ func lateOrdinaryProject(t *testing.T) string {
 	return project
 }
 
+// settleLateOrdinaryPrepare makes the deadline of every call of the test read
+// its outage answer only once the background scan of the call and the
+// rendering of that answer are over, and holds the post-deadline proof bounds
+// on a clock the test controls. The test then decides each row from the scan,
+// not from whether a loaded host finished it inside the short answer budget
+// (GAP-0859). The production deadline and the answer budget are unchanged.
+func settleLateOrdinaryPrepare(t *testing.T) {
+	t.Helper()
+	proofclocktest.Install(t)
+	previous := holdForRestartPrepare
+	holdForRestartPrepare = func(settled <-chan struct{}) {
+		select {
+		case <-settled:
+		case <-time.After(time.Minute): // a hang guard, not a timing assertion
+		}
+	}
+	t.Cleanup(func() { holdForRestartPrepare = previous })
+}
+
 func lateOrdinaryPayload(t *testing.T, project string, command any) string {
 	t.Helper()
 	body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": project, "tool_name": "Bash",
@@ -89,6 +110,7 @@ func TestGAP0518LateOrdinaryCallFollowsTheOutageMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	shortAnswerBudget(t, 400*time.Millisecond)
+	settleLateOrdinaryPrepare(t)
 	addr := hungGateway(t)
 	client, err := NewPerUserGatewayHTTPClient(2*time.Second, addr)
 	if err != nil {

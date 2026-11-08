@@ -121,6 +121,13 @@ type answerWatchdog struct {
 	// started moments ago and had answered no call before it (GAP-0295).
 	restart      *perUserRestartAnswer
 	restartProof func() restartProofResult
+	// contactSettled is closed once the first restartWindowContact and the
+	// background preparation it started are over; awaitSettled, read when
+	// the watchdog is armed, is the test seam that holds the deadline reads
+	// of the restart answer until then (holdForRestartPrepare).
+	contactSettled chan struct{}
+	settleOnce     sync.Once
+	awaitSettled   func(settled <-chan struct{})
 	// failureLog is the call's hook-failure log, opened
 	// answerWatchdogLogPrepareLead before the deadline (watch).
 	failureLog     *preparedFailureLog
@@ -235,7 +242,8 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 func prepareAnswerWatchdog(opts *Options, sp spec, failMode string, ceiling time.Time) *answerWatchdog {
 	w := &answerWatchdog{stdout: opts.Stdout, stderr: opts.Stderr, exit: opts.Exit, ceiling: ceiling, waiter: newAnswerDeadlineWaiter(), secureClient: opts.SecureClient,
 		failureLog: newPreparedFailureLog(), prepareLead: answerWatchdogLogPrepareLead,
-		closeLateAnswer: managedNativeDecision(*opts), watchDone: make(chan struct{})}
+		closeLateAnswer: managedNativeDecision(*opts), watchDone: make(chan struct{}),
+		contactSettled: make(chan struct{}), awaitSettled: holdForRestartPrepare}
 	if w.closeLateAnswer {
 		// One deadline for the whole call, also across a sleep of the
 		// computer (GAP-0648 review F4).
@@ -575,7 +583,16 @@ func (w *answerWatchdog) useRestartAnswerLocked(answer *perUserRestartAnswer) {
 // prepared in the background (it reads the outage mode), so the deadline
 // can give it if the proof holds then. Safe on a nil watchdog.
 func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode string, check *perUserPeerCheck) {
-	if w == nil || check == nil || opts.Home == "" || !perUserRestartWindowCall(opts, sp) {
+	if w == nil {
+		return
+	}
+	background := false
+	defer func() {
+		if !background {
+			w.settleContact()
+		}
+	}()
+	if check == nil || opts.Home == "" || !perUserRestartWindowCall(opts, sp) {
 		return
 	}
 	home := opts.Home
@@ -596,7 +613,9 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 	if prepared {
 		return
 	}
+	background = true
 	go func() {
+		defer w.settleContact()
 		reason := perUserGatewayRestartingReason
 		if !fresh {
 			// A gateway that has been up for a while and took the call may
@@ -620,6 +639,30 @@ func (w *answerWatchdog) restartWindowContact(opts Options, sp spec, failMode st
 		}
 		w.mu.Unlock()
 	}()
+}
+
+// settleContact marks the first contact, and its background preparation,
+// over. A watchdog a test builds by hand has no channel to close.
+func (w *answerWatchdog) settleContact() {
+	if w.contactSettled != nil {
+		w.settleOnce.Do(func() { close(w.contactSettled) })
+	}
+}
+
+// holdForRestartPrepare, when a test sets it, makes the deadline read the
+// restart answer only after the contact of the call and its background
+// preparation (the scan of the call and the rendering of the outage answer)
+// are over, so a test decides the outcome from the scan, not from how fast a
+// loaded host ran it (GAP-0859). It is read when a watchdog is armed. Nil in
+// every release build: the deadline never waits for it.
+var holdForRestartPrepare func(settled <-chan struct{})
+
+// awaitContactSettled is the test seam at the two reads of the restart
+// answer at the deadline.
+func (w *answerWatchdog) awaitContactSettled() {
+	if w.awaitSettled != nil {
+		w.awaitSettled(w.contactSettled)
+	}
 }
 
 // perUserRestartWindowProof reports whether the connection of check is held
@@ -667,6 +710,7 @@ func (w *answerWatchdog) restartWindowProven() (mode, reason string, ok bool) {
 	if w == nil {
 		return "", "", false
 	}
+	w.awaitContactSettled()
 	w.mu.Lock()
 	proof := w.restartWindowCandidateLocked()
 	skipReason := w.restartWindowSkipReasonLocked()
@@ -798,6 +842,7 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 		w.failureLog.close()
 		return
 	}
+	w.awaitContactSettled()
 	w.mu.Lock()
 	proof := w.restartWindowCandidateLocked()
 	skipReason := w.restartWindowSkipReasonLocked()

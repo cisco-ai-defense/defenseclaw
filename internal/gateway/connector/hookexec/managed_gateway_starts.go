@@ -23,6 +23,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/proofclock"
 )
 
 // errGatewayStartFailing ends a hook request early when the managed gateway
@@ -336,7 +338,9 @@ func watchManagedGatewayService(ctx context.Context, running func() (bool, bool)
 }
 
 // serviceRunningWithin is running bounded by wait: a read that takes longer
-// is not known.
+// is not known. The bound runs on the proof clock like the other bounds of a
+// call, so a test decides whether it is spent instead of racing the host for
+// a goroutine (GAP-0859); a release build runs the system clock.
 func serviceRunningWithin(running func() (bool, bool), wait time.Duration) (up, known bool) {
 	type state struct{ up, known bool }
 	read := make(chan state, 1)
@@ -344,12 +348,12 @@ func serviceRunningWithin(running func() (bool, bool), wait time.Duration) (up, 
 		up, known := running()
 		read <- state{up, known}
 	}()
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	expired, stop := proofclock.NewTimer(wait)
+	defer stop()
 	select {
 	case s := <-read:
 		return s.up, s.known
-	case <-timer.C:
+	case <-expired:
 		return false, false
 	}
 }
