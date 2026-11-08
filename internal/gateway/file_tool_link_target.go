@@ -169,7 +169,7 @@ func fileToolLinkTargetFindings(
 			continue
 		}
 		for _, finding := range scanRuleGeneration(
-			generation, candidate.Resolved, request.Input.Tool, options,
+			generation, activeHomeAsTilde(candidate.Resolved, request.Input.ActiveHome), request.Input.Tool, options,
 		) {
 			if trustedActionSensitivePathRule(finding.RuleID) {
 				findings = append(findings, finding)
