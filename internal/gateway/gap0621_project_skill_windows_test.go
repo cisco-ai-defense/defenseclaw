@@ -118,7 +118,7 @@ func TestGAP0621ManagedWindowsProfileExcludedSkillHook(t *testing.T) {
 	if decision, matched := call(linked, "sample"); matched && decision.Action == "block" {
 		t.Fatalf("repaired project decision = %+v", decision)
 	}
-	if count := api.health.Snapshot().Watcher.Details[projectSkillRootsUnverifiedDetail]; count != 0 {
-		t.Fatalf("repaired project health count = %v", count)
+	if count := api.health.Snapshot().Watcher.Details[projectSkillRootsUnverifiedDetail]; count != nil {
+		t.Fatalf("repaired project health count = %v, want none (a cleared count is removed)", count)
 	}
 }
