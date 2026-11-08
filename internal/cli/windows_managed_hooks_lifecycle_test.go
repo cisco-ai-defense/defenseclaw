@@ -1698,3 +1698,98 @@ func TestWindowsManagedHooksCaptureRefusesALinkAtAVendorFolderByName(t *testing.
 		t.Fatalf("two links were not both named: %v", err)
 	}
 }
+
+func TestWindowsManagedHooksRestoreReadsAndWritesNothingThroughAKeptLink(t *testing.T) {
+	journaled := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	current := make([]enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, 0, 3)
+	for _, connectorName := range windowsManagedHooksLifecycleSelectorConnectors {
+		journaled = append(journaled, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1, Connector: connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{Exists: false},
+		})
+		current = append(current, enterprisehooks.WindowsManagedRuntimeSelectorSnapshot{
+			SchemaVersion: 1, Connector: connectorName, Existed: true,
+			Selector: []byte("current-" + connectorName), SelectorSHA256: "sha256:current-" + connectorName,
+			CAS: enterprisehooks.WindowsManagedRuntimeSelectorCAS{Exists: true, SHA256: "sha256:current-" + connectorName},
+		})
+	}
+	originalCapture := windowsManagedHooksLifecycleSelectorCapture
+	originalRestore := windowsManagedHooksLifecycleSelectorRestore
+	t.Cleanup(func() {
+		windowsManagedHooksLifecycleSelectorCapture = originalCapture
+		windowsManagedHooksLifecycleSelectorRestore = originalRestore
+	})
+	var captured, restored []string
+	windowsManagedHooksLifecycleSelectorCapture = func(connectorName string) (enterprisehooks.WindowsManagedRuntimeSelectorSnapshot, error) {
+		captured = append(captured, connectorName)
+		return current[slices.Index(windowsManagedHooksLifecycleSelectorConnectors[:], connectorName)], nil
+	}
+	windowsManagedHooksLifecycleSelectorRestore = func(
+		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+		restored = append(restored, opts.Snapshot.Connector)
+		return opts.Snapshot.CAS, nil
+	}
+
+	kept := map[string]string{"cursor": `C:\ProgramData\Cursor`, "claudecode": `C:\Program Files\ClaudeCode`}
+	snapshots, err := captureWindowsManagedHooksLifecycleSelectorsKeeping(kept, journaled)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if !slices.Equal(captured, []string{"codex"}) {
+		t.Fatalf("a kept connector was read: captured %v, want only codex", captured)
+	}
+	if snapshots[0].Connector != "claudecode" || snapshots[2].Connector != "cursor" || snapshots[2].Existed {
+		t.Fatalf("a kept connector is not stood in for by its journaled snapshot: %+v", snapshots)
+	}
+	if _, err := restoreWindowsManagedHooksLifecycleSelectorsKept(journaled, snapshots, kept); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if !slices.Equal(restored, []string{"codex"}) {
+		t.Fatalf("a kept connector was written: restored %v, want only codex", restored)
+	}
+
+	// A failure on a connector that is not kept compensates only the connectors that were restored.
+	restored = nil
+	injected := errors.New("injected Codex selector restore failure")
+	windowsManagedHooksLifecycleSelectorRestore = func(
+		opts enterprisehooks.WindowsManagedRuntimeSelectorFullRestoreOptions,
+	) (enterprisehooks.WindowsManagedRuntimeSelectorCAS, error) {
+		restored = append(restored, opts.Snapshot.Connector)
+		if opts.Snapshot.Connector == "codex" {
+			return enterprisehooks.WindowsManagedRuntimeSelectorCAS{}, injected
+		}
+		return opts.Snapshot.CAS, nil
+	}
+	if _, err := restoreWindowsManagedHooksLifecycleSelectorsKept(journaled, snapshots, map[string]string{"claudecode": `C:\Program Files\ClaudeCode`}); !errors.Is(err, injected) {
+		t.Fatalf("restore error = %v, want the injected failure", err)
+	}
+	if slices.Contains(restored, "claudecode") {
+		t.Fatalf("the kept connector was touched while compensating: %v", restored)
+	}
+
+	// Nothing kept, or not standalone: the keeping variants read everything, as before.
+	captured = nil
+	if _, err := captureWindowsManagedHooksLifecycleSelectorsKeeping(nil, journaled); err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+	if len(captured) != 3 {
+		t.Fatalf("with no kept link %v was read, want all three", captured)
+	}
+	previousStandalone := windowsManagedHooksStandaloneProcess
+	previousLink := enterpriseHookVendorFolderLink
+	t.Cleanup(func() {
+		windowsManagedHooksStandaloneProcess = previousStandalone
+		enterpriseHookVendorFolderLink = previousLink
+	})
+	enterpriseHookVendorFolderLink = func(connectorName string) string { return `C:\ProgramData\` + connectorName }
+	windowsManagedHooksStandaloneProcess = func() bool { return false }
+	if got := windowsManagedHooksKeptVendorFolderLinks(); len(got) != 0 {
+		t.Fatalf("Secure Client kept links: %v", got)
+	}
+	windowsManagedHooksStandaloneProcess = func() bool { return true }
+	got := windowsManagedHooksKeptVendorFolderLinks()
+	if len(got) != 3 || len(windowsManagedHooksKeptLinkList(got)) != 3 {
+		t.Fatalf("standalone kept links = %v", got)
+	}
+}

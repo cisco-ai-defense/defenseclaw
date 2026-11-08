@@ -1824,6 +1824,7 @@ func applyWindowsEnterpriseInstallerReport(
 		if !named {
 			result.AddWarning("transaction_pending", step)
 		}
+		noteWindowsEnterprisePendingTransactionLink(result)
 	}
 	addWindowsEnterpriseUserRegistrationWarnings(result, report, opts != nil && opts.purge)
 	addWindowsEnterpriseUserSettingsChanges(result, report)
