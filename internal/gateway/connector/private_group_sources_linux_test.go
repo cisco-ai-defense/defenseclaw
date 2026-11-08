@@ -57,18 +57,15 @@ func privateGroupSourcesFixture(t *testing.T) (string, os.FileInfo, string) {
 			t.Fatal(err)
 		}
 	}
-	sssd := filepath.Join(files, "sssd")
-	userdb := filepath.Join(files, "userdb")
-	if err := os.MkdirAll(filepath.Join(sssd, "conf.d"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(userdb, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	resetPrivateGroupSources(t, files)
 	oldPasswd, oldGroup, oldGetent := privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent
 	oldNsswitch, oldSSSD, oldUserdb := privateGroupNsswitchFile, privateGroupSSSDDir, privateGroupUserdbDirs
+	oldSocks, oldPAMConf, oldPAMDir := privateGroupUserdbSocks, privateGroupPAMGroupConf, privateGroupPAMGroupDir
 	privateGroupPasswdFile, privateGroupGroupFile = passwd, groupFile
-	privateGroupNsswitchFile, privateGroupSSSDDir, privateGroupUserdbDirs = nsswitch, sssd, []string{userdb, filepath.Join(files, "absent")}
+	privateGroupNsswitchFile, privateGroupSSSDDir = nsswitch, filepath.Join(files, "sssd")
+	privateGroupUserdbDirs = []string{filepath.Join(files, "userdb"), filepath.Join(files, "host-userdb"), filepath.Join(files, "absent")}
+	privateGroupUserdbSocks = filepath.Join(files, "run", "systemd", "userdb")
+	privateGroupPAMGroupConf, privateGroupPAMGroupDir = filepath.Join(files, "security", "group.conf"), filepath.Join(files, "security", "group.d")
 	privateGroupGetent = func(database, key string) (string, bool) {
 		t.Errorf("the per-event proof started getent %s %s", database, key)
 		return "", false
@@ -77,8 +74,28 @@ func privateGroupSourcesFixture(t *testing.T) (string, os.FileInfo, string) {
 		privateGroupLookupUser, privateGroupLookupGroup = oldUser, oldLookupGroup
 		privateGroupPasswdFile, privateGroupGroupFile, privateGroupGetent = oldPasswd, oldGroup, oldGetent
 		privateGroupNsswitchFile, privateGroupSSSDDir, privateGroupUserdbDirs = oldNsswitch, oldSSSD, oldUserdb
+		privateGroupUserdbSocks, privateGroupPAMGroupConf, privateGroupPAMGroupDir = oldSocks, oldPAMConf, oldPAMDir
 	})
 	return dir, info, files
+}
+
+// resetPrivateGroupSources lays the source files out as on a stock Ubuntu host:
+// no sssd configuration, empty userdb directories, only the dynamic-user userdb
+// service, and a group.conf with every rule commented out.
+func resetPrivateGroupSources(t *testing.T, files string) {
+	t.Helper()
+	for _, dir := range []string{"sssd", "userdb", "host-userdb", "run", "security"} {
+		if err := os.RemoveAll(filepath.Join(files, dir)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{filepath.Join("sssd", "conf.d"), "userdb", "host-userdb"} {
+		if err := os.MkdirAll(filepath.Join(files, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSourceFile(t, filepath.Join(files, "run", "systemd", "userdb", "io.systemd.DynamicUser"), "")
+	writeSourceFile(t, filepath.Join(files, "security", "group.conf"), "# stock: every rule commented out\n#*;*;*;Al0000-2400;audio\n\n")
 }
 
 func writeSourceFile(t *testing.T, path, content string) {
@@ -135,6 +152,45 @@ func TestOwnerPrivateGroupLocalSourcesNeedsLocalAccountsOnly(t *testing.T) {
 		{name: "a systemd userdb membership record", content: stockNsswitch, extra: func(t *testing.T) {
 			writeSourceFile(t, filepath.Join(files, "userdb", "bob:devs.membership"), "{}\n")
 		}},
+		{name: "a userdb record in the host-shared directory", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "host-userdb", "other.user"), "{}\n")
+		}},
+		{name: "a numeric alias of a userdb record", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "host-userdb", "200123.user"), "{}\n")
+		}},
+		{name: "the built-in userdb services only", content: stockNsswitch, extra: func(t *testing.T) {
+			for _, name := range []string{"io.systemd.Multiplexer", "io.systemd.NameServiceSwitch"} {
+				writeSourceFile(t, filepath.Join(files, "run", "systemd", "userdb", name), "")
+			}
+		}, want: true},
+		{name: "a homed userdb service", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "run", "systemd", "userdb", "io.systemd.Home"), "")
+		}},
+		{name: "a machined userdb service", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "run", "systemd", "userdb", "io.systemd.Machine"), "")
+		}},
+		{name: "a vendor userdb service", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "run", "systemd", "userdb", "com.example.Directory"), "")
+		}},
+		{name: "initgroups from sss", content: "passwd: files\ngroup: files\ninitgroups: sss\n"},
+		{name: "initgroups from sss with a domain", content: "passwd: files\ngroup: files\ninitgroups: sss\n", extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(files, "sssd", "sssd.conf"), "[sssd]\n")
+		}},
+		{name: "initgroups from ldap", content: "passwd: files\ngroup: files\ninitgroups: files ldap\n"},
+		{name: "initgroups from a source this check does not know", content: stockNsswitch + "initgroups: files mystery\n"},
+		{name: "initgroups listed twice", content: stockNsswitch + "initgroups: files\ninitgroups: files\n"},
+		{name: "initgroups with no source", content: stockNsswitch + "initgroups:\n"},
+		{name: "initgroups from the local files", content: stockNsswitch + "initgroups: files\n", want: true},
+		{name: "initgroups from the local files and systemd", content: stockNsswitch + "initgroups: files [SUCCESS=merge] systemd\n", want: true},
+		{name: "a pam_group rule", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, privateGroupPAMGroupConf, "*;*;*;Al0000-2400;devs\n")
+		}},
+		{name: "a pam_group rule in group.d", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(privateGroupPAMGroupDir, "devs.conf"), "# header\n*;*;me;Al0000-2400;devs\n")
+		}},
+		{name: "a commented group.d file", content: stockNsswitch, extra: func(t *testing.T) {
+			writeSourceFile(t, filepath.Join(privateGroupPAMGroupDir, "devs.conf"), "# *;*;me;Al0000-2400;devs\n")
+		}, want: true},
 		{name: "an unrelated userdb file", content: stockNsswitch, extra: func(t *testing.T) {
 			writeSourceFile(t, filepath.Join(files, "userdb", "README"), "x\n")
 		}, want: true},
@@ -143,12 +199,7 @@ func TestOwnerPrivateGroupLocalSourcesNeedsLocalAccountsOnly(t *testing.T) {
 			writeSourceFile(t, nsswitch, tc.content)
 			if tc.extra != nil {
 				tc.extra(t)
-				t.Cleanup(func() {
-					_ = os.RemoveAll(filepath.Join(files, "sssd"))
-					_ = os.MkdirAll(filepath.Join(files, "sssd", "conf.d"), 0o755)
-					_ = os.RemoveAll(filepath.Join(files, "userdb"))
-					_ = os.MkdirAll(filepath.Join(files, "userdb"), 0o755)
-				})
+				t.Cleanup(func() { resetPrivateGroupSources(t, files) })
 			}
 			if got := ownerPrivateGroupLocalSources(dir, info); got != tc.want {
 				t.Fatalf("local-sources proof=%v, want %v", got, tc.want)
@@ -209,5 +260,54 @@ func TestOwnerPrivateGroupLocalSourcesRevokesAtOnce(t *testing.T) {
 	privateGroupLookupGroup = func(string) (*user.Group, error) { return &user.Group{Name: "other"}, nil }
 	if ownerPrivateGroupLocalSources(dir, info) {
 		t.Fatal("the local files disagreed and the folder was accepted")
+	}
+}
+
+// GAP-0905 review 3 MF1c: nss-systemd also reads account records from
+// /run/host/userdb, and from any Varlink service in /run/systemd/userdb. A
+// record there can give a second account the folder group as its primary gid
+// while /etc/passwd and /etc/group show only the owner. Both are sources the
+// check must see, and the stock layout (the dynamic-user service only) stays
+// accepted.
+func TestOwnerPrivateGroupLocalSourcesSeesSystemdAccountSources(t *testing.T) {
+	for _, dir := range []string{"/etc/userdb", "/run/userdb", "/run/host/userdb", "/usr/lib/userdb", "/var/lib/userdb", "/var/lib/systemd/home"} {
+		found := false
+		for _, have := range privateGroupUserdbDirs {
+			found = found || filepath.Clean(have) == dir
+		}
+		if !found {
+			t.Errorf("the production record directories omit %s", dir)
+		}
+	}
+	if privateGroupUserdbSocks != "/run/systemd/userdb" {
+		t.Errorf("the userdb service directory is %s", privateGroupUserdbSocks)
+	}
+	dir, info, files := privateGroupSourcesFixture(t)
+	gid := info.Sys().(*syscall.Stat_t).Gid
+	if !ownerPrivateGroupLocalSources(dir, info) {
+		t.Fatal("the stock layout was refused")
+	}
+	record := filepath.Join(files, "host-userdb", "other.user")
+	writeSourceFile(t, record, fmt.Sprintf("{\"userName\":\"other\",\"uid\":200123,\"gid\":%d}\n", gid))
+	if err := os.Symlink("other.user", filepath.Join(files, "host-userdb", "200123.user")); err != nil {
+		t.Fatal(err)
+	}
+	if ownerPrivateGroupLocalSources(dir, info) {
+		t.Fatal("a second account with the folder group as primary gid, in the host-shared userdb directory, was not seen")
+	}
+}
+
+// GAP-0905 review 3 MF1c: initgroups is its own nsswitch database, so a local
+// second account can receive the private gid as a supplementary group from a
+// remote source while passwd and group stay on the files.
+func TestOwnerPrivateGroupLocalSourcesChecksSupplementaryGroupSource(t *testing.T) {
+	dir, info, files := privateGroupSourcesFixture(t)
+	writeSourceFile(t, filepath.Join(files, "nsswitch.conf"), "passwd: files\ngroup: files\ninitgroups: sss\n")
+	if ownerPrivateGroupLocalSources(dir, info) {
+		t.Fatal("a remote initgroups source was accepted")
+	}
+	writeSourceFile(t, filepath.Join(files, "nsswitch.conf"), "passwd: files\ngroup: files\ninitgroups: files\n")
+	if !ownerPrivateGroupLocalSources(dir, info) {
+		t.Fatal("a local initgroups source was refused")
 	}
 }

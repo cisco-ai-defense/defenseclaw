@@ -102,17 +102,32 @@ func privateGroupNameServiceAgrees(name string, stat *syscall.Stat_t) bool {
 var (
 	privateGroupNsswitchFile = "/etc/nsswitch.conf"
 	privateGroupSSSDDir      = "/etc/sssd"
-	privateGroupUserdbDirs   = []string{"/etc/userdb", "/run/userdb", "/var/lib/userdb", "/usr/lib/userdb", "/var/lib/systemd/home"}
+	privateGroupUserdbDirs   = []string{"/etc/userdb", "/run/userdb", "/run/host/userdb", "/var/lib/userdb", "/usr/lib/userdb", "/var/lib/systemd/home"}
+	privateGroupUserdbSocks  = "/run/systemd/userdb"
+	privateGroupPAMGroupConf = "/etc/security/group.conf"
+	privateGroupPAMGroupDir  = "/etc/security/group.d"
 )
+
+// The Varlink services in privateGroupUserdbSocks that cannot add an account
+// or a group membership of their own: the dynamic service users of units (ids
+// in the dynamic range, group equal to user), the multiplexer that fans a
+// lookup out to the other services, and the glibc bridge, whose answers come
+// from the nsswitch sources this check reads. Any other service (homed,
+// machined, a vendor provider) is a source of accounts this check cannot list.
+var privateGroupBuiltinUserdbServices = map[string]bool{
+	"io.systemd.DynamicUser":       true,
+	"io.systemd.Multiplexer":       true,
+	"io.systemd.NameServiceSwitch": true,
+}
 
 // ownerPrivateGroupLocalSources is the proof for a check that runs on every
 // watcher event (GAP-0905). A private group lets nobody else in only when no
-// other account can have it as its primary group, and the name service cannot
-// be asked that: getent lists a directory service accounts only when the
-// service enumerates, and an account that is not a listed member still writes
-// through its primary gid. So the folder is private only when the local files
-// are the whole answer: ownerPrivateGroup holds, and nsswitch.conf names no
-// source for accounts or groups but the local files (privateGroupSourcesAreLocal).
+// other account can have it as its primary group or as a supplementary group,
+// and the name service cannot be asked that: getent lists a directory service
+// accounts only when the service enumerates, and an account that is not a listed
+// member still writes through its primary gid. So the folder is private only
+// when the local files are the whole answer: ownerPrivateGroup holds, and
+// nothing else can add an account or a membership (privateGroupSourcesAreLocal).
 // Nothing is remembered between calls, so a source added later refuses on the
 // next call. False off Linux, and for anything unreadable or ambiguous.
 func ownerPrivateGroupLocalSources(path string, info os.FileInfo) bool {
@@ -120,12 +135,16 @@ func ownerPrivateGroupLocalSources(path string, info os.FileInfo) bool {
 }
 
 // privateGroupSourcesAreLocal reports whether /etc/passwd and /etc/group are
-// everything the passwd and group databases are made of: each is listed once in
-// nsswitch.conf with sources that serve only this host. sss counts only where
-// no sssd configuration is readable (it has no domain then). systemd counts only
-// where no userdb or homed record files exist. Any other source (ldap, nis,
-// winbind, extrausers, db, ...), a missing line or an unreadable file is not
-// local.
+// everything that decides who holds a group. The passwd and group databases
+// (primary gid, listed members) and the initgroups database (the supplementary
+// groups glibc hands a login; a separate nsswitch line that falls back to group
+// only where it is absent) are each listed once in nsswitch.conf with sources
+// that serve only this host. sss counts only where no sssd configuration is
+// readable (it has no domain then). systemd counts only where no userdb or homed
+// record file exists and no userdb service but the built-in ones is running.
+// Where pam_group has a rule, the group is not private either. Any other source
+// (ldap, nis, winbind, extrausers, db, ...), a missing line or an unreadable
+// file is not local.
 func privateGroupSourcesAreLocal() bool {
 	data, err := os.ReadFile(privateGroupNsswitchFile)
 	if err != nil {
@@ -136,7 +155,7 @@ func privateGroupSourcesAreLocal() bool {
 		line, _, _ = strings.Cut(line, "#")
 		database, sources, found := strings.Cut(line, ":")
 		database = strings.TrimSpace(database)
-		if !found || (database != "passwd" && database != "group") {
+		if !found || (database != "passwd" && database != "group" && database != "initgroups") {
 			continue
 		}
 		if seen[database] {
@@ -148,7 +167,10 @@ func privateGroupSourcesAreLocal() bool {
 			if strings.HasPrefix(source, "[") && strings.HasSuffix(source, "]") {
 				continue
 			}
-			if !privateGroupSourceIsLocal(source) {
+			// An initgroups line of its own exists to treat supplementary groups
+			// differently from group, and sss is the source that does it; an
+			// sssd without a configuration is not taken as local there.
+			if !privateGroupSourceIsLocal(source) || (database == "initgroups" && source == "sss") {
 				return false
 			}
 			listed++
@@ -157,7 +179,32 @@ func privateGroupSourcesAreLocal() bool {
 			return false
 		}
 	}
-	return seen["passwd"] && seen["group"]
+	return seen["passwd"] && seen["group"] && !privateGroupPAMAddsGroups()
+}
+
+// privateGroupPAMAddsGroups reports whether pam_group has a rule to read: any
+// line in group.conf or group.d that is not blank or a comment. Whether the
+// PAM stack loads the module is not asked; a rule file is reason enough to
+// refuse. A file that cannot be read counts as a rule.
+func privateGroupPAMAddsGroups() bool {
+	hasRule := func(path string) bool {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return !os.IsNotExist(err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+				return true
+			}
+		}
+		return false
+	}
+	if hasRule(privateGroupPAMGroupConf) {
+		return true
+	}
+	return privateGroupDirHasEntry(privateGroupPAMGroupDir, func(name string) bool {
+		return strings.HasSuffix(name, ".conf") && hasRule(filepath.Join(privateGroupPAMGroupDir, name))
+	})
 }
 
 func privateGroupSourceIsLocal(source string) bool {
@@ -171,6 +218,11 @@ func privateGroupSourceIsLocal(source string) bool {
 			return strings.HasSuffix(name, ".conf")
 		})
 	case "systemd":
+		if privateGroupDirHasEntry(privateGroupUserdbSocks, func(name string) bool {
+			return !privateGroupBuiltinUserdbServices[name]
+		}) {
+			return false
+		}
 		for _, dir := range privateGroupUserdbDirs {
 			if privateGroupDirHasEntry(dir, func(name string) bool {
 				for _, suffix := range []string{".user", ".group", ".membership", ".identity"} {
