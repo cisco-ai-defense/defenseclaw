@@ -355,6 +355,26 @@ func enterpriseManagedHookRuntimeFailMode() string {
 	return "closed"
 }
 
+// windowsConnectorRemovedFromRoster reports whether a hook call for name is
+// the call of an agent still running after the administrator removed the
+// connector from the roster. The hook runs as the user and cannot read the
+// administrator-only removed-connectors record, so it reads the guardian's
+// off-roster marker from the machine hook runtime directory (user-readable,
+// administrator-owned, the directory of the undo closure). A seam for tests.
+var windowsConnectorRemovedFromRoster = func(executable, name string) bool {
+	if !enterprisehooks.WindowsConnectorOffRosterConnector(name) || !standaloneEnterpriseHookCheck(executable) {
+		return false
+	}
+	if held, err := windowsStandaloneHooksHeldClosed(); held || err != nil {
+		return false
+	}
+	off, err := windowsConnectorOffRosterRead(name)
+	return err == nil && off
+}
+
+// windowsConnectorOffRosterRead is replaceable in tests.
+var windowsConnectorOffRosterRead = enterprisehooks.WindowsConnectorOffRoster
+
 func enterpriseManagedRuntimeAbsenceNoop(
 	executable string,
 	connectorName string,
@@ -373,15 +393,17 @@ func enterpriseManagedRuntimeAbsenceNoop(
 	if resolveErr != nil || policyActive || registered {
 		return false
 	}
-	// On the standalone profile a machine-scope connector (Claude Code, Codex)
-	// whose machine policy is gone is a connector the administrator took off
-	// the roster: it is not managed, so a hook call a running agent still
-	// makes from its cached settings is allowed, with no gateway contact and no
-	// token read, as the Cursor tombstone adapter allows it (GAP-0916). While
-	// the connector is on the roster its policy is active with this account
-	// unregistered, which is the "not enrolled yet" refusal below. Secure
-	// Client, and a process that is not the standalone hook, are unchanged.
-	if (connectorName == "claudecode" || connectorName == "codex") && standaloneEnterpriseHookCheck(executable) {
+	// On the standalone profile a hook call a running agent still makes for
+	// Claude Code or Codex from its cached settings is allowed, with no
+	// gateway contact and no token read, as the Cursor tombstone adapter allows
+	// it, only when the administrator took the connector off the roster
+	// (GAP-0916): the connector's machine policy is gone and the guardian has
+	// published the connector as off the roster, and the hot-config undo
+	// closure is neither held nor unreadable. Anything else, a failed undo, a
+	// lifecycle window, a connector still on the roster, falls through to the
+	// refusal below. Secure Client and a process that is not the standalone
+	// hook are unchanged.
+	if windowsConnectorRemovedFromRoster(executable, connectorName) {
 		return true
 	}
 	// An absent machine target is a trusted no-op only for the stable per-user
