@@ -1340,6 +1340,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// Resolve as the hook client does, so a link to a missing final
 		// file that the redirect would create is covered as well.
 		resolved, ok := hookpaths.ResolveWriteTarget(target)
+		if !ok && !cannotResolveLocally {
+			// A directory on the way is closed to the user, so the physical
+			// file cannot be read. The user cannot write through it either
+			// (the kernel refuses), so the write is judged by the file the
+			// link text leads to, as the content proofs judge it: a key file
+			// stays protected, an ordinary file is not a key write.
+			if text, reached := hookpaths.LinkTextWriteTarget(target); reached {
+				resolved, ok = text, true
+			}
+		}
 		// An existing link whose target cannot be resolved is still a
 		// possible write into the protected home. The client and gateway
 		// must both fail closed on a linked component before "..".
