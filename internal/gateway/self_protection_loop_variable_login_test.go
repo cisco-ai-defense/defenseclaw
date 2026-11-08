@@ -270,6 +270,7 @@ func TestLoopVariableCertainBindingsAndReachingIFS(t *testing.T) {
 	write := `sed -i s/a/b/ ` + parent + `$u/aliasdir/config.yaml`
 	direct := `sed -i s/a/b/ ` + parent + `$u/.defenseclaw/config.yaml`
 	readWrite := `echo aliasdirx | while read -r d; do sed -i s/a/b/ ` + home + `/$d/config.yaml; done`
+	missing := project + `/missing/out`
 	rows := []struct {
 		name, command string
 		protected     bool
@@ -287,6 +288,20 @@ func TestLoopVariableCertainBindingsAndReachingIFS(t *testing.T) {
 		{"ifs-static", `IFS=x; ` + readWrite, true},
 		{"ifs-in-a-branch", `if test -f /nonexistent; then IFS=x; fi; ` + readWrite, true},
 		{"ifs-in-a-loop-that-runs-again", `while test -f /nonexistent; do ` + readWrite + `; IFS=x; done`, true},
+		{"read-redirection-fails", `for u in $USER; do read u < ` + missing + `; ` + direct + `; done`, true},
+		{"printf-redirection-fails", `for u in $USER; do printf -v u ordinary > ` + missing + `; ` + direct + `; done`, true},
+		{"printf-missing-format", `for u in $USER; do printf -v u; ` + direct + `; done`, true},
+		{"read-with-timeout", `for u in $USER; do read -t 1 u <<< ordinary; ` + direct + `; done`, true},
+		{"local-outside-a-function", `for u in $USER; do local u=ordinary; ` + direct + `; done`, true},
+		{"read-shadowed-before-the-call", `read() { :; }; for u in $USER; do read u <<< ordinary; ` + write + `; done`, true},
+		{"read-declared-in-a-loop-that-runs-again", `for i in 1 2; do for u in $USER; do read u <<< ordinary; ` + write + `; done; read() { :; }; done`, true},
+		{"ifs-in-a-function-the-loop-calls", `f() { IFS=x; }; for i in 1 2; do ` + readWrite + `; f; done`, true},
+		{"read-here-string-binds-and-function-declared-after", `for u in $USER; do read u <<< ordinary; ` + write + `; done; read() { :; }`, false},
+		{"printf-v-binds-and-function-declared-after", `for u in $USER; do printf -v u ordinary; ` + write + `; done; printf() { :; }`, false},
+		{"if-true-binds-and-function-declared-after", `for u in $USER; do if true; then u=ordinary; fi; ` + write + `; done; true() { :; }`, false},
+		{"or-false-binds-and-function-declared-after", `for u in $USER; do false || u=ordinary; ` + write + `; done; false() { :; }`, false},
+		{"ifs-in-an-uncalled-function-and-an-outer-loop", `f() { IFS=x; }; for i in 1 2; do ` + readWrite + `; done`, false},
+		{"ifs-in-a-function-declared-after-an-outer-loop", `for i in 1 2; do ` + readWrite + `; done; f() { IFS=x; }`, false},
 		{"if-true-binds", `for u in $USER; do if true; then u=ordinary; fi; ` + write + `; done`, false},
 		{"and-true-binds", `for u in $USER; do true && u=ordinary; ` + write + `; done`, false},
 		{"printf-v-binds", `for u in $USER; do printf -v u ordinary; ` + write + `; done`, false},

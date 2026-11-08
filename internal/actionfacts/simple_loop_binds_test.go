@@ -60,7 +60,7 @@ func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
 		{"read shadowed by a function", "read() { :; }; for u in home; do read u; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
 		{"printf shadowed by a function", "printf() { :; }; for u in home; do printf -v u other; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
 		{"true shadowed by a function", "true() { return 1; }; for u in home; do true && u=other; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
-		{"read shadowed after the loop", "for u in home; do read u; sed -i x /r/$u/.defenseclaw/config.yaml; done; read() { :; }", []string{state}, nil},
+		{"read declared as a function after the loop is still the builtin", "for u in home; do read u; sed -i x /r/$u/.defenseclaw/config.yaml; done; read() { :; }", nil, []string{state}},
 		{"write after a binding that cannot run", "for u in other; do if false; then u=home; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after a binding behind a failed and", "for u in other; do false && u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write after a binding behind a skipped or", "for u in other; do true || u=home; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
@@ -75,6 +75,32 @@ func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
 		{"write after a binding in the condition of an if", "for u in other; do if read u; then :; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{other}},
 		{"write after a read with a prompt option", "for u in other; do read -p u v; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, nil},
 		{"write in an inner loop that binds", "for u in home; do while true; do sed -i x /r/$u/.defenseclaw/config.yaml; u=other; done; done", []string{state}, nil},
+		// A binding that does not run leaves the word (the call fails first), one that runs ends it,
+		// and a function replaces a builtin only for the calls that come after its declaration (review 5).
+		{"read whose input redirection can fail", "for u in home; do read u < /nonexistent/in; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"printf -v whose output redirection can fail", "for u in home; do printf -v u other > /nonexistent/out; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"printf -v without a format", "for u in home; do printf -v u; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"read with a timeout", "for u in home; do read -t 1 u; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"read with a delimiter", "for u in home; do read -d x u; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"local outside a function", "for u in home; do local u=other; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"read from a here-string", "for u in home; do read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, []string{state}},
+		{"read with a redirect to /dev/null", "for u in home; do read u < /dev/null; sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{state}},
+		{"read with -r", "for u in home; do read -r u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{other}, []string{state}},
+		{"printf -v with a format", "for u in home; do printf -v u %s other; sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{state}},
+		{"assignment whose redirection fails still binds", "for u in home; do u=other < /nonexistent/in; sed -i x /r/$u/.defenseclaw/config.yaml; done", nil, []string{state}},
+		{"local in a function", "f() { for u in home; do local u=other; sed -i x /r/$u/.defenseclaw/config.yaml; done; }; f", nil, []string{state}},
+		{"read declared as a function after the loop", "for u in home; do read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml; done; read() { :; }", []string{other}, []string{state}},
+		{"printf declared as a function after the loop", "for u in home; do printf -v u other; sed -i x /r/$u/.defenseclaw/config.yaml; done; printf() { :; }", nil, []string{state}},
+		{"true declared as a function after the loop", "for u in home; do if true; then u=other; fi; sed -i x /r/$u/.defenseclaw/config.yaml; done; true() { :; }", nil, []string{state}},
+		{"false declared as a function after the loop", "for u in home; do false || u=other; sed -i x /r/$u/.defenseclaw/config.yaml; done; false() { :; }", nil, []string{state}},
+		{"read declared as a function in the loop after the call", "for u in home; do read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml; read() { :; }; done", []string{state}, nil},
+		{"read declared as a function in a loop that runs again", "for i in 1 2; do for u in home; do read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml; done; read() { :; }; done", []string{state}, nil},
+		{"read declared as a function before the loop", "read() { :; }; for u in home; do read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml; done", []string{state}, nil},
+		{"read in a function declared before a later declaration", "f() { for u in home; do read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml; done; }; read() { :; }; f", []string{state}, nil},
+		// read of a here-string gives the name its word (the default IFS, the builtin).
+		{"read of a here-string outside a loop", "read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml", []string{other}, nil},
+		{"read of a here-string when the action spells IFS", "IFS=x; read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml", nil, []string{other}},
+		{"read of a here-string shadowed by a function", "read() { :; }; read u <<< other; sed -i x /r/$u/.defenseclaw/config.yaml", nil, []string{other}},
 		{"select reads the words of its list", "select u in $USER; do sed -i x /r/$u/.defenseclaw/config.yaml; break; done", []string{state}, nil},
 		{"after the loop", "for u in home; do :; done; sed -i x /r/$u/.defenseclaw/config.yaml", nil, []string{state}},
 	} {
@@ -89,7 +115,7 @@ func TestSimpleCommandsReadLoopVariableWords(t *testing.T) {
 				for _, want := range row.want {
 					// The reading of an iteration only proves a state write;
 					// a statement whose name the body binds is an ordinary one.
-					if simple.Text == want && simple.LoginGuess == (simple.Text == state && strings.Contains(row.command, "u=home")) {
+					if simple.Text == want && !strings.Contains(row.command, "<<<") && simple.LoginGuess == (simple.Text == state && strings.Contains(row.command, "u=home")) {
 						t.Errorf("%q: LoginGuess = %v", simple.Text, simple.LoginGuess)
 					}
 				}
@@ -188,6 +214,13 @@ func TestSimpleCommandsReadLoopIFSReachingTheRead(t *testing.T) {
 		{"function called before the assignment", "f() { " + read + "; }; f; IFS=x", false, true},
 		{"function called after the assignment", "f() { " + read + "; }; IFS=x; f", true, false},
 		{"function called by a loop", "f() { " + read + "; }; for i in 1 2; do f; IFS=x; done", true, true},
+		// A function reaches the read only through a call in the loop (review 5).
+		{"function declared before an outer loop, not called", "f() { IFS=x; }; for i in 1 2; do " + read + "; done", false, true},
+		{"function declared after an outer loop", "for i in 1 2; do " + read + "; done; f() { IFS=x; }", false, true},
+		{"function declared in the loop, not called", "for i in 1 2; do f() { IFS=x; }; " + read + "; done", false, true},
+		{"function called in the outer loop", "f() { IFS=x; }; for i in 1 2; do " + read + "; f; done", true, true},
+		{"function called through another function", "f() { IFS=x; }; g() { f; }; for i in 1 2; do " + read + "; g; done", true, true},
+		{"local IFS of a called function", "f() { local IFS=x; }; for i in 1 2; do " + read + "; f; done", false, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := Input{Tool: "Bash", Command: row.command, ActiveHome: "/r/home", CWD: "/r/home/proj"}

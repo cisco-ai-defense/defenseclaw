@@ -60,6 +60,10 @@ func hereStringPipeTwin(command, home string, split bool) (string, bool) {
 		return "", false
 	}
 	changed, refused, homeFixed := false, false, split && xargsHomeFixed(command)
+	// read name <<< word sets name in this shell: its twin is the assignment
+	// name=word, which the pipe twin would lose (the reader of a pipe is a
+	// subshell). The default IFS and the builtin are needed for that.
+	readBinds := actionfacts.ReadBindsHereString(file)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		stmt, ok := node.(*syntax.Stmt)
 		if !ok || refused {
@@ -96,6 +100,15 @@ func hereStringPipeTwin(command, home string, split bool) (string, bool) {
 			}
 			if direct, ok := xargsCallTwin(call, []*syntax.Word{word}); ok {
 				stmt.Cmd, stmt.Redirs, changed = direct, rest, true
+				return true
+			}
+		}
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && readBinds(call) {
+			if name, value, ok := actionfacts.HereStringRead(call, word); ok {
+				stmt.Cmd, stmt.Redirs, changed = &syntax.CallExpr{Assigns: []*syntax.Assign{{
+					Name:  &syntax.Lit{Value: name},
+					Value: &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: value}}},
+				}}}, rest, true
 				return true
 			}
 		}
