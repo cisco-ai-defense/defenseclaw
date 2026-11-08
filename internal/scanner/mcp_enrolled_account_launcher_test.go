@@ -20,20 +20,25 @@ import (
 func TestEnrolledAccountLocalServerWithRefusedLauncherIsRefusedWithoutStarting(t *testing.T) {
 	for _, tc := range []struct {
 		name, command string
+		args          []string
 		refused       bool
 	}{
-		{"interpreter", "python3", true},
-		{"node", "node", true},
-		{"command path", "/usr/bin/python3", true},
-		{"allowlisted npx", "npx", false},
-		{"allowlisted uvx", "uvx", false},
+		{"interpreter", "python3", []string{"/home/eng1/server.py"}, true},
+		{"node", "node", []string{"/home/eng1/server.py"}, true},
+		{"command path", "/usr/bin/python3", []string{"/home/eng1/server.py"}, true},
+		{"allowlisted npx", "npx", []string{"-y", "pkg"}, false},
+		{"allowlisted uvx", "uvx", []string{"mcp-server-time"}, false},
+		{"npx execution flag", "npx", []string{"-c", "echo hi"}, true},
+		{"uvx execution flag with a value", "uvx", []string{"--eval=1", "pkg"}, true},
+		{"npx without a package", "npx", nil, true},
+		{"npx with options only", "npx", []string{"-y"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The binary does not exist: a scan that got past the refusal
 			// would fail in the preflight with a different message.
 			scan := &MCPScanner{
 				Config: config.MCPScannerConfig{Binary: "/nonexistent/defenseclaw-scanner"},
-				ServerEntry: &config.MCPServerEntry{Name: "localpy", Command: tc.command, Args: []string{"/home/eng1/server.py"},
+				ServerEntry: &config.MCPServerEntry{Name: "localpy", Command: tc.command, Args: tc.args,
 					Connector: "claudecode", Home: "/home/eng1"},
 			}
 			_, err := scan.Scan(context.Background(), "localpy")
@@ -43,7 +48,9 @@ func TestEnrolledAccountLocalServerWithRefusedLauncherIsRefusedWithoutStarting(t
 			if got := MCPScanRefused(err) && MCPLauncherRefusal(err.Error()); got != tc.refused {
 				t.Fatalf("command %q: launcher refusal=%v (%v), want %v", tc.command, got, err, tc.refused)
 			}
-			if tc.refused && !strings.Contains(err.Error(), "allowlisted stdio launcher") {
+			if tc.refused && !strings.Contains(err.Error(), "allowlisted stdio launcher") &&
+				!strings.Contains(err.Error(), "forbidden execution flag") &&
+				!strings.Contains(err.Error(), "requires a package/server argument") {
 				t.Fatalf("refusal %q does not carry the scanner's wording", err)
 			}
 		})
