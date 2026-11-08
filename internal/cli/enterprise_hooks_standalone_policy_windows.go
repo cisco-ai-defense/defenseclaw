@@ -358,13 +358,21 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) error {
 	windowsStandaloneGoOwnedPolicyMu.Lock()
 	published, err := enterpriseHookWindowsPublishGoOwned(publishOpts, connectors)
 	windowsStandaloneGoOwnedPolicyMu.Unlock()
-	reportWindowsGuardianVendorFolders(stderr, published, err)
+	// A vendor policy file DefenseClaw has no record of that another account
+	// can change and the publish just failed to use or move aside is the same
+	// refusal as a weak recorded folder: alerted once, and the pass is not
+	// clean (GAP-0930).
+	unrecorded := enterpriseHookWindowsUnrecordedFiles(opts, connectors)
+	reportWindowsGuardianVendorFolders(stderr, published, err, unrecorded)
 	var refusal error
 	if err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): %v\n", err)
 		if len(windowsVendorFolderRefusals(err)) != 0 {
 			refusal = err
 		}
+	}
+	for _, problem := range unrecorded {
+		refusal = errors.Join(refusal, fmt.Errorf("%s: %s", problem.Connector, problem.Message))
 	}
 	if _, err := enterpriseHookWindowsClaudeVersionFloor(opts, connectors); err != nil {
 		fmt.Fprintf(stderr, "defenseclaw: enterprise machine policy (Windows): Claude Code version floor: %v\n", err)
@@ -382,6 +390,9 @@ func enterpriseHookStandalonePlatformPrepare(stderr io.Writer) error {
 	}
 	return refusal
 }
+
+// enterpriseHookWindowsUnrecordedFiles is replaceable in tests.
+var enterpriseHookWindowsUnrecordedFiles = enterprisepolicy.UnrecordedPolicyFileProblems
 
 // windowsVendorFolderRefusals is replaceable in tests.
 var windowsVendorFolderRefusals = enterprisepolicy.VendorFolderRefusals
@@ -408,7 +419,7 @@ var (
 // and one log line; a refused folder gets one alert row naming it (and not a
 // repaired row), and the log line at every pass (GAP-0756, GAP-0760). An
 // alert that could not be written is tried again at the next pass.
-func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepolicy.Result, publishErr error) {
+func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepolicy.Result, publishErr error, unrecorded []enterprisepolicy.VendorFolderProblem) {
 	for _, state := range published.States {
 		for _, folder := range state.Reprotected {
 			fmt.Fprintf(stderr, "[hook-guardian] re-protected %s (%s): %s; access list before %s, after %s\n",
@@ -424,7 +435,12 @@ func reportWindowsGuardianVendorFolders(stderr io.Writer, published enterprisepo
 	refused := map[string]bool{}
 	var fresh []enterprisepolicy.VendorFolderRefusal
 	windowsGuardianVendorFolderMu.Lock()
-	for _, refusal := range windowsVendorFolderRefusals(publishErr) {
+	refusals := windowsVendorFolderRefusals(publishErr)
+	for _, problem := range unrecorded {
+		// Keyed by the file: its folder may be fine.
+		refusals = append(refusals, enterprisepolicy.VendorFolderRefusal{Dir: problem.File, Message: problem.Message})
+	}
+	for _, refusal := range refusals {
 		key := windowsGuardianVendorFolderKey(refusal.Dir)
 		refused[key] = true
 		if windowsGuardianVendorFolderRefusals[key] != refusal.Message {
