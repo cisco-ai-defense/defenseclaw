@@ -306,18 +306,27 @@ func registrationLoopStatementTargets(stmt *syntax.Stmt, values actionValues, cw
 		for _, word := range sources {
 			add(word)
 		}
-	case "cp", "install", "ln":
-		add(operands[len(operands)-1])
-	case "sed", "perl":
-		editing := false
+	case "cp", "gcp", "install", "ln":
+		words := []string{program}
+		known := []bool{true}
 		for _, word := range operands {
-			value, fixed := StaticWord(word, home)
-			editing = editing || fixed && (strings.HasPrefix(value, "-i") || value == "--in-place" || strings.HasPrefix(value, "--in-place="))
+			value, fixed := actionWordValue(word, values, cwd, home)
+			words, known = append(words, value), append(known, fixed)
 		}
-		if editing {
-			for _, word := range operands {
-				add(word)
+		targets = append(targets, registrationPlacedPaths(words, known, cwd)...)
+	case "sed", "gsed", "perl":
+		words := []string{program}
+		for _, word := range operands {
+			value, fixed := actionWordValue(word, values, cwd, home)
+			if !fixed {
+				return targets
 			}
+			words = append(words, value)
+		}
+		if programBase(program) == "perl" {
+			targets = append(targets, perlInPlaceFiles(words)...)
+		} else {
+			targets = append(targets, sedInPlaceFiles(words)...)
 		}
 	case "dd":
 		for _, word := range operands {
@@ -431,42 +440,81 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 // and install -t DIR SOURCE...: the destination file or the file the
 // source name takes in the destination folder.
 func registrationInstallReach(words []string, cwd string, protected protectedFiles) bool {
+	for _, path := range registrationPlacedPaths(words, nil, cwd) {
+		if protectedReachPath(path, protected, "") {
+			return true
+		}
+	}
+	return false
+}
+
+// registrationPlacedPaths lists the paths a cp, install or ln call writes
+// (words[0] is the program): the last operand when it is a plain file name,
+// and, when it is a folder (or is written with a trailing separator, or
+// -t names it), the file each source name takes in that folder. A folder
+// that receives a source under an unrelated name is not itself written. The
+// straight-line install reader and the loop-body reader share this one
+// destination-role rule. known marks the words whose value is fixed (nil:
+// all); an unknown destination lists nothing and an unknown source places
+// nothing.
+func registrationPlacedPaths(words []string, known []bool, cwd string) []string {
 	var operands []string
 	directory := ""
+	noTarget, optionsEnded := false, false
 	for i := 1; i < len(words); i++ {
+		if known != nil && !known[i] {
+			operands = append(operands, "")
+			continue
+		}
 		switch word := words[i]; {
+		case optionsEnded:
+			operands = append(operands, word)
+		case word == "--":
+			optionsEnded = true
 		case word == "-t" || word == "--target-directory":
 			if i+1 < len(words) {
+				if known != nil && !known[i+1] {
+					return nil
+				}
 				directory = words[i+1]
 				i++
 			}
 		case strings.HasPrefix(word, "--target-directory="):
 			directory = strings.TrimPrefix(word, "--target-directory=")
-		case word == "-m" || word == "-o" || word == "-g" || word == "--mode" || word == "--owner" || word == "--group":
+		case word == "-T" || word == "--no-target-directory":
+			noTarget = true
+		case word == "-m" || word == "-o" || word == "-g" || word == "-S" ||
+			word == "--mode" || word == "--owner" || word == "--group" || word == "--suffix":
 			i++
 		case strings.HasPrefix(word, "-") && word != "-":
 		default:
 			operands = append(operands, word)
 		}
 	}
+	var placed []string
 	if directory == "" && len(operands) >= 2 {
 		last := operands[len(operands)-1]
 		operands = operands[:len(operands)-1]
-		// A last operand that is a folder (or is written with a trailing
-		// separator) receives each source under the source name; only a
-		// plain file name is itself the written target.
-		if info, err := pathStat(OperandPath(last, cwd)); strings.HasSuffix(last, "/") || (err == nil && info.IsDir()) {
-			directory = last
-		} else if protectedReachPath(OperandPath(last, cwd), protected, "") {
-			return true
+		if last == "" {
+			return nil
+		}
+		if !noTarget {
+			if info, err := pathStat(OperandPath(last, cwd)); strings.HasSuffix(last, "/") || (err == nil && info.IsDir()) {
+				directory = last
+			}
+		}
+		if directory == "" {
+			placed = append(placed, OperandPath(last, cwd))
 		}
 	}
-	for _, source := range operands {
-		if directory != "" && protectedReachPath(filepath.Join(OperandPath(directory, cwd), filepath.Base(source)), protected, "") {
-			return true
+	if directory != "" {
+		for _, source := range operands {
+			if source != "" {
+				placed = append(placed, filepath.Join(OperandPath(directory, cwd), filepath.Base(source)))
+			}
 		}
 	}
-	return false
+	return placed
 }
 
 func registrationRsyncReach(words []string, cwd string, protected protectedFiles) bool {
