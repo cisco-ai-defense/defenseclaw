@@ -23136,7 +23136,7 @@ function Restore-DefenseClawTransaction {
                 Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
                     subsystem = 'rollback'
                     path      = $restoreCodexLink
-                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`", then run Setup /repair"
+                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`"; the next repair or ensure then finishes the work"
                 }
                 continue
             }
