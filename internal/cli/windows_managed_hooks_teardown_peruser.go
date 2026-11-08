@@ -339,7 +339,7 @@ func windowsManagedHooksNameKeptLinksOnce(codex, vendor, goOwned []string) []str
 // tests. A teardown makes none of them for a connector whose machine folder a
 // link keeps: the read follows a link on the parent, so an enrollment.json
 // behind an administrator link would fail the check after the uninstall
-// committed (rel-1-0-9 g758b review S1).
+// committed.
 var (
 	windowsManagedHooksPerUserEnrollmentReader   = enterprisehooks.ReadWindowsPerUserManagedEnrollmentTargets
 	windowsManagedHooksPerUserEnrollmentRestorer = enterprisehooks.RestoreWindowsPerUserManagedEnrollment
