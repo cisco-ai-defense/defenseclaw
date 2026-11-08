@@ -178,21 +178,145 @@ def test_a_creation_that_stops_before_the_key_is_repaired_by_the_next_init(tmp_p
     assert any(name.startswith(SECRET + ".orphaned-") for name in _orphans(home))
 
 
-def test_the_marker_alone_repairs_a_home_that_already_has_a_config(tmp_path, monkeypatch):
+def _write_private(path: Path, data: bytes) -> None:
+    path.write_bytes(data)
+    protect_private_file(str(path))
+
+
+def _crashed_creation(home: Path) -> None:
+    """The files a creation leaves when it stops before the key is published."""
+
+    secret = os.urandom(32)
+    digest = hmac.new(secret, b"a key that never was", hashlib.sha256).hexdigest().encode("ascii")
+    _write_private(home / PENDING, doctor_recovery._pending_marker_bytes(secret))
+    _write_private(home / SECRET, secret)
+    _write_private(home / "device.key.provenance", b"defenseclaw-device-provenance-v1:" + digest + b"\n")
+
+
+def _configured_home_without_key(tmp_path: Path, monkeypatch) -> Path:
     home = _home(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
     assert run_first_run(_options()).status != "needs_attention"
     (home / "device.key").unlink()
-    (home / "device.key.provenance").unlink()
-    (home / SECRET).unlink()
-    _leftover_secret_and_sentinel(home)
-    (home / PENDING).write_bytes(b"device identity creation in progress\n")
+    return home
+
+
+def _refused_with_nothing_moved(report, home: Path, secret_before: bytes) -> None:
+    assert report.status == "needs_attention"
+    assert any("continuity-evidence-present" in step.detail for step in report.setup)
+    assert (home / SECRET).read_bytes() == secret_before
+    assert not (home / "device.key").exists()
+    assert _orphans(home) == []
+
+
+def test_an_authentic_marker_repairs_a_home_that_already_has_a_config(tmp_path, monkeypatch):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+    for name in ("device.key.provenance", SECRET):
+        (home / name).unlink()
+    _crashed_creation(home)
 
     report = run_first_run(_options())
 
     assert report.status != "needs_attention", report.to_dict()
     assert _valid(home)
     assert not (home / PENDING).exists()
+    assert len(_orphans(home)) == 3
+
+
+def test_a_marker_dropped_into_a_configured_home_does_not_reset_the_identity(tmp_path, monkeypatch):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+    secret_before = (home / SECRET).read_bytes()
+    _write_private(home / PENDING, b"anything at all\n")
+
+    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
+    assert (home / PENDING).read_bytes() == b"anything at all\n"
+
+
+def test_a_marker_made_for_other_files_does_not_reset_the_identity(tmp_path, monkeypatch):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+    secret_before = (home / SECRET).read_bytes()
+    _write_private(home / PENDING, doctor_recovery._pending_marker_bytes(os.urandom(32)))
+
+    _refused_with_nothing_moved(run_first_run(_options()), home, secret_before)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="needs an unprivileged symlink")
+def test_a_marker_beside_a_linked_secret_does_not_reset_the_identity(tmp_path, monkeypatch):
+    home = _configured_home_without_key(tmp_path, monkeypatch)
+    real = tmp_path / "elsewhere.secret"
+    _write_private(real, (home / SECRET).read_bytes())
+    (home / SECRET).unlink()
+    os.symlink(real, home / SECRET)
+    _write_private(home / PENDING, doctor_recovery._pending_marker_bytes(real.read_bytes()))
+
+    report = run_first_run(_options())
+
+    assert report.status == "needs_attention"
+    assert (home / SECRET).is_symlink()
+    assert not (home / "device.key").exists()
+    assert _orphans(home) == []
+
+
+def test_a_stale_marker_alone_is_set_aside_and_the_identity_is_created(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _write_private(home / PENDING, b"left by a stopped run\n")
+
+    report = run_first_run(_options())
+
+    assert report.status != "needs_attention", report.to_dict()
+    assert _valid(home)
+    assert [name.split(".orphaned-")[0] for name in _orphans(home)] == [PENDING]
+
+
+def test_repeated_set_asides_never_replace_an_earlier_orphan(tmp_path):
+    home = _home(tmp_path)
+    kept: dict[str, bytes] = {}
+    with patch.object(doctor_recovery.time, "gmtime", return_value=(2026, 11, 8, 12, 0, 0, 6, 312, 0)):
+        for _ in range(3):
+            _crashed_creation(home)
+            moved = doctor_recovery.set_aside_abandoned_identity(
+                str(home / "device.key"), str(home), fresh_home=False
+            )
+            assert len(moved) == 3
+            for path in moved:
+                assert path not in kept
+                kept[path] = Path(path).read_bytes()
+
+    assert len(kept) == 9
+    assert all(Path(path).read_bytes() == data for path, data in kept.items())
+    assert len(_orphans(home)) == 9
+
+
+def test_an_unusable_lock_file_stops_init_before_it_changes_the_home(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    (home / "init.lock").mkdir()
+
+    report = run_first_run(_options())
+
+    assert report.status == "needs_attention"
+    assert [(step.name, step.status) for step in report.setup] == [("Init lock", "fail")]
+    assert "cannot take the init lock" in report.setup[0].detail
+    assert sorted(path.name for path in home.iterdir()) == ["init.lock"]
+
+
+def test_the_plain_init_path_takes_the_same_lock(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from defenseclaw.commands.cmd_init import init_cmd
+    from defenseclaw.context import AppContext
+
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    monkeypatch.setattr(bootstrap, "_FIRST_RUN_LOCK_WAIT_SECONDS", 0.2)
+
+    with locked_file_update(str(home / "init")):
+        result = CliRunner().invoke(init_cmd, ["--skip-install"], obj=AppContext())
+
+    assert result.exit_code != 0
+    assert "another defenseclaw init is running" in result.output
+    assert not (home / "config.yaml").exists()
+    assert not (home / "device.key").exists()
 
 
 def test_a_home_an_earlier_build_left_half_created_is_repaired_by_init(tmp_path, monkeypatch):

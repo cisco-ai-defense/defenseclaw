@@ -405,6 +405,35 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             )
         return
 
+    from defenseclaw.bootstrap import InitLockError, hold_init_lock
+
+    try:
+        with hold_init_lock():
+            _run_plain_init(
+                app,
+                skip_install=skip_install,
+                enable_guardrail=enable_guardrail,
+                non_interactive=non_interactive,
+                yes=yes,
+                api_port=api_port,
+                proxy_port=proxy_port,
+            )
+    except InitLockError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _run_plain_init(  # noqa: PLR0913 - the options the plain init path reads.
+    app: AppContext,
+    *,
+    skip_install: bool,
+    enable_guardrail: bool,
+    non_interactive: bool,
+    yes: bool,
+    api_port: int | None,
+    proxy_port: int | None,
+) -> None:
+    """The plain (non-guided) init; init_cmd holds the init lock around it."""
+
     from defenseclaw.config import (
         config_path,
         default_config,
