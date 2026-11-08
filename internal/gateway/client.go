@@ -1107,11 +1107,15 @@ func updateEnvFileToken(path, newToken string) error {
 	for len(lines) > 0 && lines[len(lines)-1] == "" {
 		lines = lines[:len(lines)-1]
 	}
-	out := strings.Join(lines, "\n") + "\n"
-	// The marker is provenance only: leave it out rather than push the file past
-	// the size every reader accepts, which would make the token unreadable.
+	body := strings.Join(lines, "\n")
+	// The marker is provenance only, and so is the final newline when the file is
+	// already at the size every reader accepts: leave them out rather than push the
+	// file past that size, which would make the token unreadable.
+	out := body + "\n"
 	if marked := out + envvars.AdoptedGatewayTokenMarker(newToken) + "\n"; len(marked) <= safefile.MaxDotEnvBytes {
 		out = marked
+	} else if len(out) > safefile.MaxDotEnvBytes && len(body) <= safefile.MaxDotEnvBytes {
+		out = body
 	}
 
 	return managed.WriteServiceRuntimeFile(

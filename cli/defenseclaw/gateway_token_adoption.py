@@ -51,15 +51,19 @@ def with_adopted_marker(body: bytes, token: str) -> bytes:
 
     The marker is provenance only. When recording it would push the file past the
     size every reader accepts (``MAX_DOTENV_BYTES``) the file is returned without
-    one: an unmarked file behaves as before, an unreadable one loses the token.
+    one, and without a final newline it did not have if that is what keeps it
+    within the size: an unmarked file behaves as before, an unreadable one loses
+    the token.
     """
     newline = b"\r\n" if b"\r\n" in body else b"\n"
     kept = [line for line in body.splitlines(keepends=True) if not line.strip().startswith(_MARKER)]
     out = b"".join(kept)
-    if out and not out.endswith((b"\r", b"\n")):
-        out += newline
-    marked = out + marker_line(token) + newline
-    return marked if len(marked) <= MAX_DOTENV_BYTES else out
+    terminated = out + newline if out and not out.endswith((b"\r", b"\n")) else out
+    marked = terminated + marker_line(token) + newline
+    if len(marked) <= MAX_DOTENV_BYTES:
+        return marked
+    # The final newline is provenance-neutral too: keep the accepted length.
+    return terminated if len(terminated) <= MAX_DOTENV_BYTES else out
 
 
 def shadowed_names(body: bytes) -> set[str]:
