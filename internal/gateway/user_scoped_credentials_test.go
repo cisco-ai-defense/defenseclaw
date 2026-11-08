@@ -465,3 +465,42 @@ func TestUserScopedOTLPCredentialIsBoundToItsUser(t *testing.T) {
 		t.Fatalf("another source's credential: status %d called=%v", code, observed.called)
 	}
 }
+
+// GAP-0916: once the guardian ledger no longer lists a connector for an
+// account (the connector was removed from the roster, so its row was revoked
+// in the same pass), the account's leftover hook credential is refused before
+// any handler runs, with no wait for a cache; a failed row is refused too.
+func TestUserScopedLeftoverCredentialIsRefusedAfterARosterRemoval(t *testing.T) {
+	identity := "1001"
+	target := func(name string, ok bool) managedHookLedgerTarget {
+		return managedHookLedgerTarget{User: "alice", UID: userScopedTestUID(1001), Connector: name, OK: ok}
+	}
+	if runtime.GOOS == "windows" {
+		identity = "S-1-5-21-1111-2222-3333-1001"
+		target = func(name string, ok bool) managedHookLedgerTarget {
+			return managedHookLedgerTarget{User: "alice", SID: identity, Connector: name, OK: ok}
+		}
+	}
+	ledger := &userScopedTestLedger{}
+	ledger.set(target("cursor", true), target("codex", true))
+	_, handler, observed := newUserScopedTestServer(t, true, ledger, map[string]string{identity: "alice"})
+	cursor := userScopedTestToken(t, connector.UserScopedHookCredential, "cursor", identity)
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/cursor/hook", cursor, nil); code != http.StatusOK || !observed.called {
+		t.Fatalf("enrolled cursor credential: status %d called=%v", code, observed.called)
+	}
+	// The row is revoked (absent from the ledger): the leftover token is a 401.
+	ledger.set(target("codex", true))
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/cursor/hook", cursor, nil); code != http.StatusUnauthorized || observed.called {
+		t.Fatalf("leftover cursor credential after the removal: status %d called=%v", code, observed.called)
+	}
+	// A row that is present but not OK never authenticates either.
+	ledger.set(target("cursor", false), target("codex", true))
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/cursor/hook", cursor, nil); code != http.StatusUnauthorized || observed.called {
+		t.Fatalf("leftover cursor credential with a failed row: status %d called=%v", code, observed.called)
+	}
+	// The connector that stayed on the roster is unaffected.
+	codex := userScopedTestToken(t, connector.UserScopedHookCredential, "codex", identity)
+	if code := serveUserScopedTest(handler, observed, http.MethodPost, "/api/v1/codex/hook", codex, nil); code != http.StatusOK || !observed.called {
+		t.Fatalf("the connector that stayed: status %d called=%v", code, observed.called)
+	}
+}
