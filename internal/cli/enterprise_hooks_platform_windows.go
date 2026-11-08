@@ -300,14 +300,23 @@ func syncEnterpriseHookManagedEnrollments(
 	return syncEnterpriseHookManagedMachineEnrollments(manifest, apiAddr, publishExact)
 }
 
+// syncEnterpriseHookManagedMachineEnrollments revokes stale enrollments and
+// publishes the exact set, one connector at a time. A failure of the Claude
+// Code or Codex step (a link at its machine folder, a policy that cannot be
+// repaired) is kept and named for that connector, and the later connectors
+// still run, so the Cursor revocation of a stale enrollment is not held back
+// while a link sits at the Codex folder (GAP-0862). The failing connector stays
+// fail-closed: the pass still returns its error, and the next pass retries it.
 func syncEnterpriseHookManagedMachineEnrollments(
 	manifest enterprisehooks.Manifest,
 	apiAddr string,
 	publishExact bool,
-) error {
+) (resultErr error) {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
+	var claudeErr, codexErr error
+	defer func() { resultErr = joinEnterpriseHookConnectorErrors(claudeErr, codexErr, resultErr) }()
 	configured := windowsEnterpriseConfiguredMachinePolicies()
 	desiredClaude, desiredCodex, err := windowsEnterpriseDesiredEnrollments(manifest)
 	if err != nil {
@@ -321,148 +330,154 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	if err != nil {
 		return err
 	}
-	currentClaude, claudeActive, err := enterpriseHookClaudePolicyTargetsReader()
-	var claudeRestoreErr error
-	if err != nil && cfg.StandaloneEnterprise() && configured["claudecode"] {
-		// The ownership record can outlive a changed or deleted drop-in. Put
-		// the drop-in back from that record, then read its enrollment before
-		// pre-sync can publish a smaller target set. The ensure below still
-		// tries an unrestored guard and reports both failures.
-		restored, restoreErr := enterpriseHookClaudePolicyRestorer()
-		claudeRestoreErr = restoreErr
-		if restoreErr == nil && restored {
-			currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
+	claudeErr = func() error {
+		currentClaude, claudeActive, err := enterpriseHookClaudePolicyTargetsReader()
+		var claudeRestoreErr error
+		if err != nil && cfg.StandaloneEnterprise() && configured["claudecode"] {
+			// The ownership record can outlive a changed or deleted drop-in. Put
+			// the drop-in back from that record, then read its enrollment before
+			// pre-sync can publish a smaller target set. The ensure below still
+			// tries an unrestored guard and reports both failures.
+			restored, restoreErr := enterpriseHookClaudePolicyRestorer()
+			claudeRestoreErr = restoreErr
+			if restoreErr == nil && restored {
+				currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
+			}
 		}
-	}
-	if err != nil {
-		if (!cfg.StandaloneEnterprise() || !configured["claudecode"]) &&
-			(publishExact || len(desiredClaude) == 0) {
-			return err
-		}
-		// The active global command remains fail-closed while protected state
-		// is incomplete. Let the narrow per-target secure Install path attempt
-		// its ownership-bound repair; final exact publication below will still
-		// reject any unrepaired damage.
-		currentClaude = nil
-		claudeActive = false
-	}
-	if cfg.StandaloneEnterprise() {
-		switch {
-		case configured["claudecode"] && !claudeActive:
-			if err := enterpriseHookClaudePolicyEnsurer(connector.SetupOpts{
-				APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
-				HookContractID: enterpriseHookMachinePolicyContract(manifest),
-			}); err != nil {
-				return fmt.Errorf("ensure configured Claude machine policy: %w", errors.Join(claudeRestoreErr, err))
+		if err != nil {
+			if (!cfg.StandaloneEnterprise() || !configured["claudecode"]) &&
+				(publishExact || len(desiredClaude) == 0) {
+				return err
 			}
-			currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
-			if err != nil {
-				return fmt.Errorf("read ensured Claude machine policy: %w", err)
-			}
-			if !claudeActive {
-				return errors.New("configured Claude machine policy did not become active")
-			}
-		case !configured["claudecode"] && claudeActive:
-			if err := enterpriseHookClaudePolicyDeactivator(); err != nil {
-				return fmt.Errorf("deactivate removed Claude connector: %w", err)
-			}
+			// The active global command remains fail-closed while protected state
+			// is incomplete. Let the narrow per-target secure Install path attempt
+			// its ownership-bound repair; final exact publication below will still
+			// reject any unrepaired damage.
 			currentClaude = nil
 			claudeActive = false
 		}
-	}
-	if publishExact {
-		if claudeActive || len(desiredClaude) > 0 {
-			if err := enterpriseHookClaudePolicyTargetsPublisher(desiredClaude); err != nil {
+		if cfg.StandaloneEnterprise() {
+			switch {
+			case configured["claudecode"] && !claudeActive:
+				if err := enterpriseHookClaudePolicyEnsurer(connector.SetupOpts{
+					APIAddr: apiAddr, HookExecutable: codexOpts.HookBinary,
+					HookContractID: enterpriseHookMachinePolicyContract(manifest),
+				}); err != nil {
+					return fmt.Errorf("ensure configured Claude machine policy: %w", errors.Join(claudeRestoreErr, err))
+				}
+				currentClaude, claudeActive, err = enterpriseHookClaudePolicyTargetsReader()
+				if err != nil {
+					return fmt.Errorf("read ensured Claude machine policy: %w", err)
+				}
+				if !claudeActive {
+					return errors.New("configured Claude machine policy did not become active")
+				}
+			case !configured["claudecode"] && claudeActive:
+				if err := enterpriseHookClaudePolicyDeactivator(); err != nil {
+					return fmt.Errorf("deactivate removed Claude connector: %w", err)
+				}
+				currentClaude = nil
+				claudeActive = false
+			}
+		}
+		if publishExact {
+			if claudeActive || len(desiredClaude) > 0 {
+				if err := enterpriseHookClaudePolicyTargetsPublisher(desiredClaude); err != nil {
+					return err
+				}
+			}
+		} else if claudeActive {
+			desired := make(map[string]struct{}, len(desiredClaude))
+			for _, sid := range desiredClaude {
+				desired[sid] = struct{}{}
+			}
+			retained := make([]string, 0, len(currentClaude))
+			for _, sid := range currentClaude {
+				if _, ok := desired[sid]; ok {
+					retained = append(retained, sid)
+				}
+			}
+			if err := enterpriseHookClaudePolicyTargetsPublisher(retained); err != nil {
 				return err
 			}
 		}
-	} else if claudeActive {
-		desired := make(map[string]struct{}, len(desiredClaude))
-		for _, sid := range desiredClaude {
-			desired[sid] = struct{}{}
-		}
-		retained := make([]string, 0, len(currentClaude))
-		for _, sid := range currentClaude {
-			if _, ok := desired[sid]; ok {
-				retained = append(retained, sid)
-			}
-		}
-		if err := enterpriseHookClaudePolicyTargetsPublisher(retained); err != nil {
-			return err
-		}
-	}
+		return nil
+	}()
 
-	currentCodex, err := enterpriseHookCodexRuntimeRegistryReader(
-		codexOpts.HookBinary,
-	)
-	var deferredCodexErr error
-	if cfg.StandaloneEnterprise() && configured["codex"] && (err != nil || !currentCodex.Active) {
-		// The reconcile validates the machine-policy folder and creates none of
-		// it, so a folder or vendor parent deleted after Setup made every pass
-		// fail the same way and nothing recreated it. A link on the path is
-		// named once and refused, as Install, ensure and repair refuse it.
-		ensured, folderErr := enterpriseHookCodexFolderEnsurer()
-		if folderErr != nil {
-			return fmt.Errorf("ensure configured Codex machine requirements: %w", folderErr)
+	codexErr = func() error {
+		currentCodex, err := enterpriseHookCodexRuntimeRegistryReader(
+			codexOpts.HookBinary,
+		)
+		var deferredCodexErr error
+		if cfg.StandaloneEnterprise() && configured["codex"] && (err != nil || !currentCodex.Active) {
+			// The reconcile validates the machine-policy folder and creates none of
+			// it, so a folder or vendor parent deleted after Setup made every pass
+			// fail the same way and nothing recreated it. A link on the path is
+			// named once and refused, as Install, ensure and repair refuse it.
+			ensured, folderErr := enterpriseHookCodexFolderEnsurer()
+			if folderErr != nil {
+				return fmt.Errorf("ensure configured Codex machine requirements: %w", folderErr)
+			}
+			if len(ensured.Created) != 0 {
+				fmt.Fprintf(os.Stderr, "[hook-guardian] recreated the missing Codex machine-policy folder %s (created: %s)\n",
+					ensured.Folder, strings.Join(ensured.Created, ", "))
+			}
+			codexOpts.CodexTargetEnabled = true
+			report, reconcileErr := enterpriseHookCodexRequirementsReconciler(codexOpts)
+			if reconcileErr != nil {
+				return fmt.Errorf("ensure configured Codex machine requirements: %w", reconcileErr)
+			}
+			if !report.OK {
+				return errors.New("configured Codex machine requirements were not published")
+			}
+			currentCodex, err = enterpriseHookCodexRuntimeRegistryReader(codexOpts.HookBinary)
+			if err == nil && !currentCodex.Active {
+				return errors.New("configured Codex machine requirements did not become active")
+			}
 		}
-		if len(ensured.Created) != 0 {
-			fmt.Fprintf(os.Stderr, "[hook-guardian] recreated the missing Codex machine-policy folder %s (created: %s)\n",
-				ensured.Folder, strings.Join(ensured.Created, ", "))
-		}
-		codexOpts.CodexTargetEnabled = true
-		report, reconcileErr := enterpriseHookCodexRequirementsReconciler(codexOpts)
-		if reconcileErr != nil {
-			return fmt.Errorf("ensure configured Codex machine requirements: %w", reconcileErr)
-		}
-		if !report.OK {
-			return errors.New("configured Codex machine requirements were not published")
-		}
-		currentCodex, err = enterpriseHookCodexRuntimeRegistryReader(codexOpts.HookBinary)
-		if err == nil && !currentCodex.Active {
-			return errors.New("configured Codex machine requirements did not become active")
-		}
-	}
-	if err != nil {
-		if publishExact || len(desiredCodex) == 0 {
-			deferredCodexErr = err
-		}
-		// As above, defer only to the trusted machine-policy reconciler. The
-		// target stays unregistered/fail-closed until final exact publication,
-		// but still revoke an independent stale Cursor enrollment below.
-	} else if len(desiredCodex) == 0 && (!cfg.StandaloneEnterprise() || !configured["codex"]) {
-		if currentCodex.Active {
-			report, err := enterpriseHookCodexRequirementsRemover(codexOpts)
-			if err != nil {
+		if err != nil {
+			if publishExact || len(desiredCodex) == 0 {
+				deferredCodexErr = err
+			}
+			// As above, defer only to the trusted machine-policy reconciler. The
+			// target stays unregistered/fail-closed until final exact publication,
+			// but still revoke an independent stale Cursor enrollment below.
+		} else if len(desiredCodex) == 0 && (!cfg.StandaloneEnterprise() || !configured["codex"]) {
+			if currentCodex.Active {
+				report, err := enterpriseHookCodexRequirementsRemover(codexOpts)
+				if err != nil {
+					return err
+				}
+				if !report.OK || !report.SafeToRemoveBinary ||
+					report.SurvivingOwnedPathReferences != 0 {
+					return fmt.Errorf("Codex machine requirements removal was not reference-clean")
+				}
+			}
+		} else if publishExact {
+			if !currentCodex.Active {
+				return fmt.Errorf("Codex managed policy is absent after target runtime installation")
+			}
+			if err := enterpriseHookCodexTargetsPublisher(codexOpts, desiredCodex); err != nil {
 				return err
 			}
-			if !report.OK || !report.SafeToRemoveBinary ||
-				report.SurvivingOwnedPathReferences != 0 {
-				return fmt.Errorf("Codex machine requirements removal was not reference-clean")
+		} else if currentCodex.Active {
+			desired := make(map[string]string, len(desiredCodex))
+			for _, target := range desiredCodex {
+				desired[strings.ToUpper(target.SID)] = target.DataDir
+			}
+			retained := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(currentCodex.Targets))
+			for _, target := range currentCodex.Targets {
+				dataDir, ok := desired[strings.ToUpper(target.SID)]
+				if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
+					retained = append(retained, target)
+				}
+			}
+			if err := enterpriseHookCodexTargetsPublisher(codexOpts, retained); err != nil {
+				return err
 			}
 		}
-	} else if publishExact {
-		if !currentCodex.Active {
-			return fmt.Errorf("Codex managed policy is absent after target runtime installation")
-		}
-		if err := enterpriseHookCodexTargetsPublisher(codexOpts, desiredCodex); err != nil {
-			return err
-		}
-	} else if currentCodex.Active {
-		desired := make(map[string]string, len(desiredCodex))
-		for _, target := range desiredCodex {
-			desired[strings.ToUpper(target.SID)] = target.DataDir
-		}
-		retained := make([]connector.WindowsCodexManagedRuntimeTarget, 0, len(currentCodex.Targets))
-		for _, target := range currentCodex.Targets {
-			dataDir, ok := desired[strings.ToUpper(target.SID)]
-			if ok && sameWindowsEnterprisePathCLI(dataDir, target.DataDir) {
-				retained = append(retained, target)
-			}
-		}
-		if err := enterpriseHookCodexTargetsPublisher(codexOpts, retained); err != nil {
-			return err
-		}
-	}
+		return deferredCodexErr
+	}()
 
 	currentCursor, cursorActive, err := enterpriseHookCursorPolicyTargetsReader()
 	if err != nil && cfg.StandaloneEnterprise() && configured["cursor"] {
@@ -517,10 +532,10 @@ func syncEnterpriseHookManagedMachineEnrollments(
 				return err
 			}
 		}
-		return deferredCodexErr
+		return nil
 	}
 	if !cursorActive {
-		return deferredCodexErr
+		return nil
 	}
 	desiredCursorBySID := make(map[string]string, len(desiredCursor))
 	for _, target := range desiredCursor {
@@ -536,7 +551,25 @@ func syncEnterpriseHookManagedMachineEnrollments(
 	if err := enterpriseHookCursorPolicyTargetsPublisher(retainedCursor); err != nil {
 		return err
 	}
-	return deferredCodexErr
+	return nil
+}
+
+// joinEnterpriseHookConnectorErrors is the one error a pass reports when
+// more than one connector step failed: each failure stays named, in order.
+func joinEnterpriseHookConnectorErrors(errs ...error) error {
+	var failed []error
+	for _, err := range errs {
+		if err != nil {
+			failed = append(failed, err)
+		}
+	}
+	switch len(failed) {
+	case 0:
+		return nil
+	case 1:
+		return failed[0]
+	}
+	return errors.Join(failed...)
 }
 
 func windowsEnterpriseDesiredCursorEnrollments(
