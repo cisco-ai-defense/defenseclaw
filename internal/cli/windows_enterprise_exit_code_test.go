@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -89,6 +90,7 @@ func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
 		"hook_in_use":                     enterprisestatus.WindowsExitBusy,
 		"codex_state_held":                enterprisestatus.WindowsExitBusy,
 		"codex_requirements_held":         enterprisestatus.WindowsExitBusy,
+		"codex_state_unsettled":           enterprisestatus.WindowsExitFailure,
 		"bundle_apply_failed":             enterprisestatus.WindowsExitBusy,
 		"invalid_arguments":               enterprisestatus.WindowsExitInvalidArgs,
 		"bundle_config_validation_failed": enterprisestatus.WindowsExitFailure,
@@ -121,6 +123,32 @@ func TestWindowsEnterpriseRollbackHeldCodeSurvivesTheWrappingFailureText(t *test
 		result.AddError(code, message)
 		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
 			t.Fatalf("%s: exit = %d, want %d", name, got, enterprisestatus.WindowsExitBusy)
+		}
+	}
+}
+
+// GAP-0877 review S2: a Codex writer that never settles ends the run with the
+// named code even when the module wrapped it inside the failure and rollback
+// text of an install, repair, ensure or upgrade, and the run still exits 1603
+// (a retry of the same delivery does not get past a stopped writer).
+func TestWindowsEnterpriseUnsettledCodexStateCodeSurvivesTheWrappingFailureText(t *testing.T) {
+	unsettled := "codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 3 (odd: a transaction is open) for 30 seconds, so the Codex managed-hooks state could not be judged and this run stopped"
+	for name, message := range map[string]string{
+		"leading": unsettled,
+		"upgrade": "Upgrade failed (" + unsettled + "); rolled back to the installed release",
+		"repair":  "Repair failed: " + unsettled + "; the transaction was rolled back",
+	} {
+		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
+		if code != "codex_state_unsettled" {
+			t.Fatalf("%s: code = %q, want codex_state_unsettled", name, code)
+		}
+		if got := windowsEnterpriseStderrCode([]byte(message)); !strings.Contains(got, "codex_state_unsettled:") {
+			t.Fatalf("%s: stderr code = %q, want the unsettled refusal", name, got)
+		}
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, message)
+		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitFailure {
+			t.Fatalf("%s: exit = %d, want %d", name, got, enterprisestatus.WindowsExitFailure)
 		}
 	}
 }
