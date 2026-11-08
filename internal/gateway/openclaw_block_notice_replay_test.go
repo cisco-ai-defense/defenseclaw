@@ -8,9 +8,10 @@ import (
 )
 
 // GAP-0644: OpenClaw replay can rewrite the call id of a result in ways the id
-// recorded at the block cannot predict (a forty or nine character cap, a new
-// id for a repeated call id). When the id on the result is not the recorded
-// id, the tie is unknown and nothing is shown: the notice stays pending for
+// recorded at the block cannot predict (a nine character cap, a new id for a
+// repeated call id). The letters-and-digits form of the id, cut to forty, is
+// predictable and is matched (see replayToolCallID); any other id on the result
+// leaves the tie unknown and nothing is shown: the notice stays pending for
 // the result that carries the recorded id, or expires. The block text, the
 // tool name and any quoting never decide it.
 func TestGAP0644RewrittenResultIDShowsNothing(t *testing.T) {
@@ -19,7 +20,7 @@ func TestGAP0644RewrittenResultIDShowsNothing(t *testing.T) {
 	}
 	const blockText = "DefenseClaw: protected write"
 	for _, c := range []struct{ name, recorded, req string }{
-		{"forty character cap of a long id", "id_abcdefghijklmnopqrstuvwxyz0123456789LONG", chat("idabcdefghijklmnopqrstuvwxyz0123456789LO", blockText)},
+		{"thirty-nine character cap of a long id", "id_abcdefghijklmnopqrstuvwxyz0123456789LONG", chat("idabcdefghijklmnopqrstuvwxyz0123456789L", blockText)},
 		{"new id of a repeated call id", "repeat.abc", chat("call_5052364cf5a38bda784960a6", blockText)},
 		{"nine character form of the id", "abcdefghij", chat("abcdefghi", blockText)},
 		{"unrelated id quoting the block text", "call_blk1", chat("call_5052364cf5a38bda784960a6", blockText)},

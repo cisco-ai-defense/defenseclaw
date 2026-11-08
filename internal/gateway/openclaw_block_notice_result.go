@@ -154,8 +154,15 @@ func objectItems(v any) []map[string]any {
 // request that names an item of the call, or several, never matches through the
 // call part, and a sibling item of the same call part is told from the block
 // by the inspect-side memory, which keys calls by call part. A recorded id with
-// "|" is otherwise matched only by itself.
+// "|" is otherwise matched only by itself. A result id is also matched when it
+// is exactly the replay form of the recorded id (replayToolCallID): OpenClaw
+// replays an Anthropic Messages, Chat Completions or Bedrock Converse call with
+// only the letters and digits of its id, so the result carries "toolubdrk01ab"
+// for the call "toolu_bdrk_01ab". Only that exact form matches, never a trimmed,
+// re-cased or otherwise altered id. Two calls with one replay form share an
+// inspect-side key and are ambiguous.
 func (n openClawBlockNotice) isResultOf(r toolResultID) bool {
-	return r.id == n.callID || (r.itemRef != "" && r.itemRef == n.callID) ||
+	return r.id == n.callID || r.id == replayToolCallID(n.callID) ||
+		(r.itemRef != "" && r.itemRef == n.callID) ||
 		(r.callOnly && noticeCallKey(n.callID) == r.id)
 }
