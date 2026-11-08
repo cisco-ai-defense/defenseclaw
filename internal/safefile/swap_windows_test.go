@@ -420,6 +420,54 @@ func TestCompareAndSwapFileRetriesTransactionalConflict(t *testing.T) {
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
 }
 
+func TestCompareAndSwapFileRollsBackUncommittedRename(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, "new")
+	previous := swapTransactedRename
+	defer func() { swapTransactedRename = previous }()
+	rollback := errors.New("test rollback after rename")
+	swapTransactedRename = func(from, to string, flags uint32, tx windows.Handle) error {
+		if err := renameTransacted(from, to, flags, tx); err != nil {
+			return err
+		}
+		return rollback
+	}
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	if !errors.Is(err, rollback) || result.Swapped {
+		t.Fatalf("CAS rollback: result=%+v err=%v", result, err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "old", "source.tmp": "new"})
+}
+
+func TestCompareAndSwapFileFallsBackWhenTransactionsUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := writeSwapSourceForTest(t, dir, "new")
+	previousTx, previousPlain := swapTransactedRename, swapRenameReplace
+	defer func() { swapTransactedRename, swapRenameReplace = previousTx, previousPlain }()
+	transacted, plain := 0, 0
+	swapTransactedRename = func(_, _ string, _ uint32, _ windows.Handle) error {
+		transacted++
+		return windows.ERROR_NOT_SUPPORTED
+	}
+	swapRenameReplace = func(from, to string, class, flags uint32) error {
+		plain++
+		return renameReplace(from, to, class, flags)
+	}
+	result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
+	if err != nil || !result.Swapped || transacted != 1 || plain != 1 {
+		t.Fatalf("CAS fallback: result=%+v transacted=%d plain=%d err=%v", result, transacted, plain, err)
+	}
+	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new"})
+}
+
 func TestCompareAndSwapFileLeavesProgramImagesOutsideTransactions(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "program.exe")
