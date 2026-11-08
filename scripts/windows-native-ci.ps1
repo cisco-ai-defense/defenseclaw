@@ -781,8 +781,17 @@ function Get-GoTestFailureSummary(
             }
             if ($test) {
                 if ($testOutput.ContainsKey($key)) {
+                    # The summary already names each failed test, so Go's own
+                    # run and result markers add nothing. Kept, a short
+                    # "--- FAIL:" line after a long assertion line pushes the
+                    # assertion out of the byte-bounded tail and the summary
+                    # shows no failure text (rel-1-0-6:GAP-0840).
+                    $detail = [regex]::Replace(
+                        $output,
+                        '(?m)^[ \t]*(=== (RUN|PAUSE|CONT|NAME)|--- (FAIL|PASS|SKIP):)[^\r\n]*(\r?\n|$)',
+                        '')
                     Add-WindowsNativeDiagnosticTail -Queue $testOutput[$key] `
-                        -Text $output -MaxLines 120 -MaxBytes $tailBytesPerFailure
+                        -Text $detail -MaxLines 120 -MaxBytes $tailBytesPerFailure
                 }
             }
         }
@@ -2029,6 +2038,43 @@ function Invoke-SelfTest {
             -not $goTestSummary.Contains('Authorization: ***REDACTED***') -or
             [Text.Encoding]::UTF8.GetByteCount($goTestSummary) -gt 1024) {
             throw 'structured Go test summary lost failure identity, focus, redaction, or bounds'
+        }
+
+        # A long assertion line followed by Go's end-of-test marker keeps its
+        # text in the bounded summary (rel-1-0-6:GAP-0840).
+        $longAssertion = 'ASSERT-HEAD ' + ('detail ' * 140) + 'ASSERT-TAIL'
+        $assertionJson = @(
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/assertion'
+                Test = 'TestLongAssertion'
+                Output = "=== RUN   TestLongAssertion`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/assertion'
+                Test = 'TestLongAssertion'
+                Output = "    fixture_test.go:1: $longAssertion`n"
+            },
+            [pscustomobject]@{
+                Action = 'output'
+                Package = 'example.invalid/assertion'
+                Test = 'TestLongAssertion'
+                Output = "--- FAIL: TestLongAssertion (0.32s)`n"
+            },
+            [pscustomobject]@{
+                Action = 'fail'
+                Package = 'example.invalid/assertion'
+                Test = 'TestLongAssertion'
+                Elapsed = 0.32
+            }
+        ) | ForEach-Object { $_ | ConvertTo-Json -Compress }
+        $assertionSummary = Get-GoTestFailureSummary (
+            $assertionJson -join [Environment]::NewLine
+        )
+        if (-not $assertionSummary.Contains('ASSERT-HEAD') -or
+            -not $assertionSummary.Contains('ASSERT-TAIL')) {
+            throw 'Go test summary lost a long assertion line to the end-of-test marker'
         }
 
         $runtimeJson = @(
