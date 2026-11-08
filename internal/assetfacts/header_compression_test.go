@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -96,8 +97,14 @@ func TestHeaderDeflatedValueCannotExpandWithoutBound(t *testing.T) {
 	if _, ok := Decode(compressedPrefix + "AAAA"); ok {
 		t.Error("a corrupt deflated value was decoded")
 	}
-	ok := pack([]byte(`{"skill_dirs":["/skills/notes"]}`))
-	if facts, accepted := Decode(ok); !accepted || len(facts.SkillDirs) != 1 {
+	// The skill folder is absolute on this OS: a path that starts with a slash
+	// has no drive on Windows and the decoder rightly drops it.
+	dir := filepath.Join(t.TempDir(), "skills", "notes")
+	within, err := json.Marshal(Facts{SkillDirs: []string{dir}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts, accepted := Decode(pack(within)); !accepted || len(facts.SkillDirs) != 1 || facts.SkillDirs[0] != dir {
 		t.Errorf("a deflated value within the bound was refused: %v %+v", accepted, facts)
 	}
 }
