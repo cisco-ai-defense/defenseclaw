@@ -98,8 +98,12 @@ func TestHeaderDeflatedValueCannotExpandWithoutBound(t *testing.T) {
 		t.Error("a corrupt deflated value was decoded")
 	}
 	// The skill folder is absolute on this OS: a path that starts with a slash
-	// has no drive on Windows and the decoder rightly drops it.
-	dir := filepath.Join(t.TempDir(), "skills", "notes")
+	// has no drive on Windows and the decoder rightly drops it, and a relative
+	// temporary directory (a relative GOTMPDIR) is dropped on every OS.
+	dir, err := filepath.Abs(filepath.Join(t.TempDir(), "skills", "notes"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	within, err := json.Marshal(Facts{SkillDirs: []string{dir}})
 	if err != nil {
 		t.Fatal(err)
