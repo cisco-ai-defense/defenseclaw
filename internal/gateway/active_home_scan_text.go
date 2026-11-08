@@ -6,6 +6,7 @@ package gateway
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -25,29 +26,35 @@ var ruleReadableHome = regexp.MustCompile(`^(?:/root|/home/\w+|/Users/\w+)$`)
 // name under a home of the usual shape. Only the home as a whole path prefix
 // is respelled: not a longer name, not a path that merely ends in it. A
 // drive-letter home is read in the forward-slash spelling the path facts
-// give, and compared without regard to letter case, as Windows does.
+// give, and compared without regard to letter case, as Windows does: in any
+// script, so an account name such as an accented one matches its other case.
 func activeHomeAsTilde(text, home string) string {
 	home = strings.TrimRight(strings.ReplaceAll(home, `\`, "/"), "/")
 	windows := actionfacts.DriveLetterPath(home + "/")
 	if len(home) < 2 || !windows && (home[0] != '/' || ruleReadableHome.MatchString(home)) {
 		return text
 	}
-	haystack, needle := text, home+"/"
-	if windows {
-		haystack, needle = asciiLowerPreservingBytes(text), asciiLowerPreservingBytes(needle)
+	needle := home + "/"
+	find := func(from int) (int, int) {
+		offset := strings.Index(text[from:], needle)
+		if offset < 0 {
+			return -1, -1
+		}
+		return from + offset, from + offset + len(needle)
 	}
-	if !strings.Contains(haystack, needle) {
-		return text
+	if windows {
+		find = func(from int) (int, int) { return indexFoldedPrefix(text, needle, from) }
 	}
 	var out strings.Builder
 	last := 0
 	for from := 0; ; {
-		offset := strings.Index(haystack[from:], needle)
-		if offset < 0 {
+		start, end := find(from)
+		if start < 0 {
 			break
 		}
-		start := from + offset
-		from = start + len(home)
+		// The match ends after the slash that closes the home; the home
+		// itself ends one byte earlier.
+		from = end - 1
 		if start > 0 && (strings.IndexByte("_.-/~$}", text[start-1]) >= 0 || asciiAlphanumeric(text[start-1])) {
 			continue
 		}
@@ -55,8 +62,42 @@ func activeHomeAsTilde(text, home string) string {
 		out.WriteByte('~')
 		last = from
 	}
+	if last == 0 {
+		return text
+	}
 	out.WriteString(text[last:])
 	return out.String()
+}
+
+// indexFoldedPrefix finds needle in text from byte offset from, comparing
+// letters by Unicode simple case folding as a Windows file system does, and
+// returns the byte span of the match in text (which can differ in length from
+// needle) or -1, -1. A match begins with the ASCII drive letter of needle, so
+// most positions are rejected on one byte.
+func indexFoldedPrefix(text, needle string, from int) (int, int) {
+	runes := utf8.RuneCountInString(needle)
+	first := asciiLower(needle[0])
+	for start := from; start < len(text); start++ {
+		if asciiLower(text[start]) != first {
+			continue
+		}
+		end := start
+		for count := 0; count < runes && end < len(text); count++ {
+			_, size := utf8.DecodeRuneInString(text[end:])
+			end += size
+		}
+		if strings.EqualFold(text[start:end], needle) {
+			return start, end
+		}
+	}
+	return -1, -1
+}
+
+func asciiLower(b byte) byte {
+	if 'A' <= b && b <= 'Z' {
+		return b + ('a' - 'A')
+	}
+	return b
 }
 
 func asciiAlphanumeric(b byte) bool {
