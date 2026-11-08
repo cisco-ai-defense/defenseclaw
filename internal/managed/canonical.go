@@ -51,6 +51,11 @@ const (
 	ObjectServiceInstallDirectory ObjectKind = "ServiceInstallDirectory"
 	// ObjectServiceInstallFile is the gateway executable.
 	ObjectServiceInstallFile ObjectKind = "ServiceInstallFile"
+	// ObjectSecureClientMarkerDirectory is InstallRoot\secure-client.install,
+	// the empty folder that marks a Secure Client install: the service install
+	// directory's entries, owned by SYSTEM. Only a SYSTEM-owned marker is the
+	// installer's; another owner is a boundary, never adopted.
+	ObjectSecureClientMarkerDirectory ObjectKind = "SecureClientMarkerDirectory"
 	// ObjectStateDirectory is StateRoot: gateway read and traverse.
 	ObjectStateDirectory ObjectKind = "StateDirectory"
 	// ObjectAdminDirectory is a SYSTEM and Administrators only directory: the
@@ -73,8 +78,8 @@ const (
 func (kind ObjectKind) Directory() bool {
 	switch kind {
 	case ObjectRuntimeDirectory, ObjectConfigDirectory, ObjectInstallDirectory,
-		ObjectServiceInstallDirectory, ObjectStateDirectory, ObjectAdminDirectory,
-		ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
+		ObjectServiceInstallDirectory, ObjectSecureClientMarkerDirectory, ObjectStateDirectory,
+		ObjectAdminDirectory, ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
 		return true
 	}
 	return false
@@ -332,6 +337,10 @@ func canonicalSpecFor(kind ObjectKind, gatewaySID string) canonicalSpec {
 		return gatewayRead(withGateway(maskReadAndExecute))
 	case ObjectServiceInstallDirectory, ObjectServiceInstallFile:
 		return gatewayRead(withUsers(withGateway(maskReadAndExecute)))
+	case ObjectSecureClientMarkerDirectory:
+		spec := gatewayRead(withUsers(withGateway(maskReadAndExecute)))
+		spec.Forms[0].Owner = sidLocalSystem
+		return spec
 	case ObjectInstallDirectory, ObjectInstallFile:
 		return canonicalSpec{Forms: []canonicalForm{{Owner: sidAdministrators, ACEs: withUsers(base)}}}
 	case ObjectAdminDirectory, ObjectAdminFile, ObjectLogDirectory:
@@ -491,6 +500,13 @@ func assessCanonicalDescriptor(
 		default:
 			a.Drift = append(a.Drift, fmt.Sprintf("owner %s is not trusted", ownerText(desc.Owner)))
 		}
+	}
+	if kind == ObjectSecureClientMarkerDirectory && desc.Owner != sidLocalSystem {
+		// The marker is the SYSTEM-owned fact that this is a Secure Client
+		// install; an Administrators-owned folder is not that fact
+		// (GAP-0461), so a repair never makes it one.
+		a.Owner = ownerUntrusted
+		a.Drift = append(a.Drift, fmt.Sprintf("Secure Client install marker owner %s is not SYSTEM", ownerText(desc.Owner)))
 	}
 
 	if !desc.Protected {

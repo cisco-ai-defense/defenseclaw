@@ -59,7 +59,7 @@ func (kind ObjectKind) valid() bool {
 	case ObjectRuntimeDirectory, ObjectRuntimeFile, ObjectRuntimeSecretFile,
 		ObjectConfigFile, ObjectConfigDirectory, ObjectInstallDirectory,
 		ObjectInstallFile, ObjectServiceInstallDirectory, ObjectServiceInstallFile,
-		ObjectStateDirectory, ObjectAdminDirectory, ObjectAdminFile,
+		ObjectSecureClientMarkerDirectory, ObjectStateDirectory, ObjectAdminDirectory, ObjectAdminFile,
 		ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
 		return true
 	}

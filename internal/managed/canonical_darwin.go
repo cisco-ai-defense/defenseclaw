@@ -65,7 +65,8 @@ func darwinCanonicalFormFor(kind ObjectKind, opts CanonicalOptions) (darwinCanon
 		form.Mode = 0o640
 	case ObjectRuntimeSecretFile:
 		form.Mode = 0o600
-	case ObjectConfigDirectory, ObjectInstallDirectory, ObjectServiceInstallDirectory, ObjectAdminDirectory:
+	case ObjectConfigDirectory, ObjectInstallDirectory, ObjectServiceInstallDirectory,
+		ObjectSecureClientMarkerDirectory, ObjectAdminDirectory:
 		form.Mode = 0o755
 	case ObjectInstallFile, ObjectServiceInstallFile:
 		form.Mode = 0o755
