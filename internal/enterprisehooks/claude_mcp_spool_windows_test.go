@@ -510,6 +510,13 @@ func TestWriteWindowsClaudeMCPSpoolMarksUnavailableToken(t *testing.T) {
 // effective token used for the read. A parent denial inherited by the
 // project must refuse only that project, like a denied directory or file open.
 func TestWindowsClaudeProjectMCPChecksDirectoryAndFileACL(t *testing.T) {
+	// The reader runs under the ambient token here (the user-token stub below
+	// calls fn directly). An enabled SeBackupPrivilege, as on an elevated SSH
+	// or scheduled-task session, opens directories and files with backup
+	// semantics and bypasses the deny ACEs this test sets, so disable it (and
+	// SeRestorePrivilege) in the process token for all three cases, as the
+	// GitHub runner token has them.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 	sid := currentWindowsTestSID(t)
 	original := windowsClaudeProjectWithUserToken
 	windowsClaudeProjectWithUserToken = func(_ *windows.SID, _ string, fn func() error) error { return fn() }
