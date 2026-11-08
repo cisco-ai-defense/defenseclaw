@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // hotConfigHost stages an installed config and a supplied one, and stubs what
@@ -1997,6 +1998,77 @@ func TestWindowsEnterpriseEnsureHealsAStaleApprovedConfigSource(t *testing.T) {
 	if copyOf(layout) != approvedSourceConfigA || len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_busy" ||
 		windowsEnterpriseFailureCodeFor(result) != enterprisestatus.WindowsExitBusy {
 		t.Fatalf("busy lock: copy %q, errors %+v", copyOf(layout), result.Errors)
+	}
+}
+
+// GAP-0854: the lock the check takes at the end of a lifecycle run is the
+// lifecycle.lock of the lifecycle root, where every other step and the
+// installer take it, not a file in the install state folder that holds the
+// approved copy. In the install state folder there is no lock file, so the
+// proof of a copy that already is the installed config was never written after
+// a Repair, a restart ensure or a no-op ensure, and the next Repair over a
+// single hand edit was refused. The lock here is the real one: it fails
+// without the file, as the computer does.
+func TestWindowsEnterpriseApprovedSourceCheckTakesTheLifecycleRootLock(t *testing.T) {
+	const record = `{"installed":true,"profile":"standalone","approved_policy_sources":{"config":"%s"}}`
+	newHotConfigHost(t, approvedSourceConfigB, approvedSourceConfigB)
+	layout, _ := windowsEnterpriseHotConfigLayout()
+	layout.LifecycleDir = t.TempDir() // the install state folder: deployment.json, approved copy, proof
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+	lifecycleRoot := filepath.Join(t.TempDir(), "lifecycle")
+	if err := os.MkdirAll(lifecycleRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(lifecycleRoot, "lifecycle.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	savedRoots := windowsManagedLayout.roots
+	t.Cleanup(func() { windowsManagedLayout.roots = savedRoots })
+	windowsManagedLayout.roots = func(string) (winpath.EnterpriseRoots, error) {
+		return winpath.EnterpriseRoots{LifecycleDir: lifecycleRoot}, nil
+	}
+	var locks []string
+	windowsEnterpriseHotConfigLock = func(path string) (func(), error) {
+		locks = append(locks, path)
+		return acquireWindowsEnterpriseLifecycleLock(path)
+	}
+	// A transaction published copy and digest for the installed B; only the
+	// proof of it is missing.
+	for name, body := range map[string]string{
+		managedDeploymentRecordFile: fmt.Sprintf(record, configwrite.SHA256Hex([]byte(approvedSourceConfigB))),
+		managedApprovedConfigFile:   approvedSourceConfigB,
+	} {
+		if err := os.WriteFile(filepath.Join(layout.LifecycleDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+
+	result := &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if len(result.Errors) != 0 || len(result.Warnings) != 0 {
+		t.Fatalf("heal: %+v", result)
+	}
+	if want := filepath.Join(lifecycleRoot, "lifecycle.lock"); len(locks) != 1 || locks[0] != want {
+		t.Fatalf("lock taken at %q, want %q", locks, want)
+	}
+	// The single hand edit after the run is repairable: the proof exists.
+	handEditAfter(t, layout.ConfigPath, approvedSourceConfigB)
+	if err := unprovenApprovedConfigSourceForHandEdit(layout.LifecycleDir, layout.ConfigPath); err != nil {
+		t.Fatalf("a single hand edit after the run is refused: %v", err)
+	}
+
+	// Twin: a lock another run holds leaves the proof to the exit of that run,
+	// without failing this one (the copy already is the installed config).
+	if err := os.WriteFile(layout.ConfigPath, []byte(approvedSourceConfigB), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageConfigGeneration(t, layout.ConfigPath, approvedSourceConfigB, "lifecycle")
+	windowsEnterpriseHotConfigLock = func(string) (func(), error) { return nil, windows.ERROR_SHARING_VIOLATION }
+	result = &enterprisestatus.Result{}
+	healWindowsStandaloneApprovedConfigSource(result)
+	if len(result.Errors) != 0 || len(result.Warnings) != 0 {
+		t.Fatalf("a busy lock failed a run whose copy is current: %+v", result)
 	}
 }
 
