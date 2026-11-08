@@ -105,6 +105,19 @@ def test_the_settled_resolver_is_the_plain_one_off_the_standalone_profile() -> N
     assert "return (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Path)" in body[guard:]
 
 
+def test_the_refusal_says_the_run_rolled_back_not_that_nothing_changed() -> None:
+    # Review S2: inside an install, repair, ensure or upgrade the throw rolls
+    # the run back, so "nothing was changed" was wrong there.
+    body = _function_body(_text(), "Wait-DefenseClawCodexManagedHooksStateSettled")
+    assert "nothing was changed" not in body
+    assert "is rolled back" in body and "a verify changes nothing" in body
+    go = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    known = go[go.index("var windowsEnterpriseKnownCodes = []string{") :]
+    assert '"codex_state_unsettled",' in known[: known.index("}")]
+    docs = (ROOT / "docs-site" / "content" / "docs" / "enterprise" / "troubleshooting.mdx").read_text(encoding="utf-8")
+    assert "nothing changed" not in docs[docs.index("Setup says the Codex managed-hooks state is not settled") :][:1200]
+
+
 def test_the_wait_is_bounded_and_refuses_with_a_named_reason() -> None:
     text = _text()
     assert "$script:CodexStateSettleSeconds = 30" in text
@@ -248,6 +261,13 @@ def test_a_writer_that_stopped_after_its_copy_left_the_state_the_hook_reads(tmp_
     assert result["threw"] == "", result
     assert result["judged"] == [".defenseclaw-managed-hooks.state.4"], result
     assert 2 <= result["seconds"] < 10, result
+
+
+def test_the_refusal_names_the_rollback_and_the_next_step(tmp_path: Path) -> None:
+    result = _run(tmp_path, "writer-stopped")
+    assert "nothing was changed" not in result["threw"], result
+    assert "an install, repair, ensure or upgrade that had started is rolled back" in result["threw"], result
+    assert "a verify changes nothing" in result["threw"], result
 
 
 @pytest.mark.parametrize("call", ["strict", "soft"])
