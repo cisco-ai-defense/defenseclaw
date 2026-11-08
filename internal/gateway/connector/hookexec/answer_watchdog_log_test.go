@@ -304,8 +304,26 @@ func TestWatchdogLogWaitIsSpentOnTheProofClock(t *testing.T) {
 			}
 		})
 	}()
-	// Run ends before the lookup and the transport are released.
-	t.Cleanup(func() { unblock(); close(hung); <-returned })
+	// Run ends before the lookup and the transport are released, and the
+	// released lookup writes its row before the directory goes: the watchdog
+	// writes it on a goroutine the process end does not wait for.
+	t.Cleanup(func() {
+		unblock()
+		close(hung)
+		<-returned
+		rowWritten := time.After(10 * time.Second)
+		for {
+			if row, _ := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl")); strings.HasSuffix(string(row), "\n") {
+				return
+			}
+			select {
+			case <-rowWritten:
+				t.Error("the released lookup never wrote its row")
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	})
 	giveUp := time.After(10 * time.Second)
 	for bounded := false; !bounded; {
 		for _, asked := range clock.Requested() {
