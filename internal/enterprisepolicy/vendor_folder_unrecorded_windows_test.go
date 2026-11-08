@@ -61,6 +61,13 @@ func plantUnrecorded(t *testing.T, tc unrecordedCase, dacl string) (Options, str
 	opts := tc.options(t)
 	folder := filepath.Dir(tc.file(t, opts))
 	tc.prepare(t, opts, tc.file(t, opts))
+	if opts.OpenCodePluginPath != "" {
+		// The guardian installs the managed plugin before it reconciles
+		// OpenCode; without it OpenCode is on the per-user route.
+		if _, err := InstallOpenCodeManagedPlugin(opts); err != nil {
+			t.Fatal(err)
+		}
+	}
 	file := tc.leftover(folder)
 	if err := os.WriteFile(file, []byte(tc.content), 0o644); err != nil {
 		t.Fatal(err)
