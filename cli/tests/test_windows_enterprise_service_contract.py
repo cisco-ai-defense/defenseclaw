@@ -6381,27 +6381,49 @@ def test_vendor_folder_link_refusal_runs_first_for_standalone_install_like_actio
     assert "if !windowsManagedHooksStandaloneProcess() {" in go[go.index("var windowsManagedHooksRefuseLinkedVendorFolders") :]
 
 
-def test_rollback_goes_on_past_a_kept_link_and_the_shared_bodies_are_unchanged() -> None:
-    """GAP-0900 review: the Go restore reads and writes nothing through a link on
-    a vendor folder, names it, and the rollback goes on; the failed-row label of
-    Windows ("user (SID)") is read on the standalone profile only. The psm1 bodies
-    that Secure Client shares with the standalone rollback (the restore, the
-    deployment assertion, the readiness check of a restored transaction) carry no
-    GAP-0900 line: the native mutants showed the Codex skips they once had were not
-    needed once the Go restore skips a kept link, and a skip there would also have
-    excused a forward path (-ServicingTransaction is passed by the install commit
-    and the static validation too)."""
+def test_rollback_skips_codex_files_behind_a_link_and_reads_the_user_sid_label() -> None:
+    """GAP-0900: a rollback never writes through a link that appeared on the Codex
+    folder after the transaction opened (it names the link and goes on, so the
+    services come back), and the acceptance of a completed guardian reconcile with
+    failed accounts reads the "user (SID)" label Windows has used since 1.0.5. The
+    skips are the rollback's alone (-RollbackRestore, passed by the restore check
+    only): every forward path keeps failing closed on a link. Secure Client keeps
+    the lines it had."""
     module = read(MODULE)
-    for name in (
-        "Restore-DefenseClawTransaction",
-        "Assert-DefenseClawEnterpriseDeployment",
-        "Assert-DefenseClawRestoredTransactionReadyForActivation",
+    restore = _psm1_function(module, "Restore-DefenseClawTransaction")
+    shared = restore[restore.index("        if ($isSharedCodexFile) {") :]
+    link = shared.index("Get-DefenseClawVendorMachineFolderLink")
+    skip = shared.index("continue", link)
+    assert link < skip < shared.index("Assert-DefenseClawCodexMachinePolicyDirectory")
+    assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded" in shared[link:skip]
+    assert 'cmd /c rmdir `"$restoreCodexLink`"' in shared[link:skip]
+    assert "-SkipCodexMachineState:$restoreCodexLinked" in restore
+
+    # The assertion: a dedicated switch, passed by one caller (the restore check),
+    # not -ServicingTransaction, which the install commit and the static validation
+    # of a forward run pass too.
+    deployment = _psm1_function(module, "Assert-DefenseClawEnterpriseDeployment")
+    assert "[switch]$RollbackRestore" in deployment
+    assert "if ($RollbackRestore -and $codexTargetEnabled) {" in deployment
+    assert "$ServicingTransaction -and $codexTargetEnabled" not in deployment
+    assert deployment.count("Get-DefenseClawVendorMachineFolderLink") == 1
+    assert module.count("-RollbackRestore `\n") == 1
+    ready = _psm1_function(module, "Assert-DefenseClawRestoredTransactionReadyForActivation")
+    assert "        -ServicingTransaction `\n        -RollbackRestore `\n" in ready
+    # The lines Secure Client runs are the ones it always ran, byte for byte; the
+    # new code only brackets them.
+    for kept in (
+        "    if ($codexTargetEnabled) {\n        Assert-DefenseClawCodexMachinePolicyDirectory `\n            -Path $Layout.CodexVendorDirectory\n"
+        "        Assert-DefenseClawCodexMachinePolicyDirectory `\n            -Path $Layout.CodexMachinePolicyDirectory\n"
+        "        Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout\n"
+        "        Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout\n"
+        "        [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)\n    }\n    else {\n",
+        "    [void](Invoke-DefenseClawCodexRequirementsCommand `\n        -Layout $Layout `\n"
+        "        -GatewayServiceName $GatewayServiceName `\n"
+        "        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))\n",
     ):
-        body = _psm1_function(module, name)
-        assert "GAP-0900" not in body, name
-        assert "RollbackRestore" not in body, name
-        assert "Get-DefenseClawVendorMachineFolderLink" not in body, name
-    assert "RollbackRestore" not in module
+        assert kept in deployment, kept
+    assert "if ($codexFolderLink -eq '') {\n    if ($codexTargetEnabled) {" in deployment
 
     attributable = _psm1_function(module, "Test-DefenseClawGuardianReportErrorsAttributable")
     assert "(?<connector>[^@\\s]+)@(?<account>.+?)(?: \\((?<sid>S-1-[0-9-]+)\\))?: " in attributable
@@ -6412,16 +6434,6 @@ def test_rollback_goes_on_past_a_kept_link_and_the_shared_bodies_are_unchanged()
     lifecycle = _psm1_function(module, "Invoke-DefenseClawInstallLikeLifecycle")
     assert "$operationError = Add-DefenseClawVendorMachineFolderLinkFix -ErrorRecord $operationError -Layout $Layout" in lifecycle
     assert lifecycle.count("throw $operationError") == 2
-
-    # The module names a link the Go restore kept; the Go restore keeps a linked
-    # connector out of the selector and policy restores.
-    snapshot = _psm1_function(module, "Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand")
-    assert "$report.PSObject.Properties['kept_links']" in snapshot
-    go = read(ROOT / "internal" / "cli" / "windows_managed_hooks_lifecycle.go")
-    restore = go[go.index('	case "restore":') : go.index('	case "retire":')]
-    assert "kept := windowsManagedHooksKeptVendorFolderLinks()" in restore
-    assert "report.KeptLinks = windowsManagedHooksKeptLinkList(kept)" in restore
-    assert restore.count("keepStep(") == 3
 
 
 def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
