@@ -226,6 +226,9 @@ type simpleLoopBind struct {
 	fork bool
 	// ifs is the IFS a read loop sets for its read (while IFS=: read name).
 	ifs string
+	// rebound is where the body may hold another value of the variable than
+	// the loop gave it (simpleReboundSpans).
+	rebound []simpleSpan
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The
@@ -467,9 +470,10 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				// The scope kind names the login the loop binds, so the
 				// name has no value the walk can follow once the loop ends.
 				kind = loopScopeKinds[iteration.Name.Value]
-			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(typed, iteration, functionNames) {
+			} else if iteration, ok := typed.Loop.(*syntax.WordIter); ok && simpleLoopForks(iteration) {
 				outer := loopBinds
-				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true})
+				loopBinds = append(slices.Clone(outer), simpleLoopBind{name: iteration.Name.Value, items: iteration.Items, fork: true,
+					rebound: simpleReboundSpans(typed.Do, iteration.Name.Value, functionNames, nil)})
 				defer func() { loopBinds = outer }()
 				kind, name = forkedLoopScopeKind, iteration.Name.Value
 			}
