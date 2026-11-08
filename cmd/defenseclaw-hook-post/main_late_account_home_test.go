@@ -76,9 +76,14 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 	t.Setenv(hookPostDeadlineEnv, "700")
 	t.Setenv(hookPostDataDirEnv, t.TempDir())
 	addr := strings.TrimPrefix(server.URL, "http://")
+	var workdir string
 	post := func(path, command string) int {
+		input := map[string]any{"command": command}
+		if workdir != "" {
+			input["workdir"] = workdir
+		}
 		body, err := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "cwd": project, "tool_name": "Bash",
-			"tool_input": map[string]any{"command": command}})
+			"tool_input": input})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -117,6 +122,40 @@ func TestHookPostLateCallIsToldAgainstTheAccountHomeNotTheScratchHome(t *testing
 			}
 		}
 	}
+	// A relative workdir with a link before a parent step is the folder the
+	// file system reaches (here the account home), not the one a text
+	// clean-up names (the project): the hard link there stays closed.
+	if err := os.Link(keys, filepath.Join(home, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(project, "alias"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "note.txt"), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workdir = "fold/.."
+	t.Setenv(hookPostAccountHomeEnv, home)
+	for _, path := range []string{"/api/v1/codex/hook", "/api/v1/claude-code/hook"} {
+		for _, tc := range []struct {
+			name, command string
+			want          int
+		}{
+			{"hard link to the keys", "touch alias", hookexec.PerUserPostNoAnswerExit},
+			{"hard link first operand", "touch alias " + long, hookexec.PerUserPostNoAnswerExit},
+			{"hard link last operand", "touch " + long + " alias", hookexec.PerUserPostNoAnswerExit},
+			{"hard link by absolute path", "touch " + filepath.Join(home, "alias"), hookexec.PerUserPostNoAnswerExit},
+			{"ordinary file", "touch note.txt", hookexec.PerUserPostLateOrdinaryExit},
+			{"ordinary late call", "touch " + long, hookexec.PerUserPostLateOrdinaryExit},
+		} {
+			t.Run(strings.TrimPrefix(path, "/api/v1/")+" "+tc.name+" relative workdir through a link", func(t *testing.T) {
+				if got := post(path, tc.command); got != tc.want {
+					t.Fatalf("exit %d, want %d", got, tc.want)
+				}
+			})
+		}
+	}
+	workdir = ""
 	// A saved value that is no usable home (missing folder, relative path, a
 	// regular file) holds no protected file of its own. The scan then indexes
 	// the homes the call can mean (the account database home, the home of the
