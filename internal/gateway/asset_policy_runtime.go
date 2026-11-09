@@ -323,7 +323,11 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	// the agent may still run is not that one, so the allow written for the
 	// listed one does not answer it (GAP-0920). A session that met a refused
 	// definition is released only by an allow covering every one it met.
-	if status.Failed && !status.Revoked && !matched && existing.Enabled && existing.Source == "admin-allow" &&
+	// The same decision answers a scan that has not finished: the first call
+	// of an allowed server does not wait for it (the scan still runs and is
+	// recorded when it lands), and no retry text is shown for a wait the
+	// allow ends (GAP-0998).
+	if (status.Failed || status.Pending) && !status.Revoked && !matched && existing.Enabled && existing.Source == "admin-allow" &&
 		a.heldRefusalsAllowed(ctx, cfg, connectorName, probe) {
 		return config.AssetPolicyDecision{}, false
 	}
