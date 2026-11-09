@@ -651,7 +651,56 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	if !flattenAll(file.Stmts) {
 		return nil, false, false
 	}
+	if allSimple && len(functions) != 0 && !keepFunctionPatchEnvelopes(file, keep, func(start int) bool {
+		return slices.ContainsFunc(statements, func(kept sequenceStatement) bool { return kept.sourceStart == start })
+	}, func(walk func() bool) bool {
+		subshells++
+		defer func() { subshells-- }()
+		return childScope('e', walk)
+	}) {
+		return nil, false, false
+	}
 	return statements, reduced, true
+}
+
+// keepFunctionPatchEnvelopes keeps every apply_patch statement of a function
+// body that the walk did not expand, so the envelope in a function the text
+// defines and never calls is judged on its file headers like one that runs: the
+// content rules read the envelope, not the order in which the shell would run
+// it. A statement a call has already kept (kept, by its start offset) is not
+// kept twice. The body is kept as the body of a child shell, so its directory
+// and variables stay out of the statements that follow.
+func keepFunctionPatchEnvelopes(
+	file *syntax.File,
+	keep func(node syntax.Node, redirs ...*syntax.Redirect) bool,
+	kept func(start int) bool,
+	inChildScope func(walk func() bool) bool,
+) bool {
+	ok := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		declaration, isFunction := node.(*syntax.FuncDecl)
+		if !isFunction || declaration.Body == nil {
+			return ok
+		}
+		syntax.Walk(declaration.Body, func(inner syntax.Node) bool {
+			stmt, isStmt := inner.(*syntax.Stmt)
+			if !ok || !isStmt {
+				return ok
+			}
+			call, isCall := stmt.Cmd.(*syntax.CallExpr)
+			if !isCall || len(call.Args) == 0 || len(stmt.Redirs) == 0 {
+				return true
+			}
+			program, static := simpleStaticWord(call.Args[0], nil)
+			if !static || program != "apply_patch" || kept(int(call.Pos().Offset())) {
+				return true
+			}
+			ok = inChildScope(func() bool { return keep(call, stmt.Redirs...) })
+			return ok
+		})
+		return ok
+	})
+	return ok
 }
 
 // simpleAssignedProgramNames returns the program names that word, one
