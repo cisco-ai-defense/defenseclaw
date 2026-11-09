@@ -276,12 +276,21 @@ func knownParent(path string) (folder, last string, known os.FileInfo, ok bool) 
 	return folder, last, known, ok
 }
 
+// knownFolderReadGrace is how long stillPlain waits for the read of a known
+// folder before it looks up the hook call and its remaining share wait. The
+// read of a local folder returns in microseconds, and the call lookup (the
+// goroutine number) costs more than that read, so it is made only for a read
+// that is slow. A call with less share wait left than this waits at most this
+// long for a read that is not back.
+const knownFolderReadGrace = 2 * time.Millisecond
+
 // stillPlain reads a known folder again and reports whether it is still the
 // folder that was found, as a folder and no link. The read is the first to
 // pass through the folders above it unasked, and a folder above it may have
 // become a link to a share that does not answer, so it is bounded as a share
-// is: answered is false when it did not return within the answer wait (the
-// wait is charged to the hook call, the memory is dropped, and the path is
+// is: by the answer wait and by what the hook call has left of its share
+// wait. answered is false when it did not return within that wait (the wait
+// is charged to the hook call, the memory is dropped, and the path is
 // reported unanswered).
 func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 	start := time.Now()
@@ -295,16 +304,29 @@ func stillPlain(path string, known os.FileInfo) (same, answered bool) {
 		info, err := lstat(path)
 		done <- err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 && os.SameFile(known, info)
 	}()
-	timer := time.NewTimer(networkShareAnswerWait)
+	timer := time.NewTimer(min(networkShareAnswerWait, knownFolderReadGrace))
 	defer timer.Stop()
 	select {
 	case same := <-done:
 		return same, true
 	case <-timer.C:
-		if call := currentHookCall(); call != nil {
-			call.waitLeft -= time.Since(start)
-		}
-		forgetPlainFolders()
-		return false, false
 	}
+	call := currentHookCall()
+	wait := networkShareAnswerWait
+	if call != nil {
+		wait = min(wait, call.shareWait())
+	}
+	if wait -= time.Since(start); wait > 0 {
+		timer.Reset(wait)
+		select {
+		case same := <-done:
+			return same, true
+		case <-timer.C:
+		}
+	}
+	if call != nil {
+		call.waitLeft -= time.Since(start)
+	}
+	forgetPlainFolders()
+	return false, false
 }
