@@ -375,6 +375,32 @@ var windowsConnectorRemovedFromRoster = func(executable, name string) bool {
 // windowsConnectorOffRosterRead is replaceable in tests.
 var windowsConnectorOffRosterRead = enterprisehooks.WindowsConnectorOffRoster
 
+// windowsExcludedAccountNoop reports whether a hook call is the call of an
+// account the administrator excludes from enrollment (exclude_users or
+// exclude_groups). That account is not governed, so it holds no row in the
+// protected target set, and the resolver answers "absent from the protected
+// target set", the answer of an account whose enrollment is still pending. It
+// is allowed without gateway contact, as an account the policy does not cover
+// is, only when the resolver failed for that reason alone, the hook is the
+// standalone one, the hot-config undo closure is neither held nor unreadable,
+// and the guardian has published a valid marker for the SID that runs this
+// process in the machine hook runtime directory (the hook cannot read the
+// administrator-only configuration). Any other state keeps the refusal, which
+// still tells a new account to wait for its enrollment.
+func windowsExcludedAccountNoop(executable string, resolveErr error) bool {
+	if !errors.Is(resolveErr, enterprisehooks.ErrWindowsManagedSIDUnregistered) || !standaloneEnterpriseHookCheck(executable) {
+		return false
+	}
+	if held, err := windowsStandaloneHooksHeldClosed(); held || err != nil {
+		return false
+	}
+	excluded, err := windowsCurrentAccountExcluded()
+	return err == nil && excluded
+}
+
+// windowsCurrentAccountExcluded is replaceable in tests.
+var windowsCurrentAccountExcluded = enterprisehooks.WindowsCurrentAccountExcluded
+
 func enterpriseManagedRuntimeAbsenceNoop(
 	executable string,
 	connectorName string,
@@ -388,6 +414,9 @@ func enterpriseManagedRuntimeAbsenceNoop(
 		registered,
 		resolveErr,
 	) {
+		return true
+	}
+	if windowsExcludedAccountNoop(executable, resolveErr) {
 		return true
 	}
 	if resolveErr != nil || policyActive || registered {

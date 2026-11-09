@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // An excluded account is out of enrollment, but a machine policy runs the hook
@@ -24,12 +26,15 @@ import (
 const (
 	inspectedReason = "excluded from enrollment; the machine policy still inspects your calls"
 	nothingReason   = "excluded from enrollment; DefenseClaw does not inspect your calls"
-	unknownReason   = "excluded from enrollment; run defenseclaw-managed status as an administrator to see what still inspects calls"
 
 	inspectedCode = "excluded_users_inspected"
 	nothingCode   = "excluded_users"
 	unknownCode   = "excluded_users_unverified"
 )
+
+// unknownReason names the administrator status command of the platform the
+// gateway runs on, from the one source the other status texts use (GAP-0979).
+var unknownReason = "excluded from enrollment; to see what still inspects calls, an administrator runs " + managed.AdminStatusHint(runtime.GOOS)
 
 func ownExcludedRowsOf(t *testing.T, api *APIServer, idKey, id, name string) (map[string]map[string]any, map[string]any) {
 	t.Helper()
@@ -345,5 +350,25 @@ func TestOwnStatusExcludedExemptCallerWithoutMachineAdmission(t *testing.T) {
 			rows, _ := ownExcludedRowsOf(t, api, "uid", "5003", "carol")
 			requireExcludedReason(t, "claudecode", rows["claudecode"], tc.wantCode, tc.wantText)
 		})
+	}
+}
+
+// The reason an excluded account reads when the status cannot tell what
+// inspects its calls names a command that exists on the platform, and none
+// that no platform ships (GAP-0979: it said to run defenseclaw-managed status).
+func TestOwnExcludedUnverifiedReasonNamesAnExistingAdministratorCommand(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		hint := managed.AdminStatusHint(goos)
+		if hint == "" || strings.Contains(hint, "defenseclaw-managed") {
+			t.Fatalf("%s hint %q", goos, hint)
+		}
+	}
+	reason := ownExcludedCause(ownInspectionUnknown).reason
+	if strings.Contains(reason, "defenseclaw-managed") || !strings.Contains(reason, managed.AdminStatusHint(runtime.GOOS)) {
+		t.Fatalf("unverified excluded reason %q does not name the administrator status command of %s", reason, runtime.GOOS)
+	}
+	next := ownExcludedNextStep()
+	if !strings.Contains(next, "enterprise.enrollment.exclude_users") || !strings.Contains(next, "enterprise policy show --user <account>") {
+		t.Fatalf("excluded next step %q", next)
 	}
 }
