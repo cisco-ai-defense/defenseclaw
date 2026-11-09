@@ -71,6 +71,7 @@ func TestRegistrationWriteReachFlowConstructs(t *testing.T) {
 		{"ordinary eval", "eval :; " + link(ordinary), false},
 		{"ordinary function", "f() { :; }; " + link(ordinary), false},
 		// Reads of the hook are not writes.
+		{"link that points at the hook, in a list", "ln -s " + hook + " " + ordinary + "/tmp-link && ls " + ordinary, true},
 		{"checksum in a list", "sha256sum " + hook + " && echo ok", false},
 		{"loop prints the hook", "for f in " + hook + "; do cat \"$f\"; done", false},
 		{"sed prints the hook in a list", "sed -n 1p " + hook + "; echo done", false},
