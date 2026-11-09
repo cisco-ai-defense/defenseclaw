@@ -73,7 +73,7 @@ func (f operandContextFixture) blocks(tool, cwd string, input map[string]interfa
 // that link; the same word as an operand of a program that reads files is.
 func TestOrdinaryWordEqualToALinkNameIsNotBlocked(t *testing.T) {
 	f := newOperandContextFixture(t, "held")
-	for _, name := range []string{"echo", "needle"} {
+	for _, name := range []string{"lnk-held", "needle"} {
 		if err := os.Symlink(f.held, filepath.Join(f.proj, name)); err != nil {
 			t.Skipf("link unavailable: %v", err)
 		}
@@ -82,14 +82,15 @@ func TestOrdinaryWordEqualToALinkNameIsNotBlocked(t *testing.T) {
 		tool  string
 		input map[string]interface{}
 	}{
-		"echo":              {"Bash", map[string]interface{}{"command": "echo hello"}},
-		"echo then runner":  {"Bash", map[string]interface{}{"command": "echo needle && sh -c true"}},
-		"sudo option value": {"Bash", map[string]interface{}{"command": "sudo -u root echo hello"}},
-		"git word":          {"Bash", map[string]interface{}{"command": "git log needle"}},
-		"Grep pattern":      {"Grep", map[string]interface{}{"path": "notes.txt", "pattern": "needle"}},
-		"typed Read":        {"Read", map[string]interface{}{"file_path": "needle notes.txt"}},
-		"typed Grep path":   {"Grep", map[string]interface{}{"path": "needle notes.txt", "pattern": "ordinary"}},
-		"Glob exact name":   {"Glob", map[string]interface{}{"pattern": "needle notes.txt"}},
+		"echo":               {"Bash", map[string]interface{}{"command": "echo hello"}},
+		"echo a word":        {"Bash", map[string]interface{}{"command": "echo needle"}},
+		"to the null device": {"Bash", map[string]interface{}{"command": "echo needle > /dev/null 2>&1"}},
+		"sudo option value":  {"Bash", map[string]interface{}{"command": "sudo -u root echo hello"}},
+		"git word":           {"Bash", map[string]interface{}{"command": "git log needle"}},
+		"Grep pattern":       {"Grep", map[string]interface{}{"path": "notes.txt", "pattern": "needle"}},
+		"typed Read":         {"Read", map[string]interface{}{"file_path": "needle notes.txt"}},
+		"typed Grep path":    {"Grep", map[string]interface{}{"path": "needle notes.txt", "pattern": "ordinary"}},
+		"Glob exact name":    {"Glob", map[string]interface{}{"pattern": "needle notes.txt"}},
 	} {
 		if f.blocks(c.tool, f.proj, c.input) {
 			t.Errorf("%s: ordinary call blocked because the working folder has a link with that word as its name", name)
@@ -99,14 +100,15 @@ func TestOrdinaryWordEqualToALinkNameIsNotBlocked(t *testing.T) {
 		tool  string
 		input map[string]interface{}
 	}{
-		"Read":          {"Read", map[string]interface{}{"file_path": "echo"}},
+		"Read":          {"Read", map[string]interface{}{"file_path": "lnk-held"}},
 		"cat operand":   {"Bash", map[string]interface{}{"command": "cat needle"}},
-		"slash":         {"Bash", map[string]interface{}{"command": "cat echo/SKILL.md"}},
+		"slash":         {"Bash", map[string]interface{}{"command": "cat lnk-held/SKILL.md"}},
 		"Grep path":     {"Grep", map[string]interface{}{"path": "needle", "pattern": "x"}},
 		"grep operand":  {"Bash", map[string]interface{}{"command": "grep needle notes.txt"}},
 		"through xargs": {"Bash", map[string]interface{}{"command": "echo needle | xargs cat"}},
 		"behind sudo":   {"Bash", map[string]interface{}{"command": "sudo -u root cat needle"}},
 		"shell script":  {"Bash", map[string]interface{}{"command": "sh -c 'cat needle'"}},
+		"then runner":   {"Bash", map[string]interface{}{"command": "echo needle && sh -c true"}},
 	} {
 		if !f.blocks(c.tool, f.proj, c.input) {
 			t.Errorf("%s: read of a denied skill folder through a link allowed", name)
@@ -186,13 +188,13 @@ func TestFileTakingOptionOfASearchReadsTheLinkedSkill(t *testing.T) {
 	for _, command := range []string{
 		"cat rules", "grep -f rules notes.txt", "grep --file rules notes.txt", "grep --file=rules notes.txt",
 		"grep --exclude-from rules notes.txt", "rg -f rules notes.txt", "rg --ignore-file rules notes.txt",
-		"sed -f rules notes.txt", "awk -f rules notes.txt", "sudo -u root sed -f rules notes.txt",
+		"sed -f rules notes.txt", "awk -f rules notes.txt", "sudo -u root sed -f rules notes.txt", "sudo -u root echo rules",
 	} {
 		if !f.blocks("Bash", f.proj, map[string]interface{}{"command": command}) {
 			t.Errorf("%q: read of a denied skill through a link allowed", command)
 		}
 	}
-	for _, command := range []string{"echo rules", "printf rules", "git log rules", "grep -f notes.txt notes.txt", "sudo -u root echo rules"} {
+	for _, command := range []string{"echo rules", "printf rules", "git log rules", "grep -f notes.txt notes.txt"} {
 		if f.blocks("Bash", f.proj, map[string]interface{}{"command": command}) {
 			t.Errorf("%q: ordinary call blocked", command)
 		}
@@ -202,7 +204,7 @@ func TestFileTakingOptionOfASearchReadsTheLinkedSkill(t *testing.T) {
 // The strict tier reads the slash-free word of any program that names an
 // existing entry; the balanced tier allows the same ordinary command.
 func TestStrictTierBlocksAWordThatNamesALinkToADeniedSkill(t *testing.T) {
-	commands := []string{"echo needle", "git log needle", "sudo -u root echo needle"}
+	commands := []string{"echo needle", "git log needle", "printf needle"}
 	for _, strict := range []bool{false, true} {
 		f := newOperandContextFixture(t, "held")
 		if err := os.Symlink(f.held, filepath.Join(f.proj, "needle")); err != nil {
@@ -222,5 +224,63 @@ func TestStrictTierBlocksAWordThatNamesALinkToADeniedSkill(t *testing.T) {
 		if f.blocks("Read", f.proj, map[string]interface{}{"file_path": "needle notes.txt"}) {
 			t.Errorf("strict=%t: a typed path with a blank was blocked", strict)
 		}
+	}
+}
+
+// The check does not read a command line as operands: a line that holds the
+// name of a link to a denied skill, and a word that reads, copies, writes or
+// runs, is refused whichever way the name is spelled, quoted, escaped, joined
+// to an option, split across an argument vector element or run through a
+// chain of evaluators. The same names in a line with no such word, and a line
+// with no such name, run.
+func TestLinkNameInALineThatReadsOrRunsIsRefusedWhateverTheSpelling(t *testing.T) {
+	f := newOperandContextFixture(t, "held")
+	long := strings.Repeat("r", 70)
+	for _, name := range []string{"needle", "lnk,held", "lnk=held", "name with space"} {
+		if err := os.Symlink(f.held, filepath.Join(f.proj, name)); err != nil {
+			t.Skipf("link unavailable: %v", err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(f.held, "SKILL.md"), filepath.Join(f.proj, long)); err != nil {
+		t.Skipf("link unavailable: %v", err)
+	}
+	for name, command := range map[string]interface{}{
+		"sudo separated":         "sudo -u root cat needle",
+		"sudo attached user":     "sudo -uroot cat needle",
+		"sudo attached absolute": "sudo -uroot /bin/cat needle",
+		"env attached unset":     "env -uAPP cat needle",
+		"escaped reader":         `c\at needle`,
+		"quoted comma":           `cat 'lnk,held'`,
+		"comma":                  "cat lnk,held",
+		"equals":                 "cat lnk=held",
+		"long -f separated":      "grep -f " + long + " notes.txt",
+		"long -f attached":       "grep -f" + long + " notes.txt",
+		"long --file=":           "grep --file=" + long + " notes.txt",
+		"four eval":              "eval eval eval eval cat needle",
+		"five eval":              "eval eval eval eval eval cat needle",
+		"eval in a shell":        "bash -c 'eval eval eval eval cat needle'",
+		"vector":                 []interface{}{"cat", "needle"},
+		"vector with a space":    []interface{}{"cat", "name with space"},
+		"vector in a shell":      []interface{}{"bash", "-c", "cat needle"},
+	} {
+		if !f.blocks("Bash", f.proj, map[string]interface{}{"command": command}) {
+			t.Errorf("%s: %v: read of a denied skill through a link allowed", name, command)
+		}
+	}
+	for name, command := range map[string]interface{}{
+		"echo":                "echo needle",
+		"name with spaces":    "echo name with space",
+		"no name":             "sudo -u root cat notes.txt",
+		"sudo echo":           "sudo -u root echo hello",
+		"vector echo":         []interface{}{"echo", "needle"},
+		"vector no name":      []interface{}{"cat", "notes.txt"},
+		"a name in a message": "git log --oneline -n 3",
+	} {
+		if f.blocks("Bash", f.proj, map[string]interface{}{"command": command}) {
+			t.Errorf("%s: %v: ordinary call blocked", name, command)
+		}
+	}
+	if !f.blocks("Read", f.proj, map[string]interface{}{"file_path": "lnk,held"}) {
+		t.Error("native Read of the link allowed")
 	}
 }
