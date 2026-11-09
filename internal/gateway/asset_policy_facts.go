@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -349,10 +350,12 @@ func (a *APIServer) skillFolderAccessDecision(
 		}
 	}
 	refs = appendReportedSkillLinks(refs, facts.SkillLinks, skillRoots)
-	if facts.SkillLinksTruncated {
+	if facts.SkillLinksTruncated && a.skillFoldersAreGuarded(cfg) {
 		// The hook names the skill folders a link of the call leads into, up
 		// to a bound. Past it a protected folder cannot be ruled out (fail
-		// closed).
+		// closed), when there is a protected folder: with no denied or held
+		// skill nothing the call reaches can be one, and an ordinary call
+		// runs.
 		name := "skill-links"
 		if len(facts.SkillLinks) > 0 {
 			name = filepath.Base(facts.SkillLinks[0])
@@ -435,6 +438,23 @@ func (a *APIServer) skillFolderAccessDecision(
 		}
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// skillFoldersAreGuarded reports whether any skill is denied or held
+// (runtime-disabled) for any connector, so a skill folder a call reaches can
+// be one to refuse. A store that cannot be read counts as guarded.
+func (a *APIServer) skillFoldersAreGuarded(cfg *config.Config) bool {
+	if len(cfg.AssetPolicy.Skill.Denied) > 0 {
+		return true
+	}
+	if a == nil || a.store == nil {
+		return false
+	}
+	entries, err := a.store.ListActionsByType("skill")
+	if err != nil {
+		return true
+	}
+	return slices.ContainsFunc(entries, func(entry audit.ActionEntry) bool { return entry.Actions.Runtime == "disable" })
 }
 
 // appendReportedSkillLinks adds the skill folders the standalone hook found

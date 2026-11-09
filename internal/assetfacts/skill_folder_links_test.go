@@ -11,8 +11,11 @@
 package assetfacts
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -184,20 +187,43 @@ func TestSkillFolderRefsFollowLinkThenParentSegment(t *testing.T) {
 	}
 }
 
-// The linked folders a claim carries are bounded, and a claim cut at the bound
-// says so, so the gateway does not judge only the folders it was told of.
+// The linked folders a claim carries are bounded far past an ordinary call, a
+// folder past a bound or one the claim cannot carry is never dropped without
+// the signal, and a long valid path is carried.
 func TestSkillLinksPastTheBoundAreSignalled(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixture paths are not absolute here")
+	}
+	sep := string(filepath.Separator)
+	skills := filepath.Join(sep, "home", "u", ".claude", "skills")
 	var dirs []string
 	for i := 0; i < maxSkillLinks+6; i++ {
-		dirs = append(dirs, filepath.Join(string(filepath.Separator), "home", "u", ".claude", "skills", "s"+string(rune(0x61+i%26))+string(rune(0x61+i/26))))
+		dirs = append(dirs, filepath.Join(skills, fmt.Sprintf("s%05d", i)))
 	}
 	facts, ok := Decode(Encode(Facts{SkillLinks: dirs}))
 	if !ok || len(facts.SkillLinks) != maxSkillLinks || !facts.SkillLinksTruncated {
 		t.Fatalf("ok=%t links=%d truncated=%t, want %d links and the signal", ok, len(facts.SkillLinks), facts.SkillLinksTruncated, maxSkillLinks)
 	}
-	facts, ok = Decode(Encode(Facts{SkillLinks: dirs[:maxSkillLinks]}))
-	if !ok || len(facts.SkillLinks) != maxSkillLinks || facts.SkillLinksTruncated {
-		t.Fatalf("ok=%t links=%d truncated=%t, want all links and no signal", ok, len(facts.SkillLinks), facts.SkillLinksTruncated)
+	facts, ok = Decode(Encode(Facts{SkillLinks: dirs[:65]}))
+	if !ok || len(facts.SkillLinks) != 65 || facts.SkillLinksTruncated {
+		t.Fatalf("ok=%t links=%d truncated=%t, want 65 links and no signal", ok, len(facts.SkillLinks), facts.SkillLinksTruncated)
+	}
+	long := filepath.Join(sep, "home", "u", strings.Repeat("d", 1200), ".claude", "skills", "held")
+	facts, ok = Decode(Encode(Facts{SkillLinks: []string{long}}))
+	if !ok || len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != long || facts.SkillLinksTruncated {
+		t.Fatalf("a %d byte path: ok=%t links=%d truncated=%t, want it carried", len(long), ok, len(facts.SkillLinks), facts.SkillLinksTruncated)
+	}
+	// A path the claim cannot carry (past the bound of one path, or text that
+	// is not a path) is signalled, with the ones it can carry kept.
+	for name, bad := range map[string]string{
+		"past the path bound": filepath.Join(sep, "home", strings.Repeat("d", maxSkillLinkPathBytes), "held"),
+		"control character":   filepath.Join(sep, "home", "u", "sk\x01ll"),
+		"not absolute":        "skills/held",
+	} {
+		facts, ok = Decode(Encode(Facts{SkillLinks: []string{dirs[0], bad}}))
+		if !ok || len(facts.SkillLinks) != 1 || !facts.SkillLinksTruncated {
+			t.Fatalf("%s: ok=%t links=%d truncated=%t, want one link and the signal", name, ok, len(facts.SkillLinks), facts.SkillLinksTruncated)
+		}
 	}
 }
 
