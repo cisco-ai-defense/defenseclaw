@@ -90,6 +90,12 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 			// Every connector that waits still has the previous release's
 			// hook running: do not say its agents are unguarded.
 			account.Reason = windowsEnterpriseEnrollmentPendingKeepsRunning + strings.Join(keepsRunning, ", ")
+		} else if pending && len(keepsRunning) > 0 {
+			// Some connectors of the account still wait with nothing running
+			// (never enrolled, Hermes with an unreadable home); the others
+			// keep the previous release's hook.
+			account.Reason += "; except " + strings.Join(keepsRunning, ", ") +
+				": the previous release's DefenseClaw hook keeps running until this account signs in and the guardian updates it"
 		}
 		for _, note := range earlier {
 			if account.Reason != "" {
