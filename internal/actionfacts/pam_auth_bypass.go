@@ -26,16 +26,13 @@ const (
 )
 
 // ExactPAMAuthenticationBypass recognizes the text a native file-tool call
-// (nativeFileWrites: a whole-file write, an edit, a multi-edit or a patch,
+// or shell apply_patch here-document (nativeCallWrites: a whole-file write, an edit, a multi-edit or a patch,
 // whatever the tool calls its arguments) puts into a protected PAM
 // configuration file, named directly or reached through an existing link the
 // facts record (PathFact.Linked). It does not inspect shell command text, read
 // files, or retain attacker-controlled values.
 func ExactPAMAuthenticationBypass(input Input, facts Facts) (PAMAuthenticationBypassProof, bool) {
-	if input.Command != "" || len(input.Argv) != 0 {
-		return "", false
-	}
-	writes := nativeFileWrites(input.Tool, input.Args)
+	writes, facts := nativeCallWrites(input, facts)
 	for _, write := range writes {
 		for _, file := range nativeWriteFiles(input, facts, writes, write, false) {
 			if proof, proven := pamBypassProof(file, write); proven {
