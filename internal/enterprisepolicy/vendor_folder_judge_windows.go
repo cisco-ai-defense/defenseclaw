@@ -569,9 +569,21 @@ func UnrecordedPolicyFileProblems(opts Options, connectors []string) []VendorFol
 }
 
 // psLiteral is s as a PowerShell single-quoted literal: nothing in it expands
-// ($, a backtick), and a quote is doubled.
+// ($, a backtick), and a quote is doubled. PowerShell reads the typographic
+// single quotes U+2018, U+2019, U+201A and U+201B as quotes too, so each is
+// doubled as well (two of the same quote stand for that one character).
 func psLiteral(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+	var out strings.Builder
+	out.WriteByte('\'')
+	for _, r := range s {
+		switch r {
+		case '\'', '\u2018', '\u2019', '\u201a', '\u201b':
+			out.WriteRune(r)
+		}
+		out.WriteRune(r)
+	}
+	out.WriteByte('\'')
+	return out.String()
 }
 
 // unrecordedFileFix is the one recovery that works for every cause of an

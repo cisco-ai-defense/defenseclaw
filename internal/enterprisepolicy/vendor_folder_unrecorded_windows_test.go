@@ -475,6 +475,20 @@ func TestUnrecordedFileFixQuotesEveryPathAsAPowerShellLiteral(t *testing.T) {
 	}
 }
 
+// PowerShell reads U+2018, U+2019, U+201A and U+201B as single quotes too: a
+// name that holds one must not end its literal early.
+func TestPSLiteralDoublesEveryQuoteCharacterPowerShellReads(t *testing.T) {
+	for _, quote := range []string{"'", "\u2018", "\u2019", "\u201a", "\u201b"} {
+		name := "a" + quote + "b"
+		if got, want := psLiteral(name), "'a"+quote+quote+"b'"; got != want {
+			t.Errorf("psLiteral(%q) = %q, want %q", name, got, want)
+		}
+	}
+	if got := psLiteral("plain"); got != "'plain'" {
+		t.Errorf("psLiteral(plain) = %q", got)
+	}
+}
+
 // The property the lead asked for: for every connector on the machine policy
 // route, if machine-policy verify says uncovered for any reason, Setup's
 // problems name that connector; where it says covered, they name nothing for
