@@ -1820,7 +1820,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 // exist yet is never watched again until it does, so without this status,
 // doctor and the watcher health kept naming a folder after chmod repaired it
 // (GAP-0965). A route that is still writable stays recorded, with the folder
-// now found.
+// now found. A root that is not created yet is not watched after the repair
+// either, so its record changes to say so and stays until the root is
+// registered (the retry loop above ends it); only an existing root with a
+// safe route is cleared here.
 func (w *InstallWatcher) reconcileWritableRouteIssues() {
 	if w.secureClientActive() {
 		return
@@ -1829,14 +1832,21 @@ func (w *InstallWatcher) reconcileWritableRouteIssues() {
 		if issue.Ancestor == "" {
 			continue
 		}
+		exists := false
 		var err error
 		if _, statErr := os.Lstat(issue.Path); statErr == nil {
+			exists = true
 			err = unlinkedSkillTreePath(issue.Path, issue.Path)
 		} else {
 			err = checkRootLinkRoute(issue.Path)
 		}
 		var writable *skillrootsafe.WritableAncestorError
-		if err == nil || errors.As(err, &writable) {
+		switch {
+		case err == nil && exists:
+			w.setRootCoverage(issue.Kind, issue.Path, nil)
+		case err == nil:
+			w.setRootCoverage(issue.Kind, issue.Path, fmt.Errorf("%w: %s root %s does not exist yet; watching it once it is created", errWatchDirNotCreated, issue.Kind, issue.Path))
+		case errors.As(err, &writable):
 			w.setRootCoverage(issue.Kind, issue.Path, err)
 		}
 	}
