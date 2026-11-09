@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from unittest.mock import patch
@@ -147,11 +148,33 @@ def _registered(original):
     return (json.dumps(config, indent=2) + "\n").encode()
 
 
-def _run_late_outage(tmp_dir, app, original, *, written=None, guards_openclaw=True):
+def _publish_writer_receipt(data_dir, path, original, committed):
+    """What the Go registration leaves under the data dir once it has committed ``committed`` over ``original``."""
+    folder = os.path.join(data_dir, "connector_backups", "openclaw")
+    os.makedirs(folder, exist_ok=True)
+    receipt = {
+        "version": 1,
+        "connector": "openclaw",
+        "logical_name": "openclaw.json",
+        "path": path,
+        "existed": original is not None,
+        "pristine_sha256": hashlib.sha256(original).hexdigest() if original is not None else "missing",
+        "post_sha256": hashlib.sha256(committed).hexdigest(),
+    }
+    receipt_path = os.path.join(folder, "openclaw.json.json")
+    with open(receipt_path, "w") as handle:
+        json.dump(receipt, handle)
+    return receipt_path
+
+
+def _run_late_outage(tmp_dir, app, original, *, written=None, writer=None, publish=True, guards_openclaw=True):
     """Setup whose OpenClaw gateway goes down after DefenseClaw registered the plugin.
 
-    ``original`` None means no openclaw.json before setup. ``written`` is what the
-    registering restart leaves in the file. Returns (result, path, restart calls).
+    ``original`` None means no openclaw.json before setup. ``writer`` is what the
+    registration committed (default: the plugin added and nothing else), with its
+    receipt unless ``publish`` is False. ``written`` is what the file holds when
+    the rollback starts (default: ``writer``), so a save after the registration
+    is ``written`` differing from ``writer``. Returns (result, path, restart calls).
     """
     path = os.path.join(tmp_dir, "openclaw.json")
     if original is not None:
@@ -164,6 +187,7 @@ def _run_late_outage(tmp_dir, app, original, *, written=None, guards_openclaw=Tr
     app.cfg.guardrail.connector = app.cfg.claw.mode
     app.cfg.guardrail.connectors = {}
     registered = _registered(original)
+    committed = registered if writer is None else writer
     calls = []
 
     def restart(*_args, **_kwargs):
@@ -171,12 +195,17 @@ def _run_late_outage(tmp_dir, app, original, *, written=None, guards_openclaw=Tr
         if len(calls) == 1:
             # DefenseClaw's gateway registered the plugin, then OpenClaw's went down.
             with open(path, "wb") as handle:
-                handle.write(registered if written is None else written)
+                handle.write(committed)
+            if publish:
+                _publish_writer_receipt(app.cfg.data_dir, path, original, committed)
+            if written is not None:
+                with open(path, "wb") as handle:
+                    handle.write(written)
             cmd_setup._fail_if_restart_failed(["openclaw-gateway"])
         elif guards_openclaw:
             # The rollback restart on a configuration that guards OpenClaw registers it again.
             with open(path, "wb") as handle:
-                handle.write(registered)
+                handle.write(committed)
 
     with (
         patch.object(cmd_setup, "_restart_services", side_effect=restart),
@@ -295,26 +324,11 @@ def test_a_config_that_cannot_be_copied_exactly_stops_setup_before_any_write(mak
         cleanup_app(app, db_path, tmp_dir)
 
 
-def test_content_registered_for_defenseclaw_alone_is_not_a_foreign_save():
-    prior = b"// c\n{plugins:{allow:['other'],load:{paths:['/x']}},approvals:{}}\n"
-    ours = (
-        b'{"plugins":{"allow":["other","defenseclaw"],"entries":{"defenseclaw":{"enabled":true}},'
-        b'"load":{"paths":["/x","/home/u/.openclaw/extensions/defenseclaw"]}},'
-        b'"approvals":{"plugin":{"enabled":true,"mode":"session"}}}'
-    )
-    assert cmd_setup._openclaw_config_saved_by_others(prior, ours) is False
-    created = (
-        b'{"plugins":{"allow":["defenseclaw"],"entries":{"defenseclaw":{"enabled":true}},'
-        b'"load":{"paths":["/home/u/.openclaw/extensions/defenseclaw"]}}}'
-    )
-    assert cmd_setup._openclaw_config_saved_by_others(None, created) is False
-    # A file setup created holds the registration and nothing else; other content in it was saved by someone.
-    assert cmd_setup._openclaw_config_saved_by_others(None, ours) is True
-    assert cmd_setup._openclaw_config_saved_by_others(None, b'{"gateway":{"port":1}}') is True
-    assert cmd_setup._openclaw_config_saved_by_others(prior, ours.replace(b'"allow":["other"', b'"allow":["x"')) is True
-
-
 _OPERATOR_BASE = b'{"gateway":{"mode":"local","port":18773},"plugins":{"allow":["other"]}}\n'
+_WITH_APPROVAL = (
+    b'{"plugins":{"allow":["other"]},'
+    b'"approvals":{"plugin":{"enabled":true,"mode":"session"},"exec":{"enabled":false}}}\n'
+)
 
 
 @pytest.mark.parametrize(
@@ -326,6 +340,9 @@ _OPERATOR_BASE = b'{"gateway":{"mode":"local","port":18773},"plugins":{"allow":[
         (_OPERATOR_BASE, "changed-approval-setting", b'"mode": "always"'),
         (_OPERATOR_BASE, "removed-gateway-field", b'"port": 18773'),
         (_OPERATOR_BASE, "operator-load-path", b'"/opt/operator-plugins"'),
+        (_OPERATOR_BASE, "operator-path-named-defenseclaw", b'"/opt/operator/defenseclaw"'),
+        (_OPERATOR_BASE, "operator-path-object-named-defenseclaw", b'"/opt/operator/defenseclaw"'),
+        (_WITH_APPROVAL, "operator-removed-approval-block", b'"exec"'),
     ],
 )
 def test_nearby_saves_during_setup_are_kept_and_reported(original, change, marker):
@@ -344,6 +361,16 @@ def test_nearby_saves_during_setup_are_kept_and_reported(original, change, marke
             del content["gateway"]["mode"]
         elif change == "operator-load-path":
             content["plugins"]["load"] = {"paths": ["/opt/operator-plugins"]}
+        elif change == "operator-path-named-defenseclaw":
+            content["plugins"]["load"] = {
+                "paths": ["/home/u/.openclaw/extensions/defenseclaw", "/opt/operator/defenseclaw"]
+            }
+        elif change == "operator-path-object-named-defenseclaw":
+            content["plugins"]["load"] = {
+                "paths": ["/home/u/.openclaw/extensions/defenseclaw", {"operator": ["/opt/operator/defenseclaw"]}]
+            }
+        elif change == "operator-removed-approval-block":
+            del content["approvals"]["plugin"]
         written = (json.dumps(content, indent=2) + "\n").encode()
         result, path, _ = _run_late_outage(tmp_dir, app, original, written=written, guards_openclaw=False)
         assert os.path.exists(path), result.output
@@ -351,6 +378,8 @@ def test_nearby_saves_during_setup_are_kept_and_reported(original, change, marke
             after = handle.read()
         if change == "removed-gateway-field":
             assert "mode" not in json.loads(after)["gateway"], result.output
+        elif change == "operator-removed-approval-block":
+            assert "plugin" not in json.loads(after)["approvals"], result.output
         else:
             assert marker in after, result.output
         assert "saved by OpenClaw or you while setup ran" in result.output
@@ -379,47 +408,14 @@ def test_everything_the_registration_writes_is_put_back_with_the_saved_bytes():
         ).encode()
         + b"\n"
     )
-    assert cmd_setup._openclaw_config_saved_by_others(original, written) is False
     app, tmp_dir, db_path = make_app_context()
     try:
-        result, path, _ = _run_late_outage(tmp_dir, app, original, written=written, guards_openclaw=False)
+        result, path, _ = _run_late_outage(tmp_dir, app, original, writer=written, guards_openclaw=False)
         with open(path, "rb") as handle:
             assert handle.read() == original
         assert "saved by OpenClaw or you" not in result.output
     finally:
         cleanup_app(app, db_path, tmp_dir)
-
-
-@pytest.mark.parametrize(
-    ("prior", "written"),
-    [
-        # The approvals block setup wrote earlier is dropped again on an OpenClaw that rejects it.
-        (
-            b'{"plugins":{"allow":["other"]},"approvals":{"plugin":{"enabled":true,"mode":"session"}}}',
-            b'{"plugins":{"allow":["other","defenseclaw"],"entries":{"defenseclaw":{"enabled":true}}}}',
-        ),
-        # An operator-set grant and an already registered plugin stay as they were.
-        (
-            b'{"plugins":{"allow":["defenseclaw"],"entries":{"defenseclaw":{"enabled":true,'
-            b'"hooks":{"allowConversationAccess":false}}}}}',
-            b'{"plugins":{"allow":["defenseclaw"],"entries":{"defenseclaw":{"enabled":true,'
-            b'"hooks":{"allowConversationAccess":false}}}}}',
-        ),
-    ],
-)
-def test_registration_variants_are_not_foreign_saves(prior, written):
-    assert cmd_setup._openclaw_config_saved_by_others(prior, written) is False
-
-
-def test_a_changed_grant_or_boolean_is_a_foreign_save():
-    prior = b'{"plugins":{"entries":{"defenseclaw":{"enabled":true,"hooks":{"allowConversationAccess":false}}}}}'
-    flipped = prior.replace(b"false", b"true")
-    assert cmd_setup._openclaw_config_saved_by_others(prior, flipped) is True
-    # A 1 saved where the operator had true is a change, not the same value.
-    assert (
-        cmd_setup._openclaw_config_saved_by_others(b'{"flag":true}', b'{"flag":1,"plugins":{"allow":["defenseclaw"]}}')
-        is True
-    )
 
 
 def test_restore_leaves_an_unchanged_file_alone():
@@ -447,9 +443,12 @@ def test_failed_restore_of_the_saved_bytes_is_reported_not_called_restored():
         app.cfg.claw.mode = "codex"
         app.cfg.guardrail.connector = "codex"
         app.cfg.guardrail.connectors = {}
-        snapshot = cmd_setup._with_openclaw_config_record(cmd_setup._capture_setup_config_snapshot(app.cfg), path)
+        snapshot = cmd_setup._with_openclaw_config_record(
+            cmd_setup._capture_setup_config_snapshot(app.cfg), path, app.cfg.data_dir
+        )
         with open(path, "wb") as handle:
             handle.write(_registered(_JSON5))
+        _publish_writer_receipt(app.cfg.data_dir, path, _JSON5, _registered(_JSON5))
         cause = cmd_setup._OpenClawGatewayNotRunning("The OpenClaw gateway is not running.")
         with (
             patch.object(cmd_setup, "_restart_restored_connector_runtime"),
@@ -461,3 +460,140 @@ def test_failed_restore_of_the_saved_bytes_is_reported_not_called_restored():
         assert not [name for name in os.listdir(tmp_dir) if name.startswith(".openclaw-restore-")]
     finally:
         cleanup_app(app, db_path, tmp_dir)
+
+
+_PRUNED_PRIOR = (
+    b"// operator comment\n{plugins:{entries:{defenseclaw:{config:{mode:'action',"
+    b"operatorNote:'note',agent:{id:'alice',extra:true}}}}}}\n"
+)
+
+
+def test_a_plugin_config_the_registration_pruned_to_the_schema_is_put_back():
+    """The writer drops fields the bundled schema rejects; that is its output, not a save by someone else."""
+    committed = {
+        "plugins": {
+            "allow": ["defenseclaw"],
+            "entries": {"defenseclaw": {"config": {"mode": "action", "agent": {"id": "alice"}}, "enabled": True}},
+            "load": {"paths": ["/home/u/.openclaw/extensions/defenseclaw"]},
+        }
+    }
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        result, path, _ = _run_late_outage(
+            tmp_dir, app, _PRUNED_PRIOR, writer=(json.dumps(committed, indent=2) + "\n").encode(), guards_openclaw=False
+        )
+        with open(path, "rb") as handle:
+            assert handle.read() == _PRUNED_PRIOR
+        assert "saved by OpenClaw or you" not in result.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+@pytest.mark.parametrize("publish", [True, False])
+def test_a_file_that_is_not_the_published_registration_output_is_kept(publish):
+    """With no receipt, or a file other than the receipt's digest, nothing proves the bytes are setup's."""
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        saved = _registered(_OPERATOR_BASE).replace(b"18773", b"19999")
+        result, path, _ = _run_late_outage(
+            tmp_dir, app, _OPERATOR_BASE, written=saved if publish else None, publish=publish, guards_openclaw=False
+        )
+        with open(path, "rb") as handle:
+            assert handle.read() == (saved if publish else _registered(_OPERATOR_BASE))
+        assert "saved by OpenClaw or you while setup ran" in result.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def _registered_record(tmp_path, prior=_OPERATOR_BASE):
+    """A record taken before setup, the registration's output in the file and its receipt published."""
+    data_dir = str(tmp_path / "data")
+    path = tmp_path / "openclaw.json"
+    path.write_bytes(prior)
+    record = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
+    path.write_bytes(_registered(prior))
+    receipt = _publish_writer_receipt(data_dir, record.path, prior, _registered(prior))
+    return record, path, receipt
+
+
+def test_restore_puts_back_the_saved_bytes_and_drops_the_receipt_of_the_rolled_back_registration(tmp_path):
+    record, path, receipt = _registered_record(tmp_path)
+    assert cmd_setup._restore_openclaw_config_record(record) == "restored"
+    assert path.read_bytes() == _OPERATOR_BASE
+    assert not os.path.exists(receipt)
+    assert sorted(os.listdir(tmp_path)) == ["data", "openclaw.json"]
+
+
+def test_restore_keeps_the_receipt_of_an_earlier_setup(tmp_path):
+    record, path, receipt = _registered_record(tmp_path)
+    with open(receipt) as handle:
+        earlier = json.load(handle)
+    earlier["pristine_sha256"] = hashlib.sha256(b"{}").hexdigest()
+    with open(receipt, "w") as handle:
+        json.dump(earlier, handle)
+    assert cmd_setup._restore_openclaw_config_record(record) == "restored"
+    assert os.path.exists(receipt)
+
+
+def test_receipt_for_another_file_is_not_evidence(tmp_path):
+    record, path, receipt = _registered_record(tmp_path)
+    with open(receipt) as handle:
+        other = json.load(handle)
+    other["path"] = str(tmp_path / "elsewhere" / "openclaw.json")
+    with open(receipt, "w") as handle:
+        json.dump(other, handle)
+    assert cmd_setup._restore_openclaw_config_record(record) == "kept"
+    assert path.read_bytes() == _registered(_OPERATOR_BASE)
+
+
+def test_file_deleted_after_registration_stays_deleted(tmp_path):
+    record, path, _ = _registered_record(tmp_path)
+    path.unlink()  # The registration writer never deletes an existing file.
+    assert cmd_setup._restore_openclaw_config_record(record) == "kept"
+    assert not path.exists()
+
+
+def test_save_written_into_the_file_while_it_is_replaced_is_given_back(tmp_path):
+    record, path, _ = _registered_record(tmp_path)
+    real_replace = os.replace
+    done = []
+
+    def save_then_replace(src, dst):
+        if not done:
+            done.append(True)
+            path.write_bytes(b'{"operatorNote":"saved during restore"}\n')
+        return real_replace(src, dst)
+
+    with patch.object(cmd_setup.os, "replace", side_effect=save_then_replace):
+        assert cmd_setup._restore_openclaw_config_record(record) == "kept"
+    assert path.read_bytes() == b'{"operatorNote":"saved during restore"}\n'
+    assert sorted(os.listdir(tmp_path)) == ["data", "openclaw.json"]
+
+
+def test_save_that_replaces_the_file_before_the_final_check_is_kept(tmp_path):
+    record, path, _ = _registered_record(tmp_path)
+    real_link = os.link
+
+    def save_then_link(src, dst, *args, **kwargs):
+        newer = tmp_path / "saved.tmp"
+        newer.write_bytes(b'{"operatorNote":"replaced during restore"}\n')
+        os.replace(newer, path)
+        return real_link(src, dst, *args, **kwargs)
+
+    with patch.object(cmd_setup.os, "link", side_effect=save_then_link):
+        assert cmd_setup._restore_openclaw_config_record(record) == "kept"
+    assert path.read_bytes() == b'{"operatorNote":"replaced during restore"}\n'
+    assert sorted(os.listdir(tmp_path)) == ["data", "openclaw.json"]
+
+
+def test_file_a_setup_created_is_removed_only_while_it_is_the_registration_output(tmp_path):
+    data_dir = str(tmp_path / "data")
+    path = tmp_path / "openclaw.json"
+    record = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
+    path.write_bytes(_registered(None))
+    _publish_writer_receipt(data_dir, record.path, None, _registered(None))
+    assert cmd_setup._restore_openclaw_config_record(record) == "restored"
+    assert not path.exists()
+    path.write_bytes(b'{"operatorNote":"mine"}\n')
+    assert cmd_setup._restore_openclaw_config_record(record) == "kept"
+    assert path.exists()

@@ -8686,6 +8686,7 @@ class _OpenClawConfigRecord:
     path: str
     body: bytes | None = field(repr=False)
     mode: int
+    data_dir: str = ""
 
 
 # An exact copy is kept in memory, so a file past this size is refused up
@@ -8704,7 +8705,9 @@ def _read_openclaw_config_bytes(path: str) -> bytes | None:
     return body
 
 
-def _capture_openclaw_config_record(config_file: str | None) -> _OpenClawConfigRecord | None:
+def _capture_openclaw_config_record(
+    config_file: str | None, data_dir: str | None = None
+) -> _OpenClawConfigRecord | None:
     """The exact bytes and mode of openclaw.json, or a record of its absence.
 
     Setup may rewrite or create this file, so when an existing file cannot be
@@ -8724,166 +8727,168 @@ def _capture_openclaw_config_record(config_file: str | None) -> _OpenClawConfigR
             f"cannot keep an exact copy of {path} before setup ({reason}), so a failed setup could not put it "
             "back. No changes made. Fix the file or its permissions, then run the same setup command again."
         ) from exc
-    return _OpenClawConfigRecord(path=path, body=body, mode=mode)
+    return _OpenClawConfigRecord(path=path, body=body, mode=mode, data_dir=os.fspath(data_dir) if data_dir else "")
 
 
-def _with_openclaw_config_record(snapshot: _SetupConfigSnapshot, config_file: str | None) -> _SetupConfigSnapshot:
-    return replace(snapshot, openclaw_config=_capture_openclaw_config_record(config_file))
+def _with_openclaw_config_record(
+    snapshot: _SetupConfigSnapshot, config_file: str | None, data_dir: str | None = None
+) -> _SetupConfigSnapshot:
+    return replace(snapshot, openclaw_config=_capture_openclaw_config_record(config_file, data_dir))
 
 
-def _openclaw_defenseclaw_path(value: Any) -> bool:
-    """True for a plugins.load.paths item the Go writer takes for DefenseClaw extension directory."""
-    if isinstance(value, str):
-        return os.path.basename(os.path.normpath(value.strip())) == "defenseclaw"
-    if isinstance(value, dict):
-        return any(_openclaw_defenseclaw_path(nested) for nested in value.values())
-    if isinstance(value, list):
-        return any(_openclaw_defenseclaw_path(nested) for nested in value)
-    return False
+# The Go registration (registerPlugin in internal/gateway/connector/openclaw.go)
+# publishes this record under the data directory: the pre-setup digest and, once
+# it has written the file, the digest of the exact bytes it committed. It is the
+# only evidence of what the writer made of this file with this setup's flags,
+# OpenClaw release and plugin schema, so the rollback does not model the writer.
+_OPENCLAW_WRITER_RECEIPT = ("connector_backups", "openclaw", "openclaw.json.json")
 
 
-def _openclaw_object(parent: dict, key: str) -> dict:
-    value = parent.get(key)
-    if not isinstance(value, dict):
-        value = {}
-    parent[key] = value
-    return value
+def _same_openclaw_file(first: str, second: str) -> bool:
+    return os.path.normcase(os.path.realpath(first)) == os.path.normcase(os.path.realpath(second))
 
 
-def _openclaw_registrations(prior: dict) -> list[dict]:
-    """Every document DefenseClaw registration can make of ``prior``.
-
-    This mirrors patchOpenClawConfig (internal/gateway/connector/openclaw.go)
-    step by step: the plugin name in plugins.allow, plugins.entries.defenseclaw
-    (enabled, and the conversation-hook grant when the key is unset), the
-    extension directory in plugins.load.paths, and the approvals.plugin block,
-    which is added, dropped (only when it is exactly what setup wrote) or left
-    alone. Which of those the Go writer applies depends on the OpenClaw
-    release, so every combination is a candidate. Nothing else may change.
-    """
-    documents: list[dict] = []
-    for approvals in ("enable", "drop", "keep"):
-        for conversation_hooks in (True, False):
-            document = copy.deepcopy(prior)
-            plugins = _openclaw_object(document, "plugins")
-            allow = plugins.get("allow")
-            allow = allow if isinstance(allow, list) else []
-            plugins["allow"] = allow if "defenseclaw" in allow else [*allow, "defenseclaw"]
-            entry = _openclaw_object(_openclaw_object(plugins, "entries"), "defenseclaw")
-            entry["enabled"] = True
-            if conversation_hooks:
-                _openclaw_object(entry, "hooks").setdefault("allowConversationAccess", True)
-            load = _openclaw_object(plugins, "load")
-            paths = load.get("paths")
-            kept = [item for item in (paths if isinstance(paths, list) else []) if not _openclaw_defenseclaw_path(item)]
-            load["paths"] = [*kept, "defenseclaw"]
-            if approvals == "enable":
-                plugin = _openclaw_object(_openclaw_object(document, "approvals"), "plugin")
-                plugin["enabled"] = True
-                plugin.setdefault("mode", "session")
-            elif approvals == "drop":
-                section = document.get("approvals")
-                plugin = section.get("plugin") if isinstance(section, dict) else None
-                if (
-                    isinstance(plugin, dict)
-                    and len(plugin) == 2
-                    and plugin.get("enabled") is True
-                    and plugin.get("mode") == "session"
-                ):
-                    del section["plugin"]
-                    if not section:
-                        del document["approvals"]
-            documents.append(document)
-    return documents
-
-
-def _openclaw_whole_numbers(value: Any) -> Any:
-    """The same document with integral floats as ints: the Go writer prints 1.0 as 1."""
-    if isinstance(value, dict):
-        return {key: _openclaw_whole_numbers(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_openclaw_whole_numbers(item) for item in value]
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return value
-
-
-def _openclaw_comparable(document: dict) -> str:
-    """A canonical form that ignores where the extension directory sits in plugins.load.paths."""
-    document = copy.deepcopy(document)
-    plugins = document.get("plugins")
-    load = plugins.get("load") if isinstance(plugins, dict) else None
-    if isinstance(load, dict) and isinstance(load.get("paths"), list):
-        load["paths"] = [item for item in load["paths"] if not _openclaw_defenseclaw_path(item)]
-        if not load["paths"]:
-            del load["paths"]
-        if not load:
-            del plugins["load"]
-    return _json.dumps(_openclaw_whole_numbers(document), sort_keys=True, default=str)
-
-
-def _openclaw_config_saved_by_others(prior: bytes | None, current: bytes) -> bool:
-    """True unless ``current`` is exactly what DefenseClaw registration makes of ``prior``.
-
-    The failed setup own write only registers the plugin. Any other addition,
-    changed value or removed key means OpenClaw or the operator saved the file
-    while setup ran; so does content that cannot be read as a JSON5 object.
-    A file that did not exist before setup is compared with an empty document.
-    """
-    from defenseclaw.openclaw_json5 import OpenClawConfigSyntaxError, loads
-
-    def parse(raw: bytes | None) -> Any:
-        if raw is None or not raw.strip():
-            return {}
-        return loads(raw.decode("utf-8"))
-
+def _openclaw_writer_receipt(record: _OpenClawConfigRecord) -> tuple[str, dict[str, Any]] | None:
+    """The writer's receipt for this openclaw.json (its path and fields), None when there is none."""
+    if not record.data_dir:
+        return None
+    receipt_path = os.path.join(record.data_dir, *_OPENCLAW_WRITER_RECEIPT)
     try:
-        before, now = parse(prior), parse(current)
-        if not isinstance(before, dict) or not isinstance(now, dict):
-            return True
-        wanted = _openclaw_comparable(now)
-        return all(wanted != _openclaw_comparable(document) for document in _openclaw_registrations(before))
-    except (OpenClawConfigSyntaxError, UnicodeError, TypeError, ValueError, RecursionError):
-        return True
+        with open(receipt_path, "rb") as handle:
+            raw = handle.read(2 * _OPENCLAW_CONFIG_MAX_BYTES + 1)  # The saved bytes are in it as base64.
+        receipt = _json.loads(raw) if len(raw) <= 2 * _OPENCLAW_CONFIG_MAX_BYTES else None
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("connector") != "openclaw"
+        or receipt.get("logical_name") != "openclaw.json"
+        or not isinstance(receipt.get("path"), str)
+        or not _same_openclaw_file(receipt["path"], record.path)
+    ):
+        return None
+    return receipt_path, receipt
+
+
+def _openclaw_writer_sha256(record: _OpenClawConfigRecord) -> str | None:
+    """The digest of the bytes the registration committed, None until it has published one."""
+    found = _openclaw_writer_receipt(record)
+    digest = found[1].get("post_sha256") if found else None
+    return digest if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) else None
+
+
+def _discard_openclaw_writer_receipt(record: _OpenClawConfigRecord) -> None:
+    """Drop the receipt of a registration that was rolled back.
+
+    The file is back to the bytes the receipt calls pre-setup, so the receipt
+    would otherwise read as drifted at the next setup and switch off the exact
+    restore at uninstall (GAP-0966). A receipt of an earlier setup stays.
+    """
+    found = _openclaw_writer_receipt(record)
+    if found is None:
+        return
+    pristine = "missing" if record.body is None else hashlib.sha256(record.body).hexdigest()
+    if found[1].get("pristine_sha256") == pristine:
+        with suppress(OSError):
+            os.unlink(found[0])
+
+
+@dataclass(frozen=True)
+class _OpenClawFileState:
+    body: bytes
+    identity: tuple[int, int, int]
+
+
+def _openclaw_identity(path: str) -> tuple[int, int, int]:
+    info = os.stat(path)
+    return (info.st_ino, info.st_mtime_ns, info.st_size)
+
+
+def _read_openclaw_file_state(path: str) -> _OpenClawFileState | None:
+    """The bytes with the identity of the file they came from; None when absent.
+
+    Raises OSError when the file is too large or was written while it was read.
+    """
+    try:
+        before = _openclaw_identity(path)
+        body = _read_openclaw_config_bytes(path)
+        after = _openclaw_identity(path)
+    except FileNotFoundError:
+        return None
+    if body is None:
+        return None
+    if before != after:
+        raise OSError("openclaw.json changed while it was read")
+    return _OpenClawFileState(body=body, identity=after)
 
 
 def _restore_openclaw_config_record(record: _OpenClawConfigRecord) -> str:
-    """Put back the saved openclaw.json unless a save made during setup would be lost.
+    """Put back the saved openclaw.json unless that would lose a change setup did not make.
 
     Returns ``"unchanged"`` (already the saved bytes), ``"restored"`` or
-    ``"kept"`` (the file holds a save by OpenClaw or the operator that setup
-    did not write, so it was left as saved).
+    ``"kept"`` (the file is not exactly what the registration committed: it was
+    saved by OpenClaw or the operator, deleted, or the registration published no
+    receipt for it, so it is left as it is).
 
     The rollback restarts DefenseClaw's gateway on the restored configuration,
     and that start registers the plugin again when the restored configuration
     guards OpenClaw. The saved bytes are put back after it, in place of the
     file with the same mode, so the user's comments and spelling return.
+
+    A save that lands between the check and the replace is caught by the file
+    identity check just before it and, for a write into the same file, by a
+    second name for it that is compared after it. Only a save that replaces the
+    file in the instants between the identity check and the replace is lost.
     """
     try:
-        current = _read_openclaw_config_bytes(record.path)
+        state = _read_openclaw_file_state(record.path)
     except OSError:
-        return "kept"  # larger than any file setup captured: not setup's output
-    if current == record.body:
+        return "kept"  # Larger than any file setup captured, or being written: not setup's output.
+    if (None if state is None else state.body) == record.body:
         return "unchanged"
-    if current is not None and _openclaw_config_saved_by_others(record.body, current):
+    if state is None:
+        return "kept"  # The registration never deletes openclaw.json.
+    committed = _openclaw_writer_sha256(record)
+    if committed is None or hashlib.sha256(state.body).hexdigest() != committed:
         return "kept"
-    if record.body is None:
-        os.unlink(record.path)
-        return "restored"
-    directory = os.path.dirname(record.path)
-    fd, temp_path = tempfile.mkstemp(prefix=".openclaw-restore-", dir=directory)
+    fd, scratch = tempfile.mkstemp(prefix=".openclaw-restore-", dir=os.path.dirname(record.path))
+    pin = scratch + ".pin"
+    pinned = False
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(record.body)
+            if record.body is not None:
+                handle.write(record.body)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(temp_path, record.mode)
-        os.replace(temp_path, record.path)
-    except BaseException:
-        with suppress(OSError):
-            os.unlink(temp_path)
-        raise
-    return "restored"
+        os.chmod(scratch, record.mode)
+        try:
+            os.link(record.path, pin)
+            pinned = True
+        except OSError:
+            pass  # No second name here: the identity check below is the protection.
+        try:
+            if _openclaw_identity(record.path) != state.identity:
+                return "kept"
+        except FileNotFoundError:
+            return "kept"
+        if record.body is None:
+            os.unlink(record.path)
+        else:
+            os.replace(scratch, record.path)
+        if pinned:
+            with open(pin, "rb") as handle:
+                replaced = handle.read(_OPENCLAW_CONFIG_MAX_BYTES + 1)
+            if replaced != state.body:
+                os.replace(pin, record.path)  # A save was written into the file we replaced: give it back.
+                pinned = False
+                return "kept"
+        _discard_openclaw_writer_receipt(record)
+        return "restored"
+    finally:
+        for leftover in (scratch, pin if pinned else ""):
+            if leftover:
+                with suppress(OSError):
+                    os.unlink(leftover)
 
 
 @dataclass(frozen=True)
@@ -11485,8 +11490,9 @@ def _rollback_failed_connector_application(
         )
     if openclaw_file_kept:
         failure = click.ClickException(
-            f"{failure.format_message()} Exception: openclaw.json was saved by OpenClaw or you while setup ran, "
-            "so it was left as saved and may still list the DefenseClaw plugin; "
+            f"{failure.format_message()} Exception: openclaw.json was saved by OpenClaw or you while setup ran "
+            "(or setup's own write could not be confirmed), so it was left as it is and may still list "
+            "the DefenseClaw plugin; "
             "`defenseclaw setup remove openclaw` removes only DefenseClaw's entries."
         )
     if openclaw_gateway_down:
@@ -15277,7 +15283,9 @@ def _setup_guardrail_connector_alias(
         reason, next_step = _setup_rollback_point_failure(exc)
         raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
     if connector == "openclaw":
-        prior_snapshot = _with_openclaw_config_record(prior_snapshot, app.cfg.claw.config_file)
+        prior_snapshot = _with_openclaw_config_record(
+            prior_snapshot, app.cfg.claw.config_file, getattr(app.cfg, "data_dir", None)
+        )
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
