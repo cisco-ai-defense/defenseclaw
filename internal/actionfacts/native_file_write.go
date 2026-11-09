@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
@@ -17,11 +18,12 @@ import (
 // place (a replacement's new text; a hunk's context and added lines), in
 // order, for a proof that judges the text an edit leaves and must not read
 // pieces from different places of the file as one text; added and replaced are
-// the added and removed pieces joined.
+// the added and removed pieces joined. before is, for a multi-step edit only,
+// the text each step replaces, parallel to after.
 type nativeFileWrite struct {
 	target, added, replaced string
 	whole                   bool
-	after                   []string
+	after, before           []string
 }
 
 // The argument names the reviewed whole-file write tools use for the target and
@@ -45,6 +47,9 @@ func nativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 		writes[index].replaced = boundedNativeText(writes[index].replaced)
 		for piece := range writes[index].after {
 			writes[index].after[piece] = boundedNativeText(writes[index].after[piece])
+		}
+		for piece := range writes[index].before {
+			writes[index].before[piece] = boundedNativeText(writes[index].before[piece])
 		}
 	}
 	return writes
@@ -216,7 +221,7 @@ func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
 		return nil
 	}
 	var added, replaced []string
-	var after []string
+	var after, before []string
 	for _, value := range edits {
 		item, ok := value.(map[string]any)
 		if !ok {
@@ -228,11 +233,11 @@ func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
 			return nil
 		}
 		added, replaced = append(added, newText), append(replaced, oldText)
-		after = append(after, newText)
+		after, before = append(after, newText), append(before, oldText)
 	}
 	return []nativeFileWrite{{
 		target: target, added: strings.Join(added, "\n"), replaced: strings.Join(replaced, "\n"),
-		after: after,
+		after: after, before: before,
 	}}
 }
 
@@ -293,6 +298,88 @@ func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
 		}
 	}
 	return writes
+}
+
+// editPieces are the texts a proof reads for what a multi-step edit or a patch
+// leaves in place, whatever the file held: each piece (after), the pieces
+// joined in order with and without a line break between them (a name or a list
+// that one piece opens and the next finishes), and the text the steps of a
+// multi-step edit make where they meet (nativeEditResults), alone and joined
+// the same way. An edit that gives no pieces is its added text.
+func (write nativeFileWrite) editPieces() []string {
+	if len(write.after) == 0 {
+		return []string{write.added}
+	}
+	pieces := slices.Clone(write.after)
+	if len(write.after) == 1 {
+		return pieces
+	}
+	pieces = append(pieces, strings.Join(write.after, "\n"), strings.Join(write.after, ""))
+	if results := write.nativeEditResults(); !slices.Equal(results, write.after) {
+		pieces = append(pieces, results...)
+		if len(results) > 1 {
+			pieces = append(pieces, strings.Join(results, "\n"), strings.Join(results, ""))
+		}
+	}
+	return pieces
+}
+
+// nativeEditResults is the text the steps of a multi-step edit leave where
+// they land, assembled the way the tool applies them to a file it does not
+// show: a step whose replaced text lies inside text an earlier step left (or
+// continues it at an end) rewrites that text; any other step leaves a text of
+// its own. Text one step opens and a later one finishes (a list one step
+// empties and another fills, a name one step starts and another ends) is then
+// read as the text it makes, not as two pieces. Nothing is credited: the
+// pieces themselves are judged as well (after), and a rewrite that would grow
+// past the proof bound is not made.
+func (write nativeFileWrite) nativeEditResults() []string {
+	if len(write.before) != len(write.after) {
+		return nil
+	}
+	var segments []string
+	for step, replaced := range write.before {
+		segments = nativeApplyEditStep(segments, replaced, write.after[step])
+	}
+	return segments
+}
+
+func nativeApplyEditStep(segments []string, replaced, replacement string) []string {
+	if replaced == "" {
+		return append(segments, replacement)
+	}
+	for index, segment := range segments {
+		count := strings.Count(segment, replaced)
+		if count == 0 {
+			continue
+		}
+		if len(segment)+count*(len(replacement)-len(replaced)) <= maxCommandBytes {
+			segments[index] = strings.ReplaceAll(segment, replaced, replacement)
+			return segments
+		}
+	}
+	for index, segment := range segments {
+		if overlap := nativeLongestOverlap(segment, replaced); overlap > 0 {
+			segments[index] = segment[:len(segment)-overlap] + replacement
+			return segments
+		}
+		if overlap := nativeLongestOverlap(replaced, segment); overlap > 0 {
+			segments[index] = replacement + segment[overlap:]
+			return segments
+		}
+	}
+	return append(segments, replacement)
+}
+
+// nativeLongestOverlap is the length of the longest suffix of left that is
+// also a prefix of right, shorter than both.
+func nativeLongestOverlap(left, right string) int {
+	for length := min(len(left), len(right)) - 1; length > 0; length-- {
+		if strings.HasSuffix(left, right[:length]) {
+			return length
+		}
+	}
+	return 0
 }
 
 // lastHunk is the text of the hunk the next context or added line belongs to,

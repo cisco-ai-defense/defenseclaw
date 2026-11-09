@@ -759,6 +759,31 @@ func TestExactDockerInsecureRegistryEditJudgesTheTextItLeavesWithoutCrossStepCre
 			{"list opened by one step and filled by the next", multi(
 				step(`"insecure-registries":[],`, `"insecure-registries":[`),
 				step(`]`, entry+`]`)), true},
+			{"key created empty by one step and filled by the next", multi(
+				step(`"debug":true`, `"insecure-registries":[]`),
+				step(`[]`, `[`+entry+`]`)), true},
+			{"key started by one step and finished by the next", multi(
+				step(`"debug"`, `"insecure-"`),
+				step(`-":true`, `-registries":[`+entry+`]`)), true},
+			{"key started by one step and finished by the next that abuts it", multi(
+				step(`"debug":true`, `"insecure-regi`),
+				step(`,"x":1`, `stries":[`+entry+`]`)), true},
+			{"key created by one step, an unrelated step between, filled last", multi(
+				step(`"debug":true`, `"insecure-registries":[]`),
+				step(`"log-driver":"json-file"`, `"log-driver":"journald"`),
+				step(`[]`, `[`+entry+`]`)), true},
+			{"MultiEdit that makes the mirrors list in two steps", multi(
+				step(`"debug":true`, `"registry-mirrors":[]`),
+				step(`[]`, `[`+entry+`]`)), false},
+			{"MultiEdit that starts the log driver name in one step", multi(
+				step(`"debug"`, `"log-"`),
+				step(`-":true`, `-driver":"journald"`)), false},
+			{"MultiEdit that starts the mirrors name in one step", multi(
+				step(`"debug"`, `"registry-"`),
+				step(`-":true`, `-mirrors":[`+entry+`]`)), false},
+			{"MultiEdit that empties the list in two steps", multi(
+				step(`"debug":true`, `"insecure-registries":[]`),
+				step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), false},
 
 			{"MultiEdit that only changes the log driver", multi(
 				step(`"log-driver":"json-file"`, `"log-driver":"journald"`),
