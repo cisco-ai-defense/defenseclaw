@@ -37,11 +37,12 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import cmp_to_key
@@ -4112,8 +4113,6 @@ def _rotate_token_preflight_writable(paths: list[str]) -> None:
     were stopped, leaving every hook failing closed (GAP-1636). A folder that
     does not exist yet is left to the writer, which creates it.
     """
-
-    import tempfile
 
     for directory in sorted({os.path.dirname(os.path.abspath(path)) for path in paths}):
         if not os.path.isdir(directory):
@@ -8677,6 +8676,67 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
 
 
 @dataclass(frozen=True)
+class _OpenClawConfigRecord:
+    """openclaw.json as it was before setup: the bytes a failed setup puts back (GAP-0973)."""
+
+    path: str
+    body: bytes = field(repr=False)
+    mode: int
+
+
+_OPENCLAW_CONFIG_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _capture_openclaw_config_record(config_file: str | None) -> _OpenClawConfigRecord | None:
+    """The exact bytes and mode of openclaw.json, or None when there is no readable file to keep."""
+    if not config_file:
+        return None
+    try:
+        path = os.path.realpath(os.path.expanduser(config_file))
+        with open(path, "rb") as handle:
+            body = handle.read(_OPENCLAW_CONFIG_MAX_BYTES + 1)
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except OSError:
+        return None
+    if len(body) > _OPENCLAW_CONFIG_MAX_BYTES:
+        return None
+    return _OpenClawConfigRecord(path=path, body=body, mode=mode)
+
+
+def _with_openclaw_config_record(snapshot: _SetupConfigSnapshot, config_file: str | None) -> _SetupConfigSnapshot:
+    return replace(snapshot, openclaw_config=_capture_openclaw_config_record(config_file))
+
+
+def _restore_openclaw_config_record(record: _OpenClawConfigRecord) -> None:
+    """Put back the saved openclaw.json bytes unless they are already there.
+
+    The rollback restarts DefenseClaw's gateway on the restored configuration,
+    and that start registers the plugin again when the restored configuration
+    guards OpenClaw. The saved bytes are put back after it, in place of the
+    file with the same mode, so the user's comments and spelling return.
+    """
+    try:
+        with open(record.path, "rb") as handle:
+            if handle.read(_OPENCLAW_CONFIG_MAX_BYTES + 1) == record.body:
+                return
+    except FileNotFoundError:
+        pass
+    directory = os.path.dirname(record.path)
+    fd, temp_path = tempfile.mkstemp(prefix=".openclaw-restore-", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(record.body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_path, record.mode)
+        os.replace(temp_path, record.path)
+    except BaseException:
+        with suppress(OSError):
+            os.unlink(temp_path)
+        raise
+
+
+@dataclass(frozen=True)
 class _SetupConfigSnapshot:
     """Exact rollback point for desired config and setup authority receipts."""
 
@@ -8698,6 +8758,7 @@ class _SetupConfigSnapshot:
     hook_contract_lock_generation: tuple[int, int, int, int] | None
     applied_runtime: _SetupAppliedRuntimeEvidence | None
     codex_rollback: _SetupCodexRollbackPoint | None = None
+    openclaw_config: _OpenClawConfigRecord | None = None
 
 
 @dataclass(frozen=True)
@@ -11151,6 +11212,14 @@ def _rollback_failed_connector_application(
     elif exact_runtime:
         rollback_errors.append("runtime reconciliation was skipped because restored authority was not exact")
 
+    if snapshot.openclaw_config is not None:
+        try:
+            _restore_openclaw_config_record(snapshot.openclaw_config)
+        except BaseException as exc:  # The saved bytes are the only exact record of the user's file.
+            if not isinstance(exc, Exception) and not _secret_safe:
+                raise
+            rollback_errors.append(f"restore openclaw.json [{_setup_runtime_ref(type(exc).__name__)}]")
+
     rollback_errors.extend(_verify_restored_codex_root(app.cfg, snapshot))
 
     left_changed: list[str] = []
@@ -11268,19 +11337,6 @@ def _rollback_failed_connector_application(
             f"{failure.format_message()} Note: the OpenClaw gateway is not running; start it with "
             "`openclaw gateway run` (or `openclaw gateway restart`) and it loads the DefenseClaw plugin."
         )
-    if isinstance(cause, _OpenClawGatewayNotRunning):
-        # GAP-0973: the rollback restarts DefenseClaw's gateway on the restored
-        # configuration. When that configuration already guards OpenClaw the
-        # start registers the plugin again, so say that openclaw.json carries
-        # DefenseClaw's entries instead of implying it is untouched.
-        restored_guarded = {
-            normalize_connector(name) for name in _guarded_connectors(app.cfg, app.cfg.active_connectors())
-        }
-        if "openclaw" in restored_guarded:
-            failure = click.ClickException(
-                f"{failure.format_message()} The restored configuration guards OpenClaw, so "
-                "openclaw.json keeps the DefenseClaw plugin entries."
-            )
     if exact_runtime:
         raise failure from None
     raise failure from cause
@@ -15063,6 +15119,8 @@ def _setup_guardrail_connector_alias(
     except OSError as exc:
         reason, next_step = _setup_rollback_point_failure(exc)
         raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
+    if connector == "openclaw":
+        prior_snapshot = _with_openclaw_config_record(prior_snapshot, app.cfg.claw.config_file)
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
