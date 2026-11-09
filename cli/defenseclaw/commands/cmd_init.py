@@ -484,9 +484,11 @@ def _run_repair_identity() -> None:
 
     Takes the same init locks as init (the home and the data folder the config names), so it
     cannot run beside an init. Works with or without a config.yaml: a first init that stopped on
-    the leftovers rolled its config back. With a config.yaml it also needs the proof Doctor needs
-    before it recovers durable state: that the configured gateway is not running (a running gateway
-    holds the key it loaded).
+    the leftovers rolled its config back. A running gateway holds the key it loaded, so the repair
+    first needs proof that none runs: no defenseclaw-gateway process of this account, and no live
+    gateway behind the PID record of the install home or of a config here (not derived from which
+    config file exists now). With a config.yaml it also needs the proof Doctor needs before it
+    recovers durable state. A process list or record that cannot be read refuses.
     """
 
     from defenseclaw import config as config_module
@@ -498,8 +500,17 @@ def _run_repair_identity() -> None:
     target = cfg.gateway.device_key_file or os.path.join(cfg.data_dir, "device.key")
 
     def require_gateway_inactive() -> None:
+        # The floor does not depend on any config pathname: the account process list and the PID
+        # records of the install home (where the gateway keeps them whatever config started it) and
+        # of every data folder a config here names. What cannot be read refuses.
+        from defenseclaw.doctor_gateway import gateway_activity_blocker
+
+        pid_records = [config_module.gateway_pid_path(config_module.default_data_path())]
+        pid_records += [config_module.gateway_pid_path(each.data_dir) for each in cfgs]
+        if blocker := gateway_activity_blocker(pid_records):
+            raise click.ClickException(f"{blocker}; nothing was changed")
         if not configured:
-            return  # a first init that stopped never configured a gateway
+            return  # no config describes this home: the process list and the install-home record are all there is
         from defenseclaw.commands.cmd_doctor import _recovery_gateway_blocker
 
         for each in cfgs:
