@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"unicode"
 
@@ -139,6 +141,46 @@ func windowsVerbatimOperand(operand string) bool {
 func windowsOpenedPathOfFact(path actionfacts.PathFact) (string, bool, error) {
 	trim := func(text string) string { return strings.TrimLeftFunc(text, unicode.IsSpace) }
 	return windowsOpenedPath(trim(pathFactSpelling(path)), windowsVerbatimOperand(trim(path.Value)))
+}
+
+// windowsPathHost says a Windows file system opens the paths this process
+// walks, so a Windows spelling can be looked up on it. A variable so a test
+// can name such a host.
+var windowsPathHost = runtime.GOOS == "windows"
+
+// windowsHostPath is the path a Windows host opens for a Windows spelling
+// (windowsOpenedPath), in the spelling its file-system walks take. Win32
+// normalizes a path lexically before it opens it: the walk of a device or
+// share spelling, of a name with trailing spaces or dots, of a folder
+// followed by "..", and of a short name must follow that file, not the
+// characters the caller wrote (a folder that is no entry cannot be walked
+// through, and the host of a share may be this machine). The second result is
+// false on a host that opens no Windows path, and for a spelling that is no
+// rooted Windows path; the caller then keeps the spelling it has.
+func windowsHostPath(spelling string) (string, bool) {
+	if !windowsPathHost {
+		return "", false
+	}
+	spelling = strings.TrimLeftFunc(spelling, unicode.IsSpace)
+	return windowsHostOpenedPath(windowsOpenedPath(spelling, windowsVerbatimOperand(spelling)))
+}
+
+// windowsHostPathOfFact is windowsHostPath for a path fact (windowsOpenedPathOfFact).
+func windowsHostPathOfFact(path actionfacts.PathFact) (string, bool) {
+	if !windowsPathHost {
+		return "", false
+	}
+	return windowsHostOpenedPath(windowsOpenedPathOfFact(path))
+}
+
+// windowsHostOpenedPath spells an opened path for the host. A failure of the
+// file system to expand short names leaves the path as written, which is
+// still the lexically normalized file.
+func windowsHostOpenedPath(opened string, ok bool, _ error) (string, bool) {
+	if !ok {
+		return "", false
+	}
+	return filepath.FromSlash(opened), true
 }
 
 // windowsRootedSpelling is the cheap test before windowsOpenedPath reads a

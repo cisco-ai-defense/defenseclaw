@@ -1315,6 +1315,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if request.SkipLocalFilesystemResolution {
 			return false
 		}
+		// The walk below follows the file Windows opens for a Windows
+		// spelling, not its characters (see windowsHostPath).
+		if opened, ok := windowsHostPath(target); ok {
+			target = opened
+		}
 		// A name that a link earlier in the command makes an alias of a
 		// protected file (GAP-1505).
 		if linked, ok := links.Target(target); !ok || isProtected(linked) {
