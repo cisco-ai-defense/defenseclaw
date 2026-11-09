@@ -63,6 +63,15 @@ func TestRegistrationWriteReachDestinationRoles(t *testing.T) {
 		{"install of an ordinary source with a short cluster naming the target folder", "install -m755 -Dt " + bin + " " + source, false},
 		{"loop link of a hook-named source with a short cluster naming the target folder", "for f in " + owned + "; do ln -sft " + bin + " \"$f\"; done", true},
 		{"loop link of an ordinary source with a short cluster naming the target folder", "for f in " + source + "; do ln -sft " + bin + " \"$f\"; done", false},
+		{"link of a hook-named source into an abbreviated target folder", "ln -f --target-d=" + bin + " " + owned, true},
+		{"link of a hook-named source into the full target folder option", "ln -f --target-directory=" + bin + " " + owned, true},
+		{"link of a hook-named source with a short cluster naming the target folder", "ln -sft" + bin + " " + owned, true},
+		{"link of a hook-named source with a short option naming the target folder", "ln -sf -t " + bin + " " + owned, true},
+		{"link of a hook-named source into the bin folder", "ln -sf " + owned + " " + bin + "/", true},
+		{"link of an ordinary source into an abbreviated target folder", "ln -f --target-d=" + bin + " " + source, false},
+		{"link of an ordinary source with a short cluster naming the target folder", "ln -sft" + bin + " " + source, false},
+		{"link of an ordinary source into the bin folder", "ln -sf " + source + " " + bin + "/", false},
+		{"link over the hook file", "ln -sf " + source + " " + hook, true},
 		{"operand after the end of options is not a long option", "cp -- --target-d=" + bin + " " + source, false},
 		{"install onto the hook file", "install -m755 " + source + " " + hook, true},
 		{"perl module option reads the hook", "perl -MFile::Spec -e 'print while <>' " + hook, false},
@@ -102,6 +111,18 @@ func TestRegistrationWriteReachDestinationRoles(t *testing.T) {
 		{"loop perl edits another tool in place", "for f in " + bin + "/other-tool; do perl -pi -e s/x/y/ \"$f\"; done", false},
 	} {
 		if got := len(RegistrationWriteReached(tc.command, root, home, names)) > 0; got != tc.want {
+			t.Errorf("%s: %q reached %v, want %v", tc.name, tc.command, got, tc.want)
+		}
+	}
+	// ln SOURCE links the source under its own name in the working folder.
+	for _, tc := range []struct {
+		name, command string
+		want          bool
+	}{
+		{"single-operand link of a hook-named source in the bin folder", "ln -f " + owned, true},
+		{"single-operand link of an ordinary source in the bin folder", "ln -s " + source, false},
+	} {
+		if got := len(RegistrationWriteReached(tc.command, bin, home, names)) > 0; got != tc.want {
 			t.Errorf("%s: %q reached %v, want %v", tc.name, tc.command, got, tc.want)
 		}
 	}

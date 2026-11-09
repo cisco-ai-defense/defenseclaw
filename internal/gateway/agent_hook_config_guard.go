@@ -1790,54 +1790,45 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard, fact
 	}
 	program := strings.ToLower(filepath.Base(argv[0]))
 	if program == "env" {
-		var assignments []string
-		dropsHome := false
-		for index := 1; index < len(argv); index++ {
-			if argv[index] == "--" {
-				continue
-			}
-			if argv[index] == "-i" || argv[index] == "--ignore-environment" {
-				dropsHome = true
-				continue
-			}
-			if (argv[index] == "-u" || argv[index] == "--unset") && index+1 < len(argv) {
-				dropsHome = dropsHome || argv[index+1] == "HOME"
-				index++
-				continue
-			}
-			if (argv[index] == "-C" || argv[index] == "--chdir") && index+1 < len(argv) {
-				index++
-				continue
-			}
-			if strings.HasPrefix(argv[index], "-") || strings.Contains(argv[index], "=") {
-				if agentHookConfigRunHomeAssignment(argv[index]) {
-					assignments = append(assignments, argv[index])
+		assigned, command, unset, understood := agentHookConfigEnvSplit(argv)
+		if !understood {
+			// An option the env reader does not know leaves the call as it is.
+			command = argv[1:]
+			for len(command) > 0 && (strings.HasPrefix(command[0], "-") || strings.Contains(command[0], "=")) {
+				if agentHookConfigRunHomeAssignment(command[0]) {
+					assigned = append(assigned, command[0])
 				}
-				continue
+				command = command[1:]
 			}
-			reason, target = agentHookConfigRunOverride(argv[index:], guard, facts)
-			if agent := agentHookConfigLaunchedAgent(argv[index:]); reason == "" && target == "" && agent != "" {
-				if dropsHome && !slices.ContainsFunc(assignments, func(word string) bool { return strings.HasPrefix(word, "HOME=") }) {
-					return "runs an agent without its registered hook configuration home", agent
-				}
-				for _, assignment := range assignments {
-					key, value, _ := strings.Cut(assignment, "=")
-					expected := agentHookConfigExpectedHome(key, agent, guard)
-					if expected == "" {
-						continue
-					}
-					if path, literal := agentHookConfigLiteralHomePath(value, guard); literal && path == filepath.Clean(expected) {
-						continue
-					}
-					if why := agentHookConfigLiteralHomeOverride(key, value, guard, agent); why != "" {
-						return why, agent
-					}
-					return "", agent
-				}
-			}
-			return reason, target
 		}
-		return "", ""
+		var assignments []string
+		for _, word := range assigned {
+			if agentHookConfigRunHomeAssignment(word) {
+				assignments = append(assignments, word)
+			}
+		}
+		dropsHome := slices.Contains(unset, "*") || slices.Contains(unset, "HOME")
+		reason, target = agentHookConfigRunOverride(command, guard, facts)
+		if agent := agentHookConfigLaunchedAgent(command); reason == "" && target == "" && agent != "" {
+			if dropsHome && !slices.ContainsFunc(assignments, func(word string) bool { return strings.HasPrefix(word, "HOME=") }) {
+				return "runs an agent without its registered hook configuration home", agent
+			}
+			for _, assignment := range assignments {
+				key, value, _ := strings.Cut(assignment, "=")
+				expected := agentHookConfigExpectedHome(key, agent, guard)
+				if expected == "" {
+					continue
+				}
+				if path, literal := agentHookConfigLiteralHomePath(value, guard); literal && path == filepath.Clean(expected) {
+					continue
+				}
+				if why := agentHookConfigLiteralHomeOverride(key, value, guard, agent); why != "" {
+					return why, agent
+				}
+				return "", agent
+			}
+		}
+		return reason, target
 	}
 	if program == "exec" || program == "command" || program == "nohup" {
 		return agentHookConfigRunOverride(argv[1:], guard, facts)
@@ -2128,6 +2119,12 @@ func agentHookConfigLaunchedAgent(argv []string) string {
 		}
 		switch program {
 		case "exec", "command", "nohup", "env":
+			if program == "env" {
+				if _, command, _, understood := agentHookConfigEnvSplit(argv); understood {
+					argv = command
+					continue
+				}
+			}
 			argv = argv[1:]
 			for len(argv) > 0 && (strings.HasPrefix(argv[0], "-") || strings.Contains(argv[0], "=")) {
 				option := argv[0]
@@ -2280,6 +2277,21 @@ func agentHookConfigEnvChild(argv []string) (child []string, directory string, u
 		}
 	}
 	return assigned, directory, unset, true
+}
+
+// agentHookConfigEnvSplit reads one env call through agentHookConfigEnvChild
+// and separates the NAME=value words it passes from the command it runs.
+// understood is false for an option the reader does not know.
+func agentHookConfigEnvSplit(argv []string) (assigned, command, unset []string, understood bool) {
+	child, _, unset, understood := agentHookConfigEnvChild(argv)
+	if !understood {
+		return nil, nil, nil, false
+	}
+	cut := 0
+	for cut < len(child) && agentHookConfigAssignment(child[cut]) {
+		cut++
+	}
+	return child[:cut], child[cut:], unset, true
 }
 
 // agentHookConfigWrapperChild reads one literal process wrapper (timeout,
