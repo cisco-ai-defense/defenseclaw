@@ -23961,6 +23961,15 @@ function Start-DefenseClawTransactionServices {
                     subsystem = 'guardian'
                     reason    = 'the guardian coverage proof of the rollback is deferred: a program holds the Codex requirements the recovery had to republish'
                 }
+                try {
+                    Start-DefenseClawService -Name $GuardianServiceName
+                }
+                catch {
+                    Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                        subsystem = 'guardian'
+                        reason    = "the guardian did not stay up on the held Codex requirements: $($_.Exception.Message)"
+                    }
+                }
             }
             else {
                 [void](Wait-DefenseClawFreshGuardianReconcile `
@@ -34042,7 +34051,7 @@ function Wait-DefenseClawEnterpriseReadiness {
         # Rollback, recovery and activation; see Get-DefenseClawGuardianReadinessProbe.
         [switch]$AllowFailedTargets,
         [string[]]$AllowedFailedTargetSIDs,
-        # GAP-0947: the guardian service runs but cannot prove coverage until
+        # GAP-0947: the guardian can neither prove coverage nor stay up until
         # a program lets go of the Codex requirements (rollback only).
         [switch]$GuardianCoverageDeferred
     )
@@ -34071,11 +34080,12 @@ function Wait-DefenseClawEnterpriseReadiness {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName)
         if ($gatewayReady -and $GuardianCoverageDeferred) {
-            $deferredGuardian = Microsoft.PowerShell.Management\Get-Service `
-                -Name $GuardianServiceName `
-                -ErrorAction SilentlyContinue
-            $guardianReady = $null -ne $deferredGuardian -and
-                $deferredGuardian.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+            # The guardian refuses to run on the administrator's edited Codex
+            # policy (its startup reconcile fails and the process exits) until
+            # the program lets go and the policy is republished, so neither
+            # its coverage nor its process is waited for. The gateway and
+            # the other services run.
+            $guardianReady = $true
         }
         elseif ($gatewayReady) {
             $guardianReady = Test-DefenseClawGuardianReady `

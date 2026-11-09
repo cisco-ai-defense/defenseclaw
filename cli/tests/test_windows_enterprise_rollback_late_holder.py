@@ -128,8 +128,10 @@ def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_b
     assert "-GuardianCoverageDeferred:(Test-DefenseClawRollbackCoverageDeferred)" in start
     ready = _function_body(text, "Wait-DefenseClawEnterpriseReadiness")
     assert "[switch]$GuardianCoverageDeferred" in ready
-    # The guardian service must still run; only the coverage proof is skipped.
-    assert "ServiceControllerStatus]::Running" in ready[ready.index("$GuardianCoverageDeferred) {") :]
+    # The gateway must still be ready; the guardian (which exits on the edited
+    # policy) is not waited for.
+    assert "$gatewayReady -and $GuardianCoverageDeferred" in ready
+    assert "$guardianReady = $true" in ready[ready.index("$GuardianCoverageDeferred) {") :][:700]
     # A finished or cleared rollback leaves nothing deferred.
     clear = _function_body(text, "Clear-DefenseClawRollbackDeferredHolds")
     assert "DefenseClawRollbackCoverageDeferred = $false" in clear
