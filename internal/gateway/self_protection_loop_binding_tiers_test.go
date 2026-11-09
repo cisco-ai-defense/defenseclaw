@@ -32,6 +32,8 @@ func TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict(t *testi
 	own := `sed -i s/a/b/ ` + home + `/$d/config.yaml`
 	readLoop := `echo aliasdirx | while read -r d; do ` + own + `; done`
 	missing := filepath.Join(project, "missing", "out")
+	// resolved is the reading of direct with the login in place of $u.
+	resolved := `sed -i s/a/b/ '` + parent + filepath.Base(home) + `/.defenseclaw/config.yaml'`
 	rows := []struct {
 		name, command string
 		// balanced and strict are the verdicts: true is the protected block.
@@ -58,6 +60,28 @@ func TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict(t *testi
 		{"ifs-from-a-variable-before-the-loop", `sep=x; IFS=$sep; ` + readLoop, true, true},
 		{"here-string-read-with-a-failing-redirect-link", `for u in $USER; do read u <<< ordinary > ` + missing + `; ` + sibling + `; done`, true, true},
 		{"here-string-read-with-a-failing-redirect-direct", `for u in $USER; do read u <<< ordinary > ` + missing + `; ` + direct + `; done`, true, true},
+		// The shell runs a top-level statement before it calls the function
+		// that follows it, wherever the function is written.
+		{"ifs-set-before-the-call-of-the-function-that-runs-the-loop", `f() { ` + readLoop + `; }; IFS=x; f`, true, true},
+		{"ifs-set-before-one-call-of-the-function-and-after-another", `f() { ` + readLoop + `; }; f; IFS=x; f`, true, true},
+		{"ifs-set-after-the-only-call-of-the-function", `f() { ` + readLoop + `; }; f; IFS=x`, false, false},
+		{"read-declared-before-the-call-of-the-function", `f() { read u <<< ordinary; ` + sibling + `; }; u=$USER; read() { :; }; f`, true, true},
+		{"read-declared-before-the-call-of-the-function-that-calls-it", `h() { f; }; f() { read u <<< ordinary; ` + sibling + `; }; u=$USER; read() { :; }; h`, true, true},
+		{"read-declared-after-the-call-of-the-function", `f() { read u <<< ordinary; ` + sibling + `; }; u=$USER; f; read() { :; }`, false, true},
+		// The name IFS as an argument, or as the prefix of one command, leaves
+		// the IFS of the shell as it is.
+		{"ifs-printed-before-the-here-string-read", `u=$USER; echo IFS=x; read u <<< ordinary; ` + sibling, false, true},
+		{"ifs-set-for-one-command-before-the-here-string-read", `u=$USER; IFS=x env true; read u <<< ordinary; ` + sibling, false, true},
+		{"while-read-of-an-ordinary-word-after-the-login-was-assigned", `u=$USER; echo ordinary | while read -r u; do ` + sibling + `; done`, false, true},
+		{"while-read-of-the-login-after-the-login-was-assigned", `u=$USER; echo $USER | while read -r u; do ` + direct + `; done`, true, true},
+		{"ifs-printed-before-the-while-read", `u=$USER; echo IFS=x; echo ordinary | while read -r u; do ` + sibling + `; done`, false, true},
+		{"ifs-unset-before-the-here-string-read", `u=$USER; unset IFS; read u <<< ordinary; ` + sibling, true, true},
+		// The text of a reading spelled where it does not run hides nothing.
+		{"select-with-the-reading-in-a-comment", `select u in $USER; do ` + direct + `; break; done # ` + resolved, true, true},
+		{"select-with-the-reading-in-a-quoted-word", `select u in $USER; do ` + direct + `; break; done; echo "` + resolved + `"`, true, true},
+		{"select-with-the-reading-in-a-here-document", "select u in $USER; do " + direct + "; break; done; cat <<'EOF'\n" + resolved + "\nEOF", true, true},
+		{"select-of-the-login", `select u in $USER; do ` + direct + `; break; done`, true, true},
+		{"select-of-other-names-with-a-reading-in-a-comment", `select u in alice bob; do sed -i s/a/b/ ` + parent + `$u/notes.txt; break; done # ` + resolved, false, false},
 		// The rows as filed, and their benign twins.
 		{"filed-for-list-login", `for u in $USER; do ` + direct + `; done`, true, true},
 		{"filed-for-list-logname", `for u in ${LOGNAME}; do ` + direct + `; done`, true, true},

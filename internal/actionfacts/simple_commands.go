@@ -102,14 +102,40 @@ func (s simpleShellState) clone() simpleShellState {
 	return copy
 }
 
+// simplePieces holds the commands a walk reads from the text of the call as it
+// is written: no variable of them resolved, no word of them changed. A nil
+// pointer records nothing.
+type simplePieces []SimpleCommand
+
+func (pieces *simplePieces) add(command SimpleCommand) {
+	if pieces != nil {
+		*pieces = append(*pieces, command)
+	}
+}
+
+// has reports a command that is one of the pieces. A reading marked
+// LoginGuess is judged as the piece it repeats.
+func (pieces *simplePieces) has(command SimpleCommand) bool {
+	command.LoginGuess = false
+	return slices.ContainsFunc(*pieces, func(piece SimpleCommand) bool {
+		piece.LoginGuess = false
+		return piece == command
+	})
+}
+
 // SimpleCommands flattens an action with the full parser used by the hook
 // command class rule. Every returned command is judged on its own, in
 // addition to the original action. A plain single command needs no second
 // pass. Ordinary assignments and known home or local variable expansions
 // are resolved; a subshell or pipeline stage has its own shell state.
 func SimpleCommands(input Input, facts Facts) []SimpleCommand {
-	result := simpleCommandsOfCall(input, facts)
-	if input.Command == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
+	argsOnly := input.Command == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax)
+	var pieces *simplePieces
+	if argsOnly && argsExecutionTool(input.Tool) {
+		pieces = new(simplePieces)
+	}
+	result := simpleCommandsOfCall(input, facts, pieces)
+	if argsOnly {
 		// The POSIX reader rejected the call (a construct only Bash has) and
 		// the shell parse reads it only to add readings (simpleCommands): a
 		// call it cannot read in full keeps the judgment it had without them.
@@ -119,15 +145,17 @@ func SimpleCommands(input Input, facts Facts) []SimpleCommand {
 		// A command that is a piece of the call as written adds nothing: the
 		// call is judged as written, with the rules and the enforcement it had
 		// before this reading. Only a reading with a variable resolved is new.
-		if command := extractArgsForTool(input.Args, input.Tool).command; argsExecutionTool(input.Tool) && command != "" {
-			result = slices.DeleteFunc(result, func(simple SimpleCommand) bool { return strings.Contains(command, simple.Text) })
+		// The walk records the pieces as it reads them, so a text that merely
+		// occurs elsewhere in the call (a comment, a quoted word) is no piece.
+		if pieces != nil {
+			result = slices.DeleteFunc(result, pieces.has)
 		}
 	}
 	return result
 }
 
-func simpleCommandsOfCall(input Input, facts Facts) []SimpleCommand {
-	result := simpleCommands(input, facts, 0, "", nil, false)
+func simpleCommandsOfCall(input Input, facts Facts, pieces *simplePieces) []SimpleCommand {
+	result := simpleCommands(input, facts, 0, "", nil, false, pieces)
 	// USER and LOGNAME carry a value from the home only as the guess that the
 	// login is the home's last element, and the shell may hold another. A
 	// second walk reads the action with that guess, to prove a write to state
@@ -140,7 +168,7 @@ func simpleCommandsOfCall(input Input, facts Facts) []SimpleCommand {
 	if input.Command != "" && !strings.Contains(input.Command, "USER") && !strings.Contains(input.Command, "LOGNAME") {
 		return result
 	}
-	for _, guessed := range simpleCommands(input, facts, 0, "", nil, true) {
+	for _, guessed := range simpleCommands(input, facts, 0, "", nil, true, pieces) {
 		if !slices.Contains(result, guessed) {
 			guessed.LoginGuess = true
 			result = append(result, guessed)
@@ -155,7 +183,7 @@ func simpleCommandsOfCall(input Input, facts Facts) []SimpleCommand {
 // hands one to a shell body. inherited holds the values USER and LOGNAME
 // have where a shell body starts (simpleChildUserVars); nil is the start of
 // the action, where guess gives both the home base name.
-func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string, guess bool) []SimpleCommand {
+func simpleCommands(input Input, facts Facts, depth int, interpreter string, inherited map[string]string, guess bool, pieces *simplePieces) []SimpleCommand {
 	if facts.Parse.Dialect == DialectPowerShell || facts.Parse.Dialect == DialectCMD {
 		return windowsSimpleCommands(input, facts)
 	}
@@ -445,6 +473,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative}
+			if text == part.text {
+				pieces.add(command)
+			}
 			if !emitted[command] {
 				result = append(result, command)
 				emitted[command] = true
@@ -461,6 +492,9 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
 						AbsoluteOnly:            command.AbsoluteOnly}
+					if reading == unprefixed {
+						pieces.add(alone)
+					}
 					if !emitted[alone] {
 						result = append(result, alone)
 						emitted[alone] = true
@@ -497,13 +531,22 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 					if innerInterpreter == "" {
 						innerInterpreter = interpreter
 					}
+					// The commands of a script the call spells as it is are pieces of
+					// the call; those of a script with a variable resolved are not.
+					innerPieces := pieces
+					if innerInput.Command != script {
+						innerPieces = nil
+					}
 					inner := simpleCommands(innerInput, innerFacts, depth+1, innerInterpreter,
-						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess)
+						simpleChildUserVars(call, effective, shared, innerInterpreter, login), guess, innerPieces)
 					if len(inner) == 0 && strings.TrimSpace(innerInput.Command) != "" {
 						zshHistory := innerInterpreter == "zsh" && len(innerFacts.Commands) == 1 &&
 							innerFacts.Commands[0].Executable == "history"
 						inner = []SimpleCommand{{Text: innerInput.Command, CWD: innerInput.CWD,
 							ZshHistoryBuiltin: zshHistory}}
+						if innerInput.Command == script {
+							pieces.add(inner[0])
+						}
 					}
 					changed = changed || len(inner) != 0
 					for _, child := range inner {

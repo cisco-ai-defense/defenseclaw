@@ -244,6 +244,10 @@ type simpleLoopBind struct {
 	// token is the placeholder that stands for the plain words of the list
 	// in one state (simplePlaceholderToken), "" when each is read alone.
 	token string
+	// certain marks a read loop that reads its word before every pass of the
+	// body (the straight-line reading, the builtin read): the body never runs
+	// with the variable as it was before the loop.
+	certain bool
 }
 
 // sequenceStatementDetails is the one full-parser flattening step. The

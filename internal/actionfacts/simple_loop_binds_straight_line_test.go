@@ -44,6 +44,10 @@ func TestSimpleCommandsStraightLineReadDeclarationReachesOnlyFromTopLevel(t *tes
 		{"declared in a branch that does not run", "if false; then read() { :; }; fi; " + loop, other, state},
 		{"declared in a branch that runs", "if true; then read() { :; }; fi; " + loop, other, state},
 		{"declared after the function that runs the loop", "f() { " + loop + "; }; f; read() { :; }", other, state},
+		{"declared at the top level before the call of the function that runs the loop", "f() { " + loop + "; }; read() { :; }; f", state, state},
+		{"declared before one call of the function and after another", "f() { " + loop + "; }; f; read() { :; }; f", state, state},
+		{"declared before the call of a function that calls the one that runs the loop", "g() { f; }; f() { " + loop + "; }; read() { :; }; g", state, state},
+		{"declared after the call of a function that calls the one that runs the loop", "g() { f; }; f() { " + loop + "; }; g; read() { :; }", other, state},
 		{"declared after the loop", loop + "; read() { :; }", other, other},
 		{"declared in the loop, after the call", "for i in 1 2; do " + loop + "; read() { :; }; done", other, state},
 		{"not declared", loop, other, other},
@@ -98,6 +102,18 @@ func TestSimpleCommandsStraightLineReadLoopIFSReachesOnlyFromTopLevel(t *testing
 		{"set by a function an uncalled function calls", "f() { IFS=x; }; for i in 1 2; do h() { f; }; " + read + "; done", reading{false, true}, reading{true, true}},
 		{"set by a function the loop calls", "f() { IFS=x; }; for i in 1 2; do " + read + "; f; done", reading{false, true}, reading{true, true}},
 		{"assigned after the loop", read + "; IFS=x", reading{false, true}, reading{false, true}},
+		// The shell sets the IFS where the top-level statement stands, so a
+		// function that reads with it runs with the IFS of its call.
+		{"assigned at the top level before the call of the function that runs the loop", "f() { " + read + "; }; IFS=x; f", reading{true, false}, reading{true, false}},
+		{"assigned before one call of the function and after another", "f() { " + read + "; }; f; IFS=x; f", reading{true, false}, reading{true, true}},
+		{"assigned after the only call of the function", "f() { " + read + "; }; f; IFS=x", reading{false, true}, reading{false, true}},
+		{"assigned before the call of a function that calls the one that runs the loop", "g() { f; }; f() { " + read + "; }; IFS=x; g", reading{true, false}, reading{true, false}},
+		// A statement that spells the name without changing the IFS of the
+		// shell: an argument that is printed, a prefix of one command.
+		{"printed with echo", "echo IFS=x; " + read, reading{false, true}, reading{false, true}},
+		{"set for one command only", "IFS=x env true; " + read, reading{false, true}, reading{false, true}},
+		{"set for one function call only", "f() { :; }; IFS=x f; " + read, reading{false, true}, reading{false, true}},
+		{"printed with echo before the function that runs the loop", "f() { " + read + "; }; echo IFS=x; f", reading{false, true}, reading{false, true}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			for _, mode := range []struct {
