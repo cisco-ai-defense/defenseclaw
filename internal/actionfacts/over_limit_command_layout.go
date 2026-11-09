@@ -29,8 +29,10 @@ import (
 // main shell in the order written. It gives the reading three facts:
 //
 //   - skipped: comments, the bodies of here-documents that only feed data to
-//     a command that reads data (cat, tee...), and the quoted words that are
-//     the text an echo or a printf prints. Their lines are no command.
+//     a command that reads data (cat, tee...) and that the shell does not
+//     expand (a quoted delimiter, or a body with no substitution), and the
+//     argument words of a command that only prints or counts text (echo,
+//     printf...), quoted or not. Their lines are no command.
 //   - quoted: the words that hold a quote. A command written inside one ends
 //     with it: a read of its operands never runs on into the statements that
 //     follow the closing quote.
@@ -117,6 +119,9 @@ type layoutWord struct {
 type layoutDocument struct {
 	delimiter string
 	stripTabs bool
+	// expands is true when the delimiter word holds no quote or escape: the
+	// shell then runs the command substitutions in the body.
+	expands bool
 }
 
 type layoutReader struct {
@@ -248,7 +253,8 @@ func (r *layoutReader) operator(index int) (int, bool) {
 	if !ok || end == start {
 		return 0, false
 	}
-	r.documents = append(r.documents, layoutDocument{delimiter: delimiter, stripTabs: stripTabs})
+	expands := !strings.ContainsAny(text[start:end], "'\"\\")
+	r.documents = append(r.documents, layoutDocument{delimiter: delimiter, stripTabs: stripTabs, expands: expands})
 	r.redirected = true
 	return end, true
 }
@@ -305,10 +311,10 @@ func (r *layoutReader) endStatement(term string) {
 	}
 	r.commands = append(r.commands, command)
 	if first < len(words) && layoutTextCommands[command] {
+		// Every argument word is text, quoted or not: a readable layout has
+		// no substitution in a word, so none of them runs.
 		for _, word := range words[first+1:] {
-			if word.quoted {
-				r.layout.skipped = append(r.layout.skipped, textSpan{word.start, word.end})
-			}
+			r.layout.skipped = append(r.layout.skipped, textSpan{word.start, word.end})
 		}
 	}
 	if layoutReserved[command] {
@@ -344,7 +350,8 @@ func allAssignments(words []layoutWord) bool {
 
 // readDocuments reads the bodies of the here-documents opened on the line
 // that ended at index, and returns the index after them. A body that feeds
-// only commands that read data is skipped.
+// only commands that read data is skipped, unless the shell runs a command
+// substitution in it (an unquoted delimiter): that is code, and stays text.
 func (r *layoutReader) readDocuments(index int) int {
 	data := !r.grouped
 	for _, command := range r.commands {
@@ -354,13 +361,32 @@ func (r *layoutReader) readDocuments(index int) int {
 	}
 	for _, document := range r.documents {
 		end := heredocBodyEnd(r.text, index, document.delimiter, document.stripTabs)
-		if data && end > index {
+		if data && end > index && (!document.expands || !runsSubstitution(r.text[index:end])) {
 			r.layout.skipped = append(r.layout.skipped, textSpan{index, end})
 		}
 		index = end
 	}
 	r.documents, r.commands, r.grouped = nil, nil, false
 	return index
+}
+
+// runsSubstitution reports whether the body of a here-document with an
+// unquoted delimiter holds a command substitution the shell runs: a dollar
+// parenthesis or a backtick that no backslash escapes.
+func runsSubstitution(body string) bool {
+	for index := 0; index < len(body); index++ {
+		switch body[index] {
+		case shellBackslash:
+			index++
+		case shellBacktick:
+			return true
+		case shellDollar:
+			if index+1 < len(body) && body[index+1] == shellOpenParen {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // readLayoutWord reads the shell word at index; false for a construct the
