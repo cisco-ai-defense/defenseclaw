@@ -157,12 +157,15 @@ const (
 )
 
 // ownExcludedNextStep names the administrator rule and the command that shows
-// it. Setup puts no DefenseClaw command on the PATH of a Windows computer, so
-// there the command is the managed CLI by its path, in PowerShell (GAP-0979).
+// it, as the platform installs it: the managed CLI by its path in PowerShell on
+// Windows, where Setup puts no DefenseClaw command on the PATH, and the
+// installed gateway by its absolute path on Linux and macOS, where neither the
+// PATH nor sudo's secure_path holds the install directory (GAP-0979, GAP-0983).
 func ownExcludedNextStep() string {
-	command := "defenseclaw-gateway enterprise policy show --user <account>"
+	args := []string{"enterprise", "policy", "show", "--user", "<account>"}
+	command := managed.StandaloneGatewayPath(runtime.GOOS) + " " + strings.Join(args, " ")
 	if runtime.GOOS == "windows" {
-		command = managed.WindowsAdminCommand("enterprise", "policy", "show", "--user", "<account>")
+		command = managed.WindowsAdminCommand(args...)
 	}
 	return "Ask IT to remove your account from enterprise.enrollment.exclude_users; " + command + " shows the rule"
 }

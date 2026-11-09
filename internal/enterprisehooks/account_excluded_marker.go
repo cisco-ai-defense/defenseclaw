@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // An account that enterprise.enrollment.exclude_users (or exclude_groups)
@@ -27,7 +28,12 @@ import (
 // marker of its own SID is present and valid in a trusted directory. A
 // marker is removed in the cycle that no longer excludes the account, and
 // the whole set is rewritten each cycle, so a marker never outlives the
-// exclusion by more than one cycle. Any other state keeps the refusal.
+// exclusion by more than one cycle. A cycle that cannot judge the accounts
+// (no configuration, no profile list, no manifest write) removes every
+// marker, so a failed cycle never leaves an old one authorizing an account
+// that is no longer excluded. A marker that cannot be removed is overwritten
+// with a revoked body, which the hook reads as no marker. Any other state
+// keeps the refusal.
 //
 // The bytes and the directory handling are here; Windows binds the trusted
 // reads and writes (account_excluded_windows.go).
@@ -50,6 +56,16 @@ func accountExcludedMarkerPath(dir, sid string) string {
 func accountExcludedMarkerBody(sid string) []byte {
 	return []byte("account-excluded-v1 " + sid + "\n")
 }
+
+// accountExcludedRevokedBody replaces the body of a marker that could not be
+// removed. It names no SID, so no account reads it as its own marker.
+var accountExcludedRevokedBody = []byte("account-excluded-revoked\n")
+
+// accountExcludedRemoveAttempts and accountExcludedRemoveWait bound the retry
+// of a removal that a reader of the file holds up for a moment.
+const accountExcludedRemoveAttempts = 3
+
+var accountExcludedRemoveWait = 50 * time.Millisecond
 
 // accountExcludedMarkerIO is the trusted file access of one platform.
 type accountExcludedMarkerIO struct {
@@ -77,28 +93,36 @@ func publishAccountExcludedMarkers(dir string, sids []string, io accountExcluded
 		}
 		keep[strings.ToLower(accountExcludedMarkerPrefix+sid)] = sid
 	}
-	if len(keep) > 0 {
-		if err := io.ensure(dir); err != nil {
-			return errors.Join(append(errs, err)...)
+	// Revocation comes first and does not depend on the publication: a
+	// directory that cannot be prepared for new markers still has its stale
+	// ones removed.
+	revokeErr := removeAccountExcludedMarkers(dir, keep, io)
+	if len(keep) == 0 {
+		return errors.Join(append(errs, revokeErr)...)
+	}
+	if err := io.ensure(dir); err != nil {
+		return errors.Join(append(errs, revokeErr, err)...)
+	}
+	for _, sid := range keep {
+		path := accountExcludedMarkerPath(dir, sid)
+		if data, exists, err := io.read(path); err == nil && exists && string(data) == string(accountExcludedMarkerBody(sid)) {
+			continue
 		}
-		for _, sid := range keep {
-			path := accountExcludedMarkerPath(dir, sid)
-			if data, exists, err := io.read(path); err == nil && exists && string(data) == string(accountExcludedMarkerBody(sid)) {
-				continue
-			}
-			if err := io.write(path, accountExcludedMarkerBody(sid)); err != nil {
-				// A marker that is not written keeps that account on the
-				// existing refusal, and the other accounts are still published.
-				errs = append(errs, fmt.Errorf("enterprise hooks: publish the excluded-account marker of %s: %w", sid, err))
-			}
+		if err := io.write(path, accountExcludedMarkerBody(sid)); err != nil {
+			// A marker that is not written keeps that account on the
+			// existing refusal, and the other accounts are still published.
+			errs = append(errs, fmt.Errorf("enterprise hooks: publish the excluded-account marker of %s: %w", sid, err))
 		}
 	}
-	return errors.Join(append(errs, removeAccountExcludedMarkers(dir, keep))...)
+	return errors.Join(append(errs, revokeErr)...)
 }
 
 // removeAccountExcludedMarkers removes the markers in dir whose lower-cased
 // file name is not a key of keep. A directory that does not exist has none.
-func removeAccountExcludedMarkers(dir string, keep map[string]string) error {
+// A marker that cannot be removed, after a short retry, is overwritten with
+// the revoked body; only when both fail does it stay valid, and the error
+// says so.
+func removeAccountExcludedMarkers(dir string, keep map[string]string, io accountExcludedMarkerIO) error {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -115,11 +139,29 @@ func removeAccountExcludedMarkers(dir string, keep map[string]string) error {
 		if _, kept := keep[name]; kept {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("enterprise hooks: remove the stale excluded-account marker %s: %w", entry.Name(), err))
+		path := filepath.Join(dir, entry.Name())
+		removeErr := removeAccountExcludedMarkerFile(path)
+		if removeErr == nil {
+			continue
+		}
+		if writeErr := io.write(path, accountExcludedRevokedBody); writeErr != nil {
+			errs = append(errs, fmt.Errorf("enterprise hooks: the stale excluded-account marker %s could be neither removed (%v) nor revoked (%v); it stays valid until the next cycle removes it", entry.Name(), removeErr, writeErr))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func removeAccountExcludedMarkerFile(path string) error {
+	var err error
+	for attempt := 0; attempt < accountExcludedRemoveAttempts; attempt++ {
+		if attempt > 0 {
+			time.Sleep(accountExcludedRemoveWait)
+		}
+		if err = os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+	}
+	return err
 }
 
 // accountExcludedMarkerPresent is the hook read: whether dir holds a valid
