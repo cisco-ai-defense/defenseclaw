@@ -9,6 +9,7 @@ package enterpriseunix
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 func openCodeRecordWarnings(t *testing.T, env *Env) map[string]string {
@@ -256,6 +258,13 @@ func TestUIDHasAccountTreatsAMissingAnswerAsNoProof(t *testing.T) {
 	})
 	t.Run("a uid in a local database NSS misses is an account", func(t *testing.T) {
 		stub(t, []int{5, 1234}, nil, nil)
+		env := &Env{GOOS: "linux", Runner: &fakeRunner{replies: noAccountReply("1234")}}
+		if has, err := env.UIDHasAccount(context.Background(), 1234); err != nil || !has {
+			t.Fatalf("got %v %v, want an account", has, err)
+		}
+	})
+	t.Run("a directory source the combined lookup skipped holds the uid", func(t *testing.T) {
+		stub(t, []int{0}, nil, fmt.Errorf("%w: NSS service sss holds uid 1234", unixidentity.ErrUIDHeld))
 		env := &Env{GOOS: "linux", Runner: &fakeRunner{replies: noAccountReply("1234")}}
 		if has, err := env.UIDHasAccount(context.Background(), 1234); err != nil || !has {
 			t.Fatalf("got %v %v, want an account", has, err)
