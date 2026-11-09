@@ -7,6 +7,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -147,6 +149,10 @@ func TestReadOfADeniedFolderWithWhitespaceInItsNameIsBlocked(t *testing.T) {
 	for i, row := range []struct{ name, folder string }{
 		{"two spaces", "  "}, {"tab", "folder\tname"}, {"middle space", "folder name"},
 	} {
+		if runtime.GOOS == "windows" && (strings.HasSuffix(row.folder, " ") || strings.Contains(row.folder, "\t")) {
+			// Windows cannot hold a folder name that ends in a space or has a tab.
+			continue
+		}
 		dir := filepath.Join(root, row.folder)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Skipf("folder unavailable: %v", err)
