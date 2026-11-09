@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -66,6 +67,18 @@ func TestParallelHookProcessChild(t *testing.T) {
 	}
 }
 
+// parallelHookWidth is how many hook processes start together, and in how many
+// waves: 100 hook processes in all, up to 25 at once. Every hook process reads
+// every other process of the account while it proves who holds the listener,
+// and the proof has a budget of seconds, so the number that can start together
+// depends on the CPUs of the run: on 4 CPUs 16 at once is within the budget,
+// 20 sometimes and 25 never, and a refusal for lack of CPU is not what this test
+// looks for. Two per CPU stays well inside the budget at any count.
+func parallelHookWidth() (width, waves int) {
+	width = min(25, max(4, 2*runtime.NumCPU()))
+	return width, (100 + width - 1) / width
+}
+
 // Many hook processes of one account start together while its recorded
 // gateway is frozen (an agent runs its tool calls in parallel). Each one is a
 // separate process, and each reads the other hook processes of the account
@@ -76,7 +89,7 @@ func TestParallelHookProcessesFollowTheOutageModeOfAFrozenGateway(t *testing.T) 
 	requireFrozenGatewayJob(t)
 	addr, dataDir, pid := startRealGateway(t)
 	freezeProcess(t, pid)
-	const width, waves = 25, 4
+	width, waves := parallelHookWidth()
 	failures := 0
 	for wave := 0; wave < waves; wave++ {
 		results := make([]string, width)
