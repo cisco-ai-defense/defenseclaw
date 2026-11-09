@@ -8677,29 +8677,60 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
 
 @dataclass(frozen=True)
 class _OpenClawConfigRecord:
-    """openclaw.json as it was before setup: the bytes a failed setup puts back (GAP-0973)."""
+    """openclaw.json as it was before setup: the bytes a failed setup puts back (GAP-0973).
+
+    ``body`` is None when the file did not exist: a failed setup then removes
+    the file DefenseClaw created.
+    """
 
     path: str
-    body: bytes = field(repr=False)
+    body: bytes | None = field(repr=False)
     mode: int
 
 
-_OPENCLAW_CONFIG_MAX_BYTES = 4 * 1024 * 1024
+# An exact copy is kept in memory, so a file past this size is refused up
+# front instead of being rolled back approximately.
+_OPENCLAW_CONFIG_MAX_BYTES = 64 * 1024 * 1024
+
+# What DefenseClaw's own registration writes. The plugin entry also lives under
+# plugins.entries, and plugins.allow / plugins.load.paths list it by name or by
+# its extension directory.
+_OPENCLAW_OWNED_PATHS = (("plugins", "entries", "defenseclaw"), ("approvals", "plugin"))
+_OPENCLAW_MISSING = object()
+
+
+def _read_openclaw_config_bytes(path: str) -> bytes | None:
+    """The bytes of openclaw.json, None when it is absent. A file over the size limit raises OSError."""
+    try:
+        with open(path, "rb") as handle:
+            body = handle.read(_OPENCLAW_CONFIG_MAX_BYTES + 1)
+    except FileNotFoundError:
+        return None
+    if len(body) > _OPENCLAW_CONFIG_MAX_BYTES:
+        raise OSError(f"openclaw.json is larger than {_OPENCLAW_CONFIG_MAX_BYTES // (1024 * 1024)} MiB")
+    return body
 
 
 def _capture_openclaw_config_record(config_file: str | None) -> _OpenClawConfigRecord | None:
-    """The exact bytes and mode of openclaw.json, or None when there is no readable file to keep."""
+    """The exact bytes and mode of openclaw.json, or a record of its absence.
+
+    Setup may rewrite or create this file, so when an existing file cannot be
+    copied exactly the setup stops before it writes anything.
+    """
     if not config_file:
         return None
+    path = os.path.realpath(os.path.expanduser(config_file))
     try:
-        path = os.path.realpath(os.path.expanduser(config_file))
-        with open(path, "rb") as handle:
-            body = handle.read(_OPENCLAW_CONFIG_MAX_BYTES + 1)
-        mode = stat.S_IMODE(os.stat(path).st_mode)
-    except OSError:
-        return None
-    if len(body) > _OPENCLAW_CONFIG_MAX_BYTES:
-        return None
+        body = _read_openclaw_config_bytes(path)
+        mode = stat.S_IMODE(os.stat(path).st_mode) if body is not None else 0
+    except FileNotFoundError:
+        body, mode = None, 0
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        raise click.ClickException(
+            f"cannot keep an exact copy of {path} before setup ({reason}), so a failed setup could not put it "
+            "back. No changes made. Fix the file or its permissions, then run the same setup command again."
+        ) from exc
     return _OpenClawConfigRecord(path=path, body=body, mode=mode)
 
 
@@ -8707,8 +8738,66 @@ def _with_openclaw_config_record(snapshot: _SetupConfigSnapshot, config_file: st
     return replace(snapshot, openclaw_config=_capture_openclaw_config_record(config_file))
 
 
-def _restore_openclaw_config_record(record: _OpenClawConfigRecord) -> None:
-    """Put back the saved openclaw.json bytes unless they are already there.
+def _openclaw_content_added(current: Any, prior: Any, path: tuple[str, ...]) -> bool:
+    """True when ``current`` holds a value that ``prior`` lacks and DefenseClaw's registration does not write."""
+    if path in _OPENCLAW_OWNED_PATHS:
+        return False
+    if isinstance(current, dict):
+        if prior is _OPENCLAW_MISSING:
+            prior = {}
+        if not isinstance(prior, dict):
+            return True
+        return any(
+            _openclaw_content_added(value, prior.get(key, _OPENCLAW_MISSING), (*path, key))
+            for key, value in current.items()
+        )
+    if isinstance(current, list):
+        if prior is _OPENCLAW_MISSING:
+            prior = []
+        if not isinstance(prior, list):
+            return True
+        return any(
+            item not in prior and not (isinstance(item, str) and "defenseclaw" in item.lower())
+            for item in current
+        )
+    return prior is _OPENCLAW_MISSING or prior != current
+
+
+def _openclaw_config_saved_by_others(prior: bytes | None, current: bytes) -> bool:
+    """True when ``current`` holds more than DefenseClaw's registration on top of ``prior``.
+
+    The failed setup's own write only adds the plugin entry. Anything else new
+    or changed was saved by OpenClaw or the operator while setup ran; a file
+    that cannot be read as JSON5 is not DefenseClaw's output either. A file
+    that did not exist before setup was created by it: it is DefenseClaw's
+    when it registers the plugin, whatever else the first start put there.
+    """
+    from defenseclaw.openclaw_json5 import OpenClawConfigSyntaxError, loads
+
+    def parse(raw: bytes | None) -> Any:
+        if raw is None or not raw.strip():
+            return {}
+        return loads(raw.decode("utf-8"))
+
+    try:
+        now = parse(current)
+        if prior is None:
+            plugins = now.get("plugins") if isinstance(now, dict) else None
+            entries = plugins.get("entries") if isinstance(plugins, dict) else None
+            registered = isinstance(entries, dict) and "defenseclaw" in entries
+            allowed = isinstance(plugins, dict) and "defenseclaw" in (plugins.get("allow") or [])
+            return not (registered or allowed)
+        return _openclaw_content_added(now, parse(prior), ())
+    except (OpenClawConfigSyntaxError, UnicodeError, TypeError):
+        return True
+
+
+def _restore_openclaw_config_record(record: _OpenClawConfigRecord) -> str:
+    """Put back the saved openclaw.json unless a save made during setup would be lost.
+
+    Returns ``"unchanged"`` (already the saved bytes), ``"restored"`` or
+    ``"kept"`` (the file holds a save by OpenClaw or the operator that setup
+    did not write, so it was left as saved).
 
     The rollback restarts DefenseClaw's gateway on the restored configuration,
     and that start registers the plugin again when the restored configuration
@@ -8716,11 +8805,16 @@ def _restore_openclaw_config_record(record: _OpenClawConfigRecord) -> None:
     file with the same mode, so the user's comments and spelling return.
     """
     try:
-        with open(record.path, "rb") as handle:
-            if handle.read(_OPENCLAW_CONFIG_MAX_BYTES + 1) == record.body:
-                return
-    except FileNotFoundError:
-        pass
+        current = _read_openclaw_config_bytes(record.path)
+    except OSError:
+        return "kept"  # larger than any file setup captured: not setup's output
+    if current == record.body:
+        return "unchanged"
+    if current is not None and _openclaw_config_saved_by_others(record.body, current):
+        return "kept"
+    if record.body is None:
+        os.unlink(record.path)
+        return "restored"
     directory = os.path.dirname(record.path)
     fd, temp_path = tempfile.mkstemp(prefix=".openclaw-restore-", dir=directory)
     try:
@@ -8734,6 +8828,7 @@ def _restore_openclaw_config_record(record: _OpenClawConfigRecord) -> None:
         with suppress(OSError):
             os.unlink(temp_path)
         raise
+    return "restored"
 
 
 @dataclass(frozen=True)
@@ -11212,9 +11307,10 @@ def _rollback_failed_connector_application(
     elif exact_runtime:
         rollback_errors.append("runtime reconciliation was skipped because restored authority was not exact")
 
+    openclaw_file_kept = False
     if snapshot.openclaw_config is not None:
         try:
-            _restore_openclaw_config_record(snapshot.openclaw_config)
+            openclaw_file_kept = _restore_openclaw_config_record(snapshot.openclaw_config) == "kept"
         except BaseException as exc:  # The saved bytes are the only exact record of the user's file.
             if not isinstance(exc, Exception) and not _secret_safe:
                 raise
@@ -11331,6 +11427,12 @@ def _rollback_failed_connector_application(
         failure = click.ClickException(
             f"connector setup did not converge {cause_text}; {outcome}. "
             "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
+        )
+    if openclaw_file_kept:
+        failure = click.ClickException(
+            f"{failure.format_message()} Exception: openclaw.json was saved by OpenClaw or you while setup ran, "
+            "so it was left as saved and may still list the DefenseClaw plugin; "
+            "`defenseclaw setup remove openclaw` removes only DefenseClaw's entries."
         )
     if openclaw_gateway_down:
         failure = click.ClickException(
