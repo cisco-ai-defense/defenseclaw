@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -119,5 +120,51 @@ func TestHookAssetFactsReportsALongLinkedSkillFolderPath(t *testing.T) {
 	facts, _ := assetfacts.Decode(hookAssetFacts("claudecode", raw))
 	if len(held) <= 1024 || len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != held || facts.SkillLinksTruncated {
 		t.Fatalf("held path of %d bytes: SkillLinks = %v truncated=%t, want it reported", len(held), facts.SkillLinks, facts.SkillLinksTruncated)
+	}
+}
+
+// A linked skill folder whose name is space is reported by its own path and
+// with the name its SKILL.md declares: cleaning must not turn the path into
+// its skill root or drop the claim.
+func TestHookAssetFactsReportsASpaceNamedLinkedSkillFolder(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	root := filepath.Join(home, ".claude", "skills")
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, declared := range map[string]string{" ": "listed-name", "ordinary": "ordinary-skill"} {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Skipf("cannot make this folder name here: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: "+declared+"\n---\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(dir, filepath.Join(proj, "lnk-"+strings.TrimSpace(name)+"x")); err != nil {
+			t.Skipf("cannot create a link here: %v", err)
+		}
+	}
+	raw, err := json.Marshal(map[string]any{
+		"tool_name": "Bash", "cwd": proj, "tool_input": map[string]any{"command": "cat lnk-x/SKILL.md lnk-ordinaryx/SKILL.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, _ := assetfacts.Decode(hookAssetFacts("claudecode", raw))
+	spaced, ordinary := filepath.Join(root, " "), filepath.Join(root, "ordinary")
+	if len(facts.SkillLinks) != 2 || !slices.Contains(facts.SkillLinks, spaced) || !slices.Contains(facts.SkillLinks, ordinary) || facts.SkillLinksTruncated {
+		t.Fatalf("SkillLinks = %q truncated=%t, want %q and %q", facts.SkillLinks, facts.SkillLinksTruncated, spaced, ordinary)
+	}
+	if got := facts.DeclaredFor(" "); len(got) != 1 || got[0] != "listed-name" {
+		t.Fatalf("DeclaredFor(space) = %q, want the declared name", got)
+	}
+	if got := facts.DeclaredFor("ordinary"); len(got) != 1 || got[0] != "ordinary-skill" {
+		t.Fatalf("DeclaredFor(ordinary) = %q, want its declared name", got)
 	}
 }
