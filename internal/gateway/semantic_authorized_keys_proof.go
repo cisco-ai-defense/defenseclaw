@@ -1084,6 +1084,16 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// A plain move onto an existing link to a file replaces the link:
 		// the client described that entry, which decides it (GAP-2558).
 		var plainMoves map[string]bool
+		// A client that met a directory closed to the user on the way of an
+		// operand answers it empty and adds the link text it could read. This
+		// gateway cannot read the home, so its own view of that operand is a
+		// missing path and must never stand in for the client answer: both
+		// are kept wherever the operand lies. Any other empty answer is
+		// the client saying it has no proof for the command, which the
+		// link checks below decide.
+		closedDirectoryAnswer := func(operand string) bool {
+			return filepath.IsAbs(request.ResolvedWriteTargets[hookpaths.LinkTextFactPrefix+operand])
+		}
 		for operand, resolved := range request.ResolvedWriteTargets {
 			directoryFact := strings.HasPrefix(operand, hookpaths.DirectoryFactPrefix)
 			if resolved != "" && !directoryFact && request.ResolvedWriteTargets[hookpaths.ReplacedLinkFactPrefix+operand] == "1" {
@@ -1120,7 +1130,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				operand == hookpaths.CWDKey && (changedDirectory || truncated) ||
 				operand == hookpaths.LinksStableKey ||
 				operand == hookpaths.TruncatedKey ||
-				resolved == "" && external(operand) && !truncated ||
+				resolved == "" && (external(operand) && !truncated || closedDirectoryAnswer(operand)) ||
 				isProtected(resolved) {
 				if scoped == nil {
 					scoped = make(map[string]string)
@@ -1269,6 +1279,19 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				// loop, a chain past the kernel limit or an unreadable
 				// component). Resolve it here, or fail closed.
 				if cannotResolveLocally {
+					// A directory on the way is closed to the user. A file
+					// tool cannot open it either, so it is judged by the file
+					// the client reports its link text leads to, as the
+					// per-user gateway walks it: a key file stays protected,
+					// an ordinary file is not a key write. A shell command may
+					// open the directory first, so its operand stays unresolved.
+					if text := clientTargets[hookpaths.LinkTextFactPrefix+target]; filepath.IsAbs(text) &&
+						nativeFileToolWriteOperand(request.Input, clientCWD, target) {
+						if isProtected(text) {
+							return confirmed()
+						}
+						return false
+					}
 					unresolved := !windowsLocationOrdinaryWriteTarget(target)
 					if unresolved && request.unresolvedTarget != nil {
 						*request.unresolvedTarget = true
