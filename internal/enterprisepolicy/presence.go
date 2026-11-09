@@ -48,6 +48,103 @@ func MachinePolicyPresent(opts Options, connectorName string) (bool, error) {
 	}
 }
 
+// MachinePolicyAbsent proves that no DefenseClaw hook for connectorName is
+// registered in the vendor machine policy files: they were read and hold
+// neither an owned entry nor any text that names DefenseClaw or its hook
+// binary. MachinePolicyPresent answers the other question. It recognizes only
+// an entry that matches the current registration exactly (command, arguments,
+// timeout), so a registered hook whose timeout or arguments drifted is not
+// present to it although the vendor still runs the command. False from
+// MachinePolicyPresent is therefore not absence. A source that cannot be read,
+// trusted or parsed proves nothing and is returned as an error. Connectors
+// without a machine policy target have none to register.
+func MachinePolicyAbsent(opts Options, connectorName string) (bool, error) {
+	present, err := MachinePolicyPresent(opts, connectorName)
+	if err != nil || present {
+		return false, err
+	}
+	sources, err := machinePolicySources(opts, strings.ToLower(strings.TrimSpace(connectorName)))
+	if err != nil {
+		return false, err
+	}
+	markers := []string{"defenseclaw", "--enterprise-managed", opts.HookBinary, strings.ReplaceAll(opts.HookBinary, `\`, `\\`)}
+	if opts.OpenCodePluginPath != "" {
+		markers = append(markers, openCodePluginSpec(opts))
+	}
+	for _, source := range sources {
+		text := strings.ToLower(string(source))
+		for _, marker := range markers {
+			if marker != "" && strings.Contains(text, strings.ToLower(marker)) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// machinePolicySources reads the vendor files MachinePolicyPresent reads for
+// the connector, with the same trust checks. A file that does not exist adds
+// nothing.
+func machinePolicySources(opts Options, name string) ([][]byte, error) {
+	var paths []string
+	var err error
+	switch name {
+	case ConnectorCodex:
+		var path string
+		path, err = CodexRequirementsPath(opts)
+		paths = []string{path}
+	case ConnectorClaudeCode:
+		var claude []claudeSource
+		if claude, err = readClaudeFileSources(opts); err != nil {
+			return nil, err
+		}
+		out := make([][]byte, 0, len(claude))
+		for _, source := range claude {
+			encoded, encodeErr := encodeOrdered(source.doc)
+			if encodeErr != nil {
+				return nil, encodeErr
+			}
+			out = append(out, encoded)
+		}
+		return out, nil
+	case ConnectorCursor:
+		if opts.goos() == "windows" {
+			var hooksPath, adapterPath string
+			hooksPath, adapterPath, err = windowsCursorPaths(opts)
+			paths = []string{hooksPath, adapterPath}
+		} else {
+			var path string
+			path, err = CursorEnterpriseHooksPath(opts)
+			paths = []string{path}
+		}
+	case ConnectorCopilot:
+		var path string
+		path, err = copilotDropInPath(opts)
+		paths = []string{path}
+	case ConnectorOpenCode:
+		if !opts.openCodeArtifactInstalled() {
+			return nil, nil
+		}
+		var path string
+		path, err = OpenCodeManagedConfigPath(opts)
+		paths = []string{path}
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out [][]byte
+	for _, path := range paths {
+		raw, exists, readErr := readPolicyFile(opts, path)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if exists {
+			out = append(out, raw)
+		}
+	}
+	return out, nil
+}
+
 func codexPresent(opts Options) (bool, error) {
 	path, err := CodexRequirementsPath(opts)
 	if err != nil {

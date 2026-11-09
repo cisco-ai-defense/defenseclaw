@@ -161,7 +161,8 @@ func machinePolicyPresenceOptions(goos string, viewOpts enterprisepolicy.Options
 }
 
 // machineHookAbsent proves that no machine-policy hook of connector is
-// installed in the vendor files: they were read and hold none. A source that
+// installed in the vendor files: they were read and name none, neither an exact
+// registration nor a drifted one (timeout, arguments). A source that
 // cannot be read, parsed or trusted proves nothing. The runtime descriptor and
 // the admitted set are not this proof: either can be gone while the vendor
 // hook stays, and the hook then refuses its calls.
@@ -174,8 +175,8 @@ var machineHookAbsent = func(goos string, cfg *config.Config, connector string) 
 	if err != nil {
 		return false
 	}
-	present, err := enterprisepolicy.MachinePolicyPresent(opts, connector)
-	return err == nil && !present
+	absent, err := enterprisepolicy.MachinePolicyAbsent(opts, connector)
+	return err == nil && absent
 }
 
 func admittedMachinePolicyConnectors(goos string, viewOpts enterprisepolicy.Options, generation *Generation, previous []string, descriptor *managed.RuntimeDescriptor, initial bool) []string {
