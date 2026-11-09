@@ -1114,7 +1114,7 @@ func walkWritePathMemoWithReaders(base, path string, linkDepth int, collect, pat
 	lstat func(string) (os.FileInfo, error), readlink func(string) (string, error),
 	procLink func(path string, below bool) bool, tail bool,
 ) (string, []string, int, bool) {
-	if linkDepth > maxWriteTargetLinkDepth {
+	if linkDepth > SystemLinkLimit() {
 		return "", nil, linkDepth, false
 	}
 	current := base
