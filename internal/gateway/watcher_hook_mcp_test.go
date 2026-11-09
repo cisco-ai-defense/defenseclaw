@@ -349,10 +349,11 @@ func TestManagedUnixHookReportedMCPJudgesTheCompleteDefinitionNotTheBoundedArgum
 }
 
 // A claim from a hook that stated no verdict, whose arguments are as many as
-// the header keeps, cannot show the verdict: it is neither listed nor blocked
-// for the arguments it holds. Editing a listed server into one a scan starts
-// takes it off the list, so the refusal recorded for the old definition does
-// not block the new one.
+// the header keeps, shows the verdict only as far as its arguments prove it: a
+// forbidden flag among them refuses the definition whatever follows, while
+// options alone (a package may follow) leave it neither listed nor blocked.
+// Editing a listed server into one a scan starts takes it off the list, so the
+// refusal recorded for the old definition does not block the new one.
 func TestManagedUnixHookReportedMCPUnstatedCutClaimIsNotJudgedAndAFixedServerIsForgotten(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed Windows reads the enumerator records instead")
@@ -362,12 +363,27 @@ func TestManagedUnixHookReportedMCPUnstatedCutClaimIsNotJudgedAndAFixedServerIsF
 	for i := range cut {
 		cut[i] = "--quiet"
 	}
-	cut[31] = "-c"
 	if got := h.call("/home/eng2", &assetfacts.MCPServer{Name: "oldhook", Command: "npx", Args: cut}); got.Action == "block" {
-		t.Fatalf("unstated cut claim: action=%q reason=%q, want it not judged by the arguments it holds", got.Action, got.Reason)
+		t.Fatalf("unstated cut claim of options: action=%q reason=%q, want it not judged by the arguments it holds", got.Action, got.Reason)
 	}
 	if listed, _ := h.reported.list(); len(listed) != 0 {
-		t.Fatalf("listed %+v, want an unstated cut claim left to the asset_policy lists", listed)
+		t.Fatalf("listed %+v, want an unstated cut claim of options left to the asset_policy lists", listed)
+	}
+	for _, tc := range []struct{ name, command, flag string }{
+		{"oldflag-npx", "npx", "-c"},
+		{"oldflag-uvx", "uvx", "--eval=run"},
+	} {
+		flagged := append(append([]string(nil), cut[:31]...), tc.flag)
+		got := h.call("/home/eng2", &assetfacts.MCPServer{Name: tc.name, Command: tc.command, Args: flagged})
+		if got.Action != "block" {
+			t.Fatalf("%s: unstated cut claim with the flag at argument 32: action=%q reason=%q, want block", tc.name, got.Action, got.Reason)
+		}
+	}
+	if listed, _ := h.reported.list(); len(listed) != 2 {
+		t.Fatalf("listed %+v, want the two refused older claims listed", listed)
+	}
+	if got := h.call("/home/eng2", &assetfacts.MCPServer{Name: "oldpython", Command: "python3", Args: cut}); got.Action != "block" {
+		t.Fatalf("unstated cut claim of python3: action=%q, want block", got.Action)
 	}
 	if got := h.call("/home/eng1", &assetfacts.MCPServer{Name: "edited", Command: "python3", Args: []string{"server.py"}}); got.Action != "block" {
 		t.Fatalf("python3 server: action=%q, want block", got.Action)
@@ -375,7 +391,43 @@ func TestManagedUnixHookReportedMCPUnstatedCutClaimIsNotJudgedAndAFixedServerIsF
 	if got := h.call("/home/eng1", &assetfacts.MCPServer{Name: "edited", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action == "block" {
 		t.Fatalf("server edited to npx with a package: action=%q reason=%q, want it allowed", got.Action, got.Reason)
 	}
-	if listed, _ := h.reported.list(); len(listed) != 0 {
-		t.Fatalf("listed %+v, want the edited server off the list", listed)
+	listed, _ := h.reported.list()
+	for _, entry := range listed {
+		if entry.Home == "/home/eng1" {
+			t.Fatalf("listed %+v, want the edited server off the list", entry)
+		}
+	}
+}
+
+// An administrator allow that names the launcher and the complete argument
+// list admits that definition and no other: a definition with one argument
+// more is another definition, also when the header keeps only the first 32
+// (a hook claim, stated or from an older hook).
+func TestManagedUnixHookReportedMCPExactAllowIsBoundToTheCompleteArgumentList(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	approved := []string{"-c", "approved"}
+	for len(approved) < 32 {
+		approved = append(approved, "-y")
+	}
+	edited := append(append([]string(nil), approved...), "--eval=different")
+	newHarness := func() *reportedMCPHarness {
+		h := newReportedMCPHarness()
+		h.issue = watcher.MCPScanIssueArguments
+		h.api.scannerCfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: "review", Command: "npx", ArgsPrefix: approved}}
+		return h
+	}
+	h := newHarness()
+	if got := h.callFacts(t, "/home/eng1", assetfacts.MCPServer{Name: "review", Command: "npx", Args: approved}); got.Action == "block" {
+		t.Fatalf("approved complete definition: action=%q reason=%q, want the exact allow to hold", got.Action, got.Reason)
+	}
+	if got := h.callFacts(t, "/home/eng1", assetfacts.MCPServer{Name: "review", Command: "npx", Args: edited}); got.Action != "block" {
+		t.Fatalf("edited definition of 33 arguments: action=%q, want block (the allow names 32)", got.Action)
+	}
+	// An older hook states no verdict and cuts at 32: the claim can be the start of the edited list.
+	h = newHarness()
+	if got := h.call("/home/eng1", &assetfacts.MCPServer{Name: "review", Command: "npx", Args: approved}); got.Action != "block" {
+		t.Fatalf("older hook claim of 32 arguments: action=%q, want block (it may be the start of a longer list)", got.Action)
 	}
 }

@@ -45,8 +45,11 @@ func TestEncodeStatesTheScannerVerdictOfTheCompleteLocalDefinition(t *testing.T)
 			if len(facts.MCP.Args) > maxArgs {
 				t.Fatalf("%d arguments carried, want at most %d", len(facts.MCP.Args), maxArgs)
 			}
-			if facts.MCP.ArgsMayBeCut() {
-				t.Fatal("a claim that states its verdict is reported as possibly cut")
+			if facts.MCP.VerdictUnstatedCut() {
+				t.Fatal("a claim that states its verdict is reported as unstated")
+			}
+			if cut := len(tc.server.Args) > maxArgs; facts.MCP.ArgsMayBeCut() != cut {
+				t.Fatalf("ArgsMayBeCut = %v for %d arguments, want %v", facts.MCP.ArgsMayBeCut(), len(tc.server.Args), cut)
 			}
 		})
 	}
@@ -57,15 +60,41 @@ func TestEncodeStatesTheScannerVerdictOfTheCompleteLocalDefinition(t *testing.T)
 // complete. A verdict that is not one of the classes is dropped.
 func TestClaimWithoutVerdictAtTheArgumentBoundMayBeCut(t *testing.T) {
 	long := MCPServer{Command: "npx", Args: make([]string, maxArgs)}
-	if !long.ArgsMayBeCut() {
+	if !long.VerdictUnstatedCut() || !long.ArgsMayBeCut() {
 		t.Fatal("a claim at the bound without a verdict is judged by its arguments")
 	}
-	if (MCPServer{Command: "npx", Args: make([]string, maxArgs-1)}).ArgsMayBeCut() {
+	if short := (MCPServer{Command: "npx", Args: make([]string, maxArgs-1)}); short.VerdictUnstatedCut() || short.ArgsMayBeCut() {
 		t.Fatal("a claim below the bound cannot be cut")
+	}
+	if stated := (MCPServer{Command: "npx", Args: make([]string, maxArgs), LocalRefusal: "none"}); stated.VerdictUnstatedCut() || stated.ArgsMayBeCut() {
+		t.Fatal("a stated claim of exactly the bound holds the complete list")
 	}
 	forged := MCPServer{Name: "s", Command: "npx", Args: []string{"pkg"}, LocalRefusal: "allow"}
 	facts := bounded(Facts{MCP: &forged})
 	if facts.MCP == nil || facts.MCP.LocalRefusal != "" {
 		t.Fatalf("claim %+v, want the unknown verdict dropped", facts.MCP)
+	}
+}
+
+// The hook says when it read more arguments than the header keeps, and the
+// statement survives a second pass through the bound, so an exact allow of the
+// complete list is never checked against the start of it.
+func TestEncodeStatesThatTheArgumentsAreCut(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args int
+		want bool
+	}{{"below the bound", maxArgs - 1, false}, {"at the bound", maxArgs, false}, {"past the bound", maxArgs + 1, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := MCPServer{Name: "s", Command: "npx", Args: append(make([]string, tc.args-1), "pkg")}
+			facts, ok := Decode(Encode(Facts{MCP: &server}))
+			if !ok || facts.MCP == nil || facts.MCP.ArgsCut != tc.want || facts.MCP.ArgsMayBeCut() != tc.want {
+				t.Fatalf("claim %+v, want ArgsCut=%v", facts.MCP, tc.want)
+			}
+			again := bounded(Facts{MCP: facts.MCP})
+			if again.MCP == nil || again.MCP.ArgsCut != tc.want {
+				t.Fatalf("second pass %+v, want ArgsCut=%v kept", again.MCP, tc.want)
+			}
+		})
 	}
 }
