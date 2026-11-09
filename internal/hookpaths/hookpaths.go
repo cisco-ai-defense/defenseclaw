@@ -1799,12 +1799,14 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 							filepath.IsAbs(simple.CWD) && filepath.Clean(simple.CWD) == filepath.Clean(cwd) &&
 							!slices.Contains(dynamicReadings, simple.Text) &&
 							(simple.ResolvedVariable && links.opaque ||
-								simple.LoginGuess && readingReachesLink(simple.Text, cwd, home)) &&
-							!copyOpensNoSource(simple.Text, command, cwd, home) {
-							if len(dynamicReadings) >= maxResolvedReadings {
-								truncated = true
-							} else {
-								dynamicReadings = append(dynamicReadings, simple.Text)
+								simple.LoginGuess && readingReachesLink(simple.Text, cwd, home)) {
+							if text, described := describedCopyReading(simple.Text, command, cwd, home); described &&
+								!slices.Contains(dynamicReadings, text) {
+								if len(dynamicReadings) >= maxResolvedReadings {
+									truncated = true
+								} else {
+									dynamicReadings = append(dynamicReadings, text)
+								}
 							}
 						}
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {

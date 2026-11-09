@@ -84,3 +84,52 @@ func TestManagedEmptySourceCopyProofNeedsTheCopyAndTheSourceThatRun(t *testing.T
 		{"ambient-path-project-cp", `IFS=; for f in keylink; do cp "$IFS" "$f"; done`, "block"},
 	})
 }
+
+// The copy that runs is the file the program word reaches, not a name or the
+// place PATH finds it. A program named cp outside the project (first on the
+// ambient PATH, or an absolute word) is not the system copy, so a protected
+// link is still described and blocked; a project link to the system cp is the
+// system copy and the ordinary empty-source loop stays allowed, in the managed
+// tier (rel-1-0-6:GAP-0880, GAP-0885).
+func TestEmptySourceCopyIsJudgedByTheFileTheProgramReaches(t *testing.T) {
+	if _, err := os.Stat("/bin/cp"); err != nil {
+		t.Skip("the rows need the system cp")
+	}
+	f := newB36ManagedHookFixture(t)
+	t.Setenv("BASH_ENV", "")
+	t.Setenv("ENV", "")
+	outside := t.TempDir()
+	fake := filepath.Join(outside, "cp")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nprintf altered > \"$2\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/cp", filepath.Join(f.project, "cp")); err != nil {
+		t.Fatal(err)
+	}
+	linked := t.TempDir()
+	if err := os.Symlink(fake, filepath.Join(linked, "cp")); err != nil {
+		t.Fatal(err)
+	}
+	ambient := os.Getenv("PATH")
+	const loop = `IFS=; for f in keylink; do cp "$IFS" "$f"; done`
+	for _, row := range []struct {
+		name, path, command, want string
+	}{
+		{"outside-program-first-on-path", outside + string(os.PathListSeparator) + ambient, loop, "block"},
+		{"outside-program-by-absolute-word", ambient, `IFS=; for f in keylink; do ` + fake + ` "$IFS" "$f"; done`, "block"},
+		{"link-to-outside-program", linked + string(os.PathListSeparator) + ambient, loop, "block"},
+		{"project-link-to-system-cp", f.project + string(os.PathListSeparator) + ambient, loop, "allow"},
+		{"system-cp", ambient, loop, "allow"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			t.Setenv("PATH", row.path)
+			payload := f.payload(t, row.command)
+			header := f.clientHeader(t, payload)
+			for _, connector := range []string{"claudecode", "codex"} {
+				if got := f.post(t, connector, payload, header); got != row.want {
+					t.Errorf("managed %s: %s = %s, want %s", connector, row.command, got, row.want)
+				}
+			}
+		})
+	}
+}

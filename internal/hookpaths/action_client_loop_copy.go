@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -398,7 +399,7 @@ func actionClientLoopCopyNoEffectCalls(file *syntax.File, cwd, home string) (cal
 		delete(loopAssignments, iter.Name.Value)
 		if actionClientLoopCopyKnownEmptySource(source, loopAssignments) &&
 			!actionClientLoopCopySourceVariableMayChange(source) &&
-			!actionClientCopyProgramInProject(program, cwd) {
+			actionClientCopyProgramIsSystem(program, cwd) {
 			return map[*syntax.CallExpr]bool{call: true}, i == len(file.Stmts)-1
 		}
 		return nil, false
@@ -420,32 +421,70 @@ func actionClientLoopCopyAssignmentReachesChild(name string) bool {
 	return exported
 }
 
-// actionClientCopyProgramInProject reports whether the copy the shell starts
-// for this program word is a file of the project: a relative program word, or
-// the first directory of PATH that holds the name lies in the project.
-func actionClientCopyProgramInProject(program, cwd string) bool {
+// actionClientCopyProgramIsSystem reports whether the program word names the
+// system copy: the file the shell starts (the word itself when it holds a
+// path, otherwise the first directory of PATH that holds the name) is
+// followed through its links, and the file reached must be a regular file
+// that other users cannot write, in a system program directory, and named
+// for a copy (cp, gcp, or the multi-call binary that provides it). A project
+// link to the system cp is therefore the system cp, while a script or binary
+// named cp that sits anywhere else, in the project or in a temporary
+// directory, is not. The name alone never decides: a program that only
+// carries the name cp may write anything (rel-1-0-6:GAP-0880).
+func actionClientCopyProgramIsSystem(program, cwd string) bool {
+	candidate := ""
 	if strings.ContainsAny(program, `/\`) {
-		return !filepath.IsAbs(program) || actionClientPathInside(cwd, program)
-	}
-	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
-		if dir == "" {
-			dir = "."
+		candidate = program
+		if !filepath.IsAbs(candidate) {
+			candidate = filepath.Join(cwd, candidate)
 		}
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(cwd, dir)
-		}
-		for _, name := range []string{program, program + ".exe"} {
-			if _, err := pathLstat(filepath.Join(dir, name)); err == nil {
-				return actionClientPathInside(cwd, dir)
+	} else {
+	search:
+		for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+			if dir == "" {
+				dir = "."
 			}
+			if !filepath.IsAbs(dir) {
+				dir = filepath.Join(cwd, dir)
+			}
+			for _, name := range []string{program, program + ".exe"} {
+				if _, err := pathLstat(filepath.Join(dir, name)); err == nil {
+					candidate = filepath.Join(dir, name)
+					break search
+				}
+			}
+		}
+	}
+	if candidate == "" {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(candidate)
+	if err != nil {
+		return false
+	}
+	info, err := pathLstat(resolved)
+	if err != nil || !info.Mode().IsRegular() || runtime.GOOS != "windows" && info.Mode().Perm()&0o022 != 0 {
+		return false
+	}
+	switch strings.TrimSuffix(strings.ToLower(filepath.Base(resolved)), ".exe") {
+	case "cp", "gcp", "coreutils", "busybox":
+	default:
+		return false
+	}
+	resolved = filepath.ToSlash(resolved)
+	for _, root := range actionClientSystemProgramRoots {
+		if strings.HasPrefix(resolved, root) {
+			return true
 		}
 	}
 	return false
 }
 
-func actionClientPathInside(root, path string) bool {
-	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+// The program directories the system or the package manager of the platform
+// installs a copy in. The match is on a whole directory name.
+var actionClientSystemProgramRoots = []string{
+	"/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/usr/local/bin/", "/usr/libexec/",
+	"/opt/homebrew/", "/usr/local/Cellar/",
 }
 
 func actionClientLoopCopySourceVariableMayChange(word *syntax.Word) bool {
@@ -499,6 +538,33 @@ func copyOpensNoSource(reading, command, cwd, home string) bool {
 	}
 	calls, whole := actionClientLoopCopyNoEffectCalls(file, cwd, home)
 	return whole && len(calls) != 0
+}
+
+// describedCopyReading is the text the hook client lists for a reading, and
+// whether it lists it. A plain copy with an empty source whose command is not
+// proved is described under the name of the program: the gateway reads an
+// explicit program path outside the system directories as an unknown program,
+// so a program that carries only the name cp (anywhere but the system copy)
+// would otherwise hide the write it can make to the link
+// (rel-1-0-6:GAP-0880).
+func describedCopyReading(reading, command, cwd, home string) (string, bool) {
+	if !plainEmptySourceCopy(reading, home) {
+		return reading, true
+	}
+	if copyOpensNoSource(reading, command, cwd, home) {
+		return "", false
+	}
+	file, parsed := parseShell(reading)
+	if !parsed {
+		return reading, true
+	}
+	word := file.Stmts[0].Cmd.(*syntax.CallExpr).Args[0]
+	program, _ := staticProgramWord(word, home)
+	start, end := int(word.Pos().Offset()), int(word.End().Offset())
+	if !strings.ContainsAny(program, `/\`) || start < 0 || end > len(reading) || start >= end {
+		return reading, true
+	}
+	return reading[:start] + programBase(program) + reading[end:], true
 }
 
 func plainEmptySourceCopy(reading, home string) bool {

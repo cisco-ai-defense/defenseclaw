@@ -59,11 +59,12 @@ func TestCopyOpensNoSourceNeedsTheProvedCommand(t *testing.T) {
 	t.Setenv("ENV", "")
 	t.Setenv("DC_TEST_EXPORTED_NAME", "1")
 	cwd := t.TempDir()
-	system := t.TempDir()
-	for _, dir := range []string{system, cwd} {
-		if err := os.WriteFile(filepath.Join(dir, "cp"), []byte("#!/bin/sh\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
+	system := "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	if _, err := os.Stat("/bin/cp"); err != nil {
+		t.Skip("the rows need the system cp")
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "cp"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("PATH", system)
 	const reading = `cp '' keylink`
@@ -73,7 +74,6 @@ func TestCopyOpensNoSourceNeedsTheProvedCommand(t *testing.T) {
 	}{
 		{"loop", emptySourceLoop, true},
 		{"loop-assigned-source", `src=; for f in keylink; do cp "$src" "$f"; done`, true},
-		{"loop-gcp", `IFS=; for f in keylink; do gcp "$IFS" "$f"; done`, true},
 		{"loop-option", `IFS=; for f in keylink; do cp -f "$IFS" "$f"; done`, true},
 		{"loop-target-option", `IFS=; for f in keylink; do cp -t "$f" "$IFS"; done`, false},
 		{"loop-absolute-system-cp", `IFS=; for f in keylink; do /bin/cp "$IFS" "$f"; done`, true},
@@ -113,5 +113,83 @@ func TestCopyOpensNoSourceNeedsTheProvedCommand(t *testing.T) {
 	t.Setenv("BASH_ENV", "/h/startup.sh")
 	if copyOpensNoSource(reading, emptySourceLoop, cwd, "/h") {
 		t.Error("a startup file can redefine cp: the copy is not proved to open no source")
+	}
+}
+
+// The copy that runs is identified by the file it reaches, not by the name or
+// by where PATH finds it: a program named cp outside the project (ambient
+// PATH or an absolute word) is not the system copy, and a project link to the
+// system copy is (rel-1-0-6:GAP-0880).
+func TestCopyOpensNoSourceFollowsTheProgramToTheFileItReaches(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the rows spell POSIX paths")
+	}
+	if _, err := os.Stat("/bin/cp"); err != nil {
+		t.Skip("the rows need the system cp")
+	}
+	t.Setenv("BASH_ENV", "")
+	t.Setenv("ENV", "")
+	cwd := t.TempDir()
+	outside := t.TempDir()
+	system := "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	fake := filepath.Join(outside, "cp")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/bin/cp", filepath.Join(cwd, "cp")); err != nil {
+		t.Fatal(err)
+	}
+	linked := t.TempDir()
+	if err := os.Symlink(fake, filepath.Join(linked, "cp")); err != nil {
+		t.Fatal(err)
+	}
+	const reading = `cp '' keylink`
+	for _, row := range []struct {
+		name, path, command string
+		want                bool
+	}{
+		{"project-link-to-system-cp-first", cwd + ":" + system, emptySourceLoop, true},
+		{"project-link-by-path-word", system, `IFS=; for f in keylink; do ./cp "$IFS" "$f"; done`, true},
+		{"outside-program-first-on-path", outside + ":" + system, emptySourceLoop, false},
+		{"outside-program-by-absolute-word", system, `IFS=; for f in keylink; do ` + fake + ` "$IFS" "$f"; done`, false},
+		{"link-to-outside-program", linked + ":" + system, emptySourceLoop, false},
+		{"no-cp-on-path", outside + "/none", emptySourceLoop, false},
+	} {
+		t.Setenv("PATH", row.path)
+		if got := copyOpensNoSource(reading, row.command, cwd, "/h"); got != row.want {
+			t.Errorf("%s: copyOpensNoSource(%q) with PATH=%q = %v, want %v", row.name, row.command, row.path, got, row.want)
+		}
+	}
+}
+
+// A described empty-source copy carries the name of its program: the gateway
+// reads an explicit path outside the system directories as an unknown program
+// (rel-1-0-6:GAP-0880).
+func TestDescribedCopyReadingNamesTheProgram(t *testing.T) {
+	t.Setenv("BASH_ENV", "")
+	t.Setenv("ENV", "")
+	cwd := t.TempDir()
+	const unproved = `IFS=x; for f in keylink; do /tmp/tool/cp "$IFS" "$f"; done`
+	for _, row := range []struct {
+		name, reading, command, want string
+		described                    bool
+	}{
+		{"explicit-path", "/tmp/tool/cp '' keylink", unproved, "cp '' keylink", true},
+		{"explicit-gcp", "/opt/t/gcp '' keylink", unproved, "gcp '' keylink", true},
+		{"bare-name", "cp '' keylink", unproved, "cp '' keylink", true},
+		{"named-source", "/tmp/tool/cp a.txt keylink", unproved, "/tmp/tool/cp a.txt keylink", true},
+		{"proved", "cp '' keylink", emptySourceLoop, "", false},
+	} {
+		if row.name == "proved" && runtime.GOOS == "windows" {
+			continue
+		}
+		t.Setenv("PATH", "/usr/bin"+string(os.PathListSeparator)+"/bin")
+		if _, err := os.Stat("/bin/cp"); err != nil && row.name == "proved" {
+			continue
+		}
+		got, described := describedCopyReading(row.reading, row.command, cwd, "/h")
+		if got != row.want || described != row.described {
+			t.Errorf("%s: describedCopyReading(%q) = %q, %v; want %q, %v", row.name, row.reading, got, described, row.want, row.described)
+		}
 	}
 }
