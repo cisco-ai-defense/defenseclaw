@@ -981,7 +981,7 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 			if strict || kind == kindOther || holdsReaderWord(textForms(line)) {
 				addRefs(scan.folders(line, dir), explicit)
 			}
-			if searchesFolder(line) {
+			if runsFolderReader(line, f.argv, kind == kindCommand) {
 				addToken(dir, dir, explicit)
 			}
 		}

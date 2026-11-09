@@ -9,6 +9,9 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 // A tool input is read as paths by three plain rules.
@@ -232,42 +235,55 @@ func isShellScriptFlag(arg string) bool {
 	return len(arg) >= 2 && arg[0] == 0x2d && arg[1] != 0x2d && strings.HasSuffix(arg, "c")
 }
 
-// readerWords are the words that read, copy, write, search or run what their
-// operands name: readers and copiers, writers, interpreters, shells and the
-// wrappers that run another command (sudo, env, xargs, eval, ...). A command
-// line that holds the name of a protected link and one of them may use it.
-var readerWords = func() map[string]bool {
-	words := map[string]bool{}
-	for _, list := range []string{
-		// readers and copiers
-		"cat head tail less more tac nl bat grep egrep fgrep zgrep rg ag ack find ls dir vdir tree du",
-		"cp mv rsync scp tar zip unzip gzip gunzip zcat bzcat xzcat 7z ar cpio sed awk gawk mawk sort uniq wc",
-		"diff cmp comm xxd od hexdump strings file stat cut paste tr rev fold fmt column jq yq base64",
-		"readlink realpath sha256sum shasum md5sum cksum python python3 node ruby perl vi vim view nano",
-		"emacs code open cd pushd source read mapfile readarray type gc get-content select-string sls findstr",
-		"copy xcopy robocopy move get-childitem gci get-item gi get-itemproperty",
-		// writers
-		"tee dd install ln rm rmdir touch truncate chmod chown chgrp mkdir unlink shred patch sponge mklink",
-		"del erase rd ren rename set-content add-content out-file copy-item cpi move-item mi remove-item ri",
-		// shells, evaluators and wrappers that run another command
-		"sh bash zsh dash ksh fish pwsh powershell cmd eval sudo doas env xargs parallel command builtin exec",
-		"time nohup nice ionice timeout stdbuf setsid watch",
-	} {
+// The words of a command line that read, copy, write, search or run what their
+// operands name, in three groups.
+const (
+	readerList = `cat head tail less more tac nl bat grep egrep fgrep zgrep rg ag ack find ls dir vdir tree du
+cp mv rsync scp tar zip unzip gzip gunzip zcat bzcat xzcat 7z ar cpio sed awk gawk mawk sort uniq wc
+diff cmp comm xxd od hexdump strings file stat cut paste tr rev fold fmt column jq yq base64
+readlink realpath sha256sum shasum md5sum cksum python python3 node ruby perl vi vim view nano
+emacs code open cd pushd source read mapfile readarray type gc get-content select-string sls findstr
+copy xcopy robocopy move get-childitem gci get-item gi get-itemproperty`
+	writerList = `tee dd install ln rm rmdir touch truncate chmod chown chgrp mkdir unlink shred patch sponge mklink
+del erase rd ren rename set-content add-content out-file copy-item cpi move-item mi remove-item ri`
+	// runnerList are the shells, evaluators and wrappers that run another
+	// command.
+	runnerList = `sh bash zsh dash ksh fish pwsh powershell cmd eval sudo doas env xargs parallel command builtin exec
+time nohup nice ionice timeout stdbuf setsid watch`
+)
+
+func wordSet(lists ...string) map[string]bool {
+	set := map[string]bool{}
+	for _, list := range lists {
 		for _, word := range strings.Fields(list) {
-			words[word] = true
+			set[word] = true
 		}
 	}
-	return words
-}()
-
-// searchPrograms look through the working folder when no word names another
-// place; the grep family only with a recursive option.
-var searchPrograms = map[string]bool{
-	"ls": true, "dir": true, "vdir": true, "tree": true, "du": true, "find": true,
-	"rg": true, "ag": true, "ack": true,
+	return set
 }
 
-var grepPrograms = map[string]bool{"grep": true, "egrep": true, "fgrep": true, "zgrep": true}
+// readerWords are all three groups: a command line that holds the name of a
+// protected link and one of them may use it.
+var readerWords = wordSet(readerList, writerList, runnerList)
+
+// folderReaders are the programs that read, copy or search the files of the
+// folder they run in when no operand names another place: the readers, less
+// the words that move the shell or read its own input.
+var folderReaders = func() map[string]bool {
+	set := wordSet(readerList)
+	for _, name := range strings.Fields("cd pushd source read mapfile readarray type") {
+		delete(set, name)
+	}
+	return set
+}()
+
+var (
+	// runnerShells run the command line of their -c option, or a script file.
+	runnerShells = wordSet("sh bash zsh dash ksh fish pwsh powershell cmd")
+	// runnerWrappers run the command that follows their own options.
+	runnerWrappers = wordSet("sudo doas env xargs parallel command builtin exec time nohup nice ionice timeout stdbuf setsid watch")
+	evalWord       = wordSet("eval")
+)
 
 func programName(text string) string {
 	text = strings.ToLower(text)
@@ -323,38 +339,197 @@ func isWordRune(r rune) bool {
 	return r >= 0x61 && r <= 0x7a || r >= 0x30 && r <= 0x39 || r == 0x2d || r == 0x5f
 }
 
-// searchesFolder reports whether any simple command of the line looks through
-// the working folder because no word of that command names another place: ls,
-// find, tree, rg and the like with no word with a slash in it, grep with a
-// recursive option. Each command is judged on its own, so a path named by an
-// earlier or later command does not hide the search of the working folder.
-func searchesFolder(line string) bool {
-	for _, command := range strings.FieldsFunc(line, func(r rune) bool { return strings.ContainsRune(";&|()\n\r`", r) }) {
-		if commandSearchesFolder(command) {
+// maxRunnerDepth bounds the command lines read inside command lines (sh -c,
+// eval); past it the line cannot be told.
+const maxRunnerDepth = 8
+
+// runsFolderReader reports whether a command runs a program that reads, copies
+// or searches the folder it runs in (folderReaders: ls, find, cat, cp, grep,
+// ...), whatever its other words are: the working folder is held or denied,
+// and a reader started there may read it. The line is read with the shell
+// parser, so only a word in the place of a program is a program: text inside
+// quotes, an argument or a redirection target never starts one. The program
+// is read behind the wrappers (sudo, env, xargs, nice, ...) and inside sh -c
+// and eval. Where the line cannot be told (it does not parse, a program is
+// named by an expansion or a pattern, runners nest past maxRunnerDepth) the
+// answer is cannotTell. An argument vector is one command.
+func runsFolderReader(line string, argv []string, cannotTell bool) bool {
+	if argv != nil {
+		words := make([]commandWord, len(argv))
+		for i, element := range argv {
+			words[i] = commandWord{text: element, names: []string{programName(element)}}
+		}
+		return wordsRunReader(words, 0, cannotTell)
+	}
+	return textRunsReader(line, 0, cannotTell)
+}
+
+func textRunsReader(text string, depth int, cannotTell bool) bool {
+	if depth > maxRunnerDepth {
+		return cannotTell
+	}
+	file, ok := shellparse.Parse(text)
+	if !ok {
+		return cannotTell
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if call, ok := node.(*syntax.CallExpr); ok && !found && len(call.Args) > 0 {
+			words := make([]commandWord, len(call.Args))
+			for i, arg := range call.Args {
+				words[i] = readCommandWord(arg)
+			}
+			found = wordsRunReader(words, depth, cannotTell)
+		}
+		return !found
+	})
+	return found
+}
+
+// commandWord is one word of a simple command as the parser read it.
+type commandWord struct {
+	// text is the word with its quotes and escapes taken out.
+	text string
+	// names are the program names the word may spell: read as the shell does,
+	// and with a backslash kept as a path separator (a Windows path).
+	names []string
+	// dynamic is set for a word that holds an expansion or a pattern: its
+	// value is not in the text.
+	dynamic bool
+}
+
+func (w commandWord) isOneOf(set map[string]bool) bool {
+	return slices.ContainsFunc(w.names, func(name string) bool { return set[name] })
+}
+
+func (w commandWord) isOption() bool { return strings.HasPrefix(w.text, "-") }
+
+func readCommandWord(word *syntax.Word) commandWord {
+	var raw, text strings.Builder
+	var out commandWord
+	for _, part := range word.Parts {
+		switch p := part.(type) {
+		case *syntax.Lit:
+			raw.WriteString(p.Value)
+			text.WriteString(unescapeLit(p.Value, false))
+			if p.Value != "[" && strings.ContainsAny(p.Value, "*?[{") {
+				out.dynamic = true
+			}
+		case *syntax.SglQuoted:
+			raw.WriteString(p.Value)
+			text.WriteString(p.Value)
+		case *syntax.DblQuoted:
+			for _, inner := range p.Parts {
+				if lit, ok := inner.(*syntax.Lit); ok {
+					raw.WriteString(lit.Value)
+					text.WriteString(unescapeLit(lit.Value, true))
+				} else {
+					out.dynamic = true
+				}
+			}
+		default:
+			out.dynamic = true
+		}
+	}
+	out.text = text.String()
+	out.names = []string{programName(raw.String())}
+	if name := programName(out.text); name != out.names[0] {
+		out.names = append(out.names, name)
+	}
+	return out
+}
+
+// unescapeLit takes the backslash escapes out of a literal: any character in
+// the open, only the ones that stay special inside double quotes.
+func unescapeLit(value string, quoted bool) string {
+	if !strings.Contains(value, "\\") {
+		return value
+	}
+	var out strings.Builder
+	for i := 0; i < len(value); i++ {
+		if value[i] == 0x5c && i+1 < len(value) && (!quoted || strings.IndexByte("$`\"\\\n", value[i+1]) >= 0) {
+			i++
+		}
+		out.WriteByte(value[i])
+	}
+	return out.String()
+}
+
+func wordsRunReader(words []commandWord, depth int, cannotTell bool) bool {
+	for i := 0; i < len(words); i++ {
+		word := words[i]
+		switch {
+		case word.dynamic:
+			return cannotTell
+		case word.isOneOf(folderReaders):
 			return true
+		case word.isOneOf(runnerShells), word.isOneOf(evalWord):
+			return shellRunsReader(word, words[i+1:], depth, cannotTell)
+		case word.isOneOf(runnerWrappers):
+			i = skipWrapperOptions(words, i+1) - 1
+		default:
+			return false
 		}
 	}
 	return false
 }
 
-func commandSearchesFolder(command string) bool {
-	searching, grep, recursive := false, false, false
-	for _, word := range splitWords(command, false) {
-		name := programName(word)
-		switch {
-		case searchPrograms[name]:
-			searching = true
-		case grepPrograms[name]:
-			grep = true
-		case strings.ContainsAny(word, "/\\"):
+// skipWrapperOptions returns the index of the program a wrapper runs: the
+// options of the wrapper, the word after an option (its value), a variable
+// assignment and a number (timeout 5) come first.
+func skipWrapperOptions(words []commandWord, from int) int {
+	afterOption := false
+	i := from
+	for ; i < len(words); i++ {
+		word := words[i]
+		if word.dynamic || word.isOneOf(folderReaders) || word.isOneOf(runnerShells) || word.isOneOf(runnerWrappers) || word.isOneOf(evalWord) {
+			break
+		}
+		assignment := strings.Contains(word.text, "=")
+		number := word.text != "" && word.text[0] >= 0x30 && word.text[0] <= 0x39
+		if !word.isOption() && !afterOption && !assignment && !number {
+			break
+		}
+		afterOption = word.isOption() && !assignment
+	}
+	return i
+}
+
+// shellRunsReader reads the command line a shell or eval is given: the word
+// after -c, the rest of the line after /c, /k or -Command, the joined words of
+// eval. A shell given a script file runs what it holds, so it is a reader.
+func shellRunsReader(shell commandWord, rest []commandWord, depth int, cannotTell bool) bool {
+	script := func(from []commandWord) bool {
+		texts := make([]string, len(from))
+		for i, word := range from {
+			if word.dynamic {
+				return cannotTell
+			}
+			texts[i] = word.text
+		}
+		return textRunsReader(strings.Join(texts, " "), depth+1, cannotTell)
+	}
+	if shell.isOneOf(evalWord) {
+		return script(rest)
+	}
+	for i, word := range rest {
+		switch flag := strings.ToLower(word.text); {
+		case flag == "/c", flag == "/k", flag == "-command":
+			return script(rest[i+1:])
+		case !word.dynamic && isShellScriptFlag(word.text):
+			if i+1 < len(rest) {
+				return script(rest[i+1 : i+2])
+			}
+			// The line follows as a field of its own.
 			return false
-		case strings.HasPrefix(word, "--"):
-			recursive = recursive || word == "--recursive" || word == "--dereference-recursive"
-		case len(word) > 1 && word[0] == 0x2d:
-			recursive = recursive || strings.ContainsAny(word[1:], "rR")
 		}
 	}
-	return searching || grep && recursive
+	for _, word := range rest {
+		if word.dynamic && cannotTell || !word.dynamic && !word.isOption() {
+			return true
+		}
+	}
+	return false
 }
 
 // maxListedEntries bounds the entries read from one folder, and
