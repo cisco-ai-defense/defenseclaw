@@ -229,6 +229,21 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"escaped substitution in a body":        "cat > " + notes + " <<EOF\n\\$(" + load + ")\nEOF\n",
 		"ordinary substitution in a body":       "cat > " + notes + " <<EOF\n$(date) $(echo note)\nEOF\n",
 		"exported variable reassigned":          "export F=/etc/ld.so.preload; export F=" + notes + "; echo ok > \"$F\"",
+		// A substitution elsewhere in the text does not make the data around
+		// it code.
+		"literal after a body substitution":       "cat > " + notes + " <<EOF\n$(date)\n" + load + "\nEOF\n",
+		"literal before a body substitution":      "cat > " + notes + " <<EOF\n" + load + "\n$(date)\nEOF\n",
+		"literal on the line of a substitution":   "cat > " + notes + " <<EOF\n$(date) " + load + "\nEOF\n",
+		"printed text inside a body substitution": "cat > " + notes + " <<EOF\n$(printf \x27%s\\n\x27 \x27" + load + "\x27)\nEOF\n",
+		"escaped substitution beside a real one":  "cat > " + notes + " <<EOF\n$(date)\n\\$(" + load + ")\nEOF\n",
+		"literal after a backtick":                "cat > " + notes + " <<EOF\n`date`\n" + load + "\nEOF\n",
+		"literal after a braced expansion":        "cat > " + notes + " <<EOF\n${HOME:-x}\n" + load + "\nEOF\n",
+		"printf copy words after a substitution":  "printf \x27%s\\n\x27 \"$(date)\" cp " + lib + " /etc/ld.so.preload > " + notes,
+		"printf copy words before a substitution": "printf \x27%s\\n\x27 cp " + lib + " /etc/ld.so.preload \"$(date)\" > " + notes,
+		"printf copy words after a statement":     ": \"$(date)\"; printf \x27%s\\n\x27 cp " + lib + " /etc/ld.so.preload > " + notes,
+		"echo copy words after a backtick":        "echo `date` cp " + lib + " /etc/ld.so.preload > " + notes,
+		"echo copy words after an expansion":      "echo ${HOME:-x} cp " + lib + " /etc/ld.so.preload > " + notes,
+		"echo copy words with an ANSI-C string":   "echo $\x27a\x27 cp " + lib + " /etc/ld.so.preload > " + notes,
 	} {
 		for padName, pad := range paddings {
 			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
@@ -260,6 +275,14 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"backtick in an unquoted document":       "cat > " + notes + " <<EOF\n`" + load + "`\nEOF\n",
 		"substitution after an escaped one":      "cat > " + notes + " <<EOF\n\\$(x) $(" + load + ")\nEOF\n",
 		"directory variable and relative target": "cd /etc; D=pam.d; echo \x27auth sufficient pam_permit.so\x27 > $D/sshd",
+		"redirect beside a printed substitution": "echo " + lib + " \"$(date)\" > /etc/ld.so.preload",
+		"substitution in a printed word":         "echo \"$(" + load + ")\" > " + notes,
+		"backtick in a printed word":             "echo `" + load + "` > " + notes,
+		"substitution in a printf word":          "printf \x27%s\x27 $(" + load + ") > " + notes,
+		"nested substitution in a body":          "cat > " + notes + " <<EOF\n$(date $(" + load + "))\nEOF\n",
+		"braced expansion that substitutes":      "cat > " + notes + " <<EOF\n${X:-$(" + load + ")}\nEOF\n",
+		"write after a quote in a substitution":  "cat > " + notes + " <<EOF\n$(printf \x27)\x27; " + load + ")\nEOF\n",
+		"write beside a substitution in a body":  "cat > " + notes + " <<EOF\n$(date) $(" + load + ")\nEOF\n",
 	} {
 		for padName, pad := range paddings {
 			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {

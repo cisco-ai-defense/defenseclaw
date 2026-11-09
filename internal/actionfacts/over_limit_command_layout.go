@@ -44,13 +44,28 @@ import (
 //   - sequential: the text has no group, subshell, function, loop, trap or
 //     alias, so no statement runs later or elsewhere than it is written.
 //
-// A construct this reading does not follow (a command substitution, a
-// parameter expansion beyond ${NAME}, arithmetic, a backtick, ANSI-C
-// quoting, process substitution, an unterminated quote) makes the whole
-// layout unknown: the caller then reads the text as before, every cd and
-// assignment counting wherever it is, nothing skipped.
+// A command substitution, a backtick and a parameter expansion with an
+// operator are code the reading does not follow into: it steps over each as
+// one code span, skips nothing inside it, and counts the text as not
+// sequential, so the cd and assignment statements are read additively. A word
+// that holds one is skipped as text only outside it. The inside of a
+// command substitution is read as a command text of its own, to a bounded
+// depth, so the comments, data and printed words inside it are skipped as
+// they are outside it. A construct the reading
+// cannot step over (a process substitution, an arithmetic bracket, an
+// unterminated quote or substitution) makes the whole layout unknown: the
+// caller then reads the text as before, every cd and assignment counting
+// wherever it is, nothing skipped.
 
 type textSpan struct{ start, end int }
+
+// Bytes the layout reading compares against, besides those of the comment
+// reader.
+const (
+	shellCloseParen = 0x29
+	shellOpenBrace  = 0x7b
+	shellCloseBrace = 0x7d
+)
 
 type commandLayout struct {
 	skipped    []textSpan
@@ -114,6 +129,9 @@ type layoutWord struct {
 	// quoted when it holds a quote.
 	plain, quoted bool
 	assign        bool
+	// code are the spans of the word, in text order, that hold a
+	// substitution or an expansion the shell runs.
+	code []textSpan
 }
 
 type layoutDocument struct {
@@ -127,6 +145,8 @@ type layoutDocument struct {
 type layoutReader struct {
 	text   string
 	layout commandLayout
+	// depth is how many command substitutions deep the text read is.
+	depth int
 	// words and redirected are the statement being read; before is the
 	// separator that ended the statement before it.
 	words      []layoutWord
@@ -145,8 +165,17 @@ type layoutReader struct {
 // readCommandLayout reads the layout of a command text; false when the text
 // holds a construct the reading does not follow.
 func readCommandLayout(text string) (commandLayout, bool) {
+	return readLayoutAt(text, 0)
+}
+
+// maxLayoutDepth bounds how many command substitutions deep the reading
+// follows; the text of a deeper one stays text.
+const maxLayoutDepth = 4
+
+func readLayoutAt(text string, depth int) (commandLayout, bool) {
 	r := &layoutReader{
 		text:   text,
+		depth:  depth,
 		layout: commandLayout{straight: map[int]bool{}, sequential: true},
 		before: "start",
 	}
@@ -211,6 +240,7 @@ func readCommandLayout(text string) (commandLayout, bool) {
 	}
 	r.endStatement("EOF")
 	slices.SortFunc(r.layout.skipped, func(a, b textSpan) int { return a.start - b.start })
+	slices.SortFunc(r.layout.quoted, func(a, b textSpan) int { return a.start - b.start })
 	return r.layout, true
 }
 
@@ -262,6 +292,10 @@ func (r *layoutReader) operator(index int) (int, bool) {
 // addWord adds a word to the statement: the file of a redirection and a
 // file descriptor number before one are no words of the command.
 func (r *layoutReader) addWord(word layoutWord, next int) {
+	if len(word.code) != 0 {
+		r.layout.sequential = false
+		r.readInside(word.code)
+	}
 	switch {
 	case r.target:
 		r.target = false
@@ -311,10 +345,10 @@ func (r *layoutReader) endStatement(term string) {
 	}
 	r.commands = append(r.commands, command)
 	if first < len(words) && layoutTextCommands[command] {
-		// Every argument word is text, quoted or not: a readable layout has
-		// no substitution in a word, so none of them runs.
+		// Every argument word is text, quoted or not, except the code spans
+		// of its substitutions: those run.
 		for _, word := range words[first+1:] {
-			r.layout.skipped = append(r.layout.skipped, textSpan{word.start, word.end})
+			r.skipOutsideCode(word.start, word.end, word.code)
 		}
 	}
 	if layoutReserved[command] {
@@ -339,6 +373,46 @@ func (r *layoutReader) endStatement(term string) {
 	}
 }
 
+// skipOutsideCode skips the text from start to end except the code spans in
+// it, which are in text order.
+func (r *layoutReader) skipOutsideCode(start, end int, code []textSpan) {
+	for _, span := range code {
+		if span.start > start {
+			r.layout.skipped = append(r.layout.skipped, textSpan{start, span.start})
+		}
+		start = max(start, span.end)
+	}
+	if start < end {
+		r.layout.skipped = append(r.layout.skipped, textSpan{start, end})
+	}
+}
+
+// readInside reads the inside of each command substitution among the code
+// spans as a command text of its own and adds what that reading skips and
+// quotes. A backtick (its backslashes change the text) and a braced
+// expansion stay text.
+func (r *layoutReader) readInside(code []textSpan) {
+	if r.depth >= maxLayoutDepth {
+		return
+	}
+	for _, span := range code {
+		if !strings.HasPrefix(r.text[span.start:span.end], "$(") {
+			continue
+		}
+		start := span.start + 2
+		inside, ok := readLayoutAt(r.text[start:span.end-1], r.depth+1)
+		if !ok {
+			continue
+		}
+		for _, skipped := range inside.skipped {
+			r.layout.skipped = append(r.layout.skipped, textSpan{start + skipped.start, start + skipped.end})
+		}
+		for _, quoted := range inside.quoted {
+			r.layout.quoted = append(r.layout.quoted, textSpan{start + quoted.start, start + quoted.end})
+		}
+	}
+}
+
 func allAssignments(words []layoutWord) bool {
 	for _, word := range words {
 		if !word.assign {
@@ -350,8 +424,8 @@ func allAssignments(words []layoutWord) bool {
 
 // readDocuments reads the bodies of the here-documents opened on the line
 // that ended at index, and returns the index after them. A body that feeds
-// only commands that read data is skipped, unless the shell runs a command
-// substitution in it (an unquoted delimiter): that is code, and stays text.
+// only commands that read data is skipped, except the command substitutions
+// the shell runs in it (an unquoted delimiter): those are code, and stay text.
 func (r *layoutReader) readDocuments(index int) int {
 	data := !r.grouped
 	for _, command := range r.commands {
@@ -361,7 +435,13 @@ func (r *layoutReader) readDocuments(index int) int {
 	}
 	for _, document := range r.documents {
 		end := heredocBodyEnd(r.text, index, document.delimiter, document.stripTabs)
-		if data && end > index && (!document.expands || !runsSubstitution(r.text[index:end])) {
+		switch {
+		case !data || end <= index:
+		case document.expands:
+			code := documentCode(r.text[:end], index)
+			r.skipOutsideCode(index, end, code)
+			r.readInside(code)
+		default:
 			r.layout.skipped = append(r.layout.skipped, textSpan{index, end})
 		}
 		index = end
@@ -370,23 +450,35 @@ func (r *layoutReader) readDocuments(index int) int {
 	return index
 }
 
-// runsSubstitution reports whether the body of a here-document with an
-// unquoted delimiter holds a command substitution the shell runs: a dollar
-// parenthesis or a backtick that no backslash escapes.
-func runsSubstitution(body string) bool {
-	for index := 0; index < len(body); index++ {
-		switch body[index] {
-		case shellBackslash:
+// documentCode are the code spans of the body of a here-document with an
+// unquoted delimiter that starts at index: a command substitution, a backtick
+// and a braced expansion that no backslash escapes. Quotes are plain text in
+// a body, but not inside a substitution. A substitution that does not close
+// runs to the end of the body.
+func documentCode(text string, index int) []textSpan {
+	var code []textSpan
+	for ; index < len(text); index++ {
+		var end int
+		switch {
+		case text[index] == shellBackslash:
 			index++
-		case shellBacktick:
-			return true
-		case shellDollar:
-			if index+1 < len(body) && body[index+1] == shellOpenParen {
-				return true
-			}
+			continue
+		case text[index] == shellBacktick:
+			end = layoutBacktickEnd(text, index)
+		case text[index] == shellDollar && index+1 < len(text) && text[index+1] == shellOpenParen:
+			end = layoutNestedEnd(text, index+2, shellCloseParen)
+		case text[index] == shellDollar && index+1 < len(text) && text[index+1] == shellOpenBrace:
+			end = layoutNestedEnd(text, index+2, shellCloseBrace)
+		default:
+			continue
 		}
+		if end < 0 {
+			end = len(text)
+		}
+		code = append(code, textSpan{index, end})
+		index = end - 1
 	}
-	return false
+	return code
 }
 
 // readLayoutWord reads the shell word at index; false for a construct the
@@ -409,8 +501,8 @@ func readLayoutWord(text string, index int) (layoutWord, int, bool) {
 			index += end + 2
 			word.plain, word.quoted = false, true
 		case shellDoubleQuote:
-			end, ok := layoutDoubleQuoteEnd(text, index)
-			if !ok {
+			end := layoutDoubleQuoteEnd(text, index, &word.code)
+			if end < 0 {
 				return layoutWord{}, 0, false
 			}
 			literal.WriteString(text[index+1 : end-1])
@@ -423,11 +515,21 @@ func readLayoutWord(text string, index int) (layoutWord, int, bool) {
 			}
 			index += 2
 		case shellBacktick:
-			return layoutWord{}, 0, false
-		case shellDollar:
-			end := layoutDollarEnd(text, index)
+			end := layoutBacktickEnd(text, index)
 			if end < 0 {
 				return layoutWord{}, 0, false
+			}
+			word.code = append(word.code, textSpan{index, end})
+			literal.WriteString(text[index:end])
+			index = end
+			word.plain = false
+		case shellDollar:
+			end := layoutDollarEnd(text, index, &word.code)
+			if end < 0 {
+				return layoutWord{}, 0, false
+			}
+			if index+1 < len(text) && (text[index+1] == shellSingleQuote || text[index+1] == shellDoubleQuote) {
+				word.quoted = true
 			}
 			literal.WriteString(text[index:end])
 			index = end
@@ -441,52 +543,152 @@ func readLayoutWord(text string, index int) (layoutWord, int, bool) {
 	return word, word.end, true
 }
 
-// layoutDollarEnd is the index after the dollar construct at index: the
-// dollar of a variable (its name is read as plain word bytes) or a
-// ${NAME}. -1 for a substitution, an expansion with an operator, arithmetic,
-// ANSI-C and locale quoting.
-func layoutDollarEnd(text string, index int) int {
+// layoutDollarEnd is the index after the dollar construct at index: a
+// variable (its name is read as plain word bytes), a ${NAME}, ANSI-C and
+// locale quoting, or code: a command substitution or an expansion with an
+// operator, whose span is added to code. -1 for arithmetic brackets and for a
+// construct that does not close.
+func layoutDollarEnd(text string, index int, code *[]textSpan) int {
 	if index+1 >= len(text) {
 		return index + 1
 	}
 	switch text[index+1] {
-	case '(', '[', shellSingleQuote, shellDoubleQuote:
+	case shellOpenParen:
+		end := layoutNestedEnd(text, index+2, shellCloseParen)
+		if end >= 0 && code != nil {
+			*code = append(*code, textSpan{index, end})
+		}
+		return end
+	case '[':
 		return -1
-	case '{':
+	case shellSingleQuote:
+		for next := index + 2; next < len(text); next++ {
+			switch text[next] {
+			case shellBackslash:
+				next++
+			case shellSingleQuote:
+				return next + 1
+			}
+		}
+		return -1
+	case shellDoubleQuote:
+		return layoutDoubleQuoteEnd(text, index+1, code)
+	case shellOpenBrace:
 		end := index + 2
 		for end < len(text) && (text[end] == '_' || text[end] >= 'A' && text[end] <= 'Z' ||
 			text[end] >= 'a' && text[end] <= 'z' || end > index+2 && text[end] >= '0' && text[end] <= '9') {
 			end++
 		}
-		if end == index+2 || end >= len(text) || text[end] != '}' {
-			return -1
+		if end > index+2 && end < len(text) && text[end] == shellCloseBrace {
+			return end + 1
 		}
-		return end + 1
+		end = layoutNestedEnd(text, index+2, shellCloseBrace)
+		if end >= 0 && code != nil {
+			*code = append(*code, textSpan{index, end})
+		}
+		return end
 	}
 	return index + 1
 }
 
 // layoutDoubleQuoteEnd is the index after the double quote that closes the
-// string opened at index; false for an unterminated string and for a
-// construct inside it that the reading does not follow.
-func layoutDoubleQuoteEnd(text string, index int) (int, bool) {
+// string opened at index, with the code spans inside it added to code; -1 for
+// an unterminated string and for arithmetic brackets inside it.
+func layoutDoubleQuoteEnd(text string, index int, code *[]textSpan) int {
 	for next := index + 1; next < len(text); next++ {
 		switch text[next] {
 		case shellBackslash:
 			next++
 		case shellDoubleQuote:
-			return next + 1, true
+			return next + 1
 		case shellBacktick:
-			return 0, false
-		case shellDollar:
-			end := layoutDollarEnd(text, next)
+			end := layoutBacktickEnd(text, next)
 			if end < 0 {
-				return 0, false
+				return -1
+			}
+			if code != nil {
+				*code = append(*code, textSpan{next, end})
+			}
+			next = end - 1
+		case shellDollar:
+			// A dollar before a quote is a plain dollar inside a string.
+			if next+1 < len(text) && (text[next+1] == shellSingleQuote || text[next+1] == shellDoubleQuote) {
+				continue
+			}
+			end := layoutDollarEnd(text, next, code)
+			if end < 0 {
+				return -1
 			}
 			next = end - 1
 		}
 	}
-	return 0, false
+	return -1
+}
+
+// layoutBacktickEnd is the index after the backtick that closes the one at
+// index; -1 when none does.
+func layoutBacktickEnd(text string, index int) int {
+	for next := index + 1; next < len(text); next++ {
+		switch text[next] {
+		case shellBackslash:
+			next++
+		case shellBacktick:
+			return next + 1
+		}
+	}
+	return -1
+}
+
+// layoutNestedEnd is the index after the closer (a parenthesis or a brace)
+// that ends the substitution or expansion whose body starts at index; -1 when
+// none does. Quotes, backticks and nested substitutions inside it are read as
+// the shell does, so a closer inside one does not end it.
+func layoutNestedEnd(text string, index int, closer byte) int {
+	depth := 1
+	for ; index < len(text); index++ {
+		c := text[index]
+		switch {
+		case c == shellBackslash:
+			index++
+		case c == shellSingleQuote:
+			end := strings.IndexByte(text[index+1:], shellSingleQuote)
+			if end < 0 {
+				return -1
+			}
+			index += end + 1
+		case c == shellDoubleQuote:
+			end := layoutDoubleQuoteEnd(text, index, nil)
+			if end < 0 {
+				return -1
+			}
+			index = end - 1
+		case c == shellBacktick:
+			end := layoutBacktickEnd(text, index)
+			if end < 0 {
+				return -1
+			}
+			index = end - 1
+		case c == shellDollar && index+1 < len(text) && text[index+1] == shellOpenParen:
+			end := layoutNestedEnd(text, index+2, shellCloseParen)
+			if end < 0 {
+				return -1
+			}
+			index = end - 1
+		case c == shellDollar && index+1 < len(text) && text[index+1] == shellOpenBrace:
+			end := layoutNestedEnd(text, index+2, shellCloseBrace)
+			if end < 0 {
+				return -1
+			}
+			index = end - 1
+		case c == shellOpenParen && closer == shellCloseParen:
+			depth++
+		case c == closer:
+			if depth--; depth == 0 {
+				return index + 1
+			}
+		}
+	}
+	return -1
 }
 
 // heredocBodyEnd is the index after the delimiter line of the here-document
