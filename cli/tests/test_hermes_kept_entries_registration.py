@@ -172,6 +172,8 @@ def test_the_notice_lists_a_copy_of_a_defenseclaw_hook_and_not_the_users_hook_be
         "$HOME/.defenseclaw/hooks/hookX --event pre_tool_call",
         "bash /somewhere/else/hermes-hook.sh",
         "echo hermes-hook.sh",
+        "bash /somewhere/else/hermes-hook.sh.off --event pre_tool_call",
+        "sh -c \"$HOME/.defenseclaw/hooks/hookX --event pre_tool_call\"",
     ],
 )
 def test_an_entry_that_names_a_defenseclaw_hook_is_listed(tmp_path, command):
@@ -191,6 +193,8 @@ def test_an_entry_that_names_a_defenseclaw_hook_is_listed(tmp_path, command):
         ".defenseclaw/hooks_old/audit",
         "bin/my-hermes-hook.sh",
         "bin/xhermes-hook.sh",
+        "bin/hermes-hook.sh-audit",
+        ".defenseclaw/hooks/../user-hook.sh",
     ],
 )
 def test_a_users_hook_in_a_folder_or_file_named_like_defenseclaws_is_kept_without_a_notice(tmp_path, relative):

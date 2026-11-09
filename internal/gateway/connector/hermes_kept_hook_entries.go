@@ -6,10 +6,12 @@ package connector
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // hermesKeptHookEvents lists the hook events Setup registers that still hold an
@@ -40,28 +42,93 @@ func hermesKeptHookEvents(hooks map[string]interface{}, hookScript string, recog
 	return events
 }
 
-// hermesDefenseClawHookWord finds, in a command, the generated script name, the
-// hooks folder (.defenseclaw/hooks) or the native launcher flag, each as a whole
-// word: a character that can continue a file or folder name (letter, digit, dot,
-// underscore, hyphen) before or after it means a different name, such as
-// .defenseclaw/hooks-backup or my-hermes-hook.sh. An edited copy of the script
-// (hermes-hook.sh.off) keeps its place, so nothing follows the script name.
-var hermesDefenseClawHookWord = regexp.MustCompile(
-	`(?:^|[^A-Za-z0-9._-])(?:` + regexp.QuoteMeta(hermesHookScriptName) +
-		`|\.defenseclaw/hooks(?:$|[^A-Za-z0-9._-])` +
-		`|` + regexp.QuoteMeta(nativeHookFlag+"hermes") + `(?:$|[^A-Za-z0-9._-]))`)
+// hermesDefenseClawLauncherFlag finds the native launcher Hermes flag as a
+// whole word: a character that can continue a name before or after it means
+// another command.
+var hermesDefenseClawLauncherFlag = regexp.MustCompile(
+	`(?:^|[^A-Za-z0-9._-])` + regexp.QuoteMeta(nativeHookFlag+"hermes") + `(?:$|[^A-Za-z0-9._-])`)
 
-// hermesCommandNamesDefenseClawHook reports whether a kept entry command
-// names a DefenseClaw hook: the generated script, a file in the hooks folder
-// (spelled absolute, with ~ or with $HOME) or the native launcher Hermes
-// flag. It only picks which kept entries are listed; ownership never reads the
-// command, so no entry is changed, claimed or removed because of it.
-func hermesCommandNamesDefenseClawHook(command, hookScript string) bool {
-	command = strings.ReplaceAll(command, `\`, "/")
-	if hookScript != "" && strings.Contains(command, filepath.ToSlash(filepath.Dir(hookScript))+"/") {
+// hermesCommandWords splits a command into the words a shell reads, honouring
+// single and double quotes, and breaks unquoted words at the shell operators
+// and at "=" so a path after VAR= or after && is a word of its own.
+func hermesCommandWords(command string) []string {
+	const singleQuote, doubleQuote = rune(0x27), rune(0x22)
+	var words []string
+	var word strings.Builder
+	started := false
+	var quote rune
+	flush := func() {
+		if started {
+			words = append(words, word.String())
+		}
+		word.Reset()
+		started = false
+	}
+	for _, r := range command {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				word.WriteRune(r)
+			}
+		case r == singleQuote || r == doubleQuote:
+			quote, started = r, true
+		case unicode.IsSpace(r) || strings.ContainsRune(";&|<>()=", r):
+			flush()
+		default:
+			word.WriteRune(r)
+			started = true
+		}
+	}
+	flush()
+	return words
+}
+
+// hermesWordNamesDefenseClawHook reports whether one word of a command is a
+// path DefenseClaw owns after the path is cleaned: the generated script (or an
+// edited copy of it, hermes-hook.sh.off), or anything in the hooks folder,
+// spelled absolute, with ~, with $HOME or relative. The clean path decides,
+// so .defenseclaw/hooks/../user-hook.sh is a file of the user and
+// hermes-hook.sh-audit or my-hermes-hook.sh is another name.
+func hermesWordNamesDefenseClawHook(word, hooksDir string) bool {
+	clean := path.Clean(word)
+	if hooksDir != "" && (clean == hooksDir || strings.HasPrefix(clean, hooksDir+"/")) {
 		return true
 	}
-	return hermesDefenseClawHookWord.MatchString(command)
+	const folder = ".defenseclaw/hooks"
+	if clean == folder || strings.HasPrefix(clean, folder+"/") ||
+		strings.HasSuffix(clean, "/"+folder) || strings.Contains(clean, "/"+folder+"/") {
+		return true
+	}
+	base := path.Base(clean)
+	return base == hermesHookScriptName || strings.HasPrefix(base, hermesHookScriptName+".")
+}
+
+// hermesCommandNamesDefenseClawHook reports whether a kept entry command
+// names a DefenseClaw hook: a word that is the generated script or a file in
+// the hooks folder (see hermesWordNamesDefenseClawHook), the argument of a
+// shell -c read the same way, or the native launcher Hermes flag. It only
+// picks which kept entries are listed; ownership never reads the command, so
+// no entry is changed, claimed or removed because of it.
+func hermesCommandNamesDefenseClawHook(command, hookScript string) bool {
+	command = strings.ReplaceAll(command, `\`, "/")
+	hooksDir := ""
+	if hookScript != "" {
+		hooksDir = path.Clean(filepath.ToSlash(filepath.Dir(hookScript)))
+	}
+	if hermesDefenseClawLauncherFlag.MatchString(command) {
+		return true
+	}
+	previous := ""
+	for _, word := range hermesCommandWords(command) {
+		if hermesWordNamesDefenseClawHook(word, hooksDir) ||
+			(previous == "-c" && word != command && hermesCommandNamesDefenseClawHook(word, hookScript)) {
+			return true
+		}
+		previous = word
+	}
+	return false
 }
 
 // warnHermesKeptHookEntries says once, after Setup or teardown (operation),

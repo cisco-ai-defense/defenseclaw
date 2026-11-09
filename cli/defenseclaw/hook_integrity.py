@@ -1312,20 +1312,80 @@ def hermes_command_written(command: str, current: set[str]) -> bool:
     return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
 
 
+_SHELL_QUOTES = (chr(39), chr(34))
+
+
+def _hermes_command_words(command: str) -> list[str]:
+    """The words a shell reads in *command* (quotes honoured; unquoted words break at operators and "=")."""
+
+    words: list[str] = []
+    word: list[str] = []
+    started = False
+    quote = ""
+    for char in command:
+        if quote:
+            if char == quote:
+                quote = ""
+            else:
+                word.append(char)
+        elif char in _SHELL_QUOTES:
+            quote, started = char, True
+        elif char.isspace() or char in ";&|<>()=":
+            if started:
+                words.append("".join(word))
+            word, started = [], False
+        else:
+            word.append(char)
+            started = True
+    if started:
+        words.append("".join(word))
+    return words
+
+
+def _hermes_word_names_defenseclaw_hook(word: str, hooks_dir: str) -> bool:
+    """Whether one word of a command, once its path is cleaned, is the generated script (or an edited
+    copy such as hermes-hook.sh.off) or lies in the hooks folder, spelled absolute, with ~, with $HOME
+    or relative. ``.defenseclaw/hooks/../user-hook.sh`` is a file of the user; ``hermes-hook.sh-audit``
+    and ``my-hermes-hook.sh`` are other names."""
+
+    clean = posixpath.normpath(word)
+    if hooks_dir and (clean == hooks_dir or clean.startswith(hooks_dir + "/")):
+        return True
+    folder = ".defenseclaw/hooks"
+    if (
+        clean == folder
+        or clean.startswith(folder + "/")
+        or clean.endswith("/" + folder)
+        or "/" + folder + "/" in clean
+    ):
+        return True
+    base = posixpath.basename(clean)
+    script = HOOK_SCRIPT_NAMES["hermes"]
+    return base == script or base.startswith(script + ".")
+
+
 def hermes_command_names_defenseclaw_hook(command: str, hooks_dir: str) -> bool:
     """Whether a Hermes hook *command* Setup did not write names a DefenseClaw hook.
 
-    The Python mirror of hermesCommandNamesDefenseClawHook: the generated
-    script, a file in the hooks folder (absolute, ``~`` or ``$HOME``) or the
-    native launcher Hermes flag, each as a whole word (``.defenseclaw/hooks-backup``
-    and ``my-hermes-hook.sh`` are other names). It only picks which kept entries
-    the notice lists (GAP-0940); ownership never reads the command.
+    The Python mirror of hermesCommandNamesDefenseClawHook: a word that is the
+    generated script or a file in the hooks folder once its path is cleaned, the
+    argument of a shell ``-c`` read the same way, or the native launcher Hermes
+    flag. It only picks which kept entries the notice lists (GAP-0940); ownership
+    never reads the command.
     """
 
     text = command.replace("\\", "/")
-    if hooks_dir and hooks_dir.replace("\\", "/").rstrip("/") + "/" in text:
+    folder = posixpath.normpath(hooks_dir.replace("\\", "/")) if hooks_dir else ""
+    if _HERMES_LAUNCHER_FLAG.search(text):
         return True
-    return _HERMES_DEFENSECLAW_HOOK_WORD.search(text) is not None
+    previous = ""
+    for word in _hermes_command_words(text):
+        if _hermes_word_names_defenseclaw_hook(word, folder) or (
+            previous == "-c" and word != text and hermes_command_names_defenseclaw_hook(word, hooks_dir)
+        ):
+            return True
+        previous = word
+    return False
 
 
 def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:
@@ -2080,10 +2140,9 @@ HOOK_SCRIPT_NAMES = {
     "kiro": "kiro-hook.sh",
 }
 
-# Where a Hermes hook command names a DefenseClaw hook (hermes_command_names_defenseclaw_hook).
-_HERMES_DEFENSECLAW_HOOK_WORD = re.compile(
-    r"(?:^|[^A-Za-z0-9._-])(?:" + re.escape(HOOK_SCRIPT_NAMES["hermes"])
-    + r"|\.defenseclaw/hooks(?:$|[^A-Za-z0-9._-])|hook --connector hermes(?:$|[^A-Za-z0-9._-]))"
+# The native launcher Hermes flag as a whole word (hermes_command_names_defenseclaw_hook).
+_HERMES_LAUNCHER_FLAG = re.compile(
+    r"(?:^|[^A-Za-z0-9._-])hook --connector hermes(?:$|[^A-Za-z0-9._-])"
 )
 
 _EDITED_HOOK_PREFIX = "hook command edited: "

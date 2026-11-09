@@ -157,8 +157,8 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T)
 		command func(dataDir, home string) string
 	}{
 		"apostrophe in account home, double quoted": {"o'brien", func(d, _ string) string { return "bash \"" + filepath.Join(d, "hooks", "hookX") + "\"" }},
-		"space and dotdot out to a user script": {"", func(d, _ string) string {
-			return "bash \"" + d + "/hooks/folder with space/../../../user-hook.sh\""
+		"after shell -c": {"", func(d, _ string) string {
+			return "sh -c \"" + filepath.Join(d, "hooks", "hookX") + " --event pre_tool_call\""
 		}},
 		"renamed hook, absolute":        {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") }},
 		"renamed hook, tilde":           {"", func(_, _ string) string { return "~/.defenseclaw/hooks/hookX" }},
@@ -243,6 +243,15 @@ func TestHermesAUserHookThatNamesNothingOfDefenseClawIsKeptWithoutANotice(t *tes
 		}},
 		"script named like the generated one": {"", func(_, home string) string {
 			return filepath.Join(home, "bin", "my-hermes-hook.sh")
+		}},
+		"generated name with a suffix": {"", func(_, home string) string {
+			return filepath.Join(home, "bin", hermesHookScriptName+"-audit")
+		}},
+		"hooks folder left by dotdot": {"", func(_, home string) string {
+			return filepath.Join(home, ".defenseclaw", "hooks") + "/../user-hook.sh"
+		}},
+		"space and dotdot out to a user script": {"", func(d, _ string) string {
+			return "bash \"" + d + "/hooks/folder with space/../../../user-hook.sh\""
 		}},
 		"user script with arguments": {"", func(_, home string) string {
 			return filepath.Join(home, "user-hooks", "hookX") + " --event pre_tool_call"
