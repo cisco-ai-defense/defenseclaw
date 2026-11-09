@@ -577,8 +577,14 @@ reported as unverified. The gateway logs the folder, `/health` counts it in
 `project_skill_roots_unverified`, and enterprise status shows a
 `project_skill_root_unverified` warning. A selected skill under an unverified
 root is refused in every asset policy mode until a fresh caller inspection
-verifies that the root is ordinary. Watcher rows for roots outside
-profiles carry no per-user attribution.
+verifies that the root is ordinary. The same holds for the selected skill
+itself: when its `SKILL.md` is a link (symbolic link or junction) to a file
+outside the caller's profile or below a folder another user can write, or a
+hard link, the call that selects that skill reports the root with the
+`SKILL.md` reason and the Skill call is refused; a link to a file the caller
+holds privately in the profile is the caller's own skill and loads. A hard
+link is reported because the hook cannot tell where its other names are.
+Watcher rows for roots outside profiles carry no per-user attribution.
 The scan and scan-finding rows of a `scan skill` or `scan plugin` run of the installed `defenseclaw.exe`
 on an asset in an enrolled user's folder name that user (`user.id`,
 `defenseclaw.user.name`), and the judge model when the judge ran

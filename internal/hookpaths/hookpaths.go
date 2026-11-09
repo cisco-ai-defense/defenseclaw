@@ -56,6 +56,12 @@ const (
 	ProjectSkillRootOutsideProfile = "outside-profile"
 	ProjectSkillRootSharedWritable = "shared-writable"
 	ProjectSkillRootUnreadable     = "unreadable"
+	// ProjectSkillManifestLinked is the finding for a root whose selected
+	// skill folder holds a SKILL.md that is a link to a file outside the
+	// caller's profile (or one another user can change), or a hard link
+	// (rel-1-0-9:GAP-0951). The root itself is an ordinary folder; the
+	// finding is raised only for the call that selects that skill.
+	ProjectSkillManifestLinked = "manifest-linked"
 )
 
 // TruncatedKey means at least one static write target could not fit in the
@@ -1370,6 +1376,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		if name != "" {
 			if home, err := os.UserHomeDir(); err == nil {
 				facts := projectSkillRootFacts(connector, home, cwd)
+				markLinkedProjectSkillManifests(facts, name, nil, home, cwd)
 				for key := range facts {
 					if !strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
 						continue
@@ -2653,7 +2660,8 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		root := strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix)
 		if !filepath.IsAbs(root) || len(root) > MaxWriteTargetPathBytes ||
-			(finding != ProjectSkillRootOutsideProfile && finding != ProjectSkillRootSharedWritable && finding != ProjectSkillRootUnreadable) {
+			(finding != ProjectSkillRootOutsideProfile && finding != ProjectSkillRootSharedWritable &&
+				finding != ProjectSkillRootUnreadable && finding != ProjectSkillManifestLinked) {
 			return nil, false
 		}
 	}

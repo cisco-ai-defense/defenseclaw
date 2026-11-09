@@ -594,6 +594,8 @@ func (a *APIServer) noteExcludedProjectSkillFolders(ctx context.Context, connect
 			reason = "the project skill folder resolves outside the caller's profile"
 		case hookpaths.ProjectSkillRootSharedWritable:
 			reason = "another user can write the project skill folder"
+		case hookpaths.ProjectSkillManifestLinked:
+			reason = "the selected project skill's SKILL.md is a link to a file outside the caller's profile, or a hard link"
 		case hookpaths.ProjectSkillRootUnreadable:
 			reason = "the calling user could not verify the project skill folder"
 		default:
