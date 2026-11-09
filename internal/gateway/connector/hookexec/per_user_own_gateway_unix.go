@@ -49,3 +49,13 @@ func perUserGatewayHomes(ctx context.Context) []string {
 // owner scan of its listener (ownGatewayHoldsQueue), whose answer the connect
 // deadline waits for.
 const ownerScanSupported = true
+
+// connectionStillQueued reports whether the socket table shows conn, at this
+// moment, as a connection the gateway has not accepted. An accepted
+// connection, one that is no longer listed and a table that cannot be read are
+// all false: none of them is a connection that was never accepted.
+func connectionStillQueued(conn net.Conn) bool {
+	client, _ := conn.LocalAddr().(*net.TCPAddr)
+	server, _ := conn.RemoteAddr().(*net.TCPAddr)
+	return client != nil && server != nil && tupleStillQueued(client, server)
+}

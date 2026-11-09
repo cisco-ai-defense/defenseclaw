@@ -133,3 +133,116 @@ func TestGatewayAcceptingDuringTheOwnerReadKeepsItsAnswer(t *testing.T) {
 		})
 	}
 }
+
+// acceptWatchListener tells when the gateway has taken a connection.
+type acceptWatchListener struct {
+	net.Listener
+	accepted   atomic.Int32
+	acceptedCh chan struct{}
+}
+
+func (l *acceptWatchListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil && l.accepted.Add(1) == 1 {
+		close(l.acceptedCh)
+	}
+	return conn, err
+}
+
+// The own gateway accepts the connection, and the peer check of that
+// connection is still running (a busy procfs read) when the owner of the
+// listener is found: the listener is the own gateway, but this connection was
+// accepted. Its policy block is the answer, not an outage, however long the
+// peer check takes inside the connect budget.
+func TestGatewayAcceptedWhileThePeerCheckRunsKeepsItsAnswer(t *testing.T) {
+	for _, peerDelay := range []time.Duration{50 * time.Millisecond, 300 * time.Millisecond} {
+		t.Run(peerDelay.String(), func(t *testing.T) {
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			watched := &acceptWatchListener{Listener: listener, acceptedCh: make(chan struct{})}
+			dataDir := recordGateway(t, os.Getpid(), nil)
+			var handled atomic.Int32
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				handled.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"action":"block","raw_action":"block"}`))
+			})}
+			t.Cleanup(func() { _ = server.Close() })
+			go func() {
+				time.Sleep(2600 * time.Millisecond)
+				_ = server.Serve(watched)
+			}()
+			finished := make(chan struct{})
+			previous := perUserConnectedPeer
+			perUserConnectedPeer = func(client, peer *net.TCPAddr) error {
+				defer close(finished)
+				<-watched.acceptedCh
+				time.Sleep(peerDelay)
+				return previous(client, peer)
+			}
+			t.Cleanup(func() {
+				select {
+				case <-finished:
+				case <-time.After(2 * time.Second):
+				}
+				perUserConnectedPeer = previous
+			})
+			var reads atomic.Int32
+			ctx := withPerUserGatewayHomes(context.Background(), func() []string {
+				if reads.Add(1) == 1 {
+					// The first read finds nothing and ends after the accept,
+					// so the owner of the queue is read again.
+					select {
+					case <-watched.acceptedCh:
+					case <-time.After(2 * time.Second):
+					}
+					return nil
+				}
+				return []string{dataDir}
+			})
+			tryCtx, release := connectBy(ctx, time.Now().Add(perUserConnectedWait), nil)
+			defer release()
+			reply, err := PostPerUserHook(tryCtx, listener.Addr().String(), "/api/v1/claude-code/hook", nil, []byte("{}"))
+			if err != nil || reply.Status != http.StatusOK || !strings.Contains(reply.Body, `"block"`) || handled.Load() != 1 {
+				t.Fatalf("the accepted gateway answer was lost to the owner read: reads=%d accepted=%d handled=%d status=%d body=%q err=%v",
+					reads.Load(), watched.accepted.Load(), handled.Load(), reply.Status, reply.Body, err)
+			}
+		})
+	}
+}
+
+// The socket table lists a connection as queued only while the gateway has
+// not accepted it.
+func TestConnectionStillQueuedEndsWithTheAccept(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	conn, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if !connectionStillQueued(conn) {
+		t.Fatal("a connection nobody accepted was not listed as queued")
+	}
+	accepted, err := listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = accepted.Close() })
+	deadline := time.Now().Add(2 * time.Second)
+	for connectionStillQueued(conn) {
+		if time.Now().After(deadline) {
+			t.Fatal("an accepted connection stayed listed as queued")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if connectionStillQueued(&net.TCPConn{}) {
+		t.Fatal("a connection without endpoints was listed as queued")
+	}
+}
