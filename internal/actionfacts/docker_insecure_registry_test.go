@@ -519,3 +519,77 @@ func TestExactDockerInsecureRegistryEditJudgesCompleteDocumentsByTheirEffectiveL
 		}
 	}
 }
+
+// TestExactDockerInsecureRegistryEditJudgesEachStepAndHunkByTheListItPutsInForce
+// pins a multi-step edit and a multi-hunk patch to the same verdict as a write
+// of the document they leave: each step is read on its own, a piece that lists
+// a registry and then empties the list puts nothing in force, and text after a
+// leading object never passes for part of a document.
+func TestExactDockerInsecureRegistryEditJudgesEachStepAndHunkByTheListItPutsInForce(t *testing.T) {
+	t.Parallel()
+	const remote = `"198.51.100.7:5000"`
+	step := func(oldText, newText string) map[string]any {
+		return map[string]any{"old_string": oldText, "new_string": newText}
+	}
+	multi := func(steps ...map[string]any) Input {
+		edits := make([]any, len(steps))
+		for index := range steps {
+			edits[index] = steps[index]
+		}
+		return nativeCall(t, "MultiEdit", map[string]any{"file_path": dockerDaemonConfigPath, "edits": edits})
+	}
+	edit := func(oldText, newText string) Input {
+		return nativeCall(t, "Edit", map[string]any{"file_path": dockerDaemonConfigPath, "old_string": oldText, "new_string": newText})
+	}
+	patch := func(lines ...string) Input {
+		text := "*** Begin Patch\n*** Update File: " + dockerDaemonConfigPath + "\n"
+		for _, line := range lines {
+			text += line + "\n"
+		}
+		return nativeCall(t, "apply_patch", map[string]any{"command": text + "*** End Patch\n"})
+	}
+	for _, row := range []struct {
+		name  string
+		input Input
+		want  bool
+	}{
+		{"two steps, the second key takes over", multi(
+			step(`"insecure-registries":[`+remote+`],"insecure-registries":[]`, `"insecure-registries":[],"insecure-registries":[`+remote+`]`),
+			step(`"debug":true`, `"debug":false`)), true},
+		{"two steps, a remote list beside an unrelated step", multi(
+			step(`"debug":true`, `"debug":true,"insecure-registries":[`+remote+`]`),
+			step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), true},
+		{"remote list in the first step and a list nobody can read in the second", multi(
+			step(`"debug":true`, `"debug":true,"insecure-registries":[`+remote+`]`),
+			step(`"dns":[]`, `"insecure-registries":[5]`)), true},
+		{"patch hunk where the second key takes over", patch("@@",
+			`-  "insecure-registries":[`+remote+`],`, `-  "insecure-registries":[],`, `-  "debug":true`,
+			`+  "insecure-registries":[],`, `+  "insecure-registries":[`+remote+`],`, `+  "debug":false`), true},
+		{"remote list in the second hunk of a patch", patch("@@", `-  "debug":true`, `+  "debug":false`,
+			"@@", `+  "insecure-registries":[`+remote+`],`), true},
+
+		{"two steps, an earlier remote list emptied by the same piece", multi(
+			step(`"debug":true`, `"insecure-registries":[`+remote+`],"insecure-registries":[],"debug":true`),
+			step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), false},
+		{"two steps with no list", multi(
+			step(`"debug":true`, `"debug":false`),
+			step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), false},
+		{"two steps that move a listed registry", multi(
+			step(`"insecure-registries":[`+remote+`],`, ``),
+			step(`"debug":true`, `"debug":true,"insecure-registries":[`+remote+`]`)), false},
+		{"patch lines where the last key empties the list", patch("@@",
+			`+  "insecure-registries":[`+remote+`],`, `+  "insecure-registries":[]`), false},
+		{"patch hunks that only change other settings", patch("@@",
+			`+  "insecure-registries":[`+remote+`],`, `+  "insecure-registries":[],`, `   "debug":true,`,
+			`-  "log-driver":"json-file"`, `+  "log-driver":"journald"`), false},
+
+		{"object with a repeated key, then a remote list after it", edit(`{}`, `{"debug":true,"debug":false},"insecure-registries":[`+remote+`]`), true},
+		{"object, then a remote list after it", edit(`{}`, `{"debug":true},"insecure-registries":[`+remote+`]`), true},
+		{"object with a repeated key, then a loopback list", edit(`{}`, `{"debug":true,"debug":false},"insecure-registries":["127.0.0.1:5000"]`), false},
+		{"object with a repeated key, then something that is not a list", edit(`{}`, `{"debug":true,"debug":false},"dns":["8.8.8.8"]`), false},
+	} {
+		if got := ExactDockerInsecureRegistryWrite(row.input, Analyze(row.input)); got != row.want {
+			t.Errorf("%s: proof=%t, want %t", row.name, got, row.want)
+		}
+	}
+}
