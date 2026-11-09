@@ -3119,6 +3119,82 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
 
                 self._assert_unscanned(*self._both(self._server()))
 
+    def test_journal_key_with_whitespace_or_an_oversized_length_reads_unscanned(self):
+        # The key grammar is the gateway's: hex digits only, and a length that
+        # is not a plausible number is just a key nobody wrote.
+        key = _journal_key("NEW")
+        connector_hex = b"claudecode".hex()
+        for bad in (
+            key.replace("3:4e4557", "4:4e4557  ", 1),
+            key.replace(f"10:{connector_hex}", f"11:{connector_hex}  ", 1),
+            key.replace("3:4e4557", "4:4e45 7 ", 1),
+            "mcp:v2:" + "1" * 4301 + ":" + "00" * 8,
+            "mcp:v2:" + "9" * 40 + ":4e4557",
+        ):
+            with self.subTest(source=bad[:40]):
+                self.app.store.set_action("mcp", "NEW", bad, ActionState(install="block"), "blocked", "claudecode")
+
+                self._assert_unscanned(*self._both(self._server()))
+
+    def test_journal_key_reader_returns_none_for_every_malformed_key(self):
+        from defenseclaw.commands.cmd_mcp import _mcp_key_name
+
+        key = _journal_key("NEW")
+        self.assertEqual(_mcp_key_name(key), "NEW")
+        for bad in (
+            "", "mcp:v2:", key + " ", key[:-1], key.replace("3:4e4557", "03:4e4557", 1),
+            key.replace("3:4e4557", "3:4e45zz", 1), key.replace("3:4e4557", "3:ff0000", 1),
+            "mcp:v2:" + "1" * 5000 + ":00",
+        ):
+            with self.subTest(source=bad[:40]):
+                self.assertIsNone(_mcp_key_name(bad))
+
+    def _journal_rows(self, global_row, scoped_row):
+        """Store a global and a connector-scoped journal row for NEW; each is
+        (source key, ActionState). A key of None is a row written by an older
+        release (a path, no versioned key)."""
+        for connector, (key, state) in (("", global_row), ("claudecode", scoped_row)):
+            self.app.store.set_action(
+                "mcp", "NEW", _journal_key("NEW", connector=connector) if key else "/old/mcp.json",
+                state, "held", connector,
+            )
+
+    def test_old_scoped_row_does_not_hide_a_current_global_runtime_disable(self):
+        # The gateway ignores the scoped row of an older release and falls
+        # back to the global field: the server stays disabled, not allowed.
+        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
+        for old_scoped in (ActionState(runtime="disable"), ActionState(install="block")):
+            with self.subTest(old_scoped=old_scoped):
+                self._journal_rows((True, ActionState(runtime="disable")), (False, old_scoped))
+
+                flat, item = self._both(self._server())
+
+                self.assertEqual(item["verdict"], "disabled")
+                self.assertEqual(item["actions"], {"install": "allow", "runtime": "disable"})
+                self.assertNotIn("nothing is needed", flat)
+                self.assertIn("could not be scanned", flat)
+
+    def test_old_global_row_does_not_hide_a_current_scoped_row(self):
+        # The reverse: an older global install block decides nothing, and the
+        # current scoped runtime disable is the whole journal state.
+        self._journal_rows((False, ActionState(install="block")), (True, ActionState(runtime="disable")))
+
+        _, item = self._both(self._server())
+
+        self.assertEqual(item["actions"], {"runtime": "disable"})
+
+    def test_current_scoped_row_falls_back_to_the_current_global_field(self):
+        self._journal_rows((True, ActionState(runtime="disable")), (True, ActionState(install="block")))
+
+        _, item = self._both(self._server())
+
+        self.assertEqual(item["actions"], {"install": "block", "runtime": "disable"})
+
+    def test_old_global_and_scoped_rows_together_decide_nothing(self):
+        self._journal_rows((False, ActionState(runtime="disable")), (False, ActionState(install="block")))
+
+        self._assert_unscanned(*self._both(self._server()))
+
     def test_unversioned_journal_row_keeps_its_quarantine(self):
         self.app.store.set_action("mcp", "NEW", "", ActionState(install="block", file="quarantine"), "quarantined", "claudecode")
 
