@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -27,12 +28,13 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // file the call names, in any spelling that cleans to it, or the file an
 // existing link reaches. A whole-file write is judged as the document it
 // leaves: any other setting the document carries, or a registry it lists
-// twice, does not change the verdict. An edit, a patch hunk or an append
-// cannot show the rest of the file, so it is judged on the text it adds: the
-// insecure-registries list that text puts in force, less the entries the text
-// it replaces already had in force. Each step of a multi-step edit and each
-// hunk of a patch is read on its own. It deliberately returns no path,
-// registry, or content.
+// twice, does not change the verdict. An edit, a patch or an append is not
+// given the file it changes, so it is judged on the text it leaves in place,
+// the union of every replacement of a multi-step edit and every hunk of a
+// patch (its context and added lines), read for the lists it spells, whatever
+// the file held before: an entry the file already listed, or that another
+// step took out of a key, earns no credit, as a write of the document would
+// not. It deliberately returns no path, registry, or content.
 func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	if !facts.Authoritative() || !facts.EnforcementEligible() ||
 		facts.Tool != input.Tool {
@@ -75,81 +77,42 @@ func writeToolNamesItsFile(input Input) bool {
 }
 
 // dockerWriteAddsInsecureRegistry judges the text of one write of the daemon
-// configuration: a whole document by the list it holds, an edit by the lists
-// its steps put in force and the entries the replaced text already had in
-// force. The steps of a multi-step edit and the hunks of a patch sit at
-// different places of the file, so each is read on its own and not as one
-// text. A step cannot show which of the keys of the file is the last, so the
-// entries a step replaces cancel only the entries the same step adds, with one
-// exception: a registry that one step drops together with its key and another
-// step inserts, with no list of its own in the text it replaces, is a move of
-// the entry and not a new one. A registry that goes from one key to another
-// is judged where it lands. A step the grammar cannot read (dockerd refuses
-// such a file) adds nothing.
+// configuration: a whole document by the list dockerd reads from it, an edit
+// or a patch by the text it leaves in place. The file the edit changes is not
+// given, so no step is credited for what the file held or what another step
+// took out: the pieces (each replacement of a multi-step edit, each hunk of a
+// patch, and all of them joined, for a list that one piece opens and another
+// closes) are each read for the lists they spell, and one piece that puts an
+// insecure registry in force is the verdict. Within a piece the last list
+// wins, as in a document, so a piece that lists a registry and then empties the
+// list, or sets the key to null, puts nothing in force. A piece the grammar
+// cannot read (dockerd refuses such a file) adds nothing.
 func dockerWriteAddsInsecureRegistry(write nativeFileWrite) bool {
 	if write.whole {
 		entries, ok := dockerDocumentRegistries(write.added)
-		return ok && dockerListAddsInsecureRegistry(entries, nil, nil)
+		return ok && dockerListHasInsecureRegistry(entries)
 	}
-	steps := write.steps
-	if len(steps) == 0 {
-		steps = []nativeEditStep{{added: write.added, replaced: write.replaced}}
+	pieces := write.after
+	switch {
+	case len(pieces) == 0:
+		pieces = []string{write.added}
+	case len(pieces) > 1:
+		pieces = append(slices.Clone(pieces), strings.Join(pieces, "\n"))
 	}
-	type stepReading struct{ added, replaced dockerRegistryReading }
-	var readings []stepReading
-	dropped := make(map[string]int)
-	for _, step := range steps {
-		added, ok := dockerEditTextRegistries(step.added)
-		if !ok || !dockerEntriesAreReadable(added.entries) {
-			continue
-		}
-		replaced, _ := dockerEditTextRegistries(step.replaced)
-		if !added.spelled {
-			for _, entry := range replaced.entries {
-				dropped[entry]++
-			}
-		}
-		readings = append(readings, stepReading{added, replaced})
-	}
-	for _, reading := range readings {
-		var moved map[string]int
-		if !reading.replaced.spelled {
-			moved = dropped
-		}
-		if dockerListAddsInsecureRegistry(reading.added.entries, reading.replaced.entries, moved) {
+	for _, piece := range pieces {
+		if entries, ok := dockerEditTextRegistries(piece); ok && dockerListHasInsecureRegistry(entries) {
 			return true
 		}
 	}
 	return false
 }
 
-// dockerEntriesAreReadable reports whether the closed grammar reads every entry.
-func dockerEntriesAreReadable(entries []string) bool {
-	for _, entry := range entries {
-		if _, valid := exactDockerRegistryEntry(entry); !valid {
-			return false
-		}
-	}
-	return true
-}
-
-// dockerRegistryReading is what one piece of text says about the list: the
-// entries it puts in force, and whether it spells the insecure-registries key
-// at all (a key set to null spells it and puts no entry in force).
-type dockerRegistryReading struct {
-	entries []string
-	spelled bool
-}
-
-// dockerEditTextRegistries reads the list that one side of an edit puts in
+// dockerEditTextRegistries reads the list that a piece of an edit puts in
 // force. Text that is a complete JSON object is a document, read as dockerd
 // reads one (the last repeated key wins). Any other text is a piece of a
 // document and is read the same way for the keys it spells: the last list the
-// piece spells is the one in force, so a piece that lists a registry and then
-// empties the list, or sets the key to null, puts nothing in force. A piece
-// cannot show a later key of the file around it; only an edit that drops that
-// key can change the list.
-func dockerEditTextRegistries(text string) (dockerRegistryReading, bool) {
+// piece spells is the one in force.
+func dockerEditTextRegistries(text string) ([]string, bool) {
 	if strings.HasPrefix(strings.TrimLeft(text, dockerJSONSpace), "{") {
 		if document, ok := dockerDecodeDocument(text); ok {
 			return dockerRegistryList(document)
@@ -158,34 +121,16 @@ func dockerEditTextRegistries(text string) (dockerRegistryReading, bool) {
 	return dockerFragmentRegistries(text)
 }
 
-// dockerListAddsInsecureRegistry reports whether every entry is one the closed
-// grammar can read and at least one is an insecure registry that the entries
-// already in the file (kept) did not list. moved holds entries that another
-// step dropped with their key, which an insertion may take back (nil for a
-// step that replaces a list of its own).
-func dockerListAddsInsecureRegistry(entries, kept []string, moved map[string]int) bool {
-	had := make(map[string]int, len(kept))
-	for _, entry := range kept {
-		had[entry]++
-	}
+// dockerListHasInsecureRegistry reports whether every entry is one the closed
+// grammar can read and at least one is an insecure registry.
+func dockerListHasInsecureRegistry(entries []string) bool {
 	found := false
 	for _, entry := range entries {
 		insecure, valid := exactDockerRegistryEntry(entry)
 		if !valid {
 			return false
 		}
-		if !insecure {
-			continue
-		}
-		if had[entry] > 0 {
-			had[entry]--
-			continue
-		}
-		if moved[entry] > 0 {
-			moved[entry]--
-			continue
-		}
-		found = true
+		found = found || insecure
 	}
 	return found
 }
@@ -198,8 +143,7 @@ func dockerDocumentRegistries(content string) ([]string, bool) {
 	if !ok {
 		return nil, false
 	}
-	reading, ok := dockerRegistryList(document)
-	return reading.entries, ok
+	return dockerRegistryList(document)
 }
 
 // dockerDecodeDocument decodes content as one JSON object. ok is false when it
@@ -227,27 +171,24 @@ func dockerDecodeDocument(content string) (map[string]any, bool) {
 // dockerRegistryList is the insecure-registries list of a decoded document;
 // ok is false when the key holds anything but a list of strings or null (which
 // dockerd reads as an empty list).
-func dockerRegistryList(document map[string]any) (dockerRegistryReading, bool) {
-	value, present := document["insecure-registries"]
-	if !present {
-		return dockerRegistryReading{}, true
-	}
+func dockerRegistryList(document map[string]any) ([]string, bool) {
+	value := document["insecure-registries"]
 	if value == nil {
-		return dockerRegistryReading{spelled: true}, true
+		return nil, true
 	}
 	list, ok := value.([]any)
 	if !ok {
-		return dockerRegistryReading{}, false
+		return nil, false
 	}
 	entries := make([]string, 0, len(list))
 	for _, item := range list {
 		entry, ok := item.(string)
 		if !ok {
-			return dockerRegistryReading{}, false
+			return nil, false
 		}
 		entries = append(entries, entry)
 	}
-	return dockerRegistryReading{entries: entries, spelled: true}, true
+	return entries, true
 }
 
 const dockerJSONSpace = " \t\r\n"
@@ -262,16 +203,15 @@ const dockerJSONSpace = " \t\r\n"
 // alignments (starting outside a string, and starting inside one) and the
 // lists of both are taken: the verdict never depends on where the edit cut
 // the file.
-func dockerFragmentRegistries(text string) (reading dockerRegistryReading, ok bool) {
+func dockerFragmentRegistries(text string) (entries []string, ok bool) {
 	for _, insideString := range []bool{false, true} {
-		found, spelled, valid := dockerFragmentTopLevelLists(text, insideString)
+		found, valid := dockerFragmentTopLevelLists(text, insideString)
 		if !valid {
-			return dockerRegistryReading{}, false
+			return nil, false
 		}
-		reading.entries = append(reading.entries, found...)
-		reading.spelled = reading.spelled || spelled
+		entries = append(entries, found...)
 	}
-	return reading, true
+	return entries, true
 }
 
 // dockerFragmentTopLevelLists scans text as JSON tokens and reads the list of
@@ -281,7 +221,7 @@ func dockerFragmentRegistries(text string) (reading dockerRegistryReading, ok bo
 // spelling names the same key. Containers the text closes without having opened
 // are the file's own, whose depth the text cannot show, so keys after them are
 // read as top-level.
-func dockerFragmentTopLevelLists(text string, insideString bool) (entries []string, spelled, ok bool) {
+func dockerFragmentTopLevelLists(text string, insideString bool) (entries []string, ok bool) {
 	const key = "insecure-registries"
 	var nested []bool
 	previous := byte(0)
@@ -289,7 +229,7 @@ func dockerFragmentTopLevelLists(text string, insideString bool) (entries []stri
 	if insideString {
 		end := dockerStringBodyEnd(text, 0)
 		if end < 0 {
-			return nil, false, true
+			return nil, true
 		}
 		index, previous = end+1, '"'
 	}
@@ -298,7 +238,7 @@ func dockerFragmentTopLevelLists(text string, insideString bool) (entries []stri
 		case '"':
 			end := dockerJSONStringEnd(text[index:])
 			if end < 0 {
-				return entries, spelled, true
+				return entries, true
 			}
 			literal := text[index : index+end]
 			index += end
@@ -311,10 +251,10 @@ func dockerFragmentTopLevelLists(text string, insideString bool) (entries []stri
 			}
 			list, listed, valid := dockerFragmentList(text[index:])
 			if !valid {
-				return nil, false, false
+				return nil, false
 			}
 			if listed {
-				entries, spelled = list, true
+				entries = list
 			}
 		case '{', '[':
 			inside := len(nested) > 0 && nested[len(nested)-1]
@@ -334,7 +274,7 @@ func dockerFragmentTopLevelLists(text string, insideString bool) (entries []stri
 			index++
 		}
 	}
-	return entries, spelled, true
+	return entries, true
 }
 
 // dockerStringBodyEnd is the index of the quote that closes a string whose
