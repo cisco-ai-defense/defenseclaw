@@ -20,9 +20,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {set: m, sub: setsid, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: strace, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: workers1, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ports, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: nice, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: workers2, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: monitor, run: '^TestShellHookBehaviourMatchesGolden$'}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -46,25 +47,37 @@ jobs:
           echo "step shell: pid $$ pgid $(ps -o pgid= -p $$) sid $(ps -o sid= -p $$)"
       - name: Run the slice
         timeout-minutes: 11
+        shell: bash {0}
         env:
           SUB: ${{ matrix.sub }}
           RUN: ${{ matrix.run }}
         run: |
-          set -uo pipefail
+          set -u
           go test -c -o "$RUNNER_TEMP/connector.test" ./internal/gateway/connector
           cd internal/gateway/connector
-          trace="$RUNNER_TEMP/signals.trace"
+          nproc; sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse net.ipv4.tcp_fin_timeout
+          mon="$RUNNER_TEMP/monitor.log"
+          ( while :; do
+              { echo "=== $(date -u +%T) load $(cut -d' ' -f1-4 /proc/loadavg) procs $(ps -e --no-headers | wc -l)"
+                ss -s | sed -n 1,3p
+                echo "tcp states: $(ss -tan | awk 'NR>1{print $1}' | sort | uniq -c | tr '\n' ' ')"
+                free -m | sed -n 2p
+                ps -eo pid,pcpu,rss,etime,args --sort=-pcpu | sed -n 2,6p | cut -c1-160
+              } >> "$mon" 2>&1
+              sleep 10
+            done ) &
+          monitor=$!
+          bin="$RUNNER_TEMP/connector.test"
+          args=(-test.v -test.count=1 -test.timeout 8m -test.run "$RUN")
           case "$SUB" in
-            setsid) timeout -k 15 480 setsid --wait "$RUNNER_TEMP/connector.test" -test.v -test.count=1 -test.timeout 7m -test.run "$RUN"; rc=$? ;;
-            strace)
-              sudo apt-get install -y -qq strace >/dev/null 2>&1 || true
-              timeout -k 15 480 setsid --wait strace -f -qq -e trace=kill,tkill,tgkill,pidfd_send_signal,setsid,setpgid -o "$trace" \
-                "$RUNNER_TEMP/connector.test" -test.v -test.count=1 -test.timeout 7m -test.run "$RUN"; rc=$?
-              echo "=== signal syscalls ($(wc -l < "$trace") lines), excluding signal 0 and successful self-tgkill:"
-              grep -vE 'kill\([0-9]+, 0\)|, 0\) += 0|SIGURG' "$trace" | head -200
-              echo "=== kill() to pid <= 0 or -1:"
-              grep -E '(kill|pidfd_send_signal)\((-[0-9]+|0),' "$trace" | head -50 ;;
-            workers1) DC_HOOK_GOLDEN_WORKERS=1 timeout -k 15 540 "$RUNNER_TEMP/connector.test" -test.v -test.count=1 -test.timeout 8m -test.run "$RUN"; rc=$? ;;
+            ports)
+              sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535" net.ipv4.tcp_tw_reuse=1
+              timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
+            nice) timeout -k 15 540 nice -n 19 "$bin" "${args[@]}"; rc=$? ;;
+            workers2) DC_HOOK_GOLDEN_WORKERS=2 timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
+            monitor) timeout -k 10 180 "$bin" "${args[@]}"; rc=$? ;;
           esac
+          kill "$monitor"
           echo "exit $rc"
+          echo "=== monitor"; cat "$mon"
           exit "$rc"
