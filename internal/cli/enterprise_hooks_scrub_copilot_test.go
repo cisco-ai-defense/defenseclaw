@@ -118,13 +118,17 @@ func TestScrubCopilot_KeepsFileWithUnsupportedHooksValue(t *testing.T) {
 // purge does not claim a clean removal.
 func TestScrubCopilot_ReportsOwnedEntryInUnsupportedShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "defenseclaw.json")
-	body := `{"version":1,"hooks":[{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'"}]}` + "\n"
-	writeFile(t, path, body)
-	if changed, err := scrubCopilotFile(path, scrubDefaultMarkers); err == nil || changed {
-		t.Fatalf("scrubCopilotFile = %v, %v; want an error and no change", changed, err)
-	}
-	if got := readFile(t, path); got != body {
-		t.Fatalf("file changed:\n%s", got)
+	for name, body := range map[string]string{
+		"hooks array":  `{"version":1,"hooks":[{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'"}]}` + "\n",
+		"event object": `{"version":1,"hooks":{"preToolUse":{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'"}}}` + "\n",
+	} {
+		writeFile(t, path, body)
+		if changed, err := scrubCopilotFile(path, scrubDefaultMarkers); err == nil || changed {
+			t.Fatalf("%s: scrubCopilotFile = %v, %v; want an error and no change", name, changed, err)
+		}
+		if got := readFile(t, path); got != body {
+			t.Fatalf("%s: file changed:\n%s", name, got)
+		}
 	}
 }
 

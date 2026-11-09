@@ -343,6 +343,11 @@ func scrubCopilotFile(path string, markers []string) (bool, error) {
 		}
 		return false, nil
 	}
+	for event, raw := range hooks {
+		if _, isList := raw.([]any); !isList && looksOwned(raw, markers) {
+			return false, fmt.Errorf("hooks.%s is not a list but holds a DefenseClaw entry; left in place", event)
+		}
+	}
 	scrubFlatHookEntries(hooks, markers)
 	if filepath.Base(path) == copilotOwnedHookFileName && len(hooks) == 0 && copilotHookFileOnlyEnvelope(cfg) && !scrubRunsAsRoot() {
 		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
