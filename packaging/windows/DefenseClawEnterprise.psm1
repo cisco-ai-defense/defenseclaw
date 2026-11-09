@@ -10514,6 +10514,23 @@ $script:StateFileInUseNameLimit = 256
 # lists its handles by process.
 $script:UnnamedFileHolderHint = 'it is probably running as SYSTEM, which this account cannot query; to find it, open Resource Monitor (resmon.exe), CPU tab, Associated Handles, and search for the file name'
 
+function Get-DefenseClawMissingPrivilegeRefusal {
+    # GAP-0890 r2: the holder query refuses a file this account can neither
+    # query nor delete; when the token lacks backup and restore ("(SeBackup...
+    # missing)" in the native message) the way out is SYSTEM, not a retry.
+    # Returns the refusal text, or '' for any other failure.
+    param([Parameter(Mandatory)][string]$Detail)
+    if ($Detail -notmatch '\(Se[A-Za-z]+Privilege(?:, Se[A-Za-z]+Privilege)* missing\)') {
+        return ''
+    }
+    return (
+        'privileges_required: ' + $Detail + ". This account's token does not hold the backup and restore privileges that " +
+        "DefenseClaw's own files that only SYSTEM may open need, so an Administrator cannot remove them; nothing was changed " +
+        'and the services are still running. Run the same uninstall as SYSTEM ' +
+        '(an MDM or Intune run is SYSTEM; by hand, a scheduled task or psexec -s that runs the same uninstall command)'
+    )
+}
+
 function Test-DefenseClawUnnamedFileHolder {
     # GAP-0878: a holder of a file this account cannot query has no process
     # id, so the process and service exclusions below do not apply to it.
@@ -10614,6 +10631,10 @@ function Get-DefenseClawStateFileHolders {
         }
         catch {
             if ($FailOnQueryError) {
+                $missingPrivileges = Get-DefenseClawMissingPrivilegeRefusal -Detail $_.Exception.Message
+                if ($missingPrivileges) {
+                    throw $missingPrivileges
+                }
                 throw (
                     'uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw data files (' +
                     $_.Exception.Message + '); nothing was changed; run the uninstall again'
@@ -43610,6 +43631,10 @@ function Get-DefenseClawInstallRootHolders {
             }
             catch {
                 if ($FailOnQueryError) {
+                    $missingPrivileges = Get-DefenseClawMissingPrivilegeRefusal -Detail $_.Exception.Message
+                    if ($missingPrivileges) {
+                        throw $missingPrivileges
+                    }
                     throw (
                         'uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw install files (' +
                         $_.Exception.Message + '); nothing was changed; run the uninstall again'
