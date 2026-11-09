@@ -256,14 +256,14 @@ def test_the_plain_init_path_takes_the_same_lock(tmp_path, monkeypatch):
 
 def test_a_failed_creation_takes_back_every_file_it_published(tmp_path):
     home = _home(tmp_path)
-    real_publish = doctor_recovery._publish_no_replace
+    real_publish = doctor_recovery._publish_identity_file
 
-    def fail_on_key(source: str, target: str) -> None:
+    def fail_on_key(plan, source: str, target: str) -> None:
         if target.endswith("device.key"):
             raise OSError("disk full")
-        real_publish(source, target)
+        real_publish(plan, source, target)
 
-    with patch.object(doctor_recovery, "_publish_no_replace", fail_on_key):
+    with patch.object(doctor_recovery, "_publish_identity_file", fail_on_key):
         with pytest.raises(Exception, match="device-key-create-failed"):
             _ensure_device_key(str(home / "device.key"), data_dir=str(home))
 
@@ -281,14 +281,14 @@ _PUBLISH_SUFFIX = {"secret": SECRET, "sentinel": ".provenance", "key": "device.k
 
 
 def _stop_publishing(stop_at: str, error: BaseException):
-    real_publish = doctor_recovery._publish_no_replace
+    real_publish = doctor_recovery._publish_identity_file
 
-    def publish(source: str, target: str) -> None:
+    def publish(plan, source: str, target: str) -> None:
         if target.endswith(_PUBLISH_SUFFIX[stop_at]):
             raise error
-        real_publish(source, target)
+        real_publish(plan, source, target)
 
-    return patch.object(doctor_recovery, "_publish_no_replace", publish)
+    return patch.object(doctor_recovery, "_publish_identity_file", publish)
 
 
 @pytest.mark.parametrize("stop_at", ["secret", "sentinel", "key"])
@@ -303,6 +303,63 @@ def test_a_stop_during_publication_never_leaves_a_keyless_artifact(tmp_path, sto
     assert list(home.iterdir()) == []
     _ensure_device_key(str(home / "device.key"), data_dir=str(home))
     assert _valid(home)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the directory sync after a publication is a POSIX step")
+def test_a_directory_sync_that_fails_after_a_publication_takes_that_file_back(tmp_path):
+    home = _home(tmp_path)
+
+    with patch.object(doctor_recovery, "_fsync_directory", side_effect=OSError("sync failed")):
+        with pytest.raises(click.ClickException, match="device-key-create-failed"):
+            _ensure_device_key(str(home / "device.key"), data_dir=str(home))
+
+    assert list(home.iterdir()) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the directory sync after a publication is a POSIX step")
+@pytest.mark.parametrize("stop_at_sync", [1, 2, 3], ids=["secret", "sentinel", "key"])
+@pytest.mark.parametrize("error", [OSError("sync failed"), KeyboardInterrupt()], ids=["error", "interrupt"])
+def test_a_stop_in_the_directory_sync_after_any_publication_leaves_no_keyless_artifact(
+    tmp_path, stop_at_sync, error
+):
+    home = _home(tmp_path)
+    real_sync = doctor_recovery._fsync_directory
+    syncs = 0
+
+    def sync(path):
+        nonlocal syncs
+        syncs += 1
+        if syncs == stop_at_sync:
+            raise error
+        real_sync(path)
+
+    with patch.object(doctor_recovery, "_fsync_directory", sync):
+        with pytest.raises((click.ClickException, KeyboardInterrupt)):
+            _ensure_device_key(str(home / "device.key"), data_dir=str(home))
+
+    assert list(home.iterdir()) == []
+    _ensure_device_key(str(home / "device.key"), data_dir=str(home))
+    assert _valid(home)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the directory sync after a publication is a POSIX step")
+def test_a_name_the_sync_stop_could_not_unlink_is_taken_back_by_the_caller(tmp_path):
+    home = _home(tmp_path)
+    real_discard = doctor_recovery._discard_files
+    discards = 0
+
+    def discard(paths):
+        nonlocal discards
+        discards += 1
+        return False if discards == 1 else real_discard(paths)
+
+    with patch.object(doctor_recovery, "_fsync_directory", side_effect=OSError("sync failed")):
+        with patch.object(doctor_recovery, "_discard_files", discard):
+            with pytest.raises(click.ClickException, match="device-key-create-failed"):
+                _ensure_device_key(str(home / "device.key"), data_dir=str(home))
+
+    assert discards >= 2
+    assert list(home.iterdir()) == []
 
 
 def test_a_key_that_fails_its_checks_after_publication_is_taken_back_with_its_provenance(tmp_path):

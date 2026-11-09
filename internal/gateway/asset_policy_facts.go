@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 )
 
 type claimedAssetFactsContextKey struct{}
@@ -524,6 +525,25 @@ func skillManifestUnreadable(dir string) bool {
 	return false
 }
 
+// claimedMCPEntry is the definition a hook claim states. The claim holds at
+// most the first arguments of a longer list, so the scanner verdict the hook
+// took from the complete definition travels with the entry, and the entry
+// says its arguments may be cut, so an exact allow of the complete list does
+// not match it. A claim that states no verdict and may be cut is judged only
+// as far as its arguments prove (a launcher or an execution flag), which
+// would otherwise refuse a server the scanner starts (GAP-0925).
+func claimedMCPEntry(server *assetfacts.MCPServer) config.MCPServerEntry {
+	entry := config.MCPServerEntry{
+		Name: server.Name, URL: server.URL, Command: server.Command,
+		Args: append([]string(nil), server.Args...), Transport: server.Transport,
+		LocalRefusal: server.LocalRefusal, ArgsCut: server.ArgsMayBeCut(),
+	}
+	if server.VerdictUnstatedCut() {
+		entry.LocalRefusal = mcplocal.Proven(server.Command, server.Args)
+	}
+	return entry
+}
+
 // lookupCallerMCPServer finds the MCP server name the caller's agent has
 // configured. A per-user gateway reads its own home. A service-account
 // gateway reads the caller's home and, where it may not (Linux and macOS),
@@ -534,10 +554,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 	// (GAP-0954).
 	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Source == assetfacts.SourceCommandLine &&
 		config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+		return claimedMCPEntry(server), true
 	}
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if !serviceAccount {
@@ -556,10 +573,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 			}
 		}
 		if server.Relocated {
-			return config.MCPServerEntry{
-				Name: server.Name, URL: server.URL, Command: server.Command,
-				Args: append([]string(nil), server.Args...), Transport: server.Transport,
-			}, true
+			return claimedMCPEntry(server), true
 		}
 	}
 	if home != "" {
@@ -570,10 +584,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 		}
 	}
 	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+		return claimedMCPEntry(server), true
 	}
 	return config.MCPServerEntry{}, false
 }
@@ -659,6 +670,8 @@ func (a *APIServer) noteExcludedProjectSkillFolders(ctx context.Context, connect
 			reason = "the project skill folder resolves outside the caller's profile"
 		case hookpaths.ProjectSkillRootSharedWritable:
 			reason = "another user can write the project skill folder"
+		case hookpaths.ProjectSkillManifestLinked:
+			reason = "the selected project skill's SKILL.md is a link to a file outside the caller's profile, or a hard link"
 		case hookpaths.ProjectSkillRootUnreadable:
 			reason = "the calling user could not verify the project skill folder"
 		default:

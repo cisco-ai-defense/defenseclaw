@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from defenseclaw import codex_toml
+from defenseclaw.file_permissions import read_regular_file_no_follow
 from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS, unguarded_tool_events
 
 _LOCK_LIMIT = 4 * 1024 * 1024
@@ -1310,6 +1311,40 @@ def hermes_command_written(command: str, current: set[str]) -> bool:
     # The edited-path matchers trim blanks, which would claim a command
     # Setup did not write: a command with a blank at either end belongs to the user.
     return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
+
+
+HERMES_HOME_RECORD_FILE = "hermes-home-setup.json"
+_HERMES_HOME_RECORD_LIMIT = 64 * 1024
+
+
+def hermes_command_hash(command: str) -> str:
+    """The sha256 of a hook command, as the Hermes home record keeps it (hermesCommandHash in Go)."""
+
+    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+
+
+def hermes_recorded_kept_commands(data_dir: str) -> dict[str, frozenset[str]]:
+    """The command hashes of the entries Setup kept in place of an entry it wrote, by Hermes event.
+
+    Read from the Hermes home record Setup writes in *data_dir* (hermes-home-setup.json, "hooks"
+    section: hermesHookEntryRecord in internal/gateway/connector). The kept-entry notice lists an
+    entry only when this record names it; it never reads what a command says, so a user hook that
+    mentions a DefenseClaw hook as data or in a comment gets no notice (GAP-0940). No record, or one
+    that cannot be read, lists nothing.
+    """
+
+    path = os.path.join(data_dir, HERMES_HOME_RECORD_FILE)
+    try:
+        document = json.loads(read_regular_file_no_follow(path, max_bytes=_HERMES_HOME_RECORD_LIMIT))
+    except (OSError, ValueError):  # a link, a pipe, a file too large or not JSON is no record
+        return {}
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    kept: dict[str, frozenset[str]] = {}
+    for event, record in (hooks.items() if isinstance(hooks, dict) else ()):
+        values = record.get("kept") if isinstance(record, dict) else None
+        if isinstance(values, list):
+            kept[str(event)] = frozenset(value for value in values if isinstance(value, str))
+    return kept
 
 
 def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:

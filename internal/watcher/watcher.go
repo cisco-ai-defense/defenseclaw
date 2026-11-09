@@ -83,6 +83,10 @@ type InstallEvent struct {
 	// caller snapshotted for this admission (mcpDefinitionHash). Admission
 	// decides and enforces only while the server still has that definition.
 	definitionHash string
+	// remembered is, for an MCP server the agent config no longer lists, the
+	// definition it had when it was last listed (mcpAdmissionDeparted), so
+	// an admission rule pinned to its URL or launcher is judged on it.
+	remembered *config.MCPServerEntry
 }
 
 // admittingSnapshot binds an MCP admission to the definition snap hashed, so
@@ -287,6 +291,19 @@ type InstallWatcher struct {
 	mcpAdmissionMu     sync.RWMutex
 	mcpAdmissionKnown  []mcpKnownDefinition
 	mcpAdmissionListed bool
+	// mcpAdmissionDeparted holds, by definition (mcpDepartedKey), the servers
+	// an earlier listing had and a later one did not, or had under another
+	// definition: an agent that dropped or edited the entry can keep the live
+	// connection. An admission the policy gave them stays revocable through
+	// it (GAP-0920). Bounded; a listing that has the definition again drops
+	// it. Only servers admitted before any scan are held. Guarded by
+	// mcpAdmissionMu.
+	mcpAdmissionDeparted map[string]mcpKnownDefinition
+	// mcpAdmissionLost notes, per connector and account, the departed servers
+	// that did not fit (mcpLostScope). mcpAdmissionLostKeys counts the
+	// definitions noted across scopes. Guarded by mcpAdmissionMu.
+	mcpAdmissionLost     map[string]*mcpLostScope
+	mcpAdmissionLostKeys int
 	// A slower older list read must not replace a newer completed listing.
 	mcpAdmissionReadSeq  atomic.Uint64
 	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
@@ -730,7 +747,12 @@ func (w *InstallWatcher) rootCoveragePath(path string) string {
 func (w *InstallWatcher) SetMCPServerSource(source func() ([]config.MCPServerEntry, error)) {
 	w.mcpServers = source
 	w.admitNewMCP = source != nil
+	w.mcpAdmissionMu.RLock()
+	prev := w.mcpAdmissionKnown
+	w.mcpAdmissionMu.RUnlock()
+	settled := w.settledDepartingMCP(prev, nil)
 	w.mcpAdmissionMu.Lock()
+	w.rememberDepartedMCP(w.mcpAdmissionKnown, nil, settled)
 	w.mcpAdmissionKnown = nil
 	w.mcpAdmissionListed = false
 	w.mcpAdmissionKnownSeq = w.mcpAdmissionReadSeq.Add(1)
@@ -855,7 +877,8 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 		return
 	}
 	snap, err := w.snapshotForEvent(evt)
-	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline)) {
+	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline) &&
+		!w.mcpBaselineLapsed(evt, baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
@@ -1047,13 +1070,21 @@ func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
 			}
 			known = append(known, mcpKnownDefinition{
 				server: config.MCPServerEntry{Name: server.Name, Connector: server.Connector,
-					Home: server.Home, Project: server.Project, Bundled: server.Bundled},
+					Home: server.Home, Project: server.Project, Bundled: server.Bundled,
+					URL: server.URL, Command: server.Command, Args: append([]string(nil), server.Args...),
+					Transport: server.Transport},
 				hash:  hash,
+				path:  MCPEventPath(server),
 				issue: mcpScanIssue(server),
 			})
 		}
+		w.mcpAdmissionMu.RLock()
+		prev := w.mcpAdmissionKnown
+		w.mcpAdmissionMu.RUnlock()
+		settled := w.settledDepartingMCP(prev, known)
 		w.mcpAdmissionMu.Lock()
 		if readSeq > w.mcpAdmissionKnownSeq {
+			w.rememberDepartedMCP(w.mcpAdmissionKnown, known, settled)
 			w.mcpAdmissionKnown = known
 			w.mcpAdmissionListed = true
 			w.mcpAdmissionKnownSeq = readSeq
@@ -1359,7 +1390,36 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return
 		}
 		if info, statErr := pathidentity.StatPinned(dir); statErr == nil {
-			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info, checked: time.Now()}
+			kinds := []string{kind}
+			if previous, ok := roots[key]; ok {
+				kinds = previous.kinds
+				if !slices.Contains(kinds, kind) {
+					kinds = append(slices.Clone(kinds), kind)
+				}
+			}
+			roots[key] = watchedRoot{dir: dir, absolute: absolute, kinds: kinds, info: info, checked: time.Now()}
+		}
+	}
+	// shareRoot adds a kind that is configured at a path already watched, so
+	// the root is judged and admitted for every kind. The watch can come from
+	// another root kind or from a content watch (a plugin cache nested under
+	// a skill root); a configured root with no record yet gets one, so its
+	// unsafe-route lifecycle is tracked whoever installed the watch.
+	shareRoot := func(key, dir, absolute, kind string) {
+		root, ok := roots[key]
+		if !ok {
+			rememberRoot(key, dir, absolute, kind)
+			return
+		}
+		if !slices.Contains(root.kinds, kind) {
+			root.kinds = append(slices.Clone(root.kinds), kind)
+			roots[key] = root
+		}
+	}
+	// setCoverage sets the coverage record of every kind the root serves.
+	setCoverage := func(root watchedRoot, cause error) {
+		for _, kind := range root.kinds {
+			w.setRootCoverage(kind, root.dir, cause)
 		}
 	}
 	// rewatchRoot watches a root again once the folder at its path is not
@@ -1372,7 +1432,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			root.failed, root.checked = true, time.Now()
 			roots[key] = root
-			w.setRootCoverage(root.kind, root.dir, statErr)
+			setCoverage(root, statErr)
 			return
 		}
 		_, watching := watchedDirs[key]
@@ -1388,14 +1448,14 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				nestedMu.Unlock()
 				root.info, root.failed, root.checked = info, true, time.Now()
 				roots[key] = root
-				w.setRootCoverage(root.kind, root.dir, err)
+				setCoverage(root, err)
 				return
 			}
 		}
 		root.checked = time.Now()
 		if same && watching && !root.failed {
 			roots[key] = root
-			w.setRootCoverage(root.kind, root.dir, nil)
+			setCoverage(root, nil)
 			return
 		}
 		nestedMu.Lock()
@@ -1406,18 +1466,27 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if addErr := fsw.Add(root.dir); addErr != nil {
 			root.failed = true
 			roots[key] = root
-			w.setRootCoverage(root.kind, root.dir, addErr)
+			setCoverage(root, addErr)
 			return
 		}
-		w.setRootCoverage(root.kind, root.dir, nil)
+		setCoverage(root, nil)
 		roots[key] = root
 		watchedDirs[key] = struct{}{}
-		fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", root.kind, root.dir)
-		w.admitReplacedRoot(ctx, fsw, root.dir, root.kind, watchedDirs)
+		for _, kind := range root.kinds {
+			fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", kind, root.dir)
+			w.admitReplacedRoot(ctx, fsw, root.dir, kind, watchedDirs)
+		}
 	}
 	watchOnce := func(dir, kind string) bool {
 		key, absolute := watchKey(dir)
 		if _, exists := watchedDirs[key]; exists {
+			// Another kind registered this path; this kind is covered by
+			// that watch, so its own record ends too, unless that watch is
+			// not usable right now.
+			shareRoot(key, dir, absolute, kind)
+			if !roots[key].failed {
+				w.setRootCoverage(kind, dir, nil)
+			}
 			return true
 		}
 		if createsAgentOwnedDir(dir) {
@@ -1776,8 +1845,59 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
+			// A root Run does not hold a usable watch on keeps its record:
+			// rewatchRoot and the retry loops above end it when they have
+			// watched the root again and admitted what it holds.
+			w.reconcileWritableRouteIssues(func(path string) bool {
+				key, _ := watchKey(path)
+				_, watching := watchedDirs[key]
+				return !watching || roots[key].failed
+			})
 			w.queueDueIssues()
 			w.processPending(ctx)
+		}
+	}
+}
+
+// reconcileWritableRouteIssues judges again every root recorded as unavailable
+// because a folder on its link route is writable by another account. The
+// record keeps the folder named when it was made, and a root that does not
+// exist yet is never watched again until it does, so without this status,
+// doctor and the watcher health kept naming a folder after chmod repaired it
+// (GAP-0965). A route that is still writable stays recorded, with the folder
+// now found. A root that is not created yet is not watched after the repair
+// either, so its record changes to say so and stays until the root is
+// registered (the retry loop above ends it); only an existing root with a
+// safe route is cleared here. notWatched reports a root Run holds no usable
+// watch on: its record is left for the code that watches it again, so the
+// record never ends before the root has been watched and admitted.
+func (w *InstallWatcher) reconcileWritableRouteIssues(notWatched func(path string) bool) {
+	if w.secureClientActive() {
+		return
+	}
+	for _, issue := range w.RootCoverageIssues() {
+		if issue.Ancestor == "" {
+			continue
+		}
+		exists := false
+		var err error
+		if _, statErr := os.Lstat(issue.Path); statErr == nil {
+			exists = true
+			err = unlinkedSkillTreePath(issue.Path, issue.Path)
+		} else {
+			err = checkRootLinkRoute(issue.Path)
+		}
+		var writable *skillrootsafe.WritableAncestorError
+		switch {
+		case err == nil && exists:
+			if notWatched(issue.Path) {
+				continue
+			}
+			w.setRootCoverage(issue.Kind, issue.Path, nil)
+		case err == nil:
+			w.setRootCoverage(issue.Kind, issue.Path, fmt.Errorf("%w: %s root %s does not exist yet; watching it once it is created", errWatchDirNotCreated, issue.Kind, issue.Path))
+		case errors.As(err, &writable):
+			w.setRootCoverage(issue.Kind, issue.Path, err)
 		}
 	}
 }
@@ -1838,10 +1958,15 @@ func (w *InstallWatcher) blockedPluginDecisionUnchanged(issue AdmissionIssue) bo
 // watchedRoot is a skill or plugin root Run watches and the folder it was
 // when the watch was added.
 type watchedRoot struct {
-	dir, absolute, kind string
-	info                os.FileInfo
-	failed              bool // the folder now there could not be watched
-	checked             time.Time
+	dir, absolute string
+	// kinds are all the kinds configured at this path. One path can be both
+	// a skill root and a plugin root; they share the one watch, so they share
+	// its lifecycle: each kind is unavailable while the watch is unsafe or
+	// lost and is admitted again before that ends.
+	kinds   []string
+	info    os.FileInfo
+	failed  bool // the folder now there could not be watched
+	checked time.Time
 }
 
 // admitReplacedRoot watches the folders of a skill or plugin root that was
@@ -2870,9 +2995,17 @@ func (w *InstallWatcher) withMCPDefinition(cfg *config.Config, evt InstallEvent,
 	if evt.Type != InstallMCP || cfg == nil || cfg.SecureClientIntegration() {
 		return in
 	}
-	if entry, err := w.lookupMCPServer(evt); err == nil {
-		in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
+	// A remembered definition is the one the event asks about, even when the
+	// agent config lists another definition under the same name.
+	entry := evt.remembered
+	if entry == nil {
+		var err error
+		if entry, err = w.lookupMCPServer(evt); err != nil {
+			return in
+		}
 	}
+	in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
+	in.ArgsCut = entry.ArgsCut
 	return in
 }
 
@@ -5245,25 +5378,34 @@ func ensureAndWatchLegacy(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	return ensureAndWatchWithCheck(fsw, dir, false)
 }
 
+// checkRootLinkRoute judges the link route of a watch root through its
+// nearest existing component, so a root that is not created yet is refused
+// while a folder above it is writable by another account.
+func checkRootLinkRoute(dir string) error {
+	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if _, resolveErr := skillrootsafe.Resolve(current, watcherEvalSymlinks); resolveErr != nil {
+				return linkedRootRefusal(dir, resolveErr)
+			}
+			return nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: inspect skill root %s: %v", errWatchDirNotCreated, dir, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return fmt.Errorf("unavailable skill root: %s", dir)
+		}
+	}
+}
+
 func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool) ([]string, error) {
 	var created []string
 	if isAbsentVendorSystemDir(dir) {
 		return nil, errAbsentVendorSystemDir
 	}
 	if checkLinks {
-		for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
-			if _, err := os.Lstat(current); err == nil {
-				if _, resolveErr := skillrootsafe.Resolve(current, watcherEvalSymlinks); resolveErr != nil {
-					return nil, linkedRootRefusal(dir, resolveErr)
-				}
-				break
-			} else if !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("%w: inspect skill root %s: %v", errWatchDirNotCreated, dir, err)
-			}
-			parent := filepath.Dir(current)
-			if parent == current {
-				return nil, fmt.Errorf("unavailable skill root: %s", dir)
-			}
+		if err := checkRootLinkRoute(dir); err != nil {
+			return nil, err
 		}
 	}
 	if current, err := filepath.Abs(dir); err == nil {

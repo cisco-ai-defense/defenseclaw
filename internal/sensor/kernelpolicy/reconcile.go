@@ -290,6 +290,11 @@ func New(cfg Config) *Controller {
 	}
 	c.st.Version = stateVersion
 	c.st.HelperPID = os.Getpid()
+	if c.st.SeqEpoch == 0 {
+		// A new state, or one that predates the epoch: the sequence from
+		// here on is named by this start.
+		c.st.SeqEpoch = NewEpoch()
+	}
 	c.st.KernelPolicy = Digest()
 	c.st.Intent = IntentStatus{
 		Mode: cfg.Intent.Mode, BurnIn: burnInText(cfg.Intent.BurnIn), EnforceAck: strings.Join(cfg.Intent.EnforceAcks, ","),

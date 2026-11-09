@@ -18,11 +18,15 @@ import (
 // ask (rel-1-0-9:GAP-0621).
 
 // localLinkChain makes n links, the first named by the returned path, each
-// pointing at the next and the last at target.
+// pointing at the next and the last at target. The links are made from the
+// last to the first so each target exists when its link is made: Windows
+// makes a link to a folder a folder link only if the folder is there, and a
+// file link to a folder cannot be opened as one, so a chain made from the
+// first to the last is a chain no read can go through.
 func localLinkChain(t *testing.T, dir string, n int, target string) string {
 	t.Helper()
 	name := func(i int) string { return filepath.Join(dir, fmt.Sprintf("hop%03d", i)) }
-	for i := 1; i <= n; i++ {
+	for i := n; i >= 1; i-- {
 		to := target
 		if i < n {
 			to = name(i + 1)

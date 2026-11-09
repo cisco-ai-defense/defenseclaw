@@ -70,6 +70,15 @@ type Input struct {
 	// command then resolve under it (GAP-2473); the whole action keeps its
 	// own reading.
 	MovedWindowsShellCWD bool `json:"-"`
+	// StraightLineFunctions is trusted caller context set by a gateway that
+	// judges the call in a tier that blocks only what the shell certainly
+	// runs (the default and permissive tiers). A function body then counts
+	// where a call on the straight-line path runs it, and a function the
+	// text never calls contributes no command, directory or variable. Left
+	// false (the strict tier and the hook client), SimpleCommands also walks
+	// such a body where it is defined and judges the apply_patch envelope
+	// in it, run or not (rel-1-0-6:GAP-0928 review 12).
+	StraightLineFunctions bool `json:"-"`
 	// CurrentWindowsDrive is trusted caller context: the drive letter of the
 	// directory the hook payload reported, for a gateway that could not place
 	// that directory itself (CWD is empty). A Windows path with no drive of

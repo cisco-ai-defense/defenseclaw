@@ -170,7 +170,7 @@ DefenseClaw 1.0.5 and 1.0.6 could save the secret reference text itself in `~/.d
 | Hook scripts | `~/.defenseclaw/hooks` |
 | Subprocess shims | on `PATH`, for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` |
 
-DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and its managed entries in `openclaw.json`. DefenseClaw backs up `openclaw.json` first. Backups are byte for byte and hash-checked. Teardown restores the file, or removes only DefenseClaw's entries when the file drifted.
+DefenseClaw limits its OpenClaw-tree changes to `extensions/defenseclaw/` and its managed entries in `openclaw.json`. DefenseClaw backs up `openclaw.json` first. Backups are byte for byte and hash-checked. Teardown restores the file, or removes only DefenseClaw's entries when the file drifted. OpenClaw saves `openclaw.json` itself while it runs (it keeps its own metadata there), and DefenseClaw counts that as a change: the uninstall then keeps OpenClaw's version, takes out only DefenseClaw's entries, and prints a notice that the file is not byte for byte the copy from before setup. A file nobody changed comes back exactly.
 
 ## Transport coverage
 

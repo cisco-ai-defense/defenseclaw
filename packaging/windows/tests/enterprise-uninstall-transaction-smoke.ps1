@@ -2952,10 +2952,16 @@ targets:
                 [bool]$RequireEnumerator = $true,
                 [int]$TimeoutSeconds = 90,
                 [switch]$AllowFailedTargets,
-                [string[]]$AllowedFailedTargetSIDs
+                [string[]]$AllowedFailedTargetSIDs,
+                [switch]$GuardianCoverageDeferred
             )
             if ($null -ne $AllowedFailedTargetSIDs -and $AllowedFailedTargetSIDs.Count -ne 0) {
                 throw 'Secure Client lifecycle passed standalone skipped-account SIDs'
+            }
+            if ($GuardianCoverageDeferred) {
+                # GAP-0947 pin: only the standalone rollback of a held Codex
+                # republish defers the guardian coverage proof.
+                throw 'Secure Client lifecycle deferred the guardian coverage proof'
             }
             $script:HarnessState.events.Add(
                 'readiness-require-broker:{0}' -f (

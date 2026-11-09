@@ -152,7 +152,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 		!strings.Contains(source, " -") {
 		return nil
 	}
-	parts, reduced, ok := sequenceStatementDetails(source, true, true)
+	parts, reduced, ok := sequenceStatementDetails(source, true, true, !input.StraightLineFunctions)
 	if !ok {
 		return []SimpleCommand{{EvaluationFailure: "parse"}}
 	}

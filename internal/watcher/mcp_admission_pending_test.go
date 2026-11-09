@@ -548,3 +548,42 @@ func TestMCPPublishedIsPerAccountAndPerDefinition(t *testing.T) {
 		t.Errorf("no digest: matched %v named %v, want unmatched and named", got.Matched, got.Named)
 	}
 }
+
+// GAP-0925: a local server a managed Linux or macOS hook reported with the
+// scanner verdict taken from the complete definition is not pending: the
+// admission that starts can only record the refusal, so the call that lists
+// the server gets the failed status with the cause the later calls get. The
+// same definition read by the watcher itself, and a server the verdict says a
+// scan starts, keep the pending path.
+func TestMCPStatedRefusalOfAReportedServerIsFailedOnItsFirstCall(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, stated, issue string
+		args                         []string
+		failed                       bool
+	}{
+		{"launcher", "python3", "launcher", MCPScanIssueLauncher, []string{"server.py"}, true},
+		{"arguments past the bound", "npx", "arguments", MCPScanIssueArguments, []string{"-y", "pkg"}, true},
+		{"read by the watcher", "python3", "", "", []string{"server.py"}, false},
+		{"stated none over a carried flag", "npx", "none", "", []string{"-c", "x"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, store, logger, _ := setupTestEnv(t)
+			cfg.Gateway.Watcher.MCP.TakeAction = true
+			server := config.MCPServerEntry{Name: "localsrv", Command: tc.command, Args: tc.args,
+				Connector: "claudecode", Home: "/home/eng1", LocalRefusal: tc.stated}
+			w := New(cfg, nil, nil, store, logger, nil, nil)
+			w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) { return []config.MCPServerEntry{server}, nil })
+			w.firstCycleDone.Store(true)
+			status := w.MCPAdmissionStatus(MCPAdmissionQuery{Connector: "claudecode", Server: "localsrv", Home: "/home/eng1"})
+			if tc.failed {
+				if !status.Failed || status.Pending || status.Name != "localsrv" || status.ScanIssue != tc.issue {
+					t.Fatalf("first call status %+v, want failed with the %q cause", status, tc.issue)
+				}
+				return
+			}
+			if status.Failed || !status.Pending {
+				t.Fatalf("first call status %+v, want pending until the admission", status)
+			}
+		})
+	}
+}

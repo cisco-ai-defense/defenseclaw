@@ -607,31 +607,13 @@ func TestDeniedMCPServerPastTheMemoryLimitStaysDeniedAfterAnEdit(t *testing.T) {
 			home, project := t.TempDir(), t.TempDir()
 			ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
 			servers := map[string]any{}
-			for i := 0; i < mcpResolvedDeniedPerHome; i++ {
-				servers[fmt.Sprintf("denied%d", i)] = map[string]any{"type": "http", "url": removedDeniedURL}
-			}
-			servers["wiki"] = map[string]any{"type": "http", "url": removedDeniedURL}
+			write := func() { writeClaudeServerMap(t, home, project, servers) }
+			fillDeniedMCPPartition(t, api, ctx, project, servers, write)
 			servers["calendar"] = map[string]any{"type": "http", "url": removedOtherURL}
-			write := func() {
-				t.Helper()
-				data, err := json.Marshal(map[string]any{"projects": map[string]any{filepath.ToSlash(project): map[string]any{"mcpServers": servers}}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(home, ".claude.json"), data, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
 			write()
-			for i := 0; i < mcpResolvedDeniedPerHome; i++ {
-				decision, matched := claudeMCPCall(api, ctx, project, "s1", fmt.Sprintf("mcp__denied%d__count_words", i))
-				wantDenyBlock(t, fmt.Sprintf("denied call %d", i), decision, matched)
-			}
-			decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
-			wantDenyBlock(t, "configured denied server past the limit", decision, matched)
 			servers["wiki"] = map[string]any{"type": "http", "url": removedOtherURL}
 			write()
-			decision, matched = claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+			decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
 			wantDenyBlock(t, "edited denied server past the limit", decision, matched)
 			// Benign twins.
 			decision, matched = claudeMCPCall(api, ctx, project, "s1", "mcp__calendar__count_words")
@@ -658,20 +640,7 @@ func TestCodexNameDenyPastTheMemoryLimitSurvivesRemoval(t *testing.T) {
 			home, project := t.TempDir(), t.TempDir()
 			ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home})
 			servers := map[string]any{}
-			for i := 0; i < mcpResolvedDeniedPerHome; i++ {
-				servers[fmt.Sprintf("denied%d", i)] = map[string]any{"type": "http", "url": removedDeniedURL}
-			}
-			data, err := json.Marshal(map[string]any{"projects": map[string]any{filepath.ToSlash(project): map[string]any{"mcpServers": servers}}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(home, ".claude.json"), data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			for i := 0; i < mcpResolvedDeniedPerHome; i++ {
-				decision, matched := claudeMCPCall(api, ctx, project, "s1", fmt.Sprintf("mcp__denied%d__count_words", i))
-				wantDenyBlock(t, fmt.Sprintf("denied call %d", i), decision, matched)
-			}
+			fillDeniedMCPPartition(t, api, ctx, project, servers, func() { writeClaudeServerMap(t, home, project, servers) })
 			path := filepath.Join(home, ".codex", "config.toml")
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 				t.Fatal(err)
@@ -741,19 +710,35 @@ func TestRenamedCodexServerKeepsTheDenyOfItsOldName(t *testing.T) {
 
 // fillDeniedMCPPartition makes a session resolve and be denied on as many
 // servers as one account keeps, so the next denied definition does not fit.
+// The first filler is resolved by a real call of the hook path; the others
+// enter the memory through its own remember, the function that call ends in,
+// because a real call reads and parses the whole agent config, and 1,024
+// calls on a config of 1,025 servers took minutes on a CI runner without
+// exercising anything the first call did not. The last server then does not
+// fit and must be held whole in the lost set of its session.
 func fillDeniedMCPPartition(t *testing.T, api *APIServer, ctx context.Context, project string, servers map[string]any, write func()) {
 	t.Helper()
-	for i := 0; i < mcpResolvedDeniedPerHome; i++ {
-		servers[fmt.Sprintf("filler%d", i)] = map[string]any{"type": "http", "url": removedDeniedURL}
+	peer, ok := managedHookPeerFromContext(ctx)
+	if !ok {
+		t.Fatal("the context carries no hook peer")
 	}
+	servers["filler0"] = map[string]any{"type": "http", "url": removedDeniedURL}
 	servers["wiki"] = map[string]any{"type": "http", "url": removedDeniedURL}
 	write()
-	for i := 0; i < mcpResolvedDeniedPerHome; i++ {
-		decision, matched := claudeMCPCall(api, ctx, project, "s1", fmt.Sprintf("mcp__filler%d__count_words", i))
-		wantDenyBlock(t, fmt.Sprintf("filler %d", i), decision, matched)
+	decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__filler0__count_words")
+	wantDenyBlock(t, "filler 0", decision, matched)
+	for i := 1; i < mcpResolvedDeniedPerHome; i++ {
+		name := fmt.Sprintf("filler%d", i)
+		entry := config.MCPServerEntry{Name: name, URL: removedDeniedURL, Transport: "http"}
+		if !api.mcpResolved.remember("claudecode", peer.Home, "s1", project, name, entry, true, mcpOneDefinition, time.Now()) {
+			t.Fatalf("denied definition %d does not fit below the limit", i)
+		}
 	}
-	decision, matched := claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
+	decision, matched = claudeMCPCall(api, ctx, project, "s1", "mcp__wiki__count_words")
 	wantDenyBlock(t, "denied server that does not fit", decision, matched)
+	if _, held, _ := api.mcpResolved.lostDenied("claudecode", peer.Home, "s1", project, "wiki", time.Now()); !held {
+		t.Fatal("the denied definition that does not fit is not held in the lost set of its session")
+	}
 }
 
 // A denied definition the memory could not keep is judged on the policy in

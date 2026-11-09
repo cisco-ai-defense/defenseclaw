@@ -51,6 +51,17 @@ func customerLedger(t *testing.T) *tetragon.CustomerLedger {
 // TestKernelStatusCarriesTheCustomerPolicies: kernel_status names the
 // customer policies with the ledger's counts as they are now, in every mode
 // with an event stream; off reports none. Names, modes and counts only.
+// cowork-1-0-8 GAP-0080: kernel_status names the epoch of the change
+// sequence in every mode, for the gateway's change cursor.
+func TestKernelStatusNamesTheChangeSequenceEpoch(t *testing.T) {
+	state := kernelpolicy.State{FileState: kernelpolicy.FileState{Seq: 4, SeqEpoch: 1_790_000_000_000_000_000}}
+	for _, mode := range []kernelpolicy.Mode{kernelpolicy.ModeOff, kernelpolicy.ModeConsume, kernelpolicy.ModeObserve, kernelpolicy.ModeEnforce} {
+		if status := kernelStatusOf(state, kernelpolicy.Intent{Mode: mode}); status.SeqEpoch != state.SeqEpoch {
+			t.Errorf("mode %s: seq epoch %d, want %d", mode, status.SeqEpoch, state.SeqEpoch)
+		}
+	}
+}
+
 func TestKernelStatusCarriesTheCustomerPolicies(t *testing.T) {
 	ledger := customerLedger(t)
 	now := time.Now()

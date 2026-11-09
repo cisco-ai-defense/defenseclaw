@@ -26,7 +26,7 @@ This table says which `defenseclaw` commands a standard user gets on a computer 
 | Command | Managed Linux | Managed macOS | Managed Windows | Per-user install | Notes |
 | --- | --- | --- | --- | --- | --- |
 | `defenseclaw --help, --version, help` | Offered | Offered | Offered | Linux, macOS, Windows | The launcher shows its own help; `help` explains the sandbox and status commands. |
-| `defenseclaw status` | Offered | Offered | Offered | Linux, macOS, Windows | Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`, which no managed hook covers. An administrator's run shows the deployment. |
+| `defenseclaw status` | Offered | Offered | Offered | Linux, macOS, Windows | Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`; the reason says whether the machine policy still inspects its calls. An administrator's run shows the deployment. |
 | `defenseclaw sandbox ...` | Offered | Offered | Not supported | Linux, macOS | OpenShell sandboxes run on Linux and macOS only. |
 | `defenseclaw guardrail profile explain` | Offered | Offered | Refused | Linux, macOS, Windows | Shows the guardrail profile that applies to your agents. On Windows the answer points to the administrator's policy view. |
 | `defenseclaw guardrail` | Refused | Refused | Refused | Linux, macOS, Windows | Every guardrail command except `profile explain`, which the row above offers. The guardrail is set in the administrator's config. |

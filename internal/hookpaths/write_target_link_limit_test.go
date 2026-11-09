@@ -68,6 +68,62 @@ func TestWriteTargetWalkFollowsAsManyLinksAsTheSystemOpens(t *testing.T) {
 	}
 }
 
+// A path spelled through a folder behind links and then a name of links of
+// its own is a write the system makes from a process that stands in the
+// folder: the name opens relative to it, with a limit of its own. The walk
+// counts the links of the name from the folder, at every split of the limit,
+// so the name is resolved, not called unresolvable (rel-1-0-9:GAP-0935). A
+// single chain past the limit, and a loop, stay unresolvable.
+func TestWriteTargetWalkCountsALinkFromTheFolderTheProcessStandsIn(t *testing.T) {
+	limit := SystemLinkLimit()
+	dir := linkFreeTempDir(t)
+	folder := filepath.Join(dir, "folder")
+	if err := os.Mkdir(folder, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(folder, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(file, filepath.Join(folder, "alias")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	for _, links := range []int{1, limit - 1, limit} {
+		through := localLinkChain(t, linkFreeTempDir(t), links, folder)
+		resolved, ok := resolveWritePath(filepath.Join(through, "alias"), 0)
+		if !ok || !sameResolvedPath(resolved, file) {
+			t.Errorf("alias behind %d links: resolved %q ok=%v, want the file it links to", links, resolved, ok)
+		}
+	}
+	// The same at every split of the limit between the folder and a name of
+	// two links: the process opens the name from the folder, so the folder
+	// may cost any number of links up to the limit.
+	if err := os.Symlink(file, filepath.Join(folder, "second")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(folder, "second"), filepath.Join(folder, "first")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	for links := 1; links <= limit; links++ {
+		through := localLinkChain(t, linkFreeTempDir(t), links, folder)
+		resolved, ok := resolveWritePath(filepath.Join(through, "first"), 0)
+		if !ok || !sameResolvedPath(resolved, file) {
+			t.Errorf("two-link name behind %d folder links: resolved %q ok=%v, want the file it links to", links, resolved, ok)
+		}
+	}
+	beyond := localLinkChain(t, linkFreeTempDir(t), limit+1, folder)
+	if resolved, ok := resolveWritePath(filepath.Join(beyond, "alias"), 0); ok {
+		t.Errorf("alias behind a chain of %d links resolved to %q, want unresolvable", limit+1, resolved)
+	}
+	loop := filepath.Join(dir, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if resolved, ok := resolveWritePath(filepath.Join(loop, "x"), 0); ok {
+		t.Errorf("a link loop resolved to %q, want unresolvable", resolved)
+	}
+}
+
 // linkFreeTempDir is a temp folder whose own path crosses no link (macOS
 // keeps /var, and so every temp folder, behind one), so the links a test
 // counts are the ones it makes.

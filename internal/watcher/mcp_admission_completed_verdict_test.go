@@ -86,6 +86,11 @@ func TestMCPScanIssueNamesTheRefusedDefinition(t *testing.T) {
 		{config.MCPServerEntry{Command: "/usr/bin/npx", Args: []string{"-y", "p"}}, MCPScanIssueLauncher},
 		{config.MCPServerEntry{Command: "npx", Args: []string{"-y", "p"}}, ""},
 		{config.MCPServerEntry{Command: "uvx", Args: []string{"p"}}, ""},
+		{config.MCPServerEntry{Command: "npx", Args: []string{"-c", "x"}}, MCPScanIssueArguments},
+		{config.MCPServerEntry{Command: "uvx", Args: []string{"--eval=1", "p"}}, MCPScanIssueArguments},
+		{config.MCPServerEntry{Command: "npx"}, MCPScanIssueArguments},
+		{config.MCPServerEntry{Command: "npx", Args: []string{"-y"}}, MCPScanIssueArguments},
+		{config.MCPServerEntry{Command: "npx", Args: []string{"-y", "p", "--port=1"}}, ""},
 		{config.MCPServerEntry{URL: "http://127.0.0.1:18795/mcp"}, MCPScanIssueAddress},
 		{config.MCPServerEntry{URL: "http://localhost:3000/mcp"}, MCPScanIssueAddress},
 		{config.MCPServerEntry{URL: "http://10.1.2.3/mcp"}, MCPScanIssueAddress},
@@ -120,6 +125,9 @@ func TestAllowedOutcomeReplacesTheFailedBaselineBeforeItsWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The allow is the administrator rule that decided it without a scan: it
+	// stands while that rule does (GAP-0920).
+	h.w.cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: server.Name, Reason: "reviewed"}}
 	h.w.noteMCPAdmissionOutcome(evt, snap, AdmissionResult{Event: evt, Verdict: VerdictAllowed})
 	if status := statusOf(h, *server); status.Failed || status.Pending {
 		t.Fatalf("after the allow, before the baseline: %+v, want neither failed nor pending", status)

@@ -299,8 +299,16 @@ func TestRollbackKeepsASaveMadeWhileTheCopyOfAnEditedDevinConfigIsKept(t *testin
 	if devinHandlersInEarlierForm(t, path) != 3 {
 		t.Fatalf("the DefenseClaw entries of the saved file were not rewritten: %q", got)
 	}
-	if len(kept) != 2 || bytes.Contains(kept[0], []byte("operator_saved_during_rollback")) || !bytes.Contains(kept[1], []byte("operator_saved_during_rollback")) {
-		t.Fatalf("the copy kept after the save must hold the saved bytes: %d copies", len(kept))
+	// The first copy is the file before the save. Every copy kept after the save
+	// holds the saved bytes: on Windows the engine restarts once more from the
+	// saved file to converge its protection, so there can be more than one.
+	if len(kept) < 2 || bytes.Contains(kept[0], []byte("operator_saved_during_rollback")) {
+		t.Fatalf("the first copy must be the file before the save: %d copies", len(kept))
+	}
+	for i, copyKept := range kept[1:] {
+		if !bytes.Contains(copyKept, []byte("operator_saved_during_rollback")) {
+			t.Fatalf("the copy kept after the save (%d) must hold the saved bytes: %q", i+1, copyKept)
+		}
 	}
 }
 

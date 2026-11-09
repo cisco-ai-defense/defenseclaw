@@ -261,7 +261,7 @@ Setup exits with Windows Installer codes:
 | --- | --- |
 | `0` | Success, or nothing to do |
 | `1603` | Failure. A failed install, upgrade or repair is rolled back, and a refusal before any change leaves the computer as it was. If the rollback cannot finish, the transaction stays pending ([Recover a pending transaction](#recover-a-pending-transaction)). For `status` and `verify`, the deployment is unhealthy |
-| `1618` | Retry later: another lifecycle run holds the lock, or Setup stopped before it changed anything (`hook_calls_running`, `hook_in_use`, `codex_state_held` or `codex_requirements_held`: hook calls still run, or a program holds the installed hook or a Codex file open) |
+| `1618` | Retry later: another lifecycle run holds the lock, or Setup stopped before it changed anything (`hook_calls_running`, `hook_in_use`, `codex_state_held` or `codex_requirements_held`: hook calls still run, or a program holds the installed hook or a Codex file open), or a rollback met such a program after it started: it left that one file as it is, restarted the restored services and ended with the transaction still pending (`/repair` finishes it; the services run) |
 | `1639` | Invalid arguments: a malformed command line (a relative `CONFIG=` path, an unknown property), or arguments the lifecycle rejected (`/ensure` without `CONFIG=` on a computer with no deployment, a config the gateway cannot load, a run `enterprise.trust` refuses). Retrying does not help |
 | `3010` | Reserved. The lifecycle never requests a restart |
 
@@ -577,8 +577,14 @@ reported as unverified. The gateway logs the folder, `/health` counts it in
 `project_skill_roots_unverified`, and enterprise status shows a
 `project_skill_root_unverified` warning. A selected skill under an unverified
 root is refused in every asset policy mode until a fresh caller inspection
-verifies that the root is ordinary. Watcher rows for roots outside
-profiles carry no per-user attribution.
+verifies that the root is ordinary. The same holds for the selected skill
+itself: when its `SKILL.md` is a link (symbolic link or junction) to a file
+outside the caller's profile or below a folder another user can write, or a
+hard link, the call that selects that skill reports the root with the
+`SKILL.md` reason and the Skill call is refused; a link to a file the caller
+holds privately in the profile is the caller's own skill and loads. A hard
+link is reported because the hook cannot tell where its other names are.
+Watcher rows for roots outside profiles carry no per-user attribution.
 The scan and scan-finding rows of a `scan skill` or `scan plugin` run of the installed `defenseclaw.exe`
 on an asset in an enrolled user's folder name that user (`user.id`,
 `defenseclaw.user.name`), and the judge model when the judge ran
@@ -911,11 +917,19 @@ Other recovery notes:
   guardian can read the state; the held copy stays until it is released.
   A program that opens one of those two files after that check and does not
   share delete access cannot be kept out of the rest of the run. If the run
-  then fails and rolls back, Setup retries the put-back of the file for
-  30 seconds, ends with the same `codex_requirements_held` or
-  `codex_state_held` (exit `1618`) naming the program, and leaves the
-  transaction pending; the next `/ensure` or `/repair` as LocalSystem, after
-  the program lets go, finishes the rollback.
+  then fails and rolls back, Setup waits 30 s for that file to be released,
+  then leaves it as it is, puts the rest back and starts the restored services,
+  and ends with the same `codex_requirements_held` or `codex_state_held`
+  (exit `1618`) naming the program and its process id, and with the failure
+  that started the rollback. The transaction stays pending, and the next
+  `/repair` as LocalSystem, after the program lets go, finishes the rollback.
+  The previous hook is handled the same way (`hook_in_use`). A file left this
+  way can be out of step with the restored release (a newer `requirements.toml`
+  beside the older state copy, or the replacement hook or the closed hook guard
+  where the previous hook belongs). A Codex agent can then be blocked until
+  `/repair` runs; that is fail closed by design. When the held file is the
+  `requirements.toml` the recovery had to republish, the result also says the
+  guardian's coverage was not proven by that rollback.
   A recovery that restores a `requirements.toml` an administrator edited in
   the managed policy publishes the managed policy again instead of stopping,
   keeps your file under `install\recovered-policy` and warns

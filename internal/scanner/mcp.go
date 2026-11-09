@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/managed/mcpasuser"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
@@ -579,6 +580,16 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		// Only the managed Windows scanner runtime can start a server as
 		// its user; nothing else may start it with the gateway's rights.
 		return nil, refusedMCPScan(fmt.Errorf("scanner: MCP server %q of an enrolled user starts only as that user, through the managed Windows scanner runtime", s.ServerEntry.Name))
+	}
+	if entry := s.ServerEntry; entry != nil && entry.Home != "" && entry.RunAsSID == "" && entry.URL == "" {
+		// A local server of an enrolled account that a gateway lists without
+		// a way to start it as its user (managed Linux and macOS, GAP-0925):
+		// the definition is refused as it stands, and nothing starts,
+		// where the name lookup of the scanner CLI would read the service
+		// account's files, not the user's.
+		if class, reason := mcplocal.Judge(entry.Command, entry.Args, entry.LocalRefusal); class != mcplocal.None {
+			return nil, refusedMCPScan(fmt.Errorf("scan failed: refusing to scan local MCP server %q: %s", entry.Name, reason))
+		}
 	}
 	if entry := s.ServerEntry; entry != nil && entry.RunAsSID == "" {
 		// The gateway neither reads nor starts anything at the paths of an

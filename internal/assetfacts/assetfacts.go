@@ -39,6 +39,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 )
 
 // Header carries the encoded Facts on a standalone hook request.
@@ -165,6 +166,16 @@ type MCPServer struct {
 	Command   string   `json:"command,omitempty"`
 	Args      []string `json:"args,omitempty"`
 	Transport string   `json:"transport,omitempty"`
+	// LocalRefusal is the scanner verdict on the complete definition of a
+	// local server, taken by the hook that read it: Args holds at most
+	// maxArgs arguments, and the verdict depends on all of them (an
+	// execution flag or the package may be past the bound). A mcplocal
+	// class, empty when the hook did not state it.
+	LocalRefusal string `json:"local_refusal,omitempty"`
+	// ArgsCut says the hook read more arguments than Args holds, so Args is
+	// the start of the list and an exact allow of the complete list cannot be
+	// checked against it.
+	ArgsCut bool `json:"args_cut,omitempty"`
 	// Source is SourceCommandLine for a definition from the agent's command
 	// line, "" for one from its config files.
 	Source string `json:"source,omitempty"`
@@ -190,6 +201,16 @@ type MCPServer struct {
 	// refusing every server of that name.
 	Pins *MCPPins `json:"pins,omitempty"`
 }
+
+// VerdictUnstatedCut reports a claim of a hook that stated no verdict and
+// holds as many arguments as the bound keeps: its Args can be the start of a
+// longer list, so the gateway reads a verdict out of them only as far as they
+// prove it (mcplocal.Proven).
+func (s MCPServer) VerdictUnstatedCut() bool { return s.LocalRefusal == "" && len(s.Args) >= maxArgs }
+
+// ArgsMayBeCut reports a claim whose Args can be the first maxArgs of a longer
+// list: an exact allow of the complete argument list does not match it.
+func (s MCPServer) ArgsMayBeCut() bool { return s.ArgsCut || s.VerdictUnstatedCut() }
 
 // MCPPins are the SHA-256 digests (hex) of the values an asset_policy rule
 // compares on an MCP server, taken from the complete definition the hook
@@ -236,6 +257,7 @@ func TailDigestAt(tail []byte, i int) []byte {
 // send. The cap fits every bounded fact set, including escaped arguments;
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
+	facts.MCP = withLocalRefusal(facts.MCP)
 	facts = bounded(facts)
 	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && len(facts.SkillLinks) == 0 && !facts.SkillLinksTruncated && !facts.SkillsTruncated && len(facts.Contents) == 0 {
 		return ""
@@ -264,6 +286,18 @@ func Encode(facts Facts) string {
 		return ""
 	}
 	return value
+}
+
+// withLocalRefusal states the scanner verdict on a local server from its
+// complete definition, which only the hook that reads it has: bounded keeps at
+// most maxArgs arguments, and a refusal may depend on one past them (GAP-0925).
+func withLocalRefusal(server *MCPServer) *MCPServer {
+	if server == nil || server.LocalRefusal != "" || strings.TrimSpace(server.URL) != "" || strings.TrimSpace(server.Command) == "" {
+		return server
+	}
+	stated := *server
+	stated.LocalRefusal = mcplocal.Class(server.Command, server.Args)
+	return &stated
 }
 
 // deflate renders json as a compressed header value: the prefix and the
@@ -389,6 +423,11 @@ func bounded(facts Facts) Facts {
 			Name: clean(server.Name, maxNameBytes), URL: clean(server.URL, maxFieldBytes),
 			Command: clean(server.Command, maxFieldBytes), Transport: clean(server.Transport, 64),
 		}
+		switch server.LocalRefusal {
+		case mcplocal.None, mcplocal.Launcher, mcplocal.Arguments:
+			out.LocalRefusal = server.LocalRefusal
+		}
+		out.ArgsCut = server.ArgsCut || len(server.Args) > maxArgs
 		lossy := out.URL != strings.TrimSpace(server.URL) || out.Command != strings.TrimSpace(server.Command) ||
 			out.Transport != strings.TrimSpace(server.Transport) || len(server.Args) > maxArgs
 		for _, arg := range server.Args {
@@ -573,7 +612,15 @@ func DeclaredSkillName(dir string) string {
 		return ""
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxManifestBytes))
+	return DeclaredSkillNameOf(file)
+}
+
+// DeclaredSkillNameOf returns the name the SKILL.md read from r declares in
+// its frontmatter, or "" when it declares none. Only the start is read. A
+// caller that opens the manifest as the agent does, through a link, uses it
+// on the file it opened.
+func DeclaredSkillNameOf(r io.Reader) string {
+	data, err := io.ReadAll(io.LimitReader(r, maxManifestBytes))
 	if err != nil {
 		return ""
 	}

@@ -35,14 +35,13 @@ var networkShareLinkWalk = runtime.GOOS == "windows"
 // the wait that bounds the read.
 var walkLstat = pathidentity.LstatPinned
 
-// networkLinkHopLimit bounds the links one walk follows: 40, and no more than
-// the system opens in one path (SystemLinkLimit; macOS refuses a path past 32
-// links, so a walk past 32 there is a path no read can go through, an unread
-// body). A walk that reaches the bound has not proven the path free of an
-// unasked share (the system follows far more links than this on Windows), so
-// it reports the path as unanswered, as a share that did not answer, and
-// never as a completed check.
-var networkLinkHopLimit = min(40, SystemLinkLimit())
+// networkLinkHopLimit bounds the links one walk follows: the links the system
+// opens in one path (SystemLinkLimit: 63 on Windows, 40 on Linux, 32 on macOS).
+// A path past it is one no read can go through, an unread body. A walk that
+// reaches the bound has not proven the path free of an unasked share, so it
+// reports the path as unanswered, as a share that did not answer, and never
+// as a completed check.
+var networkLinkHopLimit = SystemLinkLimit()
 
 // ShareWalkLinkLimit is the links the share walk follows before it reports a
 // path unanswered (networkLinkHopLimit), for tests of the callers.

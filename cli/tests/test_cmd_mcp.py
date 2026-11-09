@@ -2519,7 +2519,9 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
         # GAP-1855: after the gateway blocked a server because its admission
         # scan failed, the list told the user to scan it again; that scan
         # reported clean and the block stayed. The list now says a scan does
-        # not release it and names the command that does.
+        # not release it, names the cause and the command that does (GAP-0921:
+        # that is the allow, not mcp unblock, which leaves a fail-closed
+        # tier blocking the call).
         self.app.cfg.mcp_servers = lambda connector=None, **_: self._one_server()  # type: ignore[method-assign]
         self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
         reason = "scanner failure (fail-closed): scanner: mcp-scanner exited 1"
@@ -2536,12 +2538,16 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         flat = " ".join(result.output.split())
         self.assertIn("blocked because their admission scan failed: ctx7 (codex)", flat)
-        self.assertIn("a new scan does not release this block", flat)
-        self.assertIn("defenseclaw mcp unblock ctx7 --connector codex", flat)
+        self.assertIn("its admission scan failed (", flat)
+        self.assertIn("fail closed on that", flat)
+        self.assertIn("a new scan does not release the call", flat)
+        self.assertIn("defenseclaw mcp allow ctx7 --connector codex", flat)
+        self.assertNotIn("mcp unblock", flat)
+        self.assertNotIn("Release it now", flat)
         self.assertNotIn("fix reachability, then scan again", flat)
 
     def test_a_managed_device_list_names_the_administrator_for_a_held_server(self):
-        # GAP-0776: a managed device refuses `mcp unblock`, so the list for a
+        # GAP-0776: a managed device refuses `mcp allow`, so the list for a
         # server blocked after a failed scan names the administrator policy,
         # and the refusal text of a failed row carries no `mcp allow` clause.
         self.app.cfg.mcp_servers = lambda connector=None, **_: [  # type: ignore[method-assign]
@@ -2557,13 +2563,19 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
             managed = self.invoke(["list"])
         flat = " ".join(managed.output.split())
         self.assertIn("Ask your administrator to allow it in the managed MCP policy", flat)
+        self.assertIn("python3", flat)
         self.assertNotIn("mcp unblock", flat)
         self.assertNotIn("mcp allow", flat)
 
-        # Twin: an unmanaged device is still told the command that releases it.
+        # Twin: an unmanaged device is told the cause and the command that
+        # allows the call (GAP-0921), and is not offered unblock as a release.
         with patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=False):
             plain = self.invoke(["list"])
-        self.assertIn("defenseclaw mcp unblock srv --connector codex", " ".join(plain.output.split()))
+        flat = " ".join(plain.output.split())
+        self.assertIn("python3", flat)
+        self.assertIn("defenseclaw mcp allow srv --connector codex", flat)
+        self.assertNotIn("mcp unblock", flat)
+        self.assertNotIn("Release it now", flat)
 
 
 # ---------------------------------------------------------------------------
