@@ -1150,6 +1150,15 @@ not remove a lock an earlier uninstall left.
   `C:\ProgramData\Cisco\DefenseClaw` (a SIEM forwarder reading `runtime\audit.db`,
   for example) blocks it the same way. Close it and run again. The Intune
   launcher's uninstall retries and then exits `1618`.
+- `privileges_required` means the uninstall needs an account that can list and remove a
+  file or folder inside DefenseClaw's own folders that only SYSTEM may open, and the
+  Administrator that ran it cannot. An elevated Administrator holds the backup and
+  restore privileges disabled, and Setup turns them on for one walk at a time, so it
+  normally just works; the error appears when the account's token does not hold them
+  at all (a policy removed them, or the account is not an Administrator). Nothing was
+  changed and the services keep running (or the message says the uninstall can be run
+  again). Run the same uninstall as SYSTEM: an MDM or Intune run already is; by hand,
+  start Setup from a scheduled task that runs as SYSTEM, or with `psexec -s`.
 - A file or folder under `C:\Program Files\Cisco\DefenseClaw` that DefenseClaw did not
   install stops a standalone uninstall with `1603` before it changes anything, and the result
   names that item, also inside the `lib\defenseclaw` folder that 1.0.2 installed (for example

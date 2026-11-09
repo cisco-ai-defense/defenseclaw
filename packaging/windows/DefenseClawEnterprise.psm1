@@ -10554,8 +10554,18 @@ function Get-DefenseClawStateRootFiles {
         The regular files under StateRoot that a purge deletes: the audit
         database and its SQLite companions first, then the rest of the tree
         without following links (the removal refuses those itself).
+        FailOnUnreadable (the precommit holder check) does not skip a folder
+        this account cannot list: it walks again under the call-scoped backup
+        and restore of Invoke-DefenseClawStateRootWalk, so the files inside a
+        SYSTEM-only folder are holder-checked before anything changes, and a
+        walk that still cannot list refuses (GAP-0890 r2 review R1). Without
+        it an unreadable folder is skipped, as for the caller that only names
+        holders after a failed deletion.
     #>
-    param([Parameter(Mandatory)][hashtable]$Layout)
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$FailOnUnreadable
+    )
     $files = [Collections.Generic.List[string]]::new()
     $root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
     if (-not [IO.Directory]::Exists($root)) {
@@ -10570,33 +10580,50 @@ function Get-DefenseClawStateRootFiles {
             [void]$first.Add($candidate)
         }
     }
-    $pending = [Collections.Generic.Stack[string]]::new()
-    $pending.Push($root)
-    while ($pending.Count -gt 0 -and $files.Count -lt $script:StateFileInUseCheckLimit) {
-        $directory = $pending.Pop()
-        $entries = @(try {
-                [IO.DirectoryInfo]::new($directory).GetFileSystemInfos()
-            }
-            catch {
-            })
-        foreach ($entry in $entries) {
-            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                continue
-            }
-            if ($entry -is [IO.DirectoryInfo]) {
-                $pending.Push([string]$entry.FullName)
-                continue
-            }
-            if ($first.Contains([string]$entry.FullName)) {
-                continue
-            }
-            $files.Add([string]$entry.FullName)
-            if ($files.Count -ge $script:StateFileInUseCheckLimit) {
-                break
+    $walkStrict = [bool]$FailOnUnreadable
+    $walkFiles = {
+        $walkList = [Collections.Generic.List[string]]::new($files)
+        $walkPending = [Collections.Generic.Stack[string]]::new()
+        $walkPending.Push($root)
+        $walkDenied = $null
+        while ($walkPending.Count -gt 0 -and $walkList.Count -lt $script:StateFileInUseCheckLimit) {
+            $walkDirectory = $walkPending.Pop()
+            $walkEntries = @(try {
+                    [IO.DirectoryInfo]::new($walkDirectory).GetFileSystemInfos()
+                }
+                catch {
+                    if ($null -eq $walkDenied) {
+                        $walkDenied = $_
+                    }
+                })
+            foreach ($walkEntry in $walkEntries) {
+                if (($walkEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                if ($walkEntry -is [IO.DirectoryInfo]) {
+                    $walkPending.Push([string]$walkEntry.FullName)
+                    continue
+                }
+                if ($first.Contains([string]$walkEntry.FullName)) {
+                    continue
+                }
+                $walkList.Add([string]$walkEntry.FullName)
+                if ($walkList.Count -ge $script:StateFileInUseCheckLimit) {
+                    break
+                }
             }
         }
+        if ($walkStrict -and $null -ne $walkDenied) {
+            throw $walkDenied.Exception
+        }
+        return , $walkList.ToArray()
     }
-    return , $files.ToArray()
+    if ($FailOnUnreadable) {
+        $walkResult = @(Invoke-DefenseClawStateRootWalk -WalkRoot $root -WalkLabel StateRoot -Walk $walkFiles)
+        return , $walkResult
+    }
+    $walkStrict = $false
+    return , (& $walkFiles)
 }
 
 function Get-DefenseClawStateFileHolders {
@@ -10779,7 +10806,7 @@ function Assert-DefenseClawStandaloneStateFilesNotInUse {
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
-    $paths = Get-DefenseClawStateRootFiles -Layout $Layout
+    $paths = Get-DefenseClawStateRootFiles -Layout $Layout -FailOnUnreadable
     if ($paths.Count -eq 0) {
         return
     }
@@ -43589,34 +43616,78 @@ function Get-DefenseClawInstallRootHolders {
             -UserName ([string]$process.UserName) `
             -Parent ([string]$process.Parent)
     }
-    $files = [Collections.Generic.List[string]]::new()
-    $pending = [Collections.Generic.Stack[string]]::new()
-    if ([IO.Directory]::Exists($InstallRoot)) {
-        $pending.Push([IO.Path]::GetFullPath($InstallRoot))
-    }
-    while ($pending.Count -gt 0 -and $files.Count -lt $script:StateFileInUseCheckLimit) {
-        $entries = @(try {
-                [IO.DirectoryInfo]::new($pending.Pop()).GetFileSystemInfos()
-            }
-            catch {
-                if ($FailOnQueryError) {
-                    throw (
-                        'uninstall_in_use: could not enumerate DefenseClaw install files (' +
-                        $_.Exception.Message + '); nothing was changed; run the uninstall again'
-                    )
+    # GAP-0890 r2 review R1: a folder this account cannot list is walked again
+    # under the call-scoped backup and restore of Invoke-DefenseClawStateRootWalk
+    # (the exact InstallRoot of the standalone profile only), so the files in a
+    # SYSTEM-only folder are holder-checked too. Any other failure keeps the
+    # old behaviour: a refusal for a precommit caller, a skipped folder for the
+    # others.
+    $walkStrict = $true
+    $walkInstall = {
+        $walkFiles = [Collections.Generic.List[string]]::new()
+        $walkPending = [Collections.Generic.Stack[string]]::new()
+        $walkDenied = $null
+        if ([IO.Directory]::Exists($InstallRoot)) {
+            $walkPending.Push([IO.Path]::GetFullPath($InstallRoot))
+        }
+        while ($walkPending.Count -gt 0 -and $walkFiles.Count -lt $script:StateFileInUseCheckLimit) {
+            $walkEntries = @(try {
+                    [IO.DirectoryInfo]::new($walkPending.Pop()).GetFileSystemInfos()
                 }
-            })
-        foreach ($entry in $entries) {
-            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                continue
-            }
-            if ($entry -is [IO.DirectoryInfo]) {
-                $pending.Push([string]$entry.FullName)
-            }
-            elseif ($files.Count -lt $script:StateFileInUseCheckLimit) {
-                $files.Add([string]$entry.FullName)
+                catch {
+                    if ($walkStrict -and (Test-DefenseClawAccessDeniedError -ErrorRecord $_)) {
+                        if ($null -eq $walkDenied) {
+                            $walkDenied = $_
+                        }
+                    }
+                    elseif ($FailOnQueryError) {
+                        throw (
+                            'uninstall_in_use: could not enumerate DefenseClaw install files (' +
+                            $_.Exception.Message + '); nothing was changed; run the uninstall again'
+                        )
+                    }
+                })
+            foreach ($walkEntry in $walkEntries) {
+                if (($walkEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                if ($walkEntry -is [IO.DirectoryInfo]) {
+                    $walkPending.Push([string]$walkEntry.FullName)
+                }
+                elseif ($walkFiles.Count -lt $script:StateFileInUseCheckLimit) {
+                    $walkFiles.Add([string]$walkEntry.FullName)
+                }
             }
         }
+        if ($null -ne $walkDenied) {
+            throw $walkDenied.Exception
+        }
+        return [pscustomobject]@{ Files = $walkFiles; Pending = $walkPending.Count }
+    }
+    $walked = $null
+    try {
+        $walked = Invoke-DefenseClawStateRootWalk -WalkRoot ([IO.Path]::GetFullPath($InstallRoot)) -WalkLabel InstallRoot -Walk $walkInstall
+    }
+    catch {
+        if ($_.Exception.Message.StartsWith('privileges_required: ', [StringComparison]::Ordinal)) {
+            throw
+        }
+        if ($_.Exception.Message.StartsWith('uninstall_in_use: ', [StringComparison]::Ordinal)) {
+            throw
+        }
+        if ($FailOnQueryError) {
+            throw (
+                'uninstall_in_use: could not enumerate DefenseClaw install files (' +
+                $_.Exception.Message + '); nothing was changed; run the uninstall again'
+            )
+        }
+        $walkStrict = $false
+        $walked = & $walkInstall
+    }
+    $files = $walked.Files
+    $pending = [Collections.Generic.Stack[string]]::new()
+    for ($leftover = 0; $leftover -lt [int]$walked.Pending; $leftover++) {
+        $pending.Push('')
     }
     if ($FailOnQueryError -and $pending.Count -gt 0) {
         throw (
