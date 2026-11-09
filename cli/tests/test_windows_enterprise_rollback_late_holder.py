@@ -136,3 +136,16 @@ def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_b
     clear = _function_body(text, "Clear-DefenseClawRollbackDeferredHolds")
     assert "DefenseClawRollbackCoverageDeferred = $false" in clear
     assert "Clear-DefenseClawRollbackDeferredHolds" in _function_body(text, "Assert-DefenseClawRollbackHoldsResolved")
+
+
+def test_the_recovery_names_a_held_codex_state_file_before_and_after_the_reconcile_fails() -> None:
+    text = _text()
+    probe = _function_body(text, "Get-DefenseClawBlockedCodexStatePath")
+    assert "CodexManagedHooksStatePath" in probe and "Get-DefenseClawCodexManagedHooksStateWriterCopyList" in probe
+    assert "Test-DefenseClawFileReadBlocked" in probe and "Test-DefenseClawFileDeleteBlocked" in probe
+    body = _function_body(text, "Repair-DefenseClawRecoveredCodexRequirements")
+    assert body.count("Get-DefenseClawBlockedCodexStatePath -Layout $Layout") == 2
+    first = body.index("Get-DefenseClawBlockedCodexStatePath -Layout $Layout")
+    # Before anything is saved or written, and again before the rebuild.
+    assert first < body.index("[IO.FileMode]::CreateNew") < body.rindex("Get-DefenseClawBlockedCodexStatePath -Layout $Layout")
+    assert body.rindex("Get-DefenseClawBlockedCodexStatePath -Layout $Layout") < body.index("Get-DefenseClawRecordedCodexRequirementsPreimage")
