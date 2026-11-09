@@ -312,6 +312,61 @@ def test_hermes_fail_mode_rejects_stale_open_command(tmp_path, monkeypatch):
     assert fail_mode._unix_registration_freshness(cfg, "hermes") == "registration-command-stale"
 
 
+def _add_user_hook(tmp_path, command, events=("pre_tool_call",)):
+    config = tmp_path / "hermes" / "config.yaml"
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    for event in events:
+        document["hooks"][event] = [{"command": command, "timeout": 30}, *document["hooks"][event]]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize("name", ["hermes-hook.sh", "user-hook2.sh", "my-hermes-hook.sh.bak"])
+def test_hermes_registration_keeps_a_user_hook_that_shares_the_file_name(tmp_path, monkeypatch, name):
+    """A user hook is the user entry whatever its file name says (GAP-0985)."""
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    other = tmp_path / "other"
+    other.mkdir()
+    user_hook = other / name
+    user_hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    user_hook.chmod(0o700)
+    _add_user_hook(tmp_path, str(user_hook), events=("pre_tool_call", "post_tool_call"))
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+
+    # "warn" is a host that refuses the contained probe; the registration itself was read and accepted.
+    assert check()["status"] != "fail"
+    assert cmd_doctor._hermes_registration_problem(cfg, str(tmp_path / "hermes" / "config.yaml")) == ""
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_registration_ignores_a_user_hook_on_another_event_named_like_ours(tmp_path, monkeypatch):
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    config = tmp_path / "hermes" / "config.yaml"
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["some_future_event"] = [{"command": str(tmp_path / "other" / "hermes-hook.sh"), "timeout": 30}]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert check()["status"] != "fail"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_hermes_registration_still_fails_when_only_a_same_name_user_hook_is_registered(tmp_path, monkeypatch):
+    """The user hook is not ours: without the sealed entry the registration is still reported."""
+    _script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    config = tmp_path / "hermes" / "config.yaml"
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["pre_tool_call"] = [
+        {"command": str(tmp_path / "other" / "hermes-hook.sh"), "timeout": 30, "matcher": ".*"}
+    ]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=str(tmp_path / "dc"))
+
+    assert check()["status"] == "fail"
+    assert "pre_tool_call has 0 registered DefenseClaw commands" in cmd_doctor._hermes_registration_problem(cfg, str(config))
+    assert fail_mode._unix_registration_freshness(cfg, "hermes") == "registration-command-stale"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
 def test_hermes_fail_mode_rejects_unresolvable_current_home(tmp_path, monkeypatch):
     def unresolvable_home():
@@ -1161,3 +1216,53 @@ def test_hermes_doctor_warns_proof_unavailable_where_a_seccomp_profile_refuses_t
     monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_SUPERVISOR", _supervisor_with_unshare_refused(22))
     row = check()
     assert row["status"] == "fail" and "could not run" in row["detail"], row
+
+
+def _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, command, event="pre_tool_call"):
+    """What the registration check says of a sealed registration with one more entry beside Setup's."""
+    script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    check()
+    config = tmp_path / "hermes" / "config.yaml"
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"].setdefault(event, []).insert(0, {"command": command.format(c=script), "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    return cmd_doctor._hermes_registration_problem(SimpleNamespace(data_dir=str(tmp_path / "dc")), str(config))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hermes-hook.sh",
+        "bash /opt/tools/my-hermes-hook.sh",
+        "/opt/tools/audit hermes-hook.sh",
+        "{c}.off",
+        "{c} && echo done",
+        "sudo {c}",
+    ],
+)
+def test_a_user_entry_that_only_names_the_script_is_not_a_second_registered_command(tmp_path, monkeypatch, command):
+    assert _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, command) == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize("command", ["{c} ", " {c}", "'{c}' ", '"{c}"', "{c}\t"])
+def test_a_spelling_of_the_sealed_command_beside_it_is_a_second_registered_command(tmp_path, monkeypatch, command):
+    problem = _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, command)
+
+    assert "pre_tool_call has 2 registered DefenseClaw commands" in problem
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize("command", ["'{c} '", "'{c}' --extra-arg", "{c} --extra-arg"])
+def test_a_spelling_that_does_not_run_the_sealed_script_alone_is_reported(tmp_path, monkeypatch, command):
+    problem = _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, command)
+
+    assert problem == "Hermes pre_tool_call does not run the sealed hook command"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_a_spelling_of_the_sealed_command_on_another_event_is_reported(tmp_path, monkeypatch):
+    problem = _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, "'{c}' ", event="some_future_event")
+
+    assert "unexpected Hermes event some_future_event" in problem

@@ -63,7 +63,7 @@ func TestOpenClawTeardownLeavesAJSON5FileDefenseClawNeverSetUp(t *testing.T) {
 			t.Run(fmt.Sprintf("%s/dropApprovals=%v", name, dropApprovals), func(t *testing.T) {
 				ocHome := filepath.Join(t.TempDir(), "openclaw-home")
 				path := writeOpenClawText(t, ocHome, text)
-				if err := uninstallOpenClawExtension(ocHome, dropApprovals); err != nil {
+				if err := uninstallOpenClawExtension(ocHome, dropApprovals, openClawSetupGrant{}); err != nil {
 					t.Fatalf("uninstallOpenClawExtension: %v", err)
 				}
 				if got := readOpenClawText(t, path); got != text {
@@ -130,7 +130,7 @@ const json5SetUpTornDown = "// my openclaw config\n" +
 func TestOpenClawTeardownTakesOnlyDefenseClawSettingsOutOfAJSON5File(t *testing.T) {
 	ocHome := filepath.Join(t.TempDir(), "openclaw-home")
 	path := writeOpenClawText(t, ocHome, json5SetUp)
-	if err := uninstallOpenClawExtension(ocHome, true); err != nil {
+	if err := uninstallOpenClawExtension(ocHome, true, openClawSetupGrant{}); err != nil {
 		t.Fatalf("uninstallOpenClawExtension: %v", err)
 	}
 	if got := readOpenClawText(t, path); got != json5SetUpTornDown {
@@ -170,7 +170,7 @@ func TestOpenClawTeardownRemovesTheLastMemberAndTheCommaBeforeIt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ocHome := filepath.Join(t.TempDir(), "openclaw-home")
 			path := writeOpenClawText(t, ocHome, tc.in)
-			if err := uninstallOpenClawExtension(ocHome, true); err != nil {
+			if err := uninstallOpenClawExtension(ocHome, true, openClawSetupGrant{}); err != nil {
 				t.Fatalf("uninstallOpenClawExtension: %v", err)
 			}
 			if got := readOpenClawText(t, path); got != tc.want {

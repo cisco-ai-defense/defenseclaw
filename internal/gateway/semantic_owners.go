@@ -843,11 +843,13 @@ func isDefiniteFixturePath(
 	resolved := canonicalSemanticPath(candidate.Resolved)
 	cwd := canonicalSemanticPath(facts.CWD)
 	if resolved == "" || cwd == "" ||
-		isRecognizedHomeRoot(cwd) ||
+		isRecognizedHomeRoot(cwd) || isHomeContainerDirectory(cwd) ||
 		!pathWithin(resolved, cwd) {
 		return false
 	}
-	return true
+	// A call that runs in a profile found by its entries, or above it, is
+	// at the home of an account like one that runs in its Users folder.
+	return !profileHomeAtOrAbove(resolved, cwd)
 }
 
 func canonicalSemanticPath(value string) string {
@@ -880,7 +882,7 @@ func isRecognizedHomeRoot(value string) bool {
 	}
 	return len(value) >= 4 &&
 		value[1] == ':' &&
-		isSingleUserHomeRoot(value[2:], "/users/")
+		(isSingleUserHomeRoot(value[2:], "/users/") || isSingleUserHomeRoot(value[2:], "/home/"))
 }
 
 func isSingleUserHomeRoot(value, prefix string) bool {
@@ -896,13 +898,7 @@ func activeHomeRelative(
 	candidate actionfacts.PathFact,
 ) (string, bool) {
 	home := canonicalSemanticPath(facts.ActiveHome)
-	resolved := canonicalSemanticPath(candidate.Resolved)
-	if resolved == "" {
-		resolved = canonicalSemanticPath(candidate.Normalized)
-	}
-	if resolved == "" {
-		resolved = canonicalSemanticPath(candidate.Value)
-	}
+	resolved := canonicalSemanticPath(semanticPathValue(candidate))
 	if home == "" || resolved == "" || !pathWithin(resolved, home) {
 		return "", false
 	}
@@ -1441,12 +1437,13 @@ func hasDataFlowTo(
 }
 
 func semanticPathValue(path actionfacts.PathFact) string {
-	value := path.Resolved
-	if value == "" {
-		value = path.Normalized
-	}
-	if value == "" {
-		value = path.Value
+	value := pathFactSpelling(path)
+	// Trailing spaces are read by windowsOpenedPath, which keeps them in an
+	// extended-length path, where they are part of the name: the matchers trim
+	// whitespace, so they are spelled as a visible character that no
+	// protected name contains.
+	if opened, ok, _ := windowsOpenedPathOfFact(path); ok {
+		return windowsNameFold(markTrailingSpaces(opened))
 	}
 	return semanticFoldPath(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
 }
@@ -1942,4 +1939,18 @@ func hardcodedToolCallOnlyRule(ruleID string) bool {
 	default:
 		return false
 	}
+}
+
+// isHomeContainerDirectory reports a directory that holds the homes of
+// accounts, as isRecognizedHomeRoot reads a home: a file system or drive root,
+// /home or /users, or a Users or home folder on a drive. A credential file below it is
+// the file of an account, not a fixture of a project that happens to run
+// there. A folder that merely has such a name deeper in a project (repo/home)
+// is a project folder. The value is canonical (canonicalSemanticPath).
+func isHomeContainerDirectory(value string) bool {
+	value = strings.TrimRight(value, "/")
+	if len(value) >= 2 && value[1] == ':' {
+		return value[2:] == "" || value[2:] == "/users" || value[2:] == "/home"
+	}
+	return value == "" || value == "/home" || value == "/users"
 }

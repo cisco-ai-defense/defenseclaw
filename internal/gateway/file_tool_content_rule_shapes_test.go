@@ -15,8 +15,7 @@ import (
 // fileToolContentRule is one code-owned rule that proves its text from the
 // content a file tool writes: the file it protects, the text that trips it,
 // the ordinary text of the same file, and whether an edit that only inserts
-// the text can trip it (a rule that needs the complete final document cannot
-// be proven by a fragment).
+// the text can trip it.
 type fileToolContentRule struct {
 	name, rule, target string
 	attack, benign     string
@@ -48,8 +47,9 @@ var fileToolContentRules = []fileToolContentRule{
 	},
 	{
 		name: "docker daemon", rule: "tamper.docker_insecure_http_registry", target: "/etc/docker/daemon.json",
-		attack: "{\"insecure-registries\":[\"http://registry.example.test:5000\"]}\n",
-		benign: "{\"log-level\":\"warn\"}\n",
+		attack:  "{\"insecure-registries\":[\"http://registry.example.test:5000\"]}\n",
+		benign:  "{\"log-level\":\"warn\"}\n",
+		context: "{\"debug\": true}\n", edits: true,
 	},
 }
 

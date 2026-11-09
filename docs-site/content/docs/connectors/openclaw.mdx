@@ -26,6 +26,8 @@ DefenseClaw ships a plugin for OpenClaw. It redirects recognized model calls thr
 
 On a new install, run `defenseclaw init --connector openclaw` first. Until DefenseClaw is initialized, `defenseclaw setup openclaw` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
+OpenClaw's own gateway must be running (or be a service that `openclaw gateway restart` can start) before `defenseclaw setup openclaw` changes anything. If nothing answers at the gateway address in `openclaw.json`, setup stops with `No changes made.`: start it with `openclaw gateway run` and run the same command again.
+
 ```bash
 defenseclaw setup openclaw --mode observe --restart
 defenseclaw setup openclaw --mode action --human-approval --rule-pack default --restart
@@ -255,6 +257,8 @@ OpenClaw does not run in an OpenShell sandbox. The legacy standalone sandbox tha
 ## Troubleshooting
 
 If a prompt reports `Unknown model` for a still-installed provider after OpenClaw removes or disables another extension, wait for the plugin reload to finish and retry. If the error remains, run `openclaw models list --refresh --provider amazon-bedrock` (substitute your provider name) and retry.
+
+If `defenseclaw setup openclaw` fails after the OpenClaw gateway stopped, DefenseClaw does not rewrite `openclaw.json`. The failure says the file changed during setup and may still contain DefenseClaw entries. Run `defenseclaw-gateway connector teardown --connector openclaw` to remove them. The command works on `~/.openclaw/openclaw.json` whether or not OpenClaw is still a configured connector, keeps everything else in the file, and leaves a copy at another path as it is. Empty `plugins.allow` or `plugins.load.paths` arrays can remain afterwards; they are harmless.
 
 ## Disable
 

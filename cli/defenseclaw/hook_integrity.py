@@ -35,6 +35,7 @@ import posixpath
 import re
 import shlex
 import stat
+import string
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -1271,7 +1272,8 @@ def _hermes_written_command(cfg: Any, connector: str) -> Callable[[str], bool] |
 
     Setup, repair and teardown own a Hermes hook entry only by identity
     (hermesHookEntryOwned in internal/gateway/connector/hook_only.go): the
-    current command, or the generated script at an edited path. Any other
+    current command or a plain spelling of it, or the generated script at an
+    edited path. Any other
     command, even one that sits under this data directory, belongs to the
     user: Setup keeps it, does not approve it, and lists it in its notice. The
     checks used the wider "runs a DefenseClaw hook" test, so they failed a
@@ -1296,21 +1298,70 @@ def _hermes_written_command(cfg: Any, connector: str) -> Callable[[str], bool] |
 
 
 def hermes_command_written(command: str, current: set[str]) -> bool:
-    """Whether *command* is one Setup wrote: a *current* command, or the generated script at an edited path.
+    """Whether *command* is one Setup owns.
+
+    That is a *current* command, a plain spelling of one, or the generated script at an edited path.
 
     The one test behind every Hermes registration check, the Python mirror of
-    hermesHookEntryOwned. A command with a blank at either end, or with
-    arguments, belongs to the user: Setup keeps it and does not count it.
+    hermesHookEntryOwned. A plain spelling of the current command (another
+    quoting, blanks around it, plain arguments after it) is the current entry:
+    Setup replaces it, so a registration that holds one beside the entry Setup
+    added is not two handlers to count (GAP-0873). Any other command belongs
+    to the user: Setup keeps it and does not count it.
     """
 
     if command in current:
         return True
-    split = _split_hook_command(command)
-    if split is not None and split[0] in current and not split[1]:
+    if hermes_command_spells_script(command, current):
         return True
     # The edited-path matchers trim blanks, which would claim a command
     # Setup did not write: a command with a blank at either end belongs to the user.
     return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
+
+
+# The characters of a plain shell word: what posixHookCommandWord leaves unquoted.
+_PLAIN_SHELL_CHARS = frozenset(string.ascii_letters + string.digits + "/._-+=:,@%")
+
+
+def hermes_command_spells_script(command: str, current: set[str]) -> bool:
+    """Whether *command* runs a *current* script by a plain spelling.
+
+    Mirrors hermesCommandSpellsTheHookScript in
+    internal/gateway/connector/hook_only.go: the first shell word, quoted with
+    single or double quotes or not at all and with blanks around the command or
+    inside the quotes, names exactly a current script, and whatever follows is
+    plain words. A word outside that set anywhere (a second command, a
+    redirection, an expansion) means the command does more than run the script.
+    """
+
+    text = command.strip(" \t")
+    word: list[str] = []
+    i = 0
+    while i < len(text) and text[i] not in " \t":
+        char = text[i]
+        if char == "'":
+            end = text.find("'", i + 1)
+            if end < 0:
+                return False
+            word.append(text[i + 1 : end])
+            i = end + 1
+        elif char == '"':
+            end = text.find('"', i + 1)
+            if end < 0 or any(bad in text[i + 1 : end] for bad in "$`\\!"):
+                return False
+            word.append(text[i + 1 : end])
+            i = end + 1
+        elif text.startswith("\\'", i):
+            word.append("'")
+            i += 2
+        elif char in _PLAIN_SHELL_CHARS:
+            word.append(char)
+            i += 1
+        else:
+            return False
+    return "".join(word).strip(" \t") in current and all(
+        char in " \t" or char in _PLAIN_SHELL_CHARS for char in text[i:]
+    )
 
 
 HERMES_HOME_RECORD_FILE = "hermes-home-setup.json"

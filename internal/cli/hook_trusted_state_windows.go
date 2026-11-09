@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
@@ -375,6 +377,38 @@ var windowsConnectorRemovedFromRoster = func(executable, name string) bool {
 // windowsConnectorOffRosterRead is replaceable in tests.
 var windowsConnectorOffRosterRead = enterprisehooks.WindowsConnectorOffRoster
 
+// windowsExcludedAccountNoop reports whether a hook call is the call of an
+// account the current machine policy excludes from enrollment
+// (exclude_users). That account is not governed, so it holds no row in the
+// protected target set, and the resolver answers "absent from the protected
+// target set", the answer of an account whose enrollment is still pending. It
+// is allowed without a verdict, as an account the policy does not cover is,
+// only when the resolver failed for that reason alone, the hook is the
+// standalone one, the hot-config undo closure is neither held nor unreadable,
+// and the running gateway service answers, on its own-status pipe, that its
+// current configuration excludes the account that connected. The hook cannot
+// read that configuration, and no file it can read grants the pass: a gateway
+// that is down, an answer that is slow or unreadable, and any other state
+// keep the refusal, which still tells a new account to wait for its
+// enrollment (GAP-0979).
+func windowsExcludedAccountNoop(executable string, resolveErr error) bool {
+	if !errors.Is(resolveErr, enterprisehooks.ErrWindowsManagedSIDUnregistered) || !standaloneEnterpriseHookCheck(executable) {
+		return false
+	}
+	if held, err := windowsStandaloneHooksHeldClosed(); held || err != nil {
+		return false
+	}
+	excluded, err := windowsCurrentAccountExcluded()
+	return err == nil && excluded
+}
+
+// windowsCurrentAccountExcluded asks the gateway service whether the machine
+// policy excludes the account that runs this process; it is replaceable in
+// tests.
+var windowsCurrentAccountExcluded = func() (bool, error) {
+	return refusalpipe.AccountExcluded(context.Background())
+}
+
 func enterpriseManagedRuntimeAbsenceNoop(
 	executable string,
 	connectorName string,
@@ -388,6 +422,9 @@ func enterpriseManagedRuntimeAbsenceNoop(
 		registered,
 		resolveErr,
 	) {
+		return true
+	}
+	if windowsExcludedAccountNoop(executable, resolveErr) {
 		return true
 	}
 	if resolveErr != nil || policyActive || registered {

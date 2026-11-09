@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"path/filepath"
-	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -146,41 +145,32 @@ func linkTargetCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact
 	return typed || applyPatchCommandPath(facts, candidate)
 }
 
-// windowsActiveHomeMutation reports a typed write or append whose resolved
-// target is a drive-letter path inside the active home. The rule scan reads
-// the call as the tool sent it, with the path's separators escaped, so the
-// rules never see that path in the spelling the typed facts give it; the
-// target is scanned here instead, on every platform the hook decision can run.
-func windowsActiveHomeMutation(candidate actionfacts.PathFact, home string) bool {
-	if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
-		return false
+// typedTargetRuleText is the text the path rules read for the typed target of
+// a file operation. A Windows path is read as the path Windows opens for it
+// (windowsOpenedPath, windowsRuleText), whatever spelling the call used; the
+// rules name each home folder and credential file in one letter case, while
+// Windows reads them in any, so the names below a home are read in lower case.
+// Other paths are read as given, with the active home respelled.
+func typedTargetRuleText(resolved, home string, verbatim bool) string {
+	if opened, ok, _ := windowsOpenedPath(resolved, verbatim); ok {
+		return windowsRuleText(opened, home)
 	}
-	return actionfacts.DriveLetterPath(candidate.Resolved) &&
-		activeHomeAsTilde(candidate.Resolved, home) != candidate.Resolved
+	if pathCaseFoldHost && filepath.IsAbs(resolved) {
+		return caseFoldedPOSIXRuleText(resolved, home)
+	}
+	return activeHomeAsTilde(resolved, home)
 }
 
-// windowsUserPath splits a drive-letter path under a Users folder, in any
-// letter case, into the drive, the account name and the rest.
-var windowsUserPath = regexp.MustCompile(`(?i)^([a-z]:)/users/([^/]+)/(.+)$`)
-
-// typedTargetRuleText is the text the path rules read for the typed target of
-// a file operation. A Windows path names the same file in any letter case,
-// while the rules name each home folder and credential file in one: the home
-// is spelled ~ (or its Users folder in the case the rules read) and the names
-// below it are read in lower case, which is how the rules write them. Other
-// paths are read as given, with the active home respelled.
-func typedTargetRuleText(resolved, home string) string {
-	text := activeHomeAsTilde(resolved, home)
-	if !actionfacts.DriveLetterPath(resolved) {
-		return text
+// typedTargetCandidateText is typedTargetRuleText for a path fact, with
+// false for a path that is neither a rooted Windows spelling nor absolute.
+// A Windows spelling the analysis left unresolved (a trailing dot, a data
+// stream) is read by its normalized form: the file it opens is the same.
+func typedTargetCandidateText(candidate actionfacts.PathFact, home string) (string, bool) {
+	spelling := pathFactSpelling(candidate)
+	if !windowsRootedSpelling(spelling) && !filepath.IsAbs(candidate.Resolved) {
+		return "", false
 	}
-	if rest, ok := strings.CutPrefix(text, "~/"); ok {
-		return "~/" + windowsNameFold(rest)
-	}
-	if match := windowsUserPath.FindStringSubmatch(text); match != nil {
-		return match[1] + "/Users/" + match[2] + "/" + windowsNameFold(match[3])
-	}
-	return text
+	return typedTargetRuleText(spelling, home, windowsVerbatimOperand(candidate.Value)), true
 }
 
 // windowsNameFold spells a Windows name in the lower case the rules write.
@@ -243,21 +233,28 @@ func fileToolLinkTargetFindings(
 	options ruleScanOptions,
 ) []RuleFinding {
 	typed := actionfacts.PathTool(request.Input.Tool)
-	if !facts.Authoritative() || !facts.EnforcementEligible() || !typed && !hasApplyPatchCommand(facts) {
+	if !facts.Authoritative() || !facts.EnforcementEligible() ||
+		!typed && !hasApplyPatchCommand(facts) && !pathCaseFoldHost {
 		return nil
 	}
 	var findings []RuleFinding
 	for _, candidate := range facts.Paths {
-		if !linkTargetCandidate(facts, candidate, typed) {
+		// On a case-folding host every path of the action is also read in
+		// the spelling the rules write, whatever the command or access:
+		// ~/.NETRC is the file ~/.netrc names.
+		if !linkTargetCandidate(facts, candidate, typed) && !pathCaseFoldHost {
 			continue
 		}
-		if !filepath.IsAbs(candidate.Resolved) && !windowsActiveHomeMutation(candidate, request.Input.ActiveHome) {
+		text, ok := typedTargetCandidateText(candidate, request.Input.ActiveHome)
+		if !ok {
 			continue
 		}
-		for _, finding := range scanRuleGeneration(
-			generation, typedTargetRuleText(candidate.Resolved, request.Input.ActiveHome), request.Input.Tool, options,
-		) {
-			if trustedActionSensitivePathRule(finding.RuleID) {
+		for _, finding := range scanRuleGeneration(generation, text, request.Input.Tool, options) {
+			// A case-folding host reads the path rules that have no
+			// path proof (AWS config, GnuPG, /etc/shadow) in any letter case
+			// too: the exact-case spelling gets their finding from the call text.
+			if trustedActionSensitivePathRule(finding.RuleID) ||
+				pathCaseFoldHost && strings.HasPrefix(finding.RuleID, "PATH-") {
 				findings = append(findings, finding)
 			}
 		}

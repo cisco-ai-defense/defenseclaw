@@ -145,7 +145,8 @@ func TestCompactPatchEnvelopeKeepsTheChanges(t *testing.T) {
 		"*** Begin Patch\n*** Update File: b.txt\n*** End Patch",
 		"*** Begin Patch\n*** Add File: a.txt\n\n+x\n*** End Patch",
 	} {
-		compact, ok := compactPatchEnvelope(envelope)
+		budget := maxBoundedPatchBytes
+		compact, _, _, ok := reducePatchEnvelope(envelope, false, &budget)
 		if !ok {
 			t.Fatalf("compact %q", envelope)
 		}
@@ -159,5 +160,88 @@ func TestCompactPatchEnvelopeKeepsTheChanges(t *testing.T) {
 				t.Fatalf("%q: change %d %+v != %+v", envelope, i, full.changes[i], reduced.changes[i])
 			}
 		}
+	}
+}
+
+func overLimitPatchInput(t *testing.T, patch string) (Input, Facts) {
+	t.Helper()
+	return overLimitContentInput(t, "apply_patch", map[string]any{"command": patch})
+}
+
+// TestOverLimitPatchBoundedTwin pins that a patch envelope over the argument
+// limit only by white space has a twin within the limits that carries every
+// file's text without the padding, so the content proofs read it; a patch
+// with a file whose text has no bounded form has a twin that keeps that
+// text out, and names the file.
+func TestOverLimitPatchBoundedTwin(t *testing.T) {
+	line := "/usr/local/lib/liblogger.so"
+	for _, c := range []struct{ name, text string }{
+		{"trailing", line + strings.Repeat(" ", 300000)},
+		{"leading", strings.Repeat(" ", 300000) + line},
+		{"inner", line + strings.Repeat("\t", 300000) + "/usr/local/lib/b.so"},
+		{"padding lines", line + "\n+" + strings.Repeat("\n+  ", 100000)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			input, facts := overLimitPatchInput(t, "*** Begin Patch\n*** Add File: /etc/ld.so.preload\n+"+c.text+"\n*** End Patch\n")
+			if !LimitExceededWriteTool(input, facts) {
+				t.Fatalf("not limit-exceeded: %s", facts.Parse.Status)
+			}
+			args, ok := OverLimitWriteBoundedTwin(input, facts)
+			if !ok || len(args) > maxCommandBytes {
+				t.Fatalf("twin ok=%t len=%d", ok, len(args))
+			}
+			twin := Input{Tool: "apply_patch", Args: args}
+			if !ExactGlobalLDPreloadFileWrite(twin, Analyze(twin)) {
+				t.Fatalf("content proof does not read the twin: %s", args)
+			}
+			if class, elided := OverLimitWriteElidedContentTarget(input, facts, nil); elided {
+				t.Fatalf("padding left text out for %s", class)
+			}
+		})
+	}
+}
+
+// TestOverLimitPatchElidedContentTargetIsPerFile pins that only the patch
+// file whose own text could not be bounded has an unproven content rule.
+func TestOverLimitPatchElidedContentTargetIsPerFile(t *testing.T) {
+	opaque := strings.Repeat("x", 300000)
+	for _, c := range []struct{ name, patch, class string }{
+		{"opaque preload", "*** Add File: /etc/ld.so.preload\n+" + opaque + "\n", "global-preload"},
+		{"opaque pam", "*** Add File: /etc/pam.d/sshd\n+" + opaque + "\n", "pam"},
+		{"opaque update of daemon.json", "*** Update File: /etc/docker/daemon.json\n@@\n+" + opaque + "\n", "docker-daemon-config"},
+		{"opaque ordinary file", "*** Add File: /srv/app/a.txt\n+" + opaque + "\n", ""},
+		{"opaque ordinary beside small preload", "*** Add File: /srv/app/a.txt\n+" + opaque + "\n*** Add File: /etc/ld.so.preload\n+# none\n", ""},
+		{"opaque preload beside small ordinary", "*** Add File: /srv/app/a.txt\n+ok\n*** Add File: /etc/ld.so.preload\n+" + opaque + "\n", "global-preload"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			input, facts := overLimitPatchInput(t, "*** Begin Patch\n"+c.patch+"*** End Patch\n")
+			if !LimitExceededWriteTool(input, facts) {
+				t.Fatalf("not limit-exceeded: %s", facts.Parse.Status)
+			}
+			class, ok := OverLimitWriteElidedContentTarget(input, facts, nil)
+			if class != c.class || ok != (c.class != "") {
+				t.Fatalf("class=%q ok=%t, want %q", class, ok, c.class)
+			}
+		})
+	}
+}
+
+// TestOverLimitPatchEnvelopeBounded pins the reduction of a patch envelope
+// itself: padding is removed from hunk lines, a run of white space inside a
+// line is one space, ordinary indentation stays, and the paths and
+// accesses of the envelope are those of the original.
+func TestOverLimitPatchEnvelopeBounded(t *testing.T) {
+	envelope := "*** Begin Patch\n*** Update File: b.txt\n*** Move to: d.txt\n@@ f   \n    indented  \n-old" +
+		strings.Repeat(" ", 200) + "\n+a" + strings.Repeat(" ", 200) + "b\n+" + strings.Repeat(" ", 200) + "\n+" +
+		strings.Repeat(" ", 200) + "\n*** End of File\n*** End Patch\n"
+	budget := maxBoundedPatchBytes
+	reduced, elided, unscoped, ok := reducePatchEnvelope(envelope, true, &budget)
+	want := "*** Begin Patch\n*** Update File: b.txt\n*** Move to: d.txt\n@@ f\n    indented\n-old\n+a b\n+\n*** End of File\n*** End Patch\n"
+	if !ok || reduced != want || len(elided) != 0 || unscoped {
+		t.Fatalf("ok=%t elided=%v unscoped=%t reduced %q", ok, elided, unscoped, reduced)
+	}
+	full, got := parsePatchEnvelope(envelope), parsePatchEnvelope(reduced)
+	if full.status != got.status || len(full.changes) != len(got.changes) || full.hasMove != got.hasMove {
+		t.Fatalf("full %+v, reduced %+v", full, got)
 	}
 }

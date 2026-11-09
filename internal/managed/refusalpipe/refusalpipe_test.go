@@ -44,3 +44,28 @@ func TestNormalizeAcceptsTheCredentialPendingReason(t *testing.T) {
 		t.Error("an unknown reason was accepted")
 	}
 }
+
+// Only exactly {"excluded":true} is an exclusion; an absent field, another
+// type, extra fields, trailing data and an empty answer are errors or false.
+func TestParseExcludedAnswerAcceptsOnlyAnExactExclusion(t *testing.T) {
+	for _, tc := range []struct {
+		answer  string
+		want    bool
+		wantErr bool
+	}{
+		{answer: string(ExcludedAnswer(true)), want: true},
+		{answer: string(ExcludedAnswer(false))},
+		{answer: `{"excluded":true,"extra":1}`, wantErr: true},
+		{answer: `{"excluded":"true"}`, wantErr: true},
+		{answer: `{"excluded":null}`, wantErr: true},
+		{answer: `{}`, wantErr: true},
+		{answer: `{"excluded":true}{"excluded":true}`, wantErr: true},
+		{answer: `[]`, wantErr: true},
+		{answer: ``, wantErr: true},
+	} {
+		got, err := ParseExcludedAnswer([]byte(tc.answer))
+		if got != tc.want || (err != nil) != tc.wantErr {
+			t.Errorf("ParseExcludedAnswer(%q) = %t, %v; want %t, error=%t", tc.answer, got, err, tc.want, tc.wantErr)
+		}
+	}
+}

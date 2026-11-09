@@ -8677,6 +8677,67 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
 
 
 @dataclass(frozen=True)
+class _OpenClawConfigMark:
+    """What one openclaw.json held before setup, as a digest.
+
+    A failed setup never rewrites openclaw.json: nothing on disk, and nothing a
+    gateway reports, says who wrote the bytes that are there at the end, so any
+    automatic put-back can overwrite a save made by OpenClaw or the operator
+    (GAP-0973). The mark only lets the failure message say whether setup
+    changed the file.
+    """
+
+    path: str
+    digest: str
+
+
+def _openclaw_config_digest(path: str) -> str:
+    """SHA-256 of the file, "missing" when absent, "unreadable" when it cannot be read."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(chunk)
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unreadable"
+    return digest.hexdigest()
+
+
+def _openclaw_config_marks(config_file: str | None) -> tuple[_OpenClawConfigMark, ...]:
+    """The configured openclaw.json, and the one in the account's OpenClaw home that the registration writes."""
+    paths: list[str] = []
+    for raw in (config_file, os.path.join("~", ".openclaw", "openclaw.json")):
+        if not raw:
+            continue
+        path = os.path.realpath(os.path.expanduser(raw))
+        if os.path.normcase(path) not in {os.path.normcase(known) for known in paths}:
+            paths.append(path)
+    return tuple(_OpenClawConfigMark(path, _openclaw_config_digest(path)) for path in paths)
+
+
+def _with_openclaw_config_marks(snapshot: _SetupConfigSnapshot, config_file: str | None) -> _SetupConfigSnapshot:
+    return replace(snapshot, openclaw_config=_openclaw_config_marks(config_file))
+
+
+# What a failed setup says about an openclaw.json that differs from before setup. Nothing on disk says who
+# wrote those bytes, so the text claims no writer: the file changed during setup and may still hold DefenseClaw
+# entries. The teardown removes them from the OpenClaw home file whatever the rollback left configured (it
+# does not depend on the connector set) and leaves a copy at any other path alone (GAP-0973).
+_OPENCLAW_SETUP_LEFT_FILE_NOTICE = (
+    "{paths} changed during setup and may still contain DefenseClaw entries; run "
+    "`defenseclaw-gateway connector teardown --connector openclaw` to remove them. The command works on "
+    "the OpenClaw home file (~/.openclaw/openclaw.json), keeps everything else in it, and leaves a copy at "
+    "any other path as it is."
+)
+
+
+def _openclaw_config_changed_by_setup(marks: tuple[_OpenClawConfigMark, ...]) -> list[str]:
+    return [mark.path for mark in marks if _openclaw_config_digest(mark.path) != mark.digest]
+
+
+@dataclass(frozen=True)
 class _SetupConfigSnapshot:
     """Exact rollback point for desired config and setup authority receipts."""
 
@@ -8698,6 +8759,7 @@ class _SetupConfigSnapshot:
     hook_contract_lock_generation: tuple[int, int, int, int] | None
     applied_runtime: _SetupAppliedRuntimeEvidence | None
     codex_rollback: _SetupCodexRollbackPoint | None = None
+    openclaw_config: tuple[_OpenClawConfigMark, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -11151,6 +11213,8 @@ def _rollback_failed_connector_application(
     elif exact_runtime:
         rollback_errors.append("runtime reconciliation was skipped because restored authority was not exact")
 
+    openclaw_files_changed = _openclaw_config_changed_by_setup(snapshot.openclaw_config)
+
     rollback_errors.extend(_verify_restored_codex_root(app.cfg, snapshot))
 
     left_changed: list[str] = []
@@ -11263,6 +11327,9 @@ def _rollback_failed_connector_application(
             f"connector setup did not converge {cause_text}; {outcome}. "
             "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
         )
+    if openclaw_files_changed:
+        left_file_notice = _OPENCLAW_SETUP_LEFT_FILE_NOTICE.format(paths=", ".join(openclaw_files_changed))
+        failure = click.ClickException(f"{failure.format_message()} {left_file_notice}")
     if openclaw_gateway_down:
         failure = click.ClickException(
             f"{failure.format_message()} Note: the OpenClaw gateway is not running; start it with "
@@ -15038,6 +15105,9 @@ def _setup_guardrail_connector_alias(
             ux.echo("  Aborted — no changes made.")
             return
 
+    if connector == "openclaw" and restart:
+        _require_openclaw_gateway_before_setup(app)
+
     # Take the rollback point before switching the connector below: a
     # snapshot taken afterwards restores the requested connector in memory
     # and its picked_connector hint, so a failed setup's rollback restarted
@@ -15047,6 +15117,8 @@ def _setup_guardrail_connector_alias(
     except OSError as exc:
         reason, next_step = _setup_rollback_point_failure(exc)
         raise click.ClickException(f"cannot establish guardrail setup rollback point: {reason}\n{next_step}") from exc
+    if connector == "openclaw":
+        prior_snapshot = _with_openclaw_config_marks(prior_snapshot, app.cfg.claw.config_file)
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
@@ -15382,6 +15454,44 @@ def _adopt_openclaw_gateway_port(app: AppContext) -> None:
         return
     click.echo(f"  Using the OpenClaw gateway port from openclaw.json: {port} (was {gw.port}).")
     gw.port = port
+
+
+_OPENCLAW_PRESETUP_WAIT_SECONDS = 30
+
+
+def _require_openclaw_gateway_before_setup(app: AppContext) -> None:
+    """Fail before any write when OpenClaw's own gateway is not running (GAP-0973).
+
+    Setup registers the plugin and then needs OpenClaw's gateway to load it.
+    With that gateway down the run could only fail after openclaw.json carried
+    DefenseClaw's entries, and the rollback restarts DefenseClaw's gateway on
+    the restored configuration, which writes them again when that
+    configuration already names OpenClaw. A stopped gateway that has a service
+    is started here (the restart the setup would do anyway); a gateway that
+    still does not answer leaves every file as it was.
+    """
+    gw = app.cfg.gateway
+    host = gw.host or "127.0.0.1"
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return
+    port = _openclaw_json_gateway_port(app.cfg.claw.config_file) or gw.port
+    if _openclaw_gateway_healthy(host, port):
+        return
+    import time
+
+    _restart_openclaw_gateway()
+    deadline = time.monotonic() + _OPENCLAW_PRESETUP_WAIT_SECONDS
+    while not _openclaw_gateway_healthy(host, port):
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(1)
+    else:
+        return
+    raise click.ClickException(
+        f"The OpenClaw gateway is not running (nothing answers at {host}:{port}). Start it with "
+        "`openclaw gateway run` (or `openclaw gateway restart`), then run the same setup command again. "
+        "No changes made."
+    )
 
 
 def _make_guardrail_connector_setup_command(connector: str) -> click.Command:

@@ -31,6 +31,13 @@ var ruleReadableHome = regexp.MustCompile(`^(?:/root|/home/\w+|/Users/\w+)$`)
 // case, in any script, and through upper case, so an account name such as an
 // accented one matches its other case and a dotless i matches i.
 func activeHomeAsTilde(text, home string) string {
+	return respellActiveHome(text, home, false)
+}
+
+// respellActiveHome is activeHomeAsTilde with the Windows name comparison
+// also available for a POSIX home (foldPOSIX), for a host whose file system
+// names a file in any letter case (see pathCaseFoldHost).
+func respellActiveHome(text, home string, foldPOSIX bool) string {
 	home = strings.TrimRight(strings.ReplaceAll(home, `\`, "/"), "/")
 	windows := actionfacts.DriveLetterPath(home + "/")
 	if len(home) < 2 || !windows && (home[0] != '/' || ruleReadableHome.MatchString(home)) {
@@ -44,7 +51,7 @@ func activeHomeAsTilde(text, home string) string {
 		}
 		return from + offset, from + offset + len(needle)
 	}
-	if windows {
+	if windows || foldPOSIX {
 		find = func(from int) (int, int) { return indexFoldedPrefix(text, needle, from) }
 	}
 	var out strings.Builder
