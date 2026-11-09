@@ -276,7 +276,7 @@ func canonicalizeOpenedDarwin(
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
-	if assessment.Owner == ownerUntrusted && !opts.AllowUntrustedOwnerTransfer {
+	if assessment.Owner == ownerUntrusted && !ownerTransferAllowed(result.Kind, opts) {
 		result.Outcome = CanonicalBoundary
 		result.RepairError = "owner is not trusted; not adopted"
 		reportCanonicalResult(result, opts)

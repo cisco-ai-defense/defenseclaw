@@ -47,11 +47,12 @@ func TestCanonicalSDDLInstallerKinds(t *testing.T) {
 		ObjectManagedIPCDirectory: entries("", "(A;%s;0x1f01ff;;;"+testGatewaySID+")",
 			"(A;%s;0x1200a9;;;S-1-5-11)"),
 	}
-	// The Secure Client marker has the service install directory's entries
-	// and SYSTEM as its owner, as Set-DefenseClawSecureClientInstallMarker
-	// stamps it.
+	// The Secure Client marker is SYSTEM-owned with SYSTEM, Administrators
+	// and Users read and no gateway entry, as
+	// Set-DefenseClawSecureClientInstallMarker stamps it: a gateway entry
+	// the installer does not write would be drift after every install.
 	cases[ObjectSecureClientMarkerDirectory] = strings.Replace(
-		entries("OICI", gatewayRX, users), "O:S-1-5-32-544", "O:S-1-5-18", 1)
+		entries("OICI", users), "O:S-1-5-32-544", "O:S-1-5-18", 1)
 	for kind, want := range cases {
 		if got := canonicalSpecFor(kind, testGatewaySID).canonicalSDDL(); got != want {
 			t.Errorf("%s SDDL = %s, want %s", kind, got, want)
@@ -341,5 +342,20 @@ func TestAssessSecureClientMarkerOwnerAndReset(t *testing.T) {
 	// The service install directory keeps accepting an Administrators owner.
 	if got := assessCanonicalDescriptor(installerDescriptor(ObjectServiceInstallDirectory), ObjectServiceInstallDirectory, testGatewaySID, nil); !got.Canonical {
 		t.Fatalf("service install directory no longer canonical: %v", got.Drift)
+	}
+}
+
+// A repair allowed to transfer untrusted owners still never adopts a Secure
+// Client marker: its SYSTEM owner is the Secure Client fact itself.
+func TestOwnerTransferNeverAdoptsSecureClientMarker(t *testing.T) {
+	allowed := CanonicalOptions{AllowUntrustedOwnerTransfer: true}
+	if ownerTransferAllowed(ObjectSecureClientMarkerDirectory, allowed) {
+		t.Fatal("owner transfer allowed for the Secure Client marker")
+	}
+	if !ownerTransferAllowed(ObjectServiceInstallDirectory, allowed) {
+		t.Fatal("owner transfer refused for the service install directory when the caller allows it")
+	}
+	if ownerTransferAllowed(ObjectServiceInstallDirectory, CanonicalOptions{}) {
+		t.Fatal("owner transfer allowed without the caller's consent")
 	}
 }

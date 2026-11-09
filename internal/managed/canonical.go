@@ -52,9 +52,11 @@ const (
 	// ObjectServiceInstallFile is the gateway executable.
 	ObjectServiceInstallFile ObjectKind = "ServiceInstallFile"
 	// ObjectSecureClientMarkerDirectory is InstallRoot\secure-client.install,
-	// the empty folder that marks a Secure Client install: the service install
-	// directory's entries, owned by SYSTEM. Only a SYSTEM-owned marker is the
-	// installer's; another owner is a boundary, never adopted.
+	// the empty folder that marks a Secure Client install: owned by SYSTEM,
+	// SYSTEM and Administrators full control and Users read, as
+	// Set-DefenseClawSecureClientInstallMarker stamps it (no gateway entry).
+	// Only a SYSTEM-owned marker is the installer's; another owner is a
+	// boundary, never adopted, even by a repair that may transfer owners.
 	ObjectSecureClientMarkerDirectory ObjectKind = "SecureClientMarkerDirectory"
 	// ObjectStateDirectory is StateRoot: gateway read and traverse.
 	ObjectStateDirectory ObjectKind = "StateDirectory"
@@ -164,6 +166,14 @@ type CanonicalOptions struct {
 	// UnixMode overrides a kind's macOS canonical permission bits, for
 	// per-user objects whose mode depends on the file (a hook script, a token).
 	UnixMode os.FileMode
+}
+
+// ownerTransferAllowed reports whether a repair may replace an untrusted
+// owner of kind. The Secure Client install marker is never transferred: its
+// SYSTEM owner is the fact that this is a Secure Client install, so a repair
+// must not create that fact for a folder someone else made.
+func ownerTransferAllowed(kind ObjectKind, opts CanonicalOptions) bool {
+	return opts.AllowUntrustedOwnerTransfer && kind != ObjectSecureClientMarkerDirectory
 }
 
 // UnixOwnership is a uid and gid pair for CanonicalOptions.UnixOwner.
@@ -338,9 +348,7 @@ func canonicalSpecFor(kind ObjectKind, gatewaySID string) canonicalSpec {
 	case ObjectServiceInstallDirectory, ObjectServiceInstallFile:
 		return gatewayRead(withUsers(withGateway(maskReadAndExecute)))
 	case ObjectSecureClientMarkerDirectory:
-		spec := gatewayRead(withUsers(withGateway(maskReadAndExecute)))
-		spec.Forms[0].Owner = sidLocalSystem
-		return spec
+		return canonicalSpec{Forms: []canonicalForm{{Owner: sidLocalSystem, ACEs: withUsers(base)}}}
 	case ObjectInstallDirectory, ObjectInstallFile:
 		return canonicalSpec{Forms: []canonicalForm{{Owner: sidAdministrators, ACEs: withUsers(base)}}}
 	case ObjectAdminDirectory, ObjectAdminFile, ObjectLogDirectory:

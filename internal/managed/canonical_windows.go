@@ -172,7 +172,7 @@ func canonicalize(path string, kind ObjectKind, opts CanonicalOptions, repair bo
 		reportCanonicalResult(result, opts)
 		return result, nil
 	}
-	if assessment.Owner == ownerUntrusted && !descriptorUnreadable && !opts.AllowUntrustedOwnerTransfer {
+	if assessment.Owner == ownerUntrusted && !descriptorUnreadable && !ownerTransferAllowed(kind, opts) {
 		result.Outcome = CanonicalBoundary
 		result.RepairError = "owner is not trusted; not adopted"
 		reportCanonicalResult(result, opts)
