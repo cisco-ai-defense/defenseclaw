@@ -201,6 +201,7 @@ func (s *commandWriteScan) protectedWriteClass() string {
 	for index := 0; index < len(s.text); {
 		s.syncScopes(index)
 		if end := spanEnd(s.layout.skipped, &skipCursor, index); end > index {
+			s.followBraced(index, end)
 			index = end
 			continue
 		}
@@ -246,7 +247,7 @@ func (s *commandWriteScan) protectedWriteClass() string {
 		if class != "" {
 			return class
 		}
-		index = max(next, index+1)
+		index = codeStartIn(text, index+1, max(next, index+1))
 	}
 	return ""
 }
@@ -293,10 +294,36 @@ func (s *commandWriteScan) followAssignments() {
 	var skipCursor, quotedCursor int
 	for index := 0; index < len(s.text); {
 		if end := spanEnd(s.layout.skipped, &skipCursor, index); end > index {
+			s.followBraced(index, end)
 			index = end
 			continue
 		}
-		index = s.followStatement(s.readableText(&quotedCursor, index), index)
+		text := s.readableText(&quotedCursor, index)
+		index = codeStartIn(text, index+1, max(s.followStatement(text, index), index+1))
+	}
+}
+
+// followBraced applies the assigning braced expansions written in the skipped
+// text from start to end.
+func (s *commandWriteScan) followBraced(start, end int) {
+	for index := start; index < end; index++ {
+		if s.text[index] == shellDollar {
+			s.followBracedAssignment(s.text, index)
+		}
+	}
+}
+
+// followBracedAssignment adds the value of the assigning braced expansion at
+// index (${NAME=word}) to those its variable may hold. The expansion sets the
+// variable only when it is unset, so it never replaces a value.
+func (s *commandWriteScan) followBracedAssignment(text string, index int) {
+	name, start, end, ok := bracedAssignmentAt(text, index)
+	if !ok {
+		return
+	}
+	word, _, plain := readCommandWord(text[:end], start)
+	for _, value := range s.expand(word, plain) {
+		s.addVariable(name, value)
 	}
 }
 
@@ -315,6 +342,10 @@ func (s *commandWriteScan) readableText(cursor *int, index int) string {
 // the value or the directories (a sequential text only); any other adds to
 // them.
 func (s *commandWriteScan) followStatement(text string, index int) int {
+	if text[index] == shellDollar {
+		s.followBracedAssignment(text, index)
+		return index + 1
+	}
 	straight := s.layout.sequential && s.layout.straight[index]
 	if name := assignmentNameAt(text, index); name != "" {
 		word, after, plain := readCommandWord(text, index+len(name)+1)
@@ -502,20 +533,101 @@ func (s *commandWriteScan) expand(word string, plain bool) []string {
 }
 
 // assignmentNameAt is the name of a variable assignment (NAME=) that starts
-// at index, "" when none does.
+// at index, "" when none does. The name in ${NAME=word} is no assignment
+// statement: bracedAssignmentAt reads it.
 func assignmentNameAt(text string, index int) string {
-	if index > 0 && isScanWordByte(text[index-1]) {
+	if index > 0 && isScanWordByte(text[index-1]) || strings.HasSuffix(text[:index], "${") {
 		return ""
 	}
+	end := nameEnd(text, index)
+	if end == index || end >= len(text) || text[end] != 0x3d {
+		return ""
+	}
+	return text[index:end]
+}
+
+// nameEnd is the index after the variable name that starts at index; index
+// when none does.
+func nameEnd(text string, index int) int {
 	end := index
 	for end < len(text) && (text[end] == 0x5f || text[end] >= 0x41 && text[end] <= 0x5a ||
 		text[end] >= 0x61 && text[end] <= 0x7a || end > index && text[end] >= 0x30 && text[end] <= 0x39) {
 		end++
 	}
-	if end == index || end >= len(text) || text[end] != 0x3d {
-		return ""
+	return end
+}
+
+// maxBracedAssignment bounds how far the closing brace of an assigning braced
+// expansion is looked for, so a text of unclosed ones is read in linear time.
+const maxBracedAssignment = 4096
+
+// bracedAssignmentAt reads the assigning braced expansion that starts at
+// index: ${NAME=word}, ${NAME:=word} or ${NAME[subscript]=word}. It returns
+// the name, the index where the word starts and the index of the first closing
+// brace after it; false for any other expansion or one that does not close
+// within maxBracedAssignment bytes.
+func bracedAssignmentAt(text string, index int) (name string, wordStart, closeAt int, ok bool) {
+	if !strings.HasPrefix(text[index:], "${") {
+		return "", 0, 0, false
 	}
-	return text[index:end]
+	window := text[:min(len(text), index+maxBracedAssignment)]
+	end := nameEnd(window, index+2)
+	if end == index+2 {
+		return "", 0, 0, false
+	}
+	name = text[index+2 : end]
+	if end < len(window) && window[end] == '[' {
+		subscript := strings.IndexByte(window[end:], ']')
+		if subscript < 0 {
+			return "", 0, 0, false
+		}
+		end += subscript + 1
+	}
+	switch {
+	case strings.HasPrefix(window[end:], ":="):
+		wordStart = end + 2
+	case end < len(window) && window[end] == '=':
+		wordStart = end + 1
+	default:
+		return "", 0, 0, false
+	}
+	closed := strings.IndexByte(window[wordStart:], shellCloseBrace)
+	if closed < 0 {
+		return "", 0, 0, false
+	}
+	return name, wordStart, wordStart + closed, true
+}
+
+// codeStartIn is the index of the first command substitution, backtick or
+// assigning braced expansion that starts in text from start to end, outside
+// single quotes; end when none does. A scan that read a word whole resumes
+// there, so the code a quoted word holds is read as the code outside it is.
+func codeStartIn(text string, start, end int) int {
+	double := false
+	for index := start; index < end; index++ {
+		switch text[index] {
+		case scanBackslash:
+			index++
+		case scanDouble:
+			double = !double
+		case scanSingle:
+			if !double {
+				if close := strings.IndexByte(text[index+1:], scanSingle); close >= 0 {
+					index += close + 1
+				}
+			}
+		case shellBacktick:
+			return index
+		case shellDollar:
+			if index+1 < len(text) && text[index+1] == shellOpenParen {
+				return index
+			}
+			if _, _, _, ok := bracedAssignmentAt(text, index); ok {
+				return index
+			}
+		}
+	}
+	return end
 }
 
 // classOf is the content-rule class of the file a write word names, ""

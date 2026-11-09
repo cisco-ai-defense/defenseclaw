@@ -49,9 +49,9 @@ import (
 // reading marks each as a scope, so the caller reads what is inside it with
 // its own working directory and values and takes them back at its close; the
 // text stays sequential. A braced expansion is data, except the
-// substitutions inside it and an assigning one (${NAME=word}), which runs in
-// the main shell and counts the text as not sequential. A word that holds
-// code is skipped as text only outside it. The inside of a command
+// substitutions inside it; the variable an assigning one (${NAME=word}) may
+// set is added to the values the caller follows, where the expansion is
+// written. A word that holds code is skipped as text only outside it. The inside of a command
 // substitution is read as a command text of its own, to a bounded depth, so
 // the comments, data and printed words inside it are skipped as they are
 // outside it. A construct the reading cannot step over (a process
@@ -393,21 +393,12 @@ func (r *layoutReader) skipOutsideCode(start, end int, code []textSpan) {
 // readInside marks each command substitution and backtick among the code
 // spans as a scope and reads the inside of a command substitution as a command
 // text of its own, adding what that reading skips, quotes and runs in order.
-// A backtick (its backslashes change the text) stays text. Any other code span
-// is an assigning braced expansion: it runs in the main shell, in no order the
-// reading knows.
+// A backtick (its backslashes change the text) stays text.
 func (r *layoutReader) readInside(code []textSpan) {
 	for _, span := range code {
-		switch r.text[span.start] {
-		case shellBacktick:
-			r.layout.scopes = append(r.layout.scopes, span)
-		case shellDollar:
-			if r.text[span.start+1] == shellOpenParen {
-				r.layout.scopes = append(r.layout.scopes, span)
-				r.readSubstitution(span)
-				continue
-			}
-			r.layout.sequential = false
+		r.layout.scopes = append(r.layout.scopes, span)
+		if r.text[span.start] == shellDollar {
+			r.readSubstitution(span)
 		}
 	}
 }
@@ -614,28 +605,12 @@ func layoutDollarEnd(text string, index int, code *[]textSpan) int {
 			return end + 1
 		}
 		end = layoutNestedEnd(text, index+2, shellCloseBrace)
-		switch {
-		case end < 0 || code == nil:
-		case bracedAssigns(text[index+2 : end-1]):
-			*code = append(*code, textSpan{index, end})
-		default:
+		if end >= 0 && code != nil {
 			*code = append(*code, documentCode(text[:end-1], index+2)...)
 		}
 		return end
 	}
 	return index + 1
-}
-
-// bracedAssigns reports whether the body of a braced expansion (the text after
-// "${") may assign its variable: ${NAME=word} and ${NAME:=word}, and a
-// subscripted name, which is read as one that may.
-func bracedAssigns(body string) bool {
-	end := 0
-	for end < len(body) && (body[end] == '_' || body[end] >= 'A' && body[end] <= 'Z' ||
-		body[end] >= 'a' && body[end] <= 'z' || body[end] >= '0' && body[end] <= '9') {
-		end++
-	}
-	return end < len(body) && (body[end] == '=' || body[end] == '[' || strings.HasPrefix(body[end:], ":="))
 }
 
 // layoutDoubleQuoteEnd is the index after the double quote that closes the
