@@ -96,3 +96,52 @@ func TestShellFormApplyPatchGetsTheContentProofVerdictOfTheTypedTool(t *testing.
 		}
 	}
 }
+
+// A shell function the action defined for certain takes the name apply_patch
+// and consumes the here-document itself: the call runs that function, which
+// writes nothing of the patch, and the call is allowed in the default profile.
+// A call the action may still send to the program is read as the program: a
+// definition after the call, in a subshell, a name unset, a function that
+// forwards to the program.
+func TestShellFunctionNamedApplyPatchIsNotReadAsThePatchProgram(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	const (
+		patch  = "apply_patch <<\x27PATCH\x27\n*** Begin Patch\n*** Add File: /etc/ld.so.preload\n+/usr/local/lib/libreview.so\n*** End Patch\nPATCH\n"
+		loader = "persistence.global_ld_preload_install"
+	)
+	rows := []struct {
+		name, command string
+		block         bool
+	}{
+		{name: "program alone", command: patch, block: true},
+		{name: "function that does nothing", command: "apply_patch() { :; }\n" + patch},
+		{name: "function that writes an ordinary file", command: "apply_patch() { cat > notes.txt; }\n" + patch},
+		{name: "function after a cd", command: "apply_patch() { :; }\ncd " + project + " && " + patch},
+		{name: "function defined after the call", command: patch + "apply_patch() { :; }\n", block: true},
+		{name: "function defined in a subshell", command: "( apply_patch() { :; } )\n" + patch, block: true},
+		{name: "function unset", command: "apply_patch() { :; }\nunset -f apply_patch\n" + patch, block: true},
+		{name: "function that forwards to the program", command: "apply_patch() { exec apply_patch; }\n" + patch, block: true},
+		{name: "function that forwards by path", command: "apply_patch() { /usr/bin/apply_patch; }\n" + patch, block: true},
+		{name: "ordinary patch after a function", command: "apply_patch() { :; }\napply_patch <<\x27PATCH\x27\n*** Begin Patch\n*** Add File: notes-fn.txt\n+hello\n*** End Patch\nPATCH\n"},
+	}
+	for _, connector := range []string{"codex", "claudecode"} {
+		for _, row := range rows {
+			t.Run(connector+"/"+row.name, func(t *testing.T) {
+				tool, input := "Bash", map[string]any{"command": row.command}
+				if connector == "codex" {
+					tool, input = "exec_command", map[string]any{"cmd": row.command}
+				}
+				body := mustJSON(t, map[string]any{
+					"session_id": "shell-function-patch", "hook_event_name": "PreToolUse", "cwd": project,
+					"permission_mode": "default", "tool_name": tool, "tool_use_id": "toolu-shell-function-patch",
+					"tool_input": input,
+				})
+				got := overLimitHostHookWithEvidence(t, connector, home, string(body), hookpaths.Resolve(body))
+				blocked := overLimitHookAction(t, got) == "block"
+				if blocked != row.block || row.block && !strings.Contains(got, loader) {
+					t.Fatalf("blocked=%t, want block=%t by %q: %.500s", blocked, row.block, loader, got)
+				}
+			})
+		}
+	}
+}

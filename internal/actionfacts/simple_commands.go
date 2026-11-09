@@ -54,6 +54,11 @@ type SimpleCommand struct {
 	// and the directory the action starts in judges the command as well as
 	// any other (rel-1-0-6:GAP-0630 review 5).
 	AbsoluteOnly bool
+	// FunctionCall means Text is a plain call of a function the action
+	// defined for certain before it: the call runs that function, and the
+	// statements of its body, listed after it, are the commands it runs. The
+	// program of the same name is not run by it.
+	FunctionCall bool
 	// EvaluationFailure is "limit" or "parse" when no complete per-command
 	// view can be produced. A parse gap is not an action refusal.
 	EvaluationFailure string
@@ -367,7 +372,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				ZshHistoryBuiltin:       simpleZshHistoryCall(call, effective, interpreter),
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
-				AbsoluteOnly:            state.cwdUnknown && !relative}
+				AbsoluteOnly:            state.cwdUnknown && !relative,
+				FunctionCall:            part.functionCall}
 			if !emitted[command] {
 				result = append(result, command)
 				emitted[command] = true
@@ -381,7 +387,8 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						ZshHistoryBuiltin:       command.ZshHistoryBuiltin,
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
-						AbsoluteOnly:            command.AbsoluteOnly}
+						AbsoluteOnly:            command.AbsoluteOnly,
+						FunctionCall:            command.FunctionCall}
 					if !emitted[alone] {
 						result = append(result, alone)
 						emitted[alone] = true

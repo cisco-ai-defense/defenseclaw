@@ -604,6 +604,7 @@ func dispatchTrustedActionWith(
 					}
 				}
 				child.Input.Args, child.Input.Argv = nil, nil
+				child.Input.ShellFunctionCall = simple.FunctionCall
 				child.LegacyText = simple.Text
 				child.conflictSource = nil
 				child.record, child.recordTelemetry = nil, nil

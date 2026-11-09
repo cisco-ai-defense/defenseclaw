@@ -205,6 +205,10 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 type sequenceStatement struct {
 	text, scope string
 	sourceStart int
+	// functionCall marks a plain call of a function the action defined for
+	// certain before the call: the statement runs that function body, whose
+	// own statements follow it, and no program of that name.
+	functionCall bool
 	// binds holds the USER and LOGNAME names that a for or select loop
 	// around the statement binds, outermost first, with the list each
 	// takes its values from: the statement runs after the binding.
@@ -299,6 +303,23 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	}
 	subshells := 0
 	functions := make(map[string]*syntax.Stmt)
+	// definite holds the functions a top-level statement defined, and
+	// indefinite those a conditional, nested or later-run statement also
+	// defines: a call of a name in indefinite may run a program of that name.
+	definite, indefinite := make(map[string]bool), make(map[string]bool)
+	topLevel := make(map[*syntax.FuncDecl]bool)
+	for _, stmt := range file.Stmts {
+		if declaration, ok := stmt.Cmd.(*syntax.FuncDecl); ok && !stmt.Negated && !stmt.Background {
+			topLevel[declaration] = true
+		}
+	}
+	mayChange, mayChangeKnown := false, false
+	functionsMayChange := func() bool {
+		if !mayChangeKnown {
+			mayChange, mayChangeKnown = simpleMayReach(file, ""), true
+		}
+		return mayChange
+	}
 	functionDepth := 0
 	// assigned holds the static values the walk has seen assigned to each
 	// variable, so a program word such as $x can name the function it
@@ -385,6 +406,12 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				return true, false
 			}
 			functions[typed.Name.Value] = typed.Body
+			if topLevel[typed] && !indefinite[typed.Name.Value] && !simpleMayReach(typed.Body, typed.Name.Value) {
+				definite[typed.Name.Value] = true
+			} else {
+				indefinite[typed.Name.Value] = true
+				delete(definite, typed.Name.Value)
+			}
 			return true, true
 		case *syntax.Subshell:
 			subshells++
@@ -575,6 +602,9 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				if len(bodies) != 0 {
 					if functionDepth >= 8 || !keep(stmt.Cmd, stmt.Redirs...) {
 						return false
+					}
+					if direct, plain := simpleStaticWord(call.Args[0], nil); plain && definite[direct] && !functionsMayChange() {
+						statements[len(statements)-1].functionCall = true
 					}
 					reduced = true
 					if len(stmt.Redirs) != 0 {
@@ -853,6 +883,30 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 		names = append(names, name)
 	}
 	return names, true
+}
+
+// simpleMayReach reports whether the commands of node can remove or replace a
+// function the walk does not follow (an unset, an eval, a sourced file or a
+// trap, or a command whose name is not a literal word), or, for a name that is
+// not empty, can run the program of that name (any literal word that holds it).
+func simpleMayReach(node syntax.Node, name string) bool {
+	may := false
+	syntax.Walk(node, func(part syntax.Node) bool {
+		call, ok := part.(*syntax.CallExpr)
+		if may || !ok || len(call.Args) == 0 {
+			return !may
+		}
+		program, literal := simpleStaticWord(call.Args[0], nil)
+		may = !literal || program == "eval" || program == "source" || program == "." || program == "trap"
+		for _, arg := range call.Args {
+			if word, literal := simpleStaticWord(arg, nil); literal &&
+				(strings.Contains(word, "unset") || name != "" && strings.Contains(word, name)) {
+				may = true
+			}
+		}
+		return !may
+	})
+	return may
 }
 
 // simpleFunctionCallName resolves literal spellings and the shell builtins

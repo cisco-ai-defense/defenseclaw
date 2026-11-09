@@ -70,6 +70,12 @@ type Input struct {
 	// command then resolve under it (GAP-2473); the whole action keeps its
 	// own reading.
 	MovedWindowsShellCWD bool `json:"-"`
+	// ShellFunctionCall is trusted caller context set only when the gateway
+	// judges one command of a POSIX shell action alone and the action defined
+	// the function that command calls (SimpleCommand.FunctionCall). The
+	// command then runs that function, not the program of its name, and
+	// writes no file a content proof reads from the text of a patch.
+	ShellFunctionCall bool `json:"-"`
 	// CurrentWindowsDrive is trusted caller context: the drive letter of the
 	// directory the hook payload reported, for a gateway that could not place
 	// that directory itself (CWD is empty). A Windows path with no drive of
