@@ -29,11 +29,13 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // existing link reaches. A whole-file write is judged as the document it
 // leaves: any other setting the document carries, or a registry it lists
 // twice, does not change the verdict. An Edit or MultiEdit of a file the
-// gateway read (Input.ClientNativeFileContents) is applied to that text, step
-// by step, as the tool applies it, and the document it leaves is judged as a
-// write of it; no step is read on its own. An edit of a file that could not be
-// read, a patch or an append is not given the file it changes, so it is judged
-// on the text it leaves in place,
+// gateway read (Input.ClientNativeFileContents; an absent file reads as empty)
+// is applied to that text, step by step, as the tool applies it, and the
+// document it leaves is judged as a write of it; no step is read on its own.
+// When the file has text and a step cannot apply, the tool refuses the call and
+// writes nothing: the file as it is is judged. An edit of a file that could
+// not be read, of an empty one that its steps do not apply to, a patch or an
+// append is not given the file it changes, so it is judged on the text it leaves in place,
 // the union of every replacement of a multi-step edit and every hunk of a
 // patch (its context and added lines), read for the lists it spells, whatever
 // the file held before: an entry the file already listed, or that another
@@ -51,20 +53,27 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 		if !ok || !nativeOperandsCoverTarget(facts, len(writes), target) {
 			continue
 		}
-		document, applied := "", false
-		if content, read := input.ClientNativeFileContents[target]; read && dockerJudgeableText(content) {
-			document, applied = write.applyEdits(content)
+		document, judgeDocument := "", false
+		if content, read := input.ClientNativeFileContents[target]; read && dockerReadableText(content) {
+			switch edited, result := write.applyEdits(content); result {
+			case editApplied:
+				document, judgeDocument = edited, true
+			case editRefused:
+				// The tool refuses the call and writes nothing: the file stays
+				// as it is, and the call adds nothing to it.
+				document, judgeDocument = content, true
+			}
 		}
 		// The file the tool writes is a document, judged as a Write of it.
-		if applied && !dockerJudgeableText(document) ||
-			!applied && !dockerJudgeableText(write.added) {
+		if judgeDocument && !dockerReadableText(document) ||
+			!judgeDocument && !dockerJudgeableText(write.added) {
 			continue
 		}
 		for _, file := range nativeReachedFiles(facts, target) {
 			if EtcSpelling(file) != dockerDaemonConfigPath || !writeToolNamesItsFile(input) {
 				continue
 			}
-			if applied {
+			if judgeDocument {
 				if dockerDocumentHasInsecureRegistry(document) {
 					return true
 				}
@@ -79,7 +88,14 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 // dockerJudgeableText reports whether text is one the proof reads: some text,
 // within the proof's bound, valid UTF-8, with no NUL.
 func dockerJudgeableText(text string) bool {
-	return text != "" && len(text) <= maxCommandBytes && utf8.ValidString(text) &&
+	return text != "" && dockerReadableText(text)
+}
+
+// dockerReadableText reports whether text, possibly empty, is one the proof
+// reads: within the proof bound, valid UTF-8, with no NUL. The text of a file
+// the gateway read, and the document an edit leaves, may be empty.
+func dockerReadableText(text string) bool {
+	return len(text) <= maxCommandBytes && utf8.ValidString(text) &&
 		!strings.ContainsRune(text, 0)
 }
 

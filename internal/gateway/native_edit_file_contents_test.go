@@ -76,6 +76,24 @@ func TestDockerEditOfAFileTheGatewayReadsIsJudgedOnTheDocumentItLeaves(t *testin
 			}),
 			"", blocked,
 		},
+		{
+			"a registry listed in an empty file and taken out by the next step",
+			dockerMultiEdit(t, [2]string{``, `{"insecure-registries":["198.51.100.7:5000"]}`}, [2]string{`"198.51.100.7:5000"`, ``}),
+			"", nil,
+		},
+		{
+			"a first step whose text the readable file does not hold",
+			dockerMultiEdit(t, [2]string{`"absent":1`, `"insecure-registries":["198.51.100.7:5000"]`}, [2]string{`[]`, `["8.8.8.8"]`}),
+			`{"registry-mirrors":[]}`, nil,
+		},
+		{
+			"a one-step edit whose text the readable file does not hold",
+			exactStructuredInput(t, "Edit", map[string]any{
+				"file_path": dockerDaemonConfigForTest, "old_string": `"debug":false`,
+				"new_string": `"insecure-registries":["198.51.100.7:5000"]`,
+			}),
+			`{"debug":true}`, nil,
+		},
 	} {
 		for profile, want := range map[string]string{"default": "", "permissive": "", "strict": ""} {
 			_ = want

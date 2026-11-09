@@ -127,10 +127,9 @@ func TestDockerEditOfAReadFileIsJudgedOnTheDocumentItLeaves(t *testing.T) {
 	}
 }
 
-// TestDockerEditOfAnUnreadFileKeepsTheStepReading: an edit whose steps do not
-// apply to the file text (a text the file does not hold, more than once
-// without replace-all, a file past the bound) or whose file was not read is
-// judged on the text the call carries, as before.
+// TestDockerEditOfAnUnreadFileKeepsTheStepReading: an edit whose file was not
+// read (not given, past the bound) or reads as empty and is not created by the
+// steps is judged on the text the call carries, as before.
 func TestDockerEditOfAnUnreadFileKeepsTheStepReading(t *testing.T) {
 	linksEtcForTest(t, true)
 	text := func(value string) *string { return &value }
@@ -147,11 +146,6 @@ func TestDockerEditOfAnUnreadFileKeepsTheStepReading(t *testing.T) {
 	}{
 		{"file not read", registryEdit, nil, true},
 		{"absent file and a text it cannot hold", registryEdit, text(""), true},
-		{"file with text that does not hold the replaced text", registryEdit, text(`{"debug":true}`), true},
-		{"replaced text found twice without replace-all", map[string]any{
-			"file_path": daemonConfigTarget, "old_string": `[]`,
-			"new_string": `[],"insecure-registries":["198.51.100.7:5000"]`,
-		}, text(`{"dns":[],"insecure-registries":[]}`), true},
 		{"file past the bound", map[string]any{
 			"file_path": daemonConfigTarget, "old_string": `"debug"`,
 			"new_string": `"insecure-registries":["198.51.100.7:5000"],"debug"`,
@@ -238,4 +232,146 @@ func mapKeysValues(files map[string]string) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// TestDockerEditThatTheToolRefusesAddsNothing: when the file has text and a
+// step cannot apply (its text is absent, found more than once without
+// replace-all, or empty over a file with text), the tool refuses the call and
+// writes nothing, so the file as it is decides: a benign file allows, a file
+// that already lists an insecure registry is judged as a Write of it is.
+func TestDockerEditThatTheToolRefusesAddsNothing(t *testing.T) {
+	linksEtcForTest(t, true)
+	text := func(value string) *string { return &value }
+	const filled = `["198.51.100.7:5000"]`
+	for _, row := range []struct {
+		name, tool string
+		args       map[string]any
+		content    *string
+		want       bool
+	}{
+		{
+			"first step of a MultiEdit holds text the file does not", "MultiEdit",
+			multiEdit([2]string{`"missing"`, `"x"`}, [2]string{`[]`, filled}),
+			text(`{"registry-mirrors":[],"insecure-registries":[]}`), false,
+		},
+		{
+			"a later step holds text the file does not", "MultiEdit",
+			multiEdit([2]string{`"registry-mirrors":[]`, `"insecure-registries":` + filled}, [2]string{`"missing"`, `"x"`}),
+			text(`{"registry-mirrors":[]}`), false,
+		},
+		{
+			"one-step Edit that misses", "Edit",
+			map[string]any{"file_path": daemonConfigTarget, "old_string": `"debug":false`, "new_string": `"insecure-registries":` + filled},
+			text(`{"debug":true}`), false,
+		},
+		{
+			"replaced text found twice without replace-all", "Edit",
+			map[string]any{"file_path": daemonConfigTarget, "old_string": `[]`, "new_string": filled},
+			text(`{"dns":[],"insecure-registries":[]}`), false,
+		},
+		{
+			"empty replaced text over a file with text", "Edit",
+			map[string]any{"file_path": daemonConfigTarget, "old_string": ``, "new_string": `{"insecure-registries":` + filled + `}`},
+			text(`{"debug":true}`), false,
+		},
+		{
+			"refused edit of a file that already lists an insecure registry", "Edit",
+			map[string]any{"file_path": daemonConfigTarget, "old_string": `"missing"`, "new_string": `"x"`},
+			text(`{"insecure-registries":` + filled + `}`), true,
+		},
+		{
+			"refused edit of a file that lists only a loopback registry", "Edit",
+			map[string]any{"file_path": daemonConfigTarget, "old_string": `"missing"`, "new_string": `"x"`},
+			text(`{"insecure-registries":["127.0.0.1:5000"]}`), false,
+		},
+		{
+			// The gateway reads an absent file as empty, which is not proof of
+			// what the client holds: the call keeps the step reading.
+			"miss over an empty file keeps the step reading", "Edit",
+			map[string]any{"file_path": daemonConfigTarget, "old_string": `"debug":false`, "new_string": `"insecure-registries":` + filled},
+			text(``), true,
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if got := dockerEditCall(t, row.tool, row.args, row.content); got != row.want {
+				t.Fatalf("proof = %t, want %t", got, row.want)
+			}
+		})
+	}
+}
+
+// TestDockerEditOfAnEmptyFileIsAppliedStepByStep: a file that reads as empty
+// is created by an empty replaced text, and the steps that follow apply to the
+// text it gave, so the document the steps leave decides.
+func TestDockerEditOfAnEmptyFileIsAppliedStepByStep(t *testing.T) {
+	linksEtcForTest(t, true)
+	empty := ``
+	for _, row := range []struct {
+		name  string
+		steps [][2]string
+		want  bool
+	}{
+		{"created with an empty list", [][2]string{{``, `{"insecure-registries":[]}`}}, false},
+		{"created with a registry", [][2]string{{``, `{"insecure-registries":["198.51.100.7:5000"]}`}}, true},
+		{"created with a registry that the next step takes out", [][2]string{
+			{``, `{"insecure-registries":["198.51.100.7:5000"]}`}, {`"198.51.100.7:5000"`, ``},
+		}, false},
+		{"created with an empty list that the next step fills", [][2]string{
+			{``, `{"insecure-registries":[]}`}, {`[]`, `["198.51.100.7:5000"]`},
+		}, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			if got := dockerEditCall(t, "MultiEdit", multiEdit(row.steps...), &empty); got != row.want {
+				t.Fatalf("proof = %t, want %t", got, row.want)
+			}
+		})
+	}
+}
+
+// TestDockerEditThatGrowsPastTheBoundBetweenSteps: only the file read and the
+// document the steps leave are held to the proof bound. A step may take the text
+// past it and a later step bring it back, as the tool does, so the verdict is
+// the one of a Write of the final document in both directions.
+func TestDockerEditThatGrowsPastTheBoundBetweenSteps(t *testing.T) {
+	linksEtcForTest(t, true)
+	limit := maxCommandBytes
+	// Padding is JSON white space after the document, so it is not a long string.
+	padded := func(body string, size int) string {
+		return body + strings.Repeat(" ", size-len(body))
+	}
+	const spaces = "    "
+	t.Run("protected final document", func(t *testing.T) {
+		// The file is 3 bytes under the bound; the steps add 4, 3 and take 4 away.
+		start := padded(`{"registry-mirrors":["198.51.100.7:5000"]}`, limit-3)
+		got := dockerEditCall(t, "MultiEdit", multiEdit(
+			[2]string{`{"registry-mirrors"`, `{` + spaces + `"registry-mirrors"`},
+			[2]string{`"registry-mirrors"`, `"insecure-registries"`},
+			[2]string{`{` + spaces + `"insecure-registries"`, `{"insecure-registries"`},
+		), &start)
+		if !got {
+			t.Fatal("a final document at the bound that lists an insecure registry was allowed")
+		}
+	})
+	t.Run("benign final document", func(t *testing.T) {
+		// A step lists the registry under the list key and the next renames the
+		// key: the text of the first step alone would read as a protected list.
+		inserted := spaces + `"insecure-registries":["198.51.100.7:5000"],`
+		kept := strings.Replace(inserted, "insecure-registries", "registry-mirrors2", 1)
+		start := padded(`{"registry-mirrors":[]}`, limit-len(kept))
+		got := dockerEditCall(t, "MultiEdit", multiEdit(
+			[2]string{`{"registry-mirrors"`, `{` + inserted + `"registry-mirrors"`},
+			[2]string{`"insecure-registries"`, `"registry-mirrors2"`},
+		), &start)
+		if got {
+			t.Fatal("a final document that lists no insecure registry was blocked")
+		}
+	})
+	t.Run("a step that would build an unbounded text is not applied", func(t *testing.T) {
+		start := `{"insecure-registries":[]}` + strings.Repeat("a", 60000)
+		grow := multiEdit([2]string{`a`, strings.Repeat("b", 60000)})
+		grow["edits"].([]any)[0].(map[string]any)["replace_all"] = true
+		if got := dockerEditCall(t, "MultiEdit", grow, &start); got {
+			t.Fatal("an edit with no registry in its text was blocked")
+		}
+	})
 }
