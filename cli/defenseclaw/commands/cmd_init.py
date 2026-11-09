@@ -438,6 +438,47 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         raise click.ClickException(str(exc)) from exc
 
 
+def _configs_of_this_home() -> list:
+    """The config.yaml files that can describe this data home, each loaded: the active one and the home own.
+
+    DEFENSECLAW_CONFIG selects the active file, and a gateway of this home may have been started with
+    either. A file that is absent at the override path does not make the home unconfigured while the
+    home own config.yaml exists, so the repair checks both (the active one first: its key path and data
+    folder are used). Empty only for a home that has no config at all.
+    """
+
+    from defenseclaw import config as config_module
+
+    active = config_module.config_path()
+    home_file = config_module.default_data_path() / config_module.CONFIG_FILE_NAME
+
+    def same_file(a: Path, b: Path) -> bool:
+        try:
+            return os.path.samefile(a, b)
+        except OSError:
+            return os.path.abspath(a) == os.path.abspath(b)
+
+    def read_config(label: Path):
+        try:
+            return config_module.load()
+        except Exception as exc:  # noqa: BLE001 - a hand-edited config must not hide the reason for the repair.
+            raise click.ClickException(
+                f"Cannot read {label}: {exc}. Fix the file, then run defenseclaw config validate."
+            ) from exc
+
+    cfgs = []
+    if os.path.lexists(active):
+        cfgs.append(read_config(active))
+    if os.path.lexists(home_file) and not (cfgs and same_file(active, home_file)):
+        override = os.environ.pop(config_module.CONFIG_PATH_ENV, None)
+        try:
+            cfgs.append(read_config(home_file))
+        finally:
+            if override is not None:
+                os.environ[config_module.CONFIG_PATH_ENV] = override
+    return cfgs
+
+
 def _run_repair_identity() -> None:
     """``defenseclaw init --repair-identity``: the explicit repair of a keyless device identity.
 
@@ -451,16 +492,9 @@ def _run_repair_identity() -> None:
     from defenseclaw import config as config_module
     from defenseclaw.bootstrap import InitLockError, hold_init_lock
 
-    configured = os.path.lexists(config_module.config_path())
-    if configured:
-        try:
-            cfg = config_module.load()
-        except Exception as exc:  # noqa: BLE001 - a hand-edited config must not hide the repair's reason.
-            raise click.ClickException(
-                f"Cannot read config.yaml: {exc}. Fix the file, then run defenseclaw config validate."
-            ) from exc
-    else:
-        cfg = config_module.default_config()
+    cfgs = _configs_of_this_home()
+    configured = bool(cfgs)
+    cfg = cfgs[0] if cfgs else config_module.default_config()
     target = cfg.gateway.device_key_file or os.path.join(cfg.data_dir, "device.key")
 
     def require_gateway_inactive() -> None:
@@ -468,8 +502,9 @@ def _run_repair_identity() -> None:
             return  # a first init that stopped never configured a gateway
         from defenseclaw.commands.cmd_doctor import _recovery_gateway_blocker
 
-        if blocker := _recovery_gateway_blocker(cfg):
-            raise click.ClickException(f"{blocker}; nothing was changed")
+        for each in cfgs:
+            if blocker := _recovery_gateway_blocker(each):
+                raise click.ClickException(f"{blocker}; nothing was changed")
 
     def confirm(leftovers: list[str]) -> bool:
         if os.path.lexists(target):
@@ -487,6 +522,8 @@ def _run_repair_identity() -> None:
 
     try:
         with hold_init_lock() as locks:
+            for each in cfgs:
+                locks.take(each.data_dir)
             locks.take(cfg.data_dir)
             moved = _repair_device_identity(
                 target, cfg.data_dir, confirm=confirm, require_gateway_inactive=require_gateway_inactive
@@ -496,7 +533,7 @@ def _run_repair_identity() -> None:
     for item in moved:
         click.echo(f"  Set aside (kept): {item}")
     click.echo(f"Created a new device identity at {target}.")
-    if not os.path.lexists(config_module.config_path()):
+    if not configured:
         click.echo("There is no config.yaml yet; run: defenseclaw init")
 
 
