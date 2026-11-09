@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -41,4 +42,16 @@ func longPathName(path string) (string, bool) {
 		return "", false
 	}
 	return filepath.ToSlash(windows.UTF16ToString(buffer[:length])), true
+}
+
+// osWindowsProfileFolder reports a folder (drive-letter path in forward-slash
+// spelling) that holds NTUSER.DAT or an AppData folder, the entries of a user
+// profile. A folder the caller cannot read reports false.
+func osWindowsProfileFolder(dir string) bool {
+	for _, marker := range []string{"NTUSER.DAT", "AppData"} {
+		if _, err := os.Stat(filepath.FromSlash(dir + "/" + marker)); err == nil {
+			return true
+		}
+	}
+	return false
 }

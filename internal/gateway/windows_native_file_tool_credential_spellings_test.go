@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -55,13 +56,14 @@ func TestWindowsNativeFileToolCredentialFileIsJudgedInEverySpellingWindowsOpens(
 	useShortNames(t, map[string]string{
 		"NETRC~1": ".netrc", "CREDEN~1": "credentials", "GIT-CR~1": ".git-credentials",
 		"CONFIG~1": "config", "R109YW~1": "r109yws.d-2",
+		"NTRCFILE": ".netrc", "AWSKEYS": "credentials",
 	})
 	const home = `C:\Users\r109yws.d-2`
 	files := []string{`.netrc`, `.git-credentials`, `.aws\credentials`, `.kube\config`}
 	spell := map[string][]string{
-		`.netrc`:           {`NETRC~1`, `.netrc.`, `.netrc  `, `.netrc::$DATA`, `.netrc:stream`, `.netrc:stream:$DATA`, `.NETRC.`},
+		`.netrc`:           {`NETRC~1`, `NTRCFILE`, `.netrc.`, `.netrc  `, `.netrc::$DATA`, `.netrc:stream`, `.netrc:stream:$DATA`, `.NETRC.`},
 		`.git-credentials`: {`GIT-CR~1`, `.git-credentials.`, `.git-credentials::$DATA`},
-		`.aws\credentials`: {`.aws\CREDEN~1`, `.aws\credentials.`, `.aws\credentials::$DATA`, `.aws.\credentials`},
+		`.aws\credentials`: {`.aws\CREDEN~1`, `.aws\AWSKEYS`, `.aws\credentials.`, `.aws\credentials::$DATA`, `.aws.\credentials`},
 		`.kube\config`:     {`.kube\CONFIG~1`, `.kube\config.`, `.kube\config::$DATA`},
 	}
 	prefixes := []string{
@@ -78,6 +80,9 @@ func TestWindowsNativeFileToolCredentialFileIsJudgedInEverySpellingWindowsOpens(
 			}
 			for _, name := range spell[file] {
 				for _, prefix := range prefixes {
+					if strings.HasPrefix(prefix, `\\?\`) && trailsDotOrSpace(name) {
+						continue // a file of its own there: see ...ExtendedLength...
+					}
 					for _, cwd := range []string{home + `\project`, `C:\work`, `D:\work`} {
 						for _, tool := range []string{"Write", "Edit"} {
 							target := prefix + name
@@ -196,6 +201,118 @@ func TestWindowsNativeFileToolOrdinaryNamesStayAllowedInEverySpellingWindowsOpen
 		})
 		if action := buildVerdict(findings, "tool_call").Action; action != "allow" {
 			t.Errorf("note %q: %s %v, want allow", content, action, FindingStrings(findings))
+		}
+	}
+}
+
+// trailsDotOrSpace reports a spelling with a name that ends in a dot or a
+// space once its stream suffix is dropped: Win32 drops those characters,
+// except in an extended-length path.
+func trailsDotOrSpace(spelling string) bool {
+	for _, name := range strings.Split(spelling, `\`) {
+		if colon := strings.IndexByte(name, ':'); colon >= 0 {
+			name = name[:colon]
+		}
+		if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
+			return true
+		}
+	}
+	return false
+}
+
+// Win32 does not normalize an extended-length path: a name with trailing dots
+// or spaces there is a file of its own, which is not the protected file and
+// gets the verdict of an ordinary name. The same spelling in an ordinary path
+// is the protected file (the matrix above), and so are the short name, a
+// stream and the admin share in an extended-length path.
+func TestWindowsNativeFileToolExtendedLengthTrailingCharactersAreAFileOfItsOwn(t *testing.T) {
+	useShortNames(t, map[string]string{"NETRC~1": ".netrc"})
+	const home = `C:\Users\r109yws.d-2`
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-extended-length-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, own := range []string{`.netrc.`, `.netrc  `, `.NETRC.`, `.aws.\credentials`, `.git-credentials.`} {
+			for _, tool := range []string{"Write", "Edit"} {
+				target := `\\?\` + home + `\` + own
+				if action, rules := windowsFileToolVerdictIn(t, connector, tool, home, home+`\project`, target); action != "allow" {
+					t.Errorf("%s %s %q: %s %v, want allow (a file of its own)", profile, tool, target, action, rules)
+				}
+			}
+		}
+		for _, same := range []string{`\\?\` + home + `\NETRC~1`, `\\?\` + home + `\.netrc::$DATA`, `\\?\` + home + `\.netrc`} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, home+`\project`, same); action != "block" {
+				t.Errorf("%s Write %q: %s %v, want block", profile, same, action, rules)
+			}
+		}
+	}
+}
+
+// A project fixture below a working directory that merely has a home-shaped
+// name (a repo folder called home or Users) stays a fixture, on every OS; a
+// working directory that really holds the homes of accounts does not make the
+// files below it fixtures.
+func TestCredentialFixtureInAProjectFolderNamedHomeOrUsersStaysAFixture(t *testing.T) {
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "credential-fixture-home-named-project-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, c := range []struct{ home, cwd, target string }{
+			{`C:\Users\alice`, `C:\repo\home`, `C:\repo\home\fixture\.netrc`},
+			{`C:\Users\alice`, `C:\repo\Users`, `C:\repo\Users\bob\.aws\credentials`},
+			{`/home/alice`, `/repo/home`, `/repo/home/fixture/.netrc`},
+			{`/home/alice`, `/repo/Users`, `/repo/Users/bob/.git-credentials`},
+		} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", c.home, c.cwd, c.target); action != "allow" {
+				t.Errorf("%s cwd=%q %q: %s %v, want allow", profile, c.cwd, c.target, action, rules)
+			}
+		}
+		for _, c := range []struct{ home, cwd, target string }{
+			{`C:\Users\alice`, `C:\Users`, `C:\Users\bob\.netrc`},
+			{`C:\Users\alice`, `C:\`, `C:\Users\bob\.netrc`},
+			{`/home/alice`, `/home`, `/home/bob/.netrc`},
+			{`/home/alice`, `/`, `/home/bob/.git-credentials`},
+		} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", c.home, c.cwd, c.target); action != "block" {
+				t.Errorf("%s cwd=%q %q: %s %v, want block", profile, c.cwd, c.target, action, rules)
+			}
+		}
+	}
+}
+
+// The folder of a user profile outside Users and home (a profile on another
+// drive or in a folder of its own) is a home, found by the entries only a
+// profile holds; a folder without them is a project folder, and so is a
+// profile folder the file system cannot be asked about.
+func TestWindowsNativeFileToolCredentialFileInAProfileFolderIsJudgedLikeAnyOtherHome(t *testing.T) {
+	previous := windowsProfileFolder
+	t.Cleanup(func() { windowsProfileFolder = previous })
+	windowsProfileFolder = func(dir string) bool {
+		switch strings.ToLower(dir) {
+		case "c:/profiles/bob", "d:/staff/émile.x", "e:/data/appdata-user":
+			return true
+		}
+		return false
+	}
+	const home = `C:\Users\r109yws.d-2`
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-credential-profile-folder-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, cwd := range []string{home + `\project`, `D:\work`, `C:\`} {
+			for _, target := range []string{
+				`C:\Profiles\bob\.netrc`, `C:\Profiles\BOB\.Git-Credentials`, `C:\Profiles\bob\.aws\credentials`,
+				`D:\Staff\Émile.x\.netrc`, `E:\Data\appdata-user\.netrc`, `C:\Profiles\bob\.netrc::$DATA`,
+			} {
+				if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, target); action != "block" || len(rules) == 0 {
+					t.Errorf("%s cwd=%q %q: %s %v, want block", profile, cwd, target, action, rules)
+				}
+			}
+			for _, target := range []string{
+				`C:\Profiles\bob\notes.txt`, `C:\Profiles\bob\.netrc.bak`, `C:\Profiles\alice\.netrc`,
+				`C:\Projects\bob\.aws\credentials`, `C:\work\.netrc`,
+			} {
+				if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, target); action != "allow" {
+					t.Errorf("%s cwd=%q %q: %s %v, want allow", profile, cwd, target, action, rules)
+				}
+			}
 		}
 	}
 }

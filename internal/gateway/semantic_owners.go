@@ -21,6 +21,7 @@ import (
 	"path"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
@@ -1435,11 +1436,15 @@ func hasDataFlowTo(
 }
 
 func semanticPathValue(path actionfacts.PathFact) string {
-	value := strings.TrimSpace(pathFactSpelling(path))
-	if opened, ok := windowsOpenedPath(value); ok {
-		return windowsNameFold(opened)
+	value := pathFactSpelling(path)
+	// Trailing spaces are read by windowsOpenedPath, which keeps them in an
+	// extended-length path, where they are part of the name: the matchers trim
+	// whitespace, so they are spelled as a visible character that no
+	// protected name contains.
+	if opened, ok := windowsOpenedPath(strings.TrimLeftFunc(value, unicode.IsSpace)); ok {
+		return windowsNameFold(markTrailingSpaces(opened))
 	}
-	return semanticFoldPath(strings.ReplaceAll(value, `\`, "/"))
+	return semanticFoldPath(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
 }
 
 // semanticFoldPath is the lower-case spelling the semantic path matchers
@@ -1936,15 +1941,15 @@ func hardcodedToolCallOnlyRule(ruleID string) bool {
 }
 
 // isHomeContainerDirectory reports a directory that holds the homes of
-// accounts: a file system or drive root, or a folder named users or home. A
-// credential file below it is the file of an account, not a fixture of a
-// project that happens to run there. The value is canonical
-// (canonicalSemanticPath).
+// accounts, as isRecognizedHomeRoot reads a home: a file system or drive root,
+// /home or /users, or a Users or home folder on a drive. A credential file below it is
+// the file of an account, not a fixture of a project that happens to run
+// there. A folder that merely has such a name deeper in a project (repo/home)
+// is a project folder. The value is canonical (canonicalSemanticPath).
 func isHomeContainerDirectory(value string) bool {
 	value = strings.TrimRight(value, "/")
-	if value == "" || len(value) == 2 && value[1] == ':' {
-		return true
+	if len(value) >= 2 && value[1] == ':' {
+		return value[2:] == "" || value[2:] == "/users" || value[2:] == "/home"
 	}
-	base := path.Base(value)
-	return base == "users" || base == "home"
+	return value == "" || value == "/home" || value == "/users"
 }
