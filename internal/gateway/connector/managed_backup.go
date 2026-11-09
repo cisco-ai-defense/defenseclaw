@@ -49,6 +49,46 @@ type managedFileBackup struct {
 	PristineBytes  []byte `json:"pristine_bytes,omitempty"`
 	CapturedAt     string `json:"captured_at"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
+	// SetupRun is the nonce of the setup command whose registration recorded
+	// PostSHA256 (see managedSetupRun); empty when no command announced one.
+	SetupRun string `json:"setup_run,omitempty"`
+}
+
+// managedSetupRunFile is the file a setup command announces the nonce of its
+// run in, next to the records of the connector it sets up. The registration
+// runs inside the gateway service, which the command cannot hand a value to by
+// environment, so the nonce travels in this file. The command removes it when
+// it ends.
+const managedSetupRunFile = "setup_run"
+
+// managedSetupRun is the nonce the setup command announced for connectorName,
+// empty when there is none or the file is anything but a short hex string. A
+// record carries it only for the registration that read it, so the command
+// holding the nonce in memory can tell its own registration from any other
+// that published a record for the same file.
+func managedSetupRun(dataDir, connectorName string) string {
+	path := filepath.Join(dataDir, "connector_backups", connectorName, managedSetupRunFile)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, 129))
+	if err != nil {
+		return ""
+	}
+	nonce := strings.TrimSpace(string(raw))
+	if len(nonce) < 32 || len(nonce) > 64 {
+		return ""
+	}
+	if _, err := hex.DecodeString(nonce); err != nil || nonce != strings.ToLower(nonce) {
+		return ""
+	}
+	return nonce
 }
 
 func managedFileBackupPath(dataDir, connectorName, logicalName string) string {
@@ -310,6 +350,7 @@ func updateManagedFileBackupPostHashValue(
 		return nil
 	}
 	b.PostSHA256 = nextHash
+	b.SetupRun = managedSetupRun(dataDir, connectorName)
 	b.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	return writeManagedFileBackup(backupPath, b)
 }

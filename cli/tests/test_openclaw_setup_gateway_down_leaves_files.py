@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import time
 from dataclasses import replace
 from unittest.mock import patch
@@ -166,6 +167,12 @@ def _publish_writer_receipt(data_dir, path, original, committed):
     now = time.time_ns()
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now // 10**9)) + f".{now % 10**9:09d}Z"
     receipt["captured_at"] = receipt["updated_at"] = stamp
+    # The writer stamps the nonce a setup command announced (managedSetupRun in managed_backup.go).
+    try:
+        with open(os.path.join(folder, "setup_run")) as handle:
+            receipt["setup_run"] = handle.read().strip()
+    except OSError:
+        pass
     receipt_path = os.path.join(folder, "openclaw.json.json")
     with open(receipt_path, "w") as handle:
         json.dump(receipt, handle)
@@ -624,7 +631,11 @@ _EARLIER_COMMITTED = (
 _SAVED_BEFORE_SETUP = b"{\"operatorNote\":\"saved before this setup\"}\n"
 
 
-def _earlier_receipt(data_dir, path, *, stamps=True):
+_ANOTHER_RUN = "f" * 32
+
+
+def _earlier_receipt(data_dir, path, *, setup_run=None):
+    """The receipt an earlier registration left: its own post hash, no nonce or the nonce of another run."""
     folder = os.path.join(data_dir, "connector_backups", "openclaw")
     os.makedirs(folder, exist_ok=True)
     receipt = {
@@ -635,22 +646,31 @@ def _earlier_receipt(data_dir, path, *, stamps=True):
         "existed": True,
         "pristine_sha256": hashlib.sha256(_EARLIER_PRISTINE).hexdigest(),
         "post_sha256": hashlib.sha256(_EARLIER_COMMITTED).hexdigest(),
+        "captured_at": "2026-10-01T09:00:00.123456789Z",
+        "updated_at": "2026-10-01T09:00:01.5Z",
     }
-    if stamps:
-        receipt["captured_at"] = "2026-10-01T09:00:00.123456789Z"
-        receipt["updated_at"] = "2026-10-01T09:00:01.5Z"
+    if setup_run:
+        receipt["setup_run"] = setup_run
     receipt_path = os.path.join(folder, "openclaw.json.json")
     with open(receipt_path, "w") as handle:
         json.dump(receipt, handle)
     return receipt_path
 
 
-@pytest.mark.parametrize("stamps", [True, False], ids=["stamped-earlier", "unstamped"])
+def _stamp_receipt(receipt_path, **fields):
+    with open(receipt_path) as handle:
+        receipt = json.load(handle)
+    receipt.update(fields)
+    with open(receipt_path, "w") as handle:
+        json.dump(receipt, handle)
+
+
+@pytest.mark.parametrize("setup_run", [None, _ANOTHER_RUN], ids=["no-nonce", "another-runs-nonce"])
 @pytest.mark.parametrize("prior", [_SAVED_BEFORE_SETUP, _EARLIER_PRISTINE], ids=["other-prior", "same-prior"])
-def test_receipt_of_an_earlier_registration_never_authorizes_a_restore(tmp_path, prior, stamps):
+def test_receipt_of_an_earlier_registration_never_authorizes_a_restore(tmp_path, prior, setup_run):
     path = tmp_path / "openclaw.json"
     data_dir = str(tmp_path / "data")
-    receipt = _earlier_receipt(data_dir, str(path), stamps=stamps)
+    receipt = _earlier_receipt(data_dir, str(path), setup_run=setup_run)
     path.write_bytes(prior)
     record = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
     path.write_bytes(_EARLIER_COMMITTED)  # A save during the failed setup, byte for byte the earlier output.
@@ -659,10 +679,42 @@ def test_receipt_of_an_earlier_registration_never_authorizes_a_restore(tmp_path,
     assert os.path.exists(receipt)
 
 
+@pytest.mark.parametrize("stamp_ns", [-60, 0, 60], ids=["stamped-before", "stamped-at-capture", "stamped-ahead"])
+def test_a_timestamp_never_binds_a_receipt_to_a_run(tmp_path, stamp_ns):
+    """A registration of another source, or a clock step, can give a receipt any stamp; only the nonce counts."""
+    path = tmp_path / "openclaw.json"
+    data_dir = str(tmp_path / "data")
+    path.write_bytes(_SAVED_BEFORE_SETUP)
+    record = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
+    receipt = _earlier_receipt(data_dir, str(path))  # Published during the run by a registration that is not this run.
+    seconds = time.time() + stamp_ns
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(seconds)) + f".{int(seconds * 1e9) % 10**9:09d}Z"
+    _stamp_receipt(receipt, captured_at=stamp, updated_at=stamp)
+    path.write_bytes(_EARLIER_COMMITTED)
+    assert cmd_setup._restore_openclaw_config_record(record) == "kept"
+    assert path.read_bytes() == _EARLIER_COMMITTED
+
+
+def test_each_run_announces_its_own_nonce_and_withdraws_only_its_own(tmp_path):
+    path = tmp_path / "openclaw.json"
+    data_dir = str(tmp_path / "data")
+    handoff = os.path.join(data_dir, "connector_backups", "openclaw", "setup_run")
+    first = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
+    assert re.fullmatch(r"[0-9a-f]{32}", first.run_id)
+    assert open(handoff).read().strip() == first.run_id
+    assert os.stat(handoff).st_mode & 0o077 == 0 or os.name == "nt"
+    second = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
+    assert second.run_id != first.run_id
+    cmd_setup._withdraw_openclaw_setup_run(first)  # The first run ended after the second one began.
+    assert open(handoff).read().strip() == second.run_id
+    cmd_setup._withdraw_openclaw_setup_run(second)
+    assert not os.path.exists(handoff)
+
+
 def test_receipt_published_by_this_run_over_an_earlier_one_authorizes_the_restore(tmp_path):
     path = tmp_path / "openclaw.json"
     data_dir = str(tmp_path / "data")
-    _earlier_receipt(data_dir, str(path))
+    _earlier_receipt(data_dir, str(path), setup_run=_ANOTHER_RUN)
     path.write_bytes(_EARLIER_PRISTINE)
     record = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
     path.write_bytes(_registered(_EARLIER_PRISTINE))
@@ -671,13 +723,58 @@ def test_receipt_published_by_this_run_over_an_earlier_one_authorizes_the_restor
     assert path.read_bytes() == _EARLIER_PRISTINE
 
 
-def test_record_not_taken_by_a_run_authorizes_no_restore(tmp_path):
-    record, path, _ = _registered_record(tmp_path)
-    assert cmd_setup._restore_openclaw_config_record(replace(record, started_ns=None)) == "kept"
+def test_registration_by_another_run_after_this_one_began_takes_the_receipt_away(tmp_path):
+    record, path, receipt = _registered_record(tmp_path)
+    _stamp_receipt(receipt, setup_run=_ANOTHER_RUN)  # A later run published over this one before the rollback.
+    assert cmd_setup._restore_openclaw_config_record(record) == "kept"
     assert path.read_bytes() == _registered(_OPERATOR_BASE)
 
 
-def test_failed_setup_before_registration_keeps_an_outside_save_and_says_so():
+def test_a_gateway_that_does_not_know_the_hand_off_leaves_the_file_and_says_so(tmp_path):
+    record, path, receipt = _registered_record(tmp_path)
+    with open(receipt) as handle:
+        body = json.load(handle)
+    body.pop("setup_run")  # Written by a gateway that predates the nonce.
+    with open(receipt, "w") as handle:
+        json.dump(body, handle)
+    assert cmd_setup._restore_openclaw_config_record(record) == "kept"
+    assert path.read_bytes() == _registered(_OPERATOR_BASE)
+
+
+def test_record_not_taken_by_a_run_authorizes_no_restore(tmp_path):
+    record, path, _ = _registered_record(tmp_path)
+    assert cmd_setup._restore_openclaw_config_record(replace(record, run_id="")) == "kept"
+    assert path.read_bytes() == _registered(_OPERATOR_BASE)
+
+
+def _failed_setup_with_outside_registration(app, path, *, receipt_run=None):
+    """Setup whose gateway fails before it registers anything; another registration and a save land meanwhile."""
+    calls = []
+
+    def fail_before_registration(*_args, **_kwargs):
+        calls.append("restart")
+        if len(calls) == 1:
+            _earlier_receipt(app.cfg.data_dir, path, setup_run=receipt_run)
+            with open(path, "wb") as handle:
+                handle.write(_EARLIER_COMMITTED)  # OpenClaw saves while DefenseClaw gateway fails to start.
+            cmd_setup._fail_if_restart_failed(["defenseclaw-gateway"])
+
+    with (
+        patch.object(cmd_setup, "_restart_services", side_effect=fail_before_registration),
+        patch.object(cmd_setup, "_openclaw_gateway_healthy", return_value=True),
+        patch.object(cmd_setup, "_adopt_openclaw_gateway_token"),
+        patch.object(cmd_setup, "_write_picked_connector_hint"),
+        patch.object(cmd_setup, "_maybe_bring_up_local_stack"),
+        patch.object(cmd_setup, "_check_connector_version_supported_for_setup", return_value=True),
+    ):
+        result = _invoke(app, "--mode", "action")
+    assert result.exit_code != 0, result.output
+    assert len(calls) == 2, result.output
+    return result
+
+
+@pytest.mark.parametrize("receipt_run", [None, _ANOTHER_RUN], ids=["no-nonce", "another-runs-nonce"])
+def test_failed_setup_before_registration_keeps_an_outside_save_and_says_so(receipt_run):
     app, tmp_dir, db_path = make_app_context()
     try:
         path = os.path.join(tmp_dir, "openclaw.json")
@@ -688,30 +785,12 @@ def test_failed_setup_before_registration_keeps_an_outside_save_and_says_so():
         app.cfg.claw.mode = ""
         app.cfg.guardrail.connector = ""
         app.cfg.guardrail.connectors = {}
-        _earlier_receipt(app.cfg.data_dir, path)
-        calls = []
-
-        def fail_before_registration(*_args, **_kwargs):
-            calls.append("restart")
-            if len(calls) == 1:
-                with open(path, "wb") as handle:
-                    handle.write(_EARLIER_COMMITTED)  # OpenClaw saves while DefenseClaw gateway fails to start.
-                cmd_setup._fail_if_restart_failed(["defenseclaw-gateway"])
-
-        with (
-            patch.object(cmd_setup, "_restart_services", side_effect=fail_before_registration),
-            patch.object(cmd_setup, "_openclaw_gateway_healthy", return_value=True),
-            patch.object(cmd_setup, "_adopt_openclaw_gateway_token"),
-            patch.object(cmd_setup, "_write_picked_connector_hint"),
-            patch.object(cmd_setup, "_maybe_bring_up_local_stack"),
-            patch.object(cmd_setup, "_check_connector_version_supported_for_setup", return_value=True),
-        ):
-            result = _invoke(app, "--mode", "action")
-        assert result.exit_code != 0, result.output
-        assert len(calls) == 2, result.output
+        result = _failed_setup_with_outside_registration(app, path, receipt_run=receipt_run)
         with open(path, "rb") as handle:
             assert handle.read() == _EARLIER_COMMITTED, result.output
         assert "saved by OpenClaw or you while setup ran" in result.output
         assert "defenseclaw setup remove openclaw" in result.output
+        # The run is over: its announcement is withdrawn.
+        assert not os.path.exists(os.path.join(app.cfg.data_dir, "connector_backups", "openclaw", "setup_run"))
     finally:
         cleanup_app(app, db_path, tmp_dir)
