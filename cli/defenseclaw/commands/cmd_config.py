@@ -1156,6 +1156,71 @@ def _store_moved_state_file(new_dir: str, rel: str, data: bytes) -> bool:
         os.close(fd)
 
 
+_MOVED_ACTIVE_STATE = "active_connector.json"
+_MOVED_ACTIVE_STATE_MAX_BYTES = 64 * 1024
+
+
+def _torn_down_connectors(old_dir: str) -> set[str]:
+    """The connectors the old data_dir marks as torn down: inactive in its roster and not active in it.
+
+    Only a readable roster of the current (version 3) form that this account
+    owns counts; anything else names none.
+    """
+    from defenseclaw.file_permissions import open_regular_file_no_follow
+
+    path = os.path.join(old_dir, _MOVED_ACTIVE_STATE)
+    try:
+        info = os.lstat(path)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_size > _MOVED_ACTIVE_STATE_MAX_BYTES
+            or not _state_entry_is_account_owned(path, info)
+        ):
+            return set()
+        with os.fdopen(open_regular_file_no_follow(path, expected_stat=info), "rb") as handle:
+            state = json.loads(handle.read(_MOVED_ACTIVE_STATE_MAX_BYTES + 1))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(state, dict) or state.get("version") != 3:
+        return set()
+    active, inactive = state.get("names", []), state.get("inactive_names", [])
+    if not isinstance(active, list) or not isinstance(inactive, list):
+        return set()
+    if not all(isinstance(name, str) for name in (*active, *inactive)):
+        return set()
+    return {normalize_connector(name) for name in inactive} - {normalize_connector(name) for name in active}
+
+
+def _lock_without_torn_down_connectors(old_dir: str, data: bytes) -> bytes:
+    """The hook contract lock *data* without the entries of connectors the old data_dir tore down.
+
+    The gateway drops a connector entry from the lock when the connector is torn
+    down. A lock written before the teardown of a connector did the same still
+    lists it, with the mark of the teardown in the roster of the old folder only.
+    Carried as it was, the lock would list a peer the new folder has no mark for,
+    and the next setup of another connector would be refused ("contract lock peer
+    is not inactive", GAP-0941). A lock that names no such connector, or that is
+    not a lock this code reads, is carried byte for byte.
+    """
+    torn_down = _torn_down_connectors(old_dir)
+    if not torn_down:
+        return data
+    try:
+        lock = json.loads(data)
+    except ValueError:
+        return data
+    entries = lock.get("connectors") if isinstance(lock, dict) else None
+    if not isinstance(entries, dict):
+        return data
+    kept = {name: entry for name, entry in entries.items() if normalize_connector(str(name)) not in torn_down}
+    if len(kept) == len(entries):
+        return data
+    lock["connectors"] = kept
+    if not kept:
+        lock.pop("shared_hook_script_digests", None)
+    return (json.dumps(lock, indent=2) + "\n").encode("utf-8")
+
+
 def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
     """Copy the hook contract lock and the connector backups the new data_dir lacks.
 
@@ -1194,6 +1259,8 @@ def _carry_connector_seals(old_dir: str, new_dir: str) -> list[str]:
                 data = handle.read(_MOVED_STATE_MAX_FILE_BYTES + 1)
             if len(data) > _MOVED_STATE_MAX_FILE_BYTES:
                 raise OSError("file is too large")
+            if rel == _MOVED_DATA_DIR_LOCK:
+                data = _lock_without_torn_down_connectors(old_dir, data)
             if _store_moved_state_file(new_dir, rel, data):
                 carried.append(rel)
         except _MovedStateConflictError:
