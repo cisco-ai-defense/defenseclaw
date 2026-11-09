@@ -167,49 +167,53 @@ func dockerRegistryRawInput(tool, raw string) Input {
 	return Input{Tool: tool, Args: json.RawMessage(raw)}
 }
 
+// dockerInsecureRegistrySpellings are the forms Docker accepts for a
+// non-loopback insecure registry.
+var dockerInsecureRegistrySpellings = []string{
+	"http://198.51.100.7:5000",
+	"https://198.51.100.7:5000",
+	"https://mirror.example",
+	"198.51.100.7:5000",
+	"198.51.100.7",
+	"mirror.example",
+	"Mirror.Example:5000",
+	"registry.corp.example:443",
+	"[2001:db8::7]:5000",
+	"2001:db8::7",
+	"http://[2001:db8::7]:5000",
+	"198.51.100.0/24",
+	"10.0.0.0/8",
+	"192.168.0.5/16",
+	"0.0.0.0/0",
+	"126.0.0.0/7",
+	"2001:db8::/32",
+	"::/0",
+	"::ffff:198.51.100.0/120",
+	"::ffff:0:0/80",
+	"::ffff:198.51.100.7",
+	// Docker lower-cases the scheme and reads the port as a decimal number.
+	"HTTP://198.51.100.7:5000",
+	"HTTPS://Mirror.Example",
+	"Http://198.51.100.7:5000",
+	"http://198.51.100.7:5000/",
+	"http://mirror.example:05000",
+	"198.51.100.7:05000",
+	"198.51.100.7:0005000",
+	"198.51.100.7:00000000000000000005000",
+	"http://198.51.100.7:00000000000000000005000",
+	"[2001:db8::7]:00000000000000000005000",
+	"198.51.100.7:+5000",
+	"198.51.100.7:0",
+	"mirror.example:00080",
+}
+
 // TestExactDockerInsecureRegistryWriteReadsEverySpelling pins that the
 // spelling of an insecure-registries entry never decides the verdict: every
 // form Docker accepts for a non-loopback registry is proved, the http:// URL
 // form included.
 func TestExactDockerInsecureRegistryWriteReadsEverySpelling(t *testing.T) {
 	t.Parallel()
-	for _, entry := range []string{
-		"http://198.51.100.7:5000",
-		"https://198.51.100.7:5000",
-		"https://mirror.example",
-		"198.51.100.7:5000",
-		"198.51.100.7",
-		"mirror.example",
-		"Mirror.Example:5000",
-		"registry.corp.example:443",
-		"[2001:db8::7]:5000",
-		"2001:db8::7",
-		"http://[2001:db8::7]:5000",
-		"198.51.100.0/24",
-		"10.0.0.0/8",
-		"192.168.0.5/16",
-		"0.0.0.0/0",
-		"126.0.0.0/7",
-		"2001:db8::/32",
-		"::/0",
-		"::ffff:198.51.100.0/120",
-		"::ffff:0:0/80",
-		"::ffff:198.51.100.7",
-		// Docker lower-cases the scheme and reads the port as a decimal number.
-		"HTTP://198.51.100.7:5000",
-		"HTTPS://Mirror.Example",
-		"Http://198.51.100.7:5000",
-		"http://198.51.100.7:5000/",
-		"http://mirror.example:05000",
-		"198.51.100.7:05000",
-		"198.51.100.7:0005000",
-		"198.51.100.7:00000000000000000005000",
-		"http://198.51.100.7:00000000000000000005000",
-		"[2001:db8::7]:00000000000000000005000",
-		"198.51.100.7:+5000",
-		"198.51.100.7:0",
-		"mirror.example:00080",
-	} {
+	for _, entry := range dockerInsecureRegistrySpellings {
 		content := `{"insecure-registries":[` + jsonString(t, entry) + `]}`
 		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, content)
 		facts := Analyze(input)
@@ -221,62 +225,66 @@ func TestExactDockerInsecureRegistryWriteReadsEverySpelling(t *testing.T) {
 	}
 }
 
+// dockerAllowedRegistrySpellings are loopback entries, which Docker already
+// trusts, and entries the closed grammar cannot prove.
+var dockerAllowedRegistrySpellings = []string{
+	"localhost",
+	"localhost:5000",
+	"docker.localhost:5000",
+	"127.0.0.1",
+	"127.0.0.1:5000",
+	"127.1.2.3:5000",
+	"[::1]:5000",
+	"::1",
+	"::ffff:127.0.0.1",
+	"127.0.0.0/8",
+	"127.0.0.0/24",
+	"127.0.0.1/32",
+	"::1/128",
+	"::ffff:127.0.0.0/104",
+	"0.0.0.0",
+	"0.0.0.0:5000",
+	"0.0.0.0/32",
+	"http://localhost:5000",
+	"https://127.0.0.1:5000",
+	// Not provable in the closed grammar, so the document is not proven.
+	"",
+	":5000",
+	"198.51.100.7:",
+	"198.51.100.7:70000",
+	"198.51.100.7:5000:5000",
+	"[198.51.100.7]:5000",
+	"[2001:db8::7]",
+	"fe80::1%eth0",
+	"fe80::1%eth0/64",
+	"198.51.100.0/33",
+	"198.51.100.0/",
+	"/24",
+	"127.1",
+	"127.1:5000",
+	"2130706433",
+	"mirror.example.",
+	"bad_host.example",
+	"-mirror.example",
+	"mirror.example/path",
+	"mirror.example/v2",
+	"user@mirror.example",
+	"mirror.example?x=1",
+	"mirror example",
+	"${REGISTRY}",
+	"$(hostname):5000",
+	"{{ registry }}:5000",
+	"ftp://mirror.example",
+	"unix:///var/run/registry.sock",
+}
+
 // TestExactDockerInsecureRegistryWriteKeepsLoopbackAndBenignAllowed pins the
 // other side: Docker already trusts loopback, so loopback entries in any
 // spelling, a daemon.json without insecure registries, and entries the closed
 // grammar cannot prove all stay allowed.
 func TestExactDockerInsecureRegistryWriteKeepsLoopbackAndBenignAllowed(t *testing.T) {
 	t.Parallel()
-	for _, entry := range []string{
-		"localhost",
-		"localhost:5000",
-		"docker.localhost:5000",
-		"127.0.0.1",
-		"127.0.0.1:5000",
-		"127.1.2.3:5000",
-		"[::1]:5000",
-		"::1",
-		"::ffff:127.0.0.1",
-		"127.0.0.0/8",
-		"127.0.0.0/24",
-		"127.0.0.1/32",
-		"::1/128",
-		"::ffff:127.0.0.0/104",
-		"0.0.0.0",
-		"0.0.0.0:5000",
-		"0.0.0.0/32",
-		"http://localhost:5000",
-		"https://127.0.0.1:5000",
-		// Not provable in the closed grammar, so the document is not proven.
-		"",
-		":5000",
-		"198.51.100.7:",
-		"198.51.100.7:70000",
-		"198.51.100.7:5000:5000",
-		"[198.51.100.7]:5000",
-		"[2001:db8::7]",
-		"fe80::1%eth0",
-		"fe80::1%eth0/64",
-		"198.51.100.0/33",
-		"198.51.100.0/",
-		"/24",
-		"127.1",
-		"127.1:5000",
-		"2130706433",
-		"mirror.example.",
-		"bad_host.example",
-		"-mirror.example",
-		"mirror.example/path",
-		"mirror.example/v2",
-		"user@mirror.example",
-		"mirror.example?x=1",
-		"mirror example",
-		"${REGISTRY}",
-		"$(hostname):5000",
-		"{{ registry }}:5000",
-		"ftp://mirror.example",
-		"unix:///var/run/registry.sock",
-	} {
+	for _, entry := range dockerAllowedRegistrySpellings {
 		content := `{"insecure-registries":[` + jsonString(t, entry) + `]}`
 		input := dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, content)
 		facts := Analyze(input)
@@ -415,7 +423,7 @@ func TestExactDockerInsecureRegistryWriteReadsEveryPathSpellingAndEdit(t *testin
 		{"edit adding addresses to another list", edit(dockerDaemonConfigPath, `"debug": true`, `"debug": true, "dns": ["8.8.8.8", "198.51.100.7"]`), false},
 		{"edit adding a mirror", edit(dockerDaemonConfigPath, `"debug": true`, `"debug": true, "registry-mirrors": ["https://mirror.example"]`), false},
 		{"edit adding a loopback registry", edit(dockerDaemonConfigPath, `"debug": true`, `"debug": true, "insecure-registries": ["127.0.0.1:5000", "localhost:5000"]`), false},
-		{"edit keeping the listed registry", edit(dockerDaemonConfigPath, list, list+`, "debug": true`), false},
+		{"edit keeping the listed registry", edit(dockerDaemonConfigPath, list, list+`, "debug": true`), true},
 		{"edit removing the listed registry", edit(dockerDaemonConfigPath, list, `"insecure-registries": []`), false},
 		{"edit naming the key without a list", edit(dockerDaemonConfigPath, `"debug": true`, `"insecure-registries": null`), false},
 		{"edit listing an entry it cannot read", edit(dockerDaemonConfigPath, `"debug": true`, `"insecure-registries": ["bad_host.example", "198.51.100.7:5000"]`), false},
@@ -471,9 +479,10 @@ func TestExactDockerInsecureRegistryEditReadsTheKeyAsJSONDoes(t *testing.T) {
 
 // TestExactDockerInsecureRegistryEditJudgesCompleteDocumentsByTheirEffectiveList
 // pins an edit that swaps one complete daemon.json for another to the list
-// dockerd reads from each (the last repeated key wins), the same reading a
-// whole-file write gets: a list that is only effective in the new document is
-// added, a list the new document leaves ineffective is not.
+// dockerd reads from the new document (the last repeated key wins), the same
+// reading a whole-file write gets, whatever the replaced document listed: a
+// list that is effective in the new document is a verdict, a list the new
+// document leaves ineffective is not.
 func TestExactDockerInsecureRegistryEditJudgesCompleteDocumentsByTheirEffectiveList(t *testing.T) {
 	t.Parallel()
 	const (
@@ -508,8 +517,8 @@ func TestExactDockerInsecureRegistryEditJudgesCompleteDocumentsByTheirEffectiveL
 		{"ordinary document swapped for one with an ineffective remote list", edit(`{"log-driver":"json-file"}`, `{"log-driver":"json-file","insecure-registries":[`+remote+`],"insecure-registries":[]}`), false},
 		{"ineffective remote list in a multi-edit", multi(`{"debug":true}`, `{"insecure-registries":[`+remote+`],"insecure-registries":[]}`), false},
 		{"ineffective remote list in a patch hunk document", nativeCall(t, "apply_patch", nativeProofPatch("Update", dockerDaemonConfigPath, `{"insecure-registries":[`+remote+`],"insecure-registries":[]}`+"\n")), false},
-		{"same effective list on both sides", edit(`{"insecure-registries":[`+remote+`],"debug":true}`, `{"insecure-registries":[`+remote+`],"debug":false}`), false},
-		{"same list on both sides after a repeated key", edit(`{"insecure-registries":[],"insecure-registries":[`+remote+`]}`, `{"insecure-registries":[`+remote+`],"debug":true}`), false},
+		{"same effective list on both sides", edit(`{"insecure-registries":[`+remote+`],"debug":true}`, `{"insecure-registries":[`+remote+`],"debug":false}`), true},
+		{"same list on both sides after a repeated key", edit(`{"insecure-registries":[],"insecure-registries":[`+remote+`]}`, `{"insecure-registries":[`+remote+`],"debug":true}`), true},
 		{"earlier remote list left ineffective by a null last key", edit(`{"debug":true}`, `{"insecure-registries":[`+remote+`],"insecure-registries":null}`), false},
 		{"remote list removed", edit(listed, empty), false},
 		{"document without the key", edit(`{"debug":true}`, `{"debug":false}`), false},
@@ -576,7 +585,7 @@ func TestExactDockerInsecureRegistryEditJudgesEachStepAndHunkByTheListItPutsInFo
 			step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), false},
 		{"two steps that move a listed registry", multi(
 			step(`"insecure-registries":[`+remote+`],`, ``),
-			step(`"debug":true`, `"debug":true,"insecure-registries":[`+remote+`]`)), false},
+			step(`"debug":true`, `"debug":true,"insecure-registries":[`+remote+`]`)), true},
 		{"patch lines where the last key empties the list", patch("@@",
 			`+  "insecure-registries":[`+remote+`],`, `+  "insecure-registries":[]`), false},
 		{"patch hunks that only change other settings", patch("@@",
@@ -596,9 +605,9 @@ func TestExactDockerInsecureRegistryEditJudgesEachStepAndHunkByTheListItPutsInFo
 
 // TestExactDockerInsecureRegistryEditJudgesAListWhereItLandsAndNullAsEmpty pins
 // two readings of an edit to the verdict of a write of the document it leaves:
-// a registry that goes from one insecure-registries key to another across the
-// steps of a MultiEdit or the hunks of a patch is judged where it lands, and a
-// last key set to null leaves no registry in force.
+// a registry in a key that a step or hunk puts in place is judged by that text
+// alone, with no credit for the key it came from or for a key the file already
+// held, and a last key set to null leaves no registry in force.
 func TestExactDockerInsecureRegistryEditJudgesAListWhereItLandsAndNullAsEmpty(t *testing.T) {
 	t.Parallel()
 	const remote = `"198.51.100.7:5000"`
@@ -657,16 +666,114 @@ func TestExactDockerInsecureRegistryEditJudgesAListWhereItLandsAndNullAsEmpty(t 
 		{"null key in the last position of a complete document", edit(`{"debug":true}`, `{"insecure-registries":null}`), false},
 		{"remote list kept in its own key by a step", multi(
 			step(`"insecure-registries":[`+remote+`],"debug":true`, `"insecure-registries":[`+remote+`],"debug":false`),
-			step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), false},
+			step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), true},
 		{"list moves from a key to a new key in a MultiEdit", multi(
 			step(`"insecure-registries":[`+remote+`],`, ``),
-			step(`"debug":true`, `"debug":true,"insecure-registries":[`+remote+`]`)), false},
+			step(`"debug":true`, `"debug":true,"insecure-registries":[`+remote+`]`)), true},
 		{"list moves from a key to a new key in two patch hunks", patch(
 			[]string{`-  "insecure-registries":[` + remote + `],`},
-			[]string{`+  "insecure-registries":[` + remote + `],`}), false},
+			[]string{`+  "insecure-registries":[` + remote + `],`}), true},
 	} {
 		if got := ExactDockerInsecureRegistryWrite(row.input, Analyze(row.input)); got != row.want {
 			t.Errorf("%s: proof=%t, want %t", row.name, got, row.want)
+		}
+	}
+}
+
+// TestExactDockerInsecureRegistryEveryEditFormJudgesEverySpellingLikeAWrite
+// pins one verdict per spelling across the four native forms (a whole-file
+// write, an Edit, a MultiEdit and a patch hunk): every spelling Docker accepts
+// for a remote insecure registry is proved by each, and loopback entries and
+// entries the closed grammar cannot read are proved by none.
+func TestExactDockerInsecureRegistryEveryEditFormJudgesEverySpellingLikeAWrite(t *testing.T) {
+	t.Parallel()
+	forms := func(entry string) map[string]Input {
+		list := `"insecure-registries":[` + jsonString(t, entry) + `]`
+		return map[string]Input{
+			"Write": dockerRegistryInput(t, "Write", "file_path", dockerDaemonConfigPath, `{`+list+`}`),
+			"Edit": nativeCall(t, "Edit", map[string]any{
+				"file_path": dockerDaemonConfigPath, "old_string": `"debug":true`, "new_string": `"debug":true,` + list,
+			}),
+			"MultiEdit": nativeCall(t, "MultiEdit", map[string]any{"file_path": dockerDaemonConfigPath, "edits": []any{
+				map[string]any{"old_string": `"log-driver":"json-file"`, "new_string": `"log-driver":"journald"`},
+				map[string]any{"old_string": `"debug":true`, "new_string": `"debug":true,` + list},
+			}}),
+			"apply_patch": nativeCall(t, "apply_patch", map[string]any{"command": "*** Begin Patch\n*** Update File: " +
+				dockerDaemonConfigPath + "\n@@\n   \"debug\":true,\n+  " + list + "\n*** End Patch\n"}),
+		}
+	}
+	for _, group := range []struct {
+		entries []string
+		want    bool
+	}{{dockerInsecureRegistrySpellings, true}, {dockerAllowedRegistrySpellings, false}} {
+		for _, entry := range group.entries {
+			for form, input := range forms(entry) {
+				if got := ExactDockerInsecureRegistryWrite(input, Analyze(input)); got != group.want {
+					t.Errorf("%s with entry %q: proof=%t, want %t", form, entry, got, group.want)
+				}
+			}
+		}
+	}
+}
+
+// TestExactDockerInsecureRegistryEditJudgesTheTextItLeavesWithoutCrossStepCredit
+// pins a multi-step edit and a patch to the verdict of a write of the document
+// they leave, with no credit for a registry that one step took out of a key
+// and another put back: a registry moved from an overridden key to an
+// effective one is judged by the text that puts it there.
+func TestExactDockerInsecureRegistryEditJudgesTheTextItLeavesWithoutCrossStepCredit(t *testing.T) {
+	t.Parallel()
+	step := func(oldText, newText string) map[string]any {
+		return map[string]any{"old_string": oldText, "new_string": newText}
+	}
+	multi := func(steps ...map[string]any) Input {
+		edits := make([]any, len(steps))
+		for index := range steps {
+			edits[index] = steps[index]
+		}
+		return nativeCall(t, "MultiEdit", map[string]any{"file_path": dockerDaemonConfigPath, "edits": edits})
+	}
+	patch := func(lines ...string) Input {
+		text := "*** Begin Patch\n*** Update File: " + dockerDaemonConfigPath + "\n"
+		for _, line := range lines {
+			text += line + "\n"
+		}
+		return nativeCall(t, "apply_patch", map[string]any{"command": text + "*** End Patch\n"})
+	}
+	for _, entry := range []string{`"198.51.100.7:5000"`, `"http://198.51.100.7:5000"`} {
+		for _, row := range []struct {
+			name  string
+			input Input
+			want  bool
+		}{
+			{"three-step MultiEdit moving the registry past a last empty key", multi(
+				step(`"insecure-registries":[`+entry+`],`, ""),
+				step(`"insecure-registries":[],"debug":true`, `"insecure-registries":[],"debug":false`),
+				step(`"debug":false`, `"debug":false,"insecure-registries":[`+entry+`]`)), true},
+			{"patch moving the registry past a last empty key", patch("@@",
+				`-  "insecure-registries":[`+entry+`],`, "@@",
+				`   "insecure-registries":[],`, `-  "debug":true`, `+  "debug":true,`,
+				`+  "insecure-registries":[`+entry+`]`), true},
+			{"patch with the key as context and the entry added", patch("@@",
+				`   "insecure-registries":[`, `+    `+entry), true},
+			{"list opened by one step and filled by the next", multi(
+				step(`"insecure-registries":[],`, `"insecure-registries":[`),
+				step(`]`, entry+`]`)), true},
+
+			{"MultiEdit that only changes the log driver", multi(
+				step(`"log-driver":"json-file"`, `"log-driver":"journald"`),
+				step(`"debug":true`, `"debug":false`)), false},
+			{"MultiEdit that takes the earlier key out and changes a setting", multi(
+				step(`"insecure-registries":[`+entry+`],`, ""),
+				step(`"debug":true`, `"debug":false`)), false},
+			{"patch that takes the earlier key out", patch("@@",
+				`-  "insecure-registries":[`+entry+`],`, `   "debug":true`), false},
+			{"patch that only changes the log driver", patch("@@",
+				`   "debug":true,`, `-  "log-driver":"json-file"`, `+  "log-driver":"journald"`), false},
+		} {
+			if got := ExactDockerInsecureRegistryWrite(row.input, Analyze(row.input)); got != row.want {
+				t.Errorf("%s (%s): proof=%t, want %t", row.name, entry, got, row.want)
+			}
 		}
 	}
 }
