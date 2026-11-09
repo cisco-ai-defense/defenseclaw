@@ -20,10 +20,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {set: m, sub: ports, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: nice, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: workers2, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: monitor, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: claudecode, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: claudecode-cursor, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: codex, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: codex-mismatch, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cursor, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: copilot, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: devin, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: kiro, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: hermes, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: antigravity, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: inspect-tool, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: inspect-request, run: '^TestShellHookBehaviourMatchesGolden$'}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -69,14 +77,7 @@ jobs:
           monitor=$!
           bin="$RUNNER_TEMP/connector.test"
           args=(-test.v -test.count=1 -test.timeout 8m -test.run "$RUN")
-          case "$SUB" in
-            ports)
-              sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535" net.ipv4.tcp_tw_reuse=1
-              timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
-            nice) timeout -k 15 540 nice -n 19 "$bin" "${args[@]}"; rc=$? ;;
-            workers2) DC_HOOK_GOLDEN_WORKERS=2 timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
-            monitor) timeout -k 10 180 "$bin" "${args[@]}"; rc=$? ;;
-          esac
+          DC_HOOK_GOLDEN_ONLY="${SUB}/" timeout -k 15 540 "$bin" "${args[@]}"; rc=$?
           kill "$monitor"
           echo "exit $rc"
           echo "=== monitor"; cat "$mon"
