@@ -105,7 +105,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Clear-DefenseClawRollbackDeferredHolds', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
+foreach ($name in @('Test-DefenseClawCodexWriterLockBusyMessage', 'New-DefenseClawCodexWriterBusyRefusal', 'Get-DefenseClawOptionalLayoutValue', 'Get-DefenseClawCodexManagedHooksWriterCounter', 'Test-DefenseClawRollbackHeldMessage', 'New-DefenseClawCodexWriterUnsettledHeldMessage', 'Test-DefenseClawGuardianProofDeferredByCodexWriter', 'Clear-DefenseClawRollbackDeferredHolds', 'Test-DefenseClawRollbackCoverageDeferred', 'Get-DefenseClawHeldMessagePath', 'Add-DefenseClawRollbackDeferredHold', 'Assert-DefenseClawRollbackHoldsResolved')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -151,6 +151,23 @@ switch ($Case) {
     'no-lock' {
         $out.deferred = [bool](Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $layout)
         $out.holds = @($script:DefenseClawRollbackDeferredHolds)
+    }
+    'busy' {
+        $busy = @(
+            'Codex requirements reconcile failed: timed out waiting 10s for Codex machine policy lock',
+            'Codex requirements verify failed: open Codex machine policy lock: The process cannot access the file because it is being used by another process.',
+            'open Codex machine policy lock: sharing violation'
+        )
+        $notBusy = @(
+            'Codex requirements reconcile failed: allow_managed_hooks_only=false conflicts with required isolation',
+            'Codex requirements verify failed: hooks.SessionStart has no DefenseClaw managed group',
+            'acquire Codex machine policy lock: Access is denied.',
+            ''
+        )
+        $out.busy = @($busy | ForEach-Object { [bool](Test-DefenseClawCodexWriterLockBusyMessage -Message $_) })
+        $out.notBusy = @($notBusy | ForEach-Object { [bool](Test-DefenseClawCodexWriterLockBusyMessage -Message $_) })
+        $out.refusal = New-DefenseClawCodexWriterBusyRefusal -Layout $layout -Action 'reconcile' -Detail $busy[0]
+        $out.refusalIsRollbackHeld = [bool](Test-DefenseClawRollbackHeldMessage -Message $out.refusal)
     }
     'forward-refusal' {
         $refusal = 'codex_state_unsettled: the Codex writer transaction counter next to X stayed at 3 (odd: a transaction is open) for 30 seconds (the writer is writer.exe (pid 4242)), so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run Setup /repair again once no Codex writer is running'
@@ -239,3 +256,35 @@ def test_the_services_recovery_keeps_only_the_writer_deferral(tmp_path: Path) ->
     assert result["kept"] == ["codex_state_unsettled:"], result
     assert result["coverageKept"] is True, result
     assert result["cleared"] == 0 and result["coverageCleared"] is False, result
+
+
+def test_a_busy_writer_lock_is_told_apart_from_a_defect_of_the_policy_file(tmp_path: Path) -> None:
+    # GAP-0999: the gateway's lock-busy answers (the sharing violation of an
+    # exclusive writer, the byte-range lock that is never given) are not the
+    # hand edit the Codex policy recovery (GAP-0802, GAP-0955) acts on.
+    result = _run(tmp_path, "busy")
+    assert result["busy"] == [True, True, True], result
+    assert result["notBusy"] == [False, False, False, False], result
+    refusal = result["refusal"]
+    assert refusal.startswith("codex_state_unsettled: a Codex writer holds the writer lock next to "), result
+    assert "the writer is writer.exe (pid 4242, account NT AUTHORITY\\SYSTEM)" in refusal, result
+    assert "run Setup /repair again once no Codex writer is running" in refusal, result
+    assert "timed out waiting 10s for Codex machine policy lock" in refusal, result
+    assert "FORCE" not in refusal and result["refusalIsRollbackHeld"] is False, result
+
+
+def test_a_busy_writer_never_reaches_the_recovery_that_rebuilds_the_policy_file() -> None:
+    text = _text()
+    command = _function_body(text, "Invoke-DefenseClawCodexRequirementsCommand")
+    assert command.index("Test-DefenseClawStandaloneProfile") < command.index("New-DefenseClawCodexWriterBusyRefusal")
+    assert command.index("New-DefenseClawCodexWriterBusyRefusal") < command.index('throw "Codex requirements $Action failed: $detail"')
+    forward = _function_body(text, "Invoke-DefenseClawCodexRequirementsReconcileOrRecover")
+    assert forward.index("codex_state_unsettled: ") < forward.index("Repair-DefenseClawRecoveredCodexRequirements")
+    repair = _function_body(text, "Repair-DefenseClawRecoveredCodexRequirements")
+    # The file is judged and touched only after the busy answers are told apart.
+    assert repair.index("$verifyError.StartsWith('codex_state_unsettled: '") < repair.index("$backupPath = ''")
+    assert repair.index("$mergeError.StartsWith('codex_state_unsettled: '") < repair.index("Get-DefenseClawRecordedCodexRequirementsPreimage")
+    assert repair.count("New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout") == 2
+    deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
+    verify = deployment.index("-Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))")
+    assert "New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout" in deployment[verify : verify + 1200]

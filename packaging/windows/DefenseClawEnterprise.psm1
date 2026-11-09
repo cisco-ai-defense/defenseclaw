@@ -30233,6 +30233,10 @@ function Invoke-DefenseClawCodexRequirementsCommand {
         else {
             (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim())
         }
+        if ((Test-DefenseClawStandaloneProfile) -and (Test-DefenseClawCodexWriterLockBusyMessage -Message $detail)) {
+            # GAP-0999: not a defect of the policy file.
+            throw (New-DefenseClawCodexWriterBusyRefusal -Layout $Layout -Action $Action -Detail "Codex requirements $Action failed: $detail")
+        }
         throw "Codex requirements $Action failed: $detail"
     }
     foreach ($pair in @(
@@ -35885,6 +35889,42 @@ function Test-DefenseClawRollbackHeldMessage {
         $Message -match '^codex_state_unsettled: .*the rollback left that state as it is')
 }
 
+function Test-DefenseClawCodexWriterLockBusyMessage {
+    <#
+        GAP-0999: the two ways the gateway's Codex machine policy commands say
+        a Codex writer holds the writer lock: the open is refused with a
+        sharing violation, or the byte-range lock is not given within the
+        command's bound. The text is the gateway's own
+        (codex_machine_requirements_windows.go).
+    #>
+    param([AllowEmptyString()][string]$Message)
+    return ($Message -match 'timed out waiting \S+ for Codex machine policy lock' -or
+        $Message -match 'open Codex machine policy lock: .*(being used by another process|sharing violation)')
+}
+
+function New-DefenseClawCodexWriterBusyRefusal {
+    <#
+        GAP-0999: the refusal of a forward step whose Codex command could not
+        take the writer lock a writer holds. The stable code codex_state_unsettled
+        (as the wait's refusal, exit 1603), the writer by name, what the run
+        does next, and /repair. It is what the command's failure was before
+        GAP-0999 read as a hand edit of the Codex policy (the recovery then
+        rebuilt a file it had no reason to touch).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Action,
+        [Parameter(Mandatory)][string]$Detail
+    )
+    $path = [string]$Layout.CodexManagedHooksStatePath
+    $writerText = ''
+    try { $writerText = [string](Get-DefenseClawCodexWriterHolderText -Path $path) } catch { $writerText = '' }
+    if ($writerText -eq '') {
+        $writerText = 'the writer is a program that Windows did not name'
+    }
+    return ('codex_state_unsettled: a Codex writer holds the writer lock next to {0} ({1}), so the Codex managed policy could not be checked ({2}) and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run {3} again once no Codex writer is running (the next Codex writer pass ends a stopped transaction). The Codex command said: {4}' -f $path, $writerText, $Action, (Format-DefenseClawSetupAction -Action '/repair'), $Detail)
+}
+
 function New-DefenseClawCodexWriterUnsettledHeldMessage {
     <#
         GAP-0999 (r109): the retryable end of a rollback that cannot judge the
@@ -35898,7 +35938,7 @@ function New-DefenseClawCodexWriterUnsettledHeldMessage {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = [string]$Layout.CodexManagedHooksStatePath
     $counter = [int64](Get-DefenseClawCodexManagedHooksWriterCounter -Path $path)
-    $why = if (($counter % 2) -ne 0) { 'odd: a transaction is open' } else { 'still changing' }
+    $why = if (($counter % 2) -ne 0) { 'odd: a transaction is open' } else { 'even, but a writer holds the lock or keeps changing it' }
     $writerText = ''
     try { $writerText = [string](Get-DefenseClawCodexWriterHolderText -Path $path) } catch { $writerText = '' }
     if ($writerText -eq '') {
@@ -36129,6 +36169,11 @@ function Invoke-DefenseClawCodexRequirementsReconcileOrRecover {
     if ($null -eq $reconcileFailure) {
         return
     }
+    if (([string]$reconcileFailure.Exception.Message).StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+        # GAP-0999: a Codex writer holds the lock; the policy file was not
+        # judged, so no recovery runs and nothing is rebuilt.
+        throw $reconcileFailure
+    }
     $recoveredBefore = @($script:DefenseClawRecoveredCodexRequirementsNotes).Count
     if (Test-DefenseClawStandaloneProfile) {
         Repair-DefenseClawRecoveredCodexRequirements `
@@ -36212,6 +36257,11 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     catch {
         $verifyError = [string]$_.Exception.Message
     }
+    if ($verifyError.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+        # GAP-0999: a Codex writer holds the lock; the file was not judged and
+        # is not touched. The rollback defers, as for a held file.
+        throw (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
+    }
     $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
     if ($blockedState -ne '') {
         throw (New-DefenseClawCodexFileHeldMessage `
@@ -36271,6 +36321,12 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     }
     catch {
         $mergeError = [string]$_.Exception.Message
+        if ($mergeError.StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+            # GAP-0999: the merge could not run because a Codex writer holds
+            # the lock; the file is not rebuilt (the copy of the file kept
+            # above stays).
+            throw (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
+        }
         if ($exists -and ((Test-DefenseClawFileReadBlocked -Path $path) -or
                 (Test-DefenseClawFileDeleteBlocked -Path $path))) {
             throw (New-DefenseClawCodexFileHeldMessage `
@@ -37341,10 +37397,24 @@ function Assert-DefenseClawEnterpriseDeployment {
         }
     }
     if (-not $codexRequirementsDeferred) {
-        [void](Invoke-DefenseClawCodexRequirementsCommand `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName `
-            -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+        try {
+            [void](Invoke-DefenseClawCodexRequirementsCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+        }
+        catch {
+            # GAP-0999: the Codex verify of a rollback could not take the lock
+            # a Codex writer holds; the restored services still start.
+            if (-not ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
+                    (Test-DefenseClawStandaloneProfile) -and
+                    ([string]$_.Exception.Message).StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal))) {
+                throw
+            }
+            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexWriterUnsettledHeldMessage -Layout $Layout)
+            $codexRequirementsDeferred = $true
+            $script:DefenseClawRollbackCoverageDeferred = $true
+        }
     }
     }
 
