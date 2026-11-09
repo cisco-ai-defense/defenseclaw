@@ -1713,6 +1713,13 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					if !closed {
 						return true
 					}
+					if !nativeFileToolWriteOperand(request.Input, facts, clientCWD, operand) {
+						// A header the text holds in a body no call runs
+						// (the balanced tiers read none, the strict tier
+						// reads every body) writes nothing: the link text
+						// decides only the patches the call performs.
+						continue
+					}
 					resolved = text
 				}
 				if isProtected(resolved) || isProtected(target) {
