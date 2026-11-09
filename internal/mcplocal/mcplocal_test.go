@@ -51,3 +51,26 @@ func TestJudgeClassesAndStatedVerdict(t *testing.T) {
 		})
 	}
 }
+
+// A claim that states no verdict is judged only as far as its first arguments
+// prove: a launcher or an execution flag decides whatever follows, a missing
+// package does not.
+func TestProvenIsWhatTheFirstArgumentsAloneProve(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, class string
+		args                 []string
+	}{
+		{"interpreter", "python3", Launcher, []string{"server.py"}},
+		{"flag among the arguments", "npx", Arguments, []string{"-y", "pkg", "-c", "x"}},
+		{"flag with value, any case", "uvx", Arguments, []string{"--EVAL=1"}},
+		{"options only, a package may follow", "npx", None, []string{"-y", "--quiet"}},
+		{"package", "npx", None, []string{"-y", "pkg"}},
+		{"no command", "", None, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Proven(tc.command, tc.args); got != tc.class {
+				t.Fatalf("Proven = %q, want %q", got, tc.class)
+			}
+		})
+	}
+}

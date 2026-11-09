@@ -2911,6 +2911,7 @@ func (w *InstallWatcher) withMCPDefinition(cfg *config.Config, evt InstallEvent,
 		}
 	}
 	in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
+	in.ArgsCut = entry.ArgsCut
 	return in
 }
 
