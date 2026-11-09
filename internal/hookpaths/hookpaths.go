@@ -2028,18 +2028,23 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			resolved = ""
 		}
 		entry := len(jsonString(path)) + 1 + len(jsonString(resolved)) + 1
-		if size+entry > maxEncodedTargets {
+		// The link text is what tells a managed gateway that an empty answer
+		// means a directory closed to the user and not a command without
+		// proof, so the answer and its link text are one entry: when both
+		// do not fit, the operand is left out and the map says it is
+		// incomplete, never an empty answer without its text.
+		linkKey, linkCost := LinkTextFactPrefix+path, 0
+		if linkText != "" {
+			linkCost = len(jsonString(linkKey)) + 1 + len(jsonString(linkText)) + 1
+		}
+		if size+entry+linkCost > maxEncodedTargets {
 			truncated, overBudget = true, true
 			return
 		}
-		size += entry
+		size += entry + linkCost
 		targets[path] = resolved
 		if linkText != "" {
-			key := LinkTextFactPrefix + path
-			if cost := len(jsonString(key)) + 1 + len(jsonString(linkText)) + 1; size+cost <= maxEncodedTargets {
-				targets[key] = linkText
-				size += cost
-			}
+			targets[linkKey] = linkText
 		}
 		if entryOnly {
 			key := ReplacedLinkFactPrefix + path
