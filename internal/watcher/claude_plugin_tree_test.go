@@ -213,6 +213,62 @@ func TestClaudePluginUpdateStagingCloneIsNotAPlugin(t *testing.T) {
 	}
 }
 
+func TestIsClaudePluginUpdateClone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"temp_subdir_1793946491108_t2ymk0.clone", true},
+		{"temp_subdir_1793946489634_kkth3d.clone", true},
+		{"TEMP_SUBDIR_1_ABC.clone", true},
+		{"temp_subdir_tools.clone", false},
+		{"temp_subdir_1.clone", false},
+		{"temp_subdir__abc.clone", false},
+		{"temp_subdir_1_.clone", false},
+		{"temp_subdir_x1_abc.clone", false},
+		{"temp_subdir_1_ab-c.clone", false},
+		{"temp_subdir_1_abc_def.clone", false},
+		{"temp_subdir_1_abc", false},
+	} {
+		if got := isClaudePluginUpdateClone(tc.name); got != tc.want {
+			t.Errorf("isClaudePluginUpdateClone(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// CodeRabbit on #1432: marketplace names may use ".", "_" and "-", so a
+// registered marketplace named temp_subdir_tools.clone is valid. Its plugin
+// versions must still be admitted by live events, rescans and the startup walk.
+func TestClaudeMarketplaceNamedLikeUpdateCloneIsStillScanned(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
+	marketplace := filepath.Join(cache, "temp_subdir_tools.clone")
+	version := filepath.Join(marketplace, "tool-plug", "1.0.0")
+	if err := os.MkdirAll(version, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+
+	if w.inClaudePluginStaging(version, 0) || w.inClaudePluginStaging(version, claudeStagingGrace) {
+		t.Fatal("plugin version in a registered marketplace must not be staging")
+	}
+	if id, ok := w.claudePluginIdentity(version); !ok || id != "tool-plug@temp_subdir_tools.clone" {
+		t.Fatalf("claudePluginIdentity(version) = %q ok=%v", id, ok)
+	}
+	var plugins []string
+	for _, evt := range w.enumerateTargets() {
+		plugins = append(plugins, evt.Path)
+	}
+	if len(plugins) != 1 || plugins[0] != version {
+		t.Fatalf("rescan targets %v, want only %s", plugins, version)
+	}
+	w.queueExistingClaudePlugins(context.Background(), cache, 0)
+	if _, ok := w.pending[version]; !ok || len(w.pending) != 1 {
+		t.Fatalf("queued %v, want only %s", w.pending, version)
+	}
+}
+
 func TestPathHasGitDirSegment(t *testing.T) {
 	for _, tc := range []struct {
 		path string
@@ -264,6 +320,11 @@ func TestQueueDueIssuesClearsStagingAndGitIssues(t *testing.T) {
 		{name: "staging clone", path: []string{"temp_subdir_1_abc.clone", "hooks"}},
 		{name: "git internals", path: []string{"marketplace", "plugin", ".git", "hooks"}},
 		{name: "plugin version", path: []string{"marketplace", "plugin", "1.0.0"}, wantRetry: true},
+		{
+			name:      "plugin version in a marketplace named like a clone",
+			path:      []string{"temp_subdir_tools.clone", "plugin", "1.0.0"},
+			wantRetry: true,
+		},
 		{
 			name:        "plugin version in a cache below .git",
 			cacheParent: filepath.Join("dotfiles", ".git", "home"),

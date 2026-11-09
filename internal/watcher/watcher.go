@@ -3729,8 +3729,8 @@ func (w *InstallWatcher) inClaudePluginStaging(path string, grace time.Duration)
 // update), and the .dclaw-stage-<name>-<random> folder that
 // "defenseclaw plugin install" copies a plugin into, scans and decides
 // itself before it moves the copy to cache/<name> (GAP-0017, #1428).
-// Marketplace folders such as temp_subdir_tools are not staging: update
-// clones always end with ".clone".
+// Marketplace folders such as temp_subdir_tools or temp_subdir_tools.clone
+// are not staging: see isClaudePluginUpdateClone for the exact clone shape.
 func isPluginStagingFolder(name string) bool {
 	lower := strings.ToLower(name)
 	if strings.HasPrefix(lower, "temp_local_") && len(lower) > len("temp_local_") {
@@ -3746,12 +3746,43 @@ func isPluginStagingFolder(name string) bool {
 }
 
 // isClaudePluginUpdateClone names Claude Code's plugin-update staging
-// directory: cache/temp_subdir_<n>_<rand>.clone (#1428).
+// directory: cache/temp_subdir_<n>_<rand>.clone, where <n> is a decimal
+// timestamp and <rand> a short alphanumeric suffix (#1428). Marketplace
+// names may use letters, digits, ".", "_" and "-", so a marketplace such as
+// temp_subdir_tools.clone must not match; only the exact clone shape does.
 func isClaudePluginUpdateClone(name string) bool {
 	lower := strings.ToLower(name)
 	const prefix, suffix = "temp_subdir_", ".clone"
-	return strings.HasPrefix(lower, prefix) && strings.HasSuffix(lower, suffix) &&
-		len(lower) > len(prefix)+len(suffix)
+	if !strings.HasPrefix(lower, prefix) || !strings.HasSuffix(lower, suffix) ||
+		len(lower) <= len(prefix)+len(suffix) {
+		return false
+	}
+	stamp, random, ok := strings.Cut(lower[len(prefix):len(lower)-len(suffix)], "_")
+	return ok && isASCIIDigits(stamp) && isASCIIAlnum(random)
+}
+
+func isASCIIDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIAlnum(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'z') {
+			return false
+		}
+	}
+	return true
 }
 
 // pathHasGitDirSegment reports whether any path component is named ".git"
