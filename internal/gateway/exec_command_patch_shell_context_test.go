@@ -14,13 +14,15 @@ import (
 
 // The content proofs judge every apply_patch envelope the shell text of an
 // exec_command (Codex) or Bash (Claude Code) call carries on the file headers
-// of the envelope, wherever the text puts it: at the top level, in the body of
-// a function, behind a condition, after the commands that define, call or
-// remove a function of the same name. An envelope that targets a protected
-// file is blocked, an envelope that only touches ordinary files is allowed,
-// and a call of a function that has no envelope is never judged by this rule.
-// A function body is judged whether or not the text calls the function: the
-// rule reads the envelope, not the order in which the shell would run it.
+// of the envelope, wherever the text puts it that the shell can run it: at the
+// top level, in the body of a function a call runs, behind a condition, after
+// the commands that define, call or remove a function of the same name. An
+// envelope that targets a protected file is blocked, an envelope that only
+// touches ordinary files is allowed, and a call of a function that has no
+// envelope is never judged by this rule. The body of a function that nothing
+// in the text calls runs nothing: the default and permissive tiers do not
+// judge it, and the strict tier judges its envelope whether or not the text
+// calls the function (rel-1-0-6:GAP-0928 review 12).
 func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 	home, project := hermesPatchHome(t)
 	const (
@@ -35,7 +37,10 @@ func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 		name    string
 		command func(patch string) string
 		protect bool // the row is blocked when the envelope targets a protected file
-		noPatch bool // the row has no envelope at all and is always allowed
+		// uncalled is a row whose envelope is in a function body no call runs:
+		// only the strict tier blocks it.
+		uncalled bool
+		noPatch  bool // the row has no envelope at all and is always allowed
 	}{
 		{name: "top level", command: envelope, protect: true},
 		{name: "function body", command: func(p string) string { return "f() {\n" + envelope(p) + "}\nf\n" }, protect: true},
@@ -51,12 +56,12 @@ func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 		{name: "function called by source", command: func(p string) string {
 			return "f() {\n" + envelope(p) + "}\ndeclare -f f > fdef.sh\nsource fdef.sh\nf\n"
 		}, protect: true},
-		{name: "function body that nothing in the text calls", command: func(p string) string { return "f() {\n" + envelope(p) + "}\n" }, protect: true},
-		{name: "subshell function that nothing in the text calls", command: func(p string) string { return "f() (\n" + envelope(p) + ")\n" }, protect: true},
-		{name: "function nested in an uncalled function", command: func(p string) string {
+		{name: "function body that nothing in the text calls", uncalled: true, command: func(p string) string { return "f() {\n" + envelope(p) + "}\n" }, protect: true},
+		{name: "subshell function that nothing in the text calls", uncalled: true, command: func(p string) string { return "f() (\n" + envelope(p) + ")\n" }, protect: true},
+		{name: "function nested in an uncalled function", uncalled: true, command: func(p string) string {
 			return "g() {\nf() {\n" + envelope(p) + "}\n}\n"
 		}, protect: true},
-		{name: "function nested in a called function", command: func(p string) string {
+		{name: "function nested in a called function", uncalled: true, command: func(p string) string {
 			return "g() {\nf() {\n" + envelope(p) + "}\n}\ng\n"
 		}, protect: true},
 		{name: "and list", command: func(p string) string { return "test -d . && " + envelope(p) }, protect: true},
@@ -97,13 +102,13 @@ func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 		{name: "after alias settings", command: func(p string) string {
 			return "apply_patch() { :; }\nshopt -s expand_aliases\nalias apply_patch='command apply_patch'\n" + envelope(p)
 		}, protect: true},
-		{name: "uncalled function, program named by a variable", command: func(p string) string {
+		{name: "uncalled function, program named by a variable", uncalled: true, command: func(p string) string {
 			return "p=apply_patch\nf() {\n\"$p\" <<'PATCH'\n" + p + "PATCH\n}\n"
 		}, protect: true},
-		{name: "uncalled function, variable reset after the definition", command: func(p string) string {
+		{name: "uncalled function, variable reset after the definition", uncalled: true, command: func(p string) string {
 			return "p=apply_patch\nf() {\n\"$p\" <<'PATCH'\n" + p + "PATCH\n}\np=ls\n"
 		}, protect: true},
-		{name: "uncalled function, program set in the body", command: func(p string) string {
+		{name: "uncalled function, program set in the body", uncalled: true, command: func(p string) string {
 			return "f() {\np=apply_patch\n\"$p\" <<'PATCH'\n" + p + "PATCH\n}\n"
 		}, protect: true},
 		{name: "uncalled function with no envelope", noPatch: true, command: func(string) string {
@@ -126,40 +131,53 @@ func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 		}},
 	}
 	for _, connector := range []string{"codex", "claudecode"} {
-		for _, row := range rows {
-			for _, patch := range []struct {
-				name, text string
-				block      bool
-			}{{"protected", protected, row.protect}, {"ordinary", ordinary, false}} {
-				if row.noPatch && patch.name == "ordinary" {
-					continue
-				}
-				t.Run(connector+"/"+row.name+"/"+patch.name, func(t *testing.T) {
-					command := row.command(patch.text)
-					tool, input := "Bash", map[string]any{"command": command}
-					if connector == "codex" {
-						tool, input = "exec_command", map[string]any{"cmd": command}
+		for _, pack := range []string{"", "strict"} {
+			for _, row := range rows {
+				for _, patch := range []struct {
+					name, text string
+					block      bool
+				}{{"protected", protected, row.protect}, {"ordinary", ordinary, false}} {
+					if row.noPatch && patch.name == "ordinary" {
+						continue
 					}
-					body := mustJSON(t, map[string]any{
-						"session_id": "shell-patch-context", "hook_event_name": "PreToolUse", "cwd": project,
-						"permission_mode": "default", "tool_name": tool, "tool_use_id": "toolu-shell-patch-context",
-						"tool_input": input,
+					want := patch.block && (pack == "strict" || !row.uncalled)
+					t.Run(connector+"/"+packName(pack)+"/"+row.name+"/"+patch.name, func(t *testing.T) {
+						command := row.command(patch.text)
+						tool, input := "Bash", map[string]any{"command": command}
+						if connector == "codex" {
+							tool, input = "exec_command", map[string]any{"cmd": command}
+						}
+						body := mustJSON(t, map[string]any{
+							"session_id": "shell-patch-context", "hook_event_name": "PreToolUse", "cwd": project,
+							"permission_mode": "default", "tool_name": tool, "tool_use_id": "toolu-shell-patch-context",
+							"tool_input": input,
+						})
+						got := overLimitHostHookInPack(t, connector, pack, home, string(body), hookpaths.Resolve(body))
+						blocked := overLimitHookAction(t, got) == "block"
+						if blocked != want || blocked && !strings.Contains(got, loader) {
+							t.Fatalf("blocked=%t, want block=%t by %q: %.500s", blocked, want, loader, got)
+						}
 					})
-					got := overLimitHostHookWithEvidence(t, connector, home, string(body), hookpaths.Resolve(body))
-					blocked := overLimitHookAction(t, got) == "block"
-					if blocked != patch.block || blocked && !strings.Contains(got, loader) {
-						t.Fatalf("blocked=%t, want block=%t by %q: %.500s", blocked, patch.block, loader, got)
-					}
-				})
+				}
 			}
 		}
 	}
 }
 
+// packName names the policy tier of a rule pack for a subtest.
+func packName(pack string) string {
+	if pack == "" {
+		return "default"
+	}
+	return pack
+}
+
 // A relative file header of an envelope in an uncalled function is read from
 // the directory the text has where it defines the function or in the body, as
-// it is when a call runs the body. The benign twin names an ordinary file the
-// same way and stays allowed, and the directory a body sets stays in the body.
+// it is when a call runs the body. A call that runs the body is judged in
+// every tier; a body no call runs is judged only in the strict tier. The benign
+// twin names an ordinary file the same way and stays allowed, and the directory
+// a body sets stays in the body.
 func TestShellApplyPatchEnvelopeOfAnUncalledFunctionKeepsItsDirectory(t *testing.T) {
 	home, project := hermesPatchHome(t)
 	const loader = "persistence.global_ld_preload_install"
@@ -167,34 +185,109 @@ func TestShellApplyPatchEnvelopeOfAnUncalledFunctionKeepsItsDirectory(t *testing
 	envelope := "apply_patch <<'PATCH'\n" + relative + "PATCH\n"
 	for _, row := range []struct {
 		name, command string
-		block         bool
+		// strict and balanced are the verdicts of the strict and the default tier.
+		strict, balanced bool
 	}{
-		{"cd in the body", "f() {\ncd /etc\n" + envelope + "}\n", true},
-		{"cd in the body, called", "f() {\ncd /etc\n" + envelope + "}\nf\n", true},
-		{"cd before the definition", "cd /etc\nf() {\n" + envelope + "}\n", true},
-		{"cd named by a variable", "c=cd\nf() {\n$c /etc\n" + envelope + "}\n", true},
-		{"cd in a condition of the body", "f() {\nif true; then\ncd /etc\n" + envelope + "fi\n}\n", true},
-		{"cd to an ordinary directory", "f() {\ncd /tmp\n" + envelope + "}\n", false},
-		{"cd to /etc after the body", "f() {\ncd /tmp\n" + envelope + "}\ncd /etc\n", false},
-		{"cd of another function does not leak", "g() {\ncd /etc\n}\nf() {\n" + envelope + "}\n", false},
+		{"cd in the body", "f() {\ncd /etc\n" + envelope + "}\n", true, false},
+		{"cd in the body, called", "f() {\ncd /etc\n" + envelope + "}\nf\n", true, true},
+		{"cd before the definition", "cd /etc\nf() {\n" + envelope + "}\n", true, false},
+		{"cd before the definition, called", "cd /etc\nf() {\n" + envelope + "}\nf\n", true, true},
+		{"cd named by a variable", "c=cd\nf() {\n$c /etc\n" + envelope + "}\n", true, false},
+		{"cd in a condition of the body", "f() {\nif true; then\ncd /etc\n" + envelope + "fi\n}\n", true, false},
+		{"cd to an ordinary directory", "f() {\ncd /tmp\n" + envelope + "}\n", false, false},
+		{"cd to /etc after the body", "f() {\ncd /tmp\n" + envelope + "}\ncd /etc\n", false, false},
+		{"cd of another function does not leak", "g() {\ncd /etc\n}\nf() {\n" + envelope + "}\n", false, false},
 	} {
 		for _, connector := range []string{"codex", "claudecode"} {
-			t.Run(connector+"/"+row.name, func(t *testing.T) {
-				tool, input := "Bash", map[string]any{"command": row.command}
-				if connector == "codex" {
-					tool, input = "exec_command", map[string]any{"cmd": row.command}
+			for _, pack := range []string{"", "strict"} {
+				want := row.balanced
+				if pack == "strict" {
+					want = row.strict
 				}
-				body := mustJSON(t, map[string]any{
-					"session_id": "shell-patch-directory", "hook_event_name": "PreToolUse", "cwd": project,
-					"permission_mode": "default", "tool_name": tool, "tool_use_id": "toolu-shell-patch-directory",
-					"tool_input": input,
+				t.Run(connector+"/"+packName(pack)+"/"+row.name, func(t *testing.T) {
+					tool, input := "Bash", map[string]any{"command": row.command}
+					if connector == "codex" {
+						tool, input = "exec_command", map[string]any{"cmd": row.command}
+					}
+					body := mustJSON(t, map[string]any{
+						"session_id": "shell-patch-directory", "hook_event_name": "PreToolUse", "cwd": project,
+						"permission_mode": "default", "tool_name": tool, "tool_use_id": "toolu-shell-patch-directory",
+						"tool_input": input,
+					})
+					got := overLimitHostHookInPack(t, connector, pack, home, string(body), hookpaths.Resolve(body))
+					blocked := overLimitHookAction(t, got) == "block"
+					if blocked != want || blocked && !strings.Contains(got, loader) {
+						t.Fatalf("blocked=%t, want block=%t by %q: %.500s", blocked, want, loader, got)
+					}
 				})
-				got := overLimitHostHookWithEvidence(t, connector, home, string(body), hookpaths.Resolve(body))
-				blocked := overLimitHookAction(t, got) == "block"
-				if blocked != row.block || blocked && !strings.Contains(got, loader) {
-					t.Fatalf("blocked=%t, want block=%t by %q: %.500s", blocked, row.block, loader, got)
+			}
+		}
+	}
+}
+
+// Code in the body of a function that nothing in the text calls is no state
+// and no command of the call in the default and permissive tiers: a directory
+// change, a nested definition or a command such as eval in it does not reach an
+// ordinary patch envelope the text runs, and the envelope of an ordinary file
+// is allowed (rel-1-0-6:GAP-0928 review 12). The strict tier keeps reading
+// every body, and an envelope that names a protected file blocks in both.
+func TestShellApplyPatchEnvelopeIgnoresStateOfAnUncalledFunction(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	const loader = "persistence.global_ld_preload_install"
+	relative := "*** Begin Patch\n*** Add File: ld.so.preload\n+/usr/local/lib/libreview.so\n*** End Patch\n"
+	envelope := "apply_patch <<'PATCH'\n" + relative + "PATCH\n"
+	protected := "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: /etc/ld.so.preload\n+/usr/local/lib/libreview.so\n*** End Patch\nPATCH\n"
+	for _, row := range []struct {
+		name, command    string
+		strict, balanced bool
+		// strictBy is the rule that blocks the row in the strict tier when it
+		// is not the loader rule: the strict tier reads the command text of an
+		// uncalled body too.
+		strictBy string
+	}{
+		// A later uncalled function defines a helper that changes the directory;
+		// neither definition runs.
+		{"nested definition of an uncalled function", "h() {\ng\n" + envelope + "}\nf() {\ng() { cd /etc; }\n}\n", true, false, ""},
+		{"nested definition of an uncalled function, h called", "h() {\ng\n" + envelope + "}\nf() {\ng() { cd /etc; }\n}\nh\n", false, false, ""},
+		{"nested definition, h called before it is defined", "h() {\ng\n" + envelope + "}\nh\nf() {\ng() { cd /etc; }\n}\n", false, false, ""},
+		{"eval in an uncalled body before the envelope", "f() {\neval 'rm -rf /'\n" + envelope + "}\n", true, false, "CMD-RM-RF"},
+		{"command in an uncalled body before the envelope", "f() {\ncommand rm -rf /\n" + envelope + "}\n", true, false, "CMD-RM-RF"},
+		{"eval in an uncalled body, envelope at the top level", "f() {\neval 'rm -rf /'\n}\n" + envelope, false, false, ""},
+		{"directory of an uncalled body, envelope at the top level", "f() {\ncd /etc\n}\n" + envelope, false, false, ""},
+		{"directory of an uncalled body, envelope in a called one", "f() {\ncd /etc\n}\nh() {\n" + envelope + "}\nh\n", false, false, ""},
+		// What the shell runs is read in every tier.
+		{"directory change at the top level", "cd /etc\n" + envelope, true, true, ""},
+		{"directory change in a called function", "f() {\ncd /etc\n}\nf\n" + envelope, true, true, ""},
+		{"called function holds the envelope after a directory change", "h() {\ncd /etc\n" + envelope + "}\nh\n", true, true, ""},
+		{"protected envelope at the top level", protected, true, true, ""},
+		{"protected envelope in a called function", "h() {\n" + protected + "}\nh\n", true, true, ""},
+	} {
+		for _, connector := range []string{"codex", "claudecode"} {
+			for _, pack := range []string{"", "strict"} {
+				want, by := row.balanced, loader
+				if pack == "strict" {
+					want = row.strict
+					if row.strictBy != "" {
+						by = row.strictBy
+					}
 				}
-			})
+				t.Run(connector+"/"+packName(pack)+"/"+row.name, func(t *testing.T) {
+					tool, input := "Bash", map[string]any{"command": row.command}
+					if connector == "codex" {
+						tool, input = "exec_command", map[string]any{"cmd": row.command}
+					}
+					body := mustJSON(t, map[string]any{
+						"session_id": "shell-patch-state", "hook_event_name": "PreToolUse", "cwd": project,
+						"permission_mode": "default", "tool_name": tool, "tool_use_id": "toolu-shell-patch-state",
+						"tool_input": input,
+					})
+					got := overLimitHostHookInPack(t, connector, pack, home, string(body), hookpaths.Resolve(body))
+					blocked := overLimitHookAction(t, got) == "block"
+					if blocked != want || blocked && !strings.Contains(got, by) {
+						t.Fatalf("blocked=%t, want block=%t by %q: %.500s", blocked, want, by, got)
+					}
+				})
+			}
 		}
 	}
 }
