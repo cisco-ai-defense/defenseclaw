@@ -27,12 +27,21 @@ func countWalkReads(t *testing.T) *int {
 	return &reads
 }
 
+// resetPlainFolders starts the test with no folder known to the share walk
+// and leaves none behind.
+func resetPlainFolders(t *testing.T) {
+	t.Helper()
+	forgetPlainFolders()
+	t.Cleanup(forgetPlainFolders)
+}
+
 // An ordinary command names thousands of operands below one folder. On
 // Windows every operand cost a read of each folder on the way to it (about
 // 1 ms an operand, so 3000 operands of a Codex call passed the 4 s answer
-// budget); a hook call now reads each folder once and the deepest folder of
+// budget); the walk now reads each folder once and the deepest folder of
 // an operand once more to see it is the same (rel-1-0-9:GAP-0943).
 func TestShareWalkReadsEachFolderOnceAndTheDeepestAgainPerHookCall(t *testing.T) {
+	resetPlainFolders(t)
 	restore := OverrideNetworkSharesForTest(func(string) string { return "" }, func(string) {})
 	defer restore()
 	project := filepath.Join(t.TempDir(), "work", "team", "service", "project")
@@ -41,7 +50,7 @@ func TestShareWalkReadsEachFolderOnceAndTheDeepestAgainPerHookCall(t *testing.T)
 	}
 	folders := len(strings.Split(strings.Trim(filepath.ToSlash(project), "/"), "/"))
 	reads := countWalkReads(t)
-	const operands = 3000
+	const operands = 5000
 	end := HookCall()
 	for i := range operands {
 		if _, err := pathLstat(filepath.Join(project, fmt.Sprintf("f%d", i))); err == nil {
@@ -52,20 +61,13 @@ func TestShareWalkReadsEachFolderOnceAndTheDeepestAgainPerHookCall(t *testing.T)
 	if want := folders + operands - 1; *reads > want {
 		t.Fatalf("%d operands in one hook call made %d folder reads, want at most %d (%d folders and one more read per operand)", operands, *reads, want, folders)
 	}
-	// A read outside a hook call keeps no memory of an earlier one.
-	before := *reads
-	if _, err := pathLstat(filepath.Join(project, "again")); err == nil {
-		t.Fatal("the operand exists")
-	}
-	if *reads-before != folders {
-		t.Fatalf("a read outside a hook call made %d folder reads, want %d", *reads-before, folders)
-	}
 }
 
 // The folders a call has found plain are the only ones it skips: a link to a
 // share that is named after thousands of ordinary operands is still asked,
 // and so is a link met again after a plain one.
 func TestShareLinkAfterManyOrdinaryOperandsIsStillAsked(t *testing.T) {
+	resetPlainFolders(t)
 	fx := newLinkedShareFixture(t)
 	release := make(chan struct{})
 	defer close(release)
@@ -98,6 +100,7 @@ type walkReuseFixture struct {
 
 func newWalkReuseFixture(t *testing.T) walkReuseFixture {
 	t.Helper()
+	resetPlainFolders(t)
 	top := t.TempDir()
 	project := filepath.Join(top, "team", "project")
 	slot := filepath.Join(project, "slot")
@@ -185,7 +188,8 @@ func TestShareFolderReplacedByAnotherFolderStaysReadable(t *testing.T) {
 
 // A read of a known folder that the system holds (a folder above it became a
 // link to a share that does not answer) is bounded by the answer wait and
-// reported unanswered, once; the call keeps no folders after it.
+// reported unanswered, once; the walk keeps no folders after it and the wait
+// is charged to the hook call.
 func TestShareKnownFolderReadThatDoesNotReturnIsBounded(t *testing.T) {
 	fx := newWalkReuseFixture(t)
 	end := HookCall()
@@ -201,6 +205,7 @@ func TestShareKnownFolderReadThatDoesNotReturnIsBounded(t *testing.T) {
 		return os.Lstat(name)
 	}
 	t.Cleanup(func() { walkLstat = old })
+	budget := currentHookCall().waitLeft
 	start := time.Now()
 	if _, err := pathLstat(filepath.Join(fx.slot, "f0")); !errors.Is(err, errNetworkShareUnanswered) {
 		t.Fatalf("held read = %v, want the share error", err)
@@ -208,7 +213,44 @@ func TestShareKnownFolderReadThatDoesNotReturnIsBounded(t *testing.T) {
 	if took := time.Since(start); took > 5*time.Second {
 		t.Fatalf("held read took %v, want about the answer wait", took)
 	}
-	if call := currentHookCall(); len(call.plainFolders) != 0 || !call.noPlain {
-		t.Fatalf("the call keeps %d folders after a held read (noPlain %v), want none", len(call.plainFolders), call.noPlain)
+	plainFolders.mu.Lock()
+	kept := len(plainFolders.m)
+	plainFolders.mu.Unlock()
+	if kept != 0 {
+		t.Fatalf("the walk keeps %d folders after a held read, want none", kept)
+	}
+	if left := currentHookCall().waitLeft; left >= budget {
+		t.Fatalf("the held read was not charged to the call: %v left of %v", left, budget)
+	}
+}
+
+// noIdentity is a folder read whose identity cannot be compared.
+type noIdentity struct{ os.FileInfo }
+
+// A folder whose identity cannot be proven is never trusted: the walk goes
+// back to the root for every path, and a folder that became a link to a
+// share is still asked.
+func TestShareFolderWithoutIdentityIsNotSkipped(t *testing.T) {
+	fx := newWalkReuseFixture(t)
+	old := walkLstat
+	walkLstat = func(name string) (os.FileInfo, error) {
+		info, err := os.Lstat(name)
+		if err != nil {
+			return info, err
+		}
+		return noIdentity{info}, nil
+	}
+	t.Cleanup(func() { walkLstat = old })
+	end := HookCall()
+	defer end()
+	readOperands(t, fx.slot, 50)
+	if err := os.Rename(fx.slot, fx.slot+"-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(fx.share, fx.slot); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := pathLstat(filepath.Join(fx.slot, "skills")); !errors.Is(err, errNetworkShareUnanswered) {
+		t.Fatalf("read below the swapped folder = %v, want the share error", err)
 	}
 }
