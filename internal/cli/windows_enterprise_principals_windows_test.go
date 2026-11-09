@@ -63,11 +63,13 @@ func TestWindowsStandaloneTrustAdvisoryNamesTheAccountAndTheFix(t *testing.T) {
 // vendor's read entry away too. DefenseClaw's own folders, other accounts and
 // an account with no read keep /remove:g.
 func TestWindowsWriterFixKeepsTheReadOfTheStockReaderGroups(t *testing.T) {
-	originalReads, originalDirectory := windowsPrincipalReadsPath, windowsPathIsDirectory
-	t.Cleanup(func() { windowsPrincipalReadsPath, windowsPathIsDirectory = originalReads, originalDirectory })
+	originalReads, originalDirectory := managed.StandalonePrincipalReadsPath, managed.StandalonePathIsDirectory
+	t.Cleanup(func() {
+		managed.StandalonePrincipalReadsPath, managed.StandalonePathIsDirectory = originalReads, originalDirectory
+	})
 	reads, directory := true, true
-	windowsPrincipalReadsPath = func(string, string) bool { return reads }
-	windowsPathIsDirectory = func(string) bool { return directory }
+	managed.StandalonePrincipalReadsPath = func(string, string) bool { return reads }
+	managed.StandalonePathIsDirectory = func(string) bool { return directory }
 	vendor := `C:\ProgramData\OpenAI`
 	for _, tc := range []struct {
 		name, path, sid, want string

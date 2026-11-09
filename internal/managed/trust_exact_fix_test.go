@@ -101,6 +101,9 @@ func TestStandaloneMachinePolicyRecoveryNamesTheExactCommand(t *testing.T) {
 	stateFile := filepath.Join(dir, ".defenseclaw-managed-hooks.state")
 	vendor := `C:\ProgramData\Vendor`
 	vendorState := vendor + `\.defenseclaw-managed-hooks.state`
+	originalReads := StandalonePrincipalReadsPath
+	t.Cleanup(func() { StandalonePrincipalReadsPath = originalReads })
+	StandalonePrincipalReadsPath = func(string, string) bool { return true }
 	for _, test := range []struct {
 		name, sid, want string
 	}{
@@ -141,5 +144,42 @@ func TestStandaloneMachinePolicyRecoveryNamesTheExactCommand(t *testing.T) {
 		if !strings.Contains(fileText, want) {
 			t.Errorf("file recovery lacks %q: %q", want, fileText)
 		}
+	}
+}
+
+// Review D5: read is granted back only to a principal that already held a read
+// entry on the folder, and never on a DefenseClaw path.
+func TestStandaloneWriterFixGrantsReadOnlyWhereItWasHeld(t *testing.T) {
+	originalReads := StandalonePrincipalReadsPath
+	t.Cleanup(func() { StandalonePrincipalReadsPath = originalReads })
+	reads := true
+	StandalonePrincipalReadsPath = func(string, string) bool { return reads }
+	vendor := `C:\ProgramData\OpenAI`
+	for _, test := range []struct {
+		name, path, sid string
+		reads, grant    bool
+	}{
+		{"Users that read the vendor folder", vendor, "S-1-5-32-545", true, true},
+		{"Authenticated Users that read it", vendor, "S-1-5-11", true, true},
+		{"Everyone that reads it", vendor, "S-1-1-0", true, true},
+		{"Users with no read entry there", vendor, "S-1-5-32-545", false, false},
+		{"Everyone with no read entry there", vendor, "S-1-1-0", false, false},
+		{"Users on DefenseClaw's state folder", `C:\ProgramData\Cisco\DefenseClaw\etc`, "S-1-5-32-545", true, false},
+		{"Users on DefenseClaw's install folder", `C:\Program Files\Cisco\DefenseClaw`, "S-1-5-32-545", true, false},
+		{"Users on a folder merely named like it", `C:\ProgramData\NotDefenseClawX`, "S-1-5-32-545", true, true},
+		{"another account that reads it", vendor, "S-1-5-21-1-2-3-1001", true, false},
+	} {
+		reads = test.reads
+		got := standaloneWriterFix(test.path, test.sid, true)
+		if want := `icacls "` + test.path + `" /remove:g *` + test.sid; !strings.HasPrefix(got, want) {
+			t.Errorf("%s: %q does not remove the entries first", test.name, got)
+		}
+		if has := strings.Contains(got, "/grant"); has != test.grant {
+			t.Errorf("%s: %q grant=%v, want %v", test.name, got, has, test.grant)
+		}
+	}
+	reads = true
+	if got := standaloneWriterFix(vendor+`\x.toml`, "S-1-5-32-545", false); !strings.Contains(got, `/grant "*S-1-5-32-545:(RX)"`) {
+		t.Errorf("a file gets no inheritance flags: %q", got)
 	}
 }

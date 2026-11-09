@@ -14,11 +14,9 @@ package cli
 
 import (
 	"fmt"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -89,69 +87,10 @@ func windowsAccessMaskWords(mask uint32) string {
 	return fmt.Sprintf("%s (0x%x)", strings.Join(words, ", "), mask)
 }
 
-// windowsPrincipalReadsPath reports whether sid holds an allow entry on path
-// that lets it read data; tests replace it.
-var windowsPrincipalReadsPath = func(path, sid string) bool {
-	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return false
-	}
-	dacl, _, err := descriptor.DACL()
-	if err != nil || dacl == nil {
-		return false
-	}
-	for index := uint16(0); index < dacl.AceCount; index++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-			continue
-		}
-		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || uint32(ace.Mask)&0x1 == 0 {
-			continue
-		}
-		if (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String() == sid {
-			return true
-		}
-	}
-	return false
-}
-
-// windowsPathIsDirectory is os.Stat's answer for path; tests replace it.
-var windowsPathIsDirectory = func(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-// windowsDefenseClawOwnedPath is a path inside DefenseClaw's own install or
-// state folders (a folder named exactly DefenseClaw), which are
-// administrator-only by design.
-var windowsDefenseClawOwnedPath = regexp.MustCompile(`(?i)\\DefenseClaw(\\|$)`)
-
-// windowsWriterFix is the icacls command that takes a write-like entry of
-// one account off path. For a path DefenseClaw owns, or an account that holds
-// no read there, it removes the account's entries. For a folder or file that
-// is not DefenseClaw's (a vendor folder under ProgramData) and the stock
-// reader groups (Users, Authenticated Users, Everyone) it removes the
-// account's entries and grants read and execute again, so the write is gone and the read
-// every standard user needs stays: /remove:g would take the vendor's own
-// read entry away too and break reading for everyone (GAP-0602 review D3).
-func windowsWriterFix(path, sid string) string {
-	quoted := `icacls "` + path + `"`
-	switch sid {
-	case "S-1-5-32-545", "S-1-5-11", "S-1-1-0":
-		if !windowsDefenseClawOwnedPath.MatchString(path) && windowsPrincipalReadsPath(path, sid) {
-			inherit := ""
-			if windowsPathIsDirectory(path) {
-				inherit = "(OI)(CI)"
-			}
-			// /grant:r alone leaves an entry with other inheritance flags (a
-			// Modify entry for this folder only next to the stock read entry);
-			// /remove:g first takes every entry of the account off, and the
-			// grant puts the read back in the same command.
-			return quoted + " /remove:g *" + sid + ` /grant "*` + sid + `:` + inherit + `(RX)"`
-		}
-	}
-	return quoted + " /remove:g *" + sid
-}
+// windowsWriterFix is the icacls command that takes a write-like entry of one
+// account off path; the rule (stock reader groups keep read where they held it,
+// DefenseClaw's own paths never) is managed.StandaloneWriterFix.
+func windowsWriterFix(path, sid string) string { return managed.StandaloneWriterFix(path, sid) }
 
 // Trust refusals named only a raw SID and a hex mask, for well-known
 // principals too (BUILTIN\Users, CREATOR OWNER, NT SERVICE accounts), and no

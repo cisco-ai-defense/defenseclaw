@@ -70,7 +70,7 @@ func standaloneMachinePolicyDriftRecovery(path string, cause error) string {
 		text := cause.Error()
 		for _, match := range standaloneCauseFolderVerdict.FindAllStringSubmatch(text, -1) {
 			if folderAbove(match[1], path) {
-				above = append(above, standaloneWriterAboveFix(match[1], match[2]))
+				above = append(above, standaloneWriterFix(match[1], match[2], true))
 				writers = removeSID(writers, match[2])
 			}
 		}
@@ -90,7 +90,7 @@ func standaloneMachinePolicyDriftRecovery(path string, cause error) string {
 		// stays (a vendor folder that lost it breaks every standard user).
 		parent := filepath.Dir(path)
 		fix += ` and, for the folder above it, run icacls "` + parent + `" to see which account can write it, then take away only that account's ` +
-			`write-like grant and keep its read: for BUILTIN\Users that is icacls "` + parent + `" /remove:g *` + sidUsers + ` /grant "*` + sidUsers + `:(OI)(CI)(RX)"`
+			`write-like grant and keep its read: for BUILTIN\Users, if it already reads a vendor folder, that is icacls "` + parent + `" /remove:g *` + sidUsers + ` /grant "*` + sidUsers + `:(OI)(CI)(RX)"`
 	}
 	if statErr == nil && info.IsDir() {
 		return "the hook guardian leaves it as it is and every DefenseClaw reader keeps refusing it: from an elevated PowerShell prompt run " +
@@ -193,20 +193,46 @@ func standaloneExactFix(path string, directory bool, writers, drift []string) st
 	return strings.Join(commands, " and ")
 }
 
-// standaloneWriterAboveFix takes the write-like grant of one account away from
-// a folder above the object and leaves its read: the stock accounts that every
-// standard user needs to read a vendor folder (Users, Authenticated Users,
-// Everyone) lose their entries and get read and execute back in the same
-// command, any other account loses its entries. A bare /remove:g on Users
-// would break reading for everyone, and a bare /grant:r leaves an entry with
-// other inheritance flags (a Modify entry for the folder alone).
-func standaloneWriterAboveFix(folder, sid string) string {
-	quoted := `"` + folder + `"`
+// StandalonePrincipalReadsPath reports whether an account already holds a
+// read entry on a path; tests replace it.
+var StandalonePrincipalReadsPath = principalReadsPath
+
+// StandalonePathIsDirectory reports whether path is a folder; tests replace it.
+var StandalonePathIsDirectory = func(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// standaloneDefenseClawOwnedPath matches a path inside a folder named
+// DefenseClaw (the install and state folders), which are administrator-only
+// by design: nobody gets read back there.
+var standaloneDefenseClawOwnedPath = regexp.MustCompile(`(?i)\\DefenseClaw(\\|$)`)
+
+// StandaloneWriterFix is the icacls command that takes the write-like entries
+// of one account off path (review D3, D5). The stock reader groups (Users,
+// Authenticated Users, Everyone) get read and execute back, but only where
+// the account already held a read entry on the path and the path is not
+// DefenseClaw's own: the command removes the account's entries and grants
+// read again in one step, so a vendor folder keeps being readable and nothing
+// is granted that was not there. Any other account, and any DefenseClaw path,
+// loses its entries (/remove:g).
+func StandaloneWriterFix(path, sid string) string {
+	return standaloneWriterFix(path, sid, StandalonePathIsDirectory(path))
+}
+
+func standaloneWriterFix(path, sid string, directory bool) string {
+	remove := "icacls \"" + path + "\" /remove:g *" + sid
 	switch sid {
 	case sidUsers, sidAuthenticatedUser, sidEveryone:
-		return "icacls " + quoted + " /remove:g *" + sid + ` /grant "*` + sid + `:(OI)(CI)(RX)"`
+		if !standaloneDefenseClawOwnedPath.MatchString(path) && StandalonePrincipalReadsPath(path, sid) {
+			inherit := ""
+			if directory {
+				inherit = "(OI)(CI)"
+			}
+			return remove + ` /grant "*` + sid + `:` + inherit + `(RX)"`
+		}
 	}
-	return "icacls " + quoted + " /remove:g *" + sid
+	return remove
 }
 
 // folderAbove reports whether folder is a folder above path (any depth), by
