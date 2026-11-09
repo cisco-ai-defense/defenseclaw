@@ -318,9 +318,10 @@ const copilotOwnedHookFileName = "defenseclaw.json"
 // and it holds nothing but version and hooks it is removed instead of being
 // left empty. Only a scrub running as the user removes it; as root (the
 // uninstaller's retry) the emptied document is written in place, so root
-// never deletes by a path the user controls. A hooks value that is present
-// but not an object (null, an array) is not Copilot's shape, so the file is
-// kept as it is.
+// never deletes by a path the user controls. A document that is null, or
+// whose hooks value is present but not an object (null, an array), is not
+// Copilot's shape, so the file is kept as it is; when that value still holds
+// a DefenseClaw entry the scrub fails, so the purge reports it.
 func scrubCopilotFile(path string, markers []string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -330,9 +331,16 @@ func scrubCopilotFile(path string, markers []string) (bool, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return false, fmt.Errorf("parse JSON: %w", err)
 	}
+	if cfg == nil {
+		// A top-level null is not Copilot's shape: keep it.
+		return false, nil
+	}
 	rawHooks, hooksPresent := cfg["hooks"]
 	hooks, hooksIsObject := rawHooks.(map[string]any)
 	if hooksPresent && !hooksIsObject {
+		if looksOwned(rawHooks, markers) {
+			return false, fmt.Errorf("hooks is not an object but holds a DefenseClaw entry; left in place")
+		}
 		return false, nil
 	}
 	scrubFlatHookEntries(hooks, markers)

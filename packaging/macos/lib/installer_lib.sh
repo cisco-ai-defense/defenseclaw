@@ -832,14 +832,6 @@ _claude_desktop_embedded_version_from_home() {
 # fixed. Bash regex + arithmetic on the fields is portable to BSD
 # userland and short enough to keep inline here rather than growing a
 # new dependency.
-# _copilot_version_newer A B -> exit 0 when Copilot version A ranks above B:
-# a higher X.Y.Z core, or the same core where A is the release and B a
-# prerelease of it (1.0.105 over 1.0.105-rc.1).
-_copilot_version_newer() {
-  _semver_greater "$1" "$2" && return 0
-  _semver_greater "$2" "$1" && return 1
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(\+.*)?$ && "$2" =~ ^[0-9]+\.[0-9]+\.[0-9]+- ]]
-}
 
 _semver_greater() {
   local -r core_re='^([0-9]+)\.([0-9]+)\.([0-9]+)'
@@ -868,6 +860,43 @@ _semver_greater() {
     return
   fi
   (( 10#${a_patch} > 10#${b_patch} ))
+}
+
+# _COPILOT_SYSTEM_PREFIXES are the system-wide prefixes whose npm global
+# package and Homebrew cask copilot discovery reads. A shell array set here,
+# not from the environment; the tests point it at fixtures.
+_COPILOT_SYSTEM_PREFIXES=(/usr/local /opt/homebrew)
+
+# _copilot_version_newer A B -> exit 0 when Copilot version A ranks above B
+# by SemVer precedence: a higher X.Y.Z core; for the same core a release
+# above its prereleases (1.0.105 over 1.0.105-rc.1), and two prereleases
+# by their dot-separated identifiers (rc.2 over rc.1, rc.10 over rc.9).
+# Build metadata (+...) is ignored.
+_copilot_version_newer() {
+  _semver_greater "$1" "$2" && return 0
+  _semver_greater "$2" "$1" && return 1
+  local a="${1%%+*}" b="${2%%+*}" ap="" bp=""
+  [[ "$a" == *-* ]] && ap="${a#*-}"
+  [[ "$b" == *-* ]] && bp="${b#*-}"
+  [[ -z "$ap" ]] && { [[ -n "$bp" ]]; return; }
+  [[ -z "$bp" ]] && return 1
+  local -a ai bi
+  IFS=. read -r -a ai <<< "$ap"
+  IFS=. read -r -a bi <<< "$bp"
+  local i x y
+  for (( i = 0; i < ${#ai[@]} || i < ${#bi[@]}; i++ )); do
+    (( i < ${#ai[@]} )) || return 1
+    (( i < ${#bi[@]} )) || return 0
+    x="${ai[i]}" y="${bi[i]}"
+    [[ "$x" == "$y" ]] && continue
+    if [[ "$x" =~ ^[0-9]+$ && "$y" =~ ^[0-9]+$ ]]; then
+      (( 10#$x > 10#$y )); return
+    fi
+    [[ "$x" =~ ^[0-9]+$ ]] && return 1
+    [[ "$y" =~ ^[0-9]+$ ]] && return 0
+    [[ "$x" > "$y" ]]; return
+  done
+  return 1
 }
 
 # _codex_app_bundle_metadata_version APP_ROOT -> echoes version or "".
@@ -1146,13 +1175,17 @@ discover_agent_version() {
       # stale npm package beside a current cask) the highest version
       # wins, so an old one never selects the legacy contract, which has
       # no userPromptTransformed hook.
-      local pkg v caskroom dir dname best=""
+      local pkg v caskroom dir dname prefix best=""
+      local -a system_pkgs=() casks=()
+      for prefix in "${_COPILOT_SYSTEM_PREFIXES[@]}"; do
+        system_pkgs+=("${prefix}/lib/node_modules/@github/copilot/package.json")
+        casks+=("${prefix}/Caskroom/copilot-cli")
+      done
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@github/copilot/package.json \
         "${home}"/.nvm/versions/node/*/lib/node_modules/@github/copilot/package.json \
         "${home}"/.bun/install/global/node_modules/@github/copilot/package.json \
-        /usr/local/lib/node_modules/@github/copilot/package.json \
-        /opt/homebrew/lib/node_modules/@github/copilot/package.json; do
+        "${system_pkgs[@]}"; do
         [[ -f "${pkg}" ]] || continue
         v="$(_probe_json_version "${pkg}" copilot "@github/copilot")"
         [[ -n "${v}" ]] || continue
@@ -1160,7 +1193,7 @@ discover_agent_version() {
           best="${v}"
         fi
       done
-      for caskroom in /opt/homebrew/Caskroom/copilot-cli /usr/local/Caskroom/copilot-cli; do
+      for caskroom in "${casks[@]}"; do
         [[ -d "${caskroom}" && ! -L "${caskroom}" ]] || continue
         for dir in "${caskroom}"/*/; do
           dir="${dir%/}"

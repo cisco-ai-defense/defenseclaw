@@ -97,8 +97,9 @@ func TestScrubCopilot_KeepsFileWithUnsupportedHooksValue(t *testing.T) {
 	t.Cleanup(func() { scrubRunsAsRoot = original })
 	scrubRunsAsRoot = func() bool { return false }
 	for name, body := range map[string]string{
-		"array": `{"version":1,"hooks":[{"type":"command","bash":"/Users/u/bin/my-copilot-hook.sh"}]}` + "\n",
-		"null":  `{"version":1,"hooks":null}` + "\n",
+		"array":         `{"version":1,"hooks":[{"type":"command","bash":"/Users/u/bin/my-copilot-hook.sh"}]}` + "\n",
+		"null":          `{"version":1,"hooks":null}` + "\n",
+		"null document": "null\n",
 	} {
 		path := filepath.Join(t.TempDir(), "defenseclaw.json")
 		writeFile(t, path, body)
@@ -109,6 +110,21 @@ func TestScrubCopilot_KeepsFileWithUnsupportedHooksValue(t *testing.T) {
 		if got := readFile(t, path); got != body {
 			t.Fatalf("%s: file changed:\n%s", name, got)
 		}
+	}
+}
+
+// A DefenseClaw entry inside a hooks value that is not an object is not
+// removed (the shape is not Copilot's), but the scrub reports it, so the
+// purge does not claim a clean removal.
+func TestScrubCopilot_ReportsOwnedEntryInUnsupportedShape(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	body := `{"version":1,"hooks":[{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'"}]}` + "\n"
+	writeFile(t, path, body)
+	if changed, err := scrubCopilotFile(path, scrubDefaultMarkers); err == nil || changed {
+		t.Fatalf("scrubCopilotFile = %v, %v; want an error and no change", changed, err)
+	}
+	if got := readFile(t, path); got != body {
+		t.Fatalf("file changed:\n%s", got)
 	}
 }
 
