@@ -27829,10 +27829,16 @@ function Hold-DefenseClawEarlyHookGuard {
                 }
             }
             catch {
-                $restartNote = "; the hook guardian could not be started again: $($_.Exception.Message)"
+                $restartNote = "the hook guardian could not be started again: $($_.Exception.Message)"
             }
             if ($restartNote -ne '') {
-                throw "$($holdFailure.Exception.Message)$restartNote"
+                # GAP-0989: the original error is rethrown as it is, so its type
+                # and its message prefix (guardian_state_held, hook_in_use,
+                # codex_*) are kept and the exit code stays the one it mapped
+                # to. The restart failure rides on it as context: its Data, the
+                # failure document (guardian_restart_failure) and the log.
+                try { $holdFailure.Exception.Data['DefenseClaw.GuardianRestartFailure'] = $restartNote } catch { $null = $_ }
+                try { Write-DefenseClawLifecycleLogDiagnostic -Message $restartNote } catch { $null = $_ }
             }
         }
         throw $holdFailure

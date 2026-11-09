@@ -176,6 +176,7 @@ try {
             $script:SmokeServiceCalls = [Collections.Generic.List[string]]::new()
             $script:SmokeInstallFails = $true
             $script:SmokeStartFails = $false
+            $script:SmokeInstallError = $null
             # GAP-0989: the guardian's delayed-auto flag. SmokeDelayed is the flag the
             # mocked service holds; SmokeModeClearsDelayed models a mode change that
             # takes the flag with it (the real service answers natively, in the lane).
@@ -190,7 +191,7 @@ try {
                 Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeServiceCalls.Add("mode $($args[3])"); if ($script:SmokeModeClearsDelayed) { $script:SmokeDelayed = $false } }
                 Set-Item -LiteralPath 'function:script:Stop-DefenseClawService' -Value { $script:SmokeServiceCalls.Add('stop') }
                 Set-Item -LiteralPath 'function:script:Start-DefenseClawService' -Value { if ($script:SmokeStartFails) { throw 'start refused' }; $script:SmokeServiceCalls.Add('start') }
-                Set-Item -LiteralPath 'function:script:Install-DefenseClawFileAtomic' -Value { if ($script:SmokeInstallFails) { throw 'injected failure after the stop' }; Copy-Item -LiteralPath $guardPath -Destination $holdLayout.HookPath -Force }
+                Set-Item -LiteralPath 'function:script:Install-DefenseClawFileAtomic' -Value { if ($script:SmokeInstallFails) { if ($null -ne $script:SmokeInstallError) { throw $script:SmokeInstallError }; throw 'injected failure after the stop' }; Copy-Item -LiteralPath $guardPath -Destination $holdLayout.HookPath -Force }
                 $hold = { param($Failure) Hold-DefenseClawEarlyHookGuard -Layout $holdLayout -TransactionDirectory $transaction -GuardCopy $guardPath -GuardSHA256 $guardSha -GuardianServiceName 'DcSmokeGuardian' }
                 $caught = ''
                 try { [void](& $hold) } catch { $caught = $_.Exception.Message }
@@ -214,7 +215,16 @@ try {
                 $script:SmokeServiceCalls.Clear()
                 $script:SmokeServiceCalls.Clear(); $script:SmokeStartFails = $true; $caught = ''
                 try { [void](& $hold) } catch { $caught = $_.Exception.Message }
-                if (-not $caught.StartsWith('injected failure after the stop') -or -not $caught.Contains('could not be started again') -or -not $caught.Contains('start refused')) { throw "the failed restart said '$caught'" }
+                # GAP-0989: the original error is what is rethrown (same message, same type, so a
+                # message-prefix code still matches); the restart failure rides on its Data.
+                $script:SmokeInstallError = [IO.IOException]::new('guardian_state_held: x has y open without delete sharing')
+                $typed = $null
+                try { [void](& $hold) } catch { $typed = $_.Exception }
+                if ($null -eq $typed -or $typed -isnot [IO.IOException] -or -not [object]::ReferenceEquals($typed, $script:SmokeInstallError)) { throw "the failed restart did not rethrow the original typed exception: '$typed'" }
+                if (-not $typed.Message.StartsWith('guardian_state_held: ') -or $typed.Message.Contains('could not be started again')) { throw "the rethrown message was changed: '$($typed.Message)'" }
+                $note = [string]$typed.Data['DefenseClaw.GuardianRestartFailure']
+                if (-not $note.Contains('could not be started again') -or -not $note.Contains('start refused')) { throw "the restart failure was not attached: '$note'" }
+                $script:SmokeInstallError = $null
                 # A hold that works leaves the guardian stopped for the rollback that follows.
                 $script:SmokeServiceCalls.Clear(); $script:SmokeStartFails = $false; $script:SmokeInstallFails = $false
                 if ((& $hold) -ne $guardSha) { throw 'a working hold did not return the guard digest' }
