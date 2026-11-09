@@ -87,3 +87,70 @@ func TestStrictHoldsUnwatchedSkillRootAfterLinkedRouteRepair(t *testing.T) {
 		t.Fatalf("new unscanned skill was not held: blocked=%v source=%q issues=%+v", blocked, decision.Source, w.RootCoverageIssues())
 	}
 }
+
+// Benign twin: the same root is both a skill and a plugin root. Once the
+// watcher has registered it, strict admission no longer holds an ordinary
+// plugin there.
+func TestStrictAllowsPluginUnderSharedRootOnceWatched(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix linked-route ownership")
+	}
+	home := t.TempDir()
+	target := filepath.Join(home, "dotfiles", "claude-dir")
+	root := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Dir(root)); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.RulePack = "strict"
+	cfg.AssetPolicy = config.DefaultAssetPolicy()
+	cfg.Watch.DebounceMs = 100
+	cfg.Watch.RescanEnabled = false
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	w := watcher.New(cfg, []string{root}, []string{root}, store, logger, nil, nil)
+	w.SetRootConnectors(map[string]string{root: "claudecode"})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() { cancel(); <-done }()
+	waitIssues := func(what string, ok func([]watcher.RootCoverageIssue) bool) {
+		t.Helper()
+		deadline := time.After(15 * time.Second)
+		for !ok(w.RootCoverageIssues()) {
+			select {
+			case <-deadline:
+				t.Fatalf("%s: %+v", what, w.RootCoverageIssues())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
+	}
+	waitIssues("writable route not recorded", func(i []watcher.RootCoverageIssue) bool {
+		return len(i) == 2 && i[0].Ancestor != "" && i[1].Ancestor != ""
+	})
+	if err := os.Chmod(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	waitIssues("repaired route should report both unwatched kinds without the folder", func(i []watcher.RootCoverageIssue) bool {
+		return len(i) == 2 && i[0].Ancestor == "" && i[1].Ancestor == ""
+	})
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	waitIssues("registered shared root still reported", func(i []watcher.RootCoverageIssue) bool { return len(i) == 0 })
+	ordinary := filepath.Join(root, "ordinary")
+	if err := os.MkdirAll(ordinary, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg, rootCoverage: w.RootCoverageIssues}
+	if decision, blocked := api.unavailableRootDecision(cfg, "plugin", "claudecode", "hook", "ordinary", []string{ordinary}); blocked {
+		t.Fatalf("watched ordinary plugin held by stale coverage: source=%q issues=%+v", decision.Source, w.RootCoverageIssues())
+	}
+}

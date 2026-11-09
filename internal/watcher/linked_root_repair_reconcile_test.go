@@ -134,3 +134,50 @@ func TestLinkedRouteStillWritableKeepsCoverageIssues(t *testing.T) {
 		}
 	}
 }
+
+// One absent path configured as both a skill root and a plugin root: once the
+// path exists and is watched, the record of each kind ends, including the
+// kind that reuses the watch the other kind registered.
+func TestLinkedRouteRepairEndsSharedAbsentRootIssueOfEveryKind(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix ownership checks")
+	}
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Watch.RescanEnabled = false
+	home := t.TempDir()
+	target := filepath.Join(home, "dotfiles", "claude-dir")
+	root := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Dir(root)); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	w := New(cfg, []string{root}, []string{root}, store, logger, nil, nil)
+	w.SetRootConnectors(map[string]string{root: "claudecode"})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	waitForRootCoverage(t, w, "writable route not recorded for both kinds", func(i []RootCoverageIssue) bool {
+		return len(i) == 2 && i[0].Ancestor == target && i[1].Ancestor == target
+	})
+	if err := os.Chmod(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	waitForRootCoverage(t, w, "repaired route before the root exists", func(i []RootCoverageIssue) bool {
+		return len(i) == 2 && i[0].Ancestor == "" && i[1].Ancestor == ""
+	})
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	waitForRootCoverage(t, w, "a kind kept its record after the shared root was watched", func(i []RootCoverageIssue) bool { return len(i) == 0 })
+	time.Sleep(3 * w.debounce)
+	if issues := w.RootCoverageIssues(); len(issues) != 0 {
+		t.Fatalf("shared root still reported: %+v", issues)
+	}
+}
