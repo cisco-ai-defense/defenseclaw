@@ -3,6 +3,7 @@
 
 """Uninstall removes the Claude Code and Codex backup records `config set data_dir` copied into every earlier folder."""
 
+import json
 import os
 
 import pytest
@@ -107,3 +108,65 @@ def test_a_link_at_the_name_of_a_backup_is_reported_and_not_followed(tmp_path, m
 
     assert len(stayed) == 1 and "claudecode_backup.json" in stayed[0]
     assert target.read_text() == CLAUDE
+
+
+def _record(**fields):
+    return json.dumps(fields, indent=2) + "\n"
+
+
+def test_a_backup_the_user_edited_to_hold_their_own_data_is_kept_after_a_move(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    _setup_backups(home)
+    first = tmp_path / "state"
+    _move(first)
+    mine = _record(had_hooks_key=False, notes="my own data")
+    (home / "claudecode_backup.json").write_text(mine)
+    (home / "claudecode_backup.json").chmod(0o600)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, first, ["claudecode", "codex"]))
+
+    assert stayed == []
+    assert (home / "claudecode_backup.json").read_text() == mine
+    assert not (home / "codex_config_backup.json").exists(), "the record Setup wrote is still removed"
+
+
+def test_the_earlier_codex_backup_a_move_copied_is_removed_with_the_current_one(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    legacy = _record(had_base_url=True, old_base_url="https://api.example.invalid/v1")
+    (home / "codex_backup.json").write_text(legacy)
+    (home / "codex_backup.json").chmod(0o600)
+    first, second = tmp_path / "state", tmp_path / "state2"
+    _move(first)
+    _move(second)
+    assert (first / "codex_backup.json").read_text() == legacy, "the move copied it"
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, second, ["codex"]))
+
+    assert stayed == []
+    assert not (home / "codex_backup.json").exists()
+    assert not (first / "codex_backup.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "text"),
+    [
+        ("codex_backup.json", _record(had_base_url=True, old_base_url="x", notes="mine")),
+        ("codex_backup.json", _record(had_base_url="yes", old_base_url="x")),
+        ("codex_config_backup.json", _record(had_hooks_key=False, added_codex_hooks_flag=False, notes="mine")),
+        ("claudecode_backup.json", _record(original_hooks=None)),
+    ],
+)
+def test_a_file_that_is_not_the_record_setup_writes_stays(tmp_path, monkeypatch, name, text):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    (home / name).write_text(text)
+    (home / name).chmod(0o600)
+    first = tmp_path / "state"
+    first.mkdir()
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, first, ["claudecode", "codex"]))
+
+    assert stayed == []
+    assert (home / name).read_text() == text
