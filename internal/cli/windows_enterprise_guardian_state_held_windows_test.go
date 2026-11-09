@@ -238,6 +238,71 @@ func TestWindowsEnterpriseGuardianStateUserReadableReadsTheAccessList(t *testing
 	}
 }
 
+// GAP-0989: an inherit-only entry applies to what a folder holds, not to a file
+// that carries it, so it does not make the file openable. The same access list
+// without the inherit-only flag does.
+func TestWindowsEnterpriseGuardianStateUserOpenableSkipsInheritOnlyEntries(t *testing.T) {
+	trustee := func(text string) windows.TRUSTEE {
+		sid, err := windows.StringToSid(text)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_GROUP, TrusteeValue: windows.TrusteeValueFromSID(sid)}
+	}
+	build := func(extra ...windows.EXPLICIT_ACCESS) *windows.ACL {
+		t.Helper()
+		entries := []windows.EXPLICIT_ACCESS{
+			{AccessPermissions: windows.GENERIC_ALL, AccessMode: windows.GRANT_ACCESS, Trustee: trustee("S-1-5-18")},
+			{AccessPermissions: windows.GENERIC_ALL, AccessMode: windows.GRANT_ACCESS, Trustee: trustee("S-1-5-32-544")},
+		}
+		acl, err := windows.ACLFromEntries(append(entries, extra...), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return acl
+	}
+	users := func(inheritance uint32) windows.EXPLICIT_ACCESS {
+		return windows.EXPLICIT_ACCESS{AccessPermissions: windows.GENERIC_READ, AccessMode: windows.GRANT_ACCESS, Inheritance: inheritance, Trustee: trustee("S-1-5-32-545")}
+	}
+	const inheritOnly = windows.INHERIT_ONLY | windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
+	for name, tc := range map[string]struct {
+		acl  *windows.ACL
+		want bool
+	}{
+		"SYSTEM and Administrators only":                        {build(), false},
+		"Users inherit-only":                                    {build(users(inheritOnly)), false},
+		"Users inherit-only on objects":                         {build(users(windows.INHERIT_ONLY | windows.SUB_OBJECTS_ONLY_INHERIT)), false},
+		"Users on the file":                                     {build(users(windows.NO_INHERITANCE)), true},
+		"Users inherited to children and to the file":           {build(users(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)), true},
+		"Users inherit-only and Everyone on the file":           {build(users(inheritOnly), windows.EXPLICIT_ACCESS{AccessPermissions: windows.GENERIC_READ, AccessMode: windows.GRANT_ACCESS, Trustee: trustee("S-1-1-0")}), true},
+		"Users inherit-only and a service SID on the file only": {build(users(inheritOnly), windows.EXPLICIT_ACCESS{AccessPermissions: windows.GENERIC_READ, AccessMode: windows.GRANT_ACCESS, Trustee: trustee("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")}), false},
+	} {
+		if got := windowsEnterpriseGuardianStateACLUserOpenable(tc.acl); got != tc.want {
+			t.Errorf("%s: openable = %v, want %v", name, got, tc.want)
+		}
+	}
+	if !windowsEnterpriseGuardianStateACLUserOpenable(nil) {
+		t.Error("no access list means everyone, so the file is openable")
+	}
+	// The same through a real file and the production rule.
+	path := filepath.Join(t.TempDir(), "marker")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, build(users(inheritOnly)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if windowsEnterpriseGuardianStateUserOpenable(path) {
+		t.Fatal("a file carrying only an inherit-only Users entry was seen as openable")
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, build(users(windows.NO_INHERITANCE)), nil); err != nil {
+		t.Fatal(err)
+	}
+	if !windowsEnterpriseGuardianStateUserOpenable(path) {
+		t.Fatal("a file with a Users entry on itself was not seen as openable")
+	}
+}
+
 // The principals that may open a gated file are SYSTEM, Administrators and the
 // service SIDs; every other SID, including a domain or local user, may not.
 func TestWindowsEnterpriseGuardianStateSIDIsAdminOnly(t *testing.T) {
