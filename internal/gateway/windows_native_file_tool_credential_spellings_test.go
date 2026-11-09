@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -312,6 +313,191 @@ func TestWindowsNativeFileToolCredentialFileInAProfileFolderIsJudgedLikeAnyOther
 				if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, target); action != "allow" {
 					t.Errorf("%s cwd=%q %q: %s %v, want allow", profile, cwd, target, action, rules)
 				}
+			}
+		}
+	}
+}
+
+// windowsFileToolFindings is windowsFileToolVerdictIn that returns the
+// findings of the call, for a call that is or is not enforcement-capable.
+func windowsFileToolFindings(t *testing.T, connector, tool, home, cwd, file string, capable bool) []RuleFinding {
+	t.Helper()
+	args := map[string]string{"file_path": file}
+	if tool == "Write" {
+		args["content"] = "# note"
+	}
+	raw, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:      actionfacts.Input{Tool: tool, Args: raw, CWD: cwd, ActiveHome: home},
+		LegacyText: string(raw), Connector: connector, EnforcementCapable: capable,
+	})
+}
+
+// actionAtProfile is the action the thresholds of a posture profile give the
+// findings: strict blocks from MEDIUM, default blocks CRITICAL and alerts from
+// MEDIUM, permissive alerts from HIGH.
+func actionAtProfile(profile string, findings []RuleFinding) string {
+	block, alert := guardrailProfileThresholds(profile)
+	return guardrailActionForRank(guardrailSeverityRank(HighestSeverity(findings)), block, alert, false, 0)
+}
+
+// Every spelling of the extended-length prefix that Win32 normalizes gets the
+// verdict of the plain name, in every profile; the exact backslash prefix
+// keeps a name with trailing dots as a file of its own, also when the file
+// system is asked for its long form, which would normalize it without the
+// prefix.
+func TestWindowsNativeFileToolExtendedLengthPrefixIsReadAsWin32ReadsIt(t *testing.T) {
+	useWindowsLongPathModel(t, "")
+	const home = `C:\Users\r109yws.d-2`
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-prefix-spellings-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, name := range []string{`.netrc.`, `.netrc  `, `.git-credentials.`, `.aws.\credentials`, `.aws\credentials.`} {
+			plain, plainRules := windowsFileToolVerdictIn(t, connector, "Write", home, home+`\project`, home+`\`+name)
+			if plain != "block" || len(plainRules) == 0 {
+				t.Fatalf("%s: plain %q: %s %v, want block", profile, name, plain, plainRules)
+			}
+			for _, prefix := range []string{`//?/`, `\/?\`, `/\?/`, `\\.\`, `//./`} {
+				for _, tool := range []string{"Write", "Edit"} {
+					target := prefix + strings.ReplaceAll(home, `\`, "/") + "/" + strings.ReplaceAll(name, `\`, "/")
+					if action, rules := windowsFileToolVerdictIn(t, connector, tool, home, home+`\project`, target); action != "block" {
+						t.Errorf("%s %s %q: %s %v, want block like the plain name", profile, tool, target, action, rules)
+					}
+				}
+			}
+			own := `\\?\` + home + `\` + name
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, home+`\project`, own); action != "allow" {
+				t.Errorf("%s Write %q: %s %v, want allow (a file of its own)", profile, own, action, rules)
+			}
+		}
+	}
+}
+
+// A call that changes a path the file system could not be asked about gets a
+// finding the profiles judge: the default and permissive profiles show it and
+// let the call run, the strict profile closes. A read, a path the file system
+// answered for, and a call that cannot enforce are never blocked by it.
+func TestWindowsNativeFileToolUnresolvedShortNameLookupIsJudgedByProfile(t *testing.T) {
+	useWindowsLongPathModel(t, "c:/users/r109yws.d-2/locked")
+	const home = `C:\Users\r109yws.d-2`
+	for profile, want := range map[string]string{"default": "alert", "permissive": "alert", "strict": "block"} {
+		connector := "windows-native-unresolved-alias-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, tool := range []string{"Write", "Edit"} {
+			for _, target := range []string{home + `\locked\NETRC~1`, home + `\locked\notes.txt`, home + `\locked\sub\NTRCFILE`} {
+				findings := windowsFileToolFindings(t, connector, tool, home, home+`\project`, target, true)
+				var unverified []RuleFinding
+				for _, finding := range findings {
+					if finding.RuleID == windowsAliasUnverifiedRuleID {
+						unverified = append(unverified, finding)
+					}
+				}
+				if len(unverified) != 1 {
+					t.Errorf("%s %s %q: %d unverified findings %v, want one", profile, tool, target, len(unverified), FindingStrings(findings))
+					continue
+				}
+				if got := actionAtProfile(profile, unverified); got != want {
+					t.Errorf("%s %s %q: %s, want %s", profile, tool, target, got, want)
+				}
+				observed := windowsFileToolFindings(t, connector, tool, home, home+`\project`, target, false)
+				for _, finding := range observed {
+					if finding.RuleID == windowsAliasUnverifiedRuleID && finding.contributesToEnforcement() {
+						t.Errorf("%s %s %q: the finding of a call that cannot enforce enforces", profile, tool, target)
+					}
+				}
+			}
+			// A folder the file system answered for, and a read, take no finding.
+			for _, c := range []struct {
+				tool, target string
+			}{
+				{tool, home + `\project\NETRC~1`}, {tool, home + `\project\notes.txt`}, {"Read", home + `\locked\NETRC~1`},
+			} {
+				for _, finding := range windowsFileToolFindings(t, connector, c.tool, home, home+`\project`, c.target, true) {
+					if finding.RuleID == windowsAliasUnverifiedRuleID {
+						t.Errorf("%s %s %q: unexpected %s", profile, c.tool, c.target, finding.RuleID)
+					}
+				}
+			}
+		}
+	}
+}
+
+// A credential file of a known home is not a fixture because the call runs
+// from that home, or from the folder that holds the homes: the home folder of
+// an account in a home folder of a drive, a profile found by its entries, the
+// folder that holds profiles, and a drive root that is a profile. A project
+// folder in the same places stays a fixture.
+func TestWindowsNativeFileToolCredentialFileOfAKnownHomeIsNotAFixtureOfItsOwnWorkingDirectory(t *testing.T) {
+	previous := windowsProfileFolder
+	t.Cleanup(func() { windowsProfileFolder = previous })
+	windowsProfileFolder = func(dir string) bool {
+		switch strings.ToLower(dir) {
+		case "c:/profiles/bob", "e:":
+			return true
+		}
+		return false
+	}
+	const home = `C:\Users\r109yws.d-2`
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-credential-known-home-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, c := range []struct{ cwd, target string }{
+			{`C:\home\fixture`, `C:\home\fixture\.netrc`},
+			{`C:\home`, `C:\home\fixture\.aws\credentials`},
+			{`C:\Home\Fixture`, `C:\home\fixture\.NETRC`},
+			{`C:\Profiles\bob`, `C:\Profiles\bob\.netrc`},
+			{`C:\Profiles`, `C:\Profiles\bob\.git-credentials`},
+			{`C:\`, `C:\Profiles\bob\.aws\credentials`},
+			{`E:\`, `E:\.netrc`},
+			{`D:\work`, `E:\.git-credentials`},
+		} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, c.cwd, c.target); action != "block" || len(rules) == 0 {
+				t.Errorf("%s cwd=%q %q: %s %v, want block", profile, c.cwd, c.target, action, rules)
+			}
+		}
+		for _, c := range []struct{ cwd, target string }{
+			{`C:\Profiles\bob\project`, `C:\Profiles\bob\project\.netrc`},
+			{`C:\repo\home`, `C:\repo\home\fixture\.netrc`},
+			{`E:\work`, `E:\work\.netrc`},
+			{`C:\Profiles\bob`, `C:\Profiles\bob\notes.txt`},
+			{`E:\`, `E:\.netrc.bak`},
+		} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, c.cwd, c.target); action != "allow" {
+				t.Errorf("%s cwd=%q %q: %s %v, want allow", profile, c.cwd, c.target, action, rules)
+			}
+		}
+	}
+}
+
+// A project file called AppData does not make its folder the profile of an
+// account: an ordinary project keeps its credential fixtures.
+func TestWindowsNativeFileToolProjectFileCalledAppDataIsNoProfile(t *testing.T) {
+	previous := windowsProfileFolder
+	t.Cleanup(func() { windowsProfileFolder = previous })
+	windowsProfileFolder = func(dir string) bool {
+		return holdsProfileEntries(dir, func(path string) (os.FileInfo, error) {
+			switch strings.ToLower(path) {
+			case "c:/work/proj/appdata", "c:/work/real/ntuser.dat":
+				return fakeEntry{}, nil
+			case "c:/work/real/appdata":
+				return fakeEntry{folder: true}, nil
+			}
+			return nil, os.ErrNotExist
+		})
+	}
+	const home = `C:\Users\r109yws.d-2`
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-credential-appdata-file-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, cwd := range []string{`C:\work\proj`, `D:\other`} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, `C:\work\proj\.netrc`); action != "allow" {
+				t.Errorf("%s cwd=%q: a project with an AppData file: %s %v, want allow", profile, cwd, action, rules)
+			}
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, `C:\work\real\.netrc`); action != "block" {
+				t.Errorf("%s cwd=%q: a folder with AppData: %s %v, want block", profile, cwd, action, rules)
 			}
 		}
 	}

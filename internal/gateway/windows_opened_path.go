@@ -8,6 +8,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
@@ -21,11 +22,17 @@ import (
 // the semantic path proof read a Windows operand. Letter case is left to the
 // callers, which already compare names as Windows does (windowsNameFold).
 
-// expandWindowsShortNames is the file system's long-name form of a
+// expandWindowsShortNames is the long-name form the file system gives a
 // drive-letter path in forward-slash spelling: each 8.3 short name replaced
 // by the name it stands for. A short name need not contain a tilde, so every
 // such path is asked. A part that does not exist is left as written. The
-// Windows build asks the file system; other builds and tests replace it.
+// verbatim flag says the spelling had the extended-length prefix \\?\, which
+// the file system must be asked with, not without it: Win32 does not
+// normalize that path, so a name with trailing dots or spaces is the file of
+// its own. An error says the file system could not answer (a folder it
+// cannot list): the path is returned as written, and the caller decides by
+// profile what that means (windowsAliasUnverifiedFinding). The Windows build
+// asks the file system; other builds and tests replace it.
 var expandWindowsShortNames = osExpandWindowsShortNames
 
 // windowsProfileFolder reports a folder that holds the entries only the
@@ -49,21 +56,28 @@ var windowsAccountWord = regexp.MustCompile(`^\w+$`)
 // and share. In every name the part after a colon (an alternate data stream,
 // such as ::$DATA) is dropped, dot segments are resolved, and an 8.3 short
 // name is expanded. Trailing dots and spaces are dropped as Win32 does, except
-// in an extended-length path (\\?\): Win32 does not normalize that one, so
-// a name with trailing dots or spaces there is a file of its own.
-func windowsOpenedPath(spelling string) (string, bool) {
+// in a path with the exact extended-length prefix \\?\: Win32 does not
+// normalize that one, so a name with trailing dots or spaces there is a file
+// of its own. The forward-slash spelling of that prefix, and every other
+// device prefix, is normalized like an ordinary path.
+//
+// The analysis of a call keeps a path in forward-slash spelling only, so the
+// caller says with verbatim whether the operand, as written, had the exact
+// prefix (windowsVerbatimOperand). The error is the one of the file system
+// when it could not expand the short names of the path; the path is then as
+// written, and the caller decides by profile (strict closes on it).
+func windowsOpenedPath(spelling string, verbatim bool) (string, bool, error) {
 	if !windowsRootedSpelling(spelling) {
-		return "", false
+		return "", false, nil
 	}
 	slashed := strings.ReplaceAll(spelling, `\`, "/")
 	root, rest, ok := windowsPathRoot(slashed)
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
-	verbatim := strings.HasPrefix(slashed, "//?/")
 	var names []string
 	for _, name := range strings.Split(rest, "/") {
-		if colon := strings.IndexByte(name, ':'); colon >= 0 {
+		if colon := strings.Index(name, ":"); colon >= 0 {
 			name = name[:colon]
 		}
 		trimmed := name
@@ -80,10 +94,26 @@ func windowsOpenedPath(spelling string) (string, bool) {
 		}
 	}
 	opened := root + "/" + strings.Join(names, "/")
+	var err error
 	if actionfacts.DriveLetterPath(opened) {
-		opened = expandWindowsShortNames(opened)
+		opened, err = expandWindowsShortNames(opened, verbatim)
 	}
-	return opened, true
+	return opened, true, err
+}
+
+// windowsVerbatimOperand reports an operand that, as the caller wrote it, has
+// the exact extended-length prefix: only that backslash spelling skips the
+// normalization of Win32.
+func windowsVerbatimOperand(operand string) bool {
+	return strings.HasPrefix(operand, `\\?\`)
+}
+
+// windowsOpenedPathOfFact is windowsOpenedPath for a path fact: its spelling
+// is the resolved, else the normalized path, and its prefix is the one of the
+// operand as written (Value). A leading space is no part of a path.
+func windowsOpenedPathOfFact(path actionfacts.PathFact) (string, bool, error) {
+	trim := func(text string) string { return strings.TrimLeftFunc(text, unicode.IsSpace) }
+	return windowsOpenedPath(trim(pathFactSpelling(path)), windowsVerbatimOperand(trim(path.Value)))
 }
 
 // windowsRootedSpelling is the cheap test before windowsOpenedPath reads a
@@ -166,7 +196,7 @@ func pathFactSpelling(path actionfacts.PathFact) string {
 // Windows path, the path Windows opens for it (windowsOpenedPath).
 func pathFactSpellings(path actionfacts.PathFact) []string {
 	spellings := []string{path.Value, path.Normalized, path.Resolved}
-	if opened, ok := windowsOpenedPath(pathFactSpelling(path)); ok {
+	if opened, ok, _ := windowsOpenedPathOfFact(path); ok {
 		spellings = append(spellings, opened)
 	}
 	return spellings
@@ -222,7 +252,8 @@ func windowsAccountFolder(name string) string {
 // windowsProfileRuleText reads a drive-letter path whose folder is the profile
 // of an account that is not in a Users or home folder (a profile moved to
 // another folder or drive) as the home of that account: the outermost folder
-// that holds the entries of a profile is the home, and its name the account.
+// that holds the entries of a profile (a drive root included) is the home, and
+// its name the account.
 // The names below are read in the lower case the rules write them in. A path
 // with no such folder, or one the file system cannot be asked about, is read
 // as it is.
@@ -231,7 +262,7 @@ func windowsProfileRuleText(text string) string {
 		return text
 	}
 	parts := strings.Split(text, "/")
-	for end := 2; end < len(parts); end++ {
+	for end := 1; end < len(parts); end++ {
 		if windowsProfileFolder(strings.Join(parts[:end], "/")) {
 			return parts[0] + "/Users/" + windowsAccountFolder(parts[end-1]) + "/" +
 				windowsNameFold(strings.Join(parts[end:], "/"))
@@ -252,4 +283,89 @@ func markTrailingSpaces(opened string) string {
 		}
 	}
 	return strings.Join(names, "/")
+}
+
+// holdsProfileEntries reports a folder that holds the entries of a user
+// profile: NTUSER.DAT, a file, or AppData, a folder. An entry of that name of
+// the other kind (a project file called AppData) is no marker. stat answers
+// for a path in forward-slash spelling.
+func holdsProfileEntries(dir string, stat func(string) (os.FileInfo, error)) bool {
+	for _, marker := range []struct {
+		name   string
+		folder bool
+	}{{"NTUSER.DAT", false}, {"AppData", true}} {
+		if info, err := stat(dir + "/" + marker.name); err == nil && info.IsDir() == marker.folder {
+			return true
+		}
+	}
+	return false
+}
+
+// profileHomeAtOrAbove reports a drive-letter path that lies in a folder of a
+// user profile found by its entries (windowsProfileRuleText) whose folder is
+// the folder cwd or lies below it: a call that runs in a profile, or in the
+// folder that holds profiles, names the credential files of an account, not
+// the fixtures of a project. A call that runs deeper in the profile is a
+// project of the account. Both arguments are in forward-slash spelling.
+func profileHomeAtOrAbove(resolved, cwd string) bool {
+	if !actionfacts.DriveLetterPath(resolved) {
+		return false
+	}
+	parts := strings.Split(resolved, "/")
+	for end := 1; end < len(parts); end++ {
+		if home := strings.Join(parts[:end], "/"); windowsProfileFolder(home) {
+			return pathWithin(home, cwd)
+		}
+	}
+	return false
+}
+
+// windowsAliasUnverifiedRuleID is the finding of a call that changes a
+// Windows path whose 8.3 short names the file system could not expand.
+const (
+	windowsAliasUnverifiedRuleID = "TOOL-PATH-UNVERIFIED"
+	windowsAliasUnverifiedTitle  = "Windows file path whose short names could not be resolved; the file it opens cannot be verified"
+)
+
+// appendWindowsAliasUnverifiedFinding adds the finding of a call that writes,
+// appends to or deletes a Windows path the file system could not be asked
+// about (a folder of the path it cannot list): a short name in that path may
+// be the alias of a protected file. The finding is HIGH, so the default and
+// permissive profiles show it as an alert and let the call run, and the strict
+// profile, which blocks from MEDIUM, closes. Like every finding it only
+// blocks where the call is enforcement-capable.
+func appendWindowsAliasUnverifiedFinding(
+	findings []RuleFinding,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+) []RuleFinding {
+	for _, finding := range findings {
+		if finding.RuleID == windowsAliasUnverifiedRuleID {
+			return findings
+		}
+	}
+	for _, path := range facts.Paths {
+		switch path.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+		default:
+			continue
+		}
+		if _, ok, err := windowsOpenedPathOfFact(path); !ok || err == nil {
+			continue
+		}
+		enforcement := findingEnforcementAllowed
+		if !request.EnforcementCapable {
+			enforcement = findingEnforcementDetectionOnly
+		}
+		return append(findings, RuleFinding{
+			RuleID:      windowsAliasUnverifiedRuleID,
+			Title:       windowsAliasUnverifiedTitle,
+			Severity:    "HIGH",
+			Confidence:  1,
+			Tags:        []string{"tool-arguments"},
+			LineNumber:  1,
+			enforcement: enforcement,
+		})
+	}
+	return findings
 }

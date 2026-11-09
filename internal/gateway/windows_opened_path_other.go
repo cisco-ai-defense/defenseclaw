@@ -7,7 +7,7 @@ package gateway
 
 // osExpandWindowsShortNames is the identity: only a Windows file system has
 // 8.3 short names to expand.
-func osExpandWindowsShortNames(path string) string { return path }
+func osExpandWindowsShortNames(path string, _ bool) (string, error) { return path, nil }
 
 // osWindowsProfileFolder is false: only a Windows file system holds the
 // folders of Windows user profiles.

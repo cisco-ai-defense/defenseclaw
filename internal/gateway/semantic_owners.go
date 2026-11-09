@@ -21,7 +21,6 @@ import (
 	"path"
 	"slices"
 	"strings"
-	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
@@ -848,7 +847,9 @@ func isDefiniteFixturePath(
 		!pathWithin(resolved, cwd) {
 		return false
 	}
-	return true
+	// A call that runs in a profile found by its entries, or above it, is
+	// at the home of an account like one that runs in its Users folder.
+	return !profileHomeAtOrAbove(resolved, cwd)
 }
 
 func canonicalSemanticPath(value string) string {
@@ -881,7 +882,7 @@ func isRecognizedHomeRoot(value string) bool {
 	}
 	return len(value) >= 4 &&
 		value[1] == ':' &&
-		isSingleUserHomeRoot(value[2:], "/users/")
+		(isSingleUserHomeRoot(value[2:], "/users/") || isSingleUserHomeRoot(value[2:], "/home/"))
 }
 
 func isSingleUserHomeRoot(value, prefix string) bool {
@@ -1441,7 +1442,7 @@ func semanticPathValue(path actionfacts.PathFact) string {
 	// extended-length path, where they are part of the name: the matchers trim
 	// whitespace, so they are spelled as a visible character that no
 	// protected name contains.
-	if opened, ok := windowsOpenedPath(strings.TrimLeftFunc(value, unicode.IsSpace)); ok {
+	if opened, ok, _ := windowsOpenedPathOfFact(path); ok {
 		return windowsNameFold(markTrailingSpaces(opened))
 	}
 	return semanticFoldPath(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))

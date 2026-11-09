@@ -4,21 +4,30 @@
 package gateway
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
+
+// openedPath is windowsOpenedPath for an operand as the caller wrote it.
+func openedPath(spelling string) (string, bool) {
+	opened, ok, _ := windowsOpenedPath(spelling, windowsVerbatimOperand(spelling))
+	return opened, ok
+}
 
 // useShortNames makes the file system answer for 8.3 short names with the
 // given long names, and names this machine "build-host".
 func useShortNames(t *testing.T, long map[string]string) {
 	t.Helper()
 	previousExpand, previousHost := expandWindowsShortNames, windowsLocalHostname
-	expandWindowsShortNames = func(path string) string {
+	expandWindowsShortNames = func(path string, _ bool) (string, error) {
 		for short, name := range long {
 			path = strings.ReplaceAll(path, short, name)
 		}
-		return path
+		return path, nil
 	}
 	windowsLocalHostname = func() (string, error) { return "build-host", nil }
 	t.Cleanup(func() { expandWindowsShortNames, windowsLocalHostname = previousExpand, previousHost })
@@ -70,7 +79,7 @@ func TestWindowsOpenedPathIsTheNameWindowsOpens(t *testing.T) {
 		`C:\Users\r109yws.d-2\notes~1.txt`:                         home + "/notes~1.txt",
 		`C:\Users\r109yws.d-2\.netrc2`:                             home + "/.netrc2",
 	} {
-		got, ok := windowsOpenedPath(spelling)
+		got, ok := openedPath(spelling)
 		if !ok || got != want {
 			t.Errorf("windowsOpenedPath(%q) = %q, %v; want %q", spelling, got, ok, want)
 		}
@@ -79,7 +88,7 @@ func TestWindowsOpenedPathIsTheNameWindowsOpens(t *testing.T) {
 		"", ".netrc", `relative\.netrc`, "/home/alice/.netrc", "~/.netrc", `\Users\alice\.netrc`,
 		`\\?\GLOBALROOT\Device\x\.netrc`, `\\server`, `\\`,
 	} {
-		if got, ok := windowsOpenedPath(spelling); ok {
+		if got, ok := openedPath(spelling); ok {
 			t.Errorf("windowsOpenedPath(%q) = %q, want no Windows path", spelling, got)
 		}
 	}
@@ -115,12 +124,12 @@ func TestWindowsRuleTextReadsAnyHomeFolderAsTheRulesWriteIt(t *testing.T) {
 func TestWindowsShortNameExpansionLeavesWhatItDoesNotKnow(t *testing.T) {
 	path := strings.ReplaceAll(os.TempDir(), `\`, "/") + "/never-created~1/x"
 	if windowsRootedSpelling(path) {
-		if got := osExpandWindowsShortNames(path); !strings.HasSuffix(got, "/never-created~1/x") {
-			t.Errorf("osExpandWindowsShortNames(%q) = %q, want the missing part kept", path, got)
+		if got, err := osExpandWindowsShortNames(path, false); err != nil || !strings.HasSuffix(got, "/never-created~1/x") {
+			t.Errorf("osExpandWindowsShortNames(%q) = %q, %v, want the missing part kept", path, got, err)
 		}
 	}
-	if got := osExpandWindowsShortNames("/no/such~1/dir"); !strings.HasSuffix(got, "/no/such~1/dir") {
-		t.Errorf("osExpandWindowsShortNames of a non-Windows path = %q", got)
+	if got, err := osExpandWindowsShortNames("/no/such~1/dir", false); err != nil || !strings.HasSuffix(got, "/no/such~1/dir") {
+		t.Errorf("osExpandWindowsShortNames of a non-Windows path = %q, %v", got, err)
 	}
 }
 
@@ -129,14 +138,127 @@ func TestWindowsShortNameExpansionLeavesWhatItDoesNotKnow(t *testing.T) {
 func TestWindowsOpenedPathAsksTheFileSystemForEveryDrivePath(t *testing.T) {
 	useShortNames(t, nil)
 	var asked []string
-	expandWindowsShortNames = func(path string) string {
+	expandWindowsShortNames = func(path string, _ bool) (string, error) {
 		asked = append(asked, path)
-		return strings.ReplaceAll(path, "NTRCFILE", ".netrc")
+		return strings.ReplaceAll(path, "NTRCFILE", ".netrc"), nil
 	}
-	if got, ok := windowsOpenedPath(`C:\Users\bob\NTRCFILE`); !ok || got != "C:/Users/bob/.netrc" {
+	if got, ok := openedPath(`C:\Users\bob\NTRCFILE`); !ok || got != "C:/Users/bob/.netrc" {
 		t.Errorf("a tilde-free short name read as %q, %v", got, ok)
 	}
-	if _, ok := windowsOpenedPath(`\\server\share\NTRCFILE`); !ok || len(asked) != 1 {
+	if _, ok := openedPath(`\\server\share\NTRCFILE`); !ok || len(asked) != 1 {
 		t.Errorf("a share path was asked for its long form: %v", asked)
 	}
 }
+
+// useWindowsLongPathModel makes the file system answer as the Windows API
+// does: an 8.3 short name is expanded, a path asked without the
+// extended-length prefix is normalized (a name loses its trailing dots and
+// spaces, so it is answered as the file without them), a path asked with it is
+// not, and a path under unreadable cannot be answered at all. It records the
+// verbatim flag of each question.
+func useWindowsLongPathModel(t *testing.T, unreadable string) *[]bool {
+	t.Helper()
+	useShortNames(t, nil)
+	var asked []bool
+	expandWindowsShortNames = func(path string, verbatim bool) (string, error) {
+		asked = append(asked, verbatim)
+		if unreadable != "" && strings.Contains(strings.ToLower(path), unreadable) {
+			return path, errors.New("access is denied")
+		}
+		names := strings.Split(strings.ReplaceAll(path, "NETRC~1", ".netrc"), "/")
+		if !verbatim {
+			for index, name := range names {
+				names[index] = strings.TrimRight(name, ". ")
+			}
+		}
+		return strings.Join(names, "/"), nil
+	}
+	return &asked
+}
+
+// Only the exact backslash spelling of the extended-length prefix is not
+// normalized by Win32: the forward-slash and mixed spellings of it, and the
+// device prefix, are ordinary paths whose trailing dots and spaces are
+// dropped. The file system is asked for the long name of the exact spelling
+// with the prefix, so a name with trailing dots stays a file of its own.
+func TestWindowsOpenedPathKeepsTheExactExtendedLengthPrefixThroughShortNameExpansion(t *testing.T) {
+	asked := useWindowsLongPathModel(t, "")
+	const home = "C:/Users/bob"
+	for spelling, want := range map[string]string{
+		`\\?\C:\Users\bob\.netrc.`:   home + "/.netrc.",
+		`\\?\C:\Users\bob\.netrc  `:  home + "/.netrc  ",
+		`\\?\C:\Users\bob\NETRC~1`:   home + "/.netrc",
+		`//?/C:/Users/bob/.netrc.`:   home + "/.netrc",
+		`\/?\C:\Users\bob\.netrc.`:   home + "/.netrc",
+		`/\?/C:/Users/bob/.netrc.  `: home + "/.netrc",
+		`//?/C:/Users/bob/NETRC~1.`:  home + "/.netrc",
+		`\\.\C:\Users\bob\.netrc.`:   home + "/.netrc",
+		`//./C:/Users/bob/.netrc. `:  home + "/.netrc",
+		`C:\Users\bob\.netrc.`:       home + "/.netrc",
+	} {
+		*asked = nil
+		fact := actionfacts.PathFact{Value: spelling, Normalized: strings.ReplaceAll(spelling, `\`, "/")}
+		got, ok, err := windowsOpenedPathOfFact(fact)
+		if !ok || err != nil || got != want {
+			t.Errorf("windowsOpenedPathOfFact(%q) = %q, %v, %v; want %q", spelling, got, ok, err, want)
+		}
+		exact := strings.HasPrefix(spelling, `\\?\`)
+		if len(*asked) != 1 || (*asked)[0] != exact {
+			t.Errorf("windowsOpenedPathOfFact(%q) asked the file system with verbatim %v, want one question with %v", spelling, *asked, exact)
+		}
+	}
+}
+
+// A file system that cannot answer is reported with the path as written, for
+// a drive path; a path that is not one is not asked.
+func TestWindowsOpenedPathReportsWhatTheFileSystemCouldNotAnswer(t *testing.T) {
+	useWindowsLongPathModel(t, "c:/users/locked")
+	got, ok, err := windowsOpenedPath(`C:\Users\Locked\NETRC~1`, false)
+	if !ok || err == nil || got != "C:/Users/Locked/NETRC~1" {
+		t.Errorf("windowsOpenedPath = %q, %v, %v; want the path as written with an error", got, ok, err)
+	}
+	if got, ok, err := windowsOpenedPath(`C:\Users\Open\NETRC~1`, false); !ok || err != nil || got != "C:/Users/Open/.netrc" {
+		t.Errorf("windowsOpenedPath of an open folder = %q, %v, %v", got, ok, err)
+	}
+	if _, ok, err := windowsOpenedPath("relative/NETRC~1", false); ok || err != nil {
+		t.Errorf("a relative path was asked: %v, %v", ok, err)
+	}
+}
+
+// A project file called AppData, or a folder called NTUSER.DAT, is not an
+// entry of a user profile.
+func TestHoldsProfileEntriesNeedsTheKindOfEntryAProfileHolds(t *testing.T) {
+	stat := func(entries map[string]bool) func(string) (os.FileInfo, error) {
+		return func(path string) (os.FileInfo, error) {
+			folder, found := entries[path]
+			if !found {
+				return nil, os.ErrNotExist
+			}
+			return fakeEntry{folder: folder}, nil
+		}
+	}
+	for name, c := range map[string]struct {
+		entries map[string]bool
+		want    bool
+	}{
+		"AppData folder":      {map[string]bool{"C:/p/AppData": true}, true},
+		"NTUSER.DAT file":     {map[string]bool{"C:/p/NTUSER.DAT": false}, true},
+		"AppData file":        {map[string]bool{"C:/p/AppData": false}, false},
+		"NTUSER.DAT folder":   {map[string]bool{"C:/p/NTUSER.DAT": true}, false},
+		"both of the wrong":   {map[string]bool{"C:/p/AppData": false, "C:/p/NTUSER.DAT": true}, false},
+		"wrong and right one": {map[string]bool{"C:/p/AppData": false, "C:/p/NTUSER.DAT": false}, true},
+		"neither":             {map[string]bool{"C:/p/notes.txt": false}, false},
+	} {
+		if got := holdsProfileEntries("C:/p", stat(c.entries)); got != c.want {
+			t.Errorf("%s: holdsProfileEntries = %v, want %v", name, got, c.want)
+		}
+	}
+}
+
+// fakeEntry is a directory entry that is a folder or a file.
+type fakeEntry struct {
+	os.FileInfo
+	folder bool
+}
+
+func (e fakeEntry) IsDir() bool { return e.folder }
