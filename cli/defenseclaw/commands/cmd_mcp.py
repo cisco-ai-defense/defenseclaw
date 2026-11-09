@@ -515,54 +515,62 @@ def _effectively_allowed(action_entry) -> bool:
 
 def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector: str) -> dict:
     """Map each server name to its ActionEntry for one connector list, with
-    the install allow decided per server as the gateway decides it (GAP-0978).
+    the operator allow or deny decided per server as the gateway decides it
+    (GAP-0978).
 
-    The name-level map folds an operator allow in by name alone. An allow
-    pinned to a server definition covers only that definition, and a rule
-    written in another case still names the server, so the allow of each
-    server is re-read from the lists with the definition as configured now.
+    The journal rows (block, runtime disable, quarantine) belong to their
+    exact server name. The allow or deny of each configured server is read
+    fresh from the lists with the server definition as configured now: an
+    allow pinned to a definition covers only that definition, and a rule
+    written in another case still names the server. Neither source stands in
+    for the other, so a journal row never hides a policy decision and a
+    policy rule never moves a journal row onto a differently written name.
     The table row, the JSON item and the failed-scan footer all read this
     map, so they never disagree. Secure Client hosts keep the journal rows.
     """
     from defenseclaw.enforce.admission import asset_name_key
 
-    actions_map = _build_mcp_actions_map(app.store, connector, app.cfg)
+    merged = _build_mcp_actions_map(app.store, connector, app.cfg)
     if asset_lists.is_secure_client(app.cfg):
-        return actions_map
+        return merged
     asset_policy = getattr(app.cfg, "asset_policy", None)
+    journal = _build_mcp_actions_map(app.store, connector, None)
     names = {s.name for s in servers}
+    keys = {asset_name_key(n) for n in names}
+    # Rows of names that are not configured (OpenClaw "removed from config")
+    # stay as the merged view reads them, except an operator rule that names a
+    # configured server in another case: it is that server's decision.
+    actions_map = {
+        n: e for n, e in merged.items()
+        if n not in names
+        and not (str(e.id).startswith("asset_policy:mcp:") and asset_name_key(n) in keys)
+    }
     for s in servers:
-        base = actions_map.get(s.name)
-        if base is None:
-            key = asset_name_key(s.name)
-            # Only a row that comes from an operator rule is folded onto the
-            # server named in another case; a journal row (block, disable,
-            # quarantine) belongs to its exact name, as the gateway reads it.
-            other = next(
-                (
-                    n for n, e in actions_map.items()
-                    if n not in names and str(e.id).startswith("asset_policy:mcp:")
-                    and asset_name_key(n) == key
-                ),
-                None,
-            )
-            if other is not None:
-                base = actions_map.pop(other)
+        row = journal.get(s.name)
         decision, rule = asset_lists.list_decision(
             asset_policy, "mcp", s.name, connector,
             source_path=s.source, url=s.url, command=s.command, args=s.args, transport=s.transport,
         )
-        allowed = decision == asset_lists.LIST_ALLOW
-        if base is None:
-            if allowed:
+        if decision == asset_lists.LIST_ALLOW:
+            install = "allow"
+        elif decision == asset_lists.LIST_DENY:
+            install = "block"
+        else:
+            install = "" if row is None or row.actions.install == "allow" else row.actions.install
+        if row is None:
+            if rule is not None:
                 actions_map[s.name] = ActionEntry(
                     id=f"asset_policy:mcp:{s.name}@{connector}", target_type="mcp", target_name=s.name,
-                    actions=ActionState(install="allow"), reason=rule.reason, connector=connector,
+                    actions=ActionState(install=install), reason=rule.reason, connector=connector,
                 )
             continue
-        install = "allow" if allowed else ("" if base.actions.install == "allow" else base.actions.install)
+        reason = row.reason
+        failed_quarantine = str(reason or "").startswith(("quarantine failed", "link removed"))
+        if rule is not None and not (install == "block" and failed_quarantine):
+            reason = rule.reason or reason
         actions_map[s.name] = dataclasses.replace(
-            base, target_name=s.name, actions=dataclasses.replace(base.actions, install=install),
+            row, target_name=s.name, reason=reason,
+            actions=dataclasses.replace(row.actions, install=install),
         )
     return actions_map
 

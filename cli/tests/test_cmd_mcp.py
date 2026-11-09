@@ -3067,6 +3067,60 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
         self.assertNotIn("nothing is needed", flat)
         self.assertIn("could not be scanned", flat)
 
+    def _deny(self, name="new"):
+        from defenseclaw.config import AssetPolicyRule
+
+        self.app.cfg.asset_policy.mcp.denied = [AssetPolicyRule(name=name, connector="claudecode")]
+
+    def _assert_denied(self, flat, item):
+        # The list reads the same whether the deny names the server in its own
+        # case or in another one.
+        self.assertEqual(item["verdict"], "blocked")
+        self.assertEqual(item["actions"].get("install"), "block")
+        self._deny(name="NEW")
+        exact_flat, exact_item = self._both(self._server())
+        self.assertEqual(flat, exact_flat)
+        self.assertEqual(item, exact_item)
+
+    def test_deny_in_another_case_blocks_the_server(self):
+        self._deny()
+
+        self._assert_denied(*self._both(self._server()))
+
+    def test_deny_in_another_case_still_blocks_when_the_journal_has_a_row_for_that_other_case(self):
+        # The journal row of "new" holds a runtime disable that belongs to
+        # "new" alone; the deny of "new" still names the server "NEW" and the
+        # list shows it blocked, without the other name's runtime disable.
+        self._deny()
+        self.app.store.set_action("mcp", "new", "", ActionState(runtime="disable"), "disabled", "claudecode")
+
+        flat, item = self._both(self._server())
+
+        self._assert_denied(flat, item)
+        self.assertNotIn("runtime", item["actions"])
+
+    def test_deny_in_another_case_blocks_every_server_it_names(self):
+        self._deny()
+        servers = [self._server(), MCPServerEntry(name="NeW", command="python3", args=["server.py"], transport="stdio")]
+        self.app.cfg.mcp_servers = lambda connector=None, **_: servers  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self._fail_scan()
+
+        items = json.loads(self.invoke(["list", "--connector", "claudecode", "--json"]).output)["mcp_servers"]
+
+        self.assertEqual([i["verdict"] for i in items], ["blocked", "blocked"])
+
+    def test_journal_block_of_the_exact_name_survives_a_policy_allow_of_another_case(self):
+        # The journal block of "NEW" is the server's own; an allow written for
+        # "new" does not lift it.
+        self._allow(name="new", command="python3", args_prefix=["server.py"], transport="stdio")
+        self.app.store.set_action("mcp", "NEW", "", ActionState(install="block"), "blocked", "claudecode")
+
+        flat, item = self._both(self._server())
+
+        self.assertEqual(item["actions"].get("install"), "allow")
+        self.assertNotIn("mcp allow NEW", flat)
+
     def test_secure_client_list_is_unchanged(self):
         # Secure Client keeps the journal allow and the unscanned warning.
         self.app.store.set_action("mcp", "NEW", "", ActionState(install="allow"), "allowed", "claudecode")
