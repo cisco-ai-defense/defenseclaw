@@ -248,39 +248,107 @@ func TestQueueExistingClaudePluginsSkipsGitDirRoot(t *testing.T) {
 	}
 }
 
+// Each exclusion in queueDueIssues is checked on its own (a .git path inside a
+// staging clone would match both), and a cache that itself sits below a folder
+// named .git still has its plugin issues retried.
 func TestQueueDueIssuesClearsStagingAndGitIssues(t *testing.T) {
+	tests := []struct {
+		name string
+		// cacheParent is joined below the temp dir; the cache root is
+		// <cacheParent>/.claude/plugins/cache.
+		cacheParent string
+		// path is the issue path below the cache root.
+		path      []string
+		wantRetry bool
+	}{
+		{name: "staging clone", path: []string{"temp_subdir_1_abc.clone", "hooks"}},
+		{name: "git internals", path: []string{"marketplace", "plugin", ".git", "hooks"}},
+		{name: "plugin version", path: []string{"marketplace", "plugin", "1.0.0"}, wantRetry: true},
+		{
+			name:        "plugin version in a cache below .git",
+			cacheParent: filepath.Join("dotfiles", ".git", "home"),
+			path:        []string{"marketplace", "plugin", "1.0.0"},
+			wantRetry:   true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, store, logger, _ := setupTestEnv(t)
+			cfg.Guardrail.Connector = "claudecode"
+			cache := filepath.Join(t.TempDir(), tc.cacheParent, ".claude", "plugins", "cache")
+			issuePath := filepath.Join(append([]string{cache}, tc.path...)...)
+			if err := os.MkdirAll(issuePath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+			w.state.setIssue(AdmissionIssue{
+				Type: string(InstallPlugin),
+				Name: filepath.Base(issuePath),
+				Path: issuePath,
+				Kind: AdmissionUnscanned,
+			})
+			// Force the retry due so queueDueIssues sees it immediately.
+			w.state.mu.Lock()
+			r := w.state.retry[issuePath]
+			r.due = w.state.now().Add(-time.Second)
+			w.state.retry[issuePath] = r
+			w.state.mu.Unlock()
+			// dueIssues pushes the retry time forward, so do not call it
+			// here: queueDueIssues would then find nothing due and the test
+			// would pass without reaching the exclusions.
+			w.queueDueIssues()
+			_, queued := w.pending[issuePath]
+			if queued != tc.wantRetry {
+				t.Fatalf("queued = %v, want %v (pending %v)", queued, tc.wantRetry, w.pending)
+			}
+			w.state.mu.Lock()
+			_, recorded := w.state.issues[issuePath]
+			w.state.mu.Unlock()
+			if recorded == !tc.wantRetry {
+				t.Fatalf("issue still recorded = %v, want %v", recorded, tc.wantRetry)
+			}
+		})
+	}
+}
+
+// CodeRabbit on #1432: the .git check in queueExistingClaudePlugins must only
+// look below the cache root. A cache whose own path has a .git ancestor still
+// has its installed plugin versions queued.
+func TestQueueExistingClaudePluginsCacheBelowGitAncestor(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Guardrail.Connector = "claudecode"
-	cache := filepath.Join(t.TempDir(), ".claude", "plugins", "cache")
-	if err := os.MkdirAll(cache, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	staging := filepath.Join(cache, "temp_subdir_1_abc.clone")
-	gitHooks := filepath.Join(staging, ".git", "hooks")
-	if err := os.MkdirAll(gitHooks, 0o700); err != nil {
+	cache := filepath.Join(t.TempDir(), "dotfiles", ".git", "home", ".claude", "plugins", "cache")
+	marketplace := filepath.Join(cache, "marketplace")
+	version := filepath.Join(marketplace, "plugin", "1.0.0")
+	if err := os.MkdirAll(version, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
-	w.state.setIssue(AdmissionIssue{
-		Type: string(InstallPlugin),
-		Name: "hooks",
-		Path: gitHooks,
-		Kind: AdmissionUnscanned,
-	})
-	// Force the retry due so queueDueIssues sees it immediately.
-	w.state.mu.Lock()
-	r := w.state.retry[gitHooks]
-	r.due = w.state.now().Add(-time.Second)
-	w.state.retry[gitHooks] = r
-	w.state.mu.Unlock()
-	if len(w.state.dueIssues(AdmissionUnscanned, AdmissionNotQuarantined)) == 0 {
-		t.Fatal("expected saved unscanned issue")
+	w.queueExistingClaudePlugins(context.Background(), marketplace, 1)
+	if _, ok := w.pending[version]; !ok {
+		t.Fatalf("pending %v, want %s queued", w.pending, version)
 	}
-	w.queueDueIssues()
-	if len(w.pending) != 0 {
-		t.Fatalf("pending %v, want empty", w.pending)
+}
+
+func TestInClaudeCacheGitDir(t *testing.T) {
+	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	base := t.TempDir()
+	cache := filepath.Join(base, "repo", ".git", "plugins", "cache")
+	w := New(cfg, nil, []string{cache}, store, logger, nil, nil)
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{filepath.Join(cache, "marketplace", "plugin", ".git", "objects"), true},
+		{filepath.Join(cache, "marketplace", ".GIT"), true},
+		{filepath.Join(cache, "marketplace", "plugin", "1.0.0"), false},
+		{cache, false},
+		{filepath.Join(base, "repo", ".git", "hooks"), false},
 	}
-	if len(w.state.dueIssues(AdmissionUnscanned, AdmissionNotQuarantined)) != 0 {
-		t.Fatal("staging/.git issue should be cleared, not only skipped")
+	for _, tc := range tests {
+		if got := w.inClaudeCacheGitDir(tc.path); got != tc.want {
+			t.Errorf("inClaudeCacheGitDir(%q) = %v, want %v", tc.path, got, tc.want)
+		}
 	}
 }

@@ -1268,7 +1268,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 					// .git/objects and friends look like
 					// <marketplace>/<plugin>/<version> at depth 3.
-					if depth == 3 && pathHasGitDirSegment(event.Name) {
+					if depth == 3 && w.inClaudeCacheGitDir(event.Name) {
 						continue
 					}
 					if depth != 3 {
@@ -1415,7 +1415,7 @@ func (w *InstallWatcher) queueDueIssues() {
 		}
 		// Staging clones and .git internals are never plugins; do not retry them (#1428).
 		// Clear stale saved issues so they do not linger in admission reports.
-		if w.inClaudePluginStaging(issue.Path, 0) || pathHasGitDirSegment(issue.Path) {
+		if w.inClaudePluginStaging(issue.Path, 0) || w.inClaudeCacheGitDir(issue.Path) {
 			w.state.clearIssue(issue.Path)
 			continue
 		}
@@ -3639,9 +3639,10 @@ func (w *InstallWatcher) queueExistingClaudePlugins(ctx context.Context, dir str
 	if w.inClaudePluginStaging(dir, 0) {
 		return
 	}
-	// If Run handed us a .git directory (or any path under .git), do not walk
-	// its children — objects/hooks look like plugins and can be queued as skills.
-	if pathHasGitDirSegment(dir) {
+	// If Run handed us a .git directory (or any path under .git) in the cache,
+	// do not walk its children — objects/hooks look like plugins and can be
+	// queued as skills.
+	if w.inClaudeCacheGitDir(dir) {
 		return
 	}
 	entries, err := os.ReadDir(dir)
@@ -3881,9 +3882,21 @@ func (w *InstallWatcher) cacheLayoutPlugins(path string) bool {
 }
 
 func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
+	relative, inside := w.claudeCacheRelative(path)
+	if !inside {
+		return 0, false
+	}
+	return len(strings.FieldsFunc(relative, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})), true
+}
+
+// claudeCacheRelative returns path relative to the Claude Code plugin cache
+// root it is below, and whether it is below one.
+func (w *InstallWatcher) claudeCacheRelative(path string) (string, bool) {
 	pathAbs, err := filepath.Abs(path)
 	if err != nil {
-		return 0, false
+		return "", false
 	}
 	for _, root := range w.pluginDirs {
 		rootAbs, absErr := filepath.Abs(root)
@@ -3895,11 +3908,17 @@ func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
 			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 			continue
 		}
-		return len(strings.FieldsFunc(relative, func(r rune) bool {
-			return r == '/' || r == '\\'
-		})), true
+		return relative, true
 	}
-	return 0, false
+	return "", false
+}
+
+// inClaudeCacheGitDir reports a path at or below a .git folder inside the
+// Claude Code plugin cache. Only the part below the cache root counts, so a
+// cache that itself sits below a folder named .git is not excluded whole.
+func (w *InstallWatcher) inClaudeCacheGitDir(path string) bool {
+	relative, inside := w.claudeCacheRelative(path)
+	return inside && pathHasGitDirSegment(relative)
 }
 
 func sameWatcherPath(left, right string) bool {
