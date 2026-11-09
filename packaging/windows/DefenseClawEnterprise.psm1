@@ -17582,8 +17582,22 @@ function Repair-DefenseClawDeploymentAclDrift {
 # reads the attributes of each component itself (GetAttributes does not follow
 # the last component), so a junction whose target is gone is found too, which
 # Test-Path would read as an absent folder.
+# The one read of a path's attributes that the link walk makes; a smoke replaces it
+# to make the read fail.
+function Get-DefenseClawLinkCheckAttributes {
+    param([string]$Path)
+    return [IO.File]::GetAttributes($Path)
+}
+
 function Get-DefenseClawVendorMachineFolderLink {
-    param([string]$Directory)
+    param(
+        [string]$Directory,
+        # A rollback passes it: an error other than not-found is then treated like a
+        # found link (the path is returned, with a degraded event naming the path and
+        # the error) so the rollback goes on and the services come back. Without it
+        # the error propagates and the start-of-run check fails closed.
+        [switch]$Tolerant
+    )
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return ''
     }
@@ -17594,10 +17608,21 @@ function Get-DefenseClawVendorMachineFolderLink {
     while (-not [string]::IsNullOrWhiteSpace($current)) {
         $attributes = $null
         try {
-            $attributes = [IO.File]::GetAttributes($current)
+            $attributes = Get-DefenseClawLinkCheckAttributes -Path $current
         }
         catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
             $attributes = $null
+        }
+        catch {
+            if (-not $Tolerant) {
+                throw
+            }
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                path      = $current
+                reason    = "the link check could not read this path ($($_.Exception.Message)); it is treated like a link and skipped, and the rollback goes on"
+            }
+            return $current
         }
         if ($null -ne $attributes -and
             ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -23201,7 +23226,8 @@ function Restore-DefenseClawTransaction {
             # goes on, so the services come back; the link stays for the
             # administrator, who removes only the link. Standalone only.
             $restoreCodexLink = Get-DefenseClawVendorMachineFolderLink `
-                -Directory ([string]$Layout.CodexMachinePolicyDirectory)
+                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+                -Tolerant
             if ($restoreCodexLink -ne '') {
                 Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
                     subsystem = 'rollback'
@@ -23482,7 +23508,8 @@ function Restore-DefenseClawTransaction {
         }
         # GAP-0900: nothing is stamped through a link on the Codex folder either.
         $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `
-                -Directory ([string]$Layout.CodexMachinePolicyDirectory)) -ne ''
+                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+                -Tolerant) -ne ''
         Set-DefenseClawManagedAcls `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
@@ -36077,7 +36104,8 @@ function Assert-DefenseClawEnterpriseDeployment {
     $codexFolderLink = ''
     if ($RollbackRestore -and $codexTargetEnabled) {
         $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `
-            -Directory ([string]$Layout.CodexMachinePolicyDirectory)
+            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+            -Tolerant
     }
     if ($codexFolderLink -ne '') {
         Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{

@@ -1827,6 +1827,45 @@ $failures = & $module {
             [IO.Directory]::Delete($g900Cursor, $false)
             $g900Links.Remove($g900Cursor) | Out-Null
 
+            # A read error other than not-found (review): at the start of a run it
+            # propagates and the run fails closed; inside a rollback (-Tolerant) the path
+            # is treated like a found link, with a degraded event naming the path and the
+            # error, so the rollback goes on and the services come back.
+            $g900Events = [Collections.Generic.List[object]]::new()
+            & {
+                function Get-DefenseClawLinkCheckAttributes {
+                    param([string]$Path)
+                    throw [IO.IOException]::new('simulated read error')
+                }
+                function Write-DefenseClawResilienceEvent {
+                    param([string]$Marker, [hashtable]$Fields)
+                    $g900Events.Add($Fields)
+                }
+                $strict = ''
+                try { [void](Get-DefenseClawVendorMachineFolderLink -Directory $g900Cursor) } catch { $strict = $_.Exception.Message }
+                if (-not $strict.Contains('simulated read error')) {
+                    $failures.Add("GAP-0900: an unexpected error on the link check did not propagate at the start of a run: '$strict'")
+                }
+                $tolerant = Get-DefenseClawVendorMachineFolderLink -Directory $g900Cursor -Tolerant
+                if ([string]::IsNullOrEmpty($tolerant)) {
+                    $failures.Add('GAP-0900: an unexpected error on the link check in a rollback was not treated like a link')
+                }
+                $event = @($g900Events | Microsoft.PowerShell.Core\Where-Object { [string]$_.subsystem -ceq 'rollback' })
+                if ($event.Count -ne 1 -or [string]$event[0].path -cne $tolerant -or
+                    -not ([string]$event[0].reason).Contains('simulated read error')) {
+                    $failures.Add("GAP-0900: the rollback event did not name the path and the error: $(@($g900Events | ForEach-Object { $_.reason }) -join ' | ')")
+                }
+                Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                try {
+                    if (-not [string]::IsNullOrEmpty((Get-DefenseClawVendorMachineFolderLink -Directory $g900Cursor -Tolerant))) {
+                        $failures.Add('GAP-0900: Secure Client treated a read error as a link')
+                    }
+                }
+                finally {
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                }
+            }
+
             # A symbolic link (not a junction) to a folder, when the account may create one.
             $g900Sym = [IO.Path]::Combine($script:ProgramData, 'symcursor')
             $symMade = $false
