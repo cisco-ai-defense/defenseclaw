@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -82,7 +81,8 @@ func writeToolNamesItsFile(input Input) bool {
 // or a patch by the text it leaves in place. The file the edit changes is not
 // given, so no step is credited for what the file held or what another step
 // took out: the pieces (each replacement of a multi-step edit, each hunk of a
-// patch, and all of them joined, for a list that one piece opens and another
+// patch, all of them joined, and the text the steps of a multi-step edit
+// make where they meet (editPieces), for a list or a name that one piece opens and another
 // closes) are each read for the lists they spell, and one piece that puts an
 // insecure registry in force is the verdict. Within a piece the last list
 // wins, as in a document, so a piece that lists a registry and then empties the
@@ -93,14 +93,7 @@ func dockerWriteAddsInsecureRegistry(write nativeFileWrite) bool {
 		entries, ok := dockerDocumentRegistries(write.added)
 		return ok && dockerListHasInsecureRegistry(entries)
 	}
-	pieces := write.after
-	switch {
-	case len(pieces) == 0:
-		pieces = []string{write.added}
-	case len(pieces) > 1:
-		pieces = append(slices.Clone(pieces), strings.Join(pieces, "\n"))
-	}
-	for _, piece := range pieces {
+	for _, piece := range write.editPieces() {
 		if entries, ok := dockerEditTextRegistries(piece); ok && dockerListHasInsecureRegistry(entries) {
 			return true
 		}
@@ -300,8 +293,10 @@ func dockerFragmentList(rest string) (entries []string, listed, valid bool) {
 		return nil, false, true
 	}
 	rest = strings.TrimLeft(rest[1:], dockerJSONSpace)
-	if after, isNull := strings.CutPrefix(rest, "null"); isNull &&
-		(after == "" || strings.ContainsRune(dockerJSONSpace+",}]", rune(after[0]))) {
+	// A value that starts with null is read as null whatever follows: text
+	// that follows it without a separator (pieces of an edit that meet) makes a
+	// file dockerd refuses, which sets nothing.
+	if strings.HasPrefix(rest, "null") {
 		return nil, true, true
 	}
 	if !strings.HasPrefix(rest, "[") {
