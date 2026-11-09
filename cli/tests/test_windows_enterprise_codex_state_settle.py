@@ -180,6 +180,31 @@ switch ($Case) {
         function Get-DefenseClawCodexManagedHooksWriterCounter { param($Path) $script:tick += 2; [int64]$script:tick }
     }
 }
+# One lifecycle run with a stuck writer: every kind of caller in turn, then the
+# writer ends (g877b review G1).
+$steps = @()
+if ($Call -ceq 'sequence') {
+    foreach ($step in @('soft', 'strict', 'assert', 'soft', 'end', 'assert')) {
+        if ($step -ceq 'end') {
+            Set-Content -LiteralPath "$state.4" -Value x -NoNewline
+            Set-Counter 4
+            continue
+        }
+        $stepThrew = ''
+        $stepResolved = ''
+        $stepWatch = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            switch ($step) {
+                'assert' { Assert-DefenseClawCodexManagedHooksStateFile -Layout @{ CodexManagedHooksStatePath = $state } }
+                'strict' { $stepResolved = Split-Path (Resolve-DefenseClawCodexManagedHooksStateCopySettled -Strict -Path $state) -Leaf }
+                'soft' { $stepResolved = Split-Path (Resolve-DefenseClawCodexManagedHooksStateCopySettled -Path $state) -Leaf }
+            }
+        }
+        catch { $stepThrew = $_.Exception.Message }
+        $stepWatch.Stop()
+        $steps += [pscustomobject]@{ call = $step; seconds = [Math]::Round($stepWatch.Elapsed.TotalSeconds, 1); threw = $stepThrew; resolved = $stepResolved }
+    }
+}
 $threw = ''
 $resolved = ''
 $sw = [Diagnostics.Stopwatch]::StartNew()
@@ -197,6 +222,7 @@ if ($null -ne $writer) { $writer.WaitForExit(20000) | Out-Null }
     threw = $threw
     seconds = [Math]::Round($sw.Elapsed.TotalSeconds, 1)
     resolved = $resolved
+    steps = @($steps)
     judged = @($script:judged | ForEach-Object { Split-Path $_ -Leaf })
     events = @($script:events)
 } | ConvertTo-Json -Compress
@@ -328,3 +354,32 @@ def test_secure_client_resolves_at_once_without_a_wait(tmp_path: Path, call: str
     assert result["resolved"] == ".defenseclaw-managed-hooks.state.4", result
     assert result["seconds"] < 1.5, result
     assert result["events"] == [], result
+
+
+def test_a_stuck_writer_costs_one_wait_per_run_not_one_per_caller(tmp_path: Path) -> None:
+    # Review G1: the first caller waits the bound (2 s here, 30 s in the module);
+    # every later caller of the same run, soft or strict or the verify, looks
+    # once and gets the same answer at once. A writer that ends is judged again
+    # at once and forgotten.
+    result = _run(tmp_path, "writer-stopped", call="sequence")
+    first, strict, verify, soft, settled = result["steps"]
+    assert (first["call"], first["resolved"], first["threw"]) == ("soft", ".defenseclaw-managed-hooks.state.4", ""), result
+    assert 2 <= first["seconds"] < 10, result
+    for later in (strict, verify):
+        assert later["threw"].startswith("codex_state_unsettled: "), result
+        assert "for 2 seconds" in later["threw"], result  # the bound that was waited, not 0
+        assert later["seconds"] < 1.0, result
+    assert (soft["resolved"], soft["threw"]) == (".defenseclaw-managed-hooks.state.4", ""), result
+    assert soft["seconds"] < 1.0, result
+    assert settled["threw"] == "" and settled["seconds"] < 1.0, result
+    assert result["judged"] == [".defenseclaw-managed-hooks.state.4"], result
+
+
+def test_the_unsettled_answer_is_forgotten_when_a_new_lifecycle_run_starts() -> None:
+    text = _text()
+    lifecycle = _function_body(text, "Invoke-DefenseClawEnterpriseLifecycle")
+    reset = lifecycle.index("$script:CodexStateUnsettled = @{}")
+    assert reset < lifecycle.index("Enter-DefenseClawLifecycleLock -Layout $layout")
+    body = _function_body(text, "Wait-DefenseClawCodexManagedHooksStateSettled")
+    assert "$script:CodexStateUnsettled.Remove($memo)" in body
+    assert "$script:CodexStateUnsettled[$memo] = $TimeoutSeconds" in body
