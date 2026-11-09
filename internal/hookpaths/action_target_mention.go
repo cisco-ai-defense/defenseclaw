@@ -40,6 +40,7 @@ func ActionStateTargetMention(command, cwd, home string) bool {
 // ActionStateTargetMention is the package function of that name, with the
 // file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionStateTargetMention(command, cwd, home string) bool {
+	m.beginScan()
 	return actionProtectedTargetMentionIn(command, cwd, home, 0, true, nil, "", m)
 }
 

@@ -48,6 +48,9 @@ type TargetMemo struct {
 	// a name that exists or is missing (reads): the scans of one call read
 	// each operand again and again, and on Windows each read first walks the
 	// folders of the name for a link into a network share (rel-1-0-9:GAP-0943).
+	// They hold for one scan: each entry point of the evaluation starts a new
+	// one (beginScan), so a name that changed between two scans (a file that
+	// became or stopped being a hard link to a protected file) is read again.
 	lstats, stats map[string]memoRead
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
@@ -78,6 +81,19 @@ func NewTargetMemo() *TargetMemo {
 type memoRead struct {
 	info os.FileInfo
 	err  error
+}
+
+// beginScan starts a scan of the evaluation: the lstat and stat answers of
+// the earlier scans are dropped, and the next read of a name is a read of the
+// file system.
+func (m *TargetMemo) beginScan() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	clear(m.lstats)
+	clear(m.stats)
+	m.mu.Unlock()
 }
 
 // lstat is pathLstat through the memo. Only a name that exists or is missing

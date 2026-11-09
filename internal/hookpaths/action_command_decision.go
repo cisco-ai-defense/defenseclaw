@@ -56,6 +56,7 @@ func ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dia
 // ActionCommandDecisionWithDialectAndGlobFacts is the package function of
 // that name, with the file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionCommandDecisionWithDialectAndGlobFacts(command, cwd, home string, dialect actionfacts.Dialect, facts map[string]string) string {
+	m.beginScan()
 	return actionTargetDecision(command, cwd, home, dialect, dialect == actionfacts.DialectPOSIX, facts, m)
 }
 
@@ -69,6 +70,7 @@ func ActionCommandDecisionInShell(command, cwd, home string, facts map[string]st
 // ActionCommandDecisionInShell is the package function of that name, with
 // the file system answers of the evaluation m (nil: none).
 func (m *TargetMemo) ActionCommandDecisionInShell(command, cwd, home string, facts map[string]string, posixShell bool) string {
+	m.beginScan()
 	return actionTargetDecision(command, cwd, home, "", posixShell, facts, m)
 }
 

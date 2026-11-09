@@ -17,8 +17,8 @@ import (
 // write-target walk), and on Windows each read first walks the folders of
 // the name for a link into a network share, about 125 us, so 5000 ordinary
 // operands passed the hook answer budget. The evaluation now reads a name
-// once for all of its scans (TargetMemo); every read is still a walked
-// pathLstat or pathStat, so a path that reaches a share is still asked
+// once for all the readers of a scan (TargetMemo); every read is still a
+// walked pathLstat or pathStat, so a path that reaches a share is still asked
 // (rel-1-0-9:GAP-0943).
 type operandReadsFixture struct {
 	home, project, command string
@@ -87,9 +87,11 @@ func TestEvaluationReadsAnOrdinaryOperandOnce(t *testing.T) {
 	if decision != "" || state {
 		t.Fatalf("ordinary operands: decision %q, state %v, want allowed", decision, state)
 	}
-	// One walk read an operand (the folder of the name); the other readers of
-	// the evaluation are answered. Before: 7 an operand.
-	if want := 2*operands + 200; *fx.reads > want {
+	// One walk read an operand for each of the three scans (the decision and
+	// two state passes): the readers of one scan are answered, and each scan
+	// reads the name again, so a file that changed between scans is judged as
+	// it is. Before: 17 an operand for the three scans.
+	if want := 3*operands + 200; *fx.reads > want {
 		t.Fatalf("%d ordinary operands made %d walk reads in one evaluation, want at most %d", operands, *fx.reads, want)
 	}
 }
@@ -122,4 +124,91 @@ func TestEvaluationStillJudgesProtectedOperandNamedLast(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The scans of one evaluation share a memo, and a second process can change
+// a name between two of them. The identity of a file (the hard link that
+// names a protected file) is read again by each scan, so the decision judges
+// the file as it is when it is made, and answers as without a memo.
+func TestHardLinkChangedBetweenScansIsJudgedAsItIsNow(t *testing.T) {
+	setup := func(t *testing.T) (home, project, keys, alias string) {
+		t.Helper()
+		var err error
+		if home, err = filepath.EvalSymlinks(t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+		project = filepath.Join(home, "work", "project")
+		keys = filepath.Join(home, ".ssh", "authorized_keys")
+		for _, dir := range []string{project, filepath.Dir(keys)} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(keys, []byte("key\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return home, project, keys, filepath.Join(project, "alias")
+	}
+	// scanThenChange runs the state scan, then change, then the decision, on
+	// one memo; the memo answers the same as a fresh one after the change.
+	scanThenChange := func(t *testing.T, home, project string, change func()) string {
+		t.Helper()
+		memo := NewTargetMemo()
+		end := HookCall()
+		defer end()
+		if memo.ActionStateTargetMention("touch alias", project, home) {
+			t.Fatal("the alias was taken for active state")
+		}
+		change()
+		shared := memo.ActionCommandDecisionInShell("touch alias", project, home, nil, true)
+		if fresh := NewTargetMemo().ActionCommandDecisionInShell("touch alias", project, home, nil, true); (fresh != "") != (shared != "") {
+			t.Fatalf("decision %q on the shared memo, %q on a fresh one", shared, fresh)
+		}
+		return shared
+	}
+	t.Run("an ordinary file that became a hard link to the keys file is blocked", func(t *testing.T) {
+		home, project, keys, alias := setup(t)
+		if err := os.WriteFile(alias, []byte("ordinary"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		decision := scanThenChange(t, home, project, func() {
+			if err := os.Remove(alias); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(keys, alias); err != nil {
+				t.Skipf("hard link: %v", err)
+			}
+		})
+		if decision == "" {
+			t.Fatal("a hard link to the keys file was allowed")
+		}
+	})
+	t.Run("a hard link that became an ordinary file is allowed", func(t *testing.T) {
+		home, project, keys, alias := setup(t)
+		if err := os.Link(keys, alias); err != nil {
+			t.Skipf("hard link: %v", err)
+		}
+		decision := scanThenChange(t, home, project, func() {
+			if err := os.Remove(alias); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(alias, []byte("ordinary"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if decision != "" {
+			t.Fatalf("an ordinary file was blocked: %q", decision)
+		}
+	})
+	t.Run("a missing name that became a hard link to the keys file is blocked", func(t *testing.T) {
+		home, project, keys, alias := setup(t)
+		decision := scanThenChange(t, home, project, func() {
+			if err := os.Link(keys, alias); err != nil {
+				t.Skipf("hard link: %v", err)
+			}
+		})
+		if decision == "" {
+			t.Fatal("a hard link to the keys file was allowed")
+		}
+	})
 }
