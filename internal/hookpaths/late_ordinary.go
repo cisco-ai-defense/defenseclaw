@@ -198,7 +198,7 @@ func newLateScan(cwd, home string) (*lateScan, bool) {
 			return nil, false
 		}
 	}
-	realCWD, err := pathEvalSymlinks(cwd)
+	realCWD, err := pathEvalSymlinks(OSCleanedDirectory(cwd))
 	if err != nil || lateNamesProtected(realCWD) || realCWD == string(filepath.Separator) {
 		return nil, false
 	}
