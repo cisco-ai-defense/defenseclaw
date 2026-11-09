@@ -528,3 +528,22 @@ func TestWindowsEnterpriseHeldRollbackNextStepNamesOnlyThePendingTransaction(t *
 		t.Fatalf("held rollback next step = %q", got)
 	}
 }
+
+// GAP-0947: a rollback a late holder stopped starts the restored services and
+// ends with the held code; the next step says they keep enforcing and never
+// offers the forced uninstall.
+func TestWindowsEnterpriseHeldRollbackNextStepWithRunningServicesKeepsEnforcingAndNeverForces(t *testing.T) {
+	var services []enterprisestatus.Service
+	for _, name := range []string{"DefenseClawGateway", "DefenseClawHookGuardian", "DefenseClawHookEnumerator", "DefenseClawSensorHelper"} {
+		services = append(services, enterprisestatus.Service{Name: name, State: "running", Required: true})
+	}
+	got := windowsEnterpriseHeldRollbackNextStep(true, services)
+	if !strings.Contains(got, "keep enforcing") || strings.Contains(got, "stay stopped") || strings.Contains(got, "FORCE=1") || strings.Contains(got, "fails the same way") {
+		t.Fatalf("held rollback next step with running services = %q", got)
+	}
+	services[0].State = "stopped"
+	got = windowsEnterpriseHeldRollbackNextStep(true, services)
+	if !strings.Contains(got, "DefenseClawGateway service stays stopped") || strings.Contains(got, "FORCE=1") {
+		t.Fatalf("held rollback next step with a stopped service = %q", got)
+	}
+}

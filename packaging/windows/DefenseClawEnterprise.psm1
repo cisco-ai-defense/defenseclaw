@@ -23871,11 +23871,25 @@ function Start-DefenseClawTransactionServices {
         # successful LocalSystem reconciliation while gateway is still
         # disabled, so a queued gateway restart cannot beat auto-heal.
         try {
-            [void](Wait-DefenseClawFreshGuardianReconcile `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets)
+            if (Test-DefenseClawRollbackCoverageDeferred) {
+                # GAP-0947: a program holds the Codex requirements the
+                # recovery had to republish, so the guardian cannot reconcile
+                # until it lets go; the proof would only time out. The restored
+                # services start as they were before the run (the guardian
+                # first), the run ends with the held code, and the guardian
+                # republishes by itself once the program lets go.
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                    subsystem = 'guardian'
+                    reason    = 'the guardian coverage proof of the rollback is deferred: a program holds the Codex requirements the recovery had to republish'
+                }
+            }
+            else {
+                [void](Wait-DefenseClawFreshGuardianReconcile `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -AllowFailedTargets)
+            }
         }
         catch {
             if (-not (Test-DefenseClawRecoveryActivationDeferral `
@@ -23959,7 +23973,8 @@ function Start-DefenseClawTransactionServices {
             -GuardianServiceName $GuardianServiceName `
             -RequireBroker:([bool]$broker.existed) `
             -RequireEnumerator:$enumeratorShouldRun `
-            -AllowFailedTargets
+            -AllowFailedTargets `
+            -GuardianCoverageDeferred:(Test-DefenseClawRollbackCoverageDeferred)
     }
     if ([bool]$guardian.running) {
         # Guardian remains live while all exact boot policies are restored.
@@ -33947,7 +33962,10 @@ function Wait-DefenseClawEnterpriseReadiness {
         [int]$TimeoutSeconds = 90,
         # Rollback, recovery and activation; see Get-DefenseClawGuardianReadinessProbe.
         [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [string[]]$AllowedFailedTargetSIDs,
+        # GAP-0947: the guardian service runs but cannot prove coverage until
+        # a program lets go of the Codex requirements (rollback only).
+        [switch]$GuardianCoverageDeferred
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Write-DefenseClawLifecyclePhase -Stage 'enterprise readiness wait'
@@ -33973,7 +33991,14 @@ function Wait-DefenseClawEnterpriseReadiness {
             (Test-DefenseClawGatewayReady `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName)
-        if ($gatewayReady) {
+        if ($gatewayReady -and $GuardianCoverageDeferred) {
+            $deferredGuardian = Microsoft.PowerShell.Management\Get-Service `
+                -Name $GuardianServiceName `
+                -ErrorAction SilentlyContinue
+            $guardianReady = $null -ne $deferredGuardian -and
+                $deferredGuardian.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        }
+        elseif ($gatewayReady) {
             $guardianReady = Test-DefenseClawGuardianReady `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
@@ -35470,6 +35495,11 @@ function New-DefenseClawHookHeldMessage {
 # services, and ends with the retryable held code and the transaction still
 # pending (Assert-DefenseClawRollbackHoldsResolved). Standalone only.
 $script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::new()
+# Set when the recovery could not republish the managed Codex policy over a
+# file the administrator edited (a holder keeps the replacement out): the
+# guardian cannot reconcile until the holder lets go, so the restored services
+# start without the guardian's coverage proof (Test-DefenseClawRollbackCoverageDeferred).
+$script:DefenseClawRollbackCoverageDeferred = $false
 
 function Test-DefenseClawRollbackHeldMessage {
     param([AllowEmptyString()][string]$Message)
@@ -35478,6 +35508,13 @@ function Test-DefenseClawRollbackHeldMessage {
 
 function Clear-DefenseClawRollbackDeferredHolds {
     $script:DefenseClawRollbackDeferredHolds.Clear()
+    $script:DefenseClawRollbackCoverageDeferred = $false
+}
+
+function Test-DefenseClawRollbackCoverageDeferred {
+    return ([bool]$script:DefenseClawRollbackCoverageDeferred -and
+        $script:DefenseClawRollbackDeferredHolds.Count -gt 0 -and
+        (Test-DefenseClawStandaloneProfile))
 }
 
 function Add-DefenseClawRollbackDeferredHold {
@@ -35502,7 +35539,7 @@ function Assert-DefenseClawRollbackHoldsResolved {
         return
     }
     $message = $script:DefenseClawRollbackDeferredHolds -join ' | '
-    $script:DefenseClawRollbackDeferredHolds.Clear()
+    Clear-DefenseClawRollbackDeferredHolds
     throw $message
 }
 
@@ -36688,6 +36725,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             }
             Add-DefenseClawRollbackDeferredHold -Message ([string]$_.Exception.Message)
             $codexRequirementsDeferred = $true
+            $script:DefenseClawRollbackCoverageDeferred = $true
         }
     }
     if (-not $codexRequirementsDeferred) {

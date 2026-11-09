@@ -345,6 +345,74 @@ try {
         Reset-Recovery @('bad') 'edit'
         Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
         if ($script:RecoverCalls.Count -ne 0 -or @(Get-Backups).Count -ne 0 -or [IO.File]::ReadAllText($recRequirements) -ne 'edit') { throw 'Secure Client: the recovery step acted' }
+
+        # GAP-0947. A rollback that meets a late holder leaves the file, names
+        # the holder, points at /repair (never the forced uninstall), and ends
+        # with the retryable code only after everything else was put back.
+        Clear-DefenseClawRollbackDeferredHolds
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $handle = Open-Holder $heldRequirements $READ_DATA $SHARE_R
+            try {
+                $deferredMessage = New-DefenseClawCodexFileHeldMessage -Layout $heldLayout -Path $heldRequirements -Why 'open without delete sharing, so the rollback could not put it back'
+            }
+            finally { Close-Holder $handle }
+            if (-not $deferredMessage.StartsWith('codex_requirements_held: ') -or -not $deferredMessage.Contains('/repair') -or $deferredMessage -match 'FORCE|uninstall') {
+                throw "deferred rollback hold: not retryable, or not pointing at /repair: '$deferredMessage'"
+            }
+            # The recovery step defers instead of stopping the rollback: the
+            # held code is recorded, the hold list ends the run.
+            Add-DefenseClawRollbackDeferredHold -Message $deferredMessage
+            Add-DefenseClawRollbackDeferredHold -Message $deferredMessage
+            if ($script:DefenseClawRollbackDeferredHolds.Count -ne 1) { throw 'deferred holds: the same message was listed twice' }
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $second = ''
+            $handle = Open-Holder $heldState $READ_DATA $SHARE_R
+            try { try { [void](Open-DefenseClawCodexRollbackHold -Layout $heldLayout -Path $heldState) } catch { $second = $_.Exception.Message } }
+            finally { Close-Holder $handle }
+            if (-not $second.StartsWith('codex_state_held: ') -or $clock.Elapsed.TotalSeconds -gt 15) { throw "deferred holds: a second holder waited $([int]$clock.Elapsed.TotalSeconds) s or was not named: '$second'" }
+            $ended = ''
+            try { Assert-DefenseClawRollbackHoldsResolved } catch { $ended = $_.Exception.Message }
+            if ($ended -ne $deferredMessage -or $script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw "deferred holds: the run did not end with the held message: '$ended'" }
+            Assert-DefenseClawRollbackHoldsResolved
+            if (-not (Test-DefenseClawRollbackHeldMessage -Message $deferredMessage) -or (Test-DefenseClawRollbackHeldMessage -Message 'Codex requirements reconcile failed: boom')) { throw 'held message test: wrong' }
+
+            # The previous hook, put back after the restored release runs: a
+            # holder without delete sharing defers it; a free hook goes back.
+            $hookStateRoot = [IO.Path]::Combine($Scratch, 'hook-state'); [void][IO.Directory]::CreateDirectory($hookStateRoot)
+            $hookPath = [IO.Path]::Combine($Scratch, 'defenseclaw-hook.exe'); [IO.File]::WriteAllText($hookPath, 'replacement')
+            $hookBackup = [IO.Path]::Combine($hookStateRoot, 'file-00.bak'); [IO.File]::WriteAllText($hookBackup, 'previous')
+            $hookSha = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $hookBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hookLayout = @{ HookPath = $hookPath; StateRoot = $hookStateRoot; InstallRoot = $Scratch }
+            $hookSnapshot = [pscustomobject]@{
+                early_hook_guard_copy = 'guard'
+                early_hook_preimage_sha256 = $hookSha
+                files = @([pscustomobject]@{ path = $hookPath; existed = $true; backup = $hookBackup })
+            }
+            $handle = Open-Holder $hookPath $READ_DATA $SHARE_R
+            try { Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $hookSnapshot -Layout $hookLayout }
+            finally { Close-Holder $handle }
+            $hookHeld = $ended = ''
+            try { Assert-DefenseClawRollbackHoldsResolved } catch { $hookHeld = $_.Exception.Message }
+            if (-not $hookHeld.StartsWith('hook_in_use: ') -or -not $hookHeld.Contains($hookPath) -or -not $hookHeld.Contains('/repair') -or $hookHeld -match 'FORCE') { throw "hook put-back: a held hook was not deferred by name: '$hookHeld'" }
+            if ([IO.File]::ReadAllText($hookPath) -ne 'replacement') { throw 'hook put-back: the held replacement hook changed' }
+            Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $hookSnapshot -Layout $hookLayout
+            if ([IO.File]::ReadAllText($hookPath) -ne 'previous' -or $script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw 'hook put-back: a free hook was not put back' }
+        }
+        finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
+        # Secure Client pin: nothing is deferred or tolerated; the recovery
+        # step and the hook put-back act as they did (the hook holder is the
+        # error it always was).
+        Clear-DefenseClawRollbackDeferredHolds
+        Reset-Recovery @('bad') 'edit'
+        Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
+        if ($script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw 'Secure Client: the recovery step deferred a hold' }
+        [IO.File]::WriteAllText($hookPath, 'replacement')
+        $handle = Open-Holder $hookPath $READ_DATA $SHARE_R
+        $scMessage = ''
+        try { try { Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $hookSnapshot -Layout $hookLayout } catch { $scMessage = $_.Exception.Message } }
+        finally { Close-Holder $handle }
+        if ($scMessage -eq '' -or $scMessage.StartsWith('hook_in_use: ') -or $script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw "Secure Client: a held hook was deferred instead of failing: '$scMessage'" }
     } $scratch $holderType
     'enterprise-standalone-held-file-restamp-smoke: OK'
 }
