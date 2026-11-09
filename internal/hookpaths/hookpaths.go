@@ -6325,6 +6325,9 @@ var (
 		"dereference", "force", "interactive", "keep-directory-symlink", "no-clobber", "no-dereference",
 		"preserve", "parents", "recursive", "reflink", "remove-destination", "strip-trailing-slashes",
 		"update", "verbose", "one-file-system", "context", "help", "version"}
+	installLongOptions = []string{"backup", "compare", "directory", "group", "mode", "owner", "preserve-timestamps",
+		"strip", "strip-program", "suffix", "target-directory", "no-target-directory", "verbose",
+		"preserve-context", "context", "debug", "help", "version"}
 	optionsWithValue = []string{"target-directory", "suffix"}
 )
 
@@ -6344,6 +6347,16 @@ func longOption(name string, options []string) (string, bool) {
 		}
 	}
 	return match, true
+}
+
+// ExpandLongOption spells a GNU long option name (without the leading --) in
+// full: any unambiguous prefix of one of options is that option. It returns
+// "" for a name that is unknown or ambiguous.
+func ExpandLongOption(name string, options []string) string {
+	if option, ok := longOption(name, options); ok {
+		return option
+	}
+	return ""
 }
 
 // add records the links that one ln, link or cp call creates. It returns
