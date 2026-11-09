@@ -220,3 +220,61 @@ func TestReportedSkillLinksAreAllJudged(t *testing.T) {
 		t.Fatalf("a cut report with nothing held or denied was refused: %s", reason)
 	}
 }
+
+// A gateway that cannot enter the project judges the folder a link leads to by
+// the claims the hook sends. A folder named with space that declares a denied
+// name is refused through a link as it is directly; a folder named with space
+// that declares an ordinary name stays allowed.
+func TestReportedSpaceNamedSkillFolderKeepsItsDeclaredName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the project folder cannot be made unreadable here")
+	}
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".claude", "skills")
+	proj := filepath.Join(home, "proj")
+	if err := os.MkdirAll(proj, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	links := map[string]string{}
+	for _, name := range []string{" ", "  "} {
+		dir := filepath.Join(root, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Skipf("cannot make this folder name here: %v", err)
+		}
+		link := filepath.Join(proj, fmt.Sprintf("link-%d", len(name)))
+		if err := os.Symlink(dir, link); err != nil {
+			t.Skipf("cannot create a link here: %v", err)
+		}
+		links[name] = link
+	}
+	if err := os.Chmod(proj, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(proj, 0o700) })
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "listed-name"}}
+	api := &APIServer{store: store, logger: logger, scannerCfg: cfg}
+	decide := func(name, declared string) bool {
+		t.Helper()
+		claims, _ := assetfacts.Decode(assetfacts.Encode(assetfacts.Facts{
+			SkillLinks: []string{filepath.Join(root, name)}, Skills: []assetfacts.Skill{{Folder: name, Declared: declared}},
+		}))
+		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
+		ctx = context.WithValue(ctx, claimedAssetFactsContextKey{}, claims)
+		decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
+			HookEventName: "PreToolUse", ToolName: "Bash", CWD: proj,
+			ToolInput: map[string]interface{}{"command": "cat " + links[name] + "/SKILL.md"},
+		})
+		return matched && decision.Action == "block"
+	}
+	if !decide(" ", "listed-name") {
+		t.Fatal("a space-named linked folder declaring a denied name was allowed")
+	}
+	if decide("  ", "ordinary-skill") {
+		t.Fatal("a space-named linked folder declaring an ordinary name was refused")
+	}
+}

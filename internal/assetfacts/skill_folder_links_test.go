@@ -227,6 +227,40 @@ func TestSkillLinksPastTheBoundAreSignalled(t *testing.T) {
 	}
 }
 
+// A skill folder named with space is a folder: its link path and its declared
+// name arrive as the hook found them, and a claim the header cannot carry is
+// signalled rather than dropped.
+func TestSpaceNamedSkillFolderClaimsAreCarriedExactly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fixture paths are not absolute here")
+	}
+	skills := filepath.Join(string(filepath.Separator), "home", "u", ".claude", "skills")
+	for _, name := range []string{" ", "  ", " lead", "trail ", "mid dle"} {
+		dir := filepath.Join(skills, name)
+		facts, ok := Decode(Encode(Facts{SkillLinks: []string{dir}, Skills: []Skill{{Folder: name, Declared: "listed-name"}}}))
+		if !ok || len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != dir || facts.SkillLinksTruncated {
+			t.Fatalf("folder %q: links=%q truncated=%t, want %q carried", name, facts.SkillLinks, facts.SkillLinksTruncated, dir)
+		}
+		if got := facts.DeclaredFor(name); len(got) != 1 || got[0] != "listed-name" || facts.SkillsTruncated {
+			t.Fatalf("folder %q: DeclaredFor = %q truncated=%t, want its declared name", name, got, facts.SkillsTruncated)
+		}
+	}
+	// A name the claim cannot carry is signalled; an empty claim is no claim.
+	for name, skill := range map[string]Skill{
+		"control character in the folder": {Folder: "sk\x01ll", Declared: "listed-name"},
+		"declared name past the bound":    {Folder: "folder", Declared: strings.Repeat("n", maxNameBytes+1)},
+	} {
+		facts, _ := Decode(Encode(Facts{SkillLinks: []string{skills + "/x"}, Skills: []Skill{skill}}))
+		if len(facts.Skills) != 0 || !facts.SkillsTruncated {
+			t.Fatalf("%s: skills=%v truncated=%t, want the loss signalled", name, facts.Skills, facts.SkillsTruncated)
+		}
+	}
+	facts, _ := Decode(Encode(Facts{SkillLinks: []string{skills + "/x"}, Skills: []Skill{{Folder: "folder"}}}))
+	if len(facts.Skills) != 0 || facts.SkillsTruncated {
+		t.Fatalf("a claim with no declared name: skills=%v truncated=%t, want none and no signal", facts.Skills, facts.SkillsTruncated)
+	}
+}
+
 func TestResolveLinksKeepsMissingTail(t *testing.T) {
 	home, _, held := skillTree(t)
 	linkOrSkip(t, held, filepath.Join(home, "lnk"))

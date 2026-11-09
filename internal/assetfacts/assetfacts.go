@@ -325,21 +325,35 @@ func Decode(value string) (Facts, bool) {
 func (f Facts) DeclaredFor(folder string) []string {
 	var out []string
 	for _, skill := range f.Skills {
-		if strings.EqualFold(skill.Folder, strings.TrimSpace(folder)) {
+		if sameFolderName(skill.Folder, folder) {
 			out = append(out, skill.Declared)
 		}
 	}
 	return out
 }
 
+// sameFolderName reports whether two folder names are the same folder: exactly,
+// or (for a claim from a hook that trimmed the name) once surrounding space is
+// trimmed from names that hold more than space.
+func sameFolderName(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	return a != "" && strings.EqualFold(a, b)
+}
+
 func bounded(facts Facts) Facts {
 	var skills []Skill
 	for _, skill := range facts.Skills {
-		folder, declared := clean(skill.Folder, maxNameBytes), clean(skill.Declared, maxNameBytes)
-		if folder == "" || declared == "" {
+		// A folder name is exact: a folder named with space is a folder, and
+		// trimming it to nothing would drop its claim. A claim that cannot be
+		// carried is signalled, as one past the bound is.
+		if skill.Folder == "" || strings.TrimSpace(skill.Declared) == "" {
 			continue
 		}
-		if len(skills) == maxSkills {
+		folder, declared := cleanExact(skill.Folder, maxNameBytes), clean(skill.Declared, maxNameBytes)
+		if folder == "" || declared == "" || len(skills) == maxSkills {
 			facts.SkillsTruncated = true
 			continue
 		}
@@ -358,7 +372,9 @@ func bounded(facts Facts) Facts {
 	for _, dir := range facts.SkillLinks {
 		// A link that is not carried must be signalled, whatever the reason:
 		// it is a folder the gateway would otherwise never look at.
-		dir = clean(dir, maxSkillLinkPathBytes)
+		// The path is exact: trimming a folder named with space would name
+		// its parent.
+		dir = cleanExact(dir, maxSkillLinkPathBytes)
 		if !filepath.IsAbs(dir) || len(links) == maxSkillLinks || linkBytes+len(dir) > maxSkillLinkBytes {
 			facts.SkillLinksTruncated = true
 			continue
@@ -522,7 +538,13 @@ func cleanHexDigest(value string, length int) string {
 // clean drops a value that is not valid UTF-8, holds a control character or
 // is longer than limit; it trims surrounding space.
 func clean(value string, limit int) string {
-	value = strings.TrimSpace(value)
+	return cleanExact(strings.TrimSpace(value), limit)
+}
+
+// cleanExact is clean without the trim: it keeps the value as it is, or drops
+// it when it is not valid UTF-8, holds a control character or is longer than
+// limit.
+func cleanExact(value string, limit int) string {
 	if len(value) > limit || !utf8.ValidString(value) {
 		return ""
 	}
