@@ -66,7 +66,8 @@ def test_the_guardian_proof_is_deferred_for_a_stuck_writer_only_after_it_failed(
     proof = body.index("Wait-DefenseClawFreshGuardianReconcile")
     deferral = body.index("Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $Layout")
     assert proof < body.index("catch {", proof) < deferral
-    assert "throw" in body[deferral : deferral + 160]
+    # Any other proof failure still fails the recovery.
+    assert "else {\n                        throw" in body[deferral : deferral + 1800]
     helper = _function_body(_text(), "Test-DefenseClawGuardianProofDeferredByCodexWriter")
     assert helper.index("Test-DefenseClawStandaloneProfile") < helper.index("Add-DefenseClawRollbackDeferredHold")
     assert "% 2) -eq 0" in helper and "return $false" in helper

@@ -17867,6 +17867,14 @@ function New-DefenseClawTransaction {
             -Source $EarlyHookSource `
             -PriorDeploymentActive:$PriorDeploymentActive
     }
+    if ((Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive -and -not $SkipRedactionKeySnapshot) {
+        # GAP-0977: a program that holds a guardian state file keeps the
+        # guardian from publishing the coverage this transaction waits for;
+        # found before anything is stopped. An uninstall or purge transaction
+        # (SkipRedactionKeySnapshot) waits for no coverage and is not held up
+        # by it: its own in-use checks (GAP-0878) still apply.
+        Assert-DefenseClawGuardianStateNotHeld -Layout $Layout
+    }
     $codexReadHolds = $null
     if ((Test-DefenseClawStandaloneProfile) -and -not $SkipRedactionKeySnapshot -and
         $IncludeCodexMachineState) {
@@ -18679,7 +18687,8 @@ function New-DefenseClawTransaction {
                 -Layout $Layout `
                 -TransactionDirectory $directory `
                 -GuardCopy ([string]$quiescingIntent['early_hook_guard_copy']) `
-                -GuardSHA256 ([string]$quiescingIntent['early_hook_guard_sha256']))
+                -GuardSHA256 ([string]$quiescingIntent['early_hook_guard_sha256']) `
+                -GuardianServiceName $GuardianServiceName)
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
                     $GatewayServiceName,
@@ -23138,7 +23147,8 @@ function Restore-DefenseClawTransaction {
             -Layout $Layout `
             -TransactionDirectory ([string]$snapshot.directory) `
             -GuardCopy $guardCopy `
-            -GuardSHA256 $guardSHA256
+            -GuardSHA256 $guardSHA256 `
+            -GuardianServiceName ([string]$snapshot.guardian_service)
     }
     if (Test-DefenseClawServiceExists -Name $standaloneSensorHelper) {
         Assert-DefenseClawStandaloneSensorHelperOwned `
@@ -24183,6 +24193,11 @@ function Start-DefenseClawTransactionServices {
         # successful LocalSystem reconciliation while gateway is still
         # disabled, so a queued gateway restart cannot beat auto-heal.
         try {
+            if (Test-DefenseClawStandaloneProfile) {
+                # GAP-0977: a held guardian state file defers the proof the
+                # same way.
+                Set-DefenseClawRollbackGuardianStateDeferral -Layout $Layout
+            }
             if (Test-DefenseClawRollbackCoverageDeferred) {
                 # GAP-0947: a program holds the Codex requirements the
                 # recovery had to republish, so the guardian cannot reconcile
@@ -24213,25 +24228,34 @@ function Start-DefenseClawTransactionServices {
                         -AllowFailedTargets)
                 }
                 catch {
-                    # GAP-0999: a Codex writer that keeps its transaction open
-                    # keeps the guardian from publishing; the restored services
-                    # start without that proof and the run ends retryable.
-                    $proofFailure = [string]$_.Exception.Message
-                    if (-not (Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $Layout)) {
-                        throw
+                    # GAP-0977: a holder that arrived after the check above.
+                    if (Resolve-DefenseClawRollbackLateGuardianHold `
+                            -Layout $Layout `
+                            -Failure $_ `
+                            -GuardianServiceName $GuardianServiceName) {
+                        # The proof is deferred; the guardian was started as it was.
                     }
-                    Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
-                        subsystem = 'guardian'
-                        reason    = "the guardian coverage proof of the rollback is deferred: a Codex writer keeps its transaction open ($proofFailure)"
-                    }
-                    try {
-                        Start-DefenseClawService -Name $GuardianServiceName
-                    }
-                    catch {
+                    elseif (Test-DefenseClawGuardianProofDeferredByCodexWriter -Layout $Layout) {
+                        # GAP-0999: a Codex writer that keeps its transaction open
+                        # keeps the guardian from publishing; the restored services
+                        # start without that proof and the run ends retryable.
+                        $proofFailure = [string]$_.Exception.Message
                         Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
                             subsystem = 'guardian'
-                            reason    = "the guardian did not stay up while a Codex writer keeps its transaction open: $($_.Exception.Message)"
+                            reason    = "the guardian coverage proof of the rollback is deferred: a Codex writer keeps its transaction open ($proofFailure)"
                         }
+                        try {
+                            Start-DefenseClawService -Name $GuardianServiceName
+                        }
+                        catch {
+                            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                                subsystem = 'guardian'
+                                reason    = "the guardian did not stay up while a Codex writer keeps its transaction open: $($_.Exception.Message)"
+                            }
+                        }
+                    }
+                    else {
+                        throw
                     }
                 }
             }
@@ -27752,7 +27776,14 @@ function Hold-DefenseClawEarlyHookGuard {
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$TransactionDirectory,
         [AllowEmptyString()][string]$GuardCopy,
-        [AllowEmptyString()][string]$GuardSHA256
+        [AllowEmptyString()][string]$GuardSHA256,
+        # A recovery that finds the services running (a rollback that ended
+        # held, GAP-0977) must stop the guardian first: it restores any hook
+        # that is not its recorded release, so it put the previous hook back
+        # over the guard and the recovery failed "installed artifact hash drift:
+        # hook". The previous hook still answers while the gateway runs, so
+        # the guardian goes down before the guard and the rest after it.
+        [AllowEmptyString()][string]$GuardianServiceName = ''
     )
     if ([string]::IsNullOrWhiteSpace($GuardCopy) -and
         [string]::IsNullOrWhiteSpace($GuardSHA256)) {
@@ -27770,23 +27801,64 @@ function Hold-DefenseClawEarlyHookGuard {
             [StringComparison]::OrdinalIgnoreCase)) {
         throw 'pending lifecycle names an unexpected closed hook guard'
     }
-    Assert-DefenseClawNoReparsePath -Path $expected
-    $digest = (
-        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $expected -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
-    if ($digest -cne $GuardSHA256) {
-        throw 'pending lifecycle closed hook guard changed'
+    # S-I1: the guardian is stopped for the write below. Every failure after
+    # the stop puts its start mode back and starts it again, so the services
+    # a held run leaves Running are Running at the end of a failed hold too.
+    $guardianTouched = $false
+    $guardianPriorMode = 0
+    $guardianWasRunning = $false
+    try {
+        Assert-DefenseClawNoReparsePath -Path $expected
+        $digest = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $expected -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($digest -cne $GuardSHA256) {
+            throw 'pending lifecycle closed hook guard changed'
+        }
+        if (-not [string]::IsNullOrWhiteSpace($GuardianServiceName) -and
+            (Test-DefenseClawServiceExists -Name $GuardianServiceName)) {
+            $guardianPriorMode = Get-DefenseClawServiceStartMode -Name $GuardianServiceName
+            $guardianService = Get-DefenseClawServiceChecked -Name $GuardianServiceName
+            $guardianWasRunning = (
+                $null -ne $guardianService -and
+                $guardianService.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+            )
+            $guardianTouched = $true
+            Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode 4
+            Stop-DefenseClawService -Name $GuardianServiceName
+        }
+        Install-DefenseClawFileAtomic `
+            -Source $expected `
+            -Destination $Layout.HookPath `
+            -ExpectedSHA256 $GuardSHA256 `
+            -SkipIfContentMatches
+        $live = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($live -cne $GuardSHA256) {
+            throw 'pending lifecycle closed hook guard was not published'
+        }
     }
-    Install-DefenseClawFileAtomic `
-        -Source $expected `
-        -Destination $Layout.HookPath `
-        -ExpectedSHA256 $GuardSHA256 `
-        -SkipIfContentMatches
-    $live = (
-        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
-    if ($live -cne $GuardSHA256) {
-        throw 'pending lifecycle closed hook guard was not published'
+    catch {
+        $holdFailure = $_
+        if ($guardianTouched) {
+            $restartNote = ''
+            try {
+                if ($guardianPriorMode -eq 2 -or $guardianPriorMode -eq 3) {
+                    Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode $guardianPriorMode
+                }
+                if ($guardianWasRunning) {
+                    Start-DefenseClawService -Name $GuardianServiceName
+                }
+            }
+            catch {
+                $restartNote = "; the hook guardian could not be started again: $($_.Exception.Message)"
+            }
+            if ($restartNote -ne '') {
+                throw "$($holdFailure.Exception.Message)$restartNote"
+            }
+        }
+        throw $holdFailure
     }
     return $GuardSHA256
 }
@@ -28041,7 +28113,8 @@ function Recover-DefenseClawQuiescingIntent {
         -Layout $Layout `
         -TransactionDirectory $recordedDirectory `
         -GuardCopy (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_copy') `
-        -GuardSHA256 (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_sha256'))
+        -GuardSHA256 (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_sha256') `
+        -GuardianServiceName $GuardianServiceName)
     # A process/reboot recovery never trusts elapsed wall time from the prior
     # process. Reestablish both disabled+stopped, publish a fresh durable
     # quiescence point, and drain the complete failure-action window.
@@ -35869,6 +35942,251 @@ function New-DefenseClawHookHeldMessage {
         -Left 'the rollback left the replacement hook in place and put everything else back')
 }
 
+# GAP-0977 (r109): the hook guardian publishes its coverage into a handful of
+# files (its authorization ledger and activation record, the removed-connector,
+# cleanup and unprotected-agent records, its state, notices and restore
+# records, and the manifest the enumerator publishes). A program that holds one
+# of them open without delete sharing keeps the guardian from publishing, so
+# the activation's fresh-coverage proof could only time out: the transaction
+# failed after it stopped the services and its rollback met the same file, and
+# the run ended pending with every service stopped. The holder is now found
+# before anything is stopped (guardian_state_held, nothing changed), named when
+# it arrives during the transaction, and a rollback that meets it defers the
+# guardian's coverage proof like the Codex files (Test-DefenseClawRollbackCoverageDeferred).
+# Standalone only.
+function Test-DefenseClawGuardianStateFileUserOpenable {
+    <#
+        True when any principal other than SYSTEM, Administrators and a
+        service SID has an Allow entry with any access on Path: a standard
+        account, a domain or local user SID named directly, Users, Everyone
+        and the like can then open the file and hold it with read sharing, so
+        a lifecycle run must not wait for it (N2). The gated set holds only
+        files just SYSTEM, Administrators and the service SIDs can open. Deny
+        entries grant nothing. A path whose access list cannot be read answers
+        $false (it stays gated).
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop
+        foreach ($rule in @($acl.Access)) {
+            if ([string]$rule.AccessControlType -ne 'Allow') { continue }
+            if ([int]$rule.FileSystemRights -eq 0) { continue }
+            $reference = $rule.IdentityReference
+            $sid = ''
+            try { $sid = $reference.Translate([Security.Principal.SecurityIdentifier]).Value }
+            catch { $sid = [string]$reference.Value }
+            if ($sid -ceq 'S-1-5-18' -or $sid -ceq 'S-1-5-32-544' -or $sid.StartsWith('S-1-5-80-', [StringComparison]::Ordinal)) {
+                continue
+            }
+            return $true
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-DefenseClawGuardianStateFiles {
+    <#
+        The guardian state files whose hold breaks a lifecycle run, measured
+        natively (GAP-0977): the ledger (protected_targets.json), the activation
+        receipt, the cleanup ledger (a failed save aborts a guardian pass) and
+        the guardian state record. Every other file the guardian or its
+        enumerator publishes did not stop a repair when it was held, and a file
+        a standard account can open is never gated: that account could hold it
+        and block every ensure and repair (N2). Mirrors
+        windowsEnterpriseGuardianStateFiles in the CLI.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $paths = [Collections.Generic.List[string]]::new()
+    $candidates = [Collections.Generic.List[string]]::new()
+    $authorization = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name AuthorizationDirectory)
+    if (-not [string]::IsNullOrWhiteSpace($authorization)) {
+        foreach ($name in @('protected_targets.json', 'activation.json', 'user-cleanup.json')) {
+            $candidates.Add([IO.Path]::Combine($authorization, $name))
+        }
+    }
+    $runtime = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name RuntimeDirectory)
+    if (-not [string]::IsNullOrWhiteSpace($runtime)) {
+        $candidates.Add([IO.Path]::Combine($runtime, 'hook_guardian_state.json'))
+    }
+    foreach ($path in $candidates) {
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item -or $item.PSIsContainer -or $item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) {
+            continue
+        }
+        if (Test-DefenseClawGuardianStateFileUserOpenable -Path $path) {
+            continue
+        }
+        $paths.Add([string]$path)
+    }
+    return @($paths)
+}
+
+function Get-DefenseClawGuardianStateHold {
+    <#
+        The first guardian state file a program holds open in a way that keeps
+        the guardian from replacing it (an open for DELETE that allows every
+        sharing mode fails), or $null. A handle only the guardian itself has
+        for a moment does not count: the probe is repeated for a second. Not
+        the standalone profile: $null.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout, [int]$Probes = 5)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $null
+    }
+    foreach ($path in @(Get-DefenseClawGuardianStateFiles -Layout $Layout)) {
+        $blocked = $false
+        for ($probe = 0; $probe -lt $Probes; $probe++) {
+            $blocked = Test-DefenseClawFileDeleteBlocked -Path $path
+            if (-not $blocked) {
+                break
+            }
+            if ($probe -lt ($Probes - 1)) {
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 200
+            }
+        }
+        if ($blocked) {
+            return [string]$path
+        }
+    }
+    return $null
+}
+
+function Get-DefenseClawGuardianStateHolderNames {
+    param([Parameter(Mandatory)][hashtable]$Layout, [Parameter(Mandatory)][string]$Path)
+    $named = @()
+    try {
+        $excluded = [Collections.Generic.HashSet[int]]::new()
+        [void]$excluded.Add([int]$PID)
+        $named = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($Path) -Excluded $excluded).Values |
+                Microsoft.PowerShell.Core\ForEach-Object {
+                    if ([int]$_.Id -le 0) { [string]$_.Name }
+                    elseif ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
+                    else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
+                })
+    }
+    catch {
+        $named = @()
+    }
+    if ($named.Count -eq 0) {
+        $named = @('a program that Windows did not name (it may run as SYSTEM, so no process id is available)')
+    }
+    return ($named -join ', ')
+}
+
+function New-DefenseClawGuardianStateHeldMessage {
+    <#
+        guardian_state_held, the retryable refusal (exit 1618). Gate: before
+        anything was stopped, the run changed nothing. Activation: the guardian
+        could not publish its coverage during the transaction (the rollback
+        follows). Rollback: the file is left as it is and the transaction
+        stays pending, the restored services running (/repair finishes it).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][ValidateSet('Gate', 'Activation', 'Rollback')][string]$Phase
+    )
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if ($Phase -eq 'Rollback') {
+        return (New-DefenseClawRollbackHeldMessage `
+            -Layout $Layout `
+            -Path $full `
+            -Code 'guardian_state_held' `
+            -What 'the hook guardian state file' `
+            -Why 'open without delete sharing, so the guardian cannot publish its coverage' `
+            -Left 'the rollback left that file as it is and put everything else back')
+    }
+    $holders = Get-DefenseClawGuardianStateHolderNames -Layout $Layout -Path $full
+    if ($Phase -eq 'Gate') {
+        return ('guardian_state_held: {0} has {1} open without delete sharing, so the hook guardian cannot publish its coverage; this run stopped and changed nothing, and the services are as they were. Next step: close that program, then {2} (an MDM retries exit 1618 on its own)' -f $holders, $full, (Format-DefenseClawRerunStep -SameSetupCommand))
+    }
+    return ('guardian_state_held: {0} has {1} open without delete sharing, so the hook guardian could not publish fresh required coverage' -f $holders, $full)
+}
+
+function Assert-DefenseClawGuardianStateNotHeld {
+    <#
+        Before anything is stopped: waits up to TimeoutSeconds for a program to
+        let go of the guardian's state files, then defers the run with the
+        retryable guardian_state_held, naming the holder. Standalone only.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout, [int]$TimeoutSeconds = 10)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $held = Get-DefenseClawGuardianStateHold -Layout $Layout
+        if ($null -eq $held) {
+            return
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            throw (New-DefenseClawGuardianStateHeldMessage -Layout $Layout -Path $held -Phase Gate)
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds 1
+    }
+}
+
+function Resolve-DefenseClawRollbackLateGuardianHold {
+    <#
+        The rollback waited for the guardian's coverage and the wait ended on a
+        held guardian state file (guardian_state_held): a holder arrived after
+        the check that precedes the wait. The file is left as it is and the
+        proof deferred like any other (Set-DefenseClawRollbackGuardianStateDeferral
+        looks again), the guardian is started as it was, and the restored
+        services start; the run ends with the held code and the transaction
+        pending. Any other failure, a holder that is gone, and Secure Client
+        answer $false: the failure stands.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Failure,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        [string]$Failure.Exception.Message -notmatch '^guardian_state_held: ') {
+        return $false
+    }
+    Set-DefenseClawRollbackGuardianStateDeferral -Layout $Layout
+    if (-not (Test-DefenseClawRollbackCoverageDeferred)) {
+        return $false
+    }
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+        subsystem = 'guardian'
+        reason    = 'the guardian coverage proof of the rollback is deferred: a program holds a guardian state file the guardian must publish'
+    }
+    try {
+        Start-DefenseClawService -Name $GuardianServiceName
+    }
+    catch {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'guardian'
+            reason    = "the guardian did not stay up on the held state file: $($_.Exception.Message)"
+        }
+    }
+    return $true
+}
+
+function Set-DefenseClawRollbackGuardianStateDeferral {
+    <#
+        A rollback about to prove the guardian's coverage: when a program holds
+        a guardian state file the guardian cannot publish, so the proof would
+        only time out and the restored services would stay stopped. The file is
+        left as it is (listed like the Codex files), the guardian's coverage
+        proof is deferred, and the run ends with guardian_state_held and the
+        transaction pending (Assert-DefenseClawRollbackHoldsResolved).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return
+    }
+    $held = Get-DefenseClawGuardianStateHold -Layout $Layout -Probes 3
+    if ($null -eq $held) {
+        return
+    }
+    Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawGuardianStateHeldMessage -Layout $Layout -Path $held -Phase Rollback)
+    $script:DefenseClawRollbackCoverageDeferred = $true
+}
+
 # GAP-0947: a file a late holder keeps the rollback from putting back is left
 # as it is and listed here; the rollback carries on, starts the restored
 # services, and ends with the retryable held code and the transaction still
@@ -35885,7 +36203,7 @@ function Test-DefenseClawRollbackHeldMessage {
     # GAP-0999: a Codex writer that never settles is the same kind of deferral,
     # told apart from the refusal of a forward run by the words only the
     # rollback's own message carries.
-    return ($Message -match '^(codex_requirements_held|codex_state_held|hook_in_use): ' -or
+    return ($Message -match '^(codex_requirements_held|codex_state_held|hook_in_use|guardian_state_held): ' -or
         $Message -match '^codex_state_unsettled: .*the rollback left that state as it is')
 }
 
@@ -35999,7 +36317,7 @@ function Test-DefenseClawRollbackCoverageDeferred {
 function Get-DefenseClawHeldMessagePath {
     # The file a held message names ("<code>: <holder> has <path>, <what>, ..."), or ''.
     param([AllowEmptyString()][string]$Message)
-    $found = [regex]::Match($Message, '\bhas (?<path>[A-Za-z]:\\.+?), (?:the Codex|the installed)')
+    $found = [regex]::Match($Message, '\bhas (?<path>[A-Za-z]:\\.+?), (?:the Codex|the installed|the hook guardian)')
     if ($found.Success) { return $found.Groups['path'].Value.TrimEnd('\') }
     return ''
 }
@@ -36045,6 +36363,10 @@ function Assert-DefenseClawRollbackHoldsResolved {
         # the guardian's coverage.
         if ($message.Contains('codex_state_unsettled: ')) {
             $message += ". The guardian's coverage was not proven by this rollback: it cannot publish coverage while a Codex writer keeps its transaction open and may keep retrying, so run /verify after /repair"
+        }
+        elseif ($message -match '(^| \| )guardian_state_held: ') {
+            # GAP-0977: the file is one the guardian publishes into.
+            $message += ". The guardian's coverage was not proven by this rollback: it cannot publish while that file is held and may keep retrying, so run /verify after /repair"
         }
         else {
             $message += ". The guardian's coverage was not proven by this rollback: it cannot reconcile the Codex policy while that file is held and may keep retrying, so run /verify after /repair"
@@ -39439,6 +39761,12 @@ function Wait-DefenseClawFreshGuardianReconcile {
     }
     $waited = [int][Math]::Round(([DateTime]::UtcNow - $begin).TotalSeconds)
     $guardianLog = "the guardian log is $([string]$Layout.GuardianLogPath)"
+    # GAP-0977: a program that holds one of the guardian's state files keeps it
+    # from publishing, whatever it was doing when the wait ended.
+    $guardianHeld = Get-DefenseClawGuardianStateHold -Layout $Layout -Probes 3
+    if ($null -ne $guardianHeld) {
+        throw (New-DefenseClawGuardianStateHeldMessage -Layout $Layout -Path $guardianHeld -Phase Activation)
+    }
     if (-not [string]::IsNullOrEmpty($guardianGone)) {
         throw "LocalSystem guardian did not publish fresh required coverage: the hook guardian process $guardianProcessId $guardianGone during its first reconcile ($waited s after Setup started it); $guardianLog; last_status=$lastStatus"
     }

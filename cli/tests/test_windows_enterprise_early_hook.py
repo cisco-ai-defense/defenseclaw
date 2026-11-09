@@ -69,6 +69,20 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     assert restore.index("Start-DefenseClawTransactionServices") < restore.index("Restore-DefenseClawSnapshotHookAfterActivation")
     deferred = _function_body(module, "Restore-DefenseClawTransactionWithManagedHooksRollback")
     assert deferred.index("Start-DefenseClawTransactionServices") < deferred.index("Restore-DefenseClawSnapshotHookAfterActivation")
+    # GAP-0977: a retried recovery meets the guardian running (a held rollback
+    # leaves the services up), and the guardian puts any hook that is not its
+    # recorded release back over the guard. Every caller names the guardian,
+    # and the hold stops it before it writes the guard.
+    hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
+    assert hold.index("Stop-DefenseClawService -Name $GuardianServiceName") < hold.index("Install-DefenseClawFileAtomic")
+    # S-I1: a failure after the stop starts the guardian again with its start mode.
+    assert hold.index("$guardianTouched = $true") < hold.index("Stop-DefenseClawService -Name $GuardianServiceName")
+    handler = hold[hold.index("catch {\n        $holdFailure = $_"):]
+    assert "Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode $guardianPriorMode" in handler
+    assert "Start-DefenseClawService -Name $GuardianServiceName" in handler
+    assert handler.rstrip().endswith("return $GuardSHA256\n}") or "throw $holdFailure" in handler
+    assert "-GuardianServiceName ([string]$snapshot.guardian_service)" in restore
+    assert "-GuardianServiceName $GuardianServiceName" in recovery
     # Install, Upgrade and Repair hand it the authenticated replacement hook.
     assert "-EarlyHookSource $earlyHookSource" in module
     assert "$earlyHookSource = $Sources['hook']" in module
