@@ -6,7 +6,6 @@ package gateway
 
 import (
 	"context"
-	"hash/fnv"
 	"strings"
 	"time"
 
@@ -35,7 +34,7 @@ type heldMCPRefusals struct {
 // retainRefused keeps entry, a definition the scanner refuses that the hook of
 // the session reported for name, and reports whether the session is tracked:
 // false only when the store is full (the caller then holds the session in the
-// overflow table, holdOverflow). A session that met more definitions of the
+// overflow store, holdOverflow). A session that met more definitions of the
 // name than it can keep is tracked, marked overflow.
 func (h *hookReportedMCPServers) retainRefused(connector, home, session, cwd, name string, entry config.MCPServerEntry, now time.Time) bool {
 	key := mcpResolvedKey(connector, home, session, cwd, name)
@@ -109,11 +108,10 @@ func (h *hookReportedMCPServers) forgetSession(connector, home, session string) 
 			delete(h.refused, key)
 		}
 	}
-	if table := h.overflow[unrecordedKey(connector, home)]; table != nil {
-		for i := range table {
-			if table[i].session == session {
-				table[i] = overflowSlot{}
-			}
+	holds := h.overflow[unrecordedKey(connector, home)]
+	for key, hold := range holds {
+		if hold.session == session {
+			delete(holds, key)
 		}
 	}
 }
@@ -188,15 +186,15 @@ func (a *APIServer) unrecordedMCPDecision(ctx context.Context, cfg *config.Confi
 	return a.mcpAdmissionStatusDecision(ctx, cfg, connector, hookEvent, probe, watcher.FailedMCPStatus(entry))
 }
 
-// hookOverflowSlots is the size of the table that keeps the sessions the
-// session store was full for (holdOverflow).
-const hookOverflowSlots = 1024
+// hookOverflowPerAccount bounds the refused sessions the overflow store keeps
+// for one connector and account (holdOverflow).
+const hookOverflowPerAccount = 4096
 
-// overflowSlot holds until its time the latest session and refused definition
-// that mapped to it.
-type overflowSlot struct {
+// overflowHold is what the overflow store keeps for one session and server
+// name: the first refused definition the session met, whose cause every later
+// call of the session shows, and the time the hold ends.
+type overflowHold struct {
 	until   time.Time
-	key     string
 	session string
 	entry   config.MCPServerEntry
 }
@@ -205,38 +203,51 @@ func unrecordedKey(connector, home string) string {
 	return strings.ToLower(connector) + "\x00" + home
 }
 
-func overflowIndex(key string) int {
-	sum := fnv.New32a()
-	_, _ = sum.Write([]byte(key))
-	return int(sum.Sum32() % hookOverflowSlots)
-}
-
 // holdOverflow keeps, for a session the full session store could not track,
-// the refused definition it met, in a table of fixed size per connector and
-// account that cannot fill: a session maps to one slot, and a slot is held
-// until the memory time limit passes since the last call it held. The agent
-// keeps its connection to the refused definition for as long as it lives, so
-// the name of that session stays refused after the config is edited, with the
-// cause the definition shows. Another session, another name and another
-// account are held only if they map to a slot a held session also maps to,
-// and only until that slot ends.
+// the first refused definition it met for the server name, in a store per
+// connector and account keyed by the complete identity of the session, the
+// workspace and the name. The agent keeps its connection to the refused
+// definition for as long as it lives, so the name of that session stays
+// refused after the config is edited, with the cause of the definition it met
+// first: a later report of another definition of the name does not replace
+// it. A hold ends on its own memory time limit since the last call it held and
+// by SessionStart of its session. No other session, name or account shares a
+// hold, so a hold never blocks an ordinary server and no other session ends
+// it. A store that is full of live holds first gives up the expired ones; when
+// every hold is live the new session is not kept, and the call itself is
+// decided as a failed admission (unrecordedMCPDecision).
 func (h *hookReportedMCPServers) holdOverflow(connector, home, session, cwd, name string, entry config.MCPServerEntry, now time.Time) {
 	key := mcpResolvedKey(connector, home, session, cwd, name)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.overflow == nil {
-		h.overflow = map[string]*[hookOverflowSlots]overflowSlot{}
-	}
 	account := unrecordedKey(connector, home)
-	table := h.overflow[account]
-	if table == nil {
-		table = new([hookOverflowSlots]overflowSlot)
-		h.overflow[account] = table
+	holds := h.overflow[account]
+	held, present := holds[key]
+	if present && now.Before(held.until) {
+		held.until = now.Add(mcpResolvedTTL)
+		return
 	}
-	table[overflowIndex(key)] = overflowSlot{until: now.Add(mcpResolvedTTL), key: key, session: session, entry: entry}
+	if !present && len(holds) >= hookOverflowPerAccount {
+		for old, hold := range holds {
+			if !now.Before(hold.until) {
+				delete(holds, old)
+			}
+		}
+		if len(holds) >= hookOverflowPerAccount {
+			return
+		}
+	}
+	if h.overflow == nil {
+		h.overflow = map[string]map[string]*overflowHold{}
+	}
+	if holds == nil {
+		holds = map[string]*overflowHold{}
+		h.overflow[account] = holds
+	}
+	holds[key] = &overflowHold{until: now.Add(mcpResolvedTTL), session: session, entry: entry}
 }
 
-// overflowHeld returns the refused definition the overflow table holds for the
+// overflowHeld returns the refused definition the overflow store holds for the
 // session and name of a call.
 func (h *hookReportedMCPServers) overflowHeld(connector, home, session, cwd, name string, now time.Time) (config.MCPServerEntry, bool) {
 	if h == nil || session == "" {
@@ -245,16 +256,15 @@ func (h *hookReportedMCPServers) overflowHeld(connector, home, session, cwd, nam
 	key := mcpResolvedKey(connector, home, session, cwd, name)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	table := h.overflow[unrecordedKey(connector, home)]
-	if table == nil {
+	holds := h.overflow[unrecordedKey(connector, home)]
+	hold, ok := holds[key]
+	if !ok {
 		return config.MCPServerEntry{}, false
 	}
-	slot := &table[overflowIndex(key)]
-	if !now.Before(slot.until) {
+	if !now.Before(hold.until) {
+		delete(holds, key)
 		return config.MCPServerEntry{}, false
 	}
-	if slot.key == key {
-		slot.until = now.Add(mcpResolvedTTL)
-	}
-	return slot.entry, true
+	hold.until = now.Add(mcpResolvedTTL)
+	return hold.entry, true
 }

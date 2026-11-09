@@ -70,7 +70,7 @@ type hookReportedMCPServers struct {
 	refused map[string]*heldMCPRefusals
 	// overflow holds, per connector and account, the sessions the session
 	// store was full for (holdOverflow).
-	overflow map[string]*[hookOverflowSlots]overflowSlot
+	overflow map[string]map[string]*overflowHold
 }
 
 func (h *hookReportedMCPServers) list() ([]config.MCPServerEntry, error) {
@@ -168,7 +168,7 @@ func (h *hookReportedMCPServers) forget(entry config.MCPServerEntry) {
 // (unrecordedMCPDecision), so a full store never turns a refusal into an
 // allow. The decision is on that definition only: no other server of the
 // account is held for it, and the session that met it keeps it in the
-// overflow table (holdOverflow), by its own session, workspace and name.
+// overflow store (holdOverflow), by its own session, workspace and name.
 func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	if a == nil || a.hookMCP == nil || !probe.Matched || probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
