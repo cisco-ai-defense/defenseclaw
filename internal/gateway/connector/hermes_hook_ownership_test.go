@@ -543,3 +543,98 @@ func TestHermesSetupRecordNamesAKeptEntryByTheHashOfItsCommand(t *testing.T) {
 		t.Fatalf("post_tool_call kept = %q; want none", got)
 	}
 }
+
+// hermesDropSetupEntry removes the entry Setup added to pre_tool_call (the last
+// one) and the entries of the other events, then appends the given user
+// commands with the fields Setup writes.
+func hermesDropSetupEntry(t *testing.T, configPath string, added ...string) {
+	t.Helper()
+	hermesRewriteHooks(t, configPath, func(hooks map[string]interface{}) {
+		for event := range hooks {
+			if event != "pre_tool_call" {
+				delete(hooks, event)
+			}
+		}
+		entries := hooks["pre_tool_call"].([]interface{})
+		entries = entries[:len(entries)-1]
+		for _, command := range added {
+			entries = append(entries, map[string]interface{}{"command": command, "fail_closed": true, "matcher": ".*", "timeout": 30})
+		}
+		hooks["pre_tool_call"] = entries
+	})
+}
+
+// A hook the account had before Setup is a hook of the account, whatever fields
+// it has: when the Setup entry is gone the notice does not take that hook for the
+// entry Setup wrote, through repairs and teardown. Setup records the hooks it
+// found beside its own entry.
+func TestHermesAUserHookThatWasThereBeforeSetupGetsNoKeptEntryNotice(t *testing.T) {
+	const user = "/opt/tools/audit.sh"
+	conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return []string{user} })
+	hermesSetUp(t, conn, opts, configPath)
+	hermesDropSetupEntry(t, configPath)
+	notice := captureHermesNotices(t)
+	for round := 1; round <= 2; round++ {
+		if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+			t.Fatalf("repair %d: %v", round, err)
+		}
+		if got := hermesPreToolCommands(t, configPath); len(got) != 2 || got[0] != user {
+			t.Fatalf("repair %d commands = %q; want the user hook then the current entry", round, got)
+		}
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if got := hermesPreToolCommands(t, configPath); len(got) != 1 || got[0] != user {
+		t.Fatalf("remaining commands = %q; want the user hook kept", got)
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("notice = %q; want none for a hook the account had before Setup", notice.String())
+	}
+}
+
+// The twin: with the same user hook beside it, the entry Setup wrote and a
+// person edited in place is still the one entry that is kept and listed.
+func TestHermesTheEditedSetupEntryIsListedBesideAUserHookOfTheSameShape(t *testing.T) {
+	const user = "/opt/tools/audit.sh"
+	const edited = "/opt/tools/edited.sh"
+	conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return []string{user} })
+	hermesSetUp(t, conn, opts, configPath)
+	hermesRewriteHooks(t, configPath, func(hooks map[string]interface{}) {
+		for event := range hooks {
+			if event != "pre_tool_call" {
+				delete(hooks, event)
+			}
+		}
+		hooks["pre_tool_call"].([]interface{})[1].(map[string]interface{})["command"] = edited
+	})
+	notice := captureHermesNotices(t)
+	if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if !strings.Contains(notice.String(), "pre_tool_call") {
+		t.Fatalf("notice = %q; want the edited entry listed", notice.String())
+	}
+	record := readHermesSetUpRecord(opts.DataDir)
+	if got := record.Hooks["pre_tool_call"].Kept; len(got) != 1 || got[0] != hermesCommandHash(edited) {
+		t.Fatalf("kept = %q; want only the edited entry", got)
+	}
+}
+
+// Setup wrote one entry, so two entries of its shape that it never saw cannot
+// both be an edit of it: neither is listed.
+func TestHermesTwoUnknownEntriesOfTheSetupShapeAreNotListed(t *testing.T) {
+	conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
+	hermesSetUp(t, conn, opts, configPath)
+	hermesDropSetupEntry(t, configPath, "/opt/tools/one.sh", "/opt/tools/two.sh")
+	notice := captureHermesNotices(t)
+	if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+	if notice.Len() != 0 {
+		t.Fatalf("notice = %q; want none when the edited entry cannot be told from a second hook", notice.String())
+	}
+	if got := hermesPreToolCommands(t, configPath); len(got) != 3 {
+		t.Fatalf("commands = %q; want both user hooks kept beside the current entry", got)
+	}
+}
