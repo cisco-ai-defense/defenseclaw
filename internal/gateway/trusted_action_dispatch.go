@@ -308,9 +308,15 @@ func dispatchTrustedAction(
 	// A script body the hook call kept unread because its network share
 	// budget was spent is not a body that writes nothing: the strict tier
 	// judges the call as one past the evaluation limit, the others alert
-	// (shareBodyUnreadFindings, rel-1-0-6:GAP-0482).
+	// (shareBodyUnreadFindings, rel-1-0-6:GAP-0482). A managed gateway does
+	// not open the user home: the hook client reads the bodies and reports
+	// one it left unread in its evidence, which is judged the same way
+	// (hookpaths.ShareBodyUnreadKey, rel-1-0-9:GAP-0950).
 	defer func() {
-		if budget, linkBound := hookpaths.ShareBodyUnreadCauses(); budget || linkBound {
+		budget, linkBound := hookpaths.ShareBodyUnreadCauses()
+		clientBudget, clientLinkBound := hookpaths.ClientShareBodyUnread(request.ResolvedWriteTargets)
+		budget, linkBound = budget || clientBudget, linkBound || clientLinkBound
+		if budget || linkBound {
 			findings = shareBodyUnreadFindings(parent, findings, request.EnforcementCapable, budget, linkBound)
 		}
 	}()
