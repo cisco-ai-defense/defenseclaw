@@ -308,10 +308,118 @@ def test_content_registered_for_defenseclaw_alone_is_not_a_foreign_save():
         b'"load":{"paths":["/home/u/.openclaw/extensions/defenseclaw"]}}}'
     )
     assert cmd_setup._openclaw_config_saved_by_others(None, created) is False
-    # A file setup created is DefenseClaw's once it registers the plugin.
-    assert cmd_setup._openclaw_config_saved_by_others(None, ours) is False
+    # A file setup created holds the registration and nothing else; other content in it was saved by someone.
+    assert cmd_setup._openclaw_config_saved_by_others(None, ours) is True
     assert cmd_setup._openclaw_config_saved_by_others(None, b'{"gateway":{"port":1}}') is True
     assert cmd_setup._openclaw_config_saved_by_others(prior, ours.replace(b'"allow":["other"', b'"allow":["x"')) is True
+
+
+_OPERATOR_BASE = b'{"gateway":{"mode":"local","port":18773},"plugins":{"allow":["other"]}}\n'
+
+
+@pytest.mark.parametrize(
+    ("original", "change", "marker"),
+    [
+        (None, "new-note-in-a-file-setup-created", b'"operatorNote": "saved during setup"'),
+        (_OPERATOR_BASE, "other-plugin-named-like-defenseclaw", b'"other-defenseclaw-plugin"'),
+        (_OPERATOR_BASE, "operator-setting-in-the-defenseclaw-entry", b'"operatorChoice": "keep"'),
+        (_OPERATOR_BASE, "changed-approval-setting", b'"mode": "always"'),
+        (_OPERATOR_BASE, "removed-gateway-field", b'"port": 18773'),
+        (_OPERATOR_BASE, "operator-load-path", b'"/opt/operator-plugins"'),
+    ],
+)
+def test_nearby_saves_during_setup_are_kept_and_reported(original, change, marker):
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        content = json.loads(_registered(original))
+        if change == "new-note-in-a-file-setup-created":
+            content["operatorNote"] = "saved during setup"
+        elif change == "other-plugin-named-like-defenseclaw":
+            content["plugins"]["allow"].append("other-defenseclaw-plugin")
+        elif change == "operator-setting-in-the-defenseclaw-entry":
+            content["plugins"]["entries"]["defenseclaw"]["config"] = {"operatorChoice": "keep"}
+        elif change == "changed-approval-setting":
+            content["approvals"] = {"plugin": {"enabled": True, "mode": "always"}}
+        elif change == "removed-gateway-field":
+            del content["gateway"]["mode"]
+        elif change == "operator-load-path":
+            content["plugins"]["load"] = {"paths": ["/opt/operator-plugins"]}
+        written = (json.dumps(content, indent=2) + "\n").encode()
+        result, path, _ = _run_late_outage(tmp_dir, app, original, written=written, guards_openclaw=False)
+        assert os.path.exists(path), result.output
+        with open(path, "rb") as handle:
+            after = handle.read()
+        if change == "removed-gateway-field":
+            assert "mode" not in json.loads(after)["gateway"], result.output
+        else:
+            assert marker in after, result.output
+        assert "saved by OpenClaw or you while setup ran" in result.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_everything_the_registration_writes_is_put_back_with_the_saved_bytes():
+    """Approvals block, conversation-hook grant and extension directory are setup own, next to operator content."""
+    original = (
+        b'// operator comment\n{gateway:{port:0x4955,timeout:1.0},plugins:{allow:["other"],'
+        b'load:{paths:["/opt/operator-plugins"]}},approvals:{exec:{enabled:false}}}\n'
+    )
+    written = (
+        json.dumps(
+            {
+                "gateway": {"port": 0x4955, "timeout": 1},
+                "plugins": {
+                    "allow": ["other", "defenseclaw"],
+                    "entries": {"defenseclaw": {"enabled": True, "hooks": {"allowConversationAccess": True}}},
+                    "load": {"paths": ["/opt/operator-plugins", "/home/u/.openclaw/extensions/defenseclaw"]},
+                },
+                "approvals": {"exec": {"enabled": False}, "plugin": {"enabled": True, "mode": "session"}},
+            },
+            indent=2,
+        ).encode()
+        + b"\n"
+    )
+    assert cmd_setup._openclaw_config_saved_by_others(original, written) is False
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        result, path, _ = _run_late_outage(tmp_dir, app, original, written=written, guards_openclaw=False)
+        with open(path, "rb") as handle:
+            assert handle.read() == original
+        assert "saved by OpenClaw or you" not in result.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+@pytest.mark.parametrize(
+    ("prior", "written"),
+    [
+        # The approvals block setup wrote earlier is dropped again on an OpenClaw that rejects it.
+        (
+            b'{"plugins":{"allow":["other"]},"approvals":{"plugin":{"enabled":true,"mode":"session"}}}',
+            b'{"plugins":{"allow":["other","defenseclaw"],"entries":{"defenseclaw":{"enabled":true}}}}',
+        ),
+        # An operator-set grant and an already registered plugin stay as they were.
+        (
+            b'{"plugins":{"allow":["defenseclaw"],"entries":{"defenseclaw":{"enabled":true,'
+            b'"hooks":{"allowConversationAccess":false}}}}}',
+            b'{"plugins":{"allow":["defenseclaw"],"entries":{"defenseclaw":{"enabled":true,'
+            b'"hooks":{"allowConversationAccess":false}}}}}',
+        ),
+    ],
+)
+def test_registration_variants_are_not_foreign_saves(prior, written):
+    assert cmd_setup._openclaw_config_saved_by_others(prior, written) is False
+
+
+def test_a_changed_grant_or_boolean_is_a_foreign_save():
+    prior = b'{"plugins":{"entries":{"defenseclaw":{"enabled":true,"hooks":{"allowConversationAccess":false}}}}}'
+    flipped = prior.replace(b"false", b"true")
+    assert cmd_setup._openclaw_config_saved_by_others(prior, flipped) is True
+    # A 1 saved where the operator had true is a change, not the same value.
+    assert (
+        cmd_setup._openclaw_config_saved_by_others(b'{"flag":true}', b'{"flag":1,"plugins":{"allow":["defenseclaw"]}}')
+        is True
+    )
 
 
 def test_restore_leaves_an_unchanged_file_alone():
