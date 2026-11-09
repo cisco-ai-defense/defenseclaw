@@ -33,9 +33,16 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 	// spelling is judged when typed; they hold no here-string. The split
 	// twin is what xargs makes of a fixed word (pod check30), the word twin
 	// keeps the word whole; both are judged.
+	// A read that binds in some calls of its function and not in others
+	// (f; read() { :; }; f) has a reading for each call, and one rewritten
+	// text holds one. The twin keeps the reading of the calls that bind: it
+	// names the word the read gives, as the first call does, and the command
+	// blocks when it reaches state. The calls that do not bind keep the value
+	// they had, which no one text can say, so such a command is never judged
+	// here (mixed): the walk of its calls, each with its own state, judges it.
 	seen := map[string]bool{}
 	for _, split := range []bool{true, false} {
-		twin, ok := hereStringPipeTwin(command, facts.ActiveHome, split, request.Input.LoopBindsStraightLine)
+		twin, ok, mixed := hereStringPipeTwin(command, facts.ActiveHome, split, request.Input.LoopBindsStraightLine)
 		if !ok || seen[twin] {
 			continue
 		}
@@ -44,7 +51,7 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 		if twinMutates {
 			return true, true
 		}
-		judged = judged || twinJudged
+		judged = judged || twinJudged && !mixed
 	}
 	return false, judged
 }
@@ -54,13 +61,15 @@ func hereStringStateMutation(facts actionfacts.Facts, request trustedActionReque
 // With split, an xargs reader of a fixed word is judged as the call it
 // makes with the word's line split the way xargs splits it
 // (xargsStaticCallTwin). straight is Input.LoopBindsStraightLine: it tells which
-// read name <<< word statements bind their word.
-func hereStringPipeTwin(command, home string, split, straight bool) (string, bool) {
+// read name <<< word statements bind their word. A read that binds in some
+// calls of its function only is the assignment name=word, the reading of the
+// calls that bind, and the command is reported as mixed.
+func hereStringPipeTwin(command, home string, split, straight bool) (string, bool, bool) {
 	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(command), "")
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
-	changed, refused, homeFixed := false, false, split && xargsHomeFixed(command)
+	changed, refused, mixed, homeFixed := false, false, false, split && xargsHomeFixed(command)
 	// read name <<< word sets name in this shell: its twin is the assignment
 	// name=word, which the pipe twin would lose (the reader of a pipe is a
 	// subshell). The default IFS and the builtin are needed for that.
@@ -107,14 +116,8 @@ func hereStringPipeTwin(command, home string, split, straight bool) (string, boo
 		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
 			if name, value, ok := actionfacts.HereStringRead(call, word); ok {
 				all, some := readBinds(call)
-				if some && !all {
-					// The read binds in some calls of its function and not in
-					// others: no one twin is right for all, and the walk of
-					// the command reads each call.
-					refused = true
-					return false
-				}
-				if all {
+				if all || some {
+					mixed = mixed || !all
 					stmt.Cmd, stmt.Redirs, changed = &syntax.CallExpr{Assigns: []*syntax.Assign{{
 						Name:  &syntax.Lit{Value: name},
 						Value: &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: value}}},
@@ -135,13 +138,13 @@ func hereStringPipeTwin(command, home string, split, straight bool) (string, boo
 		return true
 	})
 	if refused || !changed {
-		return "", false
+		return "", false, false
 	}
 	var out strings.Builder
 	if err := syntax.NewPrinter().Print(&out, file); err != nil {
-		return "", false
+		return "", false, false
 	}
-	return out.String(), true
+	return out.String(), true, mixed
 }
 
 // xargsCallTwin is what `xargs [-r] [-t] [-0] [-d D] [-n N] [-P N] [-I R]

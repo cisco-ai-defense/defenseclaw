@@ -521,19 +521,15 @@ func simpleMayChangeIFS(stmt *syntax.Stmt) bool {
 	case *syntax.CallExpr:
 		return len(cmd.Args) == 0 || simpleCallMayChangeIFS(cmd.Args)
 	case *syntax.DeclClause:
-		// declare reads its options up to the first name or assignment: -p, -f
-		// and -F there print what they are given, and one after a name
-		// (declare IFS=x -p) is no option.
+		// declare reads its options up to the first name (simpleDeclOptions):
+		// -p, -f and -F there print what they are given.
 		if cmd.Variant != nil && (cmd.Variant.Value == "declare" || cmd.Variant.Value == "typeset") {
-			for _, arg := range cmd.Args {
-				if arg.Name != nil || arg.Value == nil {
+			options, _ := simpleDeclOptions(cmd)
+			for _, option := range options {
+				if option.Expands || option.Value == "--" {
 					break
 				}
-				option, static := simpleStaticWord(arg.Value, nil)
-				if !static || !strings.HasPrefix(option, "-") || option == "--" {
-					break
-				}
-				if strings.ContainsAny(option, "pfF") {
+				if strings.ContainsAny(option.Value, "pfF") {
 					return false
 				}
 			}
@@ -588,7 +584,8 @@ func simpleNamesIFS(args []*syntax.Word) bool {
 	})
 }
 
-// simpleNodeSpellsIFS reports a node that is the name IFS.
+// simpleNodeSpellsIFS reports a node that is the name IFS. A word of several
+// parts spells it too when its quotes join it (I"F"S).
 func simpleNodeSpellsIFS(node syntax.Node) bool {
 	switch node := node.(type) {
 	case *syntax.Lit:
@@ -597,8 +594,31 @@ func simpleNodeSpellsIFS(node syntax.Node) bool {
 		return simpleSpellsIFS(node.Value)
 	case *syntax.ParamExp:
 		return node.Param != nil && node.Param.Value == "IFS"
+	case *syntax.Word:
+		if len(node.Parts) < 2 {
+			return false
+		}
+		joined := projectPOSIXWord(node)
+		return !joined.Expands && simpleSpellsIFS(joined.Value)
 	}
 	return false
+}
+
+// StraightLineReadingDiffers reports whether the straight-line reading of a
+// script (Input.LoopBindsStraightLine) can differ from the reading of the
+// whole script: it declares a function, which can replace a builtin for the
+// calls after it, or it spells IFS. It decides this from the syntax tree, so
+// every spelling the parser accepts is seen (f ( ) { ...; }, function<TAB>f,
+// I"F"S=x), where a search of the text sees only the spellings it names.
+func StraightLineReadingDiffers(file *syntax.File) bool {
+	differs := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if _, function := node.(*syntax.FuncDecl); function || simpleNodeSpellsIFS(node) {
+			differs = true
+		}
+		return !differs
+	})
+	return differs
 }
 
 // simpleSpellsIFSIn reports code that spells the name IFS anywhere.

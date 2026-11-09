@@ -1789,13 +1789,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 						// loop variable (u=$USER; ... /home/$u/f) names a file and a
 						// link the command text does not: it is described as the
 						// reading of a runtime-expanded word is, for a gateway that
-						// cannot walk the home itself. Only the readings that prove
-						// a write to state (LoginGuess) are described; any other
+						// cannot walk the home itself. So is a reading that a variable
+						// the walk followed gives a path (d=ordinary; cp a b/$d.txt)
+						// when the link walk of the text is incomplete: the gateway
+						// judges the resolved path and finds its answer in the map,
+						// where an incomplete map alone leaves it unproven. Any other
 						// reading keeps the answer the command text has.
-						if simple.EvaluationFailure == "" && simple.LoginGuess && simple.Text != command &&
+						if simple.EvaluationFailure == "" && simple.Text != command &&
 							filepath.IsAbs(simple.CWD) && filepath.Clean(simple.CWD) == filepath.Clean(cwd) &&
 							!slices.Contains(dynamicReadings, simple.Text) &&
-							readingReachesLink(simple.Text, cwd, home) {
+							(simple.ResolvedVariable && links.opaque ||
+								simple.LoginGuess && readingReachesLink(simple.Text, cwd, home)) {
 							if len(dynamicReadings) >= maxResolvedReadings {
 								truncated = true
 							} else {
@@ -3403,10 +3407,11 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 // permissive tiers of the gateway judge (Input.LoopBindsStraightLine), for a
 // command whose functions or IFS can make them differ from the whole-script
 // reading above: that reading counts any declaration or IFS in the script,
-// the gateway tier follows what each call of a function meets. A gateway
-// behind ProtectHome reads the links of both from the map.
+// the gateway tier follows what each call of a function meets. The syntax
+// tree decides (actionfacts.StraightLineReadingDiffers), not the spelling of
+// the text. A gateway behind ProtectHome reads the links of both from the map.
 func straightLineReadings(input actionfacts.Input, command string) []actionfacts.SimpleCommand {
-	if !strings.Contains(command, "()") && !strings.Contains(command, "function ") && !strings.Contains(command, "IFS") {
+	if file, parsed := parseShell(command); !parsed || !actionfacts.StraightLineReadingDiffers(file) {
 		return nil
 	}
 	input.LoopBindsStraightLine = true

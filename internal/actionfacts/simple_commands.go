@@ -34,6 +34,11 @@ type SimpleCommand struct {
 	// body. Zsh history is fc -l, so Bash's history -c clear grammar does not
 	// apply to this child.
 	ZshHistoryBuiltin bool
+	// ResolvedVariable means the walk replaced a parameter of the statement by
+	// the value it followed (d=ordinary; cp a build/$d.txt reads
+	// build/ordinary.txt). A gateway judges the resolved path, which the
+	// command text of a hook client does not spell.
+	ResolvedVariable bool
 	// UnresolvedBoundVariable means a parameter in Text is bound elsewhere
 	// in the action but this walk could not carry its value into Text. The
 	// original action decides the protected-write class for that value.
@@ -442,10 +447,11 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 			// it applies the prefix assignments, so HOME=/tmp cp a ~/f
 			// writes the previous ~/f (GAP-2476). The prefixes set only the
 			// environment of the program (effective, used for nested scripts).
+			resolvedVariable := false
 			resolve := func(text string) string {
 				if resolved, ok := simpleResolvedVariables(text, state.vars); ok {
 					text = resolved
-					changed = true
+					changed, resolvedVariable = true, true
 				}
 				if resolved, ok := simpleResolvedDirectoryStackTildes(text, &state); ok {
 					text = resolved
@@ -470,6 +476,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 				ZshHistoryBuiltin:       simpleZshHistoryCall(call, effective, interpreter),
 				LoginGuess:              loopRead,
 				LoopReading:             loopRead,
+				ResolvedVariable:        resolvedVariable,
 				UnresolvedBoundVariable: simpleUnresolvedBoundVariable(text, effective, bound),
 				UnboundUser:             simpleUnboundUser(text, effective, bound),
 				AbsoluteOnly:            state.cwdUnknown && !relative}
@@ -489,6 +496,7 @@ func simpleCommands(input Input, facts Facts, depth int, interpreter string, inh
 						ZshHistoryBuiltin:       command.ZshHistoryBuiltin,
 						LoginGuess:              command.LoginGuess,
 						LoopReading:             command.LoopReading,
+						ResolvedVariable:        resolvedVariable,
 						UnresolvedBoundVariable: simpleUnresolvedBoundVariable(reading, effective, bound),
 						UnboundUser:             simpleUnboundUser(reading, effective, bound),
 						AbsoluteOnly:            command.AbsoluteOnly}
@@ -1111,29 +1119,19 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 		}
 	}
 	known := true
-	// The options are the words in front of the first name: a word after a
-	// name (declare IFS=x -p) is a name too, which sets nothing.
-	leading := true
-	for _, assign := range decl.Args {
-		if assign == nil {
-			continue
-		}
-		if assign.Name != nil {
-			leading = false
-			continue
-		}
-		if assign.Value == nil {
-			known = false
-			continue
-		}
-		option := projectPOSIXWord(assign.Value)
-		if !leading && !option.Expands && !strings.Contains(option.Value, "=") {
-			continue
-		}
+	options, strays := simpleDeclOptions(decl)
+	for _, option := range options {
 		if decl.Variant.Value == "export" && !option.Expands && option.Value == "-n" {
 			continue
 		}
 		if !homeDeclOption(option) {
+			known = false
+		}
+	}
+	// A word after the first name that is no option (declare IFS=x -p) is a
+	// name too: it sets nothing unless it expands or spells an assignment.
+	for _, stray := range strays {
+		if stray.Expands || strings.Contains(stray.Value, "=") {
 			known = false
 		}
 	}
@@ -1151,18 +1149,44 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 	}
 }
 
-// simpleDeclGlobal reports a static -g option word of a declaration.
-func simpleDeclGlobal(decl *syntax.DeclClause) bool {
+// simpleDeclOptions splits the words of a declaration (export, readonly,
+// declare, typeset, local) that are no assignment, as bash reads them: the
+// options are the words in front of the first name, up to and with --, and
+// every later word is a stray, a name bash rejects (declare d=x -g sets d
+// and reports -g; it is no option). This one scan serves every reader of a
+// declaration option, so no two of them can order the options differently.
+func simpleDeclOptions(decl *syntax.DeclClause) (options, strays []ArgumentFact) {
+	leading := true
 	for _, assign := range decl.Args {
-		if assign == nil || assign.Name != nil || assign.Value == nil {
-			continue
-		}
-		option := projectPOSIXWord(assign.Value)
-		if !option.Expands && strings.HasPrefix(option.Value, "-") && strings.ContainsRune(option.Value[1:], 103) {
-			return true
+		switch {
+		case assign == nil || assign.Value == nil && assign.Name == nil:
+		case assign.Name != nil:
+			leading = false
+		case !leading:
+			strays = append(strays, projectPOSIXWord(assign.Value))
+		default:
+			word := projectPOSIXWord(assign.Value)
+			if !word.Expands && !strings.HasPrefix(word.Value, "-") && !strings.HasPrefix(word.Value, "+") {
+				// Not an option: the first name, and the options end.
+				leading = false
+				strays = append(strays, word)
+				continue
+			}
+			options = append(options, word)
+			if !word.Expands && word.Value == "--" {
+				leading = false
+			}
 		}
 	}
-	return false
+	return options, strays
+}
+
+// simpleDeclGlobal reports a static -g option of a declaration.
+func simpleDeclGlobal(decl *syntax.DeclClause) bool {
+	options, _ := simpleDeclOptions(decl)
+	return slices.ContainsFunc(options, func(option ArgumentFact) bool {
+		return !option.Expands && strings.HasPrefix(option.Value, "-") && strings.ContainsRune(option.Value[1:], 103)
+	})
 }
 
 // simpleScopeStates returns the states of scope: its own, or copies of
