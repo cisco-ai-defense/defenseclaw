@@ -285,6 +285,23 @@ func TestDockerEditThatTheToolRefusesAddsNothing(t *testing.T) {
 			text(`{"insecure-registries":["127.0.0.1:5000"]}`), false,
 		},
 		{
+			// White space is text: the file is readable and not empty, so a
+			// step that misses is refused by the tool like on any other file.
+			"miss over a file of white space only", "Edit",
+			map[string]any{"file_path": daemonConfigTarget, "old_string": `"debug":false`, "new_string": `"insecure-registries":` + filled},
+			text("  \n"), false,
+		},
+		{
+			"empty replaced text over a file of white space only", "Edit",
+			map[string]any{"file_path": daemonConfigTarget, "old_string": ``, "new_string": `{"insecure-registries":` + filled + `}`},
+			text("\n"), false,
+		},
+		{
+			"miss in a later step over a file of white space only", "MultiEdit",
+			multiEdit([2]string{` `, `{"insecure-registries":` + filled + `}`}, [2]string{`"missing"`, `"x"`}),
+			text(" "), false,
+		},
+		{
 			// The gateway reads an absent file as empty, which is not proof of
 			// what the client holds: the call keeps the step reading.
 			"miss over an empty file keeps the step reading", "Edit",
@@ -366,12 +383,55 @@ func TestDockerEditThatGrowsPastTheBoundBetweenSteps(t *testing.T) {
 			t.Fatal("a final document that lists no insecure registry was blocked")
 		}
 	})
-	t.Run("a step that would build an unbounded text is not applied", func(t *testing.T) {
-		start := `{"insecure-registries":[]}` + strings.Repeat("a", 60000)
-		grow := multiEdit([2]string{`a`, strings.Repeat("b", 60000)})
-		grow["edits"].([]any)[0].(map[string]any)["replace_all"] = true
-		if got := dockerEditCall(t, "MultiEdit", grow, &start); got {
-			t.Fatal("an edit with no registry in its text was blocked")
+	t.Run("a transient text past the work limit, protected final document", func(t *testing.T) {
+		// The file is a valid protected-after-rename document of 60 KiB. The
+		// steps spread its white space to more than the work limit, bring it
+		// back and rename the list key: the final document lists an insecure
+		// registry, but it is not computed, so the call is never allowed.
+		start := `{"insecure-registriez":["198.51.100.7:5000"]}` + strings.Repeat(" ", 60000)
+		got := dockerEditCall(t, "MultiEdit", replaceAllSteps(
+			[2]string{` `, strings.Repeat(" ", 72)},
+			[2]string{strings.Repeat(" ", 72), ` `},
+			[2]string{`insecure-registriez`, `insecure-registries`},
+		), &start)
+		if !got {
+			t.Fatal("an edit whose final document lists an insecure registry was allowed")
+		}
+		if write := dockerEditCall(t, "Write", map[string]any{
+			"file_path": daemonConfigTarget,
+			"content":   strings.Replace(start, "registriez", "registries", 1),
+		}, &start); !write {
+			t.Fatal("the Write of the same final document was allowed")
 		}
 	})
+	t.Run("a transient text past the work limit is never read as harmless", func(t *testing.T) {
+		// Ruled limit: when the final document is not computed it is not judged
+		// benign, whatever the file or the fragments hold.
+		start := `{"debug":true}` + strings.Repeat(" ", 60000)
+		got := dockerEditCall(t, "MultiEdit", replaceAllSteps(
+			[2]string{` `, strings.Repeat(" ", 72)},
+			[2]string{strings.Repeat(" ", 72), ` `},
+		), &start)
+		if !got {
+			t.Fatal("an edit whose final document was not computed was allowed")
+		}
+	})
+	t.Run("a transient text just under the work limit is computed", func(t *testing.T) {
+		start := `{"debug":true}` + strings.Repeat(" ", 60000)
+		got := dockerEditCall(t, "MultiEdit", replaceAllSteps(
+			[2]string{` `, strings.Repeat(" ", 60)},
+			[2]string{strings.Repeat(" ", 60), ` `},
+		), &start)
+		if got {
+			t.Fatal("a benign final document within the work limit was blocked")
+		}
+	})
+}
+
+func replaceAllSteps(steps ...[2]string) map[string]any {
+	edits := make([]any, 0, len(steps))
+	for _, step := range steps {
+		edits = append(edits, map[string]any{"old_string": step[0], "new_string": step[1], "replace_all": true})
+	}
+	return map[string]any{"file_path": daemonConfigTarget, "edits": edits}
 }
