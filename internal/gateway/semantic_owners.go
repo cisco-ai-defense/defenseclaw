@@ -843,7 +843,7 @@ func isDefiniteFixturePath(
 	resolved := canonicalSemanticPath(candidate.Resolved)
 	cwd := canonicalSemanticPath(facts.CWD)
 	if resolved == "" || cwd == "" ||
-		isRecognizedHomeRoot(cwd) ||
+		isRecognizedHomeRoot(cwd) || isHomeContainerDirectory(cwd) ||
 		!pathWithin(resolved, cwd) {
 		return false
 	}
@@ -896,13 +896,7 @@ func activeHomeRelative(
 	candidate actionfacts.PathFact,
 ) (string, bool) {
 	home := canonicalSemanticPath(facts.ActiveHome)
-	resolved := canonicalSemanticPath(candidate.Resolved)
-	if resolved == "" {
-		resolved = canonicalSemanticPath(candidate.Normalized)
-	}
-	if resolved == "" {
-		resolved = canonicalSemanticPath(candidate.Value)
-	}
+	resolved := canonicalSemanticPath(semanticPathValue(candidate))
 	if home == "" || resolved == "" || !pathWithin(resolved, home) {
 		return "", false
 	}
@@ -1441,14 +1435,11 @@ func hasDataFlowTo(
 }
 
 func semanticPathValue(path actionfacts.PathFact) string {
-	value := path.Resolved
-	if value == "" {
-		value = path.Normalized
+	value := strings.TrimSpace(pathFactSpelling(path))
+	if opened, ok := windowsOpenedPath(value); ok {
+		return windowsNameFold(opened)
 	}
-	if value == "" {
-		value = path.Value
-	}
-	return semanticFoldPath(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	return semanticFoldPath(strings.ReplaceAll(value, `\`, "/"))
 }
 
 // semanticFoldPath is the lower-case spelling the semantic path matchers
@@ -1942,4 +1933,18 @@ func hardcodedToolCallOnlyRule(ruleID string) bool {
 	default:
 		return false
 	}
+}
+
+// isHomeContainerDirectory reports a directory that holds the homes of
+// accounts: a file system or drive root, or a folder named users or home. A
+// credential file below it is the file of an account, not a fixture of a
+// project that happens to run there. The value is canonical
+// (canonicalSemanticPath).
+func isHomeContainerDirectory(value string) bool {
+	value = strings.TrimRight(value, "/")
+	if value == "" || len(value) == 2 && value[1] == ':' {
+		return true
+	}
+	base := path.Base(value)
+	return base == "users" || base == "home"
 }
