@@ -194,6 +194,25 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 				}
 			}
 		}
+		if known && (base == "ln" || base == "gln") {
+			// A link is judged by where it is placed: its operands go through
+			// the values the command has bound so far (a name, a folder or a
+			// source set by an earlier assignment), and only a destination
+			// that resolves to a registered file counts. An uncalled function
+			// body is not walked, so a link that is never run is untouched.
+			words := []string{program}
+			fixedWords := []bool{true}
+			for _, word := range call.Args[1:] {
+				value, fixed := actionWordValue(word, values, currentCWD, home)
+				words, fixedWords = append(words, value), append(fixedWords, fixed)
+			}
+			for _, path := range registrationPlacedPaths(words, fixedWords, currentCWD) {
+				if protectedReachPath(path, protected, "") {
+					found = true
+					return false
+				}
+			}
+		}
 		actionPosixAdvanceDirectory(call, values, home, &currentCWD, &stack)
 		return true
 	})
@@ -363,7 +382,7 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected p
 			found = registrationFindReach(words, cwd, protected)
 		case "rsync":
 			found = registrationRsyncReach(words, cwd, protected)
-		case "install", "ginstall", "ln", "gln":
+		case "install", "ginstall":
 			found = registrationInstallReach(words, cwd, protected)
 		case "dd":
 			for _, word := range words[1:] {
@@ -436,9 +455,9 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 	return false
 }
 
-// registrationInstallReach reads install and ln SOURCE DEST, SOURCE... DIR
-// and -t DIR SOURCE...: the destination file or the file the source name
-// takes in the destination folder.
+// registrationInstallReach reads install SOURCE DEST, install SOURCE... DIR
+// and install -t DIR SOURCE...: the destination file or the file the
+// source name takes in the destination folder.
 func registrationInstallReach(words []string, cwd string, protected protectedFiles) bool {
 	for _, path := range registrationPlacedPaths(words, nil, cwd) {
 		if protectedReachPath(path, protected, "") {
@@ -527,6 +546,7 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 		}
 	}
 	var placed []string
+	single := len(operands) == 1
 	if directory == "" && len(operands) >= 2 {
 		last := operands[len(operands)-1]
 		operands = operands[:len(operands)-1]
@@ -544,7 +564,7 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 			placed = append(placed, OperandPath(last, cwd))
 		}
 	}
-	if directory == "" && len(operands) == 1 && operands[0] != "" && (program == "ln" || program == "gln") {
+	if directory == "" && single && operands[0] != "" && (program == "ln" || program == "gln") {
 		// ln SOURCE links it under its own name in the working folder.
 		placed = append(placed, OperandPath(filepath.Base(operands[0]), cwd))
 	}
