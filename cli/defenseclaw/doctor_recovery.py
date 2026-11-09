@@ -339,6 +339,8 @@ DEVICE_KEY_UNUSABLE_REASONS = frozenset(
     }
 )
 
+_OUTSIDE_DATA_DIR = "target-outside-data-dir"
+
 # The gateway reads device.key whole; this bound only keeps a hostile or runaway file out of memory.
 _DEVICE_KEY_READ_LIMIT = 16 * 1024 * 1024
 
@@ -362,15 +364,34 @@ def _device_key_usability(plan: RecoveryPlan) -> DeviceKeyHealth:
     if plan.disposition is RecoveryDisposition.READY:
         return DeviceKeyHealth(DeviceKeyHealthStatus.MISSING, "device-key-missing")
     if plan.disposition is RecoveryDisposition.BLOCKED:
+        # The recovery layout rule (a key to be created must sit in the data folder) says nothing about a
+        # key that already exists: the gateway loads a configured absolute path as it is, so an existing
+        # file there is judged on its bytes and custody like any other.
+        if plan.reason_code == _OUTSIDE_DATA_DIR and plan.target and os.path.lexists(plan.target):
+            return _key_file_usability(plan.target, _platform_name())
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, plan.reason_code)
     if plan.custody is None:
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-custody-unavailable")
+    return _key_file_usability(plan.target, plan.custody.platform)
 
-    platform = plan.custody.platform
-    if not _private_file_postconditions(plan.target, platform=platform, confidential=True):
+
+def _key_file_usability(target: str, platform: str) -> DeviceKeyHealth:
+    """Usability of one existing key file: a regular file, private to this account, that the gateway loads."""
+
+    try:
+        info = os.lstat(target)
+    except OSError:
+        return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "target-custody-unavailable")
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or int(getattr(info, "st_file_attributes", 0)) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    ):
+        return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "target-is-not-regular-file")
+    if not _private_file_postconditions(target, platform=platform, confidential=True):
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-custody-invalid")
     try:
-        key_data = _read_private_regular_file(plan.target, max_bytes=_DEVICE_KEY_READ_LIMIT, platform=platform)
+        key_data = _read_private_regular_file(target, max_bytes=_DEVICE_KEY_READ_LIMIT, platform=platform)
     except OSError:
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-read-failed")
     if not device_key_bytes_usable(key_data):
@@ -389,6 +410,10 @@ def inspect_device_key(
     usable = _device_key_usability(plan)
     if usable.status is not DeviceKeyHealthStatus.VALID:
         return usable
+    if plan.custody is None:
+        # A usable key at a configured path outside the data folder: DefenseClaw keeps no provenance
+        # record for it (the gateway loads it as it is), so only its usability is claimed.
+        return DeviceKeyHealth(DeviceKeyHealthStatus.LEGACY_UNPROVENANCED, "device-key-outside-data-dir")
     platform = plan.custody.platform
 
     secret_path = os.path.join(plan.data_dir, _DEVICE_PROVENANCE_SECRET)
