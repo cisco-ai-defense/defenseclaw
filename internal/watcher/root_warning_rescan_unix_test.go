@@ -14,33 +14,50 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/skillrootsafe"
 )
 
-func stubRootRouteWarnings(t *testing.T, folders []string) {
-	t.Helper()
-	old := rootRouteWarnings
-	rootRouteWarnings = func(path string, _ func(string) (string, error)) (string, []string, error) {
-		return path, folders, nil
-	}
-	t.Cleanup(func() { rootRouteWarnings = old })
+// routeFixture answers the link route of a root with the folders it is given;
+// set may be called while the watcher runs.
+type routeFixture struct {
+	mu      sync.Mutex
+	folders []string
 }
 
-func newWarnedWatcher(t *testing.T, folders []string) (*InstallWatcher, string, chan []RootWarning) {
+func (r *routeFixture) set(folders []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.folders = folders
+}
+
+func (r *routeFixture) resolve(path string, _ func(string) (string, error)) (string, []string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return path, r.folders, nil
+}
+
+func realRootRoute(root string) error {
+	_, _, err := skillrootsafe.ResolveWithWarnings(root, watcherEvalSymlinks)
+	return err
+}
+
+func newWarnedWatcher(t *testing.T, folders []string) (*InstallWatcher, string, chan []RootWarning, *routeFixture) {
 	t.Helper()
 	cfg, store, logger, root := setupTestEnv(t)
 	cfg.Watch.RescanEnabled = false
-	stubRootRouteWarnings(t, folders)
+	route := &routeFixture{folders: folders}
 	warnings := make(chan []RootWarning, 8)
 	w := New(cfg, []string{root}, nil, store, logger, nil, nil)
+	w.rootRoute = route.resolve
 	w.SetRootWarningHandler(func(current []RootWarning) { warnings <- current })
-	return w, root, warnings
+	return w, root, warnings, route
 }
 
-func runWarnedWatcher(t *testing.T, folders []string) (*InstallWatcher, string, chan []RootWarning) {
+func runWarnedWatcher(t *testing.T, folders []string) (*InstallWatcher, string, chan []RootWarning, *routeFixture) {
 	t.Helper()
-	w, root, warnings := newWarnedWatcher(t, folders)
+	w, root, warnings, route := newWarnedWatcher(t, folders)
 	startWatcher(t, w)
-	return w, root, warnings
+	return w, root, warnings, route
 }
 
 func startWatcher(t *testing.T, w *InstallWatcher) {
@@ -95,7 +112,7 @@ func addSkill(t *testing.T, root, name string) {
 // and with periodic rescan off a change under it still runs a scan of the
 // root: a skill that admission did not see is scanned when another one changes.
 func TestRootThroughGroupWritableFoldersIsRescannedOnEveryChange(t *testing.T) {
-	w, root, warnings := newWarnedWatcher(t, []string{"/home/u/dotfiles"})
+	w, root, warnings, _ := newWarnedWatcher(t, []string{"/home/u/dotfiles"})
 	addSkill(t, root, "before")
 	probe := &pathScanner{}
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return probe }
@@ -126,7 +143,7 @@ func TestRootThroughGroupWritableFoldersIsRescannedOnEveryChange(t *testing.T) {
 // A root with no group-writable folder on its route is watched as before: no
 // warning and no extra rescan, with periodic rescan off.
 func TestRootWithoutGroupWritableFoldersAsksNoExtraRescan(t *testing.T) {
-	w, root, _ := newWarnedWatcher(t, nil)
+	w, root, _, _ := newWarnedWatcher(t, nil)
 	addSkill(t, root, "before")
 	probe := &pathScanner{}
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return probe }
@@ -144,13 +161,13 @@ func TestRootWithoutGroupWritableFoldersAsksNoExtraRescan(t *testing.T) {
 
 // The warning goes away once the folders no longer carry the group write bit.
 func TestRootWarningClearsWhenTheRouteIsFixed(t *testing.T) {
-	w, root, warnings := runWarnedWatcher(t, []string{"/home/u/dotfiles"})
+	w, root, warnings, route := runWarnedWatcher(t, []string{"/home/u/dotfiles"})
 	select {
 	case <-warnings:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the warned root was not published")
 	}
-	stubRootRouteWarnings(t, nil)
+	route.set(nil)
 	deadline := time.After(10 * time.Second)
 	for {
 		select {
@@ -178,7 +195,7 @@ func TestFlaggedSkillUnderADefaultModeLinkedRootIsQuarantined(t *testing.T) {
 		}
 	}
 	w := New(cfg, []string{root}, nil, store, logger, nil, nil)
-	if _, _, err := rootRouteWarnings(root, watcherEvalSymlinks); err != nil {
+	if err := realRootRoute(root); err != nil {
 		t.Skipf("the test account has no private group on local accounts: %v", err)
 	}
 	w.scannerFactory = func(InstallEvent) scanner.Scanner {
@@ -262,7 +279,7 @@ func waitGone(t *testing.T, path string) {
 // changes, and the verdict is enforced like an install: it is taken out of the
 // folder, not only scanned. A clean skill beside it stays.
 func TestWarnedRootRescanTakesOutAFlaggedSkillThatWasAlreadyThere(t *testing.T) {
-	w, root, warnings := newWarnedWatcher(t, []string{"/home/u/dotfiles"})
+	w, root, warnings, _ := newWarnedWatcher(t, []string{"/home/u/dotfiles"})
 	w.cfg.Gateway.Watcher.Skill.TakeAction = true
 	addSkill(t, root, "before")
 	addSkill(t, root, "fine")
@@ -289,7 +306,7 @@ func TestWarnedRootRescanTakesOutAFlaggedSkillThatWasAlreadyThere(t *testing.T) 
 // rescanned by a change elsewhere (no extra cycle), and a flagged skill that
 // is already admitted stays as before: only roots watched closely enforce.
 func TestOrdinaryRootRescanLeavesAnUntouchedSkillAlone(t *testing.T) {
-	w, root, _ := newWarnedWatcher(t, nil)
+	w, root, _, _ := newWarnedWatcher(t, nil)
 	w.cfg.Gateway.Watcher.Skill.TakeAction = true
 	addSkill(t, root, "before")
 	probe := &flaggedByNameScanner{flagged: map[string]bool{"before": true}, scanned: make(chan string, 16)}
@@ -318,13 +335,13 @@ func TestWarnedLinkedRootRescanTakesOutAFlaggedSkillThatWasAlreadyThere(t *testi
 			t.Fatal(err)
 		}
 	}
-	if _, _, err := rootRouteWarnings(root, watcherEvalSymlinks); err != nil {
+	if err := realRootRoute(root); err != nil {
 		t.Skipf("the test account has no private group on local accounts: %v", err)
 	}
-	stubRootRouteWarnings(t, []string{dotfiles})
 	addSkill(t, physical, "before")
 	probe := &flaggedByNameScanner{flagged: map[string]bool{"before": true}, scanned: make(chan string, 16)}
 	w := New(cfg, []string{root}, nil, store, logger, nil, nil)
+	w.rootRoute = (&routeFixture{folders: []string{dotfiles}}).resolve
 	w.scannerFactory = func(InstallEvent) scanner.Scanner { return probe }
 	warned := make(chan []RootWarning, 8)
 	w.SetRootWarningHandler(func(current []RootWarning) { warned <- current })
