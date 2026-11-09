@@ -5,6 +5,7 @@
 package watcher
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -263,6 +264,61 @@ func TestEditedThenRemovedAgentEntryLeavesAStandingAllowAlone(t *testing.T) {
 	f.removeEntry()
 	if status := f.status(); status.Pending || status.Failed {
 		t.Fatalf("with the allow standing: %+v, want no admission state", status)
+	}
+}
+
+// The agent can keep its first connection after the entry is edited. A
+// replacement that stays listed and is admitted, by a new allow pinned to it
+// or by a clean scan, decides for itself and does not stand for the earlier
+// unscanned definition once the allow of that one is revoked.
+func TestListedReplacementDoesNotClearTheRevokedAdmissionOfTheEarlierConnection(t *testing.T) {
+	for _, mode := range []string{"a new allow pinned to the replacement", "a clean scan of the replacement"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newRemovableEntryFixture(t)
+			original := f.server
+			f.admittedByAllowRule()
+			f.server.URL = "https://replacement.example.test/mcp"
+			if status := f.status(); !status.Pending {
+				t.Fatalf("the edited definition: %+v, want it pending its own admission", status)
+			}
+			if mode == "a clean scan of the replacement" {
+				f.w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
+				f.admitQueued()
+				if status := f.status(); status.Pending || status.Failed || status.Unavailable {
+					t.Fatalf("the scanned replacement with the first allow standing: %+v, want no admission state", status)
+				}
+				f.cfg.AssetPolicy.MCP.Allowed = nil
+			} else {
+				f.cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: f.server.Name, URL: f.server.URL, Reason: "replacement reviewed"}}
+				f.w.runRescanCycle(context.Background())
+			}
+			f.w.mcpAdmissionMu.RLock()
+			held := len(f.w.mcpAdmissionDeparted)
+			f.w.mcpAdmissionMu.RUnlock()
+			if held != 1 {
+				t.Fatalf("%d departed definitions held, want the unscanned first one", held)
+			}
+			status := f.w.MCPAdmissionStatus(MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home})
+			if !status.Failed || status.Name != original.Name || status.ScanIssue != MCPScanIssueAddress {
+				t.Fatalf("the call with the replacement listed and the first allow revoked: %+v, want the failed admission of %q", status, original.Name)
+			}
+		})
+	}
+}
+
+// Benign twin: with the allow of the first definition standing, the listed
+// and admitted replacement leaves every call alone.
+func TestListedReplacementLeavesAStandingAllowOfTheEarlierConnectionAlone(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	original := f.server
+	f.admittedByAllowRule()
+	f.server.URL = "https://replacement.example.test/mcp"
+	f.status()
+	f.cfg.AssetPolicy.MCP.Allowed = append(f.cfg.AssetPolicy.MCP.Allowed,
+		config.AssetPolicyRule{Name: f.server.Name, URL: f.server.URL, Reason: "replacement reviewed"})
+	f.w.runRescanCycle(context.Background())
+	if status := f.w.MCPAdmissionStatus(MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home}); status.Pending || status.Failed {
+		t.Fatalf("with both allows standing: %+v, want no admission state", status)
 	}
 }
 
