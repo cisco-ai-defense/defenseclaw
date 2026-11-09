@@ -36,9 +36,12 @@ type TargetMemo struct {
 	words map[memoWordKey]bool
 	// homes resolves each home once (actionProtectedStatePath).
 	homes map[string]*actionStateHome
-	// keys lists each home's protected key files once
+	// keys lists the protected key files of each home once
 	// (ProtectedAuthorizedKeysPaths), and files their identities
-	// (newProtectedFiles).
+	// (newProtectedFiles). The identities are file system answers like the
+	// lstats and stats and hold for one scan (beginScan): a keys file that was
+	// created or replaced between two scans protects the names that now share
+	// its identity, and the names that shared the old one are ordinary.
 	keys  map[string][]string
 	files map[string]protectedFiles
 	// resolved are the answers of resolveWriteTarget by the exact path: the
@@ -84,8 +87,10 @@ type memoRead struct {
 }
 
 // beginScan starts a scan of the evaluation: the lstat and stat answers of
-// the earlier scans are dropped, and the next read of a name is a read of the
-// file system.
+// the earlier scans and the identities of the protected files are dropped,
+// and the next read of a name is a read of the file system. What stays are
+// the answers about paths (write-target walks, key file paths, homes), not
+// the identity of a file.
 func (m *TargetMemo) beginScan() {
 	if m == nil {
 		return
@@ -93,6 +98,7 @@ func (m *TargetMemo) beginScan() {
 	m.mu.Lock()
 	clear(m.lstats)
 	clear(m.stats)
+	clear(m.files)
 	m.mu.Unlock()
 }
 

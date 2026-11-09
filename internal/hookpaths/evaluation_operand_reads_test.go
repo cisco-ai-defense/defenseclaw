@@ -23,6 +23,8 @@ import (
 type operandReadsFixture struct {
 	home, project, command string
 	reads                  *int
+	// scanReads are the walk reads each scan of scans made.
+	scanReads []int
 }
 
 // newOperandReadsFixture is a project of operands ordinary names and the last
@@ -64,17 +66,24 @@ func newOperandReadsFixture(t *testing.T, operands int, name func(home, project 
 // the state scan twice (a second pass), on one memo. A Windows home takes the
 // state scan through the Windows grammar, which these names do not exercise;
 // there only the action decision runs.
-func (fx operandReadsFixture) scans(t *testing.T) (decision string, state bool) {
+func (fx *operandReadsFixture) scans(t *testing.T) (decision string, state bool) {
 	t.Helper()
 	memo := NewTargetMemo()
-	decision = memo.ActionCommandDecisionInShell(fx.command, fx.project, fx.home, nil, true)
+	scan := func(run func()) {
+		before := *fx.reads
+		run()
+		fx.scanReads = append(fx.scanReads, *fx.reads-before)
+	}
+	scan(func() { decision = memo.ActionCommandDecisionInShell(fx.command, fx.project, fx.home, nil, true) })
 	if runtime.GOOS == "windows" {
 		return decision, false
 	}
-	state = memo.ActionStateTargetMention(fx.command, fx.project, fx.home)
-	if again := memo.ActionStateTargetMention(fx.command, fx.project, fx.home); again != state {
-		t.Fatalf("the second state pass answered %v, the first %v", again, state)
-	}
+	scan(func() { state = memo.ActionStateTargetMention(fx.command, fx.project, fx.home) })
+	scan(func() {
+		if again := memo.ActionStateTargetMention(fx.command, fx.project, fx.home); again != state {
+			t.Fatalf("the second state pass answered %v, the first %v", again, state)
+		}
+	})
 	return decision, state
 }
 
@@ -87,12 +96,14 @@ func TestEvaluationReadsAnOrdinaryOperandOnce(t *testing.T) {
 	if decision != "" || state {
 		t.Fatalf("ordinary operands: decision %q, state %v, want allowed", decision, state)
 	}
-	// One walk read an operand for each of the three scans (the decision and
-	// two state passes): the readers of one scan are answered, and each scan
-	// reads the name again, so a file that changed between scans is judged as
-	// it is. Before: 17 an operand for the three scans.
-	if want := 3*operands + 200; *fx.reads > want {
-		t.Fatalf("%d ordinary operands made %d walk reads in one evaluation, want at most %d", operands, *fx.reads, want)
+	// Each scan reads the name again, so a file that changed between scans is
+	// judged as it is; inside a scan the readers of one name share one walk
+	// read (before: 17 an operand for the three scans together).
+	t.Logf("walk reads for each scan: %v", fx.scanReads)
+	for i, reads := range fx.scanReads {
+		if want := operands + 100; reads > want {
+			t.Errorf("scan %d of %d ordinary operands made %d walk reads, want at most %d", i+1, operands, reads, want)
+		}
 	}
 }
 
