@@ -903,7 +903,8 @@ function Assert-NoActiveConnectorRecovery([string]$Operation, [string]$Root = $D
     }
     if ($pending.Count) {
         throw ("${Operation} refused: active connector recovery remains in $Root. " +
-            "Resolve it with the current DefenseClaw version before retrying; do not remove or replay its receipts.")
+            "Finish it with the current DefenseClaw version: run 'defenseclaw setup <agent>' for the agent whose config was being " +
+            "changed (the install log names it), then retry. Do not remove or replay its receipts.")
     }
 }
 

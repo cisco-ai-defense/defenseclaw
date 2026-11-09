@@ -1683,7 +1683,14 @@ func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, erro
 		}
 		matched, matchedPriority = candidate, priority
 	}
-	if matched.exists && !matched.terminal.located && !matched.complete.located &&
+	// Only a prepared receipt (Rp) can have put anything at the live leaf: Ra
+	// and Rs are written before the transaction touches the target, and their
+	// abort deletes only exact transaction-owned artifacts. A leaf that is
+	// neither Old nor New under an allocation or staging receipt is therefore
+	// the operator's own save (an editor's rename-over lands in exactly that
+	// window), not an ambiguous state. Refusing it kept the transaction's own
+	// leftovers, and with them every later rollback, for good (GAP-0957).
+	if matched.exists && matched.prepared.located && !matched.terminal.located && !matched.complete.located &&
 		requestedParentIdentity == matched.receipt.TargetParentIdentity {
 		requestedParent, bindErr := bindAtomicTransformDirectory(filepath.Dir(requestedInput))
 		if bindErr != nil {

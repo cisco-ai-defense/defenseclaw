@@ -175,6 +175,25 @@ def _assert_active_unchanged(external: Path, active: Path) -> None:
 
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
+def test_recovery_refusal_names_the_command_that_finishes_it(tmp_path) -> None:
+    receipt = tmp_path / (".defenseclaw-cas-v2-" + "b" * 24 + ".allocation")
+    receipt.write_bytes(b"retained recovery")
+    _run(
+        tmp_path,
+        """
+try { Assert-NoActiveConnectorRecovery 'Rollback to 1.0.5'; throw 'guard unexpectedly passed' } catch {
+    $text = $_.Exception.Message
+    if ($text -notlike '*Rollback to 1.0.5 refused: active connector recovery remains*') { throw }
+    if ($text -notlike "*run 'defenseclaw setup <agent>'*") { throw }
+    if ($text -notlike '*do not remove or replay its receipts*') { throw }
+}
+""",
+    )
+    assert receipt.read_bytes() == b"retained recovery"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
 @pytest.mark.parametrize(
     "name",
     [
