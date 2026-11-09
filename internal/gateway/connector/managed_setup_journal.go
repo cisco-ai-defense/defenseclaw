@@ -146,10 +146,10 @@ func noteManagedSetupWrite(path string, data []byte) error {
 // confirmManagedSetupPublish is called by a writer right before it replaces
 // path: the target must still be what noteManagedSetupWrite found. A save that
 // landed in between taints a setup span, and a conversion span refuses the
-// write. A rollback conversion does not replace by a rename after this check:
-// publishHeldConversion compares the file it displaces (an exchange) or holds
-// it with no sharing while it rewrites it (Windows), so a save made after this
-// check is kept, whatever the timing.
+// write. A rollback conversion does not trust this check alone:
+// publishHeldConversion compares the file it displaces (an exchange on Linux and
+// macOS; on Windows a hold on the file across the rename, keptSaves), so a save
+// made after this check is put back, whatever the timing.
 func confirmManagedSetupPublish(path string) error {
 	managedSetupSpans.Lock()
 	defer managedSetupSpans.Unlock()
