@@ -345,6 +345,40 @@ def test_claudecode_real_folder_names_the_skill_and_its_links_are_aliases(
     ]
 
 
+def test_claudecode_commands_folder_keeps_precedence_over_same_stem_markdown(
+    tmp_path,
+) -> None:
+    """The sorted walk order decides a folder/Markdown name collision."""
+    root = tmp_path / ".claude" / "commands"
+    folder = root / "ordinary"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("# Ordinary\n", encoding="utf-8")
+    (root / "ordinary.md").write_text("# legacy command\n", encoding="utf-8")
+
+    discovered = discover_skill_directories(str(root), connector="claudecode")
+
+    assert discovered[0].name == "ordinary"
+    assert discovered[0].path == os.path.realpath(folder)
+
+
+@requires_symlink_privilege
+def test_claudecode_commands_folder_with_link_and_markdown_stays_one_folder_skill(
+    tmp_path,
+) -> None:
+    root = tmp_path / ".claude" / "commands"
+    folder = root / "ordinary"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("# Ordinary\n", encoding="utf-8")
+    (root / "ordinary.md").write_text("# legacy command\n", encoding="utf-8")
+    (root / "z-link").symlink_to(folder, target_is_directory=True)
+
+    discovered = discover_skill_directories(str(root), connector="claudecode")
+
+    assert discovered[0].name == "ordinary"
+    assert discovered[0].path == os.path.realpath(folder)
+    assert discovered[0].aliases == ("z-link",)
+
+
 @pytest.mark.parametrize("connector", ["claudecode", "amp"])
 def test_claude_account_synced_skills_are_expanded(tmp_path, connector) -> None:
     """GAP-1243: ~/.claude/skills/synced/<account>/<skill> holds real skills."""
