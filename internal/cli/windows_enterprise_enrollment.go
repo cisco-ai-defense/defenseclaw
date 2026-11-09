@@ -60,11 +60,24 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 		}
 		pending := false
 		hermesLimited := false
-		var earlier []string
+		var earlier, keepsRunning []string
+		otherPending := false
 		for _, row := range rows {
 			if windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome) ==
 				windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome) && enterpriseHookEarlierMatrixRow(row) {
 				earlier = append(earlier, strings.TrimSpace(row.Connector)+": "+enterpriseHookEarlierMatrixState)
+			}
+		}
+		for _, row := range rows {
+			if windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome) !=
+				windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome) {
+				continue
+			}
+			switch {
+			case enterpriseHookAwaitingSignInKeepsRunningRow(row):
+				keepsRunning = append(keepsRunning, strings.TrimSpace(row.Connector))
+			case row.Pending, enterpriseHookAwaitingSignInError(row) && !enterpriseHookEarlierMatrixRow(row):
+				otherPending = true
 			}
 		}
 		for _, connector := range entry.Connectors {
@@ -73,6 +86,11 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 			hermesLimited = hermesLimited || connector.Connector == "hermes" && connector.State == "enrolled"
 		}
 		account.Reason = windowsEnterpriseEnrollmentReason(pending, failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)])
+		if pending && !otherPending && len(keepsRunning) > 0 && failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)] == "" {
+			// Every connector that waits still has the previous release's
+			// hook running: do not say its agents are unguarded.
+			account.Reason = windowsEnterpriseEnrollmentPendingKeepsRunning + strings.Join(keepsRunning, ", ")
+		}
 		for _, note := range earlier {
 			if account.Reason != "" {
 				account.Reason += "; "
@@ -185,6 +203,12 @@ func windowsEnterpriseEnrollmentKey(sid, user, home string) string {
 // (docs: enrollment, "Signed-in session"; GAP-1733).
 const windowsEnterpriseEnrollmentPending = "pending: waiting for an active (connected) session of this account; " +
 	"its agents are not guarded until then, and a signed-out or disconnected session keeps waiting"
+
+// windowsEnterpriseEnrollmentPendingKeepsRunning leads the reason of an account
+// whose waiting connectors all still run the previous release's hook
+// (GAP-0980); the connectors follow.
+const windowsEnterpriseEnrollmentPendingKeepsRunning = "pending: waiting for an active (connected) session of this account; " +
+	"the previous release's DefenseClaw hook keeps running until this account signs in and the guardian updates it: "
 
 // windowsEnterpriseEnrollmentReason says why an account is not fully
 // enrolled, or "" when it is.

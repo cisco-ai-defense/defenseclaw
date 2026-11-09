@@ -97,6 +97,26 @@ func RenderCopilotVSCodeLocalHooks(goos, hookBinary string) ([]byte, error) {
 	return encodeOrdered(doc)
 }
 
+// renderCopilotVSCodeLocalHooksPriorRelease renders the Local harness hook
+// document as releases up to 1.0.6 wrote it on goos
+// (connector.CopilotVSCodeLocalGuardedPriorReleaseHookCommand).
+func renderCopilotVSCodeLocalHooksPriorRelease(goos, hookBinary string) ([]byte, error) {
+	if strings.TrimSpace(hookBinary) == "" {
+		return nil, errors.New("copilot vscode local hooks: hook binary is empty")
+	}
+	hooks := newObject()
+	for _, event := range connector.CopilotVSCodeLocalHookEvents {
+		handler := newObject()
+		handler.set("type", "command")
+		handler.set("command", connector.CopilotVSCodeLocalGuardedPriorReleaseHookCommand(goos, hookBinary, event))
+		handler.set("timeout", copilotVSCodeLocalHookTimeout)
+		hooks.set(event, []any{handler})
+	}
+	doc := newObject()
+	doc.set("hooks", hooks)
+	return encodeOrdered(doc)
+}
+
 // renderCopilotPluginManifest is the plugin's manifest; hooks load from the
 // plugin's hooks/hooks.json.
 func renderCopilotPluginManifest() ([]byte, error) {
@@ -161,6 +181,11 @@ type CopilotVSCodeUserRequest struct {
 	// RemoveDirs are folders below Home an earlier call created
 	// (CreatedDirs); each one still empty after this call is removed.
 	RemoveDirs []string
+	// AcceptPriorRelease, with DryRun, takes a hook document that holds exactly
+	// the render releases up to 1.0.6 wrote
+	// (connector.CopilotVSCodeLocalGuardedPriorReleaseHookCommand) as current.
+	// It never writes (GAP-0980).
+	AcceptPriorRelease bool
 }
 
 // EnsureCopilotVSCodeUser writes or removes DefenseClaw's Local hook file
@@ -198,12 +223,21 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 		}
 	}
 	var errs []error
-	if ok, err := ensureCopilotHookDocument(&result, result.HookFile, hooks, goos, req.HookBinary, true, req.HookFile, req.DryRun); err != nil {
+	hookFileWant, pluginWant := hooks, hooks
+	if req.AcceptPriorRelease && req.DryRun {
+		prior, err := renderCopilotVSCodeLocalHooksPriorRelease(goos, req.HookBinary)
+		if err != nil {
+			return result, err
+		}
+		hookFileWant = holdsPriorRender(result.HookFile, hooks, prior)
+		pluginWant = holdsPriorRender(pluginHooks, hooks, prior)
+	}
+	if ok, err := ensureCopilotHookDocument(&result, result.HookFile, hookFileWant, goos, req.HookBinary, true, req.HookFile, req.DryRun); err != nil {
 		errs = append(errs, err)
 	} else {
 		result.HookFileOK = ok
 	}
-	hooksOK, err := ensureCopilotHookDocument(&result, pluginHooks, hooks, goos, req.HookBinary, false, req.Plugin, req.DryRun)
+	hooksOK, err := ensureCopilotHookDocument(&result, pluginHooks, pluginWant, goos, req.HookBinary, false, req.Plugin, req.DryRun)
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -230,6 +264,17 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 		removeEmptyDirsBelow(home, req.RemoveDirs)
 	}
 	return result, errors.Join(errs...)
+}
+
+// holdsPriorRender is prior when the regular file at path holds exactly prior,
+// else current: a verification that accepts the earlier release's render
+// compares that document with it (GAP-0980).
+func holdsPriorRender(path string, current, prior []byte) []byte {
+	data, exists, regular, err := readUserFile(path, int64(len(prior)))
+	if err != nil || !exists || !regular || !bytes.Equal(data, prior) {
+		return current
+	}
+	return prior
 }
 
 // stripCopilotVSCodeOwnedHooks removes only the commands rendered for this
