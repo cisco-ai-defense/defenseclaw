@@ -23,6 +23,9 @@ import (
 // elsewhere). Tests that fake a share turn it on.
 var networkShareLinkWalk = runtime.GOOS == "windows"
 
+// walkLstat reads one component of a path for the walk below; tests count it.
+var walkLstat = os.Lstat
+
 // networkLinkHopLimit bounds the links one walk follows: 40, and no more than
 // the system opens in one path (SystemLinkLimit; macOS refuses a path past 32
 // links, so a walk past 32 there is a path no read can go through, an unread
@@ -85,6 +88,12 @@ func linkIntoShare(path string, followLast bool) (resolved string, exhausted boo
 		rest = trimPathSeparators(rest)
 	}
 	hops := 0
+	// A hook call resolves the paths of thousands of operands, nearly all
+	// below the same folders. A folder found to be no link is not read
+	// again within the call: the walk costs one read per new name instead of
+	// one per component of every path (rel-1-0-9:GAP-0943, about 1 ms per
+	// operand on Windows).
+	call := currentHookCall()
 	for rest != "" {
 		var elem string
 		elem, rest = cutPathElement(rest)
@@ -101,11 +110,18 @@ func linkIntoShare(path string, followLast bool) (resolved string, exhausted boo
 			return "", false
 		}
 		next := joinPathElement(cur, elem)
-		info, err := os.Lstat(next)
+		if rest != "" && call.knownPlain(next) {
+			cur = next
+			continue
+		}
+		info, err := walkLstat(next)
 		if err != nil {
 			return "", false
 		}
 		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			if rest != "" {
+				call.notePlain(next)
+			}
 			cur = next
 			continue
 		}
