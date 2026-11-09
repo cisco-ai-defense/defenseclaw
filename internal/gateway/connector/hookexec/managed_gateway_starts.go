@@ -492,6 +492,9 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 			select {
 			case <-connected:
 			default:
+				if peerCheck.deciding.Load() && ownerScanEnded(connected, tryCtx, peerCheck) {
+					return
+				}
 				if peerCheck.pending.Load() {
 					// A listener took the connection and its owner is not
 					// proven yet (the Windows tuple wait of one that
@@ -506,6 +509,47 @@ func connectBy(ctx context.Context, deadline time.Time, onConnect func()) (tryCt
 		}
 	}()
 	return tryCtx, func() { cancel(nil) }
+}
+
+// ownerScanGrace is how long past the connect deadline a try waits for the
+// owner scan of its unaccepted connection (verifyConnected). The scan is
+// bounded work: every process of the account, plus a short re-read of a
+// thread that cannot be read for a moment. The grace only keeps the deadline
+// from cutting it. A scan still running after the grace proves nothing, so
+// the try ends as an unverified peer.
+const ownerScanGrace = 2 * time.Second
+
+// ownerScanEnded holds the connect deadline of a try while the owner scan of
+// its unaccepted connection runs, for up to ownerScanGrace. It reports true
+// when the try needs no cancel: the connection was proven (connected), the
+// try ended (tryCtx), or the scan found its listener to be the own gateway
+// and the dial returned its answer (the check is no longer pending). A scan
+// that said no ends the wait with false (the deadline cut applies), and so
+// does a scan still running when the grace ends, which also marks the check
+// abandoned so that a proof arriving later is void.
+func ownerScanEnded(connected <-chan struct{}, tryCtx context.Context, check *perUserPeerCheck) bool {
+	grace := time.NewTimer(ownerScanGrace)
+	defer grace.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-connected:
+			return true
+		case <-tryCtx.Done():
+			return true
+		case <-grace.C:
+			check.abandoned.Store(true)
+			return false
+		case <-poll.C:
+			if !check.pending.Load() {
+				return true
+			}
+			if !check.deciding.Load() {
+				return false
+			}
+		}
+	}
 }
 
 // firstTryConnectWindow is the least time the first try of a per-user hook
