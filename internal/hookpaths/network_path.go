@@ -455,19 +455,44 @@ func pathOpen(name string) (*os.File, error) {
 // A read through the root stays below the root, so on the same share.
 func pathOpenRoot(name string) (*os.Root, error) {
 	if unanswered, cut := networkPathRead(name); unanswered {
-		if call := currentHookCall(); call != nil {
-			switch cut {
-			case shareReadBudgetCut:
-				call.bodyUnread = true
-			case shareReadLinkBound:
-				call.bodyLinks = true
-			}
-		}
+		noteBodyCut(cut)
 		return nil, networkShareError("openroot", name)
 	}
 	root, err := os.OpenRoot(name)
 	noteBodyLinkLimit(err)
 	return root, err
+}
+
+// noteBodyCut records on the hook call why the read of a script body did not
+// finish when a cause other than the share itself ended it (ShareBodyUnread).
+func noteBodyCut(cut shareReadCut) {
+	call := currentHookCall()
+	if call == nil {
+		return
+	}
+	switch cut {
+	case shareReadBudgetCut:
+		call.bodyUnread = true
+	case shareReadLinkBound:
+		call.bodyLinks = true
+	}
+}
+
+// pathBodyUnanswered is networkPathRead for the script a relative name reaches
+// below a folder already walked: a name that spells folder links of its own
+// is walked on from that folder, and a path past the links the system opens
+// is an unread body whatever way the name is spelled, as when the folder is
+// the one behind the links (rel-1-0-9:GAP-0982). A Windows read below an
+// open folder does not report the bound, so the walk does.
+func pathBodyUnanswered(cwd, relative string) bool {
+	if !networkShareLinkWalk || !strings.ContainsAny(relative, `/\`) {
+		return false
+	}
+	unanswered, cut := networkPathRead(joinPathElement(cwd, relative))
+	if unanswered {
+		noteBodyCut(cut)
+	}
+	return unanswered
 }
 
 // noteBodyLinkLimit records on the hook call that a read of a script body
