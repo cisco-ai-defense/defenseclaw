@@ -207,3 +207,47 @@ func TestAtomicTransformV2StagedEAStaysRetainedWhenThePriorConfigIsGone(t *testi
 		t.Fatal("recovery evidence was discarded")
 	}
 }
+
+// A save that lands after the transaction is prepared and before it begins to
+// publish is the operator own: it stays as saved, the transaction is abandoned
+// and the change is built on the saved bytes (GAP-0961). A deletion at the same
+// point stays fail-closed, as before.
+func TestAtomicTransformV2PreparedOperatorSaveBeforeCommitIsKeptAndRetried(t *testing.T) {
+	for _, mutation := range []string{"edit", "recreate"} {
+		t.Run(mutation, func(t *testing.T) {
+			path, stateDir := atomicTransformV2WriteOld(t)
+			canonical, err := canonicalAtomicTransformTargetPath(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved := false
+			restore := setAtomicTransformPhaseHookForTest(canonical, func(
+				phase atomicTransformPhase, state atomicTransformPhaseState,
+			) error {
+				if phase != atomicTransformPhaseIntentPersisted || saved {
+					return nil
+				}
+				saved = true
+				if mutation == "recreate" {
+					if err := os.Remove(state.TargetPath); err != nil {
+						return err
+					}
+				}
+				return os.WriteFile(state.TargetPath, []byte("operator-"+mutation), 0o600)
+			})
+			defer restore()
+			if err := atomicTransformFileWithStateDir(path, stateDir, 0o600, atomicTransformV2AppendDC); err != nil {
+				t.Fatalf("a save before the commit aborted the change: %v", err)
+			}
+			if !saved {
+				t.Fatal("operator save seam was not reached")
+			}
+			if content, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(content, []byte("operator-"+mutation+"+dc")) {
+				t.Fatalf("operator save was lost or not built on: %q %v", content, readErr)
+			}
+			if left := atomicTransformV2Leftovers(t, path, stateDir); len(left) != 0 {
+				t.Fatalf("recovery files remain after the change: %v", left)
+			}
+		})
+	}
+}
