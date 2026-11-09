@@ -46225,10 +46225,17 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     }
                 }
                 catch {
+                    # Standalone Setup takes /ensure, which repairs or, with no
+                    # record left, installs again; Secure Client installs its
+                    # module itself and its Setup has no /ensure.
+                    $cancelRemedy = 'reinstall DefenseClaw through Secure Client after the next restart'
+                    if (Test-DefenseClawStandaloneProfile) {
+                        $cancelRemedy = 'run Setup /ensure again after the next restart, which repairs ' +
+                            'the deployment or installs it again if the restart removed its record'
+                    }
                     $cancelWarning = (
                         "DefenseClaw $Action could not cancel the restart deletes queued for its files " +
-                        "($($_.Exception.Message)); run Setup /ensure again after the next restart, which repairs " +
-                        "the deployment or installs it again if the restart removed its record")
+                        "($($_.Exception.Message)); $cancelRemedy")
                     Microsoft.PowerShell.Utility\Write-Warning $cancelWarning
                     if ($null -ne $installResult) {
                         $warnings = [Collections.Generic.List[string]]::new()
