@@ -506,7 +506,11 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		// there is nothing to wait for: the call that lists the server gets the
 		// cause and the next step the later calls get, not a retry message
 		// (GAP-0925). A definition the watcher read itself stays pending until
-		// its own admission.
+		// its own admission. A revoked earlier definition the agent may still
+		// run is the more restrictive verdict and comes first (GAP-0920).
+		if revoked := w.mcpDepartedRevoked(q, servers, true); revoked.Failed {
+			return revoked
+		}
 		return FailedMCPStatus(*refused)
 	}
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
