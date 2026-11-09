@@ -35946,9 +35946,19 @@ function Test-DefenseClawGuardianStateFileUserOpenable {
         GAP-0989). A path whose access list cannot be read answers $false (it
         stays gated).
     #>
-    param([Parameter(Mandatory)][string]$Path)
+    param(
+        [Parameter(Mandatory, ParameterSetName = 'Path')][string]$Path,
+        # An access list already read (the smoke builds one in memory: Windows
+        # drops an inherit-only entry from a file's own list).
+        [Parameter(Mandatory, ParameterSetName = 'AccessControl')][Security.AccessControl.FileSystemSecurity]$AccessControl
+    )
     try {
-        $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop
+        $acl = if ($PSCmdlet.ParameterSetName -eq 'AccessControl') {
+            $AccessControl
+        }
+        else {
+            Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path -ErrorAction Stop
+        }
         foreach ($rule in @($acl.Access)) {
             if ([string]$rule.AccessControlType -ne 'Allow') { continue }
             if ([int]$rule.FileSystemRights -eq 0) { continue }

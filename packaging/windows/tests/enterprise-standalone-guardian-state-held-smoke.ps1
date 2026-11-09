@@ -147,19 +147,22 @@ try {
                 if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -notcontains $ledger) { throw "the ledger stayed out of the class after $label was removed" }
             }
             # GAP-0989: an inherit-only Users entry applies to what a folder holds, not to
-            # the file that carries it, so the ledger stays in the class; the same entry
-            # without the flag takes it out.
-            & icacls.exe $ledger /grant '*S-1-5-32-545:(OI)(CI)(IO)R' | Out-Null
-            try {
-                if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -notcontains $ledger) { throw 'an inherit-only Users entry took the ledger out of the class' }
+            # the file that carries it, so it does not make the file openable; the same
+            # entry without the flag does. Access lists are built in memory.
+            $sddlRows = [ordered]@{
+                'SYSTEM and Administrators only'                = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)', $false)
+                'an inherit-only Users entry'                   = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICIIO;GR;;;BU)', $false)
+                'an inherit-only Users entry on objects'        = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OIIO;GR;;;BU)', $false)
+                'a Users entry on the file itself'              = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;BU)', $true)
+                'a Users entry inherited by the file'           = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICI;GR;;;BU)', $true)
+                'an inherit-only Users entry and Everyone'      = @('D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;OICIIO;GR;;;BU)(A;;GR;;;WD)', $true)
             }
-            finally { & icacls.exe $ledger /remove:g '*S-1-5-32-545' | Out-Null }
-            & icacls.exe $ledger /grant '*S-1-5-32-545:(OI)(CI)R' | Out-Null
-            try {
-                if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -contains $ledger) { throw 'a Users entry on the file itself left the ledger in the class' }
+            foreach ($label in $sddlRows.Keys) {
+                $memory = [Security.AccessControl.FileSecurity]::new()
+                $memory.SetSecurityDescriptorSddlForm($sddlRows[$label][0])
+                $openable = [bool](Test-DefenseClawGuardianStateFileUserOpenable -AccessControl $memory)
+                if ($openable -ne $sddlRows[$label][1]) { throw "$label : openable=$openable, want $($sddlRows[$label][1])" }
             }
-            finally { & icacls.exe $ledger /remove:g '*S-1-5-32-545' | Out-Null }
-            if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -notcontains $ledger) { throw 'the ledger stayed out of the class after the inheritable entry was removed' }
             # S-I1: a hold that fails after it stopped the guardian starts it again
             # and puts its start mode back; the services a held run left Running
             # are Running at the end. The service calls are replaced in the module.

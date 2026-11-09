@@ -284,7 +284,10 @@ func TestWindowsEnterpriseGuardianStateUserOpenableSkipsInheritOnlyEntries(t *te
 	if !windowsEnterpriseGuardianStateACLUserOpenable(nil) {
 		t.Error("no access list means everyone, so the file is openable")
 	}
-	// The same through a real file and the production rule.
+	// The same through a real file and the production rule. Windows keeps no
+	// inherit-only entry on a file's own list (it drops it when the list is set),
+	// so the rows above are what proves the rule; this row proves that the file
+	// path still reads the list and that a plain entry on the file counts.
 	path := filepath.Join(t.TempDir(), "marker")
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
