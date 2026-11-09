@@ -513,44 +513,65 @@ func (r *layoutReader) setTruth(before *string, command string) {
 
 // effectiveCommand returns the command a statement runs and the index of its
 // word in words; first is the index of its first word that is not an
-// assignment. command and builtin are prefix wrappers: the shell runs the word
-// after them (and after the options of command), so that word is judged and
-// its quoted arguments stay data. "command -v" and "command -V" run nothing
-// and print, so they stand for echo. A word the reading cannot name is "?".
+// assignment. command and builtin are prefix wrappers only when written as the
+// bare word followed by the options Bash accepts for them (command: -p, -v, -V;
+// builtin: none) and an optional "--": the word after them is then judged, so
+// its quoted arguments stay data. "command -v" and "command -V" run nothing and
+// print, so they stand for echo. A wrapper followed by anything else stays the
+// command, and its words are shell text it runs. A word the reading cannot name
+// is "?", which also runs its arguments as shell text.
 func effectiveCommand(words []layoutWord, first int) (string, int) {
 	at := first
-	for at < len(words) && words[at].plain {
-		wrapper := words[at].literal
-		if wrapper != "command" && wrapper != "builtin" {
-			break
+	for at < len(words) && words[at].plain && (words[at].literal == "command" || words[at].literal == "builtin") {
+		next, silent, ok := wrapperOperand(words, at)
+		if silent {
+			return "echo", at
 		}
-		next := at + 1
-		for wrapper == "command" && next < len(words) && words[next].plain {
-			option := words[next].literal
-			if option == "--" {
-				next++
-				break
-			}
-			if !strings.HasPrefix(option, "-") || len(option) < 2 || strings.Trim(option[1:], "pvV") != "" {
-				break
-			}
-			if strings.ContainsAny(option, "vV") {
-				return "echo", at
-			}
-			next++
-		}
-		if next >= len(words) {
+		if !ok || next >= len(words) {
 			break
 		}
 		at = next
 	}
-	switch {
-	case at >= len(words):
+	if at >= len(words) {
 		return "", at
-	case !words[at].plain:
-		return "?", at
 	}
-	return words[at].literal, at
+	return layoutWordName(words[at]), at
+}
+
+// wrapperOperand returns the index of the word the wrapper at words[at] runs.
+// silent is true for command -v and -V, which only print. ok is false when a
+// word that looks like an option follows and the wrapper does not accept it.
+func wrapperOperand(words []layoutWord, at int) (next int, silent, ok bool) {
+	next = at + 1
+	for words[at].literal == "command" && next < len(words) && words[next].plain && layoutOptions(words[next].literal) {
+		if strings.ContainsAny(words[next].literal, "vV") {
+			return next, true, true
+		}
+		next++
+	}
+	if next >= len(words) {
+		return next, false, true
+	}
+	if words[next].plain && words[next].literal == "--" {
+		return next + 1, false, true
+	}
+	return next, false, !strings.HasPrefix(words[next].literal, "-") || len(words[next].literal) < 2
+}
+
+// layoutOptions reports whether word is a group of the options p, v and V of
+// command.
+func layoutOptions(word string) bool {
+	return len(word) > 1 && strings.HasPrefix(word, "-") && strings.Trim(word[1:], "pvV") == ""
+}
+
+// layoutWordName is the name a command word stands for: its text, quoted or
+// escaped or not, when no expansion or pattern in it changes the name, else "?".
+// A quoted word is no reserved word of a construct, so it stays "?".
+func layoutWordName(word layoutWord) string {
+	if word.plain || !strings.ContainsAny(word.literal, "$`*?[{~") && !layoutReserved[word.literal] {
+		return word.literal
+	}
+	return "?"
 }
 
 // markAssignments records which words of a statement the shell reads as
@@ -586,7 +607,7 @@ func (r *layoutReader) markAssignments(words []layoutWord, first, at int, comman
 	}
 	span := textSpan{words[at+1].start, words[len(words)-1].end}
 	r.layout.evaluated = append(r.layout.evaluated, span)
-	if !layoutInShell[command] {
+	if !layoutInShell[command] && command != "?" {
 		r.layout.scopes = append(r.layout.scopes, span)
 	}
 }
