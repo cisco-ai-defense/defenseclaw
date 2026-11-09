@@ -155,6 +155,9 @@ var windowsUserPath = regexp.MustCompile(`(?i)^([a-z]:)/users/([^/]+)/(.+)$`)
 func typedTargetRuleText(resolved, home string) string {
 	text := activeHomeAsTilde(resolved, home)
 	if !actionfacts.DriveLetterPath(resolved) {
+		if pathCaseFoldHost && filepath.IsAbs(resolved) {
+			return caseFoldedPOSIXRuleText(resolved, home)
+		}
 		return text
 	}
 	if rest, ok := strings.CutPrefix(text, "~/"); ok {
@@ -226,12 +229,16 @@ func fileToolLinkTargetFindings(
 	options ruleScanOptions,
 ) []RuleFinding {
 	typed := actionfacts.PathTool(request.Input.Tool)
-	if !facts.Authoritative() || !facts.EnforcementEligible() || !typed && !hasApplyPatchCommand(facts) {
+	if !facts.Authoritative() || !facts.EnforcementEligible() ||
+		!typed && !hasApplyPatchCommand(facts) && !pathCaseFoldHost {
 		return nil
 	}
 	var findings []RuleFinding
 	for _, candidate := range facts.Paths {
-		if !linkTargetCandidate(facts, candidate, typed) {
+		// On a case-folding host every path of the action is also read in
+		// the spelling the rules write, whatever the command or access:
+		// ~/.NETRC is the file ~/.netrc names.
+		if !linkTargetCandidate(facts, candidate, typed) && !pathCaseFoldHost {
 			continue
 		}
 		if !filepath.IsAbs(candidate.Resolved) && !windowsActiveHomeMutation(candidate, request.Input.ActiveHome) {
@@ -240,7 +247,11 @@ func fileToolLinkTargetFindings(
 		for _, finding := range scanRuleGeneration(
 			generation, typedTargetRuleText(candidate.Resolved, request.Input.ActiveHome), request.Input.Tool, options,
 		) {
-			if trustedActionSensitivePathRule(finding.RuleID) {
+			// A case-folding host reads the path rules that have no
+			// path proof (AWS config, GnuPG, /etc/shadow) in any letter case
+			// too: the exact-case spelling gets their finding from the call text.
+			if trustedActionSensitivePathRule(finding.RuleID) ||
+				pathCaseFoldHost && strings.HasPrefix(finding.RuleID, "PATH-") {
 				findings = append(findings, finding)
 			}
 		}
