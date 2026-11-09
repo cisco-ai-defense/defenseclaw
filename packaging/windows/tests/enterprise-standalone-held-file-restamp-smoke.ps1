@@ -360,6 +360,8 @@ try {
             if (-not $deferredMessage.StartsWith('codex_requirements_held: ') -or -not $deferredMessage.Contains('/repair') -or $deferredMessage -match 'FORCE|uninstall') {
                 throw "deferred rollback hold: not retryable, or not pointing at /repair: '$deferredMessage'"
             }
+            # This process is the holder, and the query leaves it out (it is Setup itself): the message says what it can.
+            if (-not $deferredMessage.Contains('no process id is available')) { throw "deferred rollback hold: no hint for a holder Windows did not name: '$deferredMessage'" }
             # The recovery step defers instead of stopping the rollback: the
             # held code is recorded, the hold list ends the run.
             Add-DefenseClawRollbackDeferredHold -Message $deferredMessage
@@ -367,7 +369,7 @@ try {
             if ($script:DefenseClawRollbackDeferredHolds.Count -ne 1) { throw 'deferred holds: the same message was listed twice' }
             $clock = [Diagnostics.Stopwatch]::StartNew()
             $second = ''
-            $handle = Open-Holder $heldState $READ_DATA $SHARE_R
+            $handle = Open-Holder $heldState $holders[0].Access $holders[0].Share
             try { try { [void](Open-DefenseClawCodexRollbackHold -Layout $heldLayout -Path $heldState) } catch { $second = $_.Exception.Message } }
             finally { Close-Holder $handle }
             if (-not $second.StartsWith('codex_state_held: ') -or $clock.Elapsed.TotalSeconds -gt 15) { throw "deferred holds: a second holder waited $([int]$clock.Elapsed.TotalSeconds) s or was not named: '$second'" }
