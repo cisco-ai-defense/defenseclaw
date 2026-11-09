@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
@@ -62,6 +63,9 @@ type hookReportedMCPServers struct {
 	mu      sync.Mutex
 	servers map[string]config.MCPServerEntry
 	perHome map[string]int
+	// refused holds, per session and server name, the refused definitions
+	// the session reported (heldMCPRefusals).
+	refused map[string]*heldMCPRefusals
 }
 
 func (h *hookReportedMCPServers) list() ([]config.MCPServerEntry, error) {
@@ -99,8 +103,9 @@ func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
 }
 
 // forget drops the server a hook reported earlier, whose definition no longer
-// is one the scanner refuses: it keeps the lists the hooks apply, and the
-// refusal recorded for the old definition must not block the new one.
+// is one the scanner refuses and that no running session holds refused: it
+// keeps the lists the hooks apply, and the refusal recorded for the old
+// definition must not block the new one.
 func (h *hookReportedMCPServers) forget(entry config.MCPServerEntry) {
 	key := watcher.MCPEventPath(entry)
 	h.mu.Lock()
@@ -129,26 +134,50 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		return
 	}
 	entry, ok := a.lookupCallerMCPServer(ctx, cfg, connectorName, probe.WorkspaceDir, probe.ServerName)
-	if !ok || strings.TrimSpace(entry.Name) == "" {
+	haveCurrent := ok && strings.TrimSpace(entry.Name) != ""
+	var reported config.MCPServerEntry
+	refused := false
+	if haveCurrent {
+		reported = config.MCPServerEntry{
+			Name: strings.TrimSpace(entry.Name), URL: strings.TrimSpace(entry.URL), Transport: entry.Transport,
+			Connector: connectorName, Home: home,
+		}
+		if reported.URL == "" {
+			if entry.LocalRefusal == "" {
+				// A definition read from the files is the complete one.
+				entry.LocalRefusal = mcplocal.Class(entry.Command, entry.Args)
+			}
+			if refused = watcher.MCPLocalRefused(entry); refused {
+				reported.Command = strings.TrimSpace(entry.Command)
+				reported.Args = slices.Clone(entry.Args)
+				reported.LocalRefusal = entry.LocalRefusal
+				reported.ArgsCut = entry.ArgsCut
+			}
+		}
+	}
+	now := time.Now()
+	if refused {
+		// A call that names no session cannot be tied to an agent process, and
+		// nothing would end the hold (mcpSessionStarted needs the id), so only
+		// a named session keeps what it met.
+		if probe.SessionID != "" {
+			a.hookMCP.retainRefused(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, reported, now)
+		}
+		a.hookMCP.note(reported)
 		return
 	}
-	reported := config.MCPServerEntry{
-		Name: strings.TrimSpace(entry.Name), URL: strings.TrimSpace(entry.URL), Transport: entry.Transport,
-		Connector: connectorName, Home: home,
+	// The running agent keeps the connection to a refused definition after its
+	// config is edited, so a refusal the session reported stays listed, and
+	// blocks the calls, until the agent starts again (mcpSessionStarted).
+	if held, _ := a.hookMCP.heldRefusals(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, now); len(held) > 0 {
+		a.hookMCP.note(held[len(held)-1])
+		return
 	}
-	if reported.URL == "" {
-		if entry.LocalRefusal == "" {
-			// A definition read from the files is the complete one.
-			entry.LocalRefusal = mcplocal.Class(entry.Command, entry.Args)
-		}
-		if !watcher.MCPLocalRefused(entry) {
-			a.hookMCP.forget(reported)
-			return
-		}
-		reported.Command = strings.TrimSpace(entry.Command)
-		reported.Args = slices.Clone(entry.Args)
-		reported.LocalRefusal = entry.LocalRefusal
-		reported.ArgsCut = entry.ArgsCut
+	switch {
+	case !haveCurrent:
+	case reported.URL != "":
+		a.hookMCP.note(reported)
+	default:
+		a.hookMCP.forget(reported)
 	}
-	a.hookMCP.note(reported)
 }

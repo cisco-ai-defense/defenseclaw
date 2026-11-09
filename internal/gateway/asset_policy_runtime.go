@@ -318,8 +318,10 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	// explicit deny was handled above (GAP-0775, GAP-0778). The rule decides
 	// the definition the agent config lists; a revoked earlier definition
 	// the agent may still run is not that one, so the allow written for the
-	// listed one does not answer it (GAP-0920).
-	if status.Failed && !status.Revoked && !matched && existing.Enabled && existing.Source == "admin-allow" {
+	// listed one does not answer it (GAP-0920). A session that met a refused
+	// definition is released only by an allow covering every one it met.
+	if status.Failed && !status.Revoked && !matched && existing.Enabled && existing.Source == "admin-allow" &&
+		a.heldRefusalsAllowed(ctx, cfg, connectorName, probe) {
 		return config.AssetPolicyDecision{}, false
 	}
 	name := status.Name
@@ -736,6 +738,7 @@ func (a *APIServer) mcpSessionStarted(ctx context.Context, connector, sessionID,
 		return
 	}
 	a.mcpResolved.forgetSession(connector, home, sessionID)
+	a.hookMCP.forgetSession(connector, home, sessionID)
 }
 
 // mcpProbeDecision is the asset policy verdict on a probe whose definition
