@@ -396,14 +396,20 @@ func openClawExtensionMatchesBundle(extDir string) bool {
 // snapshot is kept only while openclaw.json still holds exactly what DefenseClaw
 // last wrote. Once the user (or OpenClaw) changed it, or when there is no
 // snapshot but the file already registers DefenseClaw, teardown removes only
-// DefenseClaw's own entries and keeps everything else (GAP-1463).
+// DefenseClaw's own entries and keeps everything else (GAP-1463). A record
+// of an earlier setup is not dropped when the file changed: it is marked, so
+// the exact restore stays off while the copy of the file from before setup
+// still shows which settings setup added, such as the conversation-hook grant
+// (GAP-0986).
 func openClawSnapshotUsable(dataDir, connectorName, configPath string) (bool, error) {
 	drifted, err := managedFileBackupDrifted(dataDir, connectorName, "openclaw.json", configPath)
 	if err != nil {
 		return false, err
 	}
 	if drifted {
-		discardManagedFileBackup(dataDir, connectorName, "openclaw.json")
+		if err := captureManagedFileBackup(dataDir, connectorName, "openclaw.json", configPath); err != nil {
+			return false, err
+		}
 		return false, nil
 	}
 	if _, err := os.Stat(managedFileBackupPath(dataDir, connectorName, "openclaw.json")); err == nil {

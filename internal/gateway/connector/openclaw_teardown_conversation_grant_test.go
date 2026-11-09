@@ -191,3 +191,71 @@ func TestOpenClawUninstallOfASavedJSON5FileKeepsItsSpellingAndTakesOutTheGrant(t
 		}
 	}
 }
+
+// Setup runs again on every gateway start. A second setup over a file OpenClaw
+// saved must keep the record of the file from before setup, so uninstall still
+// knows the conversation-hook grant is DefenseClaw's to take out (GAP-0986).
+func TestOpenClawRepeatedSetupOverASavedFileKeepsTheGrantOwnership(t *testing.T) {
+	for name, saves := range map[string]int{"one setup after the save": 1, "two setups after the save": 2} {
+		t.Run(name, func(t *testing.T) {
+			configPath, opts := openClawGrantFixture(t, "{\n  gateway: { port: 18789, },\n}\n")
+			saved := strings.Replace(mustReadFileString(t, configPath), "{", "{\"meta\": {\"saved\": true},", 1)
+			if err := os.WriteFile(configPath, []byte(saved), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			extDir := filepath.Join(filepath.Dir(configPath), "extensions", "defenseclaw")
+			for i := 0; i < saves; i++ {
+				exactRestore, err := openClawSnapshotUsable(opts.DataDir, "openclaw", configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if exactRestore {
+					t.Fatal("a saved file must not be offered the exact restore")
+				}
+				if err := patchOpenClawConfig(configPath, extDir, false, false, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous := openClawTeardownNoticeOutput
+			openClawTeardownNoticeOutput = &bytes.Buffer{}
+			t.Cleanup(func() { openClawTeardownNoticeOutput = previous })
+			if err := NewOpenClawConnector().Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			got := mustReadFileString(t, configPath)
+			for _, residue := range []string{"allowConversationAccess", "\"defenseclaw\"", "hooks"} {
+				if strings.Contains(got, residue) {
+					t.Fatalf("uninstall left %q after a repeated setup:\n%s", residue, got)
+				}
+			}
+			if !strings.Contains(got, "\"saved\"") {
+				t.Fatalf("uninstall lost the saved member:\n%s", got)
+			}
+		})
+	}
+}
+
+// The benign twin: a grant the operator had before setup survives repeated setups and uninstall.
+func TestOpenClawRepeatedSetupOverASavedFileKeepsAnOperatorGrant(t *testing.T) {
+	configPath, opts := openClawGrantFixture(t, `{"plugins":{"entries":{"defenseclaw":{"hooks":{"allowConversationAccess":true}}}}}`+"\n")
+	saved := strings.Replace(mustReadFileString(t, configPath), "{", "{\"meta\": {\"saved\": true},", 1)
+	if err := os.WriteFile(configPath, []byte(saved), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	extDir := filepath.Join(filepath.Dir(configPath), "extensions", "defenseclaw")
+	if _, err := openClawSnapshotUsable(opts.DataDir, "openclaw", configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchOpenClawConfig(configPath, extDir, false, false, true); err != nil {
+		t.Fatal(err)
+	}
+	previous := openClawTeardownNoticeOutput
+	openClawTeardownNoticeOutput = &bytes.Buffer{}
+	t.Cleanup(func() { openClawTeardownNoticeOutput = previous })
+	if err := NewOpenClawConnector().Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	if got := mustReadFileString(t, configPath); !strings.Contains(got, "allowConversationAccess") {
+		t.Fatalf("a grant the operator wrote was removed:\n%s", got)
+	}
+}
