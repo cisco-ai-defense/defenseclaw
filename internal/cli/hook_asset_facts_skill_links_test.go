@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -127,6 +128,10 @@ func TestHookAssetFactsReportsALongLinkedSkillFolderPath(t *testing.T) {
 // with the name its SKILL.md declares: cleaning must not turn the path into
 // its skill root or drop the claim.
 func TestHookAssetFactsReportsASpaceNamedLinkedSkillFolder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows drops trailing spaces from a name, so no folder is named space.
+		t.Skip("a folder named space cannot exist on Windows")
+	}
 	home, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

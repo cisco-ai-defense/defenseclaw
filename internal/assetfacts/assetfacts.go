@@ -1177,6 +1177,10 @@ const maxLinkHops = 40
 // path, one component at a time in the order the filesystem takes them: a
 // parent segment removes the last component of the path as resolved so far,
 // so it leaves the folder a link leads to, not the folder that holds the link.
+// A path on a network share (a Windows UNC path) is never examined: reading
+// its attributes opens a session with another machine, and one that does not
+// answer holds the hook for the system connect timeout. It stays as spelled,
+// as does the rest of a path after a link that leads onto a share.
 // Pass the path as it is spelled; cleaning it first would drop that segment
 // before the link in front of it is known. A link whose target is missing is
 // read and followed all the same, so a link placed before its target exists
@@ -1188,7 +1192,7 @@ const maxLinkHops = 40
 func ResolveLinks(path string) string {
 	volume := filepath.VolumeName(path)
 	rest := filepath.ToSlash(path[len(volume):])
-	if !strings.HasPrefix(rest, "/") {
+	if !strings.HasPrefix(rest, "/") || onNetworkShare(path) {
 		return filepath.Clean(path)
 	}
 	resolved := volume + string(filepath.Separator)
@@ -1227,6 +1231,9 @@ func ResolveLinks(path string) string {
 			resolved = targetVolume + string(filepath.Separator)
 		}
 		pending = append(strings.Split(targetRest, "/"), pending...)
+		if onNetworkShare(resolved) {
+			return filepath.Clean(resolved + strings.Join(pending, "/"))
+		}
 	}
 	// A path that exists and has no link left is spelled as the filesystem
 	// spells it (a Windows short name, the case of a folder); a missing one
