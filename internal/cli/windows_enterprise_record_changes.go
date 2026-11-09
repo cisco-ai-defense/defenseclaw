@@ -34,7 +34,7 @@ var windowsEnterpriseKeptRecordChanges = func(installStateDir string, since time
 				continue
 			}
 			changes = append(changes, fmt.Sprintf(
-				"%s could be changed by another account: kept it as %s (administrators only) and wrote it again%s",
+				"%s could be changed by another account: kept it as %s and wrote it again; the kept copy is given administrator-only access, by this run or by the next one if a program holds it open%s",
 				filepath.Join(installStateDir, record), kept, windowsEnterpriseAttestAgainNote(strings.HasPrefix(record, "agent-"))))
 		}
 	}

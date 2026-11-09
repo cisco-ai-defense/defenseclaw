@@ -58,7 +58,12 @@ def test_the_rebuild_is_checked_and_built_before_any_live_record_changes() -> No
     # old object is kept by the atomic step of Publish-..., so a record is in
     # place at every moment (review D1). The kept file is stamped after.
     assert "Move-Item" not in body and "Remove-Item" not in body
-    assert body.index("    Protect-DefenseClawKeptRecord ", publish) > publish
+    # The stamp of a kept copy is a warning, not a stop: the repair transaction
+    # that follows must run on the rebuilt record.
+    assert body.index("    Complete-DefenseClawKeptRecordStamps -Layout $Layout\n    return", publish) > publish
+    assert "Protect-DefenseClawKeptRecord" not in body
+    complete = _function(_text(), "Complete-DefenseClawKeptRecordStamps")
+    assert "Write-Warning" in complete
     # A later run finishes what an earlier one left.
     assert "Complete-DefenseClawKeptRecordStamps" in body and "Get-DefenseClawOrphanedKeptRecordRefusal" in body
     names_body = _function(_text(), "Get-DefenseClawStandaloneKeptRecordPath")

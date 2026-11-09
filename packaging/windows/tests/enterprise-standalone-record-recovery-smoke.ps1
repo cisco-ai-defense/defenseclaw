@@ -248,28 +248,30 @@ try {
             if ($script:liveGaps.Count -ne 0) { throw "$($case.Name): the rerun had a gap: $($script:liveGaps -join '; ')" }
         }
 
-        # Review S1: a kept file that cannot be given administrator-only access
-        # is a named refusal, after the record was written again.
+        # Review S1/D2: a kept file that cannot be given administrator-only
+        # access (a program holds it open) is a named warning, not a stop: the
+        # records are written and the run goes on to the repair transaction,
+        # which a legacy-shaped rebuilt record needs (a native run that stopped
+        # here left the next /ensure failing with the services stopped). The
+        # next run stamps it.
         Reset-Records
         Plant-Owner $metadata
         $script:failKeptStamp = $true
-        $refused = ''
-        try { [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H') }
-        catch { $refused = $_.Exception.Message }
+        $quiet = @(Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H' 3>&1)
         $script:failKeptStamp = $false
-        if ($refused -notmatch 'could not be given administrator-only access' -or $refused -notmatch 'icacls' -or
+        $warned = (@($quiet | Microsoft.PowerShell.Core\Where-Object { $_ -is [Management.Automation.WarningRecord] }) | Microsoft.PowerShell.Core\ForEach-Object { $_.Message }) -join ' '
+        if ($warned -notmatch 'could not be given administrator-only access' -or $warned -notmatch 'icacls' -or $warned -notmatch 'run the same command again' -or $warned -notmatch 'only the stamp is left' -or
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata) -or @(Kept 'deployment.json').Count -ne 1) {
-            throw "a kept file that could not be stamped was not named: $refused"
+            throw "a kept file that could not be stamped was not named: $warned"
         }
-        # D2: the text says a rerun finishes it, and the rerun does: the kept
-        # copy gets its administrator-only access once nothing holds it.
-        if ($refused -notmatch 'run the same command again' -or $refused -notmatch 'already written') { throw "the stamp refusal does not say a rerun finishes it: $refused" }
         $heldKept = (Kept 'deployment.json')[0].FullName
         if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $heldKept) -eq '') { throw 'the kept copy was stamped although the stamp failed' }
+        # Still held on the next run: it warns again and goes on.
         $script:failKeptStamp = $true
         $quiet = @(Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H' 3>&1)
         $script:failKeptStamp = $false
         if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $heldKept) -eq '') { throw 'a rerun with the copy still held stamped it' }
+        # Released: the next run finishes the stamp and keeps no further copy.
         [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H')
         if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $heldKept) -ne '' -or @(Kept 'deployment.json').Count -ne 1) { throw 'the rerun did not finish the stamp of the kept copy' }
 

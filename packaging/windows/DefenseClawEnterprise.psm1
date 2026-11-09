@@ -15945,8 +15945,8 @@ function Protect-DefenseClawKeptRecord {
         $held = Get-DefenseClawHeldFileRefusal -ErrorRecord $_
         if ($null -eq $held) { $held = $_.Exception.Message }
         throw ("untrusted_record: $Path was written again, but the kept copy $Kept could not be given administrator-only access ($held). " +
-            "The record itself is already written again, so only the stamp is left; the kept copy is evidence only and nothing reads it. " +
-            "$(Format-DefenseClawRerunStep) once the program that holds it is stopped (or after a restart): that run finishes the stamp, and until then it warns and goes on. " +
+            "Setup went on: the record is written again and only the stamp is left; the kept copy is evidence only and nothing reads it. " +
+            "$(Format-DefenseClawRerunStep) once the program that holds it is stopped (or after a restart): that run finishes the stamp; until then every run warns and goes on. " +
             "Or, from an elevated prompt: icacls `"$Kept`" /inheritance:r /grant:r `"*S-1-5-18:(F)`" `"*S-1-5-32-544:(F)`" and icacls `"$Kept`" /setowner *S-1-5-32-544, or delete it (Remove-Item -LiteralPath `"$Kept`" -Force)")
     }
     Write-DefenseClawResilienceEvent -Marker defenseclaw_recover -Fields @{
@@ -15962,7 +15962,8 @@ function Complete-DefenseClawKeptRecordStamps {
         administrator-only access list. A run that wrote the records but could
         not stamp the kept copy (a program held it open) leaves the copy
         unstamped; the next run finishes it here. A stamp that still fails
-        is a warning, never a stop: the copy is evidence only.
+        is a warning, never a stop: the copy is evidence only and the run must go on
+        to the repair transaction.
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
     foreach ($record in @([string]$Layout.MetadataPath, [string]$Layout.AgentApplicationControlAttestationPath)) {
@@ -16151,9 +16152,11 @@ function Invoke-DefenseClawStandaloneRecordRecovery {
         $kept.Add([string]$item.Kept)
         Microsoft.PowerShell.Utility\Write-Warning -Message "untrusted_record_replaced: $($item.Record.Path) could be changed by another account and was kept as $($item.Kept); Setup wrote it again"
     }
-    foreach ($item in $published) {
-        Protect-DefenseClawKeptRecord -Kept ([string]$item.Kept) -Path ([string]$item.Record.Path) -Reason ([string]$item.Record.Reason)
-    }
+    # The kept copies get their administrator-only access now. A copy a program
+    # holds open cannot be stamped: that is a warning, not a stop, because the
+    # records are written and the repair transaction that follows must run
+    # (the rebuilt record has the legacy shape until it has, and any other
+    # action on it fails after stopping the services); the next run stamps it.
     Complete-DefenseClawKeptRecordStamps -Layout $Layout
     return $kept.ToArray()
 }
