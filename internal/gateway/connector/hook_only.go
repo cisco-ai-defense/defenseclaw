@@ -4632,19 +4632,30 @@ func hermesEarlierDataDir(root string) bool {
 		return false
 	}
 	root = filepath.Clean(root)
-	homes := []string{filepath.Join(userHomeDir(), ".defenseclaw")}
-	if env := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); env != "" {
-		homes = append(homes, env)
-	}
-	for _, home := range homes {
-		if !filepath.IsAbs(home) || filepath.Clean(home) != home {
-			continue
-		}
+	for _, home := range installHomeCandidates() {
 		if root == home || hermesDataDirListed(home, root) {
 			return true
 		}
 	}
 	return false
+}
+
+// installHomeCandidates are the install homes this process can name, each an
+// absolute clean path: ~/.defenseclaw and, when the process has it,
+// DEFENSECLAW_HOME. A process started with its data folder as DEFENSECLAW_HOME
+// is not told where the install home is, so both are read.
+func installHomeCandidates() []string {
+	homes := []string{filepath.Join(userHomeDir(), ".defenseclaw")}
+	if env := strings.TrimSpace(os.Getenv("DEFENSECLAW_HOME")); env != "" {
+		homes = append(homes, env)
+	}
+	valid := homes[:0]
+	for _, home := range homes {
+		if filepath.IsAbs(home) && filepath.Clean(home) == home {
+			valid = append(valid, home)
+		}
+	}
+	return valid
 }
 
 func hermesDataDirListed(home, root string) bool {
