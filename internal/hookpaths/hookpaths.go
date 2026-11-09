@@ -2288,6 +2288,17 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 	}
 	identity := strings.Join(identities, "\x00")
+	// A script body this call could not read (the call wait for a network
+	// share, or the links on its path past the bound) is told to the gateway:
+	// only this reader opens the user home (ShareBodyUnreadKey).
+	if unread := shareBodyUnreadFact(); unread != "" {
+		entry := len(jsonString(ShareBodyUnreadKey)) + 1 + len(jsonString(unread)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return unprovenEvidence(cwd, unprovenReason, identity)
+		}
+		targets[ShareBodyUnreadKey] = unread
+		size += entry
+	}
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
@@ -2648,6 +2659,8 @@ func resolveCopilotCalls(connector, surface, event string, envelope map[string]j
 				merged[key] = value
 			case key == FileIdentitiesKey:
 				merged[key] = previous + "," + value
+			case key == ShareBodyUnreadKey:
+				merged[key] = mergeShareBodyUnread(previous, value)
 			case key == InstructionIdentityKey:
 				merged[key] = previous + "\x00" + value
 			default:
@@ -2700,6 +2713,9 @@ func unprovenEvidence(cwd, reason, identity string) string {
 	if identity != "" {
 		targets[InstructionIdentityKey] = identity
 	}
+	if unread := shareBodyUnreadFact(); unread != "" {
+		targets[ShareBodyUnreadKey] = unread
+	}
 	encoded, _ := json.Marshal(targets)
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
@@ -2726,6 +2742,7 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[ActionDecisionKey] != "" && targets[ActionDecisionKey] != ProtectedTargetDecision) ||
 		(targets[NoDereferenceTouchSafeKey] != "" && targets[NoDereferenceTouchSafeKey] != "1") ||
 		(targets[LinksStableKey] != "" && targets[LinksStableKey] != "1") ||
+		!validShareBodyUnreadFact(targets[ShareBodyUnreadKey]) ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
