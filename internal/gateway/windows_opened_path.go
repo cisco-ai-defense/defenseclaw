@@ -35,8 +35,8 @@ import (
 // asks the file system; other builds and tests replace it.
 var expandWindowsShortNames = osExpandWindowsShortNames
 
-// windowsProfileFolder reports a folder that holds the entries only the
-// folder of a user profile holds (NTUSER.DAT, AppData). The Windows build
+// windowsProfileFolder reports a folder that holds the registry hive only
+// the folder of a user profile holds (NTUSER.DAT). The Windows build
 // asks the file system; other builds and tests replace it.
 var windowsProfileFolder = osWindowsProfileFolder
 
@@ -56,7 +56,8 @@ var windowsAccountWord = regexp.MustCompile(`^\w+$`)
 // and share. In every name the part after a colon (an alternate data stream,
 // such as ::$DATA) is dropped, dot segments are resolved, and an 8.3 short
 // name is expanded. Trailing dots and spaces are dropped as Win32 does, except
-// in a folder named by three or more periods (a valid name, kept), and except
+// in a folder named by three or more periods (a valid name, kept), except a
+// trailing space of a folder name (kept, see windowsTrimmedSegment), and except
 // in a path with the exact extended-length prefix \\?\: Win32 does not
 // normalize that one, so a name with trailing dots or spaces there is a file
 // of its own. The forward-slash spelling of that prefix, and every other
@@ -84,8 +85,8 @@ func windowsOpenedPath(spelling string, verbatim bool) (string, bool, error) {
 			name = name[:colon]
 		}
 		trimmed := name
-		if !verbatim && !windowsPeriodsDirectory(name, index == last) {
-			trimmed = strings.TrimRight(name, ". ")
+		if !verbatim {
+			trimmed = windowsTrimmedSegment(name, index == last)
 		}
 		switch {
 		case name == "..":
@@ -104,11 +105,20 @@ func windowsOpenedPath(spelling string, verbatim bool) (string, bool, error) {
 	return opened, true, err
 }
 
-// windowsPeriodsDirectory reports a path segment that Win32 keeps: three or
-// more periods, followed by a separator, are a valid folder name and are not
-// normalized away. The last segment of a path is trimmed like any other name.
-func windowsPeriodsDirectory(name string, last bool) bool {
-	return !last && len(name) >= 3 && strings.Trim(name, ".") == ""
+// windowsTrimmedSegment is a path segment as Win32 keeps it. Trailing periods
+// and spaces are removed from the last segment only (a path that ends in a
+// separator has an empty last segment). In any other segment only the periods
+// of a name that ends in a period go, so a trailing space stays part of the
+// folder name (a file below "x \" is not a file below "x"), and a segment of
+// three or more periods is a valid folder name, kept.
+func windowsTrimmedSegment(name string, last bool) string {
+	switch {
+	case last:
+		return strings.TrimRight(name, ". ")
+	case len(name) >= 3 && strings.Trim(name, ".") == "":
+		return name
+	}
+	return strings.TrimRight(name, ".")
 }
 
 // windowsVerbatimOperand reports an operand that, as the caller wrote it, has
@@ -295,21 +305,14 @@ func markTrailingSpaces(opened string) string {
 	return strings.Join(names, "/")
 }
 
-// holdsProfileEntries reports a folder that holds the entries of a user
-// profile: NTUSER.DAT, a file, or AppData, a folder that holds the Local and
-// Roaming folders of a profile. An entry of that name of the other kind (a
-// project file called AppData), or an AppData folder of a project without
-// those two folders, is no marker. stat answers for a path in forward-slash
-// spelling.
+// holdsProfileEntries reports a folder that holds the registry hive every user
+// profile has: NTUSER.DAT, a file. A folder of that name is no marker, and
+// neither are folders an ordinary project can hold as well (AppData with its
+// Local and Roaming folders): only the hive proves an account profile. stat
+// answers for a path in forward-slash spelling.
 func holdsProfileEntries(dir string, stat func(string) (os.FileInfo, error)) bool {
-	isKind := func(path string, folder bool) bool {
-		info, err := stat(path)
-		return err == nil && info.IsDir() == folder
-	}
-	if isKind(dir+"/NTUSER.DAT", false) {
-		return true
-	}
-	return isKind(dir+"/AppData", true) && isKind(dir+"/AppData/Local", true) && isKind(dir+"/AppData/Roaming", true)
+	info, err := stat(dir + "/NTUSER.DAT")
+	return err == nil && !info.IsDir()
 }
 
 // profileHomeAtOrAbove reports a drive-letter path that lies in a folder of a

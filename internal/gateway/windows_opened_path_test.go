@@ -84,6 +84,13 @@ func TestWindowsOpenedPathIsTheNameWindowsOpens(t *testing.T) {
 		`C:\Users\r109yws.d-2\...\..\.netrc`:                       home + "/.netrc",
 		`C:\Users\r109yws.d-2\x\...`:                               home + "/x",
 		`C:\Users\r109yws.d-2\x...\.netrc`:                         home + "/x/.netrc",
+		`C:\Users\r109yws.d-2\... \.netrc`:                         home + "/... /.netrc",
+		`C:\Users\r109yws.d-2\... \..\.netrc`:                      home + "/.netrc",
+		`C:\Users\r109yws.d-2\.aws \credentials`:                   home + "/.aws /credentials",
+		`C:\Users\r109yws.d-2\x. \.netrc`:                          home + "/x. /.netrc",
+		`C:\Users\r109yws.d-2\x \..\.netrc`:                        home + "/.netrc",
+		`C:\Users\r109yws.d-2\.aws..\credentials`:                  home + "/.aws/credentials",
+		`C:\Users\r109yws.d-2\.netrc \`:                            home + "/.netrc ",
 	} {
 		got, ok := openedPath(spelling)
 		if !ok || got != want {
@@ -231,9 +238,9 @@ func TestWindowsOpenedPathReportsWhatTheFileSystemCouldNotAnswer(t *testing.T) {
 	}
 }
 
-// A project file called AppData, a folder called NTUSER.DAT, or an AppData
-// folder without the Local and Roaming folders of a profile is not an entry of
-// a user profile.
+// A folder called NTUSER.DAT is not the registry hive of a user profile, and
+// neither a project file called AppData nor an AppData folder with the Local
+// and Roaming folders of a profile proves an account: a project can hold them.
 func TestHoldsProfileEntriesNeedsTheKindOfEntryAProfileHolds(t *testing.T) {
 	stat := func(entries map[string]bool) func(string) (os.FileInfo, error) {
 		return func(path string) (os.FileInfo, error) {
@@ -248,15 +255,12 @@ func TestHoldsProfileEntriesNeedsTheKindOfEntryAProfileHolds(t *testing.T) {
 		entries map[string]bool
 		want    bool
 	}{
-		"AppData profile":      {map[string]bool{"C:/p/AppData": true, "C:/p/AppData/Local": true, "C:/p/AppData/Roaming": true}, true},
+		"AppData profile only": {map[string]bool{"C:/p/AppData": true, "C:/p/AppData/Local": true, "C:/p/AppData/Roaming": true}, false},
 		"AppData folder only":  {map[string]bool{"C:/p/AppData": true}, false},
-		"AppData Local only":   {map[string]bool{"C:/p/AppData": true, "C:/p/AppData/Local": true}, false},
-		"AppData Roaming file": {map[string]bool{"C:/p/AppData": true, "C:/p/AppData/Local": true, "C:/p/AppData/Roaming": false}, false},
 		"NTUSER.DAT file":      {map[string]bool{"C:/p/NTUSER.DAT": false}, true},
 		"AppData file":         {map[string]bool{"C:/p/AppData": false}, false},
 		"NTUSER.DAT folder":    {map[string]bool{"C:/p/NTUSER.DAT": true}, false},
-		"both of the wrong":    {map[string]bool{"C:/p/AppData": false, "C:/p/NTUSER.DAT": true}, false},
-		"wrong and right one":  {map[string]bool{"C:/p/AppData": false, "C:/p/NTUSER.DAT": false}, true},
+		"hive and AppData":     {map[string]bool{"C:/p/AppData": true, "C:/p/NTUSER.DAT": false}, true},
 		"neither":              {map[string]bool{"C:/p/notes.txt": false}, false},
 	} {
 		if got := holdsProfileEntries("C:/p", stat(c.entries)); got != c.want {
