@@ -1805,7 +1805,7 @@ func protectedReachPathWith(path string, protected protectedFiles, ssh string, m
 	if protected.has(resolved) || samePathName(resolved, ssh) {
 		return true
 	}
-	if mapped, ok := protected.target(resolved); ok && protected.has(mapped) {
+	if mapped, ok := protected.targetWith(resolved, memo); ok && protected.has(mapped) {
 		return true
 	}
 	return false

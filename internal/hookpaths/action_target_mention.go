@@ -1928,7 +1928,7 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	// Its directory is followed and its name kept, so mv a.txt /ext/y/
 	// config.yaml with y -> ~/.defenseclaw names the entry when config.yaml
 	// links out of the tree, as it does when config.yaml is a file (GAP-2560).
-	if actionStateEntryMayDiffer(value) {
+	if actionStateEntryMayDiffer(value, home.memo) {
 		if name := filepath.Base(value); name != "." && name != ".." && name != string(filepath.Separator) {
 			if parent, ok := home.memo.resolveWriteTarget(filepath.Dir(value)); ok {
 				relative, err := filepath.Rel(activeHome, filepath.Join(parent, name))
@@ -1940,7 +1940,7 @@ func actionProtectedStatePath(value string, home *actionStateHome) bool {
 	}
 	// Only an existing regular file with a second link can alias the state.
 	// A missing or ordinary target costs one stat here, not a second walk.
-	info, err := pathStat(resolved)
+	info, err := home.memo.stat(resolved)
 	if err != nil || !info.Mode().IsRegular() || linkCount(resolved, info) < 2 {
 		return false
 	}
@@ -5037,11 +5037,11 @@ func actionSpelledWindowsTarget(value string, tilde bool, base, home string, sta
 // walk: only when the last name is itself a link. An absolute value whose
 // last name is missing or not a link costs one Lstat, not a second walk
 // (GAP-2279 answer budget); a relative value is always read.
-func actionStateEntryMayDiffer(value string) bool {
+func actionStateEntryMayDiffer(value string, memo *TargetMemo) bool {
 	if !filepath.IsAbs(value) {
 		return true
 	}
-	info, err := pathLstat(value)
+	info, err := memo.lstat(value)
 	if err != nil {
 		return !os.IsNotExist(err)
 	}

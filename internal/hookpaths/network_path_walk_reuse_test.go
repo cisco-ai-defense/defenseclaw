@@ -147,9 +147,7 @@ func TestShareFolderThatBecomesALinkInTheCallIsAsked(t *testing.T) {
 	}
 }
 
-// The same when a folder above the one the operands are in becomes the link
-// (a name the call has not read: a name it read is answered as before,
-// network_path_call_reads_test.go).
+// The same when a folder above the one the operands are in becomes the link.
 func TestShareAncestorThatBecomesALinkInTheCallIsAsked(t *testing.T) {
 	fx := newWalkReuseFixture(t)
 	end := HookCall()
@@ -161,7 +159,7 @@ func TestShareAncestorThatBecomesALinkInTheCallIsAsked(t *testing.T) {
 	if err := os.Symlink(filepath.Join(fx.share, "project"), fx.project); err != nil {
 		t.Skipf("symlink unavailable: %v", err)
 	}
-	if _, err := pathLstat(filepath.Join(fx.slot, "after-the-swap")); !errors.Is(err, errNetworkShareUnanswered) {
+	if _, err := pathLstat(filepath.Join(fx.slot, "f0")); !errors.Is(err, errNetworkShareUnanswered) {
 		t.Fatalf("read below the swapped ancestor = %v, want the share error", err)
 	}
 	if got := fx.probes(); got != 1 {
@@ -209,7 +207,7 @@ func TestShareKnownFolderReadThatDoesNotReturnIsBounded(t *testing.T) {
 	t.Cleanup(func() { walkLstat = old })
 	budget := currentHookCall().waitLeft
 	start := time.Now()
-	if _, err := pathLstat(filepath.Join(fx.slot, "after-the-hold")); !errors.Is(err, errNetworkShareUnanswered) {
+	if _, err := pathLstat(filepath.Join(fx.slot, "f0")); !errors.Is(err, errNetworkShareUnanswered) {
 		t.Fatalf("held read = %v, want the share error", err)
 	}
 	if took := time.Since(start); took > 5*time.Second {

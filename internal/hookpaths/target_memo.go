@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"os"
 	"slices"
 	"sync"
 )
@@ -43,6 +44,11 @@ type TargetMemo struct {
 	// resolved are the answers of resolveWriteTarget by the exact path: the
 	// scans of one call ask for the same operands again (GAP-0483).
 	resolved map[string]resolvedTarget
+	// lstats and stats are the answers of the evaluation's lstat and stat of
+	// a name that exists or is missing (reads): the scans of one call read
+	// each operand again and again, and on Windows each read first walks the
+	// folders of the name for a link into a network share (rel-1-0-9:GAP-0943).
+	lstats, stats map[string]memoRead
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
@@ -63,6 +69,69 @@ func NewTargetMemo() *TargetMemo {
 		keys:     make(map[string][]string),
 		files:    make(map[string]protectedFiles),
 		resolved: make(map[string]resolvedTarget),
+		lstats:   make(map[string]memoRead),
+		stats:    make(map[string]memoRead),
+	}
+}
+
+// memoRead is what a stat or lstat of a name returned.
+type memoRead struct {
+	info os.FileInfo
+	err  error
+}
+
+// lstat is pathLstat through the memo. Only a name that exists or is missing
+// is kept: any other error (a share that did not answer, a refused read) is
+// read again, so a read the share walk reports unanswered is never taken for
+// an answer. Each read that is not answered from the memo is still a
+// pathLstat, walked for a link into a share as any other read.
+func (m *TargetMemo) lstat(name string) (os.FileInfo, error) {
+	if m == nil {
+		return pathLstat(name)
+	}
+	m.mu.Lock()
+	known, ok := m.lstats[name]
+	m.mu.Unlock()
+	if ok {
+		return known.info, known.err
+	}
+	info, err := pathLstat(name)
+	m.keep(m.lstats, name, info, err)
+	return info, err
+}
+
+// stat is pathStat through the memo. A name the evaluation has read with
+// lstat answers stat as well when that read decides it: a missing name is
+// missing, and a name that is no link is the same file.
+func (m *TargetMemo) stat(name string) (os.FileInfo, error) {
+	if m == nil {
+		return pathStat(name)
+	}
+	m.mu.Lock()
+	known, ok := m.stats[name]
+	if !ok {
+		if link, seen := m.lstats[name]; seen && (os.IsNotExist(link.err) ||
+			link.err == nil && link.info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0) {
+			known, ok = link, true
+		}
+	}
+	m.mu.Unlock()
+	if ok {
+		return known.info, known.err
+	}
+	info, err := pathStat(name)
+	m.keep(m.stats, name, info, err)
+	return info, err
+}
+
+func (m *TargetMemo) keep(into map[string]memoRead, name string, info os.FileInfo, err error) {
+	if err != nil && !os.IsNotExist(err) {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(into) < maxTargetMemoEntries {
+		into[name] = memoRead{info, err}
 	}
 }
 

@@ -1025,7 +1025,7 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				return fail()
 			}
 			memo.noteWork()
-			info, err := pathLstat(candidate)
+			info, err := memo.lstat(candidate)
 			if err != nil && !os.IsNotExist(err) {
 				return fail()
 			}
@@ -1239,6 +1239,12 @@ func (files protectedFiles) has(resolved string) bool {
 // the same file. When a protected file cannot be identified, a multiply
 // linked target may be an alias of it and is reported as unresolvable.
 func (files protectedFiles) target(resolved string) (string, bool) {
+	return files.targetWith(resolved, nil)
+}
+
+// targetWith is target with the evaluation's file system answers
+// (TargetMemo; nil: none).
+func (files protectedFiles) targetWith(resolved string, memo *TargetMemo) (string, bool) {
 	var info os.FileInfo
 	for _, p := range files {
 		if p.info == nil && !p.unknown {
@@ -1246,7 +1252,7 @@ func (files protectedFiles) target(resolved string) (string, bool) {
 		}
 		if info == nil {
 			var err error
-			if info, err = pathStat(resolved); err != nil || !info.Mode().IsRegular() {
+			if info, err = memo.stat(resolved); err != nil || !info.Mode().IsRegular() {
 				return resolved, true
 			}
 		}
