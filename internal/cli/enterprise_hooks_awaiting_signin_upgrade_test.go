@@ -45,12 +45,20 @@ func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInAfterAnUpgradeForEveryC
 	enterpriseHookReconcileDeferredSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) {
 		return false, errors.New("deferred target already has a selected runtime without protected Guardian authorization")
 	}
-	// No machine registration is proven closed here: the proof the Claude
-	// Code and Codex wait needs does not exist for the other connectors, and
-	// is not met for these two.
+	// No machine registration is proven closed here (that proof is for
+	// Claude Code and Codex), and the machine policy of a Copilot, OpenCode
+	// or Cursor hook is in force unless a row says otherwise.
 	previousClosed := enterpriseHookReconcileClosedMachineRegistration
-	t.Cleanup(func() { enterpriseHookReconcileClosedMachineRegistration = previousClosed })
+	previousRegistration := enterpriseHookReconcileMachineHookRegistration
+	t.Cleanup(func() {
+		enterpriseHookReconcileClosedMachineRegistration = previousClosed
+		enterpriseHookReconcileMachineHookRegistration = previousRegistration
+	})
 	enterpriseHookReconcileClosedMachineRegistration = func(enterprisehooks.InstallOptions) (bool, error) { return false, nil }
+	registered, registrationErr := true, error(nil)
+	enterpriseHookReconcileMachineHookRegistration = func(enterprisehooks.InstallOptions) (bool, error) {
+		return registered, registrationErr
+	}
 	enterpriseHookReconcileSecureClient = func() bool { return false }
 	released, releaseErr, other := "1.0.5", error(nil), true
 	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) {
@@ -66,7 +74,7 @@ func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInAfterAnUpgradeForEveryC
 		return enterprisehooks.InstallResult{Connector: opts.ConnectorName}, nil
 	}
 	signedOutRepair := "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable"
-	connectors := []string{"copilot", "cursor", "opencode", "amp", "devin", "antigravity", "kiro", "hermes"}
+	connectors := []string{"copilot", "cursor", "opencode"}
 	for _, name := range connectors {
 		opts := enterprisehooks.InstallOptions{ConnectorName: name}
 		deferred := enterprisehooks.ManifestTarget{Connector: name, SID: "S-1-5-21-1-2-3-1010", Deferred: true}
@@ -83,6 +91,21 @@ func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInAfterAnUpgradeForEveryC
 			!strings.Contains(err.Error(), "(verification: "+verifyErr.Error()+")") {
 			t.Fatalf("%s signed out after an upgrade: err=%v repaired=%t installs=%d, want the sign-in wait", name, err, repaired, installs)
 		}
+
+		// The wait needs the machine policy that registers the hook to be in
+		// force: without it, or when that cannot be proven, the account is not
+		// covered and the failure stays.
+		registered = false
+		if _, _, err = enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, opts, true); err == nil ||
+			errors.Is(err, errEnterpriseHookAwaitingSignIn) || !strings.HasPrefix(err.Error(), signedOutRepair) {
+			t.Fatalf("%s without its machine policy: err=%v, want the signed-out repair failure", name, err)
+		}
+		registered, registrationErr = true, errors.New("machine policy is untrusted")
+		if _, _, err = enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, opts, true); err == nil ||
+			errors.Is(err, errEnterpriseHookAwaitingSignIn) || !strings.HasPrefix(err.Error(), signedOutRepair) {
+			t.Fatalf("%s with an unreadable machine policy: err=%v, want the signed-out repair failure", name, err)
+		}
+		registrationErr = nil
 
 		// A lock this release wrote changed while the account was signed out
 		// (not the upgrade): that stays a failure.
@@ -118,6 +141,37 @@ func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInAfterAnUpgradeForEveryC
 		_, repaired, err = enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, opts, true)
 		if err != nil || !repaired || installs != 1 {
 			t.Fatalf("%s signed in, repair works: err=%v repaired=%t installs=%d, want a repair", name, err, repaired, installs)
+		}
+	}
+}
+
+// The connectors that register their hooks in the account's own agent
+// configuration (Hermes, Amp, Devin, Antigravity, Kiro) have no machine policy
+// to prove: an upgrade's drift stays a failure for a signed-out account, as
+// before GAP-0980, whatever the lock says.
+func TestEnterpriseHookVerifyOrRepairTargetKeepsTheFailureForConfigRegisteredConnectors(t *testing.T) {
+	stubSecureClientSignInReconcile(t)
+	previousRegistration := enterpriseHookReconcileMachineHookRegistration
+	t.Cleanup(func() { enterpriseHookReconcileMachineHookRegistration = previousRegistration })
+	enterpriseHookReconcileMachineHookRegistration = func(enterprisehooks.InstallOptions) (bool, error) { return true, nil }
+	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return enterprisehooks.InstallResult{}, errors.New("lock drift")
+	}
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	enterpriseHookReconcileDeferredSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) {
+		return false, errors.New("selected runtime")
+	}
+	enterpriseHookReconcileSecureClient = func() bool { return false }
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "1.0.5", true, nil }
+	previousEarlier := enterpriseHookReconcileTargetEarlierMatrix
+	t.Cleanup(func() { enterpriseHookReconcileTargetEarlierMatrix = previousEarlier })
+	enterpriseHookReconcileTargetEarlierMatrix = func(enterprisehooks.InstallOptions) (bool, error) { return false, nil }
+	for _, name := range []string{"hermes", "amp", "devin", "antigravity", "kiro"} {
+		deferred := enterprisehooks.ManifestTarget{Connector: name, SID: "S-1-5-21-1-2-3-1014", Deferred: true}
+		_, _, err := enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, enterprisehooks.InstallOptions{ConnectorName: name}, true)
+		if err == nil || errors.Is(err, errEnterpriseHookAwaitingSignIn) ||
+			!strings.HasPrefix(err.Error(), "enterprise hooks: protected target requires repair but its exact active Windows session is unavailable") {
+			t.Fatalf("%s: err=%v, want the signed-out repair failure", name, err)
 		}
 	}
 }
@@ -199,6 +253,9 @@ func TestEnterpriseHookUpgradeSignInWaitIsPendingNeverProtected(t *testing.T) {
 	}
 	enterpriseHookReconcileSecureClient = func() bool { return false }
 	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "1.0.5", true, nil }
+	previousRegistration := enterpriseHookReconcileMachineHookRegistration
+	t.Cleanup(func() { enterpriseHookReconcileMachineHookRegistration = previousRegistration })
+	enterpriseHookReconcileMachineHookRegistration = func(enterprisehooks.InstallOptions) (bool, error) { return true, nil }
 	deferred := enterprisehooks.ManifestTarget{Connector: "copilot", SID: "S-1-5-21-1-2-3-1012", Deferred: true}
 	_, _, err := enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, enterprisehooks.InstallOptions{ConnectorName: "copilot"}, true)
 	if err == nil {

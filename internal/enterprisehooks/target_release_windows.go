@@ -20,7 +20,7 @@ import (
 // closed. A protected lock by itself cannot establish either fact.
 func WindowsProtectedTargetHasClosedMachineRegistration(opts InstallOptions) (bool, error) {
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
-	if !WindowsClosedRegistrationProofConnector(name) {
+	if name != "claudecode" && name != "codex" {
 		return false, nil
 	}
 	if canonicalHookFailModeFor(opts.HookFailMode, false) != "closed" {
@@ -80,6 +80,51 @@ func WindowsProtectedTargetHasClosedMachineRegistration(opts InstallOptions) (bo
 		return false, err
 	}
 	return bundle.FailMode == "closed", nil
+}
+
+// WindowsProtectedTargetHasMachineHookRegistration proves that the machine
+// policy which registers a Copilot, OpenCode or Cursor hook is in force for
+// the target: the vendor policy file the guardian publishes is present,
+// administrator-owned and not writable by standard users (Copilot, and
+// OpenCode while its machine policy is in force), or the machine hooks file
+// registers the target's SID (Cursor). It does not look at the account's own
+// folder, which only the account's session can repair, and it claims no more
+// than the registration: a target an earlier release protected waits for the
+// account's next sign-in only while it holds (GAP-0980).
+func WindowsProtectedTargetHasMachineHookRegistration(opts InstallOptions) (bool, error) {
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	if !WindowsMachineHookRegistrationConnector(name) {
+		return false, nil
+	}
+	if name == "cursor" {
+		_, sid, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
+		if err != nil {
+			return false, err
+		}
+		hook, err := windowsEnterpriseHookExecutable()
+		if err != nil {
+			return false, err
+		}
+		if err := windowsEnterpriseHookTrustCheck(hook); err != nil {
+			return false, err
+		}
+		registered, err := windowsMachinePolicyRegisteredSIDs(name, hook)
+		if err != nil {
+			return false, err
+		}
+		return registered[strings.ToUpper(sid.String())], nil
+	}
+	if !windowsStandaloneRuntimeOnlyInstall(name) {
+		return false, nil
+	}
+	path, err := windowsRuntimeOnlyPolicyPath(name)
+	if err != nil {
+		return false, err
+	}
+	if err := windowsRuntimeOnlyPolicyTrustCheck(path); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // WindowsProtectedTargetFromOtherRelease reads, without writing, the

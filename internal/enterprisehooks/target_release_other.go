@@ -23,6 +23,11 @@ func WindowsProtectedTargetHasClosedMachineRegistration(InstallOptions) (bool, e
 	return false, nil
 }
 
+// WindowsProtectedTargetHasMachineHookRegistration is the native Windows check.
+func WindowsProtectedTargetHasMachineHookRegistration(InstallOptions) (bool, error) {
+	return false, nil
+}
+
 // WindowsProtectedTargetHookFailModeChange is the native Windows check.
 func WindowsProtectedTargetHookFailModeChange(InstallOptions) (string, string, error) {
 	return "", "", nil
