@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+import subprocess
 import threading
 from pathlib import Path
 from unittest.mock import patch
@@ -1036,11 +1037,149 @@ def test_the_ps_and_tasklist_listings_name_the_gateways_of_this_account_and_neve
     assert doctor_gateway.parse_ps_gateway_listing("", 501).status == "unavailable"
     assert doctor_gateway.parse_ps_gateway_listing("ps: illegal option\n", 501).status == "unavailable"
 
-    rows = (
-        "\"defenseclaw-gateway.exe\",\"4321\",\"Console\",\"1\",\"20,000 K\"\n"
-        "\"other.exe\",\"9\",\"Console\",\"1\",\"1 K\"\n"
+    assert doctor_gateway.parse_windows_gateway_listing("INFO: No tasks are running which match the criteria.\n").status == (
+        "unavailable"
     )
-    assert doctor_gateway.parse_windows_gateway_listing(rows).pids == (4321,)
-    assert doctor_gateway.parse_windows_gateway_listing("INFO: No tasks are running which match the criteria.\n") == (
-        doctor_gateway.GatewayProcessListing("ok")
+
+
+def _tasklist_rows(*rows: tuple[str, int, str]) -> str:
+    """tasklist /V /FO CSV /NH rows: image, PID, session, session no., memory, status, user, CPU time, title."""
+
+    return "".join(
+        f"\"{image}\",\"{pid}\",\"Console\",\"1\",\"20,000 K\",\"Running\",\"{user}\",\"0:00:01\",\"N/A\"\n"
+        for image, pid, user in rows
     )
+
+
+_ME = "HOST\\me"
+_OTHER = "HOST\\other"
+
+
+def test_the_windows_listing_counts_only_gateways_under_the_account_of_this_process():
+    from defenseclaw import doctor_gateway
+
+    mine = _tasklist_rows(("python.exe", 700, _ME), ("defenseclaw-gateway.exe", 4321, _ME), ("other.exe", 9, _OTHER))
+    assert doctor_gateway.parse_windows_gateway_listing(mine, own_pid=700) == doctor_gateway.GatewayProcessListing(
+        "ok", (4321,)
+    )
+    # benign twin: a gateway of another account on a shared host does not block this account
+    theirs = _tasklist_rows(("python.exe", 700, _ME), ("defenseclaw-gateway.exe", 4321, _OTHER))
+    assert doctor_gateway.parse_windows_gateway_listing(theirs, own_pid=700) == doctor_gateway.GatewayProcessListing(
+        "ok"
+    )
+    # the account name is compared as tasklist prints it, whatever its case
+    cased = _tasklist_rows(("python.exe", 700, _ME), ("DefenseClaw-Gateway.exe", 4321, _ME.upper()))
+    assert doctor_gateway.parse_windows_gateway_listing(cased, own_pid=700).pids == (4321,)
+
+
+@pytest.mark.parametrize("owner", ["N/A", "", "Unknown"])
+def test_a_windows_gateway_whose_account_is_not_shown_cannot_be_ruled_out(owner):
+    from defenseclaw import doctor_gateway
+
+    hidden = _tasklist_rows(("python.exe", 700, _ME), ("defenseclaw-gateway.exe", 4321, owner))
+    listing = doctor_gateway.parse_windows_gateway_listing(hidden, own_pid=700)
+    assert listing.status == "unavailable"
+    assert "not shown" in listing.reason
+    # a gateway proved to be ours still decides, whatever else is hidden
+    both = hidden + _tasklist_rows(("defenseclaw-gateway.exe", 4400, _ME))
+    assert doctor_gateway.parse_windows_gateway_listing(both, own_pid=700).pids == (4400,)
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "",
+        "ERROR: Access denied\n",
+        "INFO: No tasks are running which match the specified criteria.\n",
+        _tasklist_rows(("System", 4, "NT AUTHORITY\\SYSTEM")),  # a list without this process proves nothing
+        _tasklist_rows(("python.exe", 700, "N/A")),  # this process shown without an account: no name to compare
+    ],
+)
+def test_a_windows_list_that_does_not_show_this_process_with_its_account_is_never_an_empty_list(output):
+    from defenseclaw import doctor_gateway
+
+    assert doctor_gateway.parse_windows_gateway_listing(output, own_pid=700).status == "unavailable"
+
+
+def test_the_windows_list_runs_tasklist_from_the_system_directory_the_kernel_reports_not_from_systemroot(
+    monkeypatch, tmp_path
+):
+    from defenseclaw import doctor_gateway
+
+    substitute = tmp_path / "substitute" / "System32"
+    substitute.mkdir(parents=True)
+    monkeypatch.setenv("SystemRoot", str(substitute.parent))
+    monkeypatch.setenv("WINDIR", str(substitute.parent))
+    calls: list[list[str]] = []
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        # a substitute helper that exits 0 and lists nothing is not proof that no gateway runs
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    real = str(tmp_path / "real" / "System32")
+    with (
+        patch.object(doctor_gateway, "_windows_system_directory", return_value=real),
+        patch.object(doctor_gateway.subprocess, "run", side_effect=run),
+    ):
+        listing = doctor_gateway._windows_gateway_processes()
+    assert calls and calls[0][0] == os.path.join(real, "tasklist.exe")
+    assert not any(str(substitute) in part for call in calls for part in call)
+    assert listing.status == "unavailable"
+
+    # no system directory from the kernel: nothing is run and the list is unavailable
+    with (
+        patch.object(doctor_gateway, "_windows_system_directory", return_value=""),
+        patch.object(doctor_gateway.subprocess, "run", side_effect=AssertionError("must not run")),
+    ):
+        assert doctor_gateway._windows_gateway_processes().status == "unavailable"
+
+
+def test_a_failed_tasklist_is_an_unreadable_windows_list_and_a_good_one_is_read(monkeypatch):
+    from defenseclaw import doctor_gateway
+
+    good = _tasklist_rows(("python.exe", os.getpid(), _ME), ("defenseclaw-gateway.exe", 4321, _ME))
+    outcomes = {
+        "denied": subprocess.CompletedProcess(["t"], 1, "", "ERROR: Access denied"),
+        "good": subprocess.CompletedProcess(["t"], 0, good, ""),
+    }
+    for name, expected in (("denied", ("unavailable", ())), ("good", ("ok", (4321,)))):
+        with (
+            patch.object(doctor_gateway, "_windows_system_directory", return_value="C:\\Windows\\System32"),
+            patch.object(doctor_gateway.subprocess, "run", return_value=outcomes[name]),
+        ):
+            listing = doctor_gateway._windows_gateway_processes()
+        assert (listing.status, listing.pids) == expected, name
+    with (
+        patch.object(doctor_gateway, "_windows_system_directory", return_value="C:\\Windows\\System32"),
+        patch.object(doctor_gateway.subprocess, "run", side_effect=OSError("no such file")),
+    ):
+        assert doctor_gateway._windows_gateway_processes().status == "unavailable"
+
+
+class _NoPidRecordEvidence:
+    platform_name = "win32"
+
+    def pid_record(self, _path):
+        from defenseclaw import doctor_gateway
+
+        return doctor_gateway.PIDRecord("missing")
+
+
+def test_the_repair_blocker_on_windows_follows_the_account_and_refuses_what_it_cannot_tell(tmp_path):
+    from defenseclaw import doctor_gateway
+
+    def blocker(output: str) -> str:
+        listing = doctor_gateway.parse_windows_gateway_listing(output, own_pid=700)
+        with patch.object(doctor_gateway, "list_account_gateway_processes", return_value=listing):
+            return doctor_gateway.gateway_activity_blocker([str(tmp_path / "gateway.pid")], evidence=_NoPidRecordEvidence())
+
+    assert "PID 4321" in blocker(_tasklist_rows(("python.exe", 700, _ME), ("defenseclaw-gateway.exe", 4321, _ME)))
+    assert blocker(_tasklist_rows(("python.exe", 700, _ME), ("defenseclaw-gateway.exe", 4321, _OTHER))) == ""
+    assert blocker(_tasklist_rows(("python.exe", 700, _ME))) == ""
+    for refused in (
+        _tasklist_rows(("python.exe", 700, _ME), ("defenseclaw-gateway.exe", 4321, "N/A")),
+        "",
+        "ERROR: Access denied\n",
+    ):
+        assert "cannot be ruled out" in blocker(refused)

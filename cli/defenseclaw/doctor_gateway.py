@@ -1534,8 +1534,8 @@ def list_account_gateway_processes(
     This is evidence about the account, not about one config path: a gateway
     started from any config of this home shows here. ``unavailable`` means the
     list (or part of it) could not be read, so callers must not read it as "none".
-    On Windows the image listing covers every account; a gateway of another
-    account on a shared host also counts, which only makes the answer stricter.
+    On Windows only gateways listed under this account count; one whose account
+    is not shown makes the list unavailable, never empty.
     """
     platform_name = platform_name or sys.platform
     if platform_name.startswith("linux"):
@@ -1628,53 +1628,92 @@ def parse_ps_gateway_listing(output: str, uid: int) -> GatewayProcessListing:
     return GatewayProcessListing("ok", tuple(found))
 
 
-def _windows_gateway_processes() -> GatewayProcessListing:  # pragma: no cover - native Windows only
-    root = os.environ.get("SystemRoot", r"C:\Windows")
-    for command in (
-        [
-            os.path.join(root, "System32", "tasklist.exe"),
-            "/FO",
-            "CSV",
-            "/NH",
-            "/FI",
-            "IMAGENAME eq defenseclaw-gateway.exe",
-        ],
-        [
-            os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            'Get-Process -Name defenseclaw-gateway -ErrorAction SilentlyContinue | '
-            'ForEach-Object { "defenseclaw-gateway.exe",$_.Id -join "," }',
-        ],
-    ):
-        try:
-            proc = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=15.0,
-                check=False,
-                env=trusted_system_subprocess_env(),
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if proc.returncode == 0:
-            return parse_windows_gateway_listing(proc.stdout)
-    return GatewayProcessListing("unavailable", reason="the process list could not be read")
+def _windows_system_directory() -> str:  # pragma: no cover - native Windows only
+    """The Windows system directory from the kernel, never from SystemRoot/WINDIR/PATH (process inputs)."""
+    if os.name != "nt":
+        return ""
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetSystemDirectoryW.argtypes = (wintypes.LPWSTR, wintypes.UINT)
+    kernel32.GetSystemDirectoryW.restype = wintypes.UINT
+    size = 32768
+    buffer = ctypes.create_unicode_buffer(size)
+    length = int(kernel32.GetSystemDirectoryW(buffer, size))
+    if length <= 0 or length >= size:
+        return ""
+    return os.path.abspath(buffer.value)
 
 
-def parse_windows_gateway_listing(output: str) -> GatewayProcessListing:
-    """Read tasklist CSV rows (image, PID, ...); anything that is not a row is not a process."""
+def _windows_gateway_processes() -> GatewayProcessListing:
+    """List the gateways of this account with `tasklist /V` from the kernel-reported system directory.
+
+    One evidence source and no fallback: PowerShell cannot name the owner of
+    another account process without elevation, so a failed `tasklist` is an
+    unreadable list, not an empty one.
+    """
+    system = _windows_system_directory()
+    if not system:
+        return GatewayProcessListing("unavailable", reason="the Windows system directory could not be read")
+    try:
+        proc = subprocess.run(
+            [os.path.join(system, "tasklist.exe"), "/V", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=60.0,
+            check=False,
+            env=trusted_system_subprocess_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return GatewayProcessListing("unavailable", reason="the process list could not be read")
+    if proc.returncode != 0:
+        return GatewayProcessListing("unavailable", reason="the process list could not be read")
+    return parse_windows_gateway_listing(proc.stdout)
+
+
+_WINDOWS_NO_OWNER = frozenset({"", "n/a", "unknown"})
+
+
+def parse_windows_gateway_listing(output: str, own_pid: int | None = None) -> GatewayProcessListing:
+    """Read `tasklist /V /FO CSV /NH` rows: image, PID, session, session no., memory, status, user, ...
+
+    The list counts as read only when it holds this process own row with an
+    account: that proves the whole list was enumerated and gives the account
+    name in the format tasklist prints, so no name is guessed. Only gateways
+    listed under that account count; a gateway of another account is left to
+    its own owner, and one whose account is not shown cannot be ruled out, so
+    the list is then unavailable.
+    """
     import csv
 
-    found = [
-        int(fields[1])
+    own_pid = os.getpid() if own_pid is None else own_pid
+    rows = [
+        fields
         for fields in csv.reader(output.splitlines())
-        if len(fields) >= 2 and fields[1].strip().isdigit() and fields[0].strip().lower() in GATEWAY_PROCESS_NAMES
+        if len(fields) >= 7 and fields[1].strip().isdigit()
     ]
-    return GatewayProcessListing("ok", tuple(found))
+    own = [fields[6].strip() for fields in rows if int(fields[1]) == own_pid]
+    if not own or own[0].casefold() in _WINDOWS_NO_OWNER:
+        return GatewayProcessListing("unavailable", reason="the process list does not show the account of this process")
+    account = own[0].casefold()
+    found: list[int] = []
+    unknown = 0
+    for fields in rows:
+        if fields[0].strip().lower() not in GATEWAY_PROCESS_NAMES:
+            continue
+        owner = fields[6].strip().casefold()
+        if owner == account:
+            found.append(int(fields[1]))
+        elif owner in _WINDOWS_NO_OWNER:
+            unknown += 1
+    if found:
+        return GatewayProcessListing("ok", tuple(found))
+    if unknown:
+        return GatewayProcessListing(
+            "unavailable", reason=f"the account of {unknown} gateway process(es) is not shown"
+        )
+    return GatewayProcessListing("ok")
 
 
 def gateway_activity_blocker(pid_record_paths: Iterable[str], *, evidence: GatewayEvidence | None = None) -> str:
