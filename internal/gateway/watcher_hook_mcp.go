@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 )
 
@@ -85,7 +86,7 @@ func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
 	}
 	if old, ok := h.servers[key]; ok {
 		if old.URL == entry.URL && old.Transport == entry.Transport && old.Command == entry.Command &&
-			slices.Equal(old.Args, entry.Args) {
+			old.LocalRefusal == entry.LocalRefusal && slices.Equal(old.Args, entry.Args) {
 			return false
 		}
 	} else if len(h.servers) >= hookReportedMCPLimit || h.perHome[entry.Home] >= hookReportedMCPPerHomeLimit {
@@ -95,6 +96,19 @@ func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
 	}
 	h.servers[key] = entry
 	return true
+}
+
+// forget drops the server a hook reported earlier, whose definition no longer
+// is one the scanner refuses: it keeps the lists the hooks apply, and the
+// refusal recorded for the old definition must not block the new one.
+func (h *hookReportedMCPServers) forget(entry config.MCPServerEntry) {
+	key := watcher.MCPEventPath(entry)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, ok := h.servers[key]; ok {
+		delete(h.servers, key)
+		h.perHome[entry.Home]--
+	}
 }
 
 // noteHookReportedMCPServer records, on a managed Linux or macOS gateway,
@@ -123,11 +137,17 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		Connector: connectorName, Home: home,
 	}
 	if reported.URL == "" {
+		if entry.LocalRefusal == "" {
+			// A definition read from the files is the complete one.
+			entry.LocalRefusal = mcplocal.Class(entry.Command, entry.Args)
+		}
 		if !watcher.MCPLocalRefused(entry) {
+			a.hookMCP.forget(reported)
 			return
 		}
 		reported.Command = strings.TrimSpace(entry.Command)
 		reported.Args = slices.Clone(entry.Args)
+		reported.LocalRefusal = entry.LocalRefusal
 	}
 	a.hookMCP.note(reported)
 }

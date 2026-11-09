@@ -145,7 +145,9 @@ func newReportedMCPHarness() *reportedMCPHarness {
 		servers, _ := h.reported.list()
 		for _, entry := range servers {
 			if entry.Connector == connector && entry.Name == server && entry.Home == home {
-				if !h.scanned {
+				// The watcher answers failed, with the cause, for a server whose
+				// listed definition carries a stated refusal, before any scan.
+				if !h.scanned && (entry.LocalRefusal == "" || !watcher.MCPLocalRefused(entry)) {
 					return watcher.MCPAdmissionStatus{Name: server, Pending: true, RetryAfter: 30 * time.Second}
 				}
 				return watcher.MCPAdmissionStatus{Name: server, Failed: true, ScanIssue: h.issue}
@@ -159,6 +161,20 @@ func newReportedMCPHarness() *reportedMCPHarness {
 func (h *reportedMCPHarness) call(home string, server *assetfacts.MCPServer) claudeCodeHookResponse {
 	ctx := context.WithValue(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home}),
 		claimedAssetFactsContextKey{}, assetfacts.Facts{MCP: server})
+	return h.api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "PreToolUse",
+		ToolName: "mcp__" + server.Name + "__ping", ToolInput: map[string]interface{}{}, CWD: home + "/proj"})
+}
+
+// callFacts is call with the facts carried as the standalone hook sends them:
+// encoded and decoded, so the argument bound of the header applies.
+func (h *reportedMCPHarness) callFacts(t *testing.T, home string, server assetfacts.MCPServer) claudeCodeHookResponse {
+	t.Helper()
+	facts, ok := assetfacts.Decode(assetfacts.Encode(assetfacts.Facts{MCP: &server}))
+	if !ok || facts.MCP == nil {
+		t.Fatal("the hook facts lost the server")
+	}
+	ctx := context.WithValue(withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Home: home}),
+		claimedAssetFactsContextKey{}, facts)
 	return h.api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{HookEventName: "PreToolUse",
 		ToolName: "mcp__" + server.Name + "__ping", ToolInput: map[string]interface{}{}, CWD: home + "/proj"})
 }
@@ -186,11 +202,17 @@ func TestManagedUnixHookReportedRefusedLauncherServerIsAdmittedAndBlocked(t *tes
 		servers[0].Home != "/home/eng1" || servers[0].Connector != "claudecode" || servers[0].RunAsSID != "" {
 		t.Fatalf("watched servers %+v, want the python3 server of /home/eng1", servers)
 	}
+	first := call("/home/eng1", python)
 	h.scanned = true
 	later := call("/home/eng1", python)
 	if later.Action != "block" || !strings.Contains(later.Reason, "asset_policy.mcp.allowed") ||
 		!strings.Contains(later.Reason, "launcher") {
 		t.Fatalf("later call: action=%q reason=%q, want a block naming the launcher and asset_policy.mcp.allowed", later.Action, later.Reason)
+	}
+	// The call that lists the server is blocked with the same cause and the
+	// same administrator step, not a retry message.
+	if first.Action != "block" || first.Reason != later.Reason {
+		t.Fatalf("call that lists the server: action=%q reason=%q, want the later block %q", first.Action, first.Reason, later.Reason)
 	}
 	// A changed definition is recorded again (the watcher re-admits it).
 	if !reported.note(config.MCPServerEntry{Name: "localpy", Command: "python3", Args: []string{"/home/eng1/other.py"},
@@ -271,5 +293,89 @@ func TestManagedUnixHookReportedRefusedArgumentsServerIsAdmittedAndBlocked(t *te
 	}
 	if servers, _ := h.reported.list(); len(servers) != 0 {
 		t.Fatalf("listed %+v, want no server whose launcher and arguments a scan starts", servers)
+	}
+}
+
+// The facts keep at most 32 arguments, and the scanner refuses a local server
+// for what the complete list holds: an execution flag after the 32nd argument
+// is refused, and a package after 32 options is accepted. The managed gateway
+// decides from the verdict the hook took from the complete definition, never
+// from the arguments the header carried (GAP-0925).
+func TestManagedUnixHookReportedMCPJudgesTheCompleteDefinitionNotTheBoundedArguments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	filler := func(n int, arg string, tail ...string) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = arg
+		}
+		return append(out, tail...)
+	}
+	for _, tc := range []struct {
+		name    string
+		command string
+		args    []string
+		blocked bool
+	}{
+		{"flag after the bound", "npx", append([]string{"-y", "pkg"}, filler(30, "--quiet", "-c", "echo hi")...), true},
+		{"flag after the bound without a package before", "uvx", filler(33, "--quiet", "--eval=1"), true},
+		{"no package within a long list", "npx", filler(40, "-y"), true},
+		{"package after 32 options", "npx", filler(32, "-y", "pkg"), false},
+		{"package first in a long list", "npx", append([]string{"pkg"}, filler(40, "--quiet")...), false},
+		{"short definition with a package", "npx", []string{"-y", "pkg"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReportedMCPHarness()
+			h.issue = watcher.MCPScanIssueArguments
+			server := assetfacts.MCPServer{Name: "longargs", Command: tc.command, Args: tc.args}
+			got := h.callFacts(t, "/home/eng1", server)
+			listed, _ := h.reported.list()
+			if tc.blocked {
+				if got.Action != "block" || len(listed) != 1 || listed[0].LocalRefusal != "arguments" {
+					t.Fatalf("action=%q listed=%+v, want the refused definition listed and blocked", got.Action, listed)
+				}
+				h.scanned = true
+				if later := h.callFacts(t, "/home/eng1", server); later.Action != "block" || !strings.Contains(later.Reason, "asset_policy.mcp.allowed") {
+					t.Fatalf("later call: action=%q reason=%q, want the block with the administrator step", later.Action, later.Reason)
+				}
+				return
+			}
+			if got.Action == "block" || len(listed) != 0 {
+				t.Fatalf("action=%q reason=%q listed=%+v, want the server a scan starts left to the asset_policy lists", got.Action, got.Reason, listed)
+			}
+		})
+	}
+}
+
+// A claim from a hook that stated no verdict, whose arguments are as many as
+// the header keeps, cannot show the verdict: it is neither listed nor blocked
+// for the arguments it holds. Editing a listed server into one a scan starts
+// takes it off the list, so the refusal recorded for the old definition does
+// not block the new one.
+func TestManagedUnixHookReportedMCPUnstatedCutClaimIsNotJudgedAndAFixedServerIsForgotten(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	h := newReportedMCPHarness()
+	cut := make([]string, 32)
+	for i := range cut {
+		cut[i] = "--quiet"
+	}
+	cut[31] = "-c"
+	if got := h.call("/home/eng2", &assetfacts.MCPServer{Name: "oldhook", Command: "npx", Args: cut}); got.Action == "block" {
+		t.Fatalf("unstated cut claim: action=%q reason=%q, want it not judged by the arguments it holds", got.Action, got.Reason)
+	}
+	if listed, _ := h.reported.list(); len(listed) != 0 {
+		t.Fatalf("listed %+v, want an unstated cut claim left to the asset_policy lists", listed)
+	}
+	if got := h.call("/home/eng1", &assetfacts.MCPServer{Name: "edited", Command: "python3", Args: []string{"server.py"}}); got.Action != "block" {
+		t.Fatalf("python3 server: action=%q, want block", got.Action)
+	}
+	if got := h.call("/home/eng1", &assetfacts.MCPServer{Name: "edited", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action == "block" {
+		t.Fatalf("server edited to npx with a package: action=%q reason=%q, want it allowed", got.Action, got.Reason)
+	}
+	if listed, _ := h.reported.list(); len(listed) != 0 {
+		t.Fatalf("listed %+v, want the edited server off the list", listed)
 	}
 }
