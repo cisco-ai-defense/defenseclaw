@@ -314,10 +314,10 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		}
 	}
 	functionDepth := 0
-	defined := make(map[string]bool)
+	bodies := make(map[string][]*syntax.Stmt)
 	syntax.Walk(file, func(node syntax.Node) bool {
-		if declaration, ok := node.(*syntax.FuncDecl); ok && declaration.Name != nil {
-			defined[declaration.Name.Value] = true
+		if declaration, ok := node.(*syntax.FuncDecl); ok && declaration.Name != nil && declaration.Body != nil {
+			bodies[declaration.Name.Value] = append(bodies[declaration.Name.Value], declaration.Body)
 		}
 		return true
 	})
@@ -325,29 +325,25 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	// the action defined, not the program of that name. Only the shell can
 	// remove, replace or shadow a function, and only before the call runs:
 	// the commands that run before it, in the order the shell runs them, and
-	// its own arguments, are read for that. A command after a plain top-level
-	// call does not count. A call that sits inside a compound statement counts
+	// its own arguments, are read for that. A function the action declares
+	// runs only where it is called, so its body counts where a command calls
+	// it, not where it is declared. A command after a plain top-level call
+	// does not count. A call that sits inside a compound statement counts
 	// that statement, and a call the walk reaches through another function
-	// counts the whole action. A function of the action that can run the
-	// program of that name (a body that forwards to it, also through another
-	// function) always counts.
+	// counts the whole action. A declaration of the name whose body can run
+	// the program of that name (also through a function it calls) always
+	// counts.
 	functionStable := func(stmt *syntax.Stmt, name string) bool {
 		self, _ := stmt.Cmd.(*syntax.CallExpr)
 		if self == nil {
 			return false
 		}
-		forwards := false
-		syntax.Walk(file, func(node syntax.Node) bool {
-			if declaration, ok := node.(*syntax.FuncDecl); ok && declaration.Body != nil &&
-				(simpleReach{name: name, defined: defined, programs: true}).in(declaration.Body) {
-				forwards = true
+		for _, body := range bodies[name] {
+			if (simpleReach{name: name, bodies: bodies, programs: true}).in(body) {
+				return false
 			}
-			return !forwards
-		})
-		if forwards {
-			return false
 		}
-		reach := simpleReach{name: name, defined: defined, self: self}
+		reach := simpleReach{name: name, bodies: bodies, self: self}
 		if functionDepth != 0 {
 			return !reach.in(file)
 		}
@@ -356,7 +352,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				continue
 			}
 			for _, before := range file.Stmts[:index] {
-				if (simpleReach{name: name, defined: defined}).in(before) {
+				if (simpleReach{name: name, bodies: bodies}).in(before) {
 					return false
 				}
 			}
@@ -929,19 +925,28 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 }
 
 // simpleInertArguments names the commands that only read their arguments as
-// data: they run no word they are given and can not remove a function. The
-// walk treats the words of such a command as text, not as a program or a
-// function name, unless the action defines a function of that name.
+// data: they run no word they are given. Where the walk looks for a command
+// that runs the program of the same name as the function, the words of such a
+// command are text.
 var simpleInertArguments = map[string]bool{":": true, "true": true, "false": true, "echo": true,
 	"printf": true, "cat": true, "touch": true, "mkdir": true, "rm": true, "cp": true, "mv": true,
 	"ls": true, "tee": true, "test": true, "[": true, "pwd": true, "cd": true, "read": true,
-	"sleep": true, "wc": true, "head": true, "tail": true, "sort": true, "date": true}
+	"sleep": true, "wc": true, "head": true, "tail": true, "sort": true, "date": true,
+	"grep": true, "egrep": true, "fgrep": true}
+
+// simpleFunctionTableBuiltins names the shell builtins that run text as shell
+// code or change what a command word means (eval, source, trap, the alias and
+// function table builtins of bash and zsh): after one of them a function of
+// the action may be gone or may mean something else.
+var simpleFunctionTableBuiltins = map[string]bool{"eval": true, "source": true, ".": true,
+	"trap": true, "alias": true, "unfunction": true, "unhash": true, "disable": true, "enable": true}
 
 // simpleReach is what the commands of a node can do to the call of the shell
 // function name that the action defined.
 type simpleReach struct {
-	name    string
-	defined map[string]bool
+	name string
+	// bodies holds the bodies of every function the action declares, by name.
+	bodies map[string][]*syntax.Stmt
 	// self is the call of the function itself: its arguments are data and
 	// only the commands inside them run.
 	self *syntax.CallExpr
@@ -954,33 +959,23 @@ type simpleReach struct {
 
 // in reports whether the commands of node can remove, replace or shadow the
 // function (an unset that names it or names something that is not literal,
-// an alias, an eval, source, . or trap, a command whose program word is not
-// literal, or any other command with a literal word that holds "unset" or
-// "alias", as a wrapper can run what it is given), or, with programs, run
-// the program of that name. The arguments of the commands in
-// simpleInertArguments are text and never count. A plain call of the name is
-// a call of the function and does not count either.
+// an alias, an eval, source, . or trap, or a command whose program word is
+// not literal), or, with programs, run the program of that name. A function
+// the action declares counts where a command calls it and not where it is
+// declared, and a plain call of the name is a call of the function.
 func (r simpleReach) in(node syntax.Node) bool {
+	return r.reaches(node, map[string]bool{})
+}
+
+func (r simpleReach) reaches(node syntax.Node, followed map[string]bool) bool {
 	may := false
 	syntax.Walk(node, func(part syntax.Node) bool {
-		call, ok := part.(*syntax.CallExpr)
-		if may || !ok || len(call.Args) == 0 {
-			return !may
-		}
-		program, literal := simpleStaticWord(call.Args[0], nil)
-		switch {
-		case call == r.self || literal && program == r.name:
-		case !literal || program == "eval" || program == "source" || program == "." || program == "trap":
-			may = true
-		case !r.defined[program] && program == "unset":
-			may = simpleUnsetNames(call.Args[1:], r.name)
-		case !r.defined[program] && simpleInertArguments[program]:
-		default:
-			for _, arg := range call.Args {
-				if word, literal := simpleStaticWord(arg, nil); literal && (strings.Contains(word, "unset") ||
-					strings.Contains(word, "alias") || r.programs && strings.Contains(word, r.name)) {
-					may = true
-				}
+		switch typed := part.(type) {
+		case *syntax.FuncDecl:
+			return false
+		case *syntax.CallExpr:
+			if !may && len(typed.Args) != 0 && typed != r.self {
+				may = r.runs(typed.Args, followed)
 			}
 		}
 		return !may
@@ -988,15 +983,100 @@ func (r simpleReach) in(node syntax.Node) bool {
 	return may
 }
 
-// simpleUnsetNames reports whether the operands of an unset name the
-// function called name or are not literal words (a glob or an expansion can
-// spell any name). Options and the names of other variables and functions do
-// not count.
+// runs reports whether the command words (the program word first) can change
+// the function or, with programs, run the program of its name.
+func (r simpleReach) runs(words []*syntax.Word, followed map[string]bool) bool {
+	program, literal := simpleStaticProgramWord(words[0], nil)
+	if !literal {
+		return true
+	}
+	if bodies, defined := r.bodies[program]; defined {
+		if program == r.name && r.programs || followed[program] {
+			return false
+		}
+		followed[program] = true
+		for _, body := range bodies {
+			if r.reaches(body, followed) {
+				return true
+			}
+		}
+		return false
+	}
+	operands := words[1:]
+	switch {
+	case simpleFunctionTableBuiltins[program]:
+		return true
+	case program == "unset":
+		return simpleUnsetNames(operands, r.name)
+	case program == "command" || program == "builtin":
+		return r.runsThrough(program, operands, followed)
+	case r.programs && !simpleInertArguments[program]:
+		return simpleMentions(words, r.name)
+	}
+	return false
+}
+
+// runsThrough reads the command that command or builtin runs: both run the
+// builtin unset and the others of this list, and command also runs a
+// program. command -v and -V only look a name up.
+func (r simpleReach) runsThrough(wrapper string, operands []*syntax.Word, followed map[string]bool) bool {
+	for len(operands) != 0 {
+		word, literal := simpleStaticWord(operands[0], nil)
+		if !literal {
+			return true
+		}
+		if word != "--" && (!strings.HasPrefix(word, "-") || word == "-") {
+			break
+		}
+		if wrapper == "command" && (strings.Contains(word, "v") || strings.Contains(word, "V")) {
+			return false
+		}
+		operands = operands[1:]
+		if word == "--" {
+			break
+		}
+	}
+	if len(operands) == 0 {
+		return false
+	}
+	if r.programs && simpleMentions(operands, r.name) {
+		return true
+	}
+	return r.runs(operands, followed)
+}
+
+// simpleMentions reports whether a literal word holds name.
+func simpleMentions(words []*syntax.Word, name string) bool {
+	for _, word := range words {
+		if text, literal := simpleStaticWord(word, nil); literal && strings.Contains(text, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleUnsetNames reports whether the operands of an unset can remove the
+// function called name: an operand that is not a literal word (a glob or an
+// expansion can spell any name or an option), or the name itself unless the
+// options select variables only (-v, -n). Options and the names of other
+// variables and functions do not count.
 func simpleUnsetNames(operands []*syntax.Word, name string) bool {
+	functions, variables, options := false, false, true
 	for _, operand := range operands {
 		word, literal := simpleStaticWord(operand, nil)
-		if !literal || word == name {
+		switch {
+		case !literal:
 			return true
+		case options && word == "--":
+			options = false
+		case options && len(word) > 1 && strings.HasPrefix(word, "-"):
+			functions = functions || strings.Contains(word, "f")
+			variables = variables || strings.Contains(word, "v") || strings.Contains(word, "n")
+		default:
+			options = false
+			if word == name && (functions || !variables) {
+				return true
+			}
 		}
 	}
 	return false
