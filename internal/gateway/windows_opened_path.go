@@ -183,6 +183,44 @@ func windowsHostOpenedPath(opened string, ok bool, _ error) (string, bool) {
 	return filepath.FromSlash(opened), true
 }
 
+// windowsWalkPath is host, a path from windowsHostPath, in the spelling a
+// file-system call takes. Win32 normalizes a path lexically unless it has the
+// exact extended-length prefix: without it, a name with a trailing space or
+// dot is looked up as its sibling without that character. An operand written
+// with the prefix therefore walks with it again (\\?\C:\... for a drive path,
+// \\?\UNC\server\share\... for a share). The rules and the maps keyed by
+// the operand keep reading host, the semantic form; the file system is asked
+// with the walk path, and an answer goes back through windowsWalkResult.
+func windowsWalkPath(host, operand string) string {
+	if !windowsPathHost || !windowsVerbatimOperand(strings.TrimLeftFunc(operand, unicode.IsSpace)) {
+		return host
+	}
+	text := strings.ReplaceAll(host, "/", `\`)
+	if !windowsRootedSpelling(text) {
+		return host
+	}
+	if share, isShare := strings.CutPrefix(text, `\\`); isShare {
+		return `\\?\UNC\` + share
+	}
+	return `\\?\` + text
+}
+
+// windowsWalkResult is a path a file-system call answered for a walk path
+// (windowsWalkPath), without the extended-length prefix the answer may carry,
+// so the path rules and the protected-path comparison read it like any other.
+func windowsWalkResult(resolved string) string {
+	if !windowsPathHost {
+		return resolved
+	}
+	if share, ok := strings.CutPrefix(resolved, `\\?\UNC\`); ok {
+		return `\\` + share
+	}
+	if plain, ok := strings.CutPrefix(resolved, `\\?\`); ok && actionfacts.DriveLetterPath(plain) {
+		return plain
+	}
+	return resolved
+}
+
 // windowsRootedSpelling is the cheap test before windowsOpenedPath reads a
 // spelling: it starts with a drive letter or with two separators.
 func windowsRootedSpelling(spelling string) bool {

@@ -1317,8 +1317,9 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		// The walk below follows the file Windows opens for a Windows
 		// spelling, not its characters (see windowsHostPath).
+		walked := target
 		if opened, ok := windowsHostPath(target); ok {
-			target = opened
+			walked, target = windowsWalkPath(opened, target), opened
 		}
 		// A name that a link earlier in the command makes an alias of a
 		// protected file (GAP-1505).
@@ -1349,7 +1350,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			}
 			return true
 		}
-		info, err := hookpaths.Lstat(target)
+		info, err := hookpaths.Lstat(walked)
 		if err != nil && !hookpaths.NotExist(err) {
 			return false
 		}
@@ -1367,7 +1368,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		// Resolve as the hook client does, so a link to a missing final
 		// file that the redirect would create is covered as well.
-		resolved, ok := hookpaths.ResolveWriteTarget(target)
+		resolved, ok := hookpaths.ResolveWriteTarget(walked)
+		resolved = windowsWalkResult(resolved)
 		if !ok && !cannotResolveLocally && nativeFileToolWriteOperand(request.Input, clientCWD, target) {
 			// A directory on the way is closed to the user, so the physical
 			// file cannot be read. The user cannot write through it either

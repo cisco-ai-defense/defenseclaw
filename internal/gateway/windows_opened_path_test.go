@@ -388,6 +388,48 @@ func TestWindowsHostPathIsTheFileWindowsOpens(t *testing.T) {
 	}
 }
 
+// A file-system call for an operand with the exact extended-length prefix
+// takes the prefix again: Win32 normalizes every other spelling (drops a
+// trailing space or dot), so the call would look up a sibling entry. The
+// lookup form that the rules and maps read stays without it, and an answer
+// that carries the prefix is read without it.
+func TestWindowsWalkPathKeepsTheExactExtendedLengthPrefixForTheFileSystem(t *testing.T) {
+	useShortNames(t, nil)
+	useWindowsPathHost(t, true)
+	for _, tc := range []struct{ operand, want string }{
+		{`\\?\C:\Users\h\link `, `\\?\C:\Users\h\link `},
+		{`\\?\C:\Users\h\x\..\link.`, `\\?\C:\Users\h\link.`},
+		{`  \\?\C:\Users\h\link `, `\\?\C:\Users\h\link `},
+		{`\\?\UNC\build-host\share\dir\link `, `\\?\UNC\build-host\share\dir\link `},
+		// Every other spelling is normalized by Win32 and walks as read.
+		{`C:\Users\h\link `, `C:\Users\h\link`},
+		{`//?/C:/Users/h/link `, `C:\Users\h\link`},
+		{`\\.\C:\Users\h\link `, `C:\Users\h\link`},
+	} {
+		host, ok := windowsHostPath(tc.operand)
+		if !ok {
+			t.Fatalf("windowsHostPath(%q) is no Windows path", tc.operand)
+		}
+		if got := strings.ReplaceAll(windowsWalkPath(host, tc.operand), "/", `\`); got != tc.want {
+			t.Errorf("windowsWalkPath(%q) = %q, want %q", tc.operand, got, tc.want)
+		}
+	}
+	for _, tc := range []struct{ answer, want string }{
+		{`\\?\C:\Users\h\.netrc`, `C:\Users\h\.netrc`},
+		{`\\?\UNC\build-host\share\.netrc`, `\\build-host\share\.netrc`},
+		{`C:\Users\h\.netrc`, `C:\Users\h\.netrc`},
+		{`\\?\GLOBALROOT\x`, `\\?\GLOBALROOT\x`},
+	} {
+		if got := windowsWalkResult(tc.answer); got != tc.want {
+			t.Errorf("windowsWalkResult(%q) = %q, want %q", tc.answer, got, tc.want)
+		}
+	}
+	useWindowsPathHost(t, false)
+	if got := windowsWalkPath(`C:/Users/h/link `, `\\?\C:\Users\h\link `); got != `C:/Users/h/link ` {
+		t.Errorf("a host that opens no Windows path rewrote a path: %q", got)
+	}
+}
+
 // A rooted Windows spelling is the file Windows opens for it. The analysis
 // leaves a device spelling with trailing spaces unresolved and not absolute,
 // and the spelling was then placed in the working directory as a relative
