@@ -80,6 +80,25 @@ func linkIntoShare(path string, followLast bool) (resolved string, exhausted boo
 	if !networkShareLinkWalk || path == "" {
 		return "", false
 	}
+	// A hook call resolves the paths of thousands of operands, nearly all
+	// below the same folders. A folder found to be no link is not read
+	// again within the call, but the deepest known folder of a path is read
+	// once and must still be the folder that was found; a folder that
+	// changed (a link now, or another folder) drops what the call knew and
+	// the path is walked from its root (rel-1-0-9:GAP-0943, about 1 ms per
+	// operand on Windows).
+	call := currentHookCall()
+	resolved, exhausted, stale := walkShareLinks(path, followLast, call, true)
+	if stale {
+		call.forgetPlain()
+		resolved, exhausted, _ = walkShareLinks(path, followLast, call, false)
+	}
+	return resolved, exhausted
+}
+
+// walkShareLinks is linkIntoShare. With trust it skips the folders the call
+// knows to be no link, and reports stale when a known folder has changed.
+func walkShareLinks(path string, followLast bool, call *hookCall, trust bool) (resolved string, exhausted, stale bool) {
 	sep := string(filepath.Separator)
 	vol := filepath.VolumeName(path)
 	cur, rest := vol, path[len(vol):]
@@ -88,12 +107,6 @@ func linkIntoShare(path string, followLast bool) (resolved string, exhausted boo
 		rest = trimPathSeparators(rest)
 	}
 	hops := 0
-	// A hook call resolves the paths of thousands of operands, nearly all
-	// below the same folders. A folder found to be no link is not read
-	// again within the call: the walk costs one read per new name instead of
-	// one per component of every path (rel-1-0-9:GAP-0943, about 1 ms per
-	// operand on Windows).
-	call := currentHookCall()
 	for rest != "" {
 		var elem string
 		elem, rest = cutPathElement(rest)
@@ -107,20 +120,28 @@ func linkIntoShare(path string, followLast bool) (resolved string, exhausted boo
 			continue
 		}
 		if rest == "" && !followLast {
-			return "", false
+			return "", false, false
 		}
 		next := joinPathElement(cur, elem)
-		if rest != "" && call.knownPlain(next) {
+		if known, ok := call.knownPlain(next); ok && trust && rest != "" {
+			if !call.knownBelow(next, rest) {
+				switch same, answered := call.stillPlain(next, known); {
+				case !answered:
+					return "", true, false
+				case !same:
+					return "", false, true
+				}
+			}
 			cur = next
 			continue
 		}
 		info, err := walkLstat(next)
 		if err != nil {
-			return "", false
+			return "", false, false
 		}
 		if info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			if rest != "" {
-				call.notePlain(next)
+				call.notePlain(next, info)
 			}
 			cur = next
 			continue
@@ -131,10 +152,10 @@ func linkIntoShare(path string, followLast bool) (resolved string, exhausted boo
 			continue
 		}
 		if networkShareRootOf(target) != "" {
-			return joinPathElement(target, rest), false
+			return joinPathElement(target, rest), false, false
 		}
 		if hops++; hops > networkLinkHopLimit {
-			return "", true
+			return "", true, false
 		}
 		targetVol := filepath.VolumeName(target)
 		tail := target[len(targetVol):]
@@ -161,5 +182,5 @@ func linkIntoShare(path string, followLast bool) (resolved string, exhausted boo
 		}
 		rest = tail
 	}
-	return "", false
+	return "", false, false
 }
