@@ -77,7 +77,7 @@ func hookAssetFacts(connector string, payload []byte) string {
 			}
 		}
 	}
-	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {
+	for _, ref := range assetfacts.SkillFolderRefs(event.ToolName, event.ToolInput, home, event.CWD) {
 		addSkill(ref.Name, ref.Dir)
 		if (ref.Linked || ref.BareOperand) && hookLinkedSkillFolder(connector, home, event.CWD, ref.Dir) && !slices.Contains(facts.SkillLinks, ref.Dir) {
 			// The gateway may not follow the link in this home, nor tell a
