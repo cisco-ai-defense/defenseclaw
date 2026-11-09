@@ -223,3 +223,77 @@ func TestFailedMCPAdmissionHoldKeepsTheFullDefinitionIdentity(t *testing.T) {
 	f.listUser(scopeHoldServer(scopeHoldCleanURL, "old-secret-value"))
 	wantHeldOrdinary(t, "failed definition listed again, admitted", f.call(f.cwd, "s1", "wiki-ok"))
 }
+
+// listScopes writes ~/.claude.json with the user-scope servers and the
+// local-scope servers of each project folder given.
+func (f *scopeHoldFixture) listScopes(user string, local map[string]string) {
+	f.t.Helper()
+	data := `{"mcpServers":` + user + `,"projects":{`
+	first := true
+	for project, servers := range local {
+		if !first {
+			data += ","
+		}
+		first = false
+		data += `"` + filepath.ToSlash(project) + `":{"mcpServers":` + servers + `}`
+	}
+	data += `}}`
+	if err := os.WriteFile(filepath.Join(f.home, ".claude.json"), []byte(data), 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// The failed connection a user-scope server made is not released by the clean
+// admission of a local-scope entry of the same bytes in a folder: that is
+// another connection, admitted separately by the watcher.
+func TestFailedMCPAdmissionOfUserScopeIsNotReleasedByACleanLocalScopeAdmission(t *testing.T) {
+	f := newScopeHoldFixture(t, "strict")
+	other := t.TempDir()
+	clean := false
+	f.status = func(server string) watcher.MCPAdmissionStatus {
+		if !clean && server == "wiki-ok" {
+			return watcher.MCPAdmissionStatus{Name: server, Failed: true, ScanIssue: watcher.MCPScanIssueAddress}
+		}
+		return watcher.MCPAdmissionStatus{}
+	}
+	f.listUser(scopeHoldServer(scopeHoldCleanURL, ""))
+	wantHeldFailed(t, "user scope, failed", "block", f.call(f.cwd, "s1", "wiki-ok"))
+
+	clean = true
+	f.listScopes(scopeHoldServer(scopeHoldCleanURL, ""), map[string]string{other: scopeHoldServer(scopeHoldCleanURL, "")})
+	// The call from the other folder lists the local entry and meets a clean admission.
+	wantHeldFailed(t, "local scope of the same bytes", "block", f.call(other, "s1", "wiki-ok"))
+	f.listScopes(`{}`, nil)
+	wantHeldFailed(t, "user scope removed afterwards", "block", f.call(f.cwd, "s1", "wiki-ok"))
+	wantHeldOrdinary(t, "another session", f.call(f.cwd, "s2", "wiki-ok"))
+}
+
+// Two project folders may list the same name with the same bytes and be
+// admitted separately: the clean admission of one does not release the failed
+// connection of the other, and a local-scope entry is held under its folder.
+func TestFailedMCPAdmissionOfALocalScopeIsNotReleasedByACleanSiblingFolder(t *testing.T) {
+	f := newScopeHoldFixture(t, "strict")
+	sibling := t.TempDir()
+	clean := false
+	f.status = func(server string) watcher.MCPAdmissionStatus {
+		if !clean && server == "wiki-ok" {
+			return watcher.MCPAdmissionStatus{Name: server, Failed: true, ScanIssue: watcher.MCPScanIssueAddress}
+		}
+		return watcher.MCPAdmissionStatus{}
+	}
+	both := map[string]string{f.cwd: scopeHoldServer(scopeHoldCleanURL, ""), sibling: scopeHoldServer(scopeHoldCleanURL, "")}
+	f.listScopes(`{}`, map[string]string{f.cwd: scopeHoldServer(scopeHoldCleanURL, "")})
+	wantHeldFailed(t, "local scope, failed", "block", f.call(f.cwd, "s1", "wiki-ok"))
+
+	clean = true
+	f.listScopes(`{}`, both)
+	wantHeldOrdinary(t, "sibling folder, clean admission", f.call(sibling, "s1", "wiki-ok"))
+	f.listScopes(`{}`, nil)
+	wantHeldFailed(t, "local scope removed", "block", f.call(f.cwd, "s1", "wiki-ok"))
+
+	// The same entry listed again in its folder with a clean admission releases it.
+	f.listScopes(`{}`, both)
+	wantHeldOrdinary(t, "listed again in its folder, admitted", f.call(f.cwd, "s1", "wiki-ok"))
+	f.listScopes(`{}`, nil)
+	wantHeldOrdinary(t, "removed after it was admitted", f.call(f.cwd, "s1", "wiki-ok"))
+}
