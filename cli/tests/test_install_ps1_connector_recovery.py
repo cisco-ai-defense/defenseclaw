@@ -186,8 +186,17 @@ try { Assert-NoActiveConnectorRecovery 'Rollback to 1.0.5'; throw 'guard unexpec
     $text = $_.Exception.Message
     if ($text -notlike '*Rollback to 1.0.5 refused: active connector recovery remains*') { throw }
     # The command is exact: this install's gateway and the folder that holds the receipt.
-    $command = '"C:\\dc-test\\bin\\defenseclaw-gateway.exe" connector recover-config --data-dir "' + $DataDir + '"'
+    # PowerShell runs a quoted path only behind the call operator, so the printed
+    # command must carry it and must parse as one command invocation.
+    $command = '& "C:\\dc-test\\bin\\defenseclaw-gateway.exe" connector recover-config --data-dir "' + $DataDir + '"'
     if ($text -notlike "*run '$command'*") { throw }
+    $errors = $null
+    $tree = [Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$errors)
+    if ($errors.Count) { throw "the printed command does not parse: $($errors[0].Message)" }
+    $invocation = $tree.EndBlock.Statements[0].PipelineElements[0]
+    if ($invocation -isnot [Management.Automation.Language.CommandAst] -or
+        $invocation.InvocationOperator -ne [Management.Automation.Language.TokenKind]::Ampersand -or
+        $invocation.CommandElements[0].Value -ne 'C:\\dc-test\\bin\\defenseclaw-gateway.exe') { throw }
     if ($text -notlike '*do not remove or replay its receipts*') { throw }
 }
 """,

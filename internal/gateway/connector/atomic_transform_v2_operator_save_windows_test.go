@@ -190,21 +190,38 @@ func TestAtomicTransformV2CrashedAllocationRecoversAfterAnOperatorSave(t *testin
 }
 
 // A staged extended attribute can only be proved to be the transaction own copy
-// against the prior config. With that file gone the stage stays, fail closed,
-// and the live file is never touched.
-func TestAtomicTransformV2StagedEAStaysRetainedWhenThePriorConfigIsGone(t *testing.T) {
-	path, stateDir := atomicTransformV2WriteOld(t)
-	atomicTransformEARegressionSet(t, path, atomicTransformEARegressionPayload("CONNECTOR_EA_FIXTURE", "ordinary metadata"))
-	atomicTransformV2HardExitAt(t, path, stateDir, atomicTransformPhaseStageMarkerBootstrap)
-	atomicTransformV2OperatorSave(t, path, []byte("operator save"))
-	if err := recoverAtomicTransformV2(path, stateDir); err == nil {
-		t.Fatal("an EA-bearing stage was discarded without its prior config")
-	}
-	if content, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(content, []byte("operator save")) {
-		t.Fatalf("operator save was changed: %q %v", content, readErr)
-	}
-	if left := atomicTransformV2Leftovers(t, path, stateDir); len(left) == 0 {
-		t.Fatal("recovery evidence was discarded")
+// against the prior config. With that file replaced or removed the stage is
+// kept, never deleted, but the receipt is retired so the recovery finishes, the
+// saved bytes stay and a later change to the config is not refused.
+func TestAtomicTransformV2StagedEAIsKeptAndRecoveryFinishesWhenThePriorConfigIsGone(t *testing.T) {
+	for _, mutation := range []string{"save", "remove"} {
+		t.Run(mutation, func(t *testing.T) {
+			path, stateDir := atomicTransformV2WriteOld(t)
+			atomicTransformEARegressionSet(t, path, atomicTransformEARegressionPayload("CONNECTOR_EA_FIXTURE", "ordinary metadata"))
+			atomicTransformV2HardExitAt(t, path, stateDir, atomicTransformPhaseStageMarkerBootstrap)
+			if mutation == "save" {
+				atomicTransformV2OperatorSave(t, path, []byte("operator save"))
+			} else if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := recoverAtomicTransformV2(path, stateDir); err != nil {
+				t.Fatalf("recovery could not finish with the prior config gone: %v", err)
+			}
+			content, readErr := os.ReadFile(path)
+			if mutation == "save" && (readErr != nil || !bytes.Equal(content, []byte("operator save"))) {
+				t.Fatalf("operator save was changed: %q %v", content, readErr)
+			}
+			if mutation == "remove" && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("recovery recreated the removed config: %q %v", content, readErr)
+			}
+			left := atomicTransformV2Leftovers(t, path, stateDir)
+			if len(left) != 1 || !strings.HasPrefix(filepath.Base(left[0]), atomicTransformV2NamePrefix) {
+				t.Fatalf("expected only the EA-bearing stage to be kept, no receipt: %v", left)
+			}
+			if err := atomicTransformFileWithStateDir(path, stateDir, 0o600, atomicTransformV2AppendDC); err != nil {
+				t.Fatalf("a later change was refused: %v", err)
+			}
+		})
 	}
 }
 
