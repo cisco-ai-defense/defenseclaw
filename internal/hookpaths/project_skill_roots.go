@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
 )
@@ -278,20 +279,20 @@ func projectSkillSelectedFolders(root, name string) []string {
 	return nil
 }
 
-// projectSkillManifestUnresolvable reports whether the manifest path exists as
-// a directory entry, a link included, but the system cannot resolve it to a
-// file: a link loop, or a chain of more links than the system follows (the
-// agent cannot load it either). A manifest that is absent, and a link to
-// nothing, are no skill to load and are not unresolvable. The selection of a
-// folder and the manifest finding both ask this one question, so a chain the
-// user-space link walk resolves but the system refuses is judged like a loop
+// projectSkillManifestUnresolvable reports whether the manifest path cannot
+// be resolved by the system though something is there: a link loop on the
+// manifest, a chain of more links than the system follows on the manifest or
+// on a folder of its path (the agent cannot load it either), or a folder of
+// the path the system refuses to traverse. A manifest that is absent, a path
+// whose folder is absent or is a plain file, and a link to nothing are no
+// skill to load and are
+// not unresolvable. The selection of a folder and the manifest finding both
+// ask this one question, so a chain the user-space link walk resolves but the
+// system refuses is judged like a loop wherever in the path the links sit
 // (rel-1-0-9:GAP-0987).
 func projectSkillManifestUnresolvable(manifest string) bool {
-	if _, err := pathLstat(manifest); err != nil {
-		return false
-	}
 	_, err := pathStat(manifest)
-	return err != nil && !NotExist(err) && !errors.Is(err, fs.ErrNotExist)
+	return err != nil && !NotExist(err) && !errors.Is(err, syscall.ENOTDIR)
 }
 
 // projectSkillDeclaredName is the name the SKILL.md of dir declares, read as
