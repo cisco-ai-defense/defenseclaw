@@ -292,7 +292,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	})
 	standalone := cfg.StandaloneEnterprise()
 	var unprotected []enterprisehooks.UnprotectedAgent
-	var excluded []enterprisehooks.ManifestTarget
+	var excluded, excludedInDoubt []enterprisehooks.ManifestTarget
 	var ownerUnknown []enterprisehooks.UnprotectedAgent
 	// The profiles the last cycle enrolled, so the gateway's read access
 	// can be taken from those this cycle drops.
@@ -313,6 +313,11 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		}
 		enumerateOpts.ReportExcluded = func(target enterprisehooks.ManifestTarget) {
 			excluded = append(excluded, target)
+		}
+		// An exclusion that rests on cached groups is not proved: it keeps
+		// the account off the roster but never authorizes its hook calls.
+		enumerateOpts.ReportExcludedInDoubt = func(target enterprisehooks.ManifestTarget) {
+			excludedInDoubt = append(excludedInDoubt, target)
 		}
 		// A running agent no row enrolls is recorded too (GAP-0226), and so is
 		// one whose account resolves to no SID.
@@ -405,7 +410,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	}
 	if standalone {
 		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded)
-		publishEnterpriseWindowsExcludedAccountMarkers(stderr, excluded)
+		publishEnterpriseWindowsExcludedAccountMarkers(stderr, windowsProvedExcludedTargets(excluded, excludedInDoubt))
 	}
 	elapsed := time.Since(start)
 
@@ -654,6 +659,22 @@ func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []e
 		state.sids[strings.ToUpper(strings.TrimSpace(target.SID))] = true
 	}
 	fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d excluded profile(s)\n", len(pending.Targets))
+}
+
+// windowsProvedExcludedTargets is the excluded accounts whose exclusion the
+// cycle proved: those not also reported in doubt. Only they get a marker.
+func windowsProvedExcludedTargets(excluded, inDoubt []enterprisehooks.ManifestTarget) []enterprisehooks.ManifestTarget {
+	doubtful := make(map[string]bool, len(inDoubt))
+	for _, target := range inDoubt {
+		doubtful[strings.ToUpper(strings.TrimSpace(target.SID))] = true
+	}
+	proved := make([]enterprisehooks.ManifestTarget, 0, len(excluded))
+	for _, target := range excluded {
+		if !doubtful[strings.ToUpper(strings.TrimSpace(target.SID))] {
+			proved = append(proved, target)
+		}
+	}
+	return proved
 }
 
 // enterpriseWindowsExcludedAccountMarkerPublisher is replaceable in tests.

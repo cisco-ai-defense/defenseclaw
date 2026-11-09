@@ -7,6 +7,7 @@ package enterprisehooks
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -21,6 +22,7 @@ func windowsAccountExcludedMarkerIO() accountExcludedMarkerIO {
 		write: func(path string, body []byte) error {
 			return windowsStandaloneHookClosureWrite(path, body, true)
 		},
+		remove:   os.Remove,
 		read:     readTrustedWindowsManagedPolicyFile,
 		checkDir: func(dir string) error { return windowsManagedPolicyDirTrustCheck(dir) },
 	}

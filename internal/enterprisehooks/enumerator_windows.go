@@ -141,6 +141,14 @@ type EnumerateOptions struct {
 	// the cycle can take the gateway's inventory read access off it
 	// (GAP-1024).
 	ReportExcluded func(ManifestTarget)
+	// ReportExcludedInDoubt receives, besides ReportExcluded, each profile
+	// whose exclusion rests only on group membership cached at an earlier
+	// sign-in while the current token is unreadable. The cycle still treats
+	// it as excluded for the gateway read access and the identity facts, but
+	// the exclusion is not proved, so it must not authorize a hook call: the
+	// excluded-account marker (GAP-0979) is published only for the accounts
+	// ReportExcluded names that this callback does not.
+	ReportExcludedInDoubt func(ManifestTarget)
 	// RunningAgents names, by account SID and connector, an agent session
 	// the cycle saw running (a label such as "codex (pid 4242)"). The
 	// standalone enumerator reports, through ReportUnprotected, a running
@@ -354,13 +362,12 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			continue
 		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
-		decision, reason = windowsProfileGroupDecision(profile, decision, reason, groups, previous, opts.ManifestSubjects == nil)
+		var doubt bool
+		decision, reason, doubt = windowsProfileGroupDecision(profile, decision, reason, groups, previous, opts.ManifestSubjects == nil)
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
 			judged[canonicalManifestTargetSID(profile.SID)] = true
-			if opts.ReportExcluded != nil {
-				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
-			}
+			reportWindowsGroupExcluded(profile, opts, doubt)
 			continue
 		}
 		if decision != windowsEnrollmentEnrolled {
@@ -514,11 +521,13 @@ func windowsPrivateProfileBudget(ctx context.Context, profilesLeft int) time.Dur
 
 // Apply the same group result on the regular and out-of-time profile paths.
 // An administrator-authored manifest target is enrolled regardless of group
-// filters; explicit user exclusions and exemptions still apply.
+// filters; explicit user exclusions and exemptions still apply. The last
+// result is true when an excluded decision rests on groups cached at an
+// earlier sign-in (not proved by the current token).
 func windowsProfileGroupDecision(profile windowsUserProfile, decision windowsEnrollmentDecision, reason string,
-	groups *windowsEnrollmentGroups, previous map[string]ManifestTarget, automatic bool) (windowsEnrollmentDecision, string) {
+	groups *windowsEnrollmentGroups, previous map[string]ManifestTarget, automatic bool) (windowsEnrollmentDecision, string, bool) {
 	if (decision != windowsEnrollmentEnrolled && decision != windowsEnrollmentExempt) || !groups.active() || !automatic {
-		return decision, reason
+		return decision, reason, false
 	}
 	sid := canonicalManifestTargetSID(profile.SID)
 	groupDecision, groupReason, inDoubt := groups.evaluate(sid)
@@ -528,9 +537,22 @@ func windowsProfileGroupDecision(profile windowsUserProfile, decision windowsEnr
 		groupDecision, groupReason = windowsEnrollmentUndecided, groups.inDoubtReason(sid)
 	}
 	if groupDecision != windowsEnrollmentEnrolled {
-		return groupDecision, groupReason
+		return groupDecision, groupReason, inDoubt && groupDecision == windowsEnrollmentExcluded
 	}
-	return decision, reason
+	return decision, reason, false
+}
+
+// reportWindowsGroupExcluded reports a profile a group filter excludes. An
+// exclusion in doubt is reported as excluded, and also as in doubt, so the
+// hook marker never rests on it.
+func reportWindowsGroupExcluded(profile windowsUserProfile, opts EnumerateOptions, doubt bool) {
+	target := ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)}
+	if opts.ReportExcluded != nil {
+		opts.ReportExcluded(target)
+	}
+	if doubt && opts.ReportExcludedInDoubt != nil {
+		opts.ReportExcludedInDoubt(target)
+	}
 }
 
 // Preserve rows already published for profiles the cycle could not reach,
@@ -572,13 +594,12 @@ func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors
 				"the local account no longer exists; its rows are revoked although its profile folder remains")
 			continue
 		}
-		decision, reason = windowsProfileGroupDecision(profile, decision, reason, groups, previous, opts.ManifestSubjects == nil)
+		var doubt bool
+		decision, reason, doubt = windowsProfileGroupDecision(profile, decision, reason, groups, previous, opts.ManifestSubjects == nil)
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
 			judged[sid] = true
-			if opts.ReportExcluded != nil {
-				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
-			}
+			reportWindowsGroupExcluded(profile, opts, doubt)
 			continue
 		}
 		for _, conn := range profileConnectors {
