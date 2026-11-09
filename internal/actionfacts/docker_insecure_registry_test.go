@@ -203,6 +203,9 @@ func TestExactDockerInsecureRegistryWriteReadsEverySpelling(t *testing.T) {
 		"http://mirror.example:05000",
 		"198.51.100.7:05000",
 		"198.51.100.7:0005000",
+		"198.51.100.7:00000000000000000005000",
+		"http://198.51.100.7:00000000000000000005000",
+		"[2001:db8::7]:00000000000000000005000",
 		"198.51.100.7:+5000",
 		"198.51.100.7:0",
 		"mirror.example:00080",
@@ -421,6 +424,44 @@ func TestExactDockerInsecureRegistryWriteReadsEveryPathSpellingAndEdit(t *testin
 		{"edit of a project file", edit("/work/daemon.json", `"debug": true`, `"debug": true, `+list), false},
 		{"patch hunk of another file", nativeCall(t, "apply_patch", nativeProofPatch("Update", "/etc/docker/key.json", "  "+list+"\n")), false},
 		{"patch hunk of ordinary settings", nativeCall(t, "apply_patch", nativeProofPatch("Update", dockerDaemonConfigPath, `  "log-level": "warn"`+"\n")), false},
+	} {
+		if got := ExactDockerInsecureRegistryWrite(row.input, Analyze(row.input)); got != row.want {
+			t.Errorf("%s: proof=%t, want %t", row.name, got, row.want)
+		}
+	}
+}
+
+// TestExactDockerInsecureRegistryEditReadsTheKeyAsJSONDoes pins the fragment
+// reader to JSON: a key spelled with an escape names the same key, a key inside
+// an object the text itself opens is another setting, and the verdict does not
+// depend on where the edit cut the file.
+func TestExactDockerInsecureRegistryEditReadsTheKeyAsJSONDoes(t *testing.T) {
+	t.Parallel()
+	const remote = `["198.51.100.7:5000"]`
+	edit := func(oldText, newText string) Input {
+		return nativeCall(t, "Edit", map[string]any{"file_path": dockerDaemonConfigPath, "old_string": oldText, "new_string": newText})
+	}
+	for _, row := range []struct {
+		name  string
+		input Input
+		want  bool
+	}{
+		{"key with a unicode escape", edit(`"debug": true`, `"debug": true, "\u0069nsecure-registries": `+remote), true},
+		{"key with every letter escaped", edit(`"debug": true`, `"debug": true, "\u0069\u006esecure\u002dregistries": `+remote), true},
+		{"key with an escaped hyphen", edit(`"debug": true`, `"debug": true, "insecure\u002dregistries": `+remote), true},
+		{"key with a unicode escape in a multi-edit", nativeCall(t, "MultiEdit", map[string]any{"file_path": dockerDaemonConfigPath, "edits": []any{
+			map[string]any{"old_string": `"debug": true`, "new_string": `"debug": true, "\u0069nsecure-registries": ` + remote},
+		}}), true},
+		{"key with a unicode escape in a patch hunk", nativeCall(t, "apply_patch", nativeProofPatch("Update", dockerDaemonConfigPath, `  "\u0069nsecure-registries": `+remote+"\n")), true},
+		{"key after a nested object the text closes", edit(`"debug": true`, `"builder": {"gc": {}}, "insecure-registries": `+remote), true},
+		{"whole document in place of another", edit(`{"debug": true}`, `{"debug": true, "insecure-registries": `+remote+`}`), true},
+		{"text that opens in the middle of a string", edit(`ue"`, `ue", "insecure-registries": `+remote+`, "x": "y`), true},
+		{"edit inside a builder object", edit(`"debug": true`, `"builder": {"insecure-registries": `+remote+`}`), false},
+		{"edit inside nested objects", edit(`"debug": true`, `"features": {"builder": {"insecure-registries": `+remote+`}}`), false},
+		{"edit inside an object in a list", edit(`"debug": true`, `"hooks": [{"insecure-registries": `+remote+`}]`), false},
+		{"escaped key with a loopback list", edit(`"debug": true`, `"debug": true, "\u0069nsecure-registries": ["127.0.0.1:5000"]`), false},
+		{"escaped other key", edit(`"debug": true`, `"debug": true, "\u0064ns": `+remote), false},
+		{"the key name as a value", edit(`"debug": true`, `"note": "insecure-registries", "dns": `+remote), false},
 	} {
 		if got := ExactDockerInsecureRegistryWrite(row.input, Analyze(row.input)); got != row.want {
 			t.Errorf("%s: proof=%t, want %t", row.name, got, row.want)
