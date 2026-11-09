@@ -19,7 +19,7 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // whole-file write replaces Docker's daemon configuration with a strict JSON
 // document whose only setting enables at least one non-loopback literal HTTP
 // registry. The write is read from the closed argument shapes of every native
-// file tool (nativeFileWrites: Write, the write_file aliases whichever name
+// file tool (nativeCallWrites: Write, the write_file aliases whichever name
 // they give the path, Copilot create, OpenCode write, a patch that adds the
 // file), for the file the call names or the file an existing link reaches. It
 // deliberately returns no path, registry, or content.
@@ -28,12 +28,11 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // cannot prove that the replacement is the complete final daemon.json
 // document.
 func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
-	if input.Command != "" || len(input.Argv) != 0 ||
-		!facts.Authoritative() || !facts.EnforcementEligible() ||
+	if !facts.Authoritative() || !facts.EnforcementEligible() ||
 		facts.Tool != input.Tool {
 		return false
 	}
-	writes := nativeFileWrites(input.Tool, input.Args)
+	writes, facts := nativeCallWrites(input, facts)
 	for _, write := range writes {
 		content := write.added
 		if !write.whole || content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
@@ -65,7 +64,7 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 // Claude Code's tool does, file_path: a Write that gives the path another name
 // is a call the tool refuses, not a write of that file. The other tools
 // (write_file aliases, Copilot, OpenCode, patches) take their spellings from
-// nativeFileWrites.
+// nativeCallWrites.
 func writeToolNamesItsFile(input Input) bool {
 	if input.Tool != "Write" {
 		return true

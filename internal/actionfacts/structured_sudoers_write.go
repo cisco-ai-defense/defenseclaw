@@ -26,20 +26,24 @@ func ExactPOSIXUnrestrictedSudoersGrantWrite(facts Facts) bool {
 }
 
 // projectPOSIXUnrestrictedSudoersGrantWrites reads the text a native file tool
-// writes however that tool names its arguments (nativeFileWrites), so a grant
+// writes however that tool names its arguments (nativeCallWrites: the native
+// tool call, or the apply_patch envelope of a shell here-document), so a grant
 // is one fact for every connector write, edit, multi-edit and patch call, not
 // only for one argument spelling. The text of a file tool is literal: no shell
 // expands it, so a template-looking character elsewhere in the file cannot
 // hide a grant line.
 func projectPOSIXUnrestrictedSudoersGrantWrites(
 	input Input,
+	facts Facts,
 ) []POSIXUnrestrictedSudoersGrantWriteFact {
-	if input.Command != "" || len(input.Argv) != 0 ||
+	if len(input.Argv) != 0 ||
 		(!mayNameSudoers([]byte(input.CWD)) && !mayNameSudoers(input.Args) &&
+			!mayNameSudoers([]byte(input.Command)) &&
 			!resolvesToSudoersTarget(input.ClientResolvedTargets)) {
 		return nil
 	}
-	for _, write := range nativeFileWrites(input.Tool, input.Args) {
+	writes, _ := nativeCallWrites(input, facts)
+	for _, write := range writes {
 		if (sudoersWriteTargetInCWD(write.target, input.CWD) ||
 			clientResolvedSudoersTarget(write.target, input.CWD, input.ClientWorkingDirectories, input.ClientResolvedTargets)) &&
 			addsUnrestrictedSudoersGrant(write.added, write.replaced) {
