@@ -4,7 +4,9 @@
 package hookpaths
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +39,15 @@ func readIndirectSource(name, cwd string) (string, bool) {
 		return "", false
 	}
 	before, err := root.Lstat(relative)
+	if err != nil && strings.ContainsAny(relative, `/\`) && !errors.Is(err, fs.ErrNotExist) {
+		return readIndirectSourceThroughLinks(cwd, relative)
+	}
 	noteBodyLinkLimit(err)
+	return readIndirectSourceIn(root, relative, before, err)
+}
+
+// readIndirectSourceIn reads relative below root once its Lstat answered.
+func readIndirectSourceIn(root *os.Root, relative string, before os.FileInfo, err error) (string, bool) {
 	if err != nil || !before.Mode().IsRegular() || before.Size() > maxIndirectSourceBytes {
 		return "", false
 	}
@@ -56,6 +66,45 @@ func readIndirectSource(name, cwd string) (string, bool) {
 		return "", false
 	}
 	return string(content), true
+}
+
+// readIndirectSourceThroughLinks reads a script whose name passes folder links
+// that the Root below the working folder will not follow: os.Root follows at
+// most eight links, while the system opens as many as it opens
+// (SystemLinkLimit), and the command runs the script it opens. Declining a
+// script behind nine links left it unread without a record, judged as one
+// that writes nothing whatever it wrote (rel-1-0-9:GAP-0950). The system
+// answers first: a path it refuses for passing too many links is an unread
+// body (noteBodyLinkLimit), as for a working folder behind them. A path it
+// opens is read only if the file lies below the physical working folder, as
+// every body is; one that leaves the project stays unread, as a name with ..
+// does. The file is taken from a Root on the physical folder and checked
+// against the file opened.
+func readIndirectSourceThroughLinks(cwd, relative string) (string, bool) {
+	joined := joinPathElement(cwd, relative)
+	if _, err := pathStat(joined); err != nil {
+		noteBodyLinkLimit(err)
+		return "", false
+	}
+	physical, err := pathEvalSymlinks(joined)
+	if err != nil {
+		return "", false
+	}
+	physicalCWD, err := pathEvalSymlinks(cwd)
+	if err != nil {
+		return "", false
+	}
+	below, err := filepath.Rel(physicalCWD, physical)
+	if err != nil || below == "." || below == ".." || strings.HasPrefix(below, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	root, err := pathOpenRoot(physicalCWD)
+	if err != nil {
+		return "", false
+	}
+	defer root.Close()
+	before, err := root.Lstat(below)
+	return readIndirectSourceIn(root, below, before, err)
 }
 
 func literalSourceFileOperands(words []string, cwd, home string, depth int) []string {

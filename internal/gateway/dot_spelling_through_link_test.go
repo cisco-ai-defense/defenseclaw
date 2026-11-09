@@ -29,19 +29,22 @@ func TestSourcedWriterBehindALinkIsReadWhateverTheSpelling(t *testing.T) {
 			t.Skipf("link unavailable: %v", err)
 		}
 	}
-	// The managed gateway keeps a read it cannot make behind ProtectHome, for
-	// every spelling alike (the allow after the slash).
+	// The managed hook client reads the script for the gateway, which cannot
+	// open the user home: a script behind a folder link that the working
+	// folder Root alone would not follow is read for every spelling alike,
+	// so the managed answer is the per-user block (rel-1-0-9:GAP-0950; it
+	// was an allow when the client left the body unread).
 	r106Reader2CheckWith(t, []r106Reader2Row{
-		{"source relative", "project", `source ./chain/wk.sh`, "block/allow"},
-		{"dot relative", "project", `. ./chain/wk.sh`, "block/allow"},
-		{"dot bare relative", "project", `. chain/wk.sh`, "block/allow"},
-		{"dot absolute", "project", `. {P}/chain/wk.sh`, "block/allow"},
-		{"dot quoted", "project", `. "./chain/wk.sh"`, "block/allow"},
-		{"dot from home", "home", `. ./project/chain/wk.sh`, "block/allow"},
-		{"dot tilde", "home", `. ~/project/chain/wk.sh`, "block/allow"},
+		{"source relative", "project", `source ./chain/wk.sh`, "block"},
+		{"dot relative", "project", `. ./chain/wk.sh`, "block"},
+		{"dot bare relative", "project", `. chain/wk.sh`, "block"},
+		{"dot absolute", "project", `. {P}/chain/wk.sh`, "block"},
+		{"dot quoted", "project", `. "./chain/wk.sh"`, "block"},
+		{"dot from home", "home", `. ./project/chain/wk.sh`, "block"},
+		{"dot tilde", "home", `. ~/project/chain/wk.sh`, "block"},
 		{"dot without a link", "project", `. ./real/wk.sh`, "block"},
-		{"bash relative", "project", `bash ./chain/wk.sh`, "block/allow"},
-		{"dot in a chain", "project", `echo go && . ./chain/wk.sh`, "block/allow"},
+		{"bash relative", "project", `bash ./chain/wk.sh`, "block"},
+		{"dot in a chain", "project", `echo go && . ./chain/wk.sh`, "block"},
 		{"source ordinary", "project", `source ./chain/ok.sh`, "allow"},
 		{"dot ordinary", "project", `. ./chain/ok.sh`, "allow"},
 		{"dot ordinary absolute", "project", `. {P}/chain/ok.sh`, "allow"},
