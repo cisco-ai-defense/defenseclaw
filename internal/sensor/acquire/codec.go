@@ -241,10 +241,12 @@ type wireCoverage struct {
 	MissingKinds []string     `json:"missing_kinds,omitempty"`
 	Limitations  []string     `json:"limitations,omitempty"`
 	Backend      *wireBackend `json:"backend,omitempty"`
-	// BufferDropped is plane.Coverage.BufferDropped: the helper's own
-	// buffer drops, which the gateway carries across a reconnect
-	// (cowork-1-0-8 GAP-0080). A helper that predates it sends none.
-	BufferDropped int64 `json:"buffer_dropped,omitempty"`
+	// BufferDropped and KernelOverflows are plane.Coverage's: the helper's
+	// own buffer drops and cn_proc overflows, which the gateway carries
+	// across a reconnect with the backend's events_lost (cowork-1-0-8
+	// GAP-0080). A helper that predates them sends none.
+	BufferDropped   int64 `json:"buffer_dropped,omitempty"`
+	KernelOverflows int64 `json:"kernel_overflows,omitempty"`
 }
 
 // wireBackend is plane.Backend on the wire (omitempty, like the Tetragon
@@ -268,7 +270,10 @@ type wireBackendPolicy struct {
 }
 
 func encodeCoverage(coverage plane.Coverage) wireCoverage {
-	out := wireCoverage{Mechanism: coverage.Mechanism, Limitations: coverage.Limitations, BufferDropped: coverage.BufferDropped}
+	out := wireCoverage{
+		Mechanism: coverage.Mechanism, Limitations: coverage.Limitations,
+		BufferDropped: coverage.BufferDropped, KernelOverflows: coverage.KernelOverflows,
+	}
 	for _, kind := range coverage.Kinds {
 		out.Kinds = append(out.Kinds, string(kind))
 	}
@@ -289,7 +294,10 @@ func encodeCoverage(coverage plane.Coverage) wireCoverage {
 }
 
 func decodeCoverage(coverage wireCoverage) plane.Coverage {
-	out := plane.Coverage{Mechanism: coverage.Mechanism, Limitations: coverage.Limitations, BufferDropped: coverage.BufferDropped}
+	out := plane.Coverage{
+		Mechanism: coverage.Mechanism, Limitations: coverage.Limitations,
+		BufferDropped: coverage.BufferDropped, KernelOverflows: coverage.KernelOverflows,
+	}
 	for _, kind := range coverage.Kinds {
 		out.Kinds = append(out.Kinds, plane.Kind(kind))
 	}

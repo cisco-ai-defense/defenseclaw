@@ -35,11 +35,23 @@ type fakeHalf struct {
 	events chan Event
 	once   sync.Once
 	closed chan struct{}
-	// dropped stands in for the half's buffer drops (GAP-0071).
-	dropped atomic.Int64
+	// dropped stands in for the half's buffer drops (GAP-0071), overflows
+	// for a process half's ENOBUFS overflows (cowork-1-0-8 GAP-0080).
+	dropped, overflows atomic.Int64
+	// onClose runs inside Close, before the half reports itself closed:
+	// what a stopping half counts while its reader stops.
+	hookMu  sync.Mutex
+	onClose func()
 }
 
-func (h *fakeHalf) bufferDropped() int64 { return h.dropped.Load() }
+func (h *fakeHalf) setOnClose(hook func()) {
+	h.hookMu.Lock()
+	h.onClose = hook
+	h.hookMu.Unlock()
+}
+
+func (h *fakeHalf) bufferDropped() int64   { return h.dropped.Load() }
+func (h *fakeHalf) kernelOverflows() int64 { return h.overflows.Load() }
 
 func newFakeHalf() *fakeHalf {
 	return &fakeHalf{events: make(chan Event, 64), closed: make(chan struct{})}
@@ -47,7 +59,16 @@ func newFakeHalf() *fakeHalf {
 
 func (h *fakeHalf) Events() <-chan Event { return h.events }
 func (h *fakeHalf) Close() error {
-	h.once.Do(func() { close(h.closed); close(h.events) })
+	h.once.Do(func() {
+		h.hookMu.Lock()
+		hook := h.onClose
+		h.hookMu.Unlock()
+		if hook != nil {
+			hook()
+		}
+		close(h.closed)
+		close(h.events)
+	})
 	return nil
 }
 func (h *fakeHalf) isClosed() bool {
@@ -242,10 +263,18 @@ func TestTetragonSourceFallsBackInStreamAndRecovers(t *testing.T) {
 	// The cn_proc half dropped 3 events; the coverage keeps naming them once
 	// it stops (S1 review 4 F5, GAP-0071).
 	h.lastProc().dropped.Store(3)
+	// It also overflowed twice: Tetragon's coverage named none of them
+	// (cowork-1-0-8 GAP-0080).
+	h.lastProc().overflows.Store(2)
 	h.feeds <- first
 	waitFor(t, "the switch to Tetragon", func() bool { return source.Coverage().Backend.Kind == BackendTetragon })
 	if limits := strings.Join(source.Coverage().Limitations, "; "); !strings.Contains(limits, "3 events were dropped from the sensor's event buffer") {
 		t.Fatalf("after the switch: limitations %q, want the stopped cn_proc half's drops", limits)
+	}
+	if coverage := source.Coverage(); coverage.KernelOverflows != 2 || !strings.Contains(strings.Join(coverage.Limitations, "; "),
+		"process events were lost 2 times when the netlink receive buffer overflowed (ENOBUFS)") {
+		t.Fatalf("after the switch: overflows %d, limitations %q; want the stopped cn_proc half's 2",
+			coverage.KernelOverflows, coverage.Limitations)
 	}
 	select {
 	case <-source.CoverageChanges():
@@ -280,6 +309,10 @@ func TestTetragonSourceFallsBackInStreamAndRecovers(t *testing.T) {
 	if event := next(t, source); event.PID != 50 || event.Source != SourceCNProc {
 		t.Fatalf("native event after the fallback %+v", event)
 	}
+	h.lastProc().overflows.Store(1)
+	if got := source.Coverage().KernelOverflows; got != 3 {
+		t.Fatalf("overflows of the running and the stopped cn_proc halves = %d, want 3", got)
+	}
 
 	// And back again.
 	second := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
@@ -291,6 +324,9 @@ func TestTetragonSourceFallsBackInStreamAndRecovers(t *testing.T) {
 	}
 	if lost := source.Coverage().Backend.EventsLost; lost != 5 {
 		t.Fatalf("events lost %d across sessions, want 5", lost)
+	}
+	if got := source.Coverage().KernelOverflows; got != 3 {
+		t.Fatalf("overflows after the second switch = %d, want both stopped halves' 3", got)
 	}
 }
 
@@ -663,4 +699,128 @@ func TestTetragonSourceTapsTheStreamForTheReconciler(t *testing.T) {
 			t.Fatalf("the stream came back without a new feed: %+v", stream)
 		}
 	}
+}
+
+// cowork-1-0-8 GAP-0080 review S1: a session whose first metrics read
+// failed (Tetragon's loopback metrics not up yet, as after a boot or an
+// upgrade that restarts Tetragon with the helper) started from 0 and took
+// its first readable count, Tetragon's whole lifetime total, as its own
+// loss; the host plane then carried it across every reconnect. The first
+// readable count of a session is its baseline. Growth after it counts, and
+// so does growth across a later failed read.
+func TestTetragonSourceBaselinesTheFirstReadableLossCount(t *testing.T) {
+	h := newHarness(t)
+	setLoss := func(feed *fakeFeed, lost int64, known bool) {
+		feed.mu.Lock()
+		feed.backend.EventsLost, feed.backend.LossKnown = lost, known
+		feed.mu.Unlock()
+	}
+	lossKnown := func(source *tetragonSource) bool { return source.Coverage().Backend.LossKnown }
+	first := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+	h.feeds <- first
+	source := startSource(t, h, nil, nil)
+	lost := func() int64 { return source.Coverage().Backend.EventsLost }
+	if lossKnown(source) {
+		t.Fatal("loss known before Tetragon's counters were read")
+	}
+
+	setLoss(first, 10000, true)
+	waitFor(t, "the first readable loss count", func() bool { return lossKnown(source) })
+	if got := lost(); got != 0 {
+		t.Fatalf("events lost after the first readable count = %d, want 0: Tetragon's lifetime 10000 is the baseline", got)
+	}
+	setLoss(first, 10003, true)
+	waitFor(t, "the growth after the baseline", func() bool { return lost() == 3 })
+	setLoss(first, 10003, false)
+	waitFor(t, "a failed read", func() bool { return !lossKnown(source) })
+	setLoss(first, 10005, true)
+	waitFor(t, "the growth across the failed read", func() bool { return lost() == 5 })
+
+	// A new session whose first read fails too: its first readable count is
+	// a baseline again, not 20000 more.
+	close(first.batches)
+	waitFor(t, "the fallback", func() bool { return source.Coverage().Backend.Kind == BackendNative })
+	second := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+	h.feeds <- second
+	waitFor(t, "the redial", func() bool { return source.Coverage().Backend.Kind == BackendTetragon })
+	setLoss(second, 20000, true)
+	waitFor(t, "the second session's first readable count", func() bool { return lossKnown(source) })
+	if got := lost(); got != 5 {
+		t.Fatalf("events lost after the second session's first readable count = %d, want the first session's 5", got)
+	}
+	setLoss(second, 20001, true)
+	waitFor(t, "the second session's growth", func() bool { return lost() == 6 })
+
+	// A session whose first read succeeded keeps that read as its baseline.
+	close(second.batches)
+	waitFor(t, "the second fallback", func() bool { return source.Coverage().Backend.Kind == BackendNative })
+	third := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1", EventsLost: 30000, LossKnown: true})
+	h.feeds <- third
+	waitFor(t, "the third session", func() bool { return source.Coverage().Backend.Kind == BackendTetragon })
+	setLoss(third, 30002, true)
+	waitFor(t, "the third session's growth", func() bool { return lost() == 8 })
+}
+
+// cowork-1-0-8 GAP-0080 review S2: a native half taken out of the source
+// (cn_proc when Tetragon is back, fanotify at the hand-off, both at Close)
+// was counted from a snapshot taken as it left, so what it counted while its
+// reader stopped was lost, and Close took the running halves' counts out of
+// the coverage altogether. A half is now read live until it has closed and
+// then from its final counts, once.
+func TestTetragonSourceCountsWhatAStoppingHalfCountedLast(t *testing.T) {
+	settled := func(t *testing.T, what string, got func() int64, want int64) {
+		t.Helper()
+		waitFor(t, what, func() bool { return got() == want })
+		time.Sleep(5 * superviseTick)
+		if value := got(); value != want {
+			t.Fatalf("%s: %d after it settled, want %d (counted twice?)", what, value, want)
+		}
+	}
+	t.Run("cn_proc when Tetragon comes back", func(t *testing.T) {
+		h := newHarness(t)
+		source := startSource(t, h, nil, nil)
+		proc := h.lastProc()
+		proc.overflows.Store(2)
+		proc.dropped.Store(3)
+		proc.setOnClose(func() { proc.overflows.Add(1); proc.dropped.Add(4) })
+		h.feeds <- newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+		waitFor(t, "cn_proc to stop", proc.isClosed)
+		settled(t, "the stopped cn_proc half's overflows", func() int64 { return source.Coverage().KernelOverflows }, 3)
+		settled(t, "the stopped cn_proc half's drops", func() int64 { return source.Coverage().BufferDropped }, 7)
+	})
+	t.Run("fanotify at the hand-off", func(t *testing.T) {
+		h := newHarness(t)
+		observe := func(name string) bool { return name == "defenseclaw-observe-89abcdef" }
+		feed := newFakeFeed(Backend{Kind: BackendTetragon, Version: "v1.7.1"})
+		h.feeds <- feed
+		source := startSource(t, h, []string{"/home/dcr-std1"}, observe)
+		files := h.lastFiles()
+		files.dropped.Store(5)
+		files.setOnClose(func() { files.dropped.Add(2) })
+		feed.setPolicies(BackendPolicy{Name: "defenseclaw-observe-89abcdef", Mode: "monitor", State: "enabled"})
+		time.Sleep(2 * handoffInterval)
+		feed.batches <- KernelBatch{Events: []Event{{Kind: KindFileRead, PID: 7, Path: "/home/dcr-std1/.aws/config", Policy: "defenseclaw-observe-89abcdef"}}}
+		next(t, source)
+		waitFor(t, "the hand-off", files.isClosed)
+		settled(t, "the handed-over fanotify half's drops", func() int64 { return source.Coverage().BufferDropped }, 7)
+	})
+	t.Run("both halves at Close", func(t *testing.T) {
+		h := newHarness(t)
+		source := startSource(t, h, []string{"/home/dcr-std1"}, nil)
+		proc, files := h.lastProc(), h.lastFiles()
+		if proc == nil || files == nil {
+			t.Fatalf("halves running: cn_proc %v, fanotify %v", proc != nil, files != nil)
+		}
+		proc.overflows.Store(2)
+		proc.dropped.Store(1)
+		files.dropped.Store(4)
+		proc.setOnClose(func() { proc.overflows.Add(1); proc.dropped.Add(1) })
+		files.setOnClose(func() { files.dropped.Add(1) })
+		if err := source.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if coverage := source.Coverage(); coverage.KernelOverflows != 3 || coverage.BufferDropped != 7 {
+			t.Fatalf("after Close: overflows %d, drops %d; want 3 and 7", coverage.KernelOverflows, coverage.BufferDropped)
+		}
+	})
 }

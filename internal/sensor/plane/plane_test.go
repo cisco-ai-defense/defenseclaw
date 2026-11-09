@@ -506,21 +506,59 @@ func containsReturn(stmt ast.Stmt) bool {
 	return found
 }
 
-// cowork-1-0-8 GAP-0080: the drops of replaced sources are one line of
-// their own, add to the count, and add nothing when there are none.
-func TestWithRetiredBufferDrops(t *testing.T) {
-	start := Coverage{Mechanism: "m", Limitations: []string{"start limitation"}}
-	current := WithBufferDrops(start, 2, HelperStreamBuffer)
-	if got := WithRetiredBufferDrops(current, 0); !reflect.DeepEqual(got, current) {
-		t.Fatalf("no retired drops changed the coverage: %+v", got)
+// cowork-1-0-8 GAP-0080: the losses of replaced sources (buffer drops,
+// kernel overflows, the backend's events lost) add to the running source's:
+// drops and overflows in one line each of their own, the backend's in
+// events_lost. Nothing is added when there are none, nothing is changed in
+// place, and a coverage without a backend shows no backend loss.
+func TestWithRetiredLosses(t *testing.T) {
+	start := Coverage{Mechanism: "m", Limitations: []string{"start limitation"},
+		Backend: &Backend{Kind: BackendTetragon, EventsLost: 4}}
+	current := WithBufferDrops(WithKernelOverflows(start, 1), 2, HelperStreamBuffer)
+	if got := current.Losses(); got != (Losses{BufferDropped: 2, KernelOverflows: 1, BackendLost: 4}) {
+		t.Fatalf("losses = %+v", got)
 	}
-	got := WithRetiredBufferDrops(current, 3)
-	if got.BufferDropped != 5 || len(got.Limitations) != 3 ||
-		got.Limitations[2] != "3 events were dropped under back-pressure in earlier event streams of the sensor" {
-		t.Fatalf("retired drops = %+v", got)
+	if got := WithRetiredLosses(current, Losses{}); !reflect.DeepEqual(got, current) {
+		t.Fatalf("no retired losses changed the coverage: %+v", got)
 	}
-	if len(current.Limitations) != 2 || len(start.Limitations) != 1 {
-		t.Fatalf("the limitations were changed in place: %q, %q", start.Limitations, current.Limitations)
+	retired := Losses{BufferDropped: 3}.Add(Losses{KernelOverflows: 5, BackendLost: 6})
+	got := WithRetiredLosses(current, retired)
+	want := []string{
+		"start limitation",
+		"process events were lost 1 times when the netlink receive buffer overflowed (ENOBUFS)",
+		"2 events were dropped from the gateway's event buffer for the sensor helper's stream under back-pressure " +
+			"(file events first; process events displaced the oldest)",
+		"3 events were dropped under back-pressure in earlier event streams of the sensor",
+		"process events were lost 5 times when the netlink receive buffer overflowed (ENOBUFS) in earlier event streams of the sensor",
+	}
+	if !reflect.DeepEqual(got.Limitations, want) {
+		t.Fatalf("limitations\n %q\nwant\n %q", got.Limitations, want)
+	}
+	if got.Losses() != (Losses{BufferDropped: 5, KernelOverflows: 6, BackendLost: 10}) {
+		t.Fatalf("losses with the retired = %+v", got.Losses())
+	}
+	if len(current.Limitations) != 3 || len(start.Limitations) != 1 || start.Backend.EventsLost != 4 ||
+		current.Backend.EventsLost != 4 {
+		t.Fatalf("changed in place: %q, %q, events lost %d", start.Limitations, current.Limitations, start.Backend.EventsLost)
+	}
+	bare := WithRetiredLosses(Coverage{Mechanism: "cn_proc"}, Losses{BackendLost: 6})
+	if bare.Backend != nil || len(bare.Limitations) != 0 {
+		t.Fatalf("a coverage without a backend = %+v", bare)
+	}
+}
+
+// WithKernelOverflows names the ENOBUFS overflows and counts them, without
+// changing the limitations it was given.
+func TestWithKernelOverflows(t *testing.T) {
+	start := Coverage{Limitations: []string{"start limitation"}}
+	if got := WithKernelOverflows(start, 0); !reflect.DeepEqual(got, start) {
+		t.Fatalf("no overflow changed the coverage: %+v", got)
+	}
+	got := WithKernelOverflows(WithKernelOverflows(start, 2), 0)
+	if got.KernelOverflows != 2 || len(got.Limitations) != 2 ||
+		got.Limitations[1] != "process events were lost 2 times when the netlink receive buffer overflowed (ENOBUFS)" ||
+		len(start.Limitations) != 1 {
+		t.Fatalf("overflows = %+v (start %q)", got, start.Limitations)
 	}
 }
 
