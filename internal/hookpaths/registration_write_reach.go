@@ -116,6 +116,39 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 			}
 		}
 	}
+	if registrationWalkLinks(file, command, cwd, home, protected, false, pipeEachChild) {
+		return true
+	}
+	if !registrationOpaqueFlow(file) {
+		return false
+	}
+	// The command carries state through a pipeline, ends or shadows a builtin
+	// the exact reading models, or runs text it builds: it is not straight-line
+	// code. A write it names is judged as reaching the target, so every way the
+	// shell may carry the values (each pipe stage in a child shell, in the
+	// current shell, or only the last one there) is read with every part
+	// running.
+	for _, pipes := range []registrationPipes{pipeEachChild, pipeLastInParent, pipeAllInParent} {
+		if registrationWalkLinks(file, command, cwd, home, protected, true, pipes) {
+			return true
+		}
+	}
+	return false
+}
+
+// registrationPipes says which stages of a pipeline run in the current shell.
+type registrationPipes int
+
+const (
+	pipeEachChild    registrationPipes = iota // every stage runs in a shell of its own
+	pipeLastInParent                          // lastpipe: only the last stage runs in the current shell
+	pipeAllInParent                           // the state of every stage is read as the current shell
+)
+
+// registrationWalkLinks reads the command in execution order with the shell
+// state it holds at each point. Loose reading drops what only straight-line
+// code can promise: a branch a fixed condition rules out and an unset -f.
+func registrationWalkLinks(file *syntax.File, command, cwd, home string, protected protectedFiles, loose bool, pipes registrationPipes) bool {
 	values := actionValues{"HOME": home, "PWD": cwd}
 	currentCWD := cwd
 	var stack []string
@@ -125,12 +158,9 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 	functions := make(map[string]*syntax.FuncDecl)
 	running := make(map[*syntax.FuncDecl]bool)
 	// inert counts the enclosing parts that do not run at this point: a branch
-	// a fixed condition rules out, a statement after an exit or a return, and
-	// the body of a function that is read at its calls. Inside them the shell
-	// state and the link arm stand still.
+	// a fixed condition rules out and the body of a function that is read at
+	// its calls. Inside them the shell state and the link arm stand still.
 	inert := 0
-	// A pipe stage runs in a shell of its own unless lastpipe is set.
-	pipeStages := !strings.Contains(command, "lastpipe")
 	var visit func(node syntax.Node) bool
 	walkInert := func(stmts ...*syntax.Stmt) {
 		inert++
@@ -152,17 +182,9 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		maps.Copy(functions, savedFunctions)
 		currentCWD, stack = savedCWD, savedStack
 	}
-	// walkList reads a statement list in order; the statements after an exit
-	// (or a return inside a running function) do not run.
 	walkList := func(stmts []*syntax.Stmt) {
-		ended := false
 		for _, stmt := range stmts {
-			if ended {
-				walkInert(stmt)
-				continue
-			}
 			syntax.Walk(stmt, visit)
-			ended = registrationEndsList(stmt, len(running) > 0)
 		}
 	}
 	visit = func(node syntax.Node) bool {
@@ -170,12 +192,6 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 			return false
 		}
 		switch node := node.(type) {
-		case *syntax.File:
-			walkList(node.Stmts)
-			return false
-		case *syntax.Block:
-			walkList(node.Stmts)
-			return false
 		case *syntax.Subshell:
 			isolated(func() { walkList(node.Stmts) })
 			return false
@@ -207,19 +223,29 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 				}
 			}
 		case *syntax.BinaryCmd:
-			if (node.Op == syntax.Pipe || node.Op == syntax.PipeAll) && pipeStages {
+			if node.Op == syntax.Pipe || node.Op == syntax.PipeAll {
+				if pipes == pipeAllInParent {
+					return true
+				}
 				isolated(func() { syntax.Walk(node.X, visit) })
-				isolated(func() { syntax.Walk(node.Y, visit) })
+				if pipes == pipeLastInParent {
+					syntax.Walk(node.Y, visit)
+				} else {
+					isolated(func() { syntax.Walk(node.Y, visit) })
+				}
 				return false
 			}
-			truth := declaredRedirectTruth(node.X, home)
+			truth := 0
+			if !loose {
+				truth = declaredRedirectTruth(node.X, home)
+			}
 			if node.Op == syntax.AndStmt && truth < 0 || node.Op == syntax.OrStmt && truth > 0 {
 				syntax.Walk(node.X, visit)
 				walkInert(node.Y)
 				return false
 			}
 		case *syntax.IfClause:
-			if len(node.Cond) == 0 {
+			if loose || len(node.Cond) == 0 {
 				break
 			}
 			truth := declaredRedirectTruth(node.Cond[len(node.Cond)-1], home)
@@ -257,8 +283,14 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		}
 		values["PWD"] = currentCWD
 		if inert == 0 {
-			actionUpdateValues(stmt, values, currentCWD, home)
-			registrationUnsetFunctions(call, functions, home)
+			// The loose reading keeps the values across text the command runs
+			// (eval, source): the exact reading forgets them there.
+			if !loose || !registrationRunsText(call) {
+				actionUpdateValues(stmt, values, currentCWD, home)
+			}
+			if !loose {
+				registrationUnsetFunctions(call, functions, home)
+			}
 			registrationRunFunction(call, functions, running, visit, values, &currentCWD, home)
 		}
 		if len(call.Args) < 2 {
@@ -350,6 +382,104 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 	return found
 }
 
+// registrationShadowable names the builtins and programs the exact reading
+// models: a function of the same name replaces them.
+var registrationShadowable = map[string]bool{
+	"unset": true, "exit": true, "return": true, "command": true, "builtin": true,
+	"cd": true, "pushd": true, "popd": true, "eval": true, "source": true, ".": true,
+	"declare": true, "typeset": true, "local": true, "export": true, "readonly": true,
+	"true": true, "false": true, "test": true, "[": true, ":": true, "let": true,
+	"read": true, "set": true, "shopt": true, "echo": true, "printf": true,
+	"ln": true, "gln": true, "rm": true, "rmdir": true, "unlink": true, "mv": true,
+	"chmod": true, "chown": true, "chgrp": true, "setfacl": true, "chattr": true,
+}
+
+// registrationStateWords change the shell state the exact reading follows.
+var registrationStateWords = map[string]bool{
+	"cd": true, "pushd": true, "popd": true, "unset": true, "read": true,
+	"mapfile": true, "readarray": true, "let": true, "set": true, "shopt": true,
+	"source": true, ".": true, "eval": true,
+}
+
+// registrationCommandWord is the first static word of the call after any
+// builtin or command prefix, or "" when it is not static.
+func registrationCommandWord(call *syntax.CallExpr) string {
+	for _, word := range call.Args {
+		value, fixed := StaticWord(word, "")
+		if !fixed {
+			return ""
+		}
+		if value != "builtin" && value != "command" {
+			return value
+		}
+	}
+	return ""
+}
+
+// registrationRunsText reports whether the call runs text it is given.
+func registrationRunsText(call *syntax.CallExpr) bool {
+	switch registrationCommandWord(call) {
+	case "eval", "source", ".":
+		return true
+	}
+	return false
+}
+
+// registrationOpaqueFlow reports whether the command is not plain
+// straight-line code: it ends a list or a function early (exit, return), runs
+// text it builds (eval, source), defines a function with the name of a
+// builtin or program the exact reading models, or carries state through a
+// pipeline.
+func registrationOpaqueFlow(file *syntax.File) bool {
+	declared := make(map[string]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok && decl.Name != nil {
+			declared[decl.Name.Value] = true
+		}
+		return true
+	})
+	opaque := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.FuncDecl:
+			opaque = node.Name != nil && registrationShadowable[node.Name.Value]
+		case *syntax.CallExpr:
+			switch registrationCommandWord(node) {
+			case "exit", "return":
+				opaque = true
+			default:
+				opaque = registrationRunsText(node)
+			}
+		case *syntax.BinaryCmd:
+			opaque = (node.Op == syntax.Pipe || node.Op == syntax.PipeAll) &&
+				(registrationCarriesState(node.X, declared) || registrationCarriesState(node.Y, declared))
+		}
+		return !opaque
+	})
+	return opaque
+}
+
+// registrationCarriesState reports whether a pipe stage can change shell
+// state: an assignment, a declaration, a function definition or call, or a
+// builtin that sets a value, the directory or the options.
+func registrationCarriesState(node syntax.Node, declared map[string]bool) bool {
+	carries := false
+	syntax.Walk(node, func(inner syntax.Node) bool {
+		switch inner := inner.(type) {
+		case *syntax.FuncDecl, *syntax.DeclClause, *syntax.ArithmCmd, *syntax.LetClause:
+			carries = true
+		case *syntax.ParamExp:
+			carries = carries || inner.Exp != nil &&
+				(inner.Exp.Op == syntax.AssignUnset || inner.Exp.Op == syntax.AssignUnsetOrNull)
+		case *syntax.CallExpr:
+			name := registrationCommandWord(inner)
+			carries = carries || len(inner.Assigns) > 0 || declared[name] || registrationStateWords[name]
+		}
+		return !carries
+	})
+	return carries
+}
+
 // registrationCalledFunctions names the functions the command runs only by
 // plain call words, the ones read at their calls. A name the command also
 // spells as an argument or a declaration keeps its body read where it is
@@ -426,17 +556,6 @@ func registrationUnsetFunctions(call *syntax.CallExpr, functions map[string]*syn
 			delete(functions, value)
 		}
 	}
-}
-
-// registrationEndsList reports whether the statement stops the list it ends:
-// an exit, or a return inside a running function.
-func registrationEndsList(stmt *syntax.Stmt, inFunction bool) bool {
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || stmt.Background || stmt.Negated || len(call.Assigns) > 0 || len(call.Args) == 0 {
-		return false
-	}
-	name, fixed := StaticWord(call.Args[0], "")
-	return fixed && (name == "exit" || name == "return" && inFunction)
 }
 
 // registrationRunFunction reads the body of a function the call names, with
