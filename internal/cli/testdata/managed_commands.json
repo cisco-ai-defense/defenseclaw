@@ -20,7 +20,7 @@
       "managed_windows": "Offered",
       "per_user": "Linux, macOS, Windows",
       "per_user_path": "status",
-      "note": "Shows your own protection state. An administrator's run shows the deployment."
+      "note": "Shows your own protection state: `protected`, `not protected`, `not confirmed`, or `excluded` for an account named in `enterprise.enrollment.exclude_users`, which no managed hook covers. An administrator's run shows the deployment."
     },
     {
       "command": "defenseclaw sandbox ...",
