@@ -104,13 +104,23 @@ func hereStringPipeTwin(command, home string, split, straight bool) (string, boo
 				return true
 			}
 		}
-		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok && readBinds(call) {
+		if call, ok := stmt.Cmd.(*syntax.CallExpr); ok {
 			if name, value, ok := actionfacts.HereStringRead(call, word); ok {
-				stmt.Cmd, stmt.Redirs, changed = &syntax.CallExpr{Assigns: []*syntax.Assign{{
-					Name:  &syntax.Lit{Value: name},
-					Value: &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: value}}},
-				}}}, rest, true
-				return true
+				all, some := readBinds(call)
+				if some && !all {
+					// The read binds in some calls of its function and not in
+					// others: no one twin is right for all, and the walk of
+					// the command reads each call.
+					refused = true
+					return false
+				}
+				if all {
+					stmt.Cmd, stmt.Redirs, changed = &syntax.CallExpr{Assigns: []*syntax.Assign{{
+						Name:  &syntax.Lit{Value: name},
+						Value: &syntax.Word{Parts: []syntax.WordPart{&syntax.Lit{Value: value}}},
+					}}}, rest, true
+					return true
+				}
 			}
 		}
 		printf := &syntax.Stmt{Cmd: &syntax.CallExpr{Args: []*syntax.Word{

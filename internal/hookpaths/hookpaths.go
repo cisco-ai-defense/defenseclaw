@@ -1780,7 +1780,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 					// gateway reads the state names those targets reach behind
 					// ProtectHome only from this map (rel-1-0-6:GAP-0601,
 					// GAP-0630 review 2).
-					for _, simple := range simples {
+					for _, simple := range slices.Concat(simples, straightLineReadings(fallback, command)) {
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) &&
 							filepath.Clean(simple.CWD) != filepath.Clean(cwd) {
 							commandLinksWithFacts(simple.Text, simple.CWD, home, sourceFacts, true)
@@ -3397,6 +3397,20 @@ func withDirectoryStackOperands(args []*syntax.Word, words []string, static []bo
 		}
 	}
 	return stackWords, stackStatic, expanded
+}
+
+// straightLineReadings are the readings of a command that the default and
+// permissive tiers of the gateway judge (Input.LoopBindsStraightLine), for a
+// command whose functions or IFS can make them differ from the whole-script
+// reading above: that reading counts any declaration or IFS in the script,
+// the gateway tier follows what each call of a function meets. A gateway
+// behind ProtectHome reads the links of both from the map.
+func straightLineReadings(input actionfacts.Input, command string) []actionfacts.SimpleCommand {
+	if !strings.Contains(command, "()") && !strings.Contains(command, "function ") && !strings.Contains(command, "IFS") {
+		return nil
+	}
+	input.LoopBindsStraightLine = true
+	return actionfacts.SimpleCommands(input, actionfacts.Analyze(input))
 }
 
 // readingReachesLink reports a reading with a write operand that lies behind a

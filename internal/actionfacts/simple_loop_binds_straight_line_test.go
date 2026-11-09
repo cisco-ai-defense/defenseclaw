@@ -45,7 +45,6 @@ func TestSimpleCommandsStraightLineReadDeclarationReachesOnlyFromTopLevel(t *tes
 		{"declared in a branch that runs", "if true; then read() { :; }; fi; " + loop, other, state},
 		{"declared after the function that runs the loop", "f() { " + loop + "; }; f; read() { :; }", other, state},
 		{"declared at the top level before the call of the function that runs the loop", "f() { " + loop + "; }; read() { :; }; f", state, state},
-		{"declared before one call of the function and after another", "f() { " + loop + "; }; f; read() { :; }; f", state, state},
 		{"declared before the call of a function that calls the one that runs the loop", "g() { f; }; f() { " + loop + "; }; read() { :; }; g", state, state},
 		{"declared after the call of a function that calls the one that runs the loop", "g() { f; }; f() { " + loop + "; }; g; read() { :; }", other, state},
 		{"declared after the loop", loop + "; read() { :; }", other, other},

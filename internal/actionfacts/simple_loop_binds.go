@@ -325,15 +325,20 @@ type simpleReadWord struct{ name, word string }
 
 // simpleHereStringRead returns the variable and value of read [-r] name <<<
 // word, for one plain word, the default IFS and the builtin: the shell holds
-// the word in name from the next statement on. The walk then reads a write
-// through the name as the path it names, instead of as an unresolved
-// variable. Any other form is left unread.
-func simpleHereStringRead(call *syntax.CallExpr, redirs []*syntax.Redirect, order func() *simpleScriptOrder) *simpleReadWord {
+// the word in name from the next statement on. via is the chain of calls that
+// run the function the read is in, outermost first (empty at the top level):
+// the read has the state of that call. The walk then reads a write through the
+// name as the path it names, instead of as an unresolved variable. Any other
+// form is left unread.
+func simpleHereStringRead(call *syntax.CallExpr, redirs []*syntax.Redirect, order func() *simpleScriptOrder, via []*syntax.CallExpr) *simpleReadWord {
 	if len(redirs) != 1 || redirs[0].Op != syntax.WordHdoc || redirs[0].N != nil {
 		return nil
 	}
 	name, word, ok := HereStringRead(call, redirs[0].Word)
-	if !ok || !order().readsHereString(call) {
+	if !ok {
+		return nil
+	}
+	if !order().readsHereString(call, via) {
 		return nil
 	}
 	return &simpleReadWord{name: name, word: word}
@@ -341,17 +346,34 @@ func simpleHereStringRead(call *syntax.CallExpr, redirs []*syntax.Redirect, orde
 
 // readsHereString reports a call of read that runs the builtin with the
 // default IFS: no function of that name can replace it (shadows) and no IFS
-// reaches it (ifsReaches).
-func (order *simpleScriptOrder) readsHereString(call *syntax.CallExpr) bool {
-	return !order.ifsReaches(call) && !order.shadows("read", call)
+// reaches it (ifsReachesAt). Without via, that must hold in every run of the
+// call; with the chain of calls that run it, in the run that chain makes.
+func (order *simpleScriptOrder) readsHereString(call *syntax.CallExpr, via []*syntax.CallExpr) bool {
+	runs := order.runsVia(call, via)
+	return !order.ifsReachesAt(call, runs) && !order.shadowsAt("read", call, runs)
 }
 
 // ReadBindsHereString returns a test for a call of read whose here-string
-// word is the value of its variable: the builtin runs, with the default IFS.
-// It reads file once, so it stays right while the caller rewrites statements.
-// straight is Input.LoopBindsStraightLine.
-func ReadBindsHereString(file *syntax.File, straight bool) func(call *syntax.CallExpr) bool {
-	return newSimpleScriptOrder(file, straight).readsHereString
+// word is the value of its variable: whether the builtin runs, with the
+// default IFS, in every run of the call (all), and in at least one (some). A
+// function that is called twice runs its read twice, with the state of each
+// call. It reads file once, so it stays right while the caller rewrites
+// statements. straight is Input.LoopBindsStraightLine.
+func ReadBindsHereString(file *syntax.File, straight bool) func(call *syntax.CallExpr) (all, some bool) {
+	order := newSimpleScriptOrder(file, straight)
+	return func(call *syntax.CallExpr) (all, some bool) {
+		runs := order.runsAt(call)
+		if !straight || len(runs) < 2 {
+			reads := order.readsHereString(call, nil)
+			return reads, reads
+		}
+		all = true
+		for _, run := range runs {
+			reads := !order.ifsReachesAt(call, []int{run}) && !order.shadowsAt("read", call, []int{run})
+			all, some = all && reads, some || reads
+		}
+		return all, some
+	}
 }
 
 // HereStringRead returns the variable and value of a call read [-r|-s] name
@@ -499,14 +521,23 @@ func simpleMayChangeIFS(stmt *syntax.Stmt) bool {
 	case *syntax.CallExpr:
 		return len(cmd.Args) == 0 || simpleCallMayChangeIFS(cmd.Args)
 	case *syntax.DeclClause:
-		// -p, -f and -F print what they are given.
-		return !slices.ContainsFunc(cmd.Args, func(arg *syntax.Assign) bool {
-			if arg.Name != nil || arg.Value == nil || cmd.Variant == nil || cmd.Variant.Value != "declare" && cmd.Variant.Value != "typeset" {
-				return false
+		// declare reads its options up to the first name or assignment: -p, -f
+		// and -F there print what they are given, and one after a name
+		// (declare IFS=x -p) is no option.
+		if cmd.Variant != nil && (cmd.Variant.Value == "declare" || cmd.Variant.Value == "typeset") {
+			for _, arg := range cmd.Args {
+				if arg.Name != nil || arg.Value == nil {
+					break
+				}
+				option, static := simpleStaticWord(arg.Value, nil)
+				if !static || !strings.HasPrefix(option, "-") || option == "--" {
+					break
+				}
+				if strings.ContainsAny(option, "pfF") {
+					return false
+				}
 			}
-			option, static := simpleStaticWord(arg.Value, nil)
-			return static && strings.HasPrefix(option, "-") && strings.ContainsAny(option, "pfF")
-		})
+		}
 	}
 	return true
 }
@@ -648,17 +679,21 @@ func (order *simpleScriptOrder) straightIFS(node syntax.Node) (values []string, 
 	return values, exact
 }
 
-// ifsReaches reports a call whose IFS may not be the default: the call spells
+// ifsReachesAt reports a call whose IFS may not be the default: the call spells
 // IFS, or, in the straight-line reading, a top-level statement before one of
-// its runs does. Otherwise it spells it anywhere in the script.
-func (order *simpleScriptOrder) ifsReaches(call syntax.Node) bool {
+// its runs does. Otherwise it spells it anywhere in the script. runs are the
+// runs to judge (runsVia); nil is every run of the call.
+func (order *simpleScriptOrder) ifsReachesAt(call syntax.Node, runs []int) bool {
 	if !order.straight {
 		return order.ifs
 	}
 	if simpleSpellsIFSIn(call) {
 		return true
 	}
-	return slices.ContainsFunc(order.runsAt(call), func(before int) bool {
+	if runs == nil {
+		runs = order.runsAt(call)
+	}
+	return slices.ContainsFunc(runs, func(before int) bool {
 		return slices.ContainsFunc(order.steps, func(step simpleIFSStep) bool { return step.end <= before })
 	})
 }
@@ -712,6 +747,18 @@ func (order *simpleScriptOrder) runsAt(node syntax.Node) []int {
 		return at
 	}
 	return []int{int(node.Pos().Offset())}
+}
+
+// runsVia is runsAt for the run that the chain of calls via makes of the
+// function node is in, outermost call first: the state is the one of the
+// statement that makes the outermost call. It is nil, every run (runsAt), for
+// a chain that is empty, one whose call the shell never reaches, or code
+// outside a function.
+func (order *simpleScriptOrder) runsVia(node syntax.Node, via []*syntax.CallExpr) []int {
+	if !order.straight || len(via) == 0 || order.enclosing(node) == nil || order.enclosing(via[0]) != nil || order.neverRuns(via[0]) {
+		return nil
+	}
+	return []int{int(via[0].Pos().Offset())}
 }
 
 func (order *simpleScriptOrder) runs(node syntax.Node, running []*syntax.FuncDecl) []int {
@@ -826,13 +873,23 @@ func (order *simpleScriptOrder) inFunction(node syntax.Node) bool {
 // top-level statement before the call replaces it: a declaration in a
 // function body, a branch or a loop, or after the call, is not followed.
 func (order *simpleScriptOrder) shadows(name string, call syntax.Node) bool {
+	return order.shadowsAt(name, call, nil)
+}
+
+// shadowsAt is shadows for the runs given (runsVia); nil is every run.
+func (order *simpleScriptOrder) shadowsAt(name string, call syntax.Node, runs []int) bool {
 	for _, decl := range order.funcs {
 		if decl.Name == nil || decl.Name.Value != name {
 			continue
 		}
 		if order.straight {
-			if order.top[decl] && slices.ContainsFunc(order.runsAt(call), func(at int) bool { return int(decl.Pos().Offset()) < at }) {
-				return true
+			if order.top[decl] {
+				if runs == nil {
+					runs = order.runsAt(call)
+				}
+				if slices.ContainsFunc(runs, func(at int) bool { return int(decl.Pos().Offset()) < at }) {
+					return true
+				}
 			}
 			continue
 		}

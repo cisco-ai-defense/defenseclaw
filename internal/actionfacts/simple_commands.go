@@ -1111,8 +1111,15 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 		}
 	}
 	known := true
+	// The options are the words in front of the first name: a word after a
+	// name (declare IFS=x -p) is a name too, which sets nothing.
+	leading := true
 	for _, assign := range decl.Args {
-		if assign == nil || assign.Name != nil {
+		if assign == nil {
+			continue
+		}
+		if assign.Name != nil {
+			leading = false
 			continue
 		}
 		if assign.Value == nil {
@@ -1120,6 +1127,9 @@ func updateSimpleDeclVariables(state *simpleShellState, decl *syntax.DeclClause,
 			continue
 		}
 		option := projectPOSIXWord(assign.Value)
+		if !leading && !option.Expands && !strings.Contains(option.Value, "=") {
+			continue
+		}
 		if decl.Variant.Value == "export" && !option.Expands && option.Value == "-n" {
 			continue
 		}

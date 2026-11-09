@@ -315,6 +315,9 @@ func sequenceStatementDetails(source string, compound, allSimple, straight bool)
 		return walk()
 	}
 	childScope := func(kind byte, walk func() bool) bool { return namedScope(kind, "", walk) }
+	// calling is the chain of calls whose function bodies are being flattened,
+	// outermost first.
+	var calling []*syntax.CallExpr
 	var loopBinds []simpleLoopBind
 	// enclosingLoops are the for and while loops being flattened, outermost
 	// first, through the functions they call.
@@ -346,7 +349,7 @@ func sequenceStatementDetails(source string, compound, allSimple, straight bool)
 		}
 		var read *simpleReadWord
 		if call, ok := node.(*syntax.CallExpr); ok {
-			read = simpleHereStringRead(call, redirs, order)
+			read = simpleHereStringRead(call, redirs, order, calling)
 		}
 		statements = append(statements, sequenceStatement{text: statement, scope: scope,
 			sourceStart: int(from.Offset()), maySkip: skippable != 0, read: read, binds: slices.Clone(loopBinds)})
@@ -688,7 +691,9 @@ func sequenceStatementDetails(source string, compound, allSimple, straight bool)
 							return false
 						}
 						functionDepth++
+						calling = append(calling, call)
 						ok := childScope('f', func() bool { return flatten(body) })
+						calling = calling[:len(calling)-1]
 						functionDepth--
 						if !ok {
 							return false
@@ -736,7 +741,9 @@ func sequenceStatementDetails(source string, compound, allSimple, straight bool)
 			// variables stay there.
 			functionDepth++
 			subshells++
+			calling = append(calling, call)
 			ok := childScope('e', func() bool { return flatten(body) })
+			calling = calling[:len(calling)-1]
 			subshells--
 			functionDepth--
 			if !ok {
