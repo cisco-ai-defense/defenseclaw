@@ -22,7 +22,12 @@ func TestStandaloneExactFixNamesThePathAndTheAccounts(t *testing.T) {
 		want    []string
 	}{
 		{"writer", []string{"S-1-5-32-545"}, nil, []string{`icacls "` + path + `" /remove:g *S-1-5-32-545`}},
-		{"two writers", []string{"S-1-5-32-545", "S-1-5-11"}, nil, []string{`/remove:g *S-1-5-32-545`, `/remove:g *S-1-5-11`}},
+		// Everyone with a real access list (not the null one below) is an
+		// account /remove:g can take off; so are Users and Authenticated Users.
+		{"Everyone with a real DACL", []string{"S-1-1-0"}, nil, []string{`icacls "` + path + `" /remove:g *S-1-1-0`, `/setowner *S-1-5-32-544`}},
+		{"two writers", []string{"S-1-5-32-545", "S-1-1-0"}, nil, []string{`/remove:g *S-1-5-32-545`, `/remove:g *S-1-1-0`}},
+		{"Authenticated Users", []string{"S-1-5-11"}, nil, []string{`/remove:g *S-1-5-11`}},
+		{"Users and Authenticated Users", []string{"S-1-5-32-545", "S-1-5-11"}, nil, []string{`/remove:g *S-1-5-32-545`, `/remove:g *S-1-5-11`}},
 		// A null access list names Everyone, and an object entry the assessment
 		// cannot read names "object-ace-N": neither is an SID /remove:g can use.
 		{"null DACL", []string{"S-1-1-0"}, []string{"DACL is null"}, []string{`/inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)"`, `/setowner *S-1-5-32-544`}},
