@@ -113,6 +113,42 @@ def test_an_answer_store_the_account_edited_after_the_move_is_kept_and_reported(
         assert not (home / name).exists(), name
 
 
+def test_an_answer_store_the_gateway_rewrote_after_the_move_is_removed(tmp_path, monkeypatch):
+    # The gateway still running in the old folder gives the plugin scanner's next answer after the
+    # move recorded the digest, so the bytes differ from the recorded ones and are still the cache.
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    answer = {"entrypoints": ["plugins/a/__init__.py", "plugins/b/__init__.py"], "seen": 1789012345678901234}
+    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps({"answers": {"ab" * 32: answer}}))
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert stayed == []
+    for name in RECORDS:
+        assert not (home / name).exists(), name
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"entrypoints": ["a"], "seen": 1, "note": "mine"},
+        {"entrypoints": "a", "seen": 1},
+        {"entrypoints": [1], "seen": 1},
+        {"entrypoints": [], "seen": True},
+        {"entrypoints": []},
+        "mine",
+    ],
+)
+def test_an_answer_store_with_an_answer_the_gateway_does_not_write_is_kept(tmp_path, monkeypatch, answer):
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    edited = {"answers": {"cd" * 32: answer}}
+    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps(edited))
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert json.loads((home / "hermes-plugin-entrypoints.json").read_text()) == edited
+    assert [line.split(" (")[0] for line in stayed] == [str(home / "hermes-plugin-entrypoints.json")]
+
+
 def test_a_record_edited_after_the_move_stays_even_when_it_keeps_the_shape_setup_writes(tmp_path, monkeypatch):
     home, plan = _move_and_plan(tmp_path, monkeypatch)
     edited = "DEFENSECLAW_CONNECTOR=hermes\nDEFENSECLAW_FAIL_MODE=closed\n"
