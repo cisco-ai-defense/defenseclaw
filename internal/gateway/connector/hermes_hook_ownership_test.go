@@ -392,8 +392,11 @@ func TestHermesKeptEntryNoticeIgnoresTheDataDirectoryName(t *testing.T) {
 // A backslash is a shell escape before a blank, quote, "$" or operator and a
 // Windows path separator before anything else, so the DefenseClaw hook is
 // still named when its Windows path is written with backslashes.
-func TestHermesBackslashIsAnEscapeOrAPathSeparatorWhenNamingAHook(t *testing.T) {
+func TestHermesBackslashIsAShellEscapeOnLinuxAndMacWhenNamingAHook(t *testing.T) {
 	const own = "/home/u/.defenseclaw/hooks/hermes-hook.sh"
+	previous := hermesWindowsCommands
+	hermesWindowsCommands = false
+	t.Cleanup(func() { hermesWindowsCommands = previous })
 	for command, want := range map[string]bool{
 		`bash /home/u/.defenseclaw/hooks/hermes-hook.sh`:         true,
 		`bash /home/u/bin/my\ hermes-hook.sh`:                    false,
@@ -401,12 +404,37 @@ func TestHermesBackslashIsAnEscapeOrAPathSeparatorWhenNamingAHook(t *testing.T) 
 		`bash /home/u/bin/audit\;hermes-hook.sh`:                 false,
 		`bash /home/u/bin/audit\=hermes-hook.sh`:                 false,
 		`bash /home/u/bin/audit\$hermes-hook.sh`:                 false,
+		`bash /home/u/bin/my\hermes-hook.sh`:                     false,
+		`bash /home/u/my\.defenseclaw/hooks/user.sh`:             false,
+		`bash "/home/u/bin/my\\hermes-hook.sh"`:                  false,
+		`bash '/home/u/bin/my\hermes-hook.sh'`:                   false,
+		`bash /home/u/bin/my\ hermes-hook.sh --event\ x`:         false,
 		`bash /home/u/.defenseclaw/hooks/my\ audit.sh`:           true,
-		`bash /home/u/.defenseclaw\hooks\hermes-hook.sh`:         true,
-		`bash "C:\Users\u\.defenseclaw\hooks\hermes-hook.sh"`:    true,
-		`bash 'C:\Users\u\.defenseclaw\hooks\hermes-hook.sh'`:    true,
+		`bash /home/u/.defenseclaw/hooks/my\audit.sh`:            true,
+		`bash /home/u/.defenseclaw/hooks\/hermes-hook.sh`:        true,
+		`bash /home/u/.defenseclaw\hooks\hermes-hook.sh`:         false,
 		`sh -c "bash /home/u/bin/my\ hermes-hook.sh"`:            false,
 		`sh -c "bash /home/u/.defenseclaw/hooks/hermes-hook.sh"`: true,
+	} {
+		if got := hermesCommandNamesDefenseClawHook(command, own); got != want {
+			t.Errorf("hermesCommandNamesDefenseClawHook(%q) = %v; want %v", command, got, want)
+		}
+	}
+}
+
+func TestHermesBackslashIsAPathSeparatorOnWindowsWhenNamingAHook(t *testing.T) {
+	const own = "C:/Users/u/.defenseclaw/hooks/hermes-hook.sh"
+	previous := hermesWindowsCommands
+	hermesWindowsCommands = true
+	t.Cleanup(func() { hermesWindowsCommands = previous })
+	for command, want := range map[string]bool{
+		`bash C:\Users\u\.defenseclaw\hooks\hermes-hook.sh`:   true,
+		`bash "C:\Users\u\.defenseclaw\hooks\hermes-hook.sh"`: true,
+		`bash 'C:\Users\u\.defenseclaw\hooks\hermes-hook.sh'`: true,
+		`bash C:\Users\u\bin\hermes-hook.sh`:                  true,
+		`bash C:\Users\u\bin\my-hermes-hook.sh`:               false,
+		`bash C:\Users\u\.defenseclaw\hooks-backup\audit.sh`:  false,
+		`bash C:\Users\u\.defenseclaw\hooks\..\user-hook.sh`:  false,
 	} {
 		if got := hermesCommandNamesDefenseClawHook(command, own); got != want {
 			t.Errorf("hermesCommandNamesDefenseClawHook(%q) = %v; want %v", command, got, want)

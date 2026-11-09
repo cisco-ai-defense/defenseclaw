@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from defenseclaw import hook_integrity
 from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, hermes_kept_hook_note, unix_hermes_hook_problem
+from defenseclaw.hook_integrity import hermes_command_names_defenseclaw_hook
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the Unix Hermes registration")
 
@@ -206,6 +208,7 @@ def test_a_users_hook_in_a_folder_or_file_named_like_defenseclaws_is_kept_withou
     assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows reads every backslash as a path separator")
 @pytest.mark.parametrize(
     "command",
     [
@@ -216,9 +219,16 @@ def test_a_users_hook_in_a_folder_or_file_named_like_defenseclaws_is_kept_withou
         r"{tmp}/bin/audit\$hermes-hook.sh",
         r'bash {tmp}/my\"hermes-hook.sh',
         r'sh -c "bash {tmp}/my\ hermes-hook.sh"',
+        r"bash {tmp}/my\hermes-hook.sh",
+        r"bash {tmp}/my\.defenseclaw/hooks/user.sh",
+        r"bash '{tmp}/my\hermes-hook.sh'",
+        r'bash "{tmp}/my\\hermes-hook.sh"',
+        r"bash {tmp}/my\hermes-hook.sh.off",
+        r"bash {tmp}/.defenseclaw\hooks\hermes-hook.sh",
     ],
 )
-def test_a_users_hook_with_a_shell_escape_in_its_name_is_kept_without_a_notice(tmp_path, command):
+def test_a_users_hook_with_a_shell_escape_in_its_name_is_kept_without_a_notice(tmp_path, monkeypatch, command):
+    monkeypatch.setattr(hook_integrity, "_HERMES_WINDOWS_COMMANDS", False)
     config, _script, _command = _registration(tmp_path)
     document = yaml.safe_load(config.read_text(encoding="utf-8"))
     document["hooks"]["pre_tool_call"].insert(0, {"command": command.format(tmp=tmp_path), "timeout": 30})
@@ -227,18 +237,37 @@ def test_a_users_hook_with_a_shell_escape_in_its_name_is_kept_without_a_notice(t
     assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the Windows reading is checked below")
 @pytest.mark.parametrize(
     "command",
     [
-        r"bash {tmp}\.defenseclaw\hooks\hermes-hook.sh",
         r"bash {tmp}/.defenseclaw/hooks/my\ audit.sh",
+        r"bash {tmp}/.defenseclaw/hooks/my\audit.sh",
         r"sh -c 'bash {tmp}/.defenseclaw/hooks/hermes-hook.sh'",
     ],
 )
-def test_a_hook_in_the_defenseclaw_folder_still_gets_the_notice_when_written_with_backslashes(tmp_path, command):
+def test_a_hook_in_the_defenseclaw_folder_still_gets_the_notice_beside_a_shell_escape(tmp_path, monkeypatch, command):
+    monkeypatch.setattr(hook_integrity, "_HERMES_WINDOWS_COMMANDS", False)
     config, _script, _command = _registration(tmp_path)
     document = yaml.safe_load(config.read_text(encoding="utf-8"))
     document["hooks"]["pre_tool_call"].insert(0, {"command": command.format(tmp=tmp_path), "timeout": 30})
     config.write_text(yaml.safe_dump(document), encoding="utf-8")
 
     assert hermes_kept_hook_note(str(tmp_path), str(config)) != ""
+
+
+@pytest.mark.parametrize(
+    ("command", "listed"),
+    [
+        (r"bash C:\Users\u\.defenseclaw\hooks\hermes-hook.sh", True),
+        (r'bash "C:\Users\u\.defenseclaw\hooks\audit.sh"', True),
+        (r"bash C:\Users\u\bin\hermes-hook.sh", True),
+        (r"bash C:\Users\u\bin\my-hermes-hook.sh", False),
+        (r"bash C:\Users\u\.defenseclaw\hooks-backup\audit.sh", False),
+        (r"bash C:\Users\u\.defenseclaw\hooks\..\user-hook.sh", False),
+    ],
+)
+def test_on_windows_a_backslash_is_a_path_separator_when_naming_a_hook(monkeypatch, command, listed):
+    monkeypatch.setattr(hook_integrity, "_HERMES_WINDOWS_COMMANDS", True)
+
+    assert hermes_command_names_defenseclaw_hook(command, r"C:\Users\u\.defenseclaw\hooks") is listed
