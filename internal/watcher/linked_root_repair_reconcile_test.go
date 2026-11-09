@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,21 +61,49 @@ func startLinkedRepairWatcher(t *testing.T, mode os.FileMode) *linkedRepairFixtu
 	return fixture
 }
 
-// After chmod removes the write bit, every root the folder made unavailable
-// resumes with no restart: the roots the agent has not created yet, and a path
-// that is both a skill root and a plugin root, which the watcher registers
-// once.
+func waitForRootCoverage(t *testing.T, w *InstallWatcher, what string, ok func([]RootCoverageIssue) bool) {
+	t.Helper()
+	deadline := time.After(5 * time.Second)
+	for !ok(w.RootCoverageIssues()) {
+		select {
+		case <-deadline:
+			t.Fatalf("%s: %+v", what, w.RootCoverageIssues())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+// After chmod removes the write bit, the roots that exist resume with no
+// restart (a path that is both a skill root and a plugin root is registered
+// once). A root the agent has not created yet has no watch, so it stays
+// reported, without the folder, until it is created and watched.
 func TestLinkedRouteRepairEndsEveryCoverageIssueWithoutRestart(t *testing.T) {
 	fixture := startLinkedRepairWatcher(t, 0o777)
 	if err := os.Chmod(fixture.target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.After(5 * time.Second)
-	for len(fixture.w.RootCoverageIssues()) != 0 {
-		select {
-		case <-deadline:
-			t.Fatalf("repaired route still reported: %+v", fixture.w.RootCoverageIssues())
-		case <-time.After(20 * time.Millisecond):
+	isAbsent := func(path string) bool {
+		for _, absent := range fixture.absent {
+			if path == absent || filepath.Dir(path) == absent {
+				return true
+			}
+		}
+		return false
+	}
+	waitForRootCoverage(t, fixture.w, "repaired route still names the folder or lost an unwatched root", func(issues []RootCoverageIssue) bool {
+		if len(issues) != 2 {
+			return false
+		}
+		for _, issue := range issues {
+			if issue.Ancestor != "" || !strings.Contains(issue.Reason, "does not exist yet") {
+				return false
+			}
+		}
+		return true
+	})
+	for _, issue := range fixture.w.RootCoverageIssues() {
+		if !isAbsent(issue.Path) {
+			t.Errorf("a root that exists and is watched is still reported: %+v", issue)
 		}
 	}
 	for _, absent := range fixture.absent {
@@ -82,6 +111,13 @@ func TestLinkedRouteRepairEndsEveryCoverageIssueWithoutRestart(t *testing.T) {
 			t.Errorf("the repair must not create %s: %v", absent, err)
 		}
 	}
+	// The agent creates the roots: they are registered and the reports end.
+	for _, issue := range fixture.w.RootCoverageIssues() {
+		if err := os.MkdirAll(issue.Path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitForRootCoverage(t, fixture.w, "created roots still reported", func(issues []RootCoverageIssue) bool { return len(issues) == 0 })
 }
 
 // A route that is still writable keeps every root reported and the folder named.
