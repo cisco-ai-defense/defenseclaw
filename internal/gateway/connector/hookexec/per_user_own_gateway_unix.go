@@ -44,3 +44,8 @@ func perUserGatewayHomes(ctx context.Context) []string {
 	}
 	return out
 }
+
+// ownerScanSupported is true where a connection that was not accepted gets an
+// owner scan of its listener (ownGatewayHoldsQueue), whose answer the connect
+// deadline waits for.
+const ownerScanSupported = true
