@@ -648,7 +648,9 @@ def configured_store_dir() -> str:
 
 STORE_HISTORY_FILE = "previous-data-dirs.json"
 _STORE_HISTORY_MAX_FOLDERS = 16
-_STORE_HISTORY_MAX_BYTES = 64 * 1024
+# Room for the newest _STORE_HISTORY_MAX_FOLDERS folders at the longest path a platform allows, each
+# spelled twice (the folder list and the backup digests); remember_previous_store keeps the file within it.
+_STORE_HISTORY_MAX_BYTES = 256 * 1024
 
 
 def _store_history_path() -> str:
@@ -756,17 +758,31 @@ def remember_previous_store(old_dir: str, backup_digests: Mapping[str, str] | No
         }
         if backup_digests:
             digests[old_dir] = dict(backup_digests)
-        document: dict[str, Any] = {"folders": kept}
-        if digests:
-            document["backups"] = digests
-        body = json.dumps(document, indent=2).encode() + b"\n"
+        # The reader refuses a list over _STORE_HISTORY_MAX_BYTES and then names no folder at all, so the
+        # writer keeps the file within it: the oldest folder goes first, and each is reported.
+        notes: list[str] = []
+        while True:
+            document: dict[str, Any] = {"folders": kept}
+            if digests:
+                document["backups"] = digests
+            body = json.dumps(document, indent=2).encode() + b"\n"
+            if len(body) <= _STORE_HISTORY_MAX_BYTES:
+                break
+            if len(kept) < 2:
+                raise ValueError("the list would be larger than uninstall reads")
+            dropped = kept.pop(0)
+            digests.pop(dropped, None)
+            notes.append(
+                f"warning: the data_dir list is full, so uninstall no longer searches {dropped}; "
+                "its setup records stay there until you remove them"
+            )
         atomic_write_private_bytes(_store_history_path(), body, protect_parent=False)
     except (OSError, ValueError, NotImplementedError) as exc:
         return [
             f"warning: the old data_dir {old_dir} could not be added to the list uninstall searches ({exc}); "
             "its setup records stay there until you remove them"
         ]
-    return []
+    return notes
 
 
 def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
