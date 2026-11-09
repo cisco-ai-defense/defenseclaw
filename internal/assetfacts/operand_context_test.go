@@ -383,3 +383,31 @@ func TestStrictTierReadsEveryWordThatNamesAnEntry(t *testing.T) {
 		t.Errorf("strict reading of a search pattern: refs = %+v, want none", refs)
 	}
 }
+
+// A wrapper option takes the next word as its value, whatever the word spells
+// (env -u cat, sudo -u cat), and a lookup (command -v) or a function that is
+// defined and never named runs no program. A program a wrapper really runs,
+// and a function the line names, still start a reader.
+func TestRunsFolderReaderReadsWrapperOptionValuesAndFunctionCalls(t *testing.T) {
+	for _, line := range []string{
+		"env -u cat echo ok", "env --unset cat echo ok", "env --unset=cat echo ok", "sudo -u cat echo ok", "sudo -nu cat echo ok",
+		"timeout -s ls 5 echo ok", "nice -n ls echo ok", "xargs -I cat echo ok",
+		"command -v cat", "command -V cat", "command -pv ls",
+		"f() { cat /dev/null; }; echo ok", "function f(){ cat /dev/null; }; echo ok",
+		"f() { g; }; g() { cat; }; echo ok", "f() { cat; }; g() { echo f; }; echo ok",
+	} {
+		if runsFolderReader(line, nil, true) {
+			t.Errorf("%q: reported as a reader", line)
+		}
+	}
+	for _, line := range []string{
+		"env -u HOME cat x", "env -u cat cat x", "env --unset cat ls", "sudo -u root cat x", "sudo -nu root ls", "sudo -u root -- cat x",
+		"timeout -s KILL 5 ls", "nice -n 5 find .", "xargs -I{} cat {}", "xargs -n 1 cat", "command ls", "command -p ls",
+		"f() { cat /dev/null; }; f", "function f(){ ls; }; f", "f() { g; }; g() { cat; }; f", "f() { ls; }; eval f",
+		"f() { ls; }; x=$(f)", "f() { ls; }; if f; then :; fi", "f() { ls; }; time f", "f() { ls; }; echo ok | f",
+	} {
+		if !runsFolderReader(line, nil, true) {
+			t.Errorf("%q: not reported as a reader", line)
+		}
+	}
+}
