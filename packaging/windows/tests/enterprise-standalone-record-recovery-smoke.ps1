@@ -175,10 +175,10 @@ try {
         Reset-Records
         Plant-Writer $metadata
         & icacls.exe $install /grant '*S-1-5-32-545:(OI)(CI)(M)' | Out-Null
-        $folderRefused = $false
+        $folderRefused = $false; $folderMessage = ''
         try { [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H') }
-        catch { $folderRefused = $_.Exception.Message -match '^untrusted_record: ' -and $_.Exception.Message -match [regex]::Escape($install) }
-        if (-not $folderRefused -or -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata)) { throw 'a record in a folder another account can change was moved or not refused by name' }
+        catch { $folderMessage = $_.Exception.Message; $folderRefused = $folderMessage -match '^untrusted_record: ' -and $folderMessage -match [regex]::Escape($install) }
+        if (-not $folderRefused -or -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata)) { throw "a record in a folder another account can change was moved or not refused by name: $folderMessage" }
         & icacls.exe $install /remove:g '*S-1-5-32-545' | Out-Null
 
         # Review M1: a rebuild that cannot succeed moves nothing. Each row leaves
@@ -242,7 +242,7 @@ try {
             foreach ($live in @($metadata, $attestation)) {
                 if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $live) -ne '') { throw "$($case.Name): the rerun left $live untrusted" }
             }
-            foreach ($keptFile in @((Kept 'deployment.json') + (Kept 'agent-application-control-attestation.json'))) {
+            foreach ($keptFile in (@(Kept 'deployment.json') + @(Kept 'agent-application-control-attestation.json'))) {
                 if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $keptFile.FullName) -ne '') { throw "$($case.Name): the rerun left $($keptFile.Name) unstamped" }
             }
             if ($script:liveGaps.Count -ne 0) { throw "$($case.Name): the rerun had a gap: $($script:liveGaps -join '; ')" }
