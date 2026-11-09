@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -882,6 +883,11 @@ func codexToolCallCWD(ctx context.Context, req codexHookRequest) string {
 	workdir, _ := req.ToolInput["workdir"].(string)
 	if workdir == "" {
 		workdir = codexTranscriptCallWorkdir(ctx, req)
+	}
+	if workdir == "" {
+		// A managed gateway cannot read the rollout: its hook client did, as
+		// the user, and sent the workdir of the call (GAP-0991).
+		workdir = resolvedWritesFromContext(ctx)[hookpaths.CallWorkdirKey]
 	}
 	if workdir == "" {
 		return req.CWD
