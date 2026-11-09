@@ -424,6 +424,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorVerify(cmd, nil)
 	case "prune-orphans":
 		err = runConnectorPruneOrphans(cmd, nil)
+	case "recover-config":
+		err = runConnectorRecoverConfig(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
 	case "check-agent-settings":

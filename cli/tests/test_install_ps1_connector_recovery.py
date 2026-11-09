@@ -181,10 +181,13 @@ def test_recovery_refusal_names_the_command_that_finishes_it(tmp_path) -> None:
     _run(
         tmp_path,
         """
+$BinDir = 'C:\\dc-test\\bin'
 try { Assert-NoActiveConnectorRecovery 'Rollback to 1.0.5'; throw 'guard unexpectedly passed' } catch {
     $text = $_.Exception.Message
     if ($text -notlike '*Rollback to 1.0.5 refused: active connector recovery remains*') { throw }
-    if ($text -notlike "*run 'defenseclaw setup <agent>'*") { throw }
+    # The command is exact: this install's gateway and the folder that holds the receipt.
+    $command = '"C:\\dc-test\\bin\\defenseclaw-gateway.exe" connector recover-config --data-dir "' + $DataDir + '"'
+    if ($text -notlike "*run '$command'*") { throw }
     if ($text -notlike '*do not remove or replay its receipts*') { throw }
 }
 """,
