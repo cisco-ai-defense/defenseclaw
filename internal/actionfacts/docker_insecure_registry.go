@@ -6,6 +6,7 @@ package actionfacts
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"net/netip"
 	"net/url"
@@ -28,9 +29,10 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // leaves: any other setting the document carries, or a registry it lists
 // twice, does not change the verdict. An edit, a patch hunk or an append
 // cannot show the rest of the file, so it is judged on the text it adds: the
-// insecure-registries list that text spells, less the entries the text it
-// replaces already listed. It deliberately returns no path, registry, or
-// content.
+// insecure-registries list that text puts in force, less the entries the text
+// it replaces already had in force. Each step of a multi-step edit and each
+// hunk of a patch is read on its own. It deliberately returns no path,
+// registry, or content.
 func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	if !facts.Authoritative() || !facts.EnforcementEligible() ||
 		facts.Tool != input.Tool {
@@ -73,26 +75,49 @@ func writeToolNamesItsFile(input Input) bool {
 }
 
 // dockerWriteAddsInsecureRegistry judges the text of one write of the daemon
-// configuration: a whole document by the list it holds, an edit by the list its
-// added text spells and the entries the replaced text already listed.
+// configuration: a whole document by the list it holds, an edit by the lists
+// its steps put in force and the entries the replaced text already had in
+// force. The steps of a multi-step edit and the hunks of a patch sit at
+// different places of the file, so each is read on its own and not as one text.
+// A step the grammar cannot read (dockerd refuses such a file) adds nothing.
 func dockerWriteAddsInsecureRegistry(write nativeFileWrite) bool {
 	if write.whole {
 		entries, ok := dockerDocumentRegistries(write.added)
 		return ok && dockerListAddsInsecureRegistry(entries, nil)
 	}
-	added, ok := dockerEditTextRegistries(write.added)
-	if !ok {
-		return false
+	steps := write.steps
+	if len(steps) == 0 {
+		steps = []nativeEditStep{{added: write.added, replaced: write.replaced}}
 	}
-	kept, _ := dockerEditTextRegistries(write.replaced)
+	var added, kept []string
+	for _, step := range steps {
+		entries, ok := dockerEditTextRegistries(step.added)
+		if !ok || !dockerEntriesAreReadable(entries) {
+			continue
+		}
+		had, _ := dockerEditTextRegistries(step.replaced)
+		added, kept = append(added, entries...), append(kept, had...)
+	}
 	return dockerListAddsInsecureRegistry(added, kept)
+}
+
+// dockerEntriesAreReadable reports whether the closed grammar reads every entry.
+func dockerEntriesAreReadable(entries []string) bool {
+	for _, entry := range entries {
+		if _, valid := exactDockerRegistryEntry(entry); !valid {
+			return false
+		}
+	}
+	return true
 }
 
 // dockerEditTextRegistries reads the list that one side of an edit puts in
 // force. Text that is a complete JSON object is a document, read as dockerd
-// reads one (the last repeated key wins), so a document an edit swaps for
-// another is compared by effective list, not by every list either spells. Any
-// other text is a piece of a document and is read for every list it spells.
+// reads one (the last repeated key wins). Any other text is a piece of a
+// document and is read the same way for the keys it spells: the last list the
+// piece spells is the one in force, so a piece that lists a registry and then
+// empties the list puts nothing in force. A piece cannot show a later key of
+// the file around it; only an edit that drops that key can change the list.
 func dockerEditTextRegistries(text string) ([]string, bool) {
 	if strings.HasPrefix(strings.TrimLeft(text, dockerJSONSpace), "{") {
 		if document, ok := dockerDecodeDocument(text); ok {
@@ -153,6 +178,11 @@ func dockerDecodeDocument(content string) (map[string]any, bool) {
 	if err := decoder.Decode(&document); err != nil {
 		return nil, false
 	}
+	// The validator stops at a repeated key, so the text after the first
+	// object is checked here: a document is exactly one object.
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, false
+	}
 	return document, true
 }
 
@@ -180,14 +210,14 @@ func dockerRegistryList(document map[string]any) ([]string, bool) {
 
 const dockerJSONSpace = " \t\r\n"
 
-// dockerFragmentRegistries reads the entries of every top-level
-// insecure-registries list that a piece of daemon.json text spells, including a
-// list the piece cuts off before its closing bracket. A piece without the key
-// lists nothing. ok is false when a list holds anything but JSON strings.
+// dockerFragmentRegistries reads the last top-level insecure-registries list
+// that a piece of daemon.json text spells, including a list the piece cuts off
+// before its closing bracket. A piece without the key lists nothing. ok is
+// false when a list holds anything but JSON strings.
 //
 // A piece of an edit can start inside a string, so the text is read from both
 // alignments (starting outside a string, and starting inside one) and the
-// entries of both are taken: the verdict never depends on where the edit cut
+// lists of both are taken: the verdict never depends on where the edit cut
 // the file.
 func dockerFragmentRegistries(text string) (entries []string, ok bool) {
 	for _, insideString := range []bool{false, true} {
@@ -201,7 +231,7 @@ func dockerFragmentRegistries(text string) (entries []string, ok bool) {
 }
 
 // dockerFragmentTopLevelLists scans text as JSON tokens and reads the list of
-// every key that decodes to insecure-registries and is not nested in an object
+// the last key that decodes to insecure-registries and is not nested in an object
 // or array the text itself opens as a key's value (the key means something
 // else there, as in a builder block). The key is decoded as JSON, so an escaped
 // spelling names the same key. Containers the text closes without having opened
@@ -240,7 +270,7 @@ func dockerFragmentTopLevelLists(text string, insideString bool) (entries []stri
 				return nil, false
 			}
 			if listed {
-				entries = append(entries, list...)
+				entries = list
 			}
 		case '{', '[':
 			inside := len(nested) > 0 && nested[len(nested)-1]
