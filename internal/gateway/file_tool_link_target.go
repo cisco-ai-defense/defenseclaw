@@ -90,6 +90,13 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 // blocks wherever the project lives (GAP-0831). The spelling is empty when
 // no working directory places it.
 func linkTargetSpelling(request trustedActionRequest, candidate actionfacts.PathFact) (spelling string, placed, reported bool) {
+	// A rooted Windows spelling names the file Windows opens for it, whatever
+	// the analysis could resolve: it is never an operand relative to the
+	// working directory (a device or share prefix, a name with trailing
+	// spaces, a folder followed by "..").
+	if opened, ok := windowsHostPathOfFact(candidate); ok {
+		return opened, false, false
+	}
 	if filepath.IsAbs(candidate.Resolved) {
 		return candidate.Resolved, false, false
 	}
