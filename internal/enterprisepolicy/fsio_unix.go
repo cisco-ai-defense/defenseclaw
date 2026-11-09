@@ -975,8 +975,8 @@ type VendorFolderProblem struct {
 // InspectRecordedVendorFolders reports nothing off Windows.
 func InspectRecordedVendorFolders(Options, []string) []VendorFolderProblem { return nil }
 
-// GoOwnedPolicyProblems reports nothing off Windows.
-func GoOwnedPolicyProblems(Options, []string) []VendorFolderProblem { return nil }
+// MachinePolicyProblems reports nothing off Windows.
+func MachinePolicyProblems(Options, []string) []VendorFolderProblem { return nil }
 
 // ReprotectRecordedVendorFolders does nothing off Windows.
 func ReprotectRecordedVendorFolders(Options, []string) ([]ReprotectedFolder, []VendorFolderProblem) {

@@ -286,7 +286,7 @@ func VerifyAll(opts Options, connectors []string) (Result, error) {
 }
 
 // verifyConnector is one connector's share of VerifyAll: machine-policy
-// verify and Setup's status and verify (GoOwnedPolicyProblems) both ask it, so
+// verify and Setup's status and verify (MachinePolicyProblems) both ask it, so
 // they cannot disagree about a connector's conflicts (GAP-0930).
 func verifyConnector(opts Options, name string) (State, error) {
 	route := opts.Route(name)

@@ -3187,7 +3187,7 @@ func applyWindowsEnterpriseAmpMachineFolder(result *enterprisestatus.Result) {
 // files DefenseClaw has no record of that another account can change (what a
 // purge leaves behind, GAP-0930) and every other conflict or error that
 // machine-policy verify raises for the Go-owned targets
-// (enterprisepolicy.GoOwnedPolicyProblems, the same function), so status and
+// (enterprisepolicy.MachinePolicyProblems, the same function), so status and
 // verify never claim coverage that machine-policy verify denies. A host with
 // no installed standalone config has none. Replaceable in tests.
 var windowsEnterpriseVendorFolderProblems = func() []enterprisepolicy.VendorFolderProblem {
@@ -3200,7 +3200,7 @@ var windowsEnterpriseVendorFolderProblems = func() []enterprisepolicy.VendorFold
 		return nil
 	}
 	defer pinWindowsStandaloneTrustScope()()
-	return enterprisepolicy.GoOwnedPolicyProblems(opts, connectors)
+	return enterprisepolicy.MachinePolicyProblems(opts, connectors)
 }
 
 // pinWindowsStandaloneTrustScope makes this process judge managed trust by the
