@@ -21,11 +21,15 @@ import (
 // missed the hook answer window (rel-1-0-2:GAP-0568). With the memo each
 // distinct path prefix is read once per evaluation.
 //
-// A memo holds for one evaluation only, and never outlives the call that
-// made it: the file system changes between hook calls (one call can create
-// the link the next call writes through). Within one evaluation every
-// reader already assumes the files stay as they are; the memo makes all of
-// them see the same answer. A nil memo reads the file system every time.
+// A memo holds for one scan only, and never outlives it: the file system
+// changes between hook calls (one call can create the link the next call
+// writes through) and between the scans of one call (a link can be
+// retargeted, a hard link made or removed, a keys file replaced). Each entry
+// point of an evaluation starts a scan (beginScan) that drops every answer of
+// the earlier ones, so a scan judges the names as they are when it runs.
+// Within one scan every reader already assumes the files stay as they are;
+// the memo makes all of them see the same answer. A nil memo reads the file
+// system every time.
 type TargetMemo struct {
 	mu sync.Mutex
 	// prefixes is the write-target walk state after each absolute path
@@ -38,14 +42,13 @@ type TargetMemo struct {
 	homes map[string]*actionStateHome
 	// keys lists the protected key files of each home once
 	// (ProtectedAuthorizedKeysPaths), and files their identities
-	// (newProtectedFiles). The identities are file system answers like the
-	// lstats and stats and hold for one scan (beginScan): a keys file that was
-	// created or replaced between two scans protects the names that now share
-	// its identity, and the names that shared the old one are ordinary.
+	// (newProtectedFiles). A keys file path can be a link that was retargeted
+	// and a keys file can be created or replaced between two scans, so these
+	// hold for one scan like every other answer.
 	keys  map[string][]string
 	files map[string]protectedFiles
 	// resolved are the answers of resolveWriteTarget by the exact path: the
-	// scans of one call ask for the same operands again (GAP-0483).
+	// readers of one scan ask for the same operands again (GAP-0483).
 	resolved map[string]resolvedTarget
 	// lstats and stats are the answers of the evaluation's lstat and stat of
 	// a name that exists or is missing (reads): the scans of one call read
@@ -55,6 +58,9 @@ type TargetMemo struct {
 	// one (beginScan), so a name that changed between two scans (a file that
 	// became or stopped being a hard link to a protected file) is read again.
 	lstats, stats map[string]memoRead
+	// folders are the folders the scan has read below and found no link into a
+	// network share.
+	folders folderProofs
 	// work counts the path components the memo walked on the file system
 	// and the candidate checks it computed (Work); candidates counts the
 	// Windows candidate checks among them (WorkParts).
@@ -86,19 +92,28 @@ type memoRead struct {
 	err  error
 }
 
-// beginScan starts a scan of the evaluation: the lstat and stat answers of
-// the earlier scans and the identities of the protected files are dropped,
-// and the next read of a name is a read of the file system. What stays are
-// the answers about paths (write-target walks, key file paths, homes), not
-// the identity of a file.
+// beginScan starts a scan of the evaluation and drops every answer the
+// earlier scans gave: the reads of names, the identities of the protected
+// files, the write-target walks and resolved targets, the key file paths, the
+// resolved homes and the Windows word checks. All of them are answers of the
+// file system, and the file system can change between two scans (a link
+// retargeted, a hard link made or removed, a keys file replaced), so the next
+// read of any of them is a read of the file system. Only the work counters
+// stay (Work).
 func (m *TargetMemo) beginScan() {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
+	clear(m.prefixes)
+	clear(m.words)
+	clear(m.homes)
+	clear(m.keys)
+	clear(m.files)
+	clear(m.resolved)
 	clear(m.lstats)
 	clear(m.stats)
-	clear(m.files)
+	m.folders.clear()
 	m.mu.Unlock()
 }
 
@@ -117,7 +132,7 @@ func (m *TargetMemo) lstat(name string) (os.FileInfo, error) {
 	if ok {
 		return known.info, known.err
 	}
-	info, err := pathLstat(name)
+	info, err := m.folders.lstat(name)
 	m.keep(m.lstats, name, info, err)
 	return info, err
 }
@@ -141,7 +156,7 @@ func (m *TargetMemo) stat(name string) (os.FileInfo, error) {
 	if ok {
 		return known.info, known.err
 	}
-	info, err := pathStat(name)
+	info, err := m.folders.stat(name)
 	m.keep(m.stats, name, info, err)
 	return info, err
 }

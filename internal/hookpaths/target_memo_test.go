@@ -104,11 +104,14 @@ func gap0568Assignments(n int) string {
 	return strings.Join(parts, "; ")
 }
 
-// gap0568Evaluation reads command as the gateway's evaluation does: the
+// gap0568Evaluation reads command as the gateway evaluation does: the
 // state scan and both target decisions on the whole call, then again on
-// each statement alone (the simple-command passes), all with one memo. It
-// returns the memo's file system work.
-func gap0568Evaluation(t *testing.T, command, cwd, home string) int {
+// each statement alone (the simple-command passes), all with one memo. Each
+// entry point is a scan that reads the file system anew, so a link that
+// changed between two scans is judged as it is (rel-1-0-9:GAP-0943). It
+// returns the memo file system work of the scans of the whole call, and the
+// work of the scans of the statements.
+func gap0568Evaluation(t *testing.T, command, cwd, home string) (whole, statements int) {
 	t.Helper()
 	memo := NewTargetMemo()
 	read := func(text string) {
@@ -121,10 +124,11 @@ func gap0568Evaluation(t *testing.T, command, cwd, home string) int {
 		}
 	}
 	read(command)
+	whole = memo.Work()
 	for _, statement := range strings.Split(command, "; ") {
 		read(statement)
 	}
-	return memo.Work()
+	return whole, memo.Work() - whole
 }
 
 // TestTargetMemoAssignmentChainWorkIsLinear pins rel-1-0-2:GAP-0568 with a
@@ -146,16 +150,28 @@ func TestTargetMemoAssignmentChainWorkIsLinear(t *testing.T) {
 		{"native", native, filepath.Join(native, "project")},
 	} {
 		t.Run(place.name, func(t *testing.T) {
-			work := map[int]int{}
+			whole, statements, work := map[int]int{}, map[int]int{}, map[int]int{}
 			for _, n := range []int{32, 64, 128} {
-				work[n] = gap0568Evaluation(t, gap0568Assignments(n), place.cwd, place.home)
+				whole[n], statements[n] = gap0568Evaluation(t, gap0568Assignments(n), place.cwd, place.home)
+				work[n] = whole[n] + statements[n]
 			}
-			t.Logf("work: n=32 %d, n=64 %d, n=128 %d", work[32], work[64], work[128])
+			t.Logf("work: n=32 %d, n=64 %d, n=128 %d; whole call %d, statements %d (n=128)", work[32], work[64], work[128], whole[128], statements[128])
 			if first, second := work[64]-work[32], work[128]-work[64]; second > 2*first+16 {
 				t.Errorf("work grew faster than linear: +%d for 32 more statements, then +%d for 64 more", first, second)
 			}
-			if limit := 8*128 + 256; work[128] > limit {
-				t.Errorf("128 statements cost %d units of work, want at most %d (each distinct path and candidate once)", work[128], limit)
+			// Every scan reads the file system anew, so the work of the
+			// evaluation is the work of one scan times the scans. A scan of the
+			// whole call walks each distinct path and checks each distinct
+			// candidate once: at most 4 a statement and 64 more (the 3 scans of
+			// the whole call). Before, the one limit of 8 a statement and 256
+			// held for every pass of the evaluation together.
+			if limit := 3 * (4*128 + 64); whole[128] > limit {
+				t.Errorf("the 3 scans of the whole 128-statement call cost %d units of work, want at most %d (each distinct path and candidate once a scan)", whole[128], limit)
+			}
+			// Each of the 3 scans of one statement walks the working directory
+			// and the home chains once: a constant a scan, whatever the call.
+			if limit := 3 * 128 * 32; statements[128] > limit {
+				t.Errorf("the 3 scans of each of 128 statements cost %d units of work, want at most %d (32 a scan)", statements[128], limit)
 			}
 		})
 	}

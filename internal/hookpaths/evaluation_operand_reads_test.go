@@ -96,14 +96,17 @@ func TestEvaluationReadsAnOrdinaryOperandOnce(t *testing.T) {
 	if decision != "" || state {
 		t.Fatalf("ordinary operands: decision %q, state %v, want allowed", decision, state)
 	}
-	// Each scan reads the name again, so a file that changed between scans is
-	// judged as it is; inside a scan the readers of one name share one walk
-	// read (before: 17 an operand for the three scans together).
+	// The readers of one scan share one read of a name, each scan reads the
+	// name again so a file that changed between scans is judged as it is, and
+	// a folder is proved to be no link to a share once a scan, not once a name.
+	// Before: 17 an operand for the three scans together.
+	total := 0
+	for _, reads := range fx.scanReads {
+		total += reads
+	}
 	t.Logf("walk reads for each scan: %v", fx.scanReads)
-	for i, reads := range fx.scanReads {
-		if want := operands + 100; reads > want {
-			t.Errorf("scan %d of %d ordinary operands made %d walk reads, want at most %d", i+1, operands, reads, want)
-		}
+	if want := 2*operands + 200; total > want {
+		t.Fatalf("%d ordinary operands made %d walk reads in one evaluation, want at most %d", operands, total, want)
 	}
 }
 
