@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -161,6 +163,9 @@ def _publish_writer_receipt(data_dir, path, original, committed):
         "pristine_sha256": hashlib.sha256(original).hexdigest() if original is not None else "missing",
         "post_sha256": hashlib.sha256(committed).hexdigest(),
     }
+    now = time.time_ns()
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now // 10**9)) + f".{now % 10**9:09d}Z"
+    receipt["captured_at"] = receipt["updated_at"] = stamp
     receipt_path = os.path.join(folder, "openclaw.json.json")
     with open(receipt_path, "w") as handle:
         json.dump(receipt, handle)
@@ -597,3 +602,116 @@ def test_file_a_setup_created_is_removed_only_while_it_is_the_registration_outpu
     path.write_bytes(b'{"operatorNote":"mine"}\n')
     assert cmd_setup._restore_openclaw_config_record(record) == "kept"
     assert path.exists()
+
+
+# A receipt the writer left from an earlier registration (version 1, the real fields,
+# stamped when that registration ran) is not evidence about the setup that is failing now.
+_EARLIER_PRISTINE = b"{\"gateway\":{\"port\":18773}}\n"
+_EARLIER_COMMITTED = (
+    json.dumps(
+        {
+            "gateway": {"port": 18773},
+            "plugins": {
+                "allow": ["defenseclaw"],
+                "entries": {"defenseclaw": {"enabled": True}},
+                "load": {"paths": ["/home/u/.openclaw/extensions/defenseclaw"]},
+            },
+        },
+        indent=2,
+    ).encode()
+    + b"\n"
+)
+_SAVED_BEFORE_SETUP = b"{\"operatorNote\":\"saved before this setup\"}\n"
+
+
+def _earlier_receipt(data_dir, path, *, stamps=True):
+    folder = os.path.join(data_dir, "connector_backups", "openclaw")
+    os.makedirs(folder, exist_ok=True)
+    receipt = {
+        "version": 1,
+        "connector": "openclaw",
+        "logical_name": "openclaw.json",
+        "path": path,
+        "existed": True,
+        "pristine_sha256": hashlib.sha256(_EARLIER_PRISTINE).hexdigest(),
+        "post_sha256": hashlib.sha256(_EARLIER_COMMITTED).hexdigest(),
+    }
+    if stamps:
+        receipt["captured_at"] = "2026-10-01T09:00:00.123456789Z"
+        receipt["updated_at"] = "2026-10-01T09:00:01.5Z"
+    receipt_path = os.path.join(folder, "openclaw.json.json")
+    with open(receipt_path, "w") as handle:
+        json.dump(receipt, handle)
+    return receipt_path
+
+
+@pytest.mark.parametrize("stamps", [True, False], ids=["stamped-earlier", "unstamped"])
+@pytest.mark.parametrize("prior", [_SAVED_BEFORE_SETUP, _EARLIER_PRISTINE], ids=["other-prior", "same-prior"])
+def test_receipt_of_an_earlier_registration_never_authorizes_a_restore(tmp_path, prior, stamps):
+    path = tmp_path / "openclaw.json"
+    data_dir = str(tmp_path / "data")
+    receipt = _earlier_receipt(data_dir, str(path), stamps=stamps)
+    path.write_bytes(prior)
+    record = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
+    path.write_bytes(_EARLIER_COMMITTED)  # A save during the failed setup, byte for byte the earlier output.
+    assert cmd_setup._restore_openclaw_config_record(record) == "kept"
+    assert path.read_bytes() == _EARLIER_COMMITTED
+    assert os.path.exists(receipt)
+
+
+def test_receipt_published_by_this_run_over_an_earlier_one_authorizes_the_restore(tmp_path):
+    path = tmp_path / "openclaw.json"
+    data_dir = str(tmp_path / "data")
+    _earlier_receipt(data_dir, str(path))
+    path.write_bytes(_EARLIER_PRISTINE)
+    record = cmd_setup._capture_openclaw_config_record(str(path), data_dir)
+    path.write_bytes(_registered(_EARLIER_PRISTINE))
+    _publish_writer_receipt(data_dir, record.path, _EARLIER_PRISTINE, _registered(_EARLIER_PRISTINE))
+    assert cmd_setup._restore_openclaw_config_record(record) == "restored"
+    assert path.read_bytes() == _EARLIER_PRISTINE
+
+
+def test_record_not_taken_by_a_run_authorizes_no_restore(tmp_path):
+    record, path, _ = _registered_record(tmp_path)
+    assert cmd_setup._restore_openclaw_config_record(replace(record, started_ns=None)) == "kept"
+    assert path.read_bytes() == _registered(_OPERATOR_BASE)
+
+
+def test_failed_setup_before_registration_keeps_an_outside_save_and_says_so():
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        path = os.path.join(tmp_dir, "openclaw.json")
+        with open(path, "wb") as handle:
+            handle.write(_SAVED_BEFORE_SETUP)
+        app.cfg.claw.config_file = path
+        app.cfg.gateway.host = "127.0.0.1"
+        app.cfg.claw.mode = ""
+        app.cfg.guardrail.connector = ""
+        app.cfg.guardrail.connectors = {}
+        _earlier_receipt(app.cfg.data_dir, path)
+        calls = []
+
+        def fail_before_registration(*_args, **_kwargs):
+            calls.append("restart")
+            if len(calls) == 1:
+                with open(path, "wb") as handle:
+                    handle.write(_EARLIER_COMMITTED)  # OpenClaw saves while DefenseClaw gateway fails to start.
+                cmd_setup._fail_if_restart_failed(["defenseclaw-gateway"])
+
+        with (
+            patch.object(cmd_setup, "_restart_services", side_effect=fail_before_registration),
+            patch.object(cmd_setup, "_openclaw_gateway_healthy", return_value=True),
+            patch.object(cmd_setup, "_adopt_openclaw_gateway_token"),
+            patch.object(cmd_setup, "_write_picked_connector_hint"),
+            patch.object(cmd_setup, "_maybe_bring_up_local_stack"),
+            patch.object(cmd_setup, "_check_connector_version_supported_for_setup", return_value=True),
+        ):
+            result = _invoke(app, "--mode", "action")
+        assert result.exit_code != 0, result.output
+        assert len(calls) == 2, result.output
+        with open(path, "rb") as handle:
+            assert handle.read() == _EARLIER_COMMITTED, result.output
+        assert "saved by OpenClaw or you while setup ran" in result.output
+        assert "defenseclaw setup remove openclaw" in result.output
+    finally:
+        cleanup_app(app, db_path, tmp_dir)

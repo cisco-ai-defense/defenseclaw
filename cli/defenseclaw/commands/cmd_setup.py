@@ -8687,6 +8687,9 @@ class _OpenClawConfigRecord:
     body: bytes | None = field(repr=False)
     mode: int
     data_dir: str = ""
+    # When this setup run took the record. Only a writer receipt stamped at or after
+    # it was published by this run; None (a record not taken by a run) authorizes nothing.
+    started_ns: int | None = None
 
 
 # An exact copy is kept in memory, so a file past this size is refused up
@@ -8716,6 +8719,7 @@ def _capture_openclaw_config_record(
     if not config_file:
         return None
     path = os.path.realpath(os.path.expanduser(config_file))
+    started_ns = time.time_ns()
     try:
         body = _read_openclaw_config_bytes(path)
         mode = stat.S_IMODE(os.stat(path).st_mode) if body is not None else 0
@@ -8727,7 +8731,9 @@ def _capture_openclaw_config_record(
             f"cannot keep an exact copy of {path} before setup ({reason}), so a failed setup could not put it "
             "back. No changes made. Fix the file or its permissions, then run the same setup command again."
         ) from exc
-    return _OpenClawConfigRecord(path=path, body=body, mode=mode, data_dir=os.fspath(data_dir) if data_dir else "")
+    return _OpenClawConfigRecord(
+        path=path, body=body, mode=mode, data_dir=os.fspath(data_dir) if data_dir else "", started_ns=started_ns
+    )
 
 
 def _with_openclaw_config_record(
@@ -8770,10 +8776,39 @@ def _openclaw_writer_receipt(record: _OpenClawConfigRecord) -> tuple[str, dict[s
     return receipt_path, receipt
 
 
+_RFC3339_NANO = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)")
+
+
+def _rfc3339_ns(stamp: object) -> int | None:
+    """Unix nanoseconds of an RFC 3339 stamp as the Go writer prints it, None when it is not one."""
+    found = _RFC3339_NANO.fullmatch(stamp) if isinstance(stamp, str) else None
+    if found is None:
+        return None
+    base, fraction, zone = found.groups()
+    try:
+        seconds = int(datetime.fromisoformat(base + ("+00:00" if zone == "Z" else zone)).timestamp())
+    except ValueError:
+        return None
+    return seconds * 1_000_000_000 + int((fraction or "").ljust(9, "0"))
+
+
 def _openclaw_writer_sha256(record: _OpenClawConfigRecord) -> str | None:
-    """The digest of the bytes the registration committed, None until it has published one."""
+    """The digest of the bytes the registration of this run committed, None until it has published one.
+
+    The writer keeps the receipt of an earlier setup until a registration
+    reaches it, so a receipt that is there is not yet evidence about this run. It
+    counts only when the writer stamped it (updated_at, else captured_at) at or
+    after the moment this run took its record.
+    """
     found = _openclaw_writer_receipt(record)
-    digest = found[1].get("post_sha256") if found else None
+    if found is None or record.started_ns is None:
+        return None
+    receipt = found[1]
+    stamps = [_rfc3339_ns(receipt.get(name)) for name in ("captured_at", "updated_at")]
+    published = max((stamp for stamp in stamps if stamp is not None), default=None)
+    if published is None or published < record.started_ns:
+        return None
+    digest = receipt.get("post_sha256")
     return digest if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) else None
 
 
