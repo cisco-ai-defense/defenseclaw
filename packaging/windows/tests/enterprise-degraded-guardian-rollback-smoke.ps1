@@ -70,15 +70,18 @@ function Write-DefenseClawResilienceEvent {
     $script:Events.Add("$Marker connector=$($Fields['connector']) sid=$($Fields['sid'])")
 }
 function ConvertTo-DefenseClawBoundedDiagnostic { param($Value) [string]$Value }
+# The module is not imported here: the profile is a flag. Standalone reads both label forms, Secure Client the old one only.
+$script:SmokeStandalone = $true
+function Test-DefenseClawStandaloneProfile { return [bool]$script:SmokeStandalone }
 
 $startedAfter = [DateTime]::Parse('2026-10-29T00:00:00Z').ToUniversalTime()
 $digest = 'a' * 64
-function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true, [string]$ActivationDigest = '') {
+function New-Report([int]$Failures, [int]$Rows = 3, [bool]$WithState = $true, [string]$ActivationDigest = '', [string]$FailedLabel = 'claudecode@S-1-5-21-1-2-3-1003') {
     $report = [ordered]@{
         ok = ($Failures -eq 0)
         # The exact lines `enterprise hooks status` emits for a failed target.
         errors = @($(if ($Failures -gt 0) {
-                    'last guardian reconcile failed for claudecode@S-1-5-21-1-2-3-1003: hook write denied'
+                    "last guardian reconcile failed for ${FailedLabel}: hook write denied"
                     "last guardian reconcile is incomplete ($(3 - $Failures - 1) succeeded, 1 pending, 3 total)"
                     "protected guardian authorization is incomplete ($(3 - $Failures - 1) succeeded, 1 pending, 3 total)"
                 }))
@@ -135,6 +138,29 @@ Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest ('c' * 64
 Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest) $false 'degraded activation without -AllowFailedTargets'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -Rows 2) -Allow) $false 'incomplete degraded reconcile'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -WithState $false) -Allow) $false 'not-ok report without state'
+# GAP-0900: Windows names the account of a row as "user (SID)" (GAP-2290), and the
+# acceptance of a degraded reconcile read only the old "connector@SID" label, so a
+# rollback or a recovery that met any failed row stayed pending with the services stopped.
+$accountLabel = 'claudecode@EC2AMAZ-X\alice (S-1-5-21-1-2-3-1003)'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel) -Allow) $true 'degraded reconcile, row named as user (SID), rollback lane'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel -ActivationDigest $digest) -Digest $digest -Allow) $true 'degraded reconcile, row named as user (SID), activation lane'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@Bob Smith (S-1-5-21-1-2-3-1003)') -Allow) $true 'degraded reconcile, user name with a space'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel)) $false 'user (SID) row without -AllowFailedTargets'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@EC2AMAZ-X\alice (S-1-5-21-9-9-9-9)') -Allow) $false 'row named with a SID that is not a failed row'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'codex@EC2AMAZ-X\alice (S-1-5-21-1-2-3-1003)') -Allow) $false 'row named with another connector'
+# A crafted account name: the SID of the row is the last "(S-1-...)" before the first ": ".
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil (S-1-5-21-9-9-9-9) (S-1-5-21-1-2-3-1003)') -Allow) $true 'a name that holds another SID, with the real SID last'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil (S-1-5-21-1-2-3-1003) (S-1-5-21-9-9-9-9)') -Allow) $false 'a name that holds the failed SID, with another SID last'
+Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel 'claudecode@evil: x (S-1-5-21-1-2-3-1003)') -Allow) $false 'a name that holds a colon before the SID'
+# Secure Client keeps its text and behaviour: only the old connector@SID label is read.
+$script:SmokeStandalone = $false
+try {
+    Assert-Result (Test-Coverage (New-Report -Failures 1) -Allow) $true 'Secure Client: the connector@SID label'
+    Assert-Result (Test-Coverage (New-Report -Failures 1 -FailedLabel $accountLabel) -Allow) $false 'Secure Client: the user (SID) label is not read'
+}
+finally {
+    $script:SmokeStandalone = $true
+}
 $skippedSID = 'S-1-5-21-1-2-3-1003'
 $otherSID = 'S-1-5-21-1-2-3-1001'
 Assert-Result (Test-Coverage (New-Report -Failures 1 -ActivationDigest $digest) -Digest $digest -Allow -AllowedSIDs @($skippedSID)) $true 'failed skipped account'

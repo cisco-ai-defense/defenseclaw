@@ -17374,7 +17374,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
         # (GAP-0773). Install, ensure and repair still judge them, and the
         # judgement refuses the link by name.
         if ($Scope -ceq 'Lifecycle' -or
-            [string]::IsNullOrEmpty((Get-DefenseClawCodexMachineFolderLink -Layout $Layout))) {
+            [string]::IsNullOrEmpty((Get-DefenseClawVendorMachineFolderLink -Directory ([string]$Layout.CodexMachinePolicyDirectory)))) {
             $rows += , @('CodexMachinePolicyPath', $record, $every)
             $rows += , @('CodexManagedHooksStatePath', $record, $every)
         }
@@ -17636,29 +17636,165 @@ function Repair-DefenseClawDeploymentAclDrift {
     return $true
 }
 
-# The link on the path of the Codex machine-policy folder (a junction at
-# ProgramData\OpenAI\Codex or above it), or '' when there is none. Standalone
-# only: Secure Client keeps its refusal. Nothing is created, opened or
-# followed (GAP-0773).
-function Get-DefenseClawCodexMachineFolderLink {
-    param([Parameter(Mandatory)][hashtable]$Layout)
+# The link on the path of a vendor machine-policy folder (a junction at
+# ProgramData\OpenAI\Codex, ProgramData\Cursor or Program Files\ClaudeCode, or
+# above it), or '' when there is none. Standalone only: Secure Client keeps its
+# refusal. Nothing is created, opened or followed (GAP-0773, GAP-0900). The walk
+# reads the attributes of each component itself (GetAttributes does not follow
+# the last component), so a junction whose target is gone is found too, which
+# Test-Path would read as an absent folder.
+# The one read of a path's attributes that the link walk makes; a smoke replaces it
+# to make the read fail.
+function Get-DefenseClawLinkCheckAttributes {
+    param([string]$Path)
+    return [IO.File]::GetAttributes($Path)
+}
+
+function Get-DefenseClawVendorMachineFolderLink {
+    param(
+        [string]$Directory,
+        # A rollback passes it: an error other than not-found is then treated like a
+        # found link (the path is returned, with a degraded event naming the path and
+        # the error) so the rollback goes on and the services come back. Without it
+        # the error propagates and the start-of-run check fails closed.
+        [switch]$Tolerant
+    )
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return ''
     }
-    $directory = [string]$Layout.CodexMachinePolicyDirectory
-    if ([string]::IsNullOrWhiteSpace($directory)) {
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
         return ''
     }
-    try {
-        Assert-DefenseClawNoReparsePath -Path $directory -AllowMissingLeaf
-    }
-    catch {
-        if ($_.Exception.Message -match '^reparse points are not allowed in managed path: (?<link>.+)$') {
-            return [string]$Matches['link']
+    $current = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        $attributes = $null
+        try {
+            $attributes = Get-DefenseClawLinkCheckAttributes -Path $current
         }
-        throw
+        catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+            $attributes = $null
+        }
+        catch {
+            if (-not $Tolerant) {
+                throw
+            }
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                path      = $current
+                reason    = "the link check could not read this path ($($_.Exception.Message)); it is treated like a link and skipped, and the rollback goes on"
+            }
+            return $current
+        }
+        if ($null -ne $attributes -and
+            ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $current
+        }
+        $parent = [IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) {
+            break
+        }
+        $current = $parent
     }
     return ''
+}
+
+# Each link on the path of the Codex, Cursor and Claude Code machine-policy
+# folders (the three the lifecycle snapshot reads), as Name and Link. Standalone
+# only.
+function Get-DefenseClawVendorMachineFolderLinks {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $found = [Collections.Generic.List[object]]::new()
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return @()
+    }
+    foreach ($folder in @(
+        @{ Name = 'Codex'; Path = [string]$Layout.CodexMachinePolicyDirectory },
+        @{ Name = 'Cursor'; Path = [IO.Path]::Combine($script:ProgramData, 'Cursor') },
+        @{ Name = 'Claude Code'; Path = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d') }
+    )) {
+        $link = Get-DefenseClawVendorMachineFolderLink -Directory $folder.Path
+        if ($link -ne '') {
+            $found.Add([pscustomobject]@{ Name = $folder.Name; Link = $link })
+        }
+    }
+    return @($found.ToArray())
+}
+
+function Format-DefenseClawVendorMachineFolderLinkFix {
+    param([Parameter(Mandatory)][object[]]$Links)
+    $found = @($Links | Microsoft.PowerShell.Core\ForEach-Object { "$($_.Name): $($_.Link)" })
+    $fixes = @($Links | Microsoft.PowerShell.Core\ForEach-Object { "cmd /c rmdir `"$($_.Link)`"" })
+    return (
+        'DefenseClaw does not follow a link in the machine-policy folder of an agent. A link sits on the path of: ' +
+        ($found -join '; ') + '. As an administrator, remove only the link (the folder it points to is not changed) with: ' +
+        ($fixes -join '; ') + ', then run the same command again'
+    )
+}
+
+function Assert-DefenseClawVendorMachineFoldersNotLinked {
+    <#
+        Install (fresh or over an existing install), Upgrade and Repair (and the
+        Ensure that runs one) snapshot the machine-policy folders of Codex,
+        Cursor and Claude Code, and a link on the path of any of them failed
+        that snapshot with 1603 after the services had stopped. With enrolled
+        accounts the rollback could then not bring the guardian back, and the
+        transaction stayed pending with the services stopped (GAP-0900). This
+        refuses before anything is changed: it runs once at the start of the
+        action, with the one link check the uninstall also uses, and names each
+        link with the command that removes it. Standalone only; Secure Client
+        keeps its behaviour.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Action
+    )
+    $links = @(Get-DefenseClawVendorMachineFolderLinks -Layout $Layout)
+    if ($links.Count -gt 0) {
+        throw (
+            "$Action stopped before it changed anything; the services and the deployment are as they were. " +
+            (Format-DefenseClawVendorMachineFolderLinkFix -Links $links)
+        )
+    }
+}
+
+# A failed action whose rollback ran while a link still sits on one of the three
+# folders says so in its error: the link and the command that removes it
+# (GAP-0900). Standalone only; any other failure is returned as it was.
+function Add-DefenseClawVendorMachineFolderLinkFix {
+    param(
+        [Parameter(Mandatory)]$ErrorRecord,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $ErrorRecord
+    }
+    $message = [string]$ErrorRecord.Exception.Message
+    if ($message.Contains('cmd /c rmdir')) {
+        return $ErrorRecord
+    }
+    $links = @()
+    try {
+        $links = @(Get-DefenseClawVendorMachineFolderLinks -Layout $Layout)
+    }
+    catch {
+        return $ErrorRecord
+    }
+    if ($links.Count -eq 0) {
+        return $ErrorRecord
+    }
+    $exception = [InvalidOperationException]::new(
+        ($message + ' ' + (Format-DefenseClawVendorMachineFolderLinkFix -Links $links)),
+        $ErrorRecord.Exception
+    )
+    foreach ($key in @($ErrorRecord.Exception.Data.Keys)) {
+        $exception.Data[$key] = $ErrorRecord.Exception.Data[$key]
+    }
+    return [Management.Automation.ErrorRecord]::new(
+        $exception,
+        'DefenseClawVendorMachineFolderLink',
+        [Management.Automation.ErrorCategory]::InvalidOperation,
+        $null
+    )
 }
 
 function New-DefenseClawTransaction {
@@ -18167,7 +18303,7 @@ function New-DefenseClawTransaction {
     if ($IncludeCodexMachineState) {
         $codexFolderLink = ''
         if ($SkipLinkedCodexMachineState) {
-            $codexFolderLink = Get-DefenseClawCodexMachineFolderLink -Layout $Layout
+            $codexFolderLink = Get-DefenseClawVendorMachineFolderLink -Directory ([string]$Layout.CodexMachinePolicyDirectory)
         }
         foreach ($destination in @(
             $Layout.CodexMachinePolicyPath,
@@ -23160,6 +23296,21 @@ function Restore-DefenseClawTransaction {
             continue
         }
         if ($isSharedCodexFile) {
+            # GAP-0900: a link that appeared on the Codex folder after the
+            # transaction opened. Nothing is written through it and the rollback
+            # goes on, so the services come back; the link stays for the
+            # administrator, who removes only the link. Standalone only.
+            $restoreCodexLink = Get-DefenseClawVendorMachineFolderLink `
+                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+                -Tolerant
+            if ($restoreCodexLink -ne '') {
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                    subsystem = 'rollback'
+                    path      = $restoreCodexLink
+                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`"; the next repair or ensure then finishes the work"
+                }
+                continue
+            }
             $policyDirectoryExists = Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.CodexMachinePolicyDirectory `
                 -PathType Container
@@ -23305,6 +23456,20 @@ function Restore-DefenseClawTransaction {
         [bool]$codexIncludedProperty.Value) {
         # The writer copy of the Codex state is back; the hook copy the
         # counter names must say the same (GAP-0650).
+        # GAP-0900: the hook copy of the Codex state lives in the Codex machine-policy
+        # folder; with a link on its path the copy is not written through it (nothing
+        # ever writes through a link), the link is named, and the rollback goes on.
+        $stateCopyLink = Get-DefenseClawVendorMachineFolderLink `
+            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+            -Tolerant
+        if ($stateCopyLink -ne '') {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                path      = $stateCopyLink
+                reason    = "a link sits on the Codex machine-policy folder; the restored Codex state was not written for the hook through it. As an administrator, remove only the link with: cmd /c rmdir `"$stateCopyLink`"; the next repair or ensure then finishes the work"
+            }
+        }
+        if ($stateCopyLink -eq '') {
         try {
             Sync-DefenseClawCodexManagedHooksStateCopy `
                 -Layout $Layout `
@@ -23316,6 +23481,7 @@ function Restore-DefenseClawTransaction {
                 path   = [string]$Layout.CodexManagedHooksStatePath
                 reason = "the restored Codex managed runtime state could not be written for the hook: $($_.Exception.Message); the next Codex transaction writes it"
             }
+        }
         }
     }
     if ($hasCoworkSnapshot) {
@@ -23444,9 +23610,14 @@ function Restore-DefenseClawTransaction {
                 -Layout $Layout `
                 -GatewayServiceName ([string]$snapshot.gateway_service)
         }
+        # GAP-0900: nothing is stamped through a link on the Codex folder either.
+        $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `
+                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+                -Tolerant) -ne ''
         Set-DefenseClawManagedAcls `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
+            -SkipCodexMachineState:$restoreCodexLinked `
             -AllowTransactionRecordedBrokerAbsence:(
                 $snapshotBrokerAbsent
             )
@@ -23653,6 +23824,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
         -ServicingTransaction `
+        -RollbackRestore `
         -TransitionHookSHA256 (Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_sha256') `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
         -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
@@ -31154,6 +31326,18 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
     if ([string]$report.phase -notin @($expectedPhase)) {
         throw "managed-hook lifecycle snapshot $Action returned invalid phase: $($report.phase)"
     }
+    # GAP-0900: a link the restore did not read or write through is named, with
+    # the command that removes it; the rollback went on without that connector.
+    $keptLinks = $report.PSObject.Properties['kept_links']
+    if ($null -ne $keptLinks -and $null -ne $keptLinks.Value) {
+        foreach ($keptLink in @($keptLinks.Value)) {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                path      = [string]$keptLink
+                reason    = "a link sits on the machine-policy folder of an agent; the managed-hook lifecycle $Action did not read or write through it and the rollback went on without that agent. As an administrator, remove only the link with: cmd /c rmdir `"$keptLink`""
+            }
+        }
+    }
     $restored = $report.PSObject.Properties['cursor_adapter_restored']
     if ($null -ne $restored -and $restored.Value -is [bool] -and [bool]$restored.Value) {
         $script:DefenseClawCursorAdapterRestored = $true
@@ -35989,6 +36173,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         [switch]$RequireReadiness,
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
+        # GAP-0900: set only by the rollback of a transaction (Restore). A link on
+        # the Codex folder is then named and not read through; every forward path
+        # (static validation, the install commit) still fails closed on it.
+        [switch]$RollbackRestore,
         [string]$TransitionHookSHA256 = '',
         # Restore-only: an authenticated servicing preimage that predates the
         # Broker or Enumerator. Ordinary callers keep the full service set.
@@ -36300,6 +36488,23 @@ function Assert-DefenseClawEnterpriseDeployment {
         }
     }
     $codexRequirementsDeferred = $false
+    # GAP-0900: a rollback (-RollbackRestore) that finds a link on the Codex folder
+    # does not read the Codex machine policy through it. The checks below keep their
+    # lines; they are skipped by the braces around them.
+    $codexFolderLink = ''
+    if ($RollbackRestore -and $codexTargetEnabled) {
+        $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `
+            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+            -Tolerant
+    }
+    if ($codexFolderLink -ne '') {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'rollback'
+            path      = $codexFolderLink
+            reason    = "a link sits on the Codex machine-policy folder; its policy was not checked and Codex is not protected until the link is removed with: cmd /c rmdir `"$codexFolderLink`""
+        }
+    }
+    if ($codexFolderLink -eq '') {
     if ($codexTargetEnabled) {
         Assert-DefenseClawCodexMachinePolicyDirectory `
             -Path $Layout.CodexVendorDirectory
@@ -36341,6 +36546,7 @@ function Assert-DefenseClawEnterpriseDeployment {
                 throw "Claude-only deployment retains stale DefenseClaw Codex ownership state: $ownedPath"
             }
         }
+    }
     }
     $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
     $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
@@ -36935,6 +37141,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -ExpectedStartMode $expectedServiceStartMode
     }
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
+    if ($codexFolderLink -eq '') {
     if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
         $codexTargetEnabled -and (Test-DefenseClawStandaloneProfile) -and
         -not $codexRequirementsDeferred) {
@@ -36965,6 +37172,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+    }
     }
 
     if ($RequireReadiness) {
@@ -38574,6 +38782,20 @@ function Test-DefenseClawGuardianReportErrorsAttributable {
     $countsPattern = '^(?:last guardian reconcile|protected guardian authorization|protected guardian activation) is incomplete \((\d+) succeeded, (\d+) pending, (\d+) total\)$'
     foreach ($entry in @($errorsProperty.Value)) {
         $text = ([string]$entry).Trim()
+        # Standalone (GAP-0900): Windows names the account of a row as "user (SID)"
+        # (GAP-2290); a row whose account is unknown is named by its SID alone. The
+        # key is connector@SID either way; the SID is the last "(S-1-...)" before
+        # the first ": " (Windows account names hold no colon).
+        if (Test-DefenseClawStandaloneProfile) {
+            $accountLabel = [regex]::Match($text, '^last guardian reconcile failed for (?<connector>[^@\s]+)@(?<account>.+?)(?: \((?<sid>S-1-[0-9-]+)\))?: ')
+            if ($accountLabel.Success) {
+                $who = if ($accountLabel.Groups['sid'].Success) { $accountLabel.Groups['sid'].Value } else { $accountLabel.Groups['account'].Value }
+                if (-not $failedLabels.ContainsKey($accountLabel.Groups['connector'].Value + '@' + $who)) {
+                    return $false
+                }
+                continue
+            }
+        }
         $failed = [regex]::Match($text, '^last guardian reconcile failed for (\S+): ')
         if ($failed.Success) {
             if (-not $failedLabels.ContainsKey($failed.Groups[1].Value)) {
@@ -47911,6 +48133,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     }
     catch {
         $operationError = $_
+        # GAP-0900: the error says which link a rollback met, and its rmdir fix.
+        $operationError = Add-DefenseClawVendorMachineFolderLinkFix -ErrorRecord $operationError -Layout $Layout
         try {
             Restore-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout
             Complete-DefenseClawTransaction `
@@ -53035,6 +53259,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     )
                 }
             }
+        }
+
+        # GAP-0900: a link on the path of a vendor machine-policy folder stops
+        # Install, Upgrade and Repair here, before a root, a recovery lane or a
+        # service is touched.
+        if ($Action -in @('Install', 'Upgrade', 'Repair')) {
+            Assert-DefenseClawVendorMachineFoldersNotLinked -Layout $layout -Action $Action
         }
 
         # An eligible Install that leftover state stops is cleared once
