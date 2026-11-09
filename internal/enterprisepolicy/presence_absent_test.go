@@ -102,3 +102,57 @@ func TestMachinePolicyAbsentIsNotTheNegationOfPresent(t *testing.T) {
 		})
 	}
 }
+
+// Copilot loads every effective JSON drop-in of policy.d, so a DefenseClaw hook
+// in a sibling file is registered although MachinePolicyPresent, which reads
+// the DefenseClaw drop-in alone, says false. Absence is proven only when every
+// effective drop-in was read and parsed and none names DefenseClaw.
+func TestMachinePolicyAbsentReadsEveryEffectiveCopilotDropIn(t *testing.T) {
+	opts := publishTestOptions(t)
+	if _, err := Publish(opts, []string{"copilot"}); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := CopilotPolicyDir(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := copilotDropInPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := readFile(t, owned)
+	if err := os.Remove(owned); err != nil {
+		t.Fatal(err)
+	}
+	check := func(step string, wantAbsent, wantErr bool) {
+		t.Helper()
+		got, err := MachinePolicyAbsent(opts, "copilot")
+		if (err != nil) != wantErr || got != wantAbsent {
+			t.Fatalf("%s: absent=%v err=%v, want absent=%v error=%v", step, got, err, wantAbsent, wantErr)
+		}
+	}
+	check("no drop-in", true, false)
+
+	// The same hook under another effective name stays registered.
+	writeFile(t, filepath.Join(dir, "91-policy.json"), published)
+	check("hook in a sibling drop-in", false, false)
+	// A drifted copy in a sibling is a registered hook as well.
+	writeFile(t, filepath.Join(dir, "91-policy.json"), strings.ReplaceAll(published, "--enterprise-managed --event ", "--enterprise-managed --changed --event "))
+	check("drifted hook in a sibling drop-in", false, false)
+
+	// Files Copilot does not load are not policy.
+	if err := os.Remove(filepath.Join(dir, "91-policy.json")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, ".91-draft.json"), published)
+	writeFile(t, filepath.Join(dir, "91-policy.json.bak"), published)
+	check("hidden and non-JSON copies", true, false)
+
+	// Benign twin: unrelated administrator hooks name no DefenseClaw hook.
+	writeFile(t, filepath.Join(dir, "50-admin.json"), "{\"hooks\": {\"preToolUse\": [{\"type\": \"command\", \"bash\": \"/usr/local/bin/audit-tool\"}]}}\n")
+	check("unrelated administrator drop-in", true, false)
+
+	// A source that cannot be parsed proves nothing.
+	writeFile(t, filepath.Join(dir, "60-broken.json"), "{\"hooks\": ")
+	check("unparsable sibling drop-in", false, true)
+}

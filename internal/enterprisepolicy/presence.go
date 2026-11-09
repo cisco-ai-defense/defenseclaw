@@ -83,8 +83,9 @@ func MachinePolicyAbsent(opts Options, connectorName string) (bool, error) {
 }
 
 // machinePolicySources reads the vendor files MachinePolicyPresent reads for
-// the connector, with the same trust checks. A file that does not exist adds
-// nothing.
+// the connector, with the same trust checks. Copilot loads every effective
+// JSON drop-in of policy.d, so all of them are read, not only the DefenseClaw
+// one. A file that does not exist adds nothing.
 func machinePolicySources(opts Options, name string) ([][]byte, error) {
 	var paths []string
 	var err error
@@ -118,9 +119,27 @@ func machinePolicySources(opts Options, name string) ([][]byte, error) {
 			paths = []string{path}
 		}
 	case ConnectorCopilot:
-		var path string
-		path, err = copilotDropInPath(opts)
-		paths = []string{path}
+		var dir string
+		var names []string
+		if dir, names, err = copilotEffectiveDropIns(opts); err != nil {
+			return nil, err
+		}
+		out := make([][]byte, 0, len(names))
+		for _, name := range names {
+			file := joinFor(opts, dir, name)
+			raw, exists, readErr := readPolicyFile(opts, file)
+			if readErr != nil {
+				return nil, readErr
+			}
+			if !exists {
+				continue
+			}
+			if _, parseErr := decodeOrderedObject(raw); parseErr != nil {
+				return nil, fmt.Errorf("parse Copilot policy drop-in %s: %w", file, parseErr)
+			}
+			out = append(out, raw)
+		}
+		return out, nil
 	case ConnectorOpenCode:
 		if !opts.openCodeArtifactInstalled() {
 			return nil, nil
