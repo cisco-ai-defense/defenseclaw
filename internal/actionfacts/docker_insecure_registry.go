@@ -74,19 +74,33 @@ func writeToolNamesItsFile(input Input) bool {
 }
 
 // dockerWriteAddsInsecureRegistry judges the text of one write of the daemon
-// configuration: a whole document by the list it holds, a fragment by the list
-// it spells and the entries the replaced text already listed.
+// configuration: a whole document by the list it holds, an edit by the list its
+// added text spells and the entries the replaced text already listed.
 func dockerWriteAddsInsecureRegistry(write nativeFileWrite) bool {
 	if write.whole {
 		entries, ok := dockerDocumentRegistries(write.added)
 		return ok && dockerListAddsInsecureRegistry(entries, nil)
 	}
-	added, ok := dockerFragmentRegistries(write.added)
+	added, ok := dockerEditTextRegistries(write.added)
 	if !ok {
 		return false
 	}
-	kept, _ := dockerFragmentRegistries(write.replaced)
+	kept, _ := dockerEditTextRegistries(write.replaced)
 	return dockerListAddsInsecureRegistry(added, kept)
+}
+
+// dockerEditTextRegistries reads the list that one side of an edit puts in
+// force. Text that is a complete JSON object is a document, read as dockerd
+// reads one (the last repeated key wins), so a document an edit swaps for
+// another is compared by effective list, not by every list either spells. Any
+// other text is a piece of a document and is read for every list it spells.
+func dockerEditTextRegistries(text string) ([]string, bool) {
+	if strings.HasPrefix(strings.TrimLeft(text, dockerJSONSpace), "{") {
+		if document, ok := dockerDecodeDocument(text); ok {
+			return dockerRegistryList(document)
+		}
+	}
+	return dockerFragmentRegistries(text)
 }
 
 // dockerListAddsInsecureRegistry reports whether every entry is one the closed
@@ -119,6 +133,16 @@ func dockerListAddsInsecureRegistry(entries, kept []string) bool {
 // daemon.json document. Other settings are not read: they do not change what
 // the list does. A repeated key reads as dockerd reads it, the last wins.
 func dockerDocumentRegistries(content string) ([]string, bool) {
+	document, ok := dockerDecodeDocument(content)
+	if !ok {
+		return nil, false
+	}
+	return dockerRegistryList(document)
+}
+
+// dockerDecodeDocument decodes content as one JSON object. ok is false when it
+// is not one, or holds a string beyond the proof's limit.
+func dockerDecodeDocument(content string) (map[string]any, bool) {
 	raw := []byte(content)
 	if issue := validateJSONWithStringLimit(raw, maxScalarBytes); issue != "" &&
 		issue != IssueDuplicateJSONKey {
@@ -130,6 +154,12 @@ func dockerDocumentRegistries(content string) ([]string, bool) {
 	if err := decoder.Decode(&document); err != nil {
 		return nil, false
 	}
+	return document, true
+}
+
+// dockerRegistryList is the insecure-registries list of a decoded document;
+// ok is false when the key holds anything but a list of strings.
+func dockerRegistryList(document map[string]any) ([]string, bool) {
 	value, present := document["insecure-registries"]
 	if !present {
 		return nil, true
