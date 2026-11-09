@@ -4,7 +4,6 @@
 package gateway
 
 import (
-	"maps"
 	"slices"
 	"strings"
 
@@ -49,7 +48,7 @@ func appendTrustedWriteTargetFindings(
 	}
 	if !actionfacts.LimitExceededWriteTool(request.Input, facts) {
 		findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
-		return enforceOverLimitCommandContentFindings(findings, generation, request, facts)
+		return appendOverLimitElidedContentFinding(findings, generation, request, facts)
 	}
 	if view, args, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
 		reduced := request
@@ -164,20 +163,28 @@ var overLimitContentRules = map[string]string{
 	"pam":                  "tamper.pam_permit_authentication_bypass",
 }
 
-// appendOverLimitElidedContentFinding judges an over-limit write whose
-// reduced call still left a text out and whose target is a file a content
-// rule decides on (GAP-0687): that rule cannot read the text, so the call
-// takes the rule's conservative finding. It blocks only where the call is
-// enforcement-capable and the rule pack blocks with that rule (observe and
-// alert-only profiles record it); a rule the pack does not have adds
-// nothing, and an ordinary file is never such a target.
+// appendOverLimitElidedContentFinding judges an over-limit call that names a
+// file a content rule decides on (GAP-0687, GAP-0934) and whose text that
+// rule cannot read: a write whose reduced call still left a text out, or a
+// shell command with no bounded twin that writes the file
+// (actionfacts.OverLimitCommandContentTarget). The call takes the rule's
+// conservative finding. It blocks only where the call is enforcement-capable
+// and the rule pack blocks with that rule (observe and alert-only profiles
+// record it); a rule the pack does not have adds nothing, and an ordinary
+// file is never such a target. A finding of the rule that only records is
+// replaced: the pattern match alone did not decide the call.
 func appendOverLimitElidedContentFinding(
 	findings []RuleFinding,
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
+	title := overLimitElidedContentTitle
 	class, ok := actionfacts.OverLimitWriteElidedContentTarget(request.Input, facts, request.ResolvedWriteTargets)
+	if !ok {
+		title = overLimitCommandContentTitle
+		class, ok = actionfacts.OverLimitCommandContentTarget(request.Input, facts)
+	}
 	if !ok {
 		return findings
 	}
@@ -185,21 +192,26 @@ func appendOverLimitElidedContentFinding(
 	if !ok {
 		return findings
 	}
-	for _, finding := range findings {
-		if finding.RuleID == rule.ID {
-			return findings
-		}
-	}
 	enforcement := findingEnforcementAllowed
 	if !request.EnforcementCapable {
 		enforcement = findingEnforcementDetectionOnly
 	}
-	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
-		RuleID: rule.ID, Title: overLimitElidedContentTitle, Severity: rule.Severity,
+	finding := adjustConfidence(request.Input.Tool, RuleFinding{
+		RuleID: rule.ID, Title: title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 		enforcement: enforcement,
-	}))
+	})
+	for index, existing := range findings {
+		if existing.RuleID != rule.ID {
+			continue
+		}
+		if !existing.contributesToEnforcement() {
+			findings[index] = finding
+		}
+		return findings
+	}
+	return append(findings, finding)
 }
 
 // overLimitWriteBoundedTwinRequest is the request for the bounded twin of a
@@ -223,54 +235,6 @@ func overLimitWriteBoundedTwinRequest(request trustedActionRequest, facts action
 // a command that names a file a content rule decides on and is too large for
 // that rule to read.
 const overLimitCommandContentTitle = "Shell command too large to verify names a file whose content rules decide on its text; split it into smaller calls"
-
-// enforceOverLimitCommandContentFindings makes the match of a content rule's
-// text pattern in a limit-exceeded command count, where the command cannot
-// be bounded (padded with text, not white space): the rule's exact proof
-// needs a complete reading, which a command over the limit does not have, so
-// without this a named protected target (a redirect to the loader preload
-// list) is recorded and allowed however large the call is (GAP-0934). The
-// recorded finding is replaced by the rule's own, enforcing. It applies only
-// to the rules of overLimitContentRules, only where the call is
-// enforcement-capable, and not to a command whose bounded twin is judged
-// (overLimitCommandBoundedTwinRequest): that reading decides it as it
-// decides the unpadded command.
-func enforceOverLimitCommandContentFindings(
-	findings []RuleFinding,
-	generation *compiledRulePackCategories,
-	request trustedActionRequest,
-	facts actionfacts.Facts,
-) []RuleFinding {
-	if !request.EnforcementCapable || facts.Parse.Status != actionfacts.StatusLimitExceeded ||
-		actionfacts.StructuredWriteTool(request.Input.Tool) {
-		return findings
-	}
-	bounded, boundedKnown := false, false
-	for index, finding := range findings {
-		if finding.enforcement != findingEnforcementDetectionOnly ||
-			!slices.Contains(slices.Collect(maps.Values(overLimitContentRules)), finding.RuleID) {
-			continue
-		}
-		if !boundedKnown {
-			_, bounded = actionfacts.OverLimitCommandBoundedTwin(request.Input, facts)
-			boundedKnown = true
-		}
-		if bounded {
-			return findings
-		}
-		_, rule, ok := trustedActionCatalogRule(generation, finding.RuleID)
-		if !ok {
-			continue
-		}
-		findings[index] = adjustConfidence(request.Input.Tool, RuleFinding{
-			RuleID: rule.ID, Title: overLimitCommandContentTitle, Severity: rule.Severity,
-			Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
-			Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
-			enforcement: findingEnforcementAllowed,
-		})
-	}
-	return findings
-}
 
 // overLimitCommandBoundedTwinRequest is the request for the bounded twin of
 // a limit-exceeded command that is over the string limit only by the white

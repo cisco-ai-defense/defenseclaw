@@ -26,6 +26,10 @@ func TestOverLimitCommandBoundedTwin(t *testing.T) {
 		{"leading", strings.Repeat("\t", 300000) + attack},
 		{"inner", "echo /usr/local/lib/libreview.so" + strings.Repeat(" ", 300000) + "> /etc/ld.so.preload"},
 		{"line breaks", attack + strings.Repeat("\n \n", 100000)},
+		{"comment after", attack + " # " + strings.Repeat("x", 300000)},
+		{"comment line before", "# " + strings.Repeat("x", 300000) + "\n" + attack},
+		{"comment lines between", "echo a\n# " + strings.Repeat("x", 300000) + "\n" + attack},
+		{"comment beside a here-document", "cat <<\x27EOF\x27 # " + strings.Repeat("x", 300000) + "\nnote\nEOF\n" + attack},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			input, facts := overLimitCommandInput(t, "exec_command", c.command)
@@ -49,12 +53,20 @@ func TestOverLimitCommandBoundedTwin(t *testing.T) {
 			}
 		})
 	}
-	opaque := attack + " # " + strings.Repeat("x", 300000)
-	input, facts := overLimitCommandInput(t, "exec_command", opaque)
-	if _, ok := OverLimitCommandBoundedTwin(input, facts); ok {
-		t.Fatal("text that is not white space padding has a twin")
+	for name, opaque := range map[string]string{
+		"quoted text":           attack + "\n: \x27" + strings.Repeat("x", 300000) + "\x27",
+		"here-document text":    attack + "\ncat <<EOF\n" + strings.Repeat("x", 300000) + "\nEOF\n",
+		"hash inside a quote":   attack + "\necho \"# " + strings.Repeat("x", 300000) + "\"",
+		"hash inside a word":    attack + "\necho a#" + strings.Repeat("x", 300000),
+		"hash in a body":        attack + "\ncat <<EOF\n# " + strings.Repeat("x", 300000) + "\nEOF\n",
+		"expansion with a hash": attack + "\necho ${#PATH} # " + strings.Repeat("x", 300000),
+	} {
+		input, facts := overLimitCommandInput(t, "exec_command", opaque)
+		if _, ok := OverLimitCommandBoundedTwin(input, facts); ok {
+			t.Fatalf("%s: text that is no padding has a twin", name)
+		}
 	}
-	input, facts = overLimitCommandInput(t, "exec_command", "echo ok")
+	input, facts := overLimitCommandInput(t, "exec_command", "echo ok")
 	if _, ok := OverLimitCommandBoundedTwin(input, facts); ok {
 		t.Fatal("a call within the limits has a twin")
 	}
@@ -64,22 +76,155 @@ func TestOverLimitCommandBoundedTwin(t *testing.T) {
 	}
 }
 
-// TestBoundedCommandText pins the bounded form: only a run of white space
-// longer than maxKeptWhiteSpaceRun changes, and it keeps a line break.
+// TestBoundedCommandText pins the bounded form: only a line of white space
+// longer than maxKeptWhiteSpaceRun changes, to one byte of its kind, every
+// line break stays up to maxKeptWhiteSpaceRun of them, and the meaning of a
+// here-document line is the original (GAP-0934).
 func TestBoundedCommandText(t *testing.T) {
 	short := strings.Repeat(" ", maxKeptWhiteSpaceRun)
+	long := strings.Repeat(" ", maxCommandBytes)
 	for _, c := range []struct {
 		name, text, want string
 		ok               bool
 	}{
 		{"short runs stay", "a" + short + "b" + strings.Repeat("c", maxCommandBytes), "", false},
-		{"long run is one space", "a" + strings.Repeat(" ", maxCommandBytes) + "b", "a b", true},
-		{"long run with a break is one break", "a" + strings.Repeat(" \n", maxCommandBytes) + "b", "a\nb", true},
-		{"short run kept beside a long one", "a" + short + "b" + strings.Repeat("\t", maxCommandBytes) + "c", "a" + short + "b c", true},
-		{"all white space", strings.Repeat(" ", maxCommandBytes+1), "", false},
+		{"long run is one space", "a" + long + "b", "a b", true},
+		{"long tab run is one tab", "a" + strings.Repeat("\t", maxCommandBytes) + "b", "a\tb", true},
+		{"line of blanks keeps its break", "a" + long + "\nb", "a \nb", true},
+		{"padding after a here-document word keeps the line not a delimiter", "cat <<EOF\nx\nEOF" + long + "\nEOF\n", "cat <<EOF\nx\nEOF \nEOF\n", true},
+		{"padding before a word keeps the line not a delimiter", "cat <<EOF\nx\n" + long + "EOF\nEOF\n", "cat <<EOF\nx\n EOF\nEOF\n", true},
+		{"short run kept beside a long one", "a" + short + "b" + long + "c", "a" + short + "b c", true},
+		{"empty lines past the bound go, the indent stays", "a" + strings.Repeat("\n", maxCommandBytes) + "  b", "a" + strings.Repeat("\n", maxKeptWhiteSpaceRun) + "  b", true},
+		{"no-break space is a word byte", "a" + strings.Repeat("\u00a0", maxCommandBytes) + "b", "", false},
+		{"carriage return is a word byte", "a" + strings.Repeat("\r", maxCommandBytes) + "b", "", false},
+		{"all white space", long + "  ", "", false},
+		{"blank here-document delimiter", "cat <<\x27 \x27\nx\n" + long + "\n \n", "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			got, ok := boundedCommandText(c.text)
+			if ok != c.ok || (ok && got != c.want) {
+				t.Fatalf("got %q ok=%t, want %q ok=%t", got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
+// TestOverLimitCommandContentTarget pins the reading of a command that is
+// over the limit by text (GAP-0934): a protected file named directly as the
+// target of a write is found under every spelling the shell reads as that
+// file, wherever the text puts it, and an ordinary file, a read, or a name
+// that depends on the environment is not.
+func TestOverLimitCommandContentTarget(t *testing.T) {
+	opaque := "\n: \x27" + strings.Repeat("x", 70000) + "\x27"
+	for _, c := range []struct{ name, command, class string }{
+		{"plain redirect", "echo a > /etc/ld.so.preload", "global-preload"},
+		{"dot segment", "echo a > /etc/./ld.so.preload", "global-preload"},
+		{"parent segment", "echo a > /etc/x/../ld.so.preload", "global-preload"},
+		{"double slash", "echo a >//etc//ld.so.preload", "global-preload"},
+		{"append", "echo a >> /etc/ld.so.preload", "global-preload"},
+		{"clobber", "echo a >| /etc/ld.so.preload", "global-preload"},
+		{"both streams", "echo a &> /etc/ld.so.preload", "global-preload"},
+		{"double quoted", "echo a > \"/etc/ld.so.preload\"", "global-preload"},
+		{"single quoted part", "echo a > /etc/\x27ld.so.preload\x27", "global-preload"},
+		{"escaped byte", "echo a > /etc/ld.so.pre\\load", "global-preload"},
+		{"tee", "echo a | tee -a /etc/ld.so.preload", "global-preload"},
+		{"tee by path", "echo a | /usr/bin/tee /srv/app/out /etc/ld.so.preload", "global-preload"},
+		{"cp", "cp lib.so /etc/ld.so.preload", "global-preload"},
+		{"mv with options", "mv -f lib.so /etc/ld.so.preload", "global-preload"},
+		{"install", "install -m 644 lib.so /etc/ld.so.preload", "global-preload"},
+		{"ln", "ln -sf lib.so /etc/ld.so.preload", "global-preload"},
+		{"cp then a comment on the line", "cp lib.so /etc/ld.so.preload # keep the copy", "global-preload"},
+		{"tee then a comment on the line", "echo a | tee /etc/ld.so.preload # keep the copy", "global-preload"},
+		{"cp to an ordinary file, a protected name in the comment", "cp lib.so /srv/app/x # /etc/ld.so.preload", ""},
+		{"dd", "dd if=lib.so of=/etc/ld.so.preload", "global-preload"},
+		{"variable file", "F=/etc/ld.so.preload; echo a > $F", "global-preload"},
+		{"variable directory", "D=/etc\necho a > \"${D}/ld.so.preload\"", "global-preload"},
+		{"variable of a variable", "D=/etc; F=$D/ld.so.preload; echo a > $F", "global-preload"},
+		{"cd then relative", "cd /etc && echo a > ld.so.preload", "global-preload"},
+		{"cd variable then relative", "D=/etc; cd $D; echo a > ld.so.preload", "global-preload"},
+		{"cd earlier than another cd", "cd /etc; cd /tmp; echo a > ld.so.preload", "global-preload"},
+		{"after a quoted hash", "echo \"# \"; echo a > /etc/ld.so.preload", "global-preload"},
+		{"after a stray quote in a here-document", "cat <<EOF\nit\x27s\nEOF\necho a > /etc/ld.so.preload", "global-preload"},
+		{"sudoers", "echo a > /etc/sudoers.d/agent", "sudoers"},
+		{"account database", "echo a >> /etc/passwd", "account-database"},
+		{"pam", "echo a > /etc/pam.d/sshd", "pam"},
+		{"docker daemon", "echo a > /etc/docker/daemon.json", "docker-daemon-config"},
+		{"profile fragment", "echo a > /etc/profile.d/x.sh", "global-preload"},
+		{"ordinary file", "echo a > /srv/app/notes.txt", ""},
+		{"read of a protected file", "cat /etc/ld.so.preload /etc/passwd", ""},
+		{"copy from a protected file", "cp /etc/ld.so.preload /srv/app/x", ""},
+		{"link to a protected file", "ln -s /etc/ld.so.preload x", ""},
+		{"neighbour name", "echo a > /etc/ld.so.preload.bak", ""},
+		{"other etc file", "echo a > /etc/hosts", ""},
+		{"unknown variable", "echo a > $OUT", ""},
+		{"substitution", "echo a > $(mktemp)", ""},
+		{"pattern", "echo a > /etc/ld.so.prel*", ""},
+		{"relative in the working directory", "cd /tmp && echo a > ld.so.preload", ""},
+		{"stream duplicate", "echo a 2>&1", ""},
+		{"tee of an ordinary file", "echo a | tee out.txt", ""},
+		{"longer name", "echo a > /srv/app/tee-x.txt", ""},
+	} {
+		for position, command := range map[string]string{"before": c.command + opaque, "after": opaque + "\n" + c.command} {
+			t.Run(c.name+"/"+position, func(t *testing.T) {
+				input, facts := overLimitCommandInput(t, "exec_command", command)
+				if facts.Parse.Status != StatusLimitExceeded {
+					t.Fatalf("not limit-exceeded: %s", facts.Parse.Status)
+				}
+				class, ok := OverLimitCommandContentTarget(input, facts)
+				if class != c.class || ok != (c.class != "") {
+					t.Fatalf("class=%q ok=%t, want %q", class, ok, c.class)
+				}
+			})
+		}
+	}
+	t.Run("a command with a twin is judged as its twin", func(t *testing.T) {
+		input, facts := overLimitCommandInput(t, "exec_command", "echo a > /etc/ld.so.preload"+strings.Repeat(" ", 300000))
+		if class, ok := OverLimitCommandContentTarget(input, facts); ok {
+			t.Fatalf("class %q for a command that has a twin", class)
+		}
+	})
+	t.Run("a call within the limits", func(t *testing.T) {
+		input, facts := overLimitCommandInput(t, "exec_command", "echo a > /etc/ld.so.preload")
+		if class, ok := OverLimitCommandContentTarget(input, facts); ok {
+			t.Fatalf("class %q for a call within the limits", class)
+		}
+	})
+}
+
+// TestStripShellComments pins that only a comment is left out: an unquoted
+// hash that starts a word, to the end of its line. A hash in a quote, in a
+// word, after a dollar, in a here-document body or after a backslash is none,
+// and a construct the reading does not follow leaves the text unreduced.
+func TestStripShellComments(t *testing.T) {
+	for _, c := range []struct {
+		name, text, want string
+		ok               bool
+	}{
+		{"trailing comment", "echo a # note\necho b", "echo a \necho b", true},
+		{"comment line", "# note\necho b", "\necho b", true},
+		{"after a separator", "echo a;# note", "echo a;", true},
+		{"single quoted hash", "echo \x27# a\x27 # note", "echo \x27# a\x27 ", true},
+		{"double quoted hash", "echo \"# a\" # note", "echo \"# a\" ", true},
+		{"hash inside a word", "echo a#b", "echo a#b", true},
+		{"escaped hash", "echo \\# a", "echo \\# a", true},
+		{"dollar hash", "echo $# $?", "echo $# $?", true},
+		{"here-document body is data", "cat <<EOF\n# a\nEOF\n# b\n", "cat <<EOF\n# a\nEOF\n\n", true},
+		{"dash here-document, tab delimiter", "cat <<-EOF\n# a\n\tEOF\n# b", "cat <<-EOF\n# a\n\tEOF\n", true},
+		{"padded delimiter line is data", "cat <<EOF\nEOF \n# a\nEOF\n# b", "cat <<EOF\nEOF \n# a\nEOF\n", true},
+		{"quoted delimiter", "cat <<\x27EOF\x27 # c\n# a\nEOF\n", "cat <<\x27EOF\x27 \n# a\nEOF\n", true},
+		{"two here-documents", "cat <<A <<B\n# a\nA\n# b\nB\n# c", "cat <<A <<B\n# a\nA\n# b\nB\n", true},
+		{"here-string", "cat <<< x # c", "cat <<< x ", true},
+		{"command substitution", "echo $(echo a # c\n)", "", false},
+		{"parameter expansion", "echo ${#a} # c", "", false},
+		{"arithmetic", "echo $((1)) # c", "", false},
+		{"arithmetic command", "(( a )) # c", "", false},
+		{"backtick", "echo `a` # c", "", false},
+		{"ansi-c quote", "echo $\x27a\x27 # c", "", false},
+		{"unterminated quote", "echo \x27a # c", "", false},
+		{"substitution in a string", "echo \"$(a)\" # c", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := stripShellComments(c.text)
 			if ok != c.ok || (ok && got != c.want) {
 				t.Fatalf("got %q ok=%t, want %q ok=%t", got, ok, c.want, c.ok)
 			}

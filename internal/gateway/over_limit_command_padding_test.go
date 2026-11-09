@@ -69,37 +69,128 @@ func TestOverLimitCommandPaddingKeepsItsVerdict(t *testing.T) {
 	}
 }
 
-// TestOverLimitCommandOpaqueTextFailsClosedForItsTargetOnly pins that a
-// command over the limit by text that is not white space padding, and so has
-// no bounded twin, still blocks when its text names a redirect to the loader
-// preload list, and that an ordinary command of the same size stays allowed
-// (GAP-0934).
+// TestOverLimitCommandOpaqueTextFailsClosedForItsTargetOnly pins the verdict
+// of a command over the 64 KiB limit by text (GAP-0934). Padded with
+// comments it is judged as the same command without them, as every rule
+// judges the small command: a statement that is blocked small is blocked
+// large, one that is allowed small is allowed large, and a protected file
+// named in a comment or in data is no write. Padded with text that is data
+// (a quoted string, a here-document body), which has no twin, a protected
+// file named directly as the target of a write still blocks under every
+// spelling, and an ordinary command of the same size stays allowed.
 func TestOverLimitCommandOpaqueTextFailsClosedForItsTargetOnly(t *testing.T) {
 	home, project := hermesPatchHome(t)
-	opaque := strings.Repeat("x", 70000)
+	text := strings.Repeat("x", 70000)
+	lib := "/usr/local/lib/libreview.so"
+	paddings := map[string]func(statement string) string{
+		"comment after":      func(statement string) string { return statement + " # " + text },
+		"comment line next":  func(statement string) string { return statement + "\n# " + text },
+		"comment line first": func(statement string) string { return "# " + text + "\n" + statement },
+		"quoted text after":  func(statement string) string { return statement + "\n: \x27" + text + "\x27" },
+		"quoted text first":  func(statement string) string { return ": \x27" + text + "\x27\n" + statement },
+		"document after":     func(statement string) string { return statement + "\ncat > /dev/null <<EOF\n" + text + "\nEOF\n" },
+		"stray quote before": func(statement string) string {
+			return "cat <<EOF\nit\x27s\nEOF\n" + statement + "\n: \x27" + text + "\x27"
+		},
+	}
+	for name, statement := range map[string]string{
+		"redirect":         "echo " + lib + " > /etc/ld.so.preload",
+		"dot segment":      "echo " + lib + " > /etc/./ld.so.preload",
+		"double slash":     "echo " + lib + " >//etc//ld.so.preload",
+		"quoted name":      "echo " + lib + " > \"/etc/ld.so.preload\"",
+		"variable":         "F=/etc/ld.so.preload; echo " + lib + " > $F",
+		"cd then relative": "cd /etc && echo " + lib + " > ld.so.preload",
+	} {
+		for padName, pad := range paddings {
+			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {
+				got := overLimitCommandVerdict(t, home, project, pad(statement))
+				if overLimitHookAction(t, got) != "block" || !strings.Contains(got, "persistence.global_ld_preload_install") {
+					t.Fatalf("not blocked by the preload rule: %.600s", got)
+				}
+			})
+		}
+	}
+	// Only a fallback reading, which has no twin, reads a write that the
+	// small command does not show: the statements below are the same call
+	// blocked small and large when they are padded with data.
+	for name, statement := range map[string]string{
+		"copy":    "cp " + lib + " /etc/ld.so.preload",
+		"install": "install -m 644 " + lib + " /etc/ld.so.preload",
+		"sudoers": "echo \x27agent ALL=(ALL) NOPASSWD: ALL\x27 > /etc/sudoers.d/agent",
+	} {
+		for _, padName := range []string{"quoted text after", "quoted text first"} {
+			t.Run("fallback attack/"+name+"/"+padName, func(t *testing.T) {
+				got := overLimitCommandVerdict(t, home, project, paddings[padName](statement))
+				if overLimitHookAction(t, got) != "block" {
+					t.Fatalf("not blocked: %.600s", got)
+				}
+			})
+		}
+	}
+	notes := filepath.Join(project, "notes.txt")
+	for name, statement := range map[string]string{
+		"heredoc to an ordinary file": "cat > " + filepath.Join(project, "big.txt") + " <<\x27EOF\x27\nnote\nEOF\n",
+		"protected read":              "cat /etc/ld.so.preload",
+		"ordinary redirect":           "echo ok > " + notes,
+		"unknown variable":            "echo ok > $OUT",
+		"copy from a protected file":  "cp /etc/ld.so.preload " + filepath.Join(project, "copy.txt"),
+		"neighbour name":              "echo ok > /etc/ld.so.preload.bak",
+		"relative in the project":     "cd " + project + " && echo ok > ld.so.preload",
+		"attack named in a string":    "printf \x27%s\\n\x27 \x27" + lib + " > /etc/ld.so.preload\x27 > " + notes,
+		"attack named in a document":  "cat > " + notes + " <<\x27EOF\x27\n" + lib + " > /etc/ld.so.preload\nEOF\n",
+	} {
+		for _, padName := range []string{"comment after", "comment line next", "comment line first"} {
+			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
+				got := overLimitCommandVerdict(t, home, project, paddings[padName](statement))
+				if action := overLimitHookAction(t, got); action == "block" {
+					t.Fatalf("ordinary oversize command blocked: %.600s", got)
+				}
+			})
+		}
+	}
+	for name, statement := range map[string]string{
+		"protected read":    "cat /etc/ld.so.preload",
+		"ordinary redirect": "echo ok > " + notes,
+		"unknown variable":  "echo ok > $OUT",
+	} {
+		for _, padName := range []string{"quoted text after", "document after"} {
+			t.Run("benign data padded/"+name+"/"+padName, func(t *testing.T) {
+				got := overLimitCommandVerdict(t, home, project, paddings[padName](statement))
+				if action := overLimitHookAction(t, got); action == "block" {
+					t.Fatalf("ordinary oversize command blocked: %.600s", got)
+				}
+			})
+		}
+	}
+}
+
+// TestOverLimitCommandPaddingKeepsHeredocMeaning pins that padding a here-
+// document line with white space does not change which line ends the
+// document, so the statement the shell runs stays the statement judged: the
+// padded delimiter line is not a delimiter in the original and not in the
+// twin, and the redirect below it is the document text, not a command
+// (GAP-0934). A real delimiter followed by the redirect blocks.
+func TestOverLimitCommandPaddingKeepsHeredocMeaning(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	notes := filepath.Join(project, "notes.txt")
 	attack := "echo /usr/local/lib/libreview.so > /etc/ld.so.preload"
 	for name, command := range map[string]string{
-		"comment after":      attack + " # " + opaque,
-		"comment line next":  attack + "\n# " + opaque,
-		"comment line first": "# " + opaque + "\n" + attack,
-	} {
-		t.Run("attack/"+name, func(t *testing.T) {
-			got := overLimitCommandVerdict(t, home, project, command)
-			if overLimitHookAction(t, got) != "block" || !strings.Contains(got, "persistence.global_ld_preload_install") {
-				t.Fatalf("not blocked by the preload rule: %.600s", got)
-			}
-		})
-	}
-	for name, command := range map[string]string{
-		"heredoc to an ordinary file": "cat > " + filepath.Join(project, "big.txt") + " <<'EOF'\n" + opaque + "\nEOF\n",
-		"protected read":              "cat /etc/ld.so.preload # " + opaque,
-		"ordinary redirect":           "echo ok > " + filepath.Join(project, "notes.txt") + " # " + opaque,
+		"trailing padded delimiter": "cat > " + notes + " <<EOF\nnote\nEOF" + strings.Repeat(" ", 70000) + "\n" + attack + "\nEOF\n",
+		"leading padded delimiter":  "cat > " + notes + " <<EOF\nnote\n" + strings.Repeat(" ", 70000) + "EOF\n" + attack + "\nEOF\n",
+		"tab padded dash delimiter": "cat > " + notes + " <<-EOF\nnote\n" + strings.Repeat("\t", 70000) + "EOF\nEOF\n",
+		"padded line in a document": "cat > " + notes + " <<EOF\nnote" + strings.Repeat(" ", 70000) + "\n" + attack + "\nEOF\n",
 	} {
 		t.Run("benign/"+name, func(t *testing.T) {
 			got := overLimitCommandVerdict(t, home, project, command)
 			if action := overLimitHookAction(t, got); action == "block" {
-				t.Fatalf("ordinary oversize command blocked: %.600s", got)
+				t.Fatalf("ordinary here-document blocked: %.600s", got)
 			}
 		})
 	}
+	t.Run("attack/delimiter then redirect", func(t *testing.T) {
+		got := overLimitCommandVerdict(t, home, project, "cat > "+notes+" <<EOF\nnote\nEOF\n"+attack+strings.Repeat(" ", 70000))
+		if overLimitHookAction(t, got) != "block" || !strings.Contains(got, "persistence.global_ld_preload_install") {
+			t.Fatalf("not blocked by the preload rule: %.600s", got)
+		}
+	})
 }
