@@ -35718,6 +35718,30 @@ function Get-DefenseClawRecordedCodexRequirementsPreimage {
     }
 }
 
+function Get-DefenseClawBlockedCodexStatePath {
+    <#
+        GAP-0947: the Codex managed runtime state file (the fixed name and the
+        writer copy) a program holds open in a way that keeps the Codex
+        reconcile from reading or replacing it, or '' when none is. The
+        recovery of the requirements publishes through that reconcile, so a
+        holder here stops it as one on requirements.toml does.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    foreach ($candidate in (@([string]$Layout.CodexManagedHooksStatePath) +
+            @(Get-DefenseClawCodexManagedHooksStateWriterCopyList -Layout $Layout))) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or
+            -not [IO.Path]::IsPathRooted($candidate) -or
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            continue
+        }
+        if ((Test-DefenseClawFileReadBlocked -Path $candidate) -or
+            (Test-DefenseClawFileDeleteBlocked -Path $candidate)) {
+            return $candidate
+        }
+    }
+    return ''
+}
+
 function Repair-DefenseClawRecoveredCodexRequirements {
     <#
         g582 round 11e (GAP-0802). A rollback puts back the requirements.toml
@@ -35760,6 +35784,13 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     }
     catch {
         $verifyError = [string]$_.Exception.Message
+    }
+    $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
+    if ($blockedState -ne '') {
+        throw (New-DefenseClawCodexFileHeldMessage `
+            -Layout $Layout `
+            -Path $blockedState `
+            -Why 'open in a way that keeps Setup from reading or replacing it, so the recovery could not republish the managed policy')
     }
     $exists = Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf
     if ($exists) {
@@ -35819,6 +35850,13 @@ function Repair-DefenseClawRecoveredCodexRequirements {
                 -Layout $Layout `
                 -Path $path `
                 -Why 'open in a way that keeps Setup from replacing it, so the recovery could not republish the managed policy')
+        }
+        $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
+        if ($blockedState -ne '') {
+            throw (New-DefenseClawCodexFileHeldMessage `
+                -Layout $Layout `
+                -Path $blockedState `
+                -Why 'open in a way that keeps Setup from reading or replacing it, so the recovery could not republish the managed policy')
         }
         $base = Get-DefenseClawRecordedCodexRequirementsPreimage -Layout $Layout
         $mode = 'it was rebuilt from the preimage DefenseClaw recorded'
