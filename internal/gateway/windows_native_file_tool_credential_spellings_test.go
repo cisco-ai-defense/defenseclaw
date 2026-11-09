@@ -4,12 +4,14 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // windowsFileToolVerdictIn is windowsFileToolVerdict for a call made from the
@@ -638,5 +640,65 @@ func TestWindowsNativeFileToolMovedProfileWithAMandatoryOrUnreadableHiveKeepsIts
 				}
 			}
 		}
+	}
+}
+
+// A profile folder the file system refuses to answer for is an unanswerable
+// check. It is an alert in an OSS default or permissive install and a block in
+// the strict tier (asserted above by actionAtProfile), and a managed deployment with local rules closes on it
+// whatever its rule pack grades the finding: the default pack blocks only
+// CRITICAL, so the managed install must not fall back to an alert.
+func TestWindowsNativeFileToolUnreadableProfileHiveClosesInAManagedDeployment(t *testing.T) {
+	previous := windowsProfileFolder
+	t.Cleanup(func() { windowsProfileFolder = previous })
+	windowsProfileFolder = func(dir string) (bool, error) {
+		if strings.EqualFold(dir, "C:/Profiles/locked") {
+			return false, os.ErrPermission
+		}
+		return false, nil
+	}
+	const home = `C:\Users\r109yws.d-2`
+	const target = `C:\Profiles\locked\.netrc`
+	managedConfig := func(pack string) *config.Config {
+		cfg := &config.Config{}
+		cfg.DeploymentMode = "managed_enterprise"
+		cfg.Enterprise.Profile = "standalone"
+		cfg.Guardrail.Mode = "action"
+		cfg.Guardrail.RulePack = pack
+		return cfg
+	}
+	perUserConfig := func(pack string) *config.Config {
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		cfg.Guardrail.RulePack = pack
+		return cfg
+	}
+	cases := []struct {
+		name    string
+		cfg     *config.Config
+		profile string
+		capable bool
+		tool    string
+		want    string
+	}{
+		{"managed default pack", managedConfig("default"), "default", true, "Write", "block"},
+		{"managed permissive pack", managedConfig("permissive"), "permissive", true, "Write", "block"},
+		{"managed strict pack", managedConfig("strict"), "strict", true, "Write", "block"},
+		{"managed call that cannot enforce", managedConfig("default"), "default", false, "Write", "allow"},
+		{"managed read", managedConfig("default"), "default", true, "Read", "allow"},
+		{"per-user default", perUserConfig("default"), "default", true, "Write", "alert"},
+		{"per-user permissive", perUserConfig("permissive"), "permissive", true, "Write", "alert"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			connector := "windows-native-unreadable-hive-" + strings.ReplaceAll(c.name, " ", "-")
+			installToolCallCorpusProfileConnector(t, connector, c.profile)
+			findings := windowsFileToolFindings(t, connector, c.tool, home, `D:\work`, target, c.capable)
+			api := &APIServer{scannerCfg: c.cfg}
+			ctx := context.WithValue(context.Background(), profileRuleScanConnectorKey{}, connector)
+			if got := api.buildVerdict(ctx, findings, "tool_call", false).Action; got != c.want {
+				t.Errorf("%s: %s, want %s (findings %v)", c.name, got, c.want, FindingStrings(findings))
+			}
+		})
 	}
 }
