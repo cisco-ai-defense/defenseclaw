@@ -372,8 +372,13 @@ func textRunsReader(text string, depth int, cannotTell bool) bool {
 	if !ok {
 		return cannotTell
 	}
+	called := calledFunctions(file)
 	found := false
 	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok {
+			// A definition runs nothing; its body runs where the function is called.
+			return called[decl.Name.Value]
+		}
 		if call, ok := node.(*syntax.CallExpr); ok && !found && len(call.Args) > 0 {
 			words := make([]commandWord, len(call.Args))
 			for i, arg := range call.Args {
@@ -384,6 +389,43 @@ func textRunsReader(text string, depth int, cannotTell bool) bool {
 		return !found
 	})
 	return found
+}
+
+// calledFunctions are the functions the command line defines and names as a
+// word of a command that runs (a call, an argument of eval, trap, time, ...).
+// A function nothing names never runs, so the commands of its body are not
+// commands of the line. A name found only inside the body of a function that
+// is itself not named does not count, so the answer is a fixed point.
+func calledFunctions(file *syntax.File) map[string]bool {
+	defined := map[string]bool{}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if decl, ok := node.(*syntax.FuncDecl); ok {
+			defined[decl.Name.Value] = true
+		}
+		return true
+	})
+	called := map[string]bool{}
+	for changed := len(defined) > 0; changed; {
+		changed = false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			switch n := node.(type) {
+			case *syntax.FuncDecl:
+				return called[n.Name.Value]
+			case *syntax.CallExpr:
+				for _, arg := range n.Args {
+					text := readCommandWord(arg).text
+					for _, token := range append(strings.FieldsFunc(text, func(r rune) bool { return strings.ContainsRune(" \t\r\n;|&()<>", r) }), text) {
+						if defined[token] && !called[token] {
+							called[token] = true
+							changed = true
+						}
+					}
+				}
+			}
+			return true
+		})
+	}
+	return called
 }
 
 // commandWord is one word of a simple command as the parser read it.
@@ -466,7 +508,11 @@ func wordsRunReader(words []commandWord, depth int, cannotTell bool) bool {
 		case word.isOneOf(runnerShells), word.isOneOf(evalWord):
 			return shellRunsReader(word, words[i+1:], depth, cannotTell)
 		case word.isOneOf(runnerWrappers):
-			i = skipWrapperOptions(words, i+1) - 1
+			next, queryOnly := skipWrapperOptions(word, words, i+1)
+			if queryOnly {
+				return false
+			}
+			i = next - 1
 		default:
 			return false
 		}
@@ -474,14 +520,78 @@ func wordsRunReader(words []commandWord, depth int, cannotTell bool) bool {
 	return false
 }
 
+// optionSpec names the options of a wrapper that take their value from the
+// next word: short letters (a cluster of letters ends in one, -nu root) and
+// long names (--unset NAME). The word after such an option is a value, whatever
+// it spells (env -u cat, sudo -u cat).
+type optionSpec struct {
+	short string
+	long  []string
+}
+
+var wrapperValueOptions = map[string]optionSpec{
+	"env":      {"uC", []string{"unset", "chdir"}},
+	"sudo":     {"CDRTUgprtu", []string{"close-from", "chdir", "chroot", "command-timeout", "other-user", "group", "prompt", "role", "type", "user", "host"}},
+	"doas":     {"uC", nil},
+	"xargs":    {"EILPadns", []string{"arg-file", "delimiter", "max-args", "max-procs", "max-lines", "max-chars"}},
+	"parallel": {"jnNLSa", nil},
+	"nice":     {"n", []string{"adjustment"}},
+	"ionice":   {"cnpPu", []string{"class", "classdata", "pid", "pgid", "uid"}},
+	"timeout":  {"sk", []string{"signal", "kill-after"}},
+	"stdbuf":   {"ioe", []string{"input", "output", "error"}},
+	"watch":    {"n", []string{"interval"}},
+	"time":     {"fo", []string{"format", "output"}},
+	"exec":     {"a", nil},
+}
+
+// takesValue reports whether the option, as one word, takes the next word as
+// its value: a long option without an attached =value, a short option that
+// ends its cluster.
+func (s optionSpec) takesValue(option string) bool {
+	if strings.HasPrefix(option, "--") {
+		name, _, attached := strings.Cut(option[2:], "=")
+		return !attached && slices.Contains(s.long, name)
+	}
+	letters := option[1:]
+	for j := 0; j < len(letters); j++ {
+		if strings.IndexByte(s.short, letters[j]) >= 0 {
+			return j == len(letters)-1
+		}
+	}
+	return false
+}
+
+// queriesCommand reports whether the wrapper only looks a command up
+// (command -v, command -V) and runs nothing.
+func queriesCommand(wrapper commandWord, option string) bool {
+	return wrapper.isOneOf(wordSet("command")) && !strings.HasPrefix(option, "--") && strings.ContainsAny(option[1:], "vV")
+}
+
 // skipWrapperOptions returns the index of the program a wrapper runs: the
-// options of the wrapper, the word after an option (its value), a variable
-// assignment and a number (timeout 5) come first.
-func skipWrapperOptions(words []commandWord, from int) int {
+// options of the wrapper, the value of an option that takes one, the word
+// after any other option, a variable assignment and a number (timeout 5) come
+// first. queryOnly is set where the wrapper runs no program.
+func skipWrapperOptions(wrapper commandWord, words []commandWord, from int) (next int, queryOnly bool) {
+	var spec optionSpec
+	for _, name := range wrapper.names {
+		if known, ok := wrapperValueOptions[name]; ok {
+			spec = known
+		}
+	}
 	afterOption := false
 	i := from
 	for ; i < len(words); i++ {
 		word := words[i]
+		if !word.dynamic && word.isOption() {
+			if queriesCommand(wrapper, word.text) {
+				return len(words), true
+			}
+			if spec.takesValue(word.text) {
+				i++
+				afterOption = false
+				continue
+			}
+		}
 		if word.dynamic || word.isOneOf(folderReaders) || word.isOneOf(runnerShells) || word.isOneOf(runnerWrappers) || word.isOneOf(evalWord) {
 			break
 		}
@@ -492,7 +602,7 @@ func skipWrapperOptions(words []commandWord, from int) int {
 		}
 		afterOption = word.isOption() && !assignment
 	}
-	return i
+	return i, false
 }
 
 // shellRunsReader reads the command line a shell or eval is given: the word
