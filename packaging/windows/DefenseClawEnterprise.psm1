@@ -35819,10 +35819,20 @@ function Get-DefenseClawGuardianStateFiles {
             }
         }
     }
+    # The enumerator's folder: the manifest (targets.yaml), its
+    # unprotected-agents record, its group cache, inventory grants and the
+    # OpenCode service ports. A lock or a state marker is held open on purpose.
     $manifest = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name ManifestPath)
-    if (-not [string]::IsNullOrWhiteSpace($manifest) -and
-        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $manifest -PathType Leaf)) {
-        $paths.Add([string]$manifest)
+    if (-not [string]::IsNullOrWhiteSpace($manifest)) {
+        $enumeratorDirectory = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($manifest))
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $enumeratorDirectory -PathType Container) {
+            foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $enumeratorDirectory -Force -File -ErrorAction SilentlyContinue)) {
+                if (-not $item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) -and
+                    $item.Name -notlike '*.lock' -and $item.Name -ne '.state') {
+                    $paths.Add([string]$item.FullName)
+                }
+            }
+        }
     }
     return @($paths)
 }

@@ -67,9 +67,10 @@ var (
 // removed-connectors.json, user-cleanup.json, unprotected-agents.json and the
 // others the guardian writes there), the guardian's records in its data
 // folder (hook_guardian_state.json, hook_guardian_notices.json,
-// hook_guardian_restores.json and the OpenCode port warnings), the manifest the
-// enumerator publishes (targets.yaml), and the off-roster markers of the
-// machine hook runtime folder.
+// hook_guardian_restores.json and the OpenCode port warnings), the files of the
+// enumerator's folder (the manifest targets.yaml, its unprotected-agents record,
+// the enrollment group cache, the inventory grants and the OpenCode service
+// ports), and the off-roster markers of the machine hook runtime folder.
 func windowsEnterpriseGuardianStateFiles(layout managed.StandaloneLayout) []string {
 	var files []string
 	add := func(dir, pattern string) {
@@ -78,6 +79,11 @@ func windowsEnterpriseGuardianStateFiles(layout managed.StandaloneLayout) []stri
 			return
 		}
 		for _, match := range matches {
+			// A lock or a service's own state marker is held open on
+			// purpose while a service runs.
+			if strings.HasSuffix(match, ".lock") || strings.HasSuffix(match, ".state") {
+				continue
+			}
 			if info, err := os.Lstat(match); err == nil && info.Mode().IsRegular() {
 				files = append(files, match)
 			}
@@ -91,7 +97,10 @@ func windowsEnterpriseGuardianStateFiles(layout managed.StandaloneLayout) []stri
 		add(layout.DataDir, windowsOpenCodePortWarningsFile)
 	}
 	if layout.ManifestPath != "" {
-		add(filepath.Dir(layout.ManifestPath), filepath.Base(layout.ManifestPath))
+		// The enumerator's folder: the manifest (targets.yaml), its
+		// unprotected-agents record, its enrollment group cache and inventory
+		// grants, and the OpenCode service ports.
+		add(filepath.Dir(layout.ManifestPath), "*")
 	}
 	if layout.HookRuntimeDir != "" {
 		add(layout.HookRuntimeDir, ".defenseclaw-connector-off-roster-*")

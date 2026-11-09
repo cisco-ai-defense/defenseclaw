@@ -142,6 +142,10 @@ func TestWindowsEnterpriseGuardianStateFilesListsTheWholeClass(t *testing.T) {
 		filepath.Join(layout.DataDir, "hook_guardian_restores.json"):     "restores",
 		filepath.Join(layout.DataDir, windowsOpenCodePortWarningsFile):   "opencode warnings",
 		layout.ManifestPath: "manifest",
+		filepath.Join(filepath.Dir(layout.ManifestPath), "unprotected-agents.json"):     "enumerator unprotected agents",
+		filepath.Join(filepath.Dir(layout.ManifestPath), ".enrollment-groups.json"):     "enrollment group cache",
+		filepath.Join(filepath.Dir(layout.ManifestPath), ".inventory-grants.json"):      "inventory grants",
+		filepath.Join(filepath.Dir(layout.ManifestPath), "opencode-service-ports.json"): "opencode service ports",
 		filepath.Join(layout.HookRuntimeDir, ".defenseclaw-connector-off-roster-codex"): "marker",
 	}
 	for path := range want {
@@ -156,6 +160,12 @@ func TestWindowsEnterpriseGuardianStateFilesListsTheWholeClass(t *testing.T) {
 	// folder of the authorization folder, an unrelated marker name.
 	for _, path := range []string{filepath.Join(layout.DataDir, "audit.db"), filepath.Join(layout.HookRuntimeDir, "unrelated.txt")} {
 		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A lock or a state marker an enumerator holds open on purpose is not in it.
+	for _, name := range []string{"opencode-service-ports.lock", ".state"} {
+		if err := os.WriteFile(filepath.Join(filepath.Dir(layout.ManifestPath), name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
