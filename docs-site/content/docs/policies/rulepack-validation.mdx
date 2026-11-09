@@ -25,7 +25,7 @@ On a managed computer, `defenseclaw` runs only the commands in [Managed command 
      rules: 242/246 enabled across 7 files
      components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
      digest: f8452e57c3611b6e96c7cf63ea1004ac91ee4e931dc19bc52cc4bd2b192a0181
-     files digest: 4f51e87a68751a9e85dca6bedfe9fc48a35f0a69316f3b2e867551500f34ee09 (the guardrail.custom_packs pin)
+     files digest: fcb52f40a03775d6c229f1e56e5d707a07db74b158732ebf598bbde0d04644b3 (the guardrail.custom_packs pin)
    ```
 
    `judges=4` counts the compiled-in exfil judge and the three judge files. The full digest includes compiled defaults and can change between builds even when the files digest stays the same. Use your own run's `files digest` to pin a custom pack. You can pass a pack name instead of a path.
@@ -37,7 +37,7 @@ On a managed computer, `defenseclaw` runs only the commands in [Managed command 
    ```
 
    ```json
-   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"f8452e57…","enabled_rule_count":242,"files_digest":"4f51e87a…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":246,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
+   {"kind":"validation","summary":{"alert_only_rule_count":0,"digest":"f8452e57…","enabled_rule_count":242,"files_digest":"fcb52f40…","judge_category_count":23,"judge_count":4,"local_pattern_count":11,"rule_count":246,"rule_file_count":7,"sensitive_tool_count":6,"stale_rule_count":0,"suppression_count":9},"valid":true,"wire_version":1}
    ```
 
 3. Read a failure. A file the loader does not recognize fails the whole pack and exits `1`. The reason names the file, or the folder when a whole copy of another pack sits inside this one (for example `default/judge/injection.yaml` names `default`), and says to move it out or remove it:
