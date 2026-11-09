@@ -323,12 +323,23 @@ func isWordRune(r rune) bool {
 	return r >= 0x61 && r <= 0x7a || r >= 0x30 && r <= 0x39 || r == 0x2d || r == 0x5f
 }
 
-// searchesFolder reports whether the command line looks through the working
-// folder because no word names another place: ls, find, tree, rg and the like
-// with no word with a slash in it, grep with a recursive option.
+// searchesFolder reports whether any simple command of the line looks through
+// the working folder because no word of that command names another place: ls,
+// find, tree, rg and the like with no word with a slash in it, grep with a
+// recursive option. Each command is judged on its own, so a path named by an
+// earlier or later command does not hide the search of the working folder.
 func searchesFolder(line string) bool {
+	for _, command := range strings.FieldsFunc(line, func(r rune) bool { return strings.ContainsRune(";&|()\n\r`", r) }) {
+		if commandSearchesFolder(command) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandSearchesFolder(command string) bool {
 	searching, grep, recursive := false, false, false
-	for _, word := range splitWords(line, false) {
+	for _, word := range splitWords(command, false) {
 		name := programName(word)
 		switch {
 		case searchPrograms[name]:
