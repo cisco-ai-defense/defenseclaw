@@ -825,6 +825,10 @@ var (
 	// Tests replace it.
 	enterpriseHookReconcileTargetEarlierMatrix       = enterprisehooks.WindowsProtectedTargetRunsEarlierHookMatrix
 	enterpriseHookReconcileClosedMachineRegistration = enterprisehooks.WindowsProtectedTargetHasClosedMachineRegistration
+	// enterpriseHookReconcileMachineHookRegistration proves the machine policy
+	// that registers a Copilot, OpenCode or Cursor hook is in force for a
+	// target (GAP-0980). Tests replace it.
+	enterpriseHookReconcileMachineHookRegistration = enterprisehooks.WindowsProtectedTargetHasMachineHookRegistration
 	// enterpriseHookReconcileTargetFailModeChange returns the hook fail mode
 	// a target's lock records and the one the config asks for. Tests
 	// replace it.
@@ -1164,23 +1168,27 @@ func enterpriseHookRepairAfterVerifyFailure(
 			// An upgrade changed the hooks this account's agents run, and only
 			// the account's own Windows session installs them: the lock names an
 			// earlier release, so the drift is the upgrade's own and not a
-			// change made while the account was signed out. On the standalone
-			// profile that wait covers every connector the guardian repairs per
-			// account whose machine registration has no closed proof (Claude
-			// Code and Codex keep the proof above: without it they stay a
-			// failure): a signed-out or disconnected account is pending until
-			// it signs in, and never fails the upgrade (GAP-0980). A lock this
-			// release wrote, or one that cannot be read, stays a failure.
-			// Secure Client has its own branch above.
+			// change made while the account was signed out. For a connector
+			// whose hook the guardian registers in a machine policy (Copilot,
+			// OpenCode, Cursor) that wait needs only the proof that the policy
+			// is in force; the account is then pending until it signs in, and
+			// the upgrade is not failed by it (GAP-0980). Claude Code and Codex
+			// keep the closed-registration proof above, the connectors that
+			// register their hooks in the account's own agent configuration
+			// keep their proofs (an earlier matrix), a lock this release wrote
+			// or one that cannot be read stays a failure, and Secure Client has
+			// its own branch above.
 			if !enterpriseHookReconcileSecureClient() &&
-				!enterprisehooks.WindowsClosedRegistrationProofConnector(opts.ConnectorName) {
+				enterprisehooks.WindowsMachineHookRegistrationConnector(opts.ConnectorName) {
 				if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
-					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
-						"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
-							"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
-							"it at the account's next sign-in, and this agent is not protected until then (verification: %v)",
-						errEnterpriseHookAwaitingSignIn, written, verifyErr,
-					)
+					if registered, proofErr := enterpriseHookReconcileMachineHookRegistration(opts); proofErr == nil && registered {
+						return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+							"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
+								"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
+								"it at the account's next sign-in, and this agent is not protected until then (verification: %v)",
+							errEnterpriseHookAwaitingSignIn, written, verifyErr,
+						)
+					}
 				}
 			}
 		}

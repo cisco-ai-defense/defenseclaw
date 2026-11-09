@@ -24,12 +24,16 @@ import (
 )
 
 // stubNoClosedMachineRegistration makes no connector's machine registration
-// provably closed, as for every connector but Claude Code and Codex.
+// provably closed (that proof is for Claude Code and Codex), and puts the
+// machine policy of the Copilot and Cursor hooks in force.
 func stubNoClosedMachineRegistration(t *testing.T) {
 	t.Helper()
 	previous := enterpriseHookReconcileClosedMachineRegistration
 	t.Cleanup(func() { enterpriseHookReconcileClosedMachineRegistration = previous })
 	enterpriseHookReconcileClosedMachineRegistration = func(enterprisehooks.InstallOptions) (bool, error) { return false, nil }
+	previousRegistration := enterpriseHookReconcileMachineHookRegistration
+	t.Cleanup(func() { enterpriseHookReconcileMachineHookRegistration = previousRegistration })
+	enterpriseHookReconcileMachineHookRegistration = func(enterprisehooks.InstallOptions) (bool, error) { return true, nil }
 }
 
 // GAP-0980: the same upgrade with Copilot and Cursor, whose targets no closed
