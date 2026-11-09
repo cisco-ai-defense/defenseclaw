@@ -232,15 +232,26 @@ func (b simpleBinder) ifAlways(clause *syntax.IfClause) bool {
 // false (1): the true and false builtins and :, not shadowed by a function,
 // with no redirect that could fail. Any other statement is -1.
 func (b simpleBinder) status(stmt *syntax.Stmt) int {
+	program, status := simpleLiteralStatus(stmt)
+	if status < 0 || b.order.shadows(program, stmt) {
+		return -1
+	}
+	return status
+}
+
+// simpleLiteralStatus returns the program of a statement that is the true or
+// false builtin or : with no redirect, and the exit status it has when no
+// function replaces it. Any other statement has status -1.
+func simpleLiteralStatus(stmt *syntax.Stmt) (program string, status int) {
 	call, ok := stmt.Cmd.(*syntax.CallExpr)
 	if !ok || stmt.Background || stmt.Coprocess || len(stmt.Redirs) != 0 || len(call.Assigns) != 0 || len(call.Args) == 0 {
-		return -1
+		return "", -1
 	}
 	program, static := simpleStaticWord(call.Args[0], nil)
-	if !static || b.order.shadows(program, stmt) {
-		return -1
+	if !static {
+		return "", -1
 	}
-	status := -1
+	status = -1
 	switch program {
 	case "true", ":":
 		status = 0
@@ -250,7 +261,7 @@ func (b simpleBinder) status(stmt *syntax.Stmt) int {
 	if stmt.Negated && status >= 0 {
 		status = 1 - status
 	}
-	return status
+	return program, status
 }
 
 // callBinds reports a call that gives the name another value as the call
@@ -413,6 +424,9 @@ type simpleScriptOrder struct {
 	// calls holds the calls with a command word, for the statement of the
 	// script that runs a function (runsAt).
 	calls []*syntax.CallExpr
+	// dead holds the code the shell never runs for certain (simpleDeadSpans):
+	// a call there is no run of its function.
+	dead []simpleSpan
 }
 
 // simpleIFSStep is the IFS a straight-line reading holds after a top-level
@@ -443,6 +457,7 @@ func newSimpleScriptOrder(file *syntax.File, straight bool) *simpleScriptOrder {
 		return true
 	})
 	if straight {
+		order.dead = order.deadSpans(file)
 		order.top = make(map[*syntax.FuncDecl]bool)
 		value, exact := "", true
 		for _, stmt := range file.Stmts {
@@ -464,8 +479,9 @@ func newSimpleScriptOrder(file *syntax.File, straight bool) *simpleScriptOrder {
 // and can change the IFS of the shell. An assignment of its own
 // (IFS=x), a declaration (export IFS=x) and a builtin that sets, unsets or
 // evaluates a variable can; the name as an argument of a command that only
-// prints or runs (echo IFS=x), or as a prefix assignment of a command
-// (IFS=x env true), leaves the IFS of the shell as it is.
+// prints or runs (echo IFS=x, printf "%s" IFS=x, declare -p IFS), or as a
+// prefix assignment of a command (IFS=x env true), leaves the IFS of the shell
+// as it is.
 func simpleMayChangeIFS(stmt *syntax.Stmt) bool {
 	changes := false
 	syntax.Walk(stmt, func(node syntax.Node) bool {
@@ -479,26 +495,66 @@ func simpleMayChangeIFS(stmt *syntax.Stmt) bool {
 	if changes {
 		return true
 	}
-	call, ok := stmt.Cmd.(*syntax.CallExpr)
-	if !ok || len(call.Args) == 0 {
-		return true
+	switch cmd := stmt.Cmd.(type) {
+	case *syntax.CallExpr:
+		return len(cmd.Args) == 0 || simpleCallMayChangeIFS(cmd.Args)
+	case *syntax.DeclClause:
+		// -p, -f and -F print what they are given.
+		return !slices.ContainsFunc(cmd.Args, func(arg *syntax.Assign) bool {
+			if arg.Name != nil || arg.Value == nil || cmd.Variant == nil || cmd.Variant.Value != "declare" && cmd.Variant.Value != "typeset" {
+				return false
+			}
+			option, static := simpleStaticWord(arg.Value, nil)
+			return static && strings.HasPrefix(option, "-") && strings.ContainsAny(option, "pfF")
+		})
 	}
-	program, static := simpleStaticWord(call.Args[0], nil)
+	return true
+}
+
+// simpleCallMayChangeIFS reports a command, given by its words, that can
+// change the IFS of the shell.
+func simpleCallMayChangeIFS(args []*syntax.Word) bool {
+	program, static := simpleStaticWord(args[0], nil)
 	if !static {
 		return true
 	}
 	switch program {
 	case "eval", "source", ".", "command", "builtin", "exec", "let":
 		return true
-	case "read", "unset", "printf", "mapfile", "readarray", "getopts", "wait", "declare", "typeset", "local", "export", "readonly":
+	case "printf":
+		// Only printf -v name (or -vname) assigns; the format and the rest are text.
+		if len(args) < 2 {
+			return false
+		}
+		option, static := simpleStaticWord(args[1], nil)
+		if !static {
+			return true
+		}
+		if !strings.HasPrefix(option, "-v") {
+			return false
+		}
+		name := option[2:]
+		if name == "" && len(args) > 2 {
+			if name, static = simpleStaticWord(args[2], nil); !static {
+				return true
+			}
+		}
+		return simpleSpellsIFS(name)
+	case "read", "unset", "mapfile", "readarray", "getopts", "wait", "declare", "typeset", "local", "export", "readonly":
 		// These set or unset the variables they name.
-		return slices.ContainsFunc(call.Args[1:], func(arg *syntax.Word) bool {
-			name, static := simpleStaticWord(arg, nil)
-			name, _, _ = strings.Cut(name, "=")
-			return !static || name == "IFS"
-		})
+		return simpleNamesIFS(args[1:])
 	}
 	return false
+}
+
+// simpleNamesIFS reports a word that names the variable IFS (IFS or IFS=x),
+// or one the walk cannot read.
+func simpleNamesIFS(args []*syntax.Word) bool {
+	return slices.ContainsFunc(args, func(arg *syntax.Word) bool {
+		name, static := simpleStaticWord(arg, nil)
+		name, _, _ = strings.Cut(name, "=")
+		return !static || name == "IFS"
+	})
 }
 
 // simpleNodeSpellsIFS reports a node that is the name IFS.
@@ -568,32 +624,43 @@ func simpleIFSAfter(stmt *syntax.Stmt, value string, exact bool) (string, bool) 
 }
 
 // straightIFS returns the IFS that the top-level statements ending before the
-// node runs leave, and whether it is known. A script read in full (not the
-// straight-line reading) knows none.
-func (order *simpleScriptOrder) straightIFS(node syntax.Node) (value string, exact bool) {
+// node runs leave, one for each run of the node (runsAt), and whether every
+// one is known. A script read in full (not the straight-line reading) knows
+// none.
+func (order *simpleScriptOrder) straightIFS(node syntax.Node) (values []string, exact bool) {
 	if !order.straight {
-		return "", false
+		return nil, false
 	}
-	before := order.runsAt(node)
-	value, exact = "", true
-	for _, step := range order.steps {
-		if step.end > before {
-			break
+	exact = true
+	for _, before := range order.runsAt(node) {
+		value, known := "", true
+		for _, step := range order.steps {
+			if step.end > before {
+				break
+			}
+			value, known = step.value, step.exact
 		}
-		value, exact = step.value, step.exact
+		exact = exact && known
+		if !slices.Contains(values, value) {
+			values = append(values, value)
+		}
 	}
-	return value, exact
+	return values, exact
 }
 
 // ifsReaches reports a call whose IFS may not be the default: the call spells
-// IFS, or, in the straight-line reading, a top-level statement before it does.
-// Otherwise it spells it anywhere in the script.
+// IFS, or, in the straight-line reading, a top-level statement before one of
+// its runs does. Otherwise it spells it anywhere in the script.
 func (order *simpleScriptOrder) ifsReaches(call syntax.Node) bool {
 	if !order.straight {
 		return order.ifs
 	}
-	before := order.runsAt(call)
-	return simpleSpellsIFSIn(call) || slices.ContainsFunc(order.steps, func(step simpleIFSStep) bool { return step.end <= before })
+	if simpleSpellsIFSIn(call) {
+		return true
+	}
+	return slices.ContainsFunc(order.runsAt(call), func(before int) bool {
+		return slices.ContainsFunc(order.steps, func(step simpleIFSStep) bool { return step.end <= before })
+	})
 }
 
 // simpleSpellsIFS reports text with IFS as a name of its own: not inside a
@@ -632,40 +699,117 @@ func (order *simpleScriptOrder) enclosing(node syntax.Node) *syntax.FuncDecl {
 	return inner
 }
 
-// runsAt returns the offset of the top-level statement in front of which the
-// straight-line reading holds the shell when it runs node. That is the node
-// itself at the top level. The body of a function runs when a call of the
-// function does, so it is the latest such call (the function may run more
-// than once, and a later run sees the later state); a call from the body of
-// another function counts where that function runs. A function that no
-// statement calls keeps the offset of its own code.
-func (order *simpleScriptOrder) runsAt(node syntax.Node) int {
-	return order.runsAtFrom(node, nil)
+// runsAt returns the offsets of the top-level statements in front of which
+// the straight-line reading holds the shell when it runs node, one for each
+// run. That is the node itself at the top level. The body of a function runs
+// each time a call of the function does, with the state that call has (a
+// later call can see a later state, and does not replace an earlier one); a
+// call from the body of another function counts where that function runs. A
+// call the shell never reaches (deadSpans, a function nothing calls) is no
+// run. A function that no statement runs keeps the offset of its own code.
+func (order *simpleScriptOrder) runsAt(node syntax.Node) []int {
+	if at := order.runs(node, nil); len(at) != 0 {
+		return at
+	}
+	return []int{int(node.Pos().Offset())}
 }
 
-func (order *simpleScriptOrder) runsAtFrom(node syntax.Node, running []*syntax.FuncDecl) int {
-	own := int(node.Pos().Offset())
+func (order *simpleScriptOrder) runs(node syntax.Node, running []*syntax.FuncDecl) []int {
 	decl := order.enclosing(node)
 	if decl == nil || decl.Name == nil || slices.Contains(running, decl) {
-		return own
+		return []int{int(node.Pos().Offset())}
 	}
 	running = append(running, decl)
-	at, called := 0, false
+	var at []int
 	for _, call := range order.calls {
-		if name, static := simpleStaticWord(call.Args[0], nil); !static || name != decl.Name.Value || simpleWithin(decl, call) {
+		if name, static := simpleStaticWord(call.Args[0], nil); !static || name != decl.Name.Value || simpleWithin(decl, call) || order.neverRuns(call) {
 			continue
 		}
 		// A call at the top level before the declaration runs no such function.
 		if order.enclosing(call) == nil && call.Pos().Offset() < decl.End().Offset() {
 			continue
 		}
-		called = true
-		at = max(at, order.runsAtFrom(call, running))
-	}
-	if !called {
-		return own
+		for _, offset := range order.runs(call, running) {
+			if !slices.Contains(at, offset) {
+				at = append(at, offset)
+			}
+		}
 	}
 	return at
+}
+
+// neverRuns reports code inside a span the shell skips for certain.
+func (order *simpleScriptOrder) neverRuns(node syntax.Node) bool {
+	offset := int(node.Pos().Offset())
+	return slices.ContainsFunc(order.dead, func(dead simpleSpan) bool { return offset >= dead.from && offset < dead.to })
+}
+
+// deadSpans returns where file holds code the shell never runs, for what the
+// straight-line reading proves with the true and false builtins: the branch
+// an if does not take, the right side of && after a command that fails and of
+// || after one that succeeds, and the body of a loop whose condition never
+// holds. A function of the name of such a builtin, wherever it is declared,
+// ends the proof.
+func (order *simpleScriptOrder) deadSpans(file *syntax.File) []simpleSpan {
+	var spans []simpleSpan
+	var status func(stmt *syntax.Stmt) int
+	status = func(stmt *syntax.Stmt) int {
+		result := -1
+		if bin, ok := stmt.Cmd.(*syntax.BinaryCmd); ok && !stmt.Background && !stmt.Coprocess && len(stmt.Redirs) == 0 {
+			switch {
+			case bin.Op == syntax.AndStmt && status(bin.X) == 1:
+				result = 1
+			case bin.Op == syntax.OrStmt && status(bin.X) == 0:
+				result = 0
+			}
+			if result >= 0 && stmt.Negated {
+				result = 1 - result
+			}
+			return result
+		}
+		program, result := simpleLiteralStatus(stmt)
+		if result >= 0 && slices.ContainsFunc(order.funcs, func(decl *syntax.FuncDecl) bool { return decl.Name != nil && decl.Name.Value == program }) {
+			return -1
+		}
+		return result
+	}
+	skip := func(from, to syntax.Node) {
+		spans = append(spans, simpleSpan{int(from.Pos().Offset()), int(to.End().Offset())})
+	}
+	syntax.Walk(file, func(node syntax.Node) bool {
+		switch node := node.(type) {
+		case *syntax.IfClause:
+			if len(node.Cond) == 0 {
+				break
+			}
+			switch status(node.Cond[len(node.Cond)-1]) {
+			case 0:
+				if node.Else != nil {
+					skip(node.Else, node.Else)
+				}
+			case 1:
+				if len(node.Then) != 0 {
+					skip(node.Then[0], node.Then[len(node.Then)-1])
+				}
+			}
+		case *syntax.BinaryCmd:
+			if node.Op == syntax.AndStmt && status(node.X) == 1 || node.Op == syntax.OrStmt && status(node.X) == 0 {
+				skip(node.Y, node.Y)
+			}
+		case *syntax.WhileClause:
+			// The body of while never runs when the condition fails, that of
+			// until when it succeeds.
+			never := 1
+			if node.Until {
+				never = 0
+			}
+			if len(node.Cond) != 0 && len(node.Do) != 0 && status(node.Cond[len(node.Cond)-1]) == never {
+				skip(node.Do[0], node.Do[len(node.Do)-1])
+			}
+		}
+		return true
+	})
+	return spans
 }
 
 // inFunction reports code spelled in the body of a declared function.
@@ -687,7 +831,7 @@ func (order *simpleScriptOrder) shadows(name string, call syntax.Node) bool {
 			continue
 		}
 		if order.straight {
-			if order.top[decl] && int(decl.Pos().Offset()) < order.runsAt(call) {
+			if order.top[decl] && slices.ContainsFunc(order.runsAt(call), func(at int) bool { return int(decl.Pos().Offset()) < at }) {
 				return true
 			}
 			continue
@@ -1107,8 +1251,8 @@ func simpleReadLoopBind(loop *syntax.WhileClause, input *syntax.Word, order *sim
 		rebound: simpleReboundSpans(loop.Do, name, order)}
 	if own {
 		bind.ifs = []string{ifs}
-	} else if value, exact := order.straightIFS(loop); exact {
-		bind.fixedIFS, bind.ifs = true, []string{value}
+	} else if values, exact := order.straightIFS(loop); exact {
+		bind.fixedIFS, bind.ifs = true, values
 	} else {
 		bind.outerIFS = simpleEnclosingIFS(order, loops, loop)
 	}

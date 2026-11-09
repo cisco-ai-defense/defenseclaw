@@ -105,7 +105,7 @@ func TestSimpleCommandsStraightLineReadLoopIFSReachesOnlyFromTopLevel(t *testing
 		// The shell sets the IFS where the top-level statement stands, so a
 		// function that reads with it runs with the IFS of its call.
 		{"assigned at the top level before the call of the function that runs the loop", "f() { " + read + "; }; IFS=x; f", reading{true, false}, reading{true, false}},
-		{"assigned before one call of the function and after another", "f() { " + read + "; }; f; IFS=x; f", reading{true, false}, reading{true, true}},
+		{"assigned before one call of the function and after another", "f() { " + read + "; }; f; IFS=x; f", reading{true, true}, reading{true, true}},
 		{"assigned after the only call of the function", "f() { " + read + "; }; f; IFS=x", reading{false, true}, reading{false, true}},
 		{"assigned before the call of a function that calls the one that runs the loop", "g() { f; }; f() { " + read + "; }; IFS=x; g", reading{true, false}, reading{true, false}},
 		// A statement that spells the name without changing the IFS of the
@@ -113,6 +113,8 @@ func TestSimpleCommandsStraightLineReadLoopIFSReachesOnlyFromTopLevel(t *testing
 		{"printed with echo", "echo IFS=x; " + read, reading{false, true}, reading{false, true}},
 		{"set for one command only", "IFS=x env true; " + read, reading{false, true}, reading{false, true}},
 		{"set for one function call only", "f() { :; }; IFS=x f; " + read, reading{false, true}, reading{false, true}},
+		{"printed with printf", "printf \x27%s\\n\x27 IFS=x; " + read, reading{false, true}, reading{false, true}},
+		{"printed with declare -p", "declare -p IFS; " + read, reading{false, true}, reading{false, true}},
 		{"printed with echo before the function that runs the loop", "f() { " + read + "; }; echo IFS=x; f", reading{false, true}, reading{false, true}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -128,6 +130,48 @@ func TestSimpleCommandsStraightLineReadLoopIFSReachesOnlyFromTopLevel(t *testing
 				if has := slices.Contains(got, kept); has != mode.want.kept {
 					t.Errorf("%s reading of %q: whole word = %v, want %v (%q)", mode.name, row.command, has, mode.want.kept, got)
 				}
+			}
+		})
+	}
+}
+
+// rel-1-0-6:GAP-0880, GAP-0885 review 8: in the straight-line reading a
+// function that a loop runs is read with the state of every call the shell
+// reaches, so a later call does not replace an earlier one; a call in code the
+// shell never runs (a branch, a loop or the right side of && or || that the
+// true and false builtins rule out) is no call.
+func TestSimpleCommandsStraightLineFunctionRunsWithTheStateOfEachCallTheShellReaches(t *testing.T) {
+	const write = "sed -i x /r/$d/.defenseclaw/config.yaml"
+	const stripped = "sed -i x \x27/r/home/.defenseclaw/config.yaml\x27"
+	const kept = "sed -i x \x27/r/homex/.defenseclaw/config.yaml\x27"
+	const body = "f() { echo homex | while read -r d; do " + write + "; done; }; "
+	for _, row := range []struct {
+		name, command  string
+		stripped, kept bool
+	}{
+		{"one call", body + "IFS=x; f", true, false},
+		{"two calls with different IFS", body + "f; IFS=x; f", true, true},
+		{"three calls", body + "f; IFS=x; f; unset IFS; f", true, true},
+		{"later call in a branch that does not run", body + "f; IFS=x; if false; then f; fi", false, true},
+		{"later call in the branch of an elif chain that does not run", body + "f; IFS=x; if true; then :; elif test -f /x; then f; fi", false, true},
+		{"later call in an else that does not run", body + "f; IFS=x; if true; then :; else f; fi", false, true},
+		{"later call after a failing command", body + "f; IFS=x; false && f", false, true},
+		{"later call after a succeeding command", body + "f; IFS=x; true || f", false, true},
+		{"later call after a negated command", body + "f; IFS=x; ! true && f", false, true},
+		{"later call in a while that never runs", body + "f; IFS=x; while false; do f; done", false, true},
+		{"later call in an until that never runs", body + "f; IFS=x; until true; do f; done", false, true},
+		{"later call through a function in a branch that does not run", "g() { f; }; " + body + "f; IFS=x; if false; then g; fi", false, true},
+		{"later call in a branch that may run", body + "f; IFS=x; if test -f /x; then f; fi", true, true},
+		{"later call after a command that may fail", body + "f; IFS=x; test -f /x && f", true, true},
+		{"later call in a branch of a false that a function replaces", "false() { :; }; " + body + "f; IFS=x; if false; then f; fi", true, true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			got := simpleTextsOf(t, row.command, true)
+			if has := slices.Contains(got, stripped); has != row.stripped {
+				t.Errorf("reading of %q: delimiter-stripped word = %v, want %v (%q)", row.command, has, row.stripped, got)
+			}
+			if has := slices.Contains(got, kept); has != row.kept {
+				t.Errorf("reading of %q: whole word = %v, want %v (%q)", row.command, has, row.kept, got)
 			}
 		})
 	}

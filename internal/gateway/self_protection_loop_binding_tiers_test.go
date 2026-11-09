@@ -31,6 +31,10 @@ func TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict(t *testi
 	direct := `sed -i s/a/b/ ` + parent + `$u/.defenseclaw/config.yaml`
 	own := `sed -i s/a/b/ ` + home + `/$d/config.yaml`
 	readLoop := `echo aliasdirx | while read -r d; do ` + own + `; done`
+	// earlier reads the word home, whose last letter an IFS of e strips, and
+	// writes the protected directory it names.
+	earlier := `f() { echo home | while read -r d; do sed -i s/a/b/ ` + parent + `$d/.defenseclaw/config.yaml; done; }; `
+	readBody := `f() { read u <<< ordinary; ` + sibling + `; }; u=$USER; `
 	missing := filepath.Join(project, "missing", "out")
 	// resolved is the reading of direct with the login in place of $u.
 	resolved := `sed -i s/a/b/ '` + parent + filepath.Base(home) + `/.defenseclaw/config.yaml'`
@@ -76,6 +80,28 @@ func TestLoopBindingsFollowTopLevelCodeInDefaultTiersAndAllCodeInStrict(t *testi
 		{"while-read-of-the-login-after-the-login-was-assigned", `u=$USER; echo $USER | while read -r u; do ` + direct + `; done`, true, true},
 		{"ifs-printed-before-the-while-read", `u=$USER; echo IFS=x; echo ordinary | while read -r u; do ` + sibling + `; done`, false, true},
 		{"ifs-unset-before-the-here-string-read", `u=$USER; unset IFS; read u <<< ordinary; ` + sibling, true, true},
+		// A statement that prints the name, or an option that only prints,
+		// changes nothing.
+		{"ifs-named-by-printf-text", `u=$USER; printf '%s\n' IFS=x; read u <<< ordinary; ` + sibling, false, true},
+		{"ifs-named-by-declare-p", `u=$USER; declare -p IFS; read u <<< ordinary; ` + sibling, false, true},
+		{"ifs-named-by-command-echo", `u=$USER; command echo IFS=x; read u <<< ordinary; ` + sibling, false, false},
+		{"ifs-named-by-builtin-echo", `u=$USER; builtin echo IFS=x; read u <<< ordinary; ` + sibling, false, false},
+		{"ifs-set-by-printf-v", `u=$USER; printf -v IFS x; read u <<< ordinary; ` + sibling, true, true},
+		// A function runs with the state of each call the shell reaches. A
+		// later call, or a call the shell never reaches, replaces no earlier
+		// one.
+		{"earlier-call-sees-the-word-a-later-ifs-would-strip", earlier + `f; IFS=e; f`, true, true},
+		{"earlier-call-and-a-later-call-in-a-false-branch", earlier + `f; IFS=e; if false; then f; fi`, true, true},
+		{"earlier-call-and-a-later-call-in-a-false-branch-through-a-function", `g() { f; }; ` + earlier + `f; IFS=e; if false; then g; fi`, true, true},
+		{"earlier-call-and-a-later-call-after-a-failing-command", earlier + `f; IFS=e; false && f`, true, true},
+		{"read-declared-after-the-call-and-a-call-in-a-false-branch", readBody + `f; read() { :; }; if false; then f; fi`, false, true},
+		{"read-declared-after-the-call-and-a-call-after-a-failing-command", readBody + `f; read() { :; }; false && f`, false, true},
+		{"read-declared-after-the-call-and-a-call-after-a-succeeding-command", readBody + `f; read() { :; }; true || f`, false, true},
+		{"read-declared-before-a-call-that-runs", readBody + `read() { :; }; f`, true, true},
+		{"ifs-set-after-the-call-and-a-call-in-a-false-branch", `f() { ` + readLoop + `; }; f; IFS=x; if false; then f; fi`, false, true},
+		{"ifs-set-after-the-call-and-a-call-after-a-failing-command", `f() { ` + readLoop + `; }; f; IFS=x; false && f`, false, true},
+		{"ifs-set-after-the-call-and-a-call-in-a-loop-that-never-runs", `f() { ` + readLoop + `; }; f; IFS=x; while false; do f; done`, false, true},
+		{"ifs-set-after-the-call-and-a-call-that-may-run", `f() { ` + readLoop + `; }; f; IFS=x; if test -f /x; then f; fi`, true, true},
 		// The text of a reading spelled where it does not run hides nothing.
 		{"select-with-the-reading-in-a-comment", `select u in $USER; do ` + direct + `; break; done # ` + resolved, true, true},
 		{"select-with-the-reading-in-a-quoted-word", `select u in $USER; do ` + direct + `; break; done; echo "` + resolved + `"`, true, true},
