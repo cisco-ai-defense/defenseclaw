@@ -1402,13 +1402,33 @@ def _is_empty_lock(raw: bytes) -> bool:
     return raw == b""
 
 
+def _is_plugin_answer(answer: object) -> bool:
+    """One answer of the plugin scanner cache: "entrypoints" (strings) and "seen" (integer)."""
+    return (
+        isinstance(answer, dict)
+        and set(answer) == {"entrypoints", "seen"}
+        and isinstance(answer["entrypoints"], list)
+        and all(isinstance(entrypoint, str) for entrypoint in answer["entrypoints"])
+        and type(answer["seen"]) is int
+    )
+
+
 def _is_plugin_answer_store(raw: bytes) -> bool:
-    """hermes-plugin-entrypoints.json: one object whose only key is "answers" (hermes_vendor_manifest_store.go)."""
+    """hermes-plugin-entrypoints.json: one object whose only key is "answers", each answer as the gateway writes it.
+
+    The gateway rewrites this cache whenever its scanner gives a new answer (hermes_vendor_manifest_store.go),
+    so it has no fixed bytes to prove; the whole structure is the proof.
+    """
     try:
         document = json.loads(raw)
     except ValueError:
         return False
-    return isinstance(document, dict) and set(document) == {"answers"} and isinstance(document["answers"], dict)
+    return (
+        isinstance(document, dict)
+        and set(document) == {"answers"}
+        and isinstance(document["answers"], dict)
+        and all(_is_plugin_answer(answer) for answer in document["answers"].values())
+    )
 
 
 _FLAT_HOOK_RECORD_LINE = re.compile(
@@ -1430,13 +1450,15 @@ def _is_hermes_flat_hook_record(raw: bytes) -> bool:
 
 
 # The other records Setup and the gateway keep for a connector in the folder they ran in, by path
-# below the folder and the test of the bytes Setup writes there. A file of another shape at the
-# name belongs to the account and stays (GAP-0945).
+# below the folder, the test of the bytes they write there, and whether the move records their
+# digest. A file of another shape at the name belongs to the account and stays (GAP-0945).
+# The plugin scanner cache has no digest: the gateway still running in the folder rewrites it
+# after the move, so a digest taken at the move would call that write the account's edit.
 _CONNECTOR_STATE_RECORD_SHAPES = {
     "hermes": (
-        ((".hermes-lifecycle.lock",), _is_empty_lock),
-        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store),
-        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record),
+        ((".hermes-lifecycle.lock",), _is_empty_lock, True),
+        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store, False),
+        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record, True),
     ),
 }
 
@@ -1457,7 +1479,12 @@ def _small_file_bytes(path: str) -> bytes | None:
 
 def move_recorded_record_paths() -> tuple[str, ...]:
     """The paths below a data folder, with "/" separators, of the records whose digest a data_dir move records."""
-    state = ("/".join(parts) for records in _CONNECTOR_STATE_RECORD_SHAPES.values() for parts, _ in records)
+    state = (
+        "/".join(parts)
+        for records in _CONNECTOR_STATE_RECORD_SHAPES.values()
+        for parts, _, pinned in records
+        if pinned
+    )
     return (*_TOP_LEVEL_BACKUP_SHAPES, *state)
 
 
@@ -1664,7 +1691,7 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(os.path.join(hooks, script))
         for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
             drop(os.path.join(folder, record))
-        for parts, written_by_setup in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
+        for parts, written_by_setup, pinned in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
             path = os.path.join(folder, *parts)
             if len(parts) > 1 and not real_dir(os.path.join(folder, *parts[:-1])):
                 continue
@@ -1674,11 +1701,12 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(path)  # a link or another account's file is reported and never opened
                 continue
             raw = _small_file_bytes(path)
-            # The shape says it is the record Setup writes; the digest says it is still the copy the move left.
+            # The shape says it is the record Setup writes; the digest, where the move records one, says it
+            # is still the copy the move left.
             if (
                 raw is not None
                 and written_by_setup(raw)
-                and hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts))
+                and (not pinned or hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts)))
             ):
                 drop(path)
             else:
