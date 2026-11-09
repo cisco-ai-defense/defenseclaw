@@ -14,9 +14,11 @@ package cli
 
 import (
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -87,6 +89,66 @@ func windowsAccessMaskWords(mask uint32) string {
 	return fmt.Sprintf("%s (0x%x)", strings.Join(words, ", "), mask)
 }
 
+// windowsPrincipalReadsPath reports whether sid holds an allow entry on path
+// that lets it read data; tests replace it.
+var windowsPrincipalReadsPath = func(path, sid string) bool {
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		return false
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, uint32(index), &ace) != nil || ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			continue
+		}
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 || uint32(ace.Mask)&0x1 == 0 {
+			continue
+		}
+		if (*windows.SID)(unsafe.Pointer(&ace.SidStart)).String() == sid {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsPathIsDirectory is os.Stat's answer for path; tests replace it.
+var windowsPathIsDirectory = func(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// windowsDefenseClawOwnedPath is a path inside DefenseClaw's own install or
+// state folders (a folder named exactly DefenseClaw), which are
+// administrator-only by design.
+var windowsDefenseClawOwnedPath = regexp.MustCompile(`(?i)\\DefenseClaw(\\|$)`)
+
+// windowsWriterFix is the icacls command that takes a write-like entry of
+// one account off path. For a path DefenseClaw owns, or an account that holds
+// no read there, it removes the account's entries. For a folder or file that
+// is not DefenseClaw's (a vendor folder under ProgramData) and the stock
+// reader groups (Users, Authenticated Users, Everyone) it replaces the
+// account's entries by read and execute, so the write is gone and the read
+// every standard user needs stays: /remove:g would take the vendor's own
+// read entry away too and break reading for everyone (GAP-0602 review D3).
+func windowsWriterFix(path, sid string) string {
+	quoted := `icacls "` + path + `"`
+	switch sid {
+	case "S-1-5-32-545", "S-1-5-11", "S-1-1-0":
+		if !windowsDefenseClawOwnedPath.MatchString(path) && windowsPrincipalReadsPath(path, sid) {
+			inherit := ""
+			if windowsPathIsDirectory(path) {
+				inherit = "(OI)(CI)"
+			}
+			return quoted + ` /grant:r "*` + sid + `:` + inherit + `(RX)"`
+		}
+	}
+	return quoted + " /remove:g *" + sid
+}
+
 // Trust refusals named only a raw SID and a hex mask, for well-known
 // principals too (BUILTIN\Users, CREATOR OWNER, NT SERVICE accounts), and no
 // fix (GAP-0925). windowsEnterpriseNamePrincipals names the account next to
@@ -101,7 +163,7 @@ var windowsEnterprisePrincipalRewrites = []struct {
 		regexp.MustCompile(`untrusted principal (S-1-[0-9-]+) has write-like access to managed path: ([A-Za-z]:\\[^;)"]*)`),
 		func(m []string) string {
 			return windowsPrincipalLabel(m[1]) + " has write access to " + m[2] +
-				", which only SYSTEM, Administrators and TrustedInstaller may change. Fix: icacls \"" + m[2] + "\" /remove:g *" + m[1]
+				", which only SYSTEM, Administrators and TrustedInstaller may change. Fix: " + windowsWriterFix(m[2], m[1])
 		},
 	},
 	{
@@ -122,7 +184,7 @@ var windowsEnterprisePrincipalRewrites = []struct {
 		regexp.MustCompile(`([A-Za-z]:\\[^:;"]*): untrusted Windows principal (S-1-[0-9-]+) has write-like access mask 0x([0-9a-fA-F]+)`),
 		func(m []string) string {
 			return m[1] + ": " + windowsPrincipalLabel(m[2]) + " has write access (" + windowsHexMaskWords(m[3]) +
-				"), which only SYSTEM, Administrators and TrustedInstaller may hold. Fix: icacls \"" + m[1] + "\" /remove:g *" + m[2]
+				"), which only SYSTEM, Administrators and TrustedInstaller may hold. Fix: " + windowsWriterFix(m[1], m[2])
 		},
 	},
 	{
@@ -130,7 +192,7 @@ var windowsEnterprisePrincipalRewrites = []struct {
 		regexp.MustCompile(`untrusted Windows principal (S-1-[0-9-]+) has write-like access mask 0x([0-9a-fA-F]+) on ([A-Za-z]:\\[^;)"]*)`),
 		func(m []string) string {
 			return windowsPrincipalLabel(m[1]) + " has write access (" + windowsHexMaskWords(m[2]) + ") on " + m[3] +
-				", which only SYSTEM, Administrators and TrustedInstaller may hold. Fix: icacls \"" + m[3] + "\" /remove:g *" + m[1]
+				", which only SYSTEM, Administrators and TrustedInstaller may hold. Fix: " + windowsWriterFix(m[3], m[1])
 		},
 	},
 	{
