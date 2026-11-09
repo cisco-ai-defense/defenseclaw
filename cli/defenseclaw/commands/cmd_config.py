@@ -1267,6 +1267,10 @@ def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
     except Exception:  # noqa: BLE001 - the change is committed; seeding is best effort
         return []
     new_data_dir = str(cfg.data_dir or "")
+    if old_data_dir:
+        # A config.yaml written before data_dir was stored clean can hold ``~/`` or a ``..``; the folder
+        # the records were written in is the clean spelling the gateway used (GAP-0939).
+        old_data_dir = config_module.clean_data_dir(old_data_dir, os.fspath(config_module.default_data_path()))
     notes = _carry_connector_records(old_data_dir, new_data_dir)
     notes.extend(config_module.remember_previous_store(old_data_dir))
     if not cfg.guardrail.secure_client_hook_fail_modes():
@@ -1618,6 +1622,10 @@ def config_set(app: AppContext, key: str, value: str, as_json: bool, expect_sha2
         raise click.ClickException(
             f"an empty value does not set {key}; use defenseclaw config unset {key}"
         )
+    if parts == ["data_dir"] and isinstance(parsed, str) and parsed.strip():
+        # One clean absolute spelling, stored once: the move, the records, the approvals and the
+        # seals all name this folder, so a later move and uninstall find them (GAP-0939).
+        parsed = config_module.clean_data_dir(parsed, os.fspath(config_module.default_data_path()))
     check_candidate = _connector_roster_check([parts])
     _write_config_change(app, [Change(key, parsed)], expect_sha256, "set", check_candidate=check_candidate)
 
