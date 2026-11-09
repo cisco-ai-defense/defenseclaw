@@ -104,39 +104,144 @@ func TestManagedUnixHookReportedMCPURLServerWhenReportListIsFullIsRefused(t *tes
 	}
 }
 
-// Names no store can keep are held per account in a bounded set. Past the
-// bound the account is held whole, and other accounts are not.
-func TestManagedUnixHookReportedMCPAccountIsHeldWhenUnkeptNamesPassTheBound(t *testing.T) {
+// With both stores full of live listed servers, the next refused definition of
+// the account is refused on its own calls, with the cause, and the session
+// that met it keeps it after the config is edited; no other server of the
+// account, and no other account, is held for it.
+func TestManagedUnixHookReportedMCPRefusalWhenEveryStoredSessionIsListed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	h := newReportedMCPHarness()
+	now := time.Now()
+	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
+		entry := config.MCPServerEntry{Name: fmt.Sprintf("srv-%d", i), Command: "python3", Args: []string{"/opt/old.py"},
+			Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
+		if !h.reported.note(entry) || !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), sessionTestHome+"/proj", entry.Name, entry, now) {
+			t.Fatalf("setup: slot %d not filled", i)
+		}
+	}
+	refused := assetfacts.MCPServer{Name: "review", Command: "python3", Args: []string{"/opt/new.py"}}
+	for call := 0; call < 2; call++ {
+		got := h.callInSession(t, "s1", refused)
+		if got.Action != "block" || !strings.Contains(got.Reason, "launcher") || !strings.Contains(got.Reason, "asset_policy.mcp.allowed") {
+			t.Fatalf("call %d of a refused definition with both stores full of listed servers: action=%q reason=%q, want a launcher block with the administrator step", call, got.Action, got.Reason)
+		}
+	}
+	first := h.callInSession(t, "s1", refused)
+	edited := h.callInSession(t, "s1", assetfacts.MCPServer{Name: "review", Command: "npx", Args: []string{"-y", "pkg"}})
+	if edited.Action != "block" || edited.Reason != first.Reason {
+		t.Errorf("the same session after an edit: action=%q reason=%q, want the first cause %q", edited.Action, edited.Reason, first.Reason)
+	}
+	if got := h.callInSession(t, "s2", assetfacts.MCPServer{Name: "review", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action != "allow" {
+		t.Errorf("an ordinary server of the same name in another session: action=%q, want allow", got.Action)
+	}
+	if got := h.callInSession(t, "s1", assetfacts.MCPServer{Name: "fine", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action != "allow" {
+		t.Errorf("another server of the account: action=%q, want allow", got.Action)
+	}
+	if got := h.call("/home/eng2", &assetfacts.MCPServer{Name: "fine", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action != "allow" {
+		t.Errorf("another account: action=%q, want allow", got.Action)
+	}
+	// The agent starting again ends what the session held.
+	h.startSession(t, "s1")
+	if got := h.callInSession(t, "s1", assetfacts.MCPServer{Name: "review", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action != "allow" {
+		t.Errorf("after the agent started again: action=%q, want allow", got.Action)
+	}
+}
+
+// With both stores full of definitions nothing lists, the connection a session
+// keeps to a refused definition keeps its cause after the server is edited
+// to a URL: the edit is a new definition and decided on its own, and the old
+// one is not replaced by it.
+func TestManagedUnixHookReportedMCPRefusalCauseSurvivesURLEditWhenBothStoresAreFull(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed Windows reads the enumerator records instead")
 	}
 	h := newReportedMCPHarness()
 	fillReportedMCPList(t, h)
-	for i := 0; i <= hookUnkeptPerAccount; i++ {
-		h.callInSession(t, "s1", assetfacts.MCPServer{Name: fmt.Sprintf("over-%d", i), Command: "python3", Args: []string{"/opt/new.py"}})
+	entry := config.MCPServerEntry{Name: "review", Command: "python3", Args: []string{"/opt/server.py"},
+		Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
+	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
+		if !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), sessionTestHome+"/proj", "review", entry, time.Now()) {
+			t.Fatalf("setup: session slot %d not filled", i)
+		}
 	}
-	if got := h.callInSession(t, "s1", assetfacts.MCPServer{Name: "fine", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action != "block" {
-		t.Errorf("an unknown server of an account held whole: action=%q, want block", got.Action)
+	first := h.callInSession(t, "s1", assetfacts.MCPServer{Name: "review", Command: "python3", Args: []string{"/opt/server.py"}})
+	if first.Action != "block" || !strings.Contains(first.Reason, "launcher") {
+		t.Fatalf("first refused call: action=%q reason=%q, want a launcher block", first.Action, first.Reason)
 	}
-	if got := h.call("/home/eng2", &assetfacts.MCPServer{Name: "fine", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action != "allow" {
-		t.Errorf("another account: action=%q, want allow", got.Action)
+	second := h.callInSession(t, "s1", assetfacts.MCPServer{Name: "review", URL: "https://mcp.example.com/mcp"})
+	if second.Action != "block" || second.Reason != first.Reason {
+		t.Fatalf("same connection after a URL edit: action=%q reason=%q, want the first cause %q", second.Action, second.Reason, first.Reason)
 	}
 }
 
-// What was held ends with the memory time limit, and the end of the agent
-// session clears the session store only.
-func TestHookReportedMCPUnkeptNameExpires(t *testing.T) {
+// A name nobody reported lately holds nothing: sessions and listed servers the
+// memory time limit has passed do not count for the account, and an ordinary
+// server is allowed whatever refused names the account met, in this session
+// or another.
+func TestManagedUnixHookReportedMCPExpiredRecordsNeverBlockAnOrdinaryServer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	h := newReportedMCPHarness()
+	now := time.Now()
+	stale := now.Add(-mcpResolvedTTL - time.Hour)
+	live := now.Add(-2 * time.Hour)
+	for i := 0; i < 33; i++ {
+		entry := config.MCPServerEntry{Name: fmt.Sprintf("old-%d", i), Command: "python3", Args: []string{"/opt/old.py"},
+			Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
+		h.reported.noteAt(entry, stale)
+		h.reported.retainRefused("claudecode", sessionTestHome, "old-session", sessionTestHome+"/proj", entry.Name, entry, stale)
+	}
+	liveEntry := config.MCPServerEntry{Name: "old-0", Command: "python3", Args: []string{"/opt/old.py"},
+		Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
+	h.reported.retainRefused("claudecode", sessionTestHome, "other-session", sessionTestHome+"/proj", "old-0", liveEntry, live)
+	h.reported.holdOverflow("claudecode", sessionTestHome, "old-session", sessionTestHome+"/proj", "old-3", liveEntry, stale)
+	h.reported.holdOverflow("claudecode", sessionTestHome, "other-session", sessionTestHome+"/proj", "old-0", liveEntry, live)
+	ordinary := assetfacts.MCPServer{Name: "fine", Command: "npx", Args: []string{"-y", "pkg"}}
+	if got := h.callInSession(t, "old-session", assetfacts.MCPServer{Name: "old-3", Command: "npx", Args: []string{"-y", "pkg"}}); got.Action != "allow" {
+		t.Errorf("a session whose overflow hold expired: action=%q reason=%q, want allow", got.Action, got.Reason)
+	}
+	if got := h.callInSession(t, "s1", ordinary); got.Action != "allow" {
+		t.Errorf("ordinary server after names that expired: action=%q reason=%q, want allow", got.Action, got.Reason)
+	}
+	sameName := assetfacts.MCPServer{Name: "old-1", Command: "npx", Args: []string{"-y", "pkg"}}
+	if got := h.callInSession(t, "s1", sameName); got.Action != "allow" {
+		t.Errorf("ordinary server named like an expired one: action=%q reason=%q, want allow", got.Action, got.Reason)
+	}
+	sameLive := assetfacts.MCPServer{Name: "old-0", Command: "npx", Args: []string{"-y", "pkg"}}
+	if got := h.callInSession(t, "s1", sameLive); got.Action != "allow" {
+		t.Errorf("ordinary server named like one another session holds: action=%q reason=%q, want allow", got.Action, got.Reason)
+	}
+}
+
+// A list that has used its share gives up the servers no hook reported within
+// the memory time limit before it refuses to list a new one, so a refused
+// server of the account is listed and shown to the watcher.
+func TestHookReportedMCPFullListGivesUpExpiredServers(t *testing.T) {
 	var h hookReportedMCPServers
 	now := time.Now()
-	entry := config.MCPServerEntry{Name: "review", Command: "python3", Args: []string{"/opt/old.py"}, LocalRefusal: "launcher"}
-	h.holdUnkept("claudecode", "/home/eng1", "review", entry, now)
-	if _, ok := h.unkeptFor("claudecode", "/home/eng1", "review", now.Add(time.Minute)); !ok {
-		t.Fatal("a held name was not held")
+	stale := now.Add(-mcpResolvedTTL - time.Hour)
+	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
+		h.noteAt(config.MCPServerEntry{Name: fmt.Sprintf("old-%d", i), URL: "https://old.example.com/mcp", Connector: "claudecode", Home: "/home/eng1"}, stale)
 	}
-	if _, ok := h.unkeptFor("claudecode", "/home/eng1", "other", now.Add(time.Minute)); ok {
-		t.Error("a name nobody reported was held")
+	fresh := config.MCPServerEntry{Name: "fresh", URL: "https://mcp.example.com/mcp", Connector: "claudecode", Home: "/home/eng1"}
+	if !h.noteAt(fresh, now) || !h.listedAs(fresh) {
+		t.Fatal("a full list of expired servers did not give way to a new server")
 	}
-	if _, ok := h.unkeptFor("claudecode", "/home/eng1", "review", now.Add(mcpResolvedTTL+time.Minute)); ok {
-		t.Error("a held name outlived the memory time limit")
+	if got, _ := h.list(); len(got) != 1 {
+		t.Errorf("list holds %d servers after the expired ones were given up, want 1", len(got))
+	}
+	// Live servers are not given up.
+	for i := 0; i < hookReportedMCPPerHomeLimit-1; i++ {
+		h.noteAt(config.MCPServerEntry{Name: fmt.Sprintf("live-%d", i), URL: "https://live.example.com/mcp", Connector: "claudecode", Home: "/home/eng1"}, now)
+	}
+	extra := config.MCPServerEntry{Name: "extra", URL: "https://mcp.example.com/mcp", Connector: "claudecode", Home: "/home/eng1"}
+	if h.noteAt(extra, now) || h.listedAs(extra) {
+		t.Error("a list of live servers listed a server beyond the share of the account")
+	}
+	if !h.listedAs(fresh) {
+		t.Error("a live server was given up")
 	}
 }
