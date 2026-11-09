@@ -163,7 +163,12 @@ type commandWriteScan struct {
 	// watched are the names some braced expansion of the text may assign
 	// (${NAME:=word}): whatever the text assigns them is kept, an ordinary
 	// value too, because the expansion assigns only when the name holds none.
-	watched map[string]bool
+	// definite are the watched names the main shell has given a value in the
+	// order written (a sequential text): a value set under a condition, in a
+	// pipeline or in the background may not be there, so it does not stop the
+	// expansion. Never changed in place: a scope keeps the map it opened with.
+	watched  map[string]bool
+	definite map[string]bool
 	// open are the command substitutions and backticks the read is inside:
 	// what the directories and values were when each opened, taken back at its
 	// close, as a subshell leaves the shell around it as it was. next is the
@@ -181,6 +186,7 @@ type scanScope struct {
 	previous []string
 	vars     map[string][]string
 	shared   bool
+	definite map[string]bool
 }
 
 // commandOperand is one word read from a command text; plain is false when
@@ -263,14 +269,14 @@ func (s *commandWriteScan) protectedWriteClass() string {
 func (s *commandWriteScan) syncScopes(index int) {
 	for n := len(s.open); n > 0 && s.open[n-1].end <= index; n = len(s.open) {
 		saved := s.open[n-1]
-		s.dirs, s.previous, s.vars, s.sharedVars = saved.dirs, saved.previous, saved.vars, saved.shared
+		s.dirs, s.previous, s.vars, s.sharedVars, s.definite = saved.dirs, saved.previous, saved.vars, saved.shared, saved.definite
 		s.open = s.open[:n-1]
 	}
 	for s.next < len(s.layout.scopes) && s.layout.scopes[s.next].start <= index {
 		span := s.layout.scopes[s.next]
 		s.next++
 		if span.end > index {
-			s.open = append(s.open, scanScope{span.end, s.dirs, s.previous, s.vars, s.sharedVars})
+			s.open = append(s.open, scanScope{span.end, s.dirs, s.previous, s.vars, s.sharedVars, s.definite})
 			s.sharedVars = true
 		}
 	}
@@ -348,14 +354,42 @@ func (s *commandWriteScan) followBracedAssignment(text string, index int) {
 	for _, value := range s.expand(word, plain) {
 		s.addVariable(name, value)
 	}
+	if s.layout.sequential && s.layout.bracedStraight[index] && s.watched[name] {
+		// The name holds a value from here on, one the scan may not read.
+		if _, assigned := s.vars[name]; !assigned {
+			s.ownVars()
+			s.vars[name] = []string{}
+		}
+		s.setDefinite(name, true)
+	}
+}
+
+// setDefinite records whether the main shell has given a watched name a value
+// at this point in the order written.
+func (s *commandWriteScan) setDefinite(name string, on bool) {
+	if s.definite[name] == on {
+		return
+	}
+	next := maps.Clone(s.definite)
+	if next == nil {
+		next = make(map[string]bool)
+	}
+	if on {
+		next[name] = true
+	} else {
+		delete(next, name)
+	}
+	s.definite = next
 }
 
 // holdsValue reports whether the text has given a variable a value at this
 // point: any value, or, with empty, one that is not empty. A name assigned a
-// value the scan cannot read (a substitution) holds one.
+// value the scan cannot read (a substitution) holds one. In a sequential text
+// only a value the main shell set in the order written counts: an assignment
+// under a condition may not have run, so the expansion still assigns.
 func (s *commandWriteScan) holdsValue(name string, nonEmpty bool) bool {
 	values, assigned := s.vars[name]
-	if !assigned {
+	if !assigned || s.layout.sequential && !s.definite[name] {
 		return false
 	}
 	return !nonEmpty || len(values) == 0 || slices.ContainsFunc(values, func(value string) bool { return value != "" })
@@ -390,7 +424,7 @@ func (s *commandWriteScan) followStatement(text string, index int) int {
 		return index + 1
 	}
 	straight := s.layout.sequential && s.layout.straight[index]
-	if name := assignmentNameAt(text, index); name != "" {
+	if name := assignmentNameAt(text, index); name != "" && s.layout.assignsAt(index) {
 		word, after, plain := readCommandWord(text, index+len(name)+1)
 		readings := s.expand(word, plain)
 		if straight {
@@ -412,6 +446,7 @@ func (s *commandWriteScan) followStatement(text string, index int) int {
 			if _, assigned := s.vars[operand.word]; assigned && operand.plain {
 				s.ownVars()
 				delete(s.vars, operand.word)
+				s.setDefinite(operand.word, false)
 			}
 		}
 		return max(after, index+1)
@@ -502,6 +537,7 @@ func (s *commandWriteScan) setVariable(name string, values []string) {
 	delete(s.vars, name)
 	if s.watched[name] {
 		s.vars[name] = []string{}
+		s.setDefinite(name, true)
 	}
 	for _, value := range values {
 		if strings.HasPrefix(value, "/") {

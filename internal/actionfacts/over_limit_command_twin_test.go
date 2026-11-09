@@ -321,6 +321,52 @@ func TestOverLimitCommandContentTarget(t *testing.T) {
 	})
 }
 
+// TestOverLimitCommandContentTargetAssignments pins which text assigns a
+// variable in a padded command (GAP-0934): a word the shell reads as an
+// assignment in the main shell, and a braced default only while the name holds
+// no value from a run in the order written. A quoted word of a command that
+// only receives data, the data of a braced default, a program in another
+// language and what a child process assigns assign nothing in the shell
+// around them.
+func TestOverLimitCommandContentTargetAssignments(t *testing.T) {
+	const note, protected, global = "/srv/app/notes.txt", "/etc/ld.so.preload", "global-preload"
+	opaque := "\n: \x27" + strings.Repeat("x", 70000) + "\x27"
+	write := "; echo lib > \"$F\""
+	for _, c := range []struct{ name, command, class string }{
+		{"default of an unset name", ": ${F:=" + protected + "}" + write, global},
+		{"default of a set ordinary name", "F=" + note + "; : ${F:=" + protected + "}" + write, ""},
+		{"default of a name an earlier default set", ": ${F:=" + note + "}; : ${F:=" + protected + "}" + write, ""},
+		{"default of a name set to an unreadable value", ": ${F:=$(date)}; : ${F:=" + protected + "}" + write, ""},
+		{"default of a name set under a condition", "false && F=" + note + "; : ${F:=" + protected + "}" + write, global},
+		{"default of a name set after a test that passes", "true && F=" + note + "; : ${F:=" + protected + "}" + write, ""},
+		{"default of a name set after a test that fails", "false || F=" + note + "; : ${F:=" + protected + "}" + write, ""},
+		{"default of a name set after an unknown test", "test -f x && F=" + note + "; : ${F:=" + protected + "}" + write, global},
+		{"default after a quoted assignment word", "test \x27F=" + note + "\x27; : ${F:=" + protected + "}" + write, global},
+		{"quoted assignment word after a set name", "F=" + note + "; test \x27F=" + protected + "\x27" + write, ""},
+		{"conditional assignment of a protected file may have run", "F=" + note + "; false && F=" + protected + write, global},
+		{"default inside a default is data", ": ${A:-\x27${F:=" + protected + "}\x27}" + write, ""},
+		{"default inside an assigning default is data", ": ${A:=\x27${F:=" + protected + "}\x27}" + write, ""},
+		{"default inside a double-quoted default runs", ": ${A:-\"${F:=" + protected + "}\"}" + write, global},
+		{"default inside a default runs", ": ${A:-${F:=" + protected + "}}" + write, global},
+		{"document of another language", "python3 <<\x27EOF2\x27\nprint(\x27${F:=" + protected + "}\x27)\nEOF2\necho lib > \"$F\"", ""},
+		{"assignment in a document of a child shell", "sh <<\x27EOF2\x27\n: ${F:=" + protected + "}\nEOF2\necho lib > \"$F\"", ""},
+		{"write in a document of a child shell", "sh <<\x27EOF2\x27\n: ${F:=" + protected + "}" + write + "\nEOF2\n", global},
+		{"assignment in a string of a child shell", "sh -c \x27F=" + protected + "\x27" + write, ""},
+		{"write in a string of a child shell", "sh -c \x27F=" + protected + write + "\x27", global},
+		{"assignment by an env prefix", "env F=" + protected + " true" + write, ""},
+		{"env prefix and a write by the child", "env F=" + protected + " sh -c \x27echo lib > \"$F\"\x27", global},
+		{"assignment by eval", "eval \x27F=" + protected + "\x27" + write, global},
+		{"export in the shell", "export F=" + protected + write, global},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			input, facts := overLimitCommandInput(t, "exec_command", c.command+opaque)
+			if class, _ := OverLimitCommandContentTarget(input, facts); class != c.class {
+				t.Fatalf("class=%q, want %q", class, c.class)
+			}
+		})
+	}
+}
+
 // TestStripShellComments pins that only a comment is left out: an unquoted
 // hash that starts a word, to the end of its line. A hash in a quote, in a
 // word, after a dollar, in a here-document body or after a backslash is none,
