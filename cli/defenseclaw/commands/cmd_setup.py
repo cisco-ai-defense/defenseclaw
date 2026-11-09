@@ -11268,6 +11268,19 @@ def _rollback_failed_connector_application(
             f"{failure.format_message()} Note: the OpenClaw gateway is not running; start it with "
             "`openclaw gateway run` (or `openclaw gateway restart`) and it loads the DefenseClaw plugin."
         )
+    if isinstance(cause, _OpenClawGatewayNotRunning):
+        # GAP-0973: the rollback restarts DefenseClaw's gateway on the restored
+        # configuration. When that configuration already guards OpenClaw the
+        # start registers the plugin again, so say that openclaw.json carries
+        # DefenseClaw's entries instead of implying it is untouched.
+        restored_guarded = {
+            normalize_connector(name) for name in _guarded_connectors(app.cfg, app.cfg.active_connectors())
+        }
+        if "openclaw" in restored_guarded:
+            failure = click.ClickException(
+                f"{failure.format_message()} The restored configuration guards OpenClaw, so "
+                "openclaw.json keeps the DefenseClaw plugin entries."
+            )
     if exact_runtime:
         raise failure from None
     raise failure from cause
@@ -15038,6 +15051,9 @@ def _setup_guardrail_connector_alias(
             ux.echo("  Aborted — no changes made.")
             return
 
+    if connector == "openclaw" and restart:
+        _require_openclaw_gateway_before_setup(app)
+
     # Take the rollback point before switching the connector below: a
     # snapshot taken afterwards restores the requested connector in memory
     # and its picked_connector hint, so a failed setup's rollback restarted
@@ -15382,6 +15398,44 @@ def _adopt_openclaw_gateway_port(app: AppContext) -> None:
         return
     click.echo(f"  Using the OpenClaw gateway port from openclaw.json: {port} (was {gw.port}).")
     gw.port = port
+
+
+_OPENCLAW_PRESETUP_WAIT_SECONDS = 30
+
+
+def _require_openclaw_gateway_before_setup(app: AppContext) -> None:
+    """Fail before any write when OpenClaw's own gateway is not running (GAP-0973).
+
+    Setup registers the plugin and then needs OpenClaw's gateway to load it.
+    With that gateway down the run could only fail after openclaw.json carried
+    DefenseClaw's entries, and the rollback restarts DefenseClaw's gateway on
+    the restored configuration, which writes them again when that
+    configuration already names OpenClaw. A stopped gateway that has a service
+    is started here (the restart the setup would do anyway); a gateway that
+    still does not answer leaves every file as it was.
+    """
+    gw = app.cfg.gateway
+    host = gw.host or "127.0.0.1"
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        return
+    port = _openclaw_json_gateway_port(app.cfg.claw.config_file) or gw.port
+    if _openclaw_gateway_healthy(host, port):
+        return
+    import time
+
+    _restart_openclaw_gateway()
+    deadline = time.monotonic() + _OPENCLAW_PRESETUP_WAIT_SECONDS
+    while not _openclaw_gateway_healthy(host, port):
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(1)
+    else:
+        return
+    raise click.ClickException(
+        f"The OpenClaw gateway is not running (nothing answers at {host}:{port}). Start it with "
+        "`openclaw gateway run` (or `openclaw gateway restart`), then run the same setup command again. "
+        "No changes made."
+    )
 
 
 def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
