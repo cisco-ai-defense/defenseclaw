@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -124,9 +125,12 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 	functions := make(map[string]*syntax.FuncDecl)
 	running := make(map[*syntax.FuncDecl]bool)
 	// inert counts the enclosing parts that do not run at this point: a branch
-	// a fixed condition rules out, and the body of a function that is read at
-	// its calls. Inside them the shell state and the link arm stand still.
+	// a fixed condition rules out, a statement after an exit or a return, and
+	// the body of a function that is read at its calls. Inside them the shell
+	// state and the link arm stand still.
 	inert := 0
+	// A pipe stage runs in a shell of its own unless lastpipe is set.
+	pipeStages := !strings.Contains(command, "lastpipe")
 	var visit func(node syntax.Node) bool
 	walkInert := func(stmts ...*syntax.Stmt) {
 		inert++
@@ -135,23 +139,79 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		}
 		inert--
 	}
+	// isolated reads a part that runs in a child shell (a subshell, a command
+	// or process substitution, a background command, a pipe stage): what it
+	// assigns, changes the directory to or defines stays in the child.
+	isolated := func(read func()) {
+		savedValues, savedFunctions := maps.Clone(values), maps.Clone(functions)
+		savedCWD, savedStack := currentCWD, slices.Clone(stack)
+		read()
+		clear(values)
+		maps.Copy(values, savedValues)
+		clear(functions)
+		maps.Copy(functions, savedFunctions)
+		currentCWD, stack = savedCWD, savedStack
+	}
+	// walkList reads a statement list in order; the statements after an exit
+	// (or a return inside a running function) do not run.
+	walkList := func(stmts []*syntax.Stmt) {
+		ended := false
+		for _, stmt := range stmts {
+			if ended {
+				walkInert(stmt)
+				continue
+			}
+			syntax.Walk(stmt, visit)
+			ended = registrationEndsList(stmt, len(running) > 0)
+		}
+	}
 	visit = func(node syntax.Node) bool {
 		if found {
 			return false
 		}
 		switch node := node.(type) {
+		case *syntax.File:
+			walkList(node.Stmts)
+			return false
+		case *syntax.Block:
+			walkList(node.Stmts)
+			return false
+		case *syntax.Subshell:
+			isolated(func() { walkList(node.Stmts) })
+			return false
+		case *syntax.CmdSubst:
+			isolated(func() { walkList(node.Stmts) })
+			return false
+		case *syntax.ProcSubst:
+			isolated(func() { walkList(node.Stmts) })
+			return false
+		case *syntax.Stmt:
+			if node.Background {
+				foreground := *node
+				foreground.Background = false
+				isolated(func() { syntax.Walk(&foreground, visit) })
+				return false
+			}
 		case *syntax.FuncDecl:
 			if uncalled[node] {
 				return false
 			}
 			if node.Name != nil {
-				functions[node.Name.Value] = node
+				// A definition registers the name only where it runs.
+				if inert == 0 {
+					functions[node.Name.Value] = node
+				}
 				if called[node.Name.Value] {
 					walkInert(node.Body)
 					return false
 				}
 			}
 		case *syntax.BinaryCmd:
+			if (node.Op == syntax.Pipe || node.Op == syntax.PipeAll) && pipeStages {
+				isolated(func() { syntax.Walk(node.X, visit) })
+				isolated(func() { syntax.Walk(node.Y, visit) })
+				return false
+			}
 			truth := declaredRedirectTruth(node.X, home)
 			if node.Op == syntax.AndStmt && truth < 0 || node.Op == syntax.OrStmt && truth > 0 {
 				syntax.Walk(node.X, visit)
@@ -198,6 +258,7 @@ func registrationWriteReach(file *syntax.File, command, cwd, home string, protec
 		values["PWD"] = currentCWD
 		if inert == 0 {
 			actionUpdateValues(stmt, values, currentCWD, home)
+			registrationUnsetFunctions(call, functions, home)
 			registrationRunFunction(call, functions, running, visit, values, &currentCWD, home)
 		}
 		if len(call.Args) < 2 {
@@ -301,10 +362,11 @@ func registrationCalledFunctions(file *syntax.File) map[string]bool {
 	syntax.Walk(file, func(node syntax.Node) bool {
 		switch node := node.(type) {
 		case *syntax.CallExpr:
+			unset := registrationUnsetCall(node)
 			for index, word := range node.Args {
 				if value, fixed := StaticWord(word, ""); fixed && index == 0 {
 					called[value] = true
-				} else if fixed {
+				} else if fixed && !unset {
 					spelled[value] = true
 				}
 			}
@@ -324,6 +386,57 @@ func registrationCalledFunctions(file *syntax.File) map[string]bool {
 		delete(called, name)
 	}
 	return called
+}
+
+// registrationUnsetCall reports whether the call is unset (possibly behind
+// builtin or command), whose arguments are names to forget, not uses of them.
+func registrationUnsetCall(call *syntax.CallExpr) bool {
+	for _, word := range call.Args {
+		value, fixed := StaticWord(word, "")
+		if !fixed {
+			return false
+		}
+		if value != "builtin" && value != "command" {
+			return value == "unset"
+		}
+	}
+	return false
+}
+
+// registrationUnsetFunctions forgets the functions an unset -f call removes.
+func registrationUnsetFunctions(call *syntax.CallExpr, functions map[string]*syntax.FuncDecl, home string) {
+	if !registrationUnsetCall(call) {
+		return
+	}
+	functionMode, seenUnset := false, false
+	for _, word := range call.Args {
+		value, fixed := StaticWord(word, home)
+		switch {
+		case !fixed:
+			return
+		case !seenUnset:
+			seenUnset = value == "unset"
+		case strings.HasPrefix(value, "-") && len(value) > 1:
+			if strings.Contains(value, "v") {
+				functionMode = false
+			} else if strings.Contains(value, "f") {
+				functionMode = true
+			}
+		case functionMode:
+			delete(functions, value)
+		}
+	}
+}
+
+// registrationEndsList reports whether the statement stops the list it ends:
+// an exit, or a return inside a running function.
+func registrationEndsList(stmt *syntax.Stmt, inFunction bool) bool {
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || stmt.Background || stmt.Negated || len(call.Assigns) > 0 || len(call.Args) == 0 {
+		return false
+	}
+	name, fixed := StaticWord(call.Args[0], "")
+	return fixed && (name == "exit" || name == "return" && inFunction)
 }
 
 // registrationRunFunction reads the body of a function the call names, with

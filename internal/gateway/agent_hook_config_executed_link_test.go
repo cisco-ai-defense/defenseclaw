@@ -50,11 +50,15 @@ func TestAgentHookConfigExecutedLinkPlacement(t *testing.T) {
 	if err := os.WriteFile(named, []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// A sibling folder of the test home: a destination that holds the home
+	// (the test tree under /tmp when TMPDIR is /tmp) is a different, existing
+	// rule and not the ordinary folder this test means.
+	ordinary := t.TempDir()
 	rows := []struct{ name, command, want string }{
 		{"called function with late known values", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; link_hook", "block"},
 		{"called function with early known values", "src=" + named + "; dest=" + bin + "; link_hook() { ln -sf \"$src\" \"$dest\"/; }; link_hook", "block"},
 		{"called function with arguments", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " " + bin, "block"},
-		{"function called twice, second call reaches", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " /tmp; link_hook " + named + " " + bin, "block"},
+		{"function called twice, second call reaches", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " " + ordinary + "; link_hook " + named + " " + bin, "block"},
 		{"executed link in true branch", "dest=" + bin + "; if true; then ln -sf " + named + " \"$dest\"/; fi", "block"},
 		{"link after a false and-list", "dest=" + bin + "; false || ln -sf " + named + " \"$dest\"/", "block"},
 		{"unexecuted link with false and", "dest=" + bin + "; false && ln -sf " + named + " \"$dest\"/; echo ready", "allow"},
@@ -63,8 +67,14 @@ func TestAgentHookConfigExecutedLinkPlacement(t *testing.T) {
 		{"unexecuted link in true branch else", "dest=" + bin + "; if true; then echo ready; else ln -sf " + named + " \"$dest\"/; fi", "allow"},
 		{"function called only in a false branch", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; false && link_hook; echo ready", "allow"},
 		{"function never called", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; echo ready", "allow"},
-		{"function called with an ordinary folder", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " /tmp", "allow"},
-		{"destination changed before the call", "dest=" + bin + "; link_hook() { ln -sf " + named + " \"$dest\"/; }; dest=/tmp; link_hook", "allow"},
+		{"function called with an ordinary folder", "link_hook() { ln -sf \"$1\" \"$2\"/; }; link_hook " + named + " " + ordinary, "allow"},
+		{"destination changed before the call", "dest=" + bin + "; link_hook() { ln -sf " + named + " \"$dest\"/; }; dest=" + ordinary + "; link_hook", "allow"},
+		{"child shell assignment stays in a command substitution", "f() { dest=" + ordinary + "; }; src=" + named + "; dest=" + bin + "; x=$(f); ln -sf \"$src\" \"$dest\"/", "block"},
+		{"child shell assignment stays in a subshell", "f() { dest=" + ordinary + "; }; src=" + named + "; dest=" + bin + "; (f); ln -sf \"$src\" \"$dest\"/", "block"},
+		{"child shell protected value stays in the child", "f() { dest=" + bin + "; }; src=" + named + "; dest=" + ordinary + "; x=$(f); ln -sf \"$src\" \"$dest\"/", "allow"},
+		{"function returns before its link", "link_hook() { return 0; ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; link_hook", "allow"},
+		{"definition in a branch that does not run", "if false; then link_hook() { ln -sf \"$src\" \"$dest\"/; }; fi; src=" + named + "; dest=" + bin + "; link_hook", "allow"},
+		{"function removed before the call", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; unset -f link_hook; link_hook", "allow"},
 	}
 	for _, row := range rows {
 		for _, profile := range []string{"permissive", "default", "strict"} {
