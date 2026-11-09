@@ -784,6 +784,15 @@ func TestExactDockerInsecureRegistryEditJudgesTheTextItLeavesWithoutCrossStepCre
 			{"MultiEdit that empties the list in two steps", multi(
 				step(`"debug":true`, `"insecure-registries":[]`),
 				step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), false},
+			{"MultiEdit that creates an empty list and fills a mirrors list that ends the same way", multi(
+				step(`"debug":true`, `"insecure-registries":[]`),
+				step(`[]}`, `["https://mirror.example.test:5000"]}`)), false},
+			{"MultiEdit that creates an empty list and fills a dns list that ends the same way", multi(
+				step(`"debug":true`, `"insecure-registries":[]`),
+				step(`[]}`, `["8.8.8.8"]}`)), false},
+			{"list opened by one step and filled by the next that continues it", multi(
+				step(`"debug":true`, `"insecure-registries":[`),
+				step(`[]}`, `[`+entry+`]}`)), true},
 
 			{"MultiEdit that only changes the log driver", multi(
 				step(`"log-driver":"json-file"`, `"log-driver":"journald"`),

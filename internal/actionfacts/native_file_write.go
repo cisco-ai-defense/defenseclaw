@@ -327,8 +327,8 @@ func (write nativeFileWrite) editPieces() []string {
 // nativeEditResults is the text the steps of a multi-step edit leave where
 // they land, assembled the way the tool applies them to a file it does not
 // show: a step whose replaced text lies inside text an earlier step left (or
-// continues it at an end) rewrites that text; any other step leaves a text of
-// its own. Text one step opens and a later one finishes (a list one step
+// continues, at an end, a text that step left unfinished) rewrites that text;
+// any other step leaves a text of its own. Text one step opens and a later one finishes (a list one step
 // empties and another fills, a name one step starts and another ends) is then
 // read as the text it makes, not as two pieces. Nothing is credited: the
 // pieces themselves are judged as well (after), and a rewrite that would grow
@@ -359,16 +359,58 @@ func nativeApplyEditStep(segments []string, replaced, replacement string) []stri
 		}
 	}
 	for index, segment := range segments {
-		if overlap := nativeLongestOverlap(segment, replaced); overlap > 0 {
-			segments[index] = segment[:len(segment)-overlap] + replacement
-			return segments
+		if nativeTextUnfinished(segment) {
+			if overlap := nativeLongestOverlap(segment, replaced); overlap > 0 {
+				segments[index] = segment[:len(segment)-overlap] + replacement
+				return segments
+			}
 		}
-		if overlap := nativeLongestOverlap(replaced, segment); overlap > 0 {
-			segments[index] = replacement + segment[overlap:]
-			return segments
+		if nativeTextUnfinished(replacement) {
+			if overlap := nativeLongestOverlap(replaced, segment); overlap > 0 {
+				segments[index] = replacement + segment[overlap:]
+				return segments
+			}
 		}
 	}
 	return append(segments, replacement)
+}
+
+// nativeTextUnfinished reports whether text, read from its start as a piece of
+// a JSON document, cannot stand where it ends: it stops inside a string, leaves
+// a list or an object open, stops after a name, or ends in a string that is
+// not the value of a name (a name waiting for its colon). Only such a text is
+// read as continued by a later step whose replaced text starts inside it. A
+// text that is complete gives no evidence that a step meeting its last
+// characters edits the same place: the same closing characters occur at many
+// places of a file, and only the file tells them apart.
+func nativeTextUnfinished(text string) bool {
+	inString, escaped, depth := false, false, 0
+	last, beforeString := byte(0), byte(0)
+	for index := 0; index < len(text); index++ {
+		char := text[index]
+		switch {
+		case escaped:
+			escaped = false
+		case inString && char == '\\':
+			escaped = true
+		case inString:
+			if char == '"' {
+				inString, last = false, '"'
+			}
+		case char == '"':
+			inString, beforeString = true, last
+		case char == ' ' || char == '\t' || char == '\r' || char == '\n':
+		default:
+			last = char
+			switch char {
+			case '[', '{':
+				depth++
+			case ']', '}':
+				depth--
+			}
+		}
+	}
+	return inString || depth > 0 || last == ':' || last == '"' && beforeString != ':'
 }
 
 // nativeLongestOverlap is the length of the longest suffix of left that is

@@ -263,6 +263,18 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
+			name:   "Docker insecure registry host in a list one MultiEdit step opens and the next continues",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[`},
+					map[string]any{"old_string": `[]}`, "new_string": `["198.51.100.7:5000"]}`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
 			name:   "Docker insecure registry URL in a list one MultiEdit step creates empty and the next fills",
 			ruleID: dockerInsecureHTTPRegistryRuleID,
 			input: exactStructuredInput(t, "MultiEdit", map[string]any{
@@ -546,6 +558,28 @@ func TestExactAdministrativeSecurityRuleHardNegatives(t *testing.T) {
 				"edits": []any{
 					map[string]any{"old_string": `"debug":true`, "new_string": `"registry-mirrors":[]`},
 					map[string]any{"old_string": `[]`, "new_string": `["http://registry.example.test:5000"]`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that creates an empty list and fills a mirrors list that ends the same way",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[]`},
+					map[string]any{"old_string": `[]}`, "new_string": `["https://mirror.example.test:5000"]}`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that creates an empty list and fills a dns list that ends the same way",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[]`},
+					map[string]any{"old_string": `[]}`, "new_string": `["8.8.8.8"]}`},
 				},
 			}),
 		},
