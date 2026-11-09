@@ -325,6 +325,7 @@ func dispatchTrustedAction(
 		request, clientResolvedPathTargets(request.ResolvedWriteTargets),
 	)
 	request.Input.ClientWorkingDirectories = clientWorkingDirectories(request.ResolvedWriteTargets, request.Input.CWD)
+	request.Input.ClientNativeFileContents = withNativeEditFileContents(request)
 	if request.EnforcementCapable && request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey] == "shell-parse-bound" {
 		return trustedActionLimitFindings(true)
 	}
