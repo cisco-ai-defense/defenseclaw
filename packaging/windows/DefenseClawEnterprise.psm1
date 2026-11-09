@@ -18530,6 +18530,7 @@ function New-DefenseClawTransaction {
             throw $snapshotError
         }
         $restartErrors = [Collections.Generic.List[string]]::new()
+        $heldRestart = ''
         $aclRestoreFailure = ''
         try {
             if (-not (Test-DefenseClawStandaloneProfile)) {
@@ -18625,20 +18626,32 @@ function New-DefenseClawTransaction {
                 -GuardianServiceName $GuardianServiceName
             if ((Test-DefenseClawStandaloneProfile) -and
                 -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Clear-DefenseClawRollbackDeferredHolds
                 Restore-DefenseClawEarlyHook `
                     -Layout $Layout `
                     -Intent $quiescingIntent `
                     -TransactionDirectory $directory
+                Assert-DefenseClawRollbackHoldsResolved
             }
         }
         catch {
-            $restartErrors.Add($_.Exception.Message)
+            if ((Test-DefenseClawStandaloneProfile) -and
+                (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+                # The services run; the replacement hook stays (GAP-0947).
+                $heldRestart = [string]$_.Exception.Message
+            }
+            else {
+                $restartErrors.Add($_.Exception.Message)
+            }
         }
         if ($restartErrors.Count -gt 0 -and $aclRestoreFailure) {
             $restartErrors.Add("restoring the deployment access lists also failed: $aclRestoreFailure")
         }
         if ($restartErrors.Count -gt 0) {
             throw "transaction snapshot failed ($($snapshotError.Exception.Message)); restoring prior service state also failed and protected quiescing recovery was retained: $($restartErrors -join '; ')"
+        }
+        if ($heldRestart -ne '') {
+            throw ("$heldRestart. The transaction snapshot had failed first: $($snapshotError.Exception.Message)")
         }
         $cleanupErrors = [Collections.Generic.List[string]]::new()
         $rollbackIntent = $null
@@ -27435,11 +27448,25 @@ function Restore-DefenseClawEarlyHook {
     else {
         [string]$Intent.early_hook_preimage_sha256
     }
-    Install-DefenseClawFileAtomic `
-        -Source $expected `
-        -Destination $Layout.HookPath `
-        -ExpectedSHA256 $digest `
-        -SkipIfContentMatches
+    try {
+        Install-DefenseClawFileAtomic `
+            -Source $expected `
+            -Destination $Layout.HookPath `
+            -ExpectedSHA256 $digest `
+            -SkipIfContentMatches
+    }
+    catch {
+        # GAP-0947 (review S1): standalone puts the hook back after the
+        # services run; a program that holds the replacement hook open without
+        # delete sharing leaves it in place, named, and /repair finishes it.
+        if ((Test-DefenseClawStandaloneProfile) -and
+            ([string]$_.Exception.Message -match '^another program holds ' -or
+                (Test-DefenseClawFileDeleteBlocked -Path $Layout.HookPath))) {
+            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawHookHeldMessage -Layout $Layout)
+            return
+        }
+        throw
+    }
 }
 
 # The early-hook guard fields of a lifecycle record (GAP-1305). A quiescing
@@ -27843,10 +27870,13 @@ function Recover-DefenseClawQuiescingIntent {
         -GuardianServiceName $GuardianServiceName
     if ((Test-DefenseClawStandaloneProfile) -and
         -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+        Clear-DefenseClawRollbackDeferredHolds
         Restore-DefenseClawEarlyHook `
             -Layout $Layout `
             -Intent $Intent `
             -TransactionDirectory $recordedDirectory
+        # A held hook ends the recovery here, named, with the intent pending.
+        Assert-DefenseClawRollbackHoldsResolved
     }
     $rollbackIntent = Publish-DefenseClawInstallRollbackIntent `
         -Snapshot $Intent `
@@ -35588,9 +35618,27 @@ function Test-DefenseClawRollbackCoverageDeferred {
         (Test-DefenseClawStandaloneProfile))
 }
 
+function Get-DefenseClawHeldMessagePath {
+    # The file a held message names ("<code>: <holder> has <path>, <what>, ..."), or ''.
+    param([AllowEmptyString()][string]$Message)
+    $found = [regex]::Match($Message, '\bhas (?<path>[A-Za-z]:\\.+?), (?:the Codex|the installed)')
+    if ($found.Success) { return $found.Groups['path'].Value.TrimEnd('\') }
+    return ''
+}
+
 function Add-DefenseClawRollbackDeferredHold {
     param([Parameter(Mandatory)][string]$Message)
-    if (-not $script:DefenseClawRollbackDeferredHolds.Contains($Message)) {
+    # One entry per file: a second step that meets the same holder on the
+    # same file does not repeat it in the result.
+    $path = Get-DefenseClawHeldMessagePath -Message $Message
+    $known = $false
+    foreach ($entry in $script:DefenseClawRollbackDeferredHolds) {
+        if ($entry -ceq $Message -or
+            ($path -ne '' -and (Get-DefenseClawHeldMessagePath -Message $entry) -ieq $path)) {
+            $known = $true
+        }
+    }
+    if (-not $known) {
         $script:DefenseClawRollbackDeferredHolds.Add($Message)
     }
     Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
@@ -35610,7 +35658,13 @@ function Assert-DefenseClawRollbackHoldsResolved {
         return
     }
     $message = $script:DefenseClawRollbackDeferredHolds -join ' | '
+    $guardianNotProven = Test-DefenseClawRollbackCoverageDeferred
     Clear-DefenseClawRollbackDeferredHolds
+    if ($guardianNotProven) {
+        # GAP-0947 review S2: the services run, but this rollback did not prove
+        # the guardian's coverage.
+        $message += ". The guardian's coverage was not proven by this rollback: it cannot reconcile the Codex policy while that file is held and may keep retrying, so run /verify after /repair"
+    }
     throw $message
 }
 
@@ -35697,6 +35751,47 @@ function Get-DefenseClawRecordedCodexRequirementsPreimage {
     }
     catch {
         return $empty
+    }
+}
+
+function Invoke-DefenseClawCodexRequirementsReconcileOrRecover {
+    <#
+        GAP-0955: the forward Codex reconcile of an install, upgrade, repair or
+        ensure. A requirements.toml an administrator edited against the managed
+        policy (allow_managed_hooks_only = false) failed this reconcile, rolled
+        back, and was replaced by the rollback's recovery (GAP-0802): the run
+        reported failure for a machine it had repaired. Standalone replaces the
+        file here, with the same recovery and the same named backup, and goes
+        on. A failure the recovery does not explain (the file verifies, or the
+        recovery changed nothing) stays the failure of the run; a file a
+        program holds is the retryable held error. Secure Client keeps the
+        failure.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $reconcileFailure = $null
+    try {
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action reconcile)
+    }
+    catch {
+        $reconcileFailure = $_
+    }
+    if ($null -eq $reconcileFailure) {
+        return
+    }
+    $recoveredBefore = @($script:DefenseClawRecoveredCodexRequirementsNotes).Count
+    if (Test-DefenseClawStandaloneProfile) {
+        Repair-DefenseClawRecoveredCodexRequirements `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+    }
+    if (@($script:DefenseClawRecoveredCodexRequirementsNotes).Count -eq $recoveredBefore) {
+        throw $reconcileFailure
     }
 }
 
@@ -47514,36 +47609,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
-            $reconcileFailure = $null
-            try {
-                [void](Invoke-DefenseClawCodexRequirementsCommand `
-                    -Layout $Layout `
-                    -GatewayServiceName $GatewayServiceName `
-                    -Action reconcile)
-            }
-            catch {
-                $reconcileFailure = $_
-            }
-            if ($null -ne $reconcileFailure) {
-                # GAP-0955: a requirements.toml an administrator edited against
-                # the managed policy (allow_managed_hooks_only = false) failed
-                # this reconcile, rolled back, and was replaced by the
-                # rollback's recovery (GAP-0802): the run reported failure for
-                # a machine it had repaired. Standalone replaces the file here,
-                # with the same recovery and the same named backup, and goes
-                # on. A failure the recovery does not explain (the file
-                # verifies, or the recovery changed nothing) stays the failure
-                # of the run. Secure Client keeps the failure.
-                $recoveredBefore = @($script:DefenseClawRecoveredCodexRequirementsNotes).Count
-                if (Test-DefenseClawStandaloneProfile) {
-                    Repair-DefenseClawRecoveredCodexRequirements `
-                        -Layout $Layout `
-                        -GatewayServiceName $GatewayServiceName
-                }
-                if (@($script:DefenseClawRecoveredCodexRequirementsNotes).Count -eq $recoveredBefore) {
-                    throw $reconcileFailure
-                }
-            }
+            Invoke-DefenseClawCodexRequirementsReconcileOrRecover `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
@@ -47860,7 +47928,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 # file it must put back. The restored services run; the run
                 # ends with the retryable held code, naming the holder, and
                 # the failure that caused the rollback follows it.
-                throw ([string]$_.Exception.Message + ". This $Action had failed first: " + [string]$operationError.Exception.Message)
+                $rollbackHeld = [string]$_.Exception.Message
+                $firstFailure = [string]$operationError.Exception.Message
+                $firstPath = Get-DefenseClawHeldMessagePath -Message $firstFailure
+                if ($firstPath -ne '' -and $rollbackHeld.IndexOf($firstPath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    # The run failed on the same held file: it is named once.
+                    throw $rollbackHeld
+                }
+                throw ($rollbackHeld + ". This $Action had failed first: " + $firstFailure)
             }
             # The pending transaction stays on disk: Repair resumes it, and
             # the next Install clears it through its automatic recovery. The
