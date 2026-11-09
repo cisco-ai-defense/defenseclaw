@@ -83,6 +83,10 @@ type InstallEvent struct {
 	// caller snapshotted for this admission (mcpDefinitionHash). Admission
 	// decides and enforces only while the server still has that definition.
 	definitionHash string
+	// remembered is, for an MCP server the agent config no longer lists, the
+	// definition it had when it was last listed (mcpAdmissionDeparted), so
+	// an admission rule pinned to its URL or launcher is judged on it.
+	remembered *config.MCPServerEntry
 }
 
 // admittingSnapshot binds an MCP admission to the definition snap hashed, so
@@ -287,6 +291,19 @@ type InstallWatcher struct {
 	mcpAdmissionMu     sync.RWMutex
 	mcpAdmissionKnown  []mcpKnownDefinition
 	mcpAdmissionListed bool
+	// mcpAdmissionDeparted holds, by definition (mcpDepartedKey), the servers
+	// an earlier listing had and a later one did not, or had under another
+	// definition: an agent that dropped or edited the entry can keep the live
+	// connection. An admission the policy gave them stays revocable through
+	// it (GAP-0920). Bounded; a listing that has the definition again drops
+	// it. Only servers admitted before any scan are held. Guarded by
+	// mcpAdmissionMu.
+	mcpAdmissionDeparted map[string]mcpKnownDefinition
+	// mcpAdmissionLost notes, per connector and account, the departed servers
+	// that did not fit (mcpLostScope). mcpAdmissionLostKeys counts the
+	// definitions noted across scopes. Guarded by mcpAdmissionMu.
+	mcpAdmissionLost     map[string]*mcpLostScope
+	mcpAdmissionLostKeys int
 	// A slower older list read must not replace a newer completed listing.
 	mcpAdmissionReadSeq  atomic.Uint64
 	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
@@ -730,7 +747,12 @@ func (w *InstallWatcher) rootCoveragePath(path string) string {
 func (w *InstallWatcher) SetMCPServerSource(source func() ([]config.MCPServerEntry, error)) {
 	w.mcpServers = source
 	w.admitNewMCP = source != nil
+	w.mcpAdmissionMu.RLock()
+	prev := w.mcpAdmissionKnown
+	w.mcpAdmissionMu.RUnlock()
+	settled := w.settledDepartingMCP(prev, nil)
 	w.mcpAdmissionMu.Lock()
+	w.rememberDepartedMCP(w.mcpAdmissionKnown, nil, settled)
 	w.mcpAdmissionKnown = nil
 	w.mcpAdmissionListed = false
 	w.mcpAdmissionKnownSeq = w.mcpAdmissionReadSeq.Add(1)
@@ -855,7 +877,8 @@ func (w *InstallWatcher) readmitChangedMCPServer(ctx context.Context, evt Instal
 		return
 	}
 	snap, err := w.snapshotForEvent(evt)
-	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline)) {
+	if err != nil || (snap.ContentHash == baseline.ContentHash && !w.mcpScanRetryDue(evt.Path, baseline) &&
+		!w.mcpBaselineLapsed(evt, baseline)) {
 		return
 	}
 	w.readmitChanged(ctx, evt, baseline, snap, compareSnapshots(baseline, snap), w.cachedFingerprint(evt, nil), "watch")
@@ -1047,13 +1070,21 @@ func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
 			}
 			known = append(known, mcpKnownDefinition{
 				server: config.MCPServerEntry{Name: server.Name, Connector: server.Connector,
-					Home: server.Home, Project: server.Project, Bundled: server.Bundled},
+					Home: server.Home, Project: server.Project, Bundled: server.Bundled,
+					URL: server.URL, Command: server.Command, Args: append([]string(nil), server.Args...),
+					Transport: server.Transport},
 				hash:  hash,
+				path:  MCPEventPath(server),
 				issue: mcpScanIssue(server),
 			})
 		}
+		w.mcpAdmissionMu.RLock()
+		prev := w.mcpAdmissionKnown
+		w.mcpAdmissionMu.RUnlock()
+		settled := w.settledDepartingMCP(prev, known)
 		w.mcpAdmissionMu.Lock()
 		if readSeq > w.mcpAdmissionKnownSeq {
+			w.rememberDepartedMCP(w.mcpAdmissionKnown, known, settled)
 			w.mcpAdmissionKnown = known
 			w.mcpAdmissionListed = true
 			w.mcpAdmissionKnownSeq = readSeq
@@ -2870,9 +2901,16 @@ func (w *InstallWatcher) withMCPDefinition(cfg *config.Config, evt InstallEvent,
 	if evt.Type != InstallMCP || cfg == nil || cfg.SecureClientIntegration() {
 		return in
 	}
-	if entry, err := w.lookupMCPServer(evt); err == nil {
-		in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
+	// A remembered definition is the one the event asks about, even when the
+	// agent config lists another definition under the same name.
+	entry := evt.remembered
+	if entry == nil {
+		var err error
+		if entry, err = w.lookupMCPServer(evt); err != nil {
+			return in
+		}
 	}
+	in.URL, in.Command, in.Args, in.Transport = entry.URL, entry.Command, entry.Args, entry.Transport
 	return in
 }
 

@@ -15,6 +15,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/procidentity"
 )
 
 func TestDarwinProcessInspectionUsesFixedBinaryAndMinimalEnvironment(t *testing.T) {
@@ -70,12 +72,12 @@ func TestDarwinOriginMainStartIdentityRemainsVerifiable(t *testing.T) {
 }
 
 func TestDarwinLocalizedOriginMainIdentityUsesBoundedLaunchGeneration(t *testing.T) {
-	nativeIdentity, err := darwinProcessStartIdentity(os.Getpid())
-	if err != nil {
-		t.Fatalf("read native start identity: %v", err)
-	}
-	secondsText, _, ok := strings.Cut(nativeIdentity, ".")
+	nativeIdentity, ok := procidentity.Recorded(os.Getpid())
 	if !ok {
+		t.Fatal("read native start identity")
+	}
+	secondsText, _, cut := strings.Cut(nativeIdentity, ".")
+	if !cut {
 		t.Fatalf("native identity = %q, want seconds.microseconds", nativeIdentity)
 	}
 	startedAt, err := strconv.ParseInt(secondsText, 10, 64)

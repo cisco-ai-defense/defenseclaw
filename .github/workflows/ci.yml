@@ -385,6 +385,74 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
+  go-test-frozen-gateway:
+    # The three frozen-gateway tests of the hook (a gateway of the account that
+    # takes no accept is an outage, not a listener of another account) run
+    # here alone and are skipped in the shared jobs above (they need
+    # DEFENSECLAW_FROZEN_GATEWAY_JOB=1). The hook proves who holds a listener
+    # by reading every other process of its account and refuses, by design, a
+    # same-account holder it cannot see into; a second test binary of the
+    # account running at the same time (the deliberate mixed-credential and
+    # private-thread helpers of the other hookexec tests) is such a holder.
+    # -p 1 runs one package, and the step fails if any of the three did not
+    # run and pass, so a skip cannot pass for a run. The two tests that ran in
+    # the remaining-package shard keep its race detector and coverage profile
+    # (the profile joins the Combine Go coverage step).
+    name: Go Test (frozen gateway, alone)
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        id: go
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
+      - name: Run the frozen-gateway tests alone
+        timeout-minutes: 10
+        env:
+          DEFENSECLAW_FROZEN_GATEWAY_JOB: "1"
+        run: |
+          set -euo pipefail
+          # The two tests that ran in the remaining-package shard keep the
+          # race detector there; the parallel test starts many hook processes
+          # against a budget of seconds each and runs without it (the race
+          # detector's slowdown of every child is not what it looks for). Both
+          # write a coverage profile (atomic, as -race does) and the profiles
+          # are merged into the one the Go Test aggregate requires.
+          race_tests=(
+            TestFrozenOwnGatewayFollowsTheOutageMode
+            TestFrozenGatewayTheDaemonStartedFollowsTheOutageMode
+          )
+          parallel_tests=(TestParallelHookProcessesFollowTheOutageModeOfAFrozenGateway)
+          pkg=./internal/gateway/connector/hookexec
+          log="$RUNNER_TEMP/frozen-gateway.log"
+          : > "$log"
+          # checkptr is off only in modernc.org, as in the shared race jobs.
+          go test -v -race -gcflags=modernc.org/...=-d=checkptr=0 -p 1 -count=1 -timeout 8m \
+            -coverprofile=coverage-go-frozen-gateway-race.out \
+            -run "^($(IFS="|"; echo "${race_tests[*]}"))$" "$pkg" 2>&1 | tee -a "$log"
+          go test -v -covermode=atomic -p 1 -count=1 -timeout 8m \
+            -coverprofile=coverage-go-frozen-gateway-parallel.out \
+            -run "^($(IFS="|"; echo "${parallel_tests[*]}"))$" "$pkg" 2>&1 | tee -a "$log"
+          for name in "${race_tests[@]}" "${parallel_tests[@]}"; do
+            grep -q "^--- PASS: $name " "$log" || { echo "::error::$name did not run and pass"; exit 1; }
+          done
+          python3 scripts/merge_go_coverage.py --output coverage-go-frozen-gateway.out \
+            coverage-go-frozen-gateway-race.out coverage-go-frozen-gateway-parallel.out
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-coverage-frozen-gateway
+          path: coverage-go-frozen-gateway.out
+          retention-days: 1
+
   go-pinned:
     # A pull request with no Go change still runs the Go tests that name a
     # file it changes, such as a docs page a test reads.
@@ -431,6 +499,15 @@ jobs:
     # stream or the launcher did not issue the required rate (never a skip,
     # never a pass). The Cadence and Judgement tests run that judgement against
     # stand-ins and recorded numbers.
+    #
+    # The tests answer a call only after its journal row is durable (power-loss
+    # fsync, by design). A hosted runner disk can stall one fsync for 0.5 to 2 s
+    # (run 42575454395: p95 1.786 s with answered share 1.000), which no
+    # gateway code can answer around. So the job puts the test data directories
+    # (every t.TempDir: the audit store, the sandbox bindings) on a RAM-backed
+    # path. The code path is the real one, with the real fsync calls, and the
+    # budgets are unchanged; only the runner disk is out of the measurement.
+    # The real-disk run stays the local gate (go test on a build box).
     name: Go Throughput Test (no race)
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.go != 'false' }}
@@ -448,8 +525,13 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - name: Run the open-loop throughput tests (-p 1, no race)
-        run: go test -p 1 -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+|Judgement[A-Za-z]+|Queueing[A-Za-z]+)$' ./internal/gateway
+      - name: Run the open-loop throughput tests (-p 1, no race, data on RAM)
+        run: |
+          set -euo pipefail
+          ramdir="$(mktemp -d /dev/shm/dc-throughput.XXXXXX)"
+          trap 'rm -rf "$ramdir"' EXIT
+          test "$(stat -f -c %T "$ramdir")" = tmpfs
+          TMPDIR="$ramdir" go test -p 1 -count=1 -timeout 4m -v -run '^TestGAP0490OpenLoop(SandboxStream|TwoSandboxes|FourSandboxes|Cadence[A-Za-z]+|Judgement[A-Za-z]+|Queueing[A-Za-z]+)$' ./internal/gateway
 
   go-test:
     # Preserve the existing required-check name while combining the complete
@@ -457,7 +539,7 @@ jobs:
     # packages. A pull request without Go changes skips the shards and runs
     # only Go Pinned Tests, if any.
     name: Go Test
-    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-pinned]
+    needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-test-frozen-gateway, go-pinned]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -469,6 +551,7 @@ jobs:
           AUDIT_RESULT: ${{ needs.go-test-audit.result }}
           OTHER_RESULT: ${{ needs.go-test-other.result }}
           THROUGHPUT_RESULT: ${{ needs.go-test-throughput.result }}
+          FROZEN_GATEWAY_RESULT: ${{ needs.go-test-frozen-gateway.result }}
           PINNED_RESULT: ${{ needs.go-pinned.result }}
         run: |
           set -euo pipefail
@@ -481,6 +564,7 @@ jobs:
           test "$AUDIT_RESULT" = success
           test "$OTHER_RESULT" = success
           test "$THROUGHPUT_RESULT" = success
+          test "$FROZEN_GATEWAY_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         if: ${{ needs.changes.outputs.go != 'false' }}
         with:
@@ -501,8 +585,9 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          # 36 gateway + 4 audit + 16 remaining-package shards.
-          test "${#coverage_parts[@]}" -eq 56
+          # 36 gateway + 4 audit + 16 remaining-package shards, plus the
+          # frozen-gateway job.
+          test "${#coverage_parts[@]}" -eq 57
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
@@ -1391,6 +1476,11 @@ jobs:
             for file in "$@"; do
               case "$file" in
                 *_windows_test.go | *_linux_test.go) continue ;;
+                # The open-loop throughput tests measure wall-clock answers
+                # and run alone, without -race, in Go Throughput Test; on a
+                # shared macOS runner they only report INCONCLUSIVE and use
+                # the job time.
+                */gap0490_open_loop_test.go) continue ;;
                 *_darwin_test.go | *_unix_test.go | */hook_foreign_guard*_test.go) ;;
                 *) grep -Eq '^//go:build .*(darwin|unix|!windows|!linux)' "$file" || continue ;;
               esac

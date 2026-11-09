@@ -418,4 +418,5 @@ def test_a_rollback_that_a_late_holder_stops_ends_with_the_retryable_held_code()
     assert "Start-Sleep -Milliseconds 500" in hold
     message = _function_body(text, "New-DefenseClawCodexFileHeldMessage")
     assert "'codex_requirements_held'" in message and "'codex_state_held'" in message
-    assert "the transaction is still pending" in message
+    # GAP-0947: the shared builder says the transaction is still pending.
+    assert "the transaction is still pending" in _function_body(text, "New-DefenseClawRollbackHeldMessage")

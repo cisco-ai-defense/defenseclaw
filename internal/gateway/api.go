@@ -128,6 +128,9 @@ type APIServer struct {
 	// managedPolicyView is the published proof of the vendor machine
 	// policy managed hooks enforce (managed_policy_view.go).
 	managedPolicyView atomic.Pointer[managedPolicyView]
+	// managedHookAuthz is the authorizer the standalone hook socket decides
+	// calls with, so an account status reads the inputs the hook reads.
+	managedHookAuthz atomic.Pointer[managedHookAuthorizer]
 	// managedAlertLimits bounds the policy-view alerts per account: every
 	// call under an unproven view raises one until the view is pinned.
 	managedAlertLimits managedRefusalLimiter
@@ -434,9 +437,6 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
-	// sandboxWriteLanes orders the managed sandbox call's writes on the two
-	// audit connections (laneGate).
-	sandboxWriteLanes laneGate
 	// hookCorrelationTurns holds the hooks of one session to one correlation
 	// attempt at a time (hookCorrelationSerial).
 	hookCorrelationTurns hookCorrelationSerial

@@ -539,12 +539,7 @@ func (a *APIServer) journalHookDelivery(
 	// The journal write is a durable insert (fsync): store I/O, not answer
 	// CPU, so the caller's run slot is free while it waits (GAP-1790).
 	resume := waitWithoutHookRunSlot(ctx)
-	leave := func() {}
-	if p.SandboxReceipt != nil {
-		leave = a.sandboxWriteLanes.enter(journalLane)
-	}
 	err = a.store.JournalHookDelivery(ctx, p.ID, a.deliveryProcessID(), data, pendingHookJournalLimits)
-	leave()
 	resume()
 	if errors.Is(err, audit.ErrHookDeliveryJournalFull) {
 		a.drainPendingHooks()

@@ -110,9 +110,10 @@ func TestImageDigestsTravelInTheirOwnFrame(t *testing.T) {
 	}
 	// GAP-0080: the helper's own drops come over the wire as a count, and
 	// the gateway's buffer adds its own, for the host plane to carry.
-	helperSide := plane.WithBufferDrops(plane.Coverage{Mechanism: "cn_proc"}, 2, plane.SensorEventBuffer)
+	// The kernel overflows (ENOBUFS) travel the same way.
+	helperSide := plane.WithBufferDrops(plane.WithKernelOverflows(plane.Coverage{Mechanism: "cn_proc"}, 4), 2, plane.SensorEventBuffer)
 	frame, err := json.Marshal(encodeCoverage(helperSide))
-	if err != nil || !strings.Contains(string(frame), `"buffer_dropped":2`) {
+	if err != nil || !strings.Contains(string(frame), `"buffer_dropped":2`) || !strings.Contains(string(frame), `"kernel_overflows":4`) {
 		t.Fatalf("coverage frame = %s, %v", frame, err)
 	}
 	var decoded wireCoverage
@@ -120,8 +121,14 @@ func TestImageDigestsTravelInTheirOwnFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	gateway.coverage = decodeCoverage(decoded)
-	if got := gateway.Coverage(); got.BufferDropped != 3 || len(got.Limitations) != 2 {
-		t.Fatalf("helper and gateway drops = %d, %q; want 3 in two lines", got.BufferDropped, got.Limitations)
+	if got := gateway.Coverage(); got.BufferDropped != 3 || got.KernelOverflows != 4 || len(got.Limitations) != 3 {
+		t.Fatalf("helper and gateway drops = %d, overflows %d, %q; want 3 and 4 in three lines",
+			got.BufferDropped, got.KernelOverflows, got.Limitations)
+	}
+	// A helper that predates them sends neither.
+	var old wireCoverage
+	if err := json.Unmarshal([]byte(`{"mechanism":"cn_proc"}`), &old); err != nil || decodeCoverage(old).Losses() != (plane.Losses{}) {
+		t.Fatalf("old helper coverage = %+v, %v", decodeCoverage(old), err)
 	}
 
 	// An exec from a helper that predates the state decodes with none.

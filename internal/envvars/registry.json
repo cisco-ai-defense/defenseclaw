@@ -5489,6 +5489,26 @@
       "since": "0.3.0"
     },
     {
+      "name": "DEFENSECLAW_FROZEN_GATEWAY_JOB",
+      "category": "test_fixture",
+      "purpose": "Set to 1 only by the dedicated CI job that runs the frozen-gateway hook tests alone, so those tests run only in a run in which no other test process of the account exists; without it they skip.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hookexec/per_user_parallel_frozen_gateway_linux_test.go",
+          "description": "Test-only gate read by requireFrozenGatewayJob; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
       "name": "DEFENSECLAW_TEST_AGENT_PROCESS_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the test helper process that prints the agent process identity it sees, so the agentprocess tests can run it through the platform's shells.",
@@ -5851,6 +5871,46 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_TEST_PARALLEL_HOOK_ADDR",
+      "category": "test_fixture",
+      "purpose": "Passes the frozen gateway address from the parallel-hook test to each separate hook process it starts.",
+      "default": "unset",
+      "accepted_values": [
+        "host:port address",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hookexec/per_user_parallel_frozen_gateway_linux_test.go",
+          "description": "Test-only child selector and input of TestParallelHookProcessChild; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_PARALLEL_HOOK_DIR",
+      "category": "test_fixture",
+      "purpose": "Passes the isolated data directory from the parallel-hook test to each separate hook process it starts.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute temporary directory path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hookexec/per_user_parallel_frozen_gateway_linux_test.go",
+          "description": "Test-only input of TestParallelHookProcessChild; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.9"
+    },
+    {
       "name": "DEFENSECLAW_TEST_PWSH",
       "category": "test_fixture",
       "purpose": "Names the PowerShell 7 executable the MDM kit tests run the Intune remediation, uninstall-retry and rule-pack scripts with, when pwsh is not on PATH; the tests skip when neither exists.",
@@ -5881,6 +5941,26 @@
         }
       ],
       "since": "1.0.2"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_REAL_GATEWAY_ADDR_FILE",
+      "category": "test_fixture",
+      "purpose": "Names the file in which the test gateway process started by the daemon writes the address of its listener, so the recorded-gateway hook tests can read it back.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute temporary file path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "ignore",
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hookexec/gateway_record_written_by_gateway_linux_test.go",
+          "description": "Test-only child selector and output of TestRealGatewayChildProbe; never read by production runtime paths"
+        }
+      ],
+      "since": "1.0.9"
     },
     {
       "name": "DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING",

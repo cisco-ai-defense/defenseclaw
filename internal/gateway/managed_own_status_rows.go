@@ -68,11 +68,6 @@ var (
 	ownCauseAccountUnresolved = ownCause{"account_unresolved",
 		"DefenseClaw cannot look up your account name right now, so it cannot check whether your organization's policy covers it",
 		ownRetryNextStep}
-	// ownCauseExcluded: the account is listed in exclude_users, so the
-	// machine policy does not cover it whatever it says for other accounts.
-	ownCauseExcluded = ownCause{"excluded_users",
-		"your account is listed in enterprise.enrollment.exclude_users, so DefenseClaw does not protect this agent for it",
-		"Ask IT to remove your account from enterprise.enrollment.exclude_users; defenseclaw-gateway enterprise policy show --user <account> shows the rule"}
 	// ownCauseNoUnprotectedReason: the scan lists the agent as unprotected
 	// but recorded no reason text.
 	ownCauseNoUnprotectedReason = ownCause{"scan_no_reason",
@@ -131,10 +126,58 @@ func ownNotConfirmed(cause ownCause) map[string]any {
 	return ownRow(false, "not confirmed", cause)
 }
 
+// ownInspection is what the status can prove about the calls of an account that
+// exclude_users names, for one connector. Exclusion only keeps the account out
+// of enrollment; a machine policy runs its hook for every account whatever
+// enrollment says. The row claims only what it can back: a pinned machine-policy
+// hook, or the absence of any, and otherwise it sends the reader to the
+// administrator status (rel-1-0-9 GAP-0949).
+type ownInspection int
+
+const (
+	// ownInspectionUnknown: the status cannot tell what still inspects the
+	// calls (no authorizer, as on the Windows own-status pipe; the account name
+	// is not resolved; the vendor source is unreadable or not the pinned one; an
+	// admission without a proven hook), so the row claims nothing.
+	ownInspectionUnknown ownInspection = iota
+	// ownInspectionNone: no machine-policy hook covers the account for the
+	// connector, and no admission names it.
+	ownInspectionNone
+	// ownInspectionInspected: a machine-policy hook for the connector is
+	// installed and pinned for the account. Whatever the hook authorizer then
+	// answers (inspect, refuse), the machine policy is what handles the calls.
+	ownInspectionInspected
+)
+
+const (
+	ownExcludedBase = "your account is listed in enterprise.enrollment.exclude_users: excluded from enrollment"
+	// ownExcludedNextStep names the administrator rule and the command that
+	// shows it.
+	ownExcludedNextStep = "Ask IT to remove your account from enterprise.enrollment.exclude_users; defenseclaw-gateway enterprise policy show --user <account> shows the rule"
+)
+
+// ownExcludedCause is the reason of an excluded row: the exclusion, and what
+// the status can prove about the calls. The state stays excluded whatever the
+// inspection is; the reason is in its own field.
+func ownExcludedCause(inspection ownInspection) ownCause {
+	cause := ownCause{"excluded_users", ownExcludedBase, ownExcludedNextStep}
+	switch inspection {
+	case ownInspectionNone:
+		cause.reason += "; DefenseClaw does not inspect your calls"
+	case ownInspectionInspected:
+		cause.code = "excluded_users_inspected"
+		cause.reason += "; the machine policy still inspects your calls"
+	default:
+		cause.code = "excluded_users_unverified"
+		cause.reason += "; run defenseclaw-managed status as an administrator to see what still inspects calls"
+	}
+	return cause
+}
+
 // ownExcluded is the row of an account that exclude_users names: a state of
 // its own, never protected and never the machine-wide state.
-func ownExcluded() map[string]any {
-	return ownRow(false, "excluded", ownCauseExcluded)
+func ownExcluded(inspection ownInspection) map[string]any {
+	return ownRow(false, "excluded", ownExcludedCause(inspection))
 }
 
 func ownProtected() map[string]any {

@@ -648,7 +648,9 @@ def configured_store_dir() -> str:
 
 STORE_HISTORY_FILE = "previous-data-dirs.json"
 _STORE_HISTORY_MAX_FOLDERS = 16
-_STORE_HISTORY_MAX_BYTES = 64 * 1024
+# Room for the newest _STORE_HISTORY_MAX_FOLDERS folders at the longest path a platform allows, each
+# spelled twice (the folder list and the backup digests); remember_previous_store keeps the file within it.
+_STORE_HISTORY_MAX_BYTES = 256 * 1024
 
 
 def _store_history_path() -> str:
@@ -666,6 +668,23 @@ def _account_private_regular_file(path: str, info: os.stat_result) -> bool:
     return info.st_uid == os.geteuid() and not info.st_mode & 0o077
 
 
+def _store_history_document() -> dict:
+    """The parsed list in the install home, or {} when it is absent, unsafe, oversized or malformed."""
+    path = _store_history_path()
+    try:
+        if _install_home_binding()[2]:
+            return {}  # a managed runtime keeps its own folder
+        info = os.lstat(path)
+        if not _account_private_regular_file(path, info):
+            return {}
+        document = json.loads(
+            read_regular_file_no_follow(path, max_bytes=_STORE_HISTORY_MAX_BYTES, expected_stat=info)
+        )
+    except (OSError, ValueError, NotImplementedError):
+        return {}
+    return document if isinstance(document, dict) else {}
+
+
 def previous_store_dirs() -> tuple[str, ...]:
     """The folders ``config set data_dir`` moved the stores away from, oldest first.
 
@@ -679,19 +698,7 @@ def previous_store_dirs() -> tuple[str, ...]:
     open to other accounts, oversized or malformed names nothing, and so does a
     managed runtime.
     """
-    path = _store_history_path()
-    try:
-        if _install_home_binding()[2]:
-            return ()  # a managed runtime keeps its own folder
-        info = os.lstat(path)
-        if not _account_private_regular_file(path, info):
-            return ()
-        document = json.loads(
-            read_regular_file_no_follow(path, max_bytes=_STORE_HISTORY_MAX_BYTES, expected_stat=info)
-        )
-    except (OSError, ValueError, NotImplementedError):
-        return ()
-    folders = document.get("folders") if isinstance(document, dict) else None
+    folders = _store_history_document().get("folders")
     if not isinstance(folders, list):
         return ()
     found: dict[str, None] = {}
@@ -701,31 +708,81 @@ def previous_store_dirs() -> tuple[str, ...]:
     return tuple(found)
 
 
-def remember_previous_store(old_dir: str) -> list[str]:
+def previous_store_backup_digests() -> dict[str, dict[str, str]]:
+    """Per earlier folder, the sha256 of each top-level backup record the move left in it.
+
+    The move records the digest of the bytes it copied out of the folder it
+    leaves. A record that still has that digest is the copy the move left; one
+    that differs was changed afterwards by the account, and uninstall keeps it.
+    """
+    raw = _store_history_document().get("backups")
+    found: dict[str, dict[str, str]] = {}
+    if not isinstance(raw, dict):
+        return found
+    for folder, names in raw.items():
+        if not isinstance(folder, str) or not isinstance(names, dict):
+            continue
+        digests = {
+            name: digest for name, digest in names.items()
+            if isinstance(name, str) and isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest)
+        }
+        if digests:
+            found[folder] = digests
+    return found
+
+
+def remember_previous_store(old_dir: str, backup_digests: Mapping[str, str] | None = None) -> list[str]:
     """Add the folder a data_dir move leaves behind to the list in the install home; return warning notes.
 
-    The install home is always searched, so it is never listed. The newest
-    ``_STORE_HISTORY_MAX_FOLDERS`` folders are kept.
+    The install home is always searched, so it is never listed (its backup
+    digests are kept all the same). The newest ``_STORE_HISTORY_MAX_FOLDERS``
+    folders are kept. *backup_digests* maps the top-level backup records in
+    *old_dir* to their sha256 at the time of the move.
     """
     if _is_admin_process() or not old_dir or not os.path.isabs(old_dir):
         return []
     try:
         home = os.fspath(default_data_path())
-        if _same_folder(old_dir, home) or not os.path.isdir(old_dir):
+        if not os.path.isdir(old_dir) or (_same_folder(old_dir, home) and not backup_digests):
             return []
         from defenseclaw.file_permissions import atomic_write_private_bytes
 
         # Folders that no longer exist are dropped; an unreadable list starts again.
         kept = [folder for folder in previous_store_dirs() if not _same_folder(folder, old_dir)]
-        kept.append(old_dir)
-        body = json.dumps({"folders": kept[-_STORE_HISTORY_MAX_FOLDERS:]}, indent=2).encode() + b"\n"
+        if not _same_folder(old_dir, home):
+            kept.append(old_dir)
+        kept = kept[-_STORE_HISTORY_MAX_FOLDERS:]
+        digests = {
+            folder: names for folder, names in previous_store_backup_digests().items()
+            if not _same_folder(folder, old_dir) and (folder in kept or _same_folder(folder, home))
+        }
+        if backup_digests:
+            digests[old_dir] = dict(backup_digests)
+        # The reader refuses a list over _STORE_HISTORY_MAX_BYTES and then names no folder at all, so the
+        # writer keeps the file within it: the oldest folder goes first, and each is reported.
+        notes: list[str] = []
+        while True:
+            document: dict[str, Any] = {"folders": kept}
+            if digests:
+                document["backups"] = digests
+            body = json.dumps(document, indent=2).encode() + b"\n"
+            if len(body) <= _STORE_HISTORY_MAX_BYTES:
+                break
+            if len(kept) < 2:
+                raise ValueError("the list would be larger than uninstall reads")
+            dropped = kept.pop(0)
+            digests.pop(dropped, None)
+            notes.append(
+                f"warning: the data_dir list is full, so uninstall no longer searches {dropped}; "
+                "its setup records stay there until you remove them"
+            )
         atomic_write_private_bytes(_store_history_path(), body, protect_parent=False)
     except (OSError, ValueError, NotImplementedError) as exc:
         return [
             f"warning: the old data_dir {old_dir} could not be added to the list uninstall searches ({exc}); "
             "its setup records stay there until you remove them"
         ]
-    return []
+    return notes
 
 
 def install_home_for_bound_store(store: str | os.PathLike[str]) -> str:
@@ -774,11 +831,22 @@ def _home_config_binding(path: str, home: str) -> tuple[str | None, bool]:
         managed = _is_managed_enterprise_mode(str(raw.get("deployment_mode") or ""))
         configured = raw.get("data_dir")
         if isinstance(configured, str) and configured.strip():
-            resolved = os.path.abspath(os.path.join(home, _expand_store_home(configured.strip())))
+            resolved = clean_data_dir(configured, home)
     if len(_home_config_cache) > 32:
         _home_config_cache.clear()
     _home_config_cache[key] = (resolved, managed)
     return resolved, managed
+
+
+def clean_data_dir(configured: str, home: str) -> str:
+    """The one spelling of the data_dir *configured* names: ``~/`` expanded, absolute from *home*, ``.``/``..`` folded.
+
+    The gateway, every record, approval and seal use this spelling, so a value
+    typed with a ``..`` after a link (``~/lnk/../state``) must not reach the
+    file system as typed: the system would resolve the link first and name
+    another folder than the one the gateway and the records use (GAP-0939).
+    """
+    return os.path.abspath(os.path.join(home, _expand_store_home(configured.strip())))
 
 
 def _same_folder(a: str, b: str) -> bool:

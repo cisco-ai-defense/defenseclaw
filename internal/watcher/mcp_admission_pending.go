@@ -5,6 +5,7 @@
 package watcher
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -45,6 +46,13 @@ type MCPAdmissionStatus struct {
 	// MCPScanIssueAddress. "" when the cause is not known from the
 	// definition (the hook then points to defenseclaw mcp list).
 	ScanIssue string
+	// Revoked marks a Failed status that is not the listed definition of
+	// the server but an earlier one the agent may still run (the entry was
+	// edited or removed after an admission no scan stood behind, and the
+	// allow or setting that gave it is gone). An allow written for the
+	// definition the agent config lists now does not answer it: the hook
+	// names the server, not the connection (GAP-0920).
+	Revoked bool
 }
 
 // The definitions a scan refuses, as the hook and mcp list word them.
@@ -104,6 +112,10 @@ func failedMCPStatus(server config.MCPServerEntry) MCPAdmissionStatus {
 type mcpAdmissionOutcome struct {
 	hash   string
 	failed bool
+	// withoutScan says the definition was allowed before any scan, by an
+	// allow rule or a setting that skips the scan. Such an allow stands only
+	// while that rule or setting does (mcpUnscannedAdmissionLapsed).
+	withoutScan bool
 }
 
 // noteMCPAdmissionOutcome records the outcome of an admission run on snap's
@@ -124,7 +136,8 @@ func (w *InstallWatcher) noteMCPAdmissionOutcome(evt InstallEvent, snap *TargetS
 	if w.mcpOutcomes == nil {
 		w.mcpOutcomes = map[string]mcpAdmissionOutcome{}
 	}
-	w.mcpOutcomes[evt.Path] = mcpAdmissionOutcome{hash: snap.ContentHash, failed: failed}
+	w.mcpOutcomes[evt.Path] = mcpAdmissionOutcome{hash: snap.ContentHash, failed: failed,
+		withoutScan: res.Verdict == VerdictAllowed && res.ScanID == ""}
 }
 
 // mcpDefinitionIsSnapshot reports whether the server still has the definition
@@ -195,15 +208,178 @@ func (w *InstallWatcher) noteMCPBaseline(path, hash, fingerprint string) {
 	if w.mcpOutcomes == nil {
 		w.mcpOutcomes = map[string]mcpAdmissionOutcome{}
 	}
-	w.mcpOutcomes[path] = mcpAdmissionOutcome{hash: hash, failed: mcpFingerprintFailed(fingerprint)}
+	w.mcpOutcomes[path] = mcpAdmissionOutcome{hash: hash, failed: mcpFingerprintFailed(fingerprint),
+		withoutScan: strings.HasSuffix(fingerprint, admittedWithoutScanMark)}
 }
 
 type mcpKnownDefinition struct {
+	// server holds the identity and how the server starts (URL, command,
+	// arguments, transport), never its environment or headers.
 	server config.MCPServerEntry
 	hash   string
-	// issue is mcpScanIssue of the definition, kept instead of the command
-	// and URL themselves.
+	// path is MCPEventPath of server.
+	path string
+	// issue is mcpScanIssue of the definition.
 	issue string
+}
+
+// mcpDepartedMax bounds mcpAdmissionDeparted.
+const mcpDepartedMax = 256
+
+// mcpLostKeysMax bounds the definitions mcpAdmissionLost notes in all.
+const mcpLostKeysMax = 4096
+
+// mcpLostScope is what the departed servers of one connector and account
+// that did not fit leave behind: the definitions that were dropped (keys),
+// so listing one again clears its note, and all once even those did not fit.
+// The scope with no connector and no home covers every caller.
+type mcpLostScope struct {
+	connector, home string
+	keys            map[string]struct{}
+	all             bool
+}
+
+// mcpDepartedKey names a definition: the server key and its hash, so an edit
+// of the entry keeps the earlier definition apart from the one that replaced it.
+func mcpDepartedKey(definition mcpKnownDefinition) string {
+	return definition.path + "\x00" + definition.hash
+}
+
+// settledDepartingMCP names, by definition key, the servers prev had that
+// now do not list, or list under another definition, and whose admission no
+// policy revocation can reach: one a scan decided, or one with no outcome.
+// Only a server admitted before any scan is worth holding after its entry
+// leaves the agent config or is edited (GAP-0920), so ordinary config churn
+// never fills, or evicts from, the departed servers. It reads the store, so
+// call it without mcpAdmissionMu held; a definition it does not name is held.
+func (w *InstallWatcher) settledDepartingMCP(prev, now []mcpKnownDefinition) map[string]bool {
+	if len(prev) == 0 || w.store == nil {
+		return nil
+	}
+	listed := make(map[string]bool, len(now))
+	for _, definition := range now {
+		listed[mcpDepartedKey(definition)] = true
+	}
+	var settled map[string]bool
+	for _, definition := range prev {
+		if definition.server.Bundled || listed[mcpDepartedKey(definition)] {
+			continue
+		}
+		row, err := mcpSnapshotForServer(w.store, definition.server)
+		if err != nil {
+			row = nil
+		}
+		_, decided, unscanned := w.mcpDecidedAdmission(definition.path, definition.hash, row)
+		if decided && unscanned {
+			continue
+		}
+		if settled == nil {
+			settled = map[string]bool{}
+		}
+		settled[mcpDepartedKey(definition)] = true
+	}
+	return settled
+}
+
+// rememberDepartedMCP notes, for each server prev had that now does not
+// list (or lists under another definition) and settled does not name, that
+// the agent config dropped it, and forgets a definition now lists again. One
+// that does not fit is not lost silently: noteLostMCP makes a call that
+// names no listed or held server of its connector and account fail like any
+// admission no scan stands behind. Call with mcpAdmissionMu held.
+func (w *InstallWatcher) rememberDepartedMCP(prev, now []mcpKnownDefinition, settled map[string]bool) {
+	if len(prev) == 0 && len(w.mcpAdmissionDeparted) == 0 && len(w.mcpAdmissionLost) == 0 {
+		return
+	}
+	listed := make(map[string]bool, len(now))
+	for _, definition := range now {
+		key := mcpDepartedKey(definition)
+		listed[key] = true
+		delete(w.mcpAdmissionDeparted, key)
+		w.forgetLostMCP(key)
+	}
+	for _, definition := range prev {
+		key := mcpDepartedKey(definition)
+		if definition.server.Bundled || listed[key] || settled[key] {
+			continue
+		}
+		if _, held := w.mcpAdmissionDeparted[key]; !held && len(w.mcpAdmissionDeparted) >= mcpDepartedMax {
+			w.noteLostMCP(definition, key)
+			continue
+		}
+		if w.mcpAdmissionDeparted == nil {
+			w.mcpAdmissionDeparted = map[string]mcpKnownDefinition{}
+		}
+		w.mcpAdmissionDeparted[key] = definition
+	}
+}
+
+// noteLostMCP records a departed definition that did not fit, under its
+// connector and account. Call with mcpAdmissionMu held.
+func (w *InstallWatcher) noteLostMCP(definition mcpKnownDefinition, key string) {
+	connector, home := strings.TrimSpace(definition.server.Connector), definition.server.Home
+	scopeKey := strings.ToLower(connector) + "\x00"
+	if home != "" {
+		scopeKey += mcpFolderKey(home)
+	}
+	scope := w.mcpAdmissionLost[scopeKey]
+	if scope == nil {
+		scope = &mcpLostScope{connector: connector, home: home}
+		if w.mcpAdmissionLostKeys >= mcpLostKeysMax {
+			// Out of room for another scope: any caller may be the lost one.
+			scopeKey, scope = "", &mcpLostScope{}
+			if known := w.mcpAdmissionLost[scopeKey]; known != nil {
+				scope = known
+			}
+		}
+		if w.mcpAdmissionLost == nil {
+			w.mcpAdmissionLost = map[string]*mcpLostScope{}
+		}
+		w.mcpAdmissionLost[scopeKey] = scope
+	}
+	if _, noted := scope.keys[key]; noted || scope.all {
+		return
+	}
+	if w.mcpAdmissionLostKeys >= mcpLostKeysMax {
+		scope.all = true
+		return
+	}
+	if scope.keys == nil {
+		scope.keys = map[string]struct{}{}
+	}
+	scope.keys[key] = struct{}{}
+	w.mcpAdmissionLostKeys++
+}
+
+// forgetLostMCP clears the note of a definition that lists again, and a
+// scope that has nothing left to note. Call with mcpAdmissionMu held.
+func (w *InstallWatcher) forgetLostMCP(key string) {
+	for scopeKey, scope := range w.mcpAdmissionLost {
+		if _, noted := scope.keys[key]; !noted {
+			continue
+		}
+		delete(scope.keys, key)
+		w.mcpAdmissionLostKeys--
+		if len(scope.keys) == 0 && !scope.all {
+			delete(w.mcpAdmissionLost, scopeKey)
+		}
+	}
+}
+
+// lostMCPServes reports whether a departed definition that did not fit may
+// be the server a call reaches: a note of its connector and account. Call
+// with mcpAdmissionMu held.
+func (w *InstallWatcher) lostMCPServes(q MCPAdmissionQuery) bool {
+	for _, scope := range w.mcpAdmissionLost {
+		if scope.connector != "" && !strings.EqualFold(scope.connector, strings.TrimSpace(q.Connector)) {
+			continue
+		}
+		if q.Home != "" && scope.home != "" && !sameMCPFolder(scope.home, q.Home) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 const mcpSnapshotIdentityKey = "mcp.snapshot.identity.v1"
@@ -249,6 +425,12 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	firstCycle := !w.firstCycleDone.Load()
 	servers, err := w.readMCPServers()
 	if err != nil {
+		// The earlier definitions the agent may still run are remembered, not
+		// listed, so an unreadable source does not forget which of them
+		// failed: they come before the failed scan of the last listing.
+		if revoked := w.mcpDepartedRevoked(q, nil, false); revoked.Failed {
+			return revoked
+		}
 		if failed := w.mcpFailedFromLastRead(q); failed.Failed {
 			return failed
 		}
@@ -265,26 +447,27 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return MCPAdmissionStatus{Name: server.Name, Unavailable: true, RetryAfter: defaultScanTimeout}
 		}
-		matched := err == nil && mcpBaselineMatches(row, server)
-		// A verdict this process decided for this exact definition stands
-		// before its baseline is written: a failure is not pending, and an
-		// allow that replaces a failure is not held by the old failed
-		// baseline (GAP-0775, GAP-0778).
-		if hash, hashErr := mcpDefinitionHash(server); hashErr == nil {
-			if outcome, ok := w.mcpOutcome(path, hash); ok {
-				if outcome.failed {
-					return failedMCPStatus(server)
-				}
-				continue
+		hash, _ := mcpDefinitionHash(server)
+		failed, decided, unscanned := w.mcpDecidedAdmission(path, hash, row)
+		if failed {
+			// The most restrictive verdict of the definitions the agent may
+			// still run: a revoked earlier one beats the listed one, whose
+			// allow cannot speak for it.
+			if revoked := w.mcpDepartedRevoked(q, servers, true); revoked.Failed {
+				return revoked
 			}
-		}
-		if matched && mcpSnapshotFailed(row) {
 			return failedMCPStatus(server)
 		}
-		if matched {
+		// An allow given before any scan is the policy that gave it, not a
+		// verdict on the definition: once the allow rule or the setting is
+		// gone the server has no admission and is pending again, whatever
+		// its baseline or outcome says (GAP-0920).
+		lapsed := decided && unscanned &&
+			w.mcpUnscannedAdmissionLapsed(InstallEvent{Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector})
+		if decided && !lapsed {
 			continue
 		}
-		if firstCycle && (!w.mcpStartupListed.Load() || w.listedAtStartup(path)) {
+		if !lapsed && firstCycle && (!w.mcpStartupListed.Load() || w.listedAtStartup(path)) {
 			continue
 		}
 		if !w.takeActionFor(InstallEvent{Type: InstallMCP}) {
@@ -298,10 +481,113 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		}
 	}
 	if len(pending) == 0 {
-		return MCPAdmissionStatus{}
+		return w.mcpDepartedRevoked(q, servers, true)
 	}
 	w.AdmitAddedMCPServers(pending)
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
+}
+
+// mcpDecidedAdmission reads what the admission of the definition with this
+// hash decided: the verdict this process decided stands before its baseline
+// is written (a failure is not pending, and an allow that replaces a failure
+// is not held by the old failed baseline: GAP-0775, GAP-0778), else the
+// stored baseline row when it is for this definition.
+func (w *InstallWatcher) mcpDecidedAdmission(path, hash string, row *audit.SnapshotRow) (failed, decided, unscanned bool) {
+	if hash == "" {
+		return false, false, false
+	}
+	if outcome, ok := w.mcpOutcome(path, hash); ok {
+		return outcome.failed, true, !outcome.failed && outcome.withoutScan
+	}
+	if row == nil || row.ContentHash != hash {
+		return false, false, false
+	}
+	if mcpSnapshotFailed(row) {
+		return true, true, false
+	}
+	return false, true, strings.HasSuffix(row.ScannerFingerprint, admittedWithoutScanMark)
+}
+
+// mcpDepartedRevoked is the status of a call to a server the agent config no
+// longer lists, or lists under another definition, whose admission was the
+// policy that gave it (an allow rule or scan_on_install false) and that
+// policy is gone. The agent can keep its connection after the entry is
+// removed or edited, so the revoked admission reaches that call too: the
+// server has no scan to stand on and cannot be scanned, which is the failed
+// admission of a definition that no scan admits, so strict and managed
+// refuse it and the default tiers warn. A server whose allow still stands,
+// or that a scan admitted, or that was never seen, has no status here
+// (GAP-0920). While the agent config lists that very definition (servers) it
+// decides, as for any listed server; a replacement listed under the same name
+// decides for itself and never for the live connection of the earlier one. A call that names no listed
+// and no held server may be one that did not fit (mcpAdmissionLost) when a
+// note of its connector and account says so, and fails the same way rather
+// than being allowed. servers is the agent config listing; listingRead false
+// says the listing could not be read: the held definitions are then judged as
+// departed (the last listing did not have them), and a call naming no held
+// server is left to the unavailable-source handling of the caller.
+func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []config.MCPServerEntry, listingRead bool) MCPAdmissionStatus {
+	w.mcpAdmissionMu.RLock()
+	if len(w.mcpAdmissionDeparted) == 0 && len(w.mcpAdmissionLost) == 0 {
+		w.mcpAdmissionMu.RUnlock()
+		return MCPAdmissionStatus{}
+	}
+	var gone []mcpKnownDefinition
+	for _, definition := range w.mcpAdmissionDeparted {
+		if mcpServerServesQuery(definition.server, q) {
+			gone = append(gone, definition)
+		}
+	}
+	lost := w.lostMCPServes(q)
+	w.mcpAdmissionMu.RUnlock()
+	if len(gone) == 0 && !lost {
+		return MCPAdmissionStatus{}
+	}
+	// A listed definition stands for itself only: a replacement listed under
+	// the same name and path, admitted or not, is another definition and
+	// does not speak for the live connection of the earlier one.
+	listed := map[string]bool{}
+	for _, server := range servers {
+		if server.Bundled || !mcpServerServesQuery(server, q) {
+			continue
+		}
+		hash, _ := mcpDefinitionHash(server)
+		listed[mcpDepartedKey(mcpKnownDefinition{path: MCPEventPath(server), hash: hash})] = true
+	}
+	for _, definition := range gone {
+		server := definition.server
+		// Only a server admitted before any scan is held; the allow or the
+		// setting that gave that admission is the one to ask.
+		if listed[mcpDepartedKey(definition)] || !w.mcpUnscannedAdmissionLapsed(InstallEvent{
+			Type: InstallMCP, Name: server.Name, Path: definition.path, Connector: server.Connector, remembered: &server}) {
+			continue
+		}
+		status := failedMCPStatus(server)
+		status.ScanIssue = definition.issue
+		status.Revoked = true
+		return status
+	}
+	if listingRead && lost && len(listed) == 0 && len(gone) == 0 {
+		return MCPAdmissionStatus{Name: q.Server, Failed: true, Revoked: true}
+	}
+	return MCPAdmissionStatus{}
+}
+
+// mcpUnscannedAdmissionLapsed reports an MCP server admitted before any scan
+// (an asset_policy.mcp.allowed rule or admission.mcp.scan_on_install false)
+// that admission no longer allows without one. The allow came from the
+// policy, so removing the rule takes it back at once: the server is admitted
+// again, by a scan that blocks it in a tier that fails closed. Secure Client
+// keeps main (issue #1092).
+func (w *InstallWatcher) mcpUnscannedAdmissionLapsed(evt InstallEvent) bool {
+	return evt.Type == InstallMCP && !w.secureClientActive() && !w.admitsMCPWithoutScan(context.Background(), evt)
+}
+
+// mcpBaselineLapsed is mcpUnscannedAdmissionLapsed for a stored baseline: it
+// records an admission without a scan whose policy is gone.
+func (w *InstallWatcher) mcpBaselineLapsed(evt InstallEvent, baseline *audit.SnapshotRow) bool {
+	return baseline != nil && strings.HasSuffix(baseline.ScannerFingerprint, admittedWithoutScanMark) &&
+		w.mcpUnscannedAdmissionLapsed(evt)
 }
 
 // mcpFailedFromLastRead uses a prior successful listing only to keep a

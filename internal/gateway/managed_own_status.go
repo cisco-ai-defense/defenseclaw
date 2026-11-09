@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -113,7 +114,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	// hook calls. A missing or changed view never claims protection.
 	var connectors map[string]any
 	if excluded {
-		connectors = ownExcludedConnectorStates(cfg)
+		connectors = a.ownExcludedConnectorStates(cfg, idKey, self, name)
 	} else if cfg != nil && ownExclusionUnjudgeable(cfg.Enterprise.Enrollment, idKey, self, name, domain, folder) {
 		connectors = ownUnresolvedConnectorStates(cfg)
 	} else if idKey == "uid" && cfg != nil {
@@ -132,7 +133,9 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	cowork := ownCoworkRow(true, "protected", "cowork_hooks", "Cowork runs the Claude Code hooks your organization manages")
 	switch {
 	case excluded:
-		cowork = ownCoworkRow(false, "excluded", ownCauseExcluded.code, ownCauseExcluded.reason)
+		// Cowork runs the Claude Code hooks, so it follows that connector.
+		cause := ownExcludedCause(a.ownExcludedInspection(cfg, idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
+		cowork = ownCoworkRow(false, "excluded", cause.code, cause.reason)
 	case !claudeCode && claudeConfigured:
 		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
 	case !claudeCode:
@@ -241,13 +244,54 @@ func ownUnresolvedConnectorStates(cfg *config.Config) map[string]any {
 
 // ownExcludedConnectorStates is the roster of an excluded account: every
 // connector the machine policy would otherwise cover is excluded, for the
-// account never inherits the machine-wide state.
-func ownExcludedConnectorStates(cfg *config.Config) map[string]any {
+// account never inherits the machine-wide state. Each row reason says what
+// the gateway still does with the account calls for that connector.
+func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, name string) map[string]any {
 	states := make(map[string]any)
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
-		states[connector] = ownExcluded()
+		states[connector] = ownExcluded(a.ownExcludedInspection(cfg, idKey, uid, name, connector))
 	}
 	return states
+}
+
+// ownExcludedInspection says what the status can prove about the calls of an
+// excluded account for connector, and nothing it cannot. A machine-policy hook
+// that the published policy view proves installed and pinned for the account
+// means the machine policy handles its calls, whatever verdict the hook
+// authorizer returns (inspect, or refuse under unenrolled_users: deny, or an
+// outage refusal) and whether or not the authorizer still lists the connector
+// as admitted (the watcher retires admission and the vendor source
+// separately). With no such hook, no admission and no vendor source for the
+// connector, and the vendor files read and holding no machine-policy hook,
+// none covers the account. A lost descriptor or a retired admission is not
+// that proof: the vendor hook can outlive both. Everything else is
+// unknown: no authorizer (the Windows pipe), no resolved account name (the
+// per-account proof is keyed by name, and the uid alone does not select it), an
+// admission the policy view does not back (a ledger row or exempt_users
+// outlives the hook), a vendor source that is unreadable or not the pinned
+// one, or a ledger that can not be read.
+func (a *APIServer) ownExcludedInspection(cfg *config.Config, idKey, uid, name, connector string) ownInspection {
+	z := a.managedHookAuthz.Load()
+	callerUID, err := strconv.Atoi(uid)
+	if idKey != "uid" || z == nil || err != nil || callerUID == 0 || strings.TrimSpace(name) == "" {
+		return ownInspectionUnknown
+	}
+	view := a.managedPolicyView.Load()
+	if view.provenHook(connector, name) {
+		return ownInspectionInspected
+	}
+	decision := z.decide(managedHookPeer{UID: callerUID, Name: name}, connector, "")
+	if !decision.Allow && decision.Reason != managedHookReasonUIDUnregistered {
+		return ownInspectionUnknown
+	}
+	machine := false
+	if policy := z.machinePolicy.Load(); policy != nil {
+		machine = policy.connectors[strings.ToLower(strings.TrimSpace(connector))]
+	}
+	if decision.Allow || machine || view.hasConnector(connector) || !machineHookAbsent(runtime.GOOS, cfg, connector) {
+		return ownInspectionUnknown
+	}
+	return ownInspectionNone
 }
 
 // ownWindowsConnectorStates keeps the Windows status roster aligned with the
