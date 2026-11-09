@@ -274,7 +274,13 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 			if tc.held {
 				previousHeld := windowsEnterpriseGuardianStateHeldNow
 				t.Cleanup(func() { windowsEnterpriseGuardianStateHeldNow = previousHeld })
+				// The holder arrives after the preflight: the first look finds
+				// nothing, the look the undo makes finds it.
+				looks := 0
 				windowsEnterpriseGuardianStateHeldNow = func(managed.StandaloneLayout) *windowsGuardianStateHold {
+					if looks++; looks == 1 {
+						return nil
+					}
 					return &windowsGuardianStateHold{Path: `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state\protected_targets.json`, Holders: []string{"editor.exe (PID 4242)"}}
 				}
 			}
