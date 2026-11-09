@@ -46,28 +46,53 @@ func launcherRefusal(command string) string {
 	return ""
 }
 
-func argumentsRefusal(command string, args []string) string {
-	hasPackage := false
+// forbiddenFlagRefusal words the refusal for an execution flag among args.
+// One flag decides the verdict wherever it sits, so the arguments a claim
+// carries can prove it even when more follow.
+func forbiddenFlagRefusal(command string, args []string) string {
 	for _, arg := range args {
-		token := strings.TrimSpace(arg)
-		flag, _, _ := strings.Cut(token, "=")
+		flag, _, _ := strings.Cut(strings.TrimSpace(arg), "=")
 		if flag = strings.ToLower(flag); forbiddenFlags[flag] {
 			return fmt.Sprintf("launcher %q uses forbidden execution flag %q", command, flag)
 		}
-		if token != "" && !strings.HasPrefix(token, "-") {
-			hasPackage = true
-		}
-	}
-	if !hasPackage {
-		return fmt.Sprintf("launcher %q requires a package/server argument", command)
 	}
 	return ""
+}
+
+func argumentsRefusal(command string, args []string) string {
+	if reason := forbiddenFlagRefusal(command, args); reason != "" {
+		return reason
+	}
+	for _, arg := range args {
+		if token := strings.TrimSpace(arg); token != "" && !strings.HasPrefix(token, "-") {
+			return ""
+		}
+	}
+	return fmt.Sprintf("launcher %q requires a package/server argument", command)
 }
 
 // Class is the class of the scanner refusal of a complete definition.
 func Class(command string, args []string) string {
 	class, _ := Judge(command, args, "")
 	return class
+}
+
+// Proven is the class the first arguments of a definition prove on their own,
+// for a claim that may hold only the start of a longer list and states no
+// verdict: the launcher, and an execution flag among the arguments it holds,
+// decide the refusal whatever follows. A missing package does not (it may come
+// later), so the class is None then and the claim is not judged further.
+func Proven(command string, args []string) string {
+	command = strings.TrimSpace(command)
+	switch {
+	case command == "":
+		return None
+	case launcherRefusal(command) != "":
+		return Launcher
+	case forbiddenFlagRefusal(command, args) != "":
+		return Arguments
+	}
+	return None
 }
 
 // Judge is the scanner verdict on a local server and the reason it words.

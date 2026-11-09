@@ -86,7 +86,7 @@ func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
 	}
 	if old, ok := h.servers[key]; ok {
 		if old.URL == entry.URL && old.Transport == entry.Transport && old.Command == entry.Command &&
-			old.LocalRefusal == entry.LocalRefusal && slices.Equal(old.Args, entry.Args) {
+			old.LocalRefusal == entry.LocalRefusal && old.ArgsCut == entry.ArgsCut && slices.Equal(old.Args, entry.Args) {
 			return false
 		}
 	} else if len(h.servers) >= hookReportedMCPLimit || h.perHome[entry.Home] >= hookReportedMCPPerHomeLimit {
@@ -148,6 +148,7 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		reported.Command = strings.TrimSpace(entry.Command)
 		reported.Args = slices.Clone(entry.Args)
 		reported.LocalRefusal = entry.LocalRefusal
+		reported.ArgsCut = entry.ArgsCut
 	}
 	a.hookMCP.note(reported)
 }

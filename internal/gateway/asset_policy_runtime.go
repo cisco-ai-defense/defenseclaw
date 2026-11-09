@@ -46,6 +46,8 @@ type mcpRuntimeProbe struct {
 	Transport  string
 	Surface    string
 	Matched    bool
+	// ArgsCut says Args is the start of a longer list (a bounded hook claim).
+	ArgsCut bool
 	// WorkspaceDir is the agent's working directory from the hook, used to
 	// resolve a name-only probe to the connector's configured server.
 	WorkspaceDir string
@@ -779,6 +781,7 @@ func mcpPolicyInput(connector string, probe mcpRuntimeProbe) config.AssetPolicyI
 		URL:            probe.URL,
 		Command:        probe.Command,
 		Args:           probe.Args,
+		ArgsCut:        probe.ArgsCut,
 		Transport:      probe.Transport,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	}
@@ -866,6 +869,7 @@ func mcpProbeWithEntry(probe mcpRuntimeProbe, entry config.MCPServerEntry, byCon
 	probe.URL = strings.TrimSpace(entry.URL)
 	probe.Command = strings.TrimSpace(entry.Command)
 	probe.Args = entry.Args
+	probe.ArgsCut = entry.ArgsCut
 	probe.Transport = strings.TrimSpace(entry.Transport)
 	return probe
 }

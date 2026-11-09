@@ -527,17 +527,19 @@ func skillManifestUnreadable(dir string) bool {
 
 // claimedMCPEntry is the definition a hook claim states. The claim holds at
 // most the first arguments of a longer list, so the scanner verdict the hook
-// took from the complete definition travels with the entry; a claim that
-// states none and may be cut is not judged by the arguments it holds, which
-// would refuse a server the scanner starts or miss one it refuses (GAP-0925).
+// took from the complete definition travels with the entry, and the entry
+// says its arguments may be cut, so an exact allow of the complete list does
+// not match it. A claim that states no verdict and may be cut is judged only
+// as far as its arguments prove (a launcher or an execution flag), which
+// would otherwise refuse a server the scanner starts (GAP-0925).
 func claimedMCPEntry(server *assetfacts.MCPServer) config.MCPServerEntry {
 	entry := config.MCPServerEntry{
 		Name: server.Name, URL: server.URL, Command: server.Command,
 		Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		LocalRefusal: server.LocalRefusal,
+		LocalRefusal: server.LocalRefusal, ArgsCut: server.ArgsMayBeCut(),
 	}
-	if server.ArgsMayBeCut() {
-		entry.LocalRefusal = mcplocal.None
+	if server.VerdictUnstatedCut() {
+		entry.LocalRefusal = mcplocal.Proven(server.Command, server.Args)
 	}
 	return entry
 }

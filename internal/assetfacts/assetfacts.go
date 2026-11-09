@@ -172,6 +172,10 @@ type MCPServer struct {
 	// execution flag or the package may be past the bound). A mcplocal
 	// class, empty when the hook did not state it.
 	LocalRefusal string `json:"local_refusal,omitempty"`
+	// ArgsCut says the hook read more arguments than Args holds, so Args is
+	// the start of the list and an exact allow of the complete list cannot be
+	// checked against it.
+	ArgsCut bool `json:"args_cut,omitempty"`
 	// Source is SourceCommandLine for a definition from the agent's command
 	// line, "" for one from its config files.
 	Source string `json:"source,omitempty"`
@@ -198,10 +202,15 @@ type MCPServer struct {
 	Pins *MCPPins `json:"pins,omitempty"`
 }
 
+// VerdictUnstatedCut reports a claim of a hook that stated no verdict and
+// holds as many arguments as the bound keeps: its Args can be the start of a
+// longer list, so the gateway reads a verdict out of them only as far as they
+// prove it (mcplocal.Proven).
+func (s MCPServer) VerdictUnstatedCut() bool { return s.LocalRefusal == "" && len(s.Args) >= maxArgs }
+
 // ArgsMayBeCut reports a claim whose Args can be the first maxArgs of a longer
-// list that the claim does not judge: the gateway must not read a verdict out
-// of them.
-func (s MCPServer) ArgsMayBeCut() bool { return s.LocalRefusal == "" && len(s.Args) >= maxArgs }
+// list: an exact allow of the complete argument list does not match it.
+func (s MCPServer) ArgsMayBeCut() bool { return s.ArgsCut || s.VerdictUnstatedCut() }
 
 // MCPPins are the SHA-256 digests (hex) of the values an asset_policy rule
 // compares on an MCP server, taken from the complete definition the hook
@@ -418,6 +427,7 @@ func bounded(facts Facts) Facts {
 		case mcplocal.None, mcplocal.Launcher, mcplocal.Arguments:
 			out.LocalRefusal = server.LocalRefusal
 		}
+		out.ArgsCut = server.ArgsCut || len(server.Args) > maxArgs
 		lossy := out.URL != strings.TrimSpace(server.URL) || out.Command != strings.TrimSpace(server.Command) ||
 			out.Transport != strings.TrimSpace(server.Transport) || len(server.Args) > maxArgs
 		for _, arg := range server.Args {

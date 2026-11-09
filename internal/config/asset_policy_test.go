@@ -609,17 +609,20 @@ func TestMCPAllowBindsCompleteCommandLine(t *testing.T) {
 	for _, tc := range []struct {
 		command string
 		args    []string
+		cut     bool
 		want    string
 	}{
-		{"npx", []string{"-y", "reviewed-server"}, AssetListAllow},
-		{"/tmp/npx", []string{"-y", "reviewed-server"}, ""},
-		{"npx", []string{"-y", "reviewed-server", "--extra"}, ""},
+		{"npx", []string{"-y", "reviewed-server"}, false, AssetListAllow},
+		{"/tmp/npx", []string{"-y", "reviewed-server"}, false, ""},
+		{"npx", []string{"-y", "reviewed-server", "--extra"}, false, ""},
+		// The arguments are the start of a longer list: the allow names the complete one.
+		{"npx", []string{"-y", "reviewed-server"}, true, ""},
 	} {
 		verdict, _ := cfg.AssetListDecision(AssetPolicyInput{
-			TargetType: "mcp", Name: "reviewed", Command: tc.command, Args: tc.args,
+			TargetType: "mcp", Name: "reviewed", Command: tc.command, Args: tc.args, ArgsCut: tc.cut,
 		})
 		if verdict != tc.want {
-			t.Fatalf("%q %v: verdict = %q, want %q", tc.command, tc.args, verdict, tc.want)
+			t.Fatalf("%q %v cut=%v: verdict = %q, want %q", tc.command, tc.args, tc.cut, verdict, tc.want)
 		}
 	}
 }
