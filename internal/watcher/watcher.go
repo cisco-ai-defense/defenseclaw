@@ -1807,8 +1807,37 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
+			w.reconcileWritableRouteIssues()
 			w.queueDueIssues()
 			w.processPending(ctx)
+		}
+	}
+}
+
+// reconcileWritableRouteIssues judges again every root recorded as unavailable
+// because a folder on its link route is writable by another account. The
+// record keeps the folder named when it was made, and a root that does not
+// exist yet is never watched again until it does, so without this status,
+// doctor and the watcher health kept naming a folder after chmod repaired it
+// (GAP-0965). A route that is still writable stays recorded, with the folder
+// now found.
+func (w *InstallWatcher) reconcileWritableRouteIssues() {
+	if w.secureClientActive() {
+		return
+	}
+	for _, issue := range w.RootCoverageIssues() {
+		if issue.Ancestor == "" {
+			continue
+		}
+		var err error
+		if _, statErr := os.Lstat(issue.Path); statErr == nil {
+			err = unlinkedSkillTreePath(issue.Path, issue.Path)
+		} else {
+			err = checkRootLinkRoute(issue.Path)
+		}
+		var writable *skillrootsafe.WritableAncestorError
+		if err == nil || errors.As(err, &writable) {
+			w.setRootCoverage(issue.Kind, issue.Path, err)
 		}
 	}
 }
@@ -5284,25 +5313,34 @@ func ensureAndWatchLegacy(fsw *fsnotify.Watcher, dir string) ([]string, error) {
 	return ensureAndWatchWithCheck(fsw, dir, false)
 }
 
+// checkRootLinkRoute judges the link route of a watch root through its
+// nearest existing component, so a root that is not created yet is refused
+// while a folder above it is writable by another account.
+func checkRootLinkRoute(dir string) error {
+	for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
+		if _, err := os.Lstat(current); err == nil {
+			if _, resolveErr := skillrootsafe.Resolve(current, watcherEvalSymlinks); resolveErr != nil {
+				return linkedRootRefusal(dir, resolveErr)
+			}
+			return nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("%w: inspect skill root %s: %v", errWatchDirNotCreated, dir, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return fmt.Errorf("unavailable skill root: %s", dir)
+		}
+	}
+}
+
 func ensureAndWatchWithCheck(fsw *fsnotify.Watcher, dir string, checkLinks bool) ([]string, error) {
 	var created []string
 	if isAbsentVendorSystemDir(dir) {
 		return nil, errAbsentVendorSystemDir
 	}
 	if checkLinks {
-		for current := filepath.Clean(dir); ; current = filepath.Dir(current) {
-			if _, err := os.Lstat(current); err == nil {
-				if _, resolveErr := skillrootsafe.Resolve(current, watcherEvalSymlinks); resolveErr != nil {
-					return nil, linkedRootRefusal(dir, resolveErr)
-				}
-				break
-			} else if !errors.Is(err, fs.ErrNotExist) {
-				return nil, fmt.Errorf("%w: inspect skill root %s: %v", errWatchDirNotCreated, dir, err)
-			}
-			parent := filepath.Dir(current)
-			if parent == current {
-				return nil, fmt.Errorf("unavailable skill root: %s", dir)
-			}
+		if err := checkRootLinkRoute(dir); err != nil {
+			return nil, err
 		}
 	}
 	if current, err := filepath.Abs(dir); err == nil {
