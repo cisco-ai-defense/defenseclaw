@@ -1369,10 +1369,18 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			roots[key] = watchedRoot{dir: dir, absolute: absolute, kinds: kinds, info: info, checked: time.Now()}
 		}
 	}
-	// shareRoot adds a kind that is configured at a path already watched for
-	// another kind, so the root is judged and admitted for every kind.
-	shareRoot := func(key, kind string) {
-		if root, ok := roots[key]; ok && !slices.Contains(root.kinds, kind) {
+	// shareRoot adds a kind that is configured at a path already watched, so
+	// the root is judged and admitted for every kind. The watch can come from
+	// another root kind or from a content watch (a plugin cache nested under
+	// a skill root); a configured root with no record yet gets one, so its
+	// unsafe-route lifecycle is tracked whoever installed the watch.
+	shareRoot := func(key, dir, absolute, kind string) {
+		root, ok := roots[key]
+		if !ok {
+			rememberRoot(key, dir, absolute, kind)
+			return
+		}
+		if !slices.Contains(root.kinds, kind) {
 			root.kinds = append(slices.Clone(root.kinds), kind)
 			roots[key] = root
 		}
@@ -1444,7 +1452,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			// Another kind registered this path; this kind is covered by
 			// that watch, so its own record ends too, unless that watch is
 			// not usable right now.
-			shareRoot(key, kind)
+			shareRoot(key, dir, absolute, kind)
 			if !roots[key].failed {
 				w.setRootCoverage(kind, dir, nil)
 			}
