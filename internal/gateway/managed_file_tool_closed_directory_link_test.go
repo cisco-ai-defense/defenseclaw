@@ -205,13 +205,23 @@ func TestManagedShellWriteThroughALinkIntoAClosedDirectoryStaysBlockedWhenTheCom
 	}
 }
 
-// boundedClosedLinkCall builds a project with a shell command of forty
+// The redirect paths are kept below this many bytes, the longest path every
+// supported system opens (macOS stops at 1024), so the client resolves every
+// one of them and the map grows with the names.
+const (
+	boundedOperandPathBytes = 900
+	boundedPadPerName       = 40
+)
+
+// boundedClosedLinkCall builds a project with a shell command of count
 // ordinary redirects, then a command that reopens a closed folder and appends
-// through a project link into the key file. pad lengthens one name, so the
-// client map grows byte by byte towards its bound: the operand answer and its
-// link text are the last entries, which makes the bound fall between them for
-// some pad.
-func boundedClosedLinkCall(t *testing.T, pad int) func(home, project string) map[string]any {
+// through a project link into the key file. pad lengthens the redirect names,
+// boundedPadPerName bytes at a time from the first, so the client map grows
+// byte by byte towards its bound: the operand answer and its link text are the
+// last entries, which makes the bound fall between them for some pad. The
+// folder names are sized from the project path, so the redirect paths have the
+// same length on every system whatever the length of its temporary folder.
+func boundedClosedLinkCall(t *testing.T, count, pad int) func(home, project string) map[string]any {
 	return func(home, project string) map[string]any {
 		keyDir := filepath.Join(home, ".ssh")
 		closed := filepath.Join(project, "closed")
@@ -235,9 +245,14 @@ func boundedClosedLinkCall(t *testing.T, pad int) func(home, project string) map
 				t.Fatal(err)
 			}
 		}
+		// Four folders, then "/f000" and the longest pad of one name.
+		width := (boundedOperandPathBytes - len(project) - 4*3 - len("/f000") - boundedPadPerName) / 4
+		if width < 1 || width > 200 {
+			t.Fatalf("the project path %q leaves no usable folder name size (%d)", project, width)
+		}
 		filler := project
 		for part := 0; part < 4; part++ {
-			filler = filepath.Join(filler, fmt.Sprintf("d%d", part)+strings.Repeat("q", 171))
+			filler = filepath.Join(filler, fmt.Sprintf("d%d", part)+strings.Repeat("q", width))
 		}
 		if err := os.MkdirAll(filler, 0o700); err != nil {
 			t.Fatal(err)
@@ -247,12 +262,16 @@ func boundedClosedLinkCall(t *testing.T, pad int) func(home, project string) map
 			t.Fatal(err)
 		}
 		var statements []string
-		for i := 0; i < 40; i++ {
+		remaining := pad
+		for i := 0; i < count; i++ {
 			name := fmt.Sprintf("f%03d", i)
-			if i == 39 {
-				name += strings.Repeat("r", pad)
-			}
+			extra := min(remaining, boundedPadPerName)
+			name += strings.Repeat("r", extra)
+			remaining -= extra
 			statements = append(statements, fmt.Sprintf("printf x > %s/%s", relative, name))
+		}
+		if remaining > 0 {
+			t.Fatalf("pad %d does not fit in %d redirect names", pad, count)
 		}
 		statements = append(statements, "chmod u+x closed", "printf marker >> ./alias")
 		return sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": strings.Join(statements, "; ")}))(project)
@@ -263,8 +282,10 @@ func boundedClosedLinkCall(t *testing.T, pad int) func(home, project string) map
 // and the link text that says so are one entry: for no map size does the
 // client send the empty answer without its link text and without saying the
 // map is incomplete, and the managed hook blocks the key append at the sizes
-// where the bound falls on that entry. The sweep must cross the bound, or it
-// would not hold the case it names.
+// where the bound falls on that entry. The sweep finds the bound on the system
+// it runs on (the most redirects the map holds whole, then the pads that move
+// the last whole entry across it) and must cross it, or it would not hold the
+// case it names.
 func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIsAtItsBound(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("requires an unprivileged POSIX link walk")
@@ -279,10 +300,8 @@ func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIs
 	closed := filepath.Join(project, "closed")
 	t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
 	alias := filepath.Join(project, "alias")
-	var incomplete []int
-	withText := 0
-	for pad := 0; pad <= 200; pad++ {
-		raw := mustJSON(t, boundedClosedLinkCall(t, pad)(home, project))
+	resolve := func(count, pad int) map[string]string {
+		raw := mustJSON(t, boundedClosedLinkCall(t, count, pad)(home, project))
 		if err := os.Chmod(closed, 0); err != nil {
 			t.Fatal(err)
 		}
@@ -291,26 +310,53 @@ func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIs
 			t.Fatal(err)
 		}
 		if !ok {
-			t.Fatalf("pad %d: the client map could not be read back", pad)
+			t.Fatalf("%d redirects, pad %d: the client map could not be read back", count, pad)
 		}
+		return targets
+	}
+	// The most redirects the map holds whole. The hard cap is far above the
+	// count the 64 KiB bound allows for paths of this size.
+	const redirectCap = 400
+	count := 0
+	for next := 1; next <= redirectCap; next++ {
+		if resolve(next, 0)[hookpaths.TruncatedKey] != "" {
+			break
+		}
+		count = next
+	}
+	if count == 0 || count == redirectCap {
+		t.Fatalf("the map bound was not found: %d redirects held whole (cap %d)", count, redirectCap)
+	}
+	var incomplete []int
+	withText := 0
+	// With the pad on the first names, the room left after the last whole
+	// entry shrinks two bytes a step: it passes the size of the operand answer
+	// and its link text once, then the last redirect no longer fits and the
+	// answer is whole again. The sweep ends there.
+	for pad, last := 0, count*boundedPadPerName; pad <= last; pad++ {
+		targets := resolve(count, pad)
 		resolved, present := targets[alias]
 		_, text := targets[hookpaths.LinkTextFactPrefix+alias]
 		switch {
 		case present && resolved == "" && text:
 			withText++
+			if len(incomplete) > 0 {
+				pad = last
+			}
 		case present && resolved == "":
-			t.Fatalf("pad %d: an empty answer for the linked operand without its link text and without a bound marker", pad)
+			t.Fatalf("%d redirects, pad %d: an empty answer for the linked operand without its link text and without a bound marker", count, pad)
 		case !present && targets[hookpaths.TruncatedKey] != "":
 			incomplete = append(incomplete, pad)
 		}
 	}
+	t.Logf("the map holds %d redirects; %d maps with the link text, %d incomplete maps (pads %v)", count, withText, len(incomplete), incomplete)
 	if withText == 0 || len(incomplete) < 2 {
 		t.Fatalf("the sweep did not cross the bound: %d maps with the link text, %d incomplete maps", withText, len(incomplete))
 	}
 	for _, pad := range []int{incomplete[0], incomplete[len(incomplete)-1]} {
 		t.Run(fmt.Sprintf("pad%d", pad), func(t *testing.T) {
 			blocked, body := postManagedHookBehindProtectHome(t, "default", func(home, project string) map[string]any {
-				call := boundedClosedLinkCall(t, pad)(home, project)
+				call := boundedClosedLinkCall(t, count, pad)(home, project)
 				if err := os.Chmod(filepath.Join(project, "closed"), 0); err != nil {
 					t.Fatal(err)
 				}
