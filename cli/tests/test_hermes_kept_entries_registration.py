@@ -204,3 +204,41 @@ def test_a_users_hook_in_a_folder_or_file_named_like_defenseclaws_is_kept_withou
     config.write_text(yaml.safe_dump(document), encoding="utf-8")
 
     assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"bash {tmp}/my\ hermes-hook.sh",
+        r"bash '{tmp}/my\ hermes-hook.sh'",
+        r"{tmp}/bin/audit\;hermes-hook.sh",
+        r"{tmp}/bin/audit\=hermes-hook.sh",
+        r"{tmp}/bin/audit\$hermes-hook.sh",
+        r'bash {tmp}/my\"hermes-hook.sh',
+        r'sh -c "bash {tmp}/my\ hermes-hook.sh"',
+    ],
+)
+def test_a_users_hook_with_a_shell_escape_in_its_name_is_kept_without_a_notice(tmp_path, command):
+    config, _script, _command = _registration(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["pre_tool_call"].insert(0, {"command": command.format(tmp=tmp_path), "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"bash {tmp}\.defenseclaw\hooks\hermes-hook.sh",
+        r"bash {tmp}/.defenseclaw/hooks/my\ audit.sh",
+        r"sh -c 'bash {tmp}/.defenseclaw/hooks/hermes-hook.sh'",
+    ],
+)
+def test_a_hook_in_the_defenseclaw_folder_still_gets_the_notice_when_written_with_backslashes(tmp_path, command):
+    config, _script, _command = _registration(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["pre_tool_call"].insert(0, {"command": command.format(tmp=tmp_path), "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) != ""
