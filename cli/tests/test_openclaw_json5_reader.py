@@ -97,6 +97,24 @@ def test_syntax_error_names_the_line_and_column_in_the_original_text() -> None:
     assert "line 5" in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    ("terminator", "line"),
+    [("\n", 3), ("\r", 3), ("\r\n", 3), ("\u2028", 3), ("\u2029", 3), ("\x0b", 2), ("\x0c", 2), ("\x85", 2)],
+)
+def test_syntax_error_counts_exactly_the_json5_line_terminators(terminator: str, line: int) -> None:
+    text = f"// first{terminator}// second\n{{ a: \"bad\nstring\" }}"
+    with pytest.raises(openclaw_json5.OpenClawConfigSyntaxError) as caught:
+        openclaw_json5.loads(text)
+    assert (caught.value.line, caught.value.column) == (line, 10)
+
+
+def test_oversized_json5_error_counts_json5_line_terminators() -> None:
+    text = '{"a": 1,\r b: 2}' + " " * openclaw_json5.MAX_JSON5_CHARS
+    with pytest.raises(openclaw_json5.OpenClawConfigSyntaxError) as raised:
+        openclaw_json5.loads(text)
+    assert (raised.value.line, raised.value.column) == (2, 2)
+
+
 def test_syntax_error_never_quotes_the_file_text() -> None:
     secret = "s3cret-token-value"
     with pytest.raises(openclaw_json5.OpenClawConfigSyntaxError) as caught:
