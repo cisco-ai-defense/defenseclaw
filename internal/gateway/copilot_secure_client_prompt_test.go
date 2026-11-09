@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -65,6 +66,33 @@ func TestCopilotSecureClientPromptOutput(t *testing.T) {
 	if got := copilotBlockedPromptText([]string{"CISCO-VIOLENCE", "CISCO-SEXUAL-CONTENT"}); !strings.HasSuffix(got,
 		"Cisco AI Defense: Sexual Content & Exploitation, Violence & Public Safety Threats.") {
 		t.Fatalf("multi-label text = %q", got)
+	}
+}
+
+// With the real activation predicate (no stub), a Secure Client gateway on
+// macOS or Windows replaces a blocked Copilot prompt; on any other OS it
+// does not.
+func TestCopilotSecureClientPromptOutputUsesTheRealPredicate(t *testing.T) {
+	secureClient := &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise,
+		Enterprise:     config.EnterpriseConfig{Profile: managed.ProfileSecureClient},
+	}
+	if !secureClient.SecureClientIntegration() {
+		t.Fatal("the fixture does not resolve to the Secure Client profile")
+	}
+	a := &APIServer{scannerCfg: secureClient}
+	req := agentHookRequest{ConnectorName: "copilot", HookEventName: "userPromptTransformed"}
+	out := a.copilotSecureClientPromptOutput(context.Background(), req, "action", "block",
+		[]string{"ai-defense:CISCO-PROMPT-INJECTION"}, map[string]interface{}{})
+	text, _ := out["modifiedTransformedPrompt"].(string)
+	if !copilotSecureClientPromptRewriteOS(runtime.GOOS) {
+		if len(out) != 0 {
+			t.Fatalf("on %s the output was modified: %v", runtime.GOOS, out)
+		}
+		return
+	}
+	if !strings.HasSuffix(text, "Cisco AI Defense: Prompt Injection.") {
+		t.Fatalf("on %s the blocked prompt was not replaced: %v", runtime.GOOS, out)
 	}
 }
 

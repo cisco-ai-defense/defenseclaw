@@ -56,9 +56,9 @@ func TestScrubCopilot_DropsDCKeepsUserEntry(t *testing.T) {
 // DefenseClaw's own defenseclaw.json holding nothing else is removed, not
 // left as an empty document.
 func TestScrubCopilot_RemovesOwnFileWhenOnlyDCEntries(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("as root the scrub rewrites in place instead of removing")
-	}
+	original := scrubRunsAsRoot
+	t.Cleanup(func() { scrubRunsAsRoot = original })
+	scrubRunsAsRoot = func() bool { return false }
 	path := filepath.Join(t.TempDir(), "defenseclaw.json")
 	writeFile(t, path, `{"version":1,"hooks":{"preToolUse":[{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'","timeoutSec":30}]}}
 `)
@@ -68,6 +68,40 @@ func TestScrubCopilot_RemovesOwnFileWhenOnlyDCEntries(t *testing.T) {
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("defenseclaw.json still exists: lstat err = %v", err)
+	}
+}
+
+// As root (the uninstaller's retry) the scrub never deletes by a path the
+// user controls: the owned file stays, with its hooks removed.
+func TestScrubCopilot_RootKeepsOwnFileAndEmptiesIt(t *testing.T) {
+	original := scrubRunsAsRoot
+	t.Cleanup(func() { scrubRunsAsRoot = original })
+	scrubRunsAsRoot = func() bool { return true }
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	writeFile(t, path, `{"version":1,"hooks":{"preToolUse":[{"type":"command","bash":"'/Users/u/.defenseclaw/hooks/copilot-hook.sh' --event 'preToolUse'","timeoutSec":30}]}}
+`)
+	changed, err := scrubCopilotFile(path, scrubDefaultMarkers)
+	if err != nil || !changed {
+		t.Fatalf("scrubCopilotFile = %v, %v", changed, err)
+	}
+	out := readFile(t, path)
+	if strings.Contains(out, ".defenseclaw/hooks/") || strings.Contains(out, "preToolUse") {
+		t.Fatalf("root scrub left DefenseClaw's hook:\n%s", out)
+	}
+}
+
+// A defenseclaw.json whose hooks value is not an object is not Copilot's
+// shape: it is left exactly as it is, never removed.
+func TestScrubCopilot_KeepsFileWithUnsupportedHooksValue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	body := `{"version":1,"hooks":[{"type":"command","bash":"/Users/u/bin/my-copilot-hook.sh"}]}` + "\n"
+	writeFile(t, path, body)
+	changed, err := scrubCopilotFile(path, scrubDefaultMarkers)
+	if err != nil || changed {
+		t.Fatalf("scrubCopilotFile = %v, %v; want unchanged", changed, err)
+	}
+	if got := readFile(t, path); got != body {
+		t.Fatalf("file changed:\n%s", got)
 	}
 }
 

@@ -318,7 +318,8 @@ const copilotOwnedHookFileName = "defenseclaw.json"
 // and it holds nothing but version and hooks it is removed instead of being
 // left empty. Only a scrub running as the user removes it; as root (the
 // uninstaller's retry) the emptied document is written in place, so root
-// never deletes by a path the user controls.
+// never deletes by a path the user controls. A hooks value that is not an
+// object is not Copilot's shape, so the file is kept as it is.
 func scrubCopilotFile(path string, markers []string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -328,9 +329,12 @@ func scrubCopilotFile(path string, markers []string) (bool, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return false, fmt.Errorf("parse JSON: %w", err)
 	}
-	hooks, _ := cfg["hooks"].(map[string]any)
+	hooks, hooksIsObject := cfg["hooks"].(map[string]any)
+	if !hooksIsObject && cfg["hooks"] != nil {
+		return false, nil
+	}
 	scrubFlatHookEntries(hooks, markers)
-	if filepath.Base(path) == copilotOwnedHookFileName && len(hooks) == 0 && copilotHookFileOnlyEnvelope(cfg) && os.Geteuid() != 0 {
+	if filepath.Base(path) == copilotOwnedHookFileName && len(hooks) == 0 && copilotHookFileOnlyEnvelope(cfg) && !scrubRunsAsRoot() {
 		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
 			if err := os.Remove(path); err != nil {
 				return false, err
@@ -340,6 +344,9 @@ func scrubCopilotFile(path string, markers []string) (bool, error) {
 	}
 	return writeSortedJSON(path, cfg, data)
 }
+
+// scrubRunsAsRoot reports whether the scrub runs as root; tests replace it.
+var scrubRunsAsRoot = func() bool { return os.Geteuid() == 0 }
 
 // copilotHookFileOnlyEnvelope reports whether cfg holds no key besides
 // Copilot's version and hooks.

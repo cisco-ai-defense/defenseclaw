@@ -156,14 +156,17 @@ func secureClientOwnedHookConfigConnector(connectorName string) bool {
 // The standalone per-user worker calls it with the user's own credentials.
 // The macOS Secure Client guardian runs as root and calls it inside
 // withOwnerCredentials, so the folders are made by and owned by the user.
-func prepareOwnedHookConfigParents(home, connectorName string, paths []string, uid int) ([]string, []string, error) {
+// It passes secureClientGuardian, the secureClientOwnedHookConfigConnector
+// decision it made as root: the user may not be able to search the Secure
+// Client install marker's folder.
+func prepareOwnedHookConfigParents(home, connectorName string, paths []string, uid int, secureClientGuardian bool) ([]string, []string, error) {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	switch {
 	case standalonePerUserRepair(uid):
 		if !standaloneOwnedHookConfigConnectors[name] {
 			return nil, nil, nil
 		}
-	case secureClientOwnedHookConfigConnector(name) && uid > 0 && os.Geteuid() == uid:
+	case secureClientGuardian && secureClientOwnedHookConfigConnectors[name] && uid > 0 && os.Geteuid() == uid:
 	default:
 		return nil, nil, nil
 	}

@@ -567,7 +567,8 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		// folder the agent does not create: make its missing parents as the
 		// user, and let Setup write the file itself.
 		var ownedHookConfigs, createdHookConfigParents []string
-		if standalonePerUserRepair(uid) || secureClientOwnedHookConfigConnector(conn.Name()) {
+		secureClientPrepares := secureClientOwnedHookConfigConnector(conn.Name())
+		if standalonePerUserRepair(uid) || secureClientPrepares {
 			// Refuse a contract the install cannot meet before creating any
 			// folder, so a refused install leaves the home as it was. Secure
 			// Client prepared its contract above and installs it fail-open.
@@ -578,7 +579,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			}
 			if err := withOwnerCredentials(uid, gid, func() error {
 				var prepareErr error
-				ownedHookConfigs, createdHookConfigParents, prepareErr = prepareOwnedHookConfigParents(home, conn.Name(), paths, uid)
+				ownedHookConfigs, createdHookConfigParents, prepareErr = prepareOwnedHookConfigParents(home, conn.Name(), paths, uid, secureClientPrepares)
 				return prepareErr
 			}); err != nil {
 				return err

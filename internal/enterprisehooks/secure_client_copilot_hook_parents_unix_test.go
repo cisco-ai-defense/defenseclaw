@@ -33,7 +33,11 @@ func TestSecureClientMacCreatesCopilotHookConfigParents(t *testing.T) {
 	home := t.TempDir()
 	hookFile := filepath.Join(home, ".copilot", "hooks", "defenseclaw.json")
 
-	owned, created, err := prepareOwnedHookConfigParents(home, "copilot", []string{hookFile}, os.Geteuid())
+	verified := secureClientOwnedHookConfigConnector("copilot")
+	// As the user the marker check can fail (a folder it cannot search):
+	// the folder still comes from the decision the guardian made as root.
+	secureClientHookDeliveryHost = false
+	owned, created, err := prepareOwnedHookConfigParents(home, "copilot", []string{hookFile}, os.Geteuid(), verified)
 	if err != nil {
 		t.Fatalf("prepareOwnedHookConfigParents: %v", err)
 	}
@@ -85,7 +89,8 @@ func TestSecureClientCopilotHookConfigParentsStayScoped(t *testing.T) {
 			tc.setup(t)
 			home := t.TempDir()
 			hookFile := filepath.Join(home, "."+tc.connector, "hooks", "defenseclaw.json")
-			owned, created, err := prepareOwnedHookConfigParents(home, tc.connector, []string{hookFile}, tc.uid())
+			owned, created, err := prepareOwnedHookConfigParents(home, tc.connector, []string{hookFile}, tc.uid(),
+				secureClientOwnedHookConfigConnector(tc.connector))
 			if err != nil || owned != nil || created != nil {
 				t.Fatalf("prepareOwnedHookConfigParents = %v, %v, %v; want nothing", owned, created, err)
 			}
@@ -109,7 +114,7 @@ func TestSecureClientCopilotHookConfigParentRefusesGroupWritableFolder(t *testin
 		t.Fatal(err)
 	}
 	hookFile := filepath.Join(copilotHome, "hooks", "defenseclaw.json")
-	if _, _, err := prepareOwnedHookConfigParents(home, "copilot", []string{hookFile}, os.Geteuid()); err == nil {
+	if _, _, err := prepareOwnedHookConfigParents(home, "copilot", []string{hookFile}, os.Geteuid(), true); err == nil {
 		t.Fatal("a group-writable ~/.copilot was accepted")
 	}
 	if _, err := os.Lstat(filepath.Join(copilotHome, "hooks")); !os.IsNotExist(err) {

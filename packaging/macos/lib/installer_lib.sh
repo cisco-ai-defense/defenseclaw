@@ -1133,8 +1133,11 @@ discover_agent_version() {
       # versioned release folder only; never run the user-owned `copilot`
       # from this root LaunchDaemon (its --version can start an update).
       # A curl-script install leaves neither, so the version stays empty
-      # and connector_present_for_user decides.
-      local pkg v
+      # and connector_present_for_user decides. Of several installs (a
+      # stale npm package beside a current cask) the highest version
+      # wins, so an old one never selects the legacy contract, which has
+      # no userPromptTransformed hook.
+      local pkg v caskroom dir dname best=""
       for pkg in \
         "${home}"/.npm-global/lib/node_modules/@github/copilot/package.json \
         "${home}"/.nvm/versions/node/*/lib/node_modules/@github/copilot/package.json \
@@ -1143,9 +1146,11 @@ discover_agent_version() {
         /opt/homebrew/lib/node_modules/@github/copilot/package.json; do
         [[ -f "${pkg}" ]] || continue
         v="$(_probe_json_version "${pkg}" copilot "@github/copilot")"
-        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+        [[ -n "${v}" ]] || continue
+        if [[ -z "${best}" ]] || _semver_greater "${v}" "${best}"; then
+          best="${v}"
+        fi
       done
-      local caskroom dir dname best=""
       for caskroom in /opt/homebrew/Caskroom/copilot-cli /usr/local/Caskroom/copilot-cli; do
         [[ -d "${caskroom}" && ! -L "${caskroom}" ]] || continue
         for dir in "${caskroom}"/*/; do
@@ -1158,8 +1163,8 @@ discover_agent_version() {
             best="${dname}"
           fi
         done
-        if [[ -n "${best}" ]]; then echo "${best}"; return; fi
       done
+      if [[ -n "${best}" ]]; then echo "${best}"; fi
       ;;
     cursor)
       # Cursor.app is a signed macOS bundle; read the Info.plist rather

@@ -45,9 +45,37 @@ t_copilot_from_user_npm_metadata_without_executing_cli() {
   cat > "${pkg_dir}/package.json" <<'JSON'
 { "name": "@github/copilot", "version": "1.0.105" }
 JSON
+  # A copilot on PATH records every run: discovery must make none, even a
+  # best-effort --version whose failure it would ignore.
+  local fakebin calls
+  fakebin="$(mktest_tmp)"
+  calls="${fakebin}/copilot-calls"
+  cat > "${fakebin}/copilot" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '${calls}'
+printf '9.9.9\n'
+SH
+  chmod 0700 "${fakebin}/copilot"
+  local got
+  got="$(PATH="${fakebin}:${PATH}" discover_agent_version copilot "${home}")"
+  assert_eq "${got}" "1.0.105" "copilot version from its npm package metadata"
+  if [[ -e "${calls}" ]]; then
+    _fail "copilot discovery executed the copilot binary: $(cat "${calls}")"
+  fi
+}
+
+t_copilot_stale_npm_install_does_not_win() {
+  # A stale npm package beside a current one must not select the legacy
+  # contract: the highest version found wins, whichever path comes first.
+  local home; home="$(mktest_tmp)"
+  local stale="${home}/.npm-global/lib/node_modules/@github/copilot"
+  local current="${home}/.nvm/versions/node/v22.11.0/lib/node_modules/@github/copilot"
+  mkdir -p "${stale}" "${current}"
+  printf '%s\n' '{ "name": "@github/copilot", "version": "1.0.50" }' > "${stale}/package.json"
+  printf '%s\n' '{ "name": "@github/copilot", "version": "1.0.105" }' > "${current}/package.json"
   local got
   got="$(without_host_agent_bins discover_agent_version copilot "${home}")"
-  assert_eq "${got}" "1.0.105" "copilot version from its npm package metadata"
+  assert_eq "${got}" "1.0.105" "copilot: the newest install wins over a stale npm package"
 }
 
 t_copilot_from_nvm_global_metadata() {
