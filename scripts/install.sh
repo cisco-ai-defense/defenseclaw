@@ -738,6 +738,9 @@ LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 # cancel message then died on a broken pipe (exit 141, GAP-1901). tee -i ignores
 # it itself: bash 5.3 (Ubuntu 26.04) drops the inherited ignore when the
 # subshell runs trap '' INT.
+# The shell ignores Ctrl+C while it starts tee, which inherits that, until
+# the cancel trap below: a Ctrl+C before tee -i ran ended tee the same way.
+trap '' INT
 exec > >(trap '' TERM; exec tee -ia "${LOG}") 2>&1
 # A run that stops after it staged the release and before the swap (a
 # refusal, a failed check, a cancel) leaves nothing it staged or added for uv

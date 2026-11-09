@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -28,12 +29,15 @@ func NativeSleep(t testing.TB) string {
 	if err := os.WriteFile(source, nativeSleepSource, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	compiler := os.Getenv("CC")
-	if compiler == "" {
-		compiler = "cc"
+	// CC is a command line, as for make and cgo: "cc -O2" is cc with a flag.
+	command := strings.Fields(os.Getenv("CC"))
+	if len(command) == 0 {
+		command = []string{"cc"}
 	}
+	compiler := command[0]
 	program := filepath.Join(dir, "native-sleep")
-	if output, err := exec.Command(compiler, "-o", program, source).CombinedOutput(); err != nil {
+	args := append(command[1:len(command):len(command)], "-o", program, source)
+	if output, err := exec.Command(compiler, args...).CombinedOutput(); err != nil {
 		t.Fatalf("building the stand-in program needs a C compiler (%s): %v\n%s", compiler, err, output)
 	}
 	return program

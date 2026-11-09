@@ -25,6 +25,7 @@ sources are the ones the Go tests build (internal/testenv/native).
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -36,12 +37,14 @@ SOURCES = Path(__file__).resolve().parents[2] / "internal" / "testenv" / "native
 
 def native_program(destination: Path, kind: str) -> Path:
     """Build the native stand-in ``kind`` ("sleep" or "echo") at ``destination``."""
-    compiler = shutil.which(os.environ.get("CC") or "cc")
+    # CC is a command line, as for make and cgo: "cc -O2" is cc with a flag.
+    command = shlex.split(os.environ.get("CC") or "cc") or ["cc"]
+    compiler = shutil.which(command[0])
     if compiler is None:
         pytest.fail("this test builds a stand-in program and needs a C compiler (cc)")
     destination.parent.mkdir(parents=True, exist_ok=True)
     built = subprocess.run(
-        [compiler, "-o", os.fspath(destination), os.fspath(SOURCES / f"{kind}.c")],
+        [compiler, *command[1:], "-o", os.fspath(destination), os.fspath(SOURCES / f"{kind}.c")],
         capture_output=True, text=True, check=False,
     )
     if built.returncode != 0:
