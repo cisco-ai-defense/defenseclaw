@@ -58,7 +58,7 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--cisco-endpoint`, `--cisco-api-key-env` | Cisco AI Defense. |
 | `--cisco-api-key` | Cisco AI Defense key to save into `.env`. Prefer `DEFENSECLAW_INIT_CISCO_API_KEY`, for the same reason. |
 | `--enable-guardrail` | Configure the LLM guardrail during `init`. |
-| `--repair-identity` | Repair a device identity whose key is gone but whose provenance files remain (a crashed or concurrent first `init`). `init` never replaces such an identity itself: it stops and names this command. Check that no other `init` is running, then run it; it asks first, moves those files aside (kept as `*.orphaned-*`) and creates a new identity. Nothing else runs. |
+| `--repair-identity` | Repair a device identity whose key is gone but whose provenance files remain, or whose key file is empty or cut short (a crashed or concurrent first `init`). `init` never replaces such an identity itself: for a missing key it stops and names this command, and Doctor names it for a key file that holds no key. Check that no other `init` is running, and stop the gateway if `config.yaml` exists, then run it; it asks first, moves those files aside (kept as `*.orphaned-*`) and creates a new identity. Nothing else runs. |
 | `--start-gateway` / `--no-start-gateway` | Answer the gateway prompt in advance. Without either flag, `--non-interactive` alone leaves a stopped gateway stopped, and `defenseclaw doctor` fails its gateway and hook rows until you run `defenseclaw-gateway start`. |
 | `--verify` / `--no-verify` | Run readiness checks before exiting. |
 | `--rescan-agents` | Refresh cached agent discovery. |
