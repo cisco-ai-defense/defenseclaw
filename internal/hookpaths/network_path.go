@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -75,7 +76,10 @@ import (
 // its own wait is the owner-accepted bound and is not recorded. A script
 // whose path passes more links than the walk follows (networkLinkHopLimit)
 // is recorded the same way: the walk could not show that no share on the
-// way is left unasked, so the body was not read (rel-1-0-9:GAP-0621).
+// way is left unasked, so the body was not read (rel-1-0-9:GAP-0621). So is a
+// script whose path the system itself refuses to open for passing too many
+// links (ELOOP), where the share walk is off (noteBodyLinkLimit,
+// rel-1-0-9:GAP-0950).
 
 // errNetworkShareUnanswered is the error of a read below a network share
 // that has not answered. It is not fs.ErrNotExist: the path may exist.
@@ -461,7 +465,26 @@ func pathOpenRoot(name string) (*os.Root, error) {
 		}
 		return nil, networkShareError("openroot", name)
 	}
-	return os.OpenRoot(name)
+	root, err := os.OpenRoot(name)
+	noteBodyLinkLimit(err)
+	return root, err
+}
+
+// noteBodyLinkLimit records on the hook call that a read of a script body
+// failed because the system would not follow so many links on its path
+// (ELOOP). That is the link bound on a host where the share walk is off
+// (Linux, macOS): the body is neither read nor known to write nothing, so
+// the call is judged by its tier like a body past the walk bound
+// (ShareBodyUnread, rel-1-0-9:GAP-0950). A directly named or known protected
+// target is blocked by the rules that name it and is not affected. Windows
+// reports the bound through the share walk, which stops at the same limit.
+func noteBodyLinkLimit(err error) {
+	if err == nil || !errors.Is(err, syscall.ELOOP) {
+		return
+	}
+	if call := currentHookCall(); call != nil {
+		call.bodyLinks = true
+	}
 }
 
 func pathReadDir(name string) ([]os.DirEntry, error) {
