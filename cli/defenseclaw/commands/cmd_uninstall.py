@@ -1334,6 +1334,26 @@ def _top_level_backup_records(connector: str) -> tuple[str, ...]:
     )
 
 
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """json.loads hook: a key given twice is an error, not a silent last-one-wins.
+
+    The Go writers marshal structs and maps, so they cannot emit a duplicate key. A file that has one was not
+    written by DefenseClaw, and a plain parse would show only the last copy of the key and hide what an earlier
+    copy held (GAP-0945).
+    """
+    found: dict[str, object] = {}
+    for key, value in pairs:
+        if key in found:
+            raise ValueError(f"the key {key!r} is given twice")
+        found[key] = value
+    return found
+
+
+def _loads_as_written(raw: bytes | str) -> object:
+    """Parse JSON the way a file DefenseClaw wrote can read: no repeated key at any level."""
+    return json.loads(raw, object_pairs_hook=_unique_keys)
+
+
 # The keys of each top-level record, from the structs that write it
 # (claudeCodeBackup, codexConfigBackup and the earlier codexBackup): the keys
 # every record carries, and every key a record may carry. A file at the name
@@ -1372,7 +1392,7 @@ def _is_setup_top_level_backup(path: str, move_digests: dict[str, str] | None = 
     required, allowed = shape
     raw = _small_file_bytes(path)
     try:
-        document = json.loads(raw) if raw is not None else None
+        document = _loads_as_written(raw) if raw is not None else None
     except ValueError:
         return False
     if raw is None:
@@ -1397,39 +1417,43 @@ _CONNECTOR_HOOK_SCRIPTS = {
 _CONNECTOR_SETUP_RECORDS = {"hermes": ("hermes-home-setup.json",)}
 
 
-def _is_empty_lock(raw: bytes) -> bool:
-    """The lifecycle lock Setup creates is an empty file."""
-    return raw == b""
+def _empty_lock_flaw(raw: bytes) -> str:
+    """Why *raw* is not the lifecycle lock Setup creates (an empty file), or ""."""
+    return "" if raw == b"" else "it is not empty"
 
 
-def _is_plugin_answer(answer: object) -> bool:
-    """One answer as the gateway writes it (hermesStoredAnswer): "entrypoints" (strings) and "seen" (an int64)."""
-    return (
-        isinstance(answer, dict)
-        and set(answer) == {"entrypoints", "seen"}
-        and isinstance(answer["entrypoints"], list)
-        and all(isinstance(entrypoint, str) for entrypoint in answer["entrypoints"])
-        and type(answer["seen"]) is int
-        and -(2**63) <= answer["seen"] < 2**63
-    )
+def _plugin_answer_flaw(answer: object) -> str:
+    """Why *answer* is not one answer as the gateway writes it (hermesStoredAnswer), or "".
+
+    The shape is "entrypoints" (strings) and "seen" (an int64).
+    """
+    if not isinstance(answer, dict) or set(answer) != {"entrypoints", "seen"}:
+        return "an answer does not have exactly the keys entrypoints and seen"
+    entrypoints, seen = answer["entrypoints"], answer["seen"]
+    if not isinstance(entrypoints, list) or not all(isinstance(entrypoint, str) for entrypoint in entrypoints):
+        return "an answer lists entrypoints that are not strings"
+    if type(seen) is not int or not -(2**63) <= seen < 2**63:
+        return "an answer has a seen value that is not a 64-bit integer"
+    return ""
 
 
-def _is_plugin_answer_store(raw: bytes) -> bool:
-    """hermes-plugin-entrypoints.json: one object whose only key is "answers", each answer as the gateway writes it.
+def _plugin_answer_store_flaw(raw: bytes) -> str:
+    """Why *raw* is not hermes-plugin-entrypoints.json as the gateway writes it, or "".
 
-    A file whose answers the gateway's loader would drop as damaged is not a file the gateway wrote, so it is the
-    account's and stays (GAP-0945).
+    The file is one object whose only key is "answers", each answer as the gateway writes it, and no key given
+    twice at any level. A file the gateway cannot have written, or whose answers its loader would drop as
+    damaged, is the account's and stays (GAP-0945).
     """
     try:
-        document = json.loads(raw)
-    except ValueError:
-        return False
-    return (
-        isinstance(document, dict)
-        and set(document) == {"answers"}
-        and isinstance(document["answers"], dict)
-        and all(_is_plugin_answer(answer) for answer in document["answers"].values())
-    )
+        document = _loads_as_written(raw)
+    except ValueError as exc:
+        return f"it is not JSON the gateway writes ({exc})"
+    if not isinstance(document, dict) or set(document) != {"answers"} or not isinstance(document["answers"], dict):
+        return "it is not one object whose only key is answers"
+    for answer in document["answers"].values():
+        if flaw := _plugin_answer_flaw(answer):
+            return flaw
+    return ""
 
 
 _FLAT_HOOK_RECORD_LINE = re.compile(
@@ -1437,17 +1461,19 @@ _FLAT_HOOK_RECORD_LINE = re.compile(
 )
 
 
-def _is_hermes_flat_hook_record(raw: bytes) -> bool:
-    """hooks/.hookcfg.hermes: the connector, fail mode and optional source lines (hookRuntimeFlatRecord)."""
+def _hermes_flat_hook_record_flaw(raw: bytes) -> str:
+    """Why *raw* is not hooks/.hookcfg.hermes (the connector, fail mode and optional source lines), or ""."""
     try:
         lines = raw.decode("ascii").splitlines()
     except UnicodeDecodeError:
-        return False
-    return (
+        return "it is not ASCII text"
+    if (
         "DEFENSECLAW_CONNECTOR=hermes" in lines
         and any(line.startswith("DEFENSECLAW_FAIL_MODE=") for line in lines)
         and all(_FLAT_HOOK_RECORD_LINE.fullmatch(line) for line in lines)
-    )
+    ):
+        return ""
+    return "it is not the connector, fail mode and source lines Setup writes"
 
 
 # The other records Setup and the gateway keep for a connector in the folder they ran in, by path
@@ -1456,9 +1482,9 @@ def _is_hermes_flat_hook_record(raw: bytes) -> bool:
 # belongs to the account and stays (GAP-0945).
 _CONNECTOR_STATE_RECORD_SHAPES = {
     "hermes": (
-        ((".hermes-lifecycle.lock",), _is_empty_lock, False),
-        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store, True),
-        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record, False),
+        ((".hermes-lifecycle.lock",), _empty_lock_flaw, False),
+        (("hermes-plugin-entrypoints.json",), _plugin_answer_store_flaw, True),
+        (("hooks", ".hookcfg.hermes"), _hermes_flat_hook_record_flaw, False),
     ),
 }
 
@@ -1618,7 +1644,7 @@ def _setup_backup_record_stem(path: str, connector: str) -> str:
     name = os.path.basename(path)
     raw = _small_file_bytes(path)
     try:
-        document = json.loads(raw) if raw is not None else None
+        document = _loads_as_written(raw) if raw is not None else None
     except ValueError:
         return ""
     if not isinstance(document, dict) or document.get("connector") != connector:
@@ -1695,7 +1721,7 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(os.path.join(hooks, script))
         for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
             drop(os.path.join(folder, record))
-        for parts, written_by_setup, gateway_rewrites in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
+        for parts, flaw_of, gateway_rewrites in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
             path = os.path.join(folder, *parts)
             if len(parts) > 1 and not real_dir(os.path.join(folder, *parts[:-1])):
                 continue
@@ -1705,26 +1731,27 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(path)  # a link or another account's file is reported and never opened
                 continue
             raw = _small_file_bytes(path)
-            # The shape says it is the record Setup writes; the digest says it is still the copy the move left.
-            # Nothing the account cannot also write proves a later write is the gateway's, so a record that is
-            # no longer the recorded copy is kept, whoever wrote it. The scanner answers the gateway rewrites
-            # as it works hold no credential: keeping them is reported, not an error, so a clean uninstall
-            # does not fail because the gateway answered once after the move.
-            if raw is not None and written_by_setup(raw):
-                if hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts)):
-                    drop(path)
-                    continue
+            # The shape says it is a record DefenseClaw writes; the digest says it is still the copy DefenseClaw last
+            # recorded: Setup at the move, or the gateway that ran in this folder as it wrote the file (the
+            # connector package records each such write beside the move). A copy that differs was changed by the
+            # account, or by a gateway that did not record, and DefenseClaw cannot tell which, so it is kept. The
+            # scanner answers hold no credential: keeping them is reported, not an error, so a clean uninstall does
+            # not fail because a gateway of an older release answered once after the move.
+            flaw = flaw_of(raw) if raw is not None else "it could not be read"
+            if flaw:
+                # The name belongs to DefenseClaw, so a file of another shape there is reported, not removed.
+                stayed.append(f"{path} (not the record DefenseClaw writes, so it was kept: {flaw})")
+            elif hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts)):
+                drop(path)
+            else:
                 note = (
-                    f"{path} (no longer the copy the move recorded: DefenseClaw cannot tell a later write of "
-                    "the gateway that ran in this folder from your edit, so it was kept"
+                    f"{path} (no longer the copy DefenseClaw recorded: it was changed since, by you or by a gateway "
+                    "that did not record its write, so it was kept"
                 )
                 if gateway_rewrites:
                     kept.append(note + "; it holds scanner answers and no credential, and you can delete it)")
                 else:
                     stayed.append(note + ")")
-            else:
-                # The name belongs to DefenseClaw, so a file of another shape there is reported, not removed.
-                stayed.append(f"{path} (not the record Setup writes, so it was kept)")
         for record in _top_level_backup_records(name):
             path = os.path.join(folder, record)
             # A file of another shape at the name is the account's own; a link there is reported by drop.

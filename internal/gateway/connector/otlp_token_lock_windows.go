@@ -42,6 +42,7 @@ func withOwnedFileLock(lockPath string, fn func() error) error {
 	if err := validateOwnedLockFile(lockPath, file); err != nil {
 		return err
 	}
+	recordEmptyLockCreated(lockPath, file)
 	handle := windows.Handle(file.Fd())
 	overlapped := new(windows.Overlapped)
 	if err := windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped); err != nil {
