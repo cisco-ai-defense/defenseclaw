@@ -858,7 +858,19 @@ func TestWindowsCodexMachinePolicyLifecycleIsTransactionalAndFailClosed(t *testi
 	snapshot := strings.Index(installLike, "$snapshot = New-DefenseClawTransaction `")
 	aclBackup := strings.Index(installLike, "Initialize-DefenseClawCodexRequirementsAclBackup `")
 	firstCanonicalACL := firstCodexCanonicalACLStamp(installLike)
-	reconcile := strings.Index(installLike, "-Action reconcile)")
+	// The forward Codex reconcile is the call the pin orders against the
+	// metadata write. Rel makes it through Invoke-DefenseClawCodexRequirementsReconcileOrRecover
+	// (GAP-0955); the older direct call spelled `-Action reconcile)`, and a
+	// line break or extra spaces there are not part of the contract.
+	reconcileCall := regexp.MustCompile(`Invoke-DefenseClawCodexRequirementsReconcileOrRecover\b|-Action\s+reconcile\s*\)`)
+	reconcile := -1
+	if location := reconcileCall.FindStringIndex(installLike); location != nil {
+		reconcile = location[0]
+	}
+	reconcileOrRecover := windowsPowerShellFunction(t, module, "Invoke-DefenseClawCodexRequirementsReconcileOrRecover")
+	if !regexp.MustCompile(`-Action\s+reconcile\s*\)`).MatchString(reconcileOrRecover) {
+		t.Fatal("the forward Codex reconcile helper does not run the gateway reconcile action")
+	}
 	metadataWrite := strings.Index(installLike, "Write-DefenseClawJsonAtomic -Value $newMetadata")
 	fullVerify := strings.Index(installLike, "Assert-DefenseClawEnterpriseDeployment `")
 	if preflight < 0 || snapshot < 0 || preflight > snapshot {
