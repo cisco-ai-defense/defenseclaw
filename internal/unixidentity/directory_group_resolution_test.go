@@ -411,6 +411,10 @@ func TestNSSActionClausesAreNotServices(t *testing.T) {
 		"clause last on the line":           {"passwd: files systemd [NOTFOUND=return]", []string{"files", "systemd"}},
 		"upper-case services and a comment": {"passwd: FILES [SUCCESS=return NOTFOUND=continue] Systemd # note", []string{"files", "systemd"}},
 		"no clause":                         {"passwd: files sss", []string{"files", "sss"}},
+		"form feed between services":        {"passwd: files\fsystemd", []string{"files", "systemd"}},
+		"vertical tab between services":     {"passwd: files\vsystemd", []string{"files", "systemd"}},
+		"form feed around a clause":         {"passwd: files\f[SUCCESS=return NOTFOUND=continue]\fsystemd", []string{"files", "systemd"}},
+		"vertical tab around a clause":      {"passwd: files\v[NOTFOUND=continue]\vsystemd", []string{"files", "systemd"}},
 		"unterminated clause keeps words":   {"passwd: files [SUCCESS=return NOTFOUND=continue systemd", []string{"files", "success=return", "notfound=continue", "systemd"}},
 	} {
 		t.Run(name, func(t *testing.T) {

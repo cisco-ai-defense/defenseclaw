@@ -178,10 +178,15 @@ func TestDirectoryShowsUIDUnusedReadsAMultiActionNSSLine(t *testing.T) {
 		wantErr  bool
 		wantHeld bool
 	}{
-		"two actions, uid deleted":       {line: "passwd: files [SUCCESS=return NOTFOUND=continue] systemd\n"},
-		"one action, uid deleted":        {line: "passwd: files [SUCCESS=return] systemd\n"},
-		"two actions, systemd holds uid": {line: "passwd: files [SUCCESS=return NOTFOUND=continue] systemd\n", results: map[string]commandResult{"-s systemd passwd 4321": held}, wantErr: true, wantHeld: true},
-		"one action, systemd holds uid":  {line: "passwd: files [SUCCESS=return] systemd\n", results: map[string]commandResult{"-s systemd passwd 4321": held}, wantErr: true, wantHeld: true},
+		"two actions, uid deleted":              {line: "passwd: files [SUCCESS=return NOTFOUND=continue] systemd\n"},
+		"one action, uid deleted":               {line: "passwd: files [SUCCESS=return] systemd\n"},
+		"two actions, systemd holds uid":        {line: "passwd: files [SUCCESS=return NOTFOUND=continue] systemd\n", results: map[string]commandResult{"-s systemd passwd 4321": held}, wantErr: true, wantHeld: true},
+		"form feed, one action, uid deleted":    {line: "passwd: files\f[NOTFOUND=continue]\fsystemd\n"},
+		"vertical tab, one action, uid deleted": {line: "passwd: files\v[NOTFOUND=continue]\vsystemd\n"},
+		"form feed, two actions, uid deleted":   {line: "passwd: files\f[SUCCESS=return\fNOTFOUND=continue]\fsystemd\n"},
+		"form feed, systemd holds uid":          {line: "passwd: files\f[NOTFOUND=continue]\fsystemd\n", results: map[string]commandResult{"-s systemd passwd 4321": held}, wantErr: true, wantHeld: true},
+		"vertical tab, systemd holds uid":       {line: "passwd: files\v[NOTFOUND=continue]\vsystemd\n", results: map[string]commandResult{"-s systemd passwd 4321": held}, wantErr: true, wantHeld: true},
+		"one action, systemd holds uid":         {line: "passwd: files [SUCCESS=return] systemd\n", results: map[string]commandResult{"-s systemd passwd 4321": held}, wantErr: true, wantHeld: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			oldNSS := nsswitchPath
