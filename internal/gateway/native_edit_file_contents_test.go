@@ -201,6 +201,27 @@ func TestWithNativeEditFileContents(t *testing.T) {
 	})
 }
 
+// TestNativeEditFileIsReadOnlyWhereTheGatewayCanPlaceIt: the gateway reads
+// the file of a POSIX path on a POSIX host and nothing on Windows, where the
+// path is not the daemon configuration; the rest of the file tests run the
+// same way on every host through the stubbed reader.
+func TestNativeEditFileIsReadOnlyWhereTheGatewayCanPlaceIt(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "daemon.json")
+	if err := os.WriteFile(name, []byte(`{"debug":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for goos, want := range map[string]bool{"linux": true, "darwin": true, "windows": false} {
+		text, ok := readNativeEditFileOn(goos, name)
+		if ok != want || (ok && text != `{"debug":true}`) || (!ok && text != "") {
+			t.Fatalf("%s: read = (%q, %t), want ok %t", goos, text, ok, want)
+		}
+		missing, ok := readNativeEditFileOn(goos, name+".absent")
+		if ok != want || missing != "" {
+			t.Fatalf("%s absent file: read = (%q, %t), want ok %t", goos, missing, ok, want)
+		}
+	}
+}
+
 func TestReadBoundedTextFile(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, text string) string {
