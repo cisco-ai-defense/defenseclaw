@@ -178,3 +178,56 @@ func TestHookAssetFactsReadsNothingOnAShareThatDoesNotAnswer(t *testing.T) {
 		})
 	}
 }
+
+// A skill folder inside a skill root that is itself a link into a network
+// share that has not answered is not read: the declared name, the folder and
+// its files are read only once the share answers.
+func TestHookAssetFactsSkipsALinkedSkillFolderOnAnUnansweredShare(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	share := filepath.Join(home, "unanswered-share")
+	target := filepath.Join(share, "skills", "held")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "SKILL.md"), []byte("---\nname: other-name\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(root, "linked")
+	if err := os.Symlink(target, linked); err != nil {
+		t.Skipf("cannot create a link here: %v", err)
+	}
+	read := func() assetfacts.Facts {
+		raw, err := json.Marshal(map[string]any{
+			"tool_name": "Read", "cwd": home,
+			"tool_input": map[string]any{"file_path": filepath.Join(linked, "SKILL.md")},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		facts, _ := assetfacts.Decode(hookAssetFacts("claudecode", raw))
+		return facts
+	}
+	if facts := read(); len(facts.Skills) == 0 || facts.Skills[0].Declared != "other-name" {
+		t.Fatalf("with no share in the way the hook reports the declared name: %+v", facts.Skills)
+	}
+	release := make(chan struct{})
+	restore := hookpaths.OverrideNetworkSharesForTest(func(path string) string {
+		if path == share || strings.HasPrefix(path, share+string(filepath.Separator)) {
+			return share
+		}
+		return ""
+	}, func(string) { <-release })
+	t.Cleanup(func() { close(release); restore() })
+	if facts := read(); len(facts.Skills) != 0 {
+		t.Fatalf("the hook read the declared name through a local link onto an unanswered share: %+v", facts.Skills)
+	}
+}
