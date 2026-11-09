@@ -1161,6 +1161,28 @@ func enterpriseHookRepairAfterVerifyFailure(
 					return result, repaired, err
 				}
 			}
+			// An upgrade changed the hooks this account's agents run, and only
+			// the account's own Windows session installs them: the lock names an
+			// earlier release, so the drift is the upgrade's own and not a
+			// change made while the account was signed out. On the standalone
+			// profile that wait covers every connector the guardian repairs per
+			// account whose machine registration has no closed proof (Claude
+			// Code and Codex keep the proof above: without it they stay a
+			// failure): a signed-out or disconnected account is pending until
+			// it signs in, and never fails the upgrade (GAP-0980). A lock this
+			// release wrote, or one that cannot be read, stays a failure.
+			// Secure Client has its own branch above.
+			if !enterpriseHookReconcileSecureClient() &&
+				!enterprisehooks.WindowsClosedRegistrationProofConnector(opts.ConnectorName) {
+				if written, other, releaseErr := enterpriseHookReconcileTargetRelease(opts); releaseErr == nil && other {
+					return enterprisehooks.InstallResult{}, false, fmt.Errorf(
+						"%w: DefenseClaw %s protected it, and this release's hooks install only in the account's own "+
+							"Windows session; its exact active Windows session is unavailable, so the guardian repairs "+
+							"it at the account's next sign-in, and this agent is not protected until then (verification: %v)",
+						errEnterpriseHookAwaitingSignIn, written, verifyErr,
+					)
+				}
+			}
 		}
 		return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 			"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: %v)",

@@ -20,7 +20,7 @@ import (
 // closed. A protected lock by itself cannot establish either fact.
 func WindowsProtectedTargetHasClosedMachineRegistration(opts InstallOptions) (bool, error) {
 	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
-	if name != "claudecode" && name != "codex" {
+	if !WindowsClosedRegistrationProofConnector(name) {
 		return false, nil
 	}
 	if canonicalHookFailModeFor(opts.HookFailMode, false) != "closed" {
