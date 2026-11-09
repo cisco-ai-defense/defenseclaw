@@ -152,6 +152,7 @@ function Write-DefenseClawResilienceEvent { param([string]$Marker, [hashtable]$F
 function Assert-DefenseClawCodexManagedHooksStateFilePreflight { param($Layout) }
 function New-DefenseClawRequiredRights { param($Kind) 'rights' }
 function Format-DefenseClawSetupAction { param([string]$Action) "Setup $Action" }
+function Get-DefenseClawCodexWriterHolderText { param([string]$Path) if ($Case -ceq 'writer-unnamed') { throw 'no query' }; 'the writer is writer.exe (pid 4242, account NT AUTHORITY\SYSTEM)' }
 function Assert-DefenseClawPathAcl { param([string]$Path) $script:judged.Add($Path) }
 $state = Join-Path $Scratch '.defenseclaw-managed-hooks.state'
 $lock = Join-Path $Scratch '.defenseclaw-managed-hooks.writer.lock'
@@ -170,6 +171,7 @@ switch ($Case) {
     'missing' { Set-Counter 2 }
     'writer-ends' { Set-Counter 3; $writer = Start-Writer 1500 "$state.4" 4 }
     'writer-stopped' { Set-Counter 3; $script:CodexStateSettleSeconds = 2 }
+    'writer-unnamed' { Set-Counter 3; $script:CodexStateSettleSeconds = 2 }
     'writer-stopped-after-copy' { Set-Counter 3; $script:CodexStateSettleSeconds = 2; Set-Content -LiteralPath "$state.4" -Value x -NoNewline }
     'no-lock' { Set-Content -LiteralPath $state -Value x -NoNewline }
     # The counter is even each time it is read but never the same twice, as a
@@ -303,6 +305,17 @@ def test_a_counter_that_keeps_moving_is_refused_by_name_at_the_bound(tmp_path: P
     assert "(still changing) for 2 seconds" in result["threw"], result
     assert result["judged"] == [], result
     assert 2 <= result["seconds"] < 10, result
+
+
+def test_the_refusal_names_the_writer_and_still_refuses_when_it_cannot_be_named(tmp_path: Path) -> None:
+    # GAP-0999: the program that keeps the writer lock open is named; a failed
+    # query only leaves the wording out, the run is refused the same.
+    named = _run(tmp_path, "writer-stopped")
+    assert "for 2 seconds (the writer is writer.exe (pid 4242, account NT AUTHORITY\\SYSTEM)), so the Codex managed-hooks state" in named["threw"], named
+    (tmp_path / "unnamed").mkdir()
+    unnamed = _run(tmp_path / "unnamed", "writer-unnamed")
+    assert unnamed["threw"].startswith("codex_state_unsettled: "), unnamed
+    assert "for 2 seconds, so the Codex managed-hooks state" in unnamed["threw"], unnamed
 
 
 def test_the_refusal_names_the_rollback_and_the_next_step(tmp_path: Path) -> None:

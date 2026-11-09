@@ -154,3 +154,34 @@ func TestWindowsEnterpriseUnsettledCodexStateCodeSurvivesTheWrappingFailureText(
 		}
 	}
 }
+
+// GAP-0999: a Codex writer that never settles refuses the run (1603). When the
+// rollback met the same writer, left the Codex state as it is and ended with
+// the transaction pending and the restored services running, the run exits
+// with the held-rollback convention (1618, the MDM retries and /repair
+// finishes it); a refusal whose rollback was clean stays 1603.
+func TestWindowsEnterpriseUnsettledCodexStateWithAPendingRollbackIsRetryable(t *testing.T) {
+	deferred := "codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 19 (odd: a transaction is open; the writer is pwsh.exe (pid 4242, account NT AUTHORITY\\SYSTEM)), so the rollback could not judge the Codex managed-hooks state; the rollback left that state as it is and put everything else back, and the transaction is still pending. Next step: once no Codex writer is running, run /repair; it finishes the rollback (an MDM retries exit 1618 on its own)"
+	for name, test := range map[string]struct {
+		message string
+		pending bool
+		want    int
+	}{
+		"rollback left pending":      {deferred, true, enterprisestatus.WindowsExitBusy},
+		"wrapped in the failure":     {"Ensure failed: " + deferred, true, enterprisestatus.WindowsExitBusy},
+		"clean rollback":             {strings.Replace(deferred, "the rollback left that state as it is and put everything else back, and the transaction is still pending", "this run stopped", 1), false, enterprisestatus.WindowsExitFailure},
+		"refusal without a pending transaction": {"codex_state_unsettled: x", false, enterprisestatus.WindowsExitFailure},
+	} {
+		code := windowsEnterpriseMessageCode(test.message, "lifecycle_error")
+		if code != "codex_state_unsettled" {
+			t.Fatalf("%s: code = %q, want codex_state_unsettled", name, code)
+		}
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+		result.TransactionPending = test.pending
+		result.AddError(code, test.message)
+		got := windowsEnterpriseFailureCodeFor(result)
+		if got != test.want || !slices.Contains(windowsLifecycleExitCodes, got) {
+			t.Fatalf("%s: exit = %d, want %d (one of %v)", name, got, test.want, windowsLifecycleExitCodes)
+		}
+	}
+}
