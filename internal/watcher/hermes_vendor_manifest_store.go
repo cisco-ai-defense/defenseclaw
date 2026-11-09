@@ -187,11 +187,39 @@ func (s *hermesAnswerStore) writeLocked() error {
 	if s.path == "" {
 		return nil
 	}
-	data, err := json.Marshal(map[string]any{"answers": s.answers})
+	data, err := json.Marshal(map[string]any{"answers": s.answers, "sealed": hermesAnswersSeal(s.answers)})
 	if err != nil {
 		return err
 	}
 	return writeFileAtomic0600(s.path, data)
+}
+
+// hermesAnswersSeal is the digest of the answers a write puts in the file,
+// kept in the file beside them as "sealed". It lets a reader that finds the
+// file in a data directory the gateway no longer uses tell the last write of
+// the gateway from a file of the same shape that the account edited or
+// created since: such a file does not carry the digest of the answers it
+// holds. It is computed from the answers, not from their JSON text, so it
+// does not depend on how either side encodes them; the uninstall command
+// computes the same digest (cli/defenseclaw/commands/cmd_uninstall.py,
+// _plugin_answers_seal). Each field is length-prefixed and the keys are in
+// byte order.
+func hermesAnswersSeal(answers map[string]hermesStoredAnswer) string {
+	keys := make([]string, 0, len(answers))
+	for key := range answers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	digest := sha256.New()
+	_, _ = digest.Write([]byte("defenseclaw-hermes-plugin-answers-v1\n"))
+	for _, key := range keys {
+		answer := answers[key]
+		fmt.Fprintf(digest, "%d:%s%d:%d:", len(key), key, answer.Seen, len(answer.Entrypoints))
+		for _, entrypoint := range answer.Entrypoints {
+			fmt.Fprintf(digest, "%d:%s", len(entrypoint), entrypoint)
+		}
+	}
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 // writeFileAtomic0600 replaces path with data through a temporary file in the
