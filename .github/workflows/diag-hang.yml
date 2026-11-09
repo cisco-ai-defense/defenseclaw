@@ -41,7 +41,9 @@ jobs:
       - run: make dev-pycli
       - run: make sync-openclaw-extension
       - name: Runner processes
-        run: ps -eo pid,ppid,pgid,sid,comm | head -30; echo "step shell: pid $$ pgid $(ps -o pgid= -p $$) sid $(ps -o sid= -p $$)"
+        run: |
+          ps -eo pid,ppid,pgid,sid,comm | head -30
+          echo "step shell: pid $$ pgid $(ps -o pgid= -p $$) sid $(ps -o sid= -p $$)"
       - name: Run the slice
         timeout-minutes: 11
         env:
