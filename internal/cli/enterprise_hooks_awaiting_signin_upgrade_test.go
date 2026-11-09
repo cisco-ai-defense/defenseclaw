@@ -190,6 +190,12 @@ func TestEnterpriseHookVerifyOrRepairTargetOpenFailModeWaitsOnTheRegistrationPro
 			f.installs != 0 {
 			t.Fatalf("%s open mode: err=%v installs=%d, want the open-mode sign-in wait", name, err, f.installs)
 		}
+		// The machine hook is this release's: nothing says the previous release's hook runs.
+		cause := enterpriseHookAwaitingSignInCause(err.Error())
+		if !strings.Contains(cause, "its machine hook is in place") || strings.Contains(cause, "previous release") ||
+			strings.Contains(err.Error(), enterpriseHookAwaitingSignInKeepsRunning) {
+			t.Fatalf("%s open mode wording %q / %v", name, cause, err)
+		}
 		closed := enterprisehooks.InstallOptions{ConnectorName: name, HookFailMode: "closed"}
 		if _, _, err = enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, closed, true); err == nil ||
 			errors.Is(err, errEnterpriseHookAwaitingSignIn) || !strings.HasPrefix(err.Error(), upgradeWaitSignedOutRepair) {
@@ -270,13 +276,16 @@ func TestEnterpriseHookUpgradeSignInWaitIsPendingAndSaysThePreviousHookKeepsRunn
 		!strings.Contains(accounts[0].Reason, "the previous release's DefenseClaw hook keeps running until this account signs in and the guardian updates it: copilot") {
 		t.Fatalf("enrollment accounts %+v, want copilot pending with the previous hook running", accounts)
 	}
-	// A never-enrolled connector of the same account keeps the generic reason,
-	// with the connector that still runs the previous hook named as the exception.
+	// A never-enrolled connector of the same account is named for what it has
+	// (nothing), apart from the connector that still runs the previous hook: the
+	// reason never says one thing of both.
 	waiting := enterpriseHookReconcileRow{User: row.User, SID: row.SID, Connector: "devin", Pending: true}
 	accounts = windowsEnterpriseEnrollmentAccounts([]enterpriseHookReconcileRow{row, waiting})
-	if len(accounts) != 1 || !strings.HasPrefix(accounts[0].Reason, windowsEnterpriseEnrollmentPending) ||
-		!strings.HasSuffix(accounts[0].Reason, "; except copilot: the previous release's DefenseClaw hook keeps running until this account signs in and the guardian updates it") {
-		t.Fatalf("mixed enrollment reason %+v, want the generic pending reason and the exception for copilot", accounts)
+	const mixed = "pending: waiting for an active (connected) session of this account; " +
+		"devin: not guarded until this account signs in; " +
+		"copilot: the previous release's DefenseClaw hook keeps running until this account signs in and the guardian updates it"
+	if len(accounts) != 1 || accounts[0].Reason != mixed {
+		t.Fatalf("mixed enrollment reason %+v, want %q", accounts, mixed)
 	}
 	// The words of the wait itself claim nothing about protection.
 	for _, text := range []string{issue, windowsEnterpriseEnrollmentPendingKeepsRunning} {

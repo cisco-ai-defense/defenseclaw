@@ -67,6 +67,11 @@ func applyWindowsEnterpriseGuardianTargetGaps(
 					"the hook guardian's last pass could not update %s for %s, and it updates it only in that account's "+
 						"own Windows session; the previous release's DefenseClaw hook keeps running for that account until "+
 						"it signs in and the guardian updates it", connector, account)
+			case enterpriseHookAwaitingSignInMachineHookRow(row):
+				reason = fmt.Sprintf(
+					"the hook guardian's last pass could not update %s for %s, and it updates it only in that account's "+
+						"own Windows session; the machine hook is in place, with hook fail mode open as the administrator "+
+						"chose, and the account's registration finishes when it signs in", connector, account)
 			case enterpriseHookAwaitingSignInError(row):
 				reason = fmt.Sprintf(
 					"the hook guardian's last pass could not verify %s for %s, and it repairs it only in that account's "+

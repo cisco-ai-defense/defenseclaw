@@ -210,8 +210,13 @@ starts, where it allows the call (this release's hook refuses it). Any other dif
 deleted or replaced hook file, a link, another owner, a drifted runtime), a lock this release
 wrote, and an account with an active session whose repair fails still fail the upgrade. With the
 administrator's hook fail mode open, a signed-out Claude Code or Codex account whose machine
-registration is proven waits as well, with the previous release's registered hook running in open
-mode; with fail mode closed they keep the closed-registration proof described above.
+registration is proven waits as well. For these two the machine hook is this release's own, so
+`status` and `verify` say that the machine hook is in place and the account's registration
+finishes when it signs in (the previous release's hook is what keeps running only for Copilot,
+Antigravity and Kiro); with fail mode closed they keep the closed-registration proof described
+above. When one account has connectors of several kinds, its reason names each group, for example
+`devin: not guarded until this account signs in; copilot: the previous release's DefenseClaw hook
+keeps running until this account signs in and the guardian updates it`.
 
 ## Roll back
 

@@ -60,8 +60,7 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 		}
 		pending := false
 		hermesLimited := false
-		var earlier, keepsRunning []string
-		otherPending := false
+		var earlier, keepsRunning, machineHook, unguarded []string
 		for _, row := range rows {
 			if windowsEnterpriseEnrollmentKey(row.SID, row.User, row.UserHome) ==
 				windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome) && enterpriseHookEarlierMatrixRow(row) {
@@ -76,8 +75,10 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 			switch {
 			case enterpriseHookAwaitingSignInKeepsRunningRow(row):
 				keepsRunning = append(keepsRunning, strings.TrimSpace(row.Connector))
+			case enterpriseHookAwaitingSignInMachineHookRow(row):
+				machineHook = append(machineHook, strings.TrimSpace(row.Connector))
 			case row.Pending, enterpriseHookAwaitingSignInError(row) && !enterpriseHookEarlierMatrixRow(row):
-				otherPending = true
+				unguarded = append(unguarded, strings.TrimSpace(row.Connector))
 			}
 		}
 		for _, connector := range entry.Connectors {
@@ -86,16 +87,15 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 			hermesLimited = hermesLimited || connector.Connector == "hermes" && connector.State == "enrolled"
 		}
 		account.Reason = windowsEnterpriseEnrollmentReason(pending, failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)])
-		if pending && !otherPending && len(keepsRunning) > 0 && failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)] == "" {
-			// Every connector that waits still has the previous release's
-			// hook running: do not say its agents are unguarded.
-			account.Reason = windowsEnterpriseEnrollmentPendingKeepsRunning + strings.Join(keepsRunning, ", ")
-		} else if pending && len(keepsRunning) > 0 {
-			// Some connectors of the account still wait with nothing running
-			// (never enrolled, Hermes with an unreadable home); the others
-			// keep the previous release's hook.
-			account.Reason += "; except " + strings.Join(keepsRunning, ", ") +
-				": the previous release's DefenseClaw hook keeps running until this account signs in and the guardian updates it"
+		if pending && len(keepsRunning)+len(machineHook) > 0 {
+			// Some connector that waits is not unguarded (the previous
+			// release's hook keeps running, or the machine hook is in place):
+			// name each group for what it really has, never the generic
+			// "its agents are not guarded" for all of them.
+			account.Reason = windowsEnterpriseStandalonePendingReason(unguarded, keepsRunning, machineHook)
+			if failure := failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)]; failure != "" {
+				account.Reason += "; failed: " + failure
+			}
 		}
 		for _, note := range earlier {
 			if account.Reason != "" {
@@ -210,11 +210,54 @@ func windowsEnterpriseEnrollmentKey(sid, user, home string) string {
 const windowsEnterpriseEnrollmentPending = "pending: waiting for an active (connected) session of this account; " +
 	"its agents are not guarded until then, and a signed-out or disconnected session keeps waiting"
 
+// The standalone reasons of an account that waits (GAP-0980). They are built
+// here and never reuse windowsEnterpriseEnrollmentPending, which Secure Client
+// keeps word for word.
+const (
+	windowsEnterpriseEnrollmentPendingLead = "pending: waiting for an active (connected) session of this account; "
+	// The previous release's per-user hook (Copilot, Antigravity, Kiro) runs.
+	windowsEnterpriseEnrollmentKeepsRunning = "the previous release's DefenseClaw hook keeps running until this account " +
+		"signs in and the guardian updates it"
+	// The machine hook (Claude Code, Codex with hook fail mode open) is in place.
+	windowsEnterpriseEnrollmentMachineHook = "the machine hook is in place and the account's registration finishes " +
+		"when it signs in"
+	// Nothing runs for the connector yet.
+	windowsEnterpriseEnrollmentUnguarded = "not guarded until this account signs in"
+)
+
 // windowsEnterpriseEnrollmentPendingKeepsRunning leads the reason of an account
-// whose waiting connectors all still run the previous release's hook
-// (GAP-0980); the connectors follow.
-const windowsEnterpriseEnrollmentPendingKeepsRunning = "pending: waiting for an active (connected) session of this account; " +
-	"the previous release's DefenseClaw hook keeps running until this account signs in and the guardian updates it: "
+// whose waiting connectors all still run the previous release's hook; the
+// connectors follow.
+const windowsEnterpriseEnrollmentPendingKeepsRunning = windowsEnterpriseEnrollmentPendingLead +
+	windowsEnterpriseEnrollmentKeepsRunning + ": "
+
+// windowsEnterpriseStandalonePendingReason is the reason of an account that
+// waits with at least one connector that is not unguarded. One group alone
+// reads "<lead><what it has>: <connectors>"; several groups are each named
+// "<connectors>: <what it has>", so the reason never says one thing of all.
+func windowsEnterpriseStandalonePendingReason(unguarded, keepsRunning, machineHook []string) string {
+	if len(unguarded) == 0 && (len(keepsRunning) == 0 || len(machineHook) == 0) {
+		if len(machineHook) == 0 {
+			return windowsEnterpriseEnrollmentPendingKeepsRunning + strings.Join(keepsRunning, ", ")
+		}
+		return windowsEnterpriseEnrollmentPendingLead + windowsEnterpriseEnrollmentMachineHook + ": " +
+			strings.Join(machineHook, ", ")
+	}
+	var groups []string
+	for _, group := range []struct {
+		connectors []string
+		text       string
+	}{
+		{unguarded, windowsEnterpriseEnrollmentUnguarded},
+		{keepsRunning, windowsEnterpriseEnrollmentKeepsRunning},
+		{machineHook, windowsEnterpriseEnrollmentMachineHook},
+	} {
+		if len(group.connectors) > 0 {
+			groups = append(groups, strings.Join(group.connectors, ", ")+": "+group.text)
+		}
+	}
+	return windowsEnterpriseEnrollmentPendingLead + strings.Join(groups, "; ")
+}
 
 // windowsEnterpriseEnrollmentReason says why an account is not fully
 // enrolled, or "" when it is.
