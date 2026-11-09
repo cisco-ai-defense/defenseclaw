@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"golang.org/x/sys/windows"
@@ -60,20 +61,40 @@ var (
 	windowsEnterpriseGuardianStateHolders   = processutil.FileHolders
 )
 
-// windowsEnterpriseGuardianStateFiles lists the files the guardian publishes:
-// those of its authorization folder and its state file.
+// windowsEnterpriseGuardianStateFiles lists every file the hook guardian and
+// its enumerator publish and a lifecycle run waits for: the regular files of
+// the authorization folder (the ledger protected_targets.json, activation.json,
+// removed-connectors.json, user-cleanup.json, unprotected-agents.json and the
+// others the guardian writes there), the guardian's records in its data
+// folder (hook_guardian_state.json, hook_guardian_notices.json,
+// hook_guardian_restores.json and the OpenCode port warnings), the manifest the
+// enumerator publishes (targets.yaml), and the off-roster markers of the
+// machine hook runtime folder.
 func windowsEnterpriseGuardianStateFiles(layout managed.StandaloneLayout) []string {
 	var files []string
-	if entries, err := os.ReadDir(layout.GuardianAuthDir); err == nil {
-		for _, entry := range entries {
-			if entry.Type().IsRegular() {
-				files = append(files, filepath.Join(layout.GuardianAuthDir, entry.Name()))
+	add := func(dir, pattern string) {
+		matches, err := filepath.Glob(filepath.Join(dir, pattern))
+		if err != nil {
+			return
+		}
+		for _, match := range matches {
+			if info, err := os.Lstat(match); err == nil && info.Mode().IsRegular() {
+				files = append(files, match)
 			}
 		}
 	}
-	state := filepath.Join(layout.DataDir, hookGuardianStateFile)
-	if info, err := os.Lstat(state); err == nil && info.Mode().IsRegular() {
-		files = append(files, state)
+	if layout.GuardianAuthDir != "" {
+		add(layout.GuardianAuthDir, "*")
+	}
+	if layout.DataDir != "" {
+		add(layout.DataDir, "hook_guardian_*.json")
+		add(layout.DataDir, windowsOpenCodePortWarningsFile)
+	}
+	if layout.ManifestPath != "" {
+		add(filepath.Dir(layout.ManifestPath), filepath.Base(layout.ManifestPath))
+	}
+	if layout.HookRuntimeDir != "" {
+		add(layout.HookRuntimeDir, ".defenseclaw-connector-off-roster-*")
 	}
 	return files
 }
@@ -120,4 +141,37 @@ func windowsEnterpriseGuardianStatePreflight() error {
 	}
 	return fmt.Errorf("%s; nothing was changed and the services are still running. Next step: close that program, then run this again, or from an elevated PowerShell prompt run %s",
 		hold.describe(), windowsEnterpriseAdminCommand("repair"))
+}
+
+// applyWindowsEnterpriseGuardianStateHold makes status and verify say what a
+// held guardian state file means: the guardian cannot publish, so the
+// enrollment it last published is not proven now. The accounts' connectors that
+// read enrolled are shown pending, the host is not security-complete, and the
+// warning names the file, the holder and the repair (GAP-0977).
+func applyWindowsEnterpriseGuardianStateHold(result *enterprisestatus.Result) {
+	layout, err := windowsEnterpriseHotConfigLayout()
+	if err != nil {
+		return
+	}
+	hold := windowsEnterpriseGuardianStateHeldNow(layout)
+	if hold == nil {
+		return
+	}
+	result.SecurityComplete = false
+	reason := "not proven: " + hold.describe() + ", so what it published before is not verified now"
+	for i := range result.Enrollment.Accounts {
+		account := &result.Enrollment.Accounts[i]
+		changed := false
+		for name, state := range account.Connectors {
+			if state == "enrolled" {
+				account.Connectors[name] = "pending"
+				result.Enrollment.Pending++
+				changed = true
+			}
+		}
+		if changed && account.Reason == "" {
+			account.Reason = reason
+		}
+	}
+	result.AddWarning("guardian_state_held", hold.describe()+"; the enrollment above is what the guardian published before and is not proven now. Next step: close that program, then from an elevated PowerShell prompt run "+windowsEnterpriseAdminCommand("repair"))
 }

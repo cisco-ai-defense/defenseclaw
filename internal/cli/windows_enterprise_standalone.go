@@ -1944,7 +1944,8 @@ func applyWindowsEnterpriseInstallerReport(
 		)
 		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
 			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") ||
-			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) {
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) ||
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "guardian_state_held")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
 		}
 		if next != "" {
@@ -3432,7 +3433,7 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held", "privileges_required":
+	case "codex_state_held", "codex_requirements_held", "privileges_required", "guardian_state_held":
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message

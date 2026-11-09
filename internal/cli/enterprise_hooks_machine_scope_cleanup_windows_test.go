@@ -261,6 +261,19 @@ func TestReAddedConnectorEntryIsHeldForAnEligibleAccountOnly(t *testing.T) {
 	if hold("devin", userCleanupSIDA) {
 		t.Fatal("a per-user connector was held")
 	}
+
+	// A profile list that fails says nothing about the account: the entry is
+	// held (the held-pass bound ends it), not run (GAP-0964 S-G1).
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		return nil, errors.New("group cache unreadable")
+	}
+	failing := windowsStandaloneReAddedHold(context.Background(), published)
+	if !failing("cursor", userCleanupSIDB) {
+		t.Fatal("a failed profile list was treated as not eligible and the removal ran")
+	}
+	if failing("codex", userCleanupSIDB) {
+		t.Fatal("an entry for a connector still off the roster was held by a failed profile list")
+	}
 }
 
 // S1: a link left where a connector file should be is said once and the

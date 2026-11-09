@@ -774,18 +774,23 @@ func windowsStandaloneOffRosterRuntimeCleanups(
 // excluded user) is cleaned all the same (GAP-0964).
 func windowsStandaloneReAddedHold(ctx context.Context, published func(string) bool) func(connectorName, sid string) bool {
 	var eligible map[string]bool
+	listFailed := false
 	return func(connectorName, sid string) bool {
 		if !enterprisehooks.WindowsMachineScopeUserRuntimeConnector(connectorName) || !published(connectorName) {
 			return false
 		}
 		if eligible == nil {
 			eligible = map[string]bool{}
-			profiles, _ := enterpriseHookWindowsEligibleProfiles(ctx)
+			profiles, err := enterpriseHookWindowsEligibleProfiles(ctx)
+			listFailed = err != nil
 			for _, profile := range profiles {
 				eligible[strings.ToUpper(strings.TrimSpace(profile.SID))] = true
 			}
 		}
-		return eligible[strings.ToUpper(strings.TrimSpace(sid))]
+		// A profile list that failed says nothing about the account: hold the
+		// entry (the held-pass count still ends it) instead of removing files
+		// of an account the enrollment may admit.
+		return listFailed || eligible[strings.ToUpper(strings.TrimSpace(sid))]
 	}
 }
 
