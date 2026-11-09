@@ -151,11 +151,15 @@ func markLinkedProjectSkillManifests(facts map[string]string, name string, sourc
 	}
 	for _, root := range projectSkillFactRoots(facts, ProjectSkillRootVerifiedPrefix) {
 		for _, dir := range projectSkillSelectionFolders(root, name, sources, home, cwd) {
-			if projectSkillRootKey(dir) == projectSkillRootKey(root) || projectSkillManifestFinding(home, dir) == "" {
+			if projectSkillRootKey(dir) == projectSkillRootKey(root) {
+				continue
+			}
+			finding := projectSkillManifestFinding(home, dir)
+			if finding == "" {
 				continue
 			}
 			delete(facts, ProjectSkillRootVerifiedPrefix+root)
-			facts[ProjectSkillRootUnverifiedPrefix+root] = ProjectSkillManifestLinked
+			facts[ProjectSkillRootUnverifiedPrefix+root] = finding
 			break
 		}
 	}
@@ -257,11 +261,29 @@ func projectSkillSelectedFolders(root, name string) []string {
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		if strings.EqualFold(assetfacts.DeclaredSkillName(dir), name) {
+		if strings.EqualFold(projectSkillDeclaredName(dir), name) {
 			return []string{dir}
 		}
 	}
 	return nil
+}
+
+// projectSkillDeclaredName is the name the SKILL.md of dir declares, read as
+// the agent reads it: through a link on the manifest, which the agent loads
+// and names the skill by (rel-1-0-9:GAP-0951). A manifest that is not a
+// readable regular file declares none.
+func projectSkillDeclaredName(dir string) string {
+	manifest := filepath.Join(dir, "SKILL.md")
+	info, err := pathStat(manifest)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	file, err := pathOpen(manifest)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	return assetfacts.DeclaredSkillNameOf(file)
 }
 
 // projectSkillSourceFolders returns the folders under an unverified root

@@ -573,7 +573,15 @@ func DeclaredSkillName(dir string) string {
 		return ""
 	}
 	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxManifestBytes))
+	return DeclaredSkillNameOf(file)
+}
+
+// DeclaredSkillNameOf returns the name the SKILL.md read from r declares in
+// its frontmatter, or "" when it declares none. Only the start is read. A
+// caller that opens the manifest as the agent does, through a link, uses it
+// on the file it opened.
+func DeclaredSkillNameOf(r io.Reader) string {
+	data, err := io.ReadAll(io.LimitReader(r, maxManifestBytes))
 	if err != nil {
 		return ""
 	}
