@@ -774,11 +774,22 @@ def _home_config_binding(path: str, home: str) -> tuple[str | None, bool]:
         managed = _is_managed_enterprise_mode(str(raw.get("deployment_mode") or ""))
         configured = raw.get("data_dir")
         if isinstance(configured, str) and configured.strip():
-            resolved = os.path.abspath(os.path.join(home, _expand_store_home(configured.strip())))
+            resolved = clean_data_dir(configured, home)
     if len(_home_config_cache) > 32:
         _home_config_cache.clear()
     _home_config_cache[key] = (resolved, managed)
     return resolved, managed
+
+
+def clean_data_dir(configured: str, home: str) -> str:
+    """The one spelling of the data_dir *configured* names: ``~/`` expanded, absolute from *home*, ``.``/``..`` folded.
+
+    The gateway, every record, approval and seal use this spelling, so a value
+    typed with a ``..`` after a link (``~/lnk/../state``) must not reach the
+    file system as typed: the system would resolve the link first and name
+    another folder than the one the gateway and the records use (GAP-0939).
+    """
+    return os.path.abspath(os.path.join(home, _expand_store_home(configured.strip())))
 
 
 def _same_folder(a: str, b: str) -> bool:
