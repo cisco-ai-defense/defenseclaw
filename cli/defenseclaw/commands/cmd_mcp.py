@@ -225,6 +225,10 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
     failed_rows: list[tuple[str, str, str, MCPServerEntry | None]] = []
     held_after_failed_scan: list[tuple[str, str, str, MCPServerEntry | None]] = []
+    allowed_after_failed_scan: list[tuple[str, str]] = []
+    from defenseclaw.enforce import PolicyEngine
+
+    policy_engine = PolicyEngine(app.store, app.cfg)
     not_loaded: list[tuple[str, MCPServerEntry]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
@@ -278,10 +282,17 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             (connector, name, (failed_map.get(name) or {}).get("error", ""), by_name.get(name))
             for name in held
         )
-        failed_rows.extend(
-            (connector, name, row.get("error", ""), by_name.get(name))
-            for name, row in failed_map.items() if name not in held
-        )
+        # An allowed server is not unverified: the allow (pinned to the
+        # definition it was written for) decides, so it is a note, not a
+        # warning with the advice to allow it (GAP-0978).
+        for name, row in failed_map.items():
+            if name in held:
+                continue
+            entry = by_name.get(name)
+            if entry is not None and _mcp_server_is_allowed(policy_engine, connector, entry):
+                allowed_after_failed_scan.append((connector, name))
+            else:
+                failed_rows.append((connector, name, row.get("error", ""), entry))
         shown_any = True
 
     if empty_connectors:
@@ -309,6 +320,12 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
                 "each server's last_scan_error is in: defenseclaw mcp list --json"
             )
+    if allowed_after_failed_scan:
+        ux.subhead(
+            f"{len(allowed_after_failed_scan)} allowed MCP server(s) have a failed last scan; "
+            "the allow applies and nothing is needed: "
+            + ", ".join(f"{name} ({connector})" for connector, name in allowed_after_failed_scan)
+        )
     if held_after_failed_scan:
         # GAP-1855: the gateway blocked these when their admission scan
         # failed. A new "mcp scan" reports a verdict but does not release
@@ -485,6 +502,15 @@ def _blocked_after_failed_scan(action_entry) -> bool:
     return (actions.install == "block" or actions.runtime == "disable") and str(
         getattr(action_entry, "reason", "") or ""
     ).startswith(_SCAN_FAILURE_BLOCK_REASON)
+
+
+def _mcp_server_is_allowed(policy_engine, connector: str, entry: MCPServerEntry) -> bool:
+    """True when an operator allow covers this server as it is configured now."""
+    return policy_engine.is_allowed_for_connector(
+        "mcp", entry.name, connector,
+        source_path=entry.source, url=entry.url, command=entry.command,
+        args=entry.args, transport=entry.transport,
+    )
 
 
 def _mcp_list_admission_policy(app: AppContext):

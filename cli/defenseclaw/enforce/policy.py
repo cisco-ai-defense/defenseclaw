@@ -116,12 +116,24 @@ class PolicyEngine:
             transport=transport,
         )[0] == asset_lists.LIST_DENY
 
-    def is_allowed_for_connector(self, target_type: str, name: str, connector: str = "") -> bool:
+    def is_allowed_for_connector(
+        self, target_type: str, name: str, connector: str = "", *,
+        source_path: str = "", url: str = "", command: str = "",
+        args: list[str] | None = None, transport: str = "",
+    ) -> bool:
         if self._legacy_rows():
             if target_type == "tool":
                 return self._legacy_tool_install_is(name, connector, "allow")
             return self._journal_install_is(target_type, name, connector, "allow")
-        return self._operator_decision(target_type, name, connector) == asset_lists.LIST_ALLOW
+        if target_type == "tool":
+            return self._operator_decision(target_type, name, connector) == asset_lists.LIST_ALLOW
+        # A pinned MCP allow matches only the definition it was written for,
+        # so a caller that has the server definition passes it.
+        return asset_lists.list_decision(
+            self._asset_policy(), target_type, name, connector,
+            source_path=source_path, url=url, command=command, args=args or [],
+            transport=transport,
+        )[0] == asset_lists.LIST_ALLOW
 
     def _operator_decision(self, target_type: str, name: str, connector: str) -> str:
         if target_type == "tool":
