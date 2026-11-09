@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from defenseclaw import codex_toml
+from defenseclaw.file_permissions import read_regular_file_no_follow
 from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS, unguarded_tool_events
 
 _LOCK_LIMIT = 4 * 1024 * 1024
@@ -1312,106 +1313,38 @@ def hermes_command_written(command: str, current: set[str]) -> bool:
     return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
 
 
-_SHELL_QUOTES = (chr(39), chr(34))
-# Hermes runs a hook command the way its platform does. On Windows a backslash separates folders. On Linux
-# and macOS a POSIX shell reads it: outside quotes a backslash escapes any one character, inside double
-# quotes only a double quote, "$", a backtick or a backslash, and inside single quotes nothing.
-_HERMES_WINDOWS_COMMANDS = os.name == "nt"
-_POSIX_ESCAPABLE = {chr(34): frozenset(chr(34) + "$`\\")}
+HERMES_HOME_RECORD_FILE = "hermes-home-setup.json"
+_HERMES_HOME_RECORD_LIMIT = 64 * 1024
 
 
-def _hermes_command_words(command: str) -> list[str]:
-    r"""The words the platform's shell reads in *command* (quotes and escapes honoured; unquoted words
-    break at operators and "=").
+def hermes_command_hash(command: str) -> str:
+    """The sha256 of a hook command, as the Hermes home record keeps it (hermesCommandHash in Go)."""
 
-    On Linux and macOS ``my\ hermes-hook.sh`` is the one word ``my hermes-hook.sh`` and
-    ``my\hermes-hook.sh`` the word ``myhermes-hook.sh``: a backslash outside quotes escapes the next
-    character. A backslash that stays inside quotes is read again when the quoted text is a shell ``-c``
-    argument. On Windows every backslash is a path separator and reads as "/".
+    return hashlib.sha256(command.encode("utf-8")).hexdigest()
+
+
+def hermes_recorded_kept_commands(data_dir: str) -> dict[str, frozenset[str]]:
+    """The command hashes of the entries Setup kept in place of an entry it wrote, by Hermes event.
+
+    Read from the Hermes home record Setup writes in *data_dir* (hermes-home-setup.json, "hooks"
+    section: hermesHookEntryRecord in internal/gateway/connector). The kept-entry notice lists an
+    entry only when this record names it; it never reads what a command says, so a user hook that
+    mentions a DefenseClaw hook as data or in a comment gets no notice (GAP-0940). No record, or one
+    that cannot be read, lists nothing.
     """
 
-    words: list[str] = []
-    word: list[str] = []
-    started = False
-    quote = ""
-    index = 0
-    while index < len(command):
-        char = command[index]
-        index += 1
-        if char == "\\":
-            started = True
-            following = command[index] if index < len(command) else ""
-            if _HERMES_WINDOWS_COMMANDS:
-                word.append("/")
-            elif quote == chr(39) or not following or (quote and following not in _POSIX_ESCAPABLE[quote]):
-                word.append("\\")
-            else:
-                index += 1
-                if following != "\n":  # a backslash before a newline continues the line
-                    word.append(following)
-        elif quote:
-            if char == quote:
-                quote = ""
-            else:
-                word.append(char)
-        elif char in _SHELL_QUOTES:
-            quote, started = char, True
-        elif char.isspace() or char in ";&|<>()=":
-            if started:
-                words.append("".join(word))
-            word, started = [], False
-        else:
-            word.append(char)
-            started = True
-    if started:
-        words.append("".join(word))
-    return words
-
-
-def _hermes_word_names_defenseclaw_hook(word: str, hooks_dir: str) -> bool:
-    """Whether one word of a command, once its path is cleaned, is the generated script (or an edited
-    copy such as hermes-hook.sh.off) or lies in the hooks folder, spelled absolute, with ~, with $HOME
-    or relative. ``.defenseclaw/hooks/../user-hook.sh`` is a file of the user; ``hermes-hook.sh-audit``
-    and ``my-hermes-hook.sh`` are other names."""
-
-    clean = posixpath.normpath(word)
-    if hooks_dir and (clean == hooks_dir or clean.startswith(hooks_dir + "/")):
-        return True
-    folder = ".defenseclaw/hooks"
-    if (
-        clean == folder
-        or clean.startswith(folder + "/")
-        or clean.endswith("/" + folder)
-        or "/" + folder + "/" in clean
-    ):
-        return True
-    base = posixpath.basename(clean)
-    script = HOOK_SCRIPT_NAMES["hermes"]
-    return base == script or base.startswith(script + ".")
-
-
-def hermes_command_names_defenseclaw_hook(command: str, hooks_dir: str) -> bool:
-    """Whether a Hermes hook *command* Setup did not write names a DefenseClaw hook.
-
-    The Python mirror of hermesCommandNamesDefenseClawHook: a word that is the
-    generated script or a file in the hooks folder once its path is cleaned, the
-    argument of a shell ``-c`` read the same way, or the native launcher Hermes
-    flag. It only picks which kept entries the notice lists (GAP-0940); ownership
-    never reads the command.
-    """
-
-    folder = hooks_dir.replace("\\", "/") if _HERMES_WINDOWS_COMMANDS else hooks_dir
-    folder = posixpath.normpath(folder) if folder else ""
-    if _HERMES_LAUNCHER_FLAG.search(command):
-        return True
-    previous = ""
-    for word in _hermes_command_words(command):
-        if _hermes_word_names_defenseclaw_hook(word, folder) or (
-            previous == "-c" and word != command and hermes_command_names_defenseclaw_hook(word, hooks_dir)
-        ):
-            return True
-        previous = word
-    return False
+    path = os.path.join(data_dir, HERMES_HOME_RECORD_FILE)
+    try:
+        document = json.loads(read_regular_file_no_follow(path, max_bytes=_HERMES_HOME_RECORD_LIMIT))
+    except (OSError, ValueError):  # a link, a pipe, a file too large or not JSON is no record
+        return {}
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    kept: dict[str, frozenset[str]] = {}
+    for event, record in (hooks.items() if isinstance(hooks, dict) else ()):
+        values = record.get("kept") if isinstance(record, dict) else None
+        if isinstance(values, list):
+            kept[str(event)] = frozenset(value for value in values if isinstance(value, str))
+    return kept
 
 
 def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:
@@ -2165,11 +2098,6 @@ HOOK_SCRIPT_NAMES = {
     "hermes": "hermes-hook.sh",
     "kiro": "kiro-hook.sh",
 }
-
-# The native launcher Hermes flag as a whole word (hermes_command_names_defenseclaw_hook).
-_HERMES_LAUNCHER_FLAG = re.compile(
-    r"(?:^|[^A-Za-z0-9._-])hook --connector hermes(?:$|[^A-Za-z0-9._-])"
-)
 
 _EDITED_HOOK_PREFIX = "hook command edited: "
 
