@@ -2473,7 +2473,7 @@ func TestWindowsRestartDeleteCancelFailureWarning(t *testing.T) {
 	if len(result.Errors) != 0 || len(result.Warnings) != 1 ||
 		result.Warnings[0].Code != "restart_delete_cancel_failed" ||
 		!strings.Contains(result.Warnings[0].Message, "access to the registry key is denied") ||
-		!strings.Contains(result.Warnings[0].Message, "/repair after the restart") {
+		!strings.Contains(result.Warnings[0].Message, "Setup /ensure again after the restart") {
 		t.Fatalf("restart-delete cancel failure was not reported once: %+v", result)
 	}
 }

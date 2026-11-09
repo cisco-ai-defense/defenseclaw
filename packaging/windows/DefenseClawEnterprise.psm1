@@ -46227,7 +46227,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                 catch {
                     $cancelWarning = (
                         "DefenseClaw $Action could not cancel the restart deletes queued for its files " +
-                        "($($_.Exception.Message)); run Repair after the next restart")
+                        "($($_.Exception.Message)); run Setup /ensure again after the next restart, which repairs " +
+                        "the deployment or installs it again if the restart removed its record")
                     Microsoft.PowerShell.Utility\Write-Warning $cancelWarning
                     if ($null -ne $installResult) {
                         $warnings = [Collections.Generic.List[string]]::new()

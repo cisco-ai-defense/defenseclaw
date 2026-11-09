@@ -2021,7 +2021,8 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		warnings = append(warnings, enterprisestatus.Message{
 			Code: "restart_delete_cancel_failed",
 			Message: "Setup could not cancel the deletes a purge queued for DefenseClaw's files at the next restart, " +
-				"so that restart can remove the hook and policy files this run installed; run Setup /repair after the restart: " +
+				"so that restart can remove the hook and policy files this run installed; run Setup /ensure again after the restart, " +
+				"which repairs the deployment, or installs it again with the same config if the restart also removed its record: " +
 				windowsEnterpriseBoundedDiagnostic(failed),
 		})
 	}

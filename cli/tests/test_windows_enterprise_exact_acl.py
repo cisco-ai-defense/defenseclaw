@@ -956,6 +956,13 @@ def test_install_recovers_from_leftover_state_and_reconcile_repairs_services() -
     # held-file purge queued for its paths before it returns.
     cancel = loop.index("Clear-DefenseClawQueuedRestartDeletes -Layout $layout")
     assert install_call < cancel < loop.index("return $installResult")
+    # A failed cancel is named in the result field the standalone CLI reads
+    # into its warnings; the CLI drops warnings[] (restart_delete_cancel_failed).
+    failed = loop.index("-Name restart_delete_cancel_failed", cancel)
+    assert failed < loop.index("return $installResult")
+    standalone = (ROOT / "internal" / "cli" / "windows_enterprise_standalone.go").read_text(encoding="utf-8")
+    assert 'RestartDeleteCancelFailed string `json:"restart_delete_cancel_failed"`' in standalone
+    assert "report.RestartDeleteCancelFailed" in standalone
     recovery = _extract_function_body(
         source,
         "function Invoke-DefenseClawInstallAutoRecovery",
