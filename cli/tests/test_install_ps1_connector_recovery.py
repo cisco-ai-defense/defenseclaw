@@ -224,6 +224,41 @@ try { Assert-NoActiveConnectorRecovery 'Rollback to 1.0.5'; throw 'guard unexpec
 
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
+def test_recovery_refusal_without_a_known_install_folder_still_refuses_and_names_the_command(tmp_path) -> None:
+    # Callers that never set the install folder (the guard runs from a few
+    # flows that only know the data folder) get the same refusal; the command
+    # then starts with the program name, found on PATH.
+    data = tmp_path / "data"
+    data.mkdir()
+    receipt = data / (".defenseclaw-cas-v2-" + "c" * 24 + ".intent")
+    receipt.write_bytes(b"retained recovery")
+    _run(
+        data,
+        r"""
+Remove-Variable -Name BinDir -Scope Script -ErrorAction SilentlyContinue
+Remove-Variable -Name BinDir -ErrorAction SilentlyContinue
+try { Assert-NoActiveConnectorRecovery 'Rollback to 1.0.5'; throw 'guard unexpectedly passed' } catch {
+    $text = $_.Exception.Message
+    if ($text -notlike '*Rollback to 1.0.5 refused: active connector recovery remains*') { throw }
+    $marker = ' Command: '
+    $at = $text.IndexOf($marker)
+    if ($at -lt 0) { throw 'the refusal names no command' }
+    $command = $text.Substring($at + $marker.Length)
+    $errors = $null
+    $tree = [Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$errors)
+    if ($errors.Count) { throw 'the printed command does not parse' }
+    $invocation = $tree.EndBlock.Statements[0].PipelineElements[0]
+    $values = @($invocation.CommandElements | ForEach-Object { $_.Extent.Text.Trim("'") })
+    $expected = @('defenseclaw-gateway', 'connector', 'recover-config', '--data-dir', $DataDir)
+    if (($values -join '|') -cne ($expected -join '|')) { throw ("command: " + ($values -join '|')) }
+}
+""",
+    )
+    assert receipt.read_bytes() == b"retained recovery"
+
+
+@WINDOWS_POWERSHELL
+@pytest.mark.allow_subprocess
 @pytest.mark.parametrize(
     "name",
     [

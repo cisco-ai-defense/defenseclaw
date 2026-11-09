@@ -27,6 +27,7 @@ fans out to every configured connector.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import logging
@@ -170,7 +171,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     app.store, servers, c,
                     allow_legacy_plain=allow_legacy_plain_scans,
                 )
-                actions_map = _build_mcp_actions_map(app.store, c, app.cfg)
+                actions_map = _mcp_list_actions(app, servers, c)
                 failed_map = _build_mcp_failed_scan_map(
                     app.store, servers, c,
                     allow_legacy_plain=allow_legacy_plain_scans,
@@ -196,7 +197,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 app.store, servers, connectors[0],
                 allow_legacy_plain=allow_legacy_plain_scans,
             )
-            actions_map = _build_mcp_actions_map(app.store, connectors[0], app.cfg)
+            actions_map = _mcp_list_actions(app, servers, connectors[0])
             failed_map = _build_mcp_failed_scan_map(
                 app.store, servers, connectors[0],
                 allow_legacy_plain=allow_legacy_plain_scans,
@@ -225,6 +226,8 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     source_diagnostics: list[tuple[str, connector_paths.MCPSourceDiagnostic]] = []
     failed_rows: list[tuple[str, str, str, MCPServerEntry | None]] = []
     held_after_failed_scan: list[tuple[str, str, str, MCPServerEntry | None]] = []
+    allowed_after_failed_scan: list[tuple[str, str]] = []
+    secure_client = asset_lists.is_secure_client(app.cfg)
     not_loaded: list[tuple[str, MCPServerEntry]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
@@ -241,7 +244,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             app.store, servers, connector,
             allow_legacy_plain=allow_legacy_plain_scans,
         )
-        actions_map = _build_mcp_actions_map(app.store, connector, app.cfg)
+        actions_map = _mcp_list_actions(app, servers, connector)
         if not servers:
             if not locations:
                 # Nowhere to look is not the same as looked and found
@@ -278,10 +281,18 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             (connector, name, (failed_map.get(name) or {}).get("error", ""), by_name.get(name))
             for name in held
         )
-        failed_rows.extend(
-            (connector, name, row.get("error", ""), by_name.get(name))
-            for name, row in failed_map.items() if name not in held
-        )
+        # An allowed server is not unverified: the row above shows it
+        # allowed, so the footer reads the same effective state and lists it
+        # as a note, not as a warning with the advice to allow it (GAP-0978).
+        # Secure Client keeps the unscanned warning for every failed scan.
+        for name, row in failed_map.items():
+            if name in held:
+                continue
+            entry = actions_map.get(name)
+            if not secure_client and _effectively_allowed(entry):
+                allowed_after_failed_scan.append((connector, name))
+            else:
+                failed_rows.append((connector, name, row.get("error", ""), by_name.get(name)))
         shown_any = True
 
     if empty_connectors:
@@ -309,6 +320,12 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 f"... and {len(failed_rows) - _FAILED_SCAN_HINT_LIMIT} more; "
                 "each server's last_scan_error is in: defenseclaw mcp list --json"
             )
+    if allowed_after_failed_scan:
+        ux.subhead(
+            f"{len(allowed_after_failed_scan)} allowed MCP server(s) have a failed last scan; "
+            "the allow applies and nothing is needed: "
+            + ", ".join(f"{name} ({connector})" for connector, name in allowed_after_failed_scan)
+        )
     if held_after_failed_scan:
         # GAP-1855: the gateway blocked these when their admission scan
         # failed. A new "mcp scan" reports a verdict but does not release
@@ -485,6 +502,126 @@ def _blocked_after_failed_scan(action_entry) -> bool:
     return (actions.install == "block" or actions.runtime == "disable") and str(
         getattr(action_entry, "reason", "") or ""
     ).startswith(_SCAN_FAILURE_BLOCK_REASON)
+
+
+def _effectively_allowed(action_entry) -> bool:
+    """The install allow is the whole effective state: a runtime disable or a
+    quarantine on the same server still denies it, so it is not allowed."""
+    if action_entry is None:
+        return False
+    actions = action_entry.actions
+    return actions.install == "allow" and not actions.runtime and not actions.file
+
+
+_MCP_KEY_PREFIX = "mcp:v2:"
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
+
+
+def _mcp_key_name(path: str) -> str | None:
+    """The server name in a versioned journal key, read with the grammar of
+    internal/mcpkey Decode: four fields of a canonical decimal byte length, a
+    colon and exactly twice that many hex digits, then nothing. None for any
+    other text, without raising."""
+    if not path.startswith(_MCP_KEY_PREFIX):
+        return None
+    rest = path[len(_MCP_KEY_PREFIX):]
+    fields: list[bytes] = []
+    for _ in range(4):
+        head, colon, tail = rest.partition(":")
+        # A length longer than 12 digits cannot fit in any stored path.
+        if not colon or not 0 < len(head) <= 12 or not all(c in "0123456789" for c in head):
+            return None
+        n = int(head)
+        if str(n) != head or 2 * n > len(tail):
+            return None
+        raw = tail[: 2 * n]
+        if not all(c in _HEX_DIGITS for c in raw):
+            return None
+        fields.append(bytes.fromhex(raw))
+        rest = tail[2 * n:]
+    if rest:
+        return None
+    try:
+        return fields[0].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _usable_journal_row(row):
+    """One stored journal row as the gateway reads it outside Secure Client
+    (enforce usableActionRow): the install and runtime of a row whose source
+    key is not the complete versioned key of its own server name (rows written
+    by older releases) decide nothing. The quarantine stays. None when
+    nothing is left on the row."""
+    if _mcp_key_name(row.source_path or "") == row.target_name:
+        return row
+    actions = dataclasses.replace(row.actions, install="", runtime="")
+    return None if actions.is_empty() else dataclasses.replace(row, actions=actions)
+
+
+def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector: str) -> dict:
+    """Map each server name to its ActionEntry for one connector list, with
+    the operator allow or deny decided per server as the gateway decides it
+    (GAP-0978).
+
+    The journal rows (block, runtime disable, quarantine) belong to their
+    exact server name. The allow or deny of each configured server is read
+    fresh from the lists with the server definition as configured now: an
+    allow pinned to a definition covers only that definition, and a rule
+    written in another case still names the server. Neither source stands in
+    for the other, so a journal row never hides a policy decision and a
+    policy rule never moves a journal row onto a differently written name.
+    The table row, the JSON item and the failed-scan footer all read this
+    map, so they never disagree. Secure Client hosts keep the journal rows.
+    """
+    from defenseclaw.enforce.admission import asset_name_key
+
+    merged = _build_mcp_actions_map(app.store, connector, app.cfg)
+    if asset_lists.is_secure_client(app.cfg):
+        return merged
+    asset_policy = getattr(app.cfg, "asset_policy", None)
+    # Each stored row is checked before the scoped and global rows are merged,
+    # as the gateway checks each row before it falls back from the scoped
+    # field to the global one.
+    journal = _build_mcp_actions_map(app.store, connector, None, row_filter=_usable_journal_row)
+    names = {s.name for s in servers}
+    keys = {asset_name_key(n) for n in names}
+    # Rows of names that are not configured (OpenClaw "removed from config")
+    # stay as the merged view reads them, except an operator rule that names a
+    # configured server in another case: it is that server's decision.
+    actions_map = {
+        n: e for n, e in merged.items()
+        if n not in names
+        and not (str(e.id).startswith("asset_policy:mcp:") and asset_name_key(n) in keys)
+    }
+    for s in servers:
+        row = journal.get(s.name)
+        decision, rule = asset_lists.list_decision(
+            asset_policy, "mcp", s.name, connector,
+            source_path=s.source, url=s.url, command=s.command, args=s.args, transport=s.transport,
+        )
+        if decision == asset_lists.LIST_ALLOW:
+            install = "allow"
+        elif decision == asset_lists.LIST_DENY:
+            install = "block"
+        else:
+            install = "" if row is None or row.actions.install == "allow" else row.actions.install
+        if row is None:
+            if rule is not None:
+                actions_map[s.name] = ActionEntry(
+                    id=f"asset_policy:mcp:{s.name}@{connector}", target_type="mcp", target_name=s.name,
+                    actions=ActionState(install=install), reason=rule.reason, connector=connector,
+                )
+            continue
+        reason = row.reason
+        failed_quarantine = str(reason or "").startswith(("quarantine failed", "link removed"))
+        if rule is not None and not (install == "block" and failed_quarantine):
+            reason = rule.reason or reason
+        actions_map[s.name] = dataclasses.replace(
+            row, target_name=s.name, reason=reason,
+            actions=dataclasses.replace(row.actions, install=install),
+        )
+    return actions_map
 
 
 def _mcp_list_admission_policy(app: AppContext):
@@ -1038,8 +1175,11 @@ def _effective_mcp_action_entry(
     )
 
 
-def _build_mcp_actions_map(store, connector: str = "", cfg=None) -> dict:
-    """Build effective server-name -> ActionEntry for one connector view."""
+def _build_mcp_actions_map(store, connector: str = "", cfg=None, *, row_filter=None) -> dict:
+    """Build effective server-name -> ActionEntry for one connector view.
+
+    row_filter, when given, maps each stored row to the row to merge (or None
+    to drop it) before the scoped and global rows are merged."""
     actions_map: dict = {}
     if store is None:
         return actions_map
@@ -1047,6 +1187,8 @@ def _build_mcp_actions_map(store, connector: str = "", cfg=None) -> dict:
         entries = asset_lists.merge_operator_entries(store.list_actions_by_type("mcp"), cfg, "mcp")
     except Exception:
         return actions_map
+    if row_filter is not None:
+        entries = [kept for kept in map(row_filter, entries) if kept is not None]
     normalized_connector = connector_paths.normalize(connector) if connector else ""
     for e in entries:
         if e.connector:

@@ -12268,7 +12268,7 @@ def _hermes_registration_problem(cfg, config_path: str) -> str:
     namespaces cannot). Doctor adds the probe.
     """
     from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, _InspectionError, _read_config
-    from defenseclaw.hook_integrity import _locked_hook_scripts
+    from defenseclaw.hook_integrity import _locked_hook_scripts, hermes_command_written
 
     try:
         current_config = hermes_config_path()
@@ -12279,6 +12279,10 @@ def _hermes_registration_problem(cfg, config_path: str) -> str:
 
     data_dir = str(getattr(cfg, "data_dir", "") or "")
     expected = os.path.normpath(os.path.join(data_dir, "hooks", "hermes-hook.sh"))
+    # Setup owns a Hermes hook entry by identity (hermes_command_written), never by the file
+    # name: a user hook that only shares the name hermes-hook.sh sits in another folder is
+    # kept beside ours and is not judged here (GAP-0985).
+    current = {expected, os.path.normpath(os.path.join(os.path.realpath(data_dir), "hooks", "hermes-hook.sh"))}
     scripts, digests = _locked_hook_scripts(cfg, "hermes")
     # The gateway seals Hermes' script beside the shared inspect-*.sh runtime
     # and _hardening.sh it sources (connector.hookRuntimeArtifactPaths), so the
@@ -12323,7 +12327,7 @@ def _hermes_registration_problem(cfg, config_path: str) -> str:
         owned = []
         for entry in entries:
             command = entry.get("command") if isinstance(entry, dict) else None
-            if not isinstance(command, str) or "hermes-hook.sh" not in command:
+            if not isinstance(command, str) or not hermes_command_written(command, current):
                 continue
             try:
                 argv = shlex.split(command)
@@ -12342,7 +12346,9 @@ def _hermes_registration_problem(cfg, config_path: str) -> str:
             return f"Hermes {event} matcher differs from the registered contract"
     for event, entries in hooks.items():
         if event not in _HERMES_REQUIRED_HOOKS and isinstance(entries, list) and any(
-            isinstance(entry, dict) and "hermes-hook.sh" in str(entry.get("command", ""))
+            isinstance(entry, dict)
+            and isinstance(entry.get("command"), str)
+            and hermes_command_written(entry["command"], current)
             for entry in entries
         ):
             return f"unexpected Hermes event {event} registers a DefenseClaw hook"

@@ -904,12 +904,18 @@ function Assert-NoActiveConnectorRecovery([string]$Operation, [string]$Root = $D
     if ($pending.Count) {
         # Both paths are printed as PowerShell single-quoted literals so a valid
         # folder name with a dollar sign or parenthesis is pasted as it is.
-        $gatewayLiteral = "'" + ((Join-Path $BinDir "defenseclaw-gateway.exe") -replace "'", "''") + "'"
+        # Without a known install folder the command is the program name, which
+        # the shell finds on PATH; the refusal itself never depends on $BinDir.
+        $gatewayCommand = "defenseclaw-gateway"
+        $binFolder = Get-Variable -Name BinDir -ValueOnly -ErrorAction SilentlyContinue
+        if ($binFolder) {
+            $gatewayCommand = "& " + "'" + ((Join-Path $binFolder "defenseclaw-gateway.exe") -replace "'", "''") + "'"
+        }
         $rootLiteral = "'" + ($Root -replace "'", "''") + "'"
         throw ("${Operation} refused: active connector recovery remains in $Root. " +
             "Finish it with the current DefenseClaw version (the command names any agent config change it cannot finish), " +
             "then retry. Do not remove or replay its receipts. Command: " +
-            "& $gatewayLiteral connector recover-config --data-dir $rootLiteral")
+            "$gatewayCommand connector recover-config --data-dir $rootLiteral")
     }
 }
 
