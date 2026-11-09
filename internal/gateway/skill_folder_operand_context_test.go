@@ -129,13 +129,21 @@ func TestSearchFromADeniedSkillFolderIsBlocked(t *testing.T) {
 		input     map[string]interface{}
 		want      bool
 	}{
-		"Glob in the folder": {"Glob", f.held, map[string]interface{}{"pattern": "*"}, true},
-		"Glob in the link":   {"Glob", link, map[string]interface{}{"pattern": "*"}, true},
-		"Grep in the folder": {"Grep", f.held, map[string]interface{}{"pattern": "x"}, true},
-		"explicit path":      {"Glob", f.proj, map[string]interface{}{"pattern": "*", "path": "lnk-held"}, true},
-		"ls in the folder":   {"Bash", f.held, map[string]interface{}{"command": "ls"}, true},
-		"Glob elsewhere":     {"Glob", f.proj, map[string]interface{}{"pattern": "*"}, false},
-		"ls elsewhere":       {"Bash", f.proj, map[string]interface{}{"command": "ls"}, false},
+		"Glob in the folder":         {"Glob", f.held, map[string]interface{}{"pattern": "*"}, true},
+		"Glob in the link":           {"Glob", link, map[string]interface{}{"pattern": "*"}, true},
+		"Grep in the folder":         {"Grep", f.held, map[string]interface{}{"pattern": "x"}, true},
+		"explicit path":              {"Glob", f.proj, map[string]interface{}{"pattern": "*", "path": "lnk-held"}, true},
+		"ls in the folder":           {"Bash", f.held, map[string]interface{}{"command": "ls"}, true},
+		"path then search":           {"Bash", f.held, map[string]interface{}{"command": "ls " + f.proj + "; ls"}, true},
+		"null then search":           {"Bash", f.held, map[string]interface{}{"command": "ls /dev/null; ls"}, true},
+		"null then find":             {"Bash", f.held, map[string]interface{}{"command": "ls /dev/null; find -name x"}, true},
+		"link cwd, path then search": {"Bash", link, map[string]interface{}{"command": "ls /dev/null; ls"}, true},
+		"cat then grep -r":           {"Bash", f.held, map[string]interface{}{"command": "cat /dev/null && grep -r x"}, true},
+		"inside sh -c":               {"Bash", f.held, map[string]interface{}{"command": "sh -c 'ls /dev/null; ls'"}, true},
+		"search of a path":           {"Bash", f.held, map[string]interface{}{"command": "ls " + f.proj}, false},
+		"path then search elsewhere": {"Bash", f.proj, map[string]interface{}{"command": "ls /dev/null; ls"}, false},
+		"Glob elsewhere":             {"Glob", f.proj, map[string]interface{}{"pattern": "*"}, false},
+		"ls elsewhere":               {"Bash", f.proj, map[string]interface{}{"command": "ls"}, false},
 	} {
 		if got := f.blocks(c.tool, c.cwd, c.input); got != c.want {
 			t.Errorf("%s: blocked = %t, want %t", name, got, c.want)
