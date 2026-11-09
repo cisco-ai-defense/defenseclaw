@@ -22,6 +22,7 @@ type Clock struct {
 	now      time.Time
 	timers   []*timer
 	requests []time.Duration
+	stops    int
 }
 
 type timer struct {
@@ -61,6 +62,9 @@ func (c *Clock) NewTimer(d time.Duration) (<-chan time.Time, func()) {
 	return t.c, func() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
+		if !t.stopped {
+			c.stops++
+		}
 		t.stopped = true
 	}
 }
@@ -86,4 +90,13 @@ func (c *Clock) Requested() []time.Duration {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]time.Duration(nil), c.requests...)
+}
+
+// Stopped counts the timers that were stopped so far. The product stops the
+// timer of a bounded read when the read ends, so a test that holds time still
+// can wait on that event instead of on the speed of the host.
+func (c *Clock) Stopped() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stops
 }

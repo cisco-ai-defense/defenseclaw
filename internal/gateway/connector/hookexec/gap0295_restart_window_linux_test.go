@@ -119,8 +119,12 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	sp, _ := specFor("claudecode")
 	w := &answerWatchdog{restart: &perUserRestartAnswer{mode: "open"}}
 	w.restartWindowContact(Options{Home: dataDir}, sp, "open", check)
-	eventuallyWithin(t, "the read of the connection owner", time.Second, func() bool { return check.owner.Load() != nil })
-	if owner := check.owner.Load(); owner.pid != pid {
+	awaitOwnerRead(t, clock)
+	owner := check.owner.Load()
+	if owner == nil {
+		t.Fatal("the read of the connection owner ended without naming it")
+	}
+	if owner.pid != pid {
 		t.Fatalf("captured owner = %+v, want the fresh gateway", owner)
 	}
 	// The read asked for the product wait, and it was not spent.
