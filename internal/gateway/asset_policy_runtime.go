@@ -313,8 +313,11 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	// by name and URL or launcher, or defenseclaw mcp allow) beats a scan
 	// that could not complete in every tier, strict and managed included:
 	// the administrator has decided the server, and its scan cannot. An
-	// explicit deny was handled above (GAP-0775, GAP-0778).
-	if status.Failed && !matched && existing.Enabled && existing.Source == "admin-allow" {
+	// explicit deny was handled above (GAP-0775, GAP-0778). The rule decides
+	// the definition the agent config lists; a revoked earlier definition
+	// the agent may still run is not that one, so the allow written for the
+	// listed one does not answer it (GAP-0920).
+	if status.Failed && !status.Revoked && !matched && existing.Enabled && existing.Source == "admin-allow" {
 		return config.AssetPolicyDecision{}, false
 	}
 	name := status.Name

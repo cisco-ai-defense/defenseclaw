@@ -46,6 +46,13 @@ type MCPAdmissionStatus struct {
 	// MCPScanIssueAddress. "" when the cause is not known from the
 	// definition (the hook then points to defenseclaw mcp list).
 	ScanIssue string
+	// Revoked marks a Failed status that is not the listed definition of
+	// the server but an earlier one the agent may still run (the entry was
+	// edited or removed after an admission no scan stood behind, and the
+	// allow or setting that gave it is gone). An allow written for the
+	// definition the agent config lists now does not answer it: the hook
+	// names the server, not the connection (GAP-0920).
+	Revoked bool
 }
 
 // The definitions a scan refuses, as the hook and mcp list word them.
@@ -437,6 +444,12 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		hash, _ := mcpDefinitionHash(server)
 		failed, decided, unscanned := w.mcpDecidedAdmission(path, hash, row)
 		if failed {
+			// The most restrictive verdict of the definitions the agent may
+			// still run: a revoked earlier one beats the listed one, whose
+			// allow cannot speak for it.
+			if revoked := w.mcpDepartedRevoked(q, servers); revoked.Failed {
+				return revoked
+			}
 			return failedMCPStatus(server)
 		}
 		// An allow given before any scan is the policy that gave it, not a
@@ -542,10 +555,11 @@ func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []confi
 		}
 		status := failedMCPStatus(server)
 		status.ScanIssue = definition.issue
+		status.Revoked = true
 		return status
 	}
 	if lost && len(listed) == 0 && len(gone) == 0 {
-		return MCPAdmissionStatus{Name: q.Server, Failed: true}
+		return MCPAdmissionStatus{Name: q.Server, Failed: true, Revoked: true}
 	}
 	return MCPAdmissionStatus{}
 }
