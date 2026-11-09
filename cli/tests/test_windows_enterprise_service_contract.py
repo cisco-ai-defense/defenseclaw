@@ -6428,13 +6428,20 @@ def test_rollback_skips_codex_files_behind_a_link_and_reads_the_user_sid_label()
         "    if ($codexTargetEnabled) {\n        Assert-DefenseClawCodexMachinePolicyDirectory `\n            -Path $Layout.CodexVendorDirectory\n"
         "        Assert-DefenseClawCodexMachinePolicyDirectory `\n            -Path $Layout.CodexMachinePolicyDirectory\n"
         "        Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout\n"
-        "        Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout\n"
+        "        try {\n            Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout\n",
         "        [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)\n    }\n    else {\n",
-        "    [void](Invoke-DefenseClawCodexRequirementsCommand `\n        -Layout $Layout `\n"
-        "        -GatewayServiceName $GatewayServiceName `\n"
-        "        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))\n",
+        "    if (-not $codexRequirementsDeferred) {\n"
+        "        [void](Invoke-DefenseClawCodexRequirementsCommand `\n            -Layout $Layout `\n"
+        "            -GatewayServiceName $GatewayServiceName `\n"
+        "            -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))\n",
     ):
         assert kept in deployment, kept
+    # REVIEW-g947 M1: the GAP-0947 flag is set outside the link brace (strict mode reads it
+    # later on every path); its deferral logic and the GAP-0802 repair sit inside it.
+    init = deployment.index("    $codexRequirementsDeferred = $false\n")
+    brace = deployment.index("    if ($codexFolderLink -eq '') {\n")
+    assert init < brace
+    assert deployment.count("$codexRequirementsDeferred = $false") == 1
     assert "if ($codexFolderLink -eq '') {\n    if ($codexTargetEnabled) {" in deployment
 
     attributable = _psm1_function(module, "Test-DefenseClawGuardianReportErrorsAttributable")
@@ -7938,7 +7945,7 @@ _SC_SHARED_INSERTS = {
             "        [string]$TransitionHookSHA256 = '',\n",
         ),
         (
-            '        }\n    }\n',
+            '    }\n    $codexRequirementsDeferred = $false\n',
             '    # GAP-0900: a rollback (-RollbackRestore) that finds a link on the Codex folder\n    # does not read the Codex machine policy through it. The checks below keep their\n    # lines; they are skipped by the braces around them.\n    $codexFolderLink = \'\'\n    if ($RollbackRestore -and $codexTargetEnabled) {\n        $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `\n            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `\n            -Tolerant\n    }\n    if ($codexFolderLink -ne \'\') {\n        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{\n            subsystem = \'rollback\'\n            path      = $codexFolderLink\n            reason    = "a link sits on the Codex machine-policy folder; its policy was not checked and Codex is not protected until the link is removed with: cmd /c rmdir `"$codexFolderLink`""\n        }\n    }\n    if ($codexFolderLink -eq \'\') {\n',
             '    if ($codexTargetEnabled) {\n',
         ),
@@ -7953,9 +7960,9 @@ _SC_SHARED_INSERTS = {
             '    if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and\n',
         ),
         (
-            "        -GatewayServiceName $GatewayServiceName `\n        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))\n",
+            "            -GatewayServiceName $GatewayServiceName `\n            -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))\n",
             '    }\n',
-            '\n',
+            '    }\n',
         ),
     ],
     'Restore-DefenseClawTransaction': [
