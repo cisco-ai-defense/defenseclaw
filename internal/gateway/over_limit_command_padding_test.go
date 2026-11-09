@@ -221,6 +221,13 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"relative value in the project":         "cd " + project + "; F=ld.so.preload; echo " + lib + " > \"$F\"",
 		"printed text names a redirect":         "printf \x27%s\\n\x27 \x27" + load + "\x27 > " + notes,
 		"redirect in a comment":                 "echo ok > " + notes + " # " + load,
+		"printed copy words, unquoted":          "printf \x27%s\\n\x27 cp " + lib + " /etc/ld.so.preload > " + notes,
+		"printed copy words, quoted":            "printf \x27%s\\n\x27 \x27cp " + lib + " /etc/ld.so.preload\x27 > " + notes,
+		"unquoted document, plain body":         "cat > " + notes + " <<EOF\n" + load + "\nEOF\n",
+		"quoted document, literal substitution": "cat > " + notes + " <<\x27EOF\x27\n$(" + load + ")\nEOF\n",
+		"escaped delimiter, literal backtick":   "cat > " + notes + " <<\\EOF\n`" + load + "`\nEOF\n",
+		"escaped substitution in a body":        "cat > " + notes + " <<EOF\n\\$(" + load + ")\nEOF\n",
+		"ordinary substitution in a body":       "cat > " + notes + " <<EOF\n$(date) $(echo note)\nEOF\n",
 		"exported variable reassigned":          "export F=/etc/ld.so.preload; export F=" + notes + "; echo ok > \"$F\"",
 	} {
 		for padName, pad := range paddings {
@@ -247,6 +254,11 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"function that runs in the directory":    "f() { echo " + lib + " > ld.so.preload; }; cd /etc; f",
 		"tee with a quoted operand":              "echo " + lib + " | tee \"/etc/ld.so.preload\"",
 		"redirect after a printed text":          "echo \x27tee x\x27; " + load,
+		"redirect after unquoted printed words":  "echo cp a b > /etc/ld.so.preload",
+		"substitution in an unquoted document":   "cat > " + notes + " <<EOF\n$(" + load + ")\nEOF\n",
+		"substitution, normalized target":        "cat > " + notes + " <<EOF\n$(echo " + lib + " > /etc/./ld.so.preload)\nEOF\n",
+		"backtick in an unquoted document":       "cat > " + notes + " <<EOF\n`" + load + "`\nEOF\n",
+		"substitution after an escaped one":      "cat > " + notes + " <<EOF\n\\$(x) $(" + load + ")\nEOF\n",
 		"directory variable and relative target": "cd /etc; D=pam.d; echo \x27auth sufficient pam_permit.so\x27 > $D/sshd",
 	} {
 		for padName, pad := range paddings {
