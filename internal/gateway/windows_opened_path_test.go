@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -295,6 +296,43 @@ func TestHoldsProfileEntriesReportsARefusalOfTheFileSystem(t *testing.T) {
 	}
 	if found, err := holdsProfileEntries("C:/r", refuse(nil)); found || err != nil {
 		t.Errorf("no hive: %v, %v, want false and no error", found, err)
+	}
+}
+
+// Any answer but "the name is not there" is a failure to look, not a no: an
+// I/O error is kept and returned, a missing hive (or a folder of the path that
+// is a file) is a plain no. A hive that can be seen proves the profile
+// whatever the other lookup answered.
+func TestHoldsProfileEntriesKeepsEveryFailureToLook(t *testing.T) {
+	answer := func(dat, man error) func(string) (os.FileInfo, error) {
+		return func(path string) (os.FileInfo, error) {
+			switch {
+			case strings.HasSuffix(path, "NTUSER.DAT") && dat != nil:
+				return nil, dat
+			case strings.HasSuffix(path, "NTUSER.MAN") && man != nil:
+				return nil, man
+			}
+			return fakeEntry{}, nil
+		}
+	}
+	for name, c := range map[string]struct {
+		dat, man error
+		found    bool
+		failure  error
+	}{
+		"I/O error on the first hive":    {syscall.EIO, os.ErrNotExist, false, syscall.EIO},
+		"I/O error on the second hive":   {os.ErrNotExist, syscall.EIO, false, syscall.EIO},
+		"I/O error beside a refusal":     {syscall.EIO, os.ErrPermission, false, syscall.EIO},
+		"timeout":                        {os.ErrDeadlineExceeded, os.ErrNotExist, false, os.ErrDeadlineExceeded},
+		"wrapped I/O error":              {&os.PathError{Op: "stat", Path: "C:/p/NTUSER.DAT", Err: syscall.EIO}, os.ErrNotExist, false, syscall.EIO},
+		"no hive":                        {os.ErrNotExist, os.ErrNotExist, false, nil},
+		"a folder of the path is a file": {syscall.ENOTDIR, syscall.ENOTDIR, false, nil},
+		"I/O error beside a seen hive":   {syscall.EIO, nil, true, nil},
+	} {
+		found, err := holdsProfileEntries("C:/p", answer(c.dat, c.man))
+		if found != c.found || !errors.Is(err, c.failure) || (c.failure == nil) != (err == nil) {
+			t.Errorf("%s: holdsProfileEntries = %v, %v, want %v, %v", name, found, err, c.found, c.failure)
+		}
 	}
 }
 

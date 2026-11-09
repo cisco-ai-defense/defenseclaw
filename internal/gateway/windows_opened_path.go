@@ -38,8 +38,9 @@ var expandWindowsShortNames = osExpandWindowsShortNames
 
 // windowsProfileFolder reports a folder that holds the registry hive of a
 // user profile (NTUSER.DAT, or NTUSER.MAN in a mandatory profile). The error
-// says the file system could not answer for the folder (access denied): the
-// folder is then no proven profile, and the caller decides by profile what
+// says the file system could not answer for the folder (access denied, an I/O
+// error; never the plain answer that the hive is not there): the folder is
+// then no proven profile, and the caller decides by profile what
 // that means (appendWindowsPathUnverifiedFinding). The Windows build asks the
 // file system; other builds and tests replace it.
 var windowsProfileFolder = osWindowsProfileFolder
@@ -296,29 +297,32 @@ func windowsProfileRuleText(text string) string {
 // outermostProfileFolder finds the outermost folder of a drive-letter path
 // (parts is the path split at its slashes) that holds the registry hive of a
 // user profile: end is the number of leading parts that make that folder. A
-// folder the file system could not be asked about is skipped and reported as
-// unresolved, so a profile below it is still found.
-func outermostProfileFolder(parts []string) (end int, found, unresolved bool) {
+// folder the file system could not be asked about is skipped and its first
+// lookup failure reported, so a profile below it is still found.
+func outermostProfileFolder(parts []string) (end int, found bool, failure error) {
 	for end = 1; end < len(parts); end++ {
 		profile, err := windowsProfileFolder(strings.Join(parts[:end], "/"))
 		if profile {
-			return end, true, unresolved
+			return end, true, failure
 		}
-		unresolved = unresolved || err != nil
+		if failure == nil {
+			failure = err
+		}
 	}
-	return 0, false, unresolved
+	return 0, false, failure
 }
 
-// windowsProfileUnresolved reports a drive-letter path in forward-slash
-// spelling with a folder the file system could not be asked about whether it
-// holds the hive of a user profile (access denied): the path may lie in the
-// home of an account.
-func windowsProfileUnresolved(opened string) bool {
+// windowsProfileLookupFailure is the first failure of the file system to say
+// whether a folder of a drive-letter path in forward-slash spelling holds the
+// hive of a user profile (access denied, an I/O error, any answer but "not
+// there"): the path may lie in the home of an account. It is nil when every
+// folder was answered for.
+func windowsProfileLookupFailure(opened string) error {
 	if !actionfacts.DriveLetterPath(opened) {
-		return false
+		return nil
 	}
-	_, _, unresolved := outermostProfileFolder(strings.Split(opened, "/"))
-	return unresolved
+	_, _, failure := outermostProfileFolder(strings.Split(opened, "/"))
+	return failure
 }
 
 // markTrailingSpaces spells each space that ends a name of an opened path as
@@ -344,21 +348,22 @@ var profileHives = []string{"NTUSER.DAT", "NTUSER.MAN"}
 // marker, and neither are folders an ordinary project can hold as well
 // (AppData with its Local and Roaming folders): only the hive proves an
 // account profile. stat answers for a path in forward-slash spelling. The
-// error is the refusal (access denied) of the file system to say whether a
-// hive is there: an ACL on the hive is no proof of access to the folder, so
-// the folder stays unproven and the caller says so (windowsProfileUnresolved).
+// error is the first failure of the file system to say whether a hive is
+// there (access denied, an I/O error, any answer but "not there"): the folder
+// stays unproven and the caller says so (windowsProfileLookupFailure). Only an
+// answer that the name does not exist (windowsPathDoesNotExist) is a no.
 func holdsProfileEntries(dir string, stat func(string) (os.FileInfo, error)) (bool, error) {
-	var refused error
+	var failure error
 	for _, hive := range profileHives {
 		info, err := stat(dir + "/" + hive)
 		switch {
 		case err == nil && !info.IsDir():
 			return true, nil
-		case errors.Is(err, os.ErrPermission):
-			refused = err
+		case err != nil && !windowsPathDoesNotExist(err) && failure == nil:
+			failure = err
 		}
 	}
-	return false, refused
+	return false, failure
 }
 
 // profileHomeAtOrAbove reports a drive-letter path that lies in a folder of a
@@ -385,6 +390,17 @@ const (
 	windowsPathUnverifiedTitle  = "Windows file path the file system could not verify (short names or user-profile folder); the file it opens cannot be verified"
 )
 
+// windowsPathUnverifiedReason is the title of the finding with the failure of
+// the file system that made the check unanswerable, so the alert or block
+// names it. A *PathError is cut to its cause: the path is already the call.
+func windowsPathUnverifiedReason(failure error) string {
+	var pathError *os.PathError
+	if errors.As(failure, &pathError) {
+		failure = pathError.Err
+	}
+	return windowsPathUnverifiedTitle + ": " + failure.Error()
+}
+
 // appendWindowsPathUnverifiedFinding adds the finding of a call that writes,
 // appends to or deletes a Windows path the file system could not be asked
 // about (a folder of the path it cannot list, or a folder it will not say
@@ -409,8 +425,14 @@ func appendWindowsPathUnverifiedFinding(
 		default:
 			continue
 		}
-		opened, ok, err := windowsOpenedPathOfFact(path)
-		if !ok || (err == nil && !windowsProfileUnresolved(opened)) {
+		opened, ok, failure := windowsOpenedPathOfFact(path)
+		if !ok {
+			continue
+		}
+		if failure == nil {
+			failure = windowsProfileLookupFailure(opened)
+		}
+		if failure == nil {
 			continue
 		}
 		enforcement := findingEnforcementAllowed
@@ -419,7 +441,7 @@ func appendWindowsPathUnverifiedFinding(
 		}
 		return append(findings, RuleFinding{
 			RuleID:      windowsPathUnverifiedRuleID,
-			Title:       windowsPathUnverifiedTitle,
+			Title:       windowsPathUnverifiedReason(failure),
 			Severity:    "HIGH",
 			Confidence:  1,
 			Tags:        []string{"tool-arguments"},
