@@ -144,7 +144,10 @@ def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_b
 def test_the_recovery_names_a_held_codex_state_file_before_and_after_the_reconcile_fails() -> None:
     text = _text()
     probe = _function_body(text, "Get-DefenseClawBlockedCodexStatePath")
-    assert "Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksStatePath" in probe and "Get-DefenseClawCodexManagedHooksStateWriterCopyList" in probe
+    assert (
+        "Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksStatePath" in probe
+        and "Get-DefenseClawCodexManagedHooksStateWriterCopyList" in probe
+    )
     assert "Test-DefenseClawFileReadBlocked" in probe and "Test-DefenseClawFileDeleteBlocked" in probe
     body = _function_body(text, "Repair-DefenseClawRecoveredCodexRequirements")
     assert body.count("Get-DefenseClawBlockedCodexStatePath -Layout $Layout") == 2
@@ -176,3 +179,23 @@ def test_a_held_codex_state_copy_defers_the_state_check_of_a_rollback() -> None:
     gate = body.index("if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and", catch)
     assert "-not $codexRequirementsDeferred) {" in body[gate : gate + 300]
     assert "if (-not $codexRequirementsDeferred) {" in body[gate:]
+
+
+def test_a_forward_run_replaces_a_hand_edited_requirements_file_instead_of_failing() -> None:
+    """GAP-0955: the recovery that a rollback ran (GAP-0802) also runs in the
+    forward reconcile, so one /ensure ends rc 0 for a machine it repaired."""
+    text = _text()
+    start = text.index("$reconcileFailure = $null")
+    block = text[start : start + 2600]
+    assert block.index("-Action reconcile") < block.index("$reconcileFailure = $_")
+    assert block.index("Test-DefenseClawStandaloneProfile") < block.index(
+        "Repair-DefenseClawRecoveredCodexRequirements"
+    )
+    # A failure the recovery did not explain is the failure of the run.
+    assert block.index("Repair-DefenseClawRecoveredCodexRequirements") < block.index("throw $reconcileFailure")
+    assert "DefenseClawRecoveredCodexRequirementsNotes).Count -eq $recoveredBefore" in block
+    # The ACLs and the checks run after, unchanged.
+    after = text[start + 1500 : start + 3200]
+    assert after.index("Set-DefenseClawManagedAcls") < after.index(
+        "Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout"
+    )
