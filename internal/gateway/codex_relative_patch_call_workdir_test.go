@@ -43,8 +43,12 @@ func codexRolloutCall(t *testing.T, home, project, workdir, command string) map[
 // name runs in the folder the model gave the call, which the hook payload
 // leaves out: the managed hook client reads it from the session rollout as
 // the user, as the per-user gateway does, so a loader file named relative to
-// /etc is judged as the file it is, in every profile (the rule fires; the profile decides whether it blocks). The same patch with the
-// session folder as its folder, and an ordinary file in /etc, stay allowed.
+// /etc gets the verdict of the same patch with the absolute name of that file,
+// in every profile and mode: the rule fires, and the action is the one the
+// absolute name gets (a block in the balanced and strict profiles; the
+// permissive pack alerts on this rule for the absolute name too). The same
+// patch with the session folder as its folder, and an ordinary file in /etc,
+// stay allowed.
 func TestCodexRelativePatchIsJudgedInTheFolderTheCallRunsIn(t *testing.T) {
 	const loader = "persistence.global_ld_preload_install"
 	patch := func(name string) string {
@@ -63,6 +67,13 @@ func TestCodexRelativePatchIsJudgedInTheFolderTheCallRunsIn(t *testing.T) {
 	}
 	for _, managed := range []bool{false, true} {
 		for _, profile := range []string{"default", "permissive", "strict"} {
+			_, absolute := postConnectorHookBehindProtectHome(t, "codex", managed, profile, func(home, project string) map[string]any {
+				return codexBashCall(patch("/etc/ld.so.preload"))(project)
+			})
+			wantAction := hookBodyAction(absolute)
+			if profile != "permissive" && wantAction != "block" {
+				t.Fatalf("the absolute name is not blocked in %s: %.500s", profile, absolute)
+			}
 			for _, row := range rows {
 				t.Run(map[bool]string{false: "per-user", true: "managed"}[managed]+"/"+profile+"/"+row.name, func(t *testing.T) {
 					_, body := postConnectorHookBehindProtectHome(t, "codex", managed, profile, func(home, project string) map[string]any {
@@ -72,8 +83,20 @@ func TestCodexRelativePatchIsJudgedInTheFolderTheCallRunsIn(t *testing.T) {
 					if named := strings.Contains(body, loader); named != row.blocked {
 						t.Fatalf("the loader rule is named = %t, want %t: %.500s", named, row.blocked, body)
 					}
+					if row.blocked && hookBodyAction(body) != wantAction {
+						t.Fatalf("action = %q, want %q, the action of the absolute name: %.500s", hookBodyAction(body), wantAction, body)
+					}
 				})
 			}
 		}
 	}
+}
+
+// hookBodyAction is the action field of a hook response body.
+func hookBodyAction(body string) string {
+	var verdict struct {
+		Action string `json:"action"`
+	}
+	_ = json.Unmarshal([]byte(body), &verdict)
+	return verdict.Action
 }
