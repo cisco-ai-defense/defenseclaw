@@ -42817,9 +42817,10 @@ function Remove-DefenseClawNuclearCopilotPolicy {
         keeps for it in the lifecycle folder's machine-policy store
         (<LifecycleDirectory>\machine-policy\copilot.json). The drop-in goes
         first; a drop-in that stays makes the purge incomplete. The record
-        describes that file, so it goes only once the drop-in is gone or
-        scheduled for deletion at restart: while the drop-in is there, the
-        record is what a later uninstall strips DefenseClaw's handlers by.
+        describes that file, so it goes only once the drop-in is gone: while
+        the drop-in is there, even with its deletion queued for the restart,
+        the record is what a later uninstall strips DefenseClaw's handlers
+        by, and the next purge removes it once the drop-in is gone.
         The store goes when nothing else is left in it. A record or store
         that stays is a warning, not a failed purge: nothing reads it once
         the drop-in is gone, and the next publish rewrites it.
@@ -42833,8 +42834,9 @@ function Remove-DefenseClawNuclearCopilotPolicy {
         [Parameter(Mandatory)][AllowEmptyCollection()]
         [Collections.Generic.List[string]]$Warnings
     )
+    $dropIn = [IO.Path]::Combine($CopilotPolicyDirectory, '90-defenseclaw.json')
     $leftover = Remove-DefenseClawNuclearPath `
-        -Path ([IO.Path]::Combine($CopilotPolicyDirectory, '90-defenseclaw.json')) `
+        -Path $dropIn `
         -Role 'agent sidecar' `
         -RebootRequired $RebootRequired `
         -AcceptScheduledDelete
@@ -42846,6 +42848,14 @@ function Remove-DefenseClawNuclearCopilotPolicy {
         return
     }
     $store = [IO.Path]::Combine($LifecycleDirectory, 'machine-policy')
+    if ([IO.File]::Exists($dropIn)) {
+        # Its deletion is only queued for the restart; should that not run,
+        # the record still names the drop-in to a later uninstall.
+        $Warnings.Add(
+            "GitHub Copilot machine policy record $([IO.Path]::Combine($store, 'copilot.json')) is kept " +
+            'until its drop-in is deleted at the restart; the next purge removes it')
+        return
+    }
     $leftover = Remove-DefenseClawNuclearPath `
         -Path ([IO.Path]::Combine($store, 'copilot.json')) `
         -Role 'GitHub Copilot machine policy record' `
