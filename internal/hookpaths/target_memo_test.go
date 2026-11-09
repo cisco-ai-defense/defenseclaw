@@ -131,6 +131,11 @@ func gap0568Evaluation(t *testing.T, command, cwd, home string) (whole, statemen
 	return whole, memo.Work() - whole
 }
 
+// pathComponents is the number of elements of a path, for either separator.
+func pathComponents(p string) int {
+	return len(strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }))
+}
+
 // TestTargetMemoAssignmentChainWorkIsLinear pins rel-1-0-2:GAP-0568 with a
 // work counter, not a clock: an evaluation of a chain of n assignments, the
 // whole call and each statement alone, walks each distinct path prefix and
@@ -159,19 +164,20 @@ func TestTargetMemoAssignmentChainWorkIsLinear(t *testing.T) {
 			if first, second := work[64]-work[32], work[128]-work[64]; second > 2*first+16 {
 				t.Errorf("work grew faster than linear: +%d for 32 more statements, then +%d for 64 more", first, second)
 			}
-			// Every scan reads the file system anew, so the work of the
-			// evaluation is the work of one scan times the scans. A scan of the
-			// whole call walks each distinct path and checks each distinct
-			// candidate once: at most 4 a statement and 64 more (the 3 scans of
-			// the whole call). Before, the one limit of 8 a statement and 256
-			// held for every pass of the evaluation together.
-			if limit := 3 * (4*128 + 64); whole[128] > limit {
+			// The 3 scans of the whole call keep the one limit the whole
+			// evaluation had before scans read the file system anew (8 a
+			// statement and 256): each distinct path and candidate is walked or
+			// checked once a scan, and no more.
+			if limit := 8*128 + 256; whole[128] > limit {
 				t.Errorf("the 3 scans of the whole 128-statement call cost %d units of work, want at most %d (each distinct path and candidate once a scan)", whole[128], limit)
 			}
-			// Each of the 3 scans of one statement walks the working directory
-			// and the home chains once: a constant a scan, whatever the call.
-			if limit := 3 * 128 * 32; statements[128] > limit {
-				t.Errorf("the 3 scans of each of 128 statements cost %d units of work, want at most %d (32 a scan)", statements[128], limit)
+			// Each of the 3 scans of one statement alone walks the chains of the
+			// working directory and the home once, so its work is bounded by the
+			// length of the two chains and not by the call: twice their
+			// components and 8 more a scan.
+			perScan := 2*(pathComponents(place.cwd)+pathComponents(place.home)) + 8
+			if limit := 3 * 128 * perScan; statements[128] > limit {
+				t.Errorf("the 3 scans of each of 128 statements cost %d units of work, want at most %d (%d a scan)", statements[128], limit, perScan)
 			}
 		})
 	}

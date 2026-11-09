@@ -292,13 +292,17 @@ const knownFolderReadGrace = 2 * time.Millisecond
 // is charged to the hook call, the memory is dropped, and the path is
 // reported unanswered).
 func stillPlain(path string, known os.FileInfo) (same, answered bool) {
+	return stillPlainRead(path, known, walkLstat)
+}
+
+// stillPlainRead is stillPlain with the read of the folder given.
+func stillPlainRead(path string, known os.FileInfo, lstat func(string) (os.FileInfo, error)) (same, answered bool) {
 	start := time.Now()
 	done := make(chan bool, 1)
-	// The read function is taken here, not by the goroutine, which may
-	// outlive the call (and a test that has put the function back). The
+	// The read function is taken by the caller, not by the goroutine, which
+	// may outlive the call (and a test that has put the function back). The
 	// comparison is made in the goroutine too: nothing of the folder is
 	// read after the wait.
-	lstat := walkLstat
 	go func() {
 		info, err := lstat(path)
 		done <- err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 && os.SameFile(known, info)
