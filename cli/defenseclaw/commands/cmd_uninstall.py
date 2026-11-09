@@ -1333,19 +1333,48 @@ def _top_level_backup_records(connector: str) -> tuple[str, ...]:
     )
 
 
-# What those records hold, whatever the connector (claudeCodeBackup and codexConfigBackup).
-_TOP_LEVEL_BACKUP_KEYS = ("had_hooks_key", "added_codex_hooks_flag")
+# The keys of each top-level record, from the structs that write it
+# (claudeCodeBackup, codexConfigBackup and the earlier codexBackup): the keys
+# every record carries, and every key a record may carry. A file at the name
+# that holds any other key, or lacks a required one, belongs to the account.
+_TOP_LEVEL_BACKUP_SHAPES: dict[str, tuple[dict[str, type], frozenset[str]]] = {
+    "claudecode_backup.json": (
+        {"had_hooks_key": bool},
+        frozenset({
+            "original_hooks", "had_hooks_key", "managed_hook_commands", "had_env_key", "original_env",
+            "env_backup_captured", "managed_env", "managed_absent_env", "retired_otlp_credentials",
+            "otlp_headers_helper_captured", "had_otlp_headers_helper", "original_otlp_headers_helper",
+            "managed_otlp_headers_helper",
+        }),
+    ),
+    "codex_config_backup.json": (
+        {"had_hooks_key": bool, "added_codex_hooks_flag": bool},
+        frozenset({
+            "had_hooks_key", "original_hooks", "added_codex_hooks_flag", "had_otel_block", "original_otel",
+            "operator_otel", "had_notify", "original_notify",
+        }),
+    ),
+    "codex_backup.json": ({"had_base_url": bool, "old_base_url": str}, frozenset({"had_base_url", "old_base_url"})),
+}
 
 
 def _is_setup_top_level_backup(path: str) -> bool:
-    """Whether *path* is a regular file of the shape Setup writes for a connector's own backup record."""
+    """Whether *path* holds the record Setup writes under that file name: its required keys and no other key."""
+    shape = _TOP_LEVEL_BACKUP_SHAPES.get(os.path.basename(path))
+    if shape is None:
+        return False
+    required, allowed = shape
     try:
         with open(path, "rb") as stream:
             raw = stream.read(_BACKUP_RECORD_MAX_BYTES + 1)
         document = json.loads(raw) if len(raw) <= _BACKUP_RECORD_MAX_BYTES else None
     except (OSError, ValueError):
         return False
-    return isinstance(document, dict) and any(isinstance(document.get(key), bool) for key in _TOP_LEVEL_BACKUP_KEYS)
+    return (
+        isinstance(document, dict)
+        and set(document) <= allowed
+        and all(type(document.get(key)) is kind for key, kind in required.items())
+    )
 
 
 # The hook script a Unix setup generates for a connector, and the other
@@ -1597,12 +1626,12 @@ def _connector_state_remains(folder: str) -> bool:
     The hooks folder and the backups folder are looked at on their own: a
     folder with no hooks left can still hold another connector's backup.
     """
-    if any(
-        os.path.lexists(os.path.join(folder, record))
-        for name in _MOVED_RECORD_CONNECTORS
-        for record in _top_level_backup_records(name)
-    ):
-        return True
+    for name in _MOVED_RECORD_CONNECTORS:
+        for record in _top_level_backup_records(name):
+            path = os.path.join(folder, record)
+            # A file of another shape at the name belongs to the account and keeps nothing of ours in this folder.
+            if os.path.lexists(path) and (not _account_owned_regular_file(path) or _is_setup_top_level_backup(path)):
+                return True
     for name in ("hooks", "connector_backups"):
         if _is_reparse_path(os.path.join(folder, name)):
             return True  # not entered, so not known to be empty
