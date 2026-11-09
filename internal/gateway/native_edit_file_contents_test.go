@@ -47,6 +47,7 @@ func dockerMultiEdit(t *testing.T, steps ...[2]string) actionfacts.Input {
 // blocked (strict, default) or alerted (permissive).
 func TestDockerEditOfAFileTheGatewayReadsIsJudgedOnTheDocumentItLeaves(t *testing.T) {
 	blocked := map[string]string{"default": "block", "permissive": "alert", "strict": "block"}
+	wide := strings.Repeat(" ", 72)
 	for _, test := range []struct {
 		name    string
 		input   actionfacts.Input
@@ -87,6 +88,21 @@ func TestDockerEditOfAFileTheGatewayReadsIsJudgedOnTheDocumentItLeaves(t *testin
 			`{"registry-mirrors":[]}`, nil,
 		},
 		{
+			// A valid 60 KiB document; the steps spread its white space past the
+			// work limit, bring it back and rename the list key.
+			"a transient text past the work limit and a protected final document",
+			dockerReplaceAllEdit(t, [2]string{` `, wide}, [2]string{wide, ` `}, [2]string{`insecure-registriez`, `insecure-registries`}),
+			`{"insecure-registriez":["198.51.100.7:5000"]}` + strings.Repeat(" ", 60000), blocked,
+		},
+		{
+			"an edit that the tool refuses over a file of white space only",
+			exactStructuredInput(t, "Edit", map[string]any{
+				"file_path": dockerDaemonConfigForTest, "old_string": `"debug":false`,
+				"new_string": `"insecure-registries":["198.51.100.7:5000"]`,
+			}),
+			"  \n", nil,
+		},
+		{
 			"a one-step edit whose text the readable file does not hold",
 			exactStructuredInput(t, "Edit", map[string]any{
 				"file_path": dockerDaemonConfigForTest, "old_string": `"debug":false`,
@@ -117,6 +133,15 @@ func TestDockerEditOfAFileTheGatewayReadsIsJudgedOnTheDocumentItLeaves(t *testin
 			})
 		}
 	}
+}
+
+func dockerReplaceAllEdit(t *testing.T, steps ...[2]string) actionfacts.Input {
+	t.Helper()
+	edits := make([]any, 0, len(steps))
+	for _, step := range steps {
+		edits = append(edits, map[string]any{"old_string": step[0], "new_string": step[1], "replace_all": true})
+	}
+	return exactStructuredInput(t, "MultiEdit", map[string]any{"file_path": dockerDaemonConfigForTest, "edits": edits})
 }
 
 // TestDockerEditOfAFileTheGatewayCannotReadKeepsTheStepReading: the same

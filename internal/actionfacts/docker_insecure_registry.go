@@ -33,7 +33,9 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // is applied to that text, step by step, as the tool applies it, and the
 // document it leaves is judged as a write of it; no step is read on its own.
 // When the file has text and a step cannot apply, the tool refuses the call and
-// writes nothing: the file as it is is judged. An edit of a file that could
+// writes nothing: the file as it is is judged. When the steps build more text
+// than the proof computes (nativeEditWorkLimit), the document they leave is
+// not known and the call is judged as a protected write. An edit of a file that could
 // not be read, of an empty one that its steps do not apply to, a patch or an
 // append is not given the file it changes, so it is judged on the text it leaves in place,
 // the union of every replacement of a multi-step edit and every hunk of a
@@ -53,7 +55,7 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 		if !ok || !nativeOperandsCoverTarget(facts, len(writes), target) {
 			continue
 		}
-		document, judgeDocument := "", false
+		document, judgeDocument, uncomputable := "", false, false
 		if content, read := input.ClientNativeFileContents[target]; read && dockerReadableText(content) {
 			switch edited, result := write.applyEdits(content); result {
 			case editApplied:
@@ -62,16 +64,24 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 				// The tool refuses the call and writes nothing: the file stays
 				// as it is, and the call adds nothing to it.
 				document, judgeDocument = content, true
+			case editUncomputable:
+				// The steps build more text than the proof computes: the document
+				// they leave is unknown and no fragment stands for it, so the call
+				// is never read as harmless.
+				uncomputable = true
 			}
 		}
 		// The file the tool writes is a document, judged as a Write of it.
-		if judgeDocument && !dockerReadableText(document) ||
-			!judgeDocument && !dockerJudgeableText(write.added) {
+		if !uncomputable && (judgeDocument && !dockerReadableText(document) ||
+			!judgeDocument && !dockerJudgeableText(write.added)) {
 			continue
 		}
 		for _, file := range nativeReachedFiles(facts, target) {
 			if EtcSpelling(file) != dockerDaemonConfigPath || !writeToolNamesItsFile(input) {
 				continue
+			}
+			if uncomputable {
+				return true
 			}
 			if judgeDocument {
 				if dockerDocumentHasInsecureRegistry(document) {
