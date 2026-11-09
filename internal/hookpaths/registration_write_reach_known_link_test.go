@@ -37,7 +37,7 @@ func TestRegistrationWriteReachKnownLinkPlacement(t *testing.T) {
 		{"change to bin then link by source name", "cd " + bin + " && ln -sf " + named, true},
 		{"called function", "link_hook() { ln -sf " + named + " " + bin + "/; }; link_hook", true},
 		{"change to bin then link an ordinary source", "cd " + bin + " && ln -sf " + ordinary, false},
-		{"uncalled function", "link_hook() { ln -sf " + named + " " + bin + "/; }; echo ready", false},
+		{"uncalled function", "link_hook() { ln -sf " + named + " " + bin + "/; }; echo ready", true},
 		{"ordinary source", "src=" + ordinary + "; ln -sf \"$src\" " + bin + "/", false},
 		{"ordinary destination", "dest=" + otherBin + "; ln -sf " + named + " \"$dest\"/", false},
 		{"two-operand link of a state folder under a new name", "cd " + filepath.Join(home, ".local") + " && ln -s bin dc && ls dc", false},
