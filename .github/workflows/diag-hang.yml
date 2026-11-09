@@ -20,9 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {set: m, sub: tmpfs, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: memcap, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: watch, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: strace, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: w1, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: user, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: managed, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: sc, run: '^TestShellHookBehaviourMatchesGolden$'}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -68,18 +70,19 @@ jobs:
           monitor=$!
           bin="$RUNNER_TEMP/connector.test"
           args=(-test.v -test.count=1 -test.timeout 8m -test.run "$RUN")
-          export DC_HOOK_GOLDEN_ONLY="cursor/"
           case "$SUB" in
-            tmpfs)
-              sudo mount -t tmpfs -o size=4G,mode=1777 tmpfs /tmp && df -h /tmp
-              timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
-            memcap)
-              cg=/sys/fs/cgroup/diag
-              echo "+memory +pids" | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
-              sudo mkdir -p $cg; echo 4G | sudo tee $cg/memory.max >/dev/null; echo 0 | sudo tee $cg/memory.swap.max >/dev/null
-              bash -c 'echo $$ | sudo tee '"$cg"'/cgroup.procs >/dev/null; exec timeout -k 15 540 "$@"' _ "$bin" "${args[@]}"; rc=$?
-              echo "=== memory.events"; cat $cg/memory.events ;;
-            watch) timeout -k 10 240 "$bin" "${args[@]}"; rc=$? ;;
+            strace)
+              export DC_HOOK_GOLDEN_ONLY="cursor/"
+              sudo apt-get install -y -qq strace >/dev/null 2>&1 || true
+              trace="$RUNNER_TEMP/trace"
+              timeout -k 15 480 strace -f -qq -e trace=execve,kill,tkill,tgkill,pidfd_send_signal,ptrace,prctl,prlimit64,setpriority,ioprio_set -e signal=none -o "$trace" "$bin" "${args[@]}"; rc=$?
+              echo "=== non-probe signals"; grep -E '(kill|pidfd_send_signal)\(' "$trace" | grep -vE 'kill\([0-9]+, 0\)|SIGURG|tgkill\([0-9]+, [0-9]+, SIG(URG|PROF)' | head -100
+              echo "=== ptrace/prctl/prlimit/priority"; grep -E '^[0-9]+ +(ptrace|prctl|prlimit64|setpriority|ioprio_set)\(' "$trace" | sort -k2 | uniq -c -f1 | head -50
+              echo "=== programs executed"; grep -oE 'execve\("[^"]+"' "$trace" | sort | uniq -c | sort -rn | head -60 ;;
+            w1) DC_HOOK_GOLDEN_ONLY="cursor/" DC_HOOK_GOLDEN_WORKERS=1 timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
+            user) DC_HOOK_GOLDEN_ONLY="cursor/user-" timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
+            managed) DC_HOOK_GOLDEN_ONLY="cursor/managed-" timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
+            sc) DC_HOOK_GOLDEN_ONLY="cursor/sc-" timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
           esac
           kill "$monitor"
           echo "exit $rc"
