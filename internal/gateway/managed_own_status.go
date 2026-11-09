@@ -262,8 +262,11 @@ func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, n
 // inspected; with deny it is refused unless exempt or the ledger still lists a
 // target for it. The published policy view is only the proof that the vendor
 // hook is there: an inspection claim needs it, a refusal does not (the gateway
-// refuses whatever call arrives). Without that proof, with the ledger
-// unreadable, or on the Windows pipe (no authorizer), the row claims nothing.
+// refuses whatever call arrives). Admission by the ledger or exempt_users is
+// not proof of a hook either: without the pinned vendor source the row says
+// the account is admitted and claims neither inspection nor its absence. With
+// the ledger unreadable, or on the Windows pipe (no authorizer), it claims
+// nothing.
 func (a *APIServer) ownExcludedInspection(idKey, uid, name, connector string) ownInspection {
 	z := a.managedHookAuthz.Load()
 	callerUID, err := strconv.Atoi(uid)
@@ -284,25 +287,31 @@ func (a *APIServer) ownExcludedInspection(idKey, uid, name, connector string) ow
 		}
 		return ownInspectionNone
 	}
-	switch {
-	case decision.Disabled:
+	if decision.Disabled {
 		return ownInspectionNone
-	case !machine && decision.Exempt:
-		// An exempt account of a connector without machine policy has no
-		// hook of its own either.
-		return ownInspectionNone
-	case !machine:
-		return ownInspectionLedger
-	case a.managedPolicyView.Load().provenHook(connector, name):
+	}
+	view := a.managedPolicyView.Load()
+	if view.provenHook(connector, name) {
+		// The vendor hook is there, pinned and unchanged, whether or not the
+		// authorizer still counts the connector as machine policy (the watcher
+		// retires admission and the vendor source separately), so a call
+		// arrives and the authorizer's answer is what happens to it.
 		switch {
 		case decision.Exempt:
 			return ownInspectionExempt
-		case strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny):
+		case !machine || strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny):
 			return ownInspectionLedger
 		}
 		return ownInspectionPolicy
 	}
-	return ownInspectionUnverified
+	if machine || view.hasConnector(connector) {
+		return ownInspectionUnverified
+	}
+	// The authorizer admits the account (a ledger row or exempt_users), but
+	// nothing proves a hook still sends its calls and nothing proves none
+	// does: a ledger row outlives the hook the enumerator removes for an
+	// excluded account, and admission is not installation.
+	return ownInspectionAdmittedOnly
 }
 
 // ownWindowsConnectorStates keeps the Windows status roster aligned with the

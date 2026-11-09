@@ -24,6 +24,7 @@ const (
 	ledgerReason     = "the guardian still lists an enrollment for your account, so the gateway inspects your calls"
 	refusedReason    = "the gateway refuses the calls its hook sends for your account (unenrolled_users: deny)"
 	unverifiedReason = "DefenseClaw cannot verify the vendor policy that runs the hook for your account"
+	admittedReason   = "the gateway admits the calls of your account, but DefenseClaw cannot verify that a hook still sends them"
 	nothingReason    = "excluded from enrollment; nothing inspects your calls"
 )
 
@@ -144,10 +145,19 @@ func TestOwnStatusExcludedReasonFollowsTheMachinePolicyHook(t *testing.T) {
 			cowork: [2]string{"excluded_users", nothingReason}},
 		{name: "no machine policy under deny", noMachine: true, noView: true, configure: deny, want: all("excluded_users", nothingReason),
 			cowork: [2]string{"excluded_users", nothingReason}},
-		{name: "no machine policy, an old ledger target keeps its connector", noMachine: true, noView: true,
+		{name: "no machine policy, an old ledger target alone proves no hook", noMachine: true, noView: true,
 			ledger: []managedHookLedgerTarget{carolTarget("claudecode", true)},
-			want:   map[string][2]string{"claudecode": {"excluded_users_inspected", ledgerReason}, "copilot": {"excluded_users", nothingReason}, "opencode": {"excluded_users", nothingReason}},
+			want:   map[string][2]string{"claudecode": {"excluded_users_unverified", admittedReason}, "copilot": {"excluded_users", nothingReason}, "opencode": {"excluded_users", nothingReason}},
+			cowork: [2]string{"excluded_users_unverified", admittedReason}},
+		{name: "no machine policy, an old ledger target and a pinned vendor hook", noMachine: true,
+			ledger: []managedHookLedgerTarget{carolTarget("claudecode", true)},
+			want:   map[string][2]string{"claudecode": {"excluded_users_inspected", ledgerReason}, "copilot": {"excluded_users", nothingReason}},
 			cowork: [2]string{"excluded_users_inspected", ledgerReason}},
+		{name: "no machine policy, an old ledger target and an unpinned vendor source", noMachine: true,
+			view:   provenWith(map[string]managedPolicyViewConnector{"claudecode": {shared: true}}),
+			ledger: []managedHookLedgerTarget{carolTarget("claudecode", true)},
+			want:   map[string][2]string{"claudecode": {"excluded_users_unverified", unverifiedReason}},
+			cowork: [2]string{"excluded_users_unverified", unverifiedReason}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var configure []func(*config.Config)
@@ -243,4 +253,40 @@ func TestOwnStatusWindowsExcludedReasonClaimsNothingAboutInspection(t *testing.T
 		}
 	}
 	requireExcludedReason(t, "cowork", cowork, "excluded_users", "excluded from enrollment")
+}
+
+// exempt_users admits the account whatever the machine admission is, so with
+// a pinned vendor hook and no machine admission the call still arrives and is
+// served; without the pinned source nothing proves a hook sends it, and
+// nothing proves none does.
+func TestOwnStatusExcludedExemptCallerWithoutMachineAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		view     *managedPolicyView
+		wantCode string
+		wantText string
+	}{
+		{name: "pinned vendor hook", view: &managedPolicyView{
+			connectors: map[string]managedPolicyViewConnector{"claudecode": {}}, admitted: map[string]bool{}},
+			wantCode: "excluded_users_inspected", wantText: exemptReason},
+		{name: "unpinned vendor source", view: &managedPolicyView{
+			connectors: map[string]managedPolicyViewConnector{"claudecode": {shared: true}}},
+			wantCode: "excluded_users_unverified", wantText: unverifiedReason},
+		{name: "no policy view", wantCode: "excluded_users_unverified", wantText: admittedReason},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := ownStatusExcludedFixture(t, []string{"carol"}, nil, func(cfg *config.Config) {
+				cfg.Enterprise.Enrollment.ExemptUsers = []string{"carol"}
+			})
+			api.managedPolicyView.Store(tc.view)
+			authorizer := newManagedHookAuthorizer(api.runtimeConfigSnapshot().Enterprise.Enrollment, nil,
+				func() (managedHookLedger, error) { return managedHookLedger{}, nil })
+			api.managedHookAuthz.Store(authorizer)
+			if decision := authorizer.decide(managedHookPeer{UID: 5003, Name: "carol"}, "claudecode", ""); !decision.Allow || !decision.Exempt {
+				t.Fatalf("authorizer decision = %+v, want an exempt allow", decision)
+			}
+			rows, _ := ownExcludedRowsOf(t, api, "uid", "5003", "carol")
+			requireExcludedReason(t, "claudecode", rows["claudecode"], tc.wantCode, tc.wantText)
+		})
+	}
 }

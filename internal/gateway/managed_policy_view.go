@@ -54,3 +54,13 @@ func (v *managedPolicyView) provenHook(connector, account string) bool {
 	state, ok := v.connectors[connector]
 	return ok && !state.shared && !state.allAccounts && !state.accounts[account]
 }
+
+// hasConnector reports whether the view lists connector at all, proven or
+// not: a vendor machine policy source exists for it.
+func (v *managedPolicyView) hasConnector(connector string) bool {
+	if v == nil {
+		return false
+	}
+	_, ok := v.connectors[connector]
+	return ok
+}
