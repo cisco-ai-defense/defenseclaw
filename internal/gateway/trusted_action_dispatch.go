@@ -10122,8 +10122,12 @@ func appendTrustedWindowsPathFactFindings(
 		seen[finding.RuleID] = struct{}{}
 	}
 	for _, candidate := range facts.Paths {
+		// A path with an extended-length prefix has the device flavor, though
+		// it names the same drive path.
 		if candidate.Flavor != actionfacts.PathFlavorWindows {
-			continue
+			if _, opened := windowsOpenedPath(pathFactSpelling(candidate)); !opened {
+				continue
+			}
 		}
 		switch candidate.Access {
 		case actionfacts.PathAccessRead,
@@ -10133,7 +10137,7 @@ func appendTrustedWindowsPathFactFindings(
 		default:
 			continue
 		}
-		values := []string{candidate.Value, candidate.Normalized, candidate.Resolved}
+		values := pathFactSpellings(candidate)
 		seenValues := make(map[string]struct{}, len(values))
 		for _, value := range values {
 			if strings.TrimSpace(value) == "" {
@@ -10477,10 +10481,10 @@ func trustedLegacyPathRuleMatches(
 			path.Access == actionfacts.PathAccessAppend ||
 			path.Access == actionfacts.PathAccessDelete
 		seenValues := make(map[string]struct{}, 4)
-		for _, value := range []string{
-			path.Value, path.Normalized, path.Resolved,
-			typedTargetRuleText(path.Resolved, input.ActiveHome),
-		} {
+		for _, value := range append(
+			pathFactSpellings(path),
+			typedTargetRuleText(pathFactSpelling(path), input.ActiveHome),
+		) {
 			if strings.TrimSpace(value) == "" {
 				continue
 			}
