@@ -1,0 +1,125 @@
+name: Diag runner hang
+
+# Temporary diagnostic: runs the two jobs that never finish on PRs into
+# release-defenseclaw-enterprise-26.11.1 (Connector Matrix part 0 and Go
+# shard 2) with the tests confined to a cgroup (memory, tasks), their output
+# in a file, and a monitor outside the cgroup, so a runaway test fails with
+# logs instead of taking the runner down.
+on:
+  push:
+    branches: ['diag/**']
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: diag (${{ matrix.job }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [matrix-part0, shard2]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          save-cache: false
+      - run: make plugin
+      - run: make dev-pycli
+      - run: make sync-openclaw-extension
+      - name: Host facts
+        run: |
+          set -x
+          uname -a; cat /etc/os-release | head -3; nproc; free -m; df -h / /tmp "$RUNNER_TEMP"
+          ulimit -a; cat /sys/fs/cgroup/cgroup.controllers; cat /proc/self/cgroup
+          ps -eo pid,ppid,pgid,sid,args | head -40
+      - name: Run the tests confined
+        timeout-minutes: 17
+        env:
+          DIAG_JOB: ${{ matrix.job }}
+        run: |
+          set -uo pipefail
+          cg=/sys/fs/cgroup/diag
+          echo "+memory +pids" | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null || true
+          sudo mkdir -p "$cg"
+          echo 9G | sudo tee "$cg/memory.max" >/dev/null
+          echo 0 | sudo tee "$cg/memory.swap.max" >/dev/null || true
+          echo 3000 | sudo tee "$cg/pids.max" >/dev/null
+          log="$RUNNER_TEMP/go.log"; mon="$RUNNER_TEMP/monitor.log"; : > "$log"; : > "$mon"
+          (
+            while :; do
+              {
+                echo "=== $(date -u +%T) load $(cut -d' ' -f1-3 /proc/loadavg) procs $(ps -e --no-headers | wc -l)" \
+                  "cg.mem $(( $(cat $cg/memory.current) / 1048576 ))M cg.pids $(cat $cg/pids.current)"
+                free -m | sed -n 2,3p
+                df -h / /tmp | tail -n +2
+                ps -eo pid,ppid,sid,stat,etime,rss,pcpu,args --sort=-pcpu | head -8 | cut -c1-220
+                ps -eo pid,ppid,sid,stat,etime,rss,pcpu,args --sort=-rss | sed -n 2,4p | cut -c1-220
+              } >> "$mon" 2>&1
+              tail -n 22 "$mon" | sed 's/^/[mon] /'
+              sleep 15
+            done
+          ) &
+          monitor=$!
+          tail -n +1 -F "$log" &
+          tailer=$!
+          if [ "$DIAG_JOB" = matrix-part0 ]; then
+            run="$(python3 scripts/go_test_shards.py --package-dir internal/gateway/connector \
+              --match 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix' \
+              --timings scripts/test-timings/go-linux.json --shard-count 4 --shard-index 0)"
+            cmds=("go test -v -count=1 -timeout 13m ./internal/gateway/connector -run '$run'")
+          else
+            go list ./... > "$RUNNER_TEMP/go-packages.txt"
+            python3 scripts/go_test_shards.py --packages-file "$RUNNER_TEMP/go-packages.txt" \
+              --exclude github.com/defenseclaw/defenseclaw/internal/audit \
+              --exclude github.com/defenseclaw/defenseclaw/internal/gateway \
+              --timings scripts/test-timings/go-linux.json --shard-count 12 --shard-index 2 > "$RUNNER_TEMP/go-shard.txt"
+            packages=(); cmds=()
+            while IFS= read -r item; do
+              if [[ "$item" == *$'\t'* ]]; then
+                cmds+=("go test -v -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 13m -run '${item#*$'\t'}' ${item%%$'\t'*}")
+              else
+                packages+=("$item")
+              fi
+            done < "$RUNNER_TEMP/go-shard.txt"
+            cmds=("go test -race -gcflags=modernc.org/...=-d=checkptr=0 -count=1 -timeout 13m ${packages[*]}" "${cmds[@]}")
+          fi
+          status=0
+          start=$SECONDS
+          for c in "${cmds[@]}"; do
+            echo ">>> ${c:0:200}" >> "$log"
+            left=$(( 900 - (SECONDS - start) ))
+            (( left > 30 )) || { echo ">>> out of time" >> "$log"; status=1; break; }
+            bash -c 'echo $$ | sudo tee '"$cg"'/cgroup.procs >/dev/null; exec timeout -k 20 '"$left"' bash -c "$0"' "$c" >> "$log" 2>&1 < /dev/null
+            rc=$?
+            echo ">>> exit $rc after $((SECONDS - start))s" >> "$log"
+            (( rc == 0 )) || status=1
+            echo ">>> left in the cgroup:" >> "$log"
+            for p in $(cat "$cg/cgroup.procs"); do ps -o pid,ppid,pgid,sid,stat,etime,args -p "$p" --no-headers >> "$log" 2>&1; done
+            echo 1 | sudo tee "$cg/cgroup.kill" >/dev/null || true
+          done
+          sleep 2
+          kill "$tailer" "$monitor" 2>/dev/null
+          echo "=== memory.events"; cat "$cg/memory.events"; echo "=== pids.events"; cat "$cg/pids.events"
+          echo "=== slowest tests"; grep -E '^\s*--- (PASS|FAIL)' "$log" | sed -E 's/.*\(([0-9.]+)s\)$/\1 &/' | sort -rn | head -25
+          echo "=== failures"; grep -E '^\s*--- FAIL|^FAIL|panic:' "$log" | head -40
+          exit "$status"
+      - if: ${{ always() }}
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: diag-${{ matrix.job }}
+          path: |
+            ${{ runner.temp }}/go.log
+            ${{ runner.temp }}/monitor.log
+          retention-days: 3
