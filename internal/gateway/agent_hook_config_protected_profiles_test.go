@@ -23,6 +23,11 @@ func TestAgentHookConfigProtectedTargetsBlockInEveryProfile(t *testing.T) {
 	if err := os.WriteFile(hook, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	source := filepath.Join(h.ext, "src")
+	if err := os.MkdirAll(source, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Dir(hook)
 	for _, tc := range []struct {
 		name  string
 		tool  string
@@ -35,6 +40,15 @@ func TestAgentHookConfigProtectedTargetsBlockInEveryProfile(t *testing.T) {
 	}{
 		{"disable all hooks", "Write", map[string]any{"file_path": h.userSettings, "content": `{"disableAllHooks":true}`}, true, true},
 		{"hook executable removed", "Bash", map[string]any{"command": "rm " + hook}, true, false},
+		{"hook replaced by a link through an abbreviated target folder", "Bash", map[string]any{"command": "ln -f --target-d=" + bin + " " + source + "/defenseclaw-hook-user"}, true, false},
+		{"hook replaced by a link through the full target folder option", "Bash", map[string]any{"command": "ln -f --target-directory=" + bin + " " + source + "/defenseclaw-hook-user"}, true, false},
+		{"hook replaced by a link through a short cluster", "Bash", map[string]any{"command": "ln -sft" + bin + " " + source + "/defenseclaw-hook-user"}, true, false},
+		{"hook replaced by a link through a short option and a word", "Bash", map[string]any{"command": "ln -sf -t " + bin + " " + source + "/defenseclaw-hook-user"}, true, false},
+		{"hook replaced by a link into the folder", "Bash", map[string]any{"command": "ln -sf " + source + "/defenseclaw-hook-user " + bin + "/"}, true, false},
+		{"hook replaced by a link named as the destination", "Bash", map[string]any{"command": "ln -sf " + source + "/other-tool " + hook}, true, false},
+		{"ordinary link through an abbreviated target folder", "Bash", map[string]any{"command": "ln -sf --target-d=" + bin + " " + source + "/other-tool"}, false, false},
+		{"ordinary link through a short cluster", "Bash", map[string]any{"command": "ln -sft" + bin + " " + source + "/other-tool"}, false, false},
+		{"ordinary link into the folder", "Bash", map[string]any{"command": "ln -sf " + source + "/other-tool " + bin + "/"}, false, false},
 		{"ordinary settings edit", "Edit", map[string]any{"file_path": h.userSettings, "old_string": `"env": {"FOO": "1"}`, "new_string": `"env": {"FOO": "1", "BAR": "2"}`}, false, false},
 	} {
 		for _, profile := range []string{"permissive", "default", "strict"} {
