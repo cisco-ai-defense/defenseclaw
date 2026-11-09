@@ -514,37 +514,46 @@ def _effectively_allowed(action_entry) -> bool:
 
 
 _MCP_KEY_PREFIX = "mcp:v2:"
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def _mcp_key_name(path: str) -> str | None:
-    """The server name in a versioned journal key (internal/mcpkey Decode), or
-    None when the path is not one complete canonical key."""
+    """The server name in a versioned journal key, read with the grammar of
+    internal/mcpkey Decode: four fields of a canonical decimal byte length, a
+    colon and exactly twice that many hex digits, then nothing. None for any
+    other text, without raising."""
     if not path.startswith(_MCP_KEY_PREFIX):
         return None
     rest = path[len(_MCP_KEY_PREFIX):]
-    fields: list[str] = []
+    fields: list[bytes] = []
     for _ in range(4):
         head, colon, tail = rest.partition(":")
-        if not colon or not head.isascii() or not head.isdigit() or str(int(head)) != head:
+        # A length longer than 12 digits cannot fit in any stored path.
+        if not colon or not 0 < len(head) <= 12 or not all(c in "0123456789" for c in head):
             return None
         n = int(head)
+        if str(n) != head or 2 * n > len(tail):
+            return None
         raw = tail[: 2 * n]
-        if len(raw) != 2 * n:
+        if not all(c in _HEX_DIGITS for c in raw):
             return None
-        try:
-            fields.append(bytes.fromhex(raw).decode("utf-8"))
-        except ValueError:
-            return None
+        fields.append(bytes.fromhex(raw))
         rest = tail[2 * n:]
-    return fields[0] if rest == "" else None
+    if rest:
+        return None
+    try:
+        return fields[0].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
-def _current_journal_row(row, name: str):
-    """The row as the gateway reads it outside Secure Client: the install and
-    runtime of a journal row without the versioned key of this server name
-    (rows written by older releases) decide nothing, so mcp list does not show
-    them as a block or a disable. None when nothing else is left on the row."""
-    if row is None or _mcp_key_name(row.source_path or "") == name:
+def _usable_journal_row(row):
+    """One stored journal row as the gateway reads it outside Secure Client
+    (enforce usableActionRow): the install and runtime of a row whose source
+    key is not the complete versioned key of its own server name (rows written
+    by older releases) decide nothing. The quarantine stays. None when
+    nothing is left on the row."""
+    if _mcp_key_name(row.source_path or "") == row.target_name:
         return row
     actions = dataclasses.replace(row.actions, install="", runtime="")
     return None if actions.is_empty() else dataclasses.replace(row, actions=actions)
@@ -571,7 +580,10 @@ def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector:
     if asset_lists.is_secure_client(app.cfg):
         return merged
     asset_policy = getattr(app.cfg, "asset_policy", None)
-    journal = _build_mcp_actions_map(app.store, connector, None)
+    # Each stored row is checked before the scoped and global rows are merged,
+    # as the gateway checks each row before it falls back from the scoped
+    # field to the global one.
+    journal = _build_mcp_actions_map(app.store, connector, None, row_filter=_usable_journal_row)
     names = {s.name for s in servers}
     keys = {asset_name_key(n) for n in names}
     # Rows of names that are not configured (OpenClaw "removed from config")
@@ -583,7 +595,7 @@ def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector:
         and not (str(e.id).startswith("asset_policy:mcp:") and asset_name_key(n) in keys)
     }
     for s in servers:
-        row = _current_journal_row(journal.get(s.name), s.name)
+        row = journal.get(s.name)
         decision, rule = asset_lists.list_decision(
             asset_policy, "mcp", s.name, connector,
             source_path=s.source, url=s.url, command=s.command, args=s.args, transport=s.transport,
@@ -1163,8 +1175,11 @@ def _effective_mcp_action_entry(
     )
 
 
-def _build_mcp_actions_map(store, connector: str = "", cfg=None) -> dict:
-    """Build effective server-name -> ActionEntry for one connector view."""
+def _build_mcp_actions_map(store, connector: str = "", cfg=None, *, row_filter=None) -> dict:
+    """Build effective server-name -> ActionEntry for one connector view.
+
+    row_filter, when given, maps each stored row to the row to merge (or None
+    to drop it) before the scoped and global rows are merged."""
     actions_map: dict = {}
     if store is None:
         return actions_map
@@ -1172,6 +1187,8 @@ def _build_mcp_actions_map(store, connector: str = "", cfg=None) -> dict:
         entries = asset_lists.merge_operator_entries(store.list_actions_by_type("mcp"), cfg, "mcp")
     except Exception:
         return actions_map
+    if row_filter is not None:
+        entries = [kept for kept in map(row_filter, entries) if kept is not None]
     normalized_connector = connector_paths.normalize(connector) if connector else ""
     for e in entries:
         if e.connector:
