@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode"
@@ -48,18 +49,21 @@ func hermesKeptHookEvents(hooks map[string]interface{}, hookScript string, recog
 var hermesDefenseClawLauncherFlag = regexp.MustCompile(
 	`(?:^|[^A-Za-z0-9._-])` + regexp.QuoteMeta(nativeHookFlag+"hermes") + `(?:$|[^A-Za-z0-9._-])`)
 
-// hermesShellEscaped lists the characters a backslash escapes in a command: a
-// blank, a quote, "$" or a shell operator.
-const hermesShellEscaped = " \t\n'\"$;&|<>()="
+// hermesWindowsCommands says Hermes runs the command the Windows way: every
+// backslash separates folders. On Linux and macOS a POSIX shell reads the
+// command, and a backslash there is an escape (hermesCommandWords).
+var hermesWindowsCommands = runtime.GOOS == "windows"
 
-// hermesCommandWords splits a command into the words a shell reads, honouring
-// single and double quotes, and breaks unquoted words at the shell operators
-// and at "=" so a path after VAR= or after && is a word of its own. A
-// backslash outside quotes escapes a character of hermesShellEscaped (so
-// my\ hermes-hook.sh is the one word "my hermes-hook.sh", a file of the user);
-// inside quotes only a double quote or "$" is escaped, and a backslash before
-// a blank or operator stays because a -c argument is read again by the shell;
-// any other backslash is a Windows path separator and reads as "/".
+// hermesCommandWords splits a command into the words the platform's shell
+// reads, honouring single and double quotes, and breaks unquoted words at the
+// shell operators and at "=" so a path after VAR= or after && is a word of its
+// own. On Linux and macOS a backslash outside quotes escapes the next
+// character (my\ hermes-hook.sh is the one word "my hermes-hook.sh" and
+// my\hermes-hook.sh the word "myhermes-hook.sh", both files of the user);
+// inside double quotes it escapes only a double quote, "$", a backtick or a
+// backslash, and inside single quotes nothing, and a backslash that stays is
+// read again when the quoted text is a shell -c argument. On Windows every
+// backslash is a path separator and reads as "/".
 func hermesCommandWords(command string) []string {
 	const singleQuote, doubleQuote = rune(0x27), rune(0x22)
 	var words []string
@@ -73,15 +77,6 @@ func hermesCommandWords(command string) []string {
 		word.Reset()
 		started = false
 	}
-	escapable := func(quote rune) string {
-		switch quote {
-		case 0:
-			return hermesShellEscaped
-		case doubleQuote:
-			return string(doubleQuote) + "$"
-		}
-		return ""
-	}
 	runes := []rune(command)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
@@ -93,14 +88,16 @@ func hermesCommandWords(command string) []string {
 				following = runes[i+1]
 			}
 			switch {
-			case following != 0 && strings.ContainsRune(escapable(quote), following):
-				i++
-				word.WriteRune(following)
-			case quote != 0 && following != 0 && strings.ContainsRune(hermesShellEscaped, following):
-				// Inside quotes a backslash before a blank or operator stays for the shell -c re-read.
+			case hermesWindowsCommands:
+				word.WriteRune('/')
+			case quote == singleQuote || following == 0 ||
+				(quote == doubleQuote && !strings.ContainsRune(string(doubleQuote)+"$`\\", following)):
 				word.WriteRune('\\')
 			default:
-				word.WriteRune('/')
+				i++
+				if following != '\n' { // a backslash before a newline continues the line
+					word.WriteRune(following)
+				}
 			}
 		case quote != 0:
 			if r == quote {

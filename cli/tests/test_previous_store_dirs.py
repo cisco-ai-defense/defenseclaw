@@ -153,6 +153,7 @@ def test_sixteen_real_data_dir_moves_among_long_paths_keep_the_first_folder(tmp_
     from click.testing import CliRunner
     from defenseclaw.commands import cmd_config
     from defenseclaw.context import AppContext
+
     from tests.test_config_data_dir_move import _install_home
 
     install_home, _ = _install_home(tmp_path, monkeypatch)

@@ -1313,20 +1313,21 @@ def hermes_command_written(command: str, current: set[str]) -> bool:
 
 
 _SHELL_QUOTES = (chr(39), chr(34))
-# A backslash before one of these is a shell escape: the character belongs to the word. Before
-# anything else it is a Windows path separator and reads as "/".
-_SHELL_ESCAPED = frozenset(" \t\n'\"$;&|<>()=")
-# What a backslash escapes outside quotes, inside double quotes and inside single quotes.
-_SHELL_ESCAPABLE = {"": _SHELL_ESCAPED, chr(34): frozenset(chr(34) + "$"), chr(39): frozenset()}
+# Hermes runs a hook command the way its platform does. On Windows a backslash separates folders. On Linux
+# and macOS a POSIX shell reads it: outside quotes a backslash escapes any one character, inside double
+# quotes only a double quote, "$", a backtick or a backslash, and inside single quotes nothing.
+_HERMES_WINDOWS_COMMANDS = os.name == "nt"
+_POSIX_ESCAPABLE = {chr(34): frozenset(chr(34) + "$`\\")}
 
 
 def _hermes_command_words(command: str) -> list[str]:
-    r"""The words a shell reads in *command* (quotes and escapes honoured; unquoted words break at operators and "=").
+    r"""The words the platform's shell reads in *command* (quotes and escapes honoured; unquoted words
+    break at operators and "=").
 
-    Outside quotes a backslash escapes a blank, quote, "$" or operator character, so
-    ``my\ hermes-hook.sh`` is the one word ``my hermes-hook.sh``; inside quotes only a double quote
-    or "$" is escaped (a ``-c`` argument is read again by the shell); any other backslash is a path
-    separator and reads as "/".
+    On Linux and macOS ``my\ hermes-hook.sh`` is the one word ``my hermes-hook.sh`` and
+    ``my\hermes-hook.sh`` the word ``myhermes-hook.sh``: a backslash outside quotes escapes the next
+    character. A backslash that stays inside quotes is read again when the quoted text is a shell ``-c``
+    argument. On Windows every backslash is a path separator and reads as "/".
     """
 
     words: list[str] = []
@@ -1340,12 +1341,14 @@ def _hermes_command_words(command: str) -> list[str]:
         if char == "\\":
             started = True
             following = command[index] if index < len(command) else ""
-            if following and following in _SHELL_ESCAPABLE[quote]:
-                word.append(following)
-                index += 1
+            if _HERMES_WINDOWS_COMMANDS:
+                word.append("/")
+            elif quote == chr(39) or not following or (quote and following not in _POSIX_ESCAPABLE[quote]):
+                word.append("\\")
             else:
-                # Inside quotes a backslash before a blank or operator stays for the shell -c re-read.
-                word.append("\\" if quote and following in _SHELL_ESCAPED else "/")
+                index += 1
+                if following != "\n":  # a backslash before a newline continues the line
+                    word.append(following)
         elif quote:
             if char == quote:
                 quote = ""
@@ -1397,7 +1400,8 @@ def hermes_command_names_defenseclaw_hook(command: str, hooks_dir: str) -> bool:
     never reads the command.
     """
 
-    folder = posixpath.normpath(hooks_dir.replace("\\", "/")) if hooks_dir else ""
+    folder = hooks_dir.replace("\\", "/") if _HERMES_WINDOWS_COMMANDS else hooks_dir
+    folder = posixpath.normpath(folder) if folder else ""
     if _HERMES_LAUNCHER_FLAG.search(command):
         return True
     previous = ""
