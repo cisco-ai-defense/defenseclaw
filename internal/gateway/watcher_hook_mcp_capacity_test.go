@@ -245,3 +245,123 @@ func TestHookReportedMCPFullListGivesUpExpiredServers(t *testing.T) {
 		t.Error("a live server was given up")
 	}
 }
+
+func fillRefusedSessions(t *testing.T, h *reportedMCPHarness) {
+	t.Helper()
+	entry := config.MCPServerEntry{Name: "filler", Command: "python3", Args: []string{"/opt/old.py"},
+		Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
+	for i := 0; i < hookReportedMCPPerHomeLimit; i++ {
+		if !h.reported.retainRefused("claudecode", sessionTestHome, fmt.Sprintf("prior-%d", i), sessionTestHome+"/proj", "filler", entry, time.Now()) {
+			t.Fatalf("setup: session slot %d not filled", i)
+		}
+	}
+}
+
+// Once the session store is full, each session it could not track is held by
+// its own identity: any number of other refused sessions, and the end of one of
+// them, neither block an ordinary server of another session nor release the
+// refusal an earlier session holds.
+func TestManagedUnixHookReportedMCPOverflowHoldsAreKeptByFullIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	h := newReportedMCPHarness()
+	fillRefusedSessions(t, h)
+	refused := assetfacts.MCPServer{Name: "review", Command: "python3", Args: []string{"/opt/old.py"}}
+	if got := h.callInSession(t, "held-session", refused); got.Action != "block" {
+		t.Fatalf("first refused call at capacity: action=%q, want block", got.Action)
+	}
+	const peers = 3000
+	for i := 0; i < peers; i++ {
+		other := assetfacts.MCPServer{Name: fmt.Sprintf("other-%d", i), Command: "python3", Args: []string{"/opt/other.py"}}
+		if got := h.callInSession(t, fmt.Sprintf("peer-%d", i), other); got.Action != "block" {
+			t.Fatalf("refused call of peer %d: action=%q, want block", i, got.Action)
+		}
+	}
+	ordinary := assetfacts.MCPServer{Name: "fine", Command: "npx", Args: []string{"-y", "pkg"}}
+	for i := 0; i < peers; i++ {
+		if got := h.callInSession(t, fmt.Sprintf("calm-%d", i), ordinary); got.Action != "allow" {
+			t.Fatalf("ordinary server of session calm-%d beside %d held sessions: action=%q reason=%q, want allow", i, peers, got.Action, got.Reason)
+		}
+	}
+	for i := 0; i < peers; i += 7 {
+		h.startSession(t, fmt.Sprintf("peer-%d", i))
+	}
+	edited := assetfacts.MCPServer{Name: "review", Command: "npx", Args: []string{"-y", "pkg"}}
+	if got := h.callInSession(t, "held-session", edited); got.Action != "block" {
+		t.Errorf("the first session after other sessions started again: action=%q reason=%q, want its hold kept", got.Action, got.Reason)
+	}
+	h.startSession(t, "held-session")
+	if got := h.callInSession(t, "held-session", edited); got.Action != "allow" {
+		t.Errorf("after its own agent started again: action=%q reason=%q, want allow", got.Action, got.Reason)
+	}
+}
+
+// A session the session store was full for keeps the cause of the definition
+// it met first when the same name is reported again with another refused
+// definition: the edit is a new definition and does not replace the old one.
+func TestManagedUnixHookReportedMCPOverflowKeepsFirstCauseAcrossRefusedEdit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	h := newReportedMCPHarness()
+	fillRefusedSessions(t, h)
+	first := h.callInSession(t, "held-session", assetfacts.MCPServer{Name: "review", Command: "python3", Args: []string{"/opt/old.py"}})
+	if first.Action != "block" || !strings.Contains(first.Reason, "launcher") {
+		t.Fatalf("first refused call: action=%q reason=%q, want a launcher block", first.Action, first.Reason)
+	}
+	second := h.callInSession(t, "held-session", assetfacts.MCPServer{Name: "review", Command: "npx", Args: []string{"-c", "pwd"}})
+	if second.Action != "block" || second.Reason != first.Reason {
+		t.Fatalf("after a second refused definition: action=%q reason=%q, want the first cause %q", second.Action, second.Reason, first.Reason)
+	}
+	third := h.callInSession(t, "held-session", assetfacts.MCPServer{Name: "review", Command: "npx", Args: []string{"-y", "pkg"}})
+	if third.Action != "block" || third.Reason != first.Reason {
+		t.Errorf("after an ordinary edit: action=%q reason=%q, want the first cause %q", third.Action, third.Reason, first.Reason)
+	}
+}
+
+// The overflow store is bounded per account. A store of live holds does not
+// release any of them and does not hold the next session, whose own calls are
+// decided as a failed admission; the holds that expired are given up first.
+func TestManagedUnixHookReportedMCPOverflowStoreBoundGivesUpExpiredHoldsFirst(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed Windows reads the enumerator records instead")
+	}
+	h := newReportedMCPHarness()
+	fillRefusedSessions(t, h)
+	entry := config.MCPServerEntry{Name: "review", Command: "python3", Args: []string{"/opt/old.py"},
+		Connector: "claudecode", Home: sessionTestHome, LocalRefusal: "launcher"}
+	now := time.Now()
+	stale := now.Add(-mcpResolvedTTL - time.Hour)
+	for i := 0; i < hookOverflowPerAccount; i++ {
+		at := now
+		if i%2 == 1 {
+			at = stale
+		}
+		h.reported.holdOverflow("claudecode", sessionTestHome, fmt.Sprintf("bulk-%d", i), sessionTestHome+"/proj", "review", entry, at)
+	}
+	refused := assetfacts.MCPServer{Name: "review", Command: "python3", Args: []string{"/opt/new.py"}}
+	edited := assetfacts.MCPServer{Name: "review", Command: "npx", Args: []string{"-y", "pkg"}}
+	if got := h.callInSession(t, "late", refused); got.Action != "block" {
+		t.Fatalf("refused call beside a store with expired holds: action=%q, want block", got.Action)
+	}
+	if got := h.callInSession(t, "late", edited); got.Action != "block" {
+		t.Errorf("the session after an edit, once the expired holds gave way: action=%q reason=%q, want its hold kept", got.Action, got.Reason)
+	}
+	if _, ok := h.reported.overflowHeld("claudecode", sessionTestHome, "bulk-0", sessionTestHome+"/proj", "review", now); !ok {
+		t.Error("a live hold was given up")
+	}
+	for i := 0; i < hookOverflowPerAccount; i++ {
+		h.reported.holdOverflow("claudecode", sessionTestHome, fmt.Sprintf("more-%d", i), sessionTestHome+"/proj", "review", entry, now)
+	}
+	if got := h.callInSession(t, "latest", refused); got.Action != "block" || !strings.Contains(got.Reason, "launcher") {
+		t.Errorf("refused call beside a store of live holds: action=%q reason=%q, want a launcher block", got.Action, got.Reason)
+	}
+	ordinary := assetfacts.MCPServer{Name: "fine", Command: "npx", Args: []string{"-y", "pkg"}}
+	if got := h.callInSession(t, "latest", ordinary); got.Action != "allow" {
+		t.Errorf("ordinary server beside a store of live holds: action=%q reason=%q, want allow", got.Action, got.Reason)
+	}
+	if got := h.call("/home/eng2", &ordinary); got.Action != "allow" {
+		t.Errorf("another account: action=%q reason=%q, want allow", got.Action, got.Reason)
+	}
+}
