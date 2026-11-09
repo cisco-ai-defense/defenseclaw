@@ -256,6 +256,13 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"cd inside a substitution":                  "x=$(cd /etc; pwd); echo " + lib + " > ld.so.preload",
 		"cd inside a backtick":                      "x=`cd /etc; pwd`; echo " + lib + " > ld.so.preload",
 		"assignment inside a substitution":          "x=$(F=/etc/ld.so.preload; echo ok); F=" + notes + "; echo " + lib + " > \"$F\"",
+		// An assigning braced expansion is data too: a redirect in its word
+		// is no write, and it leaves the directory and the values around it.
+		"assigning default in a printed word":        "echo ${X:=" + load + " } > " + notes,
+		"assigning default after a superseded cd":    "cd /etc; cd " + project + "; echo ${X:=ok}; echo " + lib + " > ld.so.preload",
+		"assigning default after a superseded value": "F=/etc/ld.so.preload; F=" + notes + "; echo ${X:=ok}; echo " + lib + " > \"$F\"",
+		"assigning default in a body":                "cat > " + notes + " <<EOF\n${X:=" + load + " }\nEOF\n",
+		"quoted substitution of an ordinary operand": "tee \"$(date)\" < /dev/null > " + notes,
 	} {
 		for padName, pad := range paddings {
 			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
@@ -302,6 +309,14 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"cd before a substitution":               "cd /etc; echo $(date); echo " + lib + " > ld.so.preload",
 		"cd after a substitution":                "echo $(date); cd /etc; echo " + lib + " > ld.so.preload",
 		"variable kept around a substitution":    "F=/etc/ld.so.preload; echo $(date); echo " + lib + " > \"$F\"",
+		// A substitution in a quoted word runs: its write is read whatever
+		// the command around it.
+		"quoted tee operand with a substitution":     "tee \"$(" + load + ")\" < /dev/null > " + notes,
+		"quoted assignment with a substitution":      "F=\"$(" + load + ")\"; echo ok > " + notes,
+		"quoted cd operand with a substitution":      "cd \"$(" + load + ")\"; echo ok > " + notes,
+		"quoted redirect target with a substitution": "echo ok > \"$(" + load + ")\"",
+		"assigned protected file":                    ": ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"assigning default with a substitution":      "cat > " + notes + " <<EOF\n${X:=$(" + load + ")}\nEOF\n",
 	} {
 		for padName, pad := range paddings {
 			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {
