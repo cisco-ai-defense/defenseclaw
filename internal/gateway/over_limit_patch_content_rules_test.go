@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // overLimitPatchCall is the typed Codex apply_patch call that adds the files
@@ -147,5 +149,48 @@ func TestOverLimitWriteOpaqueTextToLinkFailsClosed(t *testing.T) {
 		if (overLimitHookAction(t, got) == "block") != block {
 			t.Fatalf("%s: block = %t, want %t: %.600s", link, !block, block, got)
 		}
+	}
+}
+
+// TestOverLimitPatchRelativeLinkKeepsContentRule pins that a patch file named
+// by a relative link, which the hook client attests as the protected file it
+// reaches, is judged as that file whether its text is white space padded or
+// cannot be bounded, and that the same text through a relative link to an
+// ordinary file stays allowed.
+func TestOverLimitPatchRelativeLinkKeepsContentRule(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	for name, target := range map[string]string{
+		"lnk-preload": "/etc/ld.so.preload",
+		"lnk-notes":   filepath.Join(project, "notes.txt"),
+	} {
+		if err := os.Symlink(target, filepath.Join(project, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attack := "/usr/local/lib/libreview.so"
+	for _, c := range []struct {
+		name, link, content string
+		block               bool
+	}{
+		{"padded attack", "lnk-preload", attack + strings.Repeat(" ", 300000), true},
+		{"attack beside opaque text", "lnk-preload", attack + "\n+#" + strings.Repeat("x", 300000), true},
+		{"opaque text", "lnk-preload", strings.Repeat("x", 300000), true},
+		{"opaque text to an ordinary link", "lnk-notes", strings.Repeat("x", 300000), false},
+		{"padded text to an ordinary link", "lnk-notes", "# ok" + strings.Repeat(" ", 300000), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			body := overLimitPatchCall([][2]string{{c.link, c.content}}, 0, false).body(t, project, project)
+			evidence := hookpaths.ResolveConnector("codex", "", "preToolUse", []byte(body))
+			if resolved, ok := hookpaths.Decode(evidence); !ok || resolved[filepath.Join(project, c.link)] == "" {
+				t.Fatal("hook client did not attest the relative link target")
+			}
+			got := overLimitHostHookWithEvidence(t, "codex", home, body, evidence)
+			if (overLimitHookAction(t, got) == "block") != c.block {
+				t.Fatalf("block = %t, want %t: %.600s", !c.block, c.block, got)
+			}
+			if c.block && !strings.Contains(got, "persistence.global_ld_preload_install") {
+				t.Fatalf("block does not name the preload rule: %.600s", got)
+			}
+		})
 	}
 }

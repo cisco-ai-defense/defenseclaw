@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"maps"
 	"slices"
 	"strings"
 
@@ -47,7 +48,8 @@ func appendTrustedWriteTargetFindings(
 		return appendUnknownKeyOverflowFinding(findings, generation, request)
 	}
 	if !actionfacts.LimitExceededWriteTool(request.Input, facts) {
-		return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
+		findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
+		return enforceOverLimitCommandContentFindings(findings, generation, request, facts)
 	}
 	if view, args, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
 		reduced := request
@@ -212,6 +214,80 @@ func overLimitWriteBoundedTwinRequest(request trustedActionRequest, facts action
 	twin := request
 	twin.Input.Args = args
 	twin.LegacyText = string(args)
+	twin.conflictSource = nil
+	twin.record, twin.recordTelemetry = nil, nil
+	return twin, true
+}
+
+// overLimitCommandContentTitle is the reason of the conservative finding of
+// a command that names a file a content rule decides on and is too large for
+// that rule to read.
+const overLimitCommandContentTitle = "Shell command too large to verify names a file whose content rules decide on its text; split it into smaller calls"
+
+// enforceOverLimitCommandContentFindings makes the match of a content rule's
+// text pattern in a limit-exceeded command count, where the command cannot
+// be bounded (padded with text, not white space): the rule's exact proof
+// needs a complete reading, which a command over the limit does not have, so
+// without this a named protected target (a redirect to the loader preload
+// list) is recorded and allowed however large the call is (GAP-0934). The
+// recorded finding is replaced by the rule's own, enforcing. It applies only
+// to the rules of overLimitContentRules, only where the call is
+// enforcement-capable, and not to a command whose bounded twin is judged
+// (overLimitCommandBoundedTwinRequest): that reading decides it as it
+// decides the unpadded command.
+func enforceOverLimitCommandContentFindings(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+) []RuleFinding {
+	if !request.EnforcementCapable || facts.Parse.Status != actionfacts.StatusLimitExceeded ||
+		actionfacts.StructuredWriteTool(request.Input.Tool) {
+		return findings
+	}
+	bounded, boundedKnown := false, false
+	for index, finding := range findings {
+		if finding.enforcement != findingEnforcementDetectionOnly ||
+			!slices.Contains(slices.Collect(maps.Values(overLimitContentRules)), finding.RuleID) {
+			continue
+		}
+		if !boundedKnown {
+			_, bounded = actionfacts.OverLimitCommandBoundedTwin(request.Input, facts)
+			boundedKnown = true
+		}
+		if bounded {
+			return findings
+		}
+		_, rule, ok := trustedActionCatalogRule(generation, finding.RuleID)
+		if !ok {
+			continue
+		}
+		findings[index] = adjustConfidence(request.Input.Tool, RuleFinding{
+			RuleID: rule.ID, Title: overLimitCommandContentTitle, Severity: rule.Severity,
+			Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
+			Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
+			enforcement: findingEnforcementAllowed,
+		})
+	}
+	return findings
+}
+
+// overLimitCommandBoundedTwinRequest is the request for the bounded twin of
+// a limit-exceeded command that is over the string limit only by the white
+// space that pads it (actionfacts.OverLimitCommandBoundedTwin): the same
+// command within the limits, so every rule judges it as the unpadded
+// command (GAP-0934).
+func overLimitCommandBoundedTwinRequest(request trustedActionRequest, facts actionfacts.Facts) (trustedActionRequest, bool) {
+	input, ok := actionfacts.OverLimitCommandBoundedTwin(request.Input, facts)
+	if !ok {
+		return trustedActionRequest{}, false
+	}
+	twin := request
+	twin.Input = input
+	twin.LegacyText = string(input.Args)
+	if len(input.Args) == 0 {
+		twin.LegacyText = input.Command
+	}
 	twin.conflictSource = nil
 	twin.record, twin.recordTelemetry = nil, nil
 	return twin, true
