@@ -425,6 +425,12 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	firstCycle := !w.firstCycleDone.Load()
 	servers, err := w.readMCPServers()
 	if err != nil {
+		// The earlier definitions the agent may still run are remembered, not
+		// listed, so an unreadable source does not forget which of them
+		// failed: they come before the failed scan of the last listing.
+		if revoked := w.mcpDepartedRevoked(q, nil, false); revoked.Failed {
+			return revoked
+		}
 		if failed := w.mcpFailedFromLastRead(q); failed.Failed {
 			return failed
 		}
@@ -447,7 +453,7 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 			// The most restrictive verdict of the definitions the agent may
 			// still run: a revoked earlier one beats the listed one, whose
 			// allow cannot speak for it.
-			if revoked := w.mcpDepartedRevoked(q, servers); revoked.Failed {
+			if revoked := w.mcpDepartedRevoked(q, servers, true); revoked.Failed {
 				return revoked
 			}
 			return failedMCPStatus(server)
@@ -475,7 +481,7 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		}
 	}
 	if len(pending) == 0 {
-		return w.mcpDepartedRevoked(q, servers)
+		return w.mcpDepartedRevoked(q, servers, true)
 	}
 	w.AdmitAddedMCPServers(pending)
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
@@ -516,8 +522,11 @@ func (w *InstallWatcher) mcpDecidedAdmission(path, hash string, row *audit.Snaps
 // decides for itself and never for the live connection of the earlier one. A call that names no listed
 // and no held server may be one that did not fit (mcpAdmissionLost) when a
 // note of its connector and account says so, and fails the same way rather
-// than being allowed.
-func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []config.MCPServerEntry) MCPAdmissionStatus {
+// than being allowed. servers is the agent config listing; listingRead false
+// says the listing could not be read: the held definitions are then judged as
+// departed (the last listing did not have them), and a call naming no held
+// server is left to the unavailable-source handling of the caller.
+func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []config.MCPServerEntry, listingRead bool) MCPAdmissionStatus {
 	w.mcpAdmissionMu.RLock()
 	if len(w.mcpAdmissionDeparted) == 0 && len(w.mcpAdmissionLost) == 0 {
 		w.mcpAdmissionMu.RUnlock()
@@ -558,7 +567,7 @@ func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []confi
 		status.Revoked = true
 		return status
 	}
-	if lost && len(listed) == 0 && len(gone) == 0 {
+	if listingRead && lost && len(listed) == 0 && len(gone) == 0 {
 		return MCPAdmissionStatus{Name: q.Server, Failed: true, Revoked: true}
 	}
 	return MCPAdmissionStatus{}

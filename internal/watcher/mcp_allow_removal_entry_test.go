@@ -6,6 +6,7 @@ package watcher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -433,5 +434,49 @@ func TestEarlierDefinitionListedAgainIsNotRevokedAfterItsAllowIsGone(t *testing.
 	status := f.status()
 	if status.Revoked {
 		t.Fatalf("the earlier definition listed again: %+v, want it judged as listed, not revoked", status)
+	}
+}
+
+// A source-list outage does not forget which earlier definition failed: the
+// replacement listed at the last read does not speak for the live connection
+// of the earlier one, with the source readable or not (GAP-0920).
+func TestRevokedEarlierDefinitionSurvivesAnUnreadableSource(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	original := f.server
+	f.admittedByAllowRule()
+	f.server.URL = "http://127.0.0.1:28773/mcp"
+	if status := f.status(); !status.Pending {
+		t.Fatalf("the edited definition: %+v, want it pending its own admission", status)
+	}
+	f.admitQueued()
+	query := MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home}
+	f.cfg.AssetPolicy.MCP.Allowed = []config.AssetPolicyRule{{Name: f.server.Name, URL: f.server.URL}}
+	if status := f.w.MCPAdmissionStatus(query); !status.Failed || !status.Revoked {
+		t.Fatalf("source readable: %+v, want the revoked admission of the earlier definition", status)
+	}
+	f.w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		return nil, errors.New("agent config unreadable")
+	})
+	if status := f.w.MCPAdmissionStatus(query); !status.Failed || !status.Revoked {
+		t.Fatalf("source unreadable: %+v, want the same revoked admission", status)
+	}
+}
+
+// Benign twin: while the allow of the earlier definition stands, an
+// unreadable source keeps the failed scan of the listed definition as its own
+// failure, which an allow written for it releases.
+func TestUnreadableSourceKeepsTheListedFailureUnmarkedWhileTheEarlierAllowStands(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	original := f.server
+	f.admittedByAllowRule()
+	f.server.URL = "http://127.0.0.1:28773/mcp"
+	f.status()
+	f.admitQueued()
+	f.w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
+		return nil, errors.New("agent config unreadable")
+	})
+	query := MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home}
+	if status := f.w.MCPAdmissionStatus(query); !status.Failed || status.Revoked {
+		t.Fatalf("source unreadable, earlier allow standing: %+v, want the listed failure, not revoked", status)
 	}
 }
