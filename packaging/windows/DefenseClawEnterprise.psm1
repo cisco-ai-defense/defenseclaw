@@ -5334,24 +5334,6 @@ function Close-DefenseClawRestampHold {
     }
 }
 
-function Invoke-DefenseClawHeldFileStamp {
-    <#
-        Runs Stamp (a script block that writes the access list or owner of
-        Path) while Path is held; see Open-DefenseClawRestampHold.
-    #>
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][scriptblock]$Stamp
-    )
-    $hold = Open-DefenseClawRestampHold -Path $Path
-    try {
-        & $Stamp
-    }
-    finally {
-        Close-DefenseClawRestampHold -Handle $hold
-    }
-}
-
 function Assert-DefenseClawAdministrator {
     if (-not (Test-DefenseClawAdministrator)) {
         throw 'DefenseClaw Windows enterprise lifecycle changes require an elevated administrator token'

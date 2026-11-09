@@ -66,7 +66,9 @@ def test_a_blocked_put_back_is_left_and_the_rollback_carries_on() -> None:
     # The list starts empty, and the run ends with the held code after the
     # services were started (not before).
     assert restore.index("Clear-DefenseClawRollbackDeferredHolds") < restore.index("$snapshotCertificationProperty")
-    assert restore.rindex("Assert-DefenseClawRollbackHoldsResolved") > restore.index("Start-DefenseClawTransactionServices")
+    assert restore.rindex("Assert-DefenseClawRollbackHoldsResolved") > restore.index(
+        "Start-DefenseClawTransactionServices"
+    )
     assert "if (-not $DeferServiceRestart) {\n        # GAP-0947" in restore
 
 
@@ -113,6 +115,7 @@ def test_the_second_holder_does_not_cost_another_full_wait() -> None:
     assert "[Math]::Min($TimeoutSeconds, 5)" in body
     assert body.index("DefenseClawRollbackDeferredHolds.Count -gt 0") < body.index("$deadline")
 
+
 def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_blocked() -> None:
     text = _text()
     # Set in one place: the recovery's held republish of the Codex requirements.
@@ -147,5 +150,11 @@ def test_the_recovery_names_a_held_codex_state_file_before_and_after_the_reconci
     assert body.count("Get-DefenseClawBlockedCodexStatePath -Layout $Layout") == 2
     first = body.index("Get-DefenseClawBlockedCodexStatePath -Layout $Layout")
     # Before anything is saved or written, and again before the rebuild.
-    assert first < body.index("[IO.FileMode]::CreateNew") < body.rindex("Get-DefenseClawBlockedCodexStatePath -Layout $Layout")
-    assert body.rindex("Get-DefenseClawBlockedCodexStatePath -Layout $Layout") < body.index("Get-DefenseClawRecordedCodexRequirementsPreimage")
+    assert (
+        first
+        < body.index("[IO.FileMode]::CreateNew")
+        < body.rindex("Get-DefenseClawBlockedCodexStatePath -Layout $Layout")
+    )
+    assert body.rindex("Get-DefenseClawBlockedCodexStatePath -Layout $Layout") < body.index(
+        "Get-DefenseClawRecordedCodexRequirementsPreimage"
+    )
