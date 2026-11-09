@@ -5,6 +5,19 @@
 
 package gateway
 
+import (
+	"errors"
+	"io/fs"
+	"syscall"
+)
+
+// windowsPathDoesNotExist reports the answers of the file system that say a
+// name is not there (no such entry, or a folder of the path is a file), as
+// opposed to one that cannot be looked at.
+func windowsPathDoesNotExist(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
 // osExpandWindowsShortNames is the identity: only a Windows file system has
 // 8.3 short names to expand.
 func osExpandWindowsShortNames(path string, _ bool) (string, error) { return path, nil }

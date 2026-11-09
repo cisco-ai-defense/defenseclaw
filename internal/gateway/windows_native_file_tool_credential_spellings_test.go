@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -700,5 +701,116 @@ func TestWindowsNativeFileToolUnreadableProfileHiveClosesInAManagedDeployment(t 
 				t.Errorf("%s: %s, want %s (findings %v)", c.name, got, c.want, FindingStrings(findings))
 			}
 		})
+	}
+}
+
+// A lookup of the profile hive that fails for any reason but "the name is not
+// there" (an I/O error, a timeout) is cannot-tell, never "not a profile": the
+// write of a credential file in that folder alerts in an OSS default or
+// permissive install, blocks in the strict tier and in a managed deployment,
+// and the finding names the failure. A hive that is absent, or a folder of the
+// path that is a file, is a plain no and the project folder stays allowed.
+func TestWindowsNativeFileToolProfileHiveLookupFailureIsCannotTell(t *testing.T) {
+	const home = `C:\Users\r109yws.d-2`
+	const target = `C:\Profiles\moved\.netrc`
+	managedConfig := func(pack string) *config.Config {
+		cfg := &config.Config{}
+		cfg.DeploymentMode = "managed_enterprise"
+		cfg.Enterprise.Profile = "standalone"
+		cfg.Guardrail.Mode = "action"
+		cfg.Guardrail.RulePack = pack
+		return cfg
+	}
+	perUserConfig := func(pack string) *config.Config {
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "action"
+		cfg.Guardrail.RulePack = pack
+		return cfg
+	}
+	failures := []struct {
+		name    string
+		failure error
+		named   string
+	}{
+		{"I/O error", syscall.EIO, syscall.EIO.Error()},
+		{"wrapped I/O error", &os.PathError{Op: "stat", Path: "C:/Profiles/moved/NTUSER.MAN", Err: syscall.EIO}, syscall.EIO.Error()},
+		{"timeout", os.ErrDeadlineExceeded, os.ErrDeadlineExceeded.Error()},
+		{"access denied", os.ErrPermission, os.ErrPermission.Error()},
+	}
+	cases := []struct {
+		name    string
+		cfg     *config.Config
+		profile string
+		want    string
+	}{
+		{"per-user default", perUserConfig("default"), "default", "alert"},
+		{"per-user permissive", perUserConfig("permissive"), "permissive", "alert"},
+		{"per-user strict", perUserConfig("strict"), "strict", "block"},
+		{"managed default pack", managedConfig("default"), "default", "block"},
+		{"managed permissive pack", managedConfig("permissive"), "permissive", "block"},
+		{"managed strict pack", managedConfig("strict"), "strict", "block"},
+	}
+	previous := windowsProfileFolder
+	t.Cleanup(func() { windowsProfileFolder = previous })
+	for _, failure := range failures {
+		windowsProfileFolder = func(dir string) (bool, error) {
+			return holdsProfileEntries(dir, func(path string) (os.FileInfo, error) {
+				if strings.HasPrefix(strings.ToLower(path), "c:/profiles/moved/") {
+					return nil, failure.failure
+				}
+				return nil, os.ErrNotExist
+			})
+		}
+		for _, c := range cases {
+			t.Run(failure.name+" "+c.name, func(t *testing.T) {
+				connector := "windows-native-hive-failure-" + strings.ReplaceAll(failure.name+"-"+c.name, " ", "-")
+				installToolCallCorpusProfileConnector(t, connector, c.profile)
+				findings := windowsFileToolFindings(t, connector, "Write", home, `D:\work`, target, true)
+				var unverified []RuleFinding
+				for _, finding := range findings {
+					if finding.RuleID == windowsPathUnverifiedRuleID {
+						unverified = append(unverified, finding)
+					}
+				}
+				if len(unverified) != 1 || !strings.Contains(unverified[0].Title, failure.named) {
+					t.Fatalf("findings %v, want one unverified finding that names %q", FindingStrings(findings), failure.named)
+				}
+				// A managed deployment is decided by its configuration; the
+				// OSS postures by the profile (actionAtProfile), as above.
+				got := actionAtProfile(c.profile, unverified)
+				if c.cfg.EnterpriseProfile() != "" {
+					api := &APIServer{scannerCfg: c.cfg}
+					ctx := context.WithValue(context.Background(), profileRuleScanConnectorKey{}, connector)
+					got = api.buildVerdict(ctx, findings, "tool_call", false).Action
+				}
+				if got != c.want {
+					t.Errorf("%s: %s, want %s", c.name, got, c.want)
+				}
+			})
+		}
+	}
+
+	// An answer of "not there" is a plain no: the folder is a project folder.
+	for name, absent := range map[string]error{"absent hive": os.ErrNotExist, "folder of the path is a file": syscall.ENOTDIR} {
+		windowsProfileFolder = func(dir string) (bool, error) {
+			return holdsProfileEntries(dir, func(string) (os.FileInfo, error) { return nil, absent })
+		}
+		for _, c := range cases {
+			t.Run(name+" "+c.name, func(t *testing.T) {
+				connector := "windows-native-hive-absent-" + strings.ReplaceAll(name+"-"+c.name, " ", "-")
+				installToolCallCorpusProfileConnector(t, connector, c.profile)
+				findings := windowsFileToolFindings(t, connector, "Write", home, `D:\work`, target, true)
+				for _, finding := range findings {
+					if finding.RuleID == windowsPathUnverifiedRuleID {
+						t.Fatalf("unexpected %s: %v", finding.RuleID, FindingStrings(findings))
+					}
+				}
+				api := &APIServer{scannerCfg: c.cfg}
+				ctx := context.WithValue(context.Background(), profileRuleScanConnectorKey{}, connector)
+				if got := api.buildVerdict(ctx, findings, "tool_call", false).Action; got != "allow" {
+					t.Errorf("%s: %s, want allow", c.name, got)
+				}
+			})
+		}
 	}
 }
