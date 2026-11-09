@@ -47,6 +47,12 @@ func TestCanonicalSDDLInstallerKinds(t *testing.T) {
 		ObjectManagedIPCDirectory: entries("", "(A;%s;0x1f01ff;;;"+testGatewaySID+")",
 			"(A;%s;0x1200a9;;;S-1-5-11)"),
 	}
+	// The Secure Client marker is SYSTEM-owned with SYSTEM, Administrators
+	// and Users read and no gateway entry, as
+	// Set-DefenseClawSecureClientInstallMarker stamps it: a gateway entry
+	// the installer does not write would be drift after every install.
+	cases[ObjectSecureClientMarkerDirectory] = strings.Replace(
+		entries("OICI", users), "O:S-1-5-32-544", "O:S-1-5-18", 1)
 	for kind, want := range cases {
 		if got := canonicalSpecFor(kind, testGatewaySID).canonicalSDDL(); got != want {
 			t.Errorf("%s SDDL = %s, want %s", kind, got, want)
@@ -66,7 +72,8 @@ func installerDescriptor(kind ObjectKind) objectDescriptor {
 func TestAssessCanonicalDescriptorInstallerKinds(t *testing.T) {
 	for _, kind := range []ObjectKind{
 		ObjectInstallDirectory, ObjectInstallFile, ObjectServiceInstallDirectory,
-		ObjectServiceInstallFile, ObjectStateDirectory, ObjectAdminDirectory, ObjectAdminFile,
+		ObjectServiceInstallFile, ObjectSecureClientMarkerDirectory, ObjectStateDirectory,
+		ObjectAdminDirectory, ObjectAdminFile,
 		ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory,
 	} {
 		if got := assessCanonicalDescriptor(installerDescriptor(kind), kind, testGatewaySID, nil); !got.Canonical {
@@ -115,8 +122,9 @@ func TestObjectKindPropagatesRepairOnlyForDataFolders(t *testing.T) {
 		}
 	}
 	for _, kind := range []ObjectKind{
-		ObjectInstallDirectory, ObjectServiceInstallDirectory, ObjectStateDirectory,
-		ObjectAdminDirectory, ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory,
+		ObjectInstallDirectory, ObjectServiceInstallDirectory, ObjectSecureClientMarkerDirectory,
+		ObjectStateDirectory, ObjectAdminDirectory, ObjectAuthorizationDirectory, ObjectLogDirectory,
+		ObjectManagedIPCDirectory,
 	} {
 		if !kind.Directory() || kind.propagatesRepair() {
 			t.Errorf("%s: directory %t, propagates %t", kind, kind.Directory(), kind.propagatesRepair())
@@ -136,6 +144,7 @@ func TestManagedInstallLayoutTargets(t *testing.T) {
 	}
 	want := []string{
 		"ServiceInstallDirectory:" + install,
+		"SecureClientMarkerDirectory:" + filepath.Join(install, "secure-client.install"),
 		"ServiceInstallDirectory:" + filepath.Join(install, "bin"),
 		"InstallDirectory:" + filepath.Join(install, "libexec"),
 		"ServiceInstallFile:" + filepath.Join(install, "bin", "defenseclaw-gateway.exe"),
@@ -305,5 +314,48 @@ func TestReportServiceSecurityResultDedupe(t *testing.T) {
 	}
 	if !strings.Contains(out, `service="DefenseClawGateway"`) {
 		t.Fatalf("service field missing:\n%s", out)
+	}
+}
+
+// An icacls /reset /T on the install tree leaves the marker SYSTEM-owned but
+// inheriting the Program Files entries (TrustedInstaller full control,
+// CREATOR OWNER, Users read): drift the guardian repairs. A marker with any
+// other owner is never adopted, whatever its entries.
+func TestAssessSecureClientMarkerOwnerAndReset(t *testing.T) {
+	reset := objectDescriptor{Owner: sidLocalSystem, Protected: false, ACEs: []descriptorACE{
+		{Type: aceTypeAllowed, Flags: aceFlagInherited, Mask: maskFullControl, SID: sidTrustedInstaller},
+		{Type: aceTypeAllowed, Flags: aceFlagInherited, Mask: maskFullControl, SID: sidLocalSystem},
+		{Type: aceTypeAllowed, Flags: aceFlagInherited, Mask: maskFullControl, SID: sidAdministrators},
+		{Type: aceTypeAllowed, Flags: aceFlagInherited, Mask: maskReadAndExecute, SID: sidUsers},
+	}}
+	got := assessCanonicalDescriptor(reset, ObjectSecureClientMarkerDirectory, testGatewaySID, nil)
+	if got.Canonical || got.outcome() != CanonicalAccepted {
+		t.Fatalf("reset marker: canonical %t outcome %s drift %v, want accepted drift", got.Canonical, got.outcome(), got.Drift)
+	}
+	for _, owner := range []string{sidAdministrators, sidTrustedInstaller, "S-1-5-21-1-2-3-500", "S-1-5-21-1-2-3-1001"} {
+		marker := installerDescriptor(ObjectSecureClientMarkerDirectory)
+		marker.Owner = owner
+		if got := assessCanonicalDescriptor(marker, ObjectSecureClientMarkerDirectory, testGatewaySID, nil); got.outcome() != CanonicalBoundary {
+			t.Errorf("marker owned by %s = %s, want boundary", owner, got.outcome())
+		}
+	}
+	// The service install directory keeps accepting an Administrators owner.
+	if got := assessCanonicalDescriptor(installerDescriptor(ObjectServiceInstallDirectory), ObjectServiceInstallDirectory, testGatewaySID, nil); !got.Canonical {
+		t.Fatalf("service install directory no longer canonical: %v", got.Drift)
+	}
+}
+
+// A repair allowed to transfer untrusted owners still never adopts a Secure
+// Client marker: its SYSTEM owner is the Secure Client fact itself.
+func TestOwnerTransferNeverAdoptsSecureClientMarker(t *testing.T) {
+	allowed := CanonicalOptions{AllowUntrustedOwnerTransfer: true}
+	if ownerTransferAllowed(ObjectSecureClientMarkerDirectory, allowed) {
+		t.Fatal("owner transfer allowed for the Secure Client marker")
+	}
+	if !ownerTransferAllowed(ObjectServiceInstallDirectory, allowed) {
+		t.Fatal("owner transfer refused for the service install directory when the caller allows it")
+	}
+	if ownerTransferAllowed(ObjectServiceInstallDirectory, CanonicalOptions{}) {
+		t.Fatal("owner transfer allowed without the caller's consent")
 	}
 }

@@ -47,6 +47,9 @@ func (layout ManagedInstallLayout) targets() []managedDataTarget {
 		bin := filepath.Join(root, "bin")
 		libexec := filepath.Join(root, "libexec")
 		add(ObjectServiceInstallDirectory, root)
+		// Present only on a Secure Client install; a missing marker is
+		// reported missing and never created.
+		add(ObjectSecureClientMarkerDirectory, root, "secure-client.install")
 		add(ObjectServiceInstallDirectory, bin)
 		add(ObjectInstallDirectory, libexec)
 		add(ObjectServiceInstallFile, bin, "defenseclaw-gateway.exe")

@@ -51,6 +51,13 @@ const (
 	ObjectServiceInstallDirectory ObjectKind = "ServiceInstallDirectory"
 	// ObjectServiceInstallFile is the gateway executable.
 	ObjectServiceInstallFile ObjectKind = "ServiceInstallFile"
+	// ObjectSecureClientMarkerDirectory is InstallRoot\secure-client.install,
+	// the empty folder that marks a Secure Client install: owned by SYSTEM,
+	// SYSTEM and Administrators full control and Users read, as
+	// Set-DefenseClawSecureClientInstallMarker stamps it (no gateway entry).
+	// Only a SYSTEM-owned marker is the installer's; another owner is a
+	// boundary, never adopted, even by a repair that may transfer owners.
+	ObjectSecureClientMarkerDirectory ObjectKind = "SecureClientMarkerDirectory"
 	// ObjectStateDirectory is StateRoot: gateway read and traverse.
 	ObjectStateDirectory ObjectKind = "StateDirectory"
 	// ObjectAdminDirectory is a SYSTEM and Administrators only directory: the
@@ -73,8 +80,8 @@ const (
 func (kind ObjectKind) Directory() bool {
 	switch kind {
 	case ObjectRuntimeDirectory, ObjectConfigDirectory, ObjectInstallDirectory,
-		ObjectServiceInstallDirectory, ObjectStateDirectory, ObjectAdminDirectory,
-		ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
+		ObjectServiceInstallDirectory, ObjectSecureClientMarkerDirectory, ObjectStateDirectory,
+		ObjectAdminDirectory, ObjectAuthorizationDirectory, ObjectLogDirectory, ObjectManagedIPCDirectory:
 		return true
 	}
 	return false
@@ -159,6 +166,14 @@ type CanonicalOptions struct {
 	// UnixMode overrides a kind's macOS canonical permission bits, for
 	// per-user objects whose mode depends on the file (a hook script, a token).
 	UnixMode os.FileMode
+}
+
+// ownerTransferAllowed reports whether a repair may replace an untrusted
+// owner of kind. The Secure Client install marker is never transferred: its
+// SYSTEM owner is the fact that this is a Secure Client install, so a repair
+// must not create that fact for a folder someone else made.
+func ownerTransferAllowed(kind ObjectKind, opts CanonicalOptions) bool {
+	return opts.AllowUntrustedOwnerTransfer && kind != ObjectSecureClientMarkerDirectory
 }
 
 // UnixOwnership is a uid and gid pair for CanonicalOptions.UnixOwner.
@@ -332,6 +347,8 @@ func canonicalSpecFor(kind ObjectKind, gatewaySID string) canonicalSpec {
 		return gatewayRead(withGateway(maskReadAndExecute))
 	case ObjectServiceInstallDirectory, ObjectServiceInstallFile:
 		return gatewayRead(withUsers(withGateway(maskReadAndExecute)))
+	case ObjectSecureClientMarkerDirectory:
+		return canonicalSpec{Forms: []canonicalForm{{Owner: sidLocalSystem, ACEs: withUsers(base)}}}
 	case ObjectInstallDirectory, ObjectInstallFile:
 		return canonicalSpec{Forms: []canonicalForm{{Owner: sidAdministrators, ACEs: withUsers(base)}}}
 	case ObjectAdminDirectory, ObjectAdminFile, ObjectLogDirectory:
@@ -491,6 +508,13 @@ func assessCanonicalDescriptor(
 		default:
 			a.Drift = append(a.Drift, fmt.Sprintf("owner %s is not trusted", ownerText(desc.Owner)))
 		}
+	}
+	if kind == ObjectSecureClientMarkerDirectory && desc.Owner != sidLocalSystem {
+		// The marker is the SYSTEM-owned fact that this is a Secure Client
+		// install; an Administrators-owned folder is not that fact
+		// (GAP-0461), so a repair never makes it one.
+		a.Owner = ownerUntrusted
+		a.Drift = append(a.Drift, fmt.Sprintf("Secure Client install marker owner %s is not SYSTEM", ownerText(desc.Owner)))
 	}
 
 	if !desc.Protected {
