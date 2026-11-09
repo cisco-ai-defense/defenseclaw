@@ -786,6 +786,145 @@ public static class DcsfUnnamedRestartManager {
                 }
             }
 
+            # GAP-0890 r2: a default-token Administrator (backup and restore
+            # present but disabled) could not even list a SYSTEM-only folder in
+            # StateRoot (the IB22 forced fixture), so the purge failed at its
+            # first walk, long before the delete the earlier fallback guards.
+            # The walks now retry once with backup and restore enabled for that
+            # walk only, on the exact StateRoot of the standalone profile.
+            if (-not $canOpenRestricted) {
+                $savedProgramFiles4 = $script:ProgramFiles
+                $savedWindows4 = $script:WindowsDirectory
+                try {
+                    $walkLayout = New-TestState 'walk'
+                    $script:ProgramData = [IO.Path]::Combine($Root, 'walk', 'PD')
+                    $script:ProgramFiles = [IO.Path]::Combine($Root, 'walk', 'PF')
+                    $script:WindowsDirectory = [IO.Path]::Combine($Root, 'walk', 'WIN')
+                    [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($script:WindowsDirectory, 'Logs', 'DefenseClaw'))
+                    $forcedFolder = [IO.Path]::Combine($walkLayout.StateRoot, 'r109ib22-forced')
+                    [void][IO.Directory]::CreateDirectory([IO.Path]::Combine($forcedFolder, 'nested'))
+                    [IO.File]::WriteAllText([IO.Path]::Combine($forcedFolder, 'nested', 'file.txt'), 'forced')
+                    # SYSTEM only, leaf first: the creator-owner entry that the
+                    # parent gives the creating Administrator is removed too, as a
+                    # folder created by SYSTEM never has it.
+                    foreach ($forcedPart in @([IO.Path]::Combine($forcedFolder, 'nested', 'file.txt'), [IO.Path]::Combine($forcedFolder, 'nested'), $forcedFolder)) {
+                        & "$env:SystemRoot\System32\icacls.exe" $forcedPart /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' /remove:g '*S-1-5-32-544' | Out-Null
+                    }
+                    $listable = $true
+                    try { [void][IO.Directory]::GetFileSystemEntries($forcedFolder) } catch [UnauthorizedAccessException] { $listable = $false }
+                    if ($listable) {
+                        $failures.Add('the forced SYSTEM-only folder could be listed with the privileges disabled; the fixture is wrong')
+                    }
+                    $walkOutside = [IO.Path]::Combine($Root, 'walk', 'outside')
+                    [void][IO.Directory]::CreateDirectory($walkOutside)
+                    $walkDecoy = [IO.Path]::Combine($walkOutside, 'decoy.txt')
+                    [IO.File]::WriteAllText($walkDecoy, 'decoy')
+                    $walkDecoyHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $walkDecoy -Algorithm SHA256).Hash
+                    $walkJunction = [IO.Path]::Combine($walkLayout.StateRoot, 'r109ib22-link')
+                    & "$env:SystemRoot\System32\cmd.exe" /c mklink /J "$walkJunction" "$walkOutside" | Out-Null
+                    $walkPrivileges = Get-TestPrivilegeState
+                    # The plain walk is denied; the retried walk lists the tree,
+                    # removes the junction as a link and leaves the decoy alone.
+                    try {
+                        Remove-DefenseClawUninstallStateTreeLinks -Layout @{ StateRoot = $walkLayout.StateRoot } 3>$null
+                    }
+                    catch {
+                        $failures.Add("the link walk over a tree with a SYSTEM-only folder was refused: $($_.Exception.Message)")
+                    }
+                    if (Microsoft.PowerShell.Management\Get-Item -LiteralPath $walkJunction -Force -ErrorAction SilentlyContinue) {
+                        $failures.Add('the link walk left the junction in place')
+                    }
+                    if (-not [IO.File]::Exists($walkDecoy) -or (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $walkDecoy -Algorithm SHA256).Hash -cne $walkDecoyHash) {
+                        $failures.Add('the link walk changed the folder the junction pointed to')
+                    }
+                    if ((Get-TestPrivilegeState) -cne $walkPrivileges) {
+                        $failures.Add('the privileged walk left the process privileges changed')
+                    }
+                    $walkLog = [IO.Path]::Combine($script:WindowsDirectory, 'Logs', 'DefenseClaw', 'enterprise-lifecycle.log')
+                    if (-not [IO.File]::Exists($walkLog) -or [IO.File]::ReadAllText($walkLog) -notmatch 'listed after access denied, with backup and restore privileges enabled for this walk only') {
+                        $failures.Add('the privileged walk left no lifecycle log line')
+                    }
+                    # The tree walk and the name scan of the managed-tree delete.
+                    $walkValue = Invoke-DefenseClawStateRootWalk -WalkRoot $walkLayout.StateRoot -WalkLabel StateRoot -Walk {
+                        @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $walkLayout.StateRoot -Recurse -Force) | Microsoft.PowerShell.Core\Out-Null
+                        return 'walked'
+                    }
+                    if ($walkValue -cne 'walked') {
+                        $failures.Add("the recursive walk of a tree with a SYSTEM-only folder returned '$walkValue'")
+                    }
+                    # Anything but the exact StateRoot, or any other profile,
+                    # keeps the original refusal.
+                    $deniedWalk = { Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $forcedFolder -Force | Microsoft.PowerShell.Core\Out-Null }
+                    foreach ($case in @(
+                            @{ Name = 'the folder above StateRoot'; Root = [IO.Path]::GetDirectoryName($walkLayout.StateRoot); Label = 'StateRoot' },
+                            @{ Name = 'a label that is not StateRoot or InstallRoot'; Root = $walkLayout.StateRoot; Label = 'Other' })) {
+                        $refused = $false
+                        try { Invoke-DefenseClawStateRootWalk -WalkRoot $case.Root -WalkLabel $case.Label -Walk $deniedWalk }
+                        catch { $refused = ($_.Exception.Message -match 'Access to the path') -and ($_.Exception.Message -notmatch 'privileges_required') }
+                        if (-not $refused) {
+                            $failures.Add("the privileged walk acted on $($case.Name)")
+                        }
+                    }
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient
+                    $refused = $false
+                    try { Invoke-DefenseClawStateRootWalk -WalkRoot $walkLayout.StateRoot -WalkLabel StateRoot -Walk $deniedWalk }
+                    catch { $refused = ($_.Exception.Message -match 'Access to the path') -and ($_.Exception.Message -notmatch 'privileges_required') }
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                    if (-not $refused) {
+                        $failures.Add('the privileged walk acted for the Secure Client profile')
+                    }
+                    # A token that does not hold the privileges at all (they are
+                    # removed from the token of a child process, as a user-rights
+                    # policy does) is refused with the reason and the way out,
+                    # and nothing changes.
+                    & "$env:SystemRoot\System32\cmd.exe" /c mklink /J "$walkJunction" "$walkOutside" | Out-Null
+                    $moduleFile4 = [string](Microsoft.PowerShell.Core\Get-Module -Name DefenseClawEnterprise).Path
+                    $childScript4 = [IO.Path]::Combine($Root, 'no-privileges-child.ps1')
+                    [IO.File]::WriteAllText($childScript4, @"
+`$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices;
+public static class DcsfRemove {
+  [StructLayout(LayoutKind.Sequential)] struct LUID { public uint Lo; public int Hi; }
+  [StructLayout(LayoutKind.Sequential)] struct TP { public uint Count; public LUID Luid; public uint Attr; }
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr p, uint a, out IntPtr t);
+  [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool LookupPrivilegeValueW(string s, string n, out LUID l);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool AdjustTokenPrivileges(IntPtr t, bool d, ref TP n, uint l, IntPtr p, IntPtr r);
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  public static void Remove(string privilege) { IntPtr t; if (!OpenProcessToken(GetCurrentProcess(), 0x28, out t)) return; LUID l; if (LookupPrivilegeValueW(null, privilege, out l)) { TP n = new TP(); n.Count = 1; n.Luid = l; n.Attr = 4u; AdjustTokenPrivileges(t, false, ref n, 0, IntPtr.Zero, IntPtr.Zero); } }
+}
+'@
+[DcsfRemove]::Remove('SeBackupPrivilege'); [DcsfRemove]::Remove('SeRestorePrivilege')
+`$module = Import-Module -Name '$($moduleFile4.Replace("'", "''"))' -Force -PassThru
+& `$module {
+    `$script:ProgramData = '$($script:ProgramData.Replace("'", "''"))'
+    `$script:ProgramFiles = '$($script:ProgramFiles.Replace("'", "''"))'
+    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+    try { Remove-DefenseClawUninstallStateTreeLinks -Layout @{ StateRoot = '$($walkLayout.StateRoot.Replace("'", "''"))' }; 'NO-ERROR' } catch { 'ERROR: ' + `$_.Exception.Message }
+}
+"@)
+                    $child4Stdout = [IO.Path]::Combine($Root, 'no-privileges-child.out')
+                    $child4Stderr = [IO.Path]::Combine($Root, 'no-privileges-child.err')
+                    [void](Microsoft.PowerShell.Management\Start-Process -FilePath $engine -ArgumentList ('-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $childScript4) -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $child4Stdout -RedirectStandardError $child4Stderr)
+                    $child4Output = [IO.File]::ReadAllText($child4Stdout) + [IO.File]::ReadAllText($child4Stderr)
+                    if ($child4Output -notmatch 'ERROR: privileges_required: ' -or $child4Output -notmatch 'does not hold SeBackupPrivilege and SeRestorePrivilege' -or
+                        $child4Output -notmatch 'nothing was changed and the services are still running' -or $child4Output -notmatch 'Run the same uninstall as SYSTEM') {
+                        $failures.Add("a token without backup and restore was not refused with the reason and the way out: $child4Output")
+                    }
+                    if (-not (Microsoft.PowerShell.Management\Get-Item -LiteralPath $walkJunction -Force -ErrorAction SilentlyContinue)) {
+                        $failures.Add('the refused walk changed the tree')
+                    }
+                    # Give the scratch cleanup the forced folder back (its owner may).
+                    & "$env:SystemRoot\System32\icacls.exe" $forcedFolder /grant '*S-1-5-32-544:(OI)(CI)F' /C /Q 2>&1 | Out-Null
+                }
+                finally {
+                    $script:ProgramFiles = $savedProgramFiles4
+                    $script:WindowsDirectory = $savedWindows4
+                    $script:ProgramData = $savedProgramData
+                    Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+                }
+            }
+
             # The Secure Client profile has no data-file check.
             $reader = Start-TestReader ([IO.Path]::Combine($layout.RuntimeDirectory, 'audit.db')) 120000
             Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient

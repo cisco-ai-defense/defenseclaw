@@ -840,6 +840,48 @@ def test_the_unreadable_file_probe_and_the_state_deletion_enable_privileges_for_
     assert "$targetPlain" in deleter and deleter.index("$targetPlain") < deleter.index("DeleteTreePrivileged($Target, $deleted)")
 
 
+def test_the_purge_walks_of_state_root_retry_with_call_scoped_privileges_for_a_default_token() -> None:
+    """GAP-0890 r2: an Administrator whose backup and restore privileges are
+    present but disabled cannot list a folder only SYSTEM may open, so the purge
+    failed at its first walk of StateRoot (the junction scan) with a generic
+    lifecycle_error, long before the delete that the earlier fallback guards.
+    The three walks of the purge path (junction scan and removal, the reparse
+    veto and the name scan of the managed-tree delete) now run through one
+    wrapper that retries a walk once, only after access denied, only for the
+    standalone profile and only on the exact StateRoot or InstallRoot, with
+    backup and restore enabled on a thread-bound duplicate of the token for that
+    walk alone; a token without them is refused with privileges_required, the
+    reason and the way out (behaviour in
+    enterprise-standalone-state-files-in-use-smoke.ps1 and the native cells)."""
+
+    module = _text(MODULE)
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    scope = native[native.index("public sealed class TreeWalkScope") : native.index("public static TreeWalkScope EnterTreeWalkPrivileges()")]
+    assert "new UninstallFilePrivilegeScope(true, true)" in scope and "Dispose()" in scope
+    wrapper = _function_body(module, "Invoke-DefenseClawStateRootWalk")
+    first = wrapper.index("& $Walk")
+    for guard in (
+        "Test-DefenseClawStandaloneProfile",
+        "$WalkLabel -cne 'StateRoot' -and $WalkLabel -cne 'InstallRoot'",
+        "Test-DefenseClawAccessDeniedError",
+        "[StringComparison]::OrdinalIgnoreCase",
+        "EnterTreeWalkPrivileges()",
+        "privileges_required: ",
+        "Run the same uninstall as SYSTEM",
+        "$walkScope.Dispose()",
+        "Write-DefenseClawLifecycleLogDiagnostic",
+    ):
+        assert guard in wrapper, guard
+    # The first attempt is plain; the privileged one comes after the guards, and
+    # the scope is released in a finally block.
+    assert first < wrapper.index("EnterTreeWalkPrivileges()") and wrapper.index("finally") > wrapper.index("EnterTreeWalkPrivileges()")
+    links = _function_body(module, "Remove-DefenseClawUninstallStateTreeLinks")
+    assert "Invoke-DefenseClawStateRootWalk -WalkRoot $stateRoot -WalkLabel StateRoot -NothingChanged" in links
+    tree = _function_body(module, "Remove-DefenseClawManagedTree")
+    assert tree.count("Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label") == 2
+    assert tree.index("Invoke-DefenseClawStateRootWalk") < tree.index("Remove-Item")
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).

@@ -1228,6 +1228,37 @@ namespace $nativeNamespace
 
         private static bool failRevertForTest = false;
 
+        // GAP-0890 r2: a thread-bound backup and restore scope for a bounded
+        // walk of DefenseClaw's own tree that an Administrator's disabled
+        // privileges would otherwise stop at a folder only SYSTEM may list. The
+        // caller disposes it in a finally block; Missing names the privileges
+        // the token does not hold. Same mechanism and same fail-closed revert
+        // as the probe and the deletion.
+        public sealed class TreeWalkScope : IDisposable
+        {
+            private readonly UninstallFilePrivilegeScope scope;
+
+            internal TreeWalkScope()
+            {
+                scope = new UninstallFilePrivilegeScope(true, true);
+            }
+
+            public string[] Missing
+            {
+                get { return scope.Missing.ToArray(); }
+            }
+
+            public void Dispose()
+            {
+                scope.Dispose();
+            }
+        }
+
+        public static TreeWalkScope EnterTreeWalkPrivileges()
+        {
+            return new TreeWalkScope();
+        }
+
         private static void FailClosedAfterRevertFailure(int error)
         {
             string message =
@@ -39123,42 +39154,44 @@ function Remove-DefenseClawUninstallStateTreeLinks {
     if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw (Get-DefenseClawUninstallStateLinkRefusal -Item $root)
     }
-    $links = [Collections.Generic.List[object]]::new()
-    $pending = [Collections.Generic.Stack[string]]::new()
-    $pending.Push($stateRoot)
-    while ($pending.Count -gt 0) {
-        $directory = $pending.Pop()
-        foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force) {
-            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                $links.Add($item)
-            }
-            elseif ($item.PSIsContainer) {
-                $pending.Push([string]$item.FullName)
-            }
-        }
-    }
-    foreach ($link in $links) {
-        $path = [string]$link.FullName
-        try {
-            if ($link.PSIsContainer) {
-                # Non-recursive: RemoveDirectory deletes the junction or
-                # directory link itself and never enters it.
-                [IO.Directory]::Delete($path, $false)
-            }
-            else {
-                [IO.File]::Delete($path)
+    Invoke-DefenseClawStateRootWalk -WalkRoot $stateRoot -WalkLabel StateRoot -NothingChanged -Walk {
+        $links = [Collections.Generic.List[object]]::new()
+        $pending = [Collections.Generic.Stack[string]]::new()
+        $pending.Push($stateRoot)
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Pop()
+            foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force) {
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    $links.Add($item)
+                }
+                elseif ($item.PSIsContainer) {
+                    $pending.Push([string]$item.FullName)
+                }
             }
         }
-        catch {
-            throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason $_.Exception.Message)
+        foreach ($link in $links) {
+            $path = [string]$link.FullName
+            try {
+                if ($link.PSIsContainer) {
+                    # Non-recursive: RemoveDirectory deletes the junction or
+                    # directory link itself and never enters it.
+                    [IO.Directory]::Delete($path, $false)
+                }
+                else {
+                    [IO.File]::Delete($path)
+                }
+            }
+            catch {
+                throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason $_.Exception.Message)
+            }
+            if ($null -ne (Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)) {
+                throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason 'it is still there')
+            }
+            Microsoft.PowerShell.Utility\Write-Warning -Message (
+                "the uninstall removed the link $path from the DefenseClaw state folder; " +
+                'the folder or file it pointed to was not changed'
+            )
         }
-        if ($null -ne (Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)) {
-            throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason 'it is still there')
-        }
-        Microsoft.PowerShell.Utility\Write-Warning -Message (
-            "the uninstall removed the link $path from the DefenseClaw state folder; " +
-            'the folder or file it pointed to was not changed'
-        )
     }
 }
 
@@ -39644,17 +39677,22 @@ function Remove-DefenseClawManagedTree {
             -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
         return
     }
-    Assert-DefenseClawManagedTreeNoReparse `
-        -Root $safe `
-        -AllowAFUnixSocketAt $AllowAFUnixSocketAt
+    [void](Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label -Walk {
+        Assert-DefenseClawManagedTreeNoReparse `
+            -Root $safe `
+            -AllowAFUnixSocketAt $AllowAFUnixSocketAt
+    })
     # A tree that holds a name normalization changes (GAP-1145) is removed
     # through its extended-length path, which keeps every name exact.
-    $target = $safe
-    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $safe -Recurse -Force)) {
-        if ((Get-DefenseClawExactItemPath -Path $item.FullName) -cne [string]$item.FullName) {
-            $target = '\\?\' + $safe
-            break
+    $target = Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label -Walk {
+        $walkTarget = $safe
+        foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $safe -Recurse -Force)) {
+            if ((Get-DefenseClawExactItemPath -Path $item.FullName) -cne [string]$item.FullName) {
+                $walkTarget = '\\?\' + $safe
+                break
+            }
         }
+        return $walkTarget
     }
     # Bulldoze posture: Remove-Item can lose to a transient handle (AV scan,
     # Defender real-time, indexer, a slow service stop handler) even after
@@ -43794,6 +43832,86 @@ function Test-DefenseClawAccessDeniedError {
         $exception = $exception.InnerException
     }
     return $false
+}
+
+function Invoke-DefenseClawStateRootWalk {
+    <#
+        GAP-0890 r2: runs a read walk (or a link removal that restarts safely)
+        over DefenseClaw's own StateRoot or InstallRoot. A default-token
+        Administrator holds backup and restore disabled, and Windows lists a
+        folder only SYSTEM may open only with backup intent while one of them
+        is enabled, so the plain walk stops with access denied before the
+        purge reaches any delete. Only then, only for the standalone profile
+        and only when Root is the exact StateRoot or InstallRoot of that
+        profile, the walk runs again with backup and restore enabled on a
+        thread-bound duplicate of the token for the walk alone (the process
+        token is never changed). A token that does not hold them, or any other
+        failure, stays a refusal: a named privileges_required one when the
+        listing is still denied. Walk returns its own value.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$WalkRoot,
+        [Parameter(Mandatory)][string]$WalkLabel,
+        [Parameter(Mandatory)][scriptblock]$Walk,
+        [switch]$NothingChanged
+    )
+    try {
+        return (& $Walk)
+    }
+    catch {
+        $walkFailure = $_
+        if (-not (Test-DefenseClawStandaloneProfile) -or
+            ($WalkLabel -cne 'StateRoot' -and $WalkLabel -cne 'InstallRoot') -or
+            -not (Test-DefenseClawAccessDeniedError -ErrorRecord $walkFailure)) {
+            throw
+        }
+        $walkRoots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+        $walkOwn = [IO.Path]::GetFullPath([string]$(if ($WalkLabel -ceq 'StateRoot') { $walkRoots.StateRoot } else { $walkRoots.InstallRoot })).TrimEnd('\')
+        if (-not [string]::Equals([IO.Path]::GetFullPath($WalkRoot).TrimEnd('\'), $walkOwn, [StringComparison]::OrdinalIgnoreCase)) {
+            throw
+        }
+    }
+    $walkNative = Initialize-DefenseClawNativeSecurity
+    $walkScope = $walkNative::EnterTreeWalkPrivileges()
+    try {
+        $walkMissing = @($walkScope.Missing)
+        try {
+            $walkValue = & $Walk
+        }
+        catch {
+            if (-not (Test-DefenseClawAccessDeniedError -ErrorRecord $_)) {
+                throw
+            }
+            $walkWhy = if ($walkMissing.Count -gt 0) {
+                "this account's token does not hold $($walkMissing -join ' and ')"
+            }
+            else {
+                'the folder still denies this account'
+            }
+            $walkState = if ($NothingChanged) {
+                'nothing was changed and the services are still running'
+            }
+            else {
+                'the purge stopped here and the uninstall can be run again'
+            }
+            throw (
+                'privileges_required: ' + $_.Exception.Message + " DefenseClaw's own folder holds a file or folder that only SYSTEM may " +
+                "list, and $walkWhy, so an Administrator cannot remove it; $walkState. Run the same uninstall as SYSTEM " +
+                '(an MDM or Intune run is SYSTEM; by hand, a scheduled task or psexec -s that runs the same uninstall command)'
+            )
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+            path   = $WalkRoot
+            reason = "listed after access denied, with backup and restore privileges enabled for this walk only: $($walkFailure.Exception.Message)"
+        }
+        Write-DefenseClawLifecycleLogDiagnostic -Message (
+            'defenseclaw_repair path=' + $WalkRoot +
+            ': listed after access denied, with backup and restore privileges enabled for this walk only')
+        return $walkValue
+    }
+    finally {
+        $walkScope.Dispose()
+    }
 }
 
 function Remove-DefenseClawStateTreePrivileged {
