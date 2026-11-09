@@ -151,26 +151,101 @@ func dockerDocumentRegistries(content string) ([]string, bool) {
 
 const dockerJSONSpace = " \t\r\n"
 
-// dockerFragmentRegistries reads the entries of every insecure-registries list
-// that a piece of daemon.json text spells, including a list the piece cuts off
-// before its closing bracket. A piece without the key lists nothing. ok is
-// false when a list holds anything but JSON strings.
+// dockerFragmentRegistries reads the entries of every top-level
+// insecure-registries list that a piece of daemon.json text spells, including a
+// list the piece cuts off before its closing bracket. A piece without the key
+// lists nothing. ok is false when a list holds anything but JSON strings.
+//
+// A piece of an edit can start inside a string, so the text is read from both
+// alignments (starting outside a string, and starting inside one) and the
+// entries of both are taken: the verdict never depends on where the edit cut
+// the file.
 func dockerFragmentRegistries(text string) (entries []string, ok bool) {
-	const key = `"insecure-registries"`
-	for offset := 0; ; {
-		found := strings.Index(text[offset:], key)
-		if found < 0 {
-			return entries, true
-		}
-		offset += found + len(key)
-		list, listed, valid := dockerFragmentList(text[offset:])
+	for _, insideString := range []bool{false, true} {
+		found, valid := dockerFragmentTopLevelLists(text, insideString)
 		if !valid {
 			return nil, false
 		}
-		if listed {
-			entries = append(entries, list...)
+		entries = append(entries, found...)
+	}
+	return entries, true
+}
+
+// dockerFragmentTopLevelLists scans text as JSON tokens and reads the list of
+// every key that decodes to insecure-registries and is not nested in an object
+// or array the text itself opens as a key's value (the key means something
+// else there, as in a builder block). The key is decoded as JSON, so an escaped
+// spelling names the same key. Containers the text closes without having opened
+// are the file's own, whose depth the text cannot show, so keys after them are
+// read as top-level.
+func dockerFragmentTopLevelLists(text string, insideString bool) (entries []string, ok bool) {
+	const key = "insecure-registries"
+	var nested []bool
+	previous := byte(0)
+	index := 0
+	if insideString {
+		end := dockerStringBodyEnd(text, 0)
+		if end < 0 {
+			return nil, true
+		}
+		index, previous = end+1, '"'
+	}
+	for index < len(text) {
+		switch character := text[index]; character {
+		case '"':
+			end := dockerJSONStringEnd(text[index:])
+			if end < 0 {
+				return entries, true
+			}
+			literal := text[index : index+end]
+			index += end
+			rest := strings.TrimLeft(text[index:], dockerJSONSpace)
+			previous = '"'
+			var name string
+			if !strings.HasPrefix(rest, ":") || len(nested) > 0 && nested[len(nested)-1] ||
+				json.Unmarshal([]byte(literal), &name) != nil || name != key {
+				continue
+			}
+			list, listed, valid := dockerFragmentList(text[index:])
+			if !valid {
+				return nil, false
+			}
+			if listed {
+				entries = append(entries, list...)
+			}
+		case '{', '[':
+			inside := len(nested) > 0 && nested[len(nested)-1]
+			nested = append(nested, inside || previous == ':')
+			previous = character
+			index++
+		case '}', ']':
+			if len(nested) > 0 {
+				nested = nested[:len(nested)-1]
+			}
+			previous = character
+			index++
+		case ' ', '\t', '\r', '\n':
+			index++
+		default:
+			previous = character
+			index++
 		}
 	}
+	return entries, true
+}
+
+// dockerStringBodyEnd is the index of the quote that closes a string whose
+// opening quote lies before text[from], or -1 when the text ends first.
+func dockerStringBodyEnd(text string, from int) int {
+	for index := from; index < len(text); index++ {
+		switch text[index] {
+		case '\\':
+			index++
+		case '"':
+			return index
+		}
+	}
+	return -1
 }
 
 // dockerFragmentList reads `: ["a", "b"` after a key. listed is false when
@@ -385,15 +460,20 @@ func dockerRegistryNumericHost(value string) bool {
 }
 
 // exactDockerRegistryPort reads a port the way Docker does, as a decimal
-// number up to 65535: zero-padded spellings name the same port.
+// number up to 65535: zero-padded spellings of any length name the same port.
 func exactDockerRegistryPort(port string) bool {
-	if port == "" {
-		return true
-	}
-	if len(port) > 16 || port[0] == '-' {
+	digits := strings.TrimPrefix(port, "+")
+	if port != "" && digits == "" || strings.Trim(digits, "0123456789") != "" {
 		return false
 	}
-	value, err := strconv.Atoi(port)
+	digits = strings.TrimLeft(digits, "0")
+	if len(digits) > 5 {
+		return false
+	}
+	if digits == "" {
+		return true
+	}
+	value, err := strconv.Atoi(digits)
 	return err == nil && value <= 65535
 }
 
