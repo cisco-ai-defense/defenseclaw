@@ -130,22 +130,104 @@ def test_remote_openclaw_gateway_is_not_probed_from_here():
         cleanup_app(app, db_path, tmp_dir)
 
 
+_LATE_REGISTERED = b'{"gateway":{"port":18773},"plugins":{"allow":["other","defenseclaw"]}}\n'
+
+
+@pytest.mark.parametrize(
+    "original",
+    [
+        b"// user comment\n{gateway:{mode:'local',port:0x4955},plugins:{allow:['other']}}\n",
+        b'{"gateway":{"mode":"local","port":18773},"plugins":{"allow":["other"]}}\n',
+        _JSON5,
+    ],
+    ids=["json5-comments-hex", "plain-json", "json5-block-comment"],
+)
 @pytest.mark.parametrize("guards_openclaw", [True, False])
-def test_late_openclaw_outage_rollback_says_when_the_plugin_entries_stay(guards_openclaw):
+def test_late_openclaw_outage_puts_back_the_saved_bytes(original, guards_openclaw):
     app, tmp_dir, db_path = make_app_context()
     try:
-        app.cfg.claw.mode = "openclaw" if guards_openclaw else "codex"
-        app.cfg.guardrail.connector = "openclaw" if guards_openclaw else "codex"
+        path = os.path.join(tmp_dir, "openclaw.json")
+        with open(path, "wb") as handle:
+            handle.write(original)
+        os.chmod(path, 0o640)
+        app.cfg.claw.config_file = path
+        app.cfg.gateway.host = "127.0.0.1"
+        app.cfg.claw.mode = "openclaw" if guards_openclaw else ""
+        app.cfg.guardrail.connector = app.cfg.claw.mode
         app.cfg.guardrail.connectors = {}
-        snapshot = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        calls = []
+
+        def restart(*_args, **_kwargs):
+            calls.append("restart")
+            if len(calls) == 1:
+                # DefenseClaw's gateway registered the plugin, then OpenClaw's went down.
+                with open(path, "wb") as handle:
+                    handle.write(_LATE_REGISTERED)
+                cmd_setup._fail_if_restart_failed(["openclaw-gateway"])
+            elif guards_openclaw:
+                # The rollback restart on a configuration that guards OpenClaw registers it again.
+                with open(path, "wb") as handle:
+                    handle.write(_LATE_REGISTERED)
+
+        with (
+            patch.object(cmd_setup, "_restart_services", side_effect=restart),
+            patch.object(cmd_setup, "_openclaw_gateway_healthy", return_value=True),
+            patch.object(cmd_setup, "_adopt_openclaw_gateway_token"),
+            patch.object(cmd_setup, "_write_picked_connector_hint"),
+            patch.object(cmd_setup, "_ensure_connector_available"),
+            patch.object(cmd_setup, "_maybe_bring_up_local_stack"),
+            patch.object(cmd_setup, "_check_connector_version_supported_for_setup", return_value=True),
+            patch.object(cmd_setup, "_windows_runtime_rollback", return_value=False),
+        ):
+            result = CliRunner().invoke(cmd_setup.setup, ["openclaw", "--mode", "action", "--yes"], obj=app)
+        assert result.exit_code != 0, result.output
+        assert len(calls) == 2, result.output
+        with open(path, "rb") as handle:
+            assert handle.read() == original
+        assert os.stat(path).st_mode & 0o777 == 0o640
+        assert "rollback was incomplete" not in result.output
+        assert "keeps the DefenseClaw plugin entries" not in result.output
+        assert not [name for name in os.listdir(tmp_dir) if name.startswith(".openclaw-restore-")]
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_restore_leaves_an_unchanged_file_alone():
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        path = os.path.join(tmp_dir, "openclaw.json")
+        with open(path, "wb") as handle:
+            handle.write(_JSON5)
+        record = cmd_setup._capture_openclaw_config_record(path)
+        before = os.stat(path)
+        cmd_setup._restore_openclaw_config_record(record)
+        after = os.stat(path)
+        assert (after.st_ino, after.st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+    finally:
+        cleanup_app(app, db_path, tmp_dir)
+
+
+def test_failed_restore_of_the_saved_bytes_is_reported_not_called_restored():
+    app, tmp_dir, db_path = make_app_context()
+    try:
+        path = os.path.join(tmp_dir, "openclaw.json")
+        with open(path, "wb") as handle:
+            handle.write(_JSON5)
+        app.cfg.claw.config_file = path
+        app.cfg.claw.mode = "codex"
+        app.cfg.guardrail.connector = "codex"
+        app.cfg.guardrail.connectors = {}
+        snapshot = cmd_setup._with_openclaw_config_record(cmd_setup._capture_setup_config_snapshot(app.cfg), path)
+        with open(path, "wb") as handle:
+            handle.write(_LATE_REGISTERED)
         cause = cmd_setup._OpenClawGatewayNotRunning("The OpenClaw gateway is not running.")
         with (
             patch.object(cmd_setup, "_restart_restored_connector_runtime"),
+            patch.object(cmd_setup.os, "replace", side_effect=PermissionError("denied")),
             pytest.raises(cmd_setup.click.ClickException) as raised,
         ):
             cmd_setup._rollback_failed_connector_application(app, snapshot, cause)
-        text = raised.value.format_message()
-        assert ("keeps the DefenseClaw plugin entries" in text) is guards_openclaw
-        assert "rollback was incomplete" not in text
+        assert "rollback was incomplete: restore openclaw.json" in raised.value.format_message()
+        assert not [name for name in os.listdir(tmp_dir) if name.startswith(".openclaw-restore-")]
     finally:
         cleanup_app(app, db_path, tmp_dir)
