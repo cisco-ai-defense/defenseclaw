@@ -1263,9 +1263,13 @@ def _publish_identity_file(plan: RecoveryPlan, source: str, destination: str) ->
     _publish_no_replace(source, destination)
     try:
         _fsync_directory(os.path.dirname(destination))
-    except OSError as exc:
-        # The name exists now: the caller must take it back like any other published file.
-        raise RecoveryPublicationError("device-key-create-failed", created=True) from exc
+    except BaseException as exc:
+        # The link just made this name, so it is ours: take it back here on any stop after it
+        # exists (an interrupt included), before the caller has recorded it.  Only a name that
+        # cannot be unlinked is handed to the caller, which reports it as left behind.
+        if not _discard_files([destination]) and isinstance(exc, Exception):
+            raise RecoveryPublicationError("device-key-create-failed", created=True) from exc
+        raise
 
 
 def _publish_no_replace(source: str, target: str) -> None:
