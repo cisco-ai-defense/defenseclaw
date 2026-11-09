@@ -197,6 +197,15 @@ Missing registration, an open runtime, another owner, extra write permission,
 a link, or other untrusted state still refuses the upgrade. Correct the state,
 have the account sign in, and run Setup `/ensure JSON=1` again.
 
+An account with no active Windows session (signed out or disconnected) does not fail
+a managed Windows upgrade for its Copilot, OpenCode or Cursor hooks either. The guardian
+installs a connector's new per-user hooks only in the account's own session, so when an
+earlier release's hook lock names the target and the machine policy that registers its
+hook is in force, the target is pending until the account signs in. `status` and `verify`
+show the connector as pending and say its agent is not protected until then; the upgrade
+ends `0`. A lock this release wrote, a machine policy that is not in force or cannot be
+read, and an account with an active session whose repair fails still fail the upgrade.
+
 ## Roll back
 
 With bundle trust anchors, DefenseClaw refuses to install a release below the
