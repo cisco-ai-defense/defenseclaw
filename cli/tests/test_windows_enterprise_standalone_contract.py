@@ -933,6 +933,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-recorded-trust-smoke.ps1",
     "enterprise-standalone-recovery-activation-deferral-smoke.ps1",
     "enterprise-standalone-recovery-gateway-smoke.ps1",
+    "enterprise-standalone-record-recovery-smoke.ps1",
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
     "enterprise-standalone-runtime-env-acl-smoke.ps1",
@@ -2358,6 +2359,7 @@ def test_repair_rebuilds_deployment_metadata_that_is_not_json(tmp_path: Path) ->
             "Get-DefenseClawDeploymentMetadata",
             "Get-DefenseClawDeploymentMetadataOnce",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "Assert-DefenseClawMetadataRebuildReady",
             "Format-DefenseClawSetupAction",
             "Write-DefenseClawJsonAtomic",
             "Clear-DefenseClawRestrictiveFileAttributes",
@@ -2400,6 +2402,9 @@ function Move-DefenseClawNonImageFileReplacing {
 }
 function Test-DefenseClawTrustStrictAncestors { return $false }
 function Write-DefenseClawAclSelfHealAdvisory { param($Path, $Reason) }
+# The record is no account's: the drift of this harness is the canonical DACL
+# check above, which a file that parses must still be refused for.
+function Get-DefenseClawStandaloneRecordUntrustedReason { param([string]$Path) return '' }
 # Setup reads the metadata elevated, so the authenticated ACL repair runs
 # first. Like a file another principal could have written, a drifted one is
 # refused there, and the standalone profile keeps the canonical check.
@@ -2516,6 +2521,7 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
             "Assert-DefenseClawInstalledConfig",
             "Assert-DefenseClawRepairRollbackConfig",
             "Repair-DefenseClawUnreadableDeploymentMetadata",
+            "Assert-DefenseClawMetadataRebuildReady",
             "Get-DefenseClawRepairRollbackApprovedConfigSource",
             "Get-DefenseClawRecordedConfigGeneration",
             "Get-DefenseClawRecordedConfigGenerationHash",

@@ -1902,6 +1902,33 @@ func TestWindowsEnterpriseEnsurePlansInstallOverASquattedRoot(t *testing.T) {
 	}
 }
 
+// A deployment record or attestation another account can change makes the
+// status probe fail with untrusted_record. Setup, which carries the payload,
+// plans a repair that keeps the changed file aside and writes it again; the
+// installed CLI, which carries none, refuses with the same text (GAP-0602).
+func TestWindowsEnterpriseEnsurePlansARepairForAChangedRecord(t *testing.T) {
+	original := windowsEnterpriseEnsureDriftDetector
+	windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) { return "", nil }
+	t.Cleanup(func() { windowsEnterpriseEnsureDriftDetector = original })
+	refusal := `untrusted_record: C:\ProgramData\Cisco\DefenseClaw\install\deployment.json can be changed by the account S-1-5-32-545, so Setup does not trust what is in it and changed nothing.`
+	status, err := parseWindowsEnterpriseInstallerReport([]byte(`{"schema_version":1,"ok":false,"action":"status","error":` + strconvQuote(refusal) + `,"errors":[` + strconvQuote(refusal) + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := planWindowsEnterpriseEnsure(status, ensureTestOptions(), `C:\stage\install-enterprise.ps1`)
+	if err != nil || plan.Action != "repair" || plan.Reason != "untrusted_record" {
+		t.Fatalf("plan %+v, %v", plan, err)
+	}
+	if code := windowsEnterpriseMessageCode(refusal, ""); code != "untrusted_record" {
+		t.Fatalf("code %q", code)
+	}
+	// The installed CLI carries no payload: it refuses, naming the repair.
+	bare := &windowsEnterpriseLifecycleOptions{}
+	if _, err := planWindowsEnterpriseEnsure(status, bare, `C:\stage\install-enterprise.ps1`); err == nil || !strings.Contains(err.Error(), "untrusted_record: ") {
+		t.Fatalf("a run without a payload planned past a changed record: %v", err)
+	}
+}
+
 func TestWindowsEnterpriseFootprintIgnoresUserCreatedPaths(t *testing.T) {
 	original := windowsEnterpriseFootprintOwner
 	t.Cleanup(func() { windowsEnterpriseFootprintOwner = original })

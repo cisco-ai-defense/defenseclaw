@@ -505,6 +505,12 @@ func TestWindowsEnterpriseStandaloneErrorTextHidesSecurityDescriptorDetail(t *te
 			internal: true,
 		},
 		{message: "  the gateway did not start  ", want: "the gateway did not start"},
+		// A file name that holds the word is not detail: the refusal keeps
+		// its path and the exact icacls fix (GAP-0602).
+		{
+			message: `C:\ProgramData\Cisco\DefenseClaw\install\codex-requirements-acl-backup.json is owned by BUILTIN\Users (S-1-5-32-545), not an administrator. Fix: icacls "C:\ProgramData\Cisco\DefenseClaw\install\codex-requirements-acl-backup.json" /setowner *S-1-5-32-544`,
+			want:    `C:\ProgramData\Cisco\DefenseClaw\install\codex-requirements-acl-backup.json is owned by BUILTIN\Users (S-1-5-32-545), not an administrator. Fix: icacls "C:\ProgramData\Cisco\DefenseClaw\install\codex-requirements-acl-backup.json" /setowner *S-1-5-32-544`,
+		},
 	} {
 		got, internal := windowsEnterpriseStandaloneErrorText(test.message)
 		if got != test.want || internal != test.internal {

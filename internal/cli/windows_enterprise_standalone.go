@@ -3396,7 +3396,7 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held", "privileges_required":
+	case "codex_state_held", "codex_requirements_held", "privileges_required", "untrusted_record":
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message
@@ -3424,6 +3424,9 @@ var windowsEnterpriseKnownCodes = []string{
 	// the rollback text, so the code is not at the start of the message
 	// (GAP-0877, review S2). It exits 1603, like any refusal.
 	"codex_state_unsettled",
+	// A Setup-owned record another account owns or can write: a repair that
+	// carries the payload keeps it aside and writes it again (GAP-0602).
+	"untrusted_record",
 }
 
 // windowsEnterpriseBundleRefusalCodes are the bundle refusals a retry of the
@@ -4681,7 +4684,7 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 		// copy of a payload file an antivirus quarantine removed. Without it
 		// ensure refused "recorded managed artifact is missing" where Setup
 		// /repair healed the same host (GAP-0935).
-		if plan.Reason != "verify_failed" {
+		if plan.Reason != "verify_failed" && plan.Reason != "untrusted_record" {
 			clearWindowsEnterpriseSources(&actionOpts)
 			if opts.codexTargetTransaction {
 				// The repair installs the supplied config on the installed
@@ -4739,6 +4742,12 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// install or upgrade whose report replaces this one; keep its record of
 	// the gateway recovery ran.
 	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	if plan.Reason == "untrusted_record" && report != nil && report.OK {
+		if layout, layoutErr := windowsManagedLayout.standalone(); layoutErr == nil && strings.TrimSpace(layout.DataDir) != "" {
+			result.Changes = append(result.Changes,
+				windowsEnterpriseKeptRecordChanges(filepath.Join(filepath.Dir(layout.DataDir), "install"), opts.activationStartedAt)...)
+		}
+	}
 	if allowRetry && plan.Action == "install" && windowsEnterpriseInstallLostRace(report) {
 		result.AddWarning("concurrent_install", "another lifecycle installed this host while ensure waited for the lifecycle lock; ensure re-planned from a fresh status")
 		return true, nil
@@ -4911,6 +4920,14 @@ func planWindowsEnterpriseEnsure(
 	absentReason := "not_installed"
 	if status.probeFailed {
 		failure := windowsEnterpriseEnsureProbeFailure(status)
+		if strings.Contains(failure.Error(), "untrusted_record: ") && len(missingWindowsEnterpriseSources(opts)) == 0 {
+			// The deployment record or the attestation can be changed by
+			// another account. Setup, which carries the payload, keeps the
+			// changed file aside and writes the record again from the
+			// payload instead of trusting it in place (GAP-0602). The
+			// installed CLI carries none and refuses with the same text.
+			return windowsEnterpriseEnsurePlan{Action: "repair", Reason: "untrusted_record", Detail: failure.Error()}, nil
+		}
 		if windowsEnterpriseMessageCode(failure.Error(), "") != "root_squatted" {
 			// Planning from a document that carries no state would read an
 			// installed host as absent and install over it.
