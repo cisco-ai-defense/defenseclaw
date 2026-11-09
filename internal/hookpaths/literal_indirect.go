@@ -33,6 +33,9 @@ func readIndirectSource(name, cwd string) (string, bool) {
 		return "", false
 	}
 	defer root.Close()
+	if pathBodyUnanswered(cwd, relative) {
+		return "", false
+	}
 	before, err := root.Lstat(relative)
 	noteBodyLinkLimit(err)
 	if err != nil || !before.Mode().IsRegular() || before.Size() > maxIndirectSourceBytes {
