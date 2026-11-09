@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -1675,6 +1676,40 @@ func TestConnectorTeardownReleasesTheConnectorsContractLockEntry(t *testing.T) {
 	}
 	if got := lockedConnectorNames(t, dir); !reflect.DeepEqual(got, []string{"codex"}) {
 		t.Fatalf("lock after teardown = %v, want only the peer codex", got)
+	}
+}
+
+// A managed runtime keeps the protected contract lock: the teardown of a
+// connector does not release its entry there (Secure Client behaviour unchanged).
+func TestConnectorTeardownKeepsTheContractLockEntryOfAManagedRuntime(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dir, "cursor")()
+	loaded, previousMode := cfg, cfg.DeploymentMode
+	loaded.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	t.Cleanup(func() { loaded.DeploymentMode = previousMode })
+
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
+	previous := connector.CursorHooksPathOverride
+	connector.CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
+
+	conn := connector.NewCursorConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIToken: "test-token", ManagedEnterprise: true}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if err := connector.SaveHookContractLockEntryForMode(dir, connector.NewHookContractLockEntry(opts, conn, "test-build"), true); err != nil {
+		t.Fatalf("save lock: %v", err)
+	}
+	if _, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "cursor"); exitCode != 0 {
+		t.Fatalf("teardown failed: exit=%d stderr=%q", exitCode, stderr)
+	}
+	entry, err := connector.LoadHookContractLockEntryForMode(dir, "cursor", true)
+	if err != nil {
+		t.Fatalf("load managed lock: %v", err)
+	}
+	if entry.Connector == "" {
+		t.Fatal("a managed connector teardown released its protected contract lock entry")
 	}
 }
 
