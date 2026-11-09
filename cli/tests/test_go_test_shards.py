@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -405,10 +406,16 @@ def test_windows_remaining_package_control_stays_covered() -> None:
         for path in ("internal/gateway", "internal/gateway/connector", "internal/gateway/connector/hookexec")
     }
     packages = sorted(set(timings["packages"]) - excluded)
-    shards = partition_packages(packages, 6, timings, root=root)
+    # The workflow runs the remaining packages in this many parts, one runner each.
+    workflow = (root / ".github/workflows/windows-native.yml").read_text(encoding="utf-8")
+    shard_count = int(re.search(r"\$remainingPackageShardCount = (\d+)", workflow).group(1))
+    for index in range(shard_count):
+        assert f"{{ shard: pk{index}, kind: packages, index: {index} }}" in workflow
+    assert f"shard: pk{shard_count}," not in workflow
+    shards = partition_packages(packages, shard_count, timings, root=root)
     control = prefix + "internal/hookpaths"
     # GAP-0749: the hookpaths program sweep (every form through Resolve on
-    # native Windows, eight tests) and its archive table take about 20 minutes
+    # native Windows, sixteen tests) and its archive table take about 20 minutes
     # on a hosted runner, more than one shard step. The package runs in parts:
     # every one of its tests is in exactly one part, no part is a whole
     # package, and no part is estimated past half the 14 minute go test timeout.

@@ -57,6 +57,9 @@ func round6Selected(facts map[string]string) []string {
 func TestGAP0621LinkedChildAfterManyEntriesBinds(t *testing.T) {
 	for _, filler := range []string{"folders", "skills", "links"} {
 		t.Run(filler, func(t *testing.T) {
+			// Each filler fills its own 4,097 entries: on Windows creating
+			// them took 65 s in a row, so the three run side by side (GAP-0963).
+			t.Parallel()
 			home := t.TempDir()
 			project, root, target := round6Root(t, home)
 			protected := filepath.Join(t.TempDir(), "protected")
