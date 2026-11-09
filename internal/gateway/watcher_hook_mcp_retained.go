@@ -150,8 +150,8 @@ func (a *APIServer) heldRefusalsAllowed(ctx context.Context, cfg *config.Config,
 	if overflow {
 		return false
 	}
-	for _, h := range held {
-		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, h.def, true))
+	for _, def := range held {
+		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, def, true))
 		if !verdict.Enabled || verdict.Source != "admin-allow" {
 			return false
 		}
@@ -197,6 +197,9 @@ type overflowHold struct {
 	until   time.Time
 	session string
 	entry   config.MCPServerEntry
+	// more says the session met another definition of the name that was not
+	// kept: the hold is then never released by the admission of entry.
+	more bool
 }
 
 func unrecordedKey(connector, home string) string {
@@ -225,6 +228,7 @@ func (h *hookReportedMCPServers) holdOverflow(connector, home, session, cwd, nam
 	held, present := holds[key]
 	if present && now.Before(held.until) {
 		held.until = now.Add(mcpResolvedTTL)
+		held.more = held.more || !sameHeldDefinition(held.entry, entry)
 		return
 	}
 	if !present && len(holds) >= hookOverflowPerAccount {
