@@ -138,6 +138,16 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
+			name:   "Docker insecure registry taking over in an Edit of a complete document",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `{"insecure-registries":["198.51.100.7:5000"],"insecure-registries":[]}`,
+				"new_string": `{"insecure-registries":[],"insecure-registries":["198.51.100.7:5000"]}`,
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
 			name:   "Docker insecure registry long zero-padded port",
 			ruleID: dockerInsecureHTTPRegistryRuleID,
 			input: exactStructuredInput(t, "Write", map[string]any{
@@ -273,6 +283,15 @@ func TestExactAdministrativeSecurityRuleHardNegatives(t *testing.T) {
 				"file_path":  "/etc/docker/daemon.json",
 				"old_string": `"debug": true`,
 				"new_string": `"debug": true, "insecure-registries": ["127.0.0.1:5000"]`,
+			}),
+		},
+		{
+			name:   "Docker Edit of a complete document whose last insecure-registries key is empty",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `{"log-driver":"json-file"}`,
+				"new_string": `{"log-driver":"json-file","insecure-registries":["198.51.100.7:5000"],"insecure-registries":[]}`,
 			}),
 		},
 		{
