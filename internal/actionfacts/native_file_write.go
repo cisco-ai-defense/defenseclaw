@@ -68,43 +68,50 @@ type editResult int
 
 const (
 	// editUnread: the steps are not applied to the file. The call is not an
-	// edit, the file holds no text and the steps do not apply to nothing (the
-	// gateway cannot tell an empty file from one it does not see), or a step
-	// would grow the text past nativeEditWorkLimit. The text the call carries
-	// is then read without the file.
+	// edit, or the file holds no text and the steps do not apply to nothing (the
+	// gateway cannot tell an empty file from one it does not see). The text the
+	// call carries is then read without the file.
 	editUnread editResult = iota
 	// editApplied: every step applied, and the document is the text they leave.
 	editApplied
-	// editRefused: the file holds text and a step cannot apply to it (its text
-	// is absent, found more than once without replace-all, or empty over a file
-	// with text). The tool refuses such a call and writes nothing, so the call
-	// adds nothing to the file.
+	// editRefused: the file holds text (white space included) and a step cannot
+	// apply to it (its text is absent, found more than once without
+	// replace-all, or empty over a file with text). The tool refuses such a call
+	// and writes nothing, so the call adds nothing to the file.
 	editRefused
+	// editUncomputable: a step would grow the text past nativeEditWorkLimit, so
+	// the document the steps leave is not computed. It is never read as
+	// harmless: no fragment of the call can stand for a document that was not
+	// built.
+	editUncomputable
 )
 
 // nativeEditWorkLimit bounds the text a step of an edit may build while the
 // steps are applied. It is not the bound of a document the proof reads: a step
 // may take the text past that bound and a later step bring it back, as the
-// tool does, and only the document the steps leave is held to the bound.
+// tool does, and only the document the steps leave is held to the bound. A step
+// that passes this limit leaves a document the proof cannot compute
+// (editUncomputable).
 const nativeEditWorkLimit = 4 << 20
 
 // applyEdits applies the steps of an Edit or a MultiEdit, in order, to the text
 // of the file, as the tool does: a step replaces its text where the file holds
 // it once, or every occurrence when the step asks for it; an empty replaced
-// text over a file with no text gives the new text.
+// text over a file with no text gives the new text. A file with any text,
+// white space included, is a file with text.
 func (write nativeFileWrite) applyEdits(content string) (string, editResult) {
 	if !write.edit || len(write.before) == 0 ||
 		len(write.before) != len(write.after) || len(write.before) != len(write.all) {
 		return "", editUnread
 	}
 	failed := editUnread
-	if strings.TrimSpace(content) != "" {
+	if content != "" {
 		failed = editRefused
 	}
 	for step, replaced := range write.before {
 		replacement := write.after[step]
 		if replaced == "" {
-			if strings.TrimSpace(content) != "" {
+			if content != "" {
 				return "", failed
 			}
 			content = replacement
@@ -115,7 +122,7 @@ func (write nativeFileWrite) applyEdits(content string) (string, editResult) {
 			return "", failed
 		}
 		if len(content)+count*(len(replacement)-len(replaced)) > nativeEditWorkLimit {
-			return "", editUnread
+			return "", editUncomputable
 		}
 		content = strings.ReplaceAll(content, replaced, replacement)
 	}
