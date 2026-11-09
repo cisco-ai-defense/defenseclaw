@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // windowsEnterpriseKeptRecordChanges names the Setup-owned records (the
@@ -63,4 +65,41 @@ func windowsEnterpriseAttestAgainNote(attestation bool) string {
 		return ""
 	}
 	return "; the new attestation says not attested, attest again with enterprise windows repair --attest-agent-application-control"
+}
+
+// windowsEnterpriseKeptRecordUntrusted reports whether a kept copy still
+// carries the access of an account other than SYSTEM, Administrators and
+// TrustedInstaller (an untrusted owner or writer); a seam for tests.
+var windowsEnterpriseKeptRecordUntrusted = func(path string) bool {
+	result, err := managed.AssessCanonical(path, managed.ObjectInstallFile, managed.CanonicalOptions{Quiet: true})
+	return err == nil && result.Outcome == managed.CanonicalBoundary
+}
+
+// windowsEnterpriseKeptRecordFiles lists the copies Setup kept aside next to
+// the records in installStateDir; a seam for tests.
+var windowsEnterpriseKeptRecordFiles = func(installStateDir string) []string {
+	var kept []string
+	for _, record := range []string{"deployment.json", "agent-application-control-attestation.json"} {
+		matches, err := filepath.Glob(filepath.Join(installStateDir, record+".rejected-*"))
+		if err == nil {
+			kept = append(kept, matches...)
+		}
+	}
+	return kept
+}
+
+// addWindowsEnterpriseKeptRecordWarnings names, in status and verify, each
+// kept copy of a changed record that still carries another account's access
+// (a program held it open when Setup tried to give it administrator-only
+// access), with the exact fix. The copy is evidence only and nothing reads
+// it, so this is a warning (GAP-0602 review D4).
+func addWindowsEnterpriseKeptRecordWarnings(result interface{ AddWarning(code, message string) }, installStateDir string) {
+	for _, kept := range windowsEnterpriseKeptRecordFiles(installStateDir) {
+		if !windowsEnterpriseKeptRecordUntrusted(kept) {
+			continue
+		}
+		result.AddWarning("kept_record_unprotected", fmt.Sprintf(
+			"%s is the copy of a changed record that Setup kept aside, and another account can still change or own it (a program held it open when Setup tried to protect it). It is evidence only and nothing reads it. Fix, from an elevated prompt: icacls \"%s\" /inheritance:r /grant:r \"*S-1-5-18:(F)\" \"*S-1-5-32-544:(F)\" and icacls \"%s\" /setowner *S-1-5-32-544 (after the program that holds it is stopped, or after a restart), or run %s, which does the same",
+			kept, kept, kept, windowsEnterpriseSetupCommand("/repair")))
+	}
 }

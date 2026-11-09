@@ -42,3 +42,48 @@ func TestWindowsEnterpriseKeptRecordChangesNameThisRunsFilesOnly(t *testing.T) {
 		t.Fatalf("the attestation change does not say how to attest again: %q", changes)
 	}
 }
+
+type warningRecorder struct{ warnings [][2]string }
+
+func (w *warningRecorder) AddWarning(code, message string) {
+	w.warnings = append(w.warnings, [2]string{code, message})
+}
+
+// Review D4: status and verify warn by name about a kept copy that still
+// carries another account's access, with the exact fix; a stamped copy and a
+// host with none are silent.
+func TestWindowsEnterpriseKeptRecordWarningsNameTheUnprotectedCopy(t *testing.T) {
+	dir := t.TempDir()
+	open := filepath.Join(dir, "deployment.json.rejected-20261109T000000000Z-aaaaaaaaaaaa")
+	stamped := filepath.Join(dir, "agent-application-control-attestation.json.rejected-20261109T000000000Z-bbbbbbbbbbbb")
+	for _, path := range []string{open, stamped, filepath.Join(dir, "deployment.json")} {
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	original := windowsEnterpriseKeptRecordUntrusted
+	t.Cleanup(func() { windowsEnterpriseKeptRecordUntrusted = original })
+	windowsEnterpriseKeptRecordUntrusted = func(path string) bool { return path == open }
+	var recorded warningRecorder
+	addWindowsEnterpriseKeptRecordWarnings(&recorded, dir)
+	if len(recorded.warnings) != 1 || recorded.warnings[0][0] != "kept_record_unprotected" {
+		t.Fatalf("warnings = %q, want one kept_record_unprotected", recorded.warnings)
+	}
+	message := recorded.warnings[0][1]
+	for _, want := range []string{open, `icacls "` + open + `" /inheritance:r /grant:r "*S-1-5-18:(F)" "*S-1-5-32-544:(F)"`, `icacls "` + open + `" /setowner *S-1-5-32-544`, "/repair"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message %q lacks %q", message, want)
+		}
+	}
+	if strings.Contains(message, stamped) || strings.Contains(message, "<path>") {
+		t.Errorf("message names the stamped copy or holds a template: %q", message)
+	}
+	// A host with no kept copy, or only stamped ones, says nothing.
+	windowsEnterpriseKeptRecordUntrusted = func(string) bool { return false }
+	var quiet warningRecorder
+	addWindowsEnterpriseKeptRecordWarnings(&quiet, dir)
+	addWindowsEnterpriseKeptRecordWarnings(&quiet, filepath.Join(dir, "absent"))
+	if len(quiet.warnings) != 0 {
+		t.Errorf("warnings = %q, want none", quiet.warnings)
+	}
+}
