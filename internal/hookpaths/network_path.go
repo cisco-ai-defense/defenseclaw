@@ -137,6 +137,9 @@ type hookCall struct {
 	// bodyLinks when the link bound stopped the walk to it
 	// (ShareBodyUnread).
 	bodyUnread, bodyLinks bool
+	// linksUnproven is set when the budget cut short the ask of a share the
+	// link walk of a skill folder check needed (SkillLinksUnproven).
+	linksUnproven bool
 }
 
 // shareWait is how long the call may wait for the next share: a full answer

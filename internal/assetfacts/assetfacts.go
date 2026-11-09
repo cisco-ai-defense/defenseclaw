@@ -136,6 +136,12 @@ type Facts struct {
 	// call as unproven when it has a held or denied skill to protect, instead
 	// of judging only the folders it was told of.
 	SkillLinksTruncated bool `json:"skill_links_truncated,omitempty"`
+	// SkillLinksUnproven says a network share a path of the request is on did
+	// not answer within the hook call's wait for shares, so the links on it
+	// were not followed: a skill folder a link there leads to is not shown. The
+	// gateway judges it by the policy tier when it has a held or denied skill
+	// to protect, as it judges any check it could not finish.
+	SkillLinksUnproven bool `json:"skill_links_unproven,omitempty"`
 	// SkillsTruncated says Skills holds only the first maxSkills claims: a
 	// folder the request reaches into may declare a name no claim names, so
 	// a gateway that cannot read it cannot prove it is not a denied skill
@@ -237,7 +243,7 @@ func TailDigestAt(tail []byte, i int) []byte {
 // otherwise an oversized MCP definition could silently lose a pinned deny.
 func Encode(facts Facts) string {
 	facts = bounded(facts)
-	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && len(facts.SkillLinks) == 0 && !facts.SkillLinksTruncated && !facts.SkillsTruncated && len(facts.Contents) == 0 {
+	if len(facts.Skills) == 0 && facts.MCP == nil && facts.MCPUnproven == "" && len(facts.SkillDirs) == 0 && len(facts.SkillLinks) == 0 && !facts.SkillLinksTruncated && !facts.SkillLinksUnproven && !facts.SkillsTruncated && len(facts.Contents) == 0 {
 		return ""
 	}
 	var raw bytes.Buffer
@@ -318,7 +324,7 @@ func Decode(value string) (Facts, bool) {
 		return Facts{}, false
 	}
 	facts = bounded(facts)
-	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || len(facts.SkillLinks) > 0 || facts.SkillLinksTruncated || facts.SkillsTruncated || len(facts.Contents) > 0
+	return facts, len(facts.Skills) > 0 || facts.MCP != nil || facts.MCPUnproven != "" || len(facts.SkillDirs) > 0 || len(facts.SkillLinks) > 0 || facts.SkillLinksTruncated || facts.SkillLinksUnproven || facts.SkillsTruncated || len(facts.Contents) > 0
 }
 
 // DeclaredFor returns the names the facts say folder declares.
@@ -1173,14 +1179,26 @@ func skillFolderRefsIn(dir string, linked bool) []FolderRef {
 // maxLinkHops bounds the links ResolveLinks follows.
 const maxLinkHops = 40
 
+// ShareGate tells ResolveLinks whether the file system under path may be
+// read: true for a local path and for a path on a network share that has
+// answered, false for a share that has not (within the wait the hook call has
+// for shares). The hookpaths package, which asks the shares, sets it at start
+// (it imports this package, so this one cannot ask); with none set every path
+// is read.
+var ShareGate func(path string) bool
+
+func shareAnswers(path string) bool { return ShareGate == nil || ShareGate(path) }
+
 // ResolveLinks follows every link (symlink, junction or reparse point) in
 // path, one component at a time in the order the filesystem takes them: a
 // parent segment removes the last component of the path as resolved so far,
 // so it leaves the folder a link leads to, not the folder that holds the link.
-// A path on a network share (a Windows UNC path) is never examined: reading
-// its attributes opens a session with another machine, and one that does not
-// answer holds the hook for the system connect timeout. It stays as spelled,
-// as does the rest of a path after a link that leads onto a share.
+// A part on a network share (a Windows UNC path, or a path a link leads onto
+// one) is examined only once the share has answered (ShareGate): reading its
+// attributes opens a session with another machine, and one that does not
+// answer holds the hook for the system connect timeout. A share that answers
+// is followed like any folder, links on it included; the rest of a path after
+// a share that did not answer stays as spelled.
 // Pass the path as it is spelled; cleaning it first would drop that segment
 // before the link in front of it is known. A link whose target is missing is
 // read and followed all the same, so a link placed before its target exists
@@ -1192,7 +1210,7 @@ const maxLinkHops = 40
 func ResolveLinks(path string) string {
 	volume := filepath.VolumeName(path)
 	rest := filepath.ToSlash(path[len(volume):])
-	if !strings.HasPrefix(rest, "/") || onNetworkShare(path) {
+	if !strings.HasPrefix(rest, "/") {
 		return filepath.Clean(path)
 	}
 	resolved := volume + string(filepath.Separator)
@@ -1209,6 +1227,9 @@ func ResolveLinks(path string) string {
 			continue
 		}
 		next := filepath.Join(resolved, part)
+		if !shareAnswers(next) {
+			return filepath.Join(append([]string{next}, pending...)...)
+		}
 		info, err := os.Lstat(next)
 		if err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
 			resolved = next
@@ -1231,13 +1252,13 @@ func ResolveLinks(path string) string {
 			resolved = targetVolume + string(filepath.Separator)
 		}
 		pending = append(strings.Split(targetRest, "/"), pending...)
-		if onNetworkShare(resolved) {
-			return filepath.Clean(resolved + strings.Join(pending, "/"))
-		}
 	}
 	// A path that exists and has no link left is spelled as the filesystem
 	// spells it (a Windows short name, the case of a folder); a missing one
 	// stays as written.
+	if !shareAnswers(resolved) {
+		return resolved
+	}
 	if real, err := filepath.EvalSymlinks(resolved); err == nil {
 		return real
 	}
