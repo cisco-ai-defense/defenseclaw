@@ -1211,9 +1211,12 @@ func newProtectedFiles(home string) protectedFiles {
 
 func newProtectedFilesWith(home string, memo *TargetMemo) protectedFiles {
 	files := make(protectedFiles, 0, len(AuthorizedKeysFiles))
+	// The key files lie in a few folders: each folder is proved to be no link
+	// into a share once for these reads.
+	var folders folderProofs
 	for _, path := range memo.ProtectedAuthorizedKeysPaths(home) {
 		protected := protectedFile{path: path}
-		info, err := pathStat(path)
+		info, err := folders.stat(path)
 		switch {
 		case err == nil:
 			protected.info = info

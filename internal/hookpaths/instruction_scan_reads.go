@@ -17,6 +17,8 @@ import (
 // reads every path again.
 type scanReads struct {
 	stats map[string]scanRead
+	// folders are proved once for the call (folderProofs).
+	folders folderProofs
 }
 
 type scanRead struct {
@@ -31,7 +33,7 @@ func (r *scanReads) stat(path string) (os.FileInfo, error) {
 	if read, kept := r.stats[path]; kept {
 		return read.info, read.err
 	}
-	info, err := pathStat(path)
+	info, err := r.folders.stat(path)
 	if r.stats == nil {
 		r.stats = make(map[string]scanRead)
 	}
