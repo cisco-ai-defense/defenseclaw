@@ -443,37 +443,20 @@ func (r *layoutReader) endStatement(term string) {
 	for first < len(words) && words[first].assign {
 		first++
 	}
-	command := ""
-	if first < len(words) {
-		command = words[first].literal
-		if !words[first].plain {
-			command = "?"
-		}
-	}
-	prior := r.truth
-	r.truth = ""
-	switch command {
-	case "true", ":":
-		r.truth = "true"
-	case "false":
-		r.truth = "false"
-	}
-	if before == "&&" && prior == "true" || before == "||" && prior == "false" {
-		// The statement after a constant test that lets it run is in order.
-		before = ";"
-	}
+	command, at := effectiveCommand(words, first)
+	r.setTruth(&before, command)
 	r.commands = append(r.commands, command)
 	if first < len(words) && layoutTextCommands[command] {
 		// Every argument word is text, quoted or not, except the code spans
 		// of its substitutions: those run.
-		for _, word := range words[first+1:] {
+		for _, word := range words[at+1:] {
 			r.skipOutsideCode(word.start, word.end, word.code)
 		}
 	}
 	if layoutReserved[command] {
 		r.layout.sequential, r.grouped = false, true
 	}
-	r.markAssignments(words, first, command)
+	r.markAssignments(words, first, at, command)
 	ordered := (before == "start" || before == ";" || before == "\n") &&
 		(term == ";" || term == "\n" || term == "EOF")
 	if ordered {
@@ -502,12 +485,80 @@ func (r *layoutReader) endStatement(term string) {
 	}
 }
 
+// setTruth records what the statement being closed always returns, for the
+// statement after it, and turns *before into ";" when a constant test lets the
+// statement run. Only a statement that ran sets the result; one a constant
+// test skipped leaves the result of that test, so the next statement of the
+// chain is judged against the test and not against the skipped statement.
+func (r *layoutReader) setTruth(before *string, command string) {
+	prior := r.truth
+	runs := *before == "start" || *before == ";" || *before == "\n" ||
+		*before == "&&" && prior == "true" || *before == "||" && prior == "false"
+	skipped := *before == "&&" && prior == "false" || *before == "||" && prior == "true"
+	r.truth = ""
+	switch {
+	case skipped:
+		r.truth = prior
+	case !runs:
+	case command == "true" || command == ":":
+		r.truth = "true"
+	case command == "false":
+		r.truth = "false"
+	}
+	if runs {
+		// The statement after a constant test that lets it run is in order.
+		*before = ";"
+	}
+}
+
+// effectiveCommand returns the command a statement runs and the index of its
+// word in words; first is the index of its first word that is not an
+// assignment. command and builtin are prefix wrappers: the shell runs the word
+// after them (and after the options of command), so that word is judged and
+// its quoted arguments stay data. "command -v" and "command -V" run nothing
+// and print, so they stand for echo. A word the reading cannot name is "?".
+func effectiveCommand(words []layoutWord, first int) (string, int) {
+	at := first
+	for at < len(words) && words[at].plain {
+		wrapper := words[at].literal
+		if wrapper != "command" && wrapper != "builtin" {
+			break
+		}
+		next := at + 1
+		for wrapper == "command" && next < len(words) && words[next].plain {
+			option := words[next].literal
+			if option == "--" {
+				next++
+				break
+			}
+			if !strings.HasPrefix(option, "-") || len(option) < 2 || strings.Trim(option[1:], "pvV") != "" {
+				break
+			}
+			if strings.ContainsAny(option, "vV") {
+				return "echo", at
+			}
+			next++
+		}
+		if next >= len(words) {
+			break
+		}
+		at = next
+	}
+	switch {
+	case at >= len(words):
+		return "", at
+	case !words[at].plain:
+		return "?", at
+	}
+	return words[at].literal, at
+}
+
 // markAssignments records which words of a statement the shell reads as
 // assignments (those before the command, and the assignment words of a
 // declaration builtin), and the arguments of a command that runs them as shell
 // code. A command that runs them in a child process (sh -c, env, sudo) is a
 // scope: what it assigns never reaches the statements after it.
-func (r *layoutReader) markAssignments(words []layoutWord, first int, command string) {
+func (r *layoutReader) markAssignments(words []layoutWord, first, at int, command string) {
 	for _, word := range words[:first] {
 		r.layout.assigns[word.start] = true
 	}
@@ -524,16 +575,16 @@ func (r *layoutReader) markAssignments(words []layoutWord, first int, command st
 		return
 	}
 	if layoutDeclarations[command] {
-		for _, word := range words[first+1:] {
+		for _, word := range words[at+1:] {
 			if word.assign {
 				r.layout.assigns[word.start] = true
 			}
 		}
 	}
-	if first+1 >= len(words) || !runsArguments(words[first:], command) {
+	if at+1 >= len(words) || !runsArguments(words[at:], command) {
 		return
 	}
-	span := textSpan{words[first+1].start, words[len(words)-1].end}
+	span := textSpan{words[at+1].start, words[len(words)-1].end}
 	r.layout.evaluated = append(r.layout.evaluated, span)
 	if !layoutInShell[command] {
 		r.layout.scopes = append(r.layout.scopes, span)
