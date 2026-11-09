@@ -570,6 +570,11 @@ func DeclaredSkillName(dir string) string {
 		return ""
 	}
 	path := filepath.Join(dir, "SKILL.md")
+	// A manifest on a network share that has not answered is not read: the
+	// hook would wait for the system connect timeout (ShareGate).
+	if !shareAnswers(path) {
+		return ""
+	}
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
@@ -656,6 +661,27 @@ func SkillRoots(connector, home, cwd string) []string {
 	return roots
 }
 
+// SkillLinkConnectors are the connectors that load skills from folders; a link
+// of any connector's call may lead into the skill root of another one (Codex
+// reading a folder of the Claude Code skill root).
+var SkillLinkConnectors = []string{"claudecode", "codex", "copilot"}
+
+// KnownSkillRoots lists the skill folders of every connector in
+// SkillLinkConnectors for a user with home and working folder cwd. A link is
+// judged by the folder it ends in, whatever connector's call followed it, so a
+// link claim is taken for a folder in any of these roots.
+func KnownSkillRoots(home, cwd string) []string {
+	var roots []string
+	for _, connector := range SkillLinkConnectors {
+		for _, root := range SkillRoots(connector, home, cwd) {
+			if !slices.Contains(roots, root) {
+				roots = append(roots, root)
+			}
+		}
+	}
+	return roots
+}
+
 // projectLevels lists the folders from cwd up to the repository root (or
 // maxProjectLevels folders, stopping at home) a project skill folder is
 // looked for in.
@@ -671,7 +697,7 @@ func projectLevels(home, cwd string) []string {
 			break
 		}
 		levels = append(levels, dir)
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		if pathExists(filepath.Join(dir, ".git")) {
 			break
 		}
 		parent := filepath.Dir(dir)
@@ -769,7 +795,7 @@ func launchWorkspaces(home, cwd, launch string) []string {
 	home = filepath.Clean(strings.TrimSpace(home))
 	outer, homeAbove := "", ""
 	for level := 0; level < maxProjectLevels; level++ {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+		if pathExists(filepath.Join(dir, ".git")) {
 			outer = dir
 		}
 		if home != "" && home == dir {
@@ -853,6 +879,11 @@ type FolderRef struct {
 	// Linked is set when the folder is the target of a link the call's path
 	// goes through, not the spelling of the path.
 	Linked bool
+	// BareOperand is set when the call names the folder with a word that has
+	// no slash and names an existing entry in the working folder (a link, or
+	// SKILL.md from inside the folder): a gateway that cannot look into that
+	// folder cannot tell the word from any other, so the hook reports it.
+	BareOperand bool
 }
 
 // SkillFolderRefs lists the skill folders the strings of a tool input reach
@@ -884,6 +915,7 @@ func skillFolderRefsForCaller(input any, home, cwd, account string, uid, gid int
 				ref.ExplicitDirectory = explicit
 				if index, ok := seen[ref.Dir]; ok {
 					refs[index].Manifest = refs[index].Manifest || ref.Manifest
+					refs[index].BareOperand = refs[index].BareOperand || ref.BareOperand
 					refs[index].ExplicitDirectory = refs[index].ExplicitDirectory && explicit
 					continue
 				}
@@ -989,12 +1021,12 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 			if ch == '&' {
 				separatorWidth = 2
 			}
+			// The links of the directory are followed as the path walk follows
+			// them: one part at a time, and on a network share only once it
+			// has answered. Entry is proven only for a directory that exists.
 			original := dir
-			resolved, err := filepath.EvalSymlinks(dir)
-			if err == nil {
-				dir = resolved
-			}
-			if err == nil {
+			dir = ResolveLinks(dir)
+			if shareAnswers(original) && shareAnswers(dir) {
 				if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
 					certain = callerCanEnterDirectory(original, uid, gid) && callerCanEnterDirectory(dir, uid, gid)
 				}
@@ -1123,7 +1155,8 @@ func msysDriveSpelling(path string) string {
 }
 
 func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
-	if !strings.ContainsAny(token, "/\\") {
+	bare := !strings.ContainsAny(token, "/\\")
+	if bare && !namesEntryIn(cwd, token) {
 		return nil
 	}
 	path := strings.ReplaceAll(token, "\\", "/")
@@ -1145,6 +1178,9 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	}
 	dir := filepath.Clean(raw)
 	refs := skillFolderRefsIn(dir, false)
+	for i := range refs {
+		refs[i].BareOperand = bare
+	}
 	// A link anywhere on the path leads into a skill folder the spelling
 	// does not show. The folder it ends in is judged as the direct path is.
 	// The raw spelling is followed in the order the filesystem takes it: a
@@ -1152,9 +1188,40 @@ func skillFolderRefs(token, home, cwd, caller string) []FolderRef {
 	// folder that holds the link. A path that cannot be followed (a missing
 	// folder, one the caller may not enter) stays as written.
 	if real := ResolveLinks(raw); real != dir {
-		refs = append(refs, skillFolderRefsIn(real, true)...)
+		for _, ref := range skillFolderRefsIn(real, true) {
+			ref.BareOperand = bare
+			refs = append(refs, ref)
+		}
 	}
 	return refs
+}
+
+// namesEntryIn reports whether the slash-free word token names an entry that
+// exists in the folder cwd. A word that names one is a path, spelled as
+// ./token would be: a link, or SKILL.md read from inside a skill folder. Any
+// other word stays a word (a command, a flag, a pattern), so an ordinary call
+// is not read as naming a folder. On a network share the entry is looked up
+// only once the share has answered.
+func namesEntryIn(cwd, token string) bool {
+	if token == "" || !filepath.IsAbs(cwd) {
+		return false
+	}
+	path := cwd + string(filepath.Separator) + token
+	if !shareAnswers(path) {
+		return false
+	}
+	_, err := os.Lstat(path)
+	return err == nil
+}
+
+// pathExists reports whether path exists; a path on a network share that has
+// not answered reads as missing.
+func pathExists(path string) bool {
+	if !shareAnswers(path) {
+		return false
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // skillFolderRefsIn lists the skills/<name> pairs of the cleaned path dir.
@@ -1188,6 +1255,11 @@ const maxLinkHops = 40
 var ShareGate func(path string) bool
 
 func shareAnswers(path string) bool { return ShareGate == nil || ShareGate(path) }
+
+// ShareAnswers reports whether the hook may read path: it is local, or on a
+// network share that has answered (ShareGate). Reads of a path a call names go
+// through it.
+func ShareAnswers(path string) bool { return shareAnswers(path) }
 
 // ResolveLinks follows every link (symlink, junction or reparse point) in
 // path, one component at a time in the order the filesystem takes them: a

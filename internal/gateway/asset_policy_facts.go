@@ -338,10 +338,10 @@ func (a *APIServer) skillFolderAccessDecision(
 // followed because a network share on a path did not answer within the wait
 // the hook call has for shares (the hook's claim, or this gateway's own walk):
 // the skill folder a link there leads to is unknown. It matters only when a
-// skill is held or denied. Then the strict tier (and managed strict) refuses
-// the call as unproven; the default and permissive tiers allow it with a
-// visible alert, since an ordinary command on a slow share is not a named or
-// known protected folder. A held or denied folder the call names, directly or
+// skill is held or denied. Then a managed deployment and the strict tier
+// refuse the call as unproven; the OSS default and permissive tiers allow it
+// with a visible alert, since an ordinary command on a slow share is not a
+// named or known protected folder. A held or denied folder the call names, directly or
 // through a link the walk followed, is refused in every tier by the check
 // before this one.
 func (a *APIServer) skillLinksUnprovenDecision(
@@ -357,14 +357,14 @@ func (a *APIServer) skillLinksUnprovenDecision(
 	decision := runtimeAssetDisableBlockDecision("skill", "skill-links", connector, "skill_folder", reason, "skill-links-unproven")
 	decision.RegistryStatus = "unknown"
 	probe := skillRuntimeProbe{TargetType: "skill", SkillName: "skill-links", ToolName: toolName, Surface: "skill_folder", Matched: true}
-	if a.shareBodyStrictTier(ctx, connector) {
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) || a.shareBodyStrictTier(ctx, connector) {
 		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, probe)
 		return decision, true
 	}
 	a.logAssetPolicyAudit(ctx, connector, "skill:skill-links", runtimeSkillAssetPolicyAuditDetails(
 		config.AssetPolicyDecision{Action: "allow", Source: decision.Source, RegistryStatus: decision.RegistryStatus, WouldBlock: true, Reason: reason},
 		connector, hookEvent, probe))
-	fmt.Fprintf(os.Stderr, "[gateway] warning: %s (connector=%s; the strict policy tier blocks the call)\n", reason, connector)
+	fmt.Fprintf(os.Stderr, "[gateway] warning: %s (connector=%s; the strict policy tier and a managed deployment block the call)\n", reason, connector)
 	return config.AssetPolicyDecision{}, false
 }
 
@@ -387,14 +387,27 @@ func (a *APIServer) skillFolderRefsDecision(
 	// A folder a link leads to is spelled as the link resolves, which a root
 	// reached through a link itself (a home on another mount) is not.
 	skillRoots := slices.Clone(roots)
-	if len(facts.SkillLinks) > 0 || slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked }) {
+	followsLinks := len(facts.SkillLinks) > 0 || slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked })
+	if followsLinks {
 		for _, root := range roots {
 			if real := assetfacts.ResolveLinks(root); real != filepath.Clean(root) {
 				skillRoots = append(skillRoots, real)
 			}
 		}
 	}
-	refs = appendReportedSkillLinks(refs, facts.SkillLinks, skillRoots)
+	// A link ends in a protected folder whichever connector's call follows it,
+	// so the folders a link claim names are taken from the skill root of every
+	// connector that loads skills from folders, not only this connector's.
+	linkRoots := slices.Clone(skillRoots)
+	for _, root := range assetfacts.KnownSkillRoots(home, cwd) {
+		if !slices.ContainsFunc(linkRoots, func(have string) bool { return sameCleanPath(have, root) }) {
+			linkRoots = append(linkRoots, root)
+			if real := assetfacts.ResolveLinks(root); followsLinks && real != filepath.Clean(root) {
+				linkRoots = append(linkRoots, real)
+			}
+		}
+	}
+	refs = appendReportedSkillLinks(refs, facts.SkillLinks, linkRoots)
 	if facts.SkillLinksTruncated && a.skillFoldersAreGuarded(cfg) {
 		// The hook names the skill folders a link of the call leads into, up
 		// to a bound. Past it a protected folder cannot be ruled out (fail
@@ -418,7 +431,11 @@ func (a *APIServer) skillFolderRefsDecision(
 		return config.AssetPolicyDecision{}, false
 	}
 	for _, ref := range refs {
-		if !skillFolderRefIsSkill(ref, skillRoots, len(facts.DeclaredFor(ref.Name)) > 0) {
+		rootsOfRef := skillRoots
+		if ref.Linked {
+			rootsOfRef = linkRoots
+		}
+		if !skillFolderRefIsSkill(ref, rootsOfRef, len(facts.DeclaredFor(ref.Name)) > 0) {
 			continue
 		}
 		// A skill admission blocked and disabled (one whose quarantine
