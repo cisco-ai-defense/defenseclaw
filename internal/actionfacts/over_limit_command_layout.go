@@ -44,18 +44,21 @@ import (
 //   - sequential: the text has no group, subshell, function, loop, trap or
 //     alias, so no statement runs later or elsewhere than it is written.
 //
-// A command substitution, a backtick and a parameter expansion with an
-// operator are code the reading does not follow into: it steps over each as
-// one code span, skips nothing inside it, and counts the text as not
-// sequential, so the cd and assignment statements are read additively. A word
-// that holds one is skipped as text only outside it. The inside of a
-// command substitution is read as a command text of its own, to a bounded
-// depth, so the comments, data and printed words inside it are skipped as
-// they are outside it. A construct the reading
-// cannot step over (a process substitution, an arithmetic bracket, an
-// unterminated quote or substitution) makes the whole layout unknown: the
-// caller then reads the text as before, every cd and assignment counting
-// wherever it is, nothing skipped.
+// A command substitution and a backtick are code that runs in a subshell: a
+// cd or an assignment inside it never reaches the statements around it. The
+// reading marks each as a scope, so the caller reads what is inside it with
+// its own working directory and values and takes them back at its close; the
+// text stays sequential. A braced expansion is data, except the
+// substitutions inside it and an assigning one (${NAME=word}), which runs in
+// the main shell and counts the text as not sequential. A word that holds
+// code is skipped as text only outside it. The inside of a command
+// substitution is read as a command text of its own, to a bounded depth, so
+// the comments, data and printed words inside it are skipped as they are
+// outside it. A construct the reading cannot step over (a process
+// substitution, an arithmetic bracket, an unterminated quote or
+// substitution) makes the whole layout unknown: the caller then reads the
+// text as before, every cd and assignment counting wherever it is, nothing
+// skipped.
 
 type textSpan struct{ start, end int }
 
@@ -72,6 +75,8 @@ type commandLayout struct {
 	quoted     []textSpan
 	straight   map[int]bool
 	sequential bool
+	// scopes are the command substitutions and backticks, in text order.
+	scopes []textSpan
 }
 
 // spanEnd is the end of the span that holds index, index when none does.
@@ -241,6 +246,7 @@ func readLayoutAt(text string, depth int) (commandLayout, bool) {
 	r.endStatement("EOF")
 	slices.SortFunc(r.layout.skipped, func(a, b textSpan) int { return a.start - b.start })
 	slices.SortFunc(r.layout.quoted, func(a, b textSpan) int { return a.start - b.start })
+	slices.SortFunc(r.layout.scopes, func(a, b textSpan) int { return a.start - b.start })
 	return r.layout, true
 }
 
@@ -292,10 +298,7 @@ func (r *layoutReader) operator(index int) (int, bool) {
 // addWord adds a word to the statement: the file of a redirection and a
 // file descriptor number before one are no words of the command.
 func (r *layoutReader) addWord(word layoutWord, next int) {
-	if len(word.code) != 0 {
-		r.layout.sequential = false
-		r.readInside(word.code)
-	}
+	r.readInside(word.code)
 	switch {
 	case r.target:
 		r.target = false
@@ -387,28 +390,50 @@ func (r *layoutReader) skipOutsideCode(start, end int, code []textSpan) {
 	}
 }
 
-// readInside reads the inside of each command substitution among the code
-// spans as a command text of its own and adds what that reading skips and
-// quotes. A backtick (its backslashes change the text) and a braced
-// expansion stay text.
+// readInside marks each command substitution and backtick among the code
+// spans as a scope and reads the inside of a command substitution as a command
+// text of its own, adding what that reading skips, quotes and runs in order.
+// A backtick (its backslashes change the text) stays text. Any other code span
+// is an assigning braced expansion: it runs in the main shell, in no order the
+// reading knows.
 func (r *layoutReader) readInside(code []textSpan) {
+	for _, span := range code {
+		switch r.text[span.start] {
+		case shellBacktick:
+			r.layout.scopes = append(r.layout.scopes, span)
+		case shellDollar:
+			if r.text[span.start+1] == shellOpenParen {
+				r.layout.scopes = append(r.layout.scopes, span)
+				r.readSubstitution(span)
+				continue
+			}
+			r.layout.sequential = false
+		}
+	}
+}
+
+// readSubstitution reads the inside of the command substitution at span.
+func (r *layoutReader) readSubstitution(span textSpan) {
 	if r.depth >= maxLayoutDepth {
 		return
 	}
-	for _, span := range code {
-		if !strings.HasPrefix(r.text[span.start:span.end], "$(") {
-			continue
-		}
-		start := span.start + 2
-		inside, ok := readLayoutAt(r.text[start:span.end-1], r.depth+1)
-		if !ok {
-			continue
-		}
-		for _, skipped := range inside.skipped {
-			r.layout.skipped = append(r.layout.skipped, textSpan{start + skipped.start, start + skipped.end})
-		}
-		for _, quoted := range inside.quoted {
-			r.layout.quoted = append(r.layout.quoted, textSpan{start + quoted.start, start + quoted.end})
+	start := span.start + 2
+	inside, ok := readLayoutAt(r.text[start:span.end-1], r.depth+1)
+	if !ok {
+		return
+	}
+	for _, skipped := range inside.skipped {
+		r.layout.skipped = append(r.layout.skipped, textSpan{start + skipped.start, start + skipped.end})
+	}
+	for _, quoted := range inside.quoted {
+		r.layout.quoted = append(r.layout.quoted, textSpan{start + quoted.start, start + quoted.end})
+	}
+	for _, scope := range inside.scopes {
+		r.layout.scopes = append(r.layout.scopes, textSpan{start + scope.start, start + scope.end})
+	}
+	if inside.sequential {
+		for statement := range inside.straight {
+			r.layout.straight[start+statement] = true
 		}
 	}
 }
@@ -451,9 +476,10 @@ func (r *layoutReader) readDocuments(index int) int {
 }
 
 // documentCode are the code spans of the body of a here-document with an
-// unquoted delimiter that starts at index: a command substitution, a backtick
-// and a braced expansion that no backslash escapes. Quotes are plain text in
-// a body, but not inside a substitution. A substitution that does not close
+// unquoted delimiter that starts at index: a command substitution and a
+// backtick that no backslash escapes, also inside a braced expansion. The
+// braced expansion itself is data. Quotes are plain text in a body, but not
+// inside a substitution. A substitution, or an expansion, that does not close
 // runs to the end of the body.
 func documentCode(text string, index int) []textSpan {
 	var code []textSpan
@@ -469,6 +495,11 @@ func documentCode(text string, index int) []textSpan {
 			end = layoutNestedEnd(text, index+2, shellCloseParen)
 		case text[index] == shellDollar && index+1 < len(text) && text[index+1] == shellOpenBrace:
 			end = layoutNestedEnd(text, index+2, shellCloseBrace)
+			if end >= 0 {
+				code = append(code, documentCode(text[:end-1], index+2)...)
+				index = end - 1
+				continue
+			}
 		default:
 			continue
 		}
@@ -583,12 +614,28 @@ func layoutDollarEnd(text string, index int, code *[]textSpan) int {
 			return end + 1
 		}
 		end = layoutNestedEnd(text, index+2, shellCloseBrace)
-		if end >= 0 && code != nil {
+		switch {
+		case end < 0 || code == nil:
+		case bracedAssigns(text[index+2 : end-1]):
 			*code = append(*code, textSpan{index, end})
+		default:
+			*code = append(*code, documentCode(text[:end-1], index+2)...)
 		}
 		return end
 	}
 	return index + 1
+}
+
+// bracedAssigns reports whether the body of a braced expansion (the text after
+// "${") may assign its variable: ${NAME=word} and ${NAME:=word}, and a
+// subscripted name, which is read as one that may.
+func bracedAssigns(body string) bool {
+	end := 0
+	for end < len(body) && (body[end] == '_' || body[end] >= 'A' && body[end] <= 'Z' ||
+		body[end] >= 'a' && body[end] <= 'z' || body[end] >= '0' && body[end] <= '9') {
+		end++
+	}
+	return end < len(body) && (body[end] == '=' || body[end] == '[' || strings.HasPrefix(body[end:], ":="))
 }
 
 // layoutDoubleQuoteEnd is the index after the double quote that closes the

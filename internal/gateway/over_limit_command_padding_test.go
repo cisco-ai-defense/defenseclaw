@@ -244,6 +244,18 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"echo copy words after a backtick":        "echo `date` cp " + lib + " /etc/ld.so.preload > " + notes,
 		"echo copy words after an expansion":      "echo ${HOME:-x} cp " + lib + " /etc/ld.so.preload > " + notes,
 		"echo copy words with an ANSI-C string":   "echo $\x27a\x27 cp " + lib + " /etc/ld.so.preload > " + notes,
+		// A braced default is data: a redirect written in it is no write.
+		"braced default in a body":             "cat > " + notes + " <<EOF\n${X:-" + load + " }\nEOF\n",
+		"braced default beside a body default": "cat > " + notes + " <<EOF\n${X:-" + load + " } ${Y:-ok}\nEOF\n",
+		"braced default in a printed word":     "echo ${X:-" + load + " } > " + notes,
+		"braced default around a substitution": "cat > " + notes + " <<EOF\n${X:-" + load + " $(date) }\nEOF\n",
+		// A substitution runs in a subshell: it leaves the directory and the
+		// values of the shell around it as they were.
+		"cd superseded around a substitution":       "cd /etc; cd " + project + "; echo \"$(date)\"; echo " + lib + " > ld.so.preload",
+		"variable reassigned around a substitution": "F=/etc/ld.so.preload; echo $(date); F=" + notes + "; echo " + lib + " > \"$F\"",
+		"cd inside a substitution":                  "x=$(cd /etc; pwd); echo " + lib + " > ld.so.preload",
+		"cd inside a backtick":                      "x=`cd /etc; pwd`; echo " + lib + " > ld.so.preload",
+		"assignment inside a substitution":          "x=$(F=/etc/ld.so.preload; echo ok); F=" + notes + "; echo " + lib + " > \"$F\"",
 	} {
 		for padName, pad := range paddings {
 			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
@@ -283,6 +295,13 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"braced expansion that substitutes":      "cat > " + notes + " <<EOF\n${X:-$(" + load + ")}\nEOF\n",
 		"write after a quote in a substitution":  "cat > " + notes + " <<EOF\n$(printf \x27)\x27; " + load + ")\nEOF\n",
 		"write beside a substitution in a body":  "cat > " + notes + " <<EOF\n$(date) $(" + load + ")\nEOF\n",
+		"substitution in a braced default":       "cat > " + notes + " <<EOF\n${X:-a $(" + load + ") b}\nEOF\n",
+		"cd and write inside a substitution":     "x=$(cd /etc; echo " + lib + " > ld.so.preload)",
+		"cd and write inside a backtick":         "x=`cd /etc; echo " + lib + " > ld.so.preload`",
+		"cd and write in a body substitution":    "cat > " + notes + " <<EOF\n$(cd /etc && echo " + lib + " > ld.so.preload)\nEOF\n",
+		"cd before a substitution":               "cd /etc; echo $(date); echo " + lib + " > ld.so.preload",
+		"cd after a substitution":                "echo $(date); cd /etc; echo " + lib + " > ld.so.preload",
+		"variable kept around a substitution":    "F=/etc/ld.so.preload; echo $(date); echo " + lib + " > \"$F\"",
 	} {
 		for padName, pad := range paddings {
 			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {
