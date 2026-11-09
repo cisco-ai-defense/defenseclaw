@@ -181,3 +181,22 @@ def test_an_entry_that_names_a_defenseclaw_hook_is_listed(tmp_path, command):
     config.write_text(yaml.safe_dump(document), encoding="utf-8")
 
     assert "(events: pre_tool_call)" in hermes_kept_hook_note(str(tmp_path), str(config))
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ".defenseclaw/hooks-backup/my-audit.sh",
+        ".defenseclaw/hooks.d/audit",
+        ".defenseclaw/hooks_old/audit",
+        "bin/my-hermes-hook.sh",
+        "bin/xhermes-hook.sh",
+    ],
+)
+def test_a_users_hook_in_a_folder_or_file_named_like_defenseclaws_is_kept_without_a_notice(tmp_path, relative):
+    config, _script, _command = _registration(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["pre_tool_call"].insert(0, {"command": str(tmp_path / relative), "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""

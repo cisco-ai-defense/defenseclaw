@@ -235,6 +235,15 @@ func TestHermesAUserHookThatNamesNothingOfDefenseClawIsKeptWithoutANotice(t *tes
 		"adjacent directory":        {"", func(d, _ string) string { return d + "-hooks/hookX" }},
 		"user script":               {"", func(_, home string) string { return filepath.Join(home, "user-hooks", "hookX") }},
 		"user script in spaced dir": {"operator with space", func(_, home string) string { return "'" + filepath.Join(home, "my hooks", "hookX") + "'" }},
+		"hooks-backup folder": {"", func(_, home string) string {
+			return filepath.Join(home, ".defenseclaw", "hooks-backup", "my-audit.sh")
+		}},
+		"hooks folder of another name": {"", func(_, home string) string {
+			return "bash " + filepath.Join(home, ".defenseclaw", "hooks.d", "audit")
+		}},
+		"script named like the generated one": {"", func(_, home string) string {
+			return filepath.Join(home, "bin", "my-hermes-hook.sh")
+		}},
 		"user script with arguments": {"", func(_, home string) string {
 			return filepath.Join(home, "user-hooks", "hookX") + " --event pre_tool_call"
 		}},
