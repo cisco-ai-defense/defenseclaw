@@ -202,16 +202,19 @@ def test_a_rebuilt_record_is_marked_and_its_rollback_is_judged_by_its_artifacts(
     )
 
 
-def test_the_guardian_records_are_waited_for_before_any_service_stops() -> None:
+def test_the_guardian_is_made_to_publish_again_before_the_transaction_opens() -> None:
     """GAP-0994: the classification of a record with no activation evidence reads the
-    Guardian's three records; after the stops nothing can republish them."""
+    Guardian's three records; the transaction stops every service before it, and
+    nothing can publish them again after that."""
     text = _text()
-    pins = text.index("Write-DefenseClawTransactionLifecyclePins `\n")
-    wait = text.index("Wait-DefenseClawGuardianRecordsBound `\n                -Layout $Layout", pins)
-    stop = text.index("Stop-DefenseClawService -Name $GuardianServiceName\n        Stop-DefenseClawService -Name $GatewayServiceName", pins)
-    assert wait < stop
-    guard = text[text.rindex("if ($priorDeploymentActive", 0, wait) : wait]
-    assert "$null -eq $priorManagedHooksActivation" in guard and "Test-DefenseClawStandaloneProfile" in guard
-    body = _function(text, "Wait-DefenseClawGuardianRecordsBound")
-    assert "-Action classify-activation" in body and "-AllowFailure" in body
-    assert "No service was stopped and nothing was changed" in body
+    opens = text.index("    $snapshot = New-DefenseClawTransaction `\n")
+    heal = text.rindex("Resolve-DefenseClawGuardianPublicationBeforeTransaction `\n", 0, opens)
+    assert text.rindex("if ($priorDeploymentActive -and $null -eq $priorManagedHooksActivation -and", 0, heal) > opens - 900
+    guard = text[text.rindex("if ($priorDeploymentActive", 0, heal) : heal]
+    assert "Test-DefenseClawStandaloneProfile" in guard and "$recoverCommittedManagedHooksLifecycle" in guard
+    body = _function(text, "Resolve-DefenseClawGuardianPublicationBeforeTransaction")
+    assert body.index("Stop-DefenseClawService -Name $GuardianServiceName") < body.index("Start-DefenseClawService -Name $GuardianServiceName")
+    assert "No transaction was opened and nothing was changed" in body
+    # Only a running Guardian is restarted, and only when the records are not one publication.
+    assert "-ne [ServiceProcess.ServiceControllerStatus]::Running" in body
+    assert "Test-DefenseClawGuardianPublicationWhole" in body

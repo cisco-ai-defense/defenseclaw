@@ -354,9 +354,10 @@ try {
 
     # GAP-0994: a rebuilt deployment record carries a marker, a rollback to it
     # is judged by the artifacts it names (not by the evidence it cannot
-    # carry), and a repair over a record with no activation evidence waits,
-    # with the services still running, for the Guardian's records to bind the
-    # manifest. Its own scope: the stubs below are gone after it.
+    # carry), and a repair over a record with no activation evidence has the
+    # Guardian publish its records again before the transaction opens when
+    # they are from different publications. Its own scope: the stubs below are
+    # gone after it.
     & $module {
         param($State)
         function Test-DefenseClawStandaloneProfile { return $true }
@@ -411,33 +412,52 @@ try {
         try { Assert-DefenseClawEnterpriseDeployment -Layout @{} -GatewayServiceName 'G' -GuardianServiceName 'H' -ServicingTransaction -RollbackRestore } catch { $threw = $_.Exception.Message -match 'full assertion ran' }
         if (-not $threw) { throw 'a rollback to a record that is not rebuilt skipped the full assertion' }
 
-        # The wait before the stops. The Guardian republishes the three records
-        # on its next pass, so a refusal that goes away is waited out; one that
-        # stays ends the run before any service stops; any other refusal is the
-        # classification after the stops to report.
-        $script:GuardianBindingWaitSeconds = 3
-        $script:GuardianBindingPollSeconds = 1
-        $script:replies = [Collections.Generic.Queue[object]]::new()
-        $script:asked = 0
-        function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
-            param($Layout, $GatewayServiceName, $GatewaySource, $Action, [switch]$AllowFailure)
-            $script:asked++
-            if ($Action -cne 'classify-activation' -or -not $AllowFailure) { throw 'the wait asked for something else (fixture)' }
-            return $script:replies.Dequeue()
+        # The Guardian's three records before the transaction opens: one
+        # publication is left alone; records from different publications get the
+        # running Guardian restarted once (its first pass publishes all three);
+        # a Guardian that does not publish them again ends the run with nothing
+        # opened; a Guardian that is not running, and no record at all, are left
+        # to the classification.
+        $gdir = [IO.Path]::Combine($State, 'guardian-records')
+        $auth = [IO.Path]::Combine($gdir, 'hook-guardian-state')
+        $run = [IO.Path]::Combine($gdir, 'runtime')
+        [void][IO.Directory]::CreateDirectory($auth); [void][IO.Directory]::CreateDirectory($run)
+        $glayout = @{ AuthorizationDirectory = $auth; AuthorizationLedgerPath = [IO.Path]::Combine($auth, 'protected_targets.json'); RuntimeDirectory = $run }
+        function Write-Publication([string]$Activation, [string]$Authorization, [string]$StateStamp) {
+            [IO.File]::WriteAllText([IO.Path]::Combine($auth, 'activation.json'), ('{"version": 1, "updated_at": "' + $Activation + '"}'))
+            [IO.File]::WriteAllText($glayout.AuthorizationLedgerPath, ('{' + "`n" + '  "updated_at": "' + $Authorization + '"' + "`n" + '}'))
+            [IO.File]::WriteAllText([IO.Path]::Combine($run, 'hook_guardian_state.json'), ('{"version": 1, "updated_at": "' + $StateStamp + '"}'))
         }
-        $unbound = [pscustomobject]@{ ok = $false; failure_detail = 'protected Guardian activation does not exactly bind the legacy deployment manifest and authorization (the records are from different publications)' }
-        $other = [pscustomobject]@{ ok = $false; failure_detail = 'legacy deployment has no Guardian activation but claude runtime selector is present' }
-        $good = [pscustomobject]@{ ok = $true; legacy_activation_state = 'activated' }
-        foreach ($reply in @($unbound, $unbound, $good)) { $script:replies.Enqueue($reply) }
-        Wait-DefenseClawGuardianRecordsBound -Layout @{} -GatewayServiceName 'G'
-        if ($script:asked -ne 3) { throw "the wait asked $($script:asked) times for a refusal that went away, want 3" }
-        $script:asked = 0; $script:replies.Clear(); $script:replies.Enqueue($other)
-        Wait-DefenseClawGuardianRecordsBound -Layout @{} -GatewayServiceName 'G'
-        if ($script:asked -ne 1) { throw 'the wait asked again for a refusal that is not the binding one' }
-        $script:asked = 0; $script:replies.Clear(); 1..10 | ForEach-Object { $script:replies.Enqueue($unbound) }
+        $script:GuardianRepublishWaitSeconds = 3
+        $script:GuardianRepublishPollSeconds = 1
+        $script:guardianStatus = [ServiceProcess.ServiceControllerStatus]::Running
+        $script:restarts = 0
+        $script:republishes = $true
+        function Get-DefenseClawServiceChecked { param([string]$Name) return [pscustomobject]@{ Status = $script:guardianStatus } }
+        function Stop-DefenseClawService { param([string]$Name) $script:restarts++ }
+        function Start-DefenseClawService {
+            param([string]$Name, [string]$FailureLogPath)
+            if ($script:republishes) { Write-Publication '2026-11-09T22:00:00.5Z' '2026-11-09T22:00:00.5Z' '2026-11-09T22:00:00.5Z' }
+        }
+        Write-Publication '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:restarts -ne 0) { throw 'a Guardian that published once was restarted' }
+        Write-Publication '2026-11-09T00:00:00Z' '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z'
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:restarts -ne 1 -or -not (Test-DefenseClawGuardianPublicationWhole -Layout $glayout)) { throw 'records from different publications were not published again by one restart' }
+        $script:republishes = $false; $script:restarts = 0
+        Write-Publication '2026-11-09T21:00:00.1Z' '2026-11-09T21:00:00.1Z' '2026-11-09T00:00:00Z'
         $threw = $false
-        try { Wait-DefenseClawGuardianRecordsBound -Layout @{} -GatewayServiceName 'G' } catch { $threw = $_.Exception.Message -match 'No service was stopped and nothing was changed' }
-        if (-not $threw -or $script:asked -lt 3) { throw 'a refusal that stays did not end the run before any service stops' }
+        try { Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H' } catch { $threw = $_.Exception.Message -match 'No transaction was opened and nothing was changed' }
+        if (-not $threw -or $script:restarts -ne 1) { throw 'a Guardian that does not publish again did not end the run before the transaction' }
+        $script:restarts = 0; $script:guardianStatus = [ServiceProcess.ServiceControllerStatus]::Stopped
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:restarts -ne 0) { throw 'a stopped Guardian was restarted' }
+        $script:guardianStatus = [ServiceProcess.ServiceControllerStatus]::Running
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $gdir -Recurse -Force
+        [void][IO.Directory]::CreateDirectory($auth); [void][IO.Directory]::CreateDirectory($run)
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction -Layout $glayout -GuardianServiceName 'H'
+        if ($script:restarts -ne 0) { throw 'a deployment with no Guardian record at all was restarted' }
     } $state
     'enterprise-standalone-record-recovery-smoke: OK'
 }

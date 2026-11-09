@@ -31341,50 +31341,97 @@ $script:UninstallDeletedAccountWaitSeconds = 180
 $script:UninstallDeletedAccountPollSeconds = 10
 
 # rel-1-0-6:GAP-0994: how long a repair over a deployment record with no
-# activation evidence waits, with the services still running, for the
-# Guardian's three records to bind the manifest, and how often it asks again.
-# Tests shorten them.
-$script:GuardianBindingWaitSeconds = 45
-$script:GuardianBindingPollSeconds = 3
+# activation evidence waits for a restarted Guardian to publish its three
+# records again, and how often it looks. Tests shorten them.
+$script:GuardianRepublishWaitSeconds = 60
+$script:GuardianRepublishPollSeconds = 1
 
-function Wait-DefenseClawGuardianRecordsBound {
+function Get-DefenseClawGuardianPublicationStamps {
     <#
-        rel-1-0-6:GAP-0994: asks the activation classifier, before any service
-        stops, whether the Guardian's activation, authorization and state
-        records bind the manifest. The Guardian publishes the three one after
-        the other and republishes on its next pass when they are not from one
-        publication, so a refusal here goes away by itself while it runs.
-        After the stop it cannot: the records stay as they were, the
-        classification after the stop refuses, and a repair that stopped the
-        services ended with the transaction pending. Any other refusal is left
-        to that classification. Past the wait the run ends here, with every
-        service running and nothing changed.
+        rel-1-0-6:GAP-0994: the updated_at of the Guardian's activation,
+        authorization and state records, $null for one that is missing or has
+        none. The three are written one after the other, and one publication
+        gives them the same stamp.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $paths = [ordered]@{
+        activation = (Microsoft.PowerShell.Management\Join-Path $Layout.AuthorizationDirectory 'activation.json')
+        authorization = [string]$Layout.AuthorizationLedgerPath
+        state = (Microsoft.PowerShell.Management\Join-Path $Layout.RuntimeDirectory 'hook_guardian_state.json')
+    }
+    $stamps = [ordered]@{}
+    foreach ($name in $paths.Keys) {
+        $stamps[$name] = $null
+        try {
+            $text = [IO.File]::ReadAllText([string]$paths[$name])
+            $match = [regex]::Match($text, '"updated_at"\s*:\s*"([^"]+)"')
+            if ($match.Success) { $stamps[$name] = $match.Groups[1].Value }
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "Guardian $name record not read: $($_.Exception.Message)"
+        }
+    }
+    return $stamps
+}
+
+function Test-DefenseClawGuardianPublicationWhole {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $stamps = Get-DefenseClawGuardianPublicationStamps -Layout $Layout
+    $values = @($stamps.Values)
+    return [bool](
+        @($values | Microsoft.PowerShell.Core\Where-Object { $null -eq $_ }).Count -eq 0 -and
+        @($values | Microsoft.PowerShell.Utility\Select-Object -Unique).Count -eq 1
+    )
+}
+
+function Resolve-DefenseClawGuardianPublicationBeforeTransaction {
+    <#
+        rel-1-0-6:GAP-0994: a deployment record with no activation evidence (a
+        legacy one, or one Setup rebuilt) is classified from the Guardian's
+        activation, authorization and state records. The Guardian publishes the
+        three one after the other and does not publish again until something
+        changes or the generation ages, so a publication that was cut short, or
+        a pass that failed while the deployment record was untrusted, leaves
+        them from different publications for minutes. The classification then
+        refuses, and it runs after the transaction has stopped every service:
+        nothing is left that can publish them again. Here, before the
+        transaction opens, a running Guardian that does not have one
+        publication is restarted (the first pass of every Guardian process
+        publishes all three) and waited for. Nothing is stopped for good and
+        nothing is changed if it does not come right: the run ends with the
+        services running.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)][string]$GatewayServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName
     )
-    $needle = 'does not exactly bind the legacy deployment manifest and authorization'
-    $deadline = [DateTime]::UtcNow.AddSeconds($script:GuardianBindingWaitSeconds)
+    $stamps = Get-DefenseClawGuardianPublicationStamps -Layout $Layout
+    $values = @($stamps.Values)
+    if (@($values | Microsoft.PowerShell.Core\Where-Object { $null -ne $_ }).Count -eq 0) {
+        return
+    }
+    if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
+        return
+    }
+    $guardian = Get-DefenseClawServiceChecked -Name $GuardianServiceName
+    if ($null -eq $guardian -or
+        $guardian.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+        return
+    }
+    Write-DefenseClawLifecyclePhase -Stage 'the Guardian records are from different publications: restarting the Guardian so it publishes them again, before the transaction opens'
+    Stop-DefenseClawService -Name $GuardianServiceName
+    Start-DefenseClawService -Name $GuardianServiceName
+    $deadline = [DateTime]::UtcNow.AddSeconds($script:GuardianRepublishWaitSeconds)
     while ($true) {
-        $report = Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName `
-            -Action classify-activation `
-            -AllowFailure
-        if ([bool]$report.ok) {
-            return
-        }
-        $detail = [string]$report.failure_detail
-        if (-not $detail.Contains($needle)) {
+        if (Test-DefenseClawGuardianPublicationWhole -Layout $Layout) {
             return
         }
         if ([DateTime]::UtcNow -ge $deadline) {
-            throw ("the hook Guardian's records do not bind the manifest yet and did not within $($script:GuardianBindingWaitSeconds) seconds ($detail). " +
-                'No service was stopped and nothing was changed. Look at the Guardian log under the state folder logs\guardian, then run the same command again.')
+            $shown = (@($stamps.Keys | Microsoft.PowerShell.Core\ForEach-Object { "$_ $($stamps[$_])" }) -join ', ')
+            throw ("the hook Guardian's activation, authorization and state records are from different publications ($shown) and the restarted Guardian did not publish them again within $($script:GuardianRepublishWaitSeconds) seconds. " +
+                'No transaction was opened and nothing was changed. Look at the Guardian log under the state folder logs\guardian, then run the same command again.')
         }
-        Write-DefenseClawLifecyclePhase -Stage 'waiting for the Guardian to publish records that bind the manifest, before any service stops'
-        Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:GuardianBindingPollSeconds
+        Microsoft.PowerShell.Utility\Start-Sleep -Seconds $script:GuardianRepublishPollSeconds
     }
 }
 
@@ -48164,6 +48211,16 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -CoworkPackagePath $CoworkPackagePath -CoworkSignaturePath $CoworkSignaturePath `
             -BeforeAclRepair
     }
+    if ($priorDeploymentActive -and $null -eq $priorManagedHooksActivation -and
+        -not $recoverCommittedManagedHooksLifecycle -and
+        (Test-DefenseClawStandaloneProfile)) {
+        # rel-1-0-6:GAP-0994: the activation classification below reads records
+        # that nothing can publish again once the transaction has stopped the
+        # services.
+        Resolve-DefenseClawGuardianPublicationBeforeTransaction `
+            -Layout $Layout `
+            -GuardianServiceName $GuardianServiceName
+    }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
@@ -48210,15 +48267,6 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Layout $Layout `
                 -Metadata $metadata `
                 -SnapshotPath $snapshot
-        }
-        if ($priorDeploymentActive -and $null -eq $priorManagedHooksActivation -and
-            -not $recoverCommittedManagedHooksLifecycle -and
-            (Test-DefenseClawStandaloneProfile)) {
-            # rel-1-0-6:GAP-0994: the classification after the stops reads
-            # records no running Guardian can fix any more.
-            Wait-DefenseClawGuardianRecordsBound `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName
         }
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
