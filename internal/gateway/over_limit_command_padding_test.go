@@ -274,6 +274,17 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"default in a comment":                     "F=" + notes + "; # ${F:=/etc/ld.so.preload}\necho " + lib + " > \"$F\"",
 		"default in a single quote, no value set":  "echo '${F:=/etc/ld.so.preload}' > " + notes + "; echo " + lib + " > \"$F\"",
 		"default in a comment of a substitution":   "echo $(ls # ${F:=/etc/ld.so.preload}\n) > " + notes + "; echo " + lib + " > \"$F\"",
+		// A word the shell reads as data assigns nothing, a child process
+		// keeps what it assigns, and a default fills a name no run has set.
+		"quoted word of a data command":                "F=" + notes + "; test \x27F=/etc/ld.so.preload\x27; echo " + lib + " > \"$F\"",
+		"quoted default inside a default":              ": ${A:-\x27${F:=/etc/ld.so.preload}\x27}; echo " + lib + " > \"$F\"",
+		"quoted default inside an assigning default":   ": ${A:=\x27${F:=/etc/ld.so.preload}\x27}; echo " + lib + " > \"$F\"",
+		"document of a program in another language":    "python3 <<\x27EOF2\x27\nprint(\x27${F:=/etc/ld.so.preload}\x27)\nEOF2\necho " + lib + " > \"$F\"",
+		"assignment in a document run by a shell":      "sh <<\x27EOF2\x27\n: ${F:=/etc/ld.so.preload}\nEOF2\necho " + lib + " > \"$F\"",
+		"assignment in a string run by a shell":        "sh -c \x27F=/etc/ld.so.preload\x27; echo " + lib + " > \"$F\"",
+		"assignment in an env prefix":                  "env F=/etc/ld.so.preload true; echo " + lib + " > \"$F\"",
+		"default of a name a default has set":          ": ${F:=" + notes + "}; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"default of a name set to an unreadable value": ": ${F:=$(date)}; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
 	} {
 		for padName, pad := range paddings {
 			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
@@ -322,16 +333,24 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"variable kept around a substitution":    "F=/etc/ld.so.preload; echo $(date); echo " + lib + " > \"$F\"",
 		// A substitution in a quoted word runs: its write is read whatever
 		// the command around it.
-		"quoted tee operand with a substitution":     "tee \"$(" + load + ")\" < /dev/null > " + notes,
-		"quoted assignment with a substitution":      "F=\"$(" + load + ")\"; echo ok > " + notes,
-		"quoted cd operand with a substitution":      "cd \"$(" + load + ")\"; echo ok > " + notes,
-		"quoted redirect target with a substitution": "echo ok > \"$(" + load + ")\"",
-		"assigned protected file":                    ": ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
-		"assigning default with a substitution":      "cat > " + notes + " <<EOF\n${X:=$(" + load + ")}\nEOF\n",
-		"default of an unset name":                   "F=" + notes + "; unset F; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
-		"default of an empty name":                   "F=; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
-		"default in double quotes around single":     "echo \"'${F:=/etc/ld.so.preload}'\" > " + notes + "; echo " + lib + " > \"$F\"",
-		"quoted substitution, set ordinary file":     "F=" + notes + "; tee \"$(" + load + ")\" < /dev/null > \"$F\"",
+		"quoted tee operand with a substitution":        "tee \"$(" + load + ")\" < /dev/null > " + notes,
+		"quoted assignment with a substitution":         "F=\"$(" + load + ")\"; echo ok > " + notes,
+		"quoted cd operand with a substitution":         "cd \"$(" + load + ")\"; echo ok > " + notes,
+		"quoted redirect target with a substitution":    "echo ok > \"$(" + load + ")\"",
+		"assigned protected file":                       ": ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"assigning default with a substitution":         "cat > " + notes + " <<EOF\n${X:=$(" + load + ")}\nEOF\n",
+		"default of an unset name":                      "F=" + notes + "; unset F; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"default of an empty name":                      "F=; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"default in double quotes around single":        "echo \"'${F:=/etc/ld.so.preload}'\" > " + notes + "; echo " + lib + " > \"$F\"",
+		"quoted substitution, set ordinary file":        "F=" + notes + "; tee \"$(" + load + ")\" < /dev/null > \"$F\"",
+		"conditional assignment before a default":       "false && F=" + notes + "; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"quoted word before a default":                  "test \x27F=" + notes + "\x27; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"default inside a double-quoted default":        ": ${A:-\"${F:=/etc/ld.so.preload}\"}; echo " + lib + " > \"$F\"",
+		"default inside a default":                      ": ${A:-${F:=/etc/ld.so.preload}}; echo " + lib + " > \"$F\"",
+		"assignment and write in a string of a shell":   "sh -c \x27F=/etc/ld.so.preload; echo " + lib + " > \"$F\"\x27",
+		"assignment and write in a document of a shell": "sh <<\x27EOF2\x27\n: ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"\nEOF2\n",
+		"env prefix and a write by the child":           "env F=/etc/ld.so.preload sh -c \x27echo " + lib + " > \"$F\"\x27",
+		"assignment by eval":                            "eval \x27F=/etc/ld.so.preload\x27; echo " + lib + " > \"$F\"",
 	} {
 		for padName, pad := range paddings {
 			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {

@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 )
@@ -53,8 +54,12 @@ import (
 // set is added to the values the caller follows, where the expansion is
 // written when the shell expands it there (braced): an expansion in a single
 // quote, after a backslash, in a comment or in a here-document body that is
-// quoted is text and sets nothing. A word that holds code is skipped as text
-// only outside it. The inside of a command
+// quoted is text and sets nothing. An assignment-shaped word assigns only
+// where the shell reads an assignment (before the command of a statement, in a
+// declaration) or in text that runs as shell code: a quoted argument of a
+// command that only receives data assigns nothing, and a child process (sh -c,
+// env, sudo, a here-document it reads) keeps what it assigns to itself. A word
+// that holds code is skipped as text only outside it. The inside of a command
 // substitution is read as a command text of its own, to a bounded depth, so
 // the comments, data and printed words inside it are skipped as they are
 // outside it. A construct the reading cannot step over (a process
@@ -91,17 +96,38 @@ type commandLayout struct {
 	braced map[int]bool
 	// raw are the spans left as text that may run; sorted, not overlapping.
 	raw []textSpan
+	// assigns are the starts of the words the shell reads as variable
+	// assignments: those that lead a statement, and the assignment words of a
+	// declaration builtin. evaluated are the spans of the arguments of a
+	// command that runs them as shell code (sh -c, eval, env, sudo...); sorted,
+	// not overlapping. An assignment-shaped word anywhere else, in a quoted
+	// argument of a command that only receives data for one, assigns nothing.
+	assigns   map[int]bool
+	evaluated []textSpan
+	// bracedStraight are the starts of the braced expansions that sit in a
+	// statement the shell runs in the main shell in the order written.
+	bracedStraight map[int]bool
 }
 
 // expandsAt reports whether a dollar sign at index may start an expansion the
 // shell runs: always for a text the reading does not follow and in raw text,
 // else only when the reading found it in a place the shell expands.
 func (l commandLayout) expandsAt(index int) bool {
-	if !l.parsed || l.braced[index] {
-		return true
-	}
-	at, found := slices.BinarySearchFunc(l.raw, index, func(span textSpan, index int) int { return span.start - index })
-	return found || at > 0 && l.raw[at-1].end > index
+	return !l.parsed || l.braced[index] || spansHold(l.raw, index)
+}
+
+// assignsAt reports whether an assignment-shaped word at index may assign a
+// variable: always for a text the reading does not follow and in text that may
+// run as shell code (raw, evaluated), else only a word the shell reads as an
+// assignment.
+func (l commandLayout) assignsAt(index int) bool {
+	return !l.parsed || l.assigns[index] || spansHold(l.raw, index) || spansHold(l.evaluated, index)
+}
+
+// spansHold reports whether index lies in one of the sorted spans.
+func spansHold(spans []textSpan, index int) bool {
+	at, found := slices.BinarySearchFunc(spans, index, func(span textSpan, index int) int { return span.start - index })
+	return found || at > 0 && spans[at-1].end > index
 }
 
 // mergeSpans sorts spans and joins those that overlap.
@@ -151,6 +177,26 @@ var layoutTextCommands = map[string]bool{
 	"tail": true, "wc": true, "tr": true, "cut": true,
 }
 
+// layoutShells are the commands that run a string or a script as shell code
+// wherever they stand in a statement (docker exec c sh -c ...). layoutWrappers
+// run the command they are given, in a child process, when they stand first;
+// layoutInShell run their argument in the shell itself.
+var (
+	layoutShells = map[string]bool{
+		"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "mksh": true,
+		"ash": true, "fish": true, "csh": true, "tcsh": true, "busybox": true,
+	}
+	layoutWrappers = map[string]bool{
+		"env": true, "sudo": true, "doas": true, "su": true, "runuser": true, "nohup": true,
+		"nice": true, "ionice": true, "timeout": true, "xargs": true, "watch": true,
+		"ssh": true, "setsid": true, "stdbuf": true, "flock": true, "chroot": true,
+		"script": true, "parallel": true, "exec": true, "at": true,
+	}
+	layoutInShell = map[string]bool{
+		"eval": true, "source": true, ".": true, "command": true, "builtin": true,
+	}
+)
+
 // layoutReserved are the first words of a statement that open a construct
 // whose statements do not run once, in order, in the main shell.
 var layoutReserved = map[string]bool{
@@ -198,6 +244,9 @@ type layoutReader struct {
 	words      []layoutWord
 	redirected bool
 	before     string
+	// truth is what the statement before the one being read always returns
+	// ("true" or "false"), "" when it is any other.
+	truth string
 	// target is set after a redirection operator: the next word is its file.
 	target bool
 	// documents, commands and grouped are the here-documents opened on the
@@ -220,9 +269,12 @@ const maxLayoutDepth = 4
 
 func readLayoutAt(text string, depth int) (commandLayout, bool) {
 	r := &layoutReader{
-		text:   text,
-		depth:  depth,
-		layout: commandLayout{straight: map[int]bool{}, sequential: true, parsed: true, braced: map[int]bool{}},
+		text:  text,
+		depth: depth,
+		layout: commandLayout{
+			straight: map[int]bool{}, sequential: true, parsed: true, braced: map[int]bool{},
+			assigns: map[int]bool{}, bracedStraight: map[int]bool{},
+		},
 		before: "start",
 	}
 	for index := 0; index < len(text); {
@@ -287,8 +339,10 @@ func readLayoutAt(text string, depth int) (commandLayout, bool) {
 	r.endStatement("EOF")
 	slices.SortFunc(r.layout.skipped, func(a, b textSpan) int { return a.start - b.start })
 	slices.SortFunc(r.layout.quoted, func(a, b textSpan) int { return a.start - b.start })
-	slices.SortFunc(r.layout.scopes, func(a, b textSpan) int { return a.start - b.start })
+	// An outer scope sorts before the ones it holds that start with it.
+	slices.SortFunc(r.layout.scopes, func(a, b textSpan) int { return cmp.Or(a.start-b.start, b.end-a.end) })
 	r.layout.raw = mergeSpans(r.layout.raw)
+	r.layout.evaluated = mergeSpans(r.layout.evaluated)
 	return r.layout, true
 }
 
@@ -396,6 +450,18 @@ func (r *layoutReader) endStatement(term string) {
 			command = "?"
 		}
 	}
+	prior := r.truth
+	r.truth = ""
+	switch command {
+	case "true", ":":
+		r.truth = "true"
+	case "false":
+		r.truth = "false"
+	}
+	if before == "&&" && prior == "true" || before == "||" && prior == "false" {
+		// The statement after a constant test that lets it run is in order.
+		before = ";"
+	}
 	r.commands = append(r.commands, command)
 	if first < len(words) && layoutTextCommands[command] {
 		// Every argument word is text, quoted or not, except the code spans
@@ -407,9 +473,19 @@ func (r *layoutReader) endStatement(term string) {
 	if layoutReserved[command] {
 		r.layout.sequential, r.grouped = false, true
 	}
-	inOrder := (before == "start" || before == ";" || before == "\n") &&
-		(term == ";" || term == "\n" || term == "EOF") && !redirected
-	if !inOrder {
+	r.markAssignments(words, first, command)
+	ordered := (before == "start" || before == ";" || before == "\n") &&
+		(term == ";" || term == "\n" || term == "EOF")
+	if ordered {
+		// The words of a statement are expanded in the main shell whether or
+		// not it is redirected.
+		for _, word := range words {
+			for _, start := range word.braced {
+				r.layout.bracedStraight[start] = true
+			}
+		}
+	}
+	if !ordered || redirected {
 		return
 	}
 	switch {
@@ -424,6 +500,59 @@ func (r *layoutReader) endStatement(term string) {
 	case (command == "cd" || command == "unset") && first == 0:
 		r.layout.straight[words[0].start] = true
 	}
+}
+
+// markAssignments records which words of a statement the shell reads as
+// assignments (those before the command, and the assignment words of a
+// declaration builtin), and the arguments of a command that runs them as shell
+// code. A command that runs them in a child process (sh -c, env, sudo) is a
+// scope: what it assigns never reaches the statements after it.
+func (r *layoutReader) markAssignments(words []layoutWord, first int, command string) {
+	for _, word := range words[:first] {
+		r.layout.assigns[word.start] = true
+	}
+	// An assignment that follows the reserved words of a construct (a group
+	// or a branch of a condition) leads a statement too.
+	lead := first
+	for lead < len(words) && words[lead].plain && layoutReserved[words[lead].literal] {
+		lead++
+	}
+	for ; lead > first && lead < len(words) && words[lead].assign; lead++ {
+		r.layout.assigns[words[lead].start] = true
+	}
+	if first >= len(words) {
+		return
+	}
+	if layoutDeclarations[command] {
+		for _, word := range words[first+1:] {
+			if word.assign {
+				r.layout.assigns[word.start] = true
+			}
+		}
+	}
+	if first+1 >= len(words) || !runsArguments(words[first:], command) {
+		return
+	}
+	span := textSpan{words[first+1].start, words[len(words)-1].end}
+	r.layout.evaluated = append(r.layout.evaluated, span)
+	if !layoutInShell[command] {
+		r.layout.scopes = append(r.layout.scopes, span)
+	}
+}
+
+// runsArguments reports whether the statement whose command word is first in
+// words runs its arguments as shell code: a command the reading cannot name
+// may be any of them.
+func runsArguments(words []layoutWord, command string) bool {
+	if command == "?" || layoutWrappers[command] || layoutInShell[command] {
+		return true
+	}
+	for _, word := range words {
+		if word.plain && layoutShells[word.literal[strings.LastIndexByte(word.literal, '/')+1:]] {
+			return true
+		}
+	}
+	return false
 }
 
 // skipOutsideCode skips the text from start to end except the code spans in
@@ -470,6 +599,12 @@ func (r *layoutReader) readSubstitution(span textSpan) {
 	for brace := range inside.braced {
 		r.layout.braced[start+brace] = true
 	}
+	for assign := range inside.assigns {
+		r.layout.assigns[start+assign] = true
+	}
+	for _, evaluated := range inside.evaluated {
+		r.layout.evaluated = append(r.layout.evaluated, textSpan{start + evaluated.start, start + evaluated.end})
+	}
 	for _, raw := range inside.raw {
 		r.layout.raw = append(r.layout.raw, textSpan{start + raw.start, start + raw.end})
 	}
@@ -485,6 +620,9 @@ func (r *layoutReader) readSubstitution(span textSpan) {
 	if inside.sequential {
 		for statement := range inside.straight {
 			r.layout.straight[start+statement] = true
+		}
+		for brace := range inside.bracedStraight {
+			r.layout.bracedStraight[start+brace] = true
 		}
 	}
 }
@@ -504,10 +642,12 @@ func allAssignments(words []layoutWord) bool {
 // the shell runs in it (an unquoted delimiter): those are code, and stay text.
 func (r *layoutReader) readDocuments(index int) int {
 	data := !r.grouped
+	inShell := false
 	for _, command := range r.commands {
 		if command != "" && !layoutDataReaders[command] {
 			data = false
 		}
+		inShell = inShell || command == "?" || layoutInShell[command]
 	}
 	for _, document := range r.documents {
 		end := heredocBodyEnd(r.text, index, document.delimiter, document.stripTabs)
@@ -515,9 +655,13 @@ func (r *layoutReader) readDocuments(index int) int {
 		case end <= index:
 		case !data:
 			r.layout.raw = append(r.layout.raw, textSpan{index, end})
+			if !r.grouped && !inShell {
+				// A child process reads the body: what it assigns stays in it.
+				r.layout.scopes = append(r.layout.scopes, textSpan{index, end})
+			}
 		case document.expands:
 			var braced []int
-			code := documentCode(r.text[:end], index, &braced)
+			code := documentCode(r.text[:end], index, &braced, false)
 			r.markBraced(braced)
 			r.skipOutsideCode(index, end, code)
 			r.readInside(code)
@@ -536,14 +680,28 @@ func (r *layoutReader) readDocuments(index int) int {
 // braced expansion itself is data. Quotes are plain text in a body, but not
 // inside a substitution. A substitution, or an expansion, that does not close
 // runs to the end of the body. The starts of the braced expansions are added
-// to braced when it is not nil.
-func documentCode(text string, index int, braced *[]int) []textSpan {
+// to braced when it is not nil. With quotes the text is the word of a braced
+// expansion the shell reads outside a double quote, so a single quote is a
+// quote: what it holds is literal, and a double quote makes single quotes
+// plain text again until it closes.
+func documentCode(text string, index int, braced *[]int, quotes bool) []textSpan {
 	var code []textSpan
+	double := false
 	for ; index < len(text); index++ {
 		var end int
 		switch {
 		case text[index] == shellBackslash:
 			index++
+			continue
+		case quotes && text[index] == shellDoubleQuote:
+			double = !double
+			continue
+		case quotes && !double && text[index] == shellSingleQuote:
+			closing := strings.IndexByte(text[index+1:], shellSingleQuote)
+			if closing < 0 {
+				return code
+			}
+			index += closing + 1
 			continue
 		case text[index] == shellBacktick:
 			end = layoutBacktickEnd(text, index)
@@ -555,7 +713,7 @@ func documentCode(text string, index int, braced *[]int) []textSpan {
 				if braced != nil {
 					*braced = append(*braced, index)
 				}
-				code = append(code, documentCode(text[:end-1], index+2, braced)...)
+				code = append(code, documentCode(text[:end-1], index+2, braced, quotes && !double)...)
 				index = end - 1
 				continue
 			}
@@ -614,7 +772,7 @@ func readLayoutWord(text string, index int) (layoutWord, int, bool) {
 			index = end
 			word.plain = false
 		case shellDollar:
-			end := layoutDollarEnd(text, index, &word.code, &word.braced)
+			end := layoutDollarEnd(text, index, &word.code, &word.braced, false)
 			if end < 0 {
 				return layoutWord{}, 0, false
 			}
@@ -638,8 +796,9 @@ func readLayoutWord(text string, index int) (layoutWord, int, bool) {
 // locale quoting, or code: a command substitution or an expansion with an
 // operator, whose span is added to code. -1 for arithmetic brackets and for a
 // construct that does not close. The start of a braced expansion is added to
-// braced when it is not nil.
-func layoutDollarEnd(text string, index int, code *[]textSpan, braced *[]int) int {
+// braced when it is not nil. inDouble is true inside a double quote, where a
+// single quote in the word of a braced expansion is plain text.
+func layoutDollarEnd(text string, index int, code *[]textSpan, braced *[]int, inDouble bool) int {
 	if index+1 >= len(text) {
 		return index + 1
 	}
@@ -678,7 +837,7 @@ func layoutDollarEnd(text string, index int, code *[]textSpan, braced *[]int) in
 			if braced != nil {
 				*braced = append(*braced, index)
 			}
-			*code = append(*code, documentCode(text[:end-1], index+2, braced)...)
+			*code = append(*code, documentCode(text[:end-1], index+2, braced, !inDouble)...)
 		}
 		return end
 	}
@@ -709,7 +868,7 @@ func layoutDoubleQuoteEnd(text string, index int, code *[]textSpan, braced *[]in
 			if next+1 < len(text) && (text[next+1] == shellSingleQuote || text[next+1] == shellDoubleQuote) {
 				continue
 			}
-			end := layoutDollarEnd(text, next, code, braced)
+			end := layoutDollarEnd(text, next, code, braced, true)
 			if end < 0 {
 				return -1
 			}
