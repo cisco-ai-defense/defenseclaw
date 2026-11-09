@@ -499,6 +499,26 @@ func TestMachinePolicyProblemsNameEveryConnectorMachinePolicyVerifyCallsUncovere
 	opts := windowsOpenCodeTestOptions(t)
 	opts.CopilotCLIPolicyOnly = true
 	all := []string{ConnectorCodex, ConnectorClaudeCode, ConnectorCursor, ConnectorCopilot, ConnectorOpenCode}
+	// The hook executable every policy names, so a published connector can be
+	// covered here.
+	hookDirs := []string{}
+	for dir := filepath.Dir(opts.HookBinary); ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(dir); err == nil {
+			break
+		}
+		hookDirs = append([]string{dir}, hookDirs...)
+	}
+	for _, dir := range hookDirs {
+		if err := createProtectedDir(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(opts.HookBinary, []byte("MZ"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := applySDDL(opts.HookBinary, unrecordedAdminOnlyDACL); err != nil {
+		t.Fatal(err)
+	}
 	check := func(step string) map[string]bool {
 		t.Helper()
 		verify, err := VerifyAll(opts, all)
@@ -535,6 +555,25 @@ func TestMachinePolicyProblemsNameEveryConnectorMachinePolicyVerifyCallsUncovere
 		t.Logf("publish: %v", err)
 	}
 	check("after the Go-owned publish")
+	// Codex, Claude Code and Cursor too (the lifecycle writes them in
+	// production; the Go targets write the same files here), so "covered
+	// means no problem" is checked for all five.
+	if _, err := Publish(opts, all); err != nil {
+		t.Logf("publish of all five: %v", err)
+	}
+	verify, _ := VerifyAll(opts, all)
+	covered := 0
+	for _, state := range verify.States {
+		if state.Route == RouteMachinePolicy && state.Covered {
+			covered++
+		} else if state.Route == RouteMachinePolicy {
+			t.Logf("not covered: %s owned=%d higher=%v conflicts=%q", state.Connector, state.OwnedEntries, state.HigherPrecedence, state.Conflicts)
+		}
+	}
+	if covered != len(all) {
+		t.Fatalf("after publishing all five, %d of %d are covered; the covered side of the property needs all five", covered, len(all))
+	}
+	check("after publishing all five")
 	folder, err := CopilotPolicyDir(opts)
 	if err != nil {
 		t.Fatal(err)
