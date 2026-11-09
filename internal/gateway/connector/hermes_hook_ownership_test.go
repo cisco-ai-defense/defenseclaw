@@ -212,15 +212,17 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptWithoutANotice(t *testi
 		"after shell -c": {"", func(d, _ string) string {
 			return "sh -c \"" + filepath.Join(d, "hooks", "hookX") + " --event pre_tool_call\""
 		}},
-		"renamed hook, absolute":        {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") }},
-		"renamed hook, tilde":           {"", func(_, _ string) string { return "~/.defenseclaw/hooks/hookX" }},
-		"renamed hook, home var":        {"", func(_, _ string) string { return "$HOME/.defenseclaw/hooks/hookX" }},
-		"renamed hook, arguments":       {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") + " --event pre_tool_call" }},
-		"renamed hook, after bash":      {"", func(d, _ string) string { return "bash " + filepath.Join(d, "hooks", "hookX") }},
-		"relative word":                 {"", func(_, _ string) string { return "cd .defenseclaw/hooks && bash ./hookX" }},
-		"setup command, leading space":  {"", func(d, _ string) string { return " " + hermesSetupCommandIn(d) }},
-		"setup command, trailing space": {"", func(d, _ string) string { return hermesSetupCommandIn(d) + " " }},
-		"setup command, trailing tab":   {"", func(d, _ string) string { return hermesSetupCommandIn(d) + "\t" }},
+		"renamed hook, absolute":              {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") }},
+		"renamed hook, tilde":                 {"", func(_, _ string) string { return "~/.defenseclaw/hooks/hookX" }},
+		"renamed hook, home var":              {"", func(_, _ string) string { return "$HOME/.defenseclaw/hooks/hookX" }},
+		"renamed hook, arguments":             {"", func(d, _ string) string { return filepath.Join(d, "hooks", "hookX") + " --event pre_tool_call" }},
+		"renamed hook, after bash":            {"", func(d, _ string) string { return "bash " + filepath.Join(d, "hooks", "hookX") }},
+		"relative word":                       {"", func(_, _ string) string { return "cd .defenseclaw/hooks && bash ./hookX" }},
+		"setup command and a second command":  {"", func(d, _ string) string { return hermesSetupCommandIn(d) + " && echo done" }},
+		"setup command, quoted argument":      {"", func(d, _ string) string { return hermesSetupCommandIn(d) + " 'quoted arg'" }},
+		"setup command, command substitution": {"", func(d, _ string) string { return hermesSetupCommandIn(d) + " $(id)" }},
+		"setup command, redirection":          {"", func(d, _ string) string { return hermesSetupCommandIn(d) + " > /tmp/out" }},
+		"setup command with a suffix":         {"", func(d, _ string) string { return hermesSetupCommandIn(d) + "x" }},
 		"edited path script, padded": {"", func(d, _ string) string {
 			return " " + filepath.Join(d, "hooks", "hermes-hook.sh.off") + " --event pre_tool_call"
 		}},
@@ -268,6 +270,73 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptWithoutANotice(t *testi
 			}
 			if matches, _ := filepath.Glob(configPath + ".*"); len(matches) != 0 {
 				t.Fatalf("teardown wrote extra files next to the config: %q", matches)
+			}
+		})
+	}
+}
+
+// A plain spelling of the command Setup writes (another quoting, blanks around
+// it or inside the quotes, plain arguments after it) is the current entry, not
+// a user's: repair replaces it with the one entry Setup writes, so the event
+// holds one DefenseClaw handler and the registration check passes, a second
+// repair changes nothing, and teardown removes it. A hook of the user's beside
+// it stays (GAP-0873).
+func TestHermesAPlainSpellingOfTheCurrentCommandIsReplacedByRepairAndRemovedByTeardown(t *testing.T) {
+	spellings := map[string]func(command string) string{
+		"trailing blank":              func(c string) string { return c + " " },
+		"two trailing blanks":         func(c string) string { return c + "  " },
+		"trailing tab":                func(c string) string { return c + "\t" },
+		"leading blank":               func(c string) string { return " " + c },
+		"single quoted, blank after":  func(c string) string { return "'" + c + "' " },
+		"single quoted, blank inside": func(c string) string { return "'" + c + " '" },
+		"double quoted":               func(c string) string { return "\"" + c + "\"" },
+		"unquoted":                    func(c string) string { return c },
+		"argument":                    func(c string) string { return "'" + c + "' --extra-arg" },
+		"unquoted, argument":          func(c string) string { return c + " --extra-arg" },
+		"double quoted, argument":     func(c string) string { return "\"" + c + "\" --extra-arg=1" },
+	}
+	for name, spell := range spellings {
+		t.Run(name, func(t *testing.T) {
+			conn, opts, configPath, home := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
+			script := conn.hookCommand(opts)
+			current := hermesConfiguredHookCommand(script, "")
+			hermesSetUp(t, conn, opts, configPath)
+			user := filepath.Join(home, "user-hooks", "hookX")
+			var spelled string
+			hermesRewriteHooks(t, configPath, func(hooks map[string]interface{}) {
+				for event, raw := range hooks {
+					entries := raw.([]interface{})
+					for _, entry := range entries {
+						if event == "pre_tool_call" {
+							spelled = spell(script)
+							entry.(map[string]interface{})["command"] = spelled
+						}
+					}
+					if event == "pre_tool_call" {
+						hooks[event] = append([]interface{}{map[string]interface{}{"command": user, "timeout": 30}}, entries...)
+					}
+				}
+			})
+			notice := captureHermesNotices(t)
+			for round := 0; round < 2; round++ {
+				if err := patchHermesHooks(configPath, script, ""); err != nil {
+					t.Fatalf("repair %d refused a spelling of the current command %q: %v", round, spelled, err)
+				}
+				if got := hermesPreToolCommands(t, configPath); len(got) != 2 || got[0] != user || got[1] != current {
+					t.Fatalf("repair %d: commands = %q; want the user hook then the one current entry %q", round, got, current)
+				}
+			}
+			if notice.Len() != 0 {
+				t.Fatalf("notice = %q; want none: the spelling was replaced, nothing was kept", notice.String())
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); len(got) != 1 || got[0] != user {
+				t.Fatalf("remaining commands = %q; want only the user hook", got)
+			}
+			if err := conn.VerifyClean(opts); err != nil {
+				t.Fatalf("VerifyClean after teardown: %v", err)
 			}
 		})
 	}

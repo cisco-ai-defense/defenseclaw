@@ -1161,3 +1161,53 @@ def test_hermes_doctor_warns_proof_unavailable_where_a_seccomp_profile_refuses_t
     monkeypatch.setattr(cmd_doctor, "_HERMES_PROBE_SUPERVISOR", _supervisor_with_unshare_refused(22))
     row = check()
     assert row["status"] == "fail" and "could not run" in row["detail"], row
+
+
+def _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, command, event="pre_tool_call"):
+    """What the registration check says of a sealed registration with one more entry beside Setup's."""
+    script, check = _registered_unix_hermes(tmp_path, monkeypatch)
+    check()
+    config = tmp_path / "hermes" / "config.yaml"
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"].setdefault(event, []).insert(0, {"command": command.format(c=script), "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    return cmd_doctor._hermes_registration_problem(SimpleNamespace(data_dir=str(tmp_path / "dc")), str(config))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hermes-hook.sh",
+        "bash /opt/tools/my-hermes-hook.sh",
+        "/opt/tools/audit hermes-hook.sh",
+        "{c}.off",
+        "{c} && echo done",
+        "sudo {c}",
+    ],
+)
+def test_a_user_entry_that_only_names_the_script_is_not_a_second_registered_command(tmp_path, monkeypatch, command):
+    assert _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, command) == ""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize("command", ["{c} ", " {c}", "'{c}' ", '"{c}"', "{c}\t"])
+def test_a_spelling_of_the_sealed_command_beside_it_is_a_second_registered_command(tmp_path, monkeypatch, command):
+    problem = _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, command)
+
+    assert "pre_tool_call has 2 registered DefenseClaw commands" in problem
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+@pytest.mark.parametrize("command", ["'{c} '", "'{c}' --extra-arg", "{c} --extra-arg"])
+def test_a_spelling_that_does_not_run_the_sealed_script_alone_is_reported(tmp_path, monkeypatch, command):
+    problem = _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, command)
+
+    assert problem == "Hermes pre_tool_call does not run the sealed hook command"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Unix shell hook")
+def test_a_spelling_of_the_sealed_command_on_another_event_is_reported(tmp_path, monkeypatch):
+    problem = _registration_problem_with_an_extra_entry(tmp_path, monkeypatch, "'{c}' ", event="some_future_event")
+
+    assert "unexpected Hermes event some_future_event" in problem
