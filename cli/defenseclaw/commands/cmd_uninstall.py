@@ -1413,22 +1413,58 @@ def _is_plugin_answer(answer: object) -> bool:
     )
 
 
-def _is_plugin_answer_store(raw: bytes) -> bool:
-    """hermes-plugin-entrypoints.json: one object whose only key is "answers", each answer as the gateway writes it.
+def _plugin_answers_seal(answers: dict) -> str:
+    """The digest the gateway puts beside the answers it writes (hermesAnswersSeal in hermes_vendor_manifest_store.go).
 
-    The gateway rewrites this cache whenever its scanner gives a new answer (hermes_vendor_manifest_store.go),
-    so it has no fixed bytes to prove; the whole structure is the proof.
+    Each field is length-prefixed and the keys are in byte order, so it does not depend on how the JSON text is
+    written. Lengths are in UTF-8 bytes.
     """
+    digest = hashlib.sha256(b"defenseclaw-hermes-plugin-answers-v1\n")
+    for key in sorted(answers, key=lambda name: name.encode("utf-8")):
+        answer = answers[key]
+        raw_key = key.encode("utf-8")
+        digest.update(b"%d:%s%d:%d:" % (len(raw_key), raw_key, answer["seen"], len(answer["entrypoints"])))
+        for entrypoint in answer["entrypoints"]:
+            raw = entrypoint.encode("utf-8")
+            digest.update(b"%d:%s" % (len(raw), raw))
+    return digest.hexdigest()
+
+
+def _plugin_answer_store_document(raw: bytes) -> dict | None:
+    """The parsed hermes-plugin-entrypoints.json when it has the structure the gateway writes, else None."""
     try:
         document = json.loads(raw)
     except ValueError:
+        return None
+    if not isinstance(document, dict) or not {"answers"} <= set(document) <= {"answers", "sealed"}:
+        return None
+    answers = document["answers"]
+    if not isinstance(answers, dict) or not all(_is_plugin_answer(answer) for answer in answers.values()):
+        return None
+    return document
+
+
+def _is_plugin_answer_store(raw: bytes) -> bool:
+    """hermes-plugin-entrypoints.json: an "answers" object, each answer as the gateway writes it."""
+    return _plugin_answer_store_document(raw) is not None
+
+
+def _plugin_answer_store_is_the_gateway_last_write(raw: bytes) -> bool:
+    """Whether the cache carries the digest the gateway puts beside the answers of each write.
+
+    The gateway rewrites the cache with each new scanner answer, so after a data_dir move the file is not the
+    bytes the move recorded. The structure alone cannot tell that rewrite from a file of the same structure the
+    account edited or created since: only the digest of the answers it holds can, and an edit does not carry it.
+    A cache written before the gateway sealed its writes has no digest and is kept unless it is still the
+    recorded copy.
+    """
+    document = _plugin_answer_store_document(raw)
+    if document is None:
         return False
-    return (
-        isinstance(document, dict)
-        and set(document) == {"answers"}
-        and isinstance(document["answers"], dict)
-        and all(_is_plugin_answer(answer) for answer in document["answers"].values())
-    )
+    try:
+        return document.get("sealed") == _plugin_answers_seal(document["answers"])
+    except UnicodeEncodeError:  # a key or entrypoint the gateway could not have written
+        return False
 
 
 _FLAT_HOOK_RECORD_LINE = re.compile(
@@ -1450,15 +1486,17 @@ def _is_hermes_flat_hook_record(raw: bytes) -> bool:
 
 
 # The other records Setup and the gateway keep for a connector in the folder they ran in, by path
-# below the folder, the test of the bytes they write there, and whether the move records their
-# digest. A file of another shape at the name belongs to the account and stays (GAP-0945).
-# The plugin scanner cache has no digest: the gateway still running in the folder rewrites it
-# after the move, so a digest taken at the move would call that write the account's edit.
+# below the folder, the test of the bytes they write there, and, for a record the gateway still
+# running in the folder rewrites after the move, the test of that rewrite. A file of another shape at the
+# name belongs to the account and stays (GAP-0945).
+# The move records every digest. A record is removed while it is still the copy the move left, or, for the
+# plugin scanner cache, when it is the gateway's own later write, which only the digest the gateway puts
+# beside its answers proves: a file of the same structure that the account edited or created is kept.
 _CONNECTOR_STATE_RECORD_SHAPES = {
     "hermes": (
-        ((".hermes-lifecycle.lock",), _is_empty_lock, True),
-        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store, False),
-        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record, True),
+        ((".hermes-lifecycle.lock",), _is_empty_lock, None),
+        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store, _plugin_answer_store_is_the_gateway_last_write),
+        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record, None),
     ),
 }
 
@@ -1479,12 +1517,7 @@ def _small_file_bytes(path: str) -> bytes | None:
 
 def move_recorded_record_paths() -> tuple[str, ...]:
     """The paths below a data folder, with "/" separators, of the records whose digest a data_dir move records."""
-    state = (
-        "/".join(parts)
-        for records in _CONNECTOR_STATE_RECORD_SHAPES.values()
-        for parts, _, pinned in records
-        if pinned
-    )
+    state = ("/".join(parts) for records in _CONNECTOR_STATE_RECORD_SHAPES.values() for parts, _, _ in records)
     return (*_TOP_LEVEL_BACKUP_SHAPES, *state)
 
 
@@ -1691,7 +1724,7 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(os.path.join(hooks, script))
         for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
             drop(os.path.join(folder, record))
-        for parts, written_by_setup, pinned in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
+        for parts, written_by_setup, rewritten_by_gateway in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
             path = os.path.join(folder, *parts)
             if len(parts) > 1 and not real_dir(os.path.join(folder, *parts[:-1])):
                 continue
@@ -1701,12 +1734,15 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(path)  # a link or another account's file is reported and never opened
                 continue
             raw = _small_file_bytes(path)
-            # The shape says it is the record Setup writes; the digest, where the move records one, says it
-            # is still the copy the move left.
+            # The shape says it is the record Setup writes; the digest says it is still the copy the move left,
+            # and a record the gateway rewrites says by its own proof that this is that rewrite.
             if (
                 raw is not None
                 and written_by_setup(raw)
-                and (not pinned or hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts)))
+                and (
+                    hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts))
+                    or (rewritten_by_gateway is not None and rewritten_by_gateway(raw))
+                )
             ):
                 drop(path)
             else:

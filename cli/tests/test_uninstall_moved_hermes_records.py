@@ -113,18 +113,84 @@ def test_an_answer_store_the_account_edited_after_the_move_is_kept_and_reported(
         assert not (home / name).exists(), name
 
 
+# What the gateway writes for these two answers (TestHermesAnswerStoreWritesTheSealUninstallChecks pins the same digest).
+GATEWAY_ANSWERS = {
+    "b" * 64: {"entrypoints": ["plugins/a/__init__.py", "plugins/\u00e9/x.py"], "seen": 1789012345678901234},
+    "a" * 64: {"entrypoints": [], "seen": 7},
+}
+GATEWAY_SEAL = "ca761783fb55bdc977ddc51de8c6221df60de69801ff8ce3f7cb5eb5c9c75490"
+
+
+def test_the_seal_is_the_one_the_gateway_writes():
+    assert cmd_uninstall._plugin_answers_seal(GATEWAY_ANSWERS) == GATEWAY_SEAL
+
+
 def test_an_answer_store_the_gateway_rewrote_after_the_move_is_removed(tmp_path, monkeypatch):
-    # The gateway still running in the old folder gives the plugin scanner's next answer after the
-    # move recorded the digest, so the bytes differ from the recorded ones and are still the cache.
+    # The gateway still running in the old folder gives the plugin scanner's next answer after the move
+    # recorded the digest, so the bytes differ from the recorded ones; its seal proves the write is its own.
     home, plan = _move_and_plan(tmp_path, monkeypatch)
-    answer = {"entrypoints": ["plugins/a/__init__.py", "plugins/b/__init__.py"], "seen": 1789012345678901234}
-    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps({"answers": {"ab" * 32: answer}}))
+    (home / "hermes-plugin-entrypoints.json").write_text(
+        json.dumps({"answers": GATEWAY_ANSWERS, "sealed": GATEWAY_SEAL})
+    )
 
     stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
 
     assert stayed == []
     for name in RECORDS:
         assert not (home / name).exists(), name
+
+
+def _account_store(answer_key="ab" * 32):
+    return {"answers": {answer_key: {"entrypoints": ["plugins/mine/__init__.py"], "seen": 3}}}
+
+
+@pytest.mark.parametrize("sealed", ["absent", "wrong", "stale"])
+def test_an_answer_store_of_the_gateway_structure_the_account_edited_after_the_move_is_kept(
+    tmp_path, monkeypatch, sealed
+):
+    # The same structure the gateway writes, changed after the move: no seal, a made-up seal, or the seal of the
+    # answers before the edit. Shape alone is not proof that the gateway wrote these bytes.
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    edited = _account_store()
+    if sealed == "wrong":
+        edited["sealed"] = "0" * 64
+    elif sealed == "stale":
+        edited["sealed"] = GATEWAY_SEAL
+    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps(edited))
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert json.loads((home / "hermes-plugin-entrypoints.json").read_text()) == edited
+    assert [line.split(" (")[0] for line in stayed] == [str(home / "hermes-plugin-entrypoints.json")]
+    for name in (".hermes-lifecycle.lock", "hooks/.hookcfg.hermes"):
+        assert not (home / name).exists(), name
+
+
+def test_an_answer_store_the_gateway_wrote_and_the_account_then_edited_is_kept(tmp_path, monkeypatch):
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    answers = json.loads(json.dumps(GATEWAY_ANSWERS))
+    answers["b" * 64]["entrypoints"] = ["plugins/mine/__init__.py"]
+    edited = {"answers": answers, "sealed": GATEWAY_SEAL}
+    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps(edited))
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert json.loads((home / "hermes-plugin-entrypoints.json").read_text()) == edited
+    assert [line.split(" (")[0] for line in stayed] == [str(home / "hermes-plugin-entrypoints.json")]
+
+
+def test_an_answer_store_created_after_the_move_is_kept_when_none_was_there_at_the_move(tmp_path, monkeypatch):
+    # Nothing was recorded for the cache at the move. A file of the gateway structure that the account put
+    # there since has no proof that the gateway wrote it.
+    records = {name: body for name, body in RECORDS.items() if name != "hermes-plugin-entrypoints.json"}
+    home, plan = _move_and_plan(tmp_path, monkeypatch, records)
+    created = _account_store()
+    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps(created))
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert json.loads((home / "hermes-plugin-entrypoints.json").read_text()) == created
+    assert [line.split(" (")[0] for line in stayed] == [str(home / "hermes-plugin-entrypoints.json")]
 
 
 @pytest.mark.parametrize(
@@ -185,10 +251,10 @@ def test_a_link_or_pipe_at_a_hermes_record_name_is_reported_and_never_opened(tmp
     assert os.path.lexists(record)
 
 
-def _move_and_plan(tmp_path, monkeypatch):
+def _move_and_plan(tmp_path, monkeypatch, records=RECORDS):
     home, _path = _install_home(tmp_path, monkeypatch)
     monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
-    _write(home, RECORDS)
+    _write(home, records)
     moved = tmp_path / "moved"
     result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(moved)], obj=AppContext())
     assert result.exit_code == 0, result.output
