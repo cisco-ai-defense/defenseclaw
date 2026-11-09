@@ -47,6 +47,7 @@ import contextlib
 import errno
 import filecmp
 import glob
+import hashlib
 import json
 import ntpath
 import os
@@ -1358,8 +1359,13 @@ _TOP_LEVEL_BACKUP_SHAPES: dict[str, tuple[dict[str, type], frozenset[str]]] = {
 }
 
 
-def _is_setup_top_level_backup(path: str) -> bool:
-    """Whether *path* holds the record Setup writes under that file name: its required keys and no other key."""
+def _is_setup_top_level_backup(path: str, move_digests: dict[str, str] | None = None) -> bool:
+    """Whether *path* holds the record Setup writes under that file name: its required keys and no other key.
+
+    With *move_digests* (the digests `config set data_dir` recorded for this
+    folder) the file must also still be the bytes the move left: a record the
+    account changed since, even inside a field Setup writes, belongs to the account.
+    """
     shape = _TOP_LEVEL_BACKUP_SHAPES.get(os.path.basename(path))
     if shape is None:
         return False
@@ -1369,6 +1375,8 @@ def _is_setup_top_level_backup(path: str) -> bool:
             raw = stream.read(_BACKUP_RECORD_MAX_BYTES + 1)
         document = json.loads(raw) if len(raw) <= _BACKUP_RECORD_MAX_BYTES else None
     except (OSError, ValueError):
+        return False
+    if move_digests is not None and hashlib.sha256(raw).hexdigest() != move_digests.get(os.path.basename(path)):
         return False
     return (
         isinstance(document, dict)
@@ -1386,6 +1394,59 @@ _CONNECTOR_HOOK_SCRIPTS = {
     "hermes": "hermes-hook.sh",
 }
 _CONNECTOR_SETUP_RECORDS = {"hermes": ("hermes-home-setup.json",)}
+
+
+def _is_empty_lock(raw: bytes) -> bool:
+    """The lifecycle lock Setup creates is an empty file."""
+    return raw == b""
+
+
+def _is_plugin_answer_store(raw: bytes) -> bool:
+    """hermes-plugin-entrypoints.json: one object whose only key is "answers" (hermes_vendor_manifest_store.go)."""
+    try:
+        document = json.loads(raw)
+    except ValueError:
+        return False
+    return isinstance(document, dict) and set(document) == {"answers"} and isinstance(document["answers"], dict)
+
+
+_FLAT_HOOK_RECORD_LINE = re.compile(
+    r"DEFENSECLAW_CONNECTOR=hermes|DEFENSECLAW_FAIL_MODE=[a-z-]+|FAIL_MODE_SOURCE=[A-Za-z0-9_.-]+"
+)
+
+
+def _is_hermes_flat_hook_record(raw: bytes) -> bool:
+    """hooks/.hookcfg.hermes: the connector, fail mode and optional source lines (hookRuntimeFlatRecord)."""
+    try:
+        lines = raw.decode("ascii").splitlines()
+    except UnicodeDecodeError:
+        return False
+    return (
+        "DEFENSECLAW_CONNECTOR=hermes" in lines
+        and any(line.startswith("DEFENSECLAW_FAIL_MODE=") for line in lines)
+        and all(_FLAT_HOOK_RECORD_LINE.fullmatch(line) for line in lines)
+    )
+
+
+# The other records Setup and the gateway keep for a connector in the folder they ran in, by path
+# below the folder and the test of the bytes Setup writes there. A file of another shape at the
+# name belongs to the account and stays (GAP-0945).
+_CONNECTOR_STATE_RECORD_SHAPES = {
+    "hermes": (
+        ((".hermes-lifecycle.lock",), _is_empty_lock),
+        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store),
+        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record),
+    ),
+}
+
+
+def _small_file_bytes(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(_BACKUP_RECORD_MAX_BYTES + 1)
+    except OSError:
+        return None
+    return raw if len(raw) <= _BACKUP_RECORD_MAX_BYTES else None
 _HOOK_SCRIPT_MARKER = b"# defenseclaw-managed-hook v"
 # A backup record carries the agent file's bytes, so it can be large.
 _BACKUP_RECORD_MAX_BYTES = 8 * 1024 * 1024
@@ -1533,6 +1594,12 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
         return removed, [f"{folder} ({why}, so it was not entered)"]
     hooks = os.path.join(folder, "hooks")
     backups = os.path.join(folder, "connector_backups")
+    # What the move recorded of this folder; a folder it did not record has nothing proven unchanged.
+    move_digests = next(
+        (found for recorded, found in config_module.previous_store_backup_digests().items()
+         if config_module._same_folder(recorded, folder)),
+        {},
+    )
 
     def drop(path: str) -> None:
         """Remove a file DefenseClaw wrote; say so when it cannot be removed."""
@@ -1568,10 +1635,24 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(os.path.join(hooks, script))
         for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
             drop(os.path.join(folder, record))
+        for parts, written_by_setup in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
+            path = os.path.join(folder, *parts)
+            if len(parts) > 1 and not real_dir(os.path.join(folder, *parts[:-1])):
+                continue
+            if not os.path.lexists(path):
+                continue
+            raw = _small_file_bytes(path)
+            if not _account_owned_regular_file(path) or (raw is not None and written_by_setup(raw)):
+                drop(path)
+            else:
+                # The name belongs to DefenseClaw, so a file of another shape there is reported, not removed.
+                stayed.append(f"{path} (not the record Setup writes, so it was kept)")
         for record in _top_level_backup_records(name):
             path = os.path.join(folder, record)
             # A file of another shape at the name is the account's own; a link there is reported by drop.
-            if os.path.lexists(path) and (not _account_owned_regular_file(path) or _is_setup_top_level_backup(path)):
+            if os.path.lexists(path) and (
+                not _account_owned_regular_file(path) or _is_setup_top_level_backup(path, move_digests)
+            ):
                 drop(path)
         backup = os.path.join(backups, name)
         if real_dir(backups) and real_dir(backup):
@@ -3072,7 +3153,8 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         )
     for folder in plan.previous_stores:
         ux.echo(
-            f"  • {ux.bold('earlier data_dir:')} {folder}: the setup records left there are read and removed; "
+            f"  • {ux.bold('earlier data_dir:')} {folder}: the setup records left there are read; "
+            "the ones Setup wrote and nobody changed are removed; "
             "this uninstall does not remove that folder"
         )
     if plan.store_dir and plan.connectors and not plan.remove_data_dir:

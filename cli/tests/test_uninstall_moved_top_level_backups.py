@@ -170,3 +170,41 @@ def test_a_file_that_is_not_the_record_setup_writes_stays(tmp_path, monkeypatch,
 
     assert stayed == []
     assert (home / name).read_text() == text
+
+
+@pytest.mark.parametrize(
+    "edited",
+    [
+        {"had_hooks_key": True, "original_hooks": {"user_notes": ["keep this"]}},
+        {"had_hooks_key": False, "original_hooks": None},
+        {"had_hooks_key": True, "original_hooks": None, "had_env_key": True},
+    ],
+)
+def test_a_backup_the_account_edited_after_the_move_is_kept_even_inside_a_field_setup_writes(tmp_path, monkeypatch, edited):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    _setup_backups(home)
+    moved = tmp_path / "state"
+    _move(moved)
+    (home / "claudecode_backup.json").write_text(json.dumps(edited))
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, moved, ["claudecode"]))
+
+    assert stayed == []
+    assert json.loads((home / "claudecode_backup.json").read_text()) == edited
+
+
+def test_only_the_folder_whose_copy_was_edited_keeps_it_after_two_moves(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    _setup_backups(home)
+    first, second = tmp_path / "state", tmp_path / "state2"
+    _move(first)
+    _move(second)
+    (first / "claudecode_backup.json").write_text(json.dumps({"had_hooks_key": True, "original_hooks": {"mine": []}}))
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, second, ["claudecode"]))
+
+    assert stayed == []
+    assert not (home / "claudecode_backup.json").exists()
+    assert json.loads((first / "claudecode_backup.json").read_text())["original_hooks"] == {"mine": []}
