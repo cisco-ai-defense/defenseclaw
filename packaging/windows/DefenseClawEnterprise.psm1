@@ -44224,14 +44224,28 @@ function Complete-DefenseClawStatePurge {
         $reportPath = Microsoft.PowerShell.Management\Join-Path `
             $Layout.LifecycleLockDirectory `
             "state-root-cleanup-$($Layout.PurgeScopeSHA256)-report.json"
-        [void](Invoke-DefenseClawNamespaceRootCleanup `
+        $stateCleanup = Invoke-DefenseClawNamespaceRootCleanup `
             -Source $NativeCleanupSource `
             -Request $request `
             -RequestPath $requestPath `
             -ReportPath $reportPath `
             -ExchangeDirectory $Layout.LifecycleLockDirectory `
             -ExpectedRootPresent $true `
-            -AllowAbsentRoot)
+            -AllowAbsentRoot
+        # GAP-0890 r2: the exact-root purge removes the tree with its own
+        # backup and restore run, whatever the token. Its report carries a
+        # count, not names, so the purge is recorded once, with the root and
+        # the count, in the warnings and the lifecycle log.
+        $removedCountProperty = if ($null -ne $stateCleanup) { $stateCleanup.PSObject.Properties['entries_removed'] } else { $null }
+        if ((Test-DefenseClawStandaloneProfile) -and $null -ne $removedCountProperty -and [int]$removedCountProperty.Value -gt 0) {
+            $removedReason = "removed $([int]$removedCountProperty.Value) entries with backup and restore privileges enabled for that purge's own run"
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+                path   = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+                reason = $removedReason
+            }
+            Write-DefenseClawLifecycleLogDiagnostic -Message (
+                'defenseclaw_repair path=' + [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\') + ': ' + $removedReason)
+        }
         foreach ($exchangePath in @($requestPath, $reportPath)) {
             if (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $exchangePath `
