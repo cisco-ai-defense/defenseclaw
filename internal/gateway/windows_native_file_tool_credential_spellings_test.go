@@ -472,7 +472,8 @@ func TestWindowsNativeFileToolCredentialFileOfAKnownHomeIsNotAFixtureOfItsOwnWor
 	}
 }
 
-// A project file called AppData does not make its folder the profile of an
+// A project file called AppData, or an AppData folder without the Local and
+// Roaming folders of a profile, does not make its folder the profile of an
 // account: an ordinary project keeps its credential fixtures.
 func TestWindowsNativeFileToolProjectFileCalledAppDataIsNoProfile(t *testing.T) {
 	previous := windowsProfileFolder
@@ -482,7 +483,8 @@ func TestWindowsNativeFileToolProjectFileCalledAppDataIsNoProfile(t *testing.T) 
 			switch strings.ToLower(path) {
 			case "c:/work/proj/appdata", "c:/work/real/ntuser.dat":
 				return fakeEntry{}, nil
-			case "c:/work/real/appdata":
+			case "c:/work/real/appdata", "c:/work/real/appdata/local", "c:/work/real/appdata/roaming",
+				"c:/work/folder/appdata":
 				return fakeEntry{folder: true}, nil
 			}
 			return nil, os.ErrNotExist
@@ -498,6 +500,42 @@ func TestWindowsNativeFileToolProjectFileCalledAppDataIsNoProfile(t *testing.T) 
 			}
 			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, `C:\work\real\.netrc`); action != "block" {
 				t.Errorf("%s cwd=%q: a folder with AppData: %s %v, want block", profile, cwd, action, rules)
+			}
+			for _, target := range []string{
+				`C:\work\folder\.netrc`, `C:\work\folder\.git-credentials`, `C:\work\folder\.aws\credentials`,
+			} {
+				if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, target); action != "allow" {
+					t.Errorf("%s cwd=%q %q: a project with an AppData folder only: %s %v, want allow", profile, cwd, target, action, rules)
+				}
+			}
+		}
+	}
+}
+
+// A folder called ... is an ordinary Windows folder name (Win32 keeps a
+// segment of three or more periods that a separator follows), so a file below
+// it is a file of its own; the same folder in a path with the exact
+// extended-length prefix is that file too, and the plain protected names, the
+// one-period and trailing-period spellings of them stay judged by their name.
+func TestWindowsNativeFileToolThreePeriodFolderIsAFolderOfItsOwn(t *testing.T) {
+	const home = `C:\Users\r109yws.d-2`
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-credential-three-periods-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, target := range []string{
+			home + `\...\.netrc`, home + `\...\.aws\credentials`, `\\?\` + home + `\...\.netrc`,
+			home + `\....\.git-credentials`, home + `\project\...\.netrc`,
+		} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, home+`\project`, target); action != "allow" {
+				t.Errorf("%s %q: %s %v, want allow", profile, target, action, rules)
+			}
+		}
+		for _, target := range []string{
+			home + `\.netrc`, home + `\.\.netrc`, home + `\.netrc.`, home + `\...\..\.netrc`,
+			home + `\.aws\credentials`, home + `\x\..\.aws\credentials`, home + `\.aws.\credentials`,
+		} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, home+`\project`, target); action != "block" || len(rules) == 0 {
+				t.Errorf("%s %q: %s %v, want block", profile, target, action, rules)
 			}
 		}
 	}

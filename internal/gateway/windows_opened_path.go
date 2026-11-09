@@ -56,6 +56,7 @@ var windowsAccountWord = regexp.MustCompile(`^\w+$`)
 // and share. In every name the part after a colon (an alternate data stream,
 // such as ::$DATA) is dropped, dot segments are resolved, and an 8.3 short
 // name is expanded. Trailing dots and spaces are dropped as Win32 does, except
+// in a folder named by three or more periods (a valid name, kept), and except
 // in a path with the exact extended-length prefix \\?\: Win32 does not
 // normalize that one, so a name with trailing dots or spaces there is a file
 // of its own. The forward-slash spelling of that prefix, and every other
@@ -76,12 +77,14 @@ func windowsOpenedPath(spelling string, verbatim bool) (string, bool, error) {
 		return "", false, nil
 	}
 	var names []string
-	for _, name := range strings.Split(rest, "/") {
+	segments := strings.Split(rest, "/")
+	last := len(segments) - 1
+	for index, name := range segments {
 		if colon := strings.Index(name, ":"); colon >= 0 {
 			name = name[:colon]
 		}
 		trimmed := name
-		if !verbatim {
+		if !verbatim && !windowsPeriodsDirectory(name, index == last) {
 			trimmed = strings.TrimRight(name, ". ")
 		}
 		switch {
@@ -99,6 +102,13 @@ func windowsOpenedPath(spelling string, verbatim bool) (string, bool, error) {
 		opened, err = expandWindowsShortNames(opened, verbatim)
 	}
 	return opened, true, err
+}
+
+// windowsPeriodsDirectory reports a path segment that Win32 keeps: three or
+// more periods, followed by a separator, are a valid folder name and are not
+// normalized away. The last segment of a path is trimmed like any other name.
+func windowsPeriodsDirectory(name string, last bool) bool {
+	return !last && len(name) >= 3 && strings.Trim(name, ".") == ""
 }
 
 // windowsVerbatimOperand reports an operand that, as the caller wrote it, has
@@ -286,19 +296,20 @@ func markTrailingSpaces(opened string) string {
 }
 
 // holdsProfileEntries reports a folder that holds the entries of a user
-// profile: NTUSER.DAT, a file, or AppData, a folder. An entry of that name of
-// the other kind (a project file called AppData) is no marker. stat answers
-// for a path in forward-slash spelling.
+// profile: NTUSER.DAT, a file, or AppData, a folder that holds the Local and
+// Roaming folders of a profile. An entry of that name of the other kind (a
+// project file called AppData), or an AppData folder of a project without
+// those two folders, is no marker. stat answers for a path in forward-slash
+// spelling.
 func holdsProfileEntries(dir string, stat func(string) (os.FileInfo, error)) bool {
-	for _, marker := range []struct {
-		name   string
-		folder bool
-	}{{"NTUSER.DAT", false}, {"AppData", true}} {
-		if info, err := stat(dir + "/" + marker.name); err == nil && info.IsDir() == marker.folder {
-			return true
-		}
+	isKind := func(path string, folder bool) bool {
+		info, err := stat(path)
+		return err == nil && info.IsDir() == folder
 	}
-	return false
+	if isKind(dir+"/NTUSER.DAT", false) {
+		return true
+	}
+	return isKind(dir+"/AppData", true) && isKind(dir+"/AppData/Local", true) && isKind(dir+"/AppData/Roaming", true)
 }
 
 // profileHomeAtOrAbove reports a drive-letter path that lies in a folder of a
