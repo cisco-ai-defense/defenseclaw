@@ -152,7 +152,7 @@ func literalWriteOperandsWithParsedKnown(command, cwd, home string, depth int, f
 	}
 	var noEffectCopies map[*syntax.CallExpr]bool
 	if strings.Contains(command, "for") && strings.Contains(command, "cp") {
-		noEffectCopies = actionClientLoopCopyNoEffectCalls(file, cwd, home)
+		noEffectCopies, _ = actionClientLoopCopyNoEffectCalls(file, cwd, home)
 	}
 	var knownValues map[*syntax.Word]string
 	knownValuesRead := false

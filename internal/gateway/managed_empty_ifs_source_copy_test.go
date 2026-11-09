@@ -42,3 +42,45 @@ func TestManagedEmptyIFSSourceCopyIsBenignAndANamedSourceStaysBlocked(t *testing
 		}
 	}
 }
+
+// The empty-source proof holds only for the system cp and for a source the
+// command cannot change: a project cp that PATH reaches, a PATH assignment, a
+// program word naming a project file or a read that sets the source each
+// leave the link write described and blocked, in every managed profile the
+// reading is judged in (rel-1-0-6:GAP-0880, GAP-0885).
+func TestManagedEmptySourceCopyProofNeedsTheCopyAndTheSourceThatRun(t *testing.T) {
+	f := newB36ManagedHookFixture(t)
+	t.Setenv("BASH_ENV", "")
+	t.Setenv("ENV", "")
+	if err := os.WriteFile(filepath.Join(f.project, "cp"), []byte("#!/bin/sh\nprintf altered > \"$2\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.project, "a.txt"), []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	check := func(rows []struct{ name, command, want string }) {
+		t.Helper()
+		for _, row := range rows {
+			payload := f.payload(t, row.command)
+			header := f.clientHeader(t, payload)
+			for _, connector := range []string{"claudecode", "codex"} {
+				if got := f.post(t, connector, payload, header); got != row.want {
+					t.Errorf("%s %s: %s = %s, want %s", connector, row.name, row.command, got, row.want)
+				}
+			}
+		}
+	}
+	check([]struct{ name, command, want string }{
+		{"system-cp", `IFS=; for f in keylink; do cp "$IFS" "$f"; done`, "allow"},
+		{"path-dot-before-ifs", `PATH=.; IFS=; for f in keylink; do cp "$IFS" "$f"; done`, "block"},
+		{"path-dot-after-ifs", `IFS=; PATH=.; for f in keylink; do cp "$IFS" "$f"; done`, "block"},
+		{"path-dot-and-system", `PATH=.:/usr/bin; IFS=; for f in keylink; do cp "$IFS" "$f"; done`, "block"},
+		{"source-read-in-loop", `IFS=; src=; for f in keylink; do read src <<< a.txt; cp "$src" "$f"; done`, "block"},
+		{"source-assigned-in-loop", `IFS=; src=; for f in keylink; do src=a.txt; cp "$src" "$f"; done`, "block"},
+		{"source-read-after-loop", `IFS=; for f in keylink; do cp "$IFS" "$f"; done; read IFS <<< a.txt; cp "$IFS" keylink`, "block"},
+	})
+	t.Setenv("PATH", f.project+string(os.PathListSeparator)+os.Getenv("PATH"))
+	check([]struct{ name, command, want string }{
+		{"ambient-path-project-cp", `IFS=; for f in keylink; do cp "$IFS" "$f"; done`, "block"},
+	})
+}

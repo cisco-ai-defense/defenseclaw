@@ -1797,9 +1797,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 						// reading keeps the answer the command text has.
 						if simple.EvaluationFailure == "" && simple.Text != command &&
 							filepath.IsAbs(simple.CWD) && filepath.Clean(simple.CWD) == filepath.Clean(cwd) &&
-							!slices.Contains(dynamicReadings, simple.Text) && !copyOpensNoSource(simple.Text, home) &&
+							!slices.Contains(dynamicReadings, simple.Text) &&
 							(simple.ResolvedVariable && links.opaque ||
-								simple.LoginGuess && readingReachesLink(simple.Text, cwd, home)) {
+								simple.LoginGuess && readingReachesLink(simple.Text, cwd, home)) &&
+							!copyOpensNoSource(simple.Text, command, cwd, home) {
 							if len(dynamicReadings) >= maxResolvedReadings {
 								truncated = true
 							} else {

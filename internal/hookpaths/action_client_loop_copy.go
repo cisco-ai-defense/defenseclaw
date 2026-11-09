@@ -354,45 +354,98 @@ func actionClientPlainPatternWord(word *syntax.Word) bool {
 // A plain copy in a fixed loop with one assigned empty source cannot open a
 // source file. The literal operand reader uses this narrow proof before it
 // lists the destination; other statements keep their usual write readings.
-func actionClientLoopCopyNoEffectCalls(file *syntax.File, cwd, home string) map[*syntax.CallExpr]bool {
+// The proof needs the copy that runs to be the system one: nothing before the
+// loop may assign PATH or a name the environment already carries (a loader
+// variable reaches cp), and the cp that PATH finds must not lie in the
+// project. whole reports that the loop is the last statement, so every
+// reading of the command comes from the proved call.
+func actionClientLoopCopyNoEffectCalls(file *syntax.File, cwd, home string) (calls map[*syntax.CallExpr]bool, whole bool) {
 	if file == nil || !filepath.IsAbs(cwd) || home == "" || actionClientLoopCopySourceStartupUnknown() {
-		return nil
+		return nil, false
 	}
 	assignments := actionValues{"HOME": home, "PWD": cwd}
-	noEffect := map[*syntax.CallExpr]bool{}
-	for _, top := range file.Stmts {
+	for i, top := range file.Stmts {
 		loop, ok := actionClientLoopCopyTop(top, cwd, home)
 		if !ok {
-			if name, value, assigned := actionClientLoopCopyAssignment(top, home); assigned {
+			name, value, assigned := actionClientLoopCopyAssignment(top, home)
+			switch {
+			case assigned && actionClientLoopCopyAssignmentReachesChild(name):
+				return nil, false
+			case assigned:
 				assignments[name] = value
-			} else if !actionClientLoopCopyNoop(top, cwd, home) {
-				break
+			case !actionClientLoopCopyNoop(top, cwd, home):
+				return nil, false
 			}
 			continue
 		}
 		iter, ok := loop.Loop.(*syntax.WordIter)
 		if !ok || iter.Name == nil || len(iter.Items) == 0 || len(loop.Do) != 1 {
-			break
+			return nil, false
 		}
 		stmt := loop.Do[0]
 		call, ok := stmt.Cmd.(*syntax.CallExpr)
 		if !ok || stmt.Background || stmt.Negated || len(stmt.Redirs) != 0 ||
-			len(call.Assigns) != 0 || len(call.Args) != 3 {
-			break
+			len(call.Assigns) != 0 || len(call.Args) < 3 {
+			return nil, false
 		}
 		program, fixed := staticProgramWord(call.Args[0], home)
-		if !fixed || programBase(program) != "cp" && programBase(program) != "gcp" {
-			break
+		if !fixed || programBase(program) != "cp" && programBase(program) != "gcp" ||
+			!plainCopyOptions(call.Args[1:len(call.Args)-2], home) {
+			return nil, false
 		}
+		source := call.Args[len(call.Args)-2]
 		loopAssignments := maps.Clone(assignments)
 		delete(loopAssignments, iter.Name.Value)
-		if actionClientLoopCopyKnownEmptySource(call.Args[1], loopAssignments) &&
-			!actionClientLoopCopySourceVariableMayChange(call.Args[1]) {
-			noEffect[call] = true
+		if actionClientLoopCopyKnownEmptySource(source, loopAssignments) &&
+			!actionClientLoopCopySourceVariableMayChange(source) &&
+			!actionClientCopyProgramInProject(program, cwd) {
+			return map[*syntax.CallExpr]bool{call: true}, i == len(file.Stmts)-1
 		}
-		break
+		return nil, false
 	}
-	return noEffect
+	return nil, false
+}
+
+// A plain assignment reaches the programs the command starts when the name
+// is PATH or a loader variable, or when the environment already exports it.
+// IFS is never read by cp.
+func actionClientLoopCopyAssignmentReachesChild(name string) bool {
+	if name == "PATH" || strings.HasPrefix(name, "LD_") || strings.HasPrefix(name, "DYLD_") {
+		return true
+	}
+	if name == "IFS" {
+		return false
+	}
+	_, exported := os.LookupEnv(name)
+	return exported
+}
+
+// actionClientCopyProgramInProject reports whether the copy the shell starts
+// for this program word is a file of the project: a relative program word, or
+// the first directory of PATH that holds the name lies in the project.
+func actionClientCopyProgramInProject(program, cwd string) bool {
+	if strings.ContainsAny(program, `/\`) {
+		return !filepath.IsAbs(program) || actionClientPathInside(cwd, program)
+	}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" {
+			dir = "."
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(cwd, dir)
+		}
+		for _, name := range []string{program, program + ".exe"} {
+			if _, err := pathLstat(filepath.Join(dir, name)); err == nil {
+				return actionClientPathInside(cwd, dir)
+			}
+		}
+	}
+	return false
+}
+
+func actionClientPathInside(root, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func actionClientLoopCopySourceVariableMayChange(word *syntax.Word) bool {
@@ -426,17 +479,29 @@ func actionClientLoopCopySourceStartupUnknown() bool {
 	return false
 }
 
-// copyOpensNoSource reports a reading that is one plain copy whose source
-// operand is the empty string. cp stats its source first and fails, so the
-// call writes nothing wherever the destination lies; the loop proof above
-// reaches the same answer for a loop whose source variable is empty. A
-// reading the straight-line walk gives for such a call (IFS=; cp "$IFS" d,
-// src=; cp "$src" d) names the destination only because the walk
-// substituted the value, so it is not described as a write.
-func copyOpensNoSource(reading, home string) bool {
-	if actionClientLoopCopySourceStartupUnknown() {
+// copyOpensNoSource reports a reading of command that is one plain copy
+// whose source operand is the empty string, in a command whose every
+// reading comes from a copy the loop proof above shows opens no source: cp
+// stats its source first and fails, so the call writes nothing wherever the
+// destination lies. A reading the straight-line walk gives for such a call
+// (IFS=; cp "$IFS" d) names the destination only because the walk
+// substituted the value, so it is not described as a write. The reading
+// alone proves neither the value the source has when the copy runs nor
+// which cp runs, so the command must be the proved loop (rel-1-0-6:GAP-0880,
+// GAP-0885).
+func copyOpensNoSource(reading, command, cwd, home string) bool {
+	if !plainEmptySourceCopy(reading, home) {
 		return false
 	}
+	file, parsed := parseShell(command)
+	if !parsed {
+		return false
+	}
+	calls, whole := actionClientLoopCopyNoEffectCalls(file, cwd, home)
+	return whole && len(calls) != 0
+}
+
+func plainEmptySourceCopy(reading, home string) bool {
 	file, parsed := parseShell(reading)
 	if !parsed || len(file.Stmts) != 1 {
 		return false
@@ -450,16 +515,23 @@ func copyOpensNoSource(reading, home string) bool {
 	if !fixed || programBase(program) != "cp" && programBase(program) != "gcp" {
 		return false
 	}
-	// Only options that take no value: -t, -S and their long forms name a
-	// directory or a suffix and change which words are the sources.
-	for _, word := range call.Args[1 : len(call.Args)-2] {
+	if !plainCopyOptions(call.Args[1:len(call.Args)-2], home) {
+		return false
+	}
+	source, fixed := StaticWord(call.Args[len(call.Args)-2], home)
+	return fixed && source == ""
+}
+
+// Only options that take no value: -t, -S and their long forms name a
+// directory or a suffix and change which words are the sources.
+func plainCopyOptions(words []*syntax.Word, home string) bool {
+	for _, word := range words {
 		option, fixed := StaticWord(word, home)
 		if !fixed || option != "--" && !plainCopyFlags.MatchString(option) {
 			return false
 		}
 	}
-	source, fixed := StaticWord(call.Args[len(call.Args)-2], home)
-	return fixed && source == ""
+	return true
 }
 
 var plainCopyFlags = regexp.MustCompile(`^-[fipnrRavdPLHux]+$`)
