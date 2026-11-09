@@ -75,7 +75,16 @@ const (
 // definition, so nothing has to start for a gateway that cannot start the
 // server as its user to record it.
 func MCPLocalRefused(server config.MCPServerEntry) bool {
-	return strings.TrimSpace(server.URL) == "" && mcpScanIssue(server) != ""
+	return strings.TrimSpace(server.URL) == "" && MCPScanRefused(server)
+}
+
+// MCPScanRefused reports a definition the scanner refuses from the definition
+// alone: a local server MCPLocalRefused names, or a URL on a loopback,
+// private, link-local or multicast address, which the scanner never dials. A
+// managed gateway that cannot read the agent config of its users keeps such a
+// definition for the session that met it (GAP-0925).
+func MCPScanRefused(server config.MCPServerEntry) bool {
+	return mcpScanIssue(server) != ""
 }
 
 // mcpScanIssue names why the scanner refuses server, from its definition

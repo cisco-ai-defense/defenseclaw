@@ -145,18 +145,63 @@ func (a *APIServer) heldRefusalsAllowed(ctx context.Context, cfg *config.Config,
 		// has a record to release.
 		return false
 	}
+	_, unallowed := a.unallowedHeldRefusal(ctx, cfg, connector, probe, nil)
+	return !unallowed
+}
+
+// unallowedHeldRefusal returns the latest definition the session reported
+// for the server of probe that no administrator rule on the policy in force
+// allows, skipping except (the definition the config lists, whose own
+// admission decides it). A session marked overflow has definitions it
+// forgot, so no allow covers it: the answer is the server by name.
+func (a *APIServer) unallowedHeldRefusal(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe,
+	except *config.MCPServerEntry) (config.MCPServerEntry, bool) {
 	home, _ := callerHomeForAssets(ctx)
 	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), time.Now())
 	if overflow {
-		return false
+		return config.MCPServerEntry{Name: probe.ServerName}, true
 	}
-	for _, def := range held {
-		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, def, true))
+	for i := len(held) - 1; i >= 0; i-- {
+		if except != nil && sameMCPDefinition(held[i], *except) {
+			continue
+		}
+		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, held[i], true))
 		if !verdict.Enabled || verdict.Source != "admin-allow" {
-			return false
+			return held[i], true
 		}
 	}
-	return true
+	return config.MCPServerEntry{}, false
+}
+
+// hookReportedSessionHold is the hold of the running connection on a managed
+// Linux or macOS gateway. The agent keeps the connection it opened to a
+// definition for as long as it lives, whatever its config lists later, and
+// the hook names the server, not the connection. A session that met a refused
+// definition other than the listed one is therefore judged on that definition
+// for the rest of its life: an allow or a clean admission of the listed
+// replacement never speaks for the connection to the earlier one, and the
+// calls stay failed admissions of it until every definition the session met
+// is allowed by an administrator rule, or the agent starts again
+// (mcpSessionStarted). A listed definition whose admission already failed is
+// decided by mcpAdmissionStatusDecision with the same rule (GAP-0925).
+func (a *APIServer) hookReportedSessionHold(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe,
+	status watcher.MCPAdmissionStatus) watcher.MCPAdmissionStatus {
+	if status.Failed {
+		return status
+	}
+	home, _ := callerHomeForAssets(ctx)
+	// The ordinary call, with nothing held, reads no config.
+	if held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), time.Now()); len(held) == 0 && !overflow {
+		return status
+	}
+	var listed *config.MCPServerEntry
+	if entry, ok := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); ok {
+		listed = &entry
+	}
+	if held, unallowed := a.unallowedHeldRefusal(ctx, cfg, connector, probe, listed); unallowed {
+		return watcher.FailedMCPStatus(held)
+	}
+	return status
 }
 
 // listedAs reports whether the report list holds entry as reported.

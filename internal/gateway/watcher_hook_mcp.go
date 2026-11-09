@@ -190,17 +190,18 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 			Name: strings.TrimSpace(entry.Name), URL: strings.TrimSpace(entry.URL), Transport: entry.Transport,
 			Connector: connectorName, Home: home,
 		}
-		if reported.URL == "" {
-			if entry.LocalRefusal == "" {
-				// A definition read from the files is the complete one.
-				entry.LocalRefusal = mcplocal.Class(entry.Command, entry.Args)
-			}
-			if refused = watcher.MCPLocalRefused(entry); refused {
-				reported.Command = strings.TrimSpace(entry.Command)
-				reported.Args = slices.Clone(entry.Args)
-				reported.LocalRefusal = entry.LocalRefusal
-				reported.ArgsCut = entry.ArgsCut
-			}
+		if reported.URL == "" && entry.LocalRefusal == "" {
+			// A definition read from the files is the complete one.
+			entry.LocalRefusal = mcplocal.Class(entry.Command, entry.Args)
+		}
+		// A server the scanner refuses from its definition alone, a launcher
+		// or a loopback or private address, is the one an administrator allow
+		// admits without a scan: the session keeps it (retainRefused).
+		if refused = watcher.MCPScanRefused(entry); refused && reported.URL == "" {
+			reported.Command = strings.TrimSpace(entry.Command)
+			reported.Args = slices.Clone(entry.Args)
+			reported.LocalRefusal = entry.LocalRefusal
+			reported.ArgsCut = entry.ArgsCut
 		}
 	}
 	now := time.Now()
