@@ -2631,6 +2631,10 @@ func abortAtomicTransformV2(loaded atomicTransformV2Loaded) error {
 	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir, false)
 }
 
+// errAtomicTransformV2StagedEAUnproven marks an allocation payload whose staged
+// extended attribute can no longer be checked against the prior config.
+var errAtomicTransformV2StagedEAUnproven = errors.New("staged extended attribute cannot be proved against the prior config")
+
 func inspectAtomicTransformV2HarmlessAllocationArtifact(
 	dir *atomicTransformBoundDirectory, name string, expected []byte,
 	allowStagedEA bool, expectedEA func() (*atomicTransformV2WindowsMetadataStream, error),
@@ -2675,6 +2679,12 @@ func inspectAtomicTransformV2HarmlessAllocationArtifact(
 		var permitted *atomicTransformV2WindowsMetadataStream
 		if preservedEA != nil {
 			permitted, err = expectedEA()
+			if errors.Is(err, errAtomicTransformConflict) || errors.Is(err, os.ErrNotExist) {
+				// The prior config this EA was copied from is no longer live
+				// (an editor saved over it, or it was removed): the copy cannot
+				// be proved to be the transaction own, so it is not deleted.
+				return atomicTransformArtifactState{}, errors.Join(errAtomicTransformV2StagedEAUnproven, err)
+			}
 			if err != nil {
 				return atomicTransformArtifactState{}, err
 			}
@@ -2741,6 +2751,12 @@ func abortAtomicTransformV2Allocation(loaded atomicTransformV2Loaded) error {
 				return atomicTransformV2AllocationExpectedEA(targetDir, receipt)
 			},
 		)
+		if errors.Is(inspectErr, errAtomicTransformV2StagedEAUnproven) {
+			// Keep the EA-bearing payload (the only copy of the prior metadata
+			// once the live file was replaced) and retire the rest, so the
+			// receipt no longer blocks every later change to the config.
+			continue
+		}
 		if inspectErr != nil {
 			return inspectErr
 		}
