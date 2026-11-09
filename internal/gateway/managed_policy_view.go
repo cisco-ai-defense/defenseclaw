@@ -41,3 +41,16 @@ func (v *managedPolicyView) unproven(connector, account string) bool {
 	state, ok := v.connectors[connector]
 	return ok && (state.shared || state.allAccounts || state.accounts[account])
 }
+
+// provenHook reports whether the view proves the vendor machine hook of
+// connector for account: the connector is in the view and its vendor sources
+// are pinned. A nil view, or one without the connector, proves nothing, for
+// the authorizer keeps an admitted connector after the descriptor or the
+// published hook is gone.
+func (v *managedPolicyView) provenHook(connector, account string) bool {
+	if v == nil {
+		return false
+	}
+	state, ok := v.connectors[connector]
+	return ok && !state.shared && !state.allAccounts && !state.accounts[account]
+}
