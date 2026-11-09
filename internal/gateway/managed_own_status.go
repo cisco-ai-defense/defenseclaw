@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -133,7 +134,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	switch {
 	case excluded:
 		// Cowork runs the Claude Code hooks, so it follows that connector.
-		cause := ownExcludedCause(a.ownExcludedInspection(idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
+		cause := ownExcludedCause(a.ownExcludedInspection(cfg, idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
 		cowork = ownCoworkRow(false, "excluded", cause.code, cause.reason)
 	case !claudeCode && claudeConfigured:
 		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
@@ -248,7 +249,7 @@ func ownUnresolvedConnectorStates(cfg *config.Config) map[string]any {
 func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, name string) map[string]any {
 	states := make(map[string]any)
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
-		states[connector] = ownExcluded(a.ownExcludedInspection(idKey, uid, name, connector))
+		states[connector] = ownExcluded(a.ownExcludedInspection(cfg, idKey, uid, name, connector))
 	}
 	return states
 }
@@ -261,13 +262,15 @@ func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, n
 // outage refusal) and whether or not the authorizer still lists the connector
 // as admitted (the watcher retires admission and the vendor source
 // separately). With no such hook, no admission and no vendor source for the
-// connector, no machine-policy hook covers the account. Everything else is
+// connector, and the vendor files read and holding no machine-policy hook,
+// none covers the account. A lost descriptor or a retired admission is not
+// that proof: the vendor hook can outlive both. Everything else is
 // unknown: no authorizer (the Windows pipe), no resolved account name (the
 // per-account proof is keyed by name, and the uid alone does not select it), an
 // admission the policy view does not back (a ledger row or exempt_users
 // outlives the hook), a vendor source that is unreadable or not the pinned
 // one, or a ledger that can not be read.
-func (a *APIServer) ownExcludedInspection(idKey, uid, name, connector string) ownInspection {
+func (a *APIServer) ownExcludedInspection(cfg *config.Config, idKey, uid, name, connector string) ownInspection {
 	z := a.managedHookAuthz.Load()
 	callerUID, err := strconv.Atoi(uid)
 	if idKey != "uid" || z == nil || err != nil || callerUID == 0 || strings.TrimSpace(name) == "" {
@@ -285,7 +288,7 @@ func (a *APIServer) ownExcludedInspection(idKey, uid, name, connector string) ow
 	if policy := z.machinePolicy.Load(); policy != nil {
 		machine = policy.connectors[strings.ToLower(strings.TrimSpace(connector))]
 	}
-	if decision.Allow || machine || view.hasConnector(connector) {
+	if decision.Allow || machine || view.hasConnector(connector) || !machineHookAbsent(runtime.GOOS, cfg, connector) {
 		return ownInspectionUnknown
 	}
 	return ownInspectionNone

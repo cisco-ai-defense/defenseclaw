@@ -12,6 +12,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -140,21 +141,51 @@ func (w *managedPolicyViewWatch) refresh() {
 	w.api.publishManagedPolicyView(view)
 }
 
-func admittedMachinePolicyConnectors(goos string, viewOpts enterprisepolicy.Options, generation *Generation, previous []string, descriptor *managed.RuntimeDescriptor, initial bool) []string {
-	if generation == nil || generation.Config == nil || !generation.Config.StandaloneEnterprise() || !generation.ConfigGenRecorded {
-		return nil
-	}
+// machinePolicyPresenceOptions are the options that read the vendor machine
+// policy files of the recorded standalone config: the admission of a changed
+// descriptor and the own status of an excluded account both ask them whether a
+// machine-policy hook is installed.
+func machinePolicyPresenceOptions(goos string, viewOpts enterprisepolicy.Options, cfg *config.Config) (enterprisepolicy.Options, error) {
 	layout, err := managed.StandaloneLayoutFor(goos)
 	if err != nil {
-		return nil
+		return enterprisepolicy.Options{}, err
 	}
-	opts, err := enterprisepolicy.StandaloneOptions(layout, "", "", generation.Config)
+	opts, err := enterprisepolicy.StandaloneOptions(layout, "", "", cfg)
 	if err != nil {
-		return nil
+		return enterprisepolicy.Options{}, err
 	}
 	opts.OpenCodePluginPlanned = true
 	opts.Root = viewOpts.Root
 	opts.SkipTrustChecks = viewOpts.SkipTrustChecks
+	return opts, nil
+}
+
+// machineHookAbsent proves that no machine-policy hook of connector is
+// installed in the vendor files: they were read and hold none. A source that
+// cannot be read, parsed or trusted proves nothing. The runtime descriptor and
+// the admitted set are not this proof: either can be gone while the vendor
+// hook stays, and the hook then refuses its calls.
+var machineHookAbsent = func(goos string, cfg *config.Config, connector string) bool {
+	viewOpts, _, ok := managedPolicyViewOptions(goos)
+	if !ok {
+		return false
+	}
+	opts, err := machinePolicyPresenceOptions(goos, viewOpts, cfg)
+	if err != nil {
+		return false
+	}
+	present, err := enterprisepolicy.MachinePolicyPresent(opts, connector)
+	return err == nil && !present
+}
+
+func admittedMachinePolicyConnectors(goos string, viewOpts enterprisepolicy.Options, generation *Generation, previous []string, descriptor *managed.RuntimeDescriptor, initial bool) []string {
+	if generation == nil || generation.Config == nil || !generation.Config.StandaloneEnterprise() || !generation.ConfigGenRecorded {
+		return nil
+	}
+	opts, err := machinePolicyPresenceOptions(goos, viewOpts, generation.Config)
+	if err != nil {
+		return nil
+	}
 	intended := enterprisepolicy.MachinePolicyConnectors(opts, enterprisepolicy.StandaloneConnectors(generation.Config))
 	var admitted []string
 	// A descriptor written ahead of the gateway's config reload cannot
