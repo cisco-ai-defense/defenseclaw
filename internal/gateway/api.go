@@ -128,6 +128,9 @@ type APIServer struct {
 	// managedPolicyView is the published proof of the vendor machine
 	// policy managed hooks enforce (managed_policy_view.go).
 	managedPolicyView atomic.Pointer[managedPolicyView]
+	// managedHookAuthz is the authorizer the standalone hook socket decides
+	// calls with, so an account status reads the inputs the hook reads.
+	managedHookAuthz atomic.Pointer[managedHookAuthorizer]
 	// managedAlertLimits bounds the policy-view alerts per account: every
 	// call under an unproven view raises one until the view is pinned.
 	managedAlertLimits managedRefusalLimiter

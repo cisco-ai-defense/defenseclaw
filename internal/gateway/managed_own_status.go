@@ -133,7 +133,7 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, doma
 	switch {
 	case excluded:
 		// Cowork runs the Claude Code hooks, so it follows that connector.
-		cause := ownExcludedCause(a.ownExcludedInspection(cfg, idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
+		cause := ownExcludedCause(a.ownExcludedInspection(idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
 		cowork = ownCoworkRow(false, "excluded", cause.code, cause.reason)
 	case !claudeCode && claudeConfigured:
 		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
@@ -248,43 +248,61 @@ func ownUnresolvedConnectorStates(cfg *config.Config) map[string]any {
 func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, name string) map[string]any {
 	states := make(map[string]any)
 	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
-		states[connector] = ownExcluded(a.ownExcludedInspection(cfg, idKey, uid, name, connector))
+		states[connector] = ownExcluded(a.ownExcludedInspection(idKey, uid, name, connector))
 	}
 	return states
 }
 
 // ownExcludedInspection says what the hook authorizer does with the calls of
-// an excluded account for connector, from the inputs it decides with: the
-// connectors it admitted for machine policy (the published policy view),
-// enrollment.unenrolled_users and enrollment.exempt_users. A machine policy
-// runs the hook for every local account, so with unenrolled_users not deny the
-// excluded account is still inspected (managedHookAuthorizer.decideFor); with
-// deny it is refused unless exempt. Without a machine policy for the
-// connector nothing is installed for the account. The Windows pipe has no
-// policy view, so it claims nothing.
-func (a *APIServer) ownExcludedInspection(cfg *config.Config, idKey, uid, name, connector string) ownInspection {
-	if idKey != "uid" || cfg == nil {
-		return ownInspectionUnknown
-	}
-	view := a.managedPolicyView.Load()
-	if view == nil {
-		return ownInspectionNone
-	}
-	if _, ok := view.connectors[connector]; !ok || view.admitted != nil && !view.admitted[connector] {
-		return ownInspectionNone
-	}
+// an excluded account for connector. It asks the authorizer the hook socket
+// decides with, so it reads the inputs the hook reads: the machine-policy
+// connectors it admitted, enrollment.unenrolled_users and exempt_users, and
+// the guardian ledger. A machine policy runs the hook for every local
+// account, so with unenrolled_users not deny the excluded account is still
+// inspected; with deny it is refused unless exempt or the ledger still lists a
+// target for it. The published policy view is only the proof that the vendor
+// hook is there: an inspection claim needs it, a refusal does not (the gateway
+// refuses whatever call arrives). Without that proof, with the ledger
+// unreadable, or on the Windows pipe (no authorizer), the row claims nothing.
+func (a *APIServer) ownExcludedInspection(idKey, uid, name, connector string) ownInspection {
+	z := a.managedHookAuthz.Load()
 	callerUID, err := strconv.Atoi(uid)
-	if err != nil {
+	if idKey != "uid" || z == nil || err != nil || callerUID == 0 {
 		return ownInspectionUnknown
 	}
-	enrollment := cfg.Enterprise.Enrollment
-	if !strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) {
+	decision := z.decide(managedHookPeer{UID: callerUID, Name: name}, connector, "")
+	machine := false
+	if policy := z.machinePolicy.Load(); policy != nil {
+		machine = policy.connectors[strings.ToLower(strings.TrimSpace(connector))]
+	}
+	if !decision.Allow {
+		if decision.Reason != managedHookReasonUIDUnregistered {
+			return ownInspectionUnknown
+		}
+		if machine {
+			return ownInspectionRefused
+		}
+		return ownInspectionNone
+	}
+	switch {
+	case decision.Disabled:
+		return ownInspectionNone
+	case !machine && decision.Exempt:
+		// An exempt account of a connector without machine policy has no
+		// hook of its own either.
+		return ownInspectionNone
+	case !machine:
+		return ownInspectionLedger
+	case a.managedPolicyView.Load().provenHook(connector, name):
+		switch {
+		case decision.Exempt:
+			return ownInspectionExempt
+		case strings.EqualFold(strings.TrimSpace(z.enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny):
+			return ownInspectionLedger
+		}
 		return ownInspectionPolicy
 	}
-	if len(enrollment.ExemptUsers) > 0 && (&managedHookAuthorizer{enrollment: enrollment}).hostRunExempt(managedHookPeer{UID: callerUID, Name: name}) {
-		return ownInspectionPolicy
-	}
-	return ownInspectionRefused
+	return ownInspectionUnverified
 }
 
 // ownWindowsConnectorStates keeps the Windows status roster aligned with the

@@ -39,6 +39,8 @@ func ownStatusExcludedFixture(t *testing.T, exclude []string, agents []enterpris
 	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{
 		"claudecode": {}, "copilot": {}, "opencode": {},
 	}})
+	api.managedHookAuthz.Store(newManagedHookAuthorizer(cfg.Enterprise.Enrollment, []string{"claudecode", "copilot", "opencode"},
+		func() (managedHookLedger, error) { return managedHookLedger{}, nil }))
 	return api
 }
 
