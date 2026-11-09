@@ -513,6 +513,43 @@ def _effectively_allowed(action_entry) -> bool:
     return actions.install == "allow" and not actions.runtime and not actions.file
 
 
+_MCP_KEY_PREFIX = "mcp:v2:"
+
+
+def _mcp_key_name(path: str) -> str | None:
+    """The server name in a versioned journal key (internal/mcpkey Decode), or
+    None when the path is not one complete canonical key."""
+    if not path.startswith(_MCP_KEY_PREFIX):
+        return None
+    rest = path[len(_MCP_KEY_PREFIX):]
+    fields: list[str] = []
+    for _ in range(4):
+        head, colon, tail = rest.partition(":")
+        if not colon or not head.isascii() or not head.isdigit() or str(int(head)) != head:
+            return None
+        n = int(head)
+        raw = tail[: 2 * n]
+        if len(raw) != 2 * n:
+            return None
+        try:
+            fields.append(bytes.fromhex(raw).decode("utf-8"))
+        except ValueError:
+            return None
+        rest = tail[2 * n:]
+    return fields[0] if rest == "" else None
+
+
+def _current_journal_row(row, name: str):
+    """The row as the gateway reads it outside Secure Client: the install and
+    runtime of a journal row without the versioned key of this server name
+    (rows written by older releases) decide nothing, so mcp list does not show
+    them as a block or a disable. None when nothing else is left on the row."""
+    if row is None or _mcp_key_name(row.source_path or "") == name:
+        return row
+    actions = dataclasses.replace(row.actions, install="", runtime="")
+    return None if actions.is_empty() else dataclasses.replace(row, actions=actions)
+
+
 def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector: str) -> dict:
     """Map each server name to its ActionEntry for one connector list, with
     the operator allow or deny decided per server as the gateway decides it
@@ -546,7 +583,7 @@ def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector:
         and not (str(e.id).startswith("asset_policy:mcp:") and asset_name_key(n) in keys)
     }
     for s in servers:
-        row = journal.get(s.name)
+        row = _current_journal_row(journal.get(s.name), s.name)
         decision, rule = asset_lists.list_decision(
             asset_policy, "mcp", s.name, connector,
             source_path=s.source, url=s.url, command=s.command, args=s.args, transport=s.transport,
