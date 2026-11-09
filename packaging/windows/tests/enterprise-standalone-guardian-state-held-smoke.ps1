@@ -150,7 +150,7 @@ try {
             # and puts its start mode back; the services a held run left Running
             # are Running at the end. The service calls are replaced in the module.
             Add-Type -AssemblyName System.ServiceProcess
-            $replaced = @('Test-DefenseClawServiceExists', 'Get-DefenseClawServiceStartMode', 'Get-DefenseClawServiceChecked', 'Set-DefenseClawServiceStartMode', 'Stop-DefenseClawService', 'Start-DefenseClawService', 'Install-DefenseClawFileAtomic')
+            $replaced = @('Test-DefenseClawServiceExists', 'Get-DefenseClawServiceStartMode', 'Get-DefenseClawServiceDelayedAutoStart', 'Set-DefenseClawServiceDelayedAutoStart', 'Get-DefenseClawServiceChecked', 'Set-DefenseClawServiceStartMode', 'Stop-DefenseClawService', 'Start-DefenseClawService', 'Install-DefenseClawFileAtomic')
             $original = @{}
             foreach ($name in $replaced) { $original[$name] = (Get-Item -LiteralPath "function:$name").ScriptBlock }
             $transaction = [IO.Path]::Combine($scratch, 'txn')
@@ -162,11 +162,18 @@ try {
             $script:SmokeServiceCalls = [Collections.Generic.List[string]]::new()
             $script:SmokeInstallFails = $true
             $script:SmokeStartFails = $false
+            # GAP-0989: the guardian's delayed-auto flag. SmokeDelayed is the flag the
+            # mocked service holds; SmokeModeClearsDelayed models a mode change that
+            # takes the flag with it (the real service answers natively, in the lane).
+            $script:SmokeDelayed = $false
+            $script:SmokeModeClearsDelayed = $false
             try {
                 Set-Item -LiteralPath 'function:script:Test-DefenseClawServiceExists' -Value { $true }
                 Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceStartMode' -Value { 2 }
                 Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceChecked' -Value { [pscustomobject]@{ Status = [ServiceProcess.ServiceControllerStatus]::Running } }
-                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeServiceCalls.Add("mode $($args[3])") }
+                Set-Item -LiteralPath 'function:script:Get-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeDelayed }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceDelayedAutoStart' -Value { $script:SmokeServiceCalls.Add("delayed $($args[3])"); $script:SmokeDelayed = [bool]$args[3] }
+                Set-Item -LiteralPath 'function:script:Set-DefenseClawServiceStartMode' -Value { $script:SmokeServiceCalls.Add("mode $($args[3])"); if ($script:SmokeModeClearsDelayed) { $script:SmokeDelayed = $false } }
                 Set-Item -LiteralPath 'function:script:Stop-DefenseClawService' -Value { $script:SmokeServiceCalls.Add('stop') }
                 Set-Item -LiteralPath 'function:script:Start-DefenseClawService' -Value { if ($script:SmokeStartFails) { throw 'start refused' }; $script:SmokeServiceCalls.Add('start') }
                 Set-Item -LiteralPath 'function:script:Install-DefenseClawFileAtomic' -Value { if ($script:SmokeInstallFails) { throw 'injected failure after the stop' }; Copy-Item -LiteralPath $guardPath -Destination $holdLayout.HookPath -Force }
@@ -175,7 +182,22 @@ try {
                 try { [void](& $hold) } catch { $caught = $_.Exception.Message }
                 if ($caught -ne 'injected failure after the stop') { throw "the failed hold said '$caught'" }
                 if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start') { throw "a failed hold left '$($script:SmokeServiceCalls -join '|')', want the guardian stopped, then its start mode and start restored" }
+                # GAP-0989: a delayed-auto guardian comes back delayed-auto, whether the mode
+                # change took the flag with it (it is set again) or left it (no extra call), and
+                # a plain automatic guardian is not made delayed.
+                $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $true; $script:SmokeModeClearsDelayed = $true; $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if ($caught -ne 'injected failure after the stop') { throw "the delayed-auto hold said '$caught'" }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|delayed True|start') { throw "a failed hold of a delayed-auto guardian left '$($script:SmokeServiceCalls -join '|')', want the mode, then the delayed flag, then start" }
+                if (-not $script:SmokeDelayed) { throw 'the delayed-auto guardian came back plain automatic' }
+                $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $true; $script:SmokeModeClearsDelayed = $false; $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start') { throw "a failed hold that kept the delayed flag left '$($script:SmokeServiceCalls -join '|')'" }
+                $script:SmokeServiceCalls.Clear(); $script:SmokeDelayed = $false; $script:SmokeModeClearsDelayed = $false; $caught = ''
+                try { [void](& $hold) } catch { $caught = $_.Exception.Message }
+                if (($script:SmokeServiceCalls -join '|') -ne 'mode 4|stop|mode 2|start' -or $script:SmokeDelayed) { throw "a failed hold of a plain automatic guardian left '$($script:SmokeServiceCalls -join '|')' delayed=$($script:SmokeDelayed)" }
                 # The guardian cannot be started again: the failure says so, with the first cause.
+                $script:SmokeServiceCalls.Clear()
                 $script:SmokeServiceCalls.Clear(); $script:SmokeStartFails = $true; $caught = ''
                 try { [void](& $hold) } catch { $caught = $_.Exception.Message }
                 if (-not $caught.StartsWith('injected failure after the stop') -or -not $caught.Contains('could not be started again') -or -not $caught.Contains('start refused')) { throw "the failed restart said '$caught'" }

@@ -12913,6 +12913,65 @@ function Set-DefenseClawServiceStartMode {
     }
 }
 
+# GAP-0989: an automatic service can start delayed (sc qc says AUTO_START
+# (DELAYED)); the flag is the DelayedAutostart value beside Start=2 and is what
+# ChangeServiceConfig2 SERVICE_CONFIG_DELAYED_AUTO_START_INFO reads and writes.
+# A caller that disables a service for a while and puts its mode back records
+# both, so a delayed-auto service does not come back as plain automatic.
+function Get-DefenseClawServiceDelayedAutoStart {
+    param([Parameter(Mandatory)][string]$Name)
+    Assert-DefenseClawServiceName -Name $Name
+    if (-not (Test-DefenseClawServiceExists -Name $Name)) {
+        return $false
+    }
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $value = Microsoft.PowerShell.Management\Get-ItemProperty -LiteralPath $key -Name DelayedAutostart -ErrorAction SilentlyContinue
+    if ($null -eq $value -or $null -eq $value.PSObject.Properties['DelayedAutostart']) {
+        return $false
+    }
+    return ([int]$value.DelayedAutostart -ne 0)
+}
+
+function Set-DefenseClawServiceDelayedAutoStart {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][bool]$Enabled
+    )
+    Assert-DefenseClawServiceName -Name $Name
+    if (-not (Test-DefenseClawServiceExists -Name $Name)) {
+        throw "cannot set delayed start for missing Windows service $Name"
+    }
+    if ((Get-DefenseClawServiceStartMode -Name $Name) -ne 2) {
+        throw "service $Name is not an automatic service, so it has no delayed start"
+    }
+    $token = if ($Enabled) { 'delayed-auto' } else { 'auto' }
+    [void](Invoke-DefenseClawNative `
+        -File $script:ScExe `
+        -Arguments @('config', $Name, 'start=', $token))
+    $actual = Get-DefenseClawServiceDelayedAutoStart -Name $Name
+    if ($actual -ne $Enabled) {
+        throw "service $Name delayed start is $actual, expected $Enabled"
+    }
+}
+
+function Restore-DefenseClawServiceStartModeExact {
+    <#
+        Puts back a start mode recorded with Get-DefenseClawServiceStartMode
+        and Get-DefenseClawServiceDelayedAutoStart: the mode first, then the
+        delayed flag when the mode change did not leave it as recorded.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][ValidateSet(2, 3, 4)][int]$StartMode,
+        [Parameter(Mandatory)][bool]$DelayedAutoStart
+    )
+    Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode
+    if ($StartMode -eq 2 -and
+        (Get-DefenseClawServiceDelayedAutoStart -Name $Name) -ne $DelayedAutoStart) {
+        Set-DefenseClawServiceDelayedAutoStart -Name $Name -Enabled $DelayedAutoStart
+    }
+}
+
 function ConvertFrom-DefenseClawServiceQuiescenceTimestamp {
     param([Parameter(Mandatory)]$Value)
     if ($null -eq $Value -or
@@ -27735,6 +27794,7 @@ function Hold-DefenseClawEarlyHookGuard {
     # a held run leaves Running are Running at the end of a failed hold too.
     $guardianTouched = $false
     $guardianPriorMode = 0
+    $guardianPriorDelayed = $false
     $guardianWasRunning = $false
     try {
         Assert-DefenseClawNoReparsePath -Path $expected
@@ -27747,6 +27807,7 @@ function Hold-DefenseClawEarlyHookGuard {
         if (-not [string]::IsNullOrWhiteSpace($GuardianServiceName) -and
             (Test-DefenseClawServiceExists -Name $GuardianServiceName)) {
             $guardianPriorMode = Get-DefenseClawServiceStartMode -Name $GuardianServiceName
+            $guardianPriorDelayed = [bool](Get-DefenseClawServiceDelayedAutoStart -Name $GuardianServiceName)
             $guardianService = Get-DefenseClawServiceChecked -Name $GuardianServiceName
             $guardianWasRunning = (
                 $null -ne $guardianService -and
@@ -27774,7 +27835,11 @@ function Hold-DefenseClawEarlyHookGuard {
             $restartNote = ''
             try {
                 if ($guardianPriorMode -eq 2 -or $guardianPriorMode -eq 3) {
-                    Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode $guardianPriorMode
+                    # GAP-0989: the exact mode, a delayed-auto start included.
+                    Restore-DefenseClawServiceStartModeExact `
+                        -Name $GuardianServiceName `
+                        -StartMode $guardianPriorMode `
+                        -DelayedAutoStart $guardianPriorDelayed
                 }
                 if ($guardianWasRunning) {
                     Start-DefenseClawService -Name $GuardianServiceName

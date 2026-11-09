@@ -78,7 +78,14 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     # S-I1: a failure after the stop starts the guardian again with its start mode.
     assert hold.index("$guardianTouched = $true") < hold.index("Stop-DefenseClawService -Name $GuardianServiceName")
     handler = hold[hold.index("catch {\n        $holdFailure = $_"):]
-    assert "Set-DefenseClawServiceStartMode -Name $GuardianServiceName -StartMode $guardianPriorMode" in handler
+    # GAP-0989: the exact mode comes back, a delayed-auto start included.
+    assert "$guardianPriorDelayed = [bool](Get-DefenseClawServiceDelayedAutoStart -Name $GuardianServiceName)" in hold
+    assert "-StartMode $guardianPriorMode" in handler and "-DelayedAutoStart $guardianPriorDelayed" in handler
+    assert "Restore-DefenseClawServiceStartModeExact" in handler
+    exact = _function_body(module, "Restore-DefenseClawServiceStartModeExact")
+    assert exact.index("Set-DefenseClawServiceStartMode -Name $Name -StartMode $StartMode") < exact.index("Set-DefenseClawServiceDelayedAutoStart -Name $Name -Enabled $DelayedAutoStart")
+    delayed = _function_body(module, "Set-DefenseClawServiceDelayedAutoStart")
+    assert "'delayed-auto'" in delayed and "'start='" in delayed
     assert "Start-DefenseClawService -Name $GuardianServiceName" in handler
     assert handler.rstrip().endswith("return $GuardSHA256\n}") or "throw $holdFailure" in handler
     assert "-GuardianServiceName ([string]$snapshot.guardian_service)" in restore
@@ -950,3 +957,23 @@ def test_the_hook_payload_trust_is_unchanged(tmp_path: Path, case: str) -> None:
     else:
         assert result["pending"] is False, result
         assert result["hook"] == "hook-1.0.2", result
+
+
+def test_the_exact_start_mode_helpers_are_reached_only_from_the_standalone_hold() -> None:
+    # GAP-0989 Secure Client pin: outside their own bodies the helpers are named
+    # only in the early-hook hold, which refuses outside the standalone profile
+    # before it touches the guardian, so Secure Client behaves as before.
+    module = _text()
+    hold = _function_body(module, "Hold-DefenseClawEarlyHookGuard")
+    assert hold.index("if (-not (Test-DefenseClawStandaloneProfile)") < hold.index("Get-DefenseClawServiceDelayedAutoStart")
+    rest = module
+    for name in (
+        "Get-DefenseClawServiceDelayedAutoStart",
+        "Set-DefenseClawServiceDelayedAutoStart",
+        "Restore-DefenseClawServiceStartModeExact",
+        "Hold-DefenseClawEarlyHookGuard",
+    ):
+        rest = rest.replace(_function_body(module, name), "")
+    assert rest.count("Restore-DefenseClawServiceStartModeExact") == 0
+    assert rest.count("Get-DefenseClawServiceDelayedAutoStart") == 0
+    assert rest.count("Set-DefenseClawServiceDelayedAutoStart") == 0
