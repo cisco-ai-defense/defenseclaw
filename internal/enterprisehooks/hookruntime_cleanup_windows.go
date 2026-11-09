@@ -94,10 +94,6 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 			errs = append(errs, fmt.Errorf("enterprise hooks: remove the %s off-roster marker: %w", name, err))
 		}
 	}
-	// So are the excluded-account markers (account_excluded_marker.go).
-	if err := removeAccountExcludedMarkers(root, nil, windowsAccountExcludedMarkerIO()); err != nil {
-		errs = append(errs, err)
-	}
 	// A failed hot-config undo leaves a durable, closed hook marker. Only a
 	// completed teardown whose runtime root holds that marker alone may drop
 	// it; an enrollment, selector or unexpected entry keeps it in force.

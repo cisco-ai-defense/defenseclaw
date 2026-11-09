@@ -23,40 +23,57 @@ const (
 	// gateway names the account and reads the audit store
 	// (coworkaudit.QueryTimeout) first.
 	ownStatusAnswerTimeout = 15 * time.Second
+	// excludedAnswerTimeout bounds the hook's wait for the exclusion answer,
+	// which the gateway reads from memory; a call waits this long at most.
+	excludedAnswerTimeout = 3 * time.Second
 	// ownStatusWriteTimeout bounds the server's write of the answer and its
 	// wait for the client to close its end.
 	ownStatusWriteTimeout = 2 * time.Second
 )
 
-// ServeOwnStatus answers own-status requests on OwnStatusPipeName until ctx
-// ends. answer gets the SID of the account whose token connected, read from
-// the pipe client token, and returns that account's own state as JSON; an
-// empty answer sends nothing. A request that is not OwnStatusRequest, or
-// from a token that is not a user account (AccountSID), gets no answer.
-func ServeOwnStatus(ctx context.Context, answer func(sid string) []byte) error {
-	return serveOwnStatus(ctx, OwnStatusPipeName, answer)
+// ServeOwnStatus answers requests on OwnStatusPipeName until ctx ends. answer
+// gets the SID of the account whose token connected, read from the pipe client
+// token, and returns that account's own state as JSON; an empty answer sends
+// nothing. excluded answers ExcludedRequest the same way: whether the current
+// machine policy excludes that account from enrollment. A request that is
+// neither of the two, or from a token that is not a user account
+// (AccountSID), gets no answer.
+func ServeOwnStatus(ctx context.Context, answer func(sid string) []byte, excluded func(sid string) bool) error {
+	return serveOwnStatus(ctx, OwnStatusPipeName, answer, excluded)
 }
 
-func serveOwnStatus(ctx context.Context, pipeName string, answer func(sid string) []byte) error {
+func serveOwnStatus(ctx context.Context, pipeName string, answer func(sid string) []byte, excluded func(sid string) bool) error {
 	return serveInstances(ctx, pipeName, MaxOwnStatusBytes, func(ctx context.Context, pipe windows.Handle) {
-		answerOwnStatus(ctx, pipe, answer)
+		answerPipeRequest(ctx, pipe, answer, excluded)
 	})
 }
 
-// answerOwnStatus reads one request, names its sender and writes the answer.
-func answerOwnStatus(ctx context.Context, pipe windows.Handle, answer func(sid string) []byte) {
-	request := make([]byte, len(OwnStatusRequest)+1)
+// answerPipeRequest reads one request, names its sender and writes the answer.
+func answerPipeRequest(ctx context.Context, pipe windows.Handle, answer func(sid string) []byte, excluded func(sid string) bool) {
+	request := make([]byte, max(len(OwnStatusRequest), len(ExcludedRequest))+1)
 	count, err := overlapped(ctx, serverReadTimeout, pipe, func(done *uint32, o *windows.Overlapped) error {
 		return windows.ReadFile(pipe, request, done, o)
 	})
-	if err != nil || string(request[:count]) != OwnStatusRequest {
+	if err != nil {
+		return
+	}
+	kind := string(request[:count])
+	if kind != OwnStatusRequest && kind != ExcludedRequest {
 		return
 	}
 	sid, err := clientSID(pipe)
 	if err != nil || !AccountSID(sid) {
 		return
 	}
-	body := answer(sid)
+	var body []byte
+	if kind == ExcludedRequest {
+		if excluded == nil {
+			return
+		}
+		body = ExcludedAnswer(excluded(sid))
+	} else {
+		body = answer(sid)
+	}
 	if len(body) == 0 || len(body) > MaxOwnStatusBytes {
 		return
 	}
@@ -80,24 +97,47 @@ func answerOwnStatus(ctx context.Context, pipe windows.Handle, answer func(sid s
 // (SECURITY_IDENTIFICATION). The request names no account: the gateway
 // answers for the token that connected.
 func OwnStatus(ctx context.Context) ([]byte, error) {
+	return askGateway(ctx, OwnStatusRequest, ownStatusAnswerTimeout)
+}
+
+// AccountExcluded asks the running gateway service whether the machine
+// policy it holds now excludes the calling account from enrollment
+// (exclude_users). The gateway names the account from the pipe client token
+// and judges it against its current configuration, which a standard account
+// cannot read, so nothing the account can write or hold open decides the
+// answer. Any failure, a gateway that is not running, a slow or malformed
+// answer, is an error, and an error is never an exclusion.
+func AccountExcluded(ctx context.Context) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, excludedAnswerTimeout)
+	defer cancel()
+	answer, err := askGateway(ctx, ExcludedRequest, excludedAnswerTimeout)
+	if err != nil {
+		return false, err
+	}
+	return ParseExcludedAnswer(answer)
+}
+
+// askGateway writes request on the own-status pipe and returns the JSON
+// answer, bounded by timeout.
+func askGateway(ctx context.Context, request string, timeout time.Duration) ([]byte, error) {
 	handle, err := dial(ctx, ownStatusClientPipeName)
 	if err != nil {
 		return nil, err
 	}
 	defer windows.CloseHandle(handle)
-	request := []byte(OwnStatusRequest)
+	message := []byte(request)
 	written, err := overlapped(ctx, clientReceiptTimeout, handle, func(done *uint32, o *windows.Overlapped) error {
-		return windows.WriteFile(handle, request, done, o)
+		return windows.WriteFile(handle, message, done, o)
 	})
 	if err != nil {
 		return nil, err
 	}
-	if int(written) != len(request) {
-		return nil, errors.New("the own-status request was not written whole")
+	if int(written) != len(message) {
+		return nil, errors.New("the gateway request was not written whole")
 	}
 	answer := make([]byte, 0, 4096)
 	chunk := make([]byte, 4096)
-	deadline := time.Now().Add(ownStatusAnswerTimeout)
+	deadline := time.Now().Add(timeout)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
