@@ -1943,7 +1943,8 @@ func applyWindowsEnterpriseInstallerReport(
 			windowsEnterpriseLiveStandaloneServices(),
 		)
 		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
-			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") {
+			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") ||
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
 		}
 		if next != "" {
