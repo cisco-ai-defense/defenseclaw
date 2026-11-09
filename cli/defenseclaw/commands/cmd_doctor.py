@@ -4703,7 +4703,7 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
     """Validate the local Ed25519 identity and its continuity evidence."""
 
     from defenseclaw.doctor_recovery import (
-        DEVICE_KEY_PAYLOAD_INVALID,
+        DEVICE_KEY_UNUSABLE_REASONS,
         DeviceKeyHealthStatus,
         inspect_device_key,
         unusable_key_message,
@@ -4766,17 +4766,19 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
             remediation=keyless_identity_message(target, files),
         )
         return
-    if health.reason_code == DEVICE_KEY_PAYLOAD_INVALID:
-        # The key file is empty or cut short (a creation stopped during the write): not replaced, and the
-        # steps name the file (GAP-0927).
+    if health.reason_code in DEVICE_KEY_UNUSABLE_REASONS:
+        # The key file cannot be used (empty or cut short after a stopped creation, not private, a link):
+        # not replaced, and the steps name the file and the reason (GAP-0927).
         _emit(
             "fail",
             "Device identity",
-            f"device key at {target} holds no usable key",
+            f"device key at {target} cannot be used ({health.reason_code})",
             r=r,
             check_id="doctor.identity.device-key",
             reason_code=health.reason_code,
-            remediation=unusable_key_message(target, str(getattr(cfg, "data_dir", "") or "")),
+            remediation=unusable_key_message(
+                target, str(getattr(cfg, "data_dir", "") or ""), str(health.reason_code)
+            ),
         )
         return
     detail = f"device key recovery is unsafe: {health.reason_code}"

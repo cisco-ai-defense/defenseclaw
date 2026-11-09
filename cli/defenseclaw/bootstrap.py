@@ -53,6 +53,14 @@ from defenseclaw.connector_paths import (
     opencode_custody_text,
     opencode_unsafe_plugin_paths,
 )
+from defenseclaw.doctor_recovery import (
+    DEVICE_KEY_UNUSABLE_REASONS,
+    DeviceKeyHealthStatus,
+    device_identity_leftovers,
+    inspect_device_key_usability,
+    keyless_identity_message,
+    unusable_key_message,
+)
 from defenseclaw.gateway_path import path_gateway
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.scanner_binary import MCP_SCANNER_BINARY, SKILL_SCANNER_BINARY, resolve_scanner_binary
@@ -1306,10 +1314,10 @@ def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRu
                     "Bootstrap",
                     "fail",
                     e,
-                    # A device key gone with its provenance files, or one that holds no usable key, is never
+                    # A device key gone with its provenance files, or one that cannot be used, is never
                     # replaced by init itself: the message names the manual steps, after which init runs again.
                     options.rerun_command
-                    if "continuity-evidence-present" in e or "device-key-payload-invalid" in e
+                    if any(f"({code})" in e for code in ("continuity-evidence-present", *DEVICE_KEY_UNUSABLE_REASONS))
                     else "defenseclaw doctor --fix --dry-run",
                 )
                 for e in bootstrap.errors
@@ -1459,6 +1467,48 @@ def _until_key_ok(detail: str) -> str:
     return "until the key is set" if "not set" in detail else "until a valid key is set"
 
 
+def _device_key_readiness(cfg: Config, options: FirstRunOptions) -> StepResult:
+    """The device key row of first-run readiness, decided on the identity state init and Doctor use.
+
+    A key that cannot be used, or a key gone with its provenance files, is never replaced by a command:
+    the row carries the manual steps and the next command is the init rerun they end with.
+    """
+    device_key = cfg.gateway.device_key_file
+    if not device_key:
+        return StepResult("Device key", "fail", "(unset)", "defenseclaw init")
+    data_dir = cfg.data_dir
+    health = inspect_device_key_usability(device_key, data_dir=data_dir)
+    if health.status is DeviceKeyHealthStatus.VALID:
+        return StepResult("Device key", "pass", device_key)
+    if health.status is DeviceKeyHealthStatus.MISSING:
+        return StepResult(
+            "Device key",
+            "fail",
+            device_key,
+            "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize",
+        )
+    if health.reason_code == "continuity-evidence-present":
+        files = device_identity_leftovers(device_key, data_dir)
+        return StepResult("Device key", "fail", keyless_identity_message(device_key, files), options.rerun_command)
+    if health.reason_code in DEVICE_KEY_UNUSABLE_REASONS:
+        return StepResult(
+            "Device key",
+            "fail",
+            unusable_key_message(device_key, data_dir, str(health.reason_code)),
+            options.rerun_command,
+        )
+    # A folder-level custody reason is about the folders, not the key; Doctor reports it. The row keeps
+    # its earlier meaning: the key file is there or it is not.
+    if os.path.isfile(device_key):
+        return StepResult("Device key", "pass", device_key)
+    return StepResult(
+        "Device key",
+        "fail",
+        device_key,
+        "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize",
+    )
+
+
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
     """Run scoped readiness checks for the choices made during first run."""
     from defenseclaw.config import config_path_for_data_dir
@@ -1485,19 +1535,7 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             ),
         )
     )
-    device_key = cfg.gateway.device_key_file
-    steps.append(
-        StepResult(
-            "Device key",
-            "pass" if device_key and os.path.isfile(device_key) else "fail",
-            device_key or "(unset)",
-            (
-                "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
-                if not (device_key and os.path.isfile(device_key))
-                else ""
-            ),
-        )
-    )
+    steps.append(_device_key_readiness(cfg, options))
 
     for s in _scanner_availability(cfg):
         if s.status == "warn":

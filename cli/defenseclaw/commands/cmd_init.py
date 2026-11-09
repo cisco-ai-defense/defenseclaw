@@ -3510,17 +3510,19 @@ def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
     _validate_device_identity_artifact_layout(target, identity_root)
     if os.path.lexists(target):
         from defenseclaw.doctor_recovery import (
-            DEVICE_KEY_PAYLOAD_INVALID,
-            inspect_device_key,
+            DEVICE_KEY_UNUSABLE_REASONS,
+            inspect_device_key_usability,
             unusable_key_message,
         )
 
-        # A creation stopped during the key write can leave an empty or cut-short key beside its published
-        # provenance. That is not a finished identity and init never replaces it: it names the manual steps.
-        if inspect_device_key(target, data_dir=identity_root).reason_code == DEVICE_KEY_PAYLOAD_INVALID:
+        # An existing key is a finished identity only if the gateway can load it and its file custody holds
+        # (the one test Doctor and readiness use too). A creation stopped during the key write, or a wrong
+        # mode or a link, leaves one that is not: init never replaces it and names the manual steps.
+        reason = inspect_device_key_usability(target, data_dir=identity_root).reason_code
+        if reason in DEVICE_KEY_UNUSABLE_REASONS:
             raise click.ClickException(
-                f"cannot safely create device identity ({DEVICE_KEY_PAYLOAD_INVALID}): "
-                + unusable_key_message(target, identity_root)
+                f"cannot safely create device identity ({reason}): "
+                + unusable_key_message(target, identity_root, reason)
             )
         return
 
