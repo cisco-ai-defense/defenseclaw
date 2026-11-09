@@ -1312,6 +1312,22 @@ def hermes_command_written(command: str, current: set[str]) -> bool:
     return command == command.strip() and bool(edited_hook_script(command, HOOK_SCRIPT_NAMES["hermes"]))
 
 
+def hermes_command_names_defenseclaw_hook(command: str, hooks_dir: str) -> bool:
+    """Whether a Hermes hook *command* Setup did not write names a DefenseClaw hook.
+
+    The Python mirror of hermesCommandNamesDefenseClawHook: the generated
+    script, a file in the hooks folder (absolute, ``~`` or ``$HOME``) or the
+    native launcher's Hermes flag. It only picks which kept entries the notice
+    lists (GAP-0940); ownership never reads the command.
+    """
+
+    text = command.replace("\\", "/")
+    fragments = (HOOK_SCRIPT_NAMES["hermes"], ".defenseclaw/hooks", "hook --connector hermes")
+    return any(fragment in text for fragment in fragments) or (
+        bool(hooks_dir) and hooks_dir.replace("\\", "/").rstrip("/") + "/" in text
+    )
+
+
 def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:
     """The DefenseClaw Hermes hooks of *document* that the allowlist beside *path* does not approve.
 

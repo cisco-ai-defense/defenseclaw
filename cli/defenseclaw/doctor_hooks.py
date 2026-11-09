@@ -47,6 +47,7 @@ from defenseclaw.hook_integrity import (
     LAUNCHER_REINSTALL_STEP,
     claude_launcher_guard_view,
     hermes_approved_pairs,
+    hermes_command_names_defenseclaw_hook,
     hermes_command_written,
     hook_guard_problem,
 )
@@ -3101,6 +3102,7 @@ def hermes_kept_hook_note(data_dir: str, config_path: str) -> str:
             isinstance(entry, dict)
             and isinstance(entry.get("command"), str)
             and not hermes_command_written(entry["command"], current)
+            and hermes_command_names_defenseclaw_hook(entry["command"], os.path.dirname(script))
             for entry in hooks[event]
         )
     )
