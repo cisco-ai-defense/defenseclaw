@@ -169,6 +169,18 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
         self.assertEqual(sorted(r["name"] for r in rows), ["other", "r-benign"])
         self.assertFalse(any("alias_of" in r for r in rows))
 
+    def test_claudecode_commands_folder_beside_same_stem_markdown_is_active(self):
+        cfg = _make_cfg(self.tmp, "claudecode")
+        skill_root = os.path.join(self.tmp, ".claude", "commands")
+        folder = _seed_skill(skill_root, "ordinary")
+        with open(os.path.join(skill_root, "ordinary.md"), "w", encoding="utf-8") as fh:
+            fh.write("# legacy command\n")
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+        self.assertEqual([r["name"] for r in rows], ["ordinary"])
+        self.assertTrue(rows[0]["eligible"])
+        self.assertEqual(rows[0]["path"], os.path.realpath(folder))
+
     def test_zeptoclaw_walks_disk_with_skill_json(self):
         cfg = _make_cfg(self.tmp, "zeptoclaw")
         skill_root = os.path.join(self.tmp, ".zeptoclaw", "skills")
