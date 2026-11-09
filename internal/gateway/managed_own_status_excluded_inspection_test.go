@@ -92,16 +92,17 @@ func TestOwnStatusExcludedReasonFollowsTheMachinePolicyHook(t *testing.T) {
 		return map[string][2]string{connector: {code, text}}
 	}
 	for _, tc := range []struct {
-		name      string
-		configure func(*config.Config)
-		machine   []string                  // connectors the authorizer admitted; nil = all three
-		noMachine bool                      // the authorizer admitted none
-		view      func() *managedPolicyView // nil = every connector proven
-		noView    bool                      // no policy view published
-		ledger    []managedHookLedgerTarget
-		ledgerErr bool
-		want      map[string][2]string // connector -> code, reason text
-		cowork    [2]string
+		name       string
+		configure  func(*config.Config)
+		machine    []string                  // connectors the authorizer admitted; nil = all three
+		noMachine  bool                      // the authorizer admitted none
+		view       func() *managedPolicyView // nil = every connector proven
+		noView     bool                      // no policy view published
+		vendorHook bool                      // the vendor files hold a machine-policy hook
+		ledger     []managedHookLedgerTarget
+		ledgerErr  bool
+		want       map[string][2]string // connector -> code, reason text
+		cowork     [2]string
 	}{
 		{name: "inspect by default", want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "inspect written out", configure: func(cfg *config.Config) {
@@ -156,6 +157,10 @@ func TestOwnStatusExcludedReasonFollowsTheMachinePolicyHook(t *testing.T) {
 			want: all(inspectedCode, inspectedReason), cowork: [2]string{inspectedCode, inspectedReason}},
 		{name: "no machine policy", noMachine: true, noView: true, want: all(nothingCode, nothingReason),
 			cowork: [2]string{nothingCode, nothingReason}},
+		{name: "no machine policy, descriptor lost, vendor hook still installed", noMachine: true, noView: true, vendorHook: true,
+			want: all(unknownCode, unknownReason), cowork: [2]string{unknownCode, unknownReason}},
+		{name: "no machine policy, descriptor lost, vendor hook still installed, deny", noMachine: true, noView: true, vendorHook: true, configure: deny,
+			want: all(unknownCode, unknownReason), cowork: [2]string{unknownCode, unknownReason}},
 		{name: "no machine policy under deny", noMachine: true, noView: true, configure: deny, want: all(nothingCode, nothingReason),
 			cowork: [2]string{nothingCode, nothingReason}},
 		{name: "no machine policy, an old ledger target alone proves no hook", noMachine: true, noView: true,
@@ -177,6 +182,9 @@ func TestOwnStatusExcludedReasonFollowsTheMachinePolicyHook(t *testing.T) {
 				configure = append(configure, tc.configure)
 			}
 			api := ownStatusExcludedFixture(t, []string{"carol"}, nil, configure...)
+			savedAbsent := machineHookAbsent
+			machineHookAbsent = func(string, *config.Config, string) bool { return !tc.vendorHook }
+			t.Cleanup(func() { machineHookAbsent = savedAbsent })
 			machine := tc.machine
 			if machine == nil && !tc.noMachine {
 				machine = []string{"claudecode", "copilot", "opencode"}
