@@ -939,23 +939,37 @@ type FolderRef struct {
 // line, a file path or a working folder. "~" and $HOME expand to home and
 // a relative path resolves against cwd. tool is the name of the tool the call
 // is for (it may be empty): a search tool that names no place searches cwd. A
-// slash-free word is a path only where the call uses it as one (see
+// slash-free word is a path only when it names an existing entry of the
+// working folder and the call reads it: a path field is judged whole as typed,
+// a program that reads files (cat, grep, find, cp, sed, ...) reads every
+// word after it, and any other program only in the strict tier (see
 // operand_context.go).
 func SkillFolderRefs(tool string, input any, home, cwd string, caller ...string) []FolderRef {
-	account := ""
+	return skillFolderRefsForCaller(tool, input, home, cwd, callerName(caller), os.Geteuid(), os.Getegid(), false)
+}
+
+// SkillFolderRefsStrict is SkillFolderRefs for the strict policy tier: a
+// slash-free word of any program that names an existing entry of the working
+// folder is read as a path, not only the words of a program that reads files.
+func SkillFolderRefsStrict(tool string, input any, home, cwd string, caller ...string) []FolderRef {
+	return skillFolderRefsForCaller(tool, input, home, cwd, callerName(caller), os.Geteuid(), os.Getegid(), true)
+}
+
+func callerName(caller []string) string {
 	if len(caller) > 0 {
-		account = caller[0]
+		return caller[0]
 	}
-	return skillFolderRefsForCaller(tool, input, home, cwd, account, os.Geteuid(), os.Getegid())
+	return ""
 }
 
 // SkillFolderRefsForPeer resolves a managed hook request using the kernel
-// credentials of the caller, rather than the gateway service account.
-func SkillFolderRefsForPeer(tool string, input any, home, cwd, caller string, uid, gid int) []FolderRef {
-	return skillFolderRefsForCaller(tool, input, home, cwd, caller, uid, gid)
+// credentials of the caller, rather than the gateway service account. strict
+// is as for SkillFolderRefsStrict.
+func SkillFolderRefsForPeer(tool string, input any, home, cwd, caller string, uid, gid int, strict bool) []FolderRef {
+	return skillFolderRefsForCaller(tool, input, home, cwd, caller, uid, gid, strict)
 }
 
-func skillFolderRefsForCaller(tool string, input any, home, cwd, account string, uid, gid int) []FolderRef {
+func skillFolderRefsForCaller(tool string, input any, home, cwd, account string, uid, gid int, strict bool) []FolderRef {
 	var fields []inputField
 	collectFields(tool, input, "", 0, &fields)
 	seen := map[string]int{}
@@ -974,28 +988,26 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 		}
 	}
 	add := func(f inputField, text, dir string, explicit bool) {
-		switch kindOfField(tool, f.key) {
+		kind := kindOfField(tool, f.key)
+		switch kind {
 		case kindPath:
-			// One path, with the spaces and tabs of its folder names, and the
-			// words it splits into as well.
+			// One path, judged whole as typed, with the spaces and tabs of
+			// its folder names.
 			addToken(text, dir, explicit)
-			if hasBlank(text) {
-				for _, w := range shellWords(text, false, 0) {
-					addToken(w.text, dir, explicit)
-				}
-			}
 		case kindText:
-			for _, w := range shellWords(text, false, 0) {
+			for _, w := range shellWords(text, 0) {
 				if strings.ContainsAny(w.text, "/\\") {
 					addToken(w.text, dir, explicit)
 				}
 			}
 		default:
-			words, cwdSearch := commandWords(text, f.argv)
-			for _, w := range words {
-				if w.mayNamePath() {
-					addToken(w.text, dir, explicit)
-				}
+			if kind == kindOther && !strings.ContainsAny(text, " \t") {
+				// A field no rule knows may hold one path.
+				addToken(text, dir, explicit)
+			}
+			words, cwdSearch := commandPathWords(text, f.argv, dir, strict || kind == kindOther, 0)
+			for _, word := range words {
+				addToken(word, dir, explicit)
 			}
 			if cwdSearch {
 				addToken(dir, dir, explicit)
@@ -1006,7 +1018,7 @@ func skillFolderRefsForCaller(tool string, input any, home, cwd, account string,
 		addToken(cwd, cwd, false)
 	}
 	for _, field := range fields {
-		if field.argv != nil || kindOfField(tool, field.key) != kindCommand {
+		if field.argv != nil || !kindOfField(tool, field.key).isCommandField() {
 			add(field, field.text, cwd, false)
 			continue
 		}
@@ -1083,7 +1095,7 @@ func leadingSkillDirectoryChange(value, cwd, home, caller string, uid, gid int) 
 		case quote == 0 && (ch == ';' || ch == '\n' ||
 			ch == '&' && i+1 < len(value) && value[i+1] == '&'):
 			prefix = value[:i]
-			words := wordTexts(shellWords(prefix, true, 0))
+			words := wordTexts(shellWords(prefix, 0))
 			if len(words) != 2 || words[0] != "cd" || words[1] == "-" ||
 				strings.ContainsAny(words[1], "*?[]{}$`") {
 				return "", "", "", false, false, false
