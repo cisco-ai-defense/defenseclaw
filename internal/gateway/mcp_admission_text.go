@@ -83,6 +83,17 @@ func mcpAdmissionFailedText(name, issue, step string) string {
 	return b.String()
 }
 
+// mcpDefinitionUnprovenStep is the next step for an MCP server whose
+// definition DefenseClaw cannot prove (mcp-definition-unproven).
+const mcpDefinitionUnprovenStep = "start a new agent session with the server configured, or ask your administrator"
+
+// mcpDefinitionUnprovenText words the block of a call to an MCP server whose
+// definition DefenseClaw cannot prove from the agent config or earlier in
+// the session, as a sentence instead of the structured reason.
+func mcpDefinitionUnprovenText(name string) string {
+	return "MCP server " + name + " has a definition DefenseClaw cannot prove, so its calls are blocked; " + mcpDefinitionUnprovenStep
+}
+
 // mcpAdmissionAllowedWarning is the agent-visible warning of a call allowed
 // to a server that could not be scanned.
 func mcpAdmissionAllowedWarning(name, issue, step string) string {
