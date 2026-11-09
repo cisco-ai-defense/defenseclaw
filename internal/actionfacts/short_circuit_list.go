@@ -202,6 +202,17 @@ func sequenceStatements(source string, compound bool) (statements []string, redu
 	return statements, reduced, true
 }
 
+// functionDefinition is where the walk met a function definition: how many
+// statements it had kept, and the scope, loop bindings, subshell depth and
+// function depth it was in. A function the text never calls is walked there.
+type functionDefinition struct {
+	body             *syntax.Stmt
+	at               int
+	scope            string
+	binds            []simpleLoopBind
+	subshells, depth int
+}
+
 type sequenceStatement struct {
 	text, scope string
 	sourceStart int
@@ -274,9 +285,30 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 		defer func() { scope = parent }()
 		return walk()
 	}
+	// assigned holds the static values the walk has seen assigned to each
+	// variable, so a program word such as $x can name the function it
+	// calls (GAP-0934); unbound holds the variables the action may also
+	// bind in a way the walk cannot read.
+	assigned := make(map[string][]string)
+	unbound := simpleUnreadBindings(file)
 	var loopBinds []simpleLoopBind
+	// stateOnly is set while the walk is in the body of a function the text
+	// never calls: keep then drops every command but the ones that set what an
+	// apply_patch envelope in the body reads (simpleUncalledBodyCommand);
+	// envelopes counts the envelopes it kept.
+	stateOnly := false
+	envelopes := 0
 	// keep adds the text of node, or of a command and its redirects.
 	keep := func(node syntax.Node, redirs ...*syntax.Redirect) bool {
+		if stateOnly {
+			state, envelope := simpleUncalledBodyCommand(node, len(redirs) != 0, assigned, unbound)
+			if !state && !envelope {
+				return true
+			}
+			if envelope {
+				envelopes++
+			}
+		}
 		from, to := node.Pos(), node.End()
 		for _, redirect := range redirs {
 			if redirect.Pos().Offset() < from.Offset() {
@@ -300,12 +332,10 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	subshells := 0
 	functions := make(map[string]*syntax.Stmt)
 	functionDepth := 0
-	// assigned holds the static values the walk has seen assigned to each
-	// variable, so a program word such as $x can name the function it
-	// calls (GAP-0934); unbound holds the variables the action may also
-	// bind in a way the walk cannot read.
-	assigned := make(map[string][]string)
-	unbound := simpleUnreadBindings(file)
+	// expanded are the function bodies a call walked; definitions are the
+	// functions the walk met, to be walked where defined when no call did.
+	expanded := make(map[*syntax.Stmt]bool)
+	var definitions []functionDefinition
 	record := func(assign *syntax.Assign) {
 		if assign == nil || assign.Name == nil || assign.Naked {
 			return
@@ -385,6 +415,8 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				return true, false
 			}
 			functions[typed.Name.Value] = typed.Body
+			definitions = append(definitions, functionDefinition{body: typed.Body, at: len(statements),
+				scope: scope, binds: slices.Clone(loopBinds), subshells: subshells, depth: functionDepth})
 			return true, true
 		case *syntax.Subshell:
 			subshells++
@@ -591,6 +623,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 							return false
 						}
 						functionDepth++
+						expanded[body] = true
 						ok := childScope('f', func() bool { return flatten(body) })
 						functionDepth--
 						if !ok {
@@ -639,6 +672,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			// variables stay there.
 			functionDepth++
 			subshells++
+			expanded[body] = true
 			ok := childScope('e', func() bool { return flatten(body) })
 			subshells--
 			functionDepth--
@@ -651,56 +685,80 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	if !flattenAll(file.Stmts) {
 		return nil, false, false
 	}
-	if allSimple && len(functions) != 0 && !keepFunctionPatchEnvelopes(file, keep, func(start int) bool {
-		return slices.ContainsFunc(statements, func(kept sequenceStatement) bool { return kept.sourceStart == start })
-	}, func(walk func() bool) bool {
-		subshells++
-		defer func() { subshells-- }()
-		return childScope('e', walk)
-	}) {
-		return nil, false, false
+	if allSimple && len(definitions) != 0 {
+		// A function the text never calls runs nothing, and the content rules
+		// read the envelope, not the order in which the shell would run it: walk
+		// its body where it is defined, as the body of a child shell, so its
+		// directory and variables stay out of the statements that follow.
+		// A body with no envelope has nothing to judge: its statements are not
+		// kept, so they do not count against the statement budget. found is the
+		// number of envelopes in the bodies walkUncalled kept.
+		var walkUncalled func(defs []functionDefinition, into []sequenceStatement) (result []sequenceStatement, found int, ok bool)
+		walkUncalled = func(defs []functionDefinition, into []sequenceStatement) ([]sequenceStatement, int, bool) {
+			found := 0
+			for index := len(defs) - 1; index >= 0; index-- {
+				def := defs[index]
+				if expanded[def.body] {
+					continue
+				}
+				outer, outerScope, outerBinds := statements, scope, loopBinds
+				outerSubshells, outerDepth, mark := subshells, functionDepth, len(definitions)
+				statements, scope, loopBinds = nil, def.scope, def.binds
+				subshells, functionDepth, stateOnly, envelopes = def.subshells+1, def.depth, true, 0
+				ok := childScope('e', func() bool { return flatten(def.body) })
+				walked, nested, own := statements, slices.Clone(definitions[mark:]), envelopes
+				definitions = definitions[:mark]
+				statements, scope, loopBinds = outer, outerScope, outerBinds
+				subshells, functionDepth, stateOnly = outerSubshells, outerDepth, false
+				if !ok {
+					return nil, 0, false
+				}
+				walked, inner, ok := walkUncalled(nested, walked)
+				if !ok {
+					return nil, 0, false
+				}
+				if own+inner != 0 {
+					into = slices.Insert(into, def.at, walked...)
+					found += own + inner
+				}
+			}
+			return into, found, true
+		}
+		var ok bool
+		if statements, _, ok = walkUncalled(slices.Clone(definitions), statements); !ok {
+			return nil, false, false
+		}
 	}
 	return statements, reduced, true
 }
 
-// keepFunctionPatchEnvelopes keeps every apply_patch statement of a function
-// body that the walk did not expand, so the envelope in a function the text
-// defines and never calls is judged on its file headers like one that runs: the
-// content rules read the envelope, not the order in which the shell would run
-// it. A statement a call has already kept (kept, by its start offset) is not
-// kept twice. The body is kept as the body of a child shell, so its directory
-// and variables stay out of the statements that follow.
-func keepFunctionPatchEnvelopes(
-	file *syntax.File,
-	keep func(node syntax.Node, redirs ...*syntax.Redirect) bool,
-	kept func(start int) bool,
-	inChildScope func(walk func() bool) bool,
-) bool {
-	ok := true
-	syntax.Walk(file, func(node syntax.Node) bool {
-		declaration, isFunction := node.(*syntax.FuncDecl)
-		if !isFunction || declaration.Body == nil {
-			return ok
+// simpleUncalledBodyCommand classifies node, a command of the body of a
+// function the text never calls, for the walk of that body: an apply_patch
+// command with redirects is an envelope, and the commands that set what the
+// envelope reads are state: assignments, declarations and the commands that may
+// change the directory, named directly or through a variable the action assigns
+// static values. The walk keeps those two kinds; every other command of such a
+// body stays unexposed.
+func simpleUncalledBodyCommand(node syntax.Node, redirected bool, assigned map[string][]string, unbound map[string]bool) (state, envelope bool) {
+	switch typed := node.(type) {
+	case *syntax.DeclClause:
+		return true, false
+	case *syntax.CallExpr:
+		if len(typed.Args) == 0 {
+			return len(typed.Assigns) != 0, false
 		}
-		syntax.Walk(declaration.Body, func(inner syntax.Node) bool {
-			stmt, isStmt := inner.(*syntax.Stmt)
-			if !ok || !isStmt {
-				return ok
-			}
-			call, isCall := stmt.Cmd.(*syntax.CallExpr)
-			if !isCall || len(call.Args) == 0 || len(stmt.Redirs) == 0 {
-				return true
-			}
-			program, static := simpleStaticWord(call.Args[0], nil)
-			if !static || program != "apply_patch" || kept(int(call.Pos().Offset())) {
-				return true
-			}
-			ok = inChildScope(func() bool { return keep(call, stmt.Redirs...) })
-			return ok
-		})
-		return ok
-	})
-	return ok
+		var names []string
+		if program, static := simpleStaticWord(typed.Args[0], nil); static {
+			names = []string{program}
+		} else if bound, ok := simpleAssignedProgramNames(typed.Args[0], assigned, unbound); ok {
+			names = bound
+		}
+		for _, name := range names {
+			envelope = envelope || name == "apply_patch" && redirected
+			state = state || name != "" && ChangesShellDirectory(CommandFact{Dialect: DialectPOSIX, Program: name})
+		}
+	}
+	return state, envelope
 }
 
 // simpleAssignedProgramNames returns the program names that word, one

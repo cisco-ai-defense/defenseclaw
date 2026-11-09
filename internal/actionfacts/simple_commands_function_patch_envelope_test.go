@@ -46,3 +46,48 @@ func TestSimpleCommandsExposeTheEnvelopeOfAFunctionBodyOnce(t *testing.T) {
 		})
 	}
 }
+
+// The envelope of a function the text never calls is judged in the directory
+// and with the variables the text has where it defines the function, and in
+// its own body (a cd or an assignment in the body), as a call would judge it.
+// What the body sets stays out of the statements that follow it.
+func TestSimpleCommandsWalkTheStateOfAFunctionBodyNeverCalled(t *testing.T) {
+	const body = "<<\x27PATCH\x27\n*** Begin Patch\n*** Add File: ld.so.preload\n+/usr/local/lib/libreview.so\n*** End Patch\nPATCH"
+	const patch = "apply_patch " + body
+	const quotedPatch = "\"$p\" " + body
+	for _, tt := range []struct {
+		name, command string
+		// probe is the text the checked command holds, and cwd the directory
+		// it must be judged in.
+		probe, cwd string
+	}{
+		{"cd in the body", "f() {\ncd /etc\n" + patch + "\n}\n", "<<", "/etc"},
+		{"pushd in the body", "f() {\npushd /etc\n" + patch + "\n}\n", "<<", "/etc"},
+		{"cd named by a variable", "c=cd\nf() {\n$c /etc\n" + patch + "\n}\n", "<<", "/etc"},
+		{"directory of the definition", "cd /etc\nf() {\n" + patch + "\n}\n", "<<", "/etc"},
+		{"directory changed after the definition", "cd /etc\nf() {\n" + patch + "\n}\ncd /tmp\n", "<<", "/etc"},
+		{"program named by a variable", "p=apply_patch\nf() {\n" + quotedPatch + "\n}\n", "<<", "/repo"},
+		{"variable set after the definition", "p=apply_patch\nf() {\n" + quotedPatch + "\n}\np=ls\n", "<<", "/repo"},
+		{"variable set in the body", "f() {\np=apply_patch\n" + quotedPatch + "\n}\n", "<<", "/repo"},
+		{"nested function", "g() {\n  cd /etc\n  f() {\n" + patch + "\n  }\n}\n", "<<", "/etc"},
+		{"inside a condition of the body", "f() {\nif true; then\ncd /etc\n" + patch + "\nfi\n}\n", "<<", "/etc"},
+		{"directory of a body never called does not leak", "f() {\ncd /etc\n}\npwd\n", "pwd", "/repo"},
+		{"directory of a body never called does not leak to a later envelope", "f() {\ncd /etc\n}\n" + patch, "<<", "/repo"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := Input{Tool: "shell", Command: tt.command, CWD: "/repo", ActiveHome: "/home/alice"}
+			found := false
+			for _, child := range SimpleCommands(input, Analyze(input)) {
+				if strings.Contains(child.Text, tt.probe) {
+					found = true
+					if child.CWD != tt.cwd {
+						t.Errorf("%q judged in %q, want %q", child.Text, child.CWD, tt.cwd)
+					}
+				}
+			}
+			if !found {
+				t.Errorf("no command holding %q exposed", tt.probe)
+			}
+		})
+	}
+}
