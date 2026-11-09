@@ -1405,6 +1405,11 @@ jobs:
             for file in "$@"; do
               case "$file" in
                 *_windows_test.go | *_linux_test.go) continue ;;
+                # The open-loop throughput tests measure wall-clock answers
+                # and run alone, without -race, in Go Throughput Test; on a
+                # shared macOS runner they only report INCONCLUSIVE and use
+                # the job time.
+                */gap0490_open_loop_test.go) continue ;;
                 *_darwin_test.go | *_unix_test.go | */hook_foreign_guard*_test.go) ;;
                 *) grep -Eq '^//go:build .*(darwin|unix|!windows|!linux)' "$file" || continue ;;
               esac
