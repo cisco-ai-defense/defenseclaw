@@ -1,0 +1,172 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package hookpaths
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// manifestLinkProject makes home/project/.claude/skills as a plain folder
+// and returns the project, the root and the verified-root facts a hook
+// sends for it.
+func manifestLinkProject(t *testing.T) (home, project, root string, facts map[string]string) {
+	t.Helper()
+	home = t.TempDir()
+	project = filepath.Join(home, "project")
+	root = filepath.Join(project, ".claude", "skills")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return home, project, root, map[string]string{ProjectSkillRootVerifiedPrefix + root: "1"}
+}
+
+// A plain project skills root is verified as a folder, but a skill of it can
+// carry a SKILL.md that is another file under that name. A call that selects
+// that skill, by name or by any explicit source, turns the root unverified
+// for the call and binds the selected folder, so the gateway refuses it
+// (rel-1-0-9:GAP-0951). Private in-profile twins and ordinary skills stay
+// verified.
+func TestProjectSkillManifestLinkedOutsideTheProfileIsNotVerified(t *testing.T) {
+	type build func(t *testing.T, home, root string) string // returns the skill folder
+	outsideFile := func(t *testing.T) string {
+		path := filepath.Join(t.TempDir(), "policy.md")
+		if err := os.WriteFile(path, []byte("---\nname: sample\n---\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cases := []struct {
+		label string
+		make  build
+		bad   bool
+	}{
+		{"ordinary regular manifest", func(t *testing.T, _, root string) string {
+			dir := filepath.Join(root, "sample")
+			round6Skill(t, dir, "sample")
+			return dir
+		}, false},
+		{"symbolic link to a file outside the profile", func(t *testing.T, _, root string) string {
+			dir := filepath.Join(root, "sample")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(outsideFile(t), filepath.Join(dir, "SKILL.md")); err != nil {
+				t.Skipf("link unavailable: %v", err)
+			}
+			return dir
+		}, true},
+		{"hard link to a file outside the profile", func(t *testing.T, _, root string) string {
+			dir := filepath.Join(root, "sample")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(outsideFile(t), filepath.Join(dir, "SKILL.md")); err != nil {
+				t.Skipf("hard link unavailable: %v", err)
+			}
+			return dir
+		}, true},
+		{"skill folder that is a link to a folder outside the profile", func(t *testing.T, _, root string) string {
+			outside := filepath.Join(t.TempDir(), "sample")
+			round6Skill(t, outside, "sample")
+			dir := filepath.Join(root, "sample")
+			if err := os.Symlink(outside, dir); err != nil {
+				t.Skipf("link unavailable: %v", err)
+			}
+			return dir
+		}, true},
+		{"symbolic link to the caller private file in the profile", func(t *testing.T, home, root string) string {
+			private := filepath.Join(home, ".claude", "skills", "sample")
+			round6Skill(t, private, "sample")
+			dir := filepath.Join(root, "sample")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(private, "SKILL.md"), filepath.Join(dir, "SKILL.md")); err != nil {
+				t.Skipf("link unavailable: %v", err)
+			}
+			return dir
+		}, false},
+		{"skill folder that is a link to a private folder in the profile", func(t *testing.T, home, root string) string {
+			private := filepath.Join(home, "elsewhere", "sample")
+			round6Skill(t, private, "sample")
+			dir := filepath.Join(root, "sample")
+			if err := os.Symlink(private, dir); err != nil {
+				t.Skipf("link unavailable: %v", err)
+			}
+			return dir
+		}, false},
+		{"folder without a manifest", func(t *testing.T, _, root string) string {
+			dir := filepath.Join(root, "sample")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}, false},
+	}
+	selections := map[string]func(dir string) map[string]any{
+		"name":              func(string) map[string]any { return map[string]any{"skill": "sample"} },
+		"skill_path folder": func(dir string) map[string]any { return map[string]any{"skill": "sample", "skill_path": dir} },
+		"skill_path manifest": func(dir string) map[string]any {
+			return map[string]any{"skill": "sample", "skill_path": filepath.Join(dir, "SKILL.md")}
+		},
+	}
+	for _, tc := range cases {
+		for form, selection := range selections {
+			t.Run(tc.label+"/"+form, func(t *testing.T) {
+				home, project, root, facts := manifestLinkProject(t)
+				dir := tc.make(t, home, root)
+				// A second, ordinary skill of the same root.
+				round6Skill(t, filepath.Join(root, "other"), "other")
+				args, _ := json.Marshal(selection(dir))
+				addProjectSkillSelectedFacts(facts, nil, args, home, project)
+				unverified := facts[ProjectSkillRootUnverifiedPrefix+root]
+				_, verified := facts[ProjectSkillRootVerifiedPrefix+root]
+				selected := round6Selected(facts)
+				if tc.bad {
+					if unverified != ProjectSkillManifestLinked || verified || len(selected) != 1 || selected[0] != dir {
+						t.Fatalf("linked manifest: unverified=%q verified=%v selected=%v, want %s bound to %s",
+							unverified, verified, selected, ProjectSkillManifestLinked, dir)
+					}
+					return
+				}
+				if unverified != "" || !verified || len(selected) != 0 {
+					t.Fatalf("benign skill: unverified=%q verified=%v selected=%v, want the root verified", unverified, verified, selected)
+				}
+			})
+		}
+	}
+	t.Run("another skill of the root stays verified", func(t *testing.T) {
+		home, project, root, facts := manifestLinkProject(t)
+		dir := filepath.Join(root, "sample")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideFile(t), filepath.Join(dir, "SKILL.md")); err != nil {
+			t.Skipf("link unavailable: %v", err)
+		}
+		round6Skill(t, filepath.Join(root, "other"), "other")
+		args, _ := json.Marshal(map[string]any{"skill": "other"})
+		addProjectSkillSelectedFacts(facts, nil, args, home, project)
+		if _, verified := facts[ProjectSkillRootVerifiedPrefix+root]; !verified || len(facts) != 1 {
+			t.Fatalf("a call for the ordinary skill: facts %v, want the root verified alone", facts)
+		}
+	})
+	t.Run("codex name selection", func(t *testing.T) {
+		home, project, root, facts := manifestLinkProject(t)
+		dir := filepath.Join(root, "sample")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideFile(t), filepath.Join(dir, "SKILL.md")); err != nil {
+			t.Skipf("link unavailable: %v", err)
+		}
+		markLinkedProjectSkillManifests(facts, "sample", nil, home, project)
+		if facts[ProjectSkillRootUnverifiedPrefix+root] != ProjectSkillManifestLinked {
+			t.Fatalf("facts %v, want the root unverified as %s", facts, ProjectSkillManifestLinked)
+		}
+	})
+}
