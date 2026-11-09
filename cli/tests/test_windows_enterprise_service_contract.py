@@ -7972,6 +7972,16 @@ _SC_SHARED_INSERTS = {
             '            $policyDirectoryExists = Microsoft.PowerShell.Management\\Test-Path `\n',
         ),
         (
+            '        # The writer copy of the Codex state is back; the hook copy the\n        # counter names must say the same (GAP-0650).\n',
+            '        # GAP-0900: the hook copy of the Codex state lives in the Codex machine-policy\n        # folder; with a link on its path the copy is not written through it (nothing\n        # ever writes through a link), the link is named, and the rollback goes on.\n        $stateCopyLink = Get-DefenseClawVendorMachineFolderLink `\n            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `\n            -Tolerant\n        if ($stateCopyLink -ne \'\') {\n            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{\n                subsystem = \'rollback\'\n                path      = $stateCopyLink\n                reason    = "a link sits on the Codex machine-policy folder; the restored Codex state was not written for the hook through it. As an administrator, remove only the link with: cmd /c rmdir `"$stateCopyLink`"; the next repair or ensure then finishes the work"\n            }\n        }\n        if ($stateCopyLink -eq \'\') {\n',
+            '        try {\n',
+        ),
+        (
+            '                reason = "the restored Codex managed runtime state could not be written for the hook: $($_.Exception.Message); the next Codex transaction writes it"\n            }\n',
+            '        }\n',
+            '        }\n',
+        ),
+        (
             '                -GatewayServiceName ([string]$snapshot.gateway_service)\n        }\n',
             "        # GAP-0900: nothing is stamped through a link on the Codex folder either.\n        $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `\n                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `\n                -Tolerant) -ne ''\n",
             '        Set-DefenseClawManagedAcls `\n',
@@ -8115,6 +8125,26 @@ def test_the_rollback_link_probes_are_tolerant_and_the_start_of_run_ones_are_not
     assert "Get-DefenseClawLinkCheckAttributes -Path $current" in walk
     # The three probes inside the rollback pass -Tolerant; no other caller does.
     restore = _psm1_function(module, "Restore-DefenseClawTransaction")
-    assert restore.count("-Tolerant") == 2
+    assert restore.count("-Tolerant") == 3
     assert _psm1_function(module, "Assert-DefenseClawEnterpriseDeployment").count("-Tolerant") == 1
-    assert module.count("-Tolerant") == 3  # the three rollback call sites
+    assert module.count("-Tolerant") == 4  # the four rollback call sites
+
+
+def test_the_restored_codex_state_is_not_written_for_the_hook_through_a_link() -> None:
+    """GAP-0900 (delta-r3 S-E): Restore writes the hook copy of the Codex state into the
+    Codex machine-policy folder (Sync-DefenseClawCodexManagedHooksStateCopy). With a link
+    on that path nothing is written through it: the link is named in a degraded event
+    with the rmdir fix and the rollback goes on."""
+    module = read(MODULE)
+    restore = _psm1_function(module, "Restore-DefenseClawTransaction")
+    sync = restore.index("Sync-DefenseClawCodexManagedHooksStateCopy `\n")
+    probe = restore.rindex("$stateCopyLink = Get-DefenseClawVendorMachineFolderLink", 0, sync)
+    guard = restore.index("if ($stateCopyLink -eq '') {", probe)
+    assert probe < guard < sync
+    event = restore[probe:guard]
+    assert "-Tolerant" in event
+    assert "Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded" in event
+    assert 'cmd /c rmdir `\"$stateCopyLink`\"' in event
+    assert restore.count("Sync-DefenseClawCodexManagedHooksStateCopy") == 1
+    smoke = read(ROOT / "packaging" / "windows" / "tests" / "enterprise-standalone-recovery-gateway-smoke.ps1")
+    assert "StateCopy = 'link'" in smoke and "state-copy-sync" in smoke
