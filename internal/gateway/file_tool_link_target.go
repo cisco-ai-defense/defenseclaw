@@ -72,7 +72,7 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 			}
 		}
 		if !filepath.IsAbs(physical) {
-			physical = spelling
+			physical = filepath.Clean(spelling)
 		}
 		if filepath.Clean(physical) == filepath.Clean(spelling) && !placed {
 			continue
@@ -106,8 +106,17 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 // keyed by it and is never walked locally, so a known protected target
 // blocks wherever the project lives (GAP-0831). The spelling is empty when
 // no working directory places it.
+//
+// A name with a dot-dot segment is spelled raw (actionfacts.StepUpSpelling):
+// the analysis cleaned it lexically into Resolved, but the operating system
+// walks the links before the segment, and the working directory of the call
+// is one of them, so the file it opens is the one the raw spelling reaches.
 func linkTargetSpelling(request trustedActionRequest, candidate actionfacts.PathFact) (spelling string, placed, reported bool) {
 	if filepath.IsAbs(candidate.Resolved) {
+		if raw, steps := actionfacts.StepUpSpelling(candidate.Value, request.Input.CWD); steps &&
+			candidate.Flavor != actionfacts.PathFlavorWindows && !strings.ContainsAny(candidate.Value, "$\x60\x00") {
+			return raw, false, false
+		}
 		return candidate.Resolved, false, false
 	}
 	// Without a working directory the analysis keeps a literal relative
@@ -129,6 +138,9 @@ func linkTargetSpelling(request trustedActionRequest, candidate actionfacts.Path
 			}
 			reported = true
 		}
+	}
+	if raw, steps := actionfacts.StepUpSpelling(candidate.Value, cwd); steps {
+		return raw, true, reported
 	}
 	return hookpaths.OperandPath(candidate.Value, cwd), true, reported
 }

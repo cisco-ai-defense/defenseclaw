@@ -26,6 +26,9 @@ func withLocalWriteAnswers(request trustedActionRequest, answers map[string]stri
 	}
 	for _, target := range actionfacts.NativeFileWriteTargets(request.Input) {
 		spelling := actionfacts.OperandPath(target, request.Input.CWD)
+		if raw, steps := actionfacts.StepUpSpelling(target, request.Input.CWD); steps {
+			spelling = raw
+		}
 		if !filepath.IsAbs(spelling) || len(spelling) > hookpaths.MaxWriteTargetPathBytes {
 			continue
 		}

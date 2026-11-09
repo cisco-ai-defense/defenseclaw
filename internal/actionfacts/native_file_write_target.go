@@ -189,18 +189,40 @@ func hasDotDotSegment(name string) bool {
 	return slices.Contains(strings.Split(name, "/"), "..")
 }
 
-// clientOperandKey is the key the hook client gives a POSIX file operand: the
-// dot-dot spelling stays raw until the client has followed links, every other
-// spelling is cleaned (OperandPath, with slashes whatever system reads it).
+// clientOperandKey is the key the hook client gives a POSIX file operand: a
+// name that steps up a directory stays raw until the client has followed the
+// links before the step (StepUpSpelling), every other spelling is cleaned
+// (OperandPath, with slashes whatever system reads it).
 func clientOperandKey(name, dir string) string {
-	if !strings.Contains(name, "/../") && !strings.HasSuffix(name, "/..") {
-		if !strings.HasPrefix(name, "/") {
-			return path.Join(dir, name)
-		}
-		return path.Clean(name)
+	if raw, steps := StepUpSpelling(name, dir); steps {
+		return raw
+	}
+	if !strings.HasPrefix(name, "/") {
+		return path.Join(dir, name)
+	}
+	return path.Clean(name)
+}
+
+// StepUpSpelling returns, for a POSIX file name with a dot-dot segment at any
+// place (a leading one included), the raw absolute spelling the operating
+// system opens: the working directory of the call joined to the name, with no
+// clean. The links before a dot-dot segment decide the directory it leaves,
+// and the working directory of a call is one of those links, so the lexical
+// clean of the name is not the file a write reaches. Every place that places
+// a write target of a file tool or an apply_patch header (the hook client that
+// resolves it, the key the gateway reads that answer by, and the gateway walk
+// of a per-user home) spells the name through this one function. A name
+// without a dot-dot segment, or a relative one without an absolute working
+// directory, has none.
+func StepUpSpelling(name, dir string) (string, bool) {
+	if name == "" || !hasDotDotSegment(name) {
+		return "", false
 	}
 	if strings.HasPrefix(name, "/") {
-		return name
+		return name, true
 	}
-	return dir + "/" + name
+	if !strings.HasPrefix(dir, "/") {
+		return "", false
+	}
+	return dir + "/" + name, true
 }

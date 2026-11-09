@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/lazyregexp"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 	"mvdan.cc/sh/v3/syntax"
@@ -751,7 +752,7 @@ func patchTargetPaths(path, cwd, home string, resolve patchResolution) ([]string
 		return nil, false
 	}
 	var paths []string
-	literal := path
+	literal, name := path, path
 	if rest, homeForm := trimHomePrefix(path); homeForm {
 		if !filepath.IsAbs(home) {
 			return nil, false
@@ -772,6 +773,19 @@ func patchTargetPaths(path, cwd, home string, resolve patchResolution) ([]string
 		}
 	}
 	paths = append(paths, filepath.Clean(literal))
+	if resolve == patchResolvedOrClosed && runtime.GOOS != "windows" {
+		// The hook client describes the name of a header that steps up a
+		// directory by its raw spelling too: the links before the step, the
+		// working directory among them, decide the file the patch writes,
+		// and the gateway reads the answer by the same spelling
+		// (actionfacts.StepUpSpelling). A name the client cannot walk keeps
+		// only the clean one.
+		if raw, steps := actionfacts.StepUpSpelling(name, cwd); steps {
+			if _, known := ResolvePatchWriteTarget(raw); known {
+				paths = append(paths, raw)
+			}
+		}
+	}
 	if resolve != patchPlaced {
 		for _, candidate := range paths {
 			if _, known := ResolvePatchWriteTarget(candidate); known {
