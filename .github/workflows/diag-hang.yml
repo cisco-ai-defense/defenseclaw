@@ -20,13 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {set: m, sub: ClaudeCodeLauncherGuardA, run: '^TestClaudeCodeLauncherGuardArgvStartsOnlyTheClaudeHookOfADefenseClawLauncher$'}
-          - {set: m, sub: CursorHook_StrictMissing, run: '^TestCursorHook_StrictMissingTokenBlocks$'}
-          - {set: m, sub: HookAPITokenWindowsRejec, run: '^TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor$'}
-          - {set: m, sub: ManagedFileBackup_SkipsW, run: '^TestManagedFileBackup_SkipsWhenUserEditedAfterSetup$'}
-          - {set: m, sub: ShellHookBehaviourMatche, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: r, sub: s22a, run: '^(?:TestAIDToolCallShapesDeclareRealContracts|TestAmpToolResultAfterTheGatewayStopsCarriesTheOutageWarning|TestClaudeCodeCapabilitiesExposeResolvedInventoryAndTelemetry|TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv|TestClaudeHookResponseOptimizationKeepsMalformedRepliesClosed|TestCodexCorrelationProfileSupportsExactReviewedHookContracts|TestCodexRequirementsAdminConflictIsTypedAndReadOnly|TestCodex_Route_PassthroughNonChat|TestConnectorScopedTurnMappingsDoNotCrossKinds|TestCorrelationProfileVersionGateFailsClosed|TestCursorHook_MissingTokenFailsClosedEvenWhenOpenRequested|TestEnsurePluginCacheDir_CreatesAndTightens|TestHardeningReadStdinCappedRefusesNULAndOverflowExactly|TestHermesExecutionProbeBoundsInheritedStdout|TestHermesRegistrationRequiresExecutableProbe|TestHermesWriteViewRetarget|TestHookAPIACLVerdictReusedUntilIdentityChanges|TestHookContractLockLifecycleRewritesOnlyRegeneratedFields|TestHookScriptOwner_BuiltinSurface|TestKiroWindowsManagedHookContract|TestManagedDisabledHookTombstoneUsesManagedRuntimeDescriptor|TestMembershipIDsCannotBeDeclaredAsMirrorProof|TestNativeTelemetryBindingModesAreExplicit|TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding|TestPerUserAntigravityHookDeniesWhileTheGatewayIsDown|TestPerUserStrictOutageBlockNamesTheStoppedGatewayAndTheStartStep|TestPluginStartupGuardRetriesWithoutRestart|TestReconcileWindowsCodexRequirementsReplacesTheOneZeroHookSet|TestRemoveUnshippedConnectorFiles|TestResolveWindowsCodexManagedRuntimeRegistryCleanAbsenceIsNoop|TestSafeOpenPluginSO_HappyPath|TestShellHookHostileReview2|TestUnixHookFailModeLinesMatchTheSharedGolden|TestValidatePluginRootChain_WorldWritable|TestWindowsCodexAdoptRequirementsKeepsAdministratorManagedDir|TestWindowsCodexMachinePrerequisitesDecoupleClaudeEffectivePolicy|TestWindowsCodexUninstallTakesTheEarlierSessionStartShape|TestWriteManagedTargetRuntimeFileReplacesHardLinkedMatch)$'}
-          - {set: r, sub: s22b, run: '^(?:TestAIDToolCallShapesDeclareRealContracts|TestAmpToolResultAfterTheGatewayStopsCarriesTheOutageWarning|TestClaudeCodeCapabilitiesExposeResolvedInventoryAndTelemetry|TestClaudeCode_TeardownCleansDefenseClawOtelFromContaminatedPristineEnv|TestClaudeHookResponseOptimizationKeepsMalformedRepliesClosed|TestCodexCorrelationProfileSupportsExactReviewedHookContracts|TestCodexRequirementsAdminConflictIsTypedAndReadOnly|TestCodex_Route_PassthroughNonChat|TestConnectorScopedTurnMappingsDoNotCrossKinds|TestCorrelationProfileVersionGateFailsClosed|TestCursorHook_MissingTokenFailsClosedEvenWhenOpenRequested|TestEnsurePluginCacheDir_CreatesAndTightens|TestHardeningReadStdinCappedRefusesNULAndOverflowExactly|TestHermesExecutionProbeBoundsInheritedStdout|TestHermesRegistrationRequiresExecutableProbe|TestHermesWriteViewRetarget|TestHookAPIACLVerdictReusedUntilIdentityChanges|TestHookContractLockLifecycleRewritesOnlyRegeneratedFields|TestHookScriptOwner_BuiltinSurface|TestKiroWindowsManagedHookContract|TestManagedDisabledHookTombstoneUsesManagedRuntimeDescriptor|TestMembershipIDsCannotBeDeclaredAsMirrorProof|TestNativeTelemetryBindingModesAreExplicit|TestOpenClaw_Setup_HILTEnablesPluginApprovalForwarding|TestPerUserAntigravityHookDeniesWhileTheGatewayIsDown|TestPerUserStrictOutageBlockNamesTheStoppedGatewayAndTheStartStep|TestPluginStartupGuardRetriesWithoutRestart|TestReconcileWindowsCodexRequirementsReplacesTheOneZeroHookSet|TestRemoveUnshippedConnectorFiles|TestResolveWindowsCodexManagedRuntimeRegistryCleanAbsenceIsNoop|TestSafeOpenPluginSO_HappyPath|TestShellHookHostileReview2|TestUnixHookFailModeLinesMatchTheSharedGolden|TestValidatePluginRootChain_WorldWritable|TestWindowsCodexAdoptRequirementsKeepsAdministratorManagedDir|TestWindowsCodexMachinePrerequisitesDecoupleClaudeEffectivePolicy|TestWindowsCodexUninstallTakesTheEarlierSessionStartShape|TestWriteManagedTargetRuntimeFileReplacesHardLinkedMatch)$'}
+          - {set: m, sub: setsid, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: strace, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: workers1, run: '^TestShellHookBehaviourMatchesGolden$'}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -44,14 +40,29 @@ jobs:
       - run: make plugin
       - run: make dev-pycli
       - run: make sync-openclaw-extension
+      - name: Runner processes
+        run: ps -eo pid,ppid,pgid,sid,comm | head -30; echo "step shell: pid $$ pgid $(ps -o pgid= -p $$) sid $(ps -o sid= -p $$)"
       - name: Run the slice
         timeout-minutes: 11
         env:
-          SET: ${{ matrix.set }}
+          SUB: ${{ matrix.sub }}
           RUN: ${{ matrix.run }}
         run: |
           set -uo pipefail
-          echo "$RUN" | tr '|' '\n'
-          race=()
-          [ "$SET" = r ] && race=(-race -gcflags=modernc.org/...=-d=checkptr=0)
-          timeout -k 15 540 go test -v "${race[@]}" -count=1 -timeout 8m ./internal/gateway/connector -run "$RUN"
+          go test -c -o "$RUNNER_TEMP/connector.test" ./internal/gateway/connector
+          cd internal/gateway/connector
+          trace="$RUNNER_TEMP/signals.trace"
+          case "$SUB" in
+            setsid) timeout -k 15 480 setsid --wait "$RUNNER_TEMP/connector.test" -test.v -test.count=1 -test.timeout 7m -test.run "$RUN"; rc=$? ;;
+            strace)
+              sudo apt-get install -y -qq strace >/dev/null 2>&1 || true
+              timeout -k 15 480 setsid --wait strace -f -qq -e trace=kill,tkill,tgkill,pidfd_send_signal,setsid,setpgid -o "$trace" \
+                "$RUNNER_TEMP/connector.test" -test.v -test.count=1 -test.timeout 7m -test.run "$RUN"; rc=$?
+              echo "=== signal syscalls ($(wc -l < "$trace") lines), excluding signal 0 and successful self-tgkill:"
+              grep -vE 'kill\([0-9]+, 0\)|, 0\) += 0|SIGURG' "$trace" | head -200
+              echo "=== kill() to pid <= 0 or -1:"
+              grep -E '(kill|pidfd_send_signal)\((-[0-9]+|0),' "$trace" | head -50 ;;
+            workers1) DC_HOOK_GOLDEN_WORKERS=1 timeout -k 15 540 "$RUNNER_TEMP/connector.test" -test.v -test.count=1 -test.timeout 8m -test.run "$RUN"; rc=$? ;;
+          esac
+          echo "exit $rc"
+          exit "$rc"
