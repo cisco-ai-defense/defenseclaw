@@ -287,7 +287,11 @@ func TestFailedMCPAdmissionOfALocalScopeIsNotReleasedByACleanSiblingFolder(t *te
 
 	clean = true
 	f.listScopes(`{}`, both)
-	wantHeldOrdinary(t, "sibling folder, clean admission", f.call(sibling, "s1", "wiki-ok"))
+	// The session holds one connection per name: the hold is found from the
+	// sibling folder, and the clean admission of the sibling entry (another
+	// scope) does not release it.
+	wantHeldFailed(t, "sibling folder, clean admission", "block", f.call(sibling, "s1", "wiki-ok"))
+	wantHeldOrdinary(t, "sibling folder, another session", f.call(sibling, "s2", "wiki-ok"))
 	f.listScopes(`{}`, nil)
 	wantHeldFailed(t, "local scope removed", "block", f.call(f.cwd, "s1", "wiki-ok"))
 

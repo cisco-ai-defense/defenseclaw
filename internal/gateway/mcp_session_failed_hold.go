@@ -27,13 +27,21 @@ import (
 // its hooks report (noteHookReportedMCPServer); every other deployment holds
 // them here, in the same session store.
 //
-// A hold belongs to the config scope that lists the server, not to the working
-// directory of the call that met it: a user-scope server is one connection
-// whatever directory the agent works in later, and a local or project scope is
-// the folder its entry names (heldScope). The definition kept is the complete
-// one, by a digest of it, so an edit of a header or of the environment is a
-// different definition and the failure of the old one is not released by the
-// clean admission of the new one.
+// A hold belongs to the agent session and the server name, not to the working
+// directory of the call that met it: the agent holds one connection per name
+// for as long as it lives, whatever directory a later hook reports or leaves
+// out, so the hook of the session finds it from anywhere. The definition kept
+// is the complete one, by a digest of it, with the config scope that listed it
+// (heldScope): an edit of a header or of the environment is a different
+// definition, and the failure of the old one is released only by a clean
+// admission of the same definition in the same scope.
+//
+// A session that met more failed definitions of a name than it can keep is
+// marked (overflow). The marker lasts as long as the session: no clean
+// admission of a remembered definition releases it, and a call to a name the
+// config no longer lists is a failed admission, which the strict tier blocks
+// and the default tier warns on, because the definitions it forgot may still
+// be the connection the agent holds.
 
 // failedMCPSessionHold records, when the listed definition of the server of
 // probe has a failed admission, that the session met it, and answers a call
@@ -53,37 +61,41 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 	now := time.Now()
 	if status.Failed {
 		if listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName); isListed {
-			a.holdFailedMCP(connector, home, probe, heldScope(listed), heldMCPDefinition(listed, connector, home), now)
+			a.holdFailedMCP(connector, home, probe, heldMCPDefinition(listed, connector, home), now)
 		}
 		return status
 	}
 	// The ordinary call, with nothing held, reads no config: the agent state
 	// file can be large and this runs at every MCP call.
-	held, _ := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), now)
-	if len(held) == 0 {
+	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), now)
+	if len(held) == 0 && !overflow {
 		return status
 	}
 	listed, isListed := a.lookupCallerMCPServer(ctx, cfg, connector, probe.WorkspaceDir, probe.ServerName)
 	var listedHeld config.MCPServerEntry
-	var listedScope string
 	if isListed {
-		listedHeld, listedScope = heldMCPDefinition(listed, connector, home), heldScope(listed)
+		listedHeld = heldMCPDefinition(listed, connector, home)
 	}
 	var gone *config.MCPServerEntry
 	for i := len(held) - 1; i >= 0; i-- {
-		if isListed && held[i].scope == listedScope && sameHeldDefinition(held[i].def, listedHeld) {
+		if isListed && sameHeldDefinition(held[i], listedHeld) {
 			if !status.Pending && !status.Unavailable {
 				// This very definition is listed in the scope that held it and its
 				// admission no longer fails: the allow or the clean scan that
 				// answered it ends its hold. A clean admission of the same bytes
 				// in another scope is another connection.
-				a.hookMCP.releaseFailed(connector, home, probe.SessionID, held[i].scope, probe.ServerName, held[i].def)
+				a.hookMCP.releaseFailed(connector, home, probe.SessionID, probe.ServerName, held[i])
 			}
 			continue
 		}
 		if gone == nil {
-			gone = &held[i].def
+			gone = &held[i]
 		}
+	}
+	if gone == nil && overflow && !isListed {
+		// The definitions the session forgot are no longer listed and none was
+		// scanned clean in this session: the call is a failed admission.
+		gone = &config.MCPServerEntry{Name: probe.ServerName}
 	}
 	if gone == nil {
 		return status
@@ -93,20 +105,21 @@ func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config
 
 // heldMCPDefinition is the part of a listed definition the hold keeps: how the
 // server is reached or started, and a digest of the complete definition, never
-// its environment or headers.
+// its environment or headers, and the config scope that lists it.
 func heldMCPDefinition(entry config.MCPServerEntry, connector, home string) config.MCPServerEntry {
 	return config.MCPServerEntry{
 		Name: strings.TrimSpace(entry.Name), URL: strings.TrimSpace(entry.URL), Transport: entry.Transport,
 		Command: strings.TrimSpace(entry.Command), Args: slices.Clone(entry.Args), ArgsCut: entry.ArgsCut,
 		LocalRefusal: entry.LocalRefusal, Connector: connector, Home: home,
-		Fingerprint: watcher.MCPDefinitionHash(entry),
+		Project: heldScope(entry), Fingerprint: watcher.MCPDefinitionHash(entry),
 	}
 }
 
 // sameHeldDefinition reports whether two kept entries are one definition: the
-// same server and the same digest of everything else it was started with.
+// same server, listed in the same scope, and the same digest of everything
+// else it was started with.
 func sameHeldDefinition(a, b config.MCPServerEntry) bool {
-	return sameMCPDefinition(a, b) && a.Fingerprint == b.Fingerprint
+	return sameMCPDefinition(a, b) && a.Project == b.Project && a.Fingerprint == b.Fingerprint
 }
 
 // heldScope is the config scope that lists entry: the project folder of a
@@ -140,17 +153,12 @@ func heldScopes(cwd string) []string {
 	return append(scopes, chain...)
 }
 
-// heldFailure is a failed definition a session holds, with the scope it is
-// held under.
-type heldFailure struct {
-	scope string
-	def   config.MCPServerEntry
-}
-
 // heldFailures returns, within the memory time limit, the failed definitions
-// the session holds for name under any of scopes, the latest last, and
-// whether it met more than it could keep.
-func (h *hookReportedMCPServers) heldFailures(connector, home, session, name string, scopes []string, now time.Time) (held []heldFailure, overflow bool) {
+// the session holds for name, the latest last, and whether it met more than it
+// could keep. The holds of the per-user gateway are under the session and the
+// name alone (the empty scope); scopes adds the working directories a managed
+// hook reported a refusal under.
+func (h *hookReportedMCPServers) heldFailures(connector, home, session, name string, scopes []string, now time.Time) (held []config.MCPServerEntry, overflow bool) {
 	if h == nil || session == "" {
 		return nil, false
 	}
@@ -165,9 +173,7 @@ func (h *hookReportedMCPServers) heldFailures(connector, home, session, name str
 			} else {
 				set.seen = now
 				overflow = overflow || set.overflow
-				for _, def := range set.defs {
-					held = append(held, heldFailure{scope: scope, def: def})
-				}
+				held = append(held, set.defs...)
 			}
 		}
 		if hold, ok := holds[key]; ok {
@@ -175,26 +181,27 @@ func (h *hookReportedMCPServers) heldFailures(connector, home, session, name str
 				delete(holds, key)
 			} else {
 				hold.until = now.Add(mcpResolvedTTL)
-				held = append(held, heldFailure{scope: scope, def: hold.entry})
+				overflow = overflow || hold.more
+				held = append(held, hold.entry)
 			}
 		}
 	}
 	return held, overflow
 }
 
-// holdFailedMCP keeps entry for the session under scope; a session the full
-// store cannot track is kept in the overflow store, by its own session, scope
-// and name.
-func (a *APIServer) holdFailedMCP(connector, home string, probe mcpRuntimeProbe, scope string, entry config.MCPServerEntry, now time.Time) {
-	if !a.hookMCP.retainRefused(connector, home, probe.SessionID, scope, probe.ServerName, entry, now) {
-		a.hookMCP.holdOverflow(connector, home, probe.SessionID, scope, probe.ServerName, entry, now)
+// holdFailedMCP keeps entry for the session; a session the full store cannot
+// track is kept in the overflow store, by its own session and name.
+func (a *APIServer) holdFailedMCP(connector, home string, probe mcpRuntimeProbe, entry config.MCPServerEntry, now time.Time) {
+	if !a.hookMCP.retainRefused(connector, home, probe.SessionID, "", probe.ServerName, entry, now) {
+		a.hookMCP.holdOverflow(connector, home, probe.SessionID, "", probe.ServerName, entry, now)
 	}
 }
 
-// releaseFailed drops entry from what the session holds under scope: its
-// admission no longer fails, so the connection to it is no longer a failed one.
-func (h *hookReportedMCPServers) releaseFailed(connector, home, session, scope, name string, entry config.MCPServerEntry) {
-	key := mcpResolvedKey(connector, home, session, scope, name)
+// releaseFailed drops entry from what the session holds: its admission no
+// longer fails, so the connection to it is no longer a failed one. A session
+// marked overflow keeps its marker.
+func (h *hookReportedMCPServers) releaseFailed(connector, home, session, name string, entry config.MCPServerEntry) {
+	key := mcpResolvedKey(connector, home, session, "", name)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if set, ok := h.refused[key]; ok {
@@ -204,7 +211,7 @@ func (h *hookReportedMCPServers) releaseFailed(connector, home, session, scope, 
 		}
 	}
 	holds := h.overflow[unrecordedKey(connector, home)]
-	if hold, ok := holds[key]; ok && sameHeldDefinition(hold.entry, entry) {
+	if hold, ok := holds[key]; ok && !hold.more && sameHeldDefinition(hold.entry, entry) {
 		delete(holds, key)
 	}
 }
