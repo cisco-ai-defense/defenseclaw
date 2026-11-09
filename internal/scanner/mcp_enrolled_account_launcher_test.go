@@ -69,3 +69,37 @@ func TestLocalServerWithoutAccountHomeIsNotRefusedByTheEnrolledAccountCheck(t *t
 		t.Fatalf("a per-user gateway's server was refused by the enrolled-account check: %v", err)
 	}
 }
+
+// The entry a managed gateway lists from a hook claim holds at most the first
+// arguments; the verdict the hook took from the complete definition decides,
+// so the refusal does not depend on arguments the claim does not carry.
+func TestEnrolledAccountLocalServerIsRefusedByTheStatedVerdictOfTheCompleteDefinition(t *testing.T) {
+	for _, tc := range []struct {
+		name, stated string
+		args         []string
+		refused      bool
+	}{
+		{"flag past the claim", "arguments", []string{"-y", "pkg"}, true},
+		{"launcher", "launcher", nil, true},
+		{"nothing refused", "none", []string{"-y", "pkg"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := "npx"
+			if tc.stated == "launcher" {
+				command = "python3"
+			}
+			scan := &MCPScanner{
+				Config: config.MCPScannerConfig{Binary: "/nonexistent/defenseclaw-scanner"},
+				ServerEntry: &config.MCPServerEntry{Name: "longargs", Command: command, Args: tc.args,
+					Connector: "claudecode", Home: "/home/eng1", LocalRefusal: tc.stated},
+			}
+			_, err := scan.Scan(context.Background(), "longargs")
+			if err == nil {
+				t.Fatal("scan with a missing scanner binary succeeded")
+			}
+			if got := MCPScanRefused(err) && MCPLauncherRefusal(err.Error()); got != tc.refused {
+				t.Fatalf("stated %q: refused=%v (%v), want %v", tc.stated, got, err, tc.refused)
+			}
+		})
+	}
+}

@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 )
 
 type claimedAssetFactsContextKey struct{}
@@ -524,6 +525,23 @@ func skillManifestUnreadable(dir string) bool {
 	return false
 }
 
+// claimedMCPEntry is the definition a hook claim states. The claim holds at
+// most the first arguments of a longer list, so the scanner verdict the hook
+// took from the complete definition travels with the entry; a claim that
+// states none and may be cut is not judged by the arguments it holds, which
+// would refuse a server the scanner starts or miss one it refuses (GAP-0925).
+func claimedMCPEntry(server *assetfacts.MCPServer) config.MCPServerEntry {
+	entry := config.MCPServerEntry{
+		Name: server.Name, URL: server.URL, Command: server.Command,
+		Args: append([]string(nil), server.Args...), Transport: server.Transport,
+		LocalRefusal: server.LocalRefusal,
+	}
+	if server.ArgsMayBeCut() {
+		entry.LocalRefusal = mcplocal.None
+	}
+	return entry
+}
+
 // lookupCallerMCPServer finds the MCP server name the caller's agent has
 // configured. A per-user gateway reads its own home. A service-account
 // gateway reads the caller's home and, where it may not (Linux and macOS),
@@ -534,10 +552,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 	// (GAP-0954).
 	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Source == assetfacts.SourceCommandLine &&
 		config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+		return claimedMCPEntry(server), true
 	}
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if !serviceAccount {
@@ -556,10 +571,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 			}
 		}
 		if server.Relocated {
-			return config.MCPServerEntry{
-				Name: server.Name, URL: server.URL, Command: server.Command,
-				Args: append([]string(nil), server.Args...), Transport: server.Transport,
-			}, true
+			return claimedMCPEntry(server), true
 		}
 	}
 	if home != "" {
@@ -570,10 +582,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 		}
 	}
 	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+		return claimedMCPEntry(server), true
 	}
 	return config.MCPServerEntry{}, false
 }
