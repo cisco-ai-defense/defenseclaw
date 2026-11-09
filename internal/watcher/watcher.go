@@ -284,8 +284,11 @@ type InstallWatcher struct {
 	// and a later one did not: an agent that dropped the entry can keep the
 	// live connection. An admission the policy gave them stays revocable
 	// through it (GAP-0920). Bounded; a listing that has the key again drops
-	// it. Guarded by mcpAdmissionMu.
+	// it. Only servers admitted before any scan are held. Guarded by
+	// mcpAdmissionMu.
 	mcpAdmissionDeparted map[string]mcpKnownDefinition
+	// mcpAdmissionDepartedLost is set once a departed server did not fit.
+	mcpAdmissionDepartedLost bool
 	// A slower older list read must not replace a newer completed listing.
 	mcpAdmissionReadSeq  atomic.Uint64
 	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
@@ -611,8 +614,12 @@ func (w *InstallWatcher) rootCoveragePath(path string) string {
 func (w *InstallWatcher) SetMCPServerSource(source func() ([]config.MCPServerEntry, error)) {
 	w.mcpServers = source
 	w.admitNewMCP = source != nil
+	w.mcpAdmissionMu.RLock()
+	prev := w.mcpAdmissionKnown
+	w.mcpAdmissionMu.RUnlock()
+	settled := w.settledDepartingMCP(prev, nil)
 	w.mcpAdmissionMu.Lock()
-	w.rememberDepartedMCP(w.mcpAdmissionKnown, nil)
+	w.rememberDepartedMCP(w.mcpAdmissionKnown, nil, settled)
 	w.mcpAdmissionKnown = nil
 	w.mcpAdmissionListed = false
 	w.mcpAdmissionKnownSeq = w.mcpAdmissionReadSeq.Add(1)
@@ -938,9 +945,13 @@ func (w *InstallWatcher) readMCPServers() ([]config.MCPServerEntry, error) {
 				issue: mcpScanIssue(server),
 			})
 		}
+		w.mcpAdmissionMu.RLock()
+		prev := w.mcpAdmissionKnown
+		w.mcpAdmissionMu.RUnlock()
+		settled := w.settledDepartingMCP(prev, known)
 		w.mcpAdmissionMu.Lock()
 		if readSeq > w.mcpAdmissionKnownSeq {
-			w.rememberDepartedMCP(w.mcpAdmissionKnown, known)
+			w.rememberDepartedMCP(w.mcpAdmissionKnown, known, settled)
 			w.mcpAdmissionKnown = known
 			w.mcpAdmissionListed = true
 			w.mcpAdmissionKnownSeq = readSeq
