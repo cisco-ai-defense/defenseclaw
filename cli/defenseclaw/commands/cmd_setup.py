@@ -8676,44 +8676,80 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
 
 
 _OPENCLAW_WITNESS_KEY = "defenseclaw._openclaw_file_witness"
-_UNREADABLE = object()
+
+
+def _openclaw_digest(body: bytes | None) -> str:
+    return "missing" if body is None else hashlib.sha256(body).hexdigest()
+
+
+def _openclaw_gateway_write_report(data_dir: str) -> tuple[str | None, str | None] | None:
+    """The running gateway generation and the digest it reports for its own last write of openclaw.json.
+
+    The registration runs inside the gateway process, which keeps the digest of
+    the bytes it passed to its own write in memory only (GAP-0973). None when
+    the gateway cannot be asked; ``(None, None)`` when it does not answer.
+    """
+    if not data_dir:
+        return None
+    cfg = _gateway_api_config(data_dir)
+    if cfg is None:
+        return None
+    health = _read_defense_gateway_health_once(cfg, timeout=1.0)
+    if health is None:
+        return None, None
+    started_at = health.get("started_at")
+    write = health.get("openclaw_config_write")
+    digest = write.get("sha256") if isinstance(write, dict) else None
+    return (
+        started_at if isinstance(started_at, str) else None,
+        digest if isinstance(digest, str) and len(digest) == 64 else None,
+    )
 
 
 class _OpenClawFileWitness:
-    """The bytes of openclaw.json this setup run wrote, held in memory only.
+    """What this setup run knows of openclaw.json, held in memory only.
 
     The registration that writes the file runs inside the gateway service, so
-    the run cannot learn its bytes from the writer. It reads the file around each
-    of its own gateway restarts: when the file holds what the run last saw, the
-    restart's output is this run's and ``written`` becomes those bytes. When the
-    file held anything else at the start of a restart (OpenClaw or you saved it,
-    or another process registered over it), the run lost track of it for good.
-    Nothing on disk can say who wrote a file, so no token or receipt takes part.
+    the run never holds the bytes. It learns the digest of the slice the
+    gateway passed to its own write from that gateway after each of its own
+    restarts, and never from the file: a save that lands during the restart is
+    not the run output. The run also notes whether the file still held what it
+    knew when a restart began; a save made before the registration is merged
+    into its output and must not be rolled back. Nothing on disk can say who
+    wrote a file, so no token or receipt takes part.
     """
 
-    def __init__(self, path: str, body: bytes | None) -> None:
+    def __init__(self, path: str, body: bytes | None, data_dir: str = "") -> None:
         self.path = path
-        self.written: bytes | None | object = body
+        self.data_dir = data_dir
+        self.known = _openclaw_digest(body)
+        self.written: str | None = None
         self.lost = False
+        self._started_before: str | None = None
 
-    def _current(self) -> bytes | None | object:
+    def _current(self) -> str | None:
         try:
-            return _read_openclaw_config_bytes(self.path)
+            return _openclaw_digest(_read_openclaw_config_bytes(self.path))
         except OSError:
-            return _UNREADABLE
+            return None
 
     def before_restart(self) -> None:
-        if not self.lost and self._current() != self.written:
+        if not self.lost and self._current() != self.known:
             self.lost = True
+        report = _openclaw_gateway_write_report(self.data_dir)
+        self._started_before = report[0] if report else None
 
     def after_restart(self) -> None:
-        if not self.lost:
-            self.written = self._current()
-            self.lost = self.written is _UNREADABLE
+        report = _openclaw_gateway_write_report(self.data_dir)
+        if report is None or report[1] is None:
+            return
+        if report[0] is not None and report[0] == self._started_before:
+            return  # The same process as before the restart: not this run restart.
+        self.written = self.known = report[1]
 
     def owns(self, body: bytes) -> bool:
-        """True while the file holds exactly the bytes this run wrote."""
-        return not self.lost and isinstance(self.written, bytes) and body == self.written
+        """True while the file holds exactly the bytes the gateway reported writing in this run."""
+        return not self.lost and self.written is not None and _openclaw_digest(body) == self.written
 
 
 @dataclass(frozen=True)
@@ -8774,7 +8810,7 @@ def _capture_openclaw_config_record(
         path=path,
         body=body,
         mode=mode,
-        witness=_OpenClawFileWitness(path, body),
+        witness=_OpenClawFileWitness(path, body, os.fspath(data_dir) if data_dir else ""),
         data_dir=os.fspath(data_dir) if data_dir else "",
     )
 
