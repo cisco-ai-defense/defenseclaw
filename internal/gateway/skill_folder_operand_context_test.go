@@ -38,14 +38,25 @@ func newOperandContextFixture(t *testing.T, denied string) operandContextFixture
 	if err := os.WriteFile(filepath.Join(f.held, "SKILL.md"), []byte("---\nname: held\n---\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.proj, "notes.txt"), []byte("ordinary"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"notes.txt", "needle notes.txt"} {
+		if err := os.WriteFile(filepath.Join(f.proj, name), []byte("ordinary"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: denied}}
 	f.api = &APIServer{store: store, logger: logger, scannerCfg: cfg}
 	f.ctx = withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
 	return f
+}
+
+// inStrictTier selects the strict policy tier for the connector.
+func (f operandContextFixture) inStrictTier(t *testing.T) {
+	t.Helper()
+	cfg := f.api.scannerCfg
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
 }
 
 func (f operandContextFixture) blocks(tool, cwd string, input map[string]interface{}) bool {
@@ -55,9 +66,9 @@ func (f operandContextFixture) blocks(tool, cwd string, input map[string]interfa
 	return matched && d.Action == "block"
 }
 
-// A command name or a search pattern that equals the name of a link in the
-// working folder is not a read of that link; the same word as a path operand
-// is.
+// A command name, a word of a program that does not read files and a text
+// field that equal the name of a link in the working folder are not a read of
+// that link; the same word as an operand of a program that reads files is.
 func TestOrdinaryWordEqualToALinkNameIsNotBlocked(t *testing.T) {
 	f := newOperandContextFixture(t, "held")
 	for _, name := range []string{"echo", "needle"} {
@@ -69,9 +80,14 @@ func TestOrdinaryWordEqualToALinkNameIsNotBlocked(t *testing.T) {
 		tool  string
 		input map[string]interface{}
 	}{
-		"echo":         {"Bash", map[string]interface{}{"command": "echo hello"}},
-		"grep pattern": {"Bash", map[string]interface{}{"command": "grep needle notes.txt"}},
-		"Grep pattern": {"Grep", map[string]interface{}{"path": "notes.txt", "pattern": "needle"}},
+		"echo":              {"Bash", map[string]interface{}{"command": "echo hello"}},
+		"echo then runner":  {"Bash", map[string]interface{}{"command": "echo needle && sh -c true"}},
+		"sudo option value": {"Bash", map[string]interface{}{"command": "sudo -u root echo hello"}},
+		"git word":          {"Bash", map[string]interface{}{"command": "git log needle"}},
+		"Grep pattern":      {"Grep", map[string]interface{}{"path": "notes.txt", "pattern": "needle"}},
+		"typed Read":        {"Read", map[string]interface{}{"file_path": "needle notes.txt"}},
+		"typed Grep path":   {"Grep", map[string]interface{}{"path": "needle notes.txt", "pattern": "ordinary"}},
+		"Glob exact name":   {"Glob", map[string]interface{}{"pattern": "needle notes.txt"}},
 	} {
 		if f.blocks(c.tool, f.proj, c.input) {
 			t.Errorf("%s: ordinary call blocked because the working folder has a link with that word as its name", name)
@@ -81,10 +97,14 @@ func TestOrdinaryWordEqualToALinkNameIsNotBlocked(t *testing.T) {
 		tool  string
 		input map[string]interface{}
 	}{
-		"Read":        {"Read", map[string]interface{}{"file_path": "echo"}},
-		"cat operand": {"Bash", map[string]interface{}{"command": "cat needle"}},
-		"slash":       {"Bash", map[string]interface{}{"command": "cat echo/SKILL.md"}},
-		"Grep path":   {"Grep", map[string]interface{}{"path": "needle", "pattern": "x"}},
+		"Read":          {"Read", map[string]interface{}{"file_path": "echo"}},
+		"cat operand":   {"Bash", map[string]interface{}{"command": "cat needle"}},
+		"slash":         {"Bash", map[string]interface{}{"command": "cat echo/SKILL.md"}},
+		"Grep path":     {"Grep", map[string]interface{}{"path": "needle", "pattern": "x"}},
+		"grep operand":  {"Bash", map[string]interface{}{"command": "grep needle notes.txt"}},
+		"through xargs": {"Bash", map[string]interface{}{"command": "echo needle | xargs cat"}},
+		"behind sudo":   {"Bash", map[string]interface{}{"command": "sudo -u root cat needle"}},
+		"shell script":  {"Bash", map[string]interface{}{"command": "sh -c 'cat needle'"}},
 	} {
 		if !f.blocks(c.tool, f.proj, c.input) {
 			t.Errorf("%s: read of a denied skill folder through a link allowed", name)
@@ -146,5 +166,55 @@ func TestReadOfADeniedFolderWithWhitespaceInItsNameIsBlocked(t *testing.T) {
 	}
 	if f.blocks("Read", f.proj, map[string]interface{}{"file_path": filepath.Join(f.proj, "my notes", "a b.txt")}) {
 		t.Error("ordinary path with spaces blocked")
+	}
+}
+
+// A program that reads files reads the file an option names: a link to a
+// denied skill given as the file of grep -f, rg -f, sed -f or awk -f is the
+// skill, as it is for cat.
+func TestFileTakingOptionOfASearchReadsTheLinkedSkill(t *testing.T) {
+	f := newOperandContextFixture(t, "held")
+	if err := os.Symlink(filepath.Join(f.held, "SKILL.md"), filepath.Join(f.proj, "rules")); err != nil {
+		t.Skipf("link unavailable: %v", err)
+	}
+	for _, command := range []string{
+		"cat rules", "grep -f rules notes.txt", "grep --file rules notes.txt", "grep --file=rules notes.txt",
+		"grep --exclude-from rules notes.txt", "rg -f rules notes.txt", "rg --ignore-file rules notes.txt",
+		"sed -f rules notes.txt", "awk -f rules notes.txt", "sudo -u root sed -f rules notes.txt",
+	} {
+		if !f.blocks("Bash", f.proj, map[string]interface{}{"command": command}) {
+			t.Errorf("%q: read of a denied skill through a link allowed", command)
+		}
+	}
+	for _, command := range []string{"echo rules", "printf rules", "git log rules", "grep -f notes.txt notes.txt", "sudo -u root echo rules"} {
+		if f.blocks("Bash", f.proj, map[string]interface{}{"command": command}) {
+			t.Errorf("%q: ordinary call blocked", command)
+		}
+	}
+}
+
+// The strict tier reads the slash-free word of any program that names an
+// existing entry; the balanced tier allows the same ordinary command.
+func TestStrictTierBlocksAWordThatNamesALinkToADeniedSkill(t *testing.T) {
+	commands := []string{"echo needle", "git log needle", "sudo -u root echo needle"}
+	for _, strict := range []bool{false, true} {
+		f := newOperandContextFixture(t, "held")
+		if err := os.Symlink(f.held, filepath.Join(f.proj, "needle")); err != nil {
+			t.Skipf("link unavailable: %v", err)
+		}
+		if strict {
+			f.inStrictTier(t)
+		}
+		for _, command := range commands {
+			if got := f.blocks("Bash", f.proj, map[string]interface{}{"command": command}); got != strict {
+				t.Errorf("strict=%t %q: blocked = %t, want %t", strict, command, got, strict)
+			}
+		}
+		if f.blocks("Bash", f.proj, map[string]interface{}{"command": "echo hello"}) {
+			t.Errorf("strict=%t: a word that names no entry was blocked", strict)
+		}
+		if f.blocks("Read", f.proj, map[string]interface{}{"file_path": "needle notes.txt"}) {
+			t.Errorf("strict=%t: a typed path with a blank was blocked", strict)
+		}
 	}
 }

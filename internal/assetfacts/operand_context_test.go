@@ -35,35 +35,39 @@ func reaches(refs []FolderRef, dir string) bool {
 	return false
 }
 
-// The program a command runs, the pattern of a search and a text field are
-// words that may equal the name of a link without reading it; the same word
-// as a path operand is the link.
+// The program a command runs, the words of a command that does not read
+// files and a text field are words that may equal the name of a link without
+// reading it; the same word as an operand of a program that reads files is the
+// link. A typed path is one path whatever spaces it holds.
 func TestBareWordIsAPathOnlyWhereTheCallUsesItAsOne(t *testing.T) {
 	home, held, proj := operandTree(t, "echo", "needle", "grep", "ls", "sudo")
+	if err := os.WriteFile(filepath.Join(proj, "needle notes.txt"), []byte("ordinary"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	type call struct {
 		tool  string
 		input any
 	}
 	for name, c := range map[string]call{
-		"program":              {"Bash", map[string]any{"command": "echo hello"}},
-		"program after pipe":   {"Bash", map[string]any{"command": "ls notes.txt | grep notes"}},
-		"wrapped program":      {"Bash", map[string]any{"command": "sudo echo hello"}},
-		"grep pattern":         {"Bash", map[string]any{"command": "grep needle notes.txt"}},
-		"grep flags pattern":   {"Bash", map[string]any{"command": "grep -rn -A 3 needle notes.txt"}},
-		"grep -e pattern":      {"Bash", map[string]any{"command": "grep -e needle notes.txt"}},
-		"grep clustered -e":    {"Bash", map[string]any{"command": "grep -ne needle notes.txt"}},
-		"rg pattern":           {"Bash", map[string]any{"command": "rg needle notes.txt"}},
-		"piped grep pattern":   {"Bash", map[string]any{"command": "cat notes.txt | grep needle"}},
-		"sed script":           {"Bash", map[string]any{"command": "sed -n needle notes.txt"}},
-		"find name":            {"Bash", map[string]any{"command": "find notes.txt -name needle"}},
-		"printed words":        {"Bash", map[string]any{"command": "echo needle grep ls"}},
-		"argument vector":      {"Bash", map[string]any{"command": []any{"echo", "hello"}}},
-		"vector grep":          {"Bash", map[string]any{"command": []any{"grep", "needle", "notes.txt"}}},
-		"shell script":         {"Bash", map[string]any{"command": []any{"bash", "-lc", "echo hello"}}},
-		"Grep pattern":         {"Grep", map[string]any{"path": "notes.txt", "pattern": "needle"}},
-		"query":                {"Search", map[string]any{"query": "needle"}},
-		"edit text":            {"Edit", map[string]any{"file_path": "notes.txt", "old_string": "needle", "new_string": "echo"}},
-		"Grep include pattern": {"Grep", map[string]any{"path": "notes.txt", "pattern": "needle", "glob": "*.txt"}},
+		"program":               {"Bash", map[string]any{"command": "echo hello"}},
+		"program after pipe":    {"Bash", map[string]any{"command": "ls notes.txt | grep notes"}},
+		"wrapped program":       {"Bash", map[string]any{"command": "sudo echo hello"}},
+		"printed words":         {"Bash", map[string]any{"command": "echo needle grep ls"}},
+		"later runner":          {"Bash", map[string]any{"command": "echo needle && sh -c true"}},
+		"sudo option value":     {"Bash", map[string]any{"command": "sudo -u root echo hello"}},
+		"sudo long option":      {"Bash", map[string]any{"command": "sudo --user root echo hello"}},
+		"env assignment":        {"Bash", map[string]any{"command": "env LC_ALL=C echo hello"}},
+		"shell script echo":     {"Bash", map[string]any{"command": "sh -c 'echo needle'"}},
+		"git word":              {"Bash", map[string]any{"command": "git log needle"}},
+		"typed path with blank": {"Read", map[string]any{"file_path": "needle notes.txt"}},
+		"Grep path with blank":  {"Grep", map[string]any{"path": "needle notes.txt", "pattern": "x"}},
+		"Glob exact filename":   {"Glob", map[string]any{"pattern": "needle notes.txt"}},
+		"argument vector":       {"Bash", map[string]any{"command": []any{"echo", "hello"}}},
+		"shell script":          {"Bash", map[string]any{"command": []any{"bash", "-lc", "echo hello"}}},
+		"Grep pattern":          {"Grep", map[string]any{"path": "notes.txt", "pattern": "needle"}},
+		"query":                 {"Search", map[string]any{"query": "needle"}},
+		"edit text":             {"Edit", map[string]any{"file_path": "notes.txt", "old_string": "needle", "new_string": "echo"}},
+		"Grep include pattern":  {"Grep", map[string]any{"path": "notes.txt", "pattern": "needle", "glob": "*.txt"}},
 	} {
 		t.Run("word "+name, func(t *testing.T) {
 			if refs := SkillFolderRefs(c.tool, c.input, home, proj); len(refs) != 0 {
@@ -73,6 +77,19 @@ func TestBareWordIsAPathOnlyWhereTheCallUsesItAsOne(t *testing.T) {
 	}
 	for name, c := range map[string]call{
 		"cat operand":          {"Bash", map[string]any{"command": "cat echo"}},
+		"grep pattern":         {"Bash", map[string]any{"command": "grep needle notes.txt"}},
+		"rg pattern":           {"Bash", map[string]any{"command": "rg needle notes.txt"}},
+		"piped grep pattern":   {"Bash", map[string]any{"command": "cat notes.txt | grep needle"}},
+		"find name value":      {"Bash", map[string]any{"command": "find notes.txt -name needle"}},
+		"sudo option operand":  {"Bash", map[string]any{"command": "sudo -u root cat needle"}},
+		"printed to xargs":     {"Bash", map[string]any{"command": "echo needle | xargs cat"}},
+		"shell script cat":     {"Bash", map[string]any{"command": "sh -c 'cat needle'"}},
+		"shell script second":  {"Bash", map[string]any{"command": "echo hi && bash -c 'cat needle'"}},
+		"eval":                 {"Bash", map[string]any{"command": "eval cat needle"}},
+		"for list":             {"Bash", map[string]any{"command": "for f in needle; do ls $f; done"}},
+		"assignment":           {"Bash", map[string]any{"command": "d=needle; ls $d"}},
+		"command prefix":       {"Bash", map[string]any{"command": "command cat needle"}},
+		"windows shell":        {"Bash", map[string]any{"command": "cmd /c type needle"}},
 		"ls operand":           {"Bash", map[string]any{"command": "ls needle"}},
 		"grep file operand":    {"Bash", map[string]any{"command": "grep -r token needle"}},
 		"grep -e file":         {"Bash", map[string]any{"command": "grep -e token needle"}},
@@ -193,5 +210,72 @@ func TestExtendedLengthPrefixIsSpelledTheUsualWay(t *testing.T) {
 		if got := trimExtendedPrefix(in); got != want {
 			t.Errorf("trimExtendedPrefix(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Every word of a program that reads files may name one, including the value
+// of an option that takes a file; a program that does not read files names a
+// path only by a slash in the strict tier excepted, which reads its slash-free
+// words too.
+func TestFileTakingOptionValueIsAPathOperand(t *testing.T) {
+	home, held, proj := operandTree(t)
+	linkOrSkip(t, filepath.Join(held, "SKILL.md"), filepath.Join(proj, "rules"))
+	for name, command := range map[string]string{
+		"cat":                 "cat rules",
+		"grep -f":             "grep -f rules notes.txt",
+		"grep --file":         "grep --file rules notes.txt",
+		"grep --file=":        "grep --file=rules notes.txt",
+		"grep attached -f":    "grep -frules notes.txt",
+		"grep --exclude-from": "grep --exclude-from rules notes.txt",
+		"rg -f":               "rg -f rules notes.txt",
+		"rg --ignore-file":    "rg --ignore-file rules notes.txt",
+		"sed -f":              "sed -f rules notes.txt",
+		"awk -f":              "awk -f rules notes.txt",
+		"behind sudo":         "sudo -u root sed -f rules notes.txt",
+		"behind env":          "env LC_ALL=C grep -f rules notes.txt",
+		"behind xargs":        "xargs -n1 cat rules",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if refs := SkillFolderRefs("Bash", map[string]any{"command": command}, home, proj); !reaches(refs, held) {
+				t.Fatalf("%q: refs = %+v, want one to %s", command, refs, held)
+			}
+		})
+	}
+	for name, command := range map[string]string{
+		"echo":      "echo rules",
+		"printf":    "printf rules",
+		"git":       "git log rules",
+		"ordinary":  "grep -f notes.txt notes.txt",
+		"no entry":  "grep -f nothing-here notes.txt",
+		"sudo echo": "sudo -u root echo rules",
+	} {
+		t.Run("twin "+name, func(t *testing.T) {
+			if refs := SkillFolderRefs("Bash", map[string]any{"command": command}, home, proj); len(refs) != 0 {
+				t.Fatalf("%q: refs = %+v, want none", command, refs)
+			}
+		})
+	}
+}
+
+// The strict tier reads the slash-free word of any program that names an
+// existing entry; the balanced tier does not.
+func TestStrictTierReadsEveryWordThatNamesAnEntry(t *testing.T) {
+	home, held, proj := operandTree(t, "needle")
+	for _, command := range []string{"echo needle", "git log needle", "printf needle", "sudo -u root echo needle", "echo hi && git log needle"} {
+		input := map[string]any{"command": command}
+		if refs := SkillFolderRefs("Bash", input, home, proj); reaches(refs, held) {
+			t.Errorf("%q: balanced reading reaches the folder: %+v", command, refs)
+		}
+		if refs := SkillFolderRefsStrict("Bash", input, home, proj); !reaches(refs, held) {
+			t.Errorf("%q: strict reading refs = %+v, want one to %s", command, refs, held)
+		}
+	}
+	// A word that names no entry stays a word in the strict tier too.
+	if refs := SkillFolderRefsStrict("Bash", map[string]any{"command": "echo hello"}, home, proj); len(refs) != 0 {
+		t.Errorf("strict reading of a word that names nothing: refs = %+v, want none", refs)
+	}
+	// Text and path fields do not change with the tier.
+	if refs := SkillFolderRefsStrict("Grep", map[string]any{"path": "notes.txt", "pattern": "needle"}, home, proj); len(refs) != 0 {
+		t.Errorf("strict reading of a search pattern: refs = %+v, want none", refs)
 	}
 }
