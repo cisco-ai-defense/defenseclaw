@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import hashlib
 import json
 import os
 import re
@@ -877,32 +876,6 @@ def _carry_connector_records(old_dir: str, new_dir: str) -> list[str]:
     return notes
 
 
-def _moved_backup_digests(old_dir: str) -> dict[str, str]:
-    """The sha256 of each top-level backup record in *old_dir*, as the move leaves it.
-
-    Uninstall later removes an earlier folder copy only while it still has
-    this digest; a copy the account changed since belongs to the account (GAP-0942).
-    """
-    from defenseclaw.file_permissions import open_regular_file_no_follow
-
-    found: dict[str, str] = {}
-    try:
-        names = sorted(name for name in os.listdir(old_dir) if name.endswith(_MOVED_DATA_DIR_BACKUP_SUFFIX))
-    except OSError:
-        return found
-    for name in names:
-        path = os.path.join(old_dir, name)
-        try:
-            info = os.lstat(path)
-            if not stat.S_ISREG(info.st_mode):
-                continue
-            with os.fdopen(open_regular_file_no_follow(path, expected_stat=info), "rb") as handle:
-                found[name] = hashlib.sha256(handle.read()).hexdigest()
-        except OSError:
-            continue
-    return found
-
-
 def _hook_store_entry_is_account_private(path: str, info: os.stat_result) -> bool:
     """Whether *path* is a token file or folder only this account can change.
 
@@ -1366,7 +1339,9 @@ def _seed_moved_data_dir(changes: list, old_data_dir: str = "") -> list[str]:
         # the records were written in is the clean spelling the gateway used (GAP-0939).
         old_data_dir = config_module.clean_data_dir(old_data_dir, os.fspath(config_module.default_data_path()))
     notes = _carry_connector_records(old_data_dir, new_data_dir)
-    notes.extend(config_module.remember_previous_store(old_data_dir, _moved_backup_digests(old_data_dir)))
+    from defenseclaw.commands.cmd_uninstall import record_digests_for_move
+
+    notes.extend(config_module.remember_previous_store(old_data_dir, record_digests_for_move(old_data_dir)))
     if not cfg.guardrail.secure_client_hook_fail_modes():
         notes.extend(_carry_hook_credentials(
             old_data_dir, new_data_dir,
