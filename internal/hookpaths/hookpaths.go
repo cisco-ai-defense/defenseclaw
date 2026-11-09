@@ -857,7 +857,7 @@ func LinkTextWriteTarget(path string) (string, bool) {
 }
 
 func linkTextWalk(base, path string, linkDepth int) (string, bool) {
-	if linkDepth > maxWriteTargetLinkDepth {
+	if linkDepth > SystemLinkLimit() {
 		return "", false
 	}
 	current := base
