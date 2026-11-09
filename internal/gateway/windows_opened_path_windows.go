@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,8 +44,14 @@ func osExpandWindowsShortNames(path string, verbatim bool) (string, error) {
 }
 
 // windowsPathDoesNotExist reports the answers of the file system that say a
-// name is not there, as opposed to one that cannot be looked at.
+// name is not there, as opposed to one that cannot be looked at. The portable
+// "does not exist" answer (fs.ErrNotExist, which os.ErrNotExist is) counts as
+// well as the Win32 codes: a caller that reaches the file system through the
+// os package is answered with it.
 func windowsPathDoesNotExist(err error) bool {
+	if errors.Is(err, fs.ErrNotExist) {
+		return true
+	}
 	for _, missing := range []error{
 		windows.ERROR_FILE_NOT_FOUND, windows.ERROR_PATH_NOT_FOUND, windows.ERROR_INVALID_NAME,
 		windows.ERROR_BAD_PATHNAME, windows.ERROR_DIRECTORY, windows.ERROR_INVALID_DRIVE,
