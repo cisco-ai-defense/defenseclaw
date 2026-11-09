@@ -101,8 +101,9 @@ func nativeWriteFiles(input Input, facts Facts, writes []nativeFileWrite, write 
 // keyed its answer by the spelling of the operand in the directory it ran the
 // call in (Input.ClientResolvedTargets, Input.ClientWorkingDirectories): the
 // answer is the physical file of a link or of a dot-dot path. When the client
-// gave no answer the target is placed in that directory lexically, as the
-// direct name of the file is judged. Nothing here reads the file system.
+// gave no answer for a directory the target is placed in that directory
+// lexically, as the direct name of the file is judged. Nothing here reads the
+// file system.
 func nativeClientReachedFiles(input Input, target string) []string {
 	if target == "" || len(target) > maxScalarBytes || !utf8.ValidString(target) ||
 		strings.ContainsRune(target, 0) {
@@ -121,10 +122,9 @@ func nativeClientReachedFiles(input Input, target string) []string {
 		}
 	}
 	for _, dir := range dirs {
-		if physical, ok := input.ClientResolvedTargets[clientOperandKey(target, dir)]; ok {
+		if physical, ok := input.ClientResolvedTargets[clientOperandKey(target, dir)]; ok && strings.HasPrefix(physical, "/") {
 			add(physical)
-		}
-		if !strings.HasPrefix(target, "/") {
+		} else if !strings.HasPrefix(target, "/") {
 			add(dir + "/" + target)
 		}
 	}

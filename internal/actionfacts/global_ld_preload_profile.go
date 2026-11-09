@@ -14,19 +14,19 @@ const globalLDPreloadProfileDirectory = "/etc/profile.d/"
 const globalLDPreloadFilePath = "/etc/ld.so.preload"
 
 // ExactGlobalLDPreloadFileWrite proves that the text one native file-tool call
-// writes (nativeFileWrites: a whole-file write, an edit, a multi-edit or a
-// patch, whatever the tool calls its arguments) installs a system-wide loader
+// or shell apply_patch here-document writes (nativeCallWrites: a whole-file
+// write, an edit, a multi-edit or a patch, whatever the tool calls its
+// arguments) installs a system-wide loader
 // injection: an absolute shared-object path in /etc/ld.so.preload, or one
 // active `export LD_PRELOAD=/absolute/library.so` line in a direct
 // /etc/profile.d shell fragment, in the file the call names or the file an
 // existing link reaches (nativeReachedFiles). It retains neither the path nor
 // the text.
 func ExactGlobalLDPreloadFileWrite(input Input, facts Facts) bool {
-	if input.Command != "" || len(input.Argv) != 0 ||
-		!facts.Authoritative() || !facts.EnforcementEligible() {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
 		return false
 	}
-	writes := nativeFileWrites(input.Tool, input.Args)
+	writes, facts := nativeCallWrites(input, facts)
 	for _, write := range writes {
 		for _, file := range nativeWriteFiles(input, facts, writes, write, true) {
 			switch {
