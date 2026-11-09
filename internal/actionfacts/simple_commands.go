@@ -109,12 +109,19 @@ func (s simpleShellState) clone() simpleShellState {
 // are resolved; a subshell or pipeline stage has its own shell state.
 func SimpleCommands(input Input, facts Facts) []SimpleCommand {
 	result := simpleCommandsOfCall(input, facts)
-	if input.Command == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) &&
-		slices.ContainsFunc(result, func(simple SimpleCommand) bool { return simple.EvaluationFailure != "" }) {
+	if input.Command == "" && facts.Parse.Status == StatusInvalid && containsIssue(facts.Parse.Issues, IssueInvalidSyntax) {
 		// The POSIX reader rejected the call (a construct only Bash has) and
 		// the shell parse reads it only to add readings (simpleCommands): a
 		// call it cannot read in full keeps the judgment it had without them.
-		return nil
+		if slices.ContainsFunc(result, func(simple SimpleCommand) bool { return simple.EvaluationFailure != "" }) {
+			return nil
+		}
+		// A command that is a piece of the call as written adds nothing: the
+		// call is judged as written, with the rules and the enforcement it had
+		// before this reading. Only a reading with a variable resolved is new.
+		if command := extractArgsForTool(input.Args, input.Tool).command; argsExecutionTool(input.Tool) && command != "" {
+			result = slices.DeleteFunc(result, func(simple SimpleCommand) bool { return strings.Contains(command, simple.Text) })
+		}
 	}
 	return result
 }
