@@ -47269,10 +47269,36 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
-            [void](Invoke-DefenseClawCodexRequirementsCommand `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -Action reconcile)
+            $reconcileFailure = $null
+            try {
+                [void](Invoke-DefenseClawCodexRequirementsCommand `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -Action reconcile)
+            }
+            catch {
+                $reconcileFailure = $_
+            }
+            if ($null -ne $reconcileFailure) {
+                # GAP-0955: a requirements.toml an administrator edited against
+                # the managed policy (allow_managed_hooks_only = false) failed
+                # this reconcile, rolled back, and was replaced by the
+                # rollback's recovery (GAP-0802): the run reported failure for
+                # a machine it had repaired. Standalone replaces the file here,
+                # with the same recovery and the same named backup, and goes
+                # on. A failure the recovery does not explain (the file
+                # verifies, or the recovery changed nothing) stays the failure
+                # of the run. Secure Client keeps the failure.
+                $recoveredBefore = @($script:DefenseClawRecoveredCodexRequirementsNotes).Count
+                if (Test-DefenseClawStandaloneProfile) {
+                    Repair-DefenseClawRecoveredCodexRequirements `
+                        -Layout $Layout `
+                        -GatewayServiceName $GatewayServiceName
+                }
+                if (@($script:DefenseClawRecoveredCodexRequirementsNotes).Count -eq $recoveredBefore) {
+                    throw $reconcileFailure
+                }
+            }
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
