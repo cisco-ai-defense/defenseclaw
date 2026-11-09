@@ -116,6 +116,12 @@ var errPerUserPeerCheckUnfinished = fmt.Errorf("%w: its owner was still being ch
 // which process holds it (perUserRestartWindowProof, rel-1-0-6 GAP-0295).
 type perUserPeerCheck struct {
 	pending atomic.Bool
+	// deciding is true while verifyConnected owes a decision on a connection
+	// that was not accepted: the owner scan of its listener. connectBy gives
+	// that decision ownerScanGrace past the connect deadline.
+	deciding atomic.Bool
+	// abandoned is set when ownerScanGrace ran out with the scan unfinished.
+	abandoned atomic.Bool
 	// by is the connect deadline of the try (connectBy); zero when none.
 	by   time.Time
 	ends atomic.Pointer[perUserConnEnds]
