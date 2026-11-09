@@ -714,24 +714,13 @@ def apply_device_key_recovery(
             # Windows additionally holds the destination chain lease inside
             # its CREATE_NEW adapter.
             _revalidate_directory_custody(plan)
-            if plan.custody.platform == "windows":
-                payload = _read_private_regular_file(source, max_bytes=4096, platform="windows")
-                try:
-                    _windows_write_new_private_file(
-                        destination,
-                        payload,
-                        plan.custody,
-                        confidential=True,
-                    )
-                except RecoveryPublicationError as exc:
-                    if exc.created:
-                        placed.append((label, destination))
-                    raise
-                placed.append((label, destination))
-            else:
-                _publish_no_replace(source, destination)
-                placed.append((label, destination))
-                _fsync_directory(os.path.dirname(destination))
+            try:
+                _publish_identity_file(plan, source, destination)
+            except RecoveryPublicationError as exc:
+                if exc.created:
+                    placed.append((label, destination))
+                raise
+            placed.append((label, destination))
 
         if _device_key_postconditions(
             plan.target,
@@ -1258,6 +1247,25 @@ def _stage_private_bytes(parent: str, prefix: str, data: bytes) -> str:
         raise
     os.close(fd)
     return path
+
+
+def _publish_identity_file(plan: RecoveryPlan, source: str, destination: str) -> None:
+    """Publish one staged identity file without replacing a name, on every platform.
+
+    This is the single publication step of a device identity: a test that stops a
+    publication patches it, so the stop is the same on Windows and POSIX.
+    """
+
+    if plan.custody.platform == "windows":
+        payload = _read_private_regular_file(source, max_bytes=4096, platform="windows")
+        _windows_write_new_private_file(destination, payload, plan.custody, confidential=True)
+        return
+    _publish_no_replace(source, destination)
+    try:
+        _fsync_directory(os.path.dirname(destination))
+    except OSError as exc:
+        # The name exists now: the caller must take it back like any other published file.
+        raise RecoveryPublicationError("device-key-create-failed", created=True) from exc
 
 
 def _publish_no_replace(source: str, target: str) -> None:
