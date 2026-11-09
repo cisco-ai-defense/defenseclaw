@@ -27,6 +27,7 @@ fans out to every configured connector.
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import logging
@@ -170,7 +171,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                     app.store, servers, c,
                     allow_legacy_plain=allow_legacy_plain_scans,
                 )
-                actions_map = _build_mcp_actions_map(app.store, c, app.cfg)
+                actions_map = _mcp_list_actions(app, servers, c)
                 failed_map = _build_mcp_failed_scan_map(
                     app.store, servers, c,
                     allow_legacy_plain=allow_legacy_plain_scans,
@@ -196,7 +197,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
                 app.store, servers, connectors[0],
                 allow_legacy_plain=allow_legacy_plain_scans,
             )
-            actions_map = _build_mcp_actions_map(app.store, connectors[0], app.cfg)
+            actions_map = _mcp_list_actions(app, servers, connectors[0])
             failed_map = _build_mcp_failed_scan_map(
                 app.store, servers, connectors[0],
                 allow_legacy_plain=allow_legacy_plain_scans,
@@ -226,9 +227,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     failed_rows: list[tuple[str, str, str, MCPServerEntry | None]] = []
     held_after_failed_scan: list[tuple[str, str, str, MCPServerEntry | None]] = []
     allowed_after_failed_scan: list[tuple[str, str]] = []
-    from defenseclaw.enforce import PolicyEngine
-
-    policy_engine = PolicyEngine(app.store, app.cfg)
+    secure_client = asset_lists.is_secure_client(app.cfg)
     not_loaded: list[tuple[str, MCPServerEntry]] = []
     # GAP-1907: on a fan-out listing, a connector with no MCP servers is a
     # normal state. Collect those into one short line instead of a warning
@@ -245,7 +244,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             app.store, servers, connector,
             allow_legacy_plain=allow_legacy_plain_scans,
         )
-        actions_map = _build_mcp_actions_map(app.store, connector, app.cfg)
+        actions_map = _mcp_list_actions(app, servers, connector)
         if not servers:
             if not locations:
                 # Nowhere to look is not the same as looked and found
@@ -282,17 +281,18 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             (connector, name, (failed_map.get(name) or {}).get("error", ""), by_name.get(name))
             for name in held
         )
-        # An allowed server is not unverified: the allow (pinned to the
-        # definition it was written for) decides, so it is a note, not a
-        # warning with the advice to allow it (GAP-0978).
+        # An allowed server is not unverified: the row above shows it
+        # allowed, so the footer reads the same effective state and lists it
+        # as a note, not as a warning with the advice to allow it (GAP-0978).
+        # Secure Client keeps the unscanned warning for every failed scan.
         for name, row in failed_map.items():
             if name in held:
                 continue
-            entry = by_name.get(name)
-            if entry is not None and _mcp_server_is_allowed(policy_engine, connector, entry):
+            entry = actions_map.get(name)
+            if not secure_client and entry is not None and entry.actions.install == "allow":
                 allowed_after_failed_scan.append((connector, name))
             else:
-                failed_rows.append((connector, name, row.get("error", ""), entry))
+                failed_rows.append((connector, name, row.get("error", ""), by_name.get(name)))
         shown_any = True
 
     if empty_connectors:
@@ -504,13 +504,48 @@ def _blocked_after_failed_scan(action_entry) -> bool:
     ).startswith(_SCAN_FAILURE_BLOCK_REASON)
 
 
-def _mcp_server_is_allowed(policy_engine, connector: str, entry: MCPServerEntry) -> bool:
-    """True when an operator allow covers this server as it is configured now."""
-    return policy_engine.is_allowed_for_connector(
-        "mcp", entry.name, connector,
-        source_path=entry.source, url=entry.url, command=entry.command,
-        args=entry.args, transport=entry.transport,
-    )
+def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector: str) -> dict:
+    """Map each server name to its ActionEntry for one connector list, with
+    the install allow decided per server as the gateway decides it (GAP-0978).
+
+    The name-level map folds an operator allow in by name alone. An allow
+    pinned to a server definition covers only that definition, and a rule
+    written in another case still names the server, so the allow of each
+    server is re-read from the lists with the definition as configured now.
+    The table row, the JSON item and the failed-scan footer all read this
+    map, so they never disagree. Secure Client hosts keep the journal rows.
+    """
+    from defenseclaw.enforce.admission import asset_name_key
+
+    actions_map = _build_mcp_actions_map(app.store, connector, app.cfg)
+    if asset_lists.is_secure_client(app.cfg):
+        return actions_map
+    asset_policy = getattr(app.cfg, "asset_policy", None)
+    names = {s.name for s in servers}
+    for s in servers:
+        base = actions_map.get(s.name)
+        if base is None:
+            key = asset_name_key(s.name)
+            other = next((n for n in actions_map if n not in names and asset_name_key(n) == key), None)
+            if other is not None:
+                base = actions_map.pop(other)
+        decision, rule = asset_lists.list_decision(
+            asset_policy, "mcp", s.name, connector,
+            source_path=s.source, url=s.url, command=s.command, args=s.args, transport=s.transport,
+        )
+        allowed = decision == asset_lists.LIST_ALLOW
+        if base is None:
+            if allowed:
+                actions_map[s.name] = ActionEntry(
+                    id=f"asset_policy:mcp:{s.name}@{connector}", target_type="mcp", target_name=s.name,
+                    actions=ActionState(install="allow"), reason=rule.reason, connector=connector,
+                )
+            continue
+        install = "allow" if allowed else ("" if base.actions.install == "allow" else base.actions.install)
+        actions_map[s.name] = dataclasses.replace(
+            base, target_name=s.name, actions=dataclasses.replace(base.actions, install=install),
+        )
+    return actions_map
 
 
 def _mcp_list_admission_policy(app: AppContext):
