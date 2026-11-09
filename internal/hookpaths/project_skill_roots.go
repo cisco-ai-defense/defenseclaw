@@ -182,6 +182,9 @@ func projectSkillManifestFinding(home, dir string) string {
 		}
 		return ProjectSkillRootUnreadable
 	}
+	if projectSkillManifestUnresolvable(manifest) {
+		return ProjectSkillRootUnreadable
+	}
 	resolved, err := EvalLinks(manifest)
 	if err != nil {
 		if NotExist(err) {
@@ -245,6 +248,13 @@ func projectSkillSelectedFolders(root, name string) []string {
 	if directErr == nil && info.Mode().IsRegular() {
 		return []string{direct}
 	}
+	if directErr != nil && projectSkillManifestUnresolvable(filepath.Join(direct, "SKILL.md")) {
+		// A manifest that is there but cannot be resolved (a link loop, a
+		// chain of more links than the system follows) is still the one the
+		// agent loads for this name: bind its folder so the call keeps the
+		// unreadable reason (rel-1-0-9:GAP-0987).
+		return []string{direct}
+	}
 	entries, err := pathReadDir(root)
 	if err != nil {
 		if directErr != nil && !errors.Is(directErr, fs.ErrNotExist) {
@@ -266,6 +276,22 @@ func projectSkillSelectedFolders(root, name string) []string {
 		}
 	}
 	return nil
+}
+
+// projectSkillManifestUnresolvable reports whether the manifest path exists as
+// a directory entry, a link included, but the system cannot resolve it to a
+// file: a link loop, or a chain of more links than the system follows (the
+// agent cannot load it either). A manifest that is absent, and a link to
+// nothing, are no skill to load and are not unresolvable. The selection of a
+// folder and the manifest finding both ask this one question, so a chain the
+// user-space link walk resolves but the system refuses is judged like a loop
+// (rel-1-0-9:GAP-0987).
+func projectSkillManifestUnresolvable(manifest string) bool {
+	if _, err := pathLstat(manifest); err != nil {
+		return false
+	}
+	_, err := pathStat(manifest)
+	return err != nil && !NotExist(err) && !errors.Is(err, fs.ErrNotExist)
 }
 
 // projectSkillDeclaredName is the name the SKILL.md of dir declares, read as

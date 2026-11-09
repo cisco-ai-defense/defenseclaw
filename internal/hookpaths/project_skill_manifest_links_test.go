@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -243,5 +244,173 @@ func TestProjectSkillManifestUnresolvableKeepsTheUnreadableReason(t *testing.T) 
 	addProjectSkillSelectedFacts(facts, nil, args, home, project)
 	if got := facts[ProjectSkillRootUnverifiedPrefix+root]; got != ProjectSkillRootUnreadable {
 		t.Fatalf("facts %v, want the root unverified as %s", facts, ProjectSkillRootUnreadable)
+	}
+}
+
+// A Skill call that gives only the name selects the folder of that name even
+// when its SKILL.md is a link loop that cannot be resolved: the root turns
+// unverified as unreadable and the folder is bound, whether the call is a
+// hook Skill call or the Codex prompt route, which share the two helpers.
+// A manifest that is absent, and an ordinary skill, keep the root verified
+// (rel-1-0-9:GAP-0987).
+func TestProjectSkillManifestLoopSelectedByNameOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a link loop is not the same error on Windows")
+	}
+	loop := func(t *testing.T, _, dir string) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("loop2.md", filepath.Join(dir, "SKILL.md")); err != nil {
+			t.Skipf("link unavailable: %v", err)
+		}
+		if err := os.Symlink("SKILL.md", filepath.Join(dir, "loop2.md")); err != nil {
+			t.Skipf("link unavailable: %v", err)
+		}
+	}
+	cases := []struct {
+		label string
+		make  func(t *testing.T, home, dir string)
+		bad   bool
+	}{
+		{"two-link loop", loop, true},
+		{"self link", func(t *testing.T, _, dir string) {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("SKILL.md", filepath.Join(dir, "SKILL.md")); err != nil {
+				t.Skipf("link unavailable: %v", err)
+			}
+		}, true},
+		{"manifest absent", func(t *testing.T, _, dir string) {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"dangling link", func(t *testing.T, _, dir string) {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("missing.md", filepath.Join(dir, "SKILL.md")); err != nil {
+				t.Skipf("link unavailable: %v", err)
+			}
+		}, false},
+		{"name is a plain file", func(t *testing.T, _, dir string) {
+			if err := os.WriteFile(dir, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+		{"ordinary private skill", func(t *testing.T, _, dir string) { round6Skill(t, dir, "sample") }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.label, func(t *testing.T) {
+			home, project, root, facts := manifestLinkProject(t)
+			dir := filepath.Join(root, "sample")
+			tc.make(t, home, dir)
+
+			folders := projectSkillSelectedFolders(root, "sample")
+			if tc.bad && (len(folders) != 1 || folders[0] != dir) {
+				t.Fatalf("selected folders %v, want %s", folders, dir)
+			}
+
+			// The Codex prompt route marks and binds with the same helpers and no source.
+			codex := map[string]string{ProjectSkillRootVerifiedPrefix + root: "1"}
+			markLinkedProjectSkillManifests(codex, "sample", nil, home, project)
+			if got := codex[ProjectSkillRootUnverifiedPrefix+root]; (got == ProjectSkillRootUnreadable) != tc.bad {
+				t.Fatalf("codex name-only: %v", codex)
+			}
+
+			args, _ := json.Marshal(map[string]any{"skill": "sample"})
+			addProjectSkillSelectedFacts(facts, nil, args, home, project)
+			_, verified := facts[ProjectSkillRootVerifiedPrefix+root]
+			unverified := facts[ProjectSkillRootUnverifiedPrefix+root]
+			_, bound := facts[ProjectSkillSelectedPrefix+dir]
+			if tc.bad {
+				if unverified != ProjectSkillRootUnreadable || verified || !bound {
+					t.Fatalf("name-only call: unverified=%q verified=%v bound=%v in %v, want %s with %s bound",
+						unverified, verified, bound, facts, ProjectSkillRootUnreadable, dir)
+				}
+				return
+			}
+			if unverified != "" || !verified || bound {
+				t.Fatalf("benign twin: unverified=%q verified=%v bound=%v in %v, want the root verified", unverified, verified, bound, facts)
+			}
+		})
+	}
+}
+
+// A SKILL.md that is a chain of symbolic links to an otherwise private file
+// is judged as the system resolves it: past the 40 links Linux follows the
+// agent cannot load it, so the root is unverified as unreadable and the
+// folder is bound, on the hook name-only call, the Codex prompt route and
+// the explicit-path call alike, even though the user-space link walk would
+// reach the file. A chain within the limit stays verified
+// (rel-1-0-9:GAP-0987).
+func TestProjectSkillManifestChainPastTheSystemLimitIsUnreadable(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the link limit this test relies on is the Linux one")
+	}
+	calls := map[string]func(dir string) map[string]any{
+		"name only":  func(string) map[string]any { return map[string]any{"skill": "sample"} },
+		"skill_path": func(dir string) map[string]any { return map[string]any{"skill": "sample", "skill_path": dir} },
+	}
+	for _, tc := range []struct {
+		links int
+		bad   bool
+	}{{2, false}, {40, false}, {41, true}, {43, true}} {
+		for label, call := range calls {
+			t.Run(fmt.Sprintf("%d links %s", tc.links, label), func(t *testing.T) {
+				home, project, root, facts := manifestLinkProject(t)
+				dir := filepath.Join(root, "sample")
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "real.md"), []byte("---\nname: sample\n---\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				// SKILL.md -> hop1 -> ... -> real.md, tc.links links in all.
+				for i := tc.links; i >= 1; i-- {
+					from := "SKILL.md"
+					if i > 1 {
+						from = fmt.Sprintf("hop%d.md", i-1)
+					}
+					to := "real.md"
+					if i < tc.links {
+						to = fmt.Sprintf("hop%d.md", i)
+					}
+					if err := os.Symlink(to, filepath.Join(dir, from)); err != nil {
+						t.Skipf("link unavailable: %v", err)
+					}
+				}
+				if got := projectSkillManifestFinding(home, dir); (got == ProjectSkillRootUnreadable) != tc.bad {
+					t.Fatalf("manifest finding %q, want unreadable=%v", got, tc.bad)
+				}
+
+				codex := map[string]string{ProjectSkillRootVerifiedPrefix + root: "1"}
+				if label == "name only" {
+					markLinkedProjectSkillManifests(codex, "sample", nil, home, project)
+					if got := codex[ProjectSkillRootUnverifiedPrefix+root]; (got == ProjectSkillRootUnreadable) != tc.bad {
+						t.Fatalf("codex name-only: %v", codex)
+					}
+				}
+
+				args, _ := json.Marshal(call(dir))
+				addProjectSkillSelectedFacts(facts, nil, args, home, project)
+				_, verified := facts[ProjectSkillRootVerifiedPrefix+root]
+				unverified := facts[ProjectSkillRootUnverifiedPrefix+root]
+				_, bound := facts[ProjectSkillSelectedPrefix+dir]
+				if tc.bad {
+					if unverified != ProjectSkillRootUnreadable || verified || !bound {
+						t.Fatalf("unverified=%q verified=%v bound=%v in %v, want %s with %s bound",
+							unverified, verified, bound, facts, ProjectSkillRootUnreadable, dir)
+					}
+					return
+				}
+				if unverified != "" || !verified || bound {
+					t.Fatalf("within the limit: unverified=%q verified=%v bound=%v in %v, want the root verified",
+						unverified, verified, bound, facts)
+				}
+			})
+		}
 	}
 }
