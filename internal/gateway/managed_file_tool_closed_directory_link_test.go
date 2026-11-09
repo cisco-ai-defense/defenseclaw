@@ -8,6 +8,7 @@
 package gateway
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -201,5 +202,123 @@ func TestManagedShellWriteThroughALinkIntoAClosedDirectoryStaysBlockedWhenTheCom
 				}
 			})
 		}
+	}
+}
+
+// boundedClosedLinkCall builds a project with a shell command of forty
+// ordinary redirects, then a command that reopens a closed folder and appends
+// through a project link into the key file. pad lengthens one name, so the
+// client map grows byte by byte towards its bound: the operand answer and its
+// link text are the last entries, which makes the bound fall between them for
+// some pad.
+func boundedClosedLinkCall(t *testing.T, pad int) func(home, project string) map[string]any {
+	return func(home, project string) map[string]any {
+		keyDir := filepath.Join(home, ".ssh")
+		closed := filepath.Join(project, "closed")
+		for _, dir := range []string{keyDir, closed} {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		key := filepath.Join(keyDir, "authorized_keys")
+		if err := os.WriteFile(key, []byte("# keys\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for link, target := range map[string]string{
+			filepath.Join(closed, "inner"):  key,
+			filepath.Join(project, "alias"): filepath.Join(closed, "inner"),
+		} {
+			if _, err := os.Lstat(link); err == nil {
+				continue
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+		}
+		filler := project
+		for part := 0; part < 4; part++ {
+			filler = filepath.Join(filler, fmt.Sprintf("d%d", part)+strings.Repeat("q", 171))
+		}
+		if err := os.MkdirAll(filler, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		relative, err := filepath.Rel(project, filler)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var statements []string
+		for i := 0; i < 40; i++ {
+			name := fmt.Sprintf("f%03d", i)
+			if i == 39 {
+				name += strings.Repeat("r", pad)
+			}
+			statements = append(statements, fmt.Sprintf("printf x > %s/%s", relative, name))
+		}
+		statements = append(statements, "chmod u+x closed", "printf marker >> ./alias")
+		return sudoersClaudeCall("Bash", sudoersFixed(map[string]any{"command": strings.Join(statements, "; ")}))(project)
+	}
+}
+
+// The client map is bounded. The answer for an operand behind a closed folder
+// and the link text that says so are one entry: for no map size does the
+// client send the empty answer without its link text and without saying the
+// map is incomplete, and the managed hook blocks the key append at the sizes
+// where the bound falls on that entry. The sweep must cross the bound, or it
+// would not hold the case it names.
+func TestManagedShellWriteThroughAClosedFolderLinkStaysBlockedWhenTheClientMapIsAtItsBound(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX link walk")
+	}
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	project := filepath.Join(home, "proj")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	closed := filepath.Join(project, "closed")
+	t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
+	alias := filepath.Join(project, "alias")
+	var incomplete []int
+	withText := 0
+	for pad := 0; pad <= 200; pad++ {
+		raw := mustJSON(t, boundedClosedLinkCall(t, pad)(home, project))
+		if err := os.Chmod(closed, 0); err != nil {
+			t.Fatal(err)
+		}
+		targets, ok := hookpaths.Decode(hookpaths.Resolve(raw))
+		if err := os.Chmod(closed, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatalf("pad %d: the client map could not be read back", pad)
+		}
+		resolved, present := targets[alias]
+		_, text := targets[hookpaths.LinkTextFactPrefix+alias]
+		switch {
+		case present && resolved == "" && text:
+			withText++
+		case present && resolved == "":
+			t.Fatalf("pad %d: an empty answer for the linked operand without its link text and without a bound marker", pad)
+		case !present && targets[hookpaths.TruncatedKey] != "":
+			incomplete = append(incomplete, pad)
+		}
+	}
+	if withText == 0 || len(incomplete) < 2 {
+		t.Fatalf("the sweep did not cross the bound: %d maps with the link text, %d incomplete maps", withText, len(incomplete))
+	}
+	for _, pad := range []int{incomplete[0], incomplete[len(incomplete)-1]} {
+		t.Run(fmt.Sprintf("pad%d", pad), func(t *testing.T) {
+			blocked, body := postManagedHookBehindProtectHome(t, "default", func(home, project string) map[string]any {
+				call := boundedClosedLinkCall(t, pad)(home, project)
+				if err := os.Chmod(filepath.Join(project, "closed"), 0); err != nil {
+					t.Fatal(err)
+				}
+				return call
+			})
+			if !blocked {
+				t.Fatalf("key append through a closed-folder link allowed with a map at its bound: %.600s", body)
+			}
+		})
 	}
 }
