@@ -568,6 +568,12 @@ func UnrecordedPolicyFileProblems(opts Options, connectors []string) []VendorFol
 	return unrecordedPolicyFileProblems(opts, connectors)
 }
 
+// psLiteral is s as a PowerShell single-quoted literal: nothing in it expands
+// ($, a backtick), and a quote is doubled.
+func psLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 // unrecordedFileFix is the one recovery that works for every cause of an
 // untrusted policy file: an explicit or an inherited entry, any number of
 // accounts, a null access list, an entry type the check does not understand,
@@ -575,21 +581,21 @@ func UnrecordedPolicyFileProblems(opts Options, connectors []string) []VendorFol
 // its access list with the inherited default, then replaces that with the
 // access list DefenseClaw gives its own vendor policy files (SYSTEM and
 // Administrators full control, Users read and execute). A link or other
-// entry that is not a regular file is moved aside instead.
+// entry that is not a regular file is renamed instead: Rename-Item fails when
+// the new name exists, where Move-Item would move the entry into a folder or
+// junction a standard user planted at that name. The commands are for an
+// elevated PowerShell prompt, so every path is a single-quoted literal.
 func unrecordedFileFix(path string, regular bool) string {
 	if !regular {
-		return `Move-Item -LiteralPath "` + path + `" -Destination "` + path + `.moved-aside"`
+		return "Rename-Item -LiteralPath " + psLiteral(path) + " -NewName " + psLiteral(filepath.Base(path)+".moved-aside")
 	}
-	commands := [][]string{
-		{"icacls", path, "/setowner", "*" + adminOwnerSIDStr},
-		{"icacls", path, "/reset"},
-		{"icacls", path, "/inheritance:r", "/grant:r", "*" + systemSIDStr + ":F", "*" + adminOwnerSIDStr + ":F", "*" + usersSIDStr + ":RX"},
+	commands := []string{
+		"icacls " + psLiteral(path) + " /setowner " + psLiteral("*"+adminOwnerSIDStr),
+		"icacls " + psLiteral(path) + " /reset",
+		"icacls " + psLiteral(path) + " /inheritance:r /grant:r " +
+			psLiteral("*"+systemSIDStr+":F") + " " + psLiteral("*"+adminOwnerSIDStr+":F") + " " + psLiteral("*"+usersSIDStr+":RX"),
 	}
-	rendered := make([]string, 0, len(commands))
-	for _, command := range commands {
-		rendered = append(rendered, renderWindowsCommand(command))
-	}
-	return strings.Join(rendered, ", then ")
+	return strings.Join(commands, ", then ")
 }
 
 // unrecordedPolicyFileMessage names the file, why DefenseClaw cannot publish
@@ -631,15 +637,18 @@ func unrecordedCause(regular bool, trustErr error) string {
 	return "it is a link or other entry, not a regular file"
 }
 
-// GoOwnedPolicyProblems is what Setup's status and verify say about the
-// Go-owned Windows machine policy (Copilot's policy.d, OpenCode's managed
-// config, Devin's withdrawn files): the vendor folder and unrecorded file
-// problems of InspectRecordedVendorFolders, then every other conflict or
-// error that machine-policy verify raises for those connectors, from the
-// same function (verifyConnector), so status never claims coverage that
-// machine-policy verify denies (GAP-0930). A connector on the per-user route
-// or with ownership off has none. Standalone Windows only.
-func GoOwnedPolicyProblems(opts Options, connectors []string) []VendorFolderProblem {
+// MachinePolicyProblems is what Setup's status and verify say about machine
+// policy: the vendor folder and unrecorded file problems of
+// InspectRecordedVendorFolders, then, for every connector on the machine
+// policy route among connectors (Codex, Claude Code, Cursor, Copilot,
+// OpenCode), every conflict and error machine-policy verify raises for it,
+// from the same function (verifyConnector), and, for a connector it reports
+// uncovered with no conflict at all (no hook entry published, a higher
+// precedence source), a problem that says so. So Setup never reports coverage
+// that machine-policy verify denies, whatever the reason (GAP-0930). A
+// connector on another route, or with ownership off, has none. Standalone
+// Windows only.
+func MachinePolicyProblems(opts Options, connectors []string) []VendorFolderProblem {
 	if !vendorFolderInspectable(opts) || opts.Validate() != nil {
 		return nil
 	}
@@ -663,8 +672,8 @@ func GoOwnedPolicyProblems(opts Options, connectors []string) []VendorFolderProb
 		}
 		return false
 	}
-	for _, target := range goOwnedVendorTargets(opts, connectors) {
-		state, err := verifyConnector(opts, target.name)
+	for _, name := range withCompanions(normalizeConnectors(connectors)) {
+		state, err := verifyConnector(opts, name)
 		if state.Route != RouteMachinePolicy {
 			continue
 		}
@@ -672,15 +681,37 @@ func GoOwnedPolicyProblems(opts Options, connectors []string) []VendorFolderProb
 		if err != nil {
 			texts = append(texts, err.Error())
 		}
+		named := false
 		for _, text := range texts {
 			if known[text] || covered(text) {
+				named = true
 				continue
 			}
 			known[text] = true
-			problems = append(problems, VendorFolderProblem{Connector: target.name, Message: text, Conflict: true})
+			named = true
+			problems = append(problems, VendorFolderProblem{Connector: name, Message: text, Conflict: true})
+		}
+		if !named && !state.Covered {
+			problems = append(problems, VendorFolderProblem{Connector: name, Message: uncoveredWithoutConflict(name, state), Conflict: true})
 		}
 	}
 	return problems
+}
+
+// uncoveredWithoutConflict says why machine-policy verify calls a connector
+// uncovered when it names no conflict.
+func uncoveredWithoutConflict(name string, state State) string {
+	switch {
+	case len(state.HigherPrecedence) > 0:
+		return fmt.Sprintf("machine-policy verify reports %s uncovered: a source of higher precedence overrides DefenseClaw's entries: %s", name, strings.Join(state.HigherPrecedence, ", "))
+	case state.OwnedEntries == 0:
+		where := ""
+		if len(state.Paths) > 0 {
+			where = " in " + strings.Join(state.Paths, ", ")
+		}
+		return fmt.Sprintf("machine-policy verify reports %s uncovered: none of DefenseClaw's hook entries is published%s", name, where)
+	}
+	return fmt.Sprintf("machine-policy verify reports %s uncovered", name)
 }
 
 // InspectRecordedVendorFolders judges, without writing, the vendor folders of

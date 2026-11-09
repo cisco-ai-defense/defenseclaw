@@ -93,8 +93,8 @@ func requireUnrecordedProblem(t *testing.T, problems []VendorFolderProblem, tc u
 	for _, want := range []string{
 		file + " is not covered", "no record of writing it", "S-1-5-32-545", "Setup", "/ensure",
 		// One recovery for every cause: owner, default access list, protected access list.
-		`icacls "` + file + `" /setowner "*S-1-5-32-544", then icacls "` + file + `" /reset, then icacls "` + file +
-			`" /inheritance:r /grant:r "*S-1-5-18:F" "*S-1-5-32-544:F" "*S-1-5-32-545:RX"`,
+		`icacls '` + file + `' /setowner '*S-1-5-32-544', then icacls '` + file + `' /reset, then icacls '` + file +
+			`' /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-32-545:RX'`,
 	} {
 		if !strings.Contains(problem.Message, want) {
 			t.Fatalf("message %q lacks %q", problem.Message, want)
@@ -263,6 +263,12 @@ func TestInspectAsksOnlyWhatThePublishUses(t *testing.T) {
 			if healed, blocked := ReprotectRecordedVendorFolders(opts, []string{tc.request}); len(healed) != 0 || len(blocked) != 0 {
 				t.Fatalf("Secure Client gate: %+v %+v", healed, blocked)
 			}
+			if problems := MachinePolicyProblems(opts, []string{tc.request}); len(problems) != 0 {
+				t.Fatalf("Secure Client: Setup's machine policy problems = %+v", problems)
+			}
+			if problems := UnrecordedPolicyFileProblems(opts, []string{tc.request}); len(problems) != 0 {
+				t.Fatalf("Secure Client: the guardian's unrecorded files = %+v", problems)
+			}
 			verify, _ := VerifyAll(opts, []string{tc.request})
 			if state, ok := stateNamed(verify, tc.connector); ok && strings.Contains(strings.Join(state.Conflicts, " "), "no record of writing it") {
 				t.Fatalf("Secure Client verify names the file: %+v", state.Conflicts)
@@ -346,7 +352,7 @@ func TestInspectReportsAnUnrecordedLinkAnAdministratorOwns(t *testing.T) {
 			problems := InspectRecordedVendorFolders(opts, []string{tc.request})
 			if len(problems) != 1 || !problems[0].UnrecordedFile || problems[0].PendingMoveAside || !strings.EqualFold(problems[0].File, file) ||
 				!strings.EqualFold(problems[0].Dir, folder) || !strings.Contains(problems[0].Message, "not a regular file") ||
-				!strings.Contains(problems[0].Message, `Move-Item -LiteralPath "`+file+`"`) {
+				!strings.Contains(problems[0].Message, `Rename-Item -LiteralPath '`+file+`' -NewName '`+filepath.Base(file)+`.moved-aside'`) {
 				t.Fatalf("problems = %+v; want the link named with the move-aside recovery", problems)
 			}
 		})
@@ -356,7 +362,7 @@ func TestInspectReportsAnUnrecordedLinkAnAdministratorOwns(t *testing.T) {
 // Machine-policy verify and Setup are fed by one function: another conflict
 // the target raises (an administrator's sibling that is not valid JSON) shows
 // in Setup's problems too, and a healthy folder shows none.
-func TestGoOwnedPolicyProblemsCarryEveryMachinePolicyConflict(t *testing.T) {
+func TestMachinePolicyProblemsCarryEveryMachinePolicyConflict(t *testing.T) {
 	for _, tc := range unrecordedCases() {
 		if tc.connector != ConnectorCopilot {
 			continue
@@ -377,7 +383,7 @@ func TestGoOwnedPolicyProblemsCarryEveryMachinePolicyConflict(t *testing.T) {
 			if !ok || state.Covered || len(state.Conflicts) == 0 {
 				t.Fatalf("verify state = %+v, %v; want a conflict", state, ok)
 			}
-			problems := GoOwnedPolicyProblems(opts, []string{tc.request})
+			problems := MachinePolicyProblems(opts, []string{tc.request})
 			found := false
 			for _, problem := range problems {
 				if problem.Conflict && problem.Connector == tc.connector && strings.Contains(problem.Message, "not valid JSON") && strings.Contains(problem.Message, file) {
@@ -392,7 +398,7 @@ func TestGoOwnedPolicyProblemsCarryEveryMachinePolicyConflict(t *testing.T) {
 			}
 			_ = folder
 			// The host may lack the hook executable; only the sibling matters here.
-			for _, problem := range GoOwnedPolicyProblems(opts, []string{tc.request}) {
+			for _, problem := range MachinePolicyProblems(opts, []string{tc.request}) {
 				if strings.Contains(problem.Message, "not valid JSON") || strings.Contains(problem.Message, file) {
 					t.Fatalf("the removed sibling is still reported: %+v", problem)
 				}
@@ -451,5 +457,80 @@ func TestInspectDoesNotListTheForeignFileOfAFolderAlreadyReportedWeak(t *testing
 				t.Fatalf("blocked = %+v; want only the weak folder", blocked)
 			}
 		})
+	}
+}
+
+// D1: the recovery is for an elevated PowerShell prompt, so a path with a $,
+// a backtick or a quote cannot expand or end its literal early.
+func TestUnrecordedFileFixQuotesEveryPathAsAPowerShellLiteral(t *testing.T) {
+	path := "C:\\ProgramData\\opencode\\it's $env:TEMP `x`.json"
+	fix := unrecordedFileFix(path, true)
+	quoted := "'C:\\ProgramData\\opencode\\it''s $env:TEMP `x`.json'"
+	if strings.Count(fix, quoted) != 3 || strings.Contains(fix, `"`) {
+		t.Fatalf("fix = %s; want the path as the single-quoted literal %s three times and no double quote", fix, quoted)
+	}
+	rename := unrecordedFileFix(path, false)
+	if !strings.HasPrefix(rename, "Rename-Item -LiteralPath "+quoted+" -NewName ") || strings.Contains(rename, "Move-Item") {
+		t.Fatalf("rename = %s; want Rename-Item (it fails when the name exists, Move-Item would move into a planted folder)", rename)
+	}
+}
+
+// The property the lead asked for: for every connector on the machine policy
+// route, if machine-policy verify says uncovered for any reason, Setup's
+// problems name that connector; where it says covered, they name nothing for
+// it. Checked unpublished, after the Go-owned publish, and with a conflict an
+// administrator's sibling adds.
+func TestMachinePolicyProblemsNameEveryConnectorMachinePolicyVerifyCallsUncovered(t *testing.T) {
+	pinReclaimStandalone(t, true)
+	opts := windowsOpenCodeTestOptions(t)
+	opts.CopilotCLIPolicyOnly = true
+	all := []string{ConnectorCodex, ConnectorClaudeCode, ConnectorCursor, ConnectorCopilot, ConnectorOpenCode}
+	check := func(step string) map[string]bool {
+		t.Helper()
+		verify, err := VerifyAll(opts, all)
+		problems := MachinePolicyProblems(opts, all)
+		named := map[string]bool{}
+		for _, problem := range problems {
+			named[problem.Connector] = true
+		}
+		uncovered := 0
+		for _, state := range verify.States {
+			if state.Route != RouteMachinePolicy {
+				continue
+			}
+			if !state.Covered {
+				uncovered++
+				if !named[state.Connector] {
+					t.Fatalf("%s: machine-policy verify calls %s uncovered (%+v) but Setup names nothing for it: %+v", step, state.Connector, state, problems)
+				}
+			} else if named[state.Connector] {
+				t.Fatalf("%s: %s is covered but Setup names a problem: %+v", step, state.Connector, problems)
+			}
+		}
+		if (err != nil || uncovered > 0) && len(problems) == 0 {
+			t.Fatalf("%s: machine-policy verify is not complete (err %v, %d uncovered) and Setup has no problem", step, err, uncovered)
+		}
+		return named
+	}
+	if named := check("nothing published"); !named[ConnectorCopilot] || !named[ConnectorOpenCode] {
+		t.Fatalf("nothing published: Copilot and OpenCode must be named: %v", named)
+	}
+	if _, err := PublishWindowsGoOwned(opts, []string{ConnectorCopilot, ConnectorOpenCode}); err != nil {
+		t.Logf("publish: %v", err)
+	}
+	check("after the Go-owned publish")
+	folder, err := CopilotPolicyDir(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sibling := filepath.Join(folder, "70-bad.json")
+	if err := os.WriteFile(sibling, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := applySDDL(sibling, unrecordedAdminOnlyDACL); err != nil {
+		t.Fatal(err)
+	}
+	if named := check("an invalid administrator sibling"); !named[ConnectorCopilot] {
+		t.Fatalf("an invalid sibling must be named for Copilot: %v", named)
 	}
 }
