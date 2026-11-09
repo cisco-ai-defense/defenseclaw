@@ -181,9 +181,9 @@ func TestReportedSkillLinksAreAllJudged(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(proj, 0o700) })
 	api := &APIServer{store: store, logger: logger, scannerCfg: &config.Config{AssetPolicy: config.DefaultAssetPolicy()}}
-	decide := func(links []string, paths []string) (bool, string) {
+	decide := func(facts assetfacts.Facts, paths []string) (bool, string) {
 		t.Helper()
-		claims, _ := assetfacts.Decode(assetfacts.Encode(assetfacts.Facts{SkillLinks: links}))
+		claims, _ := assetfacts.Decode(assetfacts.Encode(facts))
 		ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1001, Name: "fixture", Home: home})
 		ctx = context.WithValue(ctx, claimedAssetFactsContextKey{}, claims)
 		decision, matched := api.claudeCodeSkillAssetDecision(ctx, claudeCodeHookRequest{
@@ -193,15 +193,30 @@ func TestReportedSkillLinksAreAllJudged(t *testing.T) {
 		return matched && decision.Action == "block", decision.Reason
 	}
 	// 20 ordinary links then the held one, all reported: refused for the held one.
-	if blocked, _ := decide(append(append([]string{}, targets[:20]...), targets[69]), append(append([]string{}, paths[:20]...), paths[69])); !blocked {
+	if blocked, _ := decide(assetfacts.Facts{SkillLinks: append(append([]string{}, targets[:20]...), targets[69])}, append(append([]string{}, paths[:20]...), paths[69])); !blocked {
 		t.Fatal("a held folder after 20 ordinary linked folders was allowed")
 	}
-	// Only ordinary folders reported: allowed.
-	if blocked, reason := decide(targets[:20], paths[:20]); blocked {
-		t.Fatalf("ordinary linked folders were refused: %s", reason)
+	// All 70 linked folders reported, the held one last: refused, and no cut.
+	if blocked, _ := decide(assetfacts.Facts{SkillLinks: targets}, paths); !blocked {
+		t.Fatal("a held folder after 69 ordinary linked folders was allowed")
 	}
-	// 70 linked folders: the report is cut, the call is refused as unproven.
-	if blocked, _ := decide(targets, paths); !blocked {
-		t.Fatal("a call past the bound of reported linked folders was allowed")
+	// Only ordinary folders reported, however many: allowed.
+	for _, n := range []int{20, 65, 69} {
+		if blocked, reason := decide(assetfacts.Facts{SkillLinks: targets[:n]}, paths[:n]); blocked {
+			t.Fatalf("%d ordinary linked folders were refused: %s", n, reason)
+		}
+	}
+	// A report that could not carry every link names a folder that cannot be
+	// ruled out while a skill is held: refused as unproven.
+	if blocked, _ := decide(assetfacts.Facts{SkillLinks: targets[:20], SkillLinksTruncated: true}, paths[:20]); !blocked {
+		t.Fatal("a cut report was allowed while a skill is held")
+	}
+	// With nothing held or denied no folder can be one, and the same cut
+	// report runs the ordinary call.
+	if err := enforce.NewPolicyEngine(store).Enable("skill", "held"); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, reason := decide(assetfacts.Facts{SkillLinks: targets[:20], SkillLinksTruncated: true}, paths[:20]); blocked {
+		t.Fatalf("a cut report with nothing held or denied was refused: %s", reason)
 	}
 }

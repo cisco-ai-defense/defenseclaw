@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
@@ -83,5 +84,40 @@ func TestHookAssetFactsReportsTheSkillFolderALinkLeadsTo(t *testing.T) {
 		if facts, _ := assetfacts.Decode(hookAssetFacts("claudecode", event(path))); len(facts.SkillLinks) != 0 {
 			t.Fatalf("%s: SkillLinks = %v, want none", path, facts.SkillLinks)
 		}
+	}
+}
+
+// A linked held folder whose path is long (a deep project or home) is still
+// reported: the claim is not cut at the length of an ordinary field.
+func TestHookAssetFactsReportsALongLinkedSkillFolderPath(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := base
+	for len(home)-len(base) < 1200 {
+		home = filepath.Join(home, strings.Repeat("d", 200))
+	}
+	held := filepath.Join(home, ".claude", "skills", "held")
+	proj := filepath.Join(home, "proj")
+	for _, dir := range []string{held, proj} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Skipf("cannot make a path this long here: %v", err)
+		}
+	}
+	if err := os.Symlink(held, filepath.Join(proj, "lnk-held")); err != nil {
+		t.Skipf("cannot create a link here: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	raw, err := json.Marshal(map[string]any{
+		"tool_name": "Read", "cwd": proj, "tool_input": map[string]any{"file_path": "lnk-held/SKILL.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, _ := assetfacts.Decode(hookAssetFacts("claudecode", raw))
+	if len(held) <= 1024 || len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != held || facts.SkillLinksTruncated {
+		t.Fatalf("held path of %d bytes: SkillLinks = %v truncated=%t, want it reported", len(held), facts.SkillLinks, facts.SkillLinksTruncated)
 	}
 }

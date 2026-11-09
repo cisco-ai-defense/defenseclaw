@@ -69,12 +69,17 @@ const (
 	// small deflated value cannot make the gateway allocate without limit.
 	maxDecodedBytes = 8 << 20
 	maxSkills       = 16
-	// maxSkillLinks bounds the linked skill folders a claim carries. They are
-	// the evidence a gateway that cannot follow a link has, so the bound is
-	// wide and a call past it says so (Facts.SkillLinksTruncated).
-	maxSkillLinks = 64
-	maxFieldBytes = 1024
-	maxArgs       = 32
+	// maxSkillLinks, maxSkillLinkBytes and maxSkillLinkPathBytes bound the
+	// linked skill folders a claim carries: their number, their text in all
+	// and one path (a Windows path can be 32 KiB). They are the evidence a
+	// gateway that cannot follow a link has, so the bounds are far past any
+	// ordinary call, and a link the claim does not carry for any reason says
+	// so (Facts.SkillLinksTruncated).
+	maxSkillLinks         = 4096
+	maxSkillLinkBytes     = 512 << 10
+	maxSkillLinkPathBytes = 32 << 10
+	maxFieldBytes         = 1024
+	maxArgs               = 32
 	// maxPinArgs bounds the argument digests a claim carries: a definition
 	// past maxArgs still pins every argument a deny prefix can sensibly name.
 	// A prefix longer than this cannot be ruled out and is refused.
@@ -125,9 +130,11 @@ type Facts struct {
 	// profile cannot follow the link itself and so would judge only the
 	// spelling of the path.
 	SkillLinks []string `json:"skill_links,omitempty"`
-	// SkillLinksTruncated says SkillLinks holds only the first maxSkillLinks
-	// folders: one past them cannot be ruled out, so the gateway refuses the
-	// call as unproven instead of judging only the folders it was told of.
+	// SkillLinksTruncated says a linked folder the hook found is not in
+	// SkillLinks (past the bounds, or a path the claim cannot carry): the
+	// gateway cannot rule out that it is held or denied, so it refuses the
+	// call as unproven when it has a held or denied skill to protect, instead
+	// of judging only the folders it was told of.
 	SkillLinksTruncated bool `json:"skill_links_truncated,omitempty"`
 	// SkillsTruncated says Skills holds only the first maxSkills claims: a
 	// folder the request reaches into may declare a name no claim names, so
@@ -347,15 +354,16 @@ func bounded(facts Facts) Facts {
 	}
 	facts.SkillDirs = dirs
 	var links []string
+	linkBytes := 0
 	for _, dir := range facts.SkillLinks {
-		dir = clean(dir, maxFieldBytes)
-		if !filepath.IsAbs(dir) {
-			continue
-		}
-		if len(links) == maxSkillLinks {
+		// A link that is not carried must be signalled, whatever the reason:
+		// it is a folder the gateway would otherwise never look at.
+		dir = clean(dir, maxSkillLinkPathBytes)
+		if !filepath.IsAbs(dir) || len(links) == maxSkillLinks || linkBytes+len(dir) > maxSkillLinkBytes {
 			facts.SkillLinksTruncated = true
 			continue
 		}
+		linkBytes += len(dir)
 		links = append(links, filepath.Clean(dir))
 	}
 	facts.SkillLinks = links
