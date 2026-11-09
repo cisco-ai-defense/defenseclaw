@@ -72,9 +72,21 @@ func TestAgentHookConfigExecutedLinkPlacement(t *testing.T) {
 		{"child shell assignment stays in a command substitution", "f() { dest=" + ordinary + "; }; src=" + named + "; dest=" + bin + "; x=$(f); ln -sf \"$src\" \"$dest\"/", "block"},
 		{"child shell assignment stays in a subshell", "f() { dest=" + ordinary + "; }; src=" + named + "; dest=" + bin + "; (f); ln -sf \"$src\" \"$dest\"/", "block"},
 		{"child shell protected value stays in the child", "f() { dest=" + bin + "; }; src=" + named + "; dest=" + ordinary + "; x=$(f); ln -sf \"$src\" \"$dest\"/", "allow"},
-		{"function returns before its link", "link_hook() { return 0; ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; link_hook", "allow"},
+		{"function returns before its link", "link_hook() { return 0; ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; link_hook", "block"},
 		{"definition in a branch that does not run", "if false; then link_hook() { ln -sf \"$src\" \"$dest\"/; }; fi; src=" + named + "; dest=" + bin + "; link_hook", "allow"},
 		{"function removed before the call", "link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; unset -f link_hook; link_hook", "allow"},
+		{"pipeline stage state with the word lastpipe as an argument", "echo lastpipe; f() { dest=" + ordinary + "; }; src=" + named + "; dest=" + bin + "; f | cat; ln -sf \"$src\" \"$dest\"/", "block"},
+		{"pipeline stage state with the lastpipe option", "shopt -s lastpipe; f() { dest=" + ordinary + "; }; src=" + named + "; dest=" + bin + "; f | cat; ln -sf \"$src\" \"$dest\"/", "block"},
+		{"pipeline stage binds the protected destination", "f() { dest=" + bin + "; }; src=" + named + "; dest=" + ordinary + "; f | cat; ln -sf \"$src\" \"$dest\"/", "block"},
+		{"pipeline stage state with an ordinary link", "f() { dest=" + ordinary + "; }; src=" + named + "; dest=" + ordinary + "; f | cat; ln -sf \"$src\" \"$dest\"/", "allow"},
+		{"exit with a failing redirection", "src=" + named + "; dest=" + bin + "; exit > " + ordinary + "/missing/never; ln -sf \"$src\" \"$dest\"/", "block"},
+		{"return with a failing redirection", "f() { return > " + ordinary + "/missing/never; ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; f", "block"},
+		{"function shadowing exit", "exit() { :; }; src=" + named + "; dest=" + bin + "; exit; ln -sf \"$src\" \"$dest\"/", "block"},
+		{"exit inside a called function", "f() { exit 0; }; src=" + named + "; dest=" + bin + "; f; ln -sf \"$src\" \"$dest\"/", "block"},
+		{"return inside a nested block", "f() { { return 0; }; ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; f", "block"},
+		{"exit before an ordinary link", "src=" + named + "; dest=" + ordinary + "; exit 0; ln -sf \"$src\" \"$dest\"/", "allow"},
+		{"function shadowing unset keeps the function", "unset() { :; }; link_hook() { ln -sf \"$src\" \"$dest\"/; }; src=" + named + "; dest=" + bin + "; unset -f link_hook; link_hook", "block"},
+		{"function shadowing unset with an ordinary link", "unset() { :; }; link_hook() { ln -sf \"$1\" \"$2\"/; }; unset -f link_hook; link_hook " + ordinary + "/note " + ordinary, "allow"},
 	}
 	for _, row := range rows {
 		for _, profile := range []string{"permissive", "default", "strict"} {
