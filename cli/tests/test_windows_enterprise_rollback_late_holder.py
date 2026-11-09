@@ -103,7 +103,7 @@ def test_a_failed_run_whose_rollback_met_a_holder_ends_with_the_held_code_and_th
     block = text[start : start + 900]
     assert "(Test-DefenseClawStandaloneProfile)" in text[start - 250 : start]
     assert "Test-DefenseClawRollbackHeldMessage" in text[start - 250 : start]
-    assert "had failed first: " in block
+    assert ". This $Action had failed first: " in block
     # Secure Client strict ancestors keeps its combined message, ahead of this.
     assert text.rindex("rollback also failed and pending recovery was retained", 0, start) > start - 500
 

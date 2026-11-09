@@ -47541,7 +47541,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 # file it must put back. The restored services run; the run
                 # ends with the retryable held code, naming the holder, and
                 # the failure that caused the rollback follows it.
-                throw ([string]$_.Exception.Message + " This $Action had failed first: " + [string]$operationError.Exception.Message)
+                throw ([string]$_.Exception.Message + ". This $Action had failed first: " + [string]$operationError.Exception.Message)
             }
             # The pending transaction stays on disk: Repair resumes it, and
             # the next Install clears it through its automatic recovery. The
