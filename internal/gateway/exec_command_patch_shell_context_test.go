@@ -19,8 +19,8 @@ import (
 // remove a function of the same name. An envelope that targets a protected
 // file is blocked, an envelope that only touches ordinary files is allowed,
 // and a call of a function that has no envelope is never judged by this rule.
-// A function that nothing in the text calls runs nothing, so a text that only
-// defines it has no command to judge.
+// A function body is judged whether or not the text calls the function: the
+// rule reads the envelope, not the order in which the shell would run it.
 func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 	home, project := hermesPatchHome(t)
 	const (
@@ -51,7 +51,14 @@ func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 		{name: "function called by source", command: func(p string) string {
 			return "f() {\n" + envelope(p) + "}\ndeclare -f f > fdef.sh\nsource fdef.sh\nf\n"
 		}, protect: true},
-		{name: "function body that nothing in the text calls", command: func(p string) string { return "f() {\n" + envelope(p) + "}\n" }},
+		{name: "function body that nothing in the text calls", command: func(p string) string { return "f() {\n" + envelope(p) + "}\n" }, protect: true},
+		{name: "subshell function that nothing in the text calls", command: func(p string) string { return "f() (\n" + envelope(p) + ")\n" }, protect: true},
+		{name: "function nested in an uncalled function", command: func(p string) string {
+			return "g() {\nf() {\n" + envelope(p) + "}\n}\n"
+		}, protect: true},
+		{name: "function nested in a called function", command: func(p string) string {
+			return "g() {\nf() {\n" + envelope(p) + "}\n}\ng\n"
+		}, protect: true},
 		{name: "and list", command: func(p string) string { return "test -d . && " + envelope(p) }, protect: true},
 		{name: "or list", command: func(p string) string { return "test -d nowhere || " + envelope(p) }, protect: true},
 		{name: "if branch", command: func(p string) string { return "if test -d .; then\n" + envelope(p) + "fi\n" }, protect: true},
@@ -90,6 +97,9 @@ func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 		{name: "after alias settings", command: func(p string) string {
 			return "apply_patch() { :; }\nshopt -s expand_aliases\nalias apply_patch='command apply_patch'\n" + envelope(p)
 		}, protect: true},
+		{name: "uncalled function with no envelope", noPatch: true, command: func(string) string {
+			return "f() {\n  echo ready\n}\n"
+		}},
 		{name: "function defined and called with no envelope", noPatch: true, command: func(string) string {
 			return "apply_patch() { :; }\napply_patch\n"
 		}},
