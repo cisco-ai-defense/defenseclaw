@@ -263,6 +263,17 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"assigning default after a superseded value": "F=/etc/ld.so.preload; F=" + notes + "; echo ${X:=ok}; echo " + lib + " > \"$F\"",
 		"assigning default in a body":                "cat > " + notes + " <<EOF\n${X:=" + load + " }\nEOF\n",
 		"quoted substitution of an ordinary operand": "tee \"$(date)\" < /dev/null > " + notes,
+		// A default expansion sets a name only when it holds no value, and
+		// text the shell does not expand sets nothing.
+		"default of a set ordinary file":           "F=" + notes + "; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"default of a set ordinary file, printed":  "F=" + notes + "; echo ${F:=/etc/ld.so.preload} > " + notes + "; echo " + lib + " > \"$F\"",
+		"default of a set ordinary file, no colon": "F=" + notes + "; : ${F=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"default in a single quote":                "F=" + notes + "; echo '${F:=/etc/ld.so.preload}' > " + notes + "; echo " + lib + " > \"$F\"",
+		"default in a quoted body":                 "F=" + notes + "; cat <<'EOF2' > " + notes + "\n${F:=/etc/ld.so.preload}\nEOF2\necho " + lib + " > \"$F\"",
+		"default after an escaped dollar":          "F=" + notes + "; echo \\${F:=/etc/ld.so.preload} > " + notes + "; echo " + lib + " > \"$F\"",
+		"default in a comment":                     "F=" + notes + "; # ${F:=/etc/ld.so.preload}\necho " + lib + " > \"$F\"",
+		"default in a single quote, no value set":  "echo '${F:=/etc/ld.so.preload}' > " + notes + "; echo " + lib + " > \"$F\"",
+		"default in a comment of a substitution":   "echo $(ls # ${F:=/etc/ld.so.preload}\n) > " + notes + "; echo " + lib + " > \"$F\"",
 	} {
 		for padName, pad := range paddings {
 			t.Run("benign/"+name+"/"+padName, func(t *testing.T) {
@@ -317,6 +328,10 @@ func TestOverLimitCommandDataPaddingFollowsShellOrder(t *testing.T) {
 		"quoted redirect target with a substitution": "echo ok > \"$(" + load + ")\"",
 		"assigned protected file":                    ": ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
 		"assigning default with a substitution":      "cat > " + notes + " <<EOF\n${X:=$(" + load + ")}\nEOF\n",
+		"default of an unset name":                   "F=" + notes + "; unset F; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"default of an empty name":                   "F=; : ${F:=/etc/ld.so.preload}; echo " + lib + " > \"$F\"",
+		"default in double quotes around single":     "echo \"'${F:=/etc/ld.so.preload}'\" > " + notes + "; echo " + lib + " > \"$F\"",
+		"quoted substitution, set ordinary file":     "F=" + notes + "; tee \"$(" + load + ")\" < /dev/null > \"$F\"",
 	} {
 		for padName, pad := range paddings {
 			t.Run("attack/"+name+"/"+padName, func(t *testing.T) {

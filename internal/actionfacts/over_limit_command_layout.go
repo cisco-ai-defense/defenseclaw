@@ -51,14 +51,19 @@ import (
 // text stays sequential. A braced expansion is data, except the
 // substitutions inside it; the variable an assigning one (${NAME=word}) may
 // set is added to the values the caller follows, where the expansion is
-// written. A word that holds code is skipped as text only outside it. The inside of a command
+// written when the shell expands it there (braced): an expansion in a single
+// quote, after a backslash, in a comment or in a here-document body that is
+// quoted is text and sets nothing. A word that holds code is skipped as text
+// only outside it. The inside of a command
 // substitution is read as a command text of its own, to a bounded depth, so
 // the comments, data and printed words inside it are skipped as they are
 // outside it. A construct the reading cannot step over (a process
 // substitution, an arithmetic bracket, an unterminated quote or
 // substitution) makes the whole layout unknown: the caller then reads the
 // text as before, every cd and assignment counting wherever it is, nothing
-// skipped.
+// skipped. Text the reading leaves as text that may still run (the inside of a
+// backtick, of a substitution too deep to follow, the body of a here-document
+// that feeds a shell) is raw: any expansion in it counts.
 
 type textSpan struct{ start, end int }
 
@@ -77,6 +82,40 @@ type commandLayout struct {
 	sequential bool
 	// scopes are the command substitutions and backticks, in text order.
 	scopes []textSpan
+	// parsed is true for a layout the reading produced, false for the zero
+	// layout of a text it does not follow.
+	parsed bool
+	// braced are the starts of the braced expansions (${) the shell expands
+	// where they are written: not those in single quotes, after a backslash,
+	// in comments or in the data of a quoted here-document.
+	braced map[int]bool
+	// raw are the spans left as text that may run; sorted, not overlapping.
+	raw []textSpan
+}
+
+// expandsAt reports whether a dollar sign at index may start an expansion the
+// shell runs: always for a text the reading does not follow and in raw text,
+// else only when the reading found it in a place the shell expands.
+func (l commandLayout) expandsAt(index int) bool {
+	if !l.parsed || l.braced[index] {
+		return true
+	}
+	at, found := slices.BinarySearchFunc(l.raw, index, func(span textSpan, index int) int { return span.start - index })
+	return found || at > 0 && l.raw[at-1].end > index
+}
+
+// mergeSpans sorts spans and joins those that overlap.
+func mergeSpans(spans []textSpan) []textSpan {
+	slices.SortFunc(spans, func(a, b textSpan) int { return a.start - b.start })
+	merged := spans[:0]
+	for _, span := range spans {
+		if last := len(merged) - 1; last >= 0 && span.start <= merged[last].end {
+			merged[last].end = max(merged[last].end, span.end)
+			continue
+		}
+		merged = append(merged, span)
+	}
+	return merged
 }
 
 // spanEnd is the end of the span that holds index, index when none does.
@@ -135,8 +174,10 @@ type layoutWord struct {
 	plain, quoted bool
 	assign        bool
 	// code are the spans of the word, in text order, that hold a
-	// substitution or an expansion the shell runs.
-	code []textSpan
+	// substitution or an expansion the shell runs; braced are the starts of
+	// its braced expansions.
+	code   []textSpan
+	braced []int
 }
 
 type layoutDocument struct {
@@ -181,7 +222,7 @@ func readLayoutAt(text string, depth int) (commandLayout, bool) {
 	r := &layoutReader{
 		text:   text,
 		depth:  depth,
-		layout: commandLayout{straight: map[int]bool{}, sequential: true},
+		layout: commandLayout{straight: map[int]bool{}, sequential: true, parsed: true, braced: map[int]bool{}},
 		before: "start",
 	}
 	for index := 0; index < len(text); {
@@ -247,6 +288,7 @@ func readLayoutAt(text string, depth int) (commandLayout, bool) {
 	slices.SortFunc(r.layout.skipped, func(a, b textSpan) int { return a.start - b.start })
 	slices.SortFunc(r.layout.quoted, func(a, b textSpan) int { return a.start - b.start })
 	slices.SortFunc(r.layout.scopes, func(a, b textSpan) int { return a.start - b.start })
+	r.layout.raw = mergeSpans(r.layout.raw)
 	return r.layout, true
 }
 
@@ -299,6 +341,7 @@ func (r *layoutReader) operator(index int) (int, bool) {
 // file descriptor number before one are no words of the command.
 func (r *layoutReader) addWord(word layoutWord, next int) {
 	r.readInside(word.code)
+	r.markBraced(word.braced)
 	switch {
 	case r.target:
 		r.target = false
@@ -311,6 +354,13 @@ func (r *layoutReader) addWord(word layoutWord, next int) {
 			r.layout.quoted = append(r.layout.quoted, textSpan{word.start, next})
 		}
 		r.words = append(r.words, word)
+	}
+}
+
+// markBraced records the braced expansions the shell expands.
+func (r *layoutReader) markBraced(starts []int) {
+	for _, start := range starts {
+		r.layout.braced[start] = true
 	}
 }
 
@@ -371,7 +421,7 @@ func (r *layoutReader) endStatement(term string) {
 		for _, word := range words[1:] {
 			r.layout.straight[word.start] = true
 		}
-	case command == "cd" && first == 0:
+	case (command == "cd" || command == "unset") && first == 0:
 		r.layout.straight[words[0].start] = true
 	}
 }
@@ -399,19 +449,29 @@ func (r *layoutReader) readInside(code []textSpan) {
 		r.layout.scopes = append(r.layout.scopes, span)
 		if r.text[span.start] == shellDollar {
 			r.readSubstitution(span)
+		} else {
+			r.layout.raw = append(r.layout.raw, span)
 		}
 	}
 }
 
 // readSubstitution reads the inside of the command substitution at span.
 func (r *layoutReader) readSubstitution(span textSpan) {
+	start := span.start + 2
 	if r.depth >= maxLayoutDepth {
+		r.layout.raw = append(r.layout.raw, span)
 		return
 	}
-	start := span.start + 2
 	inside, ok := readLayoutAt(r.text[start:span.end-1], r.depth+1)
 	if !ok {
+		r.layout.raw = append(r.layout.raw, span)
 		return
+	}
+	for brace := range inside.braced {
+		r.layout.braced[start+brace] = true
+	}
+	for _, raw := range inside.raw {
+		r.layout.raw = append(r.layout.raw, textSpan{start + raw.start, start + raw.end})
 	}
 	for _, skipped := range inside.skipped {
 		r.layout.skipped = append(r.layout.skipped, textSpan{start + skipped.start, start + skipped.end})
@@ -452,9 +512,13 @@ func (r *layoutReader) readDocuments(index int) int {
 	for _, document := range r.documents {
 		end := heredocBodyEnd(r.text, index, document.delimiter, document.stripTabs)
 		switch {
-		case !data || end <= index:
+		case end <= index:
+		case !data:
+			r.layout.raw = append(r.layout.raw, textSpan{index, end})
 		case document.expands:
-			code := documentCode(r.text[:end], index)
+			var braced []int
+			code := documentCode(r.text[:end], index, &braced)
+			r.markBraced(braced)
 			r.skipOutsideCode(index, end, code)
 			r.readInside(code)
 		default:
@@ -471,8 +535,9 @@ func (r *layoutReader) readDocuments(index int) int {
 // backtick that no backslash escapes, also inside a braced expansion. The
 // braced expansion itself is data. Quotes are plain text in a body, but not
 // inside a substitution. A substitution, or an expansion, that does not close
-// runs to the end of the body.
-func documentCode(text string, index int) []textSpan {
+// runs to the end of the body. The starts of the braced expansions are added
+// to braced when it is not nil.
+func documentCode(text string, index int, braced *[]int) []textSpan {
 	var code []textSpan
 	for ; index < len(text); index++ {
 		var end int
@@ -487,7 +552,10 @@ func documentCode(text string, index int) []textSpan {
 		case text[index] == shellDollar && index+1 < len(text) && text[index+1] == shellOpenBrace:
 			end = layoutNestedEnd(text, index+2, shellCloseBrace)
 			if end >= 0 {
-				code = append(code, documentCode(text[:end-1], index+2)...)
+				if braced != nil {
+					*braced = append(*braced, index)
+				}
+				code = append(code, documentCode(text[:end-1], index+2, braced)...)
 				index = end - 1
 				continue
 			}
@@ -523,7 +591,7 @@ func readLayoutWord(text string, index int) (layoutWord, int, bool) {
 			index += end + 2
 			word.plain, word.quoted = false, true
 		case shellDoubleQuote:
-			end := layoutDoubleQuoteEnd(text, index, &word.code)
+			end := layoutDoubleQuoteEnd(text, index, &word.code, &word.braced)
 			if end < 0 {
 				return layoutWord{}, 0, false
 			}
@@ -546,7 +614,7 @@ func readLayoutWord(text string, index int) (layoutWord, int, bool) {
 			index = end
 			word.plain = false
 		case shellDollar:
-			end := layoutDollarEnd(text, index, &word.code)
+			end := layoutDollarEnd(text, index, &word.code, &word.braced)
 			if end < 0 {
 				return layoutWord{}, 0, false
 			}
@@ -569,8 +637,9 @@ func readLayoutWord(text string, index int) (layoutWord, int, bool) {
 // variable (its name is read as plain word bytes), a ${NAME}, ANSI-C and
 // locale quoting, or code: a command substitution or an expansion with an
 // operator, whose span is added to code. -1 for arithmetic brackets and for a
-// construct that does not close.
-func layoutDollarEnd(text string, index int, code *[]textSpan) int {
+// construct that does not close. The start of a braced expansion is added to
+// braced when it is not nil.
+func layoutDollarEnd(text string, index int, code *[]textSpan, braced *[]int) int {
 	if index+1 >= len(text) {
 		return index + 1
 	}
@@ -594,7 +663,7 @@ func layoutDollarEnd(text string, index int, code *[]textSpan) int {
 		}
 		return -1
 	case shellDoubleQuote:
-		return layoutDoubleQuoteEnd(text, index+1, code)
+		return layoutDoubleQuoteEnd(text, index+1, code, braced)
 	case shellOpenBrace:
 		end := index + 2
 		for end < len(text) && (text[end] == '_' || text[end] >= 'A' && text[end] <= 'Z' ||
@@ -606,7 +675,10 @@ func layoutDollarEnd(text string, index int, code *[]textSpan) int {
 		}
 		end = layoutNestedEnd(text, index+2, shellCloseBrace)
 		if end >= 0 && code != nil {
-			*code = append(*code, documentCode(text[:end-1], index+2)...)
+			if braced != nil {
+				*braced = append(*braced, index)
+			}
+			*code = append(*code, documentCode(text[:end-1], index+2, braced)...)
 		}
 		return end
 	}
@@ -616,7 +688,7 @@ func layoutDollarEnd(text string, index int, code *[]textSpan) int {
 // layoutDoubleQuoteEnd is the index after the double quote that closes the
 // string opened at index, with the code spans inside it added to code; -1 for
 // an unterminated string and for arithmetic brackets inside it.
-func layoutDoubleQuoteEnd(text string, index int, code *[]textSpan) int {
+func layoutDoubleQuoteEnd(text string, index int, code *[]textSpan, braced *[]int) int {
 	for next := index + 1; next < len(text); next++ {
 		switch text[next] {
 		case shellBackslash:
@@ -637,7 +709,7 @@ func layoutDoubleQuoteEnd(text string, index int, code *[]textSpan) int {
 			if next+1 < len(text) && (text[next+1] == shellSingleQuote || text[next+1] == shellDoubleQuote) {
 				continue
 			}
-			end := layoutDollarEnd(text, next, code)
+			end := layoutDollarEnd(text, next, code, braced)
 			if end < 0 {
 				return -1
 			}
@@ -679,7 +751,7 @@ func layoutNestedEnd(text string, index int, closer byte) int {
 			}
 			index += end + 1
 		case c == shellDoubleQuote:
-			end := layoutDoubleQuoteEnd(text, index, nil)
+			end := layoutDoubleQuoteEnd(text, index, nil, nil)
 			if end < 0 {
 				return -1
 			}

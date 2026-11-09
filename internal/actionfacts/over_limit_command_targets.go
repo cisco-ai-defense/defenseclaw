@@ -160,6 +160,10 @@ type commandWriteScan struct {
 	// vars are the values the text assigns to a variable name, for the names
 	// whose value is, or holds, a protected file.
 	vars map[string][]string
+	// watched are the names some braced expansion of the text may assign
+	// (${NAME:=word}): whatever the text assigns them is kept, an ordinary
+	// value too, because the expansion assigns only when the name holds none.
+	watched map[string]bool
 	// open are the command substitutions and backticks the read is inside:
 	// what the directories and values were when each opened, taken back at its
 	// close, as a subshell leaves the shell around it as it was. next is the
@@ -191,6 +195,7 @@ func (s *commandWriteScan) protectedWriteClass() string {
 		s.layout = layout
 	}
 	s.base = slices.Clone(s.dirs)
+	s.watchExpansions()
 	if !s.layout.sequential {
 		// Every cd and assignment counts wherever it is. The second reading
 		// sees a relative value against the directories the first followed to.
@@ -313,17 +318,55 @@ func (s *commandWriteScan) followBraced(start, end int) {
 	}
 }
 
+// watchExpansions finds the names the braced expansions of the text assign.
+func (s *commandWriteScan) watchExpansions() {
+	for index := 0; index < len(s.text); index++ {
+		if s.text[index] != shellDollar || !s.layout.expandsAt(index) {
+			continue
+		}
+		if name, _, _, ok := bracedAssignmentAt(s.text, index); ok {
+			if s.watched == nil {
+				s.watched = make(map[string]bool)
+			}
+			s.watched[name] = true
+		}
+	}
+}
+
 // followBracedAssignment adds the value of the assigning braced expansion at
-// index (${NAME=word}) to those its variable may hold. The expansion sets the
-// variable only when it is unset, so it never replaces a value.
+// index (${NAME=word}, ${NAME:=word}) to those its variable may hold, when the
+// shell expands it there and the variable holds no value at that point: the
+// expansion sets a variable that is unset (${NAME:=word}: or empty) and never
+// replaces a value, and one in a single quote, after a backslash, in a
+// comment or in quoted here-document data sets nothing.
 func (s *commandWriteScan) followBracedAssignment(text string, index int) {
 	name, start, end, ok := bracedAssignmentAt(text, index)
-	if !ok {
+	if !ok || !s.layout.expandsAt(index) || s.holdsValue(name, start >= 2 && text[start-2] == ':') {
 		return
 	}
 	word, _, plain := readCommandWord(text[:end], start)
 	for _, value := range s.expand(word, plain) {
 		s.addVariable(name, value)
+	}
+}
+
+// holdsValue reports whether the text has given a variable a value at this
+// point: any value, or, with empty, one that is not empty. A name assigned a
+// value the scan cannot read (a substitution) holds one.
+func (s *commandWriteScan) holdsValue(name string, nonEmpty bool) bool {
+	values, assigned := s.vars[name]
+	if !assigned {
+		return false
+	}
+	return !nonEmpty || len(values) == 0 || slices.ContainsFunc(values, func(value string) bool { return value != "" })
+}
+
+// markAssigned records that a watched name was assigned a value the scan
+// cannot read.
+func (s *commandWriteScan) markAssigned(name string) {
+	if _, assigned := s.vars[name]; !assigned && s.watched[name] {
+		s.ownVars()
+		s.vars[name] = []string{}
 	}
 }
 
@@ -355,6 +398,20 @@ func (s *commandWriteScan) followStatement(text string, index int) int {
 		} else {
 			for _, value := range readings {
 				s.addVariable(name, value)
+			}
+			if len(readings) == 0 {
+				s.markAssigned(name)
+			}
+		}
+		return max(after, index+1)
+	}
+	if straight && hasKeywordAt(text, index, "unset", true) {
+		// A name unset in the order written holds no value any more.
+		operands, after := commandOperands(text, index+len("unset"))
+		for _, operand := range operands {
+			if _, assigned := s.vars[operand.word]; assigned && operand.plain {
+				s.ownVars()
+				delete(s.vars, operand.word)
 			}
 		}
 		return max(after, index+1)
@@ -403,14 +460,12 @@ func holdsProtectedFile(value string) bool {
 
 // addVariable adds a value a variable may hold: an absolute path that is, or
 // holds, a protected file, or a relative one that is, or holds, a protected
-// file in a directory the text works in.
+// file in a directory the text works in; any value of a watched name.
 func (s *commandWriteScan) addVariable(name, value string) {
 	if strings.HasPrefix(value, "/") {
 		value = path.Clean(value)
-		if !holdsProtectedFile(value) {
-			return
-		}
-	} else if !s.relativeValueMatters(value) {
+	}
+	if !s.watched[name] && !s.valueMatters(value) {
 		return
 	}
 	if slices.Contains(s.vars[name], value) || len(s.vars[name]) >= scanMaxDirs {
@@ -418,6 +473,14 @@ func (s *commandWriteScan) addVariable(name, value string) {
 	}
 	s.ownVars()
 	s.vars[name] = append(s.vars[name], value)
+}
+
+// valueMatters reports whether a value is, or holds, a protected file.
+func (s *commandWriteScan) valueMatters(value string) bool {
+	if strings.HasPrefix(value, "/") {
+		return holdsProtectedFile(value)
+	}
+	return s.relativeValueMatters(value)
 }
 
 func (s *commandWriteScan) relativeValueMatters(value string) bool {
@@ -437,6 +500,9 @@ func (s *commandWriteScan) relativeValueMatters(value string) bool {
 func (s *commandWriteScan) setVariable(name string, values []string) {
 	s.ownVars()
 	delete(s.vars, name)
+	if s.watched[name] {
+		s.vars[name] = []string{}
+	}
 	for _, value := range values {
 		if strings.HasPrefix(value, "/") {
 			value = path.Clean(value)
