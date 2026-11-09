@@ -188,10 +188,11 @@ type Service struct {
 	kernel        *KernelState
 	kernelNextTry time.Time
 	// kernelHits is the growth of the helper's hit totals per read over the
-	// last hour, and kernelHitTotals the previous read's totals (both under
-	// mu): KernelState's hour counts.
+	// last hour, kernelHitTotals the previous read's totals and
+	// kernelHitsEpoch their epoch (all under mu): KernelState's hour counts.
 	kernelHits      []kernelHitGrowth
 	kernelHitTotals *[2]int64
+	kernelHitsEpoch int64
 	// lastContainerEvents is the container-event count at the previous
 	// poll, for the per-cycle figure. Poll owns it (pollMu).
 	lastContainerEvents int64
@@ -463,7 +464,7 @@ func (s *Service) refreshKernelState(ctx context.Context) {
 		// A helper that predates the op: nothing to report, and nothing to
 		// infer about kernel policies it cannot load.
 		s.kernel = nil
-		s.kernelHits, s.kernelHitTotals = nil, nil
+		s.kernelHits, s.kernelHitTotals, s.kernelHitsEpoch = nil, nil, 0
 		s.kernelNextTry = now.Add(kernelStatusUnsupportedRetry)
 	case err != nil:
 		state := KernelState{}
@@ -477,7 +478,7 @@ func (s *Service) refreshKernelState(ctx context.Context) {
 		state.Error = boundedError(err)
 		s.kernel = &state
 	default:
-		wouldBlock, blocked := s.noteKernelHits(now, status.Counters)
+		wouldBlock, blocked := s.noteKernelHits(now, status.Counters, status.CountersEpoch)
 		s.kernel = &KernelState{Status: status, FetchedAt: now, Reachable: true,
 			WouldBlockLastHour: wouldBlock, BlockedLastHour: blocked}
 	}
@@ -500,16 +501,22 @@ type kernelHitGrowth struct {
 
 // noteKernelHits records a read's growth of the helper's would_block_total
 // and blocked_total and returns their sums over the last hour. The first
-// read is the baseline. The caller holds mu.
-func (s *Service) noteKernelHits(now time.Time, counters map[string]int64) (wouldBlock, blocked int64) {
+// read is the baseline. epoch is the counters' epoch
+// (KernelStatus.CountersEpoch). The caller holds mu.
+func (s *Service) noteKernelHits(now time.Time, counters map[string]int64, epoch int64) (wouldBlock, blocked int64) {
 	totals := [2]int64{counters["would_block_total"], counters["blocked_total"]}
 	if previous := s.kernelHitTotals; previous != nil {
-		growth := kernelHitGrowth{at: now, wouldBlock: counterGrowth(previous[0], totals[0]), blocked: counterGrowth(previous[1], totals[1])}
+		restarted := countersRestarted(s.kernelHitsEpoch, epoch)
+		growth := kernelHitGrowth{
+			at:         now,
+			wouldBlock: counterGrowth(previous[0], totals[0], restarted),
+			blocked:    counterGrowth(previous[1], totals[1], restarted),
+		}
 		if growth.wouldBlock > 0 || growth.blocked > 0 {
 			s.kernelHits = append(s.kernelHits, growth)
 		}
 	}
-	s.kernelHitTotals = &totals
+	s.kernelHitTotals, s.kernelHitsEpoch = &totals, epoch
 	cut := now.Add(-kernelHitWindow)
 	kept := s.kernelHits[:0]
 	for _, growth := range s.kernelHits {
@@ -528,13 +535,21 @@ func (s *Service) noteKernelHits(now time.Time, counters map[string]int64) (woul
 	return wouldBlock, blocked
 }
 
-// counterGrowth is how much a since-start counter grew; one that went down
-// was restarted and counts from zero.
-func counterGrowth(previous, current int64) int64 {
-	if current < previous {
+// counterGrowth is how much a since-start counter grew. A restarted one (a
+// new epoch, or without epochs a count that went down) counts from zero.
+func counterGrowth(previous, current int64, restarted bool) int64 {
+	if restarted || current < previous {
 		return current
 	}
 	return current - previous
+}
+
+// countersRestarted reports a changed epoch of the helper's since-start
+// counters (KernelStatus.CountersEpoch): the helper restarted, and
+// its counts began again at zero. A zero epoch, from a helper that predates
+// it, tells nothing (cowork-1-0-8 GAP-0080).
+func countersRestarted(previous, current int64) bool {
+	return previous != 0 && current != 0 && previous != current
 }
 
 // boundedError is an error's text cut to a status-sized length.

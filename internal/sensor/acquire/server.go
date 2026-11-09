@@ -356,7 +356,11 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 	}
 	lastSent, sent := time.Now(), coverage
 	var pending <-chan time.Time
-	sendCoverage := func() bool {
+	// broken is a stream a frame write failed on (a deadline, EPIPE): part
+	// of that frame may have gone out, so nothing more is written to it,
+	// not even the last coverage frame (cowork-1-0-8 GAP-0080 review L1).
+	broken := false
+	sendCoverageWithin := func(deadline time.Duration) bool {
 		current := encodeCoverage(source.Coverage())
 		if reflect.DeepEqual(current, sent) {
 			return true
@@ -367,12 +371,25 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 		}
 		if err := writeFrame(conn, Response{
 			Version: protocolVersion, Op: request.Op, Body: body,
-		}, responseDeadline); err != nil {
+		}, deadline); err != nil {
+			broken = true
 			return false
 		}
 		sent, lastSent = current, time.Now()
 		return true
 	}
+	sendCoverage := func() bool { return sendCoverageWithin(responseDeadline) }
+	// The stream's last frame is its coverage, before the source closes: a
+	// helper that stops (a package upgrade, a config push) or a source that
+	// ends would otherwise take the losses counted since the last coverage
+	// frame with it, and the gateway carries only the losses it was told
+	// (cowork-1-0-8 GAP-0080). Best effort and brief: a gateway that went
+	// away is not waited for, and a broken stream is not written to.
+	defer func() {
+		if !broken {
+			sendCoverageWithin(finalCoverageDeadline)
+		}
+	}()
 
 	events := source.Events()
 	for {
@@ -414,6 +431,7 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 			if err := writeFrame(conn, Response{
 				Version: protocolVersion, Op: request.Op, Body: body,
 			}, responseDeadline); err != nil {
+				broken = true
 				return
 			}
 		}
@@ -422,6 +440,9 @@ func (s *Server) serveEvents(ctx context.Context, conn net.Conn, request Request
 
 // coverageUpdateInterval bounds coverage-update frames to one per interval.
 var coverageUpdateInterval = 10 * time.Second
+
+// finalCoverageDeadline bounds the write of a stream's last coverage frame.
+const finalCoverageDeadline = 2 * time.Second
 
 // planeSource is the event stream's source. The managed Linux helper with a
 // Tetragon mode other than off reads Tetragon (falling back to the native

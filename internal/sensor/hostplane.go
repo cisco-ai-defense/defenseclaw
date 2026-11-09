@@ -134,11 +134,12 @@ type hostPlane struct {
 	running    bool
 	started    bool
 	coverage   plane.Coverage
-	// retiredDrops are the buffer drops of the sources replaced before the
-	// running one started, named in its coverage; pendingRetired those of
-	// the source replaced last, named by its final coverage (coverage)
-	// until the next source starts (cowork-1-0-8 GAP-0080).
-	retiredDrops, pendingRetired int64
+	// retired are the losses (buffer drops, kernel overflows, the backend's
+	// events lost) of the sources replaced before the running one started,
+	// added to its coverage; pendingRetired those of the source replaced
+	// last, which its final coverage (coverage) shows until the next source
+	// starts (cowork-1-0-8 GAP-0080).
+	retired, pendingRetired plane.Losses
 
 	// handled counts every event consumed; containerEvents those from
 	// container processes, routed to that count and never joined to a host
@@ -231,8 +232,8 @@ func (h *hostPlane) start(ctx context.Context) error {
 	h.running = true
 	h.started = true
 	h.done = done
-	h.retiredDrops += h.pendingRetired
-	h.pendingRetired = 0
+	h.retired = h.retired.Add(h.pendingRetired)
+	h.pendingRetired = plane.Losses{}
 	h.coverage = source.Coverage()
 	h.mu.Unlock()
 
@@ -283,8 +284,9 @@ func (h *hostPlane) ended() bool {
 // place. A brokered stream cannot be started twice (its connection is gone
 // and its buffer is closed), so a reconnect needs a fresh source. Sessions,
 // counters and the lineage tracker carry over (GAP-1418), and so do the
-// events the ended source's buffers dropped: its final coverage stands until
-// the next source starts, which then names them (cowork-1-0-8 GAP-0080).
+// ended source's losses (plane.Losses: buffer drops, kernel overflows, the
+// backend's events lost): its final coverage stands until the next source
+// starts, which then adds them (cowork-1-0-8 GAP-0080).
 // The final coverage is read before the swap, and the swap is one step, so
 // stats never shows the ended source's start coverage without its drops; a
 // source that never started (its start failed) leaves the coverage before
@@ -302,7 +304,7 @@ func (h *hostPlane) replaceSource(next plane.Source) {
 		if h.started {
 			h.coverage = final
 		}
-		h.pendingRetired += final.BufferDropped
+		h.pendingRetired = h.pendingRetired.Add(final.Losses())
 	}
 	h.source = next
 	h.started = false
@@ -1006,12 +1008,12 @@ func sessionOwnerEvidence(root procRef, observations []agentchain.Observation) (
 func (h *hostPlane) stats() (classified, gated int64, running bool, coverage plane.Coverage) {
 	h.mu.Lock()
 	classified, gated, running, coverage = h.classified, h.gated, h.running, h.coverage
-	source, retired := h.source, h.retiredDrops
+	source, retired := h.source, h.retired
 	h.mu.Unlock()
 	if running && source != nil {
 		coverage = source.Coverage()
 	}
-	return classified, gated, running, plane.WithRetiredBufferDrops(coverage, retired)
+	return classified, gated, running, plane.WithRetiredLosses(coverage, retired)
 }
 
 func (h *hostPlane) close() error {

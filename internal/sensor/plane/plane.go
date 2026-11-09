@@ -287,11 +287,17 @@ type Coverage struct {
 	Backend *Backend
 	// BufferDropped is how many events DefenseClaw's own event buffers
 	// dropped under back-pressure, each named in Limitations by
-	// WithBufferDrops. The host plane adds the drops of the sources a
-	// restart replaced (WithRetiredBufferDrops), so the count outlives a
-	// helper reconnect (cowork-1-0-8 GAP-0080). Tetragon's own losses are
-	// Backend.EventsLost.
+	// WithBufferDrops. Tetragon's own losses are Backend.EventsLost.
 	BufferDropped int64
+	// KernelOverflows is how many times the kernel dropped process events
+	// before the source read them (cn_proc ENOBUFS), named in Limitations by
+	// WithKernelOverflows.
+	//
+	// BufferDropped, KernelOverflows and Backend.EventsLost are the source's
+	// Losses: the host plane adds those of the sources a restart replaced
+	// (WithRetiredLosses), so they outlive a helper reconnect
+	// (cowork-1-0-8 GAP-0080).
+	KernelOverflows int64
 }
 
 // Backend kinds.
@@ -315,8 +321,12 @@ type Backend struct {
 	// reconciler reports it; it does not travel to the gateway.
 	PID int
 	// EventsLost is how many events the backend reported losing since the
-	// stream opened: rate-limit drops in the stream, plus Tetragon's own
-	// loss counters when LossKnown.
+	// source started: rate-limit drops in the stream, plus Tetragon's own
+	// loss counters when LossKnown. The host plane adds the losses of the
+	// sources a restart replaced, so the gateway reports it for its own
+	// life and across backends: after a change from Tetragon to the native
+	// backend it still includes Tetragon's losses (WithRetiredLosses,
+	// cowork-1-0-8 GAP-0080 and its review L2).
 	EventsLost int64
 	// LossKnown is true when Tetragon's loss counters could be read
 	// (metrics on loopback, served by the Tetragon pid). Display only.
@@ -609,7 +619,8 @@ const (
 // gateway's buffer for the helper stream (cowork-1-0-8 GAP-0072) report it
 // with this one function; TestEveryCoverageNamesItsBufferDrops checks the
 // sources. The count is added to BufferDropped, which the host plane
-// carries across a restart of the source (cowork-1-0-8 GAP-0080).
+// carries across a restart of the source (WithRetiredLosses, cowork-1-0-8
+// GAP-0080).
 func WithBufferDrops(coverage Coverage, dropped int64, buffer string) Coverage {
 	if dropped > 0 {
 		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), bufferDropLimitation(dropped, buffer))
@@ -618,16 +629,82 @@ func WithBufferDrops(coverage Coverage, dropped int64, buffer string) Coverage {
 	return coverage
 }
 
-// WithRetiredBufferDrops adds to coverage the events the buffers of earlier
-// sources dropped: a helper restart (a package upgrade, a config push)
-// replaces the source and its buffers, and those losses vanished from status
-// with them (cowork-1-0-8 GAP-0080). They are one line of their own, and
-// count in BufferDropped.
-func WithRetiredBufferDrops(coverage Coverage, retired int64) Coverage {
-	if retired > 0 {
+// WithKernelOverflows names the times the kernel dropped process events
+// before the source read them: the cn_proc socket's receive buffer
+// overflowed (ENOBUFS). Reduced, not absent: the reader carries on after an
+// overflow. The count is added to KernelOverflows, which the host plane
+// carries across a restart of the source (cowork-1-0-8 GAP-0080); the
+// limitations are copied.
+func WithKernelOverflows(coverage Coverage, overflows int64) Coverage {
+	if overflows > 0 {
 		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
-			"%d events were dropped under back-pressure in earlier event streams of the sensor", retired))
-		coverage.BufferDropped += retired
+			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS)", overflows))
+		coverage.KernelOverflows += overflows
+	}
+	return coverage
+}
+
+// Losses are the loss counts of one Plane C source, each cumulative for the
+// life of that source: the events DefenseClaw's buffers dropped
+// (Coverage.BufferDropped), the kernel's receive-buffer overflows
+// (Coverage.KernelOverflows) and the events the backend reported losing
+// (Backend.EventsLost).
+//
+// A restart of the source starts them at zero: a helper reconnect, a
+// package upgrade and a config push all replace it. The host plane sees
+// every replacement, so it keeps the final Losses of each replaced source
+// and adds them to the coverage of the next (WithRetiredLosses): for the
+// gateway every one counts for its own life, and a gateway restart is told
+// apart by the new service.instance.id on its telemetry (cowork-1-0-8
+// GAP-0080).
+type Losses struct {
+	BufferDropped, KernelOverflows, BackendLost int64
+}
+
+// Losses are the loss counts the coverage reports.
+func (c Coverage) Losses() Losses {
+	losses := Losses{BufferDropped: c.BufferDropped, KernelOverflows: c.KernelOverflows}
+	if c.Backend != nil {
+		losses.BackendLost = c.Backend.EventsLost
+	}
+	return losses
+}
+
+// Add is the sum of both tallies.
+func (l Losses) Add(other Losses) Losses {
+	return Losses{
+		BufferDropped:   l.BufferDropped + other.BufferDropped,
+		KernelOverflows: l.KernelOverflows + other.KernelOverflows,
+		BackendLost:     l.BackendLost + other.BackendLost,
+	}
+}
+
+// WithRetiredLosses adds to coverage the losses of the sources a restart
+// replaced, which otherwise vanished from status and telemetry with them
+// (cowork-1-0-8 GAP-0080). Buffer drops and kernel overflows are one line
+// each of their own and add to BufferDropped and KernelOverflows; the
+// backend's add to Backend.EventsLost, so the telemetry's events_lost never
+// goes back. They are shown on whatever backend the coverage names, of any
+// kind: the count spans backends for the life of the gateway. A coverage
+// without a backend has nowhere to show the backend's losses: the caller
+// keeps its tally, and the next backend shows them. The
+// limitations and the backend are copied, never changed in place.
+func WithRetiredLosses(coverage Coverage, retired Losses) Coverage {
+	if retired.BufferDropped > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
+			"%d events were dropped under back-pressure in earlier event streams of the sensor", retired.BufferDropped))
+		coverage.BufferDropped += retired.BufferDropped
+	}
+	if retired.KernelOverflows > 0 {
+		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
+			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS) "+
+				"in earlier event streams of the sensor", retired.KernelOverflows))
+		coverage.KernelOverflows += retired.KernelOverflows
+	}
+	if retired.BackendLost > 0 && coverage.Backend != nil {
+		backend := *coverage.Backend
+		backend.EventsLost += retired.BackendLost
+		coverage.Backend = &backend
 	}
 	return coverage
 }
