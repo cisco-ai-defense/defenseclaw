@@ -176,27 +176,76 @@ func registrationWriteCapable(file *syntax.File, home string) bool {
 				capable = capable || !fixed || value != "/dev/null"
 			}
 		case *syntax.CallExpr:
-			capable = capable || registrationEditsInPlace(node, home)
-			for index, word := range node.Args {
-				value, fixed := StaticWord(word, home)
-				if !fixed {
-					capable = capable || index == 0
-					continue
-				}
-				base := programBase(value)
-				if index == 0 && (base == "eval" || base == "source" || base == "." || base == "exec") {
-					capable = true
-				}
-				for _, name := range registrationWriteWords {
-					if base == name || strings.HasPrefix(base, name) && strings.Trim(base[len(name):], "0123456789.") == "" {
-						capable = true
-					}
-				}
-			}
+			capable = capable || registrationEditsInPlace(node, home) || registrationCallWrites(node, home)
 		}
 		return !capable
 	})
 	return capable
+}
+
+// registrationDispatchers are programs that run another program or a
+// subcommand named in their arguments, beyond the wrappers the literal
+// command reader strips: for these the arguments are searched for a writer.
+var registrationDispatchers = map[string]bool{
+	"git": true, "busybox": true, "toybox": true, "make": true, "gmake": true, "docker": true,
+	"podman": true, "nerdctl": true, "kubectl": true, "watch": true, "parallel": true, "flock": true,
+	"strace": true, "ltrace": true, "nsenter": true, "unshare": true, "chronic": true, "su": true,
+	"runuser": true, "pkexec": true, "setpriv": true, "fakeroot": true, "chroot": true, "script": true,
+	"screen": true, "tmux": true, "at": true, "ssh": true,
+}
+
+// registrationCallWrites reports whether the program a call runs writes its
+// operands or runs text of its own. A writer is recognised where a program is
+// named: the command word, after the wrappers that pass argv on. As an
+// operand of another program its name is text (echo cp && sha256sum FILE
+// reads). A wrapper whose options the reader does not know, and a dispatcher,
+// keep every later word in play, as does a command word that is not spelled
+// out.
+func registrationCallWrites(call *syntax.CallExpr, home string) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	words, known := actionLiteralCommandWords(call.Args, home)
+	if !known {
+		return registrationNamesWriter(call.Args, home, true)
+	}
+	if first, _ := StaticWord(call.Args[0], home); programBase(first) == "exec" {
+		return true
+	}
+	program, fixed := StaticWord(words[0], home)
+	if !fixed {
+		return true
+	}
+	base := programBase(program)
+	return registrationNamesWriter(words[:1], home, true) ||
+		(registrationDispatchers[base] || actionInterpreterWrappers[base]) &&
+			registrationNamesWriter(words[1:], home, false)
+}
+
+// registrationNamesWriter reports whether a static word names a program that
+// writes its operands or runs text; with command, the first word is the
+// program, so eval, source and dot count there and a word that is not
+// spelled out does too.
+func registrationNamesWriter(words []*syntax.Word, home string, command bool) bool {
+	for index, word := range words {
+		value, fixed := StaticWord(word, home)
+		if !fixed {
+			if command && index == 0 {
+				return true
+			}
+			continue
+		}
+		base := programBase(value)
+		if command && index == 0 && (base == "eval" || base == "source" || base == "." || base == "exec") {
+			return true
+		}
+		for _, name := range registrationWriteWords {
+			if base == name || strings.HasPrefix(base, name) && strings.Trim(base[len(name):], "0123456789.") == "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // registrationEditsInPlace reports whether a sed or perl call edits a file in

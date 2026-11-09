@@ -40,6 +40,13 @@ func TestAgentHookConfigKnownLinkPlacement(t *testing.T) {
 		{"ordinary source", "src=" + ordinary + "; ln -sf \"$src\" " + bin + "/", "allow"},
 		{"ordinary destination", "dest=" + otherBin + "; ln -sf " + named + " \"$dest\"/", "allow"},
 		{"read-only link to the hook in a temporary folder", "ln -s " + hook + " " + otherBin + "/tmp-link && ls " + otherBin, "block"},
+		// A writer name that is only an operand of another program is text.
+		{"checksum after echo of a writer name", "echo cp && sha256sum " + hook, "allow"},
+		{"read after echo of a writer name", "echo rm; cat " + hook, "allow"},
+		{"read after printf of a writer name", "printf \"%s\\n\" ln && cat " + hook, "allow"},
+		{"checksum after echo of a shell name", "echo bash; sha256sum " + hook, "allow"},
+		{"copy onto the hook after echo", "echo a; cp " + ordinary + " " + hook, "block"},
+		{"copy onto the hook through a wrapper after echo", "echo a; nice -n 5 cp " + ordinary + " " + hook, "block"},
 	}
 	for _, row := range rows {
 		for _, profile := range []string{"permissive", "default", "strict"} {
