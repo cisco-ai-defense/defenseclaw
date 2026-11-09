@@ -46244,6 +46244,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                                 -Name warnings `
                                 -Value ([string[]]@($warnings.ToArray())) `
                                 -Force
+                        # The standalone CLI reads this field into its own
+                        # warnings; it does not carry warnings[] over.
+                        $installResult |
+                            Microsoft.PowerShell.Utility\Add-Member `
+                                -MemberType NoteProperty `
+                                -Name restart_delete_cancel_failed `
+                                -Value ([string]$_.Exception.Message) `
+                                -Force
                     }
                 }
                 return $installResult
