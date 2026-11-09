@@ -1,0 +1,109 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+"""Uninstall removes the Claude Code and Codex backup records `config set data_dir` copied into every earlier folder."""
+
+import os
+
+import pytest
+from click.testing import CliRunner
+from defenseclaw import config as config_module
+from defenseclaw.commands import cmd_config, cmd_uninstall
+from defenseclaw.context import AppContext
+
+from tests.test_config_data_dir_move import _install_home
+
+pytestmark = pytest.mark.skipif(os.name == "nt", reason="needs symlink rights and POSIX modes")
+
+CLAUDE = '{"had_hooks_key": true, "original_hooks": null}\n'
+CODEX = '{"had_hooks_key": false, "added_codex_hooks_flag": true}\n'
+
+
+def _move(value):
+    result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", str(value)], obj=AppContext())
+    assert result.exit_code == 0, result.output
+
+
+def _plan(home, store, connectors):
+    return cmd_uninstall.UninstallPlan(
+        data_dir=str(home),
+        store_dir=str(store),
+        previous_stores=config_module.previous_store_dirs(),
+        connectors=tuple(connectors),
+    )
+
+
+def _setup_backups(home):
+    (home / "claudecode_backup.json").write_text(CLAUDE)
+    (home / "codex_config_backup.json").write_text(CODEX)
+    for name in ("claudecode_backup.json", "codex_config_backup.json"):
+        (home / name).chmod(0o600)
+    (home / "agent_discovery.json").write_text('{"agents": {}}\n')
+
+
+def test_the_backup_copies_every_move_left_are_removed_for_the_connectors_torn_down(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    _setup_backups(home)
+    first, second, third = (tmp_path / name for name in ("state", "state2", "state2/inner"))
+    for folder in (first, second, third):
+        _move(folder)
+    for folder in (home, first, second):
+        assert (folder / "claudecode_backup.json").is_file(), f"the move copied it to {folder}"
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, third, ["claudecode", "codex"]))
+
+    assert stayed == []
+    for folder in (home, first, second):
+        assert not (folder / "claudecode_backup.json").exists(), folder
+        assert not (folder / "codex_config_backup.json").exists(), folder
+        assert (folder / "agent_discovery.json").is_file(), "other files stay"
+    # The folder config.yaml names is the connector teardown's.
+    assert (third / "claudecode_backup.json").is_file() and (third / "codex_config_backup.json").is_file()
+
+
+def test_a_connector_that_is_not_torn_down_keeps_its_backup_and_the_folder_records(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    _setup_backups(home)
+    (home / "hook_contract_lock.json").write_text("{}\n")
+    (home / "hook_contract_lock.json").chmod(0o600)
+    first = tmp_path / "state"
+    _move(first)
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, first, ["codex"]))
+
+    assert stayed == []
+    assert not (home / "codex_config_backup.json").exists()
+    assert (home / "claudecode_backup.json").is_file()
+    assert (home / "hook_contract_lock.json").is_file(), "the folder record stays while a connector's backup does"
+
+
+def test_a_file_of_another_shape_at_the_name_is_the_accounts_own(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    (home / "claudecode_backup.json").write_text('{"notes": "mine"}\n')
+    (home / "codex_config_backup.json").write_text("not json\n")
+    first = tmp_path / "state"
+    first.mkdir()
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, first, ["claudecode", "codex"]))
+
+    assert stayed == []
+    assert (home / "claudecode_backup.json").read_text() == '{"notes": "mine"}\n'
+    assert (home / "codex_config_backup.json").is_file()
+
+
+def test_a_link_at_the_name_of_a_backup_is_reported_and_not_followed(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    target = tmp_path / "elsewhere.json"
+    target.write_text(CLAUDE)
+    (home / "claudecode_backup.json").symlink_to(target)
+    first = tmp_path / "state"
+    first.mkdir()
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, first, ["claudecode"]))
+
+    assert len(stayed) == 1 and "claudecode_backup.json" in stayed[0]
+    assert target.read_text() == CLAUDE
