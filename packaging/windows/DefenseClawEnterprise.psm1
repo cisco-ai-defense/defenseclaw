@@ -42542,6 +42542,181 @@ function Test-DefenseClawPendingFileRenameOperations {
     }
 }
 
+# The DefenseClaw paths a purge can queue for deletion at the next restart
+# when a file is held: the install and state roots, the lifecycle folder, the
+# agent policy files and sidecars the purge removes, and each profile's
+# .defenseclaw. A later Install, Upgrade or Repair writes these paths again.
+function Get-DefenseClawRestartDeleteScope {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $roots = [Collections.Generic.List[string]]::new()
+    foreach ($root in @(
+            [string]$Layout.InstallRoot,
+            [string]$Layout.StateRoot,
+            [string](Get-DefenseClawProfileRoots).LifecycleDirectory
+        )) {
+        if (-not [string]::IsNullOrWhiteSpace($root)) {
+            $roots.Add($root.TrimEnd('\'))
+        }
+    }
+    $claudeManaged = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d')
+    $codexManaged = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex')
+    $cursorManaged = [IO.Path]::Combine($script:ProgramData, 'Cursor')
+    $copilotManaged = [IO.Path]::Combine($script:ProgramData, 'GitHub', 'Copilot')
+    $roots.Add([IO.Path]::Combine($copilotManaged, 'DefenseClaw'))
+    # Only the managed runtime's own entries in each profile's .defenseclaw,
+    # never a per-user install's files there.
+    foreach ($registered in @(Get-DefenseClawNuclearRegisteredProfiles)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$registered.home)) {
+            foreach ($entry in @(Get-DefenseClawManagedUserRuntimeEntryNames)) {
+                $roots.Add([IO.Path]::Combine([string]$registered.home, '.defenseclaw', $entry))
+            }
+        }
+    }
+    return [pscustomobject]@{
+        Roots          = [string[]]$roots.ToArray()
+        Files          = [string[]]@(
+            [IO.Path]::Combine($claudeManaged, '90-defenseclaw.json'),
+            [IO.Path]::Combine($codexManaged, 'requirements.toml'),
+            [IO.Path]::Combine($cursorManaged, 'hooks.json'),
+            [IO.Path]::Combine($cursorManaged, 'defenseclaw-hook.ps1'),
+            [IO.Path]::Combine($copilotManaged, 'policy.d', '90-defenseclaw.json')
+        )
+        # Folders whose .defenseclaw-managed-* sidecars belong to DefenseClaw.
+        SidecarFolders = [string[]]@($claudeManaged, $codexManaged, $cursorManaged)
+    }
+}
+
+# The local path of a PendingFileRenameOperations source ("\??\C:\x", with
+# an optional "*<n>" or "!" prefix), or '' for any other shape.
+function ConvertFrom-DefenseClawPendingRenameSource {
+    param([AllowEmptyString()][string]$Value)
+    $text = [string]$Value
+    if ($text -match '^\*\d+') {
+        $text = $text.Substring($Matches[0].Length)
+    }
+    if ($text.StartsWith('!')) {
+        $text = $text.Substring(1)
+    }
+    if (-not $text.StartsWith('\??\')) {
+        return ''
+    }
+    $path = $text.Substring(4)
+    if ($path -notmatch '^[A-Za-z]:\\' -or $path.Contains('\..\') -or $path.EndsWith('\..')) {
+        return ''
+    }
+    return $path.TrimEnd('\')
+}
+
+function Test-DefenseClawRestartDeleteInScope {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Scope
+    )
+    # The <file>.backup.<32 hex> an upgrade renames a running image to and
+    # queues for deletion is never written again: its delete stays.
+    if ($Path -match '\.backup\.[0-9A-Fa-f]{32}$') {
+        return $false
+    }
+    $ignoreCase = [StringComparison]::OrdinalIgnoreCase
+    foreach ($file in @($Scope.Files)) {
+        if ([string]::Equals($Path, [string]$file, $ignoreCase)) {
+            return $true
+        }
+    }
+    foreach ($root in @($Scope.Roots)) {
+        $root = ([string]$root).TrimEnd('\')
+        if ([string]::Equals($Path, $root, $ignoreCase) -or
+            $Path.StartsWith($root + '\', $ignoreCase)) {
+            return $true
+        }
+    }
+    $cut = $Path.LastIndexOf('\')
+    $parent = $Path.Substring(0, [Math]::Max($cut, 0))
+    $leaf = $Path.Substring($cut + 1)
+    foreach ($folder in @($Scope.SidecarFolders)) {
+        if ([string]::Equals($parent, ([string]$folder).TrimEnd('\'), $ignoreCase) -and
+            $leaf.StartsWith('.defenseclaw-managed-', $ignoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+# Splits PendingFileRenameOperations pairs into the ones to keep and the
+# DefenseClaw deletes to cancel. Only deletes (empty destination) inside the
+# scope are cancelled; renames and every other program's entries stay, in
+# order. A list that is not made of pairs is returned unchanged.
+function Select-DefenseClawRestartDeleteEntries {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Entries,
+        [Parameter(Mandatory)]$Scope
+    )
+    $kept = [Collections.Generic.List[string]]::new()
+    $cancelled = [Collections.Generic.List[string]]::new()
+    if ($Entries.Count % 2 -ne 0) {
+        return [pscustomobject]@{ Kept = [string[]]$Entries; Cancelled = [string[]]@() }
+    }
+    for ($index = 0; $index -lt $Entries.Count; $index += 2) {
+        $source = [string]$Entries[$index]
+        $destination = [string]$Entries[$index + 1]
+        $path = ConvertFrom-DefenseClawPendingRenameSource -Value $source
+        if ([string]::IsNullOrEmpty($destination) -and
+            -not [string]::IsNullOrEmpty($path) -and
+            (Test-DefenseClawRestartDeleteInScope -Path $path -Scope $Scope)) {
+            $cancelled.Add($path)
+            continue
+        }
+        $kept.Add($source)
+        $kept.Add($destination)
+    }
+    return [pscustomobject]@{ Kept = [string[]]$kept.ToArray(); Cancelled = [string[]]$cancelled.ToArray() }
+}
+
+# A purge that met a held file asks Windows to delete it at the next restart.
+# Windows records the path, not the file: after a reinstall before that
+# restart, the restart deleted the new defenseclaw-hook.exe, Claude Code's
+# 90-defenseclaw.json and Cursor's hooks.json, and left a deployment that
+# looked installed but had no hook. A successful Install, Upgrade or Repair
+# owns those paths again, so it cancels the deletes queued for them. Returns
+# the cancelled paths.
+function Clear-DefenseClawQueuedRestartDeletes {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $scope = Get-DefenseClawRestartDeleteScope -Layout $Layout
+    $cancelled = [Collections.Generic.List[string]]::new()
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+        'SYSTEM\CurrentControlSet\Control\Session Manager', $true)
+    if ($null -eq $key) {
+        return [string[]]@()
+    }
+    try {
+        foreach ($name in @('PendingFileRenameOperations', 'PendingFileRenameOperations2')) {
+            if ($null -eq $key.GetValue($name, $null) -or
+                $key.GetValueKind($name) -ne [Microsoft.Win32.RegistryValueKind]::MultiString) {
+                continue
+            }
+            $entries = [string[]]$key.GetValue(
+                $name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $selection = Select-DefenseClawRestartDeleteEntries -Entries $entries -Scope $scope
+            if ($selection.Cancelled.Count -eq 0) {
+                continue
+            }
+            if ($selection.Kept.Count -eq 0) {
+                $key.DeleteValue($name)
+            }
+            else {
+                $key.SetValue($name, [string[]]$selection.Kept, [Microsoft.Win32.RegistryValueKind]::MultiString)
+            }
+            foreach ($path in $selection.Cancelled) {
+                $cancelled.Add($path)
+            }
+        }
+    }
+    finally {
+        $key.Close()
+    }
+    return [string[]]$cancelled.ToArray()
+}
+
 # Removes one DefenseClaw tree or file for the purge, whatever its ACL or
 # owner. The privileged native walk deletes without rewriting any descriptor;
 # without the native helper, icacls makes Administrators the owner (by SID,
@@ -47017,7 +47192,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                         -NativeCleanupSource $nativeCleanupSource `
                         -SelfUninstallCallerPID $SelfUninstallCallerPID
                 }
-                return Invoke-DefenseClawInstallLikeLifecycle `
+                $installResult = Invoke-DefenseClawInstallLikeLifecycle `
                     -Action $Action `
                     -Layout $layout `
                     -Sources $sources `
@@ -47035,6 +47210,51 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     -StateRootCreatedForTransaction:$stateRootCreatedForTransaction `
                     -DeferredConfig:$DeferredConfig `
                     -NoStart:($NoStart -or $DeferredConfig)
+                # The deployment is in place; a restart must not delete it.
+                try {
+                    foreach ($path in @(Clear-DefenseClawQueuedRestartDeletes -Layout $layout)) {
+                        Microsoft.PowerShell.Utility\Write-Verbose "cancelled the restart delete of $path, which this $Action wrote again"
+                    }
+                }
+                catch {
+                    # Standalone Setup takes /ensure, which repairs or, with no
+                    # record left, installs again; Secure Client installs its
+                    # module itself and its Setup has no /ensure.
+                    $cancelRemedy = 'reinstall DefenseClaw through Secure Client after the next restart'
+                    if (Test-DefenseClawStandaloneProfile) {
+                        $cancelRemedy = 'run Setup /ensure again after the next restart, which repairs ' +
+                            'the deployment or installs it again if the restart removed its record'
+                    }
+                    $cancelWarning = (
+                        "DefenseClaw $Action could not cancel the restart deletes queued for its files " +
+                        "($($_.Exception.Message)); $cancelRemedy")
+                    Microsoft.PowerShell.Utility\Write-Warning $cancelWarning
+                    if ($null -ne $installResult) {
+                        $warnings = [Collections.Generic.List[string]]::new()
+                        $existing = $installResult.PSObject.Properties['warnings']
+                        if ($null -ne $existing -and $null -ne $existing.Value) {
+                            foreach ($item in @($existing.Value)) {
+                                $warnings.Add([string]$item)
+                            }
+                        }
+                        $warnings.Add($cancelWarning)
+                        $installResult |
+                            Microsoft.PowerShell.Utility\Add-Member `
+                                -MemberType NoteProperty `
+                                -Name warnings `
+                                -Value ([string[]]@($warnings.ToArray())) `
+                                -Force
+                        # The standalone CLI reads this field into its own
+                        # warnings; it does not carry warnings[] over.
+                        $installResult |
+                            Microsoft.PowerShell.Utility\Add-Member `
+                                -MemberType NoteProperty `
+                                -Name restart_delete_cancel_failed `
+                                -Value ([string]$_.Exception.Message) `
+                                -Force
+                    }
+                }
+                return $installResult
             }
             catch {
                 # The retry's own failure is the result, but the failure

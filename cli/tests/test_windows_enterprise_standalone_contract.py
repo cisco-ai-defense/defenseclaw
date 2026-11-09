@@ -1933,7 +1933,7 @@ def _repair_rollback_config_cases(tmp_path: Path) -> dict[str, dict]:
         "[void](Repair-DefenseClawUnreadableDeploymentMetadata `"
     )
     assert entry.index("Assert-DefenseClawRepairRollbackConfig `") < entry.index(
-        "return Invoke-DefenseClawInstallLikeLifecycle `"
+        "$installResult = Invoke-DefenseClawInstallLikeLifecycle `"
     )
     install = _function_body(module, "Invoke-DefenseClawInstallLikeLifecycle")
     repair_stamp = install.index("if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {")
