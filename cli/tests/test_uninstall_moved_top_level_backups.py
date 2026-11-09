@@ -208,3 +208,22 @@ def test_only_the_folder_whose_copy_was_edited_keeps_it_after_two_moves(tmp_path
     assert stayed == []
     assert not (home / "claudecode_backup.json").exists()
     assert json.loads((first / "claudecode_backup.json").read_text())["original_hooks"] == {"mine": []}
+
+
+def test_many_other_backup_named_files_do_not_make_the_folder_history_unreadable(tmp_path, monkeypatch):
+    home, _path = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    _setup_backups(home)
+    for index in range(400):
+        (home / (f"{index:04d}-" + "x" * 125 + "_backup.json")).write_text("{}\n")
+    first, second = tmp_path / "first", tmp_path / "second"
+    _move(first)
+    _move(second)
+
+    history = home / config_module.STORE_HISTORY_FILE
+    assert history.stat().st_size < config_module._STORE_HISTORY_MAX_BYTES // 4
+    assert str(first) in config_module.previous_store_dirs()
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(_plan(home, second, ["claudecode", "codex"]))
+    assert stayed == []
+    assert not (home / "claudecode_backup.json").exists()
+    assert (home / ("0000-" + "x" * 125 + "_backup.json")).exists(), "a file of the account at another name stays"

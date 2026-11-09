@@ -1370,11 +1370,12 @@ def _is_setup_top_level_backup(path: str, move_digests: dict[str, str] | None = 
     if shape is None:
         return False
     required, allowed = shape
+    raw = _small_file_bytes(path)
     try:
-        with open(path, "rb") as stream:
-            raw = stream.read(_BACKUP_RECORD_MAX_BYTES + 1)
-        document = json.loads(raw) if len(raw) <= _BACKUP_RECORD_MAX_BYTES else None
-    except (OSError, ValueError):
+        document = json.loads(raw) if raw is not None else None
+    except ValueError:
+        return False
+    if raw is None:
         return False
     if move_digests is not None and hashlib.sha256(raw).hexdigest() != move_digests.get(os.path.basename(path)):
         return False
@@ -1441,12 +1442,41 @@ _CONNECTOR_STATE_RECORD_SHAPES = {
 
 
 def _small_file_bytes(path: str) -> bytes | None:
+    """The bytes of a regular file of at most _BACKUP_RECORD_MAX_BYTES, else None.
+
+    The file is opened without following a link and without waiting on a pipe, so a
+    name that was swapped for a link or a FIFO after it was checked is not read.
+    """
+    from defenseclaw.file_permissions import read_regular_file_no_follow
+
     try:
-        with open(path, "rb") as stream:
-            raw = stream.read(_BACKUP_RECORD_MAX_BYTES + 1)
-    except OSError:
+        return read_regular_file_no_follow(path, max_bytes=_BACKUP_RECORD_MAX_BYTES)
+    except (OSError, ValueError):
         return None
-    return raw if len(raw) <= _BACKUP_RECORD_MAX_BYTES else None
+
+
+def move_recorded_record_paths() -> tuple[str, ...]:
+    """The paths below a data folder, with "/" separators, of the records whose digest a data_dir move records."""
+    state = ("/".join(parts) for records in _CONNECTOR_STATE_RECORD_SHAPES.values() for parts, _ in records)
+    return (*_TOP_LEVEL_BACKUP_SHAPES, *state)
+
+
+def record_digests_for_move(folder: str) -> dict[str, str]:
+    """The sha256 of each record `config set data_dir` leaves in *folder*, by path below it.
+
+    Only the records Setup writes under a fixed name (move_recorded_record_paths), so the list stays
+    small however many other files the folder holds. Uninstall later removes an earlier folder's
+    copy only while it still has this digest; a copy the account changed since belongs to the
+    account (GAP-0942, GAP-0945).
+    """
+    found: dict[str, str] = {}
+    for relative in move_recorded_record_paths():
+        path = os.path.join(folder, *relative.split("/"))
+        if _account_owned_regular_file(path) and (raw := _small_file_bytes(path)) is not None:
+            found[relative] = hashlib.sha256(raw).hexdigest()
+    return found
+
+
 _HOOK_SCRIPT_MARKER = b"# defenseclaw-managed-hook v"
 # A backup record carries the agent file's bytes, so it can be large.
 _BACKUP_RECORD_MAX_BYTES = 8 * 1024 * 1024
@@ -1560,11 +1590,10 @@ def _setup_backup_record_stem(path: str, connector: str) -> str:
     of any other shape or name is the account's own and is not read as ours.
     """
     name = os.path.basename(path)
+    raw = _small_file_bytes(path)
     try:
-        with open(path, "rb") as stream:
-            raw = stream.read(_BACKUP_RECORD_MAX_BYTES + 1)
-        document = json.loads(raw) if len(raw) <= _BACKUP_RECORD_MAX_BYTES else None
-    except (OSError, ValueError):
+        document = json.loads(raw) if raw is not None else None
+    except ValueError:
         return ""
     if not isinstance(document, dict) or document.get("connector") != connector:
         return ""
@@ -1641,8 +1670,16 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 continue
             if not os.path.lexists(path):
                 continue
+            if not _account_owned_regular_file(path):
+                drop(path)  # a link or another account's file is reported and never opened
+                continue
             raw = _small_file_bytes(path)
-            if not _account_owned_regular_file(path) or (raw is not None and written_by_setup(raw)):
+            # The shape says it is the record Setup writes; the digest says it is still the copy the move left.
+            if (
+                raw is not None
+                and written_by_setup(raw)
+                and hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts))
+            ):
                 drop(path)
             else:
                 # The name belongs to DefenseClaw, so a file of another shape there is reported, not removed.
