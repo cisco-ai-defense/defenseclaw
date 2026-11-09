@@ -172,9 +172,9 @@ func TestOrdinaryRemovedEntriesDoNotDropARevokedLiveAdmission(t *testing.T) {
 		}
 	}
 	f.w.mcpAdmissionMu.RLock()
-	held, lost := len(f.w.mcpAdmissionDeparted), f.w.mcpAdmissionDepartedLost
+	held, lost := len(f.w.mcpAdmissionDeparted), len(f.w.mcpAdmissionLost)
 	f.w.mcpAdmissionMu.RUnlock()
-	if held != 1 || lost {
+	if held != 1 || lost != 0 {
 		t.Fatalf("held %d departed servers (lost=%v) after ordinary churn, want only the revoked one", held, lost)
 	}
 }
@@ -205,10 +205,10 @@ func TestDepartedMCPServersBeyondTheBoundFailTheCallsNoServerStandsFor(t *testin
 	}
 	f.w.mcpAdmissionMu.Lock()
 	f.w.rememberDepartedMCP(prev, nil, nil)
-	held, lost := len(f.w.mcpAdmissionDeparted), f.w.mcpAdmissionDepartedLost
+	held, lost := len(f.w.mcpAdmissionDeparted), len(f.w.mcpAdmissionLost)
 	f.w.mcpAdmissionMu.Unlock()
-	if held != mcpDepartedMax || !lost {
-		t.Fatalf("held %d departed servers (lost=%v), want the bound %d and the overflow noted", held, lost, mcpDepartedMax)
+	if held != mcpDepartedMax || lost != 1 {
+		t.Fatalf("held %d departed servers (%d lost scopes), want the bound %d and the overflow noted once", held, lost, mcpDepartedMax)
 	}
 	unknown := f.w.MCPAdmissionStatus(MCPAdmissionQuery{Connector: f.server.Connector, Server: "never-seen", Home: f.server.Home})
 	if !unknown.Failed || unknown.Name != "never-seen" {
@@ -230,5 +230,110 @@ func TestSettledDepartedMCPServersAreNotHeld(t *testing.T) {
 	f.w.mcpAdmissionMu.RUnlock()
 	if held != 0 {
 		t.Fatalf("%d departed servers held for entries nothing admitted without a scan, want none", held)
+	}
+}
+
+// The agent can edit an entry and then drop it while the live connection
+// keeps the first definition. The admission the policy gave that definition
+// stays revocable through both (GAP-0920).
+func TestEditedThenRemovedAgentEntryStillRevokesAnUnscannedAdmissionOfTheLiveConnection(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	original := f.server
+	f.admittedByAllowRule()
+	f.server.URL = "https://replacement.example.test/mcp"
+	if status := f.status(); !status.Pending {
+		t.Fatalf("the edited definition: %+v, want it pending its own admission", status)
+	}
+	f.listed = false
+	f.status()
+	f.cfg.AssetPolicy.MCP.Allowed = nil
+	status := f.w.MCPAdmissionStatus(MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home})
+	if !status.Failed || status.Name != original.Name || status.ScanIssue != MCPScanIssueAddress {
+		t.Fatalf("the call after edit, removal and revocation: %+v, want the failed admission of %q", status, original.Name)
+	}
+}
+
+// Benign twins: the same edit and removal with the allow standing, and an
+// edit back to the first definition, leave every call alone.
+func TestEditedThenRemovedAgentEntryLeavesAStandingAllowAlone(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	f.admittedByAllowRule()
+	f.server.URL = "https://replacement.example.test/mcp"
+	f.status()
+	f.removeEntry()
+	if status := f.status(); status.Pending || status.Failed {
+		t.Fatalf("with the allow standing: %+v, want no admission state", status)
+	}
+}
+
+func TestEditedAgentEntryRestoredIsJudgedAsListedAgain(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	f.admittedByAllowRule()
+	original := f.server
+	f.server.URL = "https://replacement.example.test/mcp"
+	f.status()
+	f.w.mcpAdmissionMu.RLock()
+	held := len(f.w.mcpAdmissionDeparted)
+	f.w.mcpAdmissionMu.RUnlock()
+	if held != 1 {
+		t.Fatalf("%d departed definitions after the edit, want the first one held", held)
+	}
+	f.server = original
+	f.status()
+	f.w.mcpAdmissionMu.RLock()
+	held = len(f.w.mcpAdmissionDeparted)
+	f.w.mcpAdmissionMu.RUnlock()
+	if held != 0 {
+		t.Fatalf("%d departed definitions after the entry was restored, want none", held)
+	}
+}
+
+// Overflow of the departed servers of one account describes only the calls
+// of that account and connector, and ends when the definitions list again.
+func TestDepartedMCPOverflowFailsOnlyTheAccountItCameFrom(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	f.admittedByAllowRule()
+	f.extra = make([]config.MCPServerEntry, mcpDepartedMax+1)
+	for i := range f.extra {
+		server := config.MCPServerEntry{Name: fmt.Sprintf("held-%d", i), URL: "https://held.example.test/mcp",
+			Connector: f.server.Connector, Home: f.server.Home}
+		f.extra[i] = server
+		hash, err := mcpDefinitionHash(server)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.w.mcpAdmissionMu.Lock()
+		if f.w.mcpOutcomes == nil {
+			f.w.mcpOutcomes = map[string]mcpAdmissionOutcome{}
+		}
+		f.w.mcpOutcomes[MCPEventPath(server)] = mcpAdmissionOutcome{hash: hash, withoutScan: true}
+		f.w.mcpAdmissionMu.Unlock()
+	}
+	listed := f.extra
+	f.status()
+	f.extra = nil
+	f.status()
+	query := func(connector, home string) MCPAdmissionStatus {
+		return f.w.MCPAdmissionStatus(MCPAdmissionQuery{Connector: connector, Server: "never-seen", Home: home})
+	}
+	if status := query(f.server.Connector, "/home/other"); status.Failed || status.Pending {
+		t.Fatalf("another account after the overflow: %+v, want no admission state", status)
+	}
+	if status := query("claudecode", f.server.Home); status.Failed || status.Pending {
+		t.Fatalf("another connector after the overflow: %+v, want no admission state", status)
+	}
+	if status := query(f.server.Connector, f.server.Home); !status.Failed {
+		t.Fatalf("the account the overflow came from: %+v, want the failed admission", status)
+	}
+	f.extra = listed
+	f.status()
+	if status := query(f.server.Connector, f.server.Home); status.Failed || status.Pending {
+		t.Fatalf("after the lost definitions listed again: %+v, want no admission state", status)
+	}
+	f.w.mcpAdmissionMu.RLock()
+	scopes, keys := len(f.w.mcpAdmissionLost), f.w.mcpAdmissionLostKeys
+	f.w.mcpAdmissionMu.RUnlock()
+	if scopes != 0 || keys != 0 {
+		t.Fatalf("%d lost scopes and %d lost definitions after they listed again, want none", scopes, keys)
 	}
 }

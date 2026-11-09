@@ -219,24 +219,43 @@ type mcpKnownDefinition struct {
 // mcpDepartedMax bounds mcpAdmissionDeparted.
 const mcpDepartedMax = 256
 
-// settledDepartingMCP names, by key, the servers prev had that now does not
-// list and whose admission no policy revocation can reach: one a scan
-// decided, or one with no outcome. Only a server admitted before any scan
-// is worth holding after its entry leaves the agent config (GAP-0920), so
-// ordinary config churn never fills, or evicts from, the departed servers.
-// It reads the store, so call it without mcpAdmissionMu held; a server it
-// does not name is held.
+// mcpLostKeysMax bounds the definitions mcpAdmissionLost notes in all.
+const mcpLostKeysMax = 4096
+
+// mcpLostScope is what the departed servers of one connector and account
+// that did not fit leave behind: the definitions that were dropped (keys),
+// so listing one again clears its note, and all once even those did not fit.
+// The scope with no connector and no home covers every caller.
+type mcpLostScope struct {
+	connector, home string
+	keys            map[string]struct{}
+	all             bool
+}
+
+// mcpDepartedKey names a definition: the server key and its hash, so an edit
+// of the entry keeps the earlier definition apart from the one that replaced it.
+func mcpDepartedKey(definition mcpKnownDefinition) string {
+	return definition.path + "\x00" + definition.hash
+}
+
+// settledDepartingMCP names, by definition key, the servers prev had that
+// now do not list, or list under another definition, and whose admission no
+// policy revocation can reach: one a scan decided, or one with no outcome.
+// Only a server admitted before any scan is worth holding after its entry
+// leaves the agent config or is edited (GAP-0920), so ordinary config churn
+// never fills, or evicts from, the departed servers. It reads the store, so
+// call it without mcpAdmissionMu held; a definition it does not name is held.
 func (w *InstallWatcher) settledDepartingMCP(prev, now []mcpKnownDefinition) map[string]bool {
 	if len(prev) == 0 || w.store == nil {
 		return nil
 	}
 	listed := make(map[string]bool, len(now))
 	for _, definition := range now {
-		listed[definition.path] = true
+		listed[mcpDepartedKey(definition)] = true
 	}
 	var settled map[string]bool
 	for _, definition := range prev {
-		if definition.server.Bundled || listed[definition.path] {
+		if definition.server.Bundled || listed[mcpDepartedKey(definition)] {
 			continue
 		}
 		row, err := mcpSnapshotForServer(w.store, definition.server)
@@ -250,44 +269,110 @@ func (w *InstallWatcher) settledDepartingMCP(prev, now []mcpKnownDefinition) map
 		if settled == nil {
 			settled = map[string]bool{}
 		}
-		settled[definition.path] = true
+		settled[mcpDepartedKey(definition)] = true
 	}
 	return settled
 }
 
 // rememberDepartedMCP notes, for each server prev had that now does not
-// list and settled does not name, that the agent config dropped it, and
-// forgets a departed server now lists again. A server that does not fit is
-// not lost silently: mcpAdmissionDepartedLost makes a call that names no
-// listed or held server fail like any admission no scan stands behind, until
-// the watcher restarts. Call with mcpAdmissionMu held.
+// list (or lists under another definition) and settled does not name, that
+// the agent config dropped it, and forgets a definition now lists again. One
+// that does not fit is not lost silently: noteLostMCP makes a call that
+// names no listed or held server of its connector and account fail like any
+// admission no scan stands behind. Call with mcpAdmissionMu held.
 func (w *InstallWatcher) rememberDepartedMCP(prev, now []mcpKnownDefinition, settled map[string]bool) {
-	if len(prev) == 0 && len(w.mcpAdmissionDeparted) == 0 {
+	if len(prev) == 0 && len(w.mcpAdmissionDeparted) == 0 && len(w.mcpAdmissionLost) == 0 {
 		return
 	}
 	listed := make(map[string]bool, len(now))
 	for _, definition := range now {
-		listed[definition.path] = true
-	}
-	for path := range w.mcpAdmissionDeparted {
-		if listed[path] {
-			delete(w.mcpAdmissionDeparted, path)
-		}
+		key := mcpDepartedKey(definition)
+		listed[key] = true
+		delete(w.mcpAdmissionDeparted, key)
+		w.forgetLostMCP(key)
 	}
 	for _, definition := range prev {
-		path := definition.path
-		if definition.server.Bundled || listed[path] || settled[path] {
+		key := mcpDepartedKey(definition)
+		if definition.server.Bundled || listed[key] || settled[key] {
 			continue
 		}
-		if _, held := w.mcpAdmissionDeparted[path]; !held && len(w.mcpAdmissionDeparted) >= mcpDepartedMax {
-			w.mcpAdmissionDepartedLost = true
+		if _, held := w.mcpAdmissionDeparted[key]; !held && len(w.mcpAdmissionDeparted) >= mcpDepartedMax {
+			w.noteLostMCP(definition, key)
 			continue
 		}
 		if w.mcpAdmissionDeparted == nil {
 			w.mcpAdmissionDeparted = map[string]mcpKnownDefinition{}
 		}
-		w.mcpAdmissionDeparted[path] = definition
+		w.mcpAdmissionDeparted[key] = definition
 	}
+}
+
+// noteLostMCP records a departed definition that did not fit, under its
+// connector and account. Call with mcpAdmissionMu held.
+func (w *InstallWatcher) noteLostMCP(definition mcpKnownDefinition, key string) {
+	connector, home := strings.TrimSpace(definition.server.Connector), definition.server.Home
+	scopeKey := strings.ToLower(connector) + "\x00"
+	if home != "" {
+		scopeKey += mcpFolderKey(home)
+	}
+	scope := w.mcpAdmissionLost[scopeKey]
+	if scope == nil {
+		scope = &mcpLostScope{connector: connector, home: home}
+		if w.mcpAdmissionLostKeys >= mcpLostKeysMax {
+			// Out of room for another scope: any caller may be the lost one.
+			scopeKey, scope = "", &mcpLostScope{}
+			if known := w.mcpAdmissionLost[scopeKey]; known != nil {
+				scope = known
+			}
+		}
+		if w.mcpAdmissionLost == nil {
+			w.mcpAdmissionLost = map[string]*mcpLostScope{}
+		}
+		w.mcpAdmissionLost[scopeKey] = scope
+	}
+	if _, noted := scope.keys[key]; noted || scope.all {
+		return
+	}
+	if w.mcpAdmissionLostKeys >= mcpLostKeysMax {
+		scope.all = true
+		return
+	}
+	if scope.keys == nil {
+		scope.keys = map[string]struct{}{}
+	}
+	scope.keys[key] = struct{}{}
+	w.mcpAdmissionLostKeys++
+}
+
+// forgetLostMCP clears the note of a definition that lists again, and a
+// scope that has nothing left to note. Call with mcpAdmissionMu held.
+func (w *InstallWatcher) forgetLostMCP(key string) {
+	for scopeKey, scope := range w.mcpAdmissionLost {
+		if _, noted := scope.keys[key]; !noted {
+			continue
+		}
+		delete(scope.keys, key)
+		w.mcpAdmissionLostKeys--
+		if len(scope.keys) == 0 && !scope.all {
+			delete(w.mcpAdmissionLost, scopeKey)
+		}
+	}
+}
+
+// lostMCPServes reports whether a departed definition that did not fit may
+// be the server a call reaches: a note of its connector and account. Call
+// with mcpAdmissionMu held.
+func (w *InstallWatcher) lostMCPServes(q MCPAdmissionQuery) bool {
+	for _, scope := range w.mcpAdmissionLost {
+		if scope.connector != "" && !strings.EqualFold(scope.connector, strings.TrimSpace(q.Connector)) {
+			continue
+		}
+		if q.Home != "" && scope.home != "" && !sameMCPFolder(scope.home, q.Home) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 const mcpSnapshotIdentityKey = "mcp.snapshot.identity.v1"
@@ -340,12 +425,10 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	}
 	var pending []string
 	var pendingPath string
-	listedServer := false
 	for _, server := range servers {
 		if server.Bundled || !mcpServerServesQuery(server, q) {
 			continue
 		}
-		listedServer = true
 		path := MCPEventPath(server)
 		row, err := mcpSnapshotForServer(w.store, server)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -379,7 +462,7 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		}
 	}
 	if len(pending) == 0 {
-		return w.mcpDepartedRevoked(q, listedServer)
+		return w.mcpDepartedRevoked(q, servers)
 	}
 	w.AdmitAddedMCPServers(pending)
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
@@ -407,19 +490,22 @@ func (w *InstallWatcher) mcpDecidedAdmission(path, hash string, row *audit.Snaps
 }
 
 // mcpDepartedRevoked is the status of a call to a server the agent config no
-// longer lists whose admission was the policy that gave it (an allow rule or
-// scan_on_install false) and that policy is gone. The agent can keep its
-// connection after the entry is removed, so the revoked admission reaches
-// that call too: the server has no scan to stand on and cannot be scanned,
-// which is the failed admission of a definition that no scan admits, so
-// strict and managed refuse it and the default tiers warn. A server whose
-// allow still stands, or that a scan admitted, or that was never seen, has no
-// status here (GAP-0920). Once a departed server did not fit
-// (mcpAdmissionDepartedLost) a call that names no listed and no held server
-// may be that one, so it fails the same way rather than being allowed.
-func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, listedServer bool) MCPAdmissionStatus {
+// longer lists, or lists under another definition, whose admission was the
+// policy that gave it (an allow rule or scan_on_install false) and that
+// policy is gone. The agent can keep its connection after the entry is
+// removed or edited, so the revoked admission reaches that call too: the
+// server has no scan to stand on and cannot be scanned, which is the failed
+// admission of a definition that no scan admits, so strict and managed
+// refuse it and the default tiers warn. A server whose allow still stands,
+// or that a scan admitted, or that was never seen, has no status here
+// (GAP-0920). While the agent config lists the server (servers) the listed
+// definition decides, as for any listed server. A call that names no listed
+// and no held server may be one that did not fit (mcpAdmissionLost) when a
+// note of its connector and account says so, and fails the same way rather
+// than being allowed.
+func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, servers []config.MCPServerEntry) MCPAdmissionStatus {
 	w.mcpAdmissionMu.RLock()
-	if len(w.mcpAdmissionDeparted) == 0 && !w.mcpAdmissionDepartedLost {
+	if len(w.mcpAdmissionDeparted) == 0 && len(w.mcpAdmissionLost) == 0 {
 		w.mcpAdmissionMu.RUnlock()
 		return MCPAdmissionStatus{}
 	}
@@ -429,24 +515,30 @@ func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, listedServer bo
 			gone = append(gone, definition)
 		}
 	}
-	lost := w.mcpAdmissionDepartedLost
+	lost := w.lostMCPServes(q)
 	w.mcpAdmissionMu.RUnlock()
-	for _, definition := range gone {
-		server, path := definition.server, definition.path
-		row, err := mcpSnapshotForServer(w.store, server)
-		if err != nil {
-			row = nil
+	if len(gone) == 0 && !lost {
+		return MCPAdmissionStatus{}
+	}
+	listed := map[string]bool{}
+	for _, server := range servers {
+		if !server.Bundled && mcpServerServesQuery(server, q) {
+			listed[MCPEventPath(server)] = true
 		}
-		_, decided, unscanned := w.mcpDecidedAdmission(path, definition.hash, row)
-		if !decided || !unscanned || !w.mcpUnscannedAdmissionLapsed(InstallEvent{
-			Type: InstallMCP, Name: server.Name, Path: path, Connector: server.Connector, remembered: &server}) {
+	}
+	for _, definition := range gone {
+		server := definition.server
+		// Only a server admitted before any scan is held; the allow or the
+		// setting that gave that admission is the one to ask.
+		if listed[definition.path] || !w.mcpUnscannedAdmissionLapsed(InstallEvent{
+			Type: InstallMCP, Name: server.Name, Path: definition.path, Connector: server.Connector, remembered: &server}) {
 			continue
 		}
 		status := failedMCPStatus(server)
 		status.ScanIssue = definition.issue
 		return status
 	}
-	if lost && !listedServer && len(gone) == 0 {
+	if lost && len(listed) == 0 && len(gone) == 0 {
 		return MCPAdmissionStatus{Name: q.Server, Failed: true}
 	}
 	return MCPAdmissionStatus{}
