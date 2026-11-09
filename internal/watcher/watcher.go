@@ -1390,7 +1390,28 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			return
 		}
 		if info, statErr := pathidentity.StatPinned(dir); statErr == nil {
-			roots[key] = watchedRoot{dir: dir, absolute: absolute, kind: kind, info: info, checked: time.Now()}
+			kinds := []string{kind}
+			if previous, ok := roots[key]; ok {
+				kinds = previous.kinds
+				if !slices.Contains(kinds, kind) {
+					kinds = append(slices.Clone(kinds), kind)
+				}
+			}
+			roots[key] = watchedRoot{dir: dir, absolute: absolute, kinds: kinds, info: info, checked: time.Now()}
+		}
+	}
+	// shareRoot adds a kind that is configured at a path already watched for
+	// another kind, so the root is judged and admitted for every kind.
+	shareRoot := func(key, kind string) {
+		if root, ok := roots[key]; ok && !slices.Contains(root.kinds, kind) {
+			root.kinds = append(slices.Clone(root.kinds), kind)
+			roots[key] = root
+		}
+	}
+	// setCoverage sets the coverage record of every kind the root serves.
+	setCoverage := func(root watchedRoot, cause error) {
+		for _, kind := range root.kinds {
+			w.setRootCoverage(kind, root.dir, cause)
 		}
 	}
 	// rewatchRoot watches a root again once the folder at its path is not
@@ -1403,7 +1424,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			root.failed, root.checked = true, time.Now()
 			roots[key] = root
-			w.setRootCoverage(root.kind, root.dir, statErr)
+			setCoverage(root, statErr)
 			return
 		}
 		_, watching := watchedDirs[key]
@@ -1419,14 +1440,14 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				nestedMu.Unlock()
 				root.info, root.failed, root.checked = info, true, time.Now()
 				roots[key] = root
-				w.setRootCoverage(root.kind, root.dir, err)
+				setCoverage(root, err)
 				return
 			}
 		}
 		root.checked = time.Now()
 		if same && watching && !root.failed {
 			roots[key] = root
-			w.setRootCoverage(root.kind, root.dir, nil)
+			setCoverage(root, nil)
 			return
 		}
 		nestedMu.Lock()
@@ -1437,21 +1458,27 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		if addErr := fsw.Add(root.dir); addErr != nil {
 			root.failed = true
 			roots[key] = root
-			w.setRootCoverage(root.kind, root.dir, addErr)
+			setCoverage(root, addErr)
 			return
 		}
-		w.setRootCoverage(root.kind, root.dir, nil)
+		setCoverage(root, nil)
 		roots[key] = root
 		watchedDirs[key] = struct{}{}
-		fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", root.kind, root.dir)
-		w.admitReplacedRoot(ctx, fsw, root.dir, root.kind, watchedDirs)
+		for _, kind := range root.kinds {
+			fmt.Printf("[watch] %s dir %s was replaced; watching it again and admitting what it holds\n", kind, root.dir)
+			w.admitReplacedRoot(ctx, fsw, root.dir, kind, watchedDirs)
+		}
 	}
 	watchOnce := func(dir, kind string) bool {
 		key, absolute := watchKey(dir)
 		if _, exists := watchedDirs[key]; exists {
 			// Another kind registered this path; this kind is covered by
-			// that watch, so its own record ends too.
-			w.setRootCoverage(kind, dir, nil)
+			// that watch, so its own record ends too, unless that watch is
+			// not usable right now.
+			shareRoot(key, kind)
+			if !roots[key].failed {
+				w.setRootCoverage(kind, dir, nil)
+			}
 			return true
 		}
 		if createsAgentOwnedDir(dir) {
@@ -1810,7 +1837,14 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
-			w.reconcileWritableRouteIssues()
+			// A root Run does not hold a usable watch on keeps its record:
+			// rewatchRoot and the retry loops above end it when they have
+			// watched the root again and admitted what it holds.
+			w.reconcileWritableRouteIssues(func(path string) bool {
+				key, _ := watchKey(path)
+				_, watching := watchedDirs[key]
+				return !watching || roots[key].failed
+			})
 			w.queueDueIssues()
 			w.processPending(ctx)
 		}
@@ -1826,8 +1860,10 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 // now found. A root that is not created yet is not watched after the repair
 // either, so its record changes to say so and stays until the root is
 // registered (the retry loop above ends it); only an existing root with a
-// safe route is cleared here.
-func (w *InstallWatcher) reconcileWritableRouteIssues() {
+// safe route is cleared here. notWatched reports a root Run holds no usable
+// watch on: its record is left for the code that watches it again, so the
+// record never ends before the root has been watched and admitted.
+func (w *InstallWatcher) reconcileWritableRouteIssues(notWatched func(path string) bool) {
 	if w.secureClientActive() {
 		return
 	}
@@ -1846,6 +1882,9 @@ func (w *InstallWatcher) reconcileWritableRouteIssues() {
 		var writable *skillrootsafe.WritableAncestorError
 		switch {
 		case err == nil && exists:
+			if notWatched(issue.Path) {
+				continue
+			}
 			w.setRootCoverage(issue.Kind, issue.Path, nil)
 		case err == nil:
 			w.setRootCoverage(issue.Kind, issue.Path, fmt.Errorf("%w: %s root %s does not exist yet; watching it once it is created", errWatchDirNotCreated, issue.Kind, issue.Path))
@@ -1911,10 +1950,15 @@ func (w *InstallWatcher) blockedPluginDecisionUnchanged(issue AdmissionIssue) bo
 // watchedRoot is a skill or plugin root Run watches and the folder it was
 // when the watch was added.
 type watchedRoot struct {
-	dir, absolute, kind string
-	info                os.FileInfo
-	failed              bool // the folder now there could not be watched
-	checked             time.Time
+	dir, absolute string
+	// kinds are all the kinds configured at this path. One path can be both
+	// a skill root and a plugin root; they share the one watch, so they share
+	// its lifecycle: each kind is unavailable while the watch is unsafe or
+	// lost and is admitted again before that ends.
+	kinds   []string
+	info    os.FileInfo
+	failed  bool // the folder now there could not be watched
+	checked time.Time
 }
 
 // admitReplacedRoot watches the folders of a skill or plugin root that was
