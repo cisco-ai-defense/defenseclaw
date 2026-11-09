@@ -6,10 +6,6 @@
 package connector
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"os"
 	"strings"
 )
 
@@ -50,45 +46,9 @@ func (c *KiroConnector) convertKiroConfigHookForms(opts SetupOpts, toEarlier boo
 	paths := append(append(c.hookCleanupPaths(opts), c.agentConfigPaths(opts)...), c.agentCleanupPaths(opts)...)
 	total := 0
 	for _, path := range uniqueNonEmptyStrings(paths) {
-		data, err := os.ReadFile(path)
-		if os.IsNotExist(err) {
-			continue
-		}
+		converted, err := convertKiroHooksFile(path, opts.DataDir, c.Name(), pairs, toEarlier, keepCopy)
 		if err != nil {
-			return total, fmt.Errorf("read Kiro hooks %s: %w", path, err)
-		}
-		if _, changed := convertKiroHookFileForms(data, pairs, toEarlier); changed == 0 {
-			continue
-		}
-		converted := 0
-		var hold func([]byte) error
-		var committed []byte
-		err = withFileLockMode(path, false, func() error {
-			return atomicTransformFileWithStateDir(path, opts.DataDir, 0o600,
-				func(current []byte, exists bool) (atomicTransformResult, error) {
-					if !exists {
-						return atomicTransformResult{Remove: true}, nil
-					}
-					out, changed := convertKiroHookFileForms(current, pairs, toEarlier)
-					if changed == 0 {
-						return atomicTransformResult{Data: current}, nil
-					}
-					if keepCopy != nil {
-						sum := sha256.Sum256([]byte(strings.ToLower(path)))
-						if err := keepCopy(opts.DataDir, "kiro-"+hex.EncodeToString(sum[:6])+".before-rollback.json", current); err != nil {
-							return atomicTransformResult{}, fmt.Errorf("keep a copy of the Kiro hooks: %w", err)
-						}
-					}
-					converted = changed
-					hold, committed = holdManagedExactRestore(opts.DataDir, c.Name(), path, current), out
-					return atomicTransformResult{Data: out}, nil
-				})
-		})
-		if err == nil && hold != nil {
-			err = hold(committed)
-		}
-		if err != nil {
-			return total, fmt.Errorf("rewrite Kiro hooks in %s: %w", path, err)
+			return total, err
 		}
 		total += converted
 	}

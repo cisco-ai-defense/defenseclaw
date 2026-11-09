@@ -6,7 +6,6 @@ package connector
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -89,71 +88,62 @@ func convertDevinHookForms(hooks map[string]interface{}, pairs map[string][][2]s
 	return changed
 }
 
-// convertDevinHooksFile applies convertDevinHookForms to one Devin hooks
-// file under its lock, keeps a copy of it before a rollback conversion, and
-// returns how many handlers it rewrote. A file that holds exactly the bytes
-// DefenseClaw last committed keeps its exact restore
-// (holdManagedExactRestoreOverRead): the converted bytes are recorded as the
-// committed output, so a rollback that finds the file unedited puts the saved
-// pre-setup bytes back. An edit that lands while the conversion runs keeps
-// the file out of the exact restore.
+// convertDevinHooksFile applies convertDevinHookForms to one Devin hooks file
+// under its lock, keeps a copy of it before a rollback conversion, and
+// returns how many handlers it rewrote. A rollback conversion (toEarlier)
+// first puts back the saved bytes of a file nobody edited since setup
+// (restoreUneditedForRollback).
 func convertDevinHooksFile(path, dataDir, connectorName string, pairs map[string][][2]string, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return 0, nil
 	}
 	converted := 0
-	err := withFileLockMode(path, false, func() error {
-		var err error
-		// A save that lands while the conversion runs makes the writer refuse
-		// to replace the file (errManagedTargetMoved); the conversion starts
-		// again from the saved bytes, which no longer match the record. The
-		// copy is kept once, from the first read.
-		for attempt := 0; attempt < devinConversionAttempts; attempt++ {
-			converted, err = convertDevinHooksOnce(path, dataDir, connectorName, pairs, toEarlier, keepCopy)
-			if !errors.Is(err, errManagedTargetMoved) {
-				return err
-			}
-			keepCopy = nil
-		}
-		return err
-	})
-	return converted, err
-}
-
-// devinConversionAttempts bounds how often a conversion starts again after the
-// file was saved under it.
-const devinConversionAttempts = 3
-
-func convertDevinHooksOnce(path, dataDir, connectorName string, pairs map[string][][2]string, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
-	data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	cfg, err := readDevinJSONObject(path)
-	if err != nil {
-		return 0, err
-	}
-	converted := convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier)
-	if converted == 0 {
-		return 0, nil
-	}
+	copyName := ""
 	if keepCopy != nil {
 		sum := sha256.Sum256([]byte(strings.ToLower(path)))
-		if err := keepCopy(dataDir, "devin-"+hex.EncodeToString(sum[:6])+".before-rollback.json", data); err != nil {
-			return converted, fmt.Errorf("keep a copy of the Devin hooks: %w", err)
+		copyName = "devin-" + hex.EncodeToString(sum[:6]) + ".before-rollback.json"
+	}
+	// read returns the file and its handlers converted in memory, or ok false
+	// when the file is gone or holds nothing to convert.
+	read := func() (data []byte, cfg map[string]interface{}, ok bool, err error) {
+		data, err = safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
+		if os.IsNotExist(err) {
+			return nil, nil, false, nil
 		}
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if cfg, err = readDevinJSONObject(path); err != nil {
+			return nil, nil, false, err
+		}
+		converted = convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier)
+		return data, cfg, converted > 0, nil
 	}
-	// The writer reads the file again to keep the comments of the operator,
-	// so the bytes read above do not bind what it consumed: the hold follows
-	// its writes instead.
-	hold := holdManagedExactRestoreOverRead(dataDir, connectorName, path, data)
-	after, err := writeDevinHooksFileBytes(path, cfg)
-	if err != nil {
-		_ = hold(nil)
-		return converted, err
-	}
-	return converted, hold(after)
+	err := withFileLockMode(path, false, func() error {
+		data, cfg, ok, err := read()
+		if err != nil || !ok {
+			return err
+		}
+		if toEarlier {
+			var keep func([]byte) error
+			if keepCopy != nil {
+				keep = func(current []byte) error { return keepCopy(dataDir, copyName, current) }
+			}
+			if done, err := restoreUneditedForRollback(dataDir, connectorName, path, keep); err != nil || done {
+				return err
+			}
+			// A save that landed while the restore ran is the operator own:
+			// convert the file as it is now, not as it was read.
+			if data, cfg, ok, err = read(); err != nil || !ok {
+				return err
+			}
+		}
+		if keepCopy != nil {
+			if err := keepCopy(dataDir, copyName, data); err != nil {
+				return fmt.Errorf("keep a copy of the Devin hooks: %w", err)
+			}
+		}
+		return writeDevinHooksFile(path, cfg)
+	})
+	return converted, err
 }

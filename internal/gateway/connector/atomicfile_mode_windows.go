@@ -165,10 +165,8 @@ func atomicFilePublishPrivateBound(
 	// it does not retain destination metadata such as alternate data streams,
 	// EFS state, or its DACL. A no-replace publication leaves every existing
 	// destination byte and name untouched.
-	if err := renameAtomicTransformBoundFileWithBusyRetryUsing(
+	if err := renameAtomicTransformBoundFileWithBusyRetry(
 		parent, stage, filepath.Base(destination), replace,
-		renameAtomicTransformBoundFilePlatform,
-		time.Sleep,
 	); err != nil {
 		if !replace && errors.Is(err, errAtomicTransformConflict) {
 			return fmt.Errorf("destination %s exists: %w", destination, os.ErrExist)
@@ -244,6 +242,16 @@ func atomicFileRenameBusy(err error) bool {
 		errors.Is(err, windows.ERROR_LOCK_VIOLATION) ||
 		errors.Is(err, windows.STATUS_ACCESS_DENIED) ||
 		errors.Is(err, windows.STATUS_SHARING_VIOLATION)
+}
+
+func renameAtomicTransformBoundFileWithBusyRetry(
+	parent, source *os.File, targetName string, replace bool,
+) error {
+	return renameAtomicTransformBoundFileWithBusyRetryUsing(
+		parent, source, targetName, replace,
+		renameAtomicTransformBoundFilePlatform,
+		time.Sleep,
+	)
 }
 
 func renameAtomicTransformBoundFileWithBusyRetryUsing(

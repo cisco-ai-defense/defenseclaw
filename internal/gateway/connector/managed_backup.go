@@ -288,16 +288,6 @@ func updateManagedFileBackupPostHash(dataDir, connectorName, logicalName, target
 func updateManagedFileBackupPostHashValue(
 	dataDir, connectorName, logicalName, targetPath, nextHash string,
 ) error {
-	return setManagedFileBackupPostHash(dataDir, connectorName, logicalName, targetPath, "", nextHash)
-}
-
-// setManagedFileBackupPostHash is updateManagedFileBackupPostHashValue with an
-// expected state: a non-empty from changes the record only while it still
-// holds that post hash. A record that moved on since the caller read it (a
-// later setup marked it drifted, or published new bytes) is left as it is.
-func setManagedFileBackupPostHash(
-	dataDir, connectorName, logicalName, targetPath, from, nextHash string,
-) error {
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	b, err := loadManagedFileBackupPath(backupPath)
 	if err != nil {
@@ -316,7 +306,7 @@ func setManagedFileBackupPostHash(
 	if nextHash == "" {
 		return fmt.Errorf("managed backup post hash is empty")
 	}
-	if b.PostSHA256 == nextHash || (from != "" && b.PostSHA256 != from) {
+	if b.PostSHA256 == nextHash {
 		return nil
 	}
 	b.PostSHA256 = nextHash
@@ -324,73 +314,8 @@ func setManagedFileBackupPostHash(
 	return writeManagedFileBackup(backupPath, b)
 }
 
-// holdManagedExactRestore is for a DefenseClaw writer that rewrites an agent
-// file outside setup, such as the rollback conversion of hook entries into
-// the form an earlier release owns (and its undo). before is the file as the
-// writer read it, and the writer must publish exactly what it derived from
-// those bytes (a compare-and-swap transform). When the connector record says
-// the file holds exactly the bytes DefenseClaw last committed, the returned
-// function records the bytes the writer commits as the new committed output,
-// so the saved pre-setup copy still comes back byte for byte when the
-// rollback restores the file. A file with no record, no post hash, or any
-// other bytes (an edit, a drifted record) gets a function that records
-// nothing: its entries are removed one by one and the bytes of the operator
-// stay. The record changes only while it still holds the post hash that was
-// read: a later setup that marked it drifted is not undone.
-func holdManagedExactRestore(dataDir, connectorName, path string, before []byte) func(after []byte) error {
-	b, ok := managedExactRestoreRecord(dataDir, connectorName, path, before)
-	if !ok {
-		return func([]byte) error { return nil }
-	}
-	return func(after []byte) error { return publishManagedExactRestore(dataDir, b, path, after) }
-}
-
-// holdManagedExactRestoreOverRead is holdManagedExactRestore for a writer that
-// reads the file again after before (to keep comments of the operator, say),
-// so before does not bind what it consumed. A span follows the writes the
-// shared writers report: each write must find the bytes the rollback left
-// (before, or its previous write), or it is refused (errManagedTargetMoved)
-// and the file stays as it is. The span is open whether or not a record
-// vouches for before, so a save is never replaced either way. It publishes the
-// exact restore only when the record vouches for before, each write found the
-// bytes the rollback left, and the file now holds the bytes the caller names.
-// The returned function takes the committed bytes, or nil when the write
-// failed; it always closes the span.
-func holdManagedExactRestoreOverRead(dataDir, connectorName, path string, before []byte) func(after []byte) error {
-	b, ok := managedExactRestoreRecord(dataDir, connectorName, path, before)
-	if !beginManagedConversionSpan(path, sha256Hex(before)) {
-		return func([]byte) error { return nil }
-	}
-	return func(after []byte) error {
-		span, open := endManagedSetupSpan(path)
-		if !ok || after == nil || !open || span.tainted || span.expected != managedFileSnapshotHash(after, true) {
-			return nil
-		}
-		if now, info, err := readManagedTarget(path); err != nil || info == nil || !bytes.Equal(now, after) {
-			return nil
-		}
-		return publishManagedExactRestore(dataDir, b, path, after)
-	}
-}
-
-// managedExactRestoreRecord returns the record of connectorName for path when
-// it vouches for exactly the bytes before.
-func managedExactRestoreRecord(dataDir, connectorName, path string, before []byte) (managedFileBackup, bool) {
-	b, ok := managedFileBackupFor(dataDir, connectorName, path)
-	if !ok || b.PostSHA256 == "" || b.PostSHA256 != sha256Hex(before) {
-		return managedFileBackup{}, false
-	}
-	return b, true
-}
-
-// publishManagedExactRestore moves the committed output of b to after, only
-// while the record still holds the post hash b was read with.
-func publishManagedExactRestore(dataDir string, b managedFileBackup, path string, after []byte) error {
-	return setManagedFileBackupPostHash(dataDir, b.Connector, b.LogicalName, path, b.PostSHA256, sha256Hex(after))
-}
-
-// managedFileBackupFor returns connectorName's record for the agent file at
-// path. A store that cannot be read yields no record.
+// managedFileBackupFor returns the record of connectorName for the agent file
+// at path. A store that cannot be read yields no record.
 func managedFileBackupFor(dataDir, connectorName, path string) (managedFileBackup, bool) {
 	var found managedFileBackup
 	ok := false
