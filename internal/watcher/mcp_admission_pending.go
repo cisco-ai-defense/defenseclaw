@@ -219,10 +219,49 @@ type mcpKnownDefinition struct {
 // mcpDepartedMax bounds mcpAdmissionDeparted.
 const mcpDepartedMax = 256
 
+// settledDepartingMCP names, by key, the servers prev had that now does not
+// list and whose admission no policy revocation can reach: one a scan
+// decided, or one with no outcome. Only a server admitted before any scan
+// is worth holding after its entry leaves the agent config (GAP-0920), so
+// ordinary config churn never fills, or evicts from, the departed servers.
+// It reads the store, so call it without mcpAdmissionMu held; a server it
+// does not name is held.
+func (w *InstallWatcher) settledDepartingMCP(prev, now []mcpKnownDefinition) map[string]bool {
+	if len(prev) == 0 || w.store == nil {
+		return nil
+	}
+	listed := make(map[string]bool, len(now))
+	for _, definition := range now {
+		listed[definition.path] = true
+	}
+	var settled map[string]bool
+	for _, definition := range prev {
+		if definition.server.Bundled || listed[definition.path] {
+			continue
+		}
+		row, err := mcpSnapshotForServer(w.store, definition.server)
+		if err != nil {
+			row = nil
+		}
+		_, decided, unscanned := w.mcpDecidedAdmission(definition.path, definition.hash, row)
+		if decided && unscanned {
+			continue
+		}
+		if settled == nil {
+			settled = map[string]bool{}
+		}
+		settled[definition.path] = true
+	}
+	return settled
+}
+
 // rememberDepartedMCP notes, for each server prev had that now does not
-// list, that the agent config dropped it, and forgets a departed server now
-// lists again. Call with mcpAdmissionMu held.
-func (w *InstallWatcher) rememberDepartedMCP(prev, now []mcpKnownDefinition) {
+// list and settled does not name, that the agent config dropped it, and
+// forgets a departed server now lists again. A server that does not fit is
+// not lost silently: mcpAdmissionDepartedLost makes a call that names no
+// listed or held server fail like any admission no scan stands behind, until
+// the watcher restarts. Call with mcpAdmissionMu held.
+func (w *InstallWatcher) rememberDepartedMCP(prev, now []mcpKnownDefinition, settled map[string]bool) {
 	if len(prev) == 0 && len(w.mcpAdmissionDeparted) == 0 {
 		return
 	}
@@ -237,17 +276,15 @@ func (w *InstallWatcher) rememberDepartedMCP(prev, now []mcpKnownDefinition) {
 	}
 	for _, definition := range prev {
 		path := definition.path
-		if definition.server.Bundled || listed[path] {
+		if definition.server.Bundled || listed[path] || settled[path] {
+			continue
+		}
+		if _, held := w.mcpAdmissionDeparted[path]; !held && len(w.mcpAdmissionDeparted) >= mcpDepartedMax {
+			w.mcpAdmissionDepartedLost = true
 			continue
 		}
 		if w.mcpAdmissionDeparted == nil {
 			w.mcpAdmissionDeparted = map[string]mcpKnownDefinition{}
-		}
-		if _, held := w.mcpAdmissionDeparted[path]; !held && len(w.mcpAdmissionDeparted) >= mcpDepartedMax {
-			for victim := range w.mcpAdmissionDeparted {
-				delete(w.mcpAdmissionDeparted, victim)
-				break
-			}
 		}
 		w.mcpAdmissionDeparted[path] = definition
 	}
@@ -303,10 +340,12 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 	}
 	var pending []string
 	var pendingPath string
+	listedServer := false
 	for _, server := range servers {
 		if server.Bundled || !mcpServerServesQuery(server, q) {
 			continue
 		}
+		listedServer = true
 		path := MCPEventPath(server)
 		row, err := mcpSnapshotForServer(w.store, server)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -340,7 +379,7 @@ func (w *InstallWatcher) MCPAdmissionStatus(q MCPAdmissionQuery) MCPAdmissionSta
 		}
 	}
 	if len(pending) == 0 {
-		return w.mcpDepartedRevoked(q)
+		return w.mcpDepartedRevoked(q, listedServer)
 	}
 	w.AdmitAddedMCPServers(pending)
 	return MCPAdmissionStatus{Name: pending[0], Pending: true, RetryAfter: w.mcpRetryAfter(pendingPath)}
@@ -375,15 +414,22 @@ func (w *InstallWatcher) mcpDecidedAdmission(path, hash string, row *audit.Snaps
 // which is the failed admission of a definition that no scan admits, so
 // strict and managed refuse it and the default tiers warn. A server whose
 // allow still stands, or that a scan admitted, or that was never seen, has no
-// status here (GAP-0920).
-func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery) MCPAdmissionStatus {
+// status here (GAP-0920). Once a departed server did not fit
+// (mcpAdmissionDepartedLost) a call that names no listed and no held server
+// may be that one, so it fails the same way rather than being allowed.
+func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery, listedServer bool) MCPAdmissionStatus {
 	w.mcpAdmissionMu.RLock()
+	if len(w.mcpAdmissionDeparted) == 0 && !w.mcpAdmissionDepartedLost {
+		w.mcpAdmissionMu.RUnlock()
+		return MCPAdmissionStatus{}
+	}
 	var gone []mcpKnownDefinition
 	for _, definition := range w.mcpAdmissionDeparted {
 		if mcpServerServesQuery(definition.server, q) {
 			gone = append(gone, definition)
 		}
 	}
+	lost := w.mcpAdmissionDepartedLost
 	w.mcpAdmissionMu.RUnlock()
 	for _, definition := range gone {
 		server, path := definition.server, definition.path
@@ -399,6 +445,9 @@ func (w *InstallWatcher) mcpDepartedRevoked(q MCPAdmissionQuery) MCPAdmissionSta
 		status := failedMCPStatus(server)
 		status.ScanIssue = definition.issue
 		return status
+	}
+	if lost && !listedServer && len(gone) == 0 {
+		return MCPAdmissionStatus{Name: q.Server, Failed: true}
 	}
 	return MCPAdmissionStatus{}
 }

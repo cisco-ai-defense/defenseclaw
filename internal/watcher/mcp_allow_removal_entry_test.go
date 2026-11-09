@@ -22,16 +22,19 @@ import (
 type removableEntryFixture struct {
 	*allowRemovalFixture
 	listed bool
+	// extra are other entries the agent config lists.
+	extra []config.MCPServerEntry
 }
 
 func newRemovableEntryFixture(t *testing.T) *removableEntryFixture {
 	t.Helper()
 	f := &removableEntryFixture{allowRemovalFixture: newAllowRemovalFixture(t), listed: true}
 	f.w.SetMCPServerSource(func() ([]config.MCPServerEntry, error) {
-		if !f.listed {
-			return nil, nil
+		servers := append([]config.MCPServerEntry(nil), f.extra...)
+		if f.listed {
+			servers = append(servers, f.server)
 		}
-		return []config.MCPServerEntry{f.server}, nil
+		return servers, nil
 	})
 	f.w.firstCycleDone.Store(true)
 	return f
@@ -140,18 +143,92 @@ func TestRestoredAgentEntryIsJudgedAsAListedServerAgain(t *testing.T) {
 	}
 }
 
-func TestDepartedMCPServersAreBounded(t *testing.T) {
-	w := &InstallWatcher{}
+func ordinaryMCPEntries(prefix string, n int, f *removableEntryFixture) []config.MCPServerEntry {
+	entries := make([]config.MCPServerEntry, 0, n)
+	for i := 0; i < n; i++ {
+		entries = append(entries, config.MCPServerEntry{Name: fmt.Sprintf("%s%d", prefix, i),
+			URL: fmt.Sprintf("https://ordinary%d.example.test/mcp", i), Connector: f.server.Connector, Home: f.server.Home})
+	}
+	return entries
+}
+
+// Entries the agent adds and removes over time are not admissions anyone
+// revoked: however many there are, they cannot push the revoked live
+// connection out of the departed servers.
+func TestOrdinaryRemovedEntriesDoNotDropARevokedLiveAdmission(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	f.admittedByAllowRule()
+	f.removeEntry()
+	f.cfg.AssetPolicy.MCP.Allowed = nil
+	if status := f.status(); !status.Failed {
+		t.Fatalf("revoked and removed: %+v, want failed", status)
+	}
+	for batch := 0; batch < 3; batch++ {
+		f.extra = ordinaryMCPEntries(fmt.Sprintf("b%d-", batch), mcpDepartedMax, f)
+		f.status()
+		f.extra = nil
+		if status := f.status(); !status.Failed || status.Name != f.server.Name {
+			t.Fatalf("after %d batches of removed ordinary entries: %+v, want the failed admission of %q", batch+1, status, f.server.Name)
+		}
+	}
+	f.w.mcpAdmissionMu.RLock()
+	held, lost := len(f.w.mcpAdmissionDeparted), f.w.mcpAdmissionDepartedLost
+	f.w.mcpAdmissionMu.RUnlock()
+	if held != 1 || lost {
+		t.Fatalf("held %d departed servers (lost=%v) after ordinary churn, want only the revoked one", held, lost)
+	}
+}
+
+// Benign twin: the same churn with the allow standing leaves every call alone.
+func TestOrdinaryRemovedEntriesLeaveAStandingAllowAlone(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	f.admittedByAllowRule()
+	f.removeEntry()
+	f.extra = ordinaryMCPEntries("c-", mcpDepartedMax+10, f)
+	f.status()
+	f.extra = nil
+	if status := f.status(); status.Pending || status.Failed {
+		t.Fatalf("with the allow standing after churn: %+v, want no admission state", status)
+	}
+}
+
+// A departed server that does not fit is not allowed by default: a call that
+// names no listed and no held server fails like any unscanned admission, a
+// call to a listed or held server is decided as before.
+func TestDepartedMCPServersBeyondTheBoundFailTheCallsNoServerStandsFor(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	f.admittedByAllowRule()
 	var prev []mcpKnownDefinition
-	for i := 0; i < mcpDepartedMax+40; i++ {
-		server := config.MCPServerEntry{Name: fmt.Sprintf("s%d", i), Connector: "codex"}
+	for i := 0; i < mcpDepartedMax+1; i++ {
+		server := config.MCPServerEntry{Name: fmt.Sprintf("held%d", i), Connector: f.server.Connector, Home: f.server.Home}
 		prev = append(prev, mcpKnownDefinition{server: server, path: MCPEventPath(server)})
 	}
-	w.mcpAdmissionMu.Lock()
-	w.rememberDepartedMCP(prev, nil)
-	held := len(w.mcpAdmissionDeparted)
-	w.mcpAdmissionMu.Unlock()
-	if held != mcpDepartedMax {
-		t.Fatalf("held %d departed servers, want the bound %d", held, mcpDepartedMax)
+	f.w.mcpAdmissionMu.Lock()
+	f.w.rememberDepartedMCP(prev, nil, nil)
+	held, lost := len(f.w.mcpAdmissionDeparted), f.w.mcpAdmissionDepartedLost
+	f.w.mcpAdmissionMu.Unlock()
+	if held != mcpDepartedMax || !lost {
+		t.Fatalf("held %d departed servers (lost=%v), want the bound %d and the overflow noted", held, lost, mcpDepartedMax)
+	}
+	unknown := f.w.MCPAdmissionStatus(MCPAdmissionQuery{Connector: f.server.Connector, Server: "never-seen", Home: f.server.Home})
+	if !unknown.Failed || unknown.Name != "never-seen" {
+		t.Fatalf("a name no listing has, after overflow: %+v, want the failed admission", unknown)
+	}
+	if status := f.status(); status.Pending || status.Failed {
+		t.Fatalf("the listed server whose allow stands, after overflow: %+v, want no admission state", status)
+	}
+}
+
+func TestSettledDepartedMCPServersAreNotHeld(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	f.extra = ordinaryMCPEntries("s", 3, f)
+	f.status()
+	f.extra = nil
+	f.status()
+	f.w.mcpAdmissionMu.RLock()
+	held := len(f.w.mcpAdmissionDeparted)
+	f.w.mcpAdmissionMu.RUnlock()
+	if held != 0 {
+		t.Fatalf("%d departed servers held for entries nothing admitted without a scan, want none", held)
 	}
 }
