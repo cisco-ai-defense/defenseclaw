@@ -141,6 +141,123 @@ type hookCall struct {
 	// bodyLinks when the link bound stopped the walk to it
 	// (ShareBodyUnread).
 	bodyUnread, bodyLinks bool
+	// cleared are the local paths the share walk has read in this call and
+	// found to lead into no share (clearedRead). The goroutines of a call
+	// may read it together.
+	clearedMu sync.Mutex
+	cleared   map[clearedRead]struct{}
+	// stats are the answers of pathStat and pathLstat in this call, for a
+	// name that exists or does not (statAnswer).
+	stats map[clearedRead]statAnswer
+}
+
+// statAnswer is what a stat of a name returned.
+type statAnswer struct {
+	info os.FileInfo
+	err  error
+}
+
+// statOfCall is the answer this call has had to a stat of name (followLast:
+// stat, not lstat). The scans of one call stat the same operand again and
+// again, and within one evaluation every reader assumes the files stay as
+// they are (TargetMemo), so the name is stat-ed once. Only an operand that
+// exists or is missing is kept: any other error (a share that did not
+// answer, a refused read) is read again.
+func (call *hookCall) statOfCall(name string, followLast bool) (statAnswer, bool) {
+	call.clearedMu.Lock()
+	defer call.clearedMu.Unlock()
+	answer, ok := call.stats[clearedKey(name, followLast)]
+	return answer, ok
+}
+
+// noteStat keeps the answer to a stat of name.
+func (call *hookCall) noteStat(name string, followLast bool, info os.FileInfo, err error) {
+	if err != nil && !os.IsNotExist(err) {
+		return
+	}
+	call.clearedMu.Lock()
+	defer call.clearedMu.Unlock()
+	if len(call.stats) >= clearedPathsLimit {
+		return
+	}
+	if call.stats == nil {
+		call.stats = make(map[clearedRead]statAnswer)
+	}
+	call.stats[clearedKey(name, followLast)] = statAnswer{info, err}
+}
+
+// clearedRead is a path read by the share walk, with whether the read opens
+// a link at the end of the path.
+type clearedRead struct {
+	path       string
+	followLast bool
+}
+
+// clearedPathsLimit bounds the paths one call remembers; past it a path is
+// read again each time, as outside a call.
+const clearedPathsLimit = 1 << 16
+
+// clearedKey is the key of a path in cleared. Windows names the same file
+// by spellings that differ in the case of a letter, and the scans of one
+// call spell an operand both ways, so the ASCII letters are folded there
+// (the system folds exactly those, so two spellings with one key are one
+// name). Any other letter keeps its case: two names the system tells apart
+// are never one key.
+func clearedKey(path string, followLast bool) clearedRead {
+	if runtime.GOOS == "windows" {
+		folded := []byte(path)
+		for i, c := range folded {
+			if c >= 0x41 && c <= 0x5a { // A to Z
+				folded[i] = c + 0x20
+			}
+		}
+		path = string(folded)
+	}
+	return clearedRead{path, followLast}
+}
+
+// isCleared reports a path this call has read and found to lead into no
+// share. A read that opens the link at the end of the path also covers the
+// read that does not.
+func (call *hookCall) isCleared(path string, followLast bool) bool {
+	call.clearedMu.Lock()
+	defer call.clearedMu.Unlock()
+	key := clearedKey(path, followLast)
+	if _, ok := call.cleared[clearedKey(path, true)]; ok {
+		return true
+	}
+	_, ok := call.cleared[key]
+	return ok
+}
+
+// clear remembers a path found to lead into no share.
+func (call *hookCall) clear(path string, followLast bool) {
+	call.clearedMu.Lock()
+	defer call.clearedMu.Unlock()
+	if len(call.cleared) >= clearedPathsLimit {
+		return
+	}
+	if call.cleared == nil {
+		call.cleared = make(map[clearedRead]struct{})
+	}
+	call.cleared[clearedKey(path, followLast)] = struct{}{}
+}
+
+// soleHookCall is the hook call in progress when exactly one is (nil: none,
+// or several). The goroutine of a call is told by a stack walk that costs
+// more than the read it would save, so the walk is remembered for the one
+// call that nothing can be confused with; with several calls in progress
+// every read is walked as before.
+func soleHookCall() *hookCall {
+	hookCalls.mu.Lock()
+	defer hookCalls.mu.Unlock()
+	if len(hookCalls.calls) != 1 {
+		return nil
+	}
+	for _, call := range hookCalls.calls {
+		return call
+	}
+	return nil
 }
 
 // shareWait is how long the call may wait for the next share: a full answer
@@ -255,9 +372,33 @@ func networkPathReadAs(path string, followLast bool) (unanswered bool, cut share
 	if path != "" && os.IsPathSeparator(path[len(path)-1]) {
 		followLast = true
 	}
+	// The scans of one hook call read the same operand again and again (a
+	// stat, an lstat and a link resolution each), and each read costs the
+	// proof of its folders: a path the call has read and found to lead into
+	// no share is not walked again in that call (rel-1-0-9:GAP-0943, about
+	// 1 ms an operand on Windows). Only a local path is remembered, and
+	// only until the call ends.
+	var call *hookCall
+	if networkShareLinkWalk {
+		if call = soleHookCall(); call != nil && call.isCleared(path, followLast) {
+			return false, shareReadFinal
+		}
+		// A read that opens the link at the end of a path the call has read
+		// without opening it needs only the last name: the folders on the
+		// way are proven.
+		if call != nil && followLast && !os.IsPathSeparator(path[len(path)-1]) &&
+			filepath.Clean(path) == path && call.isCleared(path, false) {
+			if info, err := walkLstat(path); err != nil || info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+				call.clear(path, true)
+				return false, shareReadFinal
+			}
+		}
+	}
+	local, origin := true, path
 	var seen map[string]bool
 	for range networkLinkHopLimit + 1 {
 		if root := networkShareRootOf(path); root != "" {
+			local = false
 			if silent, budgetCut := askNetworkShare(root); silent {
 				if budgetCut {
 					return true, shareReadBudgetCut
@@ -270,6 +411,9 @@ func networkPathReadAs(path string, followLast bool) (unanswered bool, cut share
 		case exhausted:
 			return true, shareReadLinkBound
 		case next == "":
+			if local && seen == nil && call != nil {
+				call.clear(origin, followLast)
+			}
 			return false, shareReadFinal
 		case seen[next]:
 			return false, shareReadFinal
@@ -422,10 +566,22 @@ func networkShareError(op, name string) error {
 // network share only once the share has answered (networkPathUnanswered).
 
 func pathStat(name string) (os.FileInfo, error) {
+	var call *hookCall
+	if networkShareLinkWalk {
+		if call = soleHookCall(); call != nil {
+			if answer, ok := call.statOfCall(name, true); ok {
+				return answer.info, answer.err
+			}
+		}
+	}
 	if networkPathUnanswered(name) {
 		return nil, networkShareError("stat", name)
 	}
-	return os.Stat(name)
+	info, err := os.Stat(name)
+	if call != nil {
+		call.noteStat(name, true, info, err)
+	}
+	return info, err
 }
 
 // pathStatPinned is pathStat with the file identity read at once, for a
@@ -438,10 +594,22 @@ func pathStatPinned(name string) (os.FileInfo, error) {
 }
 
 func pathLstat(name string) (os.FileInfo, error) {
+	var call *hookCall
+	if networkShareLinkWalk {
+		if call = soleHookCall(); call != nil {
+			if answer, ok := call.statOfCall(name, false); ok {
+				return answer.info, answer.err
+			}
+		}
+	}
 	if linkUnanswered(name) {
 		return nil, networkShareError("lstat", name)
 	}
-	return os.Lstat(name)
+	info, err := os.Lstat(name)
+	if call != nil {
+		call.noteStat(name, false, info, err)
+	}
+	return info, err
 }
 
 func pathOpen(name string) (*os.File, error) {
