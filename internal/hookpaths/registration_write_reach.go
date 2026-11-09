@@ -363,7 +363,7 @@ func registrationFindRsyncReach(file *syntax.File, cwd, home string, protected p
 			found = registrationFindReach(words, cwd, protected)
 		case "rsync":
 			found = registrationRsyncReach(words, cwd, protected)
-		case "install":
+		case "install", "ginstall", "ln", "gln":
 			found = registrationInstallReach(words, cwd, protected)
 		case "dd":
 			for _, word := range words[1:] {
@@ -436,9 +436,9 @@ func registrationFindReach(words []string, cwd string, protected protectedFiles)
 	return false
 }
 
-// registrationInstallReach reads install SOURCE DEST, install SOURCE... DIR
-// and install -t DIR SOURCE...: the destination file or the file the
-// source name takes in the destination folder.
+// registrationInstallReach reads install and ln SOURCE DEST, SOURCE... DIR
+// and -t DIR SOURCE...: the destination file or the file the source name
+// takes in the destination folder.
 func registrationInstallReach(words []string, cwd string, protected protectedFiles) bool {
 	for _, path := range registrationPlacedPaths(words, nil, cwd) {
 		if protectedReachPath(path, protected, "") {
@@ -543,6 +543,10 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 		if directory == "" {
 			placed = append(placed, OperandPath(last, cwd))
 		}
+	}
+	if directory == "" && len(operands) == 1 && operands[0] != "" && (program == "ln" || program == "gln") {
+		// ln SOURCE links it under its own name in the working folder.
+		placed = append(placed, OperandPath(filepath.Base(operands[0]), cwd))
 	}
 	if directory != "" {
 		for _, source := range operands {
