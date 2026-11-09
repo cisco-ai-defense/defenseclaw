@@ -458,7 +458,7 @@ func actionClientCopyProgramIsSystem(program, cwd string) bool {
 	if candidate == "" {
 		return false
 	}
-	resolved, err := filepath.EvalSymlinks(candidate)
+	resolved, err := pathEvalSymlinks(candidate)
 	if err != nil {
 		return false
 	}
