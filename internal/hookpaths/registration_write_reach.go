@@ -65,7 +65,19 @@ func RegistrationWriteReached(command, cwd, home string, names []string) []strin
 		narrow(mid, hi)
 	}
 	narrow(0, len(protected))
-	return reached
+	// A write-capable command that holds a flow construct and names a
+	// registered file is a reach, whatever the exact reading made of it.
+	flow := registrationFlowMembers(file, command, cwd, home, protected)
+	if !slices.Contains(flow, true) {
+		return reached
+	}
+	var merged []string
+	for index, name := range origin {
+		if flow[index] || slices.Contains(reached, name) {
+			merged = append(merged, name)
+		}
+	}
+	return merged
 }
 
 func registrationWriteReach(file *syntax.File, command, cwd, home string, protected protectedFiles) bool {
