@@ -255,6 +255,11 @@ func readDevinJSONObject(path string) (map[string]interface{}, error) {
 		}
 		return nil, err
 	}
+	return parseDevinJSONObject(path, data)
+}
+
+// parseDevinJSONObject parses the bytes of the Devin hooks file at path.
+func parseDevinJSONObject(path string, data []byte) (map[string]interface{}, error) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return map[string]interface{}{}, nil
 	}
@@ -325,20 +330,35 @@ func patchDevinHooksForEvents(path string, commandFor func(event string) string,
 }
 
 // writeDevinHooksFile writes cfg to the Devin hooks file at path: a project
-// hooks.v1.json keeps the operator's comments and other events, any other
+// hooks.v1.json keeps the operator comments and other events, any other
 // file is written back as JSON.
 func writeDevinHooksFile(path string, cfg map[string]interface{}) error {
+	var existing []byte
 	if strings.EqualFold(filepath.Base(path), "hooks.v1.json") {
-		// The project file is the operator's: keep its comments and foreign
-		// hook lists byte for byte, and edit only DefenseClaw's events
-		// (GAP-0192).
-		if data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit); err == nil && len(bytes.TrimSpace(data)) > 0 {
-			if spliced, ok := spliceDevinProjectHooks(data, devinHookEvents, cfg); ok {
-				return atomicWriteFile(path, spliced, 0o600)
-			}
+		existing, _ = safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
+	}
+	data, err := renderDevinHooksFile(path, existing, cfg)
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, data, 0o600)
+}
+
+// renderDevinHooksFile returns the bytes of the Devin hooks file at path for
+// cfg, given the bytes the file holds now. The project hooks.v1.json is the
+// operator own: keep its comments and foreign hook lists byte for byte, and
+// edit only DefenseClaw events (GAP-0192).
+func renderDevinHooksFile(path string, existing []byte, cfg map[string]interface{}) ([]byte, error) {
+	if strings.EqualFold(filepath.Base(path), "hooks.v1.json") && len(bytes.TrimSpace(existing)) > 0 {
+		if spliced, ok := spliceDevinProjectHooks(existing, devinHookEvents, cfg); ok {
+			return spliced, nil
 		}
 	}
-	return writeJSONObject(path, cfg)
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, "\n"...), nil
 }
 
 func replaceManagedDevinHooks(raw interface{}, ownedHookScripts []string, entry map[string]interface{}) []interface{} {

@@ -267,6 +267,62 @@ func TestRollbackLeavesAFileDeletedDuringTheRestoreDeleted(t *testing.T) {
 	}
 }
 
+// An edited file is converted by a compare-and-swap replace too. A save by
+// rename, or a deletion, made while the copy of the file is kept is the
+// operator own: the conversion starts again from the saved bytes, or leaves the
+// deleted file deleted. It never writes the document it read earlier.
+func TestRollbackKeepsASaveMadeWhileTheCopyOfAnEditedDevinConfigIsKept(t *testing.T) {
+	captureRollbackNotes(t)
+	dataDir, path := devinSetUp(t, "config.json", rollbackPristineVariants[0].bytes)
+	resaveWithOperatorKey(t, path)
+	saved := false
+	var kept [][]byte
+	keep := func(_, _ string, data []byte) error {
+		kept = append(kept, data)
+		if !saved {
+			saved = true
+			editorAtomicSave(t, path)
+		}
+		return nil
+	}
+	n, err := convertDevinHooksFile(path, dataDir, "devin", devinRollbackPairs(), true, keep)
+	if err != nil || n != 3 {
+		t.Fatalf("conversion = %d, %v; want 3 handlers", n, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got, []byte("operator_saved_during_rollback")) || !bytes.Contains(got, []byte("operator_after_setup")) {
+		t.Fatalf("the save made while the copy was kept was overwritten: %q", got)
+	}
+	if devinHandlersInEarlierForm(t, path) != 3 {
+		t.Fatalf("the DefenseClaw entries of the saved file were not rewritten: %q", got)
+	}
+	if len(kept) != 2 || bytes.Contains(kept[0], []byte("operator_saved_during_rollback")) || !bytes.Contains(kept[1], []byte("operator_saved_during_rollback")) {
+		t.Fatalf("the copy kept after the save must hold the saved bytes: %d copies", len(kept))
+	}
+}
+
+func TestRollbackLeavesAnEditedDevinConfigDeletedWhileTheCopyIsKept(t *testing.T) {
+	captureRollbackNotes(t)
+	dataDir, path := devinSetUp(t, "config.json", rollbackPristineVariants[0].bytes)
+	resaveWithOperatorKey(t, path)
+	keep := func(_, _ string, _ []byte) error {
+		if _, err := os.Lstat(path); err == nil {
+			return os.Remove(path)
+		}
+		return nil
+	}
+	n, err := convertDevinHooksFile(path, dataDir, "devin", devinRollbackPairs(), true, keep)
+	if err != nil || n != 0 {
+		t.Fatalf("conversion = %d, %v; want nothing rewritten", n, err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("the deleted file was recreated (%v)", err)
+	}
+}
+
 func TestRollbackConvertsAFileWithoutARecordAsBefore(t *testing.T) {
 	captureRollbackNotes(t)
 	dataDir, path := devinSetUp(t, "config.json", rollbackPristineVariants[0].bytes)

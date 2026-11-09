@@ -92,36 +92,39 @@ func convertDevinHookForms(hooks map[string]interface{}, pairs map[string][][2]s
 // under its lock, keeps a copy of it before a rollback conversion, and
 // returns how many handlers it rewrote. A rollback conversion (toEarlier)
 // first puts back the saved bytes of a file nobody edited since setup
-// (restoreUneditedForRollback).
+// (restoreUneditedForRollback). The conversion is written by a
+// compare-and-swap replace that commits only while the file is still the bytes
+// it converted: a save made meanwhile (including while the copy is kept) is
+// converted as saved, and a file deleted meanwhile stays deleted.
 func convertDevinHooksFile(path, dataDir, connectorName string, pairs map[string][][2]string, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
 	if _, err := os.Lstat(path); os.IsNotExist(err) {
 		return 0, nil
 	}
-	converted := 0
 	copyName := ""
 	if keepCopy != nil {
 		sum := sha256.Sum256([]byte(strings.ToLower(path)))
 		copyName = "devin-" + hex.EncodeToString(sum[:6]) + ".before-rollback.json"
 	}
-	// read returns the file and its handlers converted in memory, or ok false
-	// when the file is gone or holds nothing to convert.
-	read := func() (data []byte, cfg map[string]interface{}, ok bool, err error) {
-		data, err = safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
+	// convert returns the file converted in memory and how many handlers it
+	// rewrote.
+	convert := func(current []byte) (map[string]interface{}, int, error) {
+		cfg, err := parseDevinJSONObject(path, current)
+		if err != nil {
+			return nil, 0, err
+		}
+		return cfg, convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier), nil
+	}
+	converted := 0
+	err := withFileLockMode(path, false, func() error {
+		data, err := safefile.ReadRegularFileBounded(path, devinConfigReadLimit)
 		if os.IsNotExist(err) {
-			return nil, nil, false, nil
+			return nil
 		}
 		if err != nil {
-			return nil, nil, false, err
+			return err
 		}
-		if cfg, err = readDevinJSONObject(path); err != nil {
-			return nil, nil, false, err
-		}
-		converted = convertDevinHookForms(devinHooksObject(path, cfg), pairs, toEarlier)
-		return data, cfg, converted > 0, nil
-	}
-	err := withFileLockMode(path, false, func() error {
-		data, cfg, ok, err := read()
-		if err != nil || !ok {
+		_, wanted, err := convert(data)
+		if err != nil || wanted == 0 {
 			return err
 		}
 		if toEarlier {
@@ -130,20 +133,40 @@ func convertDevinHooksFile(path, dataDir, connectorName string, pairs map[string
 				keep = func(current []byte) error { return keepCopy(dataDir, copyName, current) }
 			}
 			if done, err := restoreUneditedForRollback(dataDir, connectorName, path, keep); err != nil || done {
-				return err
-			}
-			// A save that landed while the restore ran is the operator own:
-			// convert the file as it is now, not as it was read.
-			if data, cfg, ok, err = read(); err != nil || !ok {
+				if err == nil {
+					converted = wanted
+				}
 				return err
 			}
 		}
-		if keepCopy != nil {
-			if err := keepCopy(dataDir, copyName, data); err != nil {
-				return fmt.Errorf("keep a copy of the Devin hooks: %w", err)
-			}
-		}
-		return writeDevinHooksFile(path, cfg)
+		return atomicTransformFileWithStateDir(path, dataDir, 0o600,
+			func(current []byte, exists bool) (atomicTransformResult, error) {
+				converted = 0
+				if !exists {
+					return atomicTransformResult{Keep: true}, nil
+				}
+				if int64(len(current)) > devinConfigReadLimit {
+					return atomicTransformResult{}, fmt.Errorf("the Devin hooks file %s is larger than %d bytes", path, devinConfigReadLimit)
+				}
+				cfg, changed, err := convert(current)
+				if err != nil {
+					return atomicTransformResult{}, err
+				}
+				if changed == 0 {
+					return atomicTransformResult{Keep: true}, nil
+				}
+				if keepCopy != nil {
+					if err := keepCopy(dataDir, copyName, current); err != nil {
+						return atomicTransformResult{}, fmt.Errorf("keep a copy of the Devin hooks: %w", err)
+					}
+				}
+				out, err := renderDevinHooksFile(path, current, cfg)
+				if err != nil {
+					return atomicTransformResult{}, err
+				}
+				converted = changed
+				return atomicTransformResult{Data: out}, nil
+			})
 	})
 	return converted, err
 }
