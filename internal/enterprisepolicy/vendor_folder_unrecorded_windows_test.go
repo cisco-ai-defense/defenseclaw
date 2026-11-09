@@ -512,8 +512,10 @@ func TestMachinePolicyProblemsNameEveryConnectorMachinePolicyVerifyCallsUncovere
 		}
 		return named
 	}
-	if named := check("nothing published"); !named[ConnectorCopilot] || !named[ConnectorOpenCode] {
-		t.Fatalf("nothing published: Copilot and OpenCode must be named: %v", named)
+	// OpenCode is on the per-user route until its managed plugin is installed,
+	// so machine-policy verify does not call it uncovered yet.
+	if named := check("nothing published"); !named[ConnectorCopilot] || !named[ConnectorCodex] || !named[ConnectorClaudeCode] || !named[ConnectorCursor] {
+		t.Fatalf("nothing published: Copilot, Codex, Claude Code and Cursor must be named: %v", named)
 	}
 	if _, err := PublishWindowsGoOwned(opts, []string{ConnectorCopilot, ConnectorOpenCode}); err != nil {
 		t.Logf("publish: %v", err)
