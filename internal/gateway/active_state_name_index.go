@@ -23,6 +23,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -238,6 +239,12 @@ func clientWorkingDirectories(targets map[string]string, cwd string) []string {
 			continue
 		}
 		dirs = append(dirs, filepath.Clean(logical))
+	}
+	// The directory the hook client ran the call in is the one it keyed a
+	// relative operand by, whether or not it listed it as a directory fact.
+	if client := targets[hookpaths.CWDKey]; !filepath.IsAbs(cwd) && filepath.IsAbs(client) &&
+		!slices.Contains(dirs, filepath.Clean(client)) {
+		dirs = append(dirs, filepath.Clean(client))
 	}
 	sort.Strings(dirs)
 	return dirs
