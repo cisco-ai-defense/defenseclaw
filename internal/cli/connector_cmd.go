@@ -1086,6 +1086,18 @@ func runMarkedTeardown(ctx context.Context, name string, conn connector.Connecto
 		// The empty folders the gateway's install watcher created go too.
 		connector.RemoveOpenCodeWatcherCreatedDirs(opts.DataDir)
 	}
+	// The gateway's own teardown releases the connector's contract-lock entry
+	// once the connector is removed. This one did not, so `config set
+	// data_dir` copied the entry of a torn-down connector to a folder that has
+	// no inactive mark for it, and the next setup of a peer refused ("contract
+	// lock peer is not inactive", GAP-0941). A managed runtime keeps its own
+	// protected lock. A lock that cannot be updated is reported, not fatal: the
+	// inactive mark still covers it in this folder.
+	if !opts.ManagedEnterprise {
+		if err := connector.ClearHookContractLockEntry(opts.DataDir, name); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: connector %s teardown: the hook contract lock entry was not cleared: %v\n", name, err)
+		}
+	}
 	// Windows lock files stay after their lock; the idle ones this teardown
 	// used beside the agent configs go now.
 	connector.RemoveIdleFileLockSentinels()
