@@ -7947,9 +7947,9 @@ _SC_SHARED_INSERTS = {
             '    }\n',
         ),
         (
-            '            -GatewayServiceName $GatewayServiceName\n    }\n',
+            '    }\n    Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName\n',
             "    if ($codexFolderLink -eq '') {\n",
-            '    [void](Invoke-DefenseClawCodexRequirementsCommand `\n',
+            '    if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and\n',
         ),
         (
             "        -GatewayServiceName $GatewayServiceName `\n        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))\n",
