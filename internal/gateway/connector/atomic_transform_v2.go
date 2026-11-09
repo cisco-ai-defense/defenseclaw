@@ -308,7 +308,7 @@ func atomicTransformFileV2Locked(
 		matches, err = atomicFileSnapshotStillMatches(path, snapshot)
 		if err != nil || !matches {
 			_ = txn.close()
-			recoverErr := recoverAtomicTransformV2Locked(inputPath, stateDir, options.expectedOwner)
+			recoverErr := recoverAtomicTransformV2BeforeCommit(inputPath, stateDir, options.expectedOwner)
 			if recoverErr != nil {
 				if err != nil {
 					return errors.Join(err, recoverErr)
@@ -1551,6 +1551,14 @@ type atomicTransformV2CandidateGroup struct {
 }
 
 func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, error) {
+	return loadAtomicTransformV2Phased(path, stateDir, false)
+}
+
+// loadAtomicTransformV2Phased is loadAtomicTransformV2 for a caller that knows
+// whether its own transaction has started publishing. beforeCommit means the
+// caller abandons a transaction whose commit it never began, so a live leaf
+// that is neither Old nor New is the operator own save and not an ambiguity.
+func loadAtomicTransformV2Phased(path, stateDir string, beforeCommit bool) (atomicTransformV2Loaded, error) {
 	logical, fallbackBase, err := atomicTransformV2BasePath(path, stateDir)
 	if err != nil {
 		return atomicTransformV2Loaded{}, err
@@ -1690,7 +1698,7 @@ func loadAtomicTransformV2(path, stateDir string) (atomicTransformV2Loaded, erro
 	// the operator's own save (an editor's rename-over lands in exactly that
 	// window), not an ambiguous state. Refusing it kept the transaction's own
 	// leftovers, and with them every later rollback, for good (GAP-0957).
-	if matched.exists && matched.prepared.located && !matched.terminal.located && !matched.complete.located &&
+	if matched.exists && matched.prepared.located && !beforeCommit && !matched.terminal.located && !matched.complete.located &&
 		requestedParentIdentity == matched.receipt.TargetParentIdentity {
 		requestedParent, bindErr := bindAtomicTransformDirectory(filepath.Dir(requestedInput))
 		if bindErr != nil {
@@ -1875,6 +1883,20 @@ func recoverAtomicTransformV2(path, stateDir string) error {
 // legacyOwner is the enrolled user a privileged uninstall transforms for
 // (atomicTransformV2Options.expectedOwner), nil for the user's own process.
 func recoverAtomicTransformV2Locked(path, stateDir string, legacyOwner *windows.SID) error {
+	return recoverAtomicTransformV2Phased(path, stateDir, legacyOwner, false)
+}
+
+// recoverAtomicTransformV2BeforeCommit abandons the caller own transaction
+// after the caller saw the target change and before it began to publish. The
+// target was never touched by the transaction, so whatever file the operator
+// saved at the live name stays exactly as saved and only the transaction own
+// receipts and side artifacts are removed (GAP-0961). A prepared receipt left
+// by a crash is not recovered this way: it cannot prove the commit never began.
+func recoverAtomicTransformV2BeforeCommit(path, stateDir string, legacyOwner *windows.SID) error {
+	return recoverAtomicTransformV2Phased(path, stateDir, legacyOwner, true)
+}
+
+func recoverAtomicTransformV2Phased(path, stateDir string, legacyOwner *windows.SID, beforeCommit bool) error {
 	// V2 terminal and complete receipts are authoritative: once either exists,
 	// no legacy recovery is allowed to mutate the live target. Inspect both
 	// namespaces before every transition and fail closed if independently valid
@@ -1882,7 +1904,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string, legacyOwner *windows.
 	// recovery one transition at a time also closes the upgrade window in which
 	// V2 could appear between a monolithic V1 recovery and the next V2 load.
 	for pass := 0; pass < 24; pass++ {
-		loaded, err := loadAtomicTransformV2(path, stateDir)
+		loaded, err := loadAtomicTransformV2Phased(path, stateDir, beforeCommit)
 		if err != nil {
 			return err
 		}
@@ -1918,7 +1940,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string, legacyOwner *windows.
 				// mutate live state. The protected state directory and connector
 				// advisory lock exclude untrusted/conforming concurrent publishers;
 				// this second read catches an independently started V2 transaction.
-				recheck, recheckErr := loadAtomicTransformV2(path, stateDir)
+				recheck, recheckErr := loadAtomicTransformV2Phased(path, stateDir, beforeCommit)
 				if recheckErr != nil {
 					return recheckErr
 				}
@@ -1936,7 +1958,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string, legacyOwner *windows.
 			// Prove the V2 namespace is still empty after legacy convergence.
 			// atomicTransformFileV2 may now start Rs; its no-replace publication
 			// remains the final arbiter against another conforming process.
-			recheck, recheckErr := loadAtomicTransformV2(path, stateDir)
+			recheck, recheckErr := loadAtomicTransformV2Phased(path, stateDir, beforeCommit)
 			if recheckErr != nil {
 				return recheckErr
 			}
@@ -1955,7 +1977,7 @@ func recoverAtomicTransformV2Locked(path, stateDir string, legacyOwner *windows.
 				return err
 			}
 		case loaded.prepared.located:
-			if err := recoverPreparedAtomicTransformV2(loaded); err != nil {
+			if err := recoverPreparedAtomicTransformV2(loaded, beforeCommit); err != nil {
 				return err
 			}
 		case loaded.staging.located:
@@ -2374,7 +2396,12 @@ func completeCommittedAtomicTransformV2(loaded atomicTransformV2Loaded) error {
 	)
 }
 
-func recoverPreparedAtomicTransformV2(loaded atomicTransformV2Loaded) error {
+// recoverPreparedAtomicTransformV2 recovers a prepared transaction. With
+// beforeCommit the caller guarantees it never began to publish: an existing
+// live file the transaction does not recognise, with the tombstone slot empty,
+// is then the operator own save and is kept (see
+// recoverAtomicTransformV2BeforeCommit).
+func recoverPreparedAtomicTransformV2(loaded atomicTransformV2Loaded, beforeCommit bool) error {
 	targetDir, stateDir, err := bindAtomicTransformV2ReceiptDirectories(loaded.receipt)
 	if err != nil {
 		return err
@@ -2580,7 +2607,8 @@ func recoverPreparedAtomicTransformV2(loaded atomicTransformV2Loaded) error {
 	if receipt.OldExists && !target.exists {
 		return fmt.Errorf("prepared abort cannot establish an authoritative live state; retaining recovery artifacts")
 	}
-	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir)
+	operatorLive := beforeCommit && target.exists && !tomb.exists && !targetNew
+	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir, operatorLive)
 }
 
 func abortAtomicTransformV2(loaded atomicTransformV2Loaded) error {
@@ -2590,7 +2618,7 @@ func abortAtomicTransformV2(loaded atomicTransformV2Loaded) error {
 	}
 	defer targetDir.Close()
 	defer stateDir.Close()
-	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir)
+	return abortAtomicTransformV2Bound(loaded, targetDir, stateDir, false)
 }
 
 func inspectAtomicTransformV2HarmlessAllocationArtifact(
@@ -2727,10 +2755,13 @@ func abortAtomicTransformV2Allocation(loaded atomicTransformV2Loaded) error {
 func abortAtomicTransformV2Bound(
 	loaded atomicTransformV2Loaded,
 	targetDir, stateDir *atomicTransformBoundDirectory,
+	operatorLive bool,
 ) error {
 	receipt := loaded.receipt
 	if loaded.prepared.exists && !loaded.terminal.exists {
-		if receipt.OldExists {
+		// With operatorLive the transaction never moved Old, so there is nothing
+		// to put back and the saved file at the live name stays as it is.
+		if receipt.OldExists && !operatorLive {
 			targetName := filepath.Base(receipt.TargetPath)
 			target, err := atomicTransformBoundInspect(
 				targetDir, targetName, atomicTransformMaxConfigBytes,
