@@ -20,11 +20,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {set: m, sub: strace, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: w1, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: user, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: managed, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: sc, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: c-closed-shell, only: 'cursor/managed-closed/beforeShellExecution/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: c-open-shell, only: 'cursor/managed-open/beforeShellExecution/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: c-closed-pretool, only: 'cursor/managed-closed/preToolUse/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: c-closed-prompt, only: 'cursor/managed-closed/beforeSubmitPrompt/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: c-closed-stop, only: 'cursor/managed-closed/stop/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-closed, only: 'claudecode-cursor/managed-closed/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-open, only: 'claudecode-cursor/managed-open/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-closed, only: 'antigravity/managed-closed/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-open, only: 'antigravity/managed-open/', run: '^TestShellHookBehaviourMatchesGolden$'}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -51,6 +55,7 @@ jobs:
         shell: bash {0}
         env:
           SUB: ${{ matrix.sub }}
+          ONLY: ${{ matrix.only }}
           RUN: ${{ matrix.run }}
         run: |
           set -u
@@ -70,20 +75,7 @@ jobs:
           monitor=$!
           bin="$RUNNER_TEMP/connector.test"
           args=(-test.v -test.count=1 -test.timeout 8m -test.run "$RUN")
-          case "$SUB" in
-            strace)
-              export DC_HOOK_GOLDEN_ONLY="cursor/"
-              sudo apt-get install -y -qq strace >/dev/null 2>&1 || true
-              trace="$RUNNER_TEMP/trace"
-              timeout -k 15 480 strace -f -qq -e trace=execve,kill,tkill,tgkill,pidfd_send_signal,ptrace,prctl,prlimit64,setpriority,ioprio_set -e signal=none -o "$trace" "$bin" "${args[@]}"; rc=$?
-              echo "=== non-probe signals"; grep -E '(kill|pidfd_send_signal)\(' "$trace" | grep -vE 'kill\([0-9]+, 0\)|SIGURG|tgkill\([0-9]+, [0-9]+, SIG(URG|PROF)' | head -100
-              echo "=== ptrace/prctl/prlimit/priority"; grep -E '^[0-9]+ +(ptrace|prctl|prlimit64|setpriority|ioprio_set)\(' "$trace" | sort -k2 | uniq -c -f1 | head -50
-              echo "=== programs executed"; grep -oE 'execve\("[^"]+"' "$trace" | sort | uniq -c | sort -rn | head -60 ;;
-            w1) DC_HOOK_GOLDEN_ONLY="cursor/" DC_HOOK_GOLDEN_WORKERS=1 timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
-            user) DC_HOOK_GOLDEN_ONLY="cursor/user-" timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
-            managed) DC_HOOK_GOLDEN_ONLY="cursor/managed-" timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
-            sc) DC_HOOK_GOLDEN_ONLY="cursor/sc-" timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
-          esac
+          DC_HOOK_GOLDEN_ONLY="$ONLY" timeout -k 15 540 "$bin" "${args[@]}"; rc=$?
           kill "$monitor"
           echo "exit $rc"
           echo "=== monitor"; cat "$mon"
