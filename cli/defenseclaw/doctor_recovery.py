@@ -30,6 +30,7 @@ import hashlib
 import hmac
 import ntpath
 import os
+import re
 import sqlite3
 import stat
 import tempfile
@@ -322,14 +323,42 @@ def inspect_audit_db(
     )
 
 
-def inspect_device_key(
+# The reason code of a device key whose bytes the gateway would not load (empty, cut short, or no PEM key).
+DEVICE_KEY_PAYLOAD_INVALID = "device-key-payload-invalid"
+
+# The reason codes that mean an existing device.key file cannot be used. Folder-level reasons (a
+# directory-... custody failure) are about the folders, not the key, and are not in this set.
+DEVICE_KEY_UNUSABLE_REASONS = frozenset(
+    {
+        "device-key-custody-unavailable",
+        "device-key-custody-invalid",
+        "device-key-read-failed",
+        DEVICE_KEY_PAYLOAD_INVALID,
+        "target-is-not-regular-file",
+        "target-custody-unavailable",
+    }
+)
+
+# The gateway reads device.key whole; this bound only keeps a hostile or runaway file out of memory.
+_DEVICE_KEY_READ_LIMIT = 16 * 1024 * 1024
+
+
+def inspect_device_key_usability(
     target: str | os.PathLike[str],
     *,
     data_dir: str | os.PathLike[str],
 ) -> DeviceKeyHealth:
-    """Inspect an existing identity without trusting path or payload text."""
+    """The one test of whether an existing device key is usable.
 
-    plan = plan_missing_device_key(target, data_dir=data_dir)
+    A key is usable if and only if the gateway accepts it (device_key_bytes_usable mirrors the
+    gateway parser) and its file custody (a regular file, private mode and owner) holds. Init, Doctor
+    and first-run readiness all decide on this result.
+    """
+
+    return _device_key_usability(plan_missing_device_key(target, data_dir=data_dir))
+
+
+def _device_key_usability(plan: RecoveryPlan) -> DeviceKeyHealth:
     if plan.disposition is RecoveryDisposition.READY:
         return DeviceKeyHealth(DeviceKeyHealthStatus.MISSING, "device-key-missing")
     if plan.disposition is RecoveryDisposition.BLOCKED:
@@ -341,11 +370,26 @@ def inspect_device_key(
     if not _private_file_postconditions(plan.target, platform=platform, confidential=True):
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-custody-invalid")
     try:
-        key_data = _read_private_regular_file(plan.target, max_bytes=4096, platform=platform)
+        key_data = _read_private_regular_file(plan.target, max_bytes=_DEVICE_KEY_READ_LIMIT, platform=platform)
     except OSError:
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-read-failed")
-    if not _valid_device_key_bytes(key_data):
+    if not device_key_bytes_usable(key_data):
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, DEVICE_KEY_PAYLOAD_INVALID)
+    return DeviceKeyHealth(DeviceKeyHealthStatus.VALID, "device-key-usable")
+
+
+def inspect_device_key(
+    target: str | os.PathLike[str],
+    *,
+    data_dir: str | os.PathLike[str],
+) -> DeviceKeyHealth:
+    """Inspect an existing identity without trusting path or payload text."""
+
+    plan = plan_missing_device_key(target, data_dir=data_dir)
+    usable = _device_key_usability(plan)
+    if usable.status is not DeviceKeyHealthStatus.VALID:
+        return usable
+    platform = plan.custody.platform
 
     secret_path = os.path.join(plan.data_dir, _DEVICE_PROVENANCE_SECRET)
     provenance_path = plan.target + ".provenance"
@@ -744,15 +788,23 @@ def device_identity_leftovers(target: str, data_dir: str) -> list[str]:
     return [path for path in plan.continuity_paths if os.path.lexists(path)]
 
 
-# The reason code of a device key that exists but holds no usable key (empty or cut short).
-DEVICE_KEY_PAYLOAD_INVALID = "device-key-payload-invalid"
+_UNUSABLE_KEY_WHY = {
+    DEVICE_KEY_PAYLOAD_INVALID: "it holds no usable key: it is empty, cut short or not a key the gateway can load",
+    "device-key-custody-invalid": "it is not private to this account (its permissions or owner are wrong)",
+    "device-key-custody-unavailable": "its permissions and owner could not be checked",
+    "device-key-read-failed": "it could not be read as one regular file",
+    "target-is-not-regular-file": "it is not a regular file (it is a link or another kind of file)",
+    "target-custody-unavailable": "it could not be examined",
+}
 
 
-def unusable_key_message(target: str, data_dir: str) -> str:
-    """What init and Doctor print when device.key exists but holds no usable key.
+def unusable_key_message(target: str, data_dir: str, reason_code: str) -> str:
+    """What init, Doctor and first-run readiness print when device.key exists but cannot be used.
 
-    A creation stopped during the key write can leave an empty or cut-short key beside its published
-    provenance files. DefenseClaw keeps all of them as they are: the way out is manual and named.
+    The reasons are those of DEVICE_KEY_UNUSABLE_REASONS. A creation stopped during the key write can
+    leave an empty or cut-short key beside its published provenance files; a wrong mode or a link is the
+    other way a key becomes unusable. DefenseClaw keeps all of the files as they are: the way out is manual
+    and named.
     """
 
     files = [target]
@@ -760,8 +812,9 @@ def unusable_key_message(target: str, data_dir: str) -> str:
         if os.path.lexists(path):
             files.append(path)
     listed = ", ".join(files)
+    why = _UNUSABLE_KEY_WHY.get(reason_code, reason_code)
     return (
-        f"the device key at {target} exists but holds no usable key (it is empty or cut short). "
+        f"the device key at {target} exists but cannot be used ({reason_code}): {why}. "
         "DefenseClaw does not replace it and leaves it and its provenance files as they are. "
         "If you have a backup of device.key, restore it. Otherwise: "
         "1) stop the gateway (defenseclaw-gateway stop); "
@@ -1417,7 +1470,7 @@ def _device_key_postconditions(
                 confidential=True,
             ):
                 return False
-        key_data = _read_private_regular_file(key_path, max_bytes=4096, platform=platform)
+        key_data = _read_private_regular_file(key_path, max_bytes=_DEVICE_KEY_READ_LIMIT, platform=platform)
         secret = _read_private_regular_file(secret_path, max_bytes=64, platform=platform)
         provenance = _read_private_regular_file(
             provenance_path,
@@ -1432,23 +1485,114 @@ def _device_key_postconditions(
     expected = hmac.new(secret, key_data, hashlib.sha256).hexdigest().encode("ascii")
     if not hmac.compare_digest(claimed, expected):
         return False
-    return _valid_device_key_bytes(key_data)
+    return device_key_bytes_usable(key_data)
 
 
-def _valid_device_key_bytes(key_data: bytes) -> bool:
-    lines = key_data.strip().splitlines()
-    if len(lines) != 3 or lines[0] != b"-----BEGIN ED25519 PRIVATE KEY-----":
-        return False
-    if lines[2] != b"-----END ED25519 PRIVATE KEY-----":
-        return False
-    try:
-        seed = base64.b64decode(lines[1], validate=True)
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+# --- the gateway device-key parser, mirrored ------------------------------------------------------
+#
+# internal/gateway/device.go parseIdentity is the only judge of whether a device key can be loaded: the first
+# PEM block of the file, of any type, whose base64 body decodes to exactly 32 bytes. The functions below
+# follow Go encoding/pem.Decode and base64.StdEncoding step by step, and
+# internal/gateway/testdata/device_key_usability.json holds the fixtures both sides must agree on
+# (a Go test and cli/tests/test_device_key_usability.py read the same file).
 
-        Ed25519PrivateKey.from_private_bytes(seed)
-    except (TypeError, ValueError):
-        return False
-    return True
+_PEM_BEGIN = b"-----BEGIN "
+_PEM_END = b"\n-----END "
+_PEM_END_OF_LINE = b"-----"
+_ED25519_SEED_SIZE = 32
+_BASE64_STD = re.compile(
+    rb"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?"
+)
+
+
+def _pem_get_line(data: bytes) -> tuple[bytes, bytes, int]:
+    index = data.find(b"\n")
+    if index < 0:
+        index = len(data)
+        consumed = index
+    else:
+        consumed = index + 1
+        if index > 0 and data[index - 1 : index] == b"\r":
+            index -= 1
+    return data[:index].rstrip(b" \t"), data[consumed:], consumed
+
+
+def _go_base64_std_decode(body: bytes) -> bytes | None:
+    # Go skips CR and LF anywhere; every other byte must belong to a padded standard-alphabet body.
+    text = body.replace(b"\r", b"").replace(b"\n", b"")
+    if _BASE64_STD.fullmatch(text) is None:
+        return None
+    return base64.b64decode(text)
+
+
+def _go_pem_first_block(data: bytes) -> bytes | None:
+    """The decoded body of the first PEM block, as Go pem.Decode finds it; None when there is none."""
+
+    rest = data
+    end_trailer_index = 0
+    while True:
+        if end_trailer_index < 0 or end_trailer_index > len(rest):
+            return None
+        rest = rest[end_trailer_index:]
+        end_index = rest.find(_PEM_END)
+        if end_index < 0:
+            return None
+        end_trailer_index = end_index + len(_PEM_END)
+        begin_index = rest.rfind(_PEM_BEGIN, 0, end_index)
+        if begin_index < 0 or (begin_index > 0 and rest[begin_index - 1] != 0x0A):
+            continue
+        skip = begin_index + len(_PEM_BEGIN)
+        rest = rest[skip:]
+        end_index -= skip
+        end_trailer_index -= skip
+
+        type_line, rest, consumed = _pem_get_line(rest)
+        end_index -= consumed
+        end_trailer_index -= consumed
+        if not type_line.endswith(_PEM_END_OF_LINE):
+            continue
+        type_line = type_line[: -len(_PEM_END_OF_LINE)]
+
+        headers = False
+        while True:
+            if not rest:
+                return None
+            line, following, consumed = _pem_get_line(rest)
+            if b":" not in line:
+                break
+            headers = True
+            rest = following
+            end_index -= consumed
+            end_trailer_index -= consumed
+
+        if headers and end_index < 0:
+            continue
+        if end_trailer_index < 0 or end_trailer_index > len(rest):
+            return None
+        end_trailer = rest[end_trailer_index:]
+        trailer_length = len(type_line) + len(_PEM_END_OF_LINE)
+        if len(end_trailer) < trailer_length:
+            continue
+        rest_of_end_line = end_trailer[trailer_length:]
+        end_trailer = end_trailer[:trailer_length]
+        if not end_trailer.startswith(type_line) or not end_trailer.endswith(_PEM_END_OF_LINE):
+            continue
+        if _pem_get_line(rest_of_end_line)[0]:
+            continue
+
+        if end_index <= 0:
+            return b""
+        decoded = _go_base64_std_decode(rest[:end_index].replace(b" ", b"").replace(b"\t", b""))
+        if decoded is None:
+            continue
+        return decoded
+
+
+def device_key_bytes_usable(key_data: bytes) -> bool:
+    """True exactly when the gateway parseIdentity accepts these file bytes."""
+
+    seed = _go_pem_first_block(key_data)
+    return seed is not None and len(seed) == _ED25519_SEED_SIZE
 
 
 def _fsync_directory(path: str) -> None:

@@ -21,6 +21,7 @@ confirm no other init runs, remove the file, run init again).
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import os
@@ -542,3 +543,153 @@ def test_plain_init_does_not_claim_that_nothing_was_changed_when_it_stops_on_a_k
     assert "leaves them as they are" in result.output
     # Plain init saves its config before the identity step; the message must not deny that.
     assert (home / "config.yaml").exists()
+
+
+# --- one test of whether an existing key is usable: init, Doctor and readiness agree --------------------
+
+
+def _doctor_check(home: Path):
+    from defenseclaw.commands import cmd_doctor
+
+    cfg = type("Cfg", (), {})()
+    cfg.data_dir = str(home)
+    cfg.gateway = type("Gw", (), {"device_key_file": str(home / "device.key")})()
+    result = cmd_doctor._DoctorResult()
+    cmd_doctor._check_device_identity(cfg, result)
+    return result.checks[-1]
+
+
+def _plant_key(home: Path, shape: str) -> str:
+    """Plant an existing device.key in one unusable state; returns the reason code every check must give."""
+
+    key = home / "device.key"
+    if shape == "empty-mode-0644":
+        key.write_bytes(b"")
+        os.chmod(key, 0o644)
+        return "device-key-custody-invalid"
+    if shape == "empty-through-a-link":
+        target = home.parent / "elsewhere.key"
+        target.write_bytes(b"")
+        protect_private_file(str(target))
+        os.symlink(target, key)
+        return "target-is-not-regular-file"
+    if shape == "oversized":
+        key.write_bytes(b"x" * (doctor_recovery._DEVICE_KEY_READ_LIMIT + 1))
+        protect_private_file(str(key))
+        return "device-key-read-failed"
+    if shape == "not-a-key":
+        key.write_bytes(b"not a key\n")
+        protect_private_file(str(key))
+        return doctor_recovery.DEVICE_KEY_PAYLOAD_INVALID
+    raise AssertionError(shape)
+
+
+_POSIX_ONLY = {"empty-mode-0644", "empty-through-a-link"}
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("shape", ["empty-mode-0644", "empty-through-a-link", "oversized", "not-a-key"])
+def test_every_unusable_existing_key_stops_init_and_doctor_with_the_file_and_the_reason(
+    tmp_path, monkeypatch, plain, shape
+):
+    if shape in _POSIX_ONLY and os.name == "nt":
+        pytest.skip("mode bits and links are checked by the Windows ACL tests")
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    reason = _plant_key(home, shape)
+    before = _identity_files(home)
+
+    if plain:
+        result = _plain_init()
+        assert result.exit_code != 0
+        output = result.output
+    else:
+        report = run_first_run(_options())
+        assert report.status == "needs_attention"
+        output = " ".join(step.detail for step in report.setup)
+
+    assert str(home / "device.key") in output
+    assert f"({reason})" in output
+    assert "defenseclaw-gateway stop" in output
+    assert _identity_files(home) == before
+
+    check = _doctor_check(home)
+    assert check["status"] == "fail"
+    assert check["reason_code"] == reason
+    assert str(home / "device.key") in check["remediation"]
+    assert "device-key.initialize" not in check["remediation"]
+    assert _identity_files(home) == before
+
+
+@pytest.mark.parametrize("block_type", ["ED25519 PRIVATE KEY", "PRIVATE KEY"])
+@pytest.mark.parametrize("plain", [False, True])
+def test_a_key_the_gateway_can_load_is_kept_by_init_whatever_its_pem_block_type(
+    tmp_path, monkeypatch, plain, block_type
+):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    seed = base64.b64encode(bytes(range(1, 33))).decode()
+    key = home / "device.key"
+    key.write_text(f"-----BEGIN {block_type}-----\n{seed}\n-----END {block_type}-----\n")
+    protect_private_file(str(key))
+    before = key.read_bytes()
+
+    if plain:
+        assert _plain_init().exit_code == 0
+    else:
+        assert run_first_run(_options()).status != "needs_attention"
+
+    assert key.read_bytes() == before
+    check = _doctor_check(home)
+    assert check["status"] == "pass"
+
+
+def test_guided_init_on_a_keyless_home_names_the_manual_steps_and_recommends_no_refused_repair(
+    tmp_path, monkeypatch
+):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    files = _plant(home, "sentinel-only")
+    before = _identity_files(home)
+
+    report = run_first_run(
+        FirstRunOptions(connector="none", profile="observe", skip_install=True, start_gateway=False, verify=True)
+    )
+
+    assert report.status == "needs_attention"
+    device_key = next(step for step in report.readiness if step.name == "Device key")
+    assert device_key.status == "fail"
+    _assert_manual_steps(device_key.detail, home, files)
+    assert device_key.next_command == "defenseclaw init"
+    everything = [step.next_command for step in report.setup + report.readiness] + report.next_commands
+    assert not any("device-key.initialize" in command for command in everything)
+    assert _identity_files(home) == before
+
+
+@pytest.mark.parametrize("shape", ["not-a-key", "oversized"])
+def test_readiness_on_an_unusable_key_gives_the_manual_steps_and_the_init_rerun(tmp_path, monkeypatch, shape):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    reason = _plant_key(home, shape)
+    cfg = type("Cfg", (), {})()
+    cfg.data_dir = str(home)
+    cfg.gateway = type("Gw", (), {"device_key_file": str(home / "device.key")})()
+
+    step = bootstrap._device_key_readiness(cfg, _options())
+
+    assert step.status == "fail"
+    assert f"({reason})" in step.detail
+    assert str(home / "device.key") in step.detail
+    assert step.next_command == "defenseclaw init"
+
+
+def test_readiness_still_asks_for_the_repair_that_works_when_the_key_is_simply_absent(tmp_path):
+    home = _home(tmp_path)
+    cfg = type("Cfg", (), {})()
+    cfg.data_dir = str(home)
+    cfg.gateway = type("Gw", (), {"device_key_file": str(home / "device.key")})()
+
+    step = bootstrap._device_key_readiness(cfg, _options())
+
+    assert step.status == "fail"
+    assert step.next_command == "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
