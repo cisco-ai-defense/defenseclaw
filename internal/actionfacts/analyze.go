@@ -2048,6 +2048,7 @@ func equivalentCommandFact(left, right CommandFact) bool {
 		left.Program != right.Program ||
 		left.ArgvComplete != right.ArgvComplete ||
 		left.LiteralStdin != right.LiteralStdin ||
+		left.LiteralStdinView != right.LiteralStdinView ||
 		left.LiteralStdinComplete != right.LiteralStdinComplete ||
 		left.LiteralStdinAmbiguous != right.LiteralStdinAmbiguous ||
 		!equivalentCommandArgv(left.Argv, right.Argv, left.Dialect) ||
