@@ -340,6 +340,9 @@ func TestInspectReportsAnUnrecordedLinkAnAdministratorOwns(t *testing.T) {
 			if err := os.Symlink(target, file); err != nil {
 				t.Skipf("creating a symbolic link needs the privilege: %v", err)
 			}
+			// An administrator's link: the owner is the Administrators group
+			// whoever ran the test (a runner account owns what it creates).
+			ownAs(t, file, wellKnownSID(t, windows.WinBuiltinAdministratorsSid))
 			problems := InspectRecordedVendorFolders(opts, []string{tc.request})
 			if len(problems) != 1 || !problems[0].UnrecordedFile || problems[0].PendingMoveAside || !strings.EqualFold(problems[0].File, file) ||
 				!strings.EqualFold(problems[0].Dir, folder) || !strings.Contains(problems[0].Message, "not a regular file") ||
