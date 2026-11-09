@@ -20,18 +20,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {set: m, sub: claudecode, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: claudecode-cursor, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: codex, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: codex-mismatch, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cursor, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: copilot, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: devin, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: kiro, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: hermes, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: antigravity, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: inspect-tool, run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: inspect-request, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: tmpfs, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: memcap, run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: watch, run: '^TestShellHookBehaviourMatchesGolden$'}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -63,21 +54,33 @@ jobs:
           set -u
           go test -c -o "$RUNNER_TEMP/connector.test" ./internal/gateway/connector
           cd internal/gateway/connector
-          nproc; sysctl net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse net.ipv4.tcp_fin_timeout
+          df -h / /tmp; mount | grep -E ' /tmp | / ' ; swapon --show; free -m
           mon="$RUNNER_TEMP/monitor.log"
           ( while :; do
               { echo "=== $(date -u +%T) load $(cut -d' ' -f1-4 /proc/loadavg) procs $(ps -e --no-headers | wc -l)"
-                ss -s | sed -n 1,3p
-                echo "tcp states: $(ss -tan | awk 'NR>1{print $1}' | sort | uniq -c | tr '\n' ' ')"
-                free -m | sed -n 2p
-                ps -eo pid,pcpu,rss,etime,args --sort=-pcpu | sed -n 2,6p | cut -c1-160
+                df -m / /tmp | tail -n +2
+                du -sm /tmp 2>/dev/null | tail -1
+                free -m | sed -n 2,3p
+                ps -eo pid,pcpu,rss,etime,args --sort=-rss | sed -n 2,4p | cut -c1-160
               } >> "$mon" 2>&1
-              sleep 10
+              sleep 5
             done ) &
           monitor=$!
           bin="$RUNNER_TEMP/connector.test"
           args=(-test.v -test.count=1 -test.timeout 8m -test.run "$RUN")
-          DC_HOOK_GOLDEN_ONLY="${SUB}/" timeout -k 15 540 "$bin" "${args[@]}"; rc=$?
+          export DC_HOOK_GOLDEN_ONLY="cursor/"
+          case "$SUB" in
+            tmpfs)
+              sudo mount -t tmpfs -o size=4G,mode=1777 tmpfs /tmp && df -h /tmp
+              timeout -k 15 540 "$bin" "${args[@]}"; rc=$? ;;
+            memcap)
+              cg=/sys/fs/cgroup/diag
+              echo "+memory +pids" | sudo tee /sys/fs/cgroup/cgroup.subtree_control >/dev/null
+              sudo mkdir -p $cg; echo 4G | sudo tee $cg/memory.max >/dev/null; echo 0 | sudo tee $cg/memory.swap.max >/dev/null
+              bash -c 'echo $$ | sudo tee '"$cg"'/cgroup.procs >/dev/null; exec timeout -k 15 540 "$@"' _ "$bin" "${args[@]}"; rc=$?
+              echo "=== memory.events"; cat $cg/memory.events ;;
+            watch) timeout -k 10 240 "$bin" "${args[@]}"; rc=$? ;;
+          esac
           kill "$monitor"
           echo "exit $rc"
           echo "=== monitor"; cat "$mon"
