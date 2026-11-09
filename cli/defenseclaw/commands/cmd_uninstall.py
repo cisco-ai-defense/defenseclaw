@@ -1324,6 +1324,30 @@ def _remove_acp_editor_entries_in(data_dir: str, entries: tuple[tuple[str, str, 
 _MOVED_RECORD_CONNECTORS = (
     "amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode",
 )
+# The backup records a connector writes straight under the data folder, not in
+# connector_backups: Claude Code's and Codex's, which `config set data_dir`
+# copies into the new folder like the rest (GAP-0942).
+def _top_level_backup_records(connector: str) -> tuple[str, ...]:
+    return tuple(
+        marker for marker in _CONNECTOR_BACKUP_MARKERS.get(connector, ()) if os.path.basename(marker) == marker
+    )
+
+
+# What those records hold, whatever the connector (claudeCodeBackup and codexConfigBackup).
+_TOP_LEVEL_BACKUP_KEYS = ("had_hooks_key", "added_codex_hooks_flag")
+
+
+def _is_setup_top_level_backup(path: str) -> bool:
+    """Whether *path* is a regular file of the shape Setup writes for a connector's own backup record."""
+    try:
+        with open(path, "rb") as stream:
+            raw = stream.read(_BACKUP_RECORD_MAX_BYTES + 1)
+        document = json.loads(raw) if len(raw) <= _BACKUP_RECORD_MAX_BYTES else None
+    except (OSError, ValueError):
+        return False
+    return isinstance(document, dict) and any(isinstance(document.get(key), bool) for key in _TOP_LEVEL_BACKUP_KEYS)
+
+
 # The hook script a Unix setup generates for a connector, and the other
 # per-connector record it writes beside the hooks.
 _CONNECTOR_HOOK_SCRIPTS = {
@@ -1515,6 +1539,11 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(os.path.join(hooks, script))
         for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
             drop(os.path.join(folder, record))
+        for record in _top_level_backup_records(name):
+            path = os.path.join(folder, record)
+            # A file of another shape at the name is the account's own; a link there is reported by drop.
+            if os.path.lexists(path) and (not _account_owned_regular_file(path) or _is_setup_top_level_backup(path)):
+                drop(path)
         backup = os.path.join(backups, name)
         if real_dir(backups) and real_dir(backup):
             try:
@@ -1568,6 +1597,12 @@ def _connector_state_remains(folder: str) -> bool:
     The hooks folder and the backups folder are looked at on their own: a
     folder with no hooks left can still hold another connector's backup.
     """
+    if any(
+        os.path.lexists(os.path.join(folder, record))
+        for name in _MOVED_RECORD_CONNECTORS
+        for record in _top_level_backup_records(name)
+    ):
+        return True
     for name in ("hooks", "connector_backups"):
         if _is_reparse_path(os.path.join(folder, name)):
             return True  # not entered, so not known to be empty
