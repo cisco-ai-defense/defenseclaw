@@ -2301,12 +2301,14 @@ func agentHookConfigEnvChild(argv []string) (child []string, directory string, u
 var agentHookConfigSplitEscapes = map[byte]byte{'f': '\f', 'n': '\n', 'r': '\r', 't': '\t', 'v': '\v'}
 
 // agentHookConfigSplitString splits the STRING of env -S the way GNU env
-// does: blanks separate words; single quotes keep their text; double quotes
-// keep their text but read \" \\ \$ and the escape letters; a backslash
-// outside quotes reads \_ (a blank), \c (end of string), \f \n \r \t \v and
-// the quote, backslash, # and $ characters; # at the start of a word starts
-// a comment. It returns false for what GNU env rejects and for ${NAME},
-// which needs the environment of the call.
+// does: blanks separate words; a # at the start of a word starts a comment;
+// single quotes keep their text, where a backslash reads only \\ and the
+// quote and is otherwise a backslash; double quotes keep their text but read
+// \" \\ \$ \# \' \_ (a blank) and the escape letters; outside quotes a
+// backslash reads \_ (a word break), \c (end of string), the escape letters
+// and the quote, backslash, # and $ characters. It returns false for what
+// GNU env rejects and for ${NAME}, which needs the environment of the call
+// (GNU env accepts no other unescaped $).
 func agentHookConfigSplitString(text string) ([]string, bool) {
 	var fields []string
 	var current strings.Builder
@@ -2327,13 +2329,18 @@ func agentHookConfigSplitString(text string) ([]string, bool) {
 		c := text[i]
 		switch {
 		case c == 'c':
-			return true, true
-		case c == '_' && !quoted:
-			flush()
+			return !quoted, !quoted
+		case c == '_':
+			if quoted {
+				current.WriteByte(0x20)
+				inWord = true
+			} else {
+				flush()
+			}
 			return false, true
 		case agentHookConfigSplitEscapes[c] != 0:
 			current.WriteByte(agentHookConfigSplitEscapes[c])
-		case c == '"' || c == '\\' || c == '$' || !quoted && (c == '\'' || c == '#'):
+		case c == 0x22 || c == 0x5c || c == 0x24 || c == 0x23 || c == 0x27:
 			current.WriteByte(c)
 		default:
 			return false, false
@@ -2344,35 +2351,38 @@ func agentHookConfigSplitString(text string) ([]string, bool) {
 	for i := 0; i < len(text); i++ {
 		c := text[i]
 		switch {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r':
+		case c == 0x20 || c == 0x09 || c == 0x0a || c == 0x0b || c == 0x0c || c == 0x0d:
 			flush()
-		case c == '#' && !inWord:
+		case c == 0x23 && !inWord:
 			return fields, true
-		case c == '$' && i+1 < len(text) && text[i+1] == '{':
+		case c == 0x24:
 			return nil, false
-		case c == '\'':
-			end := strings.IndexByte(text[i+1:], '\'')
-			if end < 0 {
+		case c == 0x27:
+			inWord = true
+			closed := false
+			for i++; i < len(text); i++ {
+				if text[i] == 0x27 {
+					closed = true
+					break
+				}
+				if text[i] == 0x5c && i+1 < len(text) && (text[i+1] == 0x5c || text[i+1] == 0x27) {
+					i++
+				}
+				current.WriteByte(text[i])
+			}
+			if !closed {
 				return nil, false
 			}
-			current.WriteString(text[i+1 : i+1+end])
-			i += end + 1
+		case c == 0x22:
 			inWord = true
-		case c == '"':
-			inWord = true
-			for i++; i < len(text) && text[i] != '"'; i++ {
-				switch {
-				case text[i] == '$' && i+1 < len(text) && text[i+1] == '{':
+			for i++; i < len(text) && text[i] != 0x22; i++ {
+				switch text[i] {
+				case 0x24:
 					return nil, false
-				case text[i] == '\\':
+				case 0x5c:
 					i++
-					done, ok := escape(i, true)
-					if !ok {
+					if _, ok := escape(i, true); !ok {
 						return nil, false
-					}
-					if done {
-						flush()
-						return fields, true
 					}
 				default:
 					current.WriteByte(text[i])
@@ -2381,7 +2391,7 @@ func agentHookConfigSplitString(text string) ([]string, bool) {
 			if i >= len(text) {
 				return nil, false
 			}
-		case c == '\\':
+		case c == 0x5c:
 			i++
 			done, ok := escape(i, false)
 			if !ok {
