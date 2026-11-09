@@ -158,7 +158,10 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsy
     assert "GO_TEST_SHARDS: 36" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
-    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 3
+    # The three Linux jobs, and the four darwin gateway parts, which weigh the
+    # unix and darwin tests by their Linux times (go-darwin.json holds none).
+    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 4
+    assert workflow.count("label: macos-latest darwin gateway ") == 4
     # One coverage profile per gateway, audit and remaining-package shard: the
     # count Combine Go coverage requires follows the shard counts (it stayed 52
     # when the remaining packages went from 12 to 16 shards and would have
