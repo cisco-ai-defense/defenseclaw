@@ -1944,7 +1944,8 @@ func applyWindowsEnterpriseInstallerReport(
 		)
 		if windowsBundleHasCode(result.Errors[firstError:], "codex_requirements_held") ||
 			windowsBundleHasCode(result.Errors[firstError:], "codex_state_held") ||
-			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) {
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "hook_in_use")) ||
+			(report.TransactionPending && windowsBundleHasCode(result.Errors[firstError:], "codex_state_unsettled")) {
 			next = windowsEnterpriseHeldRollbackNextStep(report.TransactionPending, windowsEnterpriseLiveStandaloneServices())
 		}
 		if next != "" {
@@ -3458,7 +3459,8 @@ var windowsEnterpriseKnownCodes = []string{
 	// the whole wait, so the Codex managed-hooks state could not be judged.
 	// Inside an install, repair, ensure or upgrade the throw is followed by
 	// the rollback text, so the code is not at the start of the message
-	// (GAP-0877, review S2). It exits 1603, like any refusal.
+	// (GAP-0877, review S2). It exits 1603, like any refusal, unless the
+	// rollback was left pending too: then 1618 (GAP-0999).
 	"codex_state_unsettled",
 }
 
@@ -3492,6 +3494,15 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			// in a way that would fail the run after the services stopped
 			// (GAP-0765, g582 round 11c).
 			return enterprisestatus.WindowsExitBusy
+		case "codex_state_unsettled":
+			// GAP-0999: a Codex writer that never settles refuses the run
+			// (1603). When the rollback could not judge the Codex state either
+			// and left the transaction pending, the restored services run and
+			// /repair finishes the rollback once the writer is gone: the
+			// held-rollback convention, so an MDM retries (1618).
+			if result.TransactionPending {
+				return enterprisestatus.WindowsExitBusy
+			}
 		case "scanner_runtime_unavailable":
 			if strings.HasSuffix(message.Message, windowsScannerPrepareRetryNotice) {
 				// A prepare that hit its bound is finished by a retry of the
