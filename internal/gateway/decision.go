@@ -171,10 +171,30 @@ func profileMeetActionForFindings(
 }
 
 func singleProfileActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) string {
+	if managedClosesOnUnverifiedPath(cfg, findings) {
+		return guardrailActionBlock
+	}
 	if content {
 		return guardrailContentActionForFindings(cfg, connector, findings, confirmable)
 	}
 	return guardrailActionForConnectorFindings(cfg, connector, findings, confirmable)
+}
+
+// managedClosesOnUnverifiedPath reports a managed deployment (any enterprise
+// profile with local rules) that holds an enforceable TOOL-PATH-UNVERIFIED
+// finding: a check the file system would not answer fails closed there, as in
+// the strict tier, whatever threshold its rule pack gives the finding. The
+// OSS default and permissive tiers keep the finding as a visible alert.
+func managedClosesOnUnverifiedPath(cfg *config.Config, findings []RuleFinding) bool {
+	if cfg == nil || cfg.EnterpriseProfile() == "" {
+		return false
+	}
+	for _, finding := range enforceableRuleFindings(findings) {
+		if finding.RuleID == windowsPathUnverifiedRuleID {
+			return true
+		}
+	}
+	return false
 }
 
 func profileMeetActionForSeverity(ctx context.Context, cfg *config.Config, connector, severity string, confirmable, content bool) string {
