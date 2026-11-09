@@ -1313,17 +1313,40 @@ def hermes_command_written(command: str, current: set[str]) -> bool:
 
 
 _SHELL_QUOTES = (chr(39), chr(34))
+# A backslash before one of these is a shell escape: the character belongs to the word. Before
+# anything else it is a Windows path separator and reads as "/".
+_SHELL_ESCAPED = frozenset(" \t\n'\"$;&|<>()=")
+# What a backslash escapes outside quotes, inside double quotes and inside single quotes.
+_SHELL_ESCAPABLE = {"": _SHELL_ESCAPED, chr(34): frozenset(chr(34) + "$"), chr(39): frozenset()}
 
 
 def _hermes_command_words(command: str) -> list[str]:
-    """The words a shell reads in *command* (quotes honoured; unquoted words break at operators and "=")."""
+    r"""The words a shell reads in *command* (quotes and escapes honoured; unquoted words break at operators and "=").
+
+    Outside quotes a backslash escapes a blank, quote, "$" or operator character, so
+    ``my\ hermes-hook.sh`` is the one word ``my hermes-hook.sh``; inside quotes only a double quote
+    or "$" is escaped (a ``-c`` argument is read again by the shell); any other backslash is a path
+    separator and reads as "/".
+    """
 
     words: list[str] = []
     word: list[str] = []
     started = False
     quote = ""
-    for char in command:
-        if quote:
+    index = 0
+    while index < len(command):
+        char = command[index]
+        index += 1
+        if char == "\\":
+            started = True
+            following = command[index] if index < len(command) else ""
+            if following and following in _SHELL_ESCAPABLE[quote]:
+                word.append(following)
+                index += 1
+            else:
+                # Inside quotes a backslash before a blank or operator stays for the shell -c re-read.
+                word.append("\\" if quote and following in _SHELL_ESCAPED else "/")
+        elif quote:
             if char == quote:
                 quote = ""
             else:
@@ -1374,14 +1397,13 @@ def hermes_command_names_defenseclaw_hook(command: str, hooks_dir: str) -> bool:
     never reads the command.
     """
 
-    text = command.replace("\\", "/")
     folder = posixpath.normpath(hooks_dir.replace("\\", "/")) if hooks_dir else ""
-    if _HERMES_LAUNCHER_FLAG.search(text):
+    if _HERMES_LAUNCHER_FLAG.search(command):
         return True
     previous = ""
-    for word in _hermes_command_words(text):
+    for word in _hermes_command_words(command):
         if _hermes_word_names_defenseclaw_hook(word, folder) or (
-            previous == "-c" and word != text and hermes_command_names_defenseclaw_hook(word, hooks_dir)
+            previous == "-c" and word != command and hermes_command_names_defenseclaw_hook(word, hooks_dir)
         ):
             return True
         previous = word

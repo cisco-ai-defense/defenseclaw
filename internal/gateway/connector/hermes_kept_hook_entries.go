@@ -48,9 +48,18 @@ func hermesKeptHookEvents(hooks map[string]interface{}, hookScript string, recog
 var hermesDefenseClawLauncherFlag = regexp.MustCompile(
 	`(?:^|[^A-Za-z0-9._-])` + regexp.QuoteMeta(nativeHookFlag+"hermes") + `(?:$|[^A-Za-z0-9._-])`)
 
+// hermesShellEscaped lists the characters a backslash escapes in a command: a
+// blank, a quote, "$" or a shell operator.
+const hermesShellEscaped = " \t\n'\"$;&|<>()="
+
 // hermesCommandWords splits a command into the words a shell reads, honouring
 // single and double quotes, and breaks unquoted words at the shell operators
-// and at "=" so a path after VAR= or after && is a word of its own.
+// and at "=" so a path after VAR= or after && is a word of its own. A
+// backslash outside quotes escapes a character of hermesShellEscaped (so
+// my\ hermes-hook.sh is the one word "my hermes-hook.sh", a file of the user);
+// inside quotes only a double quote or "$" is escaped, and a backslash before
+// a blank or operator stays because a -c argument is read again by the shell;
+// any other backslash is a Windows path separator and reads as "/".
 func hermesCommandWords(command string) []string {
 	const singleQuote, doubleQuote = rune(0x27), rune(0x22)
 	var words []string
@@ -64,8 +73,35 @@ func hermesCommandWords(command string) []string {
 		word.Reset()
 		started = false
 	}
-	for _, r := range command {
+	escapable := func(quote rune) string {
+		switch quote {
+		case 0:
+			return hermesShellEscaped
+		case doubleQuote:
+			return string(doubleQuote) + "$"
+		}
+		return ""
+	}
+	runes := []rune(command)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		switch {
+		case r == '\\':
+			started = true
+			following := rune(0)
+			if i+1 < len(runes) {
+				following = runes[i+1]
+			}
+			switch {
+			case following != 0 && strings.ContainsRune(escapable(quote), following):
+				i++
+				word.WriteRune(following)
+			case quote != 0 && following != 0 && strings.ContainsRune(hermesShellEscaped, following):
+				// Inside quotes a backslash before a blank or operator stays for the shell -c re-read.
+				word.WriteRune('\\')
+			default:
+				word.WriteRune('/')
+			}
 		case quote != 0:
 			if r == quote {
 				quote = 0
@@ -112,7 +148,6 @@ func hermesWordNamesDefenseClawHook(word, hooksDir string) bool {
 // picks which kept entries are listed; ownership never reads the command, so
 // no entry is changed, claimed or removed because of it.
 func hermesCommandNamesDefenseClawHook(command, hookScript string) bool {
-	command = strings.ReplaceAll(command, `\`, "/")
 	hooksDir := ""
 	if hookScript != "" {
 		hooksDir = path.Clean(filepath.ToSlash(filepath.Dir(hookScript)))

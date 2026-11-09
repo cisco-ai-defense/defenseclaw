@@ -256,6 +256,15 @@ func TestHermesAUserHookThatNamesNothingOfDefenseClawIsKeptWithoutANotice(t *tes
 		"user script with arguments": {"", func(_, home string) string {
 			return filepath.Join(home, "user-hooks", "hookX") + " --event pre_tool_call"
 		}},
+		"shell-escaped space in a user script": {"", func(_, home string) string {
+			return "bash " + filepath.Join(home, "bin") + `/my\ ` + hermesHookScriptName
+		}},
+		"shell-escaped operator in a user script": {"", func(_, home string) string {
+			return filepath.Join(home, "bin") + `/audit\;` + hermesHookScriptName
+		}},
+		"shell-escaped quote in a user script": {"", func(_, home string) string {
+			return "bash " + filepath.Join(home, "bin") + `/my\"` + hermesHookScriptName
+		}},
 	}
 	for name, form := range forms {
 		t.Run(name, func(t *testing.T) {
@@ -377,5 +386,30 @@ func TestHermesKeptEntryNoticeIgnoresTheDataDirectoryName(t *testing.T) {
 				t.Fatalf("teardown notice = %q; want pre_tool_call listed", notice.String())
 			}
 		})
+	}
+}
+
+// A backslash is a shell escape before a blank, quote, "$" or operator and a
+// Windows path separator before anything else, so the DefenseClaw hook is
+// still named when its Windows path is written with backslashes.
+func TestHermesBackslashIsAnEscapeOrAPathSeparatorWhenNamingAHook(t *testing.T) {
+	const own = "/home/u/.defenseclaw/hooks/hermes-hook.sh"
+	for command, want := range map[string]bool{
+		`bash /home/u/.defenseclaw/hooks/hermes-hook.sh`:         true,
+		`bash /home/u/bin/my\ hermes-hook.sh`:                    false,
+		`bash "/home/u/bin/my\ hermes-hook.sh"`:                  false,
+		`bash /home/u/bin/audit\;hermes-hook.sh`:                 false,
+		`bash /home/u/bin/audit\=hermes-hook.sh`:                 false,
+		`bash /home/u/bin/audit\$hermes-hook.sh`:                 false,
+		`bash /home/u/.defenseclaw/hooks/my\ audit.sh`:           true,
+		`bash /home/u/.defenseclaw\hooks\hermes-hook.sh`:         true,
+		`bash "C:\Users\u\.defenseclaw\hooks\hermes-hook.sh"`:    true,
+		`bash 'C:\Users\u\.defenseclaw\hooks\hermes-hook.sh'`:    true,
+		`sh -c "bash /home/u/bin/my\ hermes-hook.sh"`:            false,
+		`sh -c "bash /home/u/.defenseclaw/hooks/hermes-hook.sh"`: true,
+	} {
+		if got := hermesCommandNamesDefenseClawHook(command, own); got != want {
+			t.Errorf("hermesCommandNamesDefenseClawHook(%q) = %v; want %v", command, got, want)
+		}
 	}
 }
