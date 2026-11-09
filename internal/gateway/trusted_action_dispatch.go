@@ -10495,7 +10495,7 @@ func trustedLegacyPathRuleMatches(
 		seenValues := make(map[string]struct{}, 4)
 		for _, value := range append(
 			pathFactSpellings(path),
-			typedTargetRuleText(pathFactSpelling(path), input.ActiveHome, windowsVerbatimOperand(path.Value)),
+			typedTargetRuleTexts(pathFactSpelling(path), input.ActiveHome, windowsVerbatimOperand(path.Value))...,
 		) {
 			if strings.TrimSpace(value) == "" {
 				continue

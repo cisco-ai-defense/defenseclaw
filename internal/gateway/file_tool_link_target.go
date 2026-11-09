@@ -153,32 +153,41 @@ func linkTargetCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact
 	return typed || applyPatchCommandPath(facts, candidate)
 }
 
-// typedTargetRuleText is the text the path rules read for the typed target of
-// a file operation. A Windows path is read as the path Windows opens for it
+// typedTargetRuleTexts are the texts the path rules read for the typed target
+// of a file operation. A Windows path is read as the path Windows opens for it
 // (windowsOpenedPath, windowsRuleText), whatever spelling the call used; the
 // rules name each home folder and credential file in one letter case, while
 // Windows reads them in any, so the names below a home are read in lower case.
+// A path on a case-folding host is read in the spelling the rules write
+// (caseFoldedPOSIXRuleText) and also as given, with the active home
+// respelled: the folded spelling finds a credential file in any letter case,
+// the given one keeps the verdict of every folder the rules name in the case
+// written, below any parent (a project path with a Users/<account> folder
+// inside it), which the folded spelling cannot tell from an ordinary one.
 // Other paths are read as given, with the active home respelled.
-func typedTargetRuleText(resolved, home string, verbatim bool) string {
+func typedTargetRuleTexts(resolved, home string, verbatim bool) []string {
 	if opened, ok, _ := windowsOpenedPath(resolved, verbatim); ok {
-		return windowsRuleText(opened, home)
+		return []string{windowsRuleText(opened, home)}
 	}
+	given := activeHomeAsTilde(resolved, home)
 	if pathCaseFoldHost && filepath.IsAbs(resolved) {
-		return caseFoldedPOSIXRuleText(resolved, home)
+		if folded := caseFoldedPOSIXRuleText(resolved, home); folded != given {
+			return []string{folded, given}
+		}
 	}
-	return activeHomeAsTilde(resolved, home)
+	return []string{given}
 }
 
-// typedTargetCandidateText is typedTargetRuleText for a path fact, with
+// typedTargetCandidateTexts is typedTargetRuleTexts for a path fact, with
 // false for a path that is neither a rooted Windows spelling nor absolute.
 // A Windows spelling the analysis left unresolved (a trailing dot, a data
 // stream) is read by its normalized form: the file it opens is the same.
-func typedTargetCandidateText(candidate actionfacts.PathFact, home string) (string, bool) {
+func typedTargetCandidateTexts(candidate actionfacts.PathFact, home string) ([]string, bool) {
 	spelling := pathFactSpelling(candidate)
 	if !windowsRootedSpelling(spelling) && !filepath.IsAbs(candidate.Resolved) {
-		return "", false
+		return nil, false
 	}
-	return typedTargetRuleText(spelling, home, windowsVerbatimOperand(candidate.Value)), true
+	return typedTargetRuleTexts(spelling, home, windowsVerbatimOperand(candidate.Value)), true
 }
 
 // windowsNameFold spells a Windows name in the lower case the rules write.
@@ -253,18 +262,28 @@ func fileToolLinkTargetFindings(
 		if !linkTargetCandidate(facts, candidate, typed) && !pathCaseFoldHost {
 			continue
 		}
-		text, ok := typedTargetCandidateText(candidate, request.Input.ActiveHome)
+		texts, ok := typedTargetCandidateTexts(candidate, request.Input.ActiveHome)
 		if !ok {
 			continue
 		}
-		for _, finding := range scanRuleGeneration(generation, text, request.Input.Tool, options) {
-			// A case-folding host reads the path rules that have no
-			// path proof (AWS config, GnuPG, /etc/shadow) in any letter case
-			// too: the exact-case spelling gets their finding from the call text.
-			if trustedActionSensitivePathRule(finding.RuleID) ||
-				pathCaseFoldHost && strings.HasPrefix(finding.RuleID, "PATH-") {
-				findings = append(findings, finding)
+		var earlier map[string]struct{}
+		for _, text := range texts {
+			readings := make(map[string]struct{}, 2)
+			for _, finding := range scanRuleGeneration(generation, text, request.Input.Tool, options) {
+				// A case-folding host reads the path rules that have no
+				// path proof (AWS config, GnuPG, /etc/shadow) in any letter case
+				// too: the exact-case spelling gets their finding from the call text.
+				if !trustedActionSensitivePathRule(finding.RuleID) &&
+					(!pathCaseFoldHost || !strings.HasPrefix(finding.RuleID, "PATH-")) {
+					continue
+				}
+				// A rule the first reading of the path found is no new finding.
+				if _, seen := earlier[finding.RuleID]; !seen {
+					findings = append(findings, finding)
+				}
+				readings[finding.RuleID] = struct{}{}
 			}
+			earlier = readings
 		}
 	}
 	return findings
