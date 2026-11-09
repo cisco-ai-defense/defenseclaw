@@ -20,15 +20,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {set: m, sub: c-closed-shell, only: 'cursor/managed-closed/beforeShellExecution/', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: c-open-shell, only: 'cursor/managed-open/beforeShellExecution/', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: c-closed-pretool, only: 'cursor/managed-closed/preToolUse/', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: c-closed-prompt, only: 'cursor/managed-closed/beforeSubmitPrompt/', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: c-closed-stop, only: 'cursor/managed-closed/stop/', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-closed, only: 'claudecode-cursor/managed-closed/', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-open, only: 'claudecode-cursor/managed-open/', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-closed, only: 'antigravity/managed-closed/', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-open, only: 'antigravity/managed-open/', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-empty, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-empty', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-not-json, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-not-json', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-nul, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-nul', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-trailing-nl, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-trailing-nl', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-nested-event, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-nested-event', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-over-transport, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-over-transport', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-over-cap, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-over-cap', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-answers, only: 'claudecode-cursor/managed-closed/PreToolUse/unreachable', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-empty, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-empty', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-not-json, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-not-json', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-nul, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-nul', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-trailing-nl, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-trailing-nl', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-nested-event, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-nested-event', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-over-transport, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-over-transport', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-over-cap, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-over-cap', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-answers, only: 'antigravity/managed-closed/PreToolUse/unreachable', run: '^TestShellHookBehaviourMatchesGolden$'}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
