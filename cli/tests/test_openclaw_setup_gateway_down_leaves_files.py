@@ -233,12 +233,19 @@ def _run_late_outage(
     return result, path
 
 
+_RESIDUE_COMMAND = "defenseclaw-gateway connector teardown --connector openclaw"
+
+
 def _assert_left_as_it_is(result, path):
-    assert "Not restored" in result.output, result.output
-    assert path in result.output, result.output
-    assert "defenseclaw setup remove openclaw" in result.output, result.output
-    assert "plugins.entries.defenseclaw" in result.output, result.output
-    assert "rollback was incomplete" not in result.output, result.output
+    """The notice names the file, claims no writer, and gives the teardown that removes the entries."""
+    notice = result.output
+    assert f"{path} changed during setup and may still contain DefenseClaw entries" in notice, notice
+    assert f"run `{_RESIDUE_COMMAND}` to remove them" in notice, notice
+    # Neither the file restore nor the removal that refuses or reports "already absent" is offered.
+    assert "defenseclaw setup remove openclaw" not in notice, notice
+    for claim in ("Not restored", "Setup failed after it wrote", "setup wrote", "DefenseClaw wrote"):
+        assert claim not in notice, notice
+    assert "rollback was incomplete" not in notice, notice
 
 
 @pytest.mark.parametrize(
@@ -339,8 +346,8 @@ def test_a_failed_setup_that_wrote_nothing_does_not_claim_it_did():
         result, path = _run_late_outage(tmp_dir, app, _JSON5, gateway_fails=True, guards_openclaw=False)
         with open(path, "rb") as handle:
             assert handle.read() == _JSON5
-        assert "Not restored" not in result.output
-        assert "defenseclaw setup remove openclaw" not in result.output
+        assert "changed during setup" not in result.output
+        assert _RESIDUE_COMMAND not in result.output
     finally:
         cleanup_app(app, db_path, tmp_dir)
 
@@ -403,6 +410,6 @@ def test_nearby_saves_during_setup_are_kept_and_reported(original, change, marke
             assert "plugin" not in json.loads(after)["approvals"], result.output
         else:
             assert marker in after, result.output
-        assert "Not restored" in result.output
+        assert f"{path} changed during setup and may still contain DefenseClaw entries" in result.output
     finally:
         cleanup_app(app, db_path, tmp_dir)

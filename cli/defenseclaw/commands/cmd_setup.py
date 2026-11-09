@@ -8721,6 +8721,18 @@ def _with_openclaw_config_marks(snapshot: _SetupConfigSnapshot, config_file: str
     return replace(snapshot, openclaw_config=_openclaw_config_marks(config_file))
 
 
+# What a failed setup says about an openclaw.json that differs from before setup. Nothing on disk says who
+# wrote those bytes, so the text claims no writer: the file changed during setup and may still hold DefenseClaw
+# entries. The teardown removes them from the OpenClaw home file whatever the rollback left configured (it
+# does not depend on the connector set) and leaves a copy at any other path alone (GAP-0973).
+_OPENCLAW_SETUP_LEFT_FILE_NOTICE = (
+    "{paths} changed during setup and may still contain DefenseClaw entries; run "
+    "`defenseclaw-gateway connector teardown --connector openclaw` to remove them. The command works on "
+    "the OpenClaw home file (~/.openclaw/openclaw.json), keeps everything else in it, and leaves a copy at "
+    "any other path as it is."
+)
+
+
 def _openclaw_config_changed_by_setup(marks: tuple[_OpenClawConfigMark, ...]) -> list[str]:
     return [mark.path for mark in marks if _openclaw_config_digest(mark.path) != mark.digest]
 
@@ -11316,13 +11328,8 @@ def _rollback_failed_connector_application(
             "Check each connector's current mode with `defenseclaw status`, then run the same setup command again."
         )
     if openclaw_files_changed:
-        failure = click.ClickException(
-            f"{failure.format_message()} Not restored: {', '.join(openclaw_files_changed)} was left as it is. "
-            "Setup failed after it wrote DefenseClaw's entries there (plugins.allow, "
-            "plugins.entries.defenseclaw, plugins.load.paths and, on OpenClaw releases that accept it, "
-            "hooks.allowConversationAccess), and a failed setup never rewrites that file itself. "
-            "`defenseclaw setup remove openclaw` takes out only DefenseClaw's entries and keeps everything else."
-        )
+        left_file_notice = _OPENCLAW_SETUP_LEFT_FILE_NOTICE.format(paths=", ".join(openclaw_files_changed))
+        failure = click.ClickException(f"{failure.format_message()} {left_file_notice}")
     if openclaw_gateway_down:
         failure = click.ClickException(
             f"{failure.format_message()} Note: the OpenClaw gateway is not running; start it with "
