@@ -244,9 +244,6 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 
 	cfg, cfgErr := enterpriseWindowsEnumerateConfigLoader()
 	if cfgErr != nil {
-		// Without the configuration this cycle cannot say who is excluded,
-		// so no account keeps the pass an earlier cycle gave it (GAP-0979).
-		publishEnterpriseWindowsExcludedAccountMarkers(stderr, nil)
 		// A missing config in managed_enterprise mode is a "waiting
 		// for configuration" state — logged, not fatal. Interval-loop
 		// callers retry next tick; --once callers exit non-zero so an
@@ -259,7 +256,6 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		return fmt.Errorf("enterprise windows enumerate: load config: %w", cfgErr)
 	}
 	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		publishEnterpriseWindowsExcludedAccountMarkers(stderr, nil)
 		return fmt.Errorf("enterprise windows enumerate: deployment_mode=%q is not managed_enterprise; refusing to run", cfg.DeploymentMode)
 	}
 
@@ -292,7 +288,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	})
 	standalone := cfg.StandaloneEnterprise()
 	var unprotected []enterprisehooks.UnprotectedAgent
-	var excluded, excludedInDoubt []enterprisehooks.ManifestTarget
+	var excluded []enterprisehooks.ManifestTarget
 	var ownerUnknown []enterprisehooks.UnprotectedAgent
 	// The profiles the last cycle enrolled, so the gateway's read access
 	// can be taken from those this cycle drops.
@@ -314,28 +310,17 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		enumerateOpts.ReportExcluded = func(target enterprisehooks.ManifestTarget) {
 			excluded = append(excluded, target)
 		}
-		// An exclusion that rests on cached groups is not proved: it keeps
-		// the account off the roster but never authorizes its hook calls.
-		enumerateOpts.ReportExcludedInDoubt = func(target enterprisehooks.ManifestTarget) {
-			excludedInDoubt = append(excludedInDoubt, target)
-		}
 		// A running agent no row enrolls is recorded too (GAP-0226), and so is
 		// one whose account resolves to no SID.
 		enumerateOpts.RunningAgents, ownerUnknown = enterpriseWindowsEnumerateRunningAgents(stderr, enterprisehooks.EffectiveWindowsHookConnectors(cfg), manifestPath)
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
 	if err != nil {
-		if standalone {
-			publishEnterpriseWindowsExcludedAccountMarkers(stderr, nil)
-		}
 		return fmt.Errorf("enterprise windows enumerate: walk profiles: %w", err)
 	}
 
 	changed, err := enterpriseWindowsEnumerateManifestWriter(manifestPath, manifest)
 	if err != nil {
-		if standalone {
-			publishEnterpriseWindowsExcludedAccountMarkers(stderr, nil)
-		}
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
 	}
 	if standalone {
@@ -410,7 +395,6 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	}
 	if standalone {
 		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded)
-		publishEnterpriseWindowsExcludedAccountMarkers(stderr, windowsProvedExcludedTargets(excluded, excludedInDoubt))
 	}
 	elapsed := time.Since(start)
 
@@ -437,7 +421,6 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 		GroupCache:           cache,
 		Logger:               sink.log,
 		ReportUnprotected:    sink.report,
-		ReportExcluded:       sink.reportExcluded,
 	})
 	// The administrator's enabled targets are the enrollment: only they are
 	// inspected, whatever the automatic filters say (GAP-0906). An
@@ -460,10 +443,6 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 		return scanErr
 	})
 	agents := sink.close()
-	// The accounts the scan judged excluded, whether or not it finished: an
-	// account it did not reach holds no marker, so it reads as pending and
-	// keeps the refusal until a scan reaches it (GAP-0979).
-	publishEnterpriseWindowsExcludedAccountMarkers(stderr, sink.excludedTargets())
 	if err != nil {
 		if opts.ManifestSubjects == nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN the manifest-mode install scan did not finish and the administrator's targets are unreadable; the coverage record is left as it was: %s\n", enumeratorErrorText(err))
@@ -534,24 +513,7 @@ type enterpriseWindowsManifestScanSink struct {
 	mu     sync.Mutex
 	closed bool
 	agents []enterprisehooks.UnprotectedAgent
-	// excluded are the profiles the scan judged excluded from enrollment.
-	excluded []enterprisehooks.ManifestTarget
-	logf     enterprisehooks.EnumerationLogger
-}
-
-func (s *enterpriseWindowsManifestScanSink) reportExcluded(target enterprisehooks.ManifestTarget) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
-		s.excluded = append(s.excluded, target)
-	}
-}
-
-// excludedTargets is what reportExcluded collected before close.
-func (s *enterpriseWindowsManifestScanSink) excludedTargets() []enterprisehooks.ManifestTarget {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return append([]enterprisehooks.ManifestTarget(nil), s.excluded...)
+	logf   enterprisehooks.EnumerationLogger
 }
 
 func (s *enterpriseWindowsManifestScanSink) report(agent enterprisehooks.UnprotectedAgent) {
@@ -659,42 +621,6 @@ func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []e
 		state.sids[strings.ToUpper(strings.TrimSpace(target.SID))] = true
 	}
 	fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d excluded profile(s)\n", len(pending.Targets))
-}
-
-// windowsProvedExcludedTargets is the excluded accounts whose exclusion the
-// cycle proved: those not also reported in doubt. Only they get a marker.
-func windowsProvedExcludedTargets(excluded, inDoubt []enterprisehooks.ManifestTarget) []enterprisehooks.ManifestTarget {
-	doubtful := make(map[string]bool, len(inDoubt))
-	for _, target := range inDoubt {
-		doubtful[strings.ToUpper(strings.TrimSpace(target.SID))] = true
-	}
-	proved := make([]enterprisehooks.ManifestTarget, 0, len(excluded))
-	for _, target := range excluded {
-		if !doubtful[strings.ToUpper(strings.TrimSpace(target.SID))] {
-			proved = append(proved, target)
-		}
-	}
-	return proved
-}
-
-// enterpriseWindowsExcludedAccountMarkerPublisher is replaceable in tests.
-var enterpriseWindowsExcludedAccountMarkerPublisher = enterprisehooks.PublishWindowsExcludedAccountMarkers
-
-// publishEnterpriseWindowsExcludedAccountMarkers tells the machine-wide hook
-// which accounts the administrator excludes from enrollment, so the hook lets
-// their calls pass instead of refusing them as accounts whose enrollment is
-// pending. It publishes the SIDs this cycle judged excluded and removes the
-// marker of every other account, so an account taken off exclude_users is
-// governed again within the cycle. A failure is logged; the hook then keeps
-// its existing refusal for that account, and the next cycle publishes again.
-func publishEnterpriseWindowsExcludedAccountMarkers(stderr io.Writer, excluded []enterprisehooks.ManifestTarget) {
-	sids := make([]string, 0, len(excluded))
-	for _, target := range excluded {
-		sids = append(sids, target.SID)
-	}
-	if err := enterpriseWindowsExcludedAccountMarkerPublisher(sids); err != nil {
-		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the excluded-account markers: %v\n", err)
-	}
 }
 
 // publishEnterpriseWindowsManifestIdentity refreshes signed-in token groups

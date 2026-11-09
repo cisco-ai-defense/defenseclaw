@@ -39,6 +39,9 @@ func TestOwnStatusPipeAnswersTheClientToken(t *testing.T) {
 		served <- serveOwnStatus(ctx, name, func(sid string) []byte {
 			asked <- sid
 			return []byte(`{"own":true,"account":{"sid":"` + sid + `"}}`)
+		}, func(sid string) bool {
+			asked <- "excluded:" + sid
+			return true
 		})
 	}()
 	t.Cleanup(func() {
@@ -66,8 +69,23 @@ func TestOwnStatusPipeAnswersTheClientToken(t *testing.T) {
 		t.Fatalf("the server named %s, want the client token's %s", sid, user.User.Sid)
 	}
 
+	// The exclusion question is answered for the client token too, from the
+	// gateway judgement of that token SID.
+	askCtx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	excluded, err := AccountExcluded(askCtx)
+	stop()
+	if err != nil || !excluded {
+		t.Fatalf("AccountExcluded = %t, %v, want true", excluded, err)
+	}
+	if got := <-asked; got != "excluded:"+user.User.Sid.String() {
+		t.Fatalf("the server judged %s, want the SID of the client token", got)
+	}
+
 	// The client asks nothing of a pipe another process serves.
 	gatewayServerPID = func() (uint32, error) { return uint32(os.Getpid()) + 4, nil }
+	if excluded, err := AccountExcluded(context.Background()); err == nil || excluded {
+		t.Fatal("an exclusion was read from a pipe the gateway service does not serve")
+	}
 	if _, err := OwnStatus(context.Background()); err == nil {
 		t.Fatal("own status was read from a pipe the gateway service does not serve")
 	}

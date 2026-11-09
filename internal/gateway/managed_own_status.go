@@ -78,15 +78,43 @@ func (a *APIServer) ownStatusForWindowsAccount(ctx context.Context, sid string) 
 	return body
 }
 
+// windowsAccountExcludedNow reports whether the current configuration names
+// the Windows account sid in enterprise.enrollment.exclude_users, by the
+// spelling the enumerator matches (ownAccountExcluded). The standalone hook
+// asks it, over the own-status pipe, of an account the protected target set
+// does not register: the pass of an excluded account rests on this judgement
+// of the configuration only an administrator can write, never on a file the
+// hook or the account can read. A SID that is not a user account, a missing
+// configuration and an entry the account lookup cannot judge are all "no"
+// (GAP-0979).
+func (a *APIServer) windowsAccountExcludedNow(sid string) bool {
+	if !refusalpipe.AccountSID(sid) {
+		return false
+	}
+	cfg := a.ownStatusConfig()
+	if cfg == nil {
+		return false
+	}
+	name, domain := ownStatusWindowsAccount(sid)
+	return ownAccountExcluded(cfg.Enterprise.Enrollment, "sid", sid, name, domain, userScopedIdentityHome(sid))
+}
+
+// ownStatusConfig is the configuration an own-status answer is judged by: the
+// current generation, when there is one.
+func (a *APIServer) ownStatusConfig() *config.Config {
+	cfg := a.runtimeConfigSnapshot()
+	if g := a.generation(); g != nil && g.Config != nil {
+		cfg = g.Config
+	}
+	return cfg
+}
+
 // ownStatusAnswer is the own-status answer for the verified caller whose OS
 // identifier (a uid, or a SID on Windows) is self, under idKey, and whose
 // account name is name and whose Windows domain is domain ("" on Unix, and
 // where the LSA did not name it).
 func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, domain string) map[string]any {
-	cfg := a.runtimeConfigSnapshot()
-	if g := a.generation(); g != nil && g.Config != nil {
-		cfg = g.Config
-	}
+	cfg := a.ownStatusConfig()
 	account := map[string]any{idKey: self}
 	if name != "" {
 		account["name"] = name

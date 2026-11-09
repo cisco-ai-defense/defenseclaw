@@ -78,36 +78,3 @@ func TestEnumerateWindowsManifestSubjectsAreTheInspectedAccounts(t *testing.T) {
 		t.Fatalf("old copies reported for %v, want %v; all: %+v", got, want, reported)
 	}
 }
-
-// Under manifest enrollment an account that exclude_users names and the
-// administrator's targets omit is reported excluded, so the guardian can
-// publish its marker; an omitted account the list does not name, and an
-// authored target, are not (GAP-0979).
-func TestEnumerateWindowsManifestModeReportsAnOmittedExcludedAccount(t *testing.T) {
-	stubMachineWinGet(t, nil)
-	stubGroupDirectory(t, map[string]string{}, map[string][]string{})
-	stubActiveSessions(t, map[string][]string{})
-	homeA, homeB, homeC := codexProfile(t, "0.150.0"), codexProfile(t, "0.150.0"), codexProfile(t, "0.150.0")
-	injectWindowsProfileList(t, map[string]string{
-		testDomainUserA: homeA, // authored
-		testDomainUserB: homeB, // omitted, excluded by SID
-		testDomainUserC: homeC, // omitted, not excluded
-	})
-	enabled := true
-	subjects := WindowsManifestSubjects(Manifest{Version: 1, Targets: []ManifestTarget{
-		{SID: testDomainUserA, Connector: "codex", UserHome: homeA, Enabled: &enabled},
-	}})
-	var excluded []string
-	_, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
-		ExcludeUsers:     []string{testDomainUserB},
-		GroupCache:       NewWindowsEnrollmentGroupCache(),
-		ManifestSubjects: subjects,
-		ReportExcluded:   func(target ManifestTarget) { excluded = append(excluded, target.SID) },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(excluded) != 1 || !strings.EqualFold(excluded[0], testDomainUserB) {
-		t.Fatalf("reported excluded %v, want only %s", excluded, testDomainUserB)
-	}
-}
