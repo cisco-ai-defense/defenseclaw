@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -76,7 +77,16 @@ func verifyConnected(ctx context.Context, check *perUserPeerCheck, conn net.Conn
 		return classifyUnaccepted(ctx, verify(conn), server)
 	}
 	done := make(chan error, 1)
-	go func() { done <- verify(conn) }()
+	// settled is set once the wait ended in anything but "not accepted": the
+	// connection was accepted (its answer is the result) or failed on its own.
+	var settled atomic.Bool
+	go func() {
+		err := verify(conn)
+		if !errors.Is(err, errPerUserNotAccepted) {
+			settled.Store(true)
+		}
+		done <- err
+	}()
 	at := check.by.Add(-unansweredMargin)
 	if least := time.Now().Add(queueDwell); at.Before(least) {
 		at = least
@@ -97,7 +107,20 @@ func verifyConnected(ctx context.Context, check *perUserPeerCheck, conn net.Conn
 	// (connectBy). A read that says no ends that wait, so a proof that comes
 	// after the deadline from anywhere else stays void.
 	check.deciding.Store(ownerScanSupported)
-	if ownGatewayHoldsQueueRetried(ctx, check, server) {
+	holds := ownGatewayHoldsQueueRetried(ctx, check, server, &settled)
+	// A connection that was accepted while the owner was read has its answer
+	// (or its own error): a listener owned by the own gateway does not show
+	// that the connection was never accepted. Only a wait that ended as not
+	// accepted leaves the finding of the scan to decide.
+	select {
+	case err := <-done:
+		if !holds || !errors.Is(err, errPerUserNotAccepted) {
+			check.deciding.Store(false)
+			return err
+		}
+	default:
+	}
+	if holds {
 		if check.abandoned.Load() {
 			// The scan outlasted ownerScanGrace and connectBy ended the try:
 			// a proof that came after the end of the try is no proof.
@@ -125,10 +148,15 @@ const (
 )
 
 // ownGatewayHoldsQueueRetried is ownGatewayHoldsQueue repeated, while it says
-// no, for ownerScanRetry, and not after the try was abandoned (connectBy).
-func ownGatewayHoldsQueueRetried(ctx context.Context, check *perUserPeerCheck, server *net.TCPAddr) bool {
+// no, for ownerScanRetry, and not after the try was abandoned (connectBy) or
+// once the wait settled (the connection was accepted or failed on its own;
+// the caller reads that result first).
+func ownGatewayHoldsQueueRetried(ctx context.Context, check *perUserPeerCheck, server *net.TCPAddr, settled *atomic.Bool) bool {
 	end := time.Now().Add(ownerScanRetry)
 	for {
+		if settled.Load() {
+			return false
+		}
 		if ownGatewayHoldsQueue(ctx, server) {
 			return true
 		}

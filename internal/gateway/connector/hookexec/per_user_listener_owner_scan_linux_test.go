@@ -90,3 +90,46 @@ func TestGatewayAcceptingBeforeTheConnectBudgetEndsKeepsItsAnswer(t *testing.T) 
 		})
 	}
 }
+
+// The first read of the record folder finds nothing, so the owner of the
+// queued connection is read again, and the gateway accepts the connection
+// while that read runs (still inside the connect budget). The listener is the
+// own gateway, but the connection was accepted: its policy block is the
+// answer, not an outage.
+func TestGatewayAcceptingDuringTheOwnerReadKeepsItsAnswer(t *testing.T) {
+	for _, accept := range []time.Duration{2800 * time.Millisecond, 2950 * time.Millisecond} {
+		t.Run(accept.String(), func(t *testing.T) {
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = listener.Close() })
+			dataDir := recordGateway(t, os.Getpid(), nil)
+			var handled atomic.Int32
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				handled.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"action":"block","raw_action":"block"}`))
+			})}
+			t.Cleanup(func() { _ = server.Close() })
+			go func() {
+				time.Sleep(accept)
+				_ = server.Serve(listener)
+			}()
+			var reads atomic.Int32
+			ctx := withPerUserGatewayHomes(context.Background(), func() []string {
+				if reads.Add(1) == 1 {
+					time.Sleep(300 * time.Millisecond)
+					return nil
+				}
+				return []string{dataDir}
+			})
+			tryCtx, release := connectBy(ctx, time.Now().Add(perUserConnectedWait), nil)
+			defer release()
+			reply, err := PostPerUserHook(tryCtx, listener.Addr().String(), "/api/v1/claude-code/hook", nil, []byte("{}"))
+			if err != nil || reply.Status != http.StatusOK || !strings.Contains(reply.Body, `"block"`) || handled.Load() != 1 {
+				t.Fatalf("the gateway answer was lost to the owner read: reads=%d handled=%d status=%d body=%q err=%v", reads.Load(), handled.Load(), reply.Status, reply.Body, err)
+			}
+		})
+	}
+}
