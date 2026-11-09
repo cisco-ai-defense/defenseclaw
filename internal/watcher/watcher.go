@@ -1449,6 +1449,9 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	watchOnce := func(dir, kind string) bool {
 		key, absolute := watchKey(dir)
 		if _, exists := watchedDirs[key]; exists {
+			// Another kind registered this path; this kind is covered by
+			// that watch, so its own record ends too.
+			w.setRootCoverage(kind, dir, nil)
 			return true
 		}
 		if createsAgentOwnedDir(dir) {
