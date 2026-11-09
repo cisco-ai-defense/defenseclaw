@@ -4959,7 +4959,8 @@ func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpt
 		if reconcileErr != nil {
 			return fmt.Errorf("reconcile Hermes event %s: %w", spec.event, reconcileErr)
 		}
-		written[spec.event] = hermesHookEntryRecord{Shape: hermesEntryShape(entry), Kept: kept, Seen: hermesSeenCommands(reconciled, hookScript, recognizedCommands, kept)}
+		command, _ := hermesHookEntryCommand(entry)
+		written[spec.event] = hermesHookEntryRecord{Wrote: hermesWroteWith(prior.Hooks[spec.event], command), Kept: kept}
 		hooks[spec.event] = reconciled
 	}
 	for event, raw := range hooks {

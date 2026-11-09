@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -199,9 +201,9 @@ func TestHermesTeardownRemovesTheGeneratedScriptAtAnEditedPath(t *testing.T) {
 // account home inside double quotes; a path with a space that steps out of the
 // hooks directory to an ordinary user script) and the spellings of earlier
 // reviews. Teardown keeps each entry, VerifyClean accepts the file, and the
-// user's script is untouched. Teardown and repair each warn once, whatever the
-// command says.
-func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T) {
+// user's script is untouched. Setup never recorded writing any of these
+// commands, so repair and teardown say nothing about them (GAP-0940).
+func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptWithoutANotice(t *testing.T) {
 	forms := map[string]struct {
 		home    string
 		command func(dataDir, home string) string
@@ -238,25 +240,17 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T)
 				t.Fatalf("VerifyClean rejected a user entry: %v", err)
 			}
 			// Repair adds the current entry beside the edited one, keeps the
-			// edited one and warns once, and never refuses.
+			// edited one and never refuses.
 			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
 				t.Fatalf("repair refused a user entry: %v", err)
 			}
 			if got := hermesPreToolCommands(t, configPath); len(got) != 2 || got[0] != command || got[1] != hermesConfiguredHookCommand(conn.hookCommand(opts), "") {
 				t.Fatalf("repaired commands = %q; want the edited entry %q then the current one", got, command)
 			}
-			if !strings.Contains(notice.String(), "kept hook entries") || !strings.Contains(notice.String(), "pre_tool_call") || strings.Count(notice.String(), "\n") != 1 {
-				t.Fatalf("repair notice = %q; want one line naming pre_tool_call", notice.String())
-			}
-			// Repair again: the entry is still kept, so the notice still comes.
-			notice.Reset()
+			// Repair again: the entry is still kept, still without a notice.
 			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
 				t.Fatalf("second repair: %v", err)
 			}
-			if !strings.Contains(notice.String(), "pre_tool_call") {
-				t.Fatalf("second repair notice = %q; want pre_tool_call listed", notice.String())
-			}
-			notice.Reset()
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
 			}
@@ -269,8 +263,8 @@ func TestHermesCommandsSetupDidNotWriteAreUserEntriesKeptAndListed(t *testing.T)
 			if _, err := os.Stat(userScript); err != nil {
 				t.Fatalf("user script: %v", err)
 			}
-			if !strings.Contains(notice.String(), "kept hook entries") || !strings.Contains(notice.String(), "pre_tool_call") || strings.Count(notice.String(), "\n") != 1 {
-				t.Fatalf("notice = %q; want one line naming pre_tool_call", notice.String())
+			if notice.Len() != 0 {
+				t.Fatalf("notice = %q; want none for an entry Setup never recorded writing", notice.String())
 			}
 			if matches, _ := filepath.Glob(configPath + ".*"); len(matches) != 0 {
 				t.Fatalf("teardown wrote extra files next to the config: %q", matches)
@@ -409,25 +403,57 @@ func TestHermesVerifyCleanIgnoresACommentThatNamesTheScript(t *testing.T) {
 	}
 }
 
-// The kept-entry notice does not depend on how the data directory is spelled: an
-// account whose data directory is not called defenseclaw still gets the notice
-// for a hand-edited or padded entry, from teardown and from repair.
-func TestHermesKeptEntryNoticeIgnoresTheDataDirectoryName(t *testing.T) {
-	for name, edit := range map[string]func(dataDir string) string{
-		"edited script name": func(d string) string { return "bash " + filepath.Join(d, "hooks", "hookX") },
-		"padded command":     func(d string) string { return " " + hermesSetupCommandIn(d) },
-	} {
+// hermesRecordWrote makes the Setup record say that Setup wrote command on
+// event, as a Setup of an earlier form of the command would have.
+func hermesRecordWrote(t *testing.T, opts SetupOpts, event, command string) {
+	t.Helper()
+	record := readHermesSetUpRecord(opts.DataDir)
+	entry := record.Hooks[event]
+	entry.Wrote = append(entry.Wrote, hermesCommandHash(command))
+	record.Hooks[event] = entry
+	if err := writeHermesSetUpRecord(opts.DataDir, record); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The notice is printed for an entry the Setup record names as written by
+// Setup (by the hash of its exact command) that DefenseClaw no longer owns, and
+// the notice does not depend on how the data directory is spelled. The twin: the
+// same command that Setup never recorded writing gets no notice.
+func TestHermesKeptEntryNoticeNamesAnEntryTheSetupRecordSaysSetupWrote(t *testing.T) {
+	const command = "/opt/old/launcher --hook hermes"
+	for name, recorded := range map[string]bool{"recorded as written by Setup": true, "not recorded": false} {
 		t.Run(name, func(t *testing.T) {
 			conn, opts, configPath, home := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
 			opts.DataDir = filepath.Join(home, "state")
-			command := edit(opts.DataDir)
 			hermesSetUpAndEditTheEntry(t, conn, opts, configPath, command)
-			notice := captureHermesNotices(t)
-			if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
-				t.Fatalf("repair: %v", err)
+			if recorded {
+				hermesRecordWrote(t, opts, "pre_tool_call", command)
 			}
-			if !strings.Contains(notice.String(), "pre_tool_call") {
-				t.Fatalf("repair notice = %q; want pre_tool_call listed", notice.String())
+			want := func(notice *bytes.Buffer, step string) {
+				t.Helper()
+				if got := strings.Contains(notice.String(), "pre_tool_call"); got != recorded {
+					t.Fatalf("%s notice = %q; want pre_tool_call listed: %v", step, notice.String(), recorded)
+				}
+			}
+			notice := captureHermesNotices(t)
+			for round := 1; round <= 2; round++ {
+				notice.Reset()
+				if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+					t.Fatalf("repair %d: %v", round, err)
+				}
+				want(notice, "repair")
+			}
+			record := readHermesSetUpRecord(opts.DataDir)
+			var wantKept []string
+			if recorded {
+				wantKept = []string{hermesCommandHash(command)}
+			}
+			if got := record.Hooks["pre_tool_call"].Kept; !slices.Equal(got, wantKept) {
+				t.Fatalf("kept = %q; want %q", got, wantKept)
+			}
+			if got := record.Hooks["post_tool_call"].Kept; len(got) != 0 {
+				t.Fatalf("post_tool_call kept = %q; want none", got)
 			}
 			notice.Reset()
 			if err := conn.Teardown(context.Background(), opts); err != nil {
@@ -436,18 +462,16 @@ func TestHermesKeptEntryNoticeIgnoresTheDataDirectoryName(t *testing.T) {
 			if got := hermesPreToolCommands(t, configPath); len(got) != 1 || got[0] != command {
 				t.Fatalf("remaining commands = %q; want the user entry %q kept", got, command)
 			}
-			if !strings.Contains(notice.String(), "pre_tool_call") {
-				t.Fatalf("teardown notice = %q; want pre_tool_call listed", notice.String())
-			}
+			want(notice, "teardown")
 		})
 	}
 }
 
-// The notice is printed for an entry Setup wrote and a person edited, found by
-// the record Setup made, and never for the words of a command: a hook of the
-// user that only names a DefenseClaw hook, as data or in a comment, gets none
-// beside the entry Setup wrote (repair, teardown), and an edited entry gets
-// none either when no record of Setup exists.
+// The notice is printed only for an entry the record Setup made says Setup
+// wrote, and never for the words of a command: a hook of the user that only
+// names a DefenseClaw hook, as data or in a comment, gets none beside the entry
+// Setup wrote (repair, teardown), and an edited entry gets none either when no
+// record of Setup exists.
 func TestHermesTheKeptEntryNoticeIsDecidedByTheSetupRecordNotByTheWordsOfACommand(t *testing.T) {
 	mentions := map[string]string{
 		"printf data":         `printf '%s' 'hermes-hook.sh' >/dev/null`,
@@ -525,25 +549,6 @@ func TestHermesTheKeptEntryNoticeIsDecidedByTheSetupRecordNotByTheWordsOfAComman
 	})
 }
 
-// Go writes the record that Python reads (hermes_recorded_kept_commands): an
-// entry Setup kept is named by the sha256 of its command, under its event.
-func TestHermesSetupRecordNamesAKeptEntryByTheHashOfItsCommand(t *testing.T) {
-	conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
-	hermesSetUpAndEditTheEntry(t, conn, opts, configPath, "/opt/tools/audit --old")
-	captureHermesNotices(t)
-	if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
-		t.Fatalf("repair: %v", err)
-	}
-	record := readHermesSetUpRecord(opts.DataDir)
-	const hash = "043eaf7fcdff435feeb38ee9f79e6c7e49f6125e8663f452f1d4a264ea1c7b91"
-	if got := record.Hooks["pre_tool_call"].Kept; len(got) != 1 || got[0] != hash {
-		t.Fatalf("kept = %q; want [%s]", got, hash)
-	}
-	if got := record.Hooks["post_tool_call"].Kept; len(got) != 0 {
-		t.Fatalf("post_tool_call kept = %q; want none", got)
-	}
-}
-
 // hermesDropSetupEntry removes the entry Setup added to pre_tool_call (the last
 // one) and the entries of the other events, then appends the given user
 // commands with the fields Setup writes.
@@ -593,48 +598,86 @@ func TestHermesAUserHookThatWasThereBeforeSetupGetsNoKeptEntryNotice(t *testing.
 	}
 }
 
-// The twin: with the same user hook beside it, the entry Setup wrote and a
-// person edited in place is still the one entry that is kept and listed.
-func TestHermesTheEditedSetupEntryIsListedBesideAUserHookOfTheSameShape(t *testing.T) {
+// The twin: with a user hook of the same shape beside it, the entry the record
+// says Setup wrote is still the one entry that is kept and listed.
+func TestHermesTheEntrySetupRecordedIsListedBesideAUserHookOfTheSameShape(t *testing.T) {
 	const user = "/opt/tools/audit.sh"
-	const edited = "/opt/tools/edited.sh"
+	const written = "/opt/old/launcher --hook hermes"
 	conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return []string{user} })
 	hermesSetUp(t, conn, opts, configPath)
-	hermesRewriteHooks(t, configPath, func(hooks map[string]interface{}) {
-		for event := range hooks {
-			if event != "pre_tool_call" {
-				delete(hooks, event)
-			}
-		}
-		hooks["pre_tool_call"].([]interface{})[1].(map[string]interface{})["command"] = edited
-	})
+	hermesDropSetupEntry(t, configPath, written)
+	hermesRecordWrote(t, opts, "pre_tool_call", written)
 	notice := captureHermesNotices(t)
 	if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
 		t.Fatalf("repair: %v", err)
 	}
 	if !strings.Contains(notice.String(), "pre_tool_call") {
-		t.Fatalf("notice = %q; want the edited entry listed", notice.String())
+		t.Fatalf("notice = %q; want the recorded entry listed", notice.String())
 	}
 	record := readHermesSetUpRecord(opts.DataDir)
-	if got := record.Hooks["pre_tool_call"].Kept; len(got) != 1 || got[0] != hermesCommandHash(edited) {
-		t.Fatalf("kept = %q; want only the edited entry", got)
+	if got := record.Hooks["pre_tool_call"].Kept; len(got) != 1 || got[0] != hermesCommandHash(written) {
+		t.Fatalf("kept = %q; want only the entry Setup recorded", got)
 	}
 }
 
-// Setup wrote one entry, so two entries of its shape that it never saw cannot
-// both be an edit of it: neither is listed.
-func TestHermesTwoUnknownEntriesOfTheSetupShapeAreNotListed(t *testing.T) {
-	conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return nil })
-	hermesSetUp(t, conn, opts, configPath)
-	hermesDropSetupEntry(t, configPath, "/opt/tools/one.sh", "/opt/tools/two.sh")
-	notice := captureHermesNotices(t)
-	if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
-		t.Fatalf("repair: %v", err)
+// An entry that Setup never recorded writing is a hook of the account, whatever
+// fields it has and however many there are: with Setup's own entry gone, repair
+// and teardown keep every one of them and say nothing. The cases: a hook added
+// after Setup, a hook the account had before Setup and edited afterwards, two
+// identical hooks added after Setup, and two different ones.
+func TestHermesAHookSetupNeverRecordedWritingGetsNoKeptEntryNotice(t *testing.T) {
+	cases := map[string]struct {
+		before []string
+		edit   func(hooks map[string]interface{})
+		added  []string
+		want   []string
+	}{
+		"added after Setup": {added: []string{"/opt/tools/audit.sh"}, want: []string{"/opt/tools/audit.sh"}},
+		"there before Setup, edited afterwards": {
+			before: []string{"/opt/tools/audit.sh"},
+			edit: func(hooks map[string]interface{}) {
+				hooks["pre_tool_call"].([]interface{})[0].(map[string]interface{})["command"] = "/opt/tools/audit-v2.sh"
+			},
+			want: []string{"/opt/tools/audit-v2.sh"},
+		},
+		"two identical, added after Setup": {added: []string{"/opt/tools/audit.sh", "/opt/tools/audit.sh"}, want: []string{"/opt/tools/audit.sh", "/opt/tools/audit.sh"}},
+		"two different, added after Setup": {added: []string{"/opt/tools/one.sh", "/opt/tools/two.sh"}, want: []string{"/opt/tools/one.sh", "/opt/tools/two.sh"}},
 	}
-	if notice.Len() != 0 {
-		t.Fatalf("notice = %q; want none when the edited entry cannot be told from a second hook", notice.String())
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			conn, opts, configPath, _ := hermesHookDirFixture(t, "", func(string, string) []string { return tc.before })
+			hermesSetUp(t, conn, opts, configPath)
+			if tc.edit != nil {
+				hermesRewriteHooks(t, configPath, tc.edit)
+			}
+			hermesDropSetupEntry(t, configPath, tc.added...)
+			notice := captureHermesNotices(t)
+			for round := 1; round <= 2; round++ {
+				if err := patchHermesHooks(configPath, conn.hookCommand(opts), ""); err != nil {
+					t.Fatalf("repair %d: %v", round, err)
+				}
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			if got := hermesPreToolCommands(t, configPath); !slices.Equal(got, tc.want) {
+				t.Fatalf("remaining commands = %q; want %q kept", got, tc.want)
+			}
+			if notice.Len() != 0 {
+				t.Fatalf("notice = %q; want none for a hook Setup never recorded writing", notice.String())
+			}
+		})
 	}
-	if got := hermesPreToolCommands(t, configPath); len(got) != 3 {
-		t.Fatalf("commands = %q; want both user hooks kept beside the current entry", got)
+}
+
+// The record keeps the newest commands Setup wrote on an event, each once.
+func TestHermesWroteListKeepsTheNewestCommandsOnce(t *testing.T) {
+	var record hermesHookEntryRecord
+	for i := 0; i < hermesWroteLimit+3; i++ {
+		record.Wrote = hermesWroteWith(record, "command-"+strconv.Itoa(i))
+	}
+	record.Wrote = hermesWroteWith(record, "command-"+strconv.Itoa(hermesWroteLimit+2))
+	if len(record.Wrote) != hermesWroteLimit || record.Wrote[0] != hermesCommandHash("command-3") || record.Wrote[hermesWroteLimit-1] != hermesCommandHash("command-"+strconv.Itoa(hermesWroteLimit+2)) {
+		t.Fatalf("wrote = %q; want the newest %d commands once", record.Wrote, hermesWroteLimit)
 	}
 }
