@@ -28,6 +28,7 @@ SMOKES = {
     "enterprise-target-runtime-skip-smoke.ps1": "target runtime skip smoke passed",
     "enterprise-resilience-helpers-smoke.ps1": "resilience helpers smoke passed",
     "enterprise-nuclear-user-data-paths-smoke.ps1": "nuclear user data paths smoke passed",
+    "enterprise-nuclear-copilot-policy-smoke.ps1": "nuclear copilot policy smoke passed",
     "enterprise-installer-resilience-smoke.ps1": "installer resilience smoke passed",
     "enterprise-restart-delete-cancel-smoke.ps1": "restart delete cancel smoke passed",
 }
