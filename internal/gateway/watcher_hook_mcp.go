@@ -63,12 +63,14 @@ type hookReportedMCPServers struct {
 	mu      sync.Mutex
 	servers map[string]config.MCPServerEntry
 	perHome map[string]int
+	// reportedAt is when a hook last reported each listed server.
+	reportedAt map[string]time.Time
 	// refused holds, per session and server name, the refused definitions
 	// the session reported (heldMCPRefusals).
 	refused map[string]*heldMCPRefusals
-	// unkept holds, per connector and account, the names no store could keep
-	// (unkeptMCP).
-	unkept map[string]*unkeptMCP
+	// overflow holds, per connector and account, the sessions the session
+	// store was full for (holdOverflow).
+	overflow map[string]*[hookOverflowSlots]overflowSlot
 }
 
 func (h *hookReportedMCPServers) list() ([]config.MCPServerEntry, error) {
@@ -84,25 +86,59 @@ func (h *hookReportedMCPServers) list() ([]config.MCPServerEntry, error) {
 
 // note records entry and reports whether it is new or its definition changed.
 func (h *hookReportedMCPServers) note(entry config.MCPServerEntry) bool {
+	return h.noteAt(entry, time.Now())
+}
+
+// noteAt is note at the time of the report. A list that has used its share
+// first gives up the servers no hook reported within the memory time limit,
+// which no config the hooks read lists any more; when every server is a live
+// one the new server is not listed, and the caller decides its calls itself
+// (unrecordedMCPDecision).
+func (h *hookReportedMCPServers) noteAt(entry config.MCPServerEntry, now time.Time) bool {
 	key := watcher.MCPEventPath(entry)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.servers == nil {
 		h.servers = map[string]config.MCPServerEntry{}
 		h.perHome = map[string]int{}
+		h.reportedAt = map[string]time.Time{}
 	}
 	if old, ok := h.servers[key]; ok {
+		h.reportedAt[key] = now
 		if old.URL == entry.URL && old.Transport == entry.Transport && old.Command == entry.Command &&
 			old.LocalRefusal == entry.LocalRefusal && old.ArgsCut == entry.ArgsCut && slices.Equal(old.Args, entry.Args) {
 			return false
 		}
-	} else if len(h.servers) >= hookReportedMCPLimit || h.perHome[entry.Home] >= hookReportedMCPPerHomeLimit {
-		return false
 	} else {
+		if h.listFullLocked(entry.Home) {
+			h.dropStaleLocked(entry.Home, now)
+		}
+		if h.listFullLocked(entry.Home) {
+			return false
+		}
 		h.perHome[entry.Home]++
 	}
 	h.servers[key] = entry
+	h.reportedAt[key] = now
 	return true
+}
+
+func (h *hookReportedMCPServers) listFullLocked(home string) bool {
+	return len(h.servers) >= hookReportedMCPLimit || h.perHome[home] >= hookReportedMCPPerHomeLimit
+}
+
+// dropStaleLocked drops the listed servers no hook reported within the memory
+// time limit: the account's own when its share is used, any when the list is.
+func (h *hookReportedMCPServers) dropStaleLocked(home string, now time.Time) {
+	own := h.perHome[home] >= hookReportedMCPPerHomeLimit
+	for key, entry := range h.servers {
+		if (own && entry.Home != home) || now.Sub(h.reportedAt[key]) <= mcpResolvedTTL {
+			continue
+		}
+		delete(h.servers, key)
+		delete(h.reportedAt, key)
+		h.perHome[entry.Home]--
+	}
 }
 
 // forget drops the server a hook reported earlier, whose definition no longer
@@ -115,6 +151,7 @@ func (h *hookReportedMCPServers) forget(entry config.MCPServerEntry) {
 	defer h.mu.Unlock()
 	if _, ok := h.servers[key]; ok {
 		delete(h.servers, key)
+		delete(h.reportedAt, key)
 		h.perHome[entry.Home]--
 	}
 }
@@ -125,10 +162,13 @@ func (h *hookReportedMCPServers) forget(entry config.MCPServerEntry) {
 // call until the watcher has admitted the server (GAP-2591): a URL server,
 // or a local one the scanner refuses from its definition (GAP-0925).
 //
-// A report the list or the session store cannot keep because the account used
-// its share is not dropped: the name is held (holdUnkept) and the call, and
-// each later call to the name, gets the decision of a failed admission
-// returned here, so a full store never turns a refusal into an allow.
+// A definition the list or the session store cannot keep because the account
+// used its share is not dropped: the call, and each later call that reports
+// the same definition, gets the decision of a failed admission returned here
+// (unrecordedMCPDecision), so a full store never turns a refusal into an
+// allow. The decision is on that definition only: no other server of the
+// account is held for it, and the session that met it keeps it in the
+// overflow table (holdOverflow), by its own session, workspace and name.
 func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	if a == nil || a.hookMCP == nil || !probe.Matched || probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
@@ -164,14 +204,20 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		}
 	}
 	now := time.Now()
+	// unrecorded is the definition of this call that no store could keep.
+	var unrecorded *config.MCPServerEntry
 	if refused {
 		// A call that names no session cannot be tied to an agent process, and
 		// nothing would end the hold (mcpSessionStarted needs the id), so only
-		// a named session keeps what it met.
+		// a named session keeps what it met. The list comes first: a session
+		// whose definition the list holds is not given up for a newer one.
+		a.hookMCP.noteAt(reported, now)
 		kept := probe.SessionID == "" || a.hookMCP.retainRefused(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, reported, now)
-		a.hookMCP.note(reported)
+		if !kept {
+			a.hookMCP.holdOverflow(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, reported, now)
+		}
 		if !kept || !a.hookMCP.listedAs(reported) {
-			a.hookMCP.holdUnkept(connectorName, home, probe.ServerName, reported, now)
+			unrecorded = &reported
 		}
 	} else if held, _ := a.hookMCP.heldRefusals(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, now); len(held) > 0 {
 		// The running agent keeps the connection to a refused definition after
@@ -179,22 +225,28 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		// listed, and blocks the calls, until the agent starts again
 		// (mcpSessionStarted).
 		last := held[len(held)-1]
-		a.hookMCP.note(last)
+		a.hookMCP.noteAt(last, now)
 		if !a.hookMCP.listedAs(last) {
-			a.hookMCP.holdUnkept(connectorName, home, probe.ServerName, last, now)
+			unrecorded = &last
 		}
 	} else if haveCurrent {
 		if reported.URL == "" {
 			a.hookMCP.forget(reported)
 		} else {
-			a.hookMCP.note(reported)
+			a.hookMCP.noteAt(reported, now)
 			if !a.hookMCP.listedAs(reported) {
-				a.hookMCP.holdUnkept(connectorName, home, probe.ServerName, reported, now)
+				unrecorded = &reported
 			}
 		}
 	}
-	if held, ok := a.hookMCP.unkeptFor(connectorName, home, probe.ServerName, now); ok {
-		return a.unkeptMCPDecision(ctx, cfg, connectorName, hookEvent, probe, held)
+	// A session the session store was full for stays refused after its config
+	// is edited, with the cause of the definition it met first, not the one of
+	// the edit (holdOverflow).
+	if kept, ok := a.hookMCP.overflowHeld(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, now); ok {
+		unrecorded = &kept
+	}
+	if unrecorded != nil {
+		return a.unrecordedMCPDecision(ctx, cfg, connectorName, hookEvent, probe, *unrecorded)
 	}
 	return config.AssetPolicyDecision{}, false
 }
