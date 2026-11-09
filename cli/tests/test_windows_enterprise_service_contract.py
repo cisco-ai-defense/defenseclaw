@@ -6477,7 +6477,7 @@ def test_codex_machine_link_keep_belongs_to_the_uninstall_alone() -> None:
     codex_rows = gate[gate.index("CodexTargetEnabled) -eq 'True') {") :]
     codex_rows = codex_rows[: codex_rows.index("# Writer 'Gateway'")]
     assert "$Scope -ceq 'Lifecycle' -or" in codex_rows
-    assert codex_rows.index("Get-DefenseClawCodexMachineFolderLink -Layout $Layout") < codex_rows.index("'CodexMachinePolicyPath'")
+    assert codex_rows.index("Get-DefenseClawVendorMachineFolderLink -Directory ([string]$Layout.CodexMachinePolicyDirectory)") < codex_rows.index("'CodexMachinePolicyPath'")
 
     # Only the uninstall's three removal call sites pass -Teardown, to the
     # command (which adds --uninstall to the remove action) and to the check
@@ -7947,7 +7947,7 @@ _SC_SHARED_INSERTS = {
             '    }\n',
         ),
         (
-            '    }\n    Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName\n',
+            '            -GatewayServiceName $GatewayServiceName\n    }\n',
             "    if ($codexFolderLink -eq '') {\n",
             '    [void](Invoke-DefenseClawCodexRequirementsCommand `\n',
         ),
@@ -8012,3 +8012,45 @@ def test_secure_client_shared_rollback_functions_only_gain_dead_gated_lines() ->
     # Restore's readiness check passes, and the Codex target flag.
     assert module.count("-RollbackRestore `\n") == 1
     assert module.count("if ($RollbackRestore -and $codexTargetEnabled) {") == 1
+
+
+def test_every_defenseclaw_function_a_script_or_go_file_calls_is_defined() -> None:
+    """GAP-0900: a function that is renamed while another change still calls its old
+    name merges without a textual conflict and then fails at run time (the Windows
+    uninstall answered 1603 for the old Codex link check). Every
+    <Verb>-DefenseClaw<Noun> name that the module, a Windows script or a Go file
+    (tests excluded) mentions must be a function some module or script of the
+    Windows packaging defines."""
+    import re
+
+    sources = [
+        path
+        for root in (ROOT / "packaging" / "windows", ROOT / "packaging" / "mdm" / "windows")
+        for path in root.rglob("*")
+        if path.suffix in {".ps1", ".psm1"} and "tests" not in path.parts
+    ]
+    defined: set[str] = set()
+    for path in sources:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        defined |= set(re.findall(r"(?mi)^\s*function\s+([A-Za-z]+-DefenseClaw[A-Za-z0-9]*)", text))
+        defined.add(path.stem)  # a kit script is invoked by its name
+    assert len(defined) > 500
+    assert "Get-DefenseClawVendorMachineFolderLink" in defined
+    verbs = "Add|Assert|Clear|Compare|Complete|Confirm|ConvertFrom|ConvertTo|Copy|Disable|Enable|Export|Find|Format|Get|Grant|Import|Initialize|Install|Invoke|Join|Lock|Merge|Move|New|Out|Protect|Publish|Read|Register|Remove|Rename|Repair|Reset|Resolve|Restore|Resume|Revoke|Save|Select|Send|Set|Show|Split|Start|Step|Stop|Suspend|Sync|Test|Unlock|Unregister|Update|Use|Wait|Write"
+    # A name followed by a dot, a dash or a slash is a file or path (Invoke-DefenseClawEnterprise.ps1)
+    # or a wrapped name in a comment, not a call.
+    pattern = re.compile(rf"\b(?:{verbs})-DefenseClaw[A-Za-z0-9]*(?![A-Za-z0-9.\\/-])")
+    unknown: dict[str, set[str]] = {}
+    scanned = list(sources)
+    for root in (ROOT / "internal", ROOT / "cmd"):
+        scanned += [
+            path
+            for path in root.rglob("*.go")
+            if not path.name.endswith("_test.go") and "testdata" not in path.parts
+        ]
+    for path in scanned:
+        for name in set(pattern.findall(path.read_text(encoding="utf-8", errors="replace"))):
+            if name not in defined:
+                unknown.setdefault(name, set()).add(str(path.relative_to(ROOT)))
+    assert not unknown, unknown
+    assert "Get-DefenseClawCodexMachineFolderLink" not in defined

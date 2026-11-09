@@ -17313,7 +17313,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
         # (GAP-0773). Install, ensure and repair still judge them, and the
         # judgement refuses the link by name.
         if ($Scope -ceq 'Lifecycle' -or
-            [string]::IsNullOrEmpty((Get-DefenseClawCodexMachineFolderLink -Layout $Layout))) {
+            [string]::IsNullOrEmpty((Get-DefenseClawVendorMachineFolderLink -Directory ([string]$Layout.CodexMachinePolicyDirectory)))) {
             $rows += , @('CodexMachinePolicyPath', $record, $every)
             $rows += , @('CodexManagedHooksStatePath', $record, $every)
         }
