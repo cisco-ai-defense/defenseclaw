@@ -289,7 +289,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             if name in held:
                 continue
             entry = actions_map.get(name)
-            if not secure_client and entry is not None and entry.actions.install == "allow":
+            if not secure_client and _effectively_allowed(entry):
                 allowed_after_failed_scan.append((connector, name))
             else:
                 failed_rows.append((connector, name, row.get("error", ""), by_name.get(name)))
@@ -504,6 +504,15 @@ def _blocked_after_failed_scan(action_entry) -> bool:
     ).startswith(_SCAN_FAILURE_BLOCK_REASON)
 
 
+def _effectively_allowed(action_entry) -> bool:
+    """The install allow is the whole effective state: a runtime disable or a
+    quarantine on the same server still denies it, so it is not allowed."""
+    if action_entry is None:
+        return False
+    actions = action_entry.actions
+    return actions.install == "allow" and not actions.runtime and not actions.file
+
+
 def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector: str) -> dict:
     """Map each server name to its ActionEntry for one connector list, with
     the install allow decided per server as the gateway decides it (GAP-0978).
@@ -526,7 +535,17 @@ def _mcp_list_actions(app: AppContext, servers: list[MCPServerEntry], connector:
         base = actions_map.get(s.name)
         if base is None:
             key = asset_name_key(s.name)
-            other = next((n for n in actions_map if n not in names and asset_name_key(n) == key), None)
+            # Only a row that comes from an operator rule is folded onto the
+            # server named in another case; a journal row (block, disable,
+            # quarantine) belongs to its exact name, as the gateway reads it.
+            other = next(
+                (
+                    n for n, e in actions_map.items()
+                    if n not in names and str(e.id).startswith("asset_policy:mcp:")
+                    and asset_name_key(n) == key
+                ),
+                None,
+            )
             if other is not None:
                 base = actions_map.pop(other)
         decision, rule = asset_lists.list_decision(

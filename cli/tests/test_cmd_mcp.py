@@ -3032,6 +3032,41 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
 
         self._assert_allowed(*self._both(self._server()))
 
+    def test_journal_block_of_a_name_in_another_case_does_not_move_to_this_server(self):
+        # The journal is read by exact name, as the gateway reads it: a block
+        # recorded for "new" is not a block of the server "NEW".
+        self.app.store.set_action("mcp", "new", "", ActionState(install="block"), "blocked", "claudecode")
+
+        self._assert_unscanned(*self._both(self._server()))
+
+    def test_journal_runtime_disable_of_a_name_in_another_case_does_not_move_to_this_server(self):
+        self.app.store.set_action("mcp", "new", "", ActionState(runtime="disable"), "disabled", "claudecode")
+
+        self._assert_unscanned(*self._both(self._server()))
+
+    def test_allowed_server_with_a_runtime_disable_keeps_the_warning(self):
+        # The runtime disable still denies the call, so the allow is not the
+        # whole state and the footer does not say that nothing is needed.
+        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
+        self.app.store.set_action("mcp", "NEW", "", ActionState(runtime="disable"), "disabled", "claudecode")
+
+        flat, item = self._both(self._server())
+
+        self.assertNotIn("allowed MCP server(s) have a failed last scan", flat)
+        self.assertNotIn("nothing is needed", flat)
+        self.assertIn("could not be scanned", flat)
+        self.assertEqual(item["actions"].get("runtime"), "disable")
+
+    def test_allowed_server_that_is_quarantined_keeps_the_warning(self):
+        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
+        self.app.store.set_action("mcp", "NEW", "", ActionState(file="quarantine"), "quarantined", "claudecode")
+
+        flat, _ = self._both(self._server())
+
+        self.assertNotIn("allowed MCP server(s) have a failed last scan", flat)
+        self.assertNotIn("nothing is needed", flat)
+        self.assertIn("could not be scanned", flat)
+
     def test_secure_client_list_is_unchanged(self):
         # Secure Client keeps the journal allow and the unscanned warning.
         self.app.store.set_action("mcp", "NEW", "", ActionState(install="allow"), "allowed", "claudecode")
