@@ -472,10 +472,11 @@ func TestWindowsNativeFileToolCredentialFileOfAKnownHomeIsNotAFixtureOfItsOwnWor
 	}
 }
 
-// A project file called AppData, or an AppData folder without the Local and
-// Roaming folders of a profile, does not make its folder the profile of an
-// account: an ordinary project keeps its credential fixtures.
-func TestWindowsNativeFileToolProjectFileCalledAppDataIsNoProfile(t *testing.T) {
+// Only the registry hive proves a user profile: a project that holds a file
+// called AppData, an AppData folder, or even the Local and Roaming folders of
+// one does not become the profile of an account, so it keeps its credential
+// fixtures, while a folder with NTUSER.DAT is a home.
+func TestWindowsNativeFileToolProjectWithAppDataFoldersIsNoProfile(t *testing.T) {
 	previous := windowsProfileFolder
 	t.Cleanup(func() { windowsProfileFolder = previous })
 	windowsProfileFolder = func(dir string) bool {
@@ -483,8 +484,7 @@ func TestWindowsNativeFileToolProjectFileCalledAppDataIsNoProfile(t *testing.T) 
 			switch strings.ToLower(path) {
 			case "c:/work/proj/appdata", "c:/work/real/ntuser.dat":
 				return fakeEntry{}, nil
-			case "c:/work/real/appdata", "c:/work/real/appdata/local", "c:/work/real/appdata/roaming",
-				"c:/work/folder/appdata":
+			case "c:/work/folder/appdata", "c:/work/folder/appdata/local", "c:/work/folder/appdata/roaming":
 				return fakeEntry{folder: true}, nil
 			}
 			return nil, os.ErrNotExist
@@ -494,19 +494,49 @@ func TestWindowsNativeFileToolProjectFileCalledAppDataIsNoProfile(t *testing.T) 
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		connector := "windows-native-credential-appdata-file-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)
-		for _, cwd := range []string{`C:\work\proj`, `D:\other`} {
-			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, `C:\work\proj\.netrc`); action != "allow" {
-				t.Errorf("%s cwd=%q: a project with an AppData file: %s %v, want allow", profile, cwd, action, rules)
-			}
+		for _, cwd := range []string{`C:\work\proj`, `C:\work\folder`, `D:\other`} {
 			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, `C:\work\real\.netrc`); action != "block" {
-				t.Errorf("%s cwd=%q: a folder with AppData: %s %v, want block", profile, cwd, action, rules)
+				t.Errorf("%s cwd=%q: a folder with NTUSER.DAT: %s %v, want block", profile, cwd, action, rules)
 			}
 			for _, target := range []string{
-				`C:\work\folder\.netrc`, `C:\work\folder\.git-credentials`, `C:\work\folder\.aws\credentials`,
+				`C:\work\proj\.netrc`, `C:\work\folder\.netrc`, `C:\work\folder\.git-credentials`,
+				`C:\work\folder\.aws\credentials`, `C:\work\folder\.netrc.bak`,
 			} {
 				if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, target); action != "allow" {
-					t.Errorf("%s cwd=%q %q: a project with an AppData folder only: %s %v, want allow", profile, cwd, target, action, rules)
+					t.Errorf("%s cwd=%q %q: a project with AppData entries: %s %v, want allow", profile, cwd, target, action, rules)
 				}
+			}
+		}
+	}
+}
+
+// A folder whose name ends in a space is a valid Windows folder (a separator
+// follows the space), so a file below it is a file of its own, and a dot
+// segment after it resolves to its parent: <home>\... \.netrc is not
+// <home>\.netrc, and <home>\... \..\.netrc is. The name of the last segment
+// has its trailing spaces trimmed, so the plain protected names stay judged by
+// their name.
+func TestWindowsNativeFileToolFolderWithATrailingSpaceIsAFolderOfItsOwn(t *testing.T) {
+	const home = `C:\Users\r109yws.d-2`
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-credential-trailing-space-folder-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, target := range []string{
+			home + `\... \.netrc`, home + `\... \.git-credentials`, home + `\... \.aws\credentials`,
+			home + `\.aws \credentials`, home + `\x \.netrc`, home + `\x. \.netrc`,
+			home + `\project\... \.netrc`, home + `\.aws \..\.aws.bak`,
+		} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, home+`\project`, target); action != "allow" {
+				t.Errorf("%s %q: %s %v, want allow", profile, target, action, rules)
+			}
+		}
+		for _, target := range []string{
+			home + `\... \..\.netrc`, home + `\... \..\.git-credentials`, home + `\... \..\.aws\credentials`,
+			home + `\x \..\.netrc`, home + `\.aws \..\.aws\credentials`,
+			home + `\.netrc `, home + `\.netrc. `, home + `\.aws.\credentials`, home + `\... \.\..\.netrc`,
+		} {
+			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, home+`\project`, target); action != "block" || len(rules) == 0 {
+				t.Errorf("%s %q: %s %v, want block", profile, target, action, rules)
 			}
 		}
 	}
