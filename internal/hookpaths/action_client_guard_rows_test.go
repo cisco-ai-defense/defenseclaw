@@ -107,6 +107,11 @@ func TestGAP0431LoopCopyProofGuards(t *testing.T) {
 		{"L6-special-source-seconds", `SECONDS=; for f in authorized_keys; do cp "$SECONDS" "$HOME/.ssh/$f"; done`, true},
 		{"L6-empty-reply", `REPLY=; for f in authorized_keys; do cp "$REPLY" "$HOME/.ssh/$f"; done`, true},
 		{"L6-empty-option-argument", `OPTARG=; for f in authorized_keys; do cp "$OPTARG" "$HOME/.ssh/$f"; done`, true},
+		{"L6-literal-empty-source", `for f in authorized_keys; do cp '' "$HOME/.ssh/$f"; done`, true},
+		{"L6-literal-option-source", `for f in authorized_keys; do cp -n "$HOME/.ssh/$f"; done`, true},
+		{"L6-missing-source", `for f in authorized_keys; do cp "$HOME/.ssh/$f"; done`, true},
+		{"L6-glob-source", `for f in authorized_keys; do cp *.nomatch "$HOME/.ssh/$f"; done`, true},
+		{"L6-literal-empty-source-ordinary-destination", `for f in ordinary; do cp '' "$f"; done`, false},
 		{"L6-two-loops-protected-second", `for f in ordinary; do cp a.txt "$f"; done; for f in authorized_keys; do cp a.txt "$HOME/.ssh/$f"; done`, true},
 	}
 	for _, row := range rows {

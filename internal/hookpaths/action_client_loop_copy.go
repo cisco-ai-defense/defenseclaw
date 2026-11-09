@@ -167,7 +167,7 @@ func actionClientLoopCopyNoop(stmt *syntax.Stmt, cwd, home string) bool {
 }
 
 func actionClientLoopCopyDestination(call *syntax.CallExpr, assignments actionValues, cwd, home string, copyOnly bool) (*syntax.Word, bool) {
-	if len(call.Args) < 3 {
+	if len(call.Args) < 2 {
 		return nil, false
 	}
 	program, fixed := staticProgramWord(call.Args[0], home)
@@ -186,6 +186,8 @@ func actionClientLoopCopyDestination(call *syntax.CallExpr, assignments actionVa
 		// and install on their existing entry semantics.
 		return nil, false
 	}
+	// For cp the source slot, the word before the destination, is never read:
+	// empty, option-shaped, dynamic or missing, the name still reaches a writer.
 	for i := 1; i < len(call.Args)-2; i++ {
 		option, fixed := StaticWord(call.Args[i], home)
 		if !fixed {
@@ -212,23 +214,21 @@ func actionClientLoopCopyDestination(call *syntax.CallExpr, assignments actionVa
 			return nil, false
 		}
 	}
-	sourceWord := call.Args[len(call.Args)-2]
-	source, fixed := StaticWord(sourceWord, home)
+	if base == "cp" || base == "gcp" {
+		return call.Args[len(call.Args)-1], true
+	}
+	// A move or install replaces the destination entry, a link included, so
+	// its destination is judged only for a source it plainly names.
+	if len(call.Args) < 3 {
+		return nil, false
+	}
+	source, fixed := StaticWord(call.Args[len(call.Args)-2], home)
 	endOfOptions := false
 	if len(call.Args) > 3 {
 		option, fixed := StaticWord(call.Args[len(call.Args)-3], home)
 		endOfOptions = fixed && option == "--"
 	}
-	if !fixed {
-		if base != "cp" && base != "gcp" || len(sourceWord.Parts) != 1 {
-			return nil, false
-		}
-		if _, quoted := sourceWord.Parts[0].(*syntax.DblQuoted); !quoted {
-			return nil, false
-		}
-		return call.Args[len(call.Args)-1], true
-	}
-	if source == "" || strings.HasPrefix(source, "-") && !endOfOptions || strings.ContainsAny(source, "*?[]\x00\x1f") {
+	if !fixed || source == "" || strings.HasPrefix(source, "-") && !endOfOptions || strings.ContainsAny(source, "*?[]\x00\x1f") {
 		return nil, false
 	}
 	return call.Args[len(call.Args)-1], true
