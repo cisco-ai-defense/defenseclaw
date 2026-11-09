@@ -208,7 +208,10 @@ updates it. That hook runs the same hook binary and arguments, so the gateway st
 calls; it differs only when PowerShell runs in Constrained Language mode and the launcher never
 starts, where it allows the call (this release's hook refuses it). Any other difference (a
 deleted or replaced hook file, a link, another owner, a drifted runtime), a lock this release
-wrote, and an account with an active session whose repair fails still fail the upgrade.
+wrote, and an account with an active session whose repair fails still fail the upgrade. With the
+administrator's hook fail mode open, a signed-out Claude Code or Codex account whose machine
+registration is proven waits as well, with the previous release's registered hook running in open
+mode; with fail mode closed they keep the closed-registration proof described above.
 
 ## Roll back
 
