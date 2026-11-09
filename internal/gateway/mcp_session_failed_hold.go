@@ -49,12 +49,18 @@ import (
 // as a failed status for as long as the session lives and the config does not
 // list it again with an admission that no longer fails. A listed definition
 // whose admission is still pending, or cannot be read, has not been admitted:
-// it does not release the hold. Secure Client and the managed hook-reported
-// gateway never get here with a status to change.
+// it does not release the hold. Secure Client never gets here with a status to
+// change; a managed Linux or macOS gateway keeps its own holds
+// (hookReportedSessionHold).
 func (a *APIServer) failedMCPSessionHold(ctx context.Context, cfg *config.Config, connector string, probe mcpRuntimeProbe,
 	status watcher.MCPAdmissionStatus) watcher.MCPAdmissionStatus {
-	if a == nil || a.hookMCP == nil || strings.TrimSpace(probe.SessionID) == "" || watcherUsesHookReportedMCP(cfg) ||
-		ctx.Value(unrecordedMCPKey{}) != nil || (status.Failed && status.Revoked) {
+	if a == nil || a.hookMCP == nil || strings.TrimSpace(probe.SessionID) == "" || ctx.Value(unrecordedMCPKey{}) != nil {
+		return status
+	}
+	if watcherUsesHookReportedMCP(cfg) {
+		return a.hookReportedSessionHold(ctx, cfg, connector, probe, status)
+	}
+	if status.Failed && status.Revoked {
 		return status
 	}
 	home, _ := callerHomeForAssets(ctx)
