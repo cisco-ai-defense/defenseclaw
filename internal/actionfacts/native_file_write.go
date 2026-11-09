@@ -63,10 +63,11 @@ func boundedNativeText(text string) string {
 // which Codex sends its patch tool (exec_command), and the proofs then read the
 // path facts of those commands only: a path another command of the same text
 // reads or writes is judged by the rules for that command, and is no operand of
-// the patch. Any other shell text, and any call with an argument vector, writes
-// no file a content proof reads.
+// the patch. Any other shell text, any call with an argument vector and a call
+// of a function the action defined (Input.ShellFunctionCall) write no file a
+// content proof reads.
 func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
-	if len(input.Argv) != 0 {
+	if len(input.Argv) != 0 || input.ShellFunctionCall {
 		return nil, facts
 	}
 	if PathTool(input.Tool) {
