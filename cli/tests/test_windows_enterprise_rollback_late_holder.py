@@ -144,7 +144,7 @@ def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_b
 def test_the_recovery_names_a_held_codex_state_file_before_and_after_the_reconcile_fails() -> None:
     text = _text()
     probe = _function_body(text, "Get-DefenseClawBlockedCodexStatePath")
-    assert "CodexManagedHooksStatePath" in probe and "Get-DefenseClawCodexManagedHooksStateWriterCopyList" in probe
+    assert "Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksStatePath" in probe and "Get-DefenseClawCodexManagedHooksStateWriterCopyList" in probe
     assert "Test-DefenseClawFileReadBlocked" in probe and "Test-DefenseClawFileDeleteBlocked" in probe
     body = _function_body(text, "Repair-DefenseClawRecoveredCodexRequirements")
     assert body.count("Get-DefenseClawBlockedCodexStatePath -Layout $Layout") == 2
