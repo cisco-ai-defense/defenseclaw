@@ -5,6 +5,8 @@
 // argument (seconds, fractions allowed) and works under any file name it is
 // copied or linked to: a distribution may ship its sleep(1) as one entry of a
 // multi-call binary that refuses to run under another name (Ubuntu 26.04).
+// nanosleep is POSIX: strict C (-std=c11) hides it without this.
+#define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <stdlib.h>
 #include <time.h>
