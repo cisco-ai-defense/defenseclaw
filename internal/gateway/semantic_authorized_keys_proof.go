@@ -1187,6 +1187,22 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		}
 		return windowsMovedOntoLinks[hookpaths.WindowsMovedOntoLinkKey(target)]
 	}
+	// closedLinkText is the file the client reports the link text of an
+	// operand leads to when a directory on its way is closed to the user.
+	// patchLinkText is that file for an operand a patch or file tool writes
+	// (nativeFileToolWriteOperand): such a call runs no command that could
+	// open the directory first, so the write meets the same permission and is
+	// judged by that file. A shell command's operand has no such answer.
+	closedLinkText := func(target string) (string, bool) {
+		text := clientTargets[hookpaths.LinkTextFactPrefix+target]
+		return text, filepath.IsAbs(text)
+	}
+	patchLinkText := func(target string) (string, bool) {
+		if text, closed := closedLinkText(target); closed && nativeFileToolWriteOperand(request.Input, facts, clientCWD, target) {
+			return text, true
+		}
+		return "", false
+	}
 	writeTarget := func(target string, safeRedirect, ownCopy bool) bool {
 		if !filepath.IsAbs(target) && (target == "" || !filepath.IsAbs(clientCWD)) {
 			// No directory places this operand: the gateway cannot see the
@@ -1285,8 +1301,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 					// per-user gateway walks it: a key file stays protected,
 					// an ordinary file is not a key write. A shell command may
 					// open the directory first, so its operand stays unresolved.
-					if text := clientTargets[hookpaths.LinkTextFactPrefix+target]; filepath.IsAbs(text) &&
-						nativeFileToolWriteOperand(request.Input, clientCWD, target) {
+					if text, closed := patchLinkText(target); closed {
 						if isProtected(text) {
 							return confirmed()
 						}
@@ -1363,7 +1378,7 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		// Resolve as the hook client does, so a link to a missing final
 		// file that the redirect would create is covered as well.
 		resolved, ok := hookpaths.ResolveWriteTarget(target)
-		if !ok && !cannotResolveLocally && nativeFileToolWriteOperand(request.Input, clientCWD, target) {
+		if !ok && !cannotResolveLocally && nativeFileToolWriteOperand(request.Input, facts, clientCWD, target) {
 			// A directory on the way is closed to the user, so the physical
 			// file cannot be read. The user cannot write through it either
 			// (the kernel refuses), so a file-tool write is judged by the
@@ -1667,20 +1682,39 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 			request.Input.Tool, request.Input.Args, clientCWD, facts.ActiveHome, request.ResolvedWriteTargets,
 		)
 	}
-	if !patchKnown && cannotResolveLocally && clientTargets != nil && !truncated {
+	if !patchKnown && cannotResolveLocally && clientTargets != nil {
 		// Behind ProtectHome the gateway cannot resolve an envelope's
 		// targets in the user's home; the user's hook resolved each one
-		// (GAP-1106). A target the hook did not resolve stays unknown.
+		// (GAP-1106). A target the hook did not resolve stays unknown. A target behind a directory closed
+		// to the user has no physical answer: the file its link text leads
+		// to decides it, as it does for a file-tool write (patchLinkText).
 		if lexical, parsed := hookpaths.ApplyPatchLexicalCommandTargets(
 			request.Input.Tool, request.Input.Args, input.Command, clientCWD, facts.ActiveHome,
 		); parsed && filepath.IsAbs(clientCWD) {
 			for _, target := range lexical {
-				resolved := clientTargets[hookpaths.OperandPath(target, clientCWD)]
-				if !filepath.IsAbs(resolved) || isProtected(resolved) || isProtected(target) {
+				operand := hookpaths.OperandPath(target, clientCWD)
+				if _, described := clientTargets[operand]; !described && truncated {
+					// The bounded map omits this target: the protected-name
+					// check below decides, as it did before the map was read.
+					continue
+				}
+				resolved := clientTargets[operand]
+				if !filepath.IsAbs(resolved) {
+					// The targets are the headers of the envelopes the text
+					// holds, wherever it holds them: each is a patch operand.
+					text, closed := closedLinkText(operand)
+					if !closed {
+						return true
+					}
+					resolved = text
+				}
+				if isProtected(resolved) || isProtected(target) {
 					return true
 				}
 			}
-			return false
+			if !truncated {
+				return false
+			}
 		}
 	}
 	if !patchKnown && cannotResolveLocally && clientTargets != nil && !truncated &&
@@ -2193,11 +2227,14 @@ func hermesClientPatchTarget(request trustedActionRequest, clientTargets map[str
 	return false
 }
 
-// nativeFileToolWriteOperand reports whether target is a file a native
-// file-tool call (no command) writes. Such a call runs no code of its own, so
-// the permissions it meets at the hook are the ones the write meets.
-func nativeFileToolWriteOperand(input actionfacts.Input, cwd, target string) bool {
-	for _, written := range actionfacts.NativeFileWriteTargets(input) {
+// nativeFileToolWriteOperand reports whether target is a file the call writes
+// through a patch or file tool it runs itself: a native file-tool call (no
+// command) or the apply_patch envelope of a shell here-document
+// (actionfacts.NativeCallWriteTargets). Such a call runs no code of its own
+// that could open a directory first, so the permissions it meets at the hook
+// are the ones the write meets.
+func nativeFileToolWriteOperand(input actionfacts.Input, facts actionfacts.Facts, cwd, target string) bool {
+	for _, written := range actionfacts.NativeCallWriteTargets(input, facts) {
 		if actionfacts.OperandPath(written, cwd) == target {
 			return true
 		}
