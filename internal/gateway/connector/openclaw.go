@@ -189,7 +189,7 @@ func dropDefenseClawPluginApprovals(cfg map[string]interface{}) bool {
 		return false
 	}
 	plugin, ok := approvals["plugin"].(map[string]interface{})
-	if !ok || len(plugin) != 2 || plugin["enabled"] != true || plugin["mode"] != "session" {
+	if !ok || !isDefenseClawPluginApprovals(plugin) {
 		return false
 	}
 	delete(approvals, "plugin")
@@ -197,6 +197,12 @@ func dropDefenseClawPluginApprovals(cfg map[string]interface{}) bool {
 		delete(cfg, "approvals")
 	}
 	return true
+}
+
+// isDefenseClawPluginApprovals reports whether an approvals.plugin block is
+// exactly what setup --human-approval writes.
+func isDefenseClawPluginApprovals(plugin map[string]interface{}) bool {
+	return len(plugin) == 2 && plugin["enabled"] == true && plugin["mode"] == "session"
 }
 
 // dropDefenseClawPluginApprovalsFile applies dropDefenseClawPluginApprovals
@@ -210,18 +216,11 @@ func dropDefenseClawPluginApprovalsFile(configPath string) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", configPath, err)
 		}
-		cfg, err := parseOpenClawConfig(configPath, data)
-		if err != nil {
+		out, err := removeFromOpenClawConfig(configPath, data, openClawRemoval{approvals: true})
+		if err != nil || out == nil {
 			return err
 		}
-		if !dropDefenseClawPluginApprovals(cfg) {
-			return nil
-		}
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal %s: %w", configPath, err)
-		}
-		return atomicWriteFile(configPath, append(out, '\n'), 0o644)
+		return atomicWriteFile(configPath, out, 0o644)
 	})
 }
 
@@ -667,34 +666,13 @@ func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool) error
 		return fmt.Errorf("read openclaw.json: %w", err)
 	}
 
-	cfg, err := parseOpenClawConfig(configPath, data)
+	out, err := removeFromOpenClawConfig(configPath, data, openClawRemoval{registration: true, approvals: dropRejectedApprovals})
 	if err != nil {
-		return err
-	}
-
-	plugins, _ := cfg["plugins"].(map[string]interface{})
-	if plugins != nil {
-		plugins["allow"] = removeString(plugins["allow"], "defenseclaw")
-		if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-			removeDefenseClawEntryKeys(entries)
-			plugins["entries"] = entries
+		errs = append(errs, err.Error())
+	} else if out != nil {
+		if err := atomicWriteFile(configPath, out, 0o644); err != nil {
+			errs = append(errs, fmt.Sprintf("write openclaw.json: %v", err))
 		}
-		if load, ok := plugins["load"].(map[string]interface{}); ok {
-			load["paths"] = removeDefenseClawLoadPaths(load["paths"])
-			plugins["load"] = load
-		}
-		cfg["plugins"] = plugins
-	}
-	if dropRejectedApprovals {
-		dropDefenseClawPluginApprovals(cfg)
-	}
-
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal openclaw.json: %w", err)
-	}
-	if err := atomicWriteFile(configPath, append(out, '\n'), 0o644); err != nil {
-		errs = append(errs, fmt.Sprintf("write openclaw.json: %v", err))
 	}
 
 	if len(errs) > 0 {
