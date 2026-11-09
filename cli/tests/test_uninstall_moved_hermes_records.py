@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(os.name == "nt", reason="needs POSIX modes")
 
 RECORDS = {
     ".hermes-lifecycle.lock": "",
-    "hermes-plugin-entrypoints.json": "{\"answers\": {}}\n",
+    "hermes-plugin-entrypoints.json": "{\"answers\":{}}",
     "hooks/.hookcfg.hermes": "DEFENSECLAW_CONNECTOR=hermes\nDEFENSECLAW_FAIL_MODE=open\nFAIL_MODE_SOURCE=config\n",
 }
 
@@ -60,8 +60,6 @@ def test_the_hermes_records_a_move_left_in_the_earlier_folder_are_removed(tmp_pa
     ("name", "body"),
     [
         (".hermes-lifecycle.lock", "my notes\n"),
-        ("hermes-plugin-entrypoints.json", "{\"answers\": {}, \"mine\": 1}\n"),
-        ("hermes-plugin-entrypoints.json", "[]\n"),
         ("hooks/.hookcfg.hermes", "DEFENSECLAW_CONNECTOR=hermes\nDEFENSECLAW_FAIL_MODE=open\nexport MINE=1\n"),
         ("hooks/.hookcfg.hermes", "DEFENSECLAW_CONNECTOR=cursor\nDEFENSECLAW_FAIL_MODE=open\n"),
     ],
@@ -103,15 +101,18 @@ def test_a_link_at_a_hermes_record_name_is_reported_and_not_followed(tmp_path, m
     assert target.read_text() == "mine\n"
 
 
-def test_an_answer_store_the_account_edited_after_the_move_is_kept_and_reported(tmp_path, monkeypatch):
+def test_an_answer_store_the_account_edited_after_the_move_is_moved_aside_and_named(tmp_path, monkeypatch, capsys):
     home, plan = _move_and_plan(tmp_path, monkeypatch)
-    edited = {"answers": {"personal": {"note": "keep this"}}}
-    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps(edited))
+    edited = json.dumps({"answers": {"personal": {"note": "keep this"}}})
+    (home / "hermes-plugin-entrypoints.json").write_text(edited)
 
     stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
 
-    assert json.loads((home / "hermes-plugin-entrypoints.json").read_text()) == edited
-    assert [line.split(" (")[0] for line in stayed] == [str(home / "hermes-plugin-entrypoints.json")]
+    assert stayed == []
+    assert not (home / "hermes-plugin-entrypoints.json").exists()
+    assert (home / "hermes-plugin-entrypoints.json.moved-aside").read_text() == edited
+    shown = capsys.readouterr()
+    assert str(home / "hermes-plugin-entrypoints.json") in shown.out + shown.err
     for name in (".hermes-lifecycle.lock", "hooks/.hookcfg.hermes"):
         assert not (home / name).exists(), name
 
@@ -120,6 +121,11 @@ GATEWAY_ANSWERS = {
     "b" * 64: {"entrypoints": ["plugins/a/__init__.py", "plugins/é/x.py"], "seen": 1789012345678901234},
     "a" * 64: {"entrypoints": [], "seen": 7},
 }
+
+
+def _gateway_text(answers):
+    """The bytes the gateway writes for *answers* (json.Marshal: keys sorted, no space, non-ASCII raw)."""
+    return json.dumps({"answers": answers}, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
 
 
 def _moved_plan(tmp_path, monkeypatch, records):
@@ -165,7 +171,7 @@ def test_a_cache_the_gateway_rewrote_and_recorded_after_the_move_is_removed_and_
     # the same step: uninstall sees its own rewrite as its own.
     home, plan = _move_and_plan(tmp_path, monkeypatch)
     cache = home / "hermes-plugin-entrypoints.json"
-    cache.write_text(json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":")))
+    cache.write_text(_gateway_text(GATEWAY_ANSWERS))
     _record_like_the_gateway(home, "hermes-plugin-entrypoints.json")
 
     result = _execute_earlier_folder_phase(plan)
@@ -181,9 +187,9 @@ def test_a_cache_the_account_edited_after_the_gateway_recorded_its_write_is_kept
 ):
     home, plan = _move_and_plan(tmp_path, monkeypatch)
     cache = home / "hermes-plugin-entrypoints.json"
-    cache.write_text(json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":")))
+    cache.write_text(_gateway_text(GATEWAY_ANSWERS))
     _record_like_the_gateway(home, "hermes-plugin-entrypoints.json")
-    edited = json.dumps({"answers": {**GATEWAY_ANSWERS, "c" * 64: {"entrypoints": ["mine.py"], "seen": 3}}})
+    edited = _gateway_text({**GATEWAY_ANSWERS, "c" * 64: {"entrypoints": ["mine.py"], "seen": 3}})
     cache.write_text(edited)
 
     result = _execute_earlier_folder_phase(plan)
@@ -202,7 +208,7 @@ def test_a_cache_rewritten_by_a_gateway_that_recorded_nothing_is_kept_named_and_
     # from an edit by the account, so the file is kept and named; it holds no credential, so the uninstall succeeds.
     home, plan = _move_and_plan(tmp_path, monkeypatch)
     cache = home / "hermes-plugin-entrypoints.json"
-    later = json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":"))
+    later = _gateway_text(GATEWAY_ANSWERS)
     cache.write_text(later)
 
     result = _execute_earlier_folder_phase(plan)
@@ -219,7 +225,7 @@ def test_a_cache_the_gateway_wrote_and_recorded_where_the_move_found_none_is_rem
     records = {name: body for name, body in RECORDS.items() if name != "hermes-plugin-entrypoints.json"}
     home, plan = _moved_plan(tmp_path, monkeypatch, records)
     cache = home / "hermes-plugin-entrypoints.json"
-    cache.write_text(json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":")))
+    cache.write_text(_gateway_text(GATEWAY_ANSWERS))
     _record_like_the_gateway(home, "hermes-plugin-entrypoints.json")
 
     result = _execute_earlier_folder_phase(plan)
@@ -232,7 +238,7 @@ def test_a_cache_the_account_made_where_the_move_found_none_is_kept_and_named(tm
     records = {name: body for name, body in RECORDS.items() if name != "hermes-plugin-entrypoints.json"}
     home, plan = _moved_plan(tmp_path, monkeypatch, records)
     cache = home / "hermes-plugin-entrypoints.json"
-    cache.write_text(json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":")))
+    cache.write_text(_gateway_text(GATEWAY_ANSWERS))
 
     result = _execute_earlier_folder_phase(plan)
 
@@ -246,7 +252,7 @@ def test_a_changed_hook_record_still_fails_the_uninstall_beside_a_kept_cache(tmp
     # Only the gateway's scanner answers are a named leftover; any other record DefenseClaw wrote that is not
     # removed keeps the phase failed.
     home, plan = _move_and_plan(tmp_path, monkeypatch)
-    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps({"answers": GATEWAY_ANSWERS}))
+    (home / "hermes-plugin-entrypoints.json").write_text(_gateway_text(GATEWAY_ANSWERS))
     (home / "hooks" / ".hookcfg.hermes").write_text("DEFENSECLAW_CONNECTOR=hermes\nDEFENSECLAW_FAIL_MODE=closed\n")
 
     result = _execute_earlier_folder_phase(plan)
@@ -259,34 +265,140 @@ def test_a_changed_hook_record_still_fails_the_uninstall_beside_a_kept_cache(tmp
 
 
 def test_a_cache_with_answers_is_removed_while_it_is_the_copy_the_move_recorded(tmp_path, monkeypatch):
-    body = json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":"))
+    body = _gateway_text(GATEWAY_ANSWERS)
     home, stayed = _move_and_sweep(tmp_path, monkeypatch, {**RECORDS, "hermes-plugin-entrypoints.json": body})
 
     assert stayed == []
     assert not (home / "hermes-plugin-entrypoints.json").exists()
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"answers": {"b" * 64: {"note": "mine"}}},
-        {"answers": {"b" * 64: {"entrypoints": [7], "seen": 1}}},
-        {"answers": {"b" * 64: {"entrypoints": [], "seen": True}}},
-        {"answers": {"b" * 64: {"entrypoints": [], "seen": 1.5}}},
-        {"answers": {"b" * 64: {"entrypoints": [], "seen": 2**63}}},
-        {"answers": {"b" * 64: {"entrypoints": [], "seen": 1, "note": "mine"}}},
-        {"answers": {"b" * 64: {"entrypoints": None, "seen": 1}}},
-        {"answers": {"b" * 64: "mine"}},
-    ],
-)
-def test_an_answer_cache_the_writer_cannot_emit_that_is_there_at_the_move_is_kept_and_reported(
-    tmp_path, monkeypatch, body,
-):
-    text = json.dumps(body)
-    home, stayed = _move_and_sweep(tmp_path, monkeypatch, {**RECORDS, "hermes-plugin-entrypoints.json": text})
+_ONE = "{\"entrypoints\":[],\"seen\":1}"
+_KEY = "\"" + "a" * 64 + "\""
+# Cache files the gateway cannot have written, each with a word of the reason it is named with.
+NOT_THE_GATEWAYS_BYTES = [
+    ("{\"answers\":{\"" + "b" * 64 + "\":{\"note\":\"mine\"}}}", "exactly the keys"),
+    ("{\"answers\":{\"" + "b" * 64 + "\":{\"entrypoints\":[7],\"seen\":1}}}", "not strings"),
+    ("{\"answers\":{\"" + "b" * 64 + "\":{\"entrypoints\":[],\"seen\":true}}}", "64-bit"),
+    ("{\"answers\":{\"" + "b" * 64 + "\":{\"entrypoints\":[],\"seen\":1.5}}}", "64-bit"),
+    ("{\"answers\":{\"" + "b" * 64 + "\":{\"entrypoints\":[],\"seen\":" + str(2**63) + "}}}", "64-bit"),
+    ("{\"answers\":{\"" + "b" * 64 + "\":{\"entrypoints\":[],\"seen\":1,\"note\":\"mine\"}}}", "exactly the keys"),
+    ("{\"answers\":{\"" + "b" * 64 + "\":{\"entrypoints\":null,\"seen\":1}}}", "not strings"),
+    ("{\"answers\":{\"" + "b" * 64 + "\":\"mine\"}}", "exactly the keys"),
+    # a key given twice, at each level
+    ("{\"answers\":{\"personal\":{\"note\":\"mine\"}},\"answers\":{}}", "given twice"),
+    ("{\"answers\":{" + _KEY + ":" + _ONE + "," + _KEY + ":" + _ONE + "}}", "given twice"),
+    ("{\"answers\":{" + _KEY + ":{\"entrypoints\":[],\"seen\":1,\"seen\":2}}}", "given twice"),
+    ("{\"answers\":{" + _KEY + ":{\"entrypoints\":[],\"entrypoints\":[\"x\"],\"seen\":1}}}", "given twice"),
+    # not JSON
+    ("{\"answers\"", "not JSON"),
+    # a string the writer cannot emit: an unpaired surrogate, in an entrypoint or in a key
+    ("{\"entrypoints\":[\"\\ud800\"],\"seen\":1}".join(("{\"answers\":{" + _KEY + ":", "}}")), "surrogate"),
+    ("{\"answers\":{\"" + "\\udc00" + "\":" + _ONE + "}}", "surrogate"),
+    # a key the writer cannot originate: not a manifest digest
+    ("{\"answers\":{\"personal\":" + _ONE + "}}", "manifest digest"),
+    ("{\"answers\":{\"" + "A" * 64 + "\":" + _ONE + "}}", "manifest digest"),
+    # the writer's values with another spelling, spacing or order
+    ("{\"answers\": {" + _KEY + ":" + _ONE + "}}", "bytes are not what the gateway writes"),
+    ("{\"answers\":{" + _KEY + ":" + _ONE + "}}\n", "bytes are not what the gateway writes"),
+    ("{\"answers\":{" + _KEY + ":{\"seen\":1,\"entrypoints\":[]}}}", "bytes are not what the gateway writes"),
+    ("{\"answers\":{\"" + "b" * 64 + "\":" + _ONE + "," + _KEY + ":" + _ONE + "}}", "bytes are not what the gateway writes"),
+    ("{\"answers\":{" + _KEY + ":{\"entrypoints\":[\"\\u0061\"],\"seen\":1}}}", "bytes are not what the gateway writes"),
+    ("{\"answers\":{" + _KEY + ":{\"entrypoints\":[\"a<b\"],\"seen\":1}}}", "bytes are not what the gateway writes"),
+    ("{\"answers\":{" + _KEY + ":{\"entrypoints\":[\"\\ud83d\\ude00\"],\"seen\":1}}}", "bytes are not what the gateway writes"),
+    ("[]", "only key is answers"),
+    ("{\"answers\":{},\"mine\":1}", "only key is answers"),
+    ("{\"answers\":{" + ",".join(f"\"{n:064x}\":{_ONE}" for n in range(257)) + "}}", "more answers"),
+]
 
-    assert (home / "hermes-plugin-entrypoints.json").read_text() == text
-    assert [line.split(" (")[0] for line in stayed] == [str(home / "hermes-plugin-entrypoints.json")]
+
+def _cache_moved_aside(home, body, capsys):
+    cache = home / "hermes-plugin-entrypoints.json"
+    aside = home / "hermes-plugin-entrypoints.json.moved-aside"
+    assert not cache.exists()
+    assert aside.read_bytes() == body.encode("utf-8", "surrogatepass")
+    shown = capsys.readouterr()
+    return shown.out + shown.err, str(cache), str(aside)
+
+
+@pytest.mark.parametrize(("body", "reason"), NOT_THE_GATEWAYS_BYTES)
+def test_an_answer_cache_the_writer_cannot_emit_is_moved_aside_and_named_with_the_reason(
+    tmp_path, monkeypatch, capsys, body, reason,
+):
+    # Present at the move, so the move recorded its digest by name: that digest must not make it removable.
+    home, stayed = _move_and_sweep(tmp_path, monkeypatch, {**RECORDS, "hermes-plugin-entrypoints.json": body})
+
+    assert stayed == []
+    shown, cache, aside = _cache_moved_aside(home, body, capsys)
+    assert cache in shown
+    assert aside in shown
+    assert reason in shown
+    for name in set(RECORDS) - {"hermes-plugin-entrypoints.json"}:
+        assert not (home / name).exists(), name
+
+
+@pytest.mark.parametrize(("body", "reason"), NOT_THE_GATEWAYS_BYTES)
+def test_a_gateway_record_does_not_make_a_cache_the_writer_cannot_emit_removable(
+    tmp_path, monkeypatch, capsys, body, reason,
+):
+    # Even when the digest in the list matches the file, a file the gateway cannot have written is moved aside.
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    (home / "hermes-plugin-entrypoints.json").write_bytes(body.encode("utf-8", "surrogatepass"))
+    _record_like_the_gateway(home, "hermes-plugin-entrypoints.json")
+
+    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+
+    assert stayed == []
+    shown, cache, _aside = _cache_moved_aside(home, body, capsys)
+    assert cache in shown
+    assert reason in shown
+
+
+@pytest.mark.parametrize("body", [NOT_THE_GATEWAYS_BYTES[index][0] for index in (8, 13, 15)])
+def test_an_uninstall_with_a_cache_the_writer_cannot_emit_succeeds_and_leaves_the_cache_aside(
+    tmp_path, monkeypatch, capsys, body,
+):
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    (home / "hermes-plugin-entrypoints.json").write_bytes(body.encode("utf-8", "surrogatepass"))
+
+    result = _execute_earlier_folder_phase(plan)
+
+    assert result.succeeded
+    assert cmd_uninstall._phases_left(result) == []
+    shown, cache, aside = _cache_moved_aside(home, body, capsys)
+    assert cache in shown
+    assert aside in shown
+
+
+def test_a_second_cache_the_writer_cannot_emit_is_moved_to_the_next_free_name_and_the_first_is_kept(
+    tmp_path, monkeypatch, capsys,
+):
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    (home / "hermes-plugin-entrypoints.json.moved-aside").write_text("an earlier notice\n")
+    (home / "hermes-plugin-entrypoints.json").write_text("[]")
+
+    assert cmd_uninstall._remove_earlier_folder_connector_records(plan) == []
+
+    assert (home / "hermes-plugin-entrypoints.json.moved-aside").read_text() == "an earlier notice\n"
+    assert (home / "hermes-plugin-entrypoints.json.moved-aside-2").read_text() == "[]"
+    assert not (home / "hermes-plugin-entrypoints.json").exists()
+
+
+def test_a_cache_with_the_special_characters_the_gateway_escapes_is_removed_while_recorded(tmp_path, monkeypatch):
+    # json.Marshal writes < > & U+2028 and control characters as \u escapes and non-ASCII raw; this is such a file.
+    # The same two answers, byte for byte, as TestTheAnswerStoreWritesTheBytesTheUninstallCheckExpects (internal/watcher).
+    body = (
+        '{"answers":{"' + "a" * 64 + '":{"entrypoints":[],"seen":7},"' + "b" * 64 + '":{"entrypoints":["a'
+        + "\\u003cb\\u003e\\u0026\\u2028\\u0001\\b\\f\\n\\r\\t" + '\\"' + "\\\\" + "\x7f\u00e9\U0001f600"
+        + '"],"seen":9223372036854775807}}}'
+    )
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    (home / "hermes-plugin-entrypoints.json").write_bytes(body.encode())
+    _record_like_the_gateway(home, "hermes-plugin-entrypoints.json")
+
+    assert cmd_uninstall._remove_earlier_folder_connector_records(plan) == []
+
+    assert not (home / "hermes-plugin-entrypoints.json").exists()
+    assert not (home / "hermes-plugin-entrypoints.json.moved-aside").exists()
 
 
 def test_a_record_edited_after_the_move_stays_even_when_it_keeps_the_shape_setup_writes(tmp_path, monkeypatch):
@@ -337,52 +449,6 @@ def _move_and_plan(tmp_path, monkeypatch):
         previous_stores=config_module.previous_store_dirs(), connectors=("hermes",),
     )
     return home, plan
-
-
-_ANSWER = "{\"entrypoints\":[],\"seen\":1}"
-
-
-@pytest.mark.parametrize(
-    ("body", "key"),
-    [
-        ("{\"answers\":{\"personal\":{\"note\":\"mine\"}},\"answers\":{}}", "answers"),
-        ("{\"answers\":{\"" + "a" * 64 + "\":" + _ANSWER + ",\"" + "a" * 64 + "\":" + _ANSWER + "}}", "a" * 64),
-        ("{\"answers\":{\"" + "a" * 64 + "\":{\"entrypoints\":[],\"seen\":1,\"seen\":2}}}", "seen"),
-        ("{\"answers\":{\"" + "a" * 64 + "\":{\"entrypoints\":[],\"entrypoints\":[\"x\"],\"seen\":1}}}", "entrypoints"),
-    ],
-)
-def test_an_answer_cache_with_a_key_given_twice_is_kept_and_named_with_the_reason(tmp_path, monkeypatch, body, key):
-    home, stayed = _move_and_sweep(tmp_path, monkeypatch, {**RECORDS, "hermes-plugin-entrypoints.json": body})
-
-    cache = home / "hermes-plugin-entrypoints.json"
-    assert cache.read_text() == body
-    assert len(stayed) == 1
-    assert stayed[0].startswith(str(cache))
-    assert "given twice" in stayed[0]
-    assert key in stayed[0]
-
-
-def test_an_answer_cache_that_is_not_json_is_kept_and_named_with_the_reason(tmp_path, monkeypatch):
-    home, stayed = _move_and_sweep(tmp_path, monkeypatch, {**RECORDS, "hermes-plugin-entrypoints.json": "{\"answers\""})
-
-    assert (home / "hermes-plugin-entrypoints.json").read_text() == "{\"answers\""
-    assert len(stayed) == 1
-    assert stayed[0].startswith(str(home / "hermes-plugin-entrypoints.json"))
-    assert "not JSON" in stayed[0]
-
-
-def test_a_gateway_record_does_not_make_a_cache_with_a_key_given_twice_removable(tmp_path, monkeypatch):
-    # Even when the digest in the list matches the file, a file the gateway cannot have written stays.
-    body = "{\"answers\":{\"personal\":{\"note\":\"mine\"}},\"answers\":{}}"
-    home, plan = _move_and_plan(tmp_path, monkeypatch)
-    cache = home / "hermes-plugin-entrypoints.json"
-    cache.write_text(body)
-    _record_like_the_gateway(home, "hermes-plugin-entrypoints.json")
-
-    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
-
-    assert cache.read_text() == body
-    assert len(stayed) == 1
 
 
 def test_a_setup_backup_record_with_a_key_given_twice_is_not_removed(tmp_path, monkeypatch):

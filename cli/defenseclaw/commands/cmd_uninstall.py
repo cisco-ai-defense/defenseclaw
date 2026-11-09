@@ -1349,9 +1349,29 @@ def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return found
 
 
+def _check_utf8_strings(value: object) -> None:
+    """Raise ValueError for a string holding an unpaired surrogate, at any depth.
+
+    The Go writers marshal valid UTF-8 and cannot emit one; Python parses the escape into a string it cannot
+    encode, so a file that has one was not written by DefenseClaw (GAP-0945).
+    """
+    if isinstance(value, str):
+        if re.search("[\ud800-\udfff]", value):
+            raise ValueError("a string holds an unpaired surrogate")
+    elif isinstance(value, list):
+        for item in value:
+            _check_utf8_strings(item)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _check_utf8_strings(key)
+            _check_utf8_strings(item)
+
+
 def _loads_as_written(raw: bytes | str) -> object:
-    """Parse JSON the way a file DefenseClaw wrote can read: no repeated key at any level."""
-    return json.loads(raw, object_pairs_hook=_unique_keys)
+    """Parse JSON the way a file DefenseClaw wrote can read: no repeated key at any level, no unpaired surrogate."""
+    document = json.loads(raw, object_pairs_hook=_unique_keys)
+    _check_utf8_strings(document)
+    return document
 
 
 # The keys of each top-level record, from the structs that write it
@@ -1422,6 +1442,21 @@ def _empty_lock_flaw(raw: bytes) -> str:
     return "" if raw == b"" else "it is not empty"
 
 
+# The most answers the gateway keeps (hermesStoreMaxEntries) and the key of one (hermesManifestDigest: a sha256 in hex).
+_PLUGIN_ANSWER_MAX = 256
+_PLUGIN_ANSWER_KEY = re.compile(r"[0-9a-f]{64}")
+_GO_JSON_SHORT_ESCAPES = {'"': '\\"', "\\": "\\\\", "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _go_json_string(text: str) -> str:
+    """*text* as Go's encoding/json writes a string: HTML characters and U+2028/U+2029 as \\u escapes, the rest raw."""
+    return '"' + "".join(
+        _GO_JSON_SHORT_ESCAPES.get(ch)
+        or (f"\\u{ord(ch):04x}" if ord(ch) < 0x20 or ch in "<>&\u2028\u2029" else ch)
+        for ch in text
+    ) + '"'
+
+
 def _plugin_answer_flaw(answer: object) -> str:
     """Why *answer* is not one answer as the gateway writes it (hermesStoredAnswer), or "".
 
@@ -1440,9 +1475,10 @@ def _plugin_answer_flaw(answer: object) -> str:
 def _plugin_answer_store_flaw(raw: bytes) -> str:
     """Why *raw* is not hermes-plugin-entrypoints.json as the gateway writes it, or "".
 
-    The file is one object whose only key is "answers", each answer as the gateway writes it, and no key given
-    twice at any level. A file the gateway cannot have written, or whose answers its loader would drop as
-    damaged, is the account's and stays (GAP-0945).
+    The gateway writes json.Marshal of one object whose only key is "answers": at most 256 answers, each keyed by
+    a manifest digest (64 lowercase hex digits) and shaped as hermesStoredAnswer, keys sorted, no space, no
+    repeated key, no unpaired surrogate. A file that is anything else, down to the last byte, was not written
+    by it, and its answers are the account's (GAP-0945).
     """
     try:
         document = _loads_as_written(raw)
@@ -1450,9 +1486,21 @@ def _plugin_answer_store_flaw(raw: bytes) -> str:
         return f"it is not JSON the gateway writes ({exc})"
     if not isinstance(document, dict) or set(document) != {"answers"} or not isinstance(document["answers"], dict):
         return "it is not one object whose only key is answers"
-    for answer in document["answers"].values():
+    answers = document["answers"]
+    if len(answers) > _PLUGIN_ANSWER_MAX:
+        return "it holds more answers than the gateway keeps"
+    for key, answer in answers.items():
+        if not _PLUGIN_ANSWER_KEY.fullmatch(key):
+            return "an answer is not keyed by a manifest digest"
         if flaw := _plugin_answer_flaw(answer):
             return flaw
+    written = "".join(
+        f'{_go_json_string(key)}:{{"entrypoints":[{",".join(_go_json_string(e) for e in answers[key]["entrypoints"])}],'
+        f'"seen":{answers[key]["seen"]}}}{"," if index < len(answers) - 1 else ""}'
+        for index, key in enumerate(sorted(answers))
+    )
+    if raw != ('{"answers":{' + written + "}}").encode():
+        return "its bytes are not what the gateway writes (spacing, order or spelling of the JSON differs)"
     return ""
 
 
@@ -1487,6 +1535,19 @@ _CONNECTOR_STATE_RECORD_SHAPES = {
         (("hooks", ".hookcfg.hermes"), _hermes_flat_hook_record_flaw, False),
     ),
 }
+
+
+def _move_aside(path: str) -> str:
+    """Rename *path* to a free name beside it and return that name; nothing is overwritten or deleted."""
+    for number in range(1, 100):
+        aside = f"{path}.moved-aside" + ("" if number == 1 else f"-{number}")
+        try:
+            os.link(path, aside)
+        except FileExistsError:
+            continue
+        os.unlink(path)
+        return aside
+    raise OSError(errno.EEXIST, "every moved-aside name is taken")
 
 
 def _small_file_bytes(path: str) -> bytes | None:
@@ -1738,7 +1799,18 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
             # scanner answers hold no credential: keeping them is reported, not an error, so a clean uninstall does
             # not fail because a gateway of an older release answered once after the move.
             flaw = flaw_of(raw) if raw is not None else "it could not be read"
-            if flaw:
+            if flaw and gateway_rewrites:
+                # Scanner answers of a shape the gateway cannot write are the account's: moved off the name the
+                # gateway reads, never deleted, and named with the reason. They hold no credential, so this is
+                # a notice, not a failure.
+                why = f"{path} (not the record DefenseClaw writes: {flaw}; "
+                try:
+                    aside = _move_aside(path)
+                except OSError as exc:
+                    stayed.append(f"{why}it could not be moved aside: {exc})")
+                else:
+                    kept.append(f"{why}it was moved aside to {aside}, not deleted)")
+            elif flaw:
                 # The name belongs to DefenseClaw, so a file of another shape there is reported, not removed.
                 stayed.append(f"{path} (not the record DefenseClaw writes, so it was kept: {flaw})")
             elif hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts)):
