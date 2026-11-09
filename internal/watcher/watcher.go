@@ -280,15 +280,19 @@ type InstallWatcher struct {
 	mcpAdmissionMu     sync.RWMutex
 	mcpAdmissionKnown  []mcpKnownDefinition
 	mcpAdmissionListed bool
-	// mcpAdmissionDeparted holds, by key, the servers an earlier listing had
-	// and a later one did not: an agent that dropped the entry can keep the
-	// live connection. An admission the policy gave them stays revocable
-	// through it (GAP-0920). Bounded; a listing that has the key again drops
+	// mcpAdmissionDeparted holds, by definition (mcpDepartedKey), the servers
+	// an earlier listing had and a later one did not, or had under another
+	// definition: an agent that dropped or edited the entry can keep the live
+	// connection. An admission the policy gave them stays revocable through
+	// it (GAP-0920). Bounded; a listing that has the definition again drops
 	// it. Only servers admitted before any scan are held. Guarded by
 	// mcpAdmissionMu.
 	mcpAdmissionDeparted map[string]mcpKnownDefinition
-	// mcpAdmissionDepartedLost is set once a departed server did not fit.
-	mcpAdmissionDepartedLost bool
+	// mcpAdmissionLost notes, per connector and account, the departed servers
+	// that did not fit (mcpLostScope). mcpAdmissionLostKeys counts the
+	// definitions noted across scopes. Guarded by mcpAdmissionMu.
+	mcpAdmissionLost     map[string]*mcpLostScope
+	mcpAdmissionLostKeys int
 	// A slower older list read must not replace a newer completed listing.
 	mcpAdmissionReadSeq  atomic.Uint64
 	mcpAdmissionKnownSeq uint64 // guarded by mcpAdmissionMu
