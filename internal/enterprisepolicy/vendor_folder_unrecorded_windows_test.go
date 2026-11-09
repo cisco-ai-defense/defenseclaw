@@ -409,9 +409,8 @@ func TestVerifyListsAnUnrecordedCopilotFileOnce(t *testing.T) {
 			continue
 		}
 		opts, _, file := plantUnrecorded(t, tc, unrecordedUsersModifyDACL)
-		if _, err := publishVendorCase(t, tc.vendorFolderCase, opts); err == nil {
-			// the publish writes the drop-in; the leftover stays
-		}
+		// The publish writes the drop-in; the leftover stays.
+		_, _ = publishVendorCase(t, tc.vendorFolderCase, opts)
 		verify, _ := VerifyAll(opts, []string{tc.request})
 		state, _ := stateNamed(verify, tc.connector)
 		count := 0
