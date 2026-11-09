@@ -49,7 +49,7 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 		// link is never judged as the Docker configuration.
 		files := nativeClientReachedFiles(input, write.target)
 		canonical, absolute := nativeAbsoluteTarget(write.target, input.CWD)
-		if answers := nativeClientAnswers(input, write.target); len(answers) != 0 && hasDotDotSegment(write.target) {
+		if answers := nativeDotDotAnswers(input, write.target); len(answers) != 0 {
 			files = answers
 		} else if absolute && (!strings.HasPrefix(write.target, "/") || canonical == write.target) &&
 			nativeOperandsCoverTarget(facts, len(writes), canonical) {
