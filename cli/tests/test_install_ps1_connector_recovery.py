@@ -175,29 +175,47 @@ def _assert_active_unchanged(external: Path, active: Path) -> None:
 
 @WINDOWS_POWERSHELL
 @pytest.mark.allow_subprocess
-def test_recovery_refusal_names_the_command_that_finishes_it(tmp_path) -> None:
-    receipt = tmp_path / (".defenseclaw-cas-v2-" + "b" * 24 + ".allocation")
+@pytest.mark.parametrize("folder", ["data", "d$x$(1+1) it's ($y)"])
+def test_recovery_refusal_names_the_command_that_finishes_it(tmp_path, folder: str) -> None:
+    # A valid folder name can hold a dollar sign, a sub-expression and a quote
+    # (DEFENSECLAW_HOME is user-chosen), so the printed command carries both
+    # paths as literals and its effective arguments are the real paths.
+    data = tmp_path / folder
+    data.mkdir()
+    receipt = data / (".defenseclaw-cas-v2-" + "b" * 24 + ".allocation")
     receipt.write_bytes(b"retained recovery")
     _run(
-        tmp_path,
-        """
-$BinDir = 'C:\\dc-test\\bin'
+        data,
+        r"""
+$BinDir = 'C:\dc-test\bin $dollar'
 try { Assert-NoActiveConnectorRecovery 'Rollback to 1.0.5'; throw 'guard unexpectedly passed' } catch {
     $text = $_.Exception.Message
     if ($text -notlike '*Rollback to 1.0.5 refused: active connector recovery remains*') { throw }
-    # The command is exact: this install's gateway and the folder that holds the receipt.
-    # PowerShell runs a quoted path only behind the call operator, so the printed
-    # command must carry it and must parse as one command invocation.
-    $command = '& "C:\\dc-test\\bin\\defenseclaw-gateway.exe" connector recover-config --data-dir "' + $DataDir + '"'
-    if ($text -notlike "*run '$command'*") { throw }
+    if ($text -notlike '*do not remove or replay its receipts*') { throw }
+    $marker = ' Command: '
+    $at = $text.IndexOf($marker)
+    if ($at -lt 0) { throw 'the refusal names no command' }
+    $command = $text.Substring($at + $marker.Length)
     $errors = $null
     $tree = [Management.Automation.Language.Parser]::ParseInput($command, [ref]$null, [ref]$errors)
-    if ($errors.Count) { throw "the printed command does not parse: $($errors[0].Message)" }
+    if ($errors.Count) { throw 'the printed command does not parse' }
+    if ($tree.EndBlock.Statements.Count -ne 1 -or $tree.EndBlock.Statements[0].PipelineElements.Count -ne 1) { throw 'not one command' }
     $invocation = $tree.EndBlock.Statements[0].PipelineElements[0]
     if ($invocation -isnot [Management.Automation.Language.CommandAst] -or
-        $invocation.InvocationOperator -ne [Management.Automation.Language.TokenKind]::Ampersand -or
-        $invocation.CommandElements[0].Value -ne 'C:\\dc-test\\bin\\defenseclaw-gateway.exe') { throw }
-    if ($text -notlike '*do not remove or replay its receipts*') { throw }
+        $invocation.InvocationOperator -ne [Management.Automation.Language.TokenKind]::Ampersand) { throw 'not a call-operator invocation' }
+    # The effective arguments: every element is a constant, so pasting runs
+    # exactly these values and nothing is expanded.
+    $values = @()
+    foreach ($element in $invocation.CommandElements) {
+        if ($element -is [Management.Automation.Language.StringConstantExpressionAst]) { $values += $element.Value }
+        elseif ($element -is [Management.Automation.Language.CommandParameterAst]) { $values += $element.Extent.Text }
+        else { throw ("not a literal: " + $element.Extent.Text) }
+    }
+    $expected = @('C:\dc-test\bin $dollar\defenseclaw-gateway.exe', 'connector', 'recover-config', '--data-dir', $DataDir)
+    if ($values.Count -ne $expected.Count) { throw ("arguments: " + ($values -join '|')) }
+    for ($n = 0; $n -lt $expected.Count; $n++) {
+        if ($values[$n] -cne $expected[$n]) { throw ("argument " + $n + " is " + $values[$n] + ", want " + $expected[$n]) }
+    }
 }
 """,
     )

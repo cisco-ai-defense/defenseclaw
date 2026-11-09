@@ -902,10 +902,14 @@ function Assert-NoActiveConnectorRecovery([string]$Operation, [string]$Root = $D
         throw "${Operation} refused: cannot inspect connector recovery in $Root ($($_.Exception.Message))"
     }
     if ($pending.Count) {
-        $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+        # Both paths are printed as PowerShell single-quoted literals so a valid
+        # folder name with a dollar sign or parenthesis is pasted as it is.
+        $gatewayLiteral = "'" + ((Join-Path $BinDir "defenseclaw-gateway.exe") -replace "'", "''") + "'"
+        $rootLiteral = "'" + ($Root -replace "'", "''") + "'"
         throw ("${Operation} refused: active connector recovery remains in $Root. " +
-            "Finish it with the current DefenseClaw version: run '& `"$gateway`" connector recover-config --data-dir `"$Root`"' " +
-            "(it names any agent config change it cannot finish), then retry. Do not remove or replay its receipts.")
+            "Finish it with the current DefenseClaw version (the command names any agent config change it cannot finish), " +
+            "then retry. Do not remove or replay its receipts. Command: " +
+            "& $gatewayLiteral connector recover-config --data-dir $rootLiteral")
     }
 }
 
