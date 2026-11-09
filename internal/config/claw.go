@@ -102,6 +102,11 @@ type MCPServerEntry struct {
 	// bounded hook claim); an exact allow of the complete argument list does
 	// not match it (never serialized).
 	ArgsCut bool `json:"-"`
+	// Fingerprint is a digest of the complete definition (headers and
+	// environment included), set where an entry is kept without them so that
+	// two kept entries that differ only there stay two definitions (never
+	// serialized, never a secret value).
+	Fingerprint string `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never

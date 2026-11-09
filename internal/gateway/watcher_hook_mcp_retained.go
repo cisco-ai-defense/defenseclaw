@@ -58,7 +58,7 @@ func (h *hookReportedMCPServers) retainRefused(connector, home, session, cwd, na
 	}
 	set.seen = now
 	for i, held := range set.defs {
-		if sameMCPDefinition(held, entry) {
+		if sameHeldDefinition(held, entry) {
 			// The latest report is the last, so the listed record names it.
 			set.defs = append(append(set.defs[:i:i], set.defs[i+1:]...), entry)
 			return true
@@ -146,12 +146,12 @@ func (a *APIServer) heldRefusalsAllowed(ctx context.Context, cfg *config.Config,
 		return false
 	}
 	home, _ := callerHomeForAssets(ctx)
-	defs, overflow := a.hookMCP.heldRefusals(connector, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, time.Now())
+	held, overflow := a.hookMCP.heldFailures(connector, home, probe.SessionID, probe.ServerName, heldScopes(probe.WorkspaceDir), time.Now())
 	if overflow {
 		return false
 	}
-	for _, def := range defs {
-		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, def, true))
+	for _, h := range held {
+		verdict := mcpProbeDecision(ctx, cfg, connector, mcpProbeWithEntry(probe, h.def, true))
 		if !verdict.Enabled || verdict.Source != "admin-allow" {
 			return false
 		}
