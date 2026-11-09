@@ -722,7 +722,26 @@ func InspectRecordedVendorFolders(opts Options, connectors []string) []VendorFol
 		}
 		problems = append(problems, problem)
 	}
-	return append(problems, unrecordedPolicyFileProblems(opts, connectors)...)
+	return append(problems, unrecordedOutsideWeakFolders(unrecordedPolicyFileProblems(opts, connectors), problems)...)
+}
+
+// unrecordedOutsideWeakFolders drops the unrecorded-file problems of a folder
+// that is already reported as weak: that folder's message names the foreign
+// file ("which DefenseClaw did not write"), and its own fix covers it.
+func unrecordedOutsideWeakFolders(unrecorded, folders []VendorFolderProblem) []VendorFolderProblem {
+	var out []VendorFolderProblem
+	for _, problem := range unrecorded {
+		inWeakFolder := false
+		for _, folder := range folders {
+			if strings.EqualFold(folder.Dir, problem.Dir) {
+				inWeakFolder = true
+			}
+		}
+		if !inWeakFolder {
+			out = append(out, problem)
+		}
+	}
+	return out
 }
 
 // reprotectWalks bounds the walks of one ReprotectRecordedVendorFolders call.
@@ -785,7 +804,8 @@ func ReprotectRecordedVendorFolders(opts Options, connectors []string) ([]Reprot
 	// transaction heals: it is refused with the administrator's recovery.
 	// A file a standard user owns is moved aside by the publish that follows,
 	// so it blocks nothing.
-	for _, problem := range unrecordedPolicyFileProblems(opts, connectors) {
+	folders := append(slices.Clone(stuck), blocked...)
+	for _, problem := range unrecordedOutsideWeakFolders(unrecordedPolicyFileProblems(opts, connectors), folders) {
 		if !problem.PendingMoveAside {
 			blocked = append(blocked, problem)
 		}
