@@ -43,6 +43,13 @@ from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_ru
 from tests.os_view import os_view
 
 
+def _journal_key(name, connector="claudecode", home="", project=""):
+    """The versioned source key the gateway stores on its own MCP journal rows."""
+    return "mcp:v2:" + "".join(
+        f"{len(f.encode())}:{f.encode().hex()}" for f in (name, connector, home, project)
+    )
+
+
 class MCPCommandTestBase(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
@@ -2526,7 +2533,7 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
         self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
         reason = "scanner failure (fail-closed): scanner: mcp-scanner exited 1"
         self.app.store.set_action(
-            "mcp", "ctx7", "", ActionState(install="block", runtime="disable"), reason, "codex",
+            "mcp", "ctx7", _journal_key("ctx7", "codex"), ActionState(install="block", runtime="disable"), reason, "codex",
         )
         self.app.store.insert_scan_result(
             str(uuid.uuid4()), "mcp-scanner", "ctx7",
@@ -2555,7 +2562,7 @@ class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
         ]
         self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
         self.app.store.set_action(
-            "mcp", "srv", "", ActionState(install="block", runtime="disable"),
+            "mcp", "srv", _journal_key("srv", "codex"), ActionState(install="block", runtime="disable"),
             "scanner failure (fail-closed): refused launcher", "codex",
         )
 
@@ -3035,12 +3042,16 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
     def test_journal_block_of_a_name_in_another_case_does_not_move_to_this_server(self):
         # The journal is read by exact name, as the gateway reads it: a block
         # recorded for "new" is not a block of the server "NEW".
-        self.app.store.set_action("mcp", "new", "", ActionState(install="block"), "blocked", "claudecode")
+        self.app.store.set_action(
+            "mcp", "new", _journal_key("new"), ActionState(install="block"), "blocked", "claudecode",
+        )
 
         self._assert_unscanned(*self._both(self._server()))
 
     def test_journal_runtime_disable_of_a_name_in_another_case_does_not_move_to_this_server(self):
-        self.app.store.set_action("mcp", "new", "", ActionState(runtime="disable"), "disabled", "claudecode")
+        self.app.store.set_action(
+            "mcp", "new", _journal_key("new"), ActionState(runtime="disable"), "disabled", "claudecode",
+        )
 
         self._assert_unscanned(*self._both(self._server()))
 
@@ -3048,7 +3059,9 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
         # The runtime disable still denies the call, so the allow is not the
         # whole state and the footer does not say that nothing is needed.
         self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
-        self.app.store.set_action("mcp", "NEW", "", ActionState(runtime="disable"), "disabled", "claudecode")
+        self.app.store.set_action(
+            "mcp", "NEW", _journal_key("NEW"), ActionState(runtime="disable"), "disabled", "claudecode",
+        )
 
         flat, item = self._both(self._server())
 
@@ -3066,6 +3079,52 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
         self.assertNotIn("allowed MCP server(s) have a failed last scan", flat)
         self.assertNotIn("nothing is needed", flat)
         self.assertIn("could not be scanned", flat)
+
+    def test_current_journal_block_with_a_changed_pin_stays_blocked(self):
+        # A block the gateway wrote for this server (versioned key) is a
+        # current hold, whatever the pinned allow says.
+        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
+        self.app.store.set_action(
+            "mcp", "NEW", _journal_key("NEW"), ActionState(install="block"), "blocked", "claudecode",
+        )
+
+        flat, item = self._both(self._server(args=("other.py",)))
+
+        self.assertEqual(item["verdict"], "blocked")
+        self.assertEqual(item["actions"].get("install"), "block")
+
+    def test_unversioned_journal_block_with_a_changed_pin_reads_unscanned(self):
+        # The gateway ignores an install block without the versioned key of
+        # the server (older releases), so the changed server is not blocked.
+        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
+        self.app.store.set_action("mcp", "NEW", "", ActionState(install="block"), "blocked", "claudecode")
+
+        self._assert_unscanned(*self._both(self._server(args=("other.py",))))
+
+    def test_unversioned_journal_block_without_any_rule_reads_unscanned(self):
+        self.app.store.set_action("mcp", "NEW", "", ActionState(install="block"), "blocked", "claudecode")
+
+        self._assert_unscanned(*self._both(self._server()))
+
+    def test_unversioned_journal_runtime_disable_is_not_shown(self):
+        self.app.store.set_action("mcp", "NEW", "", ActionState(runtime="disable"), "disabled", "claudecode")
+
+        self._assert_unscanned(*self._both(self._server()))
+
+    def test_journal_block_keyed_to_another_server_or_malformed_reads_unscanned(self):
+        key = _journal_key("NEW")
+        for bad in (_journal_key("new"), key[:-2], key + "0:", key.replace("mcp:v2:", "mcp:v1:", 1)):
+            with self.subTest(source=bad):
+                self.app.store.set_action("mcp", "NEW", bad, ActionState(install="block"), "blocked", "claudecode")
+
+                self._assert_unscanned(*self._both(self._server()))
+
+    def test_unversioned_journal_row_keeps_its_quarantine(self):
+        self.app.store.set_action("mcp", "NEW", "", ActionState(install="block", file="quarantine"), "quarantined", "claudecode")
+
+        _, item = self._both(self._server())
+
+        self.assertEqual(item["actions"], {"file": "quarantine"})
 
     def _deny(self, name="new"):
         from defenseclaw.config import AssetPolicyRule
@@ -3092,7 +3151,9 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
         # "new" alone; the deny of "new" still names the server "NEW" and the
         # list shows it blocked, without the other name's runtime disable.
         self._deny()
-        self.app.store.set_action("mcp", "new", "", ActionState(runtime="disable"), "disabled", "claudecode")
+        self.app.store.set_action(
+            "mcp", "new", _journal_key("new"), ActionState(runtime="disable"), "disabled", "claudecode",
+        )
 
         flat, item = self._both(self._server())
 
@@ -3110,11 +3171,13 @@ class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
 
         self.assertEqual([i["verdict"] for i in items], ["blocked", "blocked"])
 
-    def test_journal_block_of_the_exact_name_survives_a_policy_allow_of_another_case(self):
-        # The journal block of "NEW" is the server's own; an allow written for
-        # "new" does not lift it.
+    def test_policy_allow_of_another_case_decides_over_a_current_journal_block_of_the_exact_name(self):
+        # The operator allow names the server in another case and is the
+        # decision for it; the row shows install allow and no allow hint.
         self._allow(name="new", command="python3", args_prefix=["server.py"], transport="stdio")
-        self.app.store.set_action("mcp", "NEW", "", ActionState(install="block"), "blocked", "claudecode")
+        self.app.store.set_action(
+            "mcp", "NEW", _journal_key("NEW"), ActionState(install="block"), "blocked", "claudecode",
+        )
 
         flat, item = self._both(self._server())
 
