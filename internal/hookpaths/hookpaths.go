@@ -38,6 +38,12 @@ const Header = "X-DefenseClaw-Resolved-Writes"
 // prevents it from validating that directory locally.
 const CWDKey = "\x00cwd"
 
+// CallWorkdirKey carries the workdir of a Codex shell call, as the model gave
+// it, which the hook client read from the session rollout (the Codex hook
+// sends only the command and the session folder). A gateway that cannot read
+// the rollout (managed) places the call there, as a per-user gateway does.
+const CallWorkdirKey = "\x00call-workdir"
+
 // ProjectSkillRootUnverifiedPrefix carries an adverse project-root finding
 // made by the hook in the caller's filesystem view. It can only add a
 // refusal; its absence cannot authorize a skill.
@@ -1708,24 +1714,25 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	cwd = PlaceDirectory("", cwd)
 	var toolArgs map[string]json.RawMessage
 	_ = json.Unmarshal(args, &toolArgs)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return incompleteEvidence(cwd)
+	}
 	// Codex exec_command runs in tool_input.workdir, which can differ from
 	// the session cwd carried by the hook event. Resolve relative operands
 	// there so client evidence and the gateway proof name the same files.
 	// Codex cleans the workdir as text (WorkdirCleanedByAgent), so a parent
-	// step after a link is not followed here either.
-	if tool == "exec_command" {
-		if raw, present := toolArgs["workdir"]; present {
-			var workdir string
-			if json.Unmarshal(raw, &workdir) != nil || workdir == "" ||
-				strings.HasPrefix(workdir, "~") || strings.IndexByte(workdir, 0) >= 0 {
-				return incompleteEvidence(cwd)
-			}
-			cwd = CleanedDirectory(cwd, workdir)
-		}
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+	// step after a link is not followed here either. The Codex hook leaves
+	// the workdir out of tool_input: this client, which reads the home of the
+	// user, takes it from the call in the session rollout, so a gateway that
+	// cannot read the home (managed) judges the call in the folder it runs
+	// in (GAP-0991).
+	var callWorkdir string
+	if workdir, present, ok := codexCallWorkdir(connector, tool, toolArgs, envelope, home); !ok {
 		return incompleteEvidence(cwd)
+	} else if present {
+		callWorkdir = workdir
+		cwd = CleanedDirectory(cwd, workdir)
 	}
 	if len(args) == 0 {
 		return incompleteEvidence(cwd)
@@ -2473,6 +2480,16 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 			targets[LinksStableKey] = "1"
 			size += entry
 		}
+	}
+	if callWorkdir != "" {
+		// The folder the call runs in, as the model gave it: a gateway that
+		// cannot read the rollout judges the call there (GAP-0991).
+		entry := len(jsonString(CallWorkdirKey)) + 1 + len(jsonString(callWorkdir)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return incompleteEvidence(cwd)
+		}
+		targets[CallWorkdirKey] = callWorkdir
+		size += entry
 	}
 	identity := strings.Join(identities, "\x00")
 	// A script body this call could not read (the call wait for a network
