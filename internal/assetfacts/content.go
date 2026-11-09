@@ -123,6 +123,9 @@ var contentSkipDir = map[string]bool{".git": true, "node_modules": true, "__pyca
 // folder.
 func ReadContent(kind, name, dir string) (Content, bool) {
 	out := Content{Kind: kind, Name: name, Dir: filepath.Clean(dir)}
+	if !shareAnswers(dir) {
+		return Content{}, false
+	}
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return Content{}, false
