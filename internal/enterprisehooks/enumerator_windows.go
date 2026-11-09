@@ -321,6 +321,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		if opts.ManifestSubjects != nil {
 			sid := canonicalManifestTargetSID(profile.SID)
 			if _, enrolled := opts.ManifestSubjects[sid]; !enrolled {
+				reportWindowsUnenrolledManifestExcluded(profile, opts, lookupAccount)
 				// Manifest enrollment: only the administrator's enabled
 				// targets are enrolled, so no one else's installs count.
 				reportWindowsUnenrolledManifestRunningAgents(profile, connectors, running[sid], opts.ExcludeUsers, lookupAccount, opts.ReportUnprotected)
@@ -591,6 +592,22 @@ func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors
 			}
 		}
 		judged[sid] = true
+	}
+}
+
+// reportWindowsUnenrolledManifestExcluded reports a profile the administrator's
+// targets omit when enterprise.enrollment.exclude_users names it. The profile
+// holds no row either way, but the machine-wide hook tells an excluded account
+// from one whose enrollment is pending only by the guardian's exclusion
+// marker, which follows this report (GAP-0979). Only the user list applies
+// under manifest enrollment, as for an enrolled target; no home is opened.
+func reportWindowsUnenrolledManifestExcluded(profile windowsUserProfile, opts EnumerateOptions, lookup windowsEnrollmentAccountLookup) {
+	if opts.ReportExcluded == nil || len(opts.ExcludeUsers) == 0 {
+		return
+	}
+	if decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, nil, lookup); decision == windowsEnrollmentExcluded {
+		logfSafely(opts.Logger, profile.SID, reason)
+		opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
 	}
 }
 

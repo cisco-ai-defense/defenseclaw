@@ -372,3 +372,27 @@ func TestOwnExcludedUnverifiedReasonNamesAnExistingAdministratorCommand(t *testi
 		t.Fatalf("excluded next step %q", next)
 	}
 }
+
+// The next step of an excluded row runs on the platform: on Linux and macOS it
+// names the installed gateway by its absolute path, which neither the PATH nor
+// sudo's secure_path reaches by name, and never the bare command (GAP-0983).
+func TestOwnExcludedNextStepNamesTheInstalledGatewayPath(t *testing.T) {
+	next := ownExcludedNextStep()
+	switch runtime.GOOS {
+	case "linux", "darwin":
+		want := managed.StandaloneGatewayPath(runtime.GOOS) + " enterprise policy show --user <account>"
+		if !strings.HasPrefix(managed.StandaloneGatewayPath(runtime.GOOS), "/") || !strings.Contains(next, "; "+want+" shows the rule") {
+			t.Fatalf("excluded next step %q does not name %q", next, want)
+		}
+	default:
+		if strings.Contains(next, "; defenseclaw-gateway ") {
+			t.Fatalf("excluded next step %q names the bare gateway", next)
+		}
+	}
+	// The reported row carries the same text.
+	api := ownStatusExcludedFixture(t, []string{"carol"}, nil)
+	row := ownStatusRowFor(t, api, "uid", "5003", "carol", "claudecode")
+	if got, _ := row["next_step"].(string); got != next {
+		t.Fatalf("reported next_step %q, want %q", got, next)
+	}
+}

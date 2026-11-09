@@ -179,3 +179,64 @@ func TestAccountExcludedMarkerWriteFailureKeepsTheOtherAccounts(t *testing.T) {
 		t.Fatal("the account whose write failed reads as excluded")
 	}
 }
+
+// A marker that cannot be removed does not keep authorizing the account: it is
+// overwritten with a revoked body the hook reads as no marker, and when even
+// that fails the error says the marker stays valid (GAP-0979: a failed prune
+// left a valid marker for an account no longer excluded).
+func TestAccountExcludedMarkerCannotOutliveTheExclusionWhenRemovalFails(t *testing.T) {
+	previousWait := accountExcludedRemoveWait
+	accountExcludedRemoveWait = 0
+	t.Cleanup(func() { accountExcludedRemoveWait = previousWait })
+	dir := filepath.Join(t.TempDir(), "hookruntime")
+	files := plainMarkerIO()
+	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDOne}, files); err != nil {
+		t.Fatal(err)
+	}
+	// A directory that cannot be written refuses the removal; the file itself
+	// is still the guardian's to rewrite.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	_ = publishAccountExcludedMarkers(dir, nil, files)
+	if got, _ := accountExcludedMarkerPresent(dir, excludedSIDOne, files); got {
+		t.Fatal("the account taken off exclude_users still has a valid marker after the removal failed")
+	}
+
+	// When the revoking write fails too, the failure is returned.
+	dir2 := filepath.Join(t.TempDir(), "hookruntime")
+	if err := publishAccountExcludedMarkers(dir2, []string{excludedSIDOne}, files); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir2, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir2, 0o700) })
+	if os.Geteuid() == 0 {
+		return // root removes from a read-only directory; the case above is the proof here
+	}
+	denied := files
+	denied.write = func(string, []byte) error { return errors.New("access is denied") }
+	err := publishAccountExcludedMarkers(dir2, nil, denied)
+	if err == nil || !strings.Contains(err.Error(), "neither removed") {
+		t.Fatalf("err = %v, want the unrevoked marker reported", err)
+	}
+}
+
+// A directory that cannot be prepared for new markers still has its stale
+// markers removed: revocation does not wait for publication.
+func TestAccountExcludedMarkerRevocationDoesNotWaitForPublication(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hookruntime")
+	files := plainMarkerIO()
+	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDOne}, files); err != nil {
+		t.Fatal(err)
+	}
+	files.ensure = func(string) error { return errors.New("the directory is not trusted") }
+	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDTwo}, files); err == nil {
+		t.Fatal("a failed ensure was not reported")
+	}
+	if got, err := accountExcludedMarkerPresent(dir, excludedSIDOne, plainMarkerIO()); err != nil || got {
+		t.Fatalf("the stale marker survived a failed ensure: excluded=%t err=%v", got, err)
+	}
+}

@@ -244,6 +244,9 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 
 	cfg, cfgErr := enterpriseWindowsEnumerateConfigLoader()
 	if cfgErr != nil {
+		// Without the configuration this cycle cannot say who is excluded,
+		// so no account keeps the pass an earlier cycle gave it (GAP-0979).
+		publishEnterpriseWindowsExcludedAccountMarkers(stderr, nil)
 		// A missing config in managed_enterprise mode is a "waiting
 		// for configuration" state — logged, not fatal. Interval-loop
 		// callers retry next tick; --once callers exit non-zero so an
@@ -256,6 +259,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 		return fmt.Errorf("enterprise windows enumerate: load config: %w", cfgErr)
 	}
 	if !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		publishEnterpriseWindowsExcludedAccountMarkers(stderr, nil)
 		return fmt.Errorf("enterprise windows enumerate: deployment_mode=%q is not managed_enterprise; refusing to run", cfg.DeploymentMode)
 	}
 
@@ -316,11 +320,17 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	}
 	manifest, err := enterpriseWindowsEnumerateProfileEnumerator(cycleCtx, cfg, enumerateOpts)
 	if err != nil {
+		if standalone {
+			publishEnterpriseWindowsExcludedAccountMarkers(stderr, nil)
+		}
 		return fmt.Errorf("enterprise windows enumerate: walk profiles: %w", err)
 	}
 
 	changed, err := enterpriseWindowsEnumerateManifestWriter(manifestPath, manifest)
 	if err != nil {
+		if standalone {
+			publishEnterpriseWindowsExcludedAccountMarkers(stderr, nil)
+		}
 		return fmt.Errorf("enterprise windows enumerate: write manifest: %w", err)
 	}
 	if standalone {
@@ -422,6 +432,7 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 		GroupCache:           cache,
 		Logger:               sink.log,
 		ReportUnprotected:    sink.report,
+		ReportExcluded:       sink.reportExcluded,
 	})
 	// The administrator's enabled targets are the enrollment: only they are
 	// inspected, whatever the automatic filters say (GAP-0906). An
@@ -444,6 +455,10 @@ func publishEnterpriseWindowsManifestInstallScan(ctx context.Context, stderr io.
 		return scanErr
 	})
 	agents := sink.close()
+	// The accounts the scan judged excluded, whether or not it finished: an
+	// account it did not reach holds no marker, so it reads as pending and
+	// keeps the refusal until a scan reaches it (GAP-0979).
+	publishEnterpriseWindowsExcludedAccountMarkers(stderr, sink.excludedTargets())
 	if err != nil {
 		if opts.ManifestSubjects == nil {
 			fmt.Fprintf(stderr, "[hook-enumerator] WARN the manifest-mode install scan did not finish and the administrator's targets are unreadable; the coverage record is left as it was: %s\n", enumeratorErrorText(err))
@@ -514,7 +529,24 @@ type enterpriseWindowsManifestScanSink struct {
 	mu     sync.Mutex
 	closed bool
 	agents []enterprisehooks.UnprotectedAgent
-	logf   enterprisehooks.EnumerationLogger
+	// excluded are the profiles the scan judged excluded from enrollment.
+	excluded []enterprisehooks.ManifestTarget
+	logf     enterprisehooks.EnumerationLogger
+}
+
+func (s *enterpriseWindowsManifestScanSink) reportExcluded(target enterprisehooks.ManifestTarget) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.closed {
+		s.excluded = append(s.excluded, target)
+	}
+}
+
+// excludedTargets is what reportExcluded collected before close.
+func (s *enterpriseWindowsManifestScanSink) excludedTargets() []enterprisehooks.ManifestTarget {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]enterprisehooks.ManifestTarget(nil), s.excluded...)
 }
 
 func (s *enterpriseWindowsManifestScanSink) report(agent enterprisehooks.UnprotectedAgent) {
