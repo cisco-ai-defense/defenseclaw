@@ -122,7 +122,7 @@ func lsaAccount(sid *windows.SID) (windowsAccount, error) {
 	// The name the hook path gives the account, not the UPN its user signed
 	// in with (GAP-0533).
 	account = useridentity.CanonicalWindowsAccountName(sid.String(), account, domain)
-	return windowsAccount{SID: sid.String(), Name: sanitizeLLMEventUser(account), User: use == windows.SidTypeUser}, nil
+	return windowsAccount{SID: sid.String(), Name: sanitizeLLMEventUser(account), Domain: strings.TrimSpace(domain), User: use == windows.SidTypeUser}, nil
 }
 
 // profileExplainUPNWait is how long explain waits for TranslateNameW: for an

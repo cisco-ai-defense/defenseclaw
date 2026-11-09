@@ -46,6 +46,8 @@ type mcpRuntimeProbe struct {
 	Transport  string
 	Surface    string
 	Matched    bool
+	// ArgsCut says Args is the start of a longer list (a bounded hook claim).
+	ArgsCut bool
 	// WorkspaceDir is the agent's working directory from the hook, used to
 	// resolve a name-only probe to the connector's configured server.
 	WorkspaceDir string
@@ -119,7 +121,9 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
-	a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe)
+	if decision, refused := a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe); refused {
+		return decision, true
+	}
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
@@ -313,8 +317,13 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	// by name and URL or launcher, or defenseclaw mcp allow) beats a scan
 	// that could not complete in every tier, strict and managed included:
 	// the administrator has decided the server, and its scan cannot. An
-	// explicit deny was handled above (GAP-0775, GAP-0778).
-	if status.Failed && !matched && existing.Enabled && existing.Source == "admin-allow" {
+	// explicit deny was handled above (GAP-0775, GAP-0778). The rule decides
+	// the definition the agent config lists; a revoked earlier definition
+	// the agent may still run is not that one, so the allow written for the
+	// listed one does not answer it (GAP-0920). A session that met a refused
+	// definition is released only by an allow covering every one it met.
+	if status.Failed && !status.Revoked && !matched && existing.Enabled && existing.Source == "admin-allow" &&
+		a.heldRefusalsAllowed(ctx, cfg, connectorName, probe) {
 		return config.AssetPolicyDecision{}, false
 	}
 	name := status.Name
@@ -423,7 +432,9 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	if decision, refused := a.mcpUnpublishedSourceDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
-	a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe)
+	if decision, refused := a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe); refused {
+		return decision, true
+	}
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
@@ -731,6 +742,7 @@ func (a *APIServer) mcpSessionStarted(ctx context.Context, connector, sessionID,
 		return
 	}
 	a.mcpResolved.forgetSession(connector, home, sessionID)
+	a.hookMCP.forgetSession(connector, home, sessionID)
 }
 
 // mcpProbeDecision is the asset policy verdict on a probe whose definition
@@ -776,6 +788,7 @@ func mcpPolicyInput(connector string, probe mcpRuntimeProbe) config.AssetPolicyI
 		URL:            probe.URL,
 		Command:        probe.Command,
 		Args:           probe.Args,
+		ArgsCut:        probe.ArgsCut,
 		Transport:      probe.Transport,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	}
@@ -863,6 +876,7 @@ func mcpProbeWithEntry(probe mcpRuntimeProbe, entry config.MCPServerEntry, byCon
 	probe.URL = strings.TrimSpace(entry.URL)
 	probe.Command = strings.TrimSpace(entry.Command)
 	probe.Args = entry.Args
+	probe.ArgsCut = entry.ArgsCut
 	probe.Transport = strings.TrimSpace(entry.Transport)
 	return probe
 }

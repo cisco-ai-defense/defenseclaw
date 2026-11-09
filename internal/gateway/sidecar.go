@@ -4616,17 +4616,44 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		"mcp_take_action":    wcfg.MCP.TakeAction,
 	})
 	s.health.SetWatcher(watcherState, watcherDetail, baseWatcherDetails)
-	w.SetRootCoverageHandler(func(issues []watcher.RootCoverageIssue) {
-		details := make(map[string]interface{}, len(baseWatcherDetails)+2)
+	// The coverage handler (roots whose admission scan is off) and the warning
+	// handler (roots admitted but watched closely, GAP-0905) both publish the
+	// whole watcher health, so each keeps the last answer of the other.
+	var healthMu sync.Mutex
+	var coverageIssues []watcher.RootCoverageIssue
+	var rootWarnings []watcher.RootWarning
+	publishWatcherHealth := func() {
+		details := make(map[string]interface{}, len(baseWatcherDetails)+4)
 		for key, value := range baseWatcherDetails {
 			details[key] = value
 		}
+		if len(rootWarnings) > 0 {
+			// Admitted through a private group while pam_group is loaded: doctor
+			// and status name the folders with the chmod that ends the closer watch.
+			seen := make(map[string]bool)
+			folders := make([]string, 0, len(rootWarnings))
+			for _, warning := range rootWarnings {
+				for _, folder := range warning.Folders {
+					if !seen[folder] {
+						seen[folder] = true
+						folders = append(folders, folder)
+					}
+				}
+			}
+			sort.Strings(folders)
+			details["admission_root_rescan_folders"] = folders
+		}
+		issues := coverageIssues
 		if len(issues) == 0 {
 			s.health.SetWatcher(watcherState, watcherDetail, details)
 			return
 		}
 		connectors := make(map[string]bool)
+		ancestors := make(map[string]bool)
 		for _, issue := range issues {
+			if issue.Ancestor != "" {
+				ancestors[issue.Ancestor] = true
+			}
 			if len(issue.Connectors) == 0 && issue.Connector != "" {
 				connectors[issue.Connector] = true
 			}
@@ -4640,8 +4667,30 @@ func (s *Sidecar) runWatcherOnce(ctx context.Context) (restart bool, err error) 
 		}
 		sort.Strings(names)
 		details["watch_roots_unavailable"] = len(issues)
+		if len(ancestors) > 0 {
+			// Folders other accounts can write: doctor and status name them
+			// with the chmod that restores admission scanning (GAP-0905).
+			folders := make([]string, 0, len(ancestors))
+			for folder := range ancestors {
+				folders = append(folders, folder)
+			}
+			sort.Strings(folders)
+			details["admission_root_writable_folders"] = folders
+		}
 		details["admission_scanning_off"] = names
 		s.health.SetWatcher(StateDegraded, "admission scanning is off for one or more connector roots; the gateway log names each root", details)
+	}
+	w.SetRootCoverageHandler(func(issues []watcher.RootCoverageIssue) {
+		healthMu.Lock()
+		defer healthMu.Unlock()
+		coverageIssues = issues
+		publishWatcherHealth()
+	})
+	w.SetRootWarningHandler(func(warnings []watcher.RootWarning) {
+		healthMu.Lock()
+		defer healthMu.Unlock()
+		rootWarnings = warnings
+		publishWatcherHealth()
 	})
 
 	if enrolled != nil {

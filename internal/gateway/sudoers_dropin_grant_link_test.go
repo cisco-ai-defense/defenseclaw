@@ -1,7 +1,10 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 
-// The rows create POSIX symlinks and name /etc/sudoers.
+// The rows create POSIX symlinks and name /etc/sudoers. They leave
+// actionfacts.HostLinksEtcToPrivate at the host value: the hook client here
+// resolves the real link, so on macOS it answers /private/etc/sudoers, the
+// spelling the macOS gateway folds back to /etc.
 
 //go:build !windows
 
@@ -13,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -51,7 +55,6 @@ func TestFileToolWriteOfAGrantThroughALinkToSudoersIsBlockedInEveryProfile(t *te
 	if _, err := os.Stat("/etc/sudoers"); err != nil {
 		t.Skip("main sudoers file absent on this host")
 	}
-	hostLinksEtc(t, false)
 	for spelling, spell := range sudoersLinkSpellings {
 		for _, profile := range []string{"default", "permissive", "strict"} {
 			for _, managed := range []bool{false, true} {
@@ -71,7 +74,6 @@ func TestFileToolWriteOfAGrantThroughALinkToSudoersIsBlockedInEveryProfile(t *te
 // twin: the same grant text through a link to an ordinary file never names the
 // grant rule, and the balanced profiles allow it.
 func TestFileToolWriteThroughALinkToAnOrdinaryFileIsNotAGrantTarget(t *testing.T) {
-	hostLinksEtc(t, false)
 	other := filepath.Join(t.TempDir(), "notes.txt")
 	if err := os.WriteFile(other, []byte("notes\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -104,7 +106,13 @@ func sudoersLinkFromAliasedProjectRow(t *testing.T, target, text, operand string
 		payload := sudoersClaudeCall("Write", sudoersFixed(map[string]any{"file_path": operand, "content": text}))(project)
 		payload["cwd"] = alias
 		resolved, ok := hookpaths.Decode(hookpaths.Resolve(mustJSON(t, payload)))
-		if key := hookpaths.OperandPath(operand, alias); !ok || resolved[key] != target {
+		// The client answers the physical file: on macOS /etc/sudoers is
+		// /private/etc/sudoers and a temporary directory is under /private.
+		want, err := filepath.EvalSymlinks(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if key := hookpaths.OperandPath(operand, alias); !ok || actionfacts.EtcSpelling(resolved[key]) != actionfacts.EtcSpelling(want) {
 			t.Fatalf("the hook client did not place %q on %q: valid=%t got %q", key, target, ok, resolved[key])
 		}
 		return payload
@@ -119,7 +127,6 @@ func TestFileToolWriteOfAGrantThroughALinkFromAnAliasedProjectIsBlockedInEveryPr
 	if _, err := os.Stat("/etc/sudoers"); err != nil {
 		t.Skip("main sudoers file absent on this host")
 	}
-	hostLinksEtc(t, false)
 	for _, operand := range []string{"grant-link", "./grant-link"} {
 		for _, profile := range []string{"default", "permissive", "strict"} {
 			for _, managed := range []bool{false, true} {
@@ -139,7 +146,6 @@ func TestFileToolWriteOfAGrantThroughALinkFromAnAliasedProjectIsBlockedInEveryPr
 // the benign twin: the same call to an ordinary file never names the grant
 // rule, and the balanced profiles allow it.
 func TestFileToolWriteThroughALinkFromAnAliasedProjectToAnOrdinaryFileIsAllowed(t *testing.T) {
-	hostLinksEtc(t, false)
 	other := filepath.Join(t.TempDir(), "notes.txt")
 	if err := os.WriteFile(other, []byte("notes\n"), 0o600); err != nil {
 		t.Fatal(err)

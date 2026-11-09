@@ -113,6 +113,57 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	}
 }
 
+// rescanTracks reports whether the rescan keeps a baseline for the target at
+// path: always with periodic rescan on, and for a root watched closely
+// (GAP-0905) even with it off, so the rescan of a change there compares
+// against what admission scanned.
+func (w *InstallWatcher) rescanTracks(path string) bool {
+	return w.cfg.Watch.RescanEnabled || w.rootWarned(path)
+}
+
+// requestWarnedRescan asks for a rescan after a change under a root watched
+// closely: the whole cycle with periodic rescan on, only the skills and
+// plugins under such roots with it off.
+func (w *InstallWatcher) requestWarnedRescan() {
+	if w.cfg.Watch.RescanEnabled {
+		w.RequestRescan()
+		return
+	}
+	select {
+	case w.warnedRescanNow <- struct{}{}:
+	default:
+	}
+}
+
+// warnedRescanLoop serves requestWarnedRescan when periodic rescan is off.
+// It runs no startup or periodic cycle.
+func (w *InstallWatcher) warnedRescanLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.warnedRescanNow:
+			w.rescanWarnedRoots(ctx)
+		}
+	}
+}
+
+// rescanWarnedRoots rescans every skill and plugin under a root watched
+// closely, as a cycle of the periodic rescan does: a target whose content
+// and scanner are unchanged is skipped, one that changed is admitted again.
+func (w *InstallWatcher) rescanWarnedRoots(ctx context.Context) {
+	fpCache := make(map[string]string)
+	for _, evt := range w.enumerateTargets() {
+		if ctx.Err() != nil {
+			return
+		}
+		if evt.Type == InstallMCP || !w.rootWarned(evt.Path) {
+			continue
+		}
+		w.rescanTarget(ctx, evt, fpCache)
+	}
+}
+
 // scannerRuntimeRetry is the first wait before the rescan cycle after one
 // whose scans found the managed scanner runtime not ready; a var for tests.
 var scannerRuntimeRetry = 2 * time.Minute
@@ -471,6 +522,15 @@ func (w *InstallWatcher) admitsAtStartup(evt InstallEvent) bool {
 		}
 	}
 	return false
+}
+
+// admitsUnderWarnedRoot reports a skill or plugin without a baseline under a
+// root watched closely. The root was admitted through folders another account
+// of the private group may write, so what a rescan finds there is admitted
+// like a new install: a flagged skill left in place after its scan would be
+// an unenforced allow (GAP-0905).
+func (w *InstallWatcher) admitsUnderWarnedRoot(evt InstallEvent) bool {
+	return evt.Type != InstallMCP && w.rootWarned(evt.Path)
 }
 
 // hermesSkillsDiscover returns how to list dir's Hermes skills, or nil when
@@ -1047,9 +1107,11 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 				}
 				return rescanScanned
 			}
-			if w.admitsAtStartup(evt) {
+			if w.admitsAtStartup(evt) || w.admitsUnderWarnedRoot(evt) {
 				// Added while the gateway was stopped: admit it as the live
 				// watcher would (scan, verdict, block/quarantine; GAP-2475).
+				// The same under a root watched closely: its first scan
+				// enforces the verdict, whichever rescan found it (GAP-0905).
 				fmt.Fprintf(os.Stderr, "[rescan] %s %s is new since the last run; running install admission\n", evt.Type, evt.Name)
 				res := w.runAdmission(ctx, evt.admittingSnapshot(currentSnap))
 				w.notifyAdmission(res)
@@ -1081,6 +1143,16 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		fmt.Fprintf(os.Stderr, "[rescan] get baseline %s: %v\n", evt.Path, err)
 		return rescanSkipped
+	}
+
+	// An MCP server admitted without a scan stays admitted only while the
+	// allow rule or setting that admitted it stands. Once it does not (the
+	// check above found nothing that admits it), admission runs again: a
+	// scan that fails blocks it in the tiers that fail closed. The scan below
+	// for a baseline without a scan id recorded no outcome when it failed, so
+	// the stale admission stood (GAP-0920).
+	if w.mcpBaselineLapsed(evt, baseline) {
+		return w.readmitChanged(ctx, evt, baseline, currentSnap, compareSnapshots(baseline, currentSnap), fingerprint, "rescan")
 	}
 
 	// An unfinished MCP install scan was kept under the unverified-server
@@ -1551,7 +1623,7 @@ func (w *InstallWatcher) auditRescanFailure(evt InstallEvent, scannerName string
 // so the baseline describes the content that was scanned. It returns nil
 // when periodic rescan is off or the target can't be snapshotted.
 func (w *InstallWatcher) admissionSnapshot(evt InstallEvent) *TargetSnapshot {
-	if w.store == nil || !w.cfg.Watch.RescanEnabled ||
+	if w.store == nil || !w.rescanTracks(evt.Path) ||
 		(evt.Type != InstallSkill && evt.Type != InstallPlugin) {
 		return nil
 	}
@@ -1574,7 +1646,7 @@ func (w *InstallWatcher) recordAdmissionBaseline(evt InstallEvent, snap *TargetS
 	if w.movedByAdmission(evt) || res.ScanID == "" && res.Reason != hermesVendorPluginReason {
 		return
 	}
-	if !w.cfg.Watch.RescanEnabled {
+	if !w.rescanTracks(evt.Path) {
 		if evt.Type != InstallPlugin || w.secureClientActive() ||
 			(res.Verdict != VerdictRejected && res.Verdict != VerdictBlocked) {
 			return

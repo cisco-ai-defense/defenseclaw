@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -3094,29 +3095,45 @@ const hermesHomeSetUpFileName = "hermes-home-setup.json"
 type hermesHomeSetUp struct {
 	Home    string `json:"home"`
 	SetUpAt string `json:"set_up_at"`
+	// Hooks is what Setup remembers of the entry it wrote on each required
+	// event; the kept-entry notice reads it (hermesHookEntryRecord).
+	Hooks map[string]hermesHookEntryRecord `json:"hooks,omitempty"`
 }
 
-func recordHermesHomeSetUp(dataDir, home string, now time.Time) error {
-	data, err := json.Marshal(hermesHomeSetUp{Home: home, SetUpAt: now.UTC().Format(time.RFC3339)})
+// readHermesSetUpRecord is the record in dataDir, or the zero record when
+// there is none, it is not a regular file of a sane size, or it does not parse.
+func readHermesSetUpRecord(dataDir string) hermesHomeSetUp {
+	var record hermesHomeSetUp
+	path := filepath.Join(dataDir, hermesHomeSetUpFileName)
+	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return record
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &record) != nil {
+		return hermesHomeSetUp{}
+	}
+	return record
+}
+
+func writeHermesSetUpRecord(dataDir string, record hermesHomeSetUp) error {
+	data, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
 	return atomicWriteFileNoFollow(filepath.Join(dataDir, hermesHomeSetUpFileName), data, 0o600)
 }
 
+func recordHermesHomeSetUp(dataDir, home string, now time.Time) error {
+	record := readHermesSetUpRecord(dataDir)
+	record.Home, record.SetUpAt = home, now.UTC().Format(time.RFC3339)
+	return writeHermesSetUpRecord(dataDir, record)
+}
+
 // hermesHomeSetUpAt is when Setup last registered the hooks in home, or
 // zero when no readable record names home or its time is in the future.
 func hermesHomeSetUpAt(dataDir, home string) time.Time {
-	path := filepath.Join(dataDir, hermesHomeSetUpFileName)
-	if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
-		return time.Time{}
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return time.Time{}
-	}
-	var record hermesHomeSetUp
-	if json.Unmarshal(data, &record) != nil || !sameManagedTarget(record.Home, home) {
+	record := readHermesSetUpRecord(dataDir)
+	if !sameManagedTarget(record.Home, home) {
 		return time.Time{}
 	}
 	at, err := time.Parse(time.RFC3339, record.SetUpAt)
@@ -4925,12 +4942,25 @@ func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpt
 	// exact DefenseClaw (event, command) approvals in the vendor allowlist.
 	hookCommand := hermesConfiguredHookCommand(hookScript, hookExecutable)
 	recognizedCommands := hermesRecognizedHookCommands(hookCommand)
+	recordDir := hermesRecordDir(hookScript)
+	var prior hermesHomeSetUp
+	if recordDir != "" {
+		prior = readHermesSetUpRecord(recordDir)
+	}
+	written := map[string]hermesHookEntryRecord{}
+	var keptEvents []string
 	for _, spec := range hermesRequiredHooks {
 		entry := hermesHookEntry(hookCommand, spec.event, spec.matcher, opts)
+		kept := hermesKeptCommands(prior, spec.event, hooks[spec.event], hookScript, recognizedCommands)
+		if len(kept) > 0 {
+			keptEvents = append(keptEvents, spec.event)
+		}
 		reconciled, reconcileErr := reconcileHermesHookEntries(hooks[spec.event], hookScript, recognizedCommands, entry)
 		if reconcileErr != nil {
 			return fmt.Errorf("reconcile Hermes event %s: %w", spec.event, reconcileErr)
 		}
+		command, _ := hermesHookEntryCommand(entry)
+		written[spec.event] = hermesHookEntryRecord{Wrote: hermesWroteWith(prior.Hooks[spec.event], command), Kept: kept}
 		hooks[spec.event] = reconciled
 	}
 	for event, raw := range hooks {
@@ -4947,15 +4977,23 @@ func patchHermesHooks(path, hookScript, hookExecutable string, setup ...SetupOpt
 			hooks[event] = reconciled
 		}
 	}
-	warnHermesKeptHookEntries("setup", path, hooks, hookScript, recognizedCommands)
 	data, err := marshalTopLevelYAMLFieldPreservingOtherBytes(path, "hooks", hooks)
 	if err != nil {
 		return err
 	}
-	if current, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(current, data) {
-		return nil
+	if current, readErr := os.ReadFile(path); readErr != nil || !bytes.Equal(current, data) {
+		if err := atomicWriteFile(path, data, 0o600); err != nil {
+			return err
+		}
 	}
-	return atomicWriteFile(path, data, 0o600)
+	// Best effort: without the record the notice is not printed.
+	if recordDir != "" {
+		prior.Hooks = written
+		_ = writeHermesSetUpRecord(recordDir, prior)
+	}
+	sort.Strings(keptEvents)
+	warnHermesKeptHookEntries("setup", path, keptEvents)
+	return nil
 }
 
 // marshalTopLevelYAMLFieldPreservingOtherBytes replaces one top-level YAML
@@ -5225,7 +5263,18 @@ func removeStaleHermesHookEntries(
 	return out, nil
 }
 
-func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error {
+func removeHermesHooks(path, hookScript string, backup *managedFileBackup) (err error) {
+	// The record of the entries Setup wrote goes with them, once the file is done.
+	prior := hermesHomeSetUp{}
+	if recordDir := hermesRecordDir(hookScript); recordDir != "" {
+		prior = readHermesSetUpRecord(recordDir)
+		defer func() {
+			if err == nil && prior.Hooks != nil {
+				prior.Hooks = nil
+				_ = writeHermesSetUpRecord(recordDir, prior)
+			}
+		}()
+	}
 	if backup != nil {
 		if err := validateHermesManagedBackupPristine(backup); err != nil {
 			return err
@@ -5248,7 +5297,7 @@ func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error
 		hooks[event] = removeOwnedFlatHooks(raw, hookScript)
 	}
 	pruneEmptyMapArrays(hooks)
-	warnHermesKeptHookEntries("teardown", path, hooks, hookScript, hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, "")))
+	warnHermesKeptHookEntries("teardown", path, hermesRecordedKeptEvents(prior, hooks, hookScript, hermesRecognizedHookCommands(hermesConfiguredHookCommand(hookScript, ""))))
 	// DefenseClaw owns entries in the hooks mapping only: every other byte of
 	// config.yaml (Hermes' commented template, the user's settings and their
 	// order and quoting) stays as it is. A hooks field that Setup added to a

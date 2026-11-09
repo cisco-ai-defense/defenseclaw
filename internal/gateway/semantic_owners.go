@@ -73,7 +73,7 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		prerequisite: pathOwnerPrerequisite(
 			matchesContextualEnvironmentFile,
 		),
-		suppressFallback: sensitivePathSafeNegativePreservingWrites(
+		suppressFallback: pathOwnerSafeNegative(
 			matchesEnvironmentFile,
 			matchesContextualEnvironmentFile,
 		),
@@ -625,7 +625,7 @@ func sshPrivateKeyContentReadSafeNegative(facts actionfacts.Facts) bool {
 			return true
 		}
 	}
-	return sensitivePathSafeNegativePreservingWrites(
+	return pathOwnerSafeNegative(
 		matchesSSHPrivateKey,
 		matchesActiveSSHPrivateKey,
 	)(facts)
@@ -760,42 +760,18 @@ func pathValueMatcher(matches semanticPathCandidate) semanticPathMatcher {
 	}
 }
 
+// pathOwnerSafeNegative is the safe negative of an owner whose expression
+// covers reads. It distinguishes a proven live mutation of the sensitive file
+// from a read or an inert filename reference: reads keep their semantic owner
+// and fixture or reference-only inputs are safe negatives, but a live write
+// to the active user home deliberately retains the regex compatibility lane
+// until a dedicated write expression owns it. Without that, the owner of a
+// read-only expression would drop the path rule for the own file of the user
+// and leave a write to it with no rule, where the same name elsewhere is judged.
 func pathOwnerSafeNegative(
 	isCandidate semanticPathCandidate,
 	isActive semanticPathMatcher,
 ) semanticOwnerPrerequisite {
-	return func(facts actionfacts.Facts) bool {
-		if !facts.Authoritative() {
-			return false
-		}
-		sawCandidate := false
-		for _, candidate := range semanticPathCandidates(facts) {
-			if !isCandidate(semanticPathValue(candidate)) {
-				continue
-			}
-			sawCandidate = true
-			if isActive(facts, candidate) ||
-				isDefiniteFixturePath(facts, candidate) {
-				continue
-			}
-			// An unresolved path or a different user's live-home target must
-			// retain the regex fallback.
-			return false
-		}
-		return sawCandidate
-	}
-}
-
-// sensitivePathSafeNegativePreservingWrites distinguishes a proven sensitive
-// file mutation from a read or inert filename reference. Read expressions keep
-// their semantic owner, fixture/reference-only inputs are safe negatives, and
-// a live write deliberately retains the compatibility lane until a dedicated
-// write expression owns it.
-func sensitivePathSafeNegativePreservingWrites(
-	isCandidate semanticPathCandidate,
-	isActive semanticPathMatcher,
-) semanticOwnerPrerequisite {
-	baseSafeNegative := pathOwnerSafeNegative(isCandidate, isActive)
 	return func(facts actionfacts.Facts) bool {
 		if !facts.Authoritative() {
 			return false
@@ -811,7 +787,21 @@ func sensitivePathSafeNegativePreservingWrites(
 				return false
 			}
 		}
-		return baseSafeNegative(facts)
+		sawCandidate := false
+		for _, candidate := range semanticPathCandidates(facts) {
+			if !isCandidate(semanticPathValue(candidate)) {
+				continue
+			}
+			sawCandidate = true
+			if isActive(facts, candidate) ||
+				isDefiniteFixturePath(facts, candidate) {
+				continue
+			}
+			// An unresolved path or the live-home target of another user
+			// must retain the regex fallback.
+			return false
+		}
+		return sawCandidate
 	}
 }
 
@@ -861,7 +851,7 @@ func isDefiniteFixturePath(
 }
 
 func canonicalSemanticPath(value string) string {
-	value = strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	value = semanticFoldPath(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
 	if value == "" {
 		return ""
 	}
@@ -1458,7 +1448,18 @@ func semanticPathValue(path actionfacts.PathFact) string {
 	if value == "" {
 		value = path.Value
 	}
-	return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+	return semanticFoldPath(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"))
+}
+
+// semanticFoldPath is the lower-case spelling the semantic path matchers
+// read. A drive-letter path is a Windows path, whose names compare through
+// upper case, so it is also folded the way Windows folds (see windowsNameFold);
+// any other path is lower-cased only.
+func semanticFoldPath(value string) string {
+	if actionfacts.DriveLetterPath(value) {
+		return windowsNameFold(value)
+	}
+	return strings.ToLower(value)
 }
 
 func matchesActiveSensitivePath(

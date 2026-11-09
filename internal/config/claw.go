@@ -93,6 +93,15 @@ type MCPServerEntry struct {
 	// enumerator record (never serialized), so no configuration file a user
 	// writes can name an account.
 	RunAsSID string `json:"-"`
+	// LocalRefusal is the scanner verdict on the complete definition of a
+	// local server (a mcplocal class), set when the entry is a bounded claim
+	// of a hook that read the complete one (never serialized). Empty when the
+	// entry is the complete definition and is judged as it stands.
+	LocalRefusal string `json:"-"`
+	// ArgsCut marks an entry whose Args are the start of a longer list (a
+	// bounded hook claim); an exact allow of the complete argument list does
+	// not match it (never serialized).
+	ArgsCut bool `json:"-"`
 
 	// codexBuiltinShape records an exact parser-level match before the caller
 	// proves that the table came from a user-scope Codex config. It is never
@@ -898,7 +907,8 @@ func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 // ReadMCPFromJSONCPaths reads the MCP servers found at each key chain of
 // paths in a JSON or JSONC file (union). AI discovery uses it for the agent
 // files whose servers are not a top-level mcpServers map: Amp's
-// amp.mcpServers and OpenClaw's and ZeptoClaw's mcp.servers (GAP-1062).
+// amp.mcpServers and ZeptoClaw's mcp.servers (GAP-1062). OpenClaw's file is
+// JSON5 and has its own reader, ReadMCPFromOpenClawConfig.
 func ReadMCPFromJSONCPaths(path string, paths ...[]string) ([]MCPServerEntry, error) {
 	data, err := readMCPConfigFile(path, maxMCPConfigFileBytes)
 	if err != nil {

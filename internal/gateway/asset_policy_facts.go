@@ -26,9 +26,11 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/mcplocal"
 )
 
 type claimedAssetFactsContextKey struct{}
@@ -337,12 +339,42 @@ func (a *APIServer) skillFolderAccessDecision(
 	} else {
 		refs = assetfacts.SkillFolderRefs(toolInput, home, cwd, caller)
 	}
+	roots := assetfacts.SkillRoots(connector, home, cwd)
+	// A folder a link leads to is spelled as the link resolves, which a root
+	// reached through a link itself (a home on another mount) is not.
+	skillRoots := slices.Clone(roots)
+	if len(facts.SkillLinks) > 0 || slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return ref.Linked }) {
+		for _, root := range roots {
+			if real := assetfacts.ResolveLinks(root); real != filepath.Clean(root) {
+				skillRoots = append(skillRoots, real)
+			}
+		}
+	}
+	refs = appendReportedSkillLinks(refs, facts.SkillLinks, skillRoots)
+	if facts.SkillLinksTruncated && a.skillFoldersAreGuarded(cfg) {
+		// The hook names the skill folders a link of the call leads into, up
+		// to a bound. Past it a protected folder cannot be ruled out (fail
+		// closed), when there is a protected folder: with no denied or held
+		// skill nothing the call reaches can be one, and an ordinary call
+		// runs.
+		name := "skill-links"
+		if len(facts.SkillLinks) > 0 {
+			name = filepath.Base(facts.SkillLinks[0])
+		}
+		decision := runtimeAssetDisableBlockDecision("skill", name, connector, "skill_folder",
+			"the call reaches more skill folders through links than the hook reports, so none of them can be shown not to be held or denied; "+
+				"name fewer skill folders in one call", "skill-links-truncated")
+		decision.RegistryStatus = "unknown"
+		a.emitRuntimeSkillAssetPolicyDecision(ctx, decision, connector, hookEvent, skillRuntimeProbe{
+			TargetType: "skill", SkillName: name, ToolName: toolName, Surface: "skill_folder", Matched: true,
+		})
+		return decision, true
+	}
 	if len(refs) == 0 {
 		return config.AssetPolicyDecision{}, false
 	}
-	roots := assetfacts.SkillRoots(connector, home, cwd)
 	for _, ref := range refs {
-		if !skillFolderRefIsSkill(ref, roots, len(facts.DeclaredFor(ref.Name)) > 0) {
+		if !skillFolderRefIsSkill(ref, skillRoots, len(facts.DeclaredFor(ref.Name)) > 0) {
 			continue
 		}
 		// A skill admission blocked and disabled (one whose quarantine
@@ -395,7 +427,7 @@ func (a *APIServer) skillFolderAccessDecision(
 		// name, so it is refused as unproven (fail closed, GAP-1303).
 		if facts.SkillsTruncated && !claimed && skillManifestUnreadable(ref.Dir) {
 			decision := runtimeAssetDisableBlockDecision("skill", ref.Name, connector, "skill_folder", fmt.Sprintf(
-				"skill folder %s: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
+				"skill folder %q: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
 					"so the folder cannot be shown not to be a denied skill; name fewer skill folders in one call", ref.Dir),
 				"skill-facts-truncated")
 			decision.RegistryStatus = "unknown"
@@ -407,6 +439,40 @@ func (a *APIServer) skillFolderAccessDecision(
 		}
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// skillFoldersAreGuarded reports whether any skill is denied or held
+// (runtime-disabled) for any connector, so a skill folder a call reaches can
+// be one to refuse. A store that cannot be read counts as guarded.
+func (a *APIServer) skillFoldersAreGuarded(cfg *config.Config) bool {
+	if len(cfg.AssetPolicy.Skill.Denied) > 0 {
+		return true
+	}
+	if a == nil || a.store == nil {
+		return false
+	}
+	entries, err := a.store.ListActionsByType("skill")
+	if err != nil {
+		return true
+	}
+	return slices.ContainsFunc(entries, func(entry audit.ActionEntry) bool { return entry.Actions.Runtime == "disable" })
+}
+
+// appendReportedSkillLinks adds the skill folders the standalone hook found
+// a path of the call to lead into through a link, which this gateway cannot
+// follow in a profile it may not read. Only a folder directly in a skill root
+// of the connector counts: the claim names where a link ends, not a new place
+// to look.
+func appendReportedSkillLinks(refs []assetfacts.FolderRef, links, roots []string) []assetfacts.FolderRef {
+	for _, dir := range links {
+		parent := filepath.Dir(dir)
+		if !slices.ContainsFunc(roots, func(root string) bool { return sameCleanPath(root, parent) }) ||
+			slices.ContainsFunc(refs, func(ref assetfacts.FolderRef) bool { return sameCleanPath(ref.Dir, dir) }) {
+			continue
+		}
+		refs = append(refs, assetfacts.FolderRef{Dir: dir, Name: filepath.Base(dir), Linked: true})
+	}
+	return refs
 }
 
 // skillFolderRefIsSkill reports whether ref, a skills/<name> path a tool
@@ -459,6 +525,25 @@ func skillManifestUnreadable(dir string) bool {
 	return false
 }
 
+// claimedMCPEntry is the definition a hook claim states. The claim holds at
+// most the first arguments of a longer list, so the scanner verdict the hook
+// took from the complete definition travels with the entry, and the entry
+// says its arguments may be cut, so an exact allow of the complete list does
+// not match it. A claim that states no verdict and may be cut is judged only
+// as far as its arguments prove (a launcher or an execution flag), which
+// would otherwise refuse a server the scanner starts (GAP-0925).
+func claimedMCPEntry(server *assetfacts.MCPServer) config.MCPServerEntry {
+	entry := config.MCPServerEntry{
+		Name: server.Name, URL: server.URL, Command: server.Command,
+		Args: append([]string(nil), server.Args...), Transport: server.Transport,
+		LocalRefusal: server.LocalRefusal, ArgsCut: server.ArgsMayBeCut(),
+	}
+	if server.VerdictUnstatedCut() {
+		entry.LocalRefusal = mcplocal.Proven(server.Command, server.Args)
+	}
+	return entry
+}
+
 // lookupCallerMCPServer finds the MCP server name the caller's agent has
 // configured. A per-user gateway reads its own home. A service-account
 // gateway reads the caller's home and, where it may not (Linux and macOS),
@@ -469,10 +554,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 	// (GAP-0954).
 	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && server.Source == assetfacts.SourceCommandLine &&
 		config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+		return claimedMCPEntry(server), true
 	}
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if !serviceAccount {
@@ -491,10 +573,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 			}
 		}
 		if server.Relocated {
-			return config.MCPServerEntry{
-				Name: server.Name, URL: server.URL, Command: server.Command,
-				Args: append([]string(nil), server.Args...), Transport: server.Transport,
-			}, true
+			return claimedMCPEntry(server), true
 		}
 	}
 	if home != "" {
@@ -505,10 +584,7 @@ func (a *APIServer) lookupCallerMCPServer(ctx context.Context, cfg *config.Confi
 		}
 	}
 	if server := claimedAssetFactsFromContext(ctx).MCP; server != nil && config.SameMCPToolServer(connector, server.Name, name) {
-		return config.MCPServerEntry{
-			Name: server.Name, URL: server.URL, Command: server.Command,
-			Args: append([]string(nil), server.Args...), Transport: server.Transport,
-		}, true
+		return claimedMCPEntry(server), true
 	}
 	return config.MCPServerEntry{}, false
 }
@@ -594,6 +670,8 @@ func (a *APIServer) noteExcludedProjectSkillFolders(ctx context.Context, connect
 			reason = "the project skill folder resolves outside the caller's profile"
 		case hookpaths.ProjectSkillRootSharedWritable:
 			reason = "another user can write the project skill folder"
+		case hookpaths.ProjectSkillManifestLinked:
+			reason = "the selected project skill's SKILL.md is a link to a file outside the caller's profile, or a hard link"
 		case hookpaths.ProjectSkillRootUnreadable:
 			reason = "the calling user could not verify the project skill folder"
 		default:

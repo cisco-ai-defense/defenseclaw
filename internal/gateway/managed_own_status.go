@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -29,10 +30,13 @@ var ownStatusCoworkEvents = coworkaudit.LastEvents
 // record used by managed readiness and verification; a seam for tests.
 var ownStatusGuardianAuthorization = readManagedGuardianAuthorization
 
-// ownStatusWindowsAccountName names a verified Windows account SID for the
-// own-status answer (LookupAccountSid, set on Windows); "" when the LSA does
-// not name it.
-var ownStatusWindowsAccountName = func(string) string { return "" }
+// ownStatusWindowsAccount names a verified Windows account SID for the
+// own-status answer from one LookupAccountSid result: the bare account name
+// and the domain it was found in (set on Windows). Both are "" when the LSA
+// does not name the SID. The pipe passes the bare account name, so the
+// DOMAIN\account spelling the enumerator matches exclude_users by is built from
+// the domain of the same result; two lookups could disagree.
+var ownStatusWindowsAccount = func(string) (name, domain string) { return "", "" }
 
 // handleOwnStatus serves GET managed.OwnStatusPath on the hook socket: the
 // protection state of the socket's kernel-verified caller, for the
@@ -53,7 +57,7 @@ func (a *APIServer) handleOwnStatus(w http.ResponseWriter, r *http.Request) {
 		writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonPeerUnverified)
 		return
 	}
-	a.writeJSON(w, http.StatusOK, a.ownStatusAnswer(r.Context(), "uid", strconv.Itoa(peer.UID), peer.Name))
+	a.writeJSON(w, http.StatusOK, a.ownStatusAnswer(r.Context(), "uid", strconv.Itoa(peer.UID), peer.Name, ""))
 }
 
 // ownStatusForWindowsAccount is the own-status answer, as JSON, for the
@@ -66,7 +70,8 @@ func (a *APIServer) ownStatusForWindowsAccount(ctx context.Context, sid string) 
 	if !refusalpipe.AccountSID(sid) {
 		return nil
 	}
-	body, err := json.Marshal(a.ownStatusAnswer(ctx, "sid", sid, ownStatusWindowsAccountName(sid)))
+	name, domain := ownStatusWindowsAccount(sid)
+	body, err := json.Marshal(a.ownStatusAnswer(ctx, "sid", sid, name, domain))
 	if err != nil || len(body) > refusalpipe.MaxOwnStatusBytes {
 		return nil
 	}
@@ -75,8 +80,9 @@ func (a *APIServer) ownStatusForWindowsAccount(ctx context.Context, sid string) 
 
 // ownStatusAnswer is the own-status answer for the verified caller whose OS
 // identifier (a uid, or a SID on Windows) is self, under idKey, and whose
-// account name is name.
-func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name string) map[string]any {
+// account name is name and whose Windows domain is domain ("" on Unix, and
+// where the LSA did not name it).
+func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name, domain string) map[string]any {
 	cfg := a.runtimeConfigSnapshot()
 	if g := a.generation(); g != nil && g.Config != nil {
 		cfg = g.Config
@@ -85,6 +91,13 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	if name != "" {
 		account["name"] = name
 	}
+	// The profile folder is read once, so the exclusion and the can-it-be-judged
+	// check below see the same lookup result.
+	folder := ""
+	if idKey == "sid" {
+		folder = userScopedIdentityHome(self)
+	}
+	excluded := cfg != nil && ownAccountExcluded(cfg.Enterprise.Enrollment, idKey, self, name, domain, folder)
 	claudeCode := false
 	claudeConfigured := false
 	desktopRefused := false
@@ -100,7 +113,11 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	// watcher supplies the published vendor-source proof used to judge managed
 	// hook calls. A missing or changed view never claims protection.
 	var connectors map[string]any
-	if idKey == "uid" && cfg != nil {
+	if excluded {
+		connectors = a.ownExcludedConnectorStates(cfg, idKey, self, name)
+	} else if cfg != nil && ownExclusionUnjudgeable(cfg.Enterprise.Enrollment, idKey, self, name, domain, folder) {
+		connectors = ownUnresolvedConnectorStates(cfg)
+	} else if idKey == "uid" && cfg != nil {
 		connectors = a.ownConnectorStates(cfg, self, name)
 	} else if idKey == "sid" && cfg != nil {
 		connectors = a.ownWindowsConnectorStates(cfg, self, name)
@@ -115,6 +132,10 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	}
 	cowork := ownCoworkRow(true, "protected", "cowork_hooks", "Cowork runs the Claude Code hooks your organization manages")
 	switch {
+	case excluded:
+		// Cowork runs the Claude Code hooks, so it follows that connector.
+		cause := ownExcludedCause(a.ownExcludedInspection(cfg, idKey, self, name, enterprisepolicy.ConnectorClaudeCode))
+		cowork = ownCoworkRow(false, "excluded", cause.code, cause.reason)
 	case !claudeCode && claudeConfigured:
 		cowork = ownCoworkRow(false, "not confirmed", "claude_code_unverified", "Claude Code policy or enrollment is not verified for this account")
 	case !claudeCode:
@@ -139,6 +160,140 @@ func (a *APIServer) ownStatusAnswer(ctx context.Context, idKey, self, name strin
 	return answer
 }
 
+// ownAccountExcluded reports whether enterprise.enrollment.exclude_users names
+// the caller, as the enumerator matches it: on Linux and macOS the exact
+// account name or decimal uid; on Windows (windowsProfileEnrollmentDecision)
+// the SID, the profile folder name, the account name, or DOMAIN\account, in
+// any case. folder is the caller's profile directory (Windows), "" when the
+// lookup failed. A qualified entry selects one domain: it never matches the
+// same short name in another. Root is never excluded by name: enrollment.root
+// decides its calls.
+func ownAccountExcluded(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name, domain, folder string) bool {
+	if idKey == "uid" && self == "0" {
+		return false
+	}
+	var names []string
+	if idKey == "sid" {
+		names = []string{self, name}
+		account := name
+		if _, short, qualified := strings.Cut(name, `\`); qualified {
+			names = append(names, short)
+			account = short
+		}
+		if domain = strings.TrimSpace(domain); domain != "" && account != "" {
+			names = append(names, domain+`\`+account)
+		}
+		if folder != "" {
+			names = append(names, accountFolderName(folder))
+		}
+	}
+	for _, entry := range enrollment.ExcludeUsers {
+		entry = strings.TrimSpace(entry)
+		switch {
+		case entry == "":
+		case idKey == "uid" && (entry == self || name != "" && entry == name):
+			return true
+		case idKey == "sid" && requireSandboxListMatches([]string{entry}, names):
+			return true
+		}
+	}
+	return false
+}
+
+// ownExclusionUnjudgeable reports whether an exclude_users entry may name the
+// caller in a spelling the lookups did not give the means to judge. On Windows
+// any entry needs the account name, a DOMAIN\account entry needs the domain
+// too, and any other entry may be the profile folder name, so it needs the
+// folder. That includes an entry spelled as a SID that is not the caller own
+// SID: the enumerator also compares the folder name, and a folder can be named
+// like a different account or Entra SID. On Unix an entry needs the account
+// name (the uid is proven by the kernel). The enumerator matches those spellings and may already
+// have removed the hook, so the status claims no protection. An entry the
+// caller already matched was decided as excluded before this is asked.
+func ownExclusionUnjudgeable(enrollment config.EnterpriseEnrollmentConfig, idKey, self, name, domain, folder string) bool {
+	if idKey == "uid" && self == "0" {
+		return false
+	}
+	nameKnown := strings.TrimSpace(name) != ""
+	domainKnown := strings.TrimSpace(domain) != "" || strings.Contains(name, `\`)
+	folderKnown := strings.TrimSpace(folder) != ""
+	for _, entry := range enrollment.ExcludeUsers {
+		entry = strings.TrimSpace(entry)
+		switch {
+		case entry == "":
+		case !nameKnown:
+			return true
+		case idKey == "sid" && strings.Contains(entry, `\`) && !domainKnown,
+			idKey == "sid" && !strings.Contains(entry, `\`) && !folderKnown:
+			return true
+		}
+	}
+	return false
+}
+
+// ownUnresolvedConnectorStates is the roster of a Windows caller whose
+// exclude_users entries cannot be judged: every configured connector is not
+// confirmed, for there is no coverage proof.
+func ownUnresolvedConnectorStates(cfg *config.Config) map[string]any {
+	states := make(map[string]any)
+	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
+		states[connector] = ownNotConfirmed(ownCauseAccountUnresolved)
+	}
+	return states
+}
+
+// ownExcludedConnectorStates is the roster of an excluded account: every
+// connector the machine policy would otherwise cover is excluded, for the
+// account never inherits the machine-wide state. Each row reason says what
+// the gateway still does with the account calls for that connector.
+func (a *APIServer) ownExcludedConnectorStates(cfg *config.Config, idKey, uid, name string) map[string]any {
+	states := make(map[string]any)
+	for _, connector := range enterprisepolicy.StandaloneConnectors(cfg) {
+		states[connector] = ownExcluded(a.ownExcludedInspection(cfg, idKey, uid, name, connector))
+	}
+	return states
+}
+
+// ownExcludedInspection says what the status can prove about the calls of an
+// excluded account for connector, and nothing it cannot. A machine-policy hook
+// that the published policy view proves installed and pinned for the account
+// means the machine policy handles its calls, whatever verdict the hook
+// authorizer returns (inspect, or refuse under unenrolled_users: deny, or an
+// outage refusal) and whether or not the authorizer still lists the connector
+// as admitted (the watcher retires admission and the vendor source
+// separately). With no such hook, no admission and no vendor source for the
+// connector, and the vendor files read and holding no machine-policy hook,
+// none covers the account. A lost descriptor or a retired admission is not
+// that proof: the vendor hook can outlive both. Everything else is
+// unknown: no authorizer (the Windows pipe), no resolved account name (the
+// per-account proof is keyed by name, and the uid alone does not select it), an
+// admission the policy view does not back (a ledger row or exempt_users
+// outlives the hook), a vendor source that is unreadable or not the pinned
+// one, or a ledger that can not be read.
+func (a *APIServer) ownExcludedInspection(cfg *config.Config, idKey, uid, name, connector string) ownInspection {
+	z := a.managedHookAuthz.Load()
+	callerUID, err := strconv.Atoi(uid)
+	if idKey != "uid" || z == nil || err != nil || callerUID == 0 || strings.TrimSpace(name) == "" {
+		return ownInspectionUnknown
+	}
+	view := a.managedPolicyView.Load()
+	if view.provenHook(connector, name) {
+		return ownInspectionInspected
+	}
+	decision := z.decide(managedHookPeer{UID: callerUID, Name: name}, connector, "")
+	if !decision.Allow && decision.Reason != managedHookReasonUIDUnregistered {
+		return ownInspectionUnknown
+	}
+	machine := false
+	if policy := z.machinePolicy.Load(); policy != nil {
+		machine = policy.connectors[strings.ToLower(strings.TrimSpace(connector))]
+	}
+	if decision.Allow || machine || view.hasConnector(connector) || !machineHookAbsent(runtime.GOOS, cfg, connector) {
+		return ownInspectionUnknown
+	}
+	return ownInspectionNone
+}
+
 // ownWindowsConnectorStates keeps the Windows status roster aligned with the
 // managed configuration. The own-status pipe proves the caller's SID, but it
 // does not carry per-connector hook proof, so the only protected row is
@@ -157,6 +312,13 @@ func (a *APIServer) ownWindowsConnectorStates(cfg *config.Config, sid, name stri
 			state = ownProtected()
 		}
 		states[connector] = state
+	}
+	// A connector an administrator took off the roster is "not managed
+	// (removed from roster)", never protected and never pending.
+	for name, row := range ownRemovedConnectorStates(cfg, a.configDataDir(), sid) {
+		if _, configured := states[name]; !configured {
+			states[name] = row
+		}
 	}
 	return states
 }

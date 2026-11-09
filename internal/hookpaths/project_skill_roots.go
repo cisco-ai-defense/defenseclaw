@@ -105,24 +105,114 @@ func addProjectSkillSelectedFacts(facts map[string]string, payload, args json.Ra
 	if name == "" {
 		return
 	}
-	roots := make([]string, 0, len(facts))
-	for key := range facts {
-		if strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
-			roots = append(roots, strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix))
-		}
-	}
-	for _, root := range roots {
-		var dirs []string
-		if len(sources) == 0 {
-			dirs = projectSkillSelectedFolders(root, name)
-		}
-		for _, source := range sources {
-			dirs = append(dirs, projectSkillSourceFolders(root, name, source, home, cwd)...)
-		}
-		for _, dir := range dirs {
+	markLinkedProjectSkillManifests(facts, name, sources, home, cwd)
+	for _, root := range projectSkillFactRoots(facts, ProjectSkillRootUnverifiedPrefix) {
+		for _, dir := range projectSkillSelectionFolders(root, name, sources, home, cwd) {
 			facts[ProjectSkillSelectedPrefix+dir] = name
 		}
 	}
+}
+
+// projectSkillFactRoots lists the roots that facts name under prefix.
+func projectSkillFactRoots(facts map[string]string, prefix string) []string {
+	roots := make([]string, 0, len(facts))
+	for key := range facts {
+		if strings.HasPrefix(key, prefix) {
+			roots = append(roots, strings.TrimPrefix(key, prefix))
+		}
+	}
+	return roots
+}
+
+// projectSkillSelectionFolders is the folders under root that a Skill call
+// selects: by name when it names no explicit source, else by each source.
+func projectSkillSelectionFolders(root, name string, sources []string, home, cwd string) []string {
+	if len(sources) == 0 {
+		return projectSkillSelectedFolders(root, name)
+	}
+	var dirs []string
+	for _, source := range sources {
+		dirs = append(dirs, projectSkillSourceFolders(root, name, source, home, cwd)...)
+	}
+	return dirs
+}
+
+// markLinkedProjectSkillManifests turns a verified root into an unverified
+// one for the call that selects, under it, a skill folder whose SKILL.md is
+// a link out of the caller's private profile or a hard link. Verifying the
+// root verified only the folder: the selected skill's manifest can still be
+// another file under the root's name (rel-1-0-9:GAP-0951). The finding is
+// made for this call alone, as the hook makes every finding afresh: a call
+// that selects another skill of the root sends the root verified again,
+// which retires the refusal at the gateway.
+func markLinkedProjectSkillManifests(facts map[string]string, name string, sources []string, home, cwd string) {
+	if name == "" {
+		return
+	}
+	for _, root := range projectSkillFactRoots(facts, ProjectSkillRootVerifiedPrefix) {
+		for _, dir := range projectSkillSelectionFolders(root, name, sources, home, cwd) {
+			if projectSkillRootKey(dir) == projectSkillRootKey(root) {
+				continue
+			}
+			finding := projectSkillManifestFinding(home, dir)
+			if finding == "" {
+				continue
+			}
+			delete(facts, ProjectSkillRootVerifiedPrefix+root)
+			facts[ProjectSkillRootUnverifiedPrefix+root] = finding
+			break
+		}
+	}
+}
+
+// projectSkillManifestFinding judges the SKILL.md of a selected project skill
+// folder as the calling user sees it: ProjectSkillManifestLinked when the
+// manifest resolves, through a link on its own spelling or on the folder's,
+// to a file outside the profile or one below a folder another user can write,
+// or is a hard link (a name for a file that may live anywhere); the
+// unreadable finding when it cannot be resolved; "" otherwise. A link to a
+// file the caller holds privately in the profile is the caller's own
+// selection and is not reported, as for a user skill folder. A manifest that
+// is absent is no skill to load.
+func projectSkillManifestFinding(home, dir string) string {
+	manifest := filepath.Join(dir, "SKILL.md")
+	if _, err := pathLstat(manifest); err != nil {
+		if NotExist(err) {
+			return ""
+		}
+		return ProjectSkillRootUnreadable
+	}
+	resolved, err := EvalLinks(manifest)
+	if err != nil {
+		if NotExist(err) {
+			return ""
+		}
+		return ProjectSkillRootUnreadable
+	}
+	if count, err := projectSkillFileLinkCount(resolved); err != nil {
+		return ProjectSkillRootUnreadable
+	} else if count > 1 {
+		return ProjectSkillManifestLinked
+	}
+	if projectSkillRootKey(resolved) == projectSkillRootKey(manifest) {
+		// No link on the way: the root check covered the folders.
+		return ""
+	}
+	realHome, err := EvalLinks(home)
+	if err != nil {
+		return ProjectSkillRootUnreadable
+	}
+	if !projectSkillPathWithin(realHome, resolved) {
+		return ProjectSkillManifestLinked
+	}
+	shared, err := projectSkillRootSharedWritable(realHome, filepath.Dir(resolved))
+	if err != nil {
+		return ProjectSkillRootUnreadable
+	}
+	if shared {
+		return ProjectSkillManifestLinked
+	}
+	return ""
 }
 
 func projectSkillName(raw string) string {
@@ -171,11 +261,29 @@ func projectSkillSelectedFolders(root, name string) []string {
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		if strings.EqualFold(assetfacts.DeclaredSkillName(dir), name) {
+		if strings.EqualFold(projectSkillDeclaredName(dir), name) {
 			return []string{dir}
 		}
 	}
 	return nil
+}
+
+// projectSkillDeclaredName is the name the SKILL.md of dir declares, read as
+// the agent reads it: through a link on the manifest, which the agent loads
+// and names the skill by (rel-1-0-9:GAP-0951). A manifest that is not a
+// readable regular file declares none.
+func projectSkillDeclaredName(dir string) string {
+	manifest := filepath.Join(dir, "SKILL.md")
+	info, err := pathStat(manifest)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	file, err := pathOpen(manifest)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	return assetfacts.DeclaredSkillNameOf(file)
 }
 
 // projectSkillSourceFolders returns the folders under an unverified root

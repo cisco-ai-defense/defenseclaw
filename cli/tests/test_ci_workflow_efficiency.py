@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
 import re
 from pathlib import Path
 
@@ -144,7 +145,7 @@ def test_ci_preserves_make_test_context_without_repeating_test_work() -> None:
     assert all("make test" not in run for run in run_steps)
 
 
-def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
+def test_ci_shards_slow_gateway_package_and_combines_go_coverage(tmp_path, capsys) -> None:
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "name: Go Gateway Test (shard ${{ matrix.shard }})" in workflow
@@ -157,7 +158,10 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "GO_TEST_SHARDS: 36" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/audit" in workflow
     assert "--exclude github.com/defenseclaw/defenseclaw/internal/gateway" in workflow
-    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 3
+    # The three Linux jobs, and the four darwin gateway parts, which weigh the
+    # unix and darwin tests by their Linux times (go-darwin.json holds none).
+    assert workflow.count("--timings scripts/test-timings/go-linux.json") == 4
+    assert workflow.count("label: macos-latest darwin gateway ") == 4
     # One coverage profile per gateway, audit and remaining-package shard: the
     # count Combine Go coverage requires follows the shard counts (it stayed 52
     # when the remaining packages went from 12 to 16 shards and would have
@@ -167,6 +171,9 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
         len(jobs[name]["strategy"]["matrix"]["shard"]) for name in ("go-test-gateway", "go-test-audit", "go-test-other")
     )
     assert profiles == 56
+    # The frozen-gateway job adds one more profile (it runs the three tests
+    # that no longer run in the shards).
+    profiles += 1
     assert f'test "${{#coverage_parts[@]}}" -eq {profiles}' in workflow
     # checkptr in the transpiled SQLite doubled the cost of every race shard.
     # A hang fails at go test's -timeout, well inside the job's budget, and
@@ -187,8 +194,46 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
     assert "--timings scripts/test-timings/go-darwin.json \\\n            --shard-count 4 \\" in workflow
     assert "name: go-test-timings-darwin-connector-${{ matrix.shard }}" in workflow
     assert "DC_TEST_NATIVE_GATEWAY" in workflow
-    assert "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-pinned]" in workflow
+    needs = "needs: [changes, go-test-gateway, go-test-audit, go-test-other, go-test-throughput, go-test-frozen-gateway, go-pinned]"
+    assert needs in workflow
+    # The frozen-gateway tests run alone in their own required job.
+    assert 'test "$FROZEN_GATEWAY_RESULT" = success' in workflow
+    frozen = jobs["go-test-frozen-gateway"]
+    # It is selected by the classifier exactly as the other Go jobs are: a
+    # string compared with a boolean is always unequal in a workflow
+    # expression, which ran the job on pull requests that selected no Go.
+    assert frozen["if"] == jobs["go-test-audit"]["if"]
+    frozen_run = next(
+        step["run"] for step in frozen["steps"] if step.get("name") == "Run the frozen-gateway tests alone"
+    )
+    # The two tests that ran in the remaining-package shard keep its race
+    # detector and coverage profile; the parallel test runs without the race
+    # detector; the profiles reach the combined one as a single part.
+    assert "go test -v -race -gcflags=modernc.org/...=-d=checkptr=0 -p 1 -count=1" in frozen_run
+    assert "go test -v -covermode=atomic -p 1 -count=1" in frozen_run
+    assert "-coverprofile=coverage-go-frozen-gateway-race.out" in frozen_run
+    assert "-coverprofile=coverage-go-frozen-gateway-parallel.out" in frozen_run
+    assert "--output coverage-go-frozen-gateway.out" in frozen_run
+    upload = next(step for step in frozen["steps"] if str(step.get("uses", "")).startswith("actions/upload-artifact@"))
+    assert upload["with"]["name"] == "go-coverage-frozen-gateway"
+    assert upload["with"]["path"] == "coverage-go-frozen-gateway.out"
+    # ...and the classifier's answer for a workflow-only change is the string
+    # 'false' the condition compares with, and 'true' for a Go change.
+    spec = importlib.util.spec_from_file_location("ci_changes", ROOT / "scripts" / "ci_changes.py")
+    ci_changes = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ci_changes)
+    for path, expected in (
+        (".github/workflows/ci.yml", "false"),
+        ("internal/gateway/connector/hookexec/hookexec.go", "true"),
+    ):
+        files = tmp_path / "files.txt"
+        files.write_text(path + "\n", encoding="utf-8")
+        assert ci_changes.main(["--event", "pull_request", "--files-from", str(files), "--get", "go"]) == 0
+        assert capsys.readouterr().out.strip() == expected
     assert 'test "$AUDIT_RESULT" = success' in workflow
+    assert "THROUGHPUT_RESULT" in workflow
+    assert "go test -p 1 -count=1 -timeout 4m -v -run " in workflow
+    assert "Go Throughput Test (no race)" in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
     assert "go tool cover -func=coverage.out" in workflow
     assert "run: make go-test-cov" not in workflow

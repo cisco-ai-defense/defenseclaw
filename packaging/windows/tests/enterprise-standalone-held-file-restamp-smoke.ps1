@@ -345,6 +345,135 @@ try {
         Reset-Recovery @('bad') 'edit'
         Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
         if ($script:RecoverCalls.Count -ne 0 -or @(Get-Backups).Count -ne 0 -or [IO.File]::ReadAllText($recRequirements) -ne 'edit') { throw 'Secure Client: the recovery step acted' }
+
+        # GAP-0947. A rollback that meets a late holder leaves the file, names
+        # the holder, points at /repair (never the forced uninstall), and ends
+        # with the retryable code only after everything else was put back.
+        Clear-DefenseClawRollbackDeferredHolds
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            $handle = Open-Holder $heldRequirements $READ_DATA $SHARE_R
+            try {
+                $deferredMessage = New-DefenseClawCodexFileHeldMessage -Layout $heldLayout -Path $heldRequirements -Why 'open without delete sharing, so the rollback could not put it back'
+            }
+            finally { Close-Holder $handle }
+            if (-not $deferredMessage.StartsWith('codex_requirements_held: ') -or -not $deferredMessage.Contains('/repair') -or $deferredMessage -match 'FORCE|uninstall') {
+                throw "deferred rollback hold: not retryable, or not pointing at /repair: '$deferredMessage'"
+            }
+            # This process is the holder, and the query leaves it out (it is Setup itself): the message says what it can.
+            if (-not $deferredMessage.Contains('no process id is available')) { throw "deferred rollback hold: no hint for a holder Windows did not name: '$deferredMessage'" }
+            # The recovery step defers instead of stopping the rollback: the
+            # held code is recorded, the hold list ends the run.
+            Add-DefenseClawRollbackDeferredHold -Message $deferredMessage
+            Add-DefenseClawRollbackDeferredHold -Message $deferredMessage
+            if ($script:DefenseClawRollbackDeferredHolds.Count -ne 1) { throw 'deferred holds: the same message was listed twice' }
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            $second = ''
+            $handle = Open-Holder $heldState $holders[0].Access $holders[0].Share
+            try { try { [void](Open-DefenseClawCodexRollbackHold -Layout $heldLayout -Path $heldState) } catch { $second = $_.Exception.Message } }
+            finally { Close-Holder $handle }
+            if (-not $second.StartsWith('codex_state_held: ') -or $clock.Elapsed.TotalSeconds -gt 15) { throw "deferred holds: a second holder waited $([int]$clock.Elapsed.TotalSeconds) s or was not named: '$second'" }
+            $ended = ''
+            try { Assert-DefenseClawRollbackHoldsResolved } catch { $ended = $_.Exception.Message }
+            if ($ended -ne $deferredMessage -or $script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw "deferred holds: the run did not end with the held message: '$ended'" }
+            Assert-DefenseClawRollbackHoldsResolved
+            if (-not (Test-DefenseClawRollbackHeldMessage -Message $deferredMessage) -or (Test-DefenseClawRollbackHeldMessage -Message 'Codex requirements reconcile failed: boom')) { throw 'held message test: wrong' }
+
+            # The previous hook, put back after the restored release runs: a
+            # holder without delete sharing defers it; a free hook goes back.
+            $hookStateRoot = [IO.Path]::Combine($Scratch, 'hook-state'); [void][IO.Directory]::CreateDirectory($hookStateRoot)
+            $hookPath = [IO.Path]::Combine($Scratch, 'defenseclaw-hook.exe'); [IO.File]::WriteAllText($hookPath, 'replacement')
+            $hookBackup = [IO.Path]::Combine($hookStateRoot, 'file-00.bak'); [IO.File]::WriteAllText($hookBackup, 'previous')
+            $hookSha = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $hookBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hookLayout = @{ HookPath = $hookPath; StateRoot = $hookStateRoot; InstallRoot = $Scratch }
+            $hookSnapshot = [pscustomobject]@{
+                early_hook_guard_copy = 'guard'
+                early_hook_preimage_sha256 = $hookSha
+                files = @([pscustomobject]@{ path = $hookPath; existed = $true; backup = $hookBackup })
+            }
+            $handle = Open-Holder $hookPath $READ_DATA $SHARE_R
+            try { Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $hookSnapshot -Layout $hookLayout }
+            finally { Close-Holder $handle }
+            $hookHeld = $ended = ''
+            try { Assert-DefenseClawRollbackHoldsResolved } catch { $hookHeld = $_.Exception.Message }
+            if (-not $hookHeld.StartsWith('hook_in_use: ') -or -not $hookHeld.Contains($hookPath) -or -not $hookHeld.Contains('/repair') -or $hookHeld -match 'FORCE') { throw "hook put-back: a held hook was not deferred by name: '$hookHeld'" }
+            if ([IO.File]::ReadAllText($hookPath) -ne 'replacement') { throw 'hook put-back: the held replacement hook changed' }
+            Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $hookSnapshot -Layout $hookLayout
+            if ([IO.File]::ReadAllText($hookPath) -ne 'previous' -or $script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw 'hook put-back: a free hook was not put back' }
+        }
+        finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
+        # Secure Client pin: nothing is deferred or tolerated; the recovery
+        # step and the hook put-back act as they did (the hook holder is the
+        # error it always was).
+        Clear-DefenseClawRollbackDeferredHolds
+        Reset-Recovery @('bad') 'edit'
+        Repair-DefenseClawRecoveredCodexRequirements -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
+        if ($script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw 'Secure Client: the recovery step deferred a hold' }
+        [IO.File]::WriteAllText($hookPath, 'replacement')
+        $handle = Open-Holder $hookPath $READ_DATA $SHARE_R
+        $scMessage = ''
+        try { try { Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $hookSnapshot -Layout $hookLayout } catch { $scMessage = $_.Exception.Message } }
+        finally { Close-Holder $handle }
+        if ($scMessage -eq '' -or $scMessage.StartsWith('hook_in_use: ') -or $script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw "Secure Client: a held hook was deferred instead of failing: '$scMessage'" }
+
+        # Review S1: the early-hook put-back of a recovery (services already
+        # running) names a held hook instead of failing with the generic error.
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
+        try {
+            Clear-DefenseClawRollbackDeferredHolds
+            $earlyDirectory = [IO.Path]::Combine($Scratch, 'early-hook'); [void][IO.Directory]::CreateDirectory($earlyDirectory)
+            $earlyBackup = [IO.Path]::Combine($earlyDirectory, 'early-hook.bak'); [IO.File]::WriteAllText($earlyBackup, 'previous')
+            $earlySha = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $earlyBackup -Algorithm SHA256).Hash.ToLowerInvariant()
+            $earlyIntent = @{ early_hook_preimage = $earlyBackup; early_hook_preimage_sha256 = $earlySha }
+            [IO.File]::WriteAllText($hookPath, 'replacement')
+            $handle = Open-Holder $hookPath $READ_DATA $SHARE_R
+            try { Restore-DefenseClawEarlyHook -Layout $hookLayout -Intent $earlyIntent -TransactionDirectory $earlyDirectory }
+            finally { Close-Holder $handle }
+            $earlyHeld = ''
+            try { Assert-DefenseClawRollbackHoldsResolved } catch { $earlyHeld = $_.Exception.Message }
+            if (-not $earlyHeld.StartsWith('hook_in_use: ') -or -not $earlyHeld.Contains($hookPath) -or -not $earlyHeld.Contains('/repair') -or $earlyHeld -match 'FORCE') { throw "early hook put-back: a held hook was not deferred by name: '$earlyHeld'" }
+            if ([IO.File]::ReadAllText($hookPath) -ne 'replacement') { throw 'early hook put-back: the held replacement hook changed' }
+            Restore-DefenseClawEarlyHook -Layout $hookLayout -Intent $earlyIntent -TransactionDirectory $earlyDirectory
+            if ([IO.File]::ReadAllText($hookPath) -ne 'previous' -or $script:DefenseClawRollbackDeferredHolds.Count -ne 0) { throw 'early hook put-back: a free hook was not put back' }
+
+            # Review S2 and S6: the guardian is said not to be proven when the
+            # coverage proof was deferred; one file is named once.
+            Clear-DefenseClawRollbackDeferredHolds
+            Add-DefenseClawRollbackDeferredHold -Message $deferredMessage
+            Add-DefenseClawRollbackDeferredHold -Message ($deferredMessage -replace '^codex_requirements_held: [^h]*', 'codex_requirements_held: other.exe (process id 9) ')
+            if ($script:DefenseClawRollbackDeferredHolds.Count -ne 1) { throw 'deferred holds: the same file was listed twice' }
+            $script:DefenseClawRollbackCoverageDeferred = $true
+            $notProven = ''
+            try { Assert-DefenseClawRollbackHoldsResolved } catch { $notProven = $_.Exception.Message }
+            if (-not $notProven.Contains("The guardian's coverage was not proven by this rollback")) { throw "deferred holds: the result does not say the guardian was not proven: '$notProven'" }
+            Add-DefenseClawRollbackDeferredHold -Message $deferredMessage
+            $proven = ''
+            try { Assert-DefenseClawRollbackHoldsResolved } catch { $proven = $_.Exception.Message }
+            if ($proven.Contains('not proven')) { throw 'deferred holds: the guardian note is there without a deferred coverage proof' }
+
+            # Review S5, GAP-0955: the forward reconcile. A hand-edited file the
+            # recovery replaces lets the run go on; a failure the recovery does
+            # not explain, and a held file, stay failures.
+            Reset-Recovery @('allow_managed_hooks_only=false conflicts with required isolation', 'allow_managed_hooks_only is not pinned true', 'ok') 'allow = false'
+            Invoke-DefenseClawCodexRequirementsReconcileOrRecover -Layout $recLayout -GatewayServiceName 'DefenseClawGateway'
+            $forwardBackups = @(Get-Backups)
+            if ($forwardBackups.Count -ne 1 -or [IO.File]::ReadAllText($forwardBackups[0].FullName) -ne 'allow = false' -or [IO.File]::ReadAllText($recRequirements) -ne 'canonical') { throw 'forward reconcile: the hand-edited file was not kept and replaced' }
+            Reset-Recovery @('boom', 'ok') 'fine'
+            $unexplained = ''
+            try { Invoke-DefenseClawCodexRequirementsReconcileOrRecover -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $unexplained = $_.Exception.Message }
+            if (-not $unexplained.Contains('boom') -or @(Get-Backups).Count -ne 0 -or [IO.File]::ReadAllText($recRequirements) -ne 'fine') { throw "forward reconcile: a failure the recovery does not explain was swallowed: '$unexplained'" }
+            Reset-Recovery @('boom', 'bad') 'edit'
+            $handle = Open-Holder $recRequirements $READ_DATA ($SHARE_R -bor $SHARE_W)
+            $forwardHeld = ''
+            try { try { Invoke-DefenseClawCodexRequirementsReconcileOrRecover -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $forwardHeld = $_.Exception.Message } }
+            finally { Close-Holder $handle }
+            if (-not $forwardHeld.StartsWith('codex_requirements_held: ')) { throw "forward reconcile: a held file was not the retryable held error: '$forwardHeld'" }
+        }
+        finally { Set-DefenseClawEnterpriseProfile -EnterpriseProfile SecureClient }
+        Reset-Recovery @('boom') 'edit'
+        $scForward = ''
+        try { Invoke-DefenseClawCodexRequirementsReconcileOrRecover -Layout $recLayout -GatewayServiceName 'DefenseClawGateway' } catch { $scForward = $_.Exception.Message }
+        if (-not $scForward.Contains('boom') -or $script:RecoverCalls.Count -ne 1 -or @(Get-Backups).Count -ne 0) { throw "Secure Client: the forward reconcile recovered instead of failing: '$scForward'" }
     } $scratch $holderType
     'enterprise-standalone-held-file-restamp-smoke: OK'
 }

@@ -15,12 +15,12 @@ import (
 )
 
 func init() {
-	ownStatusWindowsAccountName = func(sid string) string {
+	ownStatusWindowsAccount = func(sid string) (string, string) {
 		account, err := lsaAccountBySID(sid)
 		if err != nil {
-			return ""
+			return "", ""
 		}
-		return account.Name
+		return account.Name, account.Domain
 	}
 }
 

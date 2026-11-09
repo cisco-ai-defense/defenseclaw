@@ -19,7 +19,7 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // whole-file write replaces Docker's daemon configuration with a strict JSON
 // document whose only setting enables at least one non-loopback literal HTTP
 // registry. The write is read from the closed argument shapes of every native
-// file tool (nativeFileWrites: Write, the write_file aliases whichever name
+// file tool (nativeCallWrites: Write, the write_file aliases whichever name
 // they give the path, Copilot create, OpenCode write, a patch that adds the
 // file), for the file the call names or the file an existing link reaches. It
 // deliberately returns no path, registry, or content.
@@ -28,24 +28,34 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // cannot prove that the replacement is the complete final daemon.json
 // document.
 func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
-	if input.Command != "" || len(input.Argv) != 0 ||
-		!facts.Authoritative() || !facts.EnforcementEligible() ||
+	if !facts.Authoritative() || !facts.EnforcementEligible() ||
 		facts.Tool != input.Tool {
 		return false
 	}
-	writes := nativeFileWrites(input.Tool, input.Args)
+	writes, facts := nativeCallWrites(input, facts)
 	for _, write := range writes {
-		canonical, absolute := nativeAbsoluteTarget(write.target, "")
-		if !write.whole || !absolute || canonical != write.target ||
-			!nativeOperandsCoverTarget(facts, len(writes), canonical) {
-			continue
-		}
 		content := write.added
-		if content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
+		if !write.whole || content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
 			strings.ContainsRune(content, 0) {
 			continue
 		}
-		for _, file := range nativeReachedFiles(facts, canonical) {
+		// An absolute name the call gives must itself be the canonical
+		// spelling; a relative name (a link in the project) is placed in the
+		// working directory of the call, as the tool does, and a link or a
+		// name the gateway cannot place is read from the client answer. A
+		// relative name that steps up a directory is the file the client
+		// answered with when it gave one: the lexical clean of such a name is
+		// no file the write reaches, so an ordinary file reached through a
+		// link is never judged as the Docker configuration.
+		files := nativeClientReachedFiles(input, write.target)
+		canonical, absolute := nativeAbsoluteTarget(write.target, input.CWD)
+		if answers := nativeDotDotAnswers(input, write.target); len(answers) != 0 {
+			files = answers
+		} else if absolute && (!strings.HasPrefix(write.target, "/") || canonical == write.target) &&
+			nativeOperandsCoverTarget(facts, len(writes), canonical) {
+			files = append(nativeReachedFiles(facts, canonical), files...)
+		}
+		for _, file := range files {
 			if EtcSpelling(file) == dockerDaemonConfigPath &&
 				writeToolNamesItsFile(input) &&
 				exactDockerInsecureRegistryDocument(content) {
@@ -60,7 +70,7 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 // Claude Code's tool does, file_path: a Write that gives the path another name
 // is a call the tool refuses, not a write of that file. The other tools
 // (write_file aliases, Copilot, OpenCode, patches) take their spellings from
-// nativeFileWrites.
+// nativeCallWrites.
 func writeToolNamesItsFile(input Input) bool {
 	if input.Tool != "Write" {
 		return true

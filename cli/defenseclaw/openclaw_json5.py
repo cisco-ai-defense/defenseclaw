@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import bisect
 import json
+import re
 import unicodedata
 from typing import Any
 
@@ -335,11 +336,19 @@ def _strip_trailing_commas(text: str) -> tuple[str, list[int]]:
     return "".join(out), origin
 
 
+# JSON5 line terminators: LF, CR, CRLF (one terminator), U+2028 and U+2029, nothing else.
+_LINE_END = re.compile("\r\n|[\n\r\u2028\u2029]")
+
+
 def _line_column(text: str, offset: int) -> tuple[int, int]:
     offset = max(0, min(offset, len(text)))
-    line = text.count("\n", 0, offset) + 1
-    column = offset - (text.rfind("\n", 0, offset) + 1) + 1
-    return line, column
+    line, start = 1, 0
+    for end in _LINE_END.finditer(text):
+        if end.end() > offset:
+            break
+        line += 1
+        start = end.end()
+    return line, offset - start + 1
 
 
 def loads(text: str) -> Any:
@@ -353,8 +362,7 @@ def loads(text: str) -> Any:
     if len(text) > MAX_JSON5_CHARS:
         raise OpenClawConfigSyntaxError(
             f"{strict_error.msg}; file is too large to read as JSON5",
-            strict_error.lineno,
-            strict_error.colno,
+            *_line_column(text, strict_error.pos),
         ) from None
     rewriter = _Rewriter(text)
     rewritten, origin = _strip_trailing_commas(rewriter.run())

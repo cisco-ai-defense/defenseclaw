@@ -288,7 +288,8 @@ def test_run_first_run_refuses_over_0_8_hooks_before_anything_is_written_or_star
         guard.assert_not_called()
     # Platform probes may run a command; none starts or asks a DefenseClaw program.
     assert not [c for c in run.call_args_list if "defenseclaw" in str(c.args).lower()]
-    assert _tree(base) == before
+    # The only new entry is the empty init lock sentinel that every first run takes.
+    assert _tree(base) == {**before, os.path.join(".defenseclaw", "init.lock"): b""}
     assert not (data_dir / "config.yaml").exists()
 
 

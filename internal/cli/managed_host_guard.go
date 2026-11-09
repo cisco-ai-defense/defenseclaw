@@ -235,7 +235,8 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 	detail := ""
 	switch command {
 	case "doctor":
-		detail = " If Hermes is enrolled, a session-only HERMES_HOME is NOT COVERED because the managed service cannot observe a home selected only by your shell; the administrator's status and verify name this limit."
+		detail = " If Hermes is enrolled, a session-only HERMES_HOME is NOT COVERED because the managed service cannot observe a home selected only by your shell; the administrator's status and verify name this limit." +
+			managedWindowsRemovedConnectorDetail()
 	case "status":
 		// Only an elevated prompt gets this answer to status: one that is
 		// not elevated shows the account's own state (GAP-0060). The
@@ -257,9 +258,26 @@ func managedWindowsAdminCommandAnswer(where, command string) error {
 func managedWindowsTUIAnswer(where string) error {
 	return managedDeviceAnswer(fmt.Sprintf("this computer's DefenseClaw is managed by your organization (%s), so the DefenseClaw TUI is not installed on this computer: "+
 		"it is part of the per-user DefenseClaw, which a managed computer does not have, and there is nothing for you to set up. "+
-		"Your administrator can check the managed deployment %s, and your account's agents with %s. "+
+		"Your administrator can check the managed deployment %s, and your account's agents with %s.%s "+
 		"Nothing was changed.",
-		where, managedWindowsAdminStatusHint(), managedWindowsAccountAgentsCommand()))
+		where, managedWindowsAdminStatusHint(), managedWindowsAccountAgentsCommand(), managedWindowsRemovedConnectorDetail()))
+}
+
+// managedWindowsRemovedConnectorLines names the caller's own connectors the
+// administrator took off the roster, each as "<connector>: not managed
+// (removed from roster)"; the Windows build reads them from the gateway's
+// own-status pipe, and every other build has none. A seam for tests.
+var managedWindowsRemovedConnectorLines = func() []string { return nil }
+
+// managedWindowsRemovedConnectorDetail is the sentence the doctor and TUI
+// answers add for a caller who has a removed connector: it is not managed,
+// which is neither protected nor pending. Empty when there is none.
+func managedWindowsRemovedConnectorDetail() string {
+	lines := managedWindowsRemovedConnectorLines()
+	if len(lines) == 0 {
+		return ""
+	}
+	return " For your account: " + strings.Join(lines, "; ") + ". Your administrator removed it from the roster, so DefenseClaw no longer governs it for you: it is neither protected nor pending, and its hook calls are allowed without inspection."
 }
 
 // managedWindowsVersionChangeAnswer tells a user on a managed Windows

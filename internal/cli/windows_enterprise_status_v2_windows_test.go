@@ -568,3 +568,56 @@ func TestWindowsStatusV2NamesTheHolderOfTheCodexRequirements(t *testing.T) {
 		}
 	}
 }
+
+func TestWindowsEnterpriseStatusNamesTheLinkOfAPendingTransaction(t *testing.T) {
+	previous := windowsEnterpriseVendorFolderLink
+	t.Cleanup(func() { windowsEnterpriseVendorFolderLink = previous })
+	links := map[string]string{
+		"cursor":     `C:\ProgramData\Cursor`,
+		"claudecode": `C:\Program Files\ClaudeCode`,
+	}
+	windowsEnterpriseVendorFolderLink = func(connectorName string) string { return links[connectorName] }
+	count := func(result *enterprisestatus.Result) int {
+		n := 0
+		for _, warning := range result.Warnings {
+			if warning.Code == "transaction_pending_link" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Not pending: the link is named by the machine-folder warning only.
+	result := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.9")
+	noteWindowsEnterprisePendingTransactionLink(result)
+	if count(result) != 0 {
+		t.Fatalf("no pending transaction, but a pending-link warning: %+v", result.Warnings)
+	}
+
+	// Pending: each link is named with the pending state and the rmdir fix.
+	result = enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.9")
+	result.TransactionPending = true
+	noteWindowsEnterprisePendingTransactionLink(result)
+	if count(result) != 2 {
+		t.Fatalf("pending with two links: %d warnings, want 2: %+v", count(result), result.Warnings)
+	}
+	for _, warning := range result.Warnings {
+		for _, want := range []string{"transaction is pending", "stay stopped", "cmd /c rmdir \"", "link only, not its target"} {
+			if !strings.Contains(warning.Message, want) {
+				t.Fatalf("pending-link warning lacks %q: %s", want, warning.Message)
+			}
+		}
+	}
+	if !strings.Contains(result.Warnings[0].Message, `Cursor machine-policy folder`) || !strings.Contains(result.Warnings[1].Message, `Claude Code machine-policy folder`) {
+		t.Fatalf("the links are not named by connector: %+v", result.Warnings)
+	}
+
+	// Pending, no link: nothing is added.
+	windowsEnterpriseVendorFolderLink = func(string) string { return "" }
+	result = enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.9")
+	result.TransactionPending = true
+	noteWindowsEnterprisePendingTransactionLink(result)
+	if count(result) != 0 {
+		t.Fatalf("no link, but a pending-link warning: %+v", result.Warnings)
+	}
+}

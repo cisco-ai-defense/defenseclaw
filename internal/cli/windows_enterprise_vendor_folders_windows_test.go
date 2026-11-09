@@ -182,19 +182,19 @@ func TestWindowsGuardianAuditsReprotectedFoldersAndRefusals(t *testing.T) {
 
 	published := enterprisepolicy.Result{States: []enterprisepolicy.State{{Connector: "devincascade",
 		Reprotected: []enterprisepolicy.ReprotectedFolder{{Connector: "devincascade", Dir: `C:\ProgramData\Devin`, Why: "weak", Before: "b", After: "a"}}}}}
-	reportWindowsGuardianVendorFolders(&log, published, nil)
+	reportWindowsGuardianVendorFolders(&log, published, nil, nil)
 	repaired, alerts := *repairedRows, *alertRows
 	if len(repaired) != 1 || repaired[0] != `defenseclaw-hook-guardian:C:\ProgramData\Devin` || len(alerts) != 0 ||
 		!strings.Contains(log.String(), "re-protected C:\\ProgramData\\Devin") {
 		t.Fatalf("re-protect: repaired %q alerts %q log %q", repaired, alerts, log.String())
 	}
-	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, refusal("refusal one"))
-	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, refusal("refusal one"))
+	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, refusal("refusal one"), nil)
+	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, refusal("refusal one"), nil)
 	repaired, alerts = *repairedRows, *alertRows
 	if len(repaired) != 1 || len(alerts) != 1 || !strings.Contains(alerts[0], "refusal one") {
 		t.Fatalf("refusal: repaired %q alerts %q; want one alert, no repaired row, and not repeated", repaired, alerts)
 	}
-	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, refusal("refusal two"))
+	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, refusal("refusal two"), nil)
 	if alerts = *alertRows; len(alerts) != 2 {
 		t.Fatalf("a changed refusal must be reported again: %q", alerts)
 	}
@@ -214,7 +214,7 @@ func TestWindowsGuardianVendorFolderAlertIsPerFolderAndComesBackAfterARecovery(t
 		if len(refusals) != 0 {
 			err = fakeVendorFolderRefusals(refusals)
 		}
-		reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, err)
+		reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, err, nil)
 	}
 	want := func(step string, n int) {
 		t.Helper()
@@ -230,7 +230,7 @@ func TestWindowsGuardianVendorFolderAlertIsPerFolderAndComesBackAfterARecovery(t
 	want("clean pass", 1)
 	pass(enterprisepolicy.VendorFolderRefusal{Dir: devin, Message: "refused"})
 	want("refused again after the clean pass", 2)
-	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{States: []enterprisepolicy.State{{Reprotected: []enterprisepolicy.ReprotectedFolder{{Dir: devin}}}}}, nil)
+	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{States: []enterprisepolicy.State{{Reprotected: []enterprisepolicy.ReprotectedFolder{{Dir: devin}}}}}, nil, nil)
 	pass(enterprisepolicy.VendorFolderRefusal{Dir: devin, Message: "refused"})
 	want("refused again after the heal", 3)
 
@@ -326,4 +326,89 @@ func TestWindowsEnterpriseVendorFolderGateAlertsARefusalAndRetriesItsRows(t *tes
 			t.Fatalf("Secure Client: %v, %d alerts; want no gate and no alert", err, alerts)
 		}
 	})
+}
+
+// GAP-0930: a vendor policy file DefenseClaw has no record of that another
+// account can change refuses the install-like action and /ensure by name, with
+// the gate's wording for a file (not the folder takeover wording), and writes
+// its alert row with the file as the path. Status warns and verify fails on it,
+// and coverage and security are incomplete.
+func TestWindowsEnterpriseVendorFolderGateRefusesAnUnrecordedPolicyFile(t *testing.T) {
+	file := `C:\ProgramData\opencode\opencode.json`
+	problem := enterprisepolicy.VendorFolderProblem{Connector: "opencode", Dir: `C:\ProgramData\opencode`, File: file, UnrecordedFile: true,
+		Message: file + ` is not covered: DefenseClaw has no record of writing it. Fix: icacls "` + file + `" /remove:g "*S-1-5-32-545"`,
+		Blocker: "S-1-5-32-545 has write access"}
+	t.Run("refused", func(t *testing.T) {
+		audited := vendorFolderSeams(t, nil, []enterprisepolicy.VendorFolderProblem{problem})
+		var alertPaths []any
+		windowsEnterpriseVendorFolderAlert = func(_, _ string, details map[string]any) error {
+			alertPaths = append(alertPaths, details["path"])
+			return nil
+		}
+		opts := standaloneVendorOpts()
+		err := refuseWindowsEnterpriseUntrustedVendorFolders(opts)
+		if err == nil || !strings.HasPrefix(err.Error(), windowsEnterpriseGateRefusal) || !strings.Contains(err.Error(), "opencode: "+file+" is not covered") ||
+			!strings.Contains(err.Error(), `/remove:g "*S-1-5-32-545"`) ||
+			!strings.Contains(err.Error(), windowsEnterpriseUnrecordedFileRefusalWhy) || strings.Contains(err.Error(), windowsEnterpriseVendorFolderRefusalWhy) {
+			t.Fatalf("err = %v; want the gate refusal naming the file, the file wording and the recovery", err)
+		}
+		if len(alertPaths) != 1 || alertPaths[0] != file {
+			t.Fatalf("alert paths = %v; want the file", alertPaths)
+		}
+		if len(opts.recoveryChanges) != 0 || len(*audited) != 0 {
+			t.Fatalf("a refusal changed or audited something as repaired: %q %q", opts.recoveryChanges, *audited)
+		}
+	})
+	t.Run("with a folder", func(t *testing.T) {
+		folder := enterprisepolicy.VendorFolderProblem{Connector: "copilot", Dir: `C:\ProgramData\GitHub\Copilot\policy.d`, Message: "policy.d is weak", Blocker: "foreign.json"}
+		vendorFolderSeams(t, nil, []enterprisepolicy.VendorFolderProblem{folder, problem})
+		err := refuseWindowsEnterpriseUntrustedVendorFolders(standaloneVendorOpts())
+		if err == nil || strings.Count(err.Error(), windowsEnterpriseGateRefusal) != 1 ||
+			!strings.Contains(err.Error(), windowsEnterpriseVendorFolderRefusalWhy) || !strings.Contains(err.Error(), windowsEnterpriseUnrecordedFileRefusalWhy) ||
+			!strings.Contains(err.Error(), "copilot: policy.d is weak") || !strings.Contains(err.Error(), "opencode: "+file) {
+			t.Fatalf("err = %v; want both refusals under one gate refusal", err)
+		}
+	})
+	t.Run("secure client", func(t *testing.T) {
+		vendorFolderSeams(t, nil, []enterprisepolicy.VendorFolderProblem{problem})
+		opts := &windowsEnterpriseLifecycleOptions{profile: managed.ProfileSecureClient, resolvedProfile: managed.ProfileSecureClient}
+		if err := refuseWindowsEnterpriseUntrustedVendorFolders(opts); err != nil {
+			t.Fatalf("Secure Client: %v; want no gate", err)
+		}
+	})
+	t.Run("verify and status", func(t *testing.T) {
+		vendorFolderSeams(t, nil, []enterprisepolicy.VendorFolderProblem{problem})
+		for _, action := range []string{"verify", "status", "ensure"} {
+			result := &enterprisestatus.Result{Action: action, CoverageComplete: true, SecurityComplete: true}
+			applyWindowsEnterpriseVendorFolders(result)
+			wantErrors := 0
+			if action == "verify" {
+				wantErrors = 1
+			}
+			if len(result.Errors) != wantErrors || result.CoverageComplete || result.SecurityComplete ||
+				!windowsEnterpriseResultHasMessage(result, windowsEnterpriseVendorFolderCode, "opencode: "+problem.Message) {
+				t.Fatalf("%s: errors %v warnings %v coverage %v security %v", action, result.Errors, result.Warnings, result.CoverageComplete, result.SecurityComplete)
+			}
+		}
+	})
+}
+
+// GAP-0930: the guardian pass raises the HIGH alert for an unrecorded vendor
+// policy file it could not use, keyed by the file, once while it stays, and
+// again if it comes back after a clean pass.
+func TestWindowsGuardianAlertsOnceForAnUnrecordedPolicyFile(t *testing.T) {
+	_, alertRows, _ := guardianVendorFolderSeams(t)
+	file := `C:\ProgramData\opencode\opencode.json`
+	problem := enterprisepolicy.VendorFolderProblem{Connector: "opencode", Dir: `C:\ProgramData\opencode`, File: file, UnrecordedFile: true, Message: file + " is not covered"}
+	var log bytes.Buffer
+	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, nil, []enterprisepolicy.VendorFolderProblem{problem})
+	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, nil, []enterprisepolicy.VendorFolderProblem{problem})
+	if len(*alertRows) != 1 || !strings.Contains((*alertRows)[0], "managed_vendor_folder_not_protected:"+file+":") {
+		t.Fatalf("alerts = %q; want one alert for the file", *alertRows)
+	}
+	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, nil, nil)
+	reportWindowsGuardianVendorFolders(&log, enterprisepolicy.Result{}, nil, []enterprisepolicy.VendorFolderProblem{problem})
+	if len(*alertRows) != 2 {
+		t.Fatalf("alerts = %q; want a second after a clean pass", *alertRows)
+	}
 }

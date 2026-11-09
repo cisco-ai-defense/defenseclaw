@@ -5,6 +5,7 @@ package actionfacts
 
 import (
 	"path"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -73,4 +74,133 @@ func nativeReachedFiles(facts Facts, target string) []string {
 		}
 	}
 	return files
+}
+
+// nativeWriteFiles returns every file a native write may put its text into: for
+// a name that steps up a directory and has a client answer, that answer
+// (nativeDotDotAnswers); otherwise the file its target names, the physical file
+// of an existing link the facts record (nativeReachedFiles), and the files the
+// hook client placed the target on (nativeClientReachedFiles). requireOperand
+// is true for a proof that judges the lexical target only when the facts carry
+// the operand for it.
+func nativeWriteFiles(input Input, facts Facts, writes []nativeFileWrite, write nativeFileWrite, requireOperand bool) []string {
+	if answers := nativeDotDotAnswers(input, write.target); len(answers) != 0 {
+		return answers
+	}
+	var files []string
+	if target, ok := nativeAbsoluteTarget(write.target, input.CWD); ok {
+		switch {
+		case nativeOperandsCoverTarget(facts, len(writes), target):
+			files = nativeReachedFiles(facts, target)
+		case !requireOperand:
+			files = []string{target}
+		}
+	}
+	return append(files, nativeClientReachedFiles(input, write.target)...)
+}
+
+// nativeClientReachedFiles returns the files a relative or link-named target
+// reaches when the gateway has no working directory of its own for the call (a
+// managed gateway cannot read the home of the user, so it places nothing and
+// follows no link there). The hook client resolved the target as the user and
+// keyed its answer by the spelling of the operand in the directory it ran the
+// call in (Input.ClientResolvedTargets, Input.ClientWorkingDirectories): the
+// answer is the physical file of a link or of a dot-dot path. For a directory
+// the client gave no answer for, the target is placed in that directory
+// lexically, as the direct name of the file is judged. Nothing here reads the
+// file system.
+func nativeClientReachedFiles(input Input, target string) []string {
+	var files []string
+	add := func(file string) {
+		if file = path.Clean(file); strings.HasPrefix(file, "/") && !slices.Contains(files, file) {
+			files = append(files, file)
+		}
+	}
+	for _, dir := range nativeClientDirectories(input, target) {
+		if physical, ok := input.ClientResolvedTargets[clientOperandKey(target, dir)]; ok && strings.HasPrefix(physical, "/") {
+			add(physical)
+		} else if !strings.HasPrefix(target, "/") {
+			add(dir + "/" + target)
+		}
+	}
+	if physical, ok := input.ClientResolvedTargets[target]; ok {
+		add(physical)
+	}
+	return files
+}
+
+// nativeClientAnswers returns only the physical files the hook client gave for
+// the spelling of target, none when it gave no answer: whether the client could
+// tell, apart from where the name lexically falls.
+func nativeClientAnswers(input Input, target string) []string {
+	var files []string
+	add := func(file string) {
+		if file = path.Clean(file); strings.HasPrefix(file, "/") && !slices.Contains(files, file) {
+			files = append(files, file)
+		}
+	}
+	for _, dir := range nativeClientDirectories(input, target) {
+		if physical, ok := input.ClientResolvedTargets[clientOperandKey(target, dir)]; ok {
+			add(physical)
+		}
+	}
+	if physical, ok := input.ClientResolvedTargets[target]; ok {
+		add(physical)
+	}
+	return files
+}
+
+// nativeClientDirectories is the directories the hook client may have keyed
+// its answer for target by: the working directory of the call and the
+// directories the client ran it in. A target that is not text the proofs read
+// has none.
+func nativeClientDirectories(input Input, target string) []string {
+	if target == "" || len(target) > maxScalarBytes || !utf8.ValidString(target) ||
+		strings.ContainsRune(target, 0) {
+		return nil
+	}
+	dirs := make([]string, 0, 1+len(input.ClientWorkingDirectories))
+	for _, dir := range append([]string{input.CWD}, input.ClientWorkingDirectories...) {
+		if strings.HasPrefix(dir, "/") && !strings.ContainsRune(dir, 0) {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
+// nativeDotDotAnswers returns the physical files the hook client gave for a
+// name that steps up a directory, none for any other name or when the client
+// gave no answer. The lexical clean of such a name is not a file the write
+// reaches (the links before the segment decide the file), so a proof that has
+// the client answer judges the answer and not that spelling: an ordinary file
+// reached through a link is never judged as the protected file its lexical
+// clean names, and a link to a protected file is still judged as that file.
+func nativeDotDotAnswers(input Input, target string) []string {
+	if !hasDotDotSegment(target) {
+		return nil
+	}
+	return nativeClientAnswers(input, target)
+}
+
+// hasDotDotSegment reports whether a name steps up a directory. The physical
+// file such a name reaches depends on the links before the segment, so the
+// lexical clean of the name is not that file.
+func hasDotDotSegment(name string) bool {
+	return slices.Contains(strings.Split(name, "/"), "..")
+}
+
+// clientOperandKey is the key the hook client gives a POSIX file operand: the
+// dot-dot spelling stays raw until the client has followed links, every other
+// spelling is cleaned (OperandPath, with slashes whatever system reads it).
+func clientOperandKey(name, dir string) string {
+	if !strings.Contains(name, "/../") && !strings.HasSuffix(name, "/..") {
+		if !strings.HasPrefix(name, "/") {
+			return path.Join(dir, name)
+		}
+		return path.Clean(name)
+	}
+	if strings.HasPrefix(name, "/") {
+		return name
+	}
+	return dir + "/" + name
 }

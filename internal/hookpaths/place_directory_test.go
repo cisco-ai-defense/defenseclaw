@@ -91,3 +91,48 @@ func TestCleanedDirectoryIsTheTextCleanUpCodexAppliesToAWorkdir(t *testing.T) {
 		}
 	}
 }
+
+// Where the system reads a parent step as text (Windows normalizes a path
+// lexically), proj\lnk\.. is proj whatever lnk is: a reported cwd, a relative
+// directory and the late scan all place the call in proj. A directory
+// without a parent step keeps its spelling.
+func TestPlaceDirectoryReadsAParentStepAsTextWhereTheSystemDoes(t *testing.T) {
+	defer SetParentStepIsText(true)()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home")
+	project := filepath.Join(home, "proj")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), filepath.Join(project, "sub")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(home, ".ssh"), filepath.Join(project, "lnk")); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ name, base, dir, want string }{
+		{"absolute through a link", "", project + "/lnk/..", project},
+		{"absolute with a dot", "", project + "/lnk/../.", project},
+		{"relative through a link", project, "lnk/..", project},
+		{"relative through a link, deeper", project, "lnk/../sub/..", project},
+		{"parent step without a link", project, "sub/..", project},
+		{"plain relative", project, "sub", filepath.Join(project, "sub")},
+		{"ordinary absolute", "", project, project},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := PlaceDirectory(c.base, c.dir); got != c.want {
+				t.Fatalf("PlaceDirectory(%q, %q) = %q, want %q", c.base, c.dir, got, c.want)
+			}
+		})
+	}
+	if got := OSCleanedDirectory(project + "/lnk/.."); got != project {
+		t.Fatalf("OSCleanedDirectory = %q, want %q", got, project)
+	}
+	restore := SetParentStepIsText(false)
+	if got := OSCleanedDirectory(project + "/lnk/.."); got != project+"/lnk/.." {
+		t.Fatalf("OSCleanedDirectory where the file system reads the step = %q, want it unchanged", got)
+	}
+	restore()
+}

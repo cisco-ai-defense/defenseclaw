@@ -242,14 +242,12 @@ func openHomeCredentialRoot(home, root string) (int, error) {
 
 func (s *linuxSource) Events() <-chan Event { return s.buffer.Events() }
 func (s *linuxSource) Coverage() Coverage {
-	coverage := s.coverage
-	if lost := s.procOverflows.Load(); lost > 0 {
-		// Reduced, not absent: the reader carries on after an overflow.
-		coverage.Limitations = append(append([]string(nil), coverage.Limitations...), fmt.Sprintf(
-			"process events were lost %d times when the netlink receive buffer overflowed (ENOBUFS)", lost))
-	}
-	return WithBufferDrops(coverage, s.bufferDropped(), SensorEventBuffer)
+	return WithBufferDrops(WithKernelOverflows(s.coverage, s.kernelOverflows()), s.bufferDropped(), SensorEventBuffer)
 }
+
+// kernelOverflows is how many times the cn_proc receive buffer overflowed
+// (ENOBUFS): the kernel dropped process events this source never saw.
+func (s *linuxSource) kernelOverflows() int64 { return s.procOverflows.Load() }
 
 // bufferDropped is how many events this source's own buffer dropped under
 // back-pressure, after the kernel delivered them (GAP-0071).

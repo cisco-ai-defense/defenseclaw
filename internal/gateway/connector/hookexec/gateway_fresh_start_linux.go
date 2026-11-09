@@ -196,8 +196,11 @@ func freshGatewayFromRecord(dataDir string) (perUserPeerProcess, bool) {
 	if err != nil || strings.TrimSuffix(executable, " (deleted)") != record.Executable {
 		return perUserPeerProcess{}, false
 	}
+	if !procidentity.IsRecorded(record.PID, record.StartIdentity) {
+		return perUserPeerProcess{}, false
+	}
 	identity, ok := procidentity.Of(record.PID)
-	return perUserPeerProcess{pid: record.PID, identity: identity}, ok && identity == record.StartIdentity
+	return perUserPeerProcess{pid: record.PID, identity: identity}, ok
 }
 
 func perUserGatewayAnswerPath(dataDir string, peer perUserPeerProcess) string {

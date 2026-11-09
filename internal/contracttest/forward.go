@@ -48,7 +48,7 @@ var forwardOf = map[string]string{
 var KeepOnDevice = []string{
 	// Account names, identifiers and free text.
 	"accounts", "actor", "principal", "created_by", "change_summary", "changes", "entries", "message",
-	"subject", "reason", "detail", "last_reload_error", "error_message", "excluded_users", "excluded_groups",
+	"subject", "reason", "detail", "last_reload_error", "error_message", "excluded_users", "excluded_groups", "removed_connectors",
 	// Credential names: secret_refs[].name, secret_refs_missing, secret_refs_mismatch.
 	"name", "secret_refs_missing", "secret_refs_mismatch",
 	// Local detail: services, machine policy, observability destinations,

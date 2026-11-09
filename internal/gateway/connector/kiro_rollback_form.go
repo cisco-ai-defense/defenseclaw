@@ -5,7 +5,12 @@ package connector
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
 )
 
 // Releases before 1.0.9 own the per-user Windows Kiro command only in the
@@ -63,4 +68,64 @@ func kiroJSONString(value string, escapeHTML bool) []byte {
 	encoder.SetEscapeHTML(escapeHTML)
 	_ = encoder.Encode(value)
 	return bytes.TrimSuffix(out.Bytes(), []byte("\n"))
+}
+
+// convertKiroHooksFile applies convertKiroHookFileForms to one Kiro hooks file
+// under its lock and returns how many handlers it rewrote. A rollback
+// conversion (toEarlier) first puts back the saved bytes of a file nobody
+// edited since setup (restoreUneditedForRollback). A copy of the file is kept
+// before a rollback conversion.
+func convertKiroHooksFile(path, dataDir, connectorName string, pairs [][2]string, toEarlier bool, keepCopy func(dataDir, name string, data []byte) error) (int, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read Kiro hooks %s: %w", path, err)
+	}
+	_, wanted := convertKiroHookFileForms(data, pairs, toEarlier)
+	if wanted == 0 {
+		return 0, nil
+	}
+	copyName := ""
+	if keepCopy != nil {
+		sum := sha256.Sum256([]byte(strings.ToLower(path)))
+		copyName = "kiro-" + hex.EncodeToString(sum[:6]) + ".before-rollback.json"
+	}
+	converted := 0
+	err = withFileLockMode(path, false, func() error {
+		if toEarlier {
+			var keep func([]byte) error
+			if keepCopy != nil {
+				keep = func(current []byte) error { return keepCopy(dataDir, copyName, current) }
+			}
+			if done, err := restoreUneditedForRollback(dataDir, connectorName, path, keep); err != nil || done {
+				if err == nil {
+					converted = wanted
+				}
+				return err
+			}
+		}
+		return atomicTransformFileWithStateDir(path, dataDir, 0o600,
+			func(current []byte, exists bool) (atomicTransformResult, error) {
+				if !exists {
+					return atomicTransformResult{Remove: true}, nil
+				}
+				out, changed := convertKiroHookFileForms(current, pairs, toEarlier)
+				if changed == 0 {
+					return atomicTransformResult{Data: current}, nil
+				}
+				if keepCopy != nil {
+					if err := keepCopy(dataDir, copyName, current); err != nil {
+						return atomicTransformResult{}, fmt.Errorf("keep a copy of the Kiro hooks: %w", err)
+					}
+				}
+				converted = changed
+				return atomicTransformResult{Data: out}, nil
+			})
+	})
+	if err != nil {
+		return 0, fmt.Errorf("rewrite Kiro hooks in %s: %w", path, err)
+	}
+	return converted, nil
 }

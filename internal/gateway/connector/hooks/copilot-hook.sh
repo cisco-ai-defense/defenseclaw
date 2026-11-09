@@ -635,7 +635,10 @@ RESULT=$(echo "$RESPONSE" | sed '$d')
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
   {{if and (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
-elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
+{{if .Sandbox}}elif [ "$HTTP_CODE" = 429 ]; then
+  # The gateway named the limit that refused the call: show it.
+  fail_response "$(defenseclaw_sandbox_rate_refusal_reason "$RESULT")"
+{{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 

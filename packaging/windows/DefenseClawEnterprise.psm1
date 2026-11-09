@@ -1228,6 +1228,37 @@ namespace $nativeNamespace
 
         private static bool failRevertForTest = false;
 
+        // GAP-0890 r2: a thread-bound backup and restore scope for a bounded
+        // walk of DefenseClaw's own tree that an Administrator's disabled
+        // privileges would otherwise stop at a folder only SYSTEM may list. The
+        // caller disposes it in a finally block; Missing names the privileges
+        // the token does not hold. Same mechanism and same fail-closed revert
+        // as the probe and the deletion.
+        public sealed class TreeWalkScope : IDisposable
+        {
+            private readonly UninstallFilePrivilegeScope scope;
+
+            internal TreeWalkScope()
+            {
+                scope = new UninstallFilePrivilegeScope(true, true);
+            }
+
+            public string[] Missing
+            {
+                get { return scope.Missing.ToArray(); }
+            }
+
+            public void Dispose()
+            {
+                scope.Dispose();
+            }
+        }
+
+        public static TreeWalkScope EnterTreeWalkPrivileges()
+        {
+            return new TreeWalkScope();
+        }
+
         private static void FailClosedAfterRevertFailure(int error)
         {
             string message =
@@ -5300,24 +5331,6 @@ function Close-DefenseClawRestampHold {
     if ($Handle -ne [IntPtr]::Zero) {
         $nativeSecurity = Initialize-DefenseClawNativeSecurity
         $nativeSecurity::ReleaseHeldFile($Handle)
-    }
-}
-
-function Invoke-DefenseClawHeldFileStamp {
-    <#
-        Runs Stamp (a script block that writes the access list or owner of
-        Path) while Path is held; see Open-DefenseClawRestampHold.
-    #>
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][scriptblock]$Stamp
-    )
-    $hold = Open-DefenseClawRestampHold -Path $Path
-    try {
-        & $Stamp
-    }
-    finally {
-        Close-DefenseClawRestampHold -Handle $hold
     }
 }
 
@@ -10483,6 +10496,23 @@ $script:StateFileInUseNameLimit = 256
 # lists its handles by process.
 $script:UnnamedFileHolderHint = 'it is probably running as SYSTEM, which this account cannot query; to find it, open Resource Monitor (resmon.exe), CPU tab, Associated Handles, and search for the file name'
 
+function Get-DefenseClawMissingPrivilegeRefusal {
+    # GAP-0890 r2: the holder query refuses a file this account can neither
+    # query nor delete; when the token lacks backup and restore ("(SeBackup...
+    # missing)" in the native message) the way out is SYSTEM, not a retry.
+    # Returns the refusal text, or '' for any other failure.
+    param([Parameter(Mandatory)][string]$Detail)
+    if ($Detail -notmatch '\(Se[A-Za-z]+Privilege(?:, Se[A-Za-z]+Privilege)* missing\)') {
+        return ''
+    }
+    return (
+        'privileges_required: ' + $Detail + ". This account's token does not hold the backup and restore privileges that " +
+        "DefenseClaw's own files that only SYSTEM may open need, so an Administrator cannot remove them; nothing was changed " +
+        'and the services are still running. Run the same uninstall as SYSTEM ' +
+        '(an MDM or Intune run is SYSTEM; by hand, a scheduled task or psexec -s that runs the same uninstall command)'
+    )
+}
+
 function Test-DefenseClawUnnamedFileHolder {
     # GAP-0878: a holder of a file this account cannot query has no process
     # id, so the process and service exclusions below do not apply to it.
@@ -10506,8 +10536,18 @@ function Get-DefenseClawStateRootFiles {
         The regular files under StateRoot that a purge deletes: the audit
         database and its SQLite companions first, then the rest of the tree
         without following links (the removal refuses those itself).
+        FailOnUnreadable (the precommit holder check) does not skip a folder
+        this account cannot list: it walks again under the call-scoped backup
+        and restore of Invoke-DefenseClawStateRootWalk, so the files inside a
+        SYSTEM-only folder are holder-checked before anything changes, and a
+        walk that still cannot list refuses (GAP-0890 r2 review R1). Without
+        it an unreadable folder is skipped, as for the caller that only names
+        holders after a failed deletion.
     #>
-    param([Parameter(Mandatory)][hashtable]$Layout)
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [switch]$FailOnUnreadable
+    )
     $files = [Collections.Generic.List[string]]::new()
     $root = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
     if (-not [IO.Directory]::Exists($root)) {
@@ -10522,33 +10562,50 @@ function Get-DefenseClawStateRootFiles {
             [void]$first.Add($candidate)
         }
     }
-    $pending = [Collections.Generic.Stack[string]]::new()
-    $pending.Push($root)
-    while ($pending.Count -gt 0 -and $files.Count -lt $script:StateFileInUseCheckLimit) {
-        $directory = $pending.Pop()
-        $entries = @(try {
-                [IO.DirectoryInfo]::new($directory).GetFileSystemInfos()
-            }
-            catch {
-            })
-        foreach ($entry in $entries) {
-            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                continue
-            }
-            if ($entry -is [IO.DirectoryInfo]) {
-                $pending.Push([string]$entry.FullName)
-                continue
-            }
-            if ($first.Contains([string]$entry.FullName)) {
-                continue
-            }
-            $files.Add([string]$entry.FullName)
-            if ($files.Count -ge $script:StateFileInUseCheckLimit) {
-                break
+    $walkStrict = [bool]$FailOnUnreadable
+    $walkFiles = {
+        $walkList = [Collections.Generic.List[string]]::new($files)
+        $walkPending = [Collections.Generic.Stack[string]]::new()
+        $walkPending.Push($root)
+        $walkDenied = $null
+        while ($walkPending.Count -gt 0 -and $walkList.Count -lt $script:StateFileInUseCheckLimit) {
+            $walkDirectory = $walkPending.Pop()
+            $walkEntries = @(try {
+                    [IO.DirectoryInfo]::new($walkDirectory).GetFileSystemInfos()
+                }
+                catch {
+                    if ($null -eq $walkDenied) {
+                        $walkDenied = $_
+                    }
+                })
+            foreach ($walkEntry in $walkEntries) {
+                if (($walkEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                if ($walkEntry -is [IO.DirectoryInfo]) {
+                    $walkPending.Push([string]$walkEntry.FullName)
+                    continue
+                }
+                if ($first.Contains([string]$walkEntry.FullName)) {
+                    continue
+                }
+                $walkList.Add([string]$walkEntry.FullName)
+                if ($walkList.Count -ge $script:StateFileInUseCheckLimit) {
+                    break
+                }
             }
         }
+        if ($walkStrict -and $null -ne $walkDenied) {
+            throw $walkDenied.Exception
+        }
+        return , $walkList.ToArray()
     }
-    return , $files.ToArray()
+    if ($FailOnUnreadable) {
+        $walkResult = @(Invoke-DefenseClawStateRootWalk -WalkRoot $root -WalkLabel StateRoot -WalkName 'preflight file walk' -Walk $walkFiles)
+        return , $walkResult
+    }
+    $walkStrict = $false
+    return , (& $walkFiles)
 }
 
 function Get-DefenseClawStateFileHolders {
@@ -10583,6 +10640,10 @@ function Get-DefenseClawStateFileHolders {
         }
         catch {
             if ($FailOnQueryError) {
+                $missingPrivileges = Get-DefenseClawMissingPrivilegeRefusal -Detail $_.Exception.Message
+                if ($missingPrivileges) {
+                    throw $missingPrivileges
+                }
                 throw (
                     'uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw data files (' +
                     $_.Exception.Message + '); nothing was changed; run the uninstall again'
@@ -10727,7 +10788,7 @@ function Assert-DefenseClawStandaloneStateFilesNotInUse {
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return
     }
-    $paths = Get-DefenseClawStateRootFiles -Layout $Layout
+    $paths = Get-DefenseClawStateRootFiles -Layout $Layout -FailOnUnreadable
     if ($paths.Count -eq 0) {
         return
     }
@@ -14227,7 +14288,7 @@ function Set-DefenseClawManagedAcls {
             -Kind MachinePolicyFile `
             -GatewayServiceSID $gatewaySID
     }
-    $codexStateCopy = Resolve-DefenseClawCodexManagedHooksStateCopy `
+    $codexStateCopy = Resolve-DefenseClawCodexManagedHooksStateCopySettled `
         -Path $Layout.CodexManagedHooksStatePath
     if (-not $SkipCodexMachineState -and
         [bool]$Layout.CodexTargetEnabled -and
@@ -16554,7 +16615,7 @@ function New-DefenseClawDeploymentMetadata {
         if ([bool]$Layout.CodexTargetEnabled) {
             foreach ($entry in @(
                 @($Layout.CodexMachinePolicyPath, 'policy'),
-                @((Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath), 'managed hooks state')
+                @((Resolve-DefenseClawCodexManagedHooksStateCopySettled -Strict -Path $Layout.CodexManagedHooksStatePath), 'managed hooks state')
             )) {
                 if (-not (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $entry[0] `
@@ -17313,7 +17374,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
         # (GAP-0773). Install, ensure and repair still judge them, and the
         # judgement refuses the link by name.
         if ($Scope -ceq 'Lifecycle' -or
-            [string]::IsNullOrEmpty((Get-DefenseClawCodexMachineFolderLink -Layout $Layout))) {
+            [string]::IsNullOrEmpty((Get-DefenseClawVendorMachineFolderLink -Directory ([string]$Layout.CodexMachinePolicyDirectory)))) {
             $rows += , @('CodexMachinePolicyPath', $record, $every)
             $rows += , @('CodexManagedHooksStatePath', $record, $every)
         }
@@ -17327,7 +17388,7 @@ function Assert-DefenseClawStandaloneContentTrusted {
             if ([string]$row[0] -ceq 'CodexManagedHooksStatePath' -and
                 -not [string]::IsNullOrWhiteSpace($entryPath)) {
                 # The copy of the Codex state the hook reads (GAP-0650).
-                $entryPath = Resolve-DefenseClawCodexManagedHooksStateCopy -Path $entryPath
+                $entryPath = Resolve-DefenseClawCodexManagedHooksStateCopySettled -Path $entryPath
             }
             $entries.Add([pscustomobject]@{
                 Path     = $entryPath
@@ -17575,29 +17636,165 @@ function Repair-DefenseClawDeploymentAclDrift {
     return $true
 }
 
-# The link on the path of the Codex machine-policy folder (a junction at
-# ProgramData\OpenAI\Codex or above it), or '' when there is none. Standalone
-# only: Secure Client keeps its refusal. Nothing is created, opened or
-# followed (GAP-0773).
-function Get-DefenseClawCodexMachineFolderLink {
-    param([Parameter(Mandatory)][hashtable]$Layout)
+# The link on the path of a vendor machine-policy folder (a junction at
+# ProgramData\OpenAI\Codex, ProgramData\Cursor or Program Files\ClaudeCode, or
+# above it), or '' when there is none. Standalone only: Secure Client keeps its
+# refusal. Nothing is created, opened or followed (GAP-0773, GAP-0900). The walk
+# reads the attributes of each component itself (GetAttributes does not follow
+# the last component), so a junction whose target is gone is found too, which
+# Test-Path would read as an absent folder.
+# The one read of a path's attributes that the link walk makes; a smoke replaces it
+# to make the read fail.
+function Get-DefenseClawLinkCheckAttributes {
+    param([string]$Path)
+    return [IO.File]::GetAttributes($Path)
+}
+
+function Get-DefenseClawVendorMachineFolderLink {
+    param(
+        [string]$Directory,
+        # A rollback passes it: an error other than not-found is then treated like a
+        # found link (the path is returned, with a degraded event naming the path and
+        # the error) so the rollback goes on and the services come back. Without it
+        # the error propagates and the start-of-run check fails closed.
+        [switch]$Tolerant
+    )
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return ''
     }
-    $directory = [string]$Layout.CodexMachinePolicyDirectory
-    if ([string]::IsNullOrWhiteSpace($directory)) {
+    if ([string]::IsNullOrWhiteSpace($Directory)) {
         return ''
     }
-    try {
-        Assert-DefenseClawNoReparsePath -Path $directory -AllowMissingLeaf
-    }
-    catch {
-        if ($_.Exception.Message -match '^reparse points are not allowed in managed path: (?<link>.+)$') {
-            return [string]$Matches['link']
+    $current = [IO.Path]::GetFullPath($Directory).TrimEnd('\')
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        $attributes = $null
+        try {
+            $attributes = Get-DefenseClawLinkCheckAttributes -Path $current
         }
-        throw
+        catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] {
+            $attributes = $null
+        }
+        catch {
+            if (-not $Tolerant) {
+                throw
+            }
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                path      = $current
+                reason    = "the link check could not read this path ($($_.Exception.Message)); it is treated like a link and skipped, and the rollback goes on"
+            }
+            return $current
+        }
+        if ($null -ne $attributes -and
+            ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            return $current
+        }
+        $parent = [IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $current) {
+            break
+        }
+        $current = $parent
     }
     return ''
+}
+
+# Each link on the path of the Codex, Cursor and Claude Code machine-policy
+# folders (the three the lifecycle snapshot reads), as Name and Link. Standalone
+# only.
+function Get-DefenseClawVendorMachineFolderLinks {
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    $found = [Collections.Generic.List[object]]::new()
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return @()
+    }
+    foreach ($folder in @(
+        @{ Name = 'Codex'; Path = [string]$Layout.CodexMachinePolicyDirectory },
+        @{ Name = 'Cursor'; Path = [IO.Path]::Combine($script:ProgramData, 'Cursor') },
+        @{ Name = 'Claude Code'; Path = [IO.Path]::Combine($script:ProgramFiles, 'ClaudeCode', 'managed-settings.d') }
+    )) {
+        $link = Get-DefenseClawVendorMachineFolderLink -Directory $folder.Path
+        if ($link -ne '') {
+            $found.Add([pscustomobject]@{ Name = $folder.Name; Link = $link })
+        }
+    }
+    return @($found.ToArray())
+}
+
+function Format-DefenseClawVendorMachineFolderLinkFix {
+    param([Parameter(Mandatory)][object[]]$Links)
+    $found = @($Links | Microsoft.PowerShell.Core\ForEach-Object { "$($_.Name): $($_.Link)" })
+    $fixes = @($Links | Microsoft.PowerShell.Core\ForEach-Object { "cmd /c rmdir `"$($_.Link)`"" })
+    return (
+        'DefenseClaw does not follow a link in the machine-policy folder of an agent. A link sits on the path of: ' +
+        ($found -join '; ') + '. As an administrator, remove only the link (the folder it points to is not changed) with: ' +
+        ($fixes -join '; ') + ', then run the same command again'
+    )
+}
+
+function Assert-DefenseClawVendorMachineFoldersNotLinked {
+    <#
+        Install (fresh or over an existing install), Upgrade and Repair (and the
+        Ensure that runs one) snapshot the machine-policy folders of Codex,
+        Cursor and Claude Code, and a link on the path of any of them failed
+        that snapshot with 1603 after the services had stopped. With enrolled
+        accounts the rollback could then not bring the guardian back, and the
+        transaction stayed pending with the services stopped (GAP-0900). This
+        refuses before anything is changed: it runs once at the start of the
+        action, with the one link check the uninstall also uses, and names each
+        link with the command that removes it. Standalone only; Secure Client
+        keeps its behaviour.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Action
+    )
+    $links = @(Get-DefenseClawVendorMachineFolderLinks -Layout $Layout)
+    if ($links.Count -gt 0) {
+        throw (
+            "$Action stopped before it changed anything; the services and the deployment are as they were. " +
+            (Format-DefenseClawVendorMachineFolderLinkFix -Links $links)
+        )
+    }
+}
+
+# A failed action whose rollback ran while a link still sits on one of the three
+# folders says so in its error: the link and the command that removes it
+# (GAP-0900). Standalone only; any other failure is returned as it was.
+function Add-DefenseClawVendorMachineFolderLinkFix {
+    param(
+        [Parameter(Mandatory)]$ErrorRecord,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return $ErrorRecord
+    }
+    $message = [string]$ErrorRecord.Exception.Message
+    if ($message.Contains('cmd /c rmdir')) {
+        return $ErrorRecord
+    }
+    $links = @()
+    try {
+        $links = @(Get-DefenseClawVendorMachineFolderLinks -Layout $Layout)
+    }
+    catch {
+        return $ErrorRecord
+    }
+    if ($links.Count -eq 0) {
+        return $ErrorRecord
+    }
+    $exception = [InvalidOperationException]::new(
+        ($message + ' ' + (Format-DefenseClawVendorMachineFolderLinkFix -Links $links)),
+        $ErrorRecord.Exception
+    )
+    foreach ($key in @($ErrorRecord.Exception.Data.Keys)) {
+        $exception.Data[$key] = $ErrorRecord.Exception.Data[$key]
+    }
+    return [Management.Automation.ErrorRecord]::new(
+        $exception,
+        'DefenseClawVendorMachineFolderLink',
+        [Management.Automation.ErrorCategory]::InvalidOperation,
+        $null
+    )
 }
 
 function New-DefenseClawTransaction {
@@ -18106,7 +18303,7 @@ function New-DefenseClawTransaction {
     if ($IncludeCodexMachineState) {
         $codexFolderLink = ''
         if ($SkipLinkedCodexMachineState) {
-            $codexFolderLink = Get-DefenseClawCodexMachineFolderLink -Layout $Layout
+            $codexFolderLink = Get-DefenseClawVendorMachineFolderLink -Directory ([string]$Layout.CodexMachinePolicyDirectory)
         }
         foreach ($destination in @(
             $Layout.CodexMachinePolicyPath,
@@ -18469,6 +18666,7 @@ function New-DefenseClawTransaction {
             throw $snapshotError
         }
         $restartErrors = [Collections.Generic.List[string]]::new()
+        $heldRestart = ''
         $aclRestoreFailure = ''
         try {
             if (-not (Test-DefenseClawStandaloneProfile)) {
@@ -18564,20 +18762,32 @@ function New-DefenseClawTransaction {
                 -GuardianServiceName $GuardianServiceName
             if ((Test-DefenseClawStandaloneProfile) -and
                 -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Clear-DefenseClawRollbackDeferredHolds
                 Restore-DefenseClawEarlyHook `
                     -Layout $Layout `
                     -Intent $quiescingIntent `
                     -TransactionDirectory $directory
+                Assert-DefenseClawRollbackHoldsResolved
             }
         }
         catch {
-            $restartErrors.Add($_.Exception.Message)
+            if ((Test-DefenseClawStandaloneProfile) -and
+                (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+                # The services run; the replacement hook stays (GAP-0947).
+                $heldRestart = [string]$_.Exception.Message
+            }
+            else {
+                $restartErrors.Add($_.Exception.Message)
+            }
         }
         if ($restartErrors.Count -gt 0 -and $aclRestoreFailure) {
             $restartErrors.Add("restoring the deployment access lists also failed: $aclRestoreFailure")
         }
         if ($restartErrors.Count -gt 0) {
             throw "transaction snapshot failed ($($snapshotError.Exception.Message)); restoring prior service state also failed and protected quiescing recovery was retained: $($restartErrors -join '; ')"
+        }
+        if ($heldRestart -ne '') {
+            throw ("$heldRestart. The transaction snapshot had failed first: $($snapshotError.Exception.Message)")
         }
         $cleanupErrors = [Collections.Generic.List[string]]::new()
         $rollbackIntent = $null
@@ -19216,6 +19426,10 @@ function Sync-DefenseClawCodexManagedHooksStateCopy {
         return
     }
     $committed = Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout
+    # The plain resolver, on purpose (GAP-0877, review S1): this computes the
+    # name of the copy to WRITE for the counter the rollback left, odd or
+    # even, with the writer stopped by the rollback; waiting for it to settle
+    # would be wrong, and nothing here judges a copy another process made.
     $current = Resolve-DefenseClawCodexManagedHooksStateCopy -Path $statePath
     $left = @(Remove-DefenseClawCodexManagedHooksStateCopies -Directory $directory -Keep @($committed))
     foreach ($copy in $left) {
@@ -19300,7 +19514,7 @@ function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
     # the fixed name of 1.0.8), a fixed name an earlier release left, and
     # the writer copy (GAP-0650).
     $copies = [Collections.Generic.List[string]]::new()
-    foreach ($candidate in @($path, (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $path))) {
+    foreach ($candidate in @($path, (Resolve-DefenseClawCodexManagedHooksStateCopySettled -Path $path))) {
         if (-not $copies.Contains($candidate) -and
             (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate)) {
             $copies.Add($candidate)
@@ -19372,6 +19586,9 @@ function Assert-DefenseClawCodexManagedHooksStateFilePreflight {
 # writer transaction that is open (GAP-0877). A transaction takes
 # milliseconds; a counter that is still odd after this is a writer that stopped.
 $script:CodexStateSettleSeconds = 30
+# Paths whose wait reached the bound in this lifecycle run, with the seconds
+# waited (g877b review G1); Invoke-DefenseClawEnterpriseLifecycle clears it.
+$script:CodexStateUnsettled = @{}
 
 function Wait-DefenseClawCodexManagedHooksStateSettled {
     <#
@@ -19388,11 +19605,27 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
         copy of its end value the state is that copy, otherwise the check
         refuses with the named reason and changes nothing. The next Setup run
         or the next guardian pass ends a stopped transaction.
+        One stopped writer costs one wait per lifecycle run, not one per
+        caller (g877b review G1): a wait that reached its bound is remembered
+        for $Path until Invoke-DefenseClawEnterpriseLifecycle starts the next run,
+        and a later caller in the run only looks once. That look still ends
+        the same way, so the outcome is as fail-closed as the wait: a writer
+        that has ended since is judged (and forgotten), one that has not is
+        refused or judged on its end copy at once.
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
         [int]$TimeoutSeconds = $script:CodexStateSettleSeconds
     )
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath variable:script:CodexStateUnsettled)) {
+        $script:CodexStateUnsettled = @{}
+    }
+    $memo = $Path.ToLowerInvariant()
+    $waitedSeconds = $TimeoutSeconds
+    if ($script:CodexStateUnsettled.ContainsKey($memo)) {
+        $waitedSeconds = [int]$script:CodexStateUnsettled[$memo]
+        $TimeoutSeconds = 0
+    }
     $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0, $TimeoutSeconds))
     $last = [int64]0
     $waitStarted = $null
@@ -19411,6 +19644,7 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
                             [int]([DateTime]::UtcNow - $waitStarted).TotalMilliseconds, $before)
                     }
                 }
+                $script:CodexStateUnsettled.Remove($memo)
                 return [pscustomobject]@{ Path = $copy; Present = $present; Counter = $before }
             }
         }
@@ -19421,6 +19655,9 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
             $waitStarted = [DateTime]::UtcNow
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 100
+    }
+    if ($TimeoutSeconds -gt 0) {
+        $script:CodexStateUnsettled[$memo] = $TimeoutSeconds
     }
     if (($last % 2) -ne 0) {
         # A writer that stopped after it put the hook copy of its end value in
@@ -19434,11 +19671,48 @@ function Wait-DefenseClawCodexManagedHooksStateSettled {
     $why = if (($last % 2) -ne 0) { 'odd: a transaction is open' } else { 'still changing' }
     throw (
         'codex_state_unsettled: the Codex writer transaction counter next to ' + $Path +
-        ' stayed at ' + $last + ' (' + $why + ') for ' + $TimeoutSeconds +
-        ' seconds, so the Codex managed-hooks state could not be judged; nothing was changed. Next step: run ' +
+        ' stayed at ' + $last + ' (' + $why + ') for ' + $waitedSeconds +
+        ' seconds, so the Codex managed-hooks state could not be judged and this run stopped (an install, repair, ensure or upgrade that had started is rolled back, an upgrade to the release it came from; a verify changes nothing). Next step: run ' +
         (Format-DefenseClawSetupAction -Action '/repair') +
         ' again once no Codex writer is running (the next Codex writer pass ends a stopped transaction)'
     )
+}
+
+function Resolve-DefenseClawCodexManagedHooksStateCopySettled {
+    <#
+        The Codex hook copy of the state at $Path for a caller that reads or
+        stamps it, read the way the hook reads it: through
+        Wait-DefenseClawCodexManagedHooksStateSettled, so a caller that looks
+        while the Codex writer is mid-transaction does not resolve the copy of
+        "odd counter + 1", which does not exist yet (GAP-0877, review S1).
+        Resolve-DefenseClawCodexManagedHooksStateCopy stays for the callers
+        that compute a name to write or to remove (Sync-... after a rollback)
+        and for a forced uninstall, whose writers are stopped.
+        Off the standalone profile this is the plain resolver: Secure Client
+        has no writer lock and keeps the fixed-name state of 1.0.8.
+        -Strict is for a caller that judges or records the state, where a
+        counter that stays odd or keeps moving to the bound refuses with the
+        named codex_state_unsettled; without it (an ACL stamp, a gate that
+        names paths, a check that the state is gone) such a writer falls back
+        to the plain resolver, as before this wait, and the verify steps
+        (Assert-DefenseClawCodexManagedHooksStateFile) still refuse it.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$Strict
+    )
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        return (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Path)
+    }
+    try {
+        return [string](Wait-DefenseClawCodexManagedHooksStateSettled -Path $Path).Path
+    }
+    catch {
+        if ($Strict -or -not ([string]$_.Exception.Message).StartsWith('codex_state_unsettled: ', [StringComparison]::Ordinal)) {
+            throw
+        }
+        return (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Path)
+    }
 }
 
 function Assert-DefenseClawCodexManagedHooksStateFile {
@@ -22641,6 +22915,7 @@ function Restore-DefenseClawTransaction {
         [Parameter(Mandatory)][hashtable]$Layout,
         [switch]$DeferServiceRestart
     )
+    Clear-DefenseClawRollbackDeferredHolds
     Assert-DefenseClawDescendant -Path $SnapshotPath -Root $Layout.StateRoot -Label 'transaction snapshot' | Microsoft.PowerShell.Core\Out-Null
     Assert-DefenseClawNoReparsePath -Path $SnapshotPath
     $snapshot = Microsoft.PowerShell.Management\Get-Content -LiteralPath $SnapshotPath -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
@@ -23021,6 +23296,21 @@ function Restore-DefenseClawTransaction {
             continue
         }
         if ($isSharedCodexFile) {
+            # GAP-0900: a link that appeared on the Codex folder after the
+            # transaction opened. Nothing is written through it and the rollback
+            # goes on, so the services come back; the link stays for the
+            # administrator, who removes only the link. Standalone only.
+            $restoreCodexLink = Get-DefenseClawVendorMachineFolderLink `
+                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+                -Tolerant
+            if ($restoreCodexLink -ne '') {
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                    subsystem = 'rollback'
+                    path      = $restoreCodexLink
+                    reason    = "a link sits on the Codex machine-policy folder; the rollback did not write through it. As an administrator, remove only the link with: cmd /c rmdir `"$restoreCodexLink`"; the next repair or ensure then finishes the work"
+                }
+                continue
+            }
             $policyDirectoryExists = Microsoft.PowerShell.Management\Test-Path `
                 -LiteralPath $Layout.CodexMachinePolicyDirectory `
                 -PathType Container
@@ -23051,10 +23341,11 @@ function Restore-DefenseClawTransaction {
                 if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile) -and
                     ([string]$_.Exception.Message -match 'another program holds' -or
                         (Test-DefenseClawFileDeleteBlocked -Path $destination))) {
-                    throw (New-DefenseClawCodexFileHeldMessage `
+                    Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexFileHeldMessage `
                         -Layout $Layout `
                         -Path $destination `
                         -Why 'open without delete sharing, so the rollback could not put it back')
+                    continue
                 }
                 throw
             }
@@ -23079,11 +23370,23 @@ function Restore-DefenseClawTransaction {
                 # The restored file is held while its recorded access list
                 # is written back; a program that holds it open stops the
                 # restore before anything on it changes (GAP-0763).
-                $restoreHold = if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile)) {
-                    Open-DefenseClawCodexRollbackHold -Layout $Layout -Path $destination
+                try {
+                    $restoreHold = if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile)) {
+                        Open-DefenseClawCodexRollbackHold -Layout $Layout -Path $destination
+                    }
+                    else {
+                        Open-DefenseClawRestampHold -Path $destination
+                    }
                 }
-                else {
-                    Open-DefenseClawRestampHold -Path $destination
+                catch {
+                    # GAP-0947: the file is back; a late holder only keeps its
+                    # access list from being written. Leave it, carry on.
+                    if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile) -and
+                        (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+                        Add-DefenseClawRollbackDeferredHold -Message ([string]$_.Exception.Message)
+                        continue
+                    }
+                    throw
                 }
                 try {
                     try {
@@ -23137,10 +23440,11 @@ function Restore-DefenseClawTransaction {
             catch {
                 if ($isSharedCodexFile -and (Test-DefenseClawStandaloneProfile) -and
                     (Test-DefenseClawFileDeleteBlocked -Path $destination)) {
-                    throw (New-DefenseClawCodexFileHeldMessage `
+                    Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexFileHeldMessage `
                         -Layout $Layout `
                         -Path $destination `
                         -Why 'open without delete sharing, so the rollback could not remove it')
+                    continue
                 }
                 throw
             }
@@ -23152,6 +23456,20 @@ function Restore-DefenseClawTransaction {
         [bool]$codexIncludedProperty.Value) {
         # The writer copy of the Codex state is back; the hook copy the
         # counter names must say the same (GAP-0650).
+        # GAP-0900: the hook copy of the Codex state lives in the Codex machine-policy
+        # folder; with a link on its path the copy is not written through it (nothing
+        # ever writes through a link), the link is named, and the rollback goes on.
+        $stateCopyLink = Get-DefenseClawVendorMachineFolderLink `
+            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+            -Tolerant
+        if ($stateCopyLink -ne '') {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                path      = $stateCopyLink
+                reason    = "a link sits on the Codex machine-policy folder; the restored Codex state was not written for the hook through it. As an administrator, remove only the link with: cmd /c rmdir `"$stateCopyLink`"; the next repair or ensure then finishes the work"
+            }
+        }
+        if ($stateCopyLink -eq '') {
         try {
             Sync-DefenseClawCodexManagedHooksStateCopy `
                 -Layout $Layout `
@@ -23163,6 +23481,7 @@ function Restore-DefenseClawTransaction {
                 path   = [string]$Layout.CodexManagedHooksStatePath
                 reason = "the restored Codex managed runtime state could not be written for the hook: $($_.Exception.Message); the next Codex transaction writes it"
             }
+        }
         }
     }
     if ($hasCoworkSnapshot) {
@@ -23291,9 +23610,14 @@ function Restore-DefenseClawTransaction {
                 -Layout $Layout `
                 -GatewayServiceName ([string]$snapshot.gateway_service)
         }
+        # GAP-0900: nothing is stamped through a link on the Codex folder either.
+        $restoreCodexLinked = (Get-DefenseClawVendorMachineFolderLink `
+                -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+                -Tolerant) -ne ''
         Set-DefenseClawManagedAcls `
             -Layout $Layout `
             -GatewayServiceName ([string]$snapshot.gateway_service) `
+            -SkipCodexMachineState:$restoreCodexLinked `
             -AllowTransactionRecordedBrokerAbsence:(
                 $snapshotBrokerAbsent
             )
@@ -23444,6 +23768,11 @@ function Restore-DefenseClawTransaction {
                 -Snapshot $snapshot -SnapshotPath $SnapshotPath -Layout $Layout
         }
     }
+    if (-not $DeferServiceRestart) {
+        # GAP-0947: a file a late holder kept from the put-back ends the run
+        # now, with the restored services running.
+        Assert-DefenseClawRollbackHoldsResolved
+    }
 }
 
 function Assert-DefenseClawRestoredTransactionReadyForActivation {
@@ -23495,6 +23824,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
         -ServicingTransaction `
+        -RollbackRestore `
         -TransitionHookSHA256 (Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_sha256') `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
         -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
@@ -23787,11 +24117,34 @@ function Start-DefenseClawTransactionServices {
         # successful LocalSystem reconciliation while gateway is still
         # disabled, so a queued gateway restart cannot beat auto-heal.
         try {
-            [void](Wait-DefenseClawFreshGuardianReconcile `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -AllowFailedTargets)
+            if (Test-DefenseClawRollbackCoverageDeferred) {
+                # GAP-0947: a program holds the Codex requirements the
+                # recovery had to republish, so the guardian cannot reconcile
+                # until it lets go; the proof would only time out. The restored
+                # services start as they were before the run (the guardian
+                # first), the run ends with the held code, and the guardian
+                # republishes by itself once the program lets go.
+                Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                    subsystem = 'guardian'
+                    reason    = 'the guardian coverage proof of the rollback is deferred: a program holds the Codex requirements the recovery had to republish'
+                }
+                try {
+                    Start-DefenseClawService -Name $GuardianServiceName
+                }
+                catch {
+                    Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                        subsystem = 'guardian'
+                        reason    = "the guardian did not stay up on the held Codex requirements: $($_.Exception.Message)"
+                    }
+                }
+            }
+            else {
+                [void](Wait-DefenseClawFreshGuardianReconcile `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -AllowFailedTargets)
+            }
         }
         catch {
             if (-not (Test-DefenseClawRecoveryActivationDeferral `
@@ -23875,7 +24228,8 @@ function Start-DefenseClawTransactionServices {
             -GuardianServiceName $GuardianServiceName `
             -RequireBroker:([bool]$broker.existed) `
             -RequireEnumerator:$enumeratorShouldRun `
-            -AllowFailedTargets
+            -AllowFailedTargets `
+            -GuardianCoverageDeferred:(Test-DefenseClawRollbackCoverageDeferred)
     }
     if ([bool]$guardian.running) {
         # Guardian remains live while all exact boot policies are restored.
@@ -24177,6 +24531,9 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
             Invoke-DefenseClawUserNativeOTLPRestoreBestEffort `
                 -Snapshot $snapshot -SnapshotPath $SnapshotPath -Layout $Layout
         }
+    }
+    if ($rollbackRequired) {
+        Assert-DefenseClawRollbackHoldsResolved
     }
     return $snapshot
 }
@@ -27263,11 +27620,25 @@ function Restore-DefenseClawEarlyHook {
     else {
         [string]$Intent.early_hook_preimage_sha256
     }
-    Install-DefenseClawFileAtomic `
-        -Source $expected `
-        -Destination $Layout.HookPath `
-        -ExpectedSHA256 $digest `
-        -SkipIfContentMatches
+    try {
+        Install-DefenseClawFileAtomic `
+            -Source $expected `
+            -Destination $Layout.HookPath `
+            -ExpectedSHA256 $digest `
+            -SkipIfContentMatches
+    }
+    catch {
+        # GAP-0947 (review S1): standalone puts the hook back after the
+        # services run; a program that holds the replacement hook open without
+        # delete sharing leaves it in place, named, and /repair finishes it.
+        if ((Test-DefenseClawStandaloneProfile) -and
+            ([string]$_.Exception.Message -match '^another program holds ' -or
+                (Test-DefenseClawFileDeleteBlocked -Path $Layout.HookPath))) {
+            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawHookHeldMessage -Layout $Layout)
+            return
+        }
+        throw
+    }
 }
 
 # The early-hook guard fields of a lifecycle record (GAP-1305). A quiescing
@@ -27358,11 +27729,25 @@ function Restore-DefenseClawSnapshotHookAfterActivation {
     $backup = [string]$rows[0].backup
     Assert-DefenseClawDescendant -Path $backup -Root $Layout.StateRoot -Label 'transaction hook backup' |
         Microsoft.PowerShell.Core\Out-Null
-    Install-DefenseClawFileAtomic `
-        -Source $backup `
-        -Destination $Layout.HookPath `
-        -ExpectedSHA256 $oldDigest `
-        -SkipIfContentMatches
+    try {
+        Install-DefenseClawFileAtomic `
+            -Source $backup `
+            -Destination $Layout.HookPath `
+            -ExpectedSHA256 $oldDigest `
+            -SkipIfContentMatches
+    }
+    catch {
+        # GAP-0947: a program that arrived during the rollback holds the
+        # replacement hook open without delete sharing. The restored release
+        # is running; the previous hook goes back with /repair.
+        if ((Test-DefenseClawStandaloneProfile) -and
+            ([string]$_.Exception.Message -match '^another program holds ' -or
+                (Test-DefenseClawFileDeleteBlocked -Path $Layout.HookPath))) {
+            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawHookHeldMessage -Layout $Layout)
+            return
+        }
+        throw
+    }
     $live = (
         Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
     ).Hash.ToLowerInvariant()
@@ -27657,10 +28042,13 @@ function Recover-DefenseClawQuiescingIntent {
         -GuardianServiceName $GuardianServiceName
     if ((Test-DefenseClawStandaloneProfile) -and
         -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+        Clear-DefenseClawRollbackDeferredHolds
         Restore-DefenseClawEarlyHook `
             -Layout $Layout `
             -Intent $Intent `
             -TransactionDirectory $recordedDirectory
+        # A held hook ends the recovery here, named, with the intent pending.
+        Assert-DefenseClawRollbackHoldsResolved
     }
     $rollbackIntent = Publish-DefenseClawInstallRollbackIntent `
         -Snapshot $Intent `
@@ -29170,7 +29558,7 @@ function Get-DefenseClawSharedManagedHookOwners {
     $specifications = @(
         @{
             name = 'Codex'
-            state = [string](Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath)
+            state = [string](Resolve-DefenseClawCodexManagedHooksStateCopySettled -Strict -Path $Layout.CodexManagedHooksStatePath)
             limit = 4194304
             bindings = @(@{
                 path = [string]$Layout.CodexMachinePolicyPath
@@ -30003,7 +30391,7 @@ function Complete-DefenseClawCodexRequirementsRemoval {
     # (GAP-0650).
     $committedState = Get-DefenseClawCodexManagedHooksStateCommittedPath -Layout $Layout
     if ((Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath (Resolve-DefenseClawCodexManagedHooksStateCopy -Path $Layout.CodexManagedHooksStatePath)) -or
+        -LiteralPath (Resolve-DefenseClawCodexManagedHooksStateCopySettled -Path $Layout.CodexManagedHooksStatePath)) -or
         ([IO.File]::Exists($committedState) -and [IO.FileInfo]::new($committedState).Length -gt 0)) {
         throw 'DefenseClaw Codex managed-hooks state remains after managed removal'
     }
@@ -30937,6 +31325,18 @@ function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
     }
     if ([string]$report.phase -notin @($expectedPhase)) {
         throw "managed-hook lifecycle snapshot $Action returned invalid phase: $($report.phase)"
+    }
+    # GAP-0900: a link the restore did not read or write through is named, with
+    # the command that removes it; the rollback went on without that connector.
+    $keptLinks = $report.PSObject.Properties['kept_links']
+    if ($null -ne $keptLinks -and $null -ne $keptLinks.Value) {
+        foreach ($keptLink in @($keptLinks.Value)) {
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+                subsystem = 'rollback'
+                path      = [string]$keptLink
+                reason    = "a link sits on the machine-policy folder of an agent; the managed-hook lifecycle $Action did not read or write through it and the rollback went on without that agent. As an administrator, remove only the link with: cmd /c rmdir `"$keptLink`""
+            }
+        }
     }
     $restored = $report.PSObject.Properties['cursor_adapter_restored']
     if ($null -ne $restored -and $restored.Value -is [bool] -and [bool]$restored.Value) {
@@ -33846,7 +34246,10 @@ function Wait-DefenseClawEnterpriseReadiness {
         [int]$TimeoutSeconds = 90,
         # Rollback, recovery and activation; see Get-DefenseClawGuardianReadinessProbe.
         [switch]$AllowFailedTargets,
-        [string[]]$AllowedFailedTargetSIDs
+        [string[]]$AllowedFailedTargetSIDs,
+        # GAP-0947: the guardian can neither prove coverage nor stay up until
+        # a program lets go of the Codex requirements (rollback only).
+        [switch]$GuardianCoverageDeferred
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     Write-DefenseClawLifecyclePhase -Stage 'enterprise readiness wait'
@@ -33872,7 +34275,15 @@ function Wait-DefenseClawEnterpriseReadiness {
             (Test-DefenseClawGatewayReady `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName)
-        if ($gatewayReady) {
+        if ($gatewayReady -and $GuardianCoverageDeferred) {
+            # The guardian refuses to run on the administrator's edited Codex
+            # policy (its startup reconcile fails and the process exits) until
+            # the program lets go and the policy is republished, so neither
+            # its coverage nor its process is waited for. The gateway and
+            # the other services run.
+            $guardianReady = $true
+        }
+        elseif ($gatewayReady) {
             $guardianReady = Test-DefenseClawGuardianReady `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
@@ -35278,14 +35689,54 @@ function Assert-DefenseClawInstalledArtifacts {
     }
 }
 
+function New-DefenseClawRollbackHeldMessage {
+    <#
+        GAP-0947 (r109): the retryable refusal of a rollback that cannot put
+        one file back because a program holds it open in the way (it arrived
+        after the pre-stop gate). The stable code first, the holder by name and
+        process id (a holder Windows reports without a process id, such as a
+        program that runs as SYSTEM, is named by the hint instead), the file,
+        what was refused, and the next step: /repair finishes the rollback once
+        the program lets go. The services are not named here: the rollback puts
+        everything else back and starts them (Assert-DefenseClawRollbackHoldsResolved),
+        and the result adds the state they are in. The Setup exit code is 1618.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][string]$Why,
+        [Parameter(Mandatory)][string]$Left
+    )
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $named = @()
+    try {
+        $excluded = [Collections.Generic.HashSet[int]]::new()
+        [void]$excluded.Add([int]$PID)
+        $named = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($full) -Excluded $excluded).Values |
+                Microsoft.PowerShell.Core\ForEach-Object {
+                    if ([int]$_.Id -le 0) { [string]$_.Name }
+                    elseif ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
+                    else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
+                })
+    }
+    catch {
+        $named = @()
+    }
+    if ($named.Count -eq 0) {
+        $named = @('a program that Windows did not name (it may run as SYSTEM, so no process id is available)')
+    }
+    return ('{0}: {1} has {2}, {3}, {4}; {5}, and the transaction is still pending. Next step: close that program, then run {6}; it finishes the rollback (an MDM retries exit 1618 on its own)' -f $Code, ($named -join ', '), $full, $What, $Why, $Left, (Format-DefenseClawSetupAction -Action '/repair'))
+}
+
 function New-DefenseClawCodexFileHeldMessage {
     <#
         g582 round 11e (GAP-0803): the retryable refusal of a rollback that
         cannot put a Codex machine-policy file back because a program holds
         it open in the way (it arrived after the pre-stop gate). Same shape as
-        the gate's codex_state_held and codex_requirements_held: the stable
-        code first, the holder by name where Windows can tell, the file and
-        what was refused. The Setup exit code is 1618.
+        the gate's codex_state_held and codex_requirements_held; GAP-0947: the
+        rollback leaves this one file as it is and puts the rest back.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -35298,25 +35749,107 @@ function New-DefenseClawCodexFileHeldMessage {
         [IO.Path]::GetFullPath([string]$Layout.CodexMachinePolicyPath).TrimEnd('\'),
         [StringComparison]::OrdinalIgnoreCase
     )
-    $code = if ($isRequirements) { 'codex_requirements_held' } else { 'codex_state_held' }
-    $what = if ($isRequirements) { 'the Codex machine requirements' } else { 'the Codex managed-hooks state' }
-    $named = @()
-    try {
-        $excluded = [Collections.Generic.HashSet[int]]::new()
-        [void]$excluded.Add([int]$PID)
-        $named = @((Get-DefenseClawStateFileHolders -Layout $Layout -Paths @($full) -Excluded $excluded).Values |
-                Microsoft.PowerShell.Core\ForEach-Object {
-                    if ([string]::IsNullOrWhiteSpace([string]$_.UserName)) { '{0} (process id {1})' -f $_.Name, $_.Id }
-                    else { '{0} (process id {1}, {2})' -f $_.Name, $_.Id, $_.UserName }
-                })
+    return (New-DefenseClawRollbackHeldMessage `
+        -Layout $Layout `
+        -Path $full `
+        -Code $(if ($isRequirements) { 'codex_requirements_held' } else { 'codex_state_held' }) `
+        -What $(if ($isRequirements) { 'the Codex machine requirements' } else { 'the Codex managed-hooks state' }) `
+        -Why $Why `
+        -Left 'the rollback left that file as it is and put everything else back')
+}
+
+function New-DefenseClawHookHeldMessage {
+    <#
+        GAP-0947: the previous hook cannot be put back after the restored
+        release is running because a program holds the installed hook open
+        without delete sharing. The replacement hook stays in place (it
+        answers for the restored gateway, as it did through the rollback).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    return (New-DefenseClawRollbackHeldMessage `
+        -Layout $Layout `
+        -Path ([string]$Layout.HookPath) `
+        -Code 'hook_in_use' `
+        -What 'the installed hook' `
+        -Why 'open without delete sharing, so the rollback could not put the previous hook back' `
+        -Left 'the rollback left the replacement hook in place and put everything else back')
+}
+
+# GAP-0947: a file a late holder keeps the rollback from putting back is left
+# as it is and listed here; the rollback carries on, starts the restored
+# services, and ends with the retryable held code and the transaction still
+# pending (Assert-DefenseClawRollbackHoldsResolved). Standalone only.
+$script:DefenseClawRollbackDeferredHolds = [Collections.Generic.List[string]]::new()
+# Set when the recovery could not republish the managed Codex policy over a
+# file the administrator edited (a holder keeps the replacement out): the
+# guardian cannot reconcile until the holder lets go, so the restored services
+# start without the guardian's coverage proof (Test-DefenseClawRollbackCoverageDeferred).
+$script:DefenseClawRollbackCoverageDeferred = $false
+
+function Test-DefenseClawRollbackHeldMessage {
+    param([AllowEmptyString()][string]$Message)
+    return ($Message -match '^(codex_requirements_held|codex_state_held|hook_in_use): ')
+}
+
+function Clear-DefenseClawRollbackDeferredHolds {
+    $script:DefenseClawRollbackDeferredHolds.Clear()
+    $script:DefenseClawRollbackCoverageDeferred = $false
+}
+
+function Test-DefenseClawRollbackCoverageDeferred {
+    return ([bool]$script:DefenseClawRollbackCoverageDeferred -and
+        $script:DefenseClawRollbackDeferredHolds.Count -gt 0 -and
+        (Test-DefenseClawStandaloneProfile))
+}
+
+function Get-DefenseClawHeldMessagePath {
+    # The file a held message names ("<code>: <holder> has <path>, <what>, ..."), or ''.
+    param([AllowEmptyString()][string]$Message)
+    $found = [regex]::Match($Message, '\bhas (?<path>[A-Za-z]:\\.+?), (?:the Codex|the installed)')
+    if ($found.Success) { return $found.Groups['path'].Value.TrimEnd('\') }
+    return ''
+}
+
+function Add-DefenseClawRollbackDeferredHold {
+    param([Parameter(Mandatory)][string]$Message)
+    # One entry per file: a second step that meets the same holder on the
+    # same file does not repeat it in the result.
+    $path = Get-DefenseClawHeldMessagePath -Message $Message
+    $known = $false
+    foreach ($entry in $script:DefenseClawRollbackDeferredHolds) {
+        if ($entry -ceq $Message -or
+            ($path -ne '' -and (Get-DefenseClawHeldMessagePath -Message $entry) -ieq $path)) {
+            $known = $true
+        }
     }
-    catch {
-        $named = @()
+    if (-not $known) {
+        $script:DefenseClawRollbackDeferredHolds.Add($Message)
     }
-    if ($named.Count -eq 0) {
-        $named = @('a program')
+    Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+        subsystem = 'rollback'
+        reason    = "a program holds a file the rollback must put back; it is left as it is and the transaction stays pending: $Message"
     }
-    return ('{0}: {1} has {2}, {3}, {4}; the rollback stopped before it finished and the transaction is still pending. Next step: close that program, then run the same command again (an MDM retries exit 1618 on its own); it completes the rollback' -f $code, ($named -join ', '), $full, $what, $Why)
+}
+
+function Assert-DefenseClawRollbackHoldsResolved {
+    <#
+        Ends a rollback that left a held file alone: the services are running
+        as restored, and the run fails with the retryable held code (exit
+        1618) and the pending transaction, which /repair finishes after the
+        program lets go.
+    #>
+    if ($script:DefenseClawRollbackDeferredHolds.Count -eq 0) {
+        return
+    }
+    $message = $script:DefenseClawRollbackDeferredHolds -join ' | '
+    $guardianNotProven = Test-DefenseClawRollbackCoverageDeferred
+    Clear-DefenseClawRollbackDeferredHolds
+    if ($guardianNotProven) {
+        # GAP-0947 review S2: the services run, but this rollback did not prove
+        # the guardian's coverage.
+        $message += ". The guardian's coverage was not proven by this rollback: it cannot reconcile the Codex policy while that file is held and may keep retrying, so run /verify after /repair"
+    }
+    throw $message
 }
 
 function Open-DefenseClawCodexRollbackHold {
@@ -35331,6 +35864,11 @@ function Open-DefenseClawCodexRollbackHold {
         [Parameter(Mandatory)][string]$Path,
         [ValidateRange(0, 120)][int]$TimeoutSeconds = 30
     )
+    if ($script:DefenseClawRollbackDeferredHolds.Count -gt 0) {
+        # A file is already left alone: a second holder does not cost another
+        # full wait.
+        $TimeoutSeconds = [Math]::Min($TimeoutSeconds, 5)
+    }
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ($true) {
         $handle = Open-DefenseClawRestampHold -Path $Path -TolerateHeld
@@ -35400,6 +35938,76 @@ function Get-DefenseClawRecordedCodexRequirementsPreimage {
     }
 }
 
+function Invoke-DefenseClawCodexRequirementsReconcileOrRecover {
+    <#
+        GAP-0955: the forward Codex reconcile of an install, upgrade, repair or
+        ensure. A requirements.toml an administrator edited against the managed
+        policy (allow_managed_hooks_only = false) failed this reconcile, rolled
+        back, and was replaced by the rollback's recovery (GAP-0802): the run
+        reported failure for a machine it had repaired. Standalone replaces the
+        file here, with the same recovery and the same named backup, and goes
+        on. A failure the recovery does not explain (the file verifies, or the
+        recovery changed nothing) stays the failure of the run; a file a
+        program holds is the retryable held error. Secure Client keeps the
+        failure.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    $reconcileFailure = $null
+    try {
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action reconcile)
+    }
+    catch {
+        $reconcileFailure = $_
+    }
+    if ($null -eq $reconcileFailure) {
+        return
+    }
+    $recoveredBefore = @($script:DefenseClawRecoveredCodexRequirementsNotes).Count
+    if (Test-DefenseClawStandaloneProfile) {
+        Repair-DefenseClawRecoveredCodexRequirements `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName
+    }
+    if (@($script:DefenseClawRecoveredCodexRequirementsNotes).Count -eq $recoveredBefore) {
+        throw $reconcileFailure
+    }
+}
+
+function Get-DefenseClawBlockedCodexStatePath {
+    <#
+        GAP-0947: the Codex managed runtime state file (the fixed name and the
+        writer copy) a program holds open in a way that keeps the Codex
+        reconcile from reading or replacing it, or '' when none is. The
+        recovery of the requirements publishes through that reconcile, so a
+        holder here stops it as one on requirements.toml does.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    # A partial layout (a test fixture) may not carry the key.
+    $statePath = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksStatePath)
+    if ([string]::IsNullOrWhiteSpace($statePath)) {
+        return ''
+    }
+    foreach ($candidate in (@($statePath) +
+            @(Get-DefenseClawCodexManagedHooksStateWriterCopyList -Layout $Layout))) {
+        if ([string]::IsNullOrWhiteSpace($candidate) -or
+            -not [IO.Path]::IsPathRooted($candidate) -or
+            -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            continue
+        }
+        if ((Test-DefenseClawFileReadBlocked -Path $candidate) -or
+            (Test-DefenseClawFileDeleteBlocked -Path $candidate)) {
+            return $candidate
+        }
+    }
+    return ''
+}
+
 function Repair-DefenseClawRecoveredCodexRequirements {
     <#
         g582 round 11e (GAP-0802). A rollback puts back the requirements.toml
@@ -35442,6 +36050,13 @@ function Repair-DefenseClawRecoveredCodexRequirements {
     }
     catch {
         $verifyError = [string]$_.Exception.Message
+    }
+    $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
+    if ($blockedState -ne '') {
+        throw (New-DefenseClawCodexFileHeldMessage `
+            -Layout $Layout `
+            -Path $blockedState `
+            -Why 'open in a way that keeps Setup from reading or replacing it, so the recovery could not republish the managed policy')
     }
     $exists = Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf
     if ($exists) {
@@ -35502,6 +36117,13 @@ function Repair-DefenseClawRecoveredCodexRequirements {
                 -Path $path `
                 -Why 'open in a way that keeps Setup from replacing it, so the recovery could not republish the managed policy')
         }
+        $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
+        if ($blockedState -ne '') {
+            throw (New-DefenseClawCodexFileHeldMessage `
+                -Layout $Layout `
+                -Path $blockedState `
+                -Why 'open in a way that keeps Setup from reading or replacing it, so the recovery could not republish the managed policy')
+        }
         $base = Get-DefenseClawRecordedCodexRequirementsPreimage -Layout $Layout
         $mode = 'it was rebuilt from the preimage DefenseClaw recorded'
         if ($base.Length -eq 0) {
@@ -35551,6 +36173,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         [switch]$RequireReadiness,
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
+        # GAP-0900: set only by the rollback of a transaction (Restore). A link on
+        # the Codex folder is then named and not read through; every forward path
+        # (static validation, the install commit) still fails closed on it.
+        [switch]$RollbackRestore,
         [string]$TransitionHookSHA256 = '',
         # Restore-only: an authenticated servicing preimage that predates the
         # Broker or Enumerator. Ordinary callers keep the full service set.
@@ -35861,13 +36487,53 @@ function Assert-DefenseClawEnterpriseDeployment {
             }
         }
     }
+    $codexRequirementsDeferred = $false
+    # GAP-0900: a rollback (-RollbackRestore) that finds a link on the Codex folder
+    # does not read the Codex machine policy through it. The checks below keep their
+    # lines; they are skipped by the braces around them.
+    $codexFolderLink = ''
+    if ($RollbackRestore -and $codexTargetEnabled) {
+        $codexFolderLink = Get-DefenseClawVendorMachineFolderLink `
+            -Directory ([string]$Layout.CodexMachinePolicyDirectory) `
+            -Tolerant
+    }
+    if ($codexFolderLink -ne '') {
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_degraded -Fields @{
+            subsystem = 'rollback'
+            path      = $codexFolderLink
+            reason    = "a link sits on the Codex machine-policy folder; its policy was not checked and Codex is not protected until the link is removed with: cmd /c rmdir `"$codexFolderLink`""
+        }
+    }
+    if ($codexFolderLink -eq '') {
     if ($codexTargetEnabled) {
         Assert-DefenseClawCodexMachinePolicyDirectory `
             -Path $Layout.CodexVendorDirectory
         Assert-DefenseClawCodexMachinePolicyDirectory `
             -Path $Layout.CodexMachinePolicyDirectory
         Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
-        Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+        try {
+            Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+        }
+        catch {
+            # GAP-0947: a rollback whose Codex state copy a program holds open
+            # could not write the copy the hook reads (Sync-...StateCopy), so
+            # the state check cannot pass until the program lets go. The
+            # restored services still start; the run ends with the held code.
+            $blockedState = ''
+            if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
+                (Test-DefenseClawStandaloneProfile)) {
+                $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
+            }
+            if ($blockedState -eq '') {
+                throw
+            }
+            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexFileHeldMessage `
+                -Layout $Layout `
+                -Path $blockedState `
+                -Why 'open in a way that keeps Setup from reading it, so the rollback could not write the Codex state the hook reads')
+            $codexRequirementsDeferred = $true
+            $script:DefenseClawRollbackCoverageDeferred = $true
+        }
         [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
     }
     else {
@@ -35880,6 +36546,7 @@ function Assert-DefenseClawEnterpriseDeployment {
                 throw "Claude-only deployment retains stale DefenseClaw Codex ownership state: $ownedPath"
             }
         }
+    }
     }
     $gatewaySID = Get-DefenseClawServiceSID -ServiceName $GatewayServiceName
     $adminWriters = @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)
@@ -36474,19 +37141,39 @@ function Assert-DefenseClawEnterpriseDeployment {
             -ExpectedStartMode $expectedServiceStartMode
     }
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
+    if ($codexFolderLink -eq '') {
     if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
-        $codexTargetEnabled -and (Test-DefenseClawStandaloneProfile)) {
+        $codexTargetEnabled -and (Test-DefenseClawStandaloneProfile) -and
+        -not $codexRequirementsDeferred) {
         # GAP-0802: the file a rollback restored may carry an administrator's
         # hand edit of the managed policy; it is replaced by the managed
         # policy (and kept in a named backup) instead of stopping recovery.
-        Repair-DefenseClawRecoveredCodexRequirements `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName
+        try {
+            Repair-DefenseClawRecoveredCodexRequirements `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
+        }
+        catch {
+            # GAP-0947: a program that holds the file keeps the recovery from
+            # republishing the managed policy. The restored services still
+            # start (the guardian republishes once the program lets go); the
+            # rollback ends with the retryable held code and the pending
+            # transaction.
+            if (-not (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+                throw
+            }
+            Add-DefenseClawRollbackDeferredHold -Message ([string]$_.Exception.Message)
+            $codexRequirementsDeferred = $true
+            $script:DefenseClawRollbackCoverageDeferred = $true
+        }
     }
-    [void](Invoke-DefenseClawCodexRequirementsCommand `
-        -Layout $Layout `
-        -GatewayServiceName $GatewayServiceName `
-        -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+    if (-not $codexRequirementsDeferred) {
+        [void](Invoke-DefenseClawCodexRequirementsCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action $(if ($codexTargetEnabled) { 'verify' } else { 'inspect' }))
+    }
+    }
 
     if ($RequireReadiness) {
         if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
@@ -38095,6 +38782,20 @@ function Test-DefenseClawGuardianReportErrorsAttributable {
     $countsPattern = '^(?:last guardian reconcile|protected guardian authorization|protected guardian activation) is incomplete \((\d+) succeeded, (\d+) pending, (\d+) total\)$'
     foreach ($entry in @($errorsProperty.Value)) {
         $text = ([string]$entry).Trim()
+        # Standalone (GAP-0900): Windows names the account of a row as "user (SID)"
+        # (GAP-2290); a row whose account is unknown is named by its SID alone. The
+        # key is connector@SID either way; the SID is the last "(S-1-...)" before
+        # the first ": " (Windows account names hold no colon).
+        if (Test-DefenseClawStandaloneProfile) {
+            $accountLabel = [regex]::Match($text, '^last guardian reconcile failed for (?<connector>[^@\s]+)@(?<account>.+?)(?: \((?<sid>S-1-[0-9-]+)\))?: ')
+            if ($accountLabel.Success) {
+                $who = if ($accountLabel.Groups['sid'].Success) { $accountLabel.Groups['sid'].Value } else { $accountLabel.Groups['account'].Value }
+                if (-not $failedLabels.ContainsKey($accountLabel.Groups['connector'].Value + '@' + $who)) {
+                    return $false
+                }
+                continue
+            }
+        }
         $failed = [regex]::Match($text, '^last guardian reconcile failed for (\S+): ')
         if ($failed.Success) {
             if (-not $failedLabels.ContainsKey($failed.Groups[1].Value)) {
@@ -39004,6 +39705,19 @@ function Assert-DefenseClawStandaloneUninstallInstallTree {
     }
     catch {
         $message = [string]$_.Exception.Message
+        if ((Test-DefenseClawStandaloneProfile) -and (Test-DefenseClawAccessDeniedError -ErrorRecord $_)) {
+            # A folder under InstallRoot that this account cannot list was not
+            # installed by DefenseClaw (it sets no such access list there), so
+            # it is the documented unexpected-item refusal, not a raw error
+            # (GAP-0890 r2 review R4).
+            $deniedRoot = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\')
+            throw (
+                'refusing to remove unexpected item from managed install root: ' + $message +
+                '. The uninstall stopped before it changed anything and the services are still running. DefenseClaw did not install ' +
+                'that item and this account cannot open it: move it out of ' + $deniedRoot +
+                ' (as SYSTEM, which is the account that can open it), then run the uninstall again'
+            )
+        }
         if ($message -notlike 'refusing to remove unexpected * from managed install root: *') {
             throw
         }
@@ -39059,42 +39773,44 @@ function Remove-DefenseClawUninstallStateTreeLinks {
     if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw (Get-DefenseClawUninstallStateLinkRefusal -Item $root)
     }
-    $links = [Collections.Generic.List[object]]::new()
-    $pending = [Collections.Generic.Stack[string]]::new()
-    $pending.Push($stateRoot)
-    while ($pending.Count -gt 0) {
-        $directory = $pending.Pop()
-        foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force) {
-            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                $links.Add($item)
-            }
-            elseif ($item.PSIsContainer) {
-                $pending.Push([string]$item.FullName)
-            }
-        }
-    }
-    foreach ($link in $links) {
-        $path = [string]$link.FullName
-        try {
-            if ($link.PSIsContainer) {
-                # Non-recursive: RemoveDirectory deletes the junction or
-                # directory link itself and never enters it.
-                [IO.Directory]::Delete($path, $false)
-            }
-            else {
-                [IO.File]::Delete($path)
+    Invoke-DefenseClawStateRootWalk -WalkRoot $stateRoot -WalkLabel StateRoot -WalkName 'junction scan' -NothingChanged -Walk {
+        $links = [Collections.Generic.List[object]]::new()
+        $pending = [Collections.Generic.Stack[string]]::new()
+        $pending.Push($stateRoot)
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Pop()
+            foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force) {
+                if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    $links.Add($item)
+                }
+                elseif ($item.PSIsContainer) {
+                    $pending.Push([string]$item.FullName)
+                }
             }
         }
-        catch {
-            throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason $_.Exception.Message)
+        foreach ($link in $links) {
+            $path = [string]$link.FullName
+            try {
+                if ($link.PSIsContainer) {
+                    # Non-recursive: RemoveDirectory deletes the junction or
+                    # directory link itself and never enters it.
+                    [IO.Directory]::Delete($path, $false)
+                }
+                else {
+                    [IO.File]::Delete($path)
+                }
+            }
+            catch {
+                throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason $_.Exception.Message)
+            }
+            if ($null -ne (Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)) {
+                throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason 'it is still there')
+            }
+            Microsoft.PowerShell.Utility\Write-Warning -Message (
+                "the uninstall removed the link $path from the DefenseClaw state folder; " +
+                'the folder or file it pointed to was not changed'
+            )
         }
-        if ($null -ne (Microsoft.PowerShell.Management\Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)) {
-            throw (Get-DefenseClawUninstallStateLinkRefusal -Item $link -Reason 'it is still there')
-        }
-        Microsoft.PowerShell.Utility\Write-Warning -Message (
-            "the uninstall removed the link $path from the DefenseClaw state folder; " +
-            'the folder or file it pointed to was not changed'
-        )
     }
 }
 
@@ -39580,17 +40296,22 @@ function Remove-DefenseClawManagedTree {
             -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
         return
     }
-    Assert-DefenseClawManagedTreeNoReparse `
-        -Root $safe `
-        -AllowAFUnixSocketAt $AllowAFUnixSocketAt
+    [void](Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label -WalkName 'reparse veto' -Walk {
+        Assert-DefenseClawManagedTreeNoReparse `
+            -Root $safe `
+            -AllowAFUnixSocketAt $AllowAFUnixSocketAt
+    })
     # A tree that holds a name normalization changes (GAP-1145) is removed
     # through its extended-length path, which keeps every name exact.
-    $target = $safe
-    foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $safe -Recurse -Force)) {
-        if ((Get-DefenseClawExactItemPath -Path $item.FullName) -cne [string]$item.FullName) {
-            $target = '\\?\' + $safe
-            break
+    $target = Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label -WalkName 'name scan' -Walk {
+        $walkTarget = $safe
+        foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $safe -Recurse -Force)) {
+            if ((Get-DefenseClawExactItemPath -Path $item.FullName) -cne [string]$item.FullName) {
+                $walkTarget = '\\?\' + $safe
+                break
+            }
         }
+        return $walkTarget
     }
     # Bulldoze posture: Remove-Item can lose to a transient handle (AV scan,
     # Defender real-time, indexer, a slow service stop handler) even after
@@ -43466,34 +44187,78 @@ function Get-DefenseClawInstallRootHolders {
             -UserName ([string]$process.UserName) `
             -Parent ([string]$process.Parent)
     }
-    $files = [Collections.Generic.List[string]]::new()
-    $pending = [Collections.Generic.Stack[string]]::new()
-    if ([IO.Directory]::Exists($InstallRoot)) {
-        $pending.Push([IO.Path]::GetFullPath($InstallRoot))
-    }
-    while ($pending.Count -gt 0 -and $files.Count -lt $script:StateFileInUseCheckLimit) {
-        $entries = @(try {
-                [IO.DirectoryInfo]::new($pending.Pop()).GetFileSystemInfos()
-            }
-            catch {
-                if ($FailOnQueryError) {
-                    throw (
-                        'uninstall_in_use: could not enumerate DefenseClaw install files (' +
-                        $_.Exception.Message + '); nothing was changed; run the uninstall again'
-                    )
+    # GAP-0890 r2 review R1: a folder this account cannot list is walked again
+    # under the call-scoped backup and restore of Invoke-DefenseClawStateRootWalk
+    # (the exact InstallRoot of the standalone profile only), so the files in a
+    # SYSTEM-only folder are holder-checked too. Any other failure keeps the
+    # old behaviour: a refusal for a precommit caller, a skipped folder for the
+    # others.
+    $walkStrict = $true
+    $walkInstall = {
+        $walkFiles = [Collections.Generic.List[string]]::new()
+        $walkPending = [Collections.Generic.Stack[string]]::new()
+        $walkDenied = $null
+        if ([IO.Directory]::Exists($InstallRoot)) {
+            $walkPending.Push([IO.Path]::GetFullPath($InstallRoot))
+        }
+        while ($walkPending.Count -gt 0 -and $walkFiles.Count -lt $script:StateFileInUseCheckLimit) {
+            $walkEntries = @(try {
+                    [IO.DirectoryInfo]::new($walkPending.Pop()).GetFileSystemInfos()
                 }
-            })
-        foreach ($entry in $entries) {
-            if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                continue
-            }
-            if ($entry -is [IO.DirectoryInfo]) {
-                $pending.Push([string]$entry.FullName)
-            }
-            elseif ($files.Count -lt $script:StateFileInUseCheckLimit) {
-                $files.Add([string]$entry.FullName)
+                catch {
+                    if ($walkStrict -and (Test-DefenseClawAccessDeniedError -ErrorRecord $_)) {
+                        if ($null -eq $walkDenied) {
+                            $walkDenied = $_
+                        }
+                    }
+                    elseif ($FailOnQueryError) {
+                        throw (
+                            'uninstall_in_use: could not enumerate DefenseClaw install files (' +
+                            $_.Exception.Message + '); nothing was changed; run the uninstall again'
+                        )
+                    }
+                })
+            foreach ($walkEntry in $walkEntries) {
+                if (($walkEntry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    continue
+                }
+                if ($walkEntry -is [IO.DirectoryInfo]) {
+                    $walkPending.Push([string]$walkEntry.FullName)
+                }
+                elseif ($walkFiles.Count -lt $script:StateFileInUseCheckLimit) {
+                    $walkFiles.Add([string]$walkEntry.FullName)
+                }
             }
         }
+        if ($null -ne $walkDenied) {
+            throw $walkDenied.Exception
+        }
+        return [pscustomobject]@{ Files = $walkFiles; Pending = $walkPending.Count }
+    }
+    $walked = $null
+    try {
+        $walked = Invoke-DefenseClawStateRootWalk -WalkRoot ([IO.Path]::GetFullPath($InstallRoot)) -WalkLabel InstallRoot -WalkName 'install-root walk' -Walk $walkInstall
+    }
+    catch {
+        if ($_.Exception.Message.StartsWith('privileges_required: ', [StringComparison]::Ordinal)) {
+            throw
+        }
+        if ($_.Exception.Message.StartsWith('uninstall_in_use: ', [StringComparison]::Ordinal)) {
+            throw
+        }
+        if ($FailOnQueryError) {
+            throw (
+                'uninstall_in_use: could not enumerate DefenseClaw install files (' +
+                $_.Exception.Message + '); nothing was changed; run the uninstall again'
+            )
+        }
+        $walkStrict = $false
+        $walked = & $walkInstall
+    }
+    $files = $walked.Files
+    $pending = [Collections.Generic.Stack[string]]::new()
+    for ($leftover = 0; $leftover -lt [int]$walked.Pending; $leftover++) {
+        $pending.Push('')
     }
     if ($FailOnQueryError -and $pending.Count -gt 0) {
         throw (
@@ -43508,6 +44273,10 @@ function Get-DefenseClawInstallRootHolders {
             }
             catch {
                 if ($FailOnQueryError) {
+                    $missingPrivileges = Get-DefenseClawMissingPrivilegeRefusal -Detail $_.Exception.Message
+                    if ($missingPrivileges) {
+                        throw $missingPrivileges
+                    }
                     throw (
                         'uninstall_in_use: Restart Manager could not list the programs that hold DefenseClaw install files (' +
                         $_.Exception.Message + '); nothing was changed; run the uninstall again'
@@ -43732,6 +44501,90 @@ function Test-DefenseClawAccessDeniedError {
     return $false
 }
 
+function Invoke-DefenseClawStateRootWalk {
+    <#
+        GAP-0890 r2: runs a read walk (or a link removal that restarts safely)
+        over DefenseClaw's own StateRoot or InstallRoot. A default-token
+        Administrator holds backup and restore disabled, and Windows lists a
+        folder only SYSTEM may open only with backup intent while one of them
+        is enabled, so the plain walk stops with access denied before the
+        purge reaches any delete. Only then, only for the standalone profile
+        and only when Root is the exact StateRoot or InstallRoot of that
+        profile, the walk runs again with backup and restore enabled on a
+        thread-bound duplicate of the token for the walk alone (the process
+        token is never changed). A token that does not hold them, or any other
+        failure, stays a refusal: a named privileges_required one when the
+        listing is still denied. Walk returns its own value.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$WalkRoot,
+        [Parameter(Mandatory)][string]$WalkLabel,
+        [Parameter(Mandatory)][scriptblock]$Walk,
+        # Names the walk in the log line, so a support reader can tell which
+        # step needed the privilege (junction scan, reparse veto, name scan,
+        # preflight file walk, install-root walk).
+        [string]$WalkName = 'walk',
+        [switch]$NothingChanged
+    )
+    try {
+        return (& $Walk)
+    }
+    catch {
+        $walkFailure = $_
+        if (-not (Test-DefenseClawStandaloneProfile) -or
+            ($WalkLabel -cne 'StateRoot' -and $WalkLabel -cne 'InstallRoot') -or
+            -not (Test-DefenseClawAccessDeniedError -ErrorRecord $walkFailure)) {
+            throw
+        }
+        $walkRoots = Get-DefenseClawProfileRoots -EnterpriseProfile Standalone
+        $walkOwn = [IO.Path]::GetFullPath([string]$(if ($WalkLabel -ceq 'StateRoot') { $walkRoots.StateRoot } else { $walkRoots.InstallRoot })).TrimEnd('\')
+        if (-not [string]::Equals([IO.Path]::GetFullPath($WalkRoot).TrimEnd('\'), $walkOwn, [StringComparison]::OrdinalIgnoreCase)) {
+            throw
+        }
+    }
+    $walkNative = Initialize-DefenseClawNativeSecurity
+    $walkScope = $walkNative::EnterTreeWalkPrivileges()
+    try {
+        $walkMissing = @($walkScope.Missing)
+        try {
+            $walkValue = & $Walk
+        }
+        catch {
+            if (-not (Test-DefenseClawAccessDeniedError -ErrorRecord $_)) {
+                throw
+            }
+            $walkWhy = if ($walkMissing.Count -gt 0) {
+                "this account's token does not hold $($walkMissing -join ' and ')"
+            }
+            else {
+                'the folder still denies this account'
+            }
+            $walkState = if ($NothingChanged) {
+                'nothing was changed and the services are still running'
+            }
+            else {
+                'the purge stopped here and the uninstall can be run again'
+            }
+            throw (
+                'privileges_required: ' + $_.Exception.Message + " (the $WalkName) DefenseClaw's own folder holds a file or folder that only SYSTEM may " +
+                "list, and $walkWhy, so an Administrator cannot remove it; $walkState. Run the same uninstall as SYSTEM " +
+                '(an MDM or Intune run is SYSTEM; by hand, a scheduled task or psexec -s that runs the same uninstall command)'
+            )
+        }
+        Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+            path   = $WalkRoot
+            reason = "$WalkName listed after access denied, with backup and restore privileges enabled for this walk only: $($walkFailure.Exception.Message)"
+        }
+        Write-DefenseClawLifecycleLogDiagnostic -Message (
+            'defenseclaw_repair path=' + $WalkRoot +
+            ": $WalkName listed after access denied, with backup and restore privileges enabled for this walk only")
+        return $walkValue
+    }
+    finally {
+        $walkScope.Dispose()
+    }
+}
+
 function Remove-DefenseClawStateTreePrivileged {
     <#
         GAP-0890: the plain deletion of DefenseClaw's own tree got access
@@ -43789,13 +44642,13 @@ function Remove-DefenseClawStateTreePrivileged {
     foreach ($entry in $deleted) {
         Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
             path   = [string]$entry
-            reason = "deleted after access denied, with backup and restore privileges enabled for this call only: $($ErrorRecord.Exception.Message)"
+            reason = "delete (fallback) deleted after access denied, with backup and restore privileges enabled for this call only: $($ErrorRecord.Exception.Message)"
         }
         # The warning stream is not kept by the CLI or Setup; the lifecycle
         # log is, so each privileged deletion is named there too.
         Write-DefenseClawLifecycleLogDiagnostic -Message (
             'defenseclaw_repair path=' + [string]$entry +
-            ': deleted after access denied, with backup and restore privileges enabled for this call only')
+            ': delete (fallback) deleted after access denied, with backup and restore privileges enabled for this call only')
         if (-not $script:LifecycleLogDiagnosticWritten) {
             $logMissing = $true
         }
@@ -44042,14 +44895,28 @@ function Complete-DefenseClawStatePurge {
         $reportPath = Microsoft.PowerShell.Management\Join-Path `
             $Layout.LifecycleLockDirectory `
             "state-root-cleanup-$($Layout.PurgeScopeSHA256)-report.json"
-        [void](Invoke-DefenseClawNamespaceRootCleanup `
+        $stateCleanup = Invoke-DefenseClawNamespaceRootCleanup `
             -Source $NativeCleanupSource `
             -Request $request `
             -RequestPath $requestPath `
             -ReportPath $reportPath `
             -ExchangeDirectory $Layout.LifecycleLockDirectory `
             -ExpectedRootPresent $true `
-            -AllowAbsentRoot)
+            -AllowAbsentRoot
+        # GAP-0890 r2: the exact-root purge removes the tree with its own
+        # backup and restore run, whatever the token. Its report carries a
+        # count, not names, so the purge is recorded once, with the root and
+        # the count, in the warnings and the lifecycle log.
+        $removedCountProperty = if ($null -ne $stateCleanup) { $stateCleanup.PSObject.Properties['entries_removed'] } else { $null }
+        if ((Test-DefenseClawStandaloneProfile) -and $null -ne $removedCountProperty -and [int]$removedCountProperty.Value -gt 0) {
+            $removedReason = "native exact-root purge removed $([int]$removedCountProperty.Value) entries with backup and restore privileges enabled for that purge's own run"
+            Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
+                path   = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
+                reason = $removedReason
+            }
+            Write-DefenseClawLifecycleLogDiagnostic -Message (
+                'defenseclaw_repair path=' + [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\') + ': ' + $removedReason)
+        }
         foreach ($exchangePath in @($requestPath, $reportPath)) {
             if (Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $exchangePath `
@@ -46964,10 +47831,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
-            [void](Invoke-DefenseClawCodexRequirementsCommand `
+            Invoke-DefenseClawCodexRequirementsReconcileOrRecover `
                 -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -Action reconcile)
+                -GatewayServiceName $GatewayServiceName
             Set-DefenseClawManagedAcls `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
@@ -47267,6 +48133,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     }
     catch {
         $operationError = $_
+        # GAP-0900: the error says which link a rollback met, and its rmdir fix.
+        $operationError = Add-DefenseClawVendorMachineFolderLinkFix -ErrorRecord $operationError -Layout $Layout
         try {
             Restore-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout
             Complete-DefenseClawTransaction `
@@ -47277,6 +48145,21 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         catch {
             if (Test-DefenseClawTrustStrictAncestors) {
                 throw "$Action failed ($($operationError.Exception.Message)); rollback also failed and pending recovery was retained: $($_.Exception.Message)"
+            }
+            if ((Test-DefenseClawStandaloneProfile) -and
+                (Test-DefenseClawRollbackHeldMessage -Message ([string]$_.Exception.Message))) {
+                # GAP-0947: a program that arrived during the rollback holds a
+                # file it must put back. The restored services run; the run
+                # ends with the retryable held code, naming the holder, and
+                # the failure that caused the rollback follows it.
+                $rollbackHeld = [string]$_.Exception.Message
+                $firstFailure = [string]$operationError.Exception.Message
+                $firstPath = Get-DefenseClawHeldMessagePath -Message $firstFailure
+                if ($firstPath -ne '' -and $rollbackHeld.IndexOf($firstPath, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    # The run failed on the same held file: it is named once.
+                    throw $rollbackHeld
+                }
+                throw ($rollbackHeld + ". This $Action had failed first: " + $firstFailure)
             }
             # The pending transaction stays on disk: Repair resumes it, and
             # the next Install clears it through its automatic recovery. The
@@ -47719,6 +48602,10 @@ function Restore-DefenseClawForcedUninstallCodexPolicy {
         return 'the forced uninstall did not resolve its InstallRoot, so it could not prove the Codex ownership record is this deployment''s'
     }
     $folder = [IO.Path]::Combine($script:ProgramData, 'OpenAI', 'Codex')
+    # The plain resolver, on purpose (GAP-0877, review S1): the forced uninstall
+    # has stopped the guardian and the gateway and moved StateRoot aside
+    # (Invoke-DefenseClawForcedUninstallPreparation) before this runs, so no
+    # Codex writer transaction is open and the counter cannot move under it.
     $owner = Get-DefenseClawNuclearConnectorOwner `
         -StatePath (Resolve-DefenseClawCodexManagedHooksStateCopy -Path ([IO.Path]::Combine($folder, '.defenseclaw-managed-hooks.state'))) `
         -InstallRoot $installRoot
@@ -52196,6 +53083,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -Path $layout.LifecycleLockDirectory `
         -Label 'lifecycle lock directory' `
         -RequiredBase $script:ProgramData
+    # A new lifecycle run waits for a Codex writer afresh (g877b review G1).
+    $script:CodexStateUnsettled = @{}
     $lifecycleLock = Enter-DefenseClawLifecycleLock -Layout $layout
     # The vendor folders DefenseClaw touched, before an uninstall removes its
     # files (GAP-0704 rule i, review 3 L4).
@@ -52370,6 +53259,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     )
                 }
             }
+        }
+
+        # GAP-0900: a link on the path of a vendor machine-policy folder stops
+        # Install, Upgrade and Repair here, before a root, a recovery lane or a
+        # service is touched.
+        if ($Action -in @('Install', 'Upgrade', 'Repair')) {
+            Assert-DefenseClawVendorMachineFoldersNotLinked -Layout $layout -Action $Action
         }
 
         # An eligible Install that leftover state stops is cleared once

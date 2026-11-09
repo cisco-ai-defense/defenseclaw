@@ -104,3 +104,66 @@ def test_a_managed_runtime_searches_no_earlier_folder(tmp_path, home, monkeypatc
     assert config_module.previous_store_dirs() == (one,)
     monkeypatch.setenv(config_module.DEPLOYMENT_MODE_ENV, "managed_enterprise")
     assert config_module.previous_store_dirs() == ()
+
+
+def _long_folders(tmp_path, count, name_length=150, depth=16):
+    parent = tmp_path
+    for _ in range(depth):
+        parent = parent / ("q" * name_length)
+    parent.mkdir(parents=True)
+    made = []
+    for index in range(count):
+        folder = parent / f"state{index:02d}"
+        folder.mkdir()
+        made.append(str(folder))
+    return made
+
+
+_DIGESTS = {name: "a" * 64 for name in ("claudecode_backup.json", "codex_config_backup.json", "hermes/answers.json")}
+
+
+def test_sixteen_moves_among_long_folder_paths_keep_every_folder_and_its_digests(tmp_path, home):
+    folders = _long_folders(tmp_path, 16)
+    assert len(folders[0]) > 2000
+
+    for folder in folders:
+        assert config_module.remember_previous_store(folder, _DIGESTS) == []
+
+    assert set(config_module.previous_store_dirs()) == set(folders)
+    assert set(config_module.previous_store_backup_digests()) == set(folders)
+
+
+def test_a_list_that_cannot_fit_the_reader_budget_drops_the_oldest_folder_and_says_so(tmp_path, home, monkeypatch):
+    folders = _long_folders(tmp_path, 6, name_length=100, depth=8)
+    monkeypatch.setattr(config_module, "_STORE_HISTORY_MAX_BYTES", 4096)
+
+    notes: list[str] = []
+    for folder in folders:
+        notes = config_module.remember_previous_store(folder, _DIGESTS)
+
+    kept = config_module.previous_store_dirs()
+    assert kept and folders[-1] in kept, "the list stays readable and holds the newest folder"
+    assert folders[0] not in kept
+    assert (home / config_module.STORE_HISTORY_FILE).stat().st_size <= 4096
+    assert set(config_module.previous_store_backup_digests()) <= set(kept)
+    assert any("no longer searches" in note for note in notes), notes
+
+
+def test_sixteen_real_data_dir_moves_among_long_paths_keep_the_first_folder(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_config
+    from defenseclaw.context import AppContext
+
+    from tests.test_config_data_dir_move import _install_home
+
+    install_home, _ = _install_home(tmp_path, monkeypatch)
+    monkeypatch.setattr(config_module, "_is_admin_process", lambda: False)
+    (install_home / "claudecode_backup.json").write_text('{"had_hooks_key": true, "original_hooks": null}\n')
+    (install_home / "codex_config_backup.json").write_text('{"had_hooks_key": false, "added_codex_hooks_flag": true}\n')
+    folders = _long_folders(tmp_path / "moves", 16)
+
+    for folder in folders:
+        result = CliRunner().invoke(cmd_config.config_cmd, ["set", "data_dir", folder], obj=AppContext())
+        assert result.exit_code == 0, (result.output[-300:], str(result.exception))
+
+    assert folders[0] in config_module.previous_store_dirs()

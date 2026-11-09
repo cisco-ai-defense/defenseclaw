@@ -525,6 +525,10 @@ func agentAssetPolicySubject(reason string) string {
 			return mcpAdmissionFailedText(name, values["scan_issue"], values["next_step"])
 		}
 		return kind + " " + name + " has a failed admission scan"
+	case "mcp-definition-unproven":
+		if values["asset_type"] == "mcp" {
+			return mcpDefinitionUnprovenText(name)
+		}
 	case "not-in-approved-registry":
 		return kind + " " + name + " is not in the approved registry"
 	case "registry-required-but-empty":
@@ -628,6 +632,9 @@ func agentMCPAdmissionAllowedSentence(reason string) string {
 		return "DefenseClaw could not read admission for MCP server " + values["asset_name"] + ". This call is allowed with a warning."
 	case "mcp-admission-failed":
 		return mcpAdmissionAllowedWarning(values["asset_name"], values["scan_issue"], values["next_step"])
+	case "mcp-definition-unproven":
+		return "DefenseClaw cannot prove which definition MCP server " + values["asset_name"] + " runs. This call is allowed with a warning; " +
+			mcpDefinitionUnprovenStep + "."
 	}
 	return ""
 }

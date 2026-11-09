@@ -314,6 +314,20 @@ func updateManagedFileBackupPostHashValue(
 	return writeManagedFileBackup(backupPath, b)
 }
 
+// managedFileBackupFor returns the record of connectorName for the agent file
+// at path. A store that cannot be read yields no record.
+func managedFileBackupFor(dataDir, connectorName, path string) (managedFileBackup, bool) {
+	var found managedFileBackup
+	ok := false
+	_ = forEachManagedFileBackup(dataDir, func(b managedFileBackup) error {
+		if strings.EqualFold(b.Connector, connectorName) && sameManagedTargetPath(b.Path, path) {
+			found, ok = b, true
+		}
+		return nil
+	})
+	return found, ok
+}
+
 func managedFileSnapshotHash(data []byte, exists bool) string {
 	if !exists {
 		return managedBackupMissingHash

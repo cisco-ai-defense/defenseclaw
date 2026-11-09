@@ -101,6 +101,10 @@ const (
 
 	managedHookReasonRateLimited = "enterprise_managed_rate_limited"
 	managedHookReasonOverloaded  = "enterprise_managed_overloaded"
+
+	// The readable text of each refusal; sandboxHookRefusal picks one.
+	managedHookRateLimitedMessage = "DefenseClaw is limiting the hook requests of this account; retry shortly"
+	managedHookOverloadedMessage  = "DefenseClaw is handling as many hook requests as it can; retry shortly"
 )
 
 var hookGlobalInFlightMin = 4 * max(sandboxUserHookInFlight, sandboxUserReceiptInFlight)
@@ -433,22 +437,29 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 			"[sidecar-api] hook caller refused identity=%s route=%s reason=%s\n",
 			identity, route, refusal)
 	}
-	message := "DefenseClaw is limiting the hook requests of this account; retry shortly"
+	message := managedHookRateLimitedMessage
 	if refusal == managedHookReasonOverloaded {
-		message = "DefenseClaw is handling as many hook requests as it can; retry shortly"
+		message = managedHookOverloadedMessage
+	} else if isSandboxHookClassKey(key) {
+		message = sandboxHookBudgetMessage()
 	}
+	writeHookRateLimited(w, refusal, message)
+	return r, nil
+}
+
+// writeHookRateLimited answers 429 with the stable reason and a readable
+// message. retry_after_seconds mirrors Retry-After for the shell hooks, whose
+// curl call keeps only the body and the status.
+func writeHookRateLimited(w http.ResponseWriter, reason, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Retry-After", "1")
 	w.WriteHeader(http.StatusTooManyRequests)
-	// retry_after_seconds mirrors Retry-After for the shell hooks, whose
-	// curl call keeps only the body and the status.
 	_ = json.NewEncoder(w).Encode(map[string]string{
 		"error":               "rate_limited",
-		"reason":              refusal,
+		"reason":              reason,
 		"message":             message,
 		"retry_after_seconds": "1",
 	})
-	return r, nil
 }
 
 // hookRunSlot is the caller's run slot one admitted request holds.

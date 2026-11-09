@@ -1136,6 +1136,59 @@ class DoctorGuardrailTests(unittest.TestCase):
         managed_cfg.deployment_mode = "managed_enterprise"
         self.assertEqual(cmd_doctor._watch_root_coverage_severity(managed_cfg, ["claudecode"]), "fail")
 
+    def test_gap0905_doctor_names_the_writable_folder_and_the_chmod(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {
+            "state": "degraded",
+            "details": {
+                "watch_roots_unavailable": 1,
+                "admission_scanning_off": ["claudecode"],
+                "admission_root_writable_folders": ["/home/u/dotfiles"],
+            },
+        }
+        watcher = self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")
+        self.assertIn("/home/u/dotfiles can be written by another account", watcher["detail"])
+        self.assertIn("chmod go-w /home/u/dotfiles", watcher["detail"])
+        self.assertIn("the gateway log names each root", watcher["detail"])
+
+    def test_gap0905_doctor_warns_about_a_root_watched_closely_and_names_the_chmod(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {
+            "state": "running",
+            "details": {"admission_root_rescan_folders": ["/home/u/dotfiles"]},
+        }
+        watcher = self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")
+        self.assertEqual(watcher["status"], "warn")
+        self.assertIn("/home/u/dotfiles is group-writable and pam_group is loaded", watcher["detail"])
+        self.assertIn("chmod g-w /home/u/dotfiles", watcher["detail"])
+
+    def test_gap0905_doctor_names_both_folders_when_one_root_is_off_and_another_is_watched_closely(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {
+            "state": "degraded",
+            "details": {
+                "watch_roots_unavailable": 1,
+                "admission_scanning_off": ["claudecode"],
+                "admission_root_writable_folders": ["/home/u/shared-dotfiles"],
+                "admission_root_rescan_folders": ["/home/u/dotfiles"],
+            },
+        }
+        watcher = self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")
+        self.assertIn("/home/u/shared-dotfiles can be written by another account", watcher["detail"])
+        self.assertIn("chmod go-w /home/u/shared-dotfiles", watcher["detail"])
+        self.assertIn("/home/u/dotfiles is group-writable and pam_group is loaded", watcher["detail"])
+        self.assertIn("chmod g-w /home/u/dotfiles", watcher["detail"])
+        self.assertIn("the gateway log names each root", watcher["detail"])
+
+    def test_gap0905_doctor_passes_a_running_watcher_without_the_warning(self):
+        cfg = self._sidecar_alignment_cfg(watcher_enabled=True)
+        health = self._complete_sidecar_health()
+        health["watcher"] = {"state": "running", "details": {"skill_dirs": 2}}
+        self.assertEqual(self._sidecar_row(self._run_sidecar_health(cfg, health), "watcher")["status"], "pass")
+
     def test_sidecar_check_reports_malformed_nested_health_without_crashing(self):
         cases = (
             (

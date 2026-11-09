@@ -56,6 +56,51 @@ func boundedNativeText(text string) string {
 	return text
 }
 
+// nativeCallWrites reads the files one call writes and the facts that describe
+// them. A native file-tool call gives them in its arguments, and its facts are
+// the facts of the call. A shell command gives them only in the literal
+// envelope of an apply_patch command with a quoted here-document, the form in
+// which Codex sends its patch tool (exec_command), and the proofs then read the
+// path facts of those commands only: a path another command of the same text
+// reads or writes is judged by the rules for that command, and is no operand of
+// the patch. Any other shell text, and any call with an argument vector, writes
+// no file a content proof reads.
+func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
+	if len(input.Argv) != 0 {
+		return nil, facts
+	}
+	if PathTool(input.Tool) {
+		if input.Command != "" {
+			return nil, facts
+		}
+		return nativeFileWrites(input.Tool, input.Args), facts
+	}
+	view := facts
+	view.Paths = nil
+	var writes []nativeFileWrite
+	patchCommands := map[int64]bool{}
+	for _, command := range facts.Commands {
+		if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
+			!command.ArgvComplete || len(command.Argv) != 1 ||
+			!command.LiteralStdinComplete || command.LiteralStdinAmbiguous ||
+			parsePatchEnvelope(command.LiteralStdin).status != StatusComplete {
+			continue
+		}
+		patchCommands[command.ID] = true
+		for _, write := range nativePatchEnvelopeWrites(command.LiteralStdin) {
+			write.added = boundedNativeText(write.added)
+			write.replaced = boundedNativeText(write.replaced)
+			writes = append(writes, write)
+		}
+	}
+	for _, candidate := range facts.Paths {
+		if patchCommands[candidate.CommandID] {
+			view.Paths = append(view.Paths, candidate)
+		}
+	}
+	return writes, view
+}
+
 func readNativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 	if tool == "" || strings.TrimSpace(tool) != tool {
 		return nil
@@ -95,6 +140,23 @@ func readNativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 		writes[index].whole = !appendTool
 	}
 	return writes
+}
+
+// NativeFileWriteTargets lists, as written, the files a native file-tool call
+// writes, edits or patches (nativeFileWrites). A gateway that resolves the
+// links of a per-user home itself asks it which names to resolve.
+func NativeFileWriteTargets(input Input) []string {
+	if input.Command != "" || len(input.Argv) != 0 {
+		return nil
+	}
+	writes := nativeFileWrites(input.Tool, input.Args)
+	targets := make([]string, 0, len(writes))
+	for _, write := range writes {
+		if write.target != "" {
+			targets = append(targets, write.target)
+		}
+	}
+	return targets
 }
 
 func nativeWholeFileWrites(object map[string]any) []nativeFileWrite {
@@ -163,7 +225,8 @@ func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
 }
 
 // nativePatchWrites reads the added and removed lines of each file of one
-// apply_patch envelope. A moved file's new path receives the same hunks.
+// apply_patch envelope given to the native tool. A moved file's new path
+// receives the same hunks.
 func nativePatchWrites(object map[string]any) []nativeFileWrite {
 	if len(object) != 1 {
 		return nil
@@ -172,6 +235,12 @@ func nativePatchWrites(object map[string]any) []nativeFileWrite {
 	if !ok || parsePatchEnvelope(text).status != StatusComplete {
 		return nil
 	}
+	return nativePatchEnvelopeWrites(text)
+}
+
+// nativePatchEnvelopeWrites reads the files and the added and removed lines of
+// an apply_patch envelope that parsePatchEnvelope read complete.
+func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
 	var writes []nativeFileWrite
 	var current []int
 	for _, line := range strings.Split(

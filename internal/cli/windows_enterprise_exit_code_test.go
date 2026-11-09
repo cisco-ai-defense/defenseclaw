@@ -15,6 +15,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -89,6 +90,7 @@ func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
 		"hook_in_use":                     enterprisestatus.WindowsExitBusy,
 		"codex_state_held":                enterprisestatus.WindowsExitBusy,
 		"codex_requirements_held":         enterprisestatus.WindowsExitBusy,
+		"codex_state_unsettled":           enterprisestatus.WindowsExitFailure,
 		"bundle_apply_failed":             enterprisestatus.WindowsExitBusy,
 		"invalid_arguments":               enterprisestatus.WindowsExitInvalidArgs,
 		"bundle_config_validation_failed": enterprisestatus.WindowsExitFailure,
@@ -109,18 +111,46 @@ func TestWindowsEnterpriseFailureCodesAreInTheExitCodeTable(t *testing.T) {
 func TestWindowsEnterpriseRollbackHeldCodeSurvivesTheWrappingFailureText(t *testing.T) {
 	holder := "codex_requirements_held: notepad.exe (process id 4242, EC2AMAZ-X\\Administrator) has C:\\ProgramData\\OpenAI\\Codex\\requirements.toml, the Codex machine requirements, open without delete sharing, so the rollback could not put it back"
 	for name, message := range map[string]string{
-		"leading":       holder,
-		"upgrade":       "Upgrade failed (Codex requirements reconcile failed: boom); rollback also failed and protected recovery state was retained: managed lifecycle/hook restore failed: " + holder,
-		"state variant": "codex_state_held: a program (process id 7) has C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state, the Codex managed-hooks state, open without delete sharing, so the rollback could not put it back",
+		"leading":                       holder,
+		"upgrade":                       "Upgrade failed (Codex requirements reconcile failed: boom); rollback also failed and protected recovery state was retained: managed lifecycle/hook restore failed: " + holder,
+		"ensure, rollback met a holder": "codex_requirements_held: notepad.exe (process id 4242, EC2AMAZ-X\\Administrator) has C:\\ProgramData\\OpenAI\\Codex\\requirements.toml, the Codex machine requirements, open without delete sharing, so the rollback could not put it back; the rollback left that file as it is and put everything else back, and the transaction is still pending. Next step: close that program, then run & '.\\DefenseClawSetup-Enterprise-Standalone-x64.exe' /repair; it finishes the rollback (an MDM retries exit 1618 on its own). This ensure had failed first: Codex requirements reconcile failed: boom",
+		"hook, rollback met a holder":   "hook_in_use: a program that Windows did not name (it may run as SYSTEM, so no process id is available) has C:\\Program Files\\Cisco\\DefenseClaw\\bin\\defenseclaw-hook.exe, the installed hook, open without delete sharing, so the rollback could not put the previous hook back; the rollback left the replacement hook in place and put everything else back, and the transaction is still pending. Next step: close that program, then run /repair",
+		"state variant":                 "codex_state_held: a program (process id 7) has C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state, the Codex managed-hooks state, open without delete sharing, so the rollback could not put it back",
 	} {
 		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
-		if code != "codex_requirements_held" && code != "codex_state_held" {
+		if code != "codex_requirements_held" && code != "codex_state_held" && code != "hook_in_use" {
 			t.Fatalf("%s: code = %q, want a held code", name, code)
 		}
 		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
 		result.AddError(code, message)
 		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitBusy {
 			t.Fatalf("%s: exit = %d, want %d", name, got, enterprisestatus.WindowsExitBusy)
+		}
+	}
+}
+
+// GAP-0877 review S2: a Codex writer that never settles ends the run with the
+// named code even when the module wrapped it inside the failure and rollback
+// text of an install, repair, ensure or upgrade, and the run still exits 1603
+// (a retry of the same delivery does not get past a stopped writer).
+func TestWindowsEnterpriseUnsettledCodexStateCodeSurvivesTheWrappingFailureText(t *testing.T) {
+	unsettled := "codex_state_unsettled: the Codex writer transaction counter next to C:\\ProgramData\\OpenAI\\Codex\\.defenseclaw-managed-hooks.state stayed at 3 (odd: a transaction is open) for 30 seconds, so the Codex managed-hooks state could not be judged and this run stopped"
+	for name, message := range map[string]string{
+		"leading": unsettled,
+		"upgrade": "Upgrade failed (" + unsettled + "); rolled back to the installed release",
+		"repair":  "Repair failed: " + unsettled + "; the transaction was rolled back",
+	} {
+		code := windowsEnterpriseMessageCode(message, "lifecycle_error")
+		if code != "codex_state_unsettled" {
+			t.Fatalf("%s: code = %q, want codex_state_unsettled", name, code)
+		}
+		if got := windowsEnterpriseStderrCode([]byte(message)); !strings.Contains(got, "codex_state_unsettled:") {
+			t.Fatalf("%s: stderr code = %q, want the unsettled refusal", name, got)
+		}
+		result := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "9.9.9")
+		result.AddError(code, message)
+		if got := windowsEnterpriseFailureCodeFor(result); got != enterprisestatus.WindowsExitFailure {
+			t.Fatalf("%s: exit = %d, want %d", name, got, enterprisestatus.WindowsExitFailure)
 		}
 	}
 }

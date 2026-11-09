@@ -35,7 +35,7 @@ func TestGAP0295FreshGatewayNoAnswerUsesOutageExit(t *testing.T) {
 	addr := listener.Addr().String()
 	_ = listener.Close()
 	cmd := startGAP0295FreshServer(t, addr, freshUnansweredHelperEnv)
-	identity, ok := procidentity.Of(cmd.Process.Pid)
+	identity, ok := procidentity.Recorded(cmd.Process.Pid)
 	if !ok {
 		t.Fatal("fresh listener identity unavailable")
 	}
@@ -152,7 +152,7 @@ func checkGAP0295FirstAnswerEndsFreshWindow(t *testing.T, publishBeforeAnswer bo
 	addr := free.Addr().String()
 	_ = free.Close()
 	cmd := startGAP0295FreshServer(t, addr, freshAnsweredHelperEnv)
-	identity, ok := procidentity.Of(cmd.Process.Pid)
+	identity, ok := procidentity.Recorded(cmd.Process.Pid)
 	if !ok {
 		t.Fatal("identity unavailable")
 	}

@@ -602,7 +602,8 @@ Each request passes these steps in order:
    uploads in `x-defenseclaw-source`, which defaults to the binding's
    connector. A mismatch answers 403.
 4. **Limit.** Per binding, hook, notify and inspect calls share a bucket of
-   25 requests a second with a burst of 100 and at most 32 in flight. OTLP
+   25 requests a second with a burst of 100 and at most 475 in flight (the
+   burst plus the rate over the 15 s a request can stay open). OTLP
    has its own bucket (10 a second, burst 50), at most 4 uploads in flight per
    binding and 16 across all bindings, and a 4 MiB body cap. Over a limit the
    answer is 429 with `Retry-After: 1`.
@@ -2874,7 +2875,11 @@ The daemon calls the hook-socket routes of the managed gateway
 socket mux, never on the TCP API). Every route runs the peer decision first,
 refuses uid 0, applies its own budget key per peer uid (`<uid>|sandbox-hook`,
 `|sandbox-policy`, `|sandbox-events`; the host hook budget `<uid>` is separate),
-and answers `sandbox_*` reasons. A resolve creates a pending registration
+and answers `sandbox_*` reasons. The relayed hook and receipt classes each
+have 40 calls a second with a burst of 100 per user, shared by all of the
+user's sandboxes: the rate the gateway answers inside the hook's 3.5 s window.
+A call past it is refused at once with a 429 whose message names the budget.
+A resolve creates a pending registration
 (`internal/sandboxreg`, `<DataDir>/sandbox/registrations/<uid>.json`, 0600,
 service-owned) that the daemon binds to the sandbox; a registration holds the
 `subject_key` (an HMAC of `v1|uid|account|sid`, so directory facts never turn a

@@ -7,31 +7,39 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 )
 
 // A script whose folder is reached through more links than the walk follows
-// is a body the call could not read: it is recorded as unread, as a body the
-// call budget kept unread is, so the gateway judges it by the policy tier
-// (rel-1-0-9:GAP-0621). A chain within the bound reads the script and
-// records nothing.
+// (the links the system opens in one path: 63 on Windows, 40 on Linux, 32 on
+// macOS) is a body the call could not read: it is recorded as unread, as a
+// body the call budget kept unread is, so the gateway judges it by the policy
+// tier (rel-1-0-9:GAP-0621). A chain within the bound reads the script and
+// records nothing, on every system (rel-1-0-9:GAP-0935).
 func TestScriptBodyBehindMoreLinksThanTheWalkFollowsIsRecordedUnread(t *testing.T) {
-	for _, tc := range []struct {
-		links    int
-		wantRead bool
-	}{
-		{3, true},
-		{networkLinkHopLimit, true},
-		{networkLinkHopLimit + 1, false},
-		{networkLinkHopLimit + 5, false},
-	} {
+	limit := networkLinkHopLimit
+	if limit != SystemLinkLimit() {
+		t.Fatalf("the walk follows %d links, the system opens %d", limit, SystemLinkLimit())
+	}
+	// Every count the three systems draw their line at, and those either
+	// side of each line; the bound itself decides which are read.
+	counts := []int{3, 31, 32, 33, 39, 40, 41, 62, 63, 64, limit - 1, limit, limit + 1, limit + 5}
+	slices.Sort(counts)
+	for _, links := range slices.Compact(counts) {
+		tc := struct {
+			links    int
+			wantRead bool
+		}{links, links <= limit}
 		t.Run(fmt.Sprint(tc.links, " links"), func(t *testing.T) {
-			dir := t.TempDir()
+			// The folders are spelled without a link of their own (macOS keeps
+			// /var behind one), so the chain is the links counted.
+			dir := linkFreeTempDir(t)
 			if err := os.WriteFile(filepath.Join(dir, "safe.sh"), []byte("echo ordinary > report.txt\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cwd := localLinkChain(t, t.TempDir(), tc.links, dir)
+			cwd := localLinkChain(t, linkFreeTempDir(t), tc.links, dir)
 			fakeNetworkShare(t, t.TempDir(), 20*time.Millisecond, time.Second, func(string) {})
 			defer HookCall()()
 			_, read := readIndirectSource("safe.sh", cwd)
@@ -48,11 +56,11 @@ func TestScriptBodyBehindMoreLinksThanTheWalkFollowsIsRecordedUnread(t *testing.
 
 // Outside a hook call nothing is recorded.
 func TestScriptBodyBehindTooManyLinksOutsideAHookCallRecordsNothing(t *testing.T) {
-	dir := t.TempDir()
+	dir := linkFreeTempDir(t)
 	if err := os.WriteFile(filepath.Join(dir, "safe.sh"), []byte("echo ordinary > report.txt\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cwd := localLinkChain(t, t.TempDir(), networkLinkHopLimit+1, dir)
+	cwd := localLinkChain(t, linkFreeTempDir(t), networkLinkHopLimit+1, dir)
 	fakeNetworkShare(t, t.TempDir(), 20*time.Millisecond, time.Second, func(string) {})
 	if _, read := readIndirectSource("safe.sh", cwd); read || ShareBodyUnread() {
 		t.Errorf("outside a call: read %v, unread recorded %v", read, ShareBodyUnread())

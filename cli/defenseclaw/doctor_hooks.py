@@ -47,7 +47,9 @@ from defenseclaw.hook_integrity import (
     LAUNCHER_REINSTALL_STEP,
     claude_launcher_guard_view,
     hermes_approved_pairs,
+    hermes_command_hash,
     hermes_command_written,
+    hermes_recorded_kept_commands,
     hook_guard_problem,
 )
 from defenseclaw.inventory.plugin_identity import is_link_or_reparse
@@ -3079,11 +3081,16 @@ def hermes_kept_hook_note(data_dir: str, config_path: str) -> str:
     The gateway applies the registration and words the same notice in its own
     log (warnHermesKeptHookEntries in internal/gateway/connector), which the
     command that ran Setup does not show. Setup owns an entry by identity
-    (hermes_command_written); every other entry on an event Setup registers is
-    the user content it keeps, and it is listed, never read for what it runs.
-    Per-user Unix only, where the exact command is known.
+    (hermes_command_written). The notice lists an event only when the record
+    Setup made (hermes_recorded_kept_commands) names an entry still in the file
+    that Setup does not own, the entry it wrote and a person edited; it never
+    reads what a command says, and with no record it prints nothing. Per-user
+    Unix only, where the exact command is known.
     """
     if os.name == "nt" or not data_dir:
+        return ""
+    recorded = hermes_recorded_kept_commands(data_dir)
+    if not recorded:
         return ""
     try:
         hooks = _read_config(config_path, "hermes").get("hooks")
@@ -3101,6 +3108,7 @@ def hermes_kept_hook_note(data_dir: str, config_path: str) -> str:
             isinstance(entry, dict)
             and isinstance(entry.get("command"), str)
             and not hermes_command_written(entry["command"], current)
+            and hermes_command_hash(entry["command"]) in recorded.get(event, ())
             for entry in hooks[event]
         )
     )

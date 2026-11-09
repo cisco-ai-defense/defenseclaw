@@ -88,7 +88,7 @@ func TestGAP0295FreshGatewayBenignHookFollowsOutageMode(t *testing.T) {
 			if line, err := bufio.NewReader(ready).ReadString('\n'); err != nil || line != "ready\n" {
 				t.Fatalf("gateway fixture not ready: %q, %v", line, err)
 			}
-			identity, ok := procidentity.Of(gateway.Process.Pid)
+			identity, ok := procidentity.Recorded(gateway.Process.Pid)
 			if !ok {
 				t.Fatal("gateway fixture identity unavailable")
 			}

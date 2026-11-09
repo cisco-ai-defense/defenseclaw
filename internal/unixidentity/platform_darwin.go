@@ -128,6 +128,51 @@ func platformLocalDatabaseAccounts(ctx context.Context) (map[string]int, error) 
 	return platformLocalAccounts(ctx)
 }
 
+// platformLocalDatabaseUIDs lists the uids of the local directory node.
+func platformLocalDatabaseUIDs(ctx context.Context) ([]int, error) {
+	if err := validateTrustedTool(darwinDSCL); err != nil {
+		return nil, err
+	}
+	result, err := runTrustedCommand(ctx, darwinDSCL, []string{".", "-list", "/Users", "UniqueID"})
+	if err != nil {
+		return nil, err
+	}
+	if result.exitCode != 0 {
+		return nil, fmt.Errorf("unixidentity: dscl exited %d", result.exitCode)
+	}
+	var uids []int
+	for _, line := range strings.Split(string(result.stdout), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || validName(fields[0]) != nil {
+			continue
+		}
+		if uid, err := parseSignedDSCLID(fields[1]); err == nil {
+			uids = append(uids, uid)
+		}
+	}
+	return uids, nil
+}
+
+// platformDirectoryShowsUIDUnused: a Mac whose search policy lists only local
+// nodes answers from its local directory. A bound Mac answers at once, without
+// an error, while a domain is out of reach, so its node list must be readable
+// and list no node offline.
+func platformDirectoryShowsUIDUnused(ctx context.Context, uid int) error {
+	if !platformDirectoryConfigured() {
+		return nil
+	}
+	out, err := openDirectoryNodeStates(ctx)
+	if err != nil {
+		return fmt.Errorf("unixidentity: cannot read the Open Directory node states, so a miss for uid %d is no proof: %w", uid, err)
+	}
+	for name, state := range ParseODUtilNodeStates(out) {
+		if state == "offline" {
+			return fmt.Errorf("unixidentity: Open Directory node %s is offline, so a miss for uid %d is no proof", name, uid)
+		}
+	}
+	return nil
+}
+
 // dsclAccountRecordsOutputLimit bounds the plist of the local node's
 // account records: about 520 bytes a record, 76 KB for the 146 records of a
 // stock macOS 15 node, so room for some 8,000.

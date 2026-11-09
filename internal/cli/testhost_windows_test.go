@@ -836,11 +836,18 @@ func isolateTestDeploymentReaders(dir string) {
 		return enterpriseHookGuardianState{}, false, nil
 	})
 	sandboxSeam("windowsEnterpriseUserCleanupsForStatus", &windowsEnterpriseUserCleanupsForStatus, func() ([]enterpriseHookUserCleanup, error) { return nil, nil })
+	// The off-roster markers live in the computer's own hook runtime folder,
+	// and the removed-connectors record in its guardian state folder.
+	sandboxSeam("enterpriseHookWindowsOffRosterPublisher", &enterpriseHookWindowsOffRosterPublisher, func(string, bool) error { return nil })
+	sandboxSeam("windowsConnectorOffRosterRead", &windowsConnectorOffRosterRead, func(string) (bool, error) { return false, nil })
+	sandboxSeam("windowsEnterpriseRemovedConnectorsForStatus", &windowsEnterpriseRemovedConnectorsForStatus, func() ([]managed.RemovedConnector, error) { return nil, nil })
 	sandboxSeam("windowsEnterpriseAgentSettingsNotices", &windowsEnterpriseAgentSettingsNotices, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseNativeOTLPNotices", &windowsEnterpriseNativeOTLPNotices, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseAmpMachineFolderProblems", &windowsEnterpriseAmpMachineFolderProblems, func() []string { return nil })
 	sandboxSeam("windowsManagedHooksKeptUntrustedPolicyFiles", &windowsManagedHooksKeptUntrustedPolicyFiles, func() []string { return nil })
 	sandboxSeam("windowsEnterpriseVendorFolderProblems", &windowsEnterpriseVendorFolderProblems, func() []enterprisepolicy.VendorFolderProblem { return nil })
+	sandboxSeam("enterpriseHookWindowsUnrecordedFiles", &enterpriseHookWindowsUnrecordedFiles,
+		func(enterprisepolicy.Options, []string) []enterprisepolicy.VendorFolderProblem { return nil })
 	sandboxSeam("windowsEnterpriseVendorFolderHeal", &windowsEnterpriseVendorFolderHeal,
 		func() ([]enterprisepolicy.ReprotectedFolder, []enterprisepolicy.VendorFolderProblem) { return nil, nil })
 	sandboxSeam("windowsEnterpriseDiscoveryHomeDirs", &windowsEnterpriseDiscoveryHomeDirs, func() ([]string, error) { return nil, nil })

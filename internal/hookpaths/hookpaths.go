@@ -56,6 +56,12 @@ const (
 	ProjectSkillRootOutsideProfile = "outside-profile"
 	ProjectSkillRootSharedWritable = "shared-writable"
 	ProjectSkillRootUnreadable     = "unreadable"
+	// ProjectSkillManifestLinked is the finding for a root whose selected
+	// skill folder holds a SKILL.md that is a link to a file outside the
+	// caller's profile (or one another user can change), or a hard link
+	// (rel-1-0-9:GAP-0951). The root itself is an ordinary folder; the
+	// finding is raised only for the call that selects that skill.
+	ProjectSkillManifestLinked = "manifest-linked"
 )
 
 // TruncatedKey means at least one static write target could not fit in the
@@ -123,6 +129,14 @@ const OpaqueScopeFactPrefix = "\x00opaque-scope:"
 // only value. A gateway that cannot walk the user home reads it only for an
 // operand its own facts place as such a move destination.
 const ReplacedLinkFactPrefix = "\x00replaced-link:"
+
+// LinkTextFactPrefix keys a write operand whose link walk the user could not
+// finish because a directory on the way is closed to them (mode 0750 root:
+// /etc/sudoers.d): the value is the file the link text leads to, read from
+// the links the user can read, up to the closed directory. The answer of the
+// operand itself stays empty (unresolved); a gateway uses this one only to
+// judge the path by its name, as it judges the same name written directly.
+const LinkTextFactPrefix = "\x00link-text:"
 
 // InPlaceEntryFactPrefix keys a sed -i or perl -i operand whose directory
 // entry lies in the DefenseClaw state tree once its directory is followed
@@ -826,6 +840,74 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 	return resolved, ok
 }
 
+// linkTextWritePath follows the links of a write operand that the user can
+// read, as far as the user can see. A directory closed to the user (stat
+// fails with a permission error) ends the walk, and the rest of the name is
+// taken as written: the answer is the file the link text leads to. It is used
+// only when the full walk (resolveWritePath) failed, so an operand the user
+// can resolve keeps the physical answer. ok is false for a link loop, a
+// dot-dot after a component whose type is unknown, a Windows host, or any
+// failure other than a closed or missing directory.
+func linkTextWritePath(path string) (string, bool) {
+	if runtime.GOOS == "windows" {
+		return "", false
+	}
+	return linkTextWalk("", path, 0)
+}
+
+// LinkTextWriteTarget is the file the link text of a write operand leads to
+// as far as the user can read it (linkTextWritePath), for a gateway that
+// resolves a link itself and finds a directory on the way closed.
+func LinkTextWriteTarget(path string) (string, bool) {
+	return linkTextWritePath(path)
+}
+
+func linkTextWalk(base, path string, linkDepth int) (string, bool) {
+	if linkDepth > SystemLinkLimit() {
+		return "", false
+	}
+	current := base
+	if filepath.IsAbs(path) {
+		current = string(filepath.Separator)
+	} else if !filepath.IsAbs(base) {
+		return "", false
+	}
+	parts := strings.Split(path, "/")
+	for index, part := range parts {
+		switch part {
+		case "", ".":
+		case "..":
+			current = filepath.Dir(current)
+		default:
+			candidate := filepath.Join(current, part)
+			info, err := pathLstat(candidate)
+			switch {
+			case err == nil && info.Mode()&os.ModeSymlink != 0:
+				link, err := pathReadlink(candidate)
+				if err != nil || ProcCWDWriteOperand(candidate) {
+					return "", false
+				}
+				next, ok := linkTextWalk(current, link, linkDepth+1)
+				if !ok {
+					return "", false
+				}
+				current = next
+			case err == nil:
+				current = candidate
+			case os.IsNotExist(err) || os.IsPermission(err):
+				rest := parts[index+1:]
+				if slices.Contains(rest, "..") {
+					return "", false
+				}
+				return filepath.Join(append([]string{candidate}, rest...)...), true
+			default:
+				return "", false
+			}
+		}
+	}
+	return filepath.Clean(current), true
+}
+
 // windowsMountPointLink reports a Windows directory junction (mount point).
 // Go reports a junction as os.ModeIrregular, not os.ModeSymlink, yet a write
 // through it lands in the junction target, so the walk follows it like a
@@ -971,7 +1053,17 @@ func walkWritePathMemo(base, path string, linkDepth int, collect, patchTarget bo
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return fail()
 				}
-				linkDepth = nextDepth
+				if base != "" {
+					// The links of one resolution add up. At the top of a
+					// walk each link met starts a resolution of its own: a
+					// process stands in the folder the links before it
+					// reached (it changed into it, or it started there) and
+					// opens the name from there with a limit of its own, so
+					// the links of the folder and of the name are not one
+					// count. One chain past the limit, and a loop, are one
+					// resolution and stay unresolvable (rel-1-0-9:GAP-0935).
+					linkDepth = nextDepth
+				}
 				forms = append(forms, extra...)
 				_, err = pathLstat(current)
 				if err != nil && !os.IsNotExist(err) {
@@ -1360,6 +1452,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		if name != "" {
 			if home, err := os.UserHomeDir(); err == nil {
 				facts := projectSkillRootFacts(connector, home, cwd)
+				markLinkedProjectSkillManifests(facts, name, nil, home, cwd)
 				for key := range facts {
 					if !strings.HasPrefix(key, ProjectSkillRootUnverifiedPrefix) {
 						continue
@@ -1949,6 +2042,12 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 				resolved = state
 			}
 		}
+		linkText := ""
+		if !ok && aliasKnown && !entryOnly {
+			if text, reached := linkTextWritePath(resolutionPath); reached && text != filepath.Clean(path) {
+				linkText = text
+			}
+		}
 		if !ok {
 			resolved = ""
 		}
@@ -1959,6 +2058,13 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 		size += entry
 		targets[path] = resolved
+		if linkText != "" {
+			key := LinkTextFactPrefix + path
+			if cost := len(jsonString(key)) + 1 + len(jsonString(linkText)) + 1; size+cost <= maxEncodedTargets {
+				targets[key] = linkText
+				size += cost
+			}
+		}
 		if entryOnly {
 			key := ReplacedLinkFactPrefix + path
 			if cost := len(jsonString(key)) + 1 + len(jsonString("1")) + 1; size+cost <= maxEncodedTargets {
@@ -2667,7 +2773,8 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		root := strings.TrimPrefix(key, ProjectSkillRootUnverifiedPrefix)
 		if !filepath.IsAbs(root) || len(root) > MaxWriteTargetPathBytes ||
-			(finding != ProjectSkillRootOutsideProfile && finding != ProjectSkillRootSharedWritable && finding != ProjectSkillRootUnreadable) {
+			(finding != ProjectSkillRootOutsideProfile && finding != ProjectSkillRootSharedWritable &&
+				finding != ProjectSkillRootUnreadable && finding != ProjectSkillManifestLinked) {
 			return nil, false
 		}
 	}
@@ -2734,6 +2841,10 @@ func Decode(value string) (map[string]string, bool) {
 		}
 		if strings.HasPrefix(key, InPlaceEntryFactPrefix) && (!filepath.IsAbs(value) ||
 			!filepath.IsAbs(strings.TrimPrefix(key, InPlaceEntryFactPrefix))) {
+			return nil, false
+		}
+		if strings.HasPrefix(key, LinkTextFactPrefix) && (!filepath.IsAbs(value) ||
+			!filepath.IsAbs(strings.TrimPrefix(key, LinkTextFactPrefix))) {
 			return nil, false
 		}
 		if strings.HasPrefix(key, ReplacedLinkFactPrefix) && (value != "1" ||

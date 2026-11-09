@@ -142,6 +142,10 @@ type AssetPolicyInput struct {
 	Transport      string
 	RuntimeSurface string
 
+	// ArgsCut says Args is the start of a longer list: an allow that names
+	// the complete argument list cannot match it.
+	ArgsCut bool
+
 	// DeclaredNames are other names the asset gives itself, such as the
 	// name in a skill's SKILL.md frontmatter. A denied rule matches Name
 	// or any of them, so a copy of a denied skill in a folder with another

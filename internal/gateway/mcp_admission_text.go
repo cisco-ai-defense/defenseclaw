@@ -22,6 +22,8 @@ func mcpScanIssueClause(issue string) string {
 	switch issue {
 	case watcher.MCPScanIssueLauncher:
 		return "its launcher is not npx or uvx"
+	case watcher.MCPScanIssueArguments:
+		return "its npx or uvx arguments run code or name no package"
 	case watcher.MCPScanIssueAddress:
 		return "its URL is a loopback, private or link-local address"
 	}
@@ -47,6 +49,8 @@ func mcpAdmissionNextStep(name, issue, step string) string {
 	switch issue {
 	case watcher.MCPScanIssueLauncher:
 		alternative = "start it with npx or uvx, or serve it from a public URL"
+	case watcher.MCPScanIssueArguments:
+		alternative = "start it with npx or uvx and a package name, or serve it from a public URL"
 	case watcher.MCPScanIssueAddress:
 		alternative = "serve it from a public URL"
 	}
@@ -81,6 +85,17 @@ func mcpAdmissionFailedText(name, issue, step string) string {
 	}
 	b.WriteString("; " + mcpAdmissionNextStep(name, issue, step))
 	return b.String()
+}
+
+// mcpDefinitionUnprovenStep is the next step for an MCP server whose
+// definition DefenseClaw cannot prove (mcp-definition-unproven).
+const mcpDefinitionUnprovenStep = "start a new agent session with the server configured, or ask your administrator"
+
+// mcpDefinitionUnprovenText words the block of a call to an MCP server whose
+// definition DefenseClaw cannot prove from the agent config or earlier in
+// the session, as a sentence instead of the structured reason.
+func mcpDefinitionUnprovenText(name string) string {
+	return "MCP server " + name + " has a definition DefenseClaw cannot prove, so its calls are blocked; " + mcpDefinitionUnprovenStep
 }
 
 // mcpAdmissionAllowedWarning is the agent-visible warning of a call allowed

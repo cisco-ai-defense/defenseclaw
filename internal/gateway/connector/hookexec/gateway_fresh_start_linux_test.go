@@ -69,7 +69,7 @@ func TestGAP0295FreshStartRequiresCurrentPeerIdentity(t *testing.T) {
 	peer := &PerUserPeerRecord{done: make(chan struct{}), ok: true,
 		peer: perUserPeerProcess{pid: cmd.Process.Pid, identity: identity}}
 	close(peer.done)
-	writeRecord(identity)
+	writeRecord(recordedStart(t, cmd.Process.Pid))
 	if fresh, _ := PerUserGatewayFreshStartNoAnswer(dataDir, peer); !fresh {
 		t.Fatal("current peer record not recognized")
 	}
@@ -79,7 +79,7 @@ func TestGAP0295FreshStartRequiresCurrentPeerIdentity(t *testing.T) {
 		t.Fatal("changed peer identity recognized")
 	}
 	peer.peer.identity = identity
-	writeRecord(identity)
+	writeRecord(recordedStart(t, cmd.Process.Pid))
 	peer.at = time.Now()
 	time.Sleep(50 * time.Millisecond)
 	if err := recordPerUserGatewayAnswer(dataDir, perUserPeerProcess{pid: cmd.Process.Pid, identity: identity}); err != nil {

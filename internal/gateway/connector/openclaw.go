@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -189,7 +190,7 @@ func dropDefenseClawPluginApprovals(cfg map[string]interface{}) bool {
 		return false
 	}
 	plugin, ok := approvals["plugin"].(map[string]interface{})
-	if !ok || len(plugin) != 2 || plugin["enabled"] != true || plugin["mode"] != "session" {
+	if !ok || !isDefenseClawPluginApprovals(plugin) {
 		return false
 	}
 	delete(approvals, "plugin")
@@ -199,30 +200,49 @@ func dropDefenseClawPluginApprovals(cfg map[string]interface{}) bool {
 	return true
 }
 
+// isDefenseClawPluginApprovals reports whether an approvals.plugin block is
+// exactly what setup --human-approval writes.
+func isDefenseClawPluginApprovals(plugin map[string]interface{}) bool {
+	return len(plugin) == 2 && plugin["enabled"] == true && plugin["mode"] == "session"
+}
+
 // dropDefenseClawPluginApprovalsFile applies dropDefenseClawPluginApprovals
-// to configPath and rewrites it only when the block was there.
+// to configPath and rewrites it only when the block was there. The caller
+// holds the openclaw.json lock (see openClawConfigLocked).
 func dropDefenseClawPluginApprovalsFile(configPath string) error {
-	return withFileLock(configPath, func() error {
-		data, err := os.ReadFile(configPath)
-		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read %s: %w", configPath, err)
-		}
-		cfg, err := parseOpenClawConfig(configPath, data)
-		if err != nil {
-			return err
-		}
-		if !dropDefenseClawPluginApprovals(cfg) {
-			return nil
-		}
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal %s: %w", configPath, err)
-		}
-		return atomicWriteFile(configPath, append(out, '\n'), 0o644)
-	})
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read %s: %w", configPath, err)
+	}
+	out, err := removeFromOpenClawConfig(configPath, data, openClawRemoval{approvals: true})
+	if err != nil || out == nil {
+		return err
+	}
+	return atomicWriteFile(configPath, out, 0o644)
+}
+
+// openClawTeardownNoticeOutput receives the notice that teardown kept a changed
+// openclaw.json; tests replace it.
+var openClawTeardownNoticeOutput io.Writer = os.Stderr
+
+// openClawConfigLocked runs fn holding the cross-process lock on
+// openclaw.json. Setup and Teardown take it around every read, record update
+// and write of the file and of its pre-setup record. The setup command and a
+// gateway start run Setup at the same moment, and a second setup that read the
+// file between the first one's write and its record update saw "changed since
+// DefenseClaw wrote it" and retired the exact restore, so the uninstall that
+// followed left the rewritten file, not the bytes from before setup. Claude
+// Code and Codex hold their file lock around the same steps.
+func openClawConfigLocked(configPath string, fn func() error) error {
+	if _, err := os.Stat(filepath.Dir(configPath)); err != nil {
+		// No OpenClaw folder yet: there is no file to race over, and the
+		// lock file needs a folder to live in.
+		return fn()
+	}
+	return withFileLock(configPath, fn)
 }
 
 // OpenClawPluginApprovalsRefusal names the version, the reason and the two
@@ -262,26 +282,8 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// Surface 1: Install the embedded plugin into OpenClaw and register it
 	// in openclaw.json. Enabling the connector is the *only* step an
 	// operator needs — no separate `defenseclaw setup guardrail` phase.
-	configPath := filepath.Join(openClawHome(), "openclaw.json")
-	keepSnapshot, err := openClawSnapshotUsable(opts.DataDir, c.Name(), configPath)
-	if err != nil {
-		return fmt.Errorf("openclaw config backup: %w", err)
-	}
-	if keepSnapshot {
-		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
-			return fmt.Errorf("openclaw config backup: %w", err)
-		}
-	}
-	observedVersion := openClawObservedVersion(opts)
-	dropRejectedApprovals := OpenClawLacksPluginApprovals(observedVersion)
-	if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled, dropRejectedApprovals,
-		openClawConversationHooksSupported(observedVersion)); err != nil {
-		return fmt.Errorf("openclaw extension install: %w", err)
-	}
-	if keepSnapshot {
-		if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
-			return fmt.Errorf("openclaw config backup hash: %w", err)
-		}
+	if err := c.registerPlugin(opts); err != nil {
+		return err
 	}
 
 	// Surface 2: Plugin subprocess enforcement
@@ -297,6 +299,39 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	}
 
 	return nil
+}
+
+// registerPlugin installs the plugin and registers it in openclaw.json, and
+// keeps the pre-setup record of the file in step. The record is read, written
+// and updated under one hold of the file lock (see openClawConfigLocked).
+func (c *OpenClawConnector) registerPlugin(opts SetupOpts) error {
+	configPath := filepath.Join(openClawHome(), "openclaw.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("openclaw extension install: %w", err)
+	}
+	return openClawConfigLocked(configPath, func() error {
+		keepSnapshot, err := openClawSnapshotUsable(opts.DataDir, c.Name(), configPath)
+		if err != nil {
+			return fmt.Errorf("openclaw config backup: %w", err)
+		}
+		if keepSnapshot {
+			if err := captureManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+				return fmt.Errorf("openclaw config backup: %w", err)
+			}
+		}
+		observedVersion := openClawObservedVersion(opts)
+		dropRejectedApprovals := OpenClawLacksPluginApprovals(observedVersion)
+		if err := installOpenClawExtension(openClawHome(), opts.HILTEnabled, dropRejectedApprovals,
+			openClawConversationHooksSupported(observedVersion)); err != nil {
+			return fmt.Errorf("openclaw extension install: %w", err)
+		}
+		if keepSnapshot {
+			if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+				return fmt.Errorf("openclaw config backup hash: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 // IsBundledPlugin reports whether dir is DefenseClaw's own OpenClaw plugin
@@ -411,27 +446,38 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 
 	configPath := filepath.Join(openClawHome(), "openclaw.json")
 	dropRejectedApprovals := OpenClawLacksPluginApprovals(openClawObservedVersion(opts))
-	if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
-		errs = append(errs, fmt.Sprintf("restore openclaw.json backup: %v", err))
-	} else if restored {
-		extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
-		parentDir := filepath.Join(openClawHome(), "extensions")
-		if err := safeRemoveAll(extDir, parentDir); err != nil {
-			errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
-		}
-		// The snapshot predates this setup and can hold the block an
-		// earlier setup --human-approval wrote.
-		if dropRejectedApprovals {
-			if err := dropDefenseClawPluginApprovalsFile(configPath); err != nil {
-				errs = append(errs, fmt.Sprintf("remove approvals.plugin: %v", err))
+	// One hold covers the restore-or-cleanup decision and its write, so a setup
+	// that starts meanwhile (a gateway start) cannot interleave with it.
+	if err := openClawConfigLocked(configPath, func() error {
+		if restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.Name(), "openclaw.json", configPath); err != nil {
+			errs = append(errs, fmt.Sprintf("restore openclaw.json backup: %v", err))
+		} else if restored {
+			extDir := filepath.Join(openClawHome(), "extensions", "defenseclaw")
+			parentDir := filepath.Join(openClawHome(), "extensions")
+			if err := safeRemoveAll(extDir, parentDir); err != nil {
+				errs = append(errs, fmt.Sprintf("remove extension dir: %v", err))
+			}
+			// The snapshot predates this setup and can hold the block an
+			// earlier setup --human-approval wrote.
+			if dropRejectedApprovals {
+				if err := dropDefenseClawPluginApprovalsFile(configPath); err != nil {
+					errs = append(errs, fmt.Sprintf("remove approvals.plugin: %v", err))
+				}
+			}
+		} else {
+			if _, statErr := os.Stat(managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")); statErr == nil {
+				fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: %s changed after DefenseClaw set it up (OpenClaw or you saved it); "+
+					"removed only the DefenseClaw settings and kept everything else, so the file is not byte for byte the copy from before setup\n", configPath)
+			}
+			if err := uninstallOpenClawExtension(openClawHome(), dropRejectedApprovals); err != nil {
+				errs = append(errs, fmt.Sprintf("uninstall extension: %v", err))
+			} else {
+				discardManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json")
 			}
 		}
-	} else {
-		if err := uninstallOpenClawExtension(openClawHome(), dropRejectedApprovals); err != nil {
-			errs = append(errs, fmt.Sprintf("uninstall extension: %v", err))
-		} else {
-			discardManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json")
-		}
+		return nil
+	}); err != nil {
+		errs = append(errs, err.Error())
 	}
 
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
@@ -548,98 +594,97 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 
 // patchOpenClawConfig reads openclaw.json (creates it if missing), ensures
 // the DefenseClaw plugin is allowed, enabled, and has its extension path
-// in plugins.load.paths. Other sections are left untouched.
+// in plugins.load.paths. Other sections are left untouched. The caller holds
+// the openclaw.json lock (see openClawConfigLocked).
 func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropRejectedApprovals, allowConversationHooks bool) error {
-	return withFileLock(configPath, func() error {
-		cfg := map[string]interface{}{}
-		var before map[string]interface{}
-		original, readErr := os.ReadFile(configPath)
-		if readErr == nil && len(original) > 0 {
-			parsed, err := parseOpenClawConfig(configPath, original)
-			if err != nil {
-				return err
-			}
-			cfg = parsed
-			before, _ = parseOpenClawConfig(configPath, original)
-		} else if readErr != nil && !os.IsNotExist(readErr) {
-			return fmt.Errorf("read %s: %w", configPath, readErr)
-		}
-
-		plugins, _ := cfg["plugins"].(map[string]interface{})
-		if plugins == nil {
-			plugins = map[string]interface{}{}
-		}
-
-		plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
-
-		entries, _ := plugins["entries"].(map[string]interface{})
-		if entries == nil {
-			entries = map[string]interface{}{}
-		}
-		// Merge, so keys an operator wrote under the entry (hooks, config)
-		// stay (GAP-0596). DefenseClaw writes "enabled" and, on OpenClaw
-		// releases that accept it, the conversation-hook grant the model
-		// outage warning needs, unless the operator already set that key.
-		entry, _ := entries["defenseclaw"].(map[string]interface{})
-		if entry == nil {
-			entry = map[string]interface{}{}
-		}
-		if err := reconcileOpenClawPluginConfig(entry, configPath, original); err != nil {
+	cfg := map[string]interface{}{}
+	var before map[string]interface{}
+	original, readErr := os.ReadFile(configPath)
+	if readErr == nil && len(original) > 0 {
+		parsed, err := parseOpenClawConfig(configPath, original)
+		if err != nil {
 			return err
 		}
-		entry["enabled"] = true
-		if allowConversationHooks {
-			hooks, _ := entry["hooks"].(map[string]interface{})
-			if hooks == nil {
-				hooks = map[string]interface{}{}
-			}
-			if _, set := hooks["allowConversationAccess"]; !set {
-				hooks["allowConversationAccess"] = true
-			}
-			entry["hooks"] = hooks
-		}
-		entries["defenseclaw"] = entry
-		plugins["entries"] = entries
+		cfg = parsed
+		before, _ = parseOpenClawConfig(configPath, original)
+	} else if readErr != nil && !os.IsNotExist(readErr) {
+		return fmt.Errorf("read %s: %w", configPath, readErr)
+	}
 
-		load, _ := plugins["load"].(map[string]interface{})
-		if load == nil {
-			load = map[string]interface{}{}
-		}
-		load["paths"] = appendUniqueString(removeDefenseClawLoadPaths(load["paths"]), extDir)
-		plugins["load"] = load
+	plugins, _ := cfg["plugins"].(map[string]interface{})
+	if plugins == nil {
+		plugins = map[string]interface{}{}
+	}
 
-		cfg["plugins"] = plugins
-		if enablePluginApprovals {
-			approvals, _ := cfg["approvals"].(map[string]interface{})
-			if approvals == nil {
-				approvals = map[string]interface{}{}
-			}
-			pluginApprovals, _ := approvals["plugin"].(map[string]interface{})
-			if pluginApprovals == nil {
-				pluginApprovals = map[string]interface{}{}
-			}
-			pluginApprovals["enabled"] = true
-			if _, ok := pluginApprovals["mode"]; !ok {
-				pluginApprovals["mode"] = "session"
-			}
-			approvals["plugin"] = pluginApprovals
-			cfg["approvals"] = approvals
-		} else if dropRejectedApprovals {
-			dropDefenseClawPluginApprovals(cfg)
-		}
+	plugins["allow"] = appendUniqueString(plugins["allow"], "defenseclaw")
 
-		// The file already says everything this patch would write: leave it
-		// as the user wrote it, comments and all, instead of rewriting it as
-		// plain JSON on every gateway start.
-		if before != nil && reflect.DeepEqual(before, cfg) {
-			return nil
+	entries, _ := plugins["entries"].(map[string]interface{})
+	if entries == nil {
+		entries = map[string]interface{}{}
+	}
+	// Merge, so keys an operator wrote under the entry (hooks, config)
+	// stay (GAP-0596). DefenseClaw writes "enabled" and, on OpenClaw
+	// releases that accept it, the conversation-hook grant the model
+	// outage warning needs, unless the operator already set that key.
+	entry, _ := entries["defenseclaw"].(map[string]interface{})
+	if entry == nil {
+		entry = map[string]interface{}{}
+	}
+	if err := reconcileOpenClawPluginConfig(entry, configPath, original); err != nil {
+		return err
+	}
+	entry["enabled"] = true
+	if allowConversationHooks {
+		hooks, _ := entry["hooks"].(map[string]interface{})
+		if hooks == nil {
+			hooks = map[string]interface{}{}
 		}
-		out, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal %s: %w", configPath, err)
+		if _, set := hooks["allowConversationAccess"]; !set {
+			hooks["allowConversationAccess"] = true
 		}
-		return atomicWriteFile(configPath, append(out, '\n'), 0o644)
-	})
+		entry["hooks"] = hooks
+	}
+	entries["defenseclaw"] = entry
+	plugins["entries"] = entries
+
+	load, _ := plugins["load"].(map[string]interface{})
+	if load == nil {
+		load = map[string]interface{}{}
+	}
+	load["paths"] = appendUniqueString(removeDefenseClawLoadPaths(load["paths"]), extDir)
+	plugins["load"] = load
+
+	cfg["plugins"] = plugins
+	if enablePluginApprovals {
+		approvals, _ := cfg["approvals"].(map[string]interface{})
+		if approvals == nil {
+			approvals = map[string]interface{}{}
+		}
+		pluginApprovals, _ := approvals["plugin"].(map[string]interface{})
+		if pluginApprovals == nil {
+			pluginApprovals = map[string]interface{}{}
+		}
+		pluginApprovals["enabled"] = true
+		if _, ok := pluginApprovals["mode"]; !ok {
+			pluginApprovals["mode"] = "session"
+		}
+		approvals["plugin"] = pluginApprovals
+		cfg["approvals"] = approvals
+	} else if dropRejectedApprovals {
+		dropDefenseClawPluginApprovals(cfg)
+	}
+
+	// The file already says everything this patch would write: leave it
+	// as the user wrote it, comments and all, instead of rewriting it as
+	// plain JSON on every gateway start.
+	if before != nil && reflect.DeepEqual(before, cfg) {
+		return nil
+	}
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal %s: %w", configPath, err)
+	}
+	return atomicWriteFile(configPath, append(out, '\n'), 0o644)
 }
 
 // uninstallOpenClawExtension removes the extension directory and deletes
@@ -667,34 +712,13 @@ func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool) error
 		return fmt.Errorf("read openclaw.json: %w", err)
 	}
 
-	cfg, err := parseOpenClawConfig(configPath, data)
+	out, err := removeFromOpenClawConfig(configPath, data, openClawRemoval{registration: true, approvals: dropRejectedApprovals})
 	if err != nil {
-		return err
-	}
-
-	plugins, _ := cfg["plugins"].(map[string]interface{})
-	if plugins != nil {
-		plugins["allow"] = removeString(plugins["allow"], "defenseclaw")
-		if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-			removeDefenseClawEntryKeys(entries)
-			plugins["entries"] = entries
+		errs = append(errs, err.Error())
+	} else if out != nil {
+		if err := atomicWriteFile(configPath, out, 0o644); err != nil {
+			errs = append(errs, fmt.Sprintf("write openclaw.json: %v", err))
 		}
-		if load, ok := plugins["load"].(map[string]interface{}); ok {
-			load["paths"] = removeDefenseClawLoadPaths(load["paths"])
-			plugins["load"] = load
-		}
-		cfg["plugins"] = plugins
-	}
-	if dropRejectedApprovals {
-		dropDefenseClawPluginApprovals(cfg)
-	}
-
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal openclaw.json: %w", err)
-	}
-	if err := atomicWriteFile(configPath, append(out, '\n'), 0o644); err != nil {
-		errs = append(errs, fmt.Sprintf("write openclaw.json: %v", err))
 	}
 
 	if len(errs) > 0 {

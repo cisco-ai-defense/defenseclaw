@@ -26,26 +26,15 @@ const (
 )
 
 // ExactPAMAuthenticationBypass recognizes the text a native file-tool call
-// (nativeFileWrites: a whole-file write, an edit, a multi-edit or a patch,
+// or shell apply_patch here-document (nativeCallWrites: a whole-file write, an edit, a multi-edit or a patch,
 // whatever the tool calls its arguments) puts into a protected PAM
 // configuration file, named directly or reached through an existing link the
 // facts record (PathFact.Linked). It does not inspect shell command text, read
 // files, or retain attacker-controlled values.
 func ExactPAMAuthenticationBypass(input Input, facts Facts) (PAMAuthenticationBypassProof, bool) {
-	if input.Command != "" || len(input.Argv) != 0 {
-		return "", false
-	}
-	writes := nativeFileWrites(input.Tool, input.Args)
+	writes, facts := nativeCallWrites(input, facts)
 	for _, write := range writes {
-		target, ok := nativeAbsoluteTarget(write.target, input.CWD)
-		if !ok {
-			continue
-		}
-		files := []string{target}
-		if nativeOperandsCoverTarget(facts, len(writes), target) {
-			files = nativeReachedFiles(facts, target)
-		}
-		for _, file := range files {
+		for _, file := range nativeWriteFiles(input, facts, writes, write, false) {
 			if proof, proven := pamBypassProof(file, write); proven {
 				return proof, true
 			}
@@ -139,52 +128,126 @@ func pamDocumentationOrScriptName(value string) bool {
 	return false
 }
 
+// exactPAMLines reads the logical lines of PAM text. Every member of a stack
+// is an ordinary line to the proof: a module line, an `include` or `substack`
+// control, an `@include` directive, a type with the leading "-" that ignores a
+// missing module, a line with a trailing comment and a continued line. A line
+// the grammar does not read stays a member too (an opaque line), judged by
+// what it says about pam_permit.so, so one line outside the grammar never
+// hides a permit-all inserted beside it. Text that is not PAM text at all (a
+// NUL, a bare CR, invalid UTF-8, over the bound) is not read.
 func exactPAMLines(target, content string) ([]exactPAMLine, bool) {
 	if content == "" || len(content) > maxCommandBytes || !utf8.ValidString(content) ||
 		strings.ContainsAny(content, "\x00\r") {
 		return nil, false
 	}
-
 	pamConf := EtcSpelling(target) == "/etc/pam.conf"
-	lines := make([]exactPAMLine, 0, 4)
-	for _, rawLine := range strings.Split(content, "\n") {
-		line := strings.Trim(rawLine, " \t")
-		if line == "" || strings.HasPrefix(line, "#") {
+	physical := strings.Split(content, "\n")
+	lines := make([]exactPAMLine, 0, len(physical))
+	for index := 0; index < len(physical); index++ {
+		logical := physical[index]
+		for strings.HasSuffix(strings.TrimRight(logical, " \t"), "\\") && index+1 < len(physical) {
+			logical = strings.TrimSuffix(strings.TrimRight(logical, " \t"), "\\") + " " + physical[index+1]
+			index++
+		}
+		line := strings.Trim(pamWithoutComment(logical), " \t")
+		if line == "" {
 			continue
 		}
-		if strings.ContainsAny(line, "#\\") {
-			return nil, false
-		}
-		fields, ok := exactPAMFields(line)
-		if !ok {
-			return nil, false
-		}
-		facilityIndex, controlIndex, moduleIndex := 0, 1, 2
-		if pamConf {
-			if len(fields) < 4 || !exactPAMServiceName(fields[0]) {
-				return nil, false
-			}
-			facilityIndex, controlIndex, moduleIndex = 1, 2, 3
-		} else if len(fields) < 3 {
-			return nil, false
-		}
-		if !exactPAMFacility(fields[facilityIndex]) ||
-			!exactPAMBypassControl(fields[controlIndex]) ||
-			!exactPAMModule(fields[moduleIndex]) {
-			return nil, false
-		}
-		for _, argument := range fields[moduleIndex+1:] {
-			if !exactPAMModuleArgument(argument) {
-				return nil, false
-			}
-		}
-		lines = append(lines, exactPAMLine{
-			fingerprint: canonicalPAMBypassLine(fields, controlIndex),
-			permitAuth: fields[facilityIndex] == "auth" &&
-				path.Base(fields[moduleIndex]) == "pam_permit.so",
-		})
+		lines = append(lines, exactPAMLineOf(line, pamConf))
 	}
-	return lines, len(lines) != 0
+	return lines, true
+}
+
+// pamWithoutComment drops the comment of a PAM line: a "#" outside a
+// bracketed word starts it, as in a line the module reads.
+func pamWithoutComment(line string) string {
+	inBracket := false
+	for offset := 0; offset < len(line); offset++ {
+		switch line[offset] {
+		case '[':
+			inBracket = true
+		case ']':
+			inBracket = false
+		case '#':
+			if !inBracket {
+				return line[:offset]
+			}
+		}
+	}
+	return line
+}
+
+// exactPAMLineOf is one non-empty logical line: read by the grammar when it
+// fits, else an opaque member.
+func exactPAMLineOf(line string, pamConf bool) exactPAMLine {
+	if parsed, ok := exactPAMGrammarLine(line, pamConf); ok {
+		return parsed
+	}
+	words := strings.Fields(line)
+	opaque := exactPAMLine{fingerprint: "?\x1f" + strings.Join(words, "\x1f")}
+	if pamConf && len(words) != 0 {
+		words = words[1:]
+	}
+	if len(words) < 3 || strings.TrimPrefix(words[0], "-") != "auth" {
+		return opaque
+	}
+	for _, word := range words[2:] {
+		if path.Base(word) == "pam_permit.so" {
+			opaque.permitAuth = true
+		}
+	}
+	return opaque
+}
+
+// exactPAMGrammarLine reads one line of the grammar: type, control, module
+// and arguments (the service name leads in pam.conf), or `@include name`.
+func exactPAMGrammarLine(line string, pamConf bool) (exactPAMLine, bool) {
+	fields, ok := exactPAMFields(line)
+	if !ok {
+		return exactPAMLine{}, false
+	}
+	if fields[0] == "@include" {
+		if len(fields) != 2 || !exactPAMIncludeName(fields[1]) {
+			return exactPAMLine{}, false
+		}
+		return exactPAMLine{fingerprint: canonicalPAMBypassLine(fields, 1)}, true
+	}
+	facilityIndex, controlIndex, moduleIndex := 0, 1, 2
+	if pamConf {
+		if len(fields) < 4 || !exactPAMServiceName(fields[0]) {
+			return exactPAMLine{}, false
+		}
+		facilityIndex, controlIndex, moduleIndex = 1, 2, 3
+	} else if len(fields) < 3 {
+		return exactPAMLine{}, false
+	}
+	facility := strings.TrimPrefix(fields[facilityIndex], "-")
+	if !exactPAMFacility(facility) || !exactPAMBypassControl(fields[controlIndex]) {
+		return exactPAMLine{}, false
+	}
+	including := fields[controlIndex] == "include" || fields[controlIndex] == "substack"
+	if including && !exactPAMIncludeName(fields[moduleIndex]) || !including && !exactPAMModule(fields[moduleIndex]) {
+		return exactPAMLine{}, false
+	}
+	for _, argument := range fields[moduleIndex+1:] {
+		if !exactPAMModuleArgument(argument) {
+			return exactPAMLine{}, false
+		}
+	}
+	return exactPAMLine{
+		fingerprint: canonicalPAMBypassLine(fields, controlIndex),
+		permitAuth:  !including && facility == "auth" && path.Base(fields[moduleIndex]) == "pam_permit.so",
+	}, true
+}
+
+// exactPAMIncludeName is the stack an include, substack or @include line
+// names: a service name or an absolute path.
+func exactPAMIncludeName(value string) bool {
+	if strings.HasPrefix(value, "/") {
+		return exactPAMModule(value)
+	}
+	return exactPAMServiceName(value)
 }
 
 func canonicalPAMBypassLine(fields []string, controlIndex int) string {
@@ -249,7 +312,7 @@ func exactPAMFacility(value string) bool {
 
 func exactPAMBypassControl(value string) bool {
 	switch value {
-	case "required", "requisite", "sufficient", "optional":
+	case "required", "requisite", "sufficient", "optional", "include", "substack":
 		return true
 	}
 	return len(value) >= 3 && value[0] == '[' && value[len(value)-1] == ']' &&

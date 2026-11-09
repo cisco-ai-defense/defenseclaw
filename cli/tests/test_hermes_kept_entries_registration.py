@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS, hermes_kept_hook_note, unix_hermes_hook_problem
+from defenseclaw.hook_integrity import HERMES_HOME_RECORD_FILE, hermes_command_hash
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the Unix Hermes registration")
 
@@ -75,12 +76,29 @@ def test_a_registration_with_only_a_padded_command_is_reported(tmp_path):
     assert state == "stale" and "pre_tool_call has 0 DefenseClaw handlers" in problem
 
 
+def _record_setup(tmp_path: Path, kept: dict[str, list[str]] | None = None) -> None:
+    """Write the Hermes home record Setup makes: per event, the commands it wrote and the commands it kept."""
+
+    hooks = {
+        event: {"wrote": [hermes_command_hash(event)], **({"kept": [hermes_command_hash(c) for c in kept[event]]} if event in (kept or {}) else {})}
+        for event in _HERMES_REQUIRED_HOOKS
+    }
+    record = {"home": str(tmp_path), "set_up_at": "2026-11-09T00:00:00Z", "hooks": hooks}
+    (tmp_path / HERMES_HOME_RECORD_FILE).write_text(json.dumps(record), encoding="utf-8")
+
+
+def _add_entry(config: Path, event: str, command: str, *, first: bool = True) -> None:
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    entry = {"command": command, "timeout": 30}
+    document["hooks"][event] = [entry, *document["hooks"][event]] if first else [*document["hooks"][event], entry]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+
 def test_setup_says_which_events_kept_an_entry(tmp_path):
     config, script, command = _registration(tmp_path)
-    document = yaml.safe_load(config.read_text(encoding="utf-8"))
-    document["hooks"]["pre_tool_call"].insert(0, {"command": command + " ", "timeout": 30})
-    document["hooks"]["post_tool_call"].insert(0, {"command": str(script) + ".off", "timeout": 30})
-    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    _add_entry(config, "pre_tool_call", command + " ")
+    _add_entry(config, "post_tool_call", str(script) + ".off")
+    _record_setup(tmp_path, {"pre_tool_call": [command + " "], "post_tool_call": [str(script) + ".off"]})
 
     note = hermes_kept_hook_note(str(tmp_path), str(config))
 
@@ -90,6 +108,7 @@ def test_setup_says_which_events_kept_an_entry(tmp_path):
 
 def test_setup_says_nothing_when_every_entry_is_its_own(tmp_path):
     config, _script, _command = _registration(tmp_path)
+    _record_setup(tmp_path)
 
     assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
     assert hermes_kept_hook_note(str(tmp_path), str(tmp_path / "missing.yaml")) == ""
@@ -99,9 +118,8 @@ def test_the_restart_step_of_a_hermes_setup_prints_the_kept_entry_notice(tmp_pat
     from defenseclaw.commands import cmd_setup
 
     config, _script, command = _registration(tmp_path)
-    document = yaml.safe_load(config.read_text(encoding="utf-8"))
-    document["hooks"]["pre_tool_call"].insert(0, {"command": command + " ", "timeout": 30})
-    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+    _add_entry(config, "pre_tool_call", command + " ")
+    _record_setup(tmp_path, {"pre_tool_call": [command + " "]})
     monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *a, **k: True)
     monkeypatch.setattr(cmd_setup.connector_paths, "hermes_config_path", lambda: str(config))
     warned: list[str] = []
@@ -122,7 +140,7 @@ def test_a_double_quoted_copy_of_the_command_is_kept_beside_the_setup_written_en
     document["hooks"][event] = [{"command": chr(34) + command + chr(34), "timeout": 30}, *document["hooks"].get(event, [])]
     for required in _HERMES_REQUIRED_HOOKS:
         document["hooks"][required] = [
-            {**entry, "command": "\x27" + command + "\x27"} if entry["command"] == command else entry
+            {**entry, "command": chr(39) + command + chr(39)} if entry["command"] == command else entry
             for entry in document["hooks"][required]
         ]
     config.write_text(yaml.safe_dump(document), encoding="utf-8")
@@ -133,9 +151,107 @@ def test_a_double_quoted_copy_of_the_command_is_kept_beside_the_setup_written_en
 def test_an_extra_event_with_the_setup_written_single_quoted_command_is_still_reported(tmp_path):
     config, script, command = _registration(tmp_path)
     document = yaml.safe_load(config.read_text(encoding="utf-8"))
-    document["hooks"]["some_future_event"] = [{"command": "\x27" + command + "\x27", "timeout": 30}]
+    document["hooks"]["some_future_event"] = [{"command": chr(39) + command + chr(39), "timeout": 30}]
     config.write_text(yaml.safe_dump(document), encoding="utf-8")
 
     state, problem = unix_hermes_hook_problem(str(config), str(script), check_approvals=False)
 
     assert state == "stale" and "some_future_event" in problem
+
+
+def test_a_users_own_hook_is_kept_without_a_notice(tmp_path):
+    config, script, _command = _registration(tmp_path)
+    _add_entry(config, "pre_tool_call", str(tmp_path / "user-hook.sh"))
+    _add_entry(config, "post_tool_call", "/opt/tools/audit --event post_tool_call")
+    _record_setup(tmp_path)
+
+    assert unix_hermes_hook_problem(str(config), str(script), check_approvals=False) == ("", "")
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+def test_the_notice_lists_a_copy_of_a_defenseclaw_hook_and_not_the_users_hook_beside_it(tmp_path):
+    config, script, command = _registration(tmp_path)
+    _add_entry(config, "pre_tool_call", str(tmp_path / "user-hook.sh"))
+    _add_entry(config, "post_tool_call", command + " ")
+    _record_setup(tmp_path, {"post_tool_call": [command + " "]})
+
+    note = hermes_kept_hook_note(str(tmp_path), str(config))
+
+    assert "(events: post_tool_call)" in note
+    assert "pre_tool_call" not in note
+
+
+_NAMES_A_HOOK = [
+    "~/.defenseclaw/hooks/hookX",
+    "$HOME/.defenseclaw/hooks/hookX --event pre_tool_call",
+    "bash /somewhere/else/hermes-hook.sh",
+    "echo hermes-hook.sh",
+    "bash /somewhere/else/hermes-hook.sh.off --event pre_tool_call",
+    "sh -c \"$HOME/.defenseclaw/hooks/hookX --event pre_tool_call\"",
+    "printf %s " + chr(39) + "hermes-hook.sh" + chr(39) + " >/dev/null",
+    "true # hermes-hook.sh",
+    "true # ~/.defenseclaw/hooks/hermes-hook.sh",
+    "echo hook --connector hermes",
+    "bash /opt/tools/audit.sh",
+]
+
+
+@pytest.mark.parametrize("command", _NAMES_A_HOOK)
+def test_an_entry_the_setup_record_names_is_listed_whatever_the_command_says(tmp_path, command):
+    config, _script, _command = _registration(tmp_path)
+    _add_entry(config, "pre_tool_call", command)
+    _record_setup(tmp_path, {"pre_tool_call": [command]})
+
+    assert "(events: pre_tool_call)" in hermes_kept_hook_note(str(tmp_path), str(config))
+
+
+@pytest.mark.parametrize("command", _NAMES_A_HOOK)
+def test_a_user_hook_that_only_names_a_defenseclaw_hook_gets_no_notice(tmp_path, command):
+    config, _script, _command = _registration(tmp_path)
+    _add_entry(config, "pre_tool_call", command)
+    _add_entry(config, "post_tool_call", command, first=False)
+    _record_setup(tmp_path)
+
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+@pytest.mark.parametrize("command", _NAMES_A_HOOK)
+def test_an_entry_gets_no_notice_when_there_is_no_setup_record(tmp_path, command):
+    config, _script, _command = _registration(tmp_path)
+    _add_entry(config, "pre_tool_call", command)
+
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+@pytest.mark.parametrize(
+    "record",
+    [b"", b"not json", b"[]", b"{}", b"{\"hooks\": []}", b"{\"hooks\": {\"pre_tool_call\": {\"kept\": \"x\"}}}"],
+)
+def test_a_setup_record_that_cannot_be_read_lists_nothing(tmp_path, record):
+    config, _script, command = _registration(tmp_path)
+    _add_entry(config, "pre_tool_call", command + " ")
+    (tmp_path / HERMES_HOME_RECORD_FILE).write_bytes(record)
+
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+def test_a_setup_record_that_is_a_link_is_not_followed(tmp_path):
+    config, _script, command = _registration(tmp_path)
+    _add_entry(config, "pre_tool_call", command + " ")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _record_setup(elsewhere, {"pre_tool_call": [command + " "]})
+    (tmp_path / HERMES_HOME_RECORD_FILE).symlink_to(elsewhere / HERMES_HOME_RECORD_FILE)
+
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+def test_an_entry_the_record_names_is_not_listed_once_it_is_gone_from_the_file(tmp_path):
+    config, _script, command = _registration(tmp_path)
+    _record_setup(tmp_path, {"pre_tool_call": [command + " "]})
+
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+def test_a_command_is_named_by_the_sha256_the_gateway_writes():
+    assert hermes_command_hash("/opt/tools/audit --old") == "043eaf7fcdff435feeb38ee9f79e6c7e49f6125e8663f452f1d4a264ea1c7b91"

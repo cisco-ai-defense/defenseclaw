@@ -89,10 +89,6 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := cmd.Process.Pid
-	identity, ok := procidentity.Of(pid)
-	if !ok {
-		t.Fatal("helper identity unavailable")
-	}
 	executable, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/exe")
 	if err != nil {
 		t.Fatal(err)
@@ -101,7 +97,7 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	dataDir := t.TempDir()
 	record, err := json.Marshal(map[string]any{
 		"pid": pid, "executable": strings.TrimSuffix(executable, " (deleted)"), "data_dir": dataDir,
-		"start_time": start.Add(-time.Second).Unix(), "start_identity": identity,
+		"start_time": start.Add(-time.Second).Unix(), "start_identity": recordedStart(t, pid),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -123,8 +119,12 @@ func TestGAP0295FreshOwnerSurvivesSocketClose(t *testing.T) {
 	sp, _ := specFor("claudecode")
 	w := &answerWatchdog{restart: &perUserRestartAnswer{mode: "open"}}
 	w.restartWindowContact(Options{Home: dataDir}, sp, "open", check)
-	eventuallyWithin(t, "the read of the connection owner", time.Second, func() bool { return check.owner.Load() != nil })
-	if owner := check.owner.Load(); owner.pid != pid {
+	awaitOwnerRead(t, clock)
+	owner := check.owner.Load()
+	if owner == nil {
+		t.Fatal("the read of the connection owner ended without naming it")
+	}
+	if owner.pid != pid {
 		t.Fatalf("captured owner = %+v, want the fresh gateway", owner)
 	}
 	// The read asked for the product wait, and it was not spent.
@@ -185,7 +185,7 @@ func TestGAP0295FreshGatewayHoldsCallProof(t *testing.T) {
 		t.Helper()
 		b, err := json.Marshal(map[string]any{
 			"pid": pid, "executable": strings.TrimSuffix(executable, " (deleted)"), "data_dir": dataDir,
-			"start_time": started.Unix(), "start_identity": identity,
+			"start_time": started.Unix(), "start_identity": recordedStart(t, pid),
 		})
 		if err != nil {
 			t.Fatal(err)

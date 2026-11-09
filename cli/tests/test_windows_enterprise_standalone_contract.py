@@ -840,6 +840,72 @@ def test_the_unreadable_file_probe_and_the_state_deletion_enable_privileges_for_
     assert "$targetPlain" in deleter and deleter.index("$targetPlain") < deleter.index("DeleteTreePrivileged($Target, $deleted)")
 
 
+def test_the_purge_walks_of_state_root_retry_with_call_scoped_privileges_for_a_default_token() -> None:
+    """GAP-0890 r2: an Administrator whose backup and restore privileges are
+    present but disabled cannot list a folder only SYSTEM may open, so the purge
+    failed at its first walk of StateRoot (the junction scan) with a generic
+    lifecycle_error, long before the delete that the earlier fallback guards.
+    The three walks of the purge path (junction scan and removal, the reparse
+    veto and the name scan of the managed-tree delete) now run through one
+    wrapper that retries a walk once, only after access denied, only for the
+    standalone profile and only on the exact StateRoot or InstallRoot, with
+    backup and restore enabled on a thread-bound duplicate of the token for that
+    walk alone; a token without them is refused with privileges_required, the
+    reason and the way out (behaviour in
+    enterprise-standalone-state-files-in-use-smoke.ps1 and the native cells)."""
+
+    module = _text(MODULE)
+    native = _function_body(module, "Initialize-DefenseClawNativeSecurity")
+    scope = native[native.index("public sealed class TreeWalkScope") : native.index("public static TreeWalkScope EnterTreeWalkPrivileges()")]
+    assert "new UninstallFilePrivilegeScope(true, true)" in scope and "Dispose()" in scope
+    wrapper = _function_body(module, "Invoke-DefenseClawStateRootWalk")
+    first = wrapper.index("& $Walk")
+    for guard in (
+        "Test-DefenseClawStandaloneProfile",
+        "$WalkLabel -cne 'StateRoot' -and $WalkLabel -cne 'InstallRoot'",
+        "Test-DefenseClawAccessDeniedError",
+        "[StringComparison]::OrdinalIgnoreCase",
+        "EnterTreeWalkPrivileges()",
+        "privileges_required: ",
+        "Run the same uninstall as SYSTEM",
+        "$walkScope.Dispose()",
+        "Write-DefenseClawLifecycleLogDiagnostic",
+        "[string]$WalkName = 'walk'",
+        ': $WalkName listed after access denied',
+    ):
+        assert guard in wrapper, guard
+    # The first attempt is plain; the privileged one comes after the guards, and
+    # the scope is released in a finally block.
+    assert first < wrapper.index("EnterTreeWalkPrivileges()") and wrapper.index("finally") > wrapper.index("EnterTreeWalkPrivileges()")
+    links = _function_body(module, "Remove-DefenseClawUninstallStateTreeLinks")
+    assert "-WalkLabel StateRoot -WalkName 'junction scan' -NothingChanged" in links
+    for walk_name in ("reparse veto", "name scan"):
+        assert f"-WalkName '{walk_name}'" in _function_body(module, "Remove-DefenseClawManagedTree")
+    assert "-WalkName 'preflight file walk'" in _function_body(module, "Get-DefenseClawStateRootFiles")
+    assert "-WalkName 'install-root walk'" in _function_body(module, "Get-DefenseClawInstallRootHolders")
+    # An unlistable item under InstallRoot is the documented unexpected-item refusal.
+    assert "refusing to remove unexpected item from managed install root: " in _function_body(
+        module, "Assert-DefenseClawStandaloneUninstallInstallTree"
+    )
+    # The precommit file walks (state files, install files) go through the same
+    # wrapper, so the files inside a SYSTEM-only folder are holder-checked
+    # before anything changes (review R1).
+    files = _function_body(module, "Get-DefenseClawStateRootFiles")
+    assert "[switch]$FailOnUnreadable" in files and "Invoke-DefenseClawStateRootWalk -WalkRoot $root -WalkLabel StateRoot" in files
+    assert "Get-DefenseClawStateRootFiles -Layout $Layout -FailOnUnreadable" in _function_body(module, "Assert-DefenseClawStandaloneStateFilesNotInUse")
+    assert "Invoke-DefenseClawStateRootWalk -WalkRoot ([IO.Path]::GetFullPath($InstallRoot)) -WalkLabel InstallRoot" in _function_body(module, "Get-DefenseClawInstallRootHolders")
+    helper = _function_body(module, "Get-DefenseClawMissingPrivilegeRefusal")
+    assert "privileges_required: " in helper and "Run the same uninstall as SYSTEM" in helper
+    assert "Get-DefenseClawMissingPrivilegeRefusal" in _function_body(module, "Get-DefenseClawStateFileHolders")
+    assert "Get-DefenseClawMissingPrivilegeRefusal" in _function_body(module, "Get-DefenseClawInstallRootHolders")
+    purge = _function_body(module, "Complete-DefenseClawStatePurge")
+    assert "$stateCleanup = Invoke-DefenseClawNamespaceRootCleanup" in purge and "entries_removed" in purge
+    assert purge.index("entries_removed") < purge.index("Write-DefenseClawLifecycleLogDiagnostic")
+    tree = _function_body(module, "Remove-DefenseClawManagedTree")
+    assert tree.count("Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label") == 2
+    assert tree.index("Invoke-DefenseClawStateRootWalk") < tree.index("Remove-Item")
+
+
 # The standalone PowerShell smokes run inside disposable scratch directories
 # and never touch a service or a real machine root, so Windows CI runs every
 # one of them on each installed engine (Windows PowerShell 5.1 and 7).
@@ -1522,6 +1588,8 @@ def test_a_failed_exact_root_cleanup_names_the_programs_that_hold_its_files(tmp_
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
             "Test-DefenseClawUnnamedFileHolder",
+            "Test-DefenseClawAccessDeniedError",
+            "Invoke-DefenseClawStateRootWalk",
             "Get-DefenseClawNamespaceRootCleanupHolderText",
         ],
         _FAKE_RENAME_NATIVE
@@ -1576,6 +1644,8 @@ def test_a_committed_retirement_defers_only_to_a_holder_it_finds(tmp_path) -> No
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
             "Test-DefenseClawUnnamedFileHolder",
+            "Test-DefenseClawAccessDeniedError",
+            "Invoke-DefenseClawStateRootWalk",
             "Get-DefenseClawInstallRootRenameDenial",
             "Invoke-DefenseClawCommittedInstallRootRetirement",
         ],
@@ -1671,6 +1741,8 @@ def test_an_uninstall_refuses_a_lasting_install_root_holder_before_its_commit(tm
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
             "Test-DefenseClawUnnamedFileHolder",
+            "Test-DefenseClawAccessDeniedError",
+            "Invoke-DefenseClawStateRootWalk",
             "Assert-DefenseClawStandaloneInstallRootNotHeld",
         ],
         _FAKE_RENAME_NATIVE
@@ -3256,6 +3328,31 @@ def test_lazy_lock_files_are_standalone_only_and_name_every_product_lock() -> No
         line for line in _text(MODULE).splitlines() if "Get-DefenseClawLazyLockFiles -Layout" in line
     ]
     assert len(callers) == 2, "stamp (repair) and verify both read the one list"
+
+
+def test_a_lazy_lock_file_with_an_untrusted_owner_is_still_refused() -> None:
+    # g877b review S5: StandaloneContentGateOutOfClass names the lazily created
+    # lock files out of the content gate because "the stamp still refuses an
+    # untrusted owner". Pin that: the verify judges every lock with the
+    # untrusted-read rejection and the self-heal that refuses a foreign owner,
+    # the smoke drives each real lock entry with a foreign owner, and the
+    # exemption stays the only way a lock avoids the gate.
+    module = _text(MODULE)
+    start = module.index("foreach ($lockFile in @(Get-DefenseClawLazyLockFiles -Layout $Layout)) {\n        if (-not (")
+    verify = module[start : module.index("\n    }\n", start + 400)]
+    assert "Assert-DefenseClawPathAcl" in verify
+    assert "-RejectUntrustedRead" in verify
+    assert "-SelfHealKind $lockFile.Kind" in verify
+    exemption = module[module.index("$script:StandaloneContentGateOutOfClass = @("):]
+    exemption = exemption[: exemption.index("\n)\n")]
+    assert "the stamp still refuses an untrusted owner" in exemption
+    assert exemption.count("'LazyLockFiles'") == 1
+    smoke = (ROOT / "packaging" / "windows" / "tests" / "enterprise-path-acl-verdict-smoke.ps1").read_text(encoding="utf-8")
+    assert "Get-DefenseClawLazyLockFiles -Layout $layout" in smoke
+    assert "untrusted owner, re-stamp does nothing" in smoke
+    assert "untrusted owner, re-stamp fails" in smoke
+    # ... and with a real file that BUILTIN\\Users owns, for every lock kind.
+    assert "/setowner" in smoke and "real owner: $kind lock" in smoke
 
 
 def test_codex_vendor_folder_adoption_runs_before_the_snapshot_and_tolerates_defenseclaws_own_lock() -> None:

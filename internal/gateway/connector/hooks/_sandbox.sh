@@ -80,6 +80,7 @@ readonly DC_SANDBOX_RETRY_MAX_TIME={{.SandboxRetryMaxTime}}
 readonly DC_SANDBOX_SESSION_END_MAX_TIME={{.SandboxSessionEndMaxTime}}
 readonly DC_SANDBOX_HOOK_STARTED=$SECONDS
 DC_SANDBOX_RECEIPT_STATUS=transport
+DC_SANDBOX_RECEIPT_BODY=""
 
 # DC_SANDBOX_UNREACHABLE is why a sandbox hook blocked when DefenseClaw did not
 # answer, worded for the agent and for the user who reads its screen: what is
@@ -126,6 +127,36 @@ defenseclaw_sandbox_unreachable_reason() {
       esac ;;
     *) printf '%s' "$DC_SANDBOX_UNREACHABLE" ;;
   esac
+}
+
+# defenseclaw_sandbox_rate_refusal_message BODY [legacy] prints the message the
+# gateway wrote for a call it refused 429. The gateway's own message names
+# which limit refused it (this sandbox's rate, its waiting requests, the
+# user's sandboxes together, or the gateway as a whole): the cause and the
+# numbers live there, not here. It is cut to one printable line of at most
+# 300 characters. With "legacy" a body that carries only an error field (the
+# older gateway answer) counts as its message; without it only the message
+# field does.
+defenseclaw_sandbox_rate_refusal_message() {
+  local message filter='if type == "object" then (.message // "") else "" end'
+  [ "${2:-}" = legacy ] && filter='if type == "object" then (.message // .error // "") else "" end'
+  message="$(printf %s "$1" | _dc_jq -r "$filter" 2>/dev/null)" || message=""
+  message="$(printf %s "$message" | LC_ALL=C tr -d '\000-\037\177')"
+  printf %s "${message:0:300}"
+}
+
+# defenseclaw_sandbox_rate_refusal_reason BODY prints why a sandbox hook
+# blocked a call the gateway refused 429, with the gateway's message when it
+# gave one. A refusal for rate is the gateway answering, not an outage, and
+# says so.
+defenseclaw_sandbox_rate_refusal_reason() {
+  local message
+  message="$(defenseclaw_sandbox_rate_refusal_message "$1" legacy)"
+  if [ -n "$message" ]; then
+    printf 'DefenseClaw refused this tool call, the gateway is limiting requests (not an outage): %s' "$message"
+  else
+    printf %s "DefenseClaw refused this tool call, the gateway answered HTTP 429 (too many requests, not an outage): retry in a few seconds"
+  fi
 }
 
 # defenseclaw_sandbox_require_token CONNECTOR HOOK_NAME SUBJECT
@@ -324,6 +355,7 @@ defenseclaw_sandbox_confirm_receipt() {
     -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || status=$?
   code="${reply##*$'\n'}"
   case "$code" in [0-9][0-9][0-9]) DC_SANDBOX_RECEIPT_STATUS="$code" ;; esac
+  [ "$code" = 429 ] && DC_SANDBOX_RECEIPT_BODY="${reply%$'\n'*}"
   [ "$status" -eq 0 ] && [ "$code" = 200 ] || return 1
   received="$(printf '%s' "${reply%$'\n'*}" | _dc_jq -r '.received // false' 2>/dev/null)" || return 1
   [ "$received" = true ]

@@ -73,6 +73,11 @@ func hookAssetFacts(connector string, payload []byte) string {
 	}
 	for _, ref := range assetfacts.SkillFolderRefs(event.ToolInput, home, event.CWD) {
 		addSkill(ref.Name, ref.Dir)
+		if ref.Linked && hookLinkedSkillFolder(connector, home, event.CWD, ref.Dir) && !slices.Contains(facts.SkillLinks, ref.Dir) {
+			// The gateway may not follow the link in this home; say where it
+			// leads.
+			facts.SkillLinks = append(facts.SkillLinks, ref.Dir)
+		}
 		if _, err := os.Lstat(ref.Dir); errors.Is(err, os.ErrNotExist) {
 			for _, root := range hookSkillRoots(connector, home, event.CWD) {
 				addSkill(ref.Name, filepath.Join(root, ref.Name))
@@ -108,6 +113,20 @@ func hookAssetFacts(connector string, payload []byte) string {
 	}
 	facts.Contents = hookAssetContents(connector, home, event.ToolName, event.ToolInput, event.Prompt, event.CommandName, facts.SkillDirs)
 	return assetfacts.Encode(facts)
+}
+
+// hookLinkedSkillFolder reports whether dir, where a link of the call ends, is
+// a folder directly in a skill root of the connector, spelled as the root or as
+// the root resolves: the only place the gateway takes a reported link, so the
+// claim carries nothing else.
+func hookLinkedSkillFolder(connector, home, cwd, dir string) bool {
+	parent := filepath.Dir(dir)
+	for _, root := range hookSkillRoots(connector, home, cwd) {
+		if parent == filepath.Clean(root) || parent == assetfacts.ResolveLinks(root) {
+			return true
+		}
+	}
+	return false
 }
 
 // hookSkillRoots are the skill folders the agent loads from for this user:

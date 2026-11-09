@@ -203,7 +203,7 @@ func TestOwnStatusEveryNotProtectedConnectorRowSaysWhyAndWhatToDo(t *testing.T) 
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
 			api := ownReasonsAPI(t, sc)
-			roster, ok := api.ownStatusAnswer(context.Background(), "uid", sc.uid, sc.user)["connectors"].(map[string]any)
+			roster, ok := api.ownStatusAnswer(context.Background(), "uid", sc.uid, sc.user, "")["connectors"].(map[string]any)
 			if !ok || len(roster) == 0 {
 				t.Fatalf("no roster: %#v", roster)
 			}

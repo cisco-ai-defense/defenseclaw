@@ -87,6 +87,13 @@ func RemoveWindowsStandaloneHookRuntimeDirectories() ([]string, error) {
 			kept = append(kept, directory)
 		}
 	}
+	// The off-roster markers (connector_off_roster_windows.go) are the
+	// guardian's own and mean nothing once the deployment is gone.
+	for _, name := range []string{"claudecode", "codex"} {
+		if err := os.Remove(windowsConnectorOffRosterPath(managed.StandaloneLayout{HookRuntimeDir: root}, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("enterprise hooks: remove the %s off-roster marker: %w", name, err))
+		}
+	}
 	// A failed hot-config undo leaves a durable, closed hook marker. Only a
 	// completed teardown whose runtime root holds that marker alone may drop
 	// it; an enrollment, selector or unexpected entry keeps it in force.

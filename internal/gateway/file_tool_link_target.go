@@ -5,7 +5,10 @@ package gateway
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -51,6 +54,23 @@ func fileToolLinkTargetFacts(facts actionfacts.Facts, request trustedActionReque
 		}
 		if physical == "" && !reported && !request.SkipLocalFilesystemResolution {
 			physical, _ = request.targetMemo.ResolveWriteTarget(spelling)
+		}
+		if !filepath.IsAbs(physical) && !reported && !request.SkipLocalFilesystemResolution {
+			// A gateway that walks the link itself finds the same closed
+			// directory the client would.
+			if text, reached := hookpaths.LinkTextWriteTarget(spelling); reached {
+				physical = text
+			}
+		}
+		if !filepath.IsAbs(physical) {
+			// The user could not open a directory on the way of the link:
+			// the file its link text leads to is judged by name.
+			for _, key := range []string{spelling, candidate.Resolved, candidate.Normalized, candidate.Value} {
+				if text := request.ResolvedWriteTargets[hookpaths.LinkTextFactPrefix+key]; filepath.IsAbs(text) {
+					physical = text
+					break
+				}
+			}
 		}
 		if !filepath.IsAbs(physical) {
 			physical = spelling
@@ -126,6 +146,72 @@ func linkTargetCandidate(facts actionfacts.Facts, candidate actionfacts.PathFact
 	return typed || applyPatchCommandPath(facts, candidate)
 }
 
+// windowsActiveHomeMutation reports a typed write or append whose resolved
+// target is a drive-letter path inside the active home. The rule scan reads
+// the call as the tool sent it, with the path's separators escaped, so the
+// rules never see that path in the spelling the typed facts give it; the
+// target is scanned here instead, on every platform the hook decision can run.
+func windowsActiveHomeMutation(candidate actionfacts.PathFact, home string) bool {
+	if candidate.Access != actionfacts.PathAccessWrite && candidate.Access != actionfacts.PathAccessAppend {
+		return false
+	}
+	return actionfacts.DriveLetterPath(candidate.Resolved) &&
+		activeHomeAsTilde(candidate.Resolved, home) != candidate.Resolved
+}
+
+// windowsUserPath splits a drive-letter path under a Users folder, in any
+// letter case, into the drive, the account name and the rest.
+var windowsUserPath = regexp.MustCompile(`(?i)^([a-z]:)/users/([^/]+)/(.+)$`)
+
+// typedTargetRuleText is the text the path rules read for the typed target of
+// a file operation. A Windows path names the same file in any letter case,
+// while the rules name each home folder and credential file in one: the home
+// is spelled ~ (or its Users folder in the case the rules read) and the names
+// below it are read in lower case, which is how the rules write them. Other
+// paths are read as given, with the active home respelled.
+func typedTargetRuleText(resolved, home string) string {
+	text := activeHomeAsTilde(resolved, home)
+	if !actionfacts.DriveLetterPath(resolved) {
+		return text
+	}
+	if rest, ok := strings.CutPrefix(text, "~/"); ok {
+		return "~/" + windowsNameFold(rest)
+	}
+	if match := windowsUserPath.FindStringSubmatch(text); match != nil {
+		return match[1] + "/Users/" + match[2] + "/" + windowsNameFold(match[3])
+	}
+	return text
+}
+
+// windowsNameFold spells a Windows name in the lower case the rules write.
+// Windows compares names through upper case, so a letter that is not ASCII
+// but upper-cases or case-folds to an ASCII letter (long s, Kelvin sign,
+// dotless i) names the same file as that letter. strings.ToLower alone leaves
+// those letters as they are, and the ASCII-only rule expressions miss them.
+func windowsNameFold(name string) string {
+	ascii := true
+	for index := 0; index < len(name) && ascii; index++ {
+		ascii = name[index] < utf8.RuneSelf
+	}
+	if ascii {
+		return strings.ToLower(name)
+	}
+	return strings.Map(func(r rune) rune {
+		if r < unicode.MaxASCII {
+			return unicode.ToLower(r)
+		}
+		if upper := unicode.ToUpper(r); upper < unicode.MaxASCII {
+			return unicode.ToLower(upper)
+		}
+		for folded := unicode.SimpleFold(r); folded != r; folded = unicode.SimpleFold(folded) {
+			if folded < unicode.MaxASCII {
+				return unicode.ToLower(folded)
+			}
+		}
+		return unicode.ToLower(r)
+	}, name)
+}
+
 // hasApplyPatchCommand reports an apply_patch command in the parsed action,
 // whichever tool carried the shell text.
 func hasApplyPatchCommand(facts actionfacts.Facts) bool {
@@ -165,11 +251,11 @@ func fileToolLinkTargetFindings(
 		if !linkTargetCandidate(facts, candidate, typed) {
 			continue
 		}
-		if !filepath.IsAbs(candidate.Resolved) {
+		if !filepath.IsAbs(candidate.Resolved) && !windowsActiveHomeMutation(candidate, request.Input.ActiveHome) {
 			continue
 		}
 		for _, finding := range scanRuleGeneration(
-			generation, candidate.Resolved, request.Input.Tool, options,
+			generation, typedTargetRuleText(candidate.Resolved, request.Input.ActiveHome), request.Input.Tool, options,
 		) {
 			if trustedActionSensitivePathRule(finding.RuleID) {
 				findings = append(findings, finding)

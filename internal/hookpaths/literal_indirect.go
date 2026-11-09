@@ -34,11 +34,13 @@ func readIndirectSource(name, cwd string) (string, bool) {
 	}
 	defer root.Close()
 	before, err := root.Lstat(relative)
+	noteBodyLinkLimit(err)
 	if err != nil || !before.Mode().IsRegular() || before.Size() > maxIndirectSourceBytes {
 		return "", false
 	}
 	file, err := root.Open(relative)
 	if err != nil {
+		noteBodyLinkLimit(err)
 		return "", false
 	}
 	defer file.Close()

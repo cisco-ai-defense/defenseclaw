@@ -105,7 +105,7 @@ func TestParseHookPostFlagsTakesWhatTheRequestUses(t *testing.T) {
 // pid (the gateway), with the kernel start identity of that process.
 func recordGateway(t *testing.T, dataDir string, pid int) {
 	t.Helper()
-	identity, ok := procidentity.Of(pid)
+	identity, ok := procidentity.Recorded(pid)
 	if !ok {
 		t.Fatalf("no start identity for process %d", pid)
 	}

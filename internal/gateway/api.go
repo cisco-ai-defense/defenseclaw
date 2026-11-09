@@ -128,6 +128,9 @@ type APIServer struct {
 	// managedPolicyView is the published proof of the vendor machine
 	// policy managed hooks enforce (managed_policy_view.go).
 	managedPolicyView atomic.Pointer[managedPolicyView]
+	// managedHookAuthz is the authorizer the standalone hook socket decides
+	// calls with, so an account status reads the inputs the hook reads.
+	managedHookAuthz atomic.Pointer[managedHookAuthorizer]
 	// managedAlertLimits bounds the policy-view alerts per account: every
 	// call under an unproven view raises one until the view is pinned.
 	managedAlertLimits managedRefusalLimiter
@@ -434,10 +437,9 @@ type APIServer struct {
 	// SetSandboxIngress (api_sandbox_ingress.go); nil when sandboxes are off.
 	sandboxIngressMu sync.RWMutex
 	sandboxIngress   *sandboxIngressState
-	// The receipt's fallback, audit, and settlement use SQLite's one writer.
-	// Queue those writes in the gateway instead of making parallel receipts
-	// contend in SQLite's busy handler while their hook answers wait.
-	sandboxReceiptWriteMu sync.Mutex
+	// hookCorrelationTurns holds the hooks of one session to one correlation
+	// attempt at a time (hookCorrelationSerial).
+	hookCorrelationTurns hookCorrelationSerial
 
 	// sandboxCtl is the OpenShell sandbox manager behind /api/v1/sandbox/
 	// (api_sandbox.go); nil when sandboxes are off.
