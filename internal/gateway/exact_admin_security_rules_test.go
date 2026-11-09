@@ -239,6 +239,54 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
+			name:   "Docker insecure registry host in a list one MultiEdit step creates empty and the next fills",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[]`},
+					map[string]any{"old_string": `[]`, "new_string": `["198.51.100.7:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry host under a key two MultiEdit steps spell between them",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug"`, "new_string": `"insecure-`},
+					map[string]any{"old_string": `-":true`, "new_string": `-registries":["198.51.100.7:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry URL in a list one MultiEdit step creates empty and the next fills",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"insecure-registries":[]`},
+					map[string]any{"old_string": `[]`, "new_string": `["http://registry.example.test:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry URL under a key two MultiEdit steps spell between them",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug"`, "new_string": `"insecure-`},
+					map[string]any{"old_string": `-":true`, "new_string": `-registries":["http://registry.example.test:5000"]`},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
 			name:   "Docker insecure registry moved past a last empty key in a two-hunk patch",
 			ruleID: dockerInsecureHTTPRegistryRuleID,
 			input: exactStructuredInput(t, "apply_patch", map[string]any{
@@ -465,6 +513,39 @@ func TestExactAdministrativeSecurityRuleHardNegatives(t *testing.T) {
 				"edits": []any{
 					map[string]any{"old_string": `"log-driver":"json-file"`, "new_string": `"log-driver":"journald"`},
 					map[string]any{"old_string": `"debug":true`, "new_string": `"debug":false`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that spells the log driver name over two steps",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug"`, "new_string": `"log-`},
+					map[string]any{"old_string": `-":true`, "new_string": `-driver":"journald"`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that spells the mirrors name and a URL over two steps",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug"`, "new_string": `"registry-`},
+					map[string]any{"old_string": `-":true`, "new_string": `-mirrors":["http://registry.example.test:5000"]`},
+				},
+			}),
+		},
+		{
+			name:   "Docker MultiEdit that creates an empty mirrors list and fills it",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{"old_string": `"debug":true`, "new_string": `"registry-mirrors":[]`},
+					map[string]any{"old_string": `[]`, "new_string": `["http://registry.example.test:5000"]`},
 				},
 			}),
 		},
