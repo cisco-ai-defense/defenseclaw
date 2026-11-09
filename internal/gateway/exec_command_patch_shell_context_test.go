@@ -97,6 +97,15 @@ func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 		{name: "after alias settings", command: func(p string) string {
 			return "apply_patch() { :; }\nshopt -s expand_aliases\nalias apply_patch='command apply_patch'\n" + envelope(p)
 		}, protect: true},
+		{name: "uncalled function, program named by a variable", command: func(p string) string {
+			return "p=apply_patch\nf() {\n\"$p\" <<'PATCH'\n" + p + "PATCH\n}\n"
+		}, protect: true},
+		{name: "uncalled function, variable reset after the definition", command: func(p string) string {
+			return "p=apply_patch\nf() {\n\"$p\" <<'PATCH'\n" + p + "PATCH\n}\np=ls\n"
+		}, protect: true},
+		{name: "uncalled function, program set in the body", command: func(p string) string {
+			return "f() {\np=apply_patch\n\"$p\" <<'PATCH'\n" + p + "PATCH\n}\n"
+		}, protect: true},
 		{name: "uncalled function with no envelope", noPatch: true, command: func(string) string {
 			return "f() {\n  echo ready\n}\n"
 		}},
@@ -143,6 +152,49 @@ func TestShellApplyPatchEnvelopeIsJudgedWhereverTheTextHasIt(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// A relative file header of an envelope in an uncalled function is read from
+// the directory the text has where it defines the function or in the body, as
+// it is when a call runs the body. The benign twin names an ordinary file the
+// same way and stays allowed, and the directory a body sets stays in the body.
+func TestShellApplyPatchEnvelopeOfAnUncalledFunctionKeepsItsDirectory(t *testing.T) {
+	home, project := hermesPatchHome(t)
+	const loader = "persistence.global_ld_preload_install"
+	relative := "*** Begin Patch\n*** Add File: ld.so.preload\n+/usr/local/lib/libreview.so\n*** End Patch\n"
+	envelope := "apply_patch <<'PATCH'\n" + relative + "PATCH\n"
+	for _, row := range []struct {
+		name, command string
+		block         bool
+	}{
+		{"cd in the body", "f() {\ncd /etc\n" + envelope + "}\n", true},
+		{"cd in the body, called", "f() {\ncd /etc\n" + envelope + "}\nf\n", true},
+		{"cd before the definition", "cd /etc\nf() {\n" + envelope + "}\n", true},
+		{"cd named by a variable", "c=cd\nf() {\n$c /etc\n" + envelope + "}\n", true},
+		{"cd in a condition of the body", "f() {\nif true; then\ncd /etc\n" + envelope + "fi\n}\n", true},
+		{"cd to an ordinary directory", "f() {\ncd /tmp\n" + envelope + "}\n", false},
+		{"cd to /etc after the body", "f() {\ncd /tmp\n" + envelope + "}\ncd /etc\n", false},
+		{"cd of another function does not leak", "g() {\ncd /etc\n}\nf() {\n" + envelope + "}\n", false},
+	} {
+		for _, connector := range []string{"codex", "claudecode"} {
+			t.Run(connector+"/"+row.name, func(t *testing.T) {
+				tool, input := "Bash", map[string]any{"command": row.command}
+				if connector == "codex" {
+					tool, input = "exec_command", map[string]any{"cmd": row.command}
+				}
+				body := mustJSON(t, map[string]any{
+					"session_id": "shell-patch-directory", "hook_event_name": "PreToolUse", "cwd": project,
+					"permission_mode": "default", "tool_name": tool, "tool_use_id": "toolu-shell-patch-directory",
+					"tool_input": input,
+				})
+				got := overLimitHostHookWithEvidence(t, connector, home, string(body), hookpaths.Resolve(body))
+				blocked := overLimitHookAction(t, got) == "block"
+				if blocked != row.block || blocked && !strings.Contains(got, loader) {
+					t.Fatalf("blocked=%t, want block=%t by %q: %.500s", blocked, row.block, loader, got)
+				}
+			})
 		}
 	}
 }
