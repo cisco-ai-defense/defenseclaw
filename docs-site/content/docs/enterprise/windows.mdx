@@ -911,11 +911,13 @@ Other recovery notes:
   guardian can read the state; the held copy stays until it is released.
   A program that opens one of those two files after that check and does not
   share delete access cannot be kept out of the rest of the run. If the run
-  then fails and rolls back, Setup retries the put-back of the file for
-  30 seconds, ends with the same `codex_requirements_held` or
-  `codex_state_held` (exit `1618`) naming the program, and leaves the
-  transaction pending; the next `/ensure` or `/repair` as LocalSystem, after
-  the program lets go, finishes the rollback.
+  then fails and rolls back, Setup waits up to 30 seconds for that file,
+  leaves it as it is, puts the rest back and starts the restored services,
+  and ends with the same `codex_requirements_held` or `codex_state_held`
+  (exit `1618`) naming the program and its process id, and with the failure
+  that started the rollback. The transaction stays pending, and the next
+  `/repair` as LocalSystem, after the program lets go, finishes the rollback.
+  The previous hook is handled the same way (`hook_in_use`).
   A recovery that restores a `requirements.toml` an administrator edited in
   the managed policy publishes the managed policy again instead of stopping,
   keeps your file under `install\recovered-policy` and warns

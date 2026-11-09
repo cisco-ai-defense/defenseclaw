@@ -36199,13 +36199,36 @@ function Assert-DefenseClawEnterpriseDeployment {
             }
         }
     }
+    $codexRequirementsDeferred = $false
     if ($codexTargetEnabled) {
         Assert-DefenseClawCodexMachinePolicyDirectory `
             -Path $Layout.CodexVendorDirectory
         Assert-DefenseClawCodexMachinePolicyDirectory `
             -Path $Layout.CodexMachinePolicyDirectory
         Assert-DefenseClawCodexMachinePolicyFile -Layout $Layout
-        Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+        try {
+            Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout
+        }
+        catch {
+            # GAP-0947: a rollback whose Codex state copy a program holds open
+            # could not write the copy the hook reads (Sync-...StateCopy), so
+            # the state check cannot pass until the program lets go. The
+            # restored services still start; the run ends with the held code.
+            $blockedState = ''
+            if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
+                (Test-DefenseClawStandaloneProfile)) {
+                $blockedState = Get-DefenseClawBlockedCodexStatePath -Layout $Layout
+            }
+            if ($blockedState -eq '') {
+                throw
+            }
+            Add-DefenseClawRollbackDeferredHold -Message (New-DefenseClawCodexFileHeldMessage `
+                -Layout $Layout `
+                -Path $blockedState `
+                -Why 'open in a way that keeps Setup from reading it, so the rollback could not write the Codex state the hook reads')
+            $codexRequirementsDeferred = $true
+            $script:DefenseClawRollbackCoverageDeferred = $true
+        }
         [void](Get-DefenseClawCodexRequirementsAclBackup -Layout $Layout)
     }
     else {
@@ -36812,9 +36835,9 @@ function Assert-DefenseClawEnterpriseDeployment {
             -ExpectedStartMode $expectedServiceStartMode
     }
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
-    $codexRequirementsDeferred = $false
     if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
-        $codexTargetEnabled -and (Test-DefenseClawStandaloneProfile)) {
+        $codexTargetEnabled -and (Test-DefenseClawStandaloneProfile) -and
+        -not $codexRequirementsDeferred) {
         # GAP-0802: the file a rollback restored may carry an administrator's
         # hand edit of the managed policy; it is replaced by the managed
         # policy (and kept in a named backup) instead of stopping recovery.

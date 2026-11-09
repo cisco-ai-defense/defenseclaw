@@ -47,7 +47,7 @@ def test_every_deferral_is_standalone_only() -> None:
     sites = [m.start() for m in re.finditer(r"Add-DefenseClawRollbackDeferredHold -Message", text)]
     # The definition is a function, not a call.
     sites = [s for s in sites if not text[max(0, s - 40) : s].rstrip().endswith("function")]
-    assert len(sites) == 5, len(sites)
+    assert len(sites) == 6, len(sites)
     for site in sites:
         window = text[max(0, site - 1700) : site]
         assert "Test-DefenseClawStandaloneProfile" in window, text[site - 200 : site + 100]
@@ -118,8 +118,8 @@ def test_the_second_holder_does_not_cost_another_full_wait() -> None:
 
 def test_the_guardian_coverage_proof_is_deferred_only_for_a_republish_a_holder_blocked() -> None:
     text = _text()
-    # Set in one place: the recovery's held republish of the Codex requirements.
-    assert text.count("$script:DefenseClawRollbackCoverageDeferred = $true") == 1
+    # Set in two places, both in the rollback readiness: the held republish of the Codex requirements and the held state check.
+    assert text.count("$script:DefenseClawRollbackCoverageDeferred = $true") == 2
     deployment = _function_body(text, "Assert-DefenseClawEnterpriseDeployment")
     assert "$script:DefenseClawRollbackCoverageDeferred = $true" in deployment
     check = _function_body(text, "Test-DefenseClawRollbackCoverageDeferred")
@@ -158,3 +158,21 @@ def test_the_recovery_names_a_held_codex_state_file_before_and_after_the_reconci
     assert body.rindex("Get-DefenseClawBlockedCodexStatePath -Layout $Layout") < body.index(
         "Get-DefenseClawRecordedCodexRequirementsPreimage"
     )
+
+
+def test_a_held_codex_state_copy_defers_the_state_check_of_a_rollback() -> None:
+    body = _function_body(_text(), "Assert-DefenseClawEnterpriseDeployment")
+    init = body.index("$codexRequirementsDeferred = $false")
+    check = body.index("Assert-DefenseClawCodexManagedHooksStateFile -Layout $Layout")
+    catch = body.index("Get-DefenseClawBlockedCodexStatePath -Layout $Layout", check)
+    # One init, ahead of the state check; only a servicing rollback on the
+    # standalone profile that finds a holder defers; anything else rethrows.
+    assert body.count("$codexRequirementsDeferred = $false") == 1 and init < check < catch
+    window = body[check:catch]
+    assert "$RepairRecoveredCodexRequirements -and $ServicingTransaction" in window
+    assert "Test-DefenseClawStandaloneProfile" in window
+    assert "if ($blockedState -eq '') {\n                throw" in body[catch : catch + 300]
+    # The republish and the Codex verify are skipped once the state check deferred.
+    gate = body.index("if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and", catch)
+    assert "-not $codexRequirementsDeferred) {" in body[gate : gate + 300]
+    assert "if (-not $codexRequirementsDeferred) {" in body[gate:]
