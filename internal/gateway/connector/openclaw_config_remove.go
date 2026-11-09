@@ -16,6 +16,12 @@ import (
 type openClawRemoval struct {
 	registration bool
 	approvals    bool
+	// conversationGrant also takes hooks.allowConversationAccess (when it is
+	// true) out of the defenseclaw entry: setup wrote it, the operator did not
+	// (GAP-0986). keepEmptyHooks leaves an emptied hooks object in place
+	// because the operator had one before setup.
+	conversationGrant bool
+	keepEmptyHooks    bool
 }
 
 // removeDefenseClawFromConfig takes the settings in scope out of a parsed
@@ -27,7 +33,7 @@ func removeDefenseClawFromConfig(cfg map[string]interface{}, scope openClawRemov
 				plugins["allow"] = removeString(plugins["allow"], "defenseclaw")
 			}
 			if entries, ok := plugins["entries"].(map[string]interface{}); ok {
-				removeDefenseClawEntryKeys(entries)
+				removeDefenseClawEntryKeys(entries, scope)
 			}
 			if load, ok := plugins["load"].(map[string]interface{}); ok {
 				if _, ok := load["paths"].([]interface{}); ok {
@@ -116,6 +122,11 @@ func nextDefenseClawRemoval(doc *jsonc.Value, data []byte, scope openClawRemoval
 						if j, ok := entry.Lookup("enabled"); ok {
 							return entry.RemoveChild(data, j)
 						}
+						if scope.conversationGrant {
+							if spans := removeConversationGrantSpans(entry, data, scope.keepEmptyHooks); spans != nil {
+								return spans
+							}
+						}
 					}
 				}
 			}
@@ -147,6 +158,31 @@ func nextDefenseClawRemoval(doc *jsonc.Value, data []byte, scope openClawRemoval
 		}
 	}
 	return nil
+}
+
+// removeConversationGrantSpans returns the text ranges that drop
+// hooks.allowConversationAccess from a defenseclaw entry when it is true, and
+// the hooks object with it when nothing else is in it (unless keepEmptyHooks).
+// It mirrors removeDefenseClawConversationGrant on the located text.
+func removeConversationGrantSpans(entry *jsonc.Value, data []byte, keepEmptyHooks bool) []jsonc.Span {
+	hooks := childValue(entry, "hooks")
+	if hooks == nil || !hooks.Object {
+		return nil
+	}
+	g, ok := hooks.Lookup("allowConversationAccess")
+	if !ok {
+		return nil
+	}
+	var granted bool
+	value := hooks.Children[g].Value
+	if jsonc.UnmarshalJSON5(data[value.Start:value.End], &granted) != nil || !granted {
+		return nil
+	}
+	if len(hooks.Children) == 1 && !keepEmptyHooks {
+		k, _ := entry.Lookup("hooks")
+		return entry.RemoveChild(data, k)
+	}
+	return hooks.RemoveChild(data, g)
 }
 
 // childValue is the value of the member of obj named key, or nil.

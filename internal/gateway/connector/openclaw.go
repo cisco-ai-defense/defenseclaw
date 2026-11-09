@@ -469,7 +469,7 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 				fmt.Fprintf(openClawTeardownNoticeOutput, "[connector] openclaw: %s changed after DefenseClaw set it up (OpenClaw or you saved it); "+
 					"removed only the DefenseClaw settings and kept everything else, so the file is not byte for byte the copy from before setup\n", configPath)
 			}
-			if err := uninstallOpenClawExtension(openClawHome(), dropRejectedApprovals); err != nil {
+			if err := uninstallOpenClawExtension(openClawHome(), dropRejectedApprovals, openClawSetupGrantFor(opts.DataDir, c.Name())); err != nil {
 				errs = append(errs, fmt.Sprintf("uninstall extension: %v", err))
 			} else {
 				discardManagedFileBackup(opts.DataDir, c.Name(), "openclaw.json")
@@ -691,7 +691,7 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 // the DefenseClaw entries from openclaw.json, leaving unrelated plugins
 // untouched. Returns an error if cleanup fails so the caller can log or
 // retry.
-func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool) error {
+func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool, grant openClawSetupGrant) error {
 	var errs []string
 
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
@@ -712,7 +712,12 @@ func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool) error
 		return fmt.Errorf("read openclaw.json: %w", err)
 	}
 
-	out, err := removeFromOpenClawConfig(configPath, data, openClawRemoval{registration: true, approvals: dropRejectedApprovals})
+	out, err := removeFromOpenClawConfig(configPath, data, openClawRemoval{
+		registration:      true,
+		approvals:         dropRejectedApprovals,
+		conversationGrant: grant.added,
+		keepEmptyHooks:    grant.hooksBefore,
+	})
 	if err != nil {
 		errs = append(errs, err.Error())
 	} else if out != nil {
@@ -769,20 +774,70 @@ func openClawEntryHasDefenseClawKeys(entry interface{}) bool {
 }
 
 // removeDefenseClawEntryKeys takes back what setup wrote under
-// plugins.entries.defenseclaw: the "enabled" key, and the entry itself when
-// no key an operator wrote is left in it (GAP-0596).
-func removeDefenseClawEntryKeys(entries map[string]interface{}) {
+// plugins.entries.defenseclaw: the "enabled" key, the conversation-hook grant
+// when scope says setup wrote it, and the entry itself when no key an operator
+// wrote is left in it (GAP-0596, GAP-0986).
+func removeDefenseClawEntryKeys(entries map[string]interface{}, scope openClawRemoval) {
 	entry, ok := entries["defenseclaw"].(map[string]interface{})
 	if !ok {
 		delete(entries, "defenseclaw")
 		return
 	}
 	delete(entry, "enabled")
+	if scope.conversationGrant {
+		removeDefenseClawConversationGrant(entry, scope.keepEmptyHooks)
+	}
 	if len(entry) == 0 {
 		delete(entries, "defenseclaw")
 		return
 	}
 	entries["defenseclaw"] = entry
+}
+
+// removeDefenseClawConversationGrant deletes hooks.allowConversationAccess
+// from a defenseclaw entry when it is true, the value setup writes, and the
+// hooks object with it when that leaves it empty (unless keepEmptyHooks).
+func removeDefenseClawConversationGrant(entry map[string]interface{}, keepEmptyHooks bool) {
+	hooks, ok := entry["hooks"].(map[string]interface{})
+	if !ok || hooks["allowConversationAccess"] != true {
+		return
+	}
+	delete(hooks, "allowConversationAccess")
+	if len(hooks) == 0 && !keepEmptyHooks {
+		delete(entry, "hooks")
+	}
+}
+
+// openClawSetupGrant says whether the conversation-hook grant in the
+// defenseclaw entry is DefenseClaw's to take out, as the copy of openclaw.json
+// from before setup shows it. Setup keeps a grant the operator already had, so
+// only a copy without one (or no file at all) makes it setup's. With no copy,
+// or one that cannot be read, nothing is claimed.
+type openClawSetupGrant struct {
+	// added: the file before setup had no hooks.allowConversationAccess in the entry.
+	added bool
+	// hooksBefore: it had a hooks object there, which stays even when empty.
+	hooksBefore bool
+}
+
+func openClawSetupGrantFor(dataDir, connectorName string) openClawSetupGrant {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, "openclaw.json"))
+	if err != nil {
+		return openClawSetupGrant{}
+	}
+	if !b.Existed {
+		return openClawSetupGrant{added: true}
+	}
+	pristine, err := parseOpenClawConfig(b.Path, b.PristineBytes)
+	if err != nil {
+		return openClawSetupGrant{}
+	}
+	plugins, _ := pristine["plugins"].(map[string]interface{})
+	entries, _ := plugins["entries"].(map[string]interface{})
+	entry, _ := entries["defenseclaw"].(map[string]interface{})
+	hooks, hooksBefore := entry["hooks"].(map[string]interface{})
+	_, operatorSet := hooks["allowConversationAccess"]
+	return openClawSetupGrant{added: !operatorSet, hooksBefore: hooksBefore}
 }
 
 func removeDefenseClawLoadPaths(existing interface{}) []interface{} {
