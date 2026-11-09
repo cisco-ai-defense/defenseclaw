@@ -245,6 +245,14 @@ func projectSkillSelectedFolders(root, name string) []string {
 	if directErr == nil && info.Mode().IsRegular() {
 		return []string{direct}
 	}
+	unresolvable := directErr != nil && !NotExist(directErr) && !errors.Is(directErr, fs.ErrNotExist) &&
+		projectSkillManifestPresent(filepath.Join(direct, "SKILL.md"))
+	if unresolvable {
+		// A manifest that is there but cannot be resolved (a link loop) is
+		// still the one the agent loads for this name: bind its folder so the
+		// call keeps the unreadable reason (rel-1-0-9:GAP-0987).
+		return []string{direct}
+	}
 	entries, err := pathReadDir(root)
 	if err != nil {
 		if directErr != nil && !errors.Is(directErr, fs.ErrNotExist) {
@@ -266,6 +274,13 @@ func projectSkillSelectedFolders(root, name string) []string {
 		}
 	}
 	return nil
+}
+
+// projectSkillManifestPresent reports whether the manifest path itself exists
+// as a directory entry, a link included, whatever it resolves to.
+func projectSkillManifestPresent(manifest string) bool {
+	_, err := pathLstat(manifest)
+	return err == nil
 }
 
 // projectSkillDeclaredName is the name the SKILL.md of dir declares, read as
