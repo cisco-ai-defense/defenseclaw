@@ -7,7 +7,6 @@ package connector
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -22,36 +21,36 @@ import (
 // what a command says, because a command that merely mentions a DefenseClaw
 // hook name (as data, in a comment) runs no DefenseClaw hook (GAP-0940).
 type hermesHookEntryRecord struct {
-	// Shape is the hash of the entry Setup wrote without its command (timeout,
-	// matcher and the other fields), so the entry a person edited in place is
-	// told from a hook that is theirs.
-	Shape string `json:"shape"`
-	// Kept lists the hashes of the commands of entries Setup found in the place
-	// of its own edited entry and kept. They stay listed for as long as the
-	// same command stays in the file.
+	// Wrote lists the hashes of the commands Setup itself wrote on the event,
+	// the newest last. It is the only identity the notice accepts: an entry is
+	// written by DefenseClaw only if Setup recorded writing its exact command.
+	// An entry whose command was edited, or a hook of a person that Setup never
+	// wrote, is not in it and gets no notice (an unprovable notice is omitted).
+	Wrote []string `json:"wrote,omitempty"`
+	// Kept lists the hashes of the commands of entries that Setup wrote
+	// earlier and that DefenseClaw no longer owns (for example the launcher
+	// moved), so Setup leaves them in the file. They stay listed for as long
+	// as the same command stays in the file.
 	Kept []string `json:"kept,omitempty"`
-	// Seen lists the hashes of the commands of the other entries the event
-	// held when Setup last wrote it: hooks that belong to a person, whatever
-	// shape they have. An entry listed here is never taken for the entry Setup
-	// wrote.
-	Seen []string `json:"seen,omitempty"`
 }
+
+// hermesWroteLimit bounds Wrote: the newest commands Setup wrote on an event.
+const hermesWroteLimit = 8
 
 func hermesCommandHash(command string) string {
 	sum := sha256.Sum256([]byte(command))
 	return hex.EncodeToString(sum[:])
 }
 
-// hermesEntryShape hashes every field of a hook entry except its command.
-func hermesEntryShape(entry map[string]interface{}) string {
-	rest := make(map[string]interface{}, len(entry))
-	for key, value := range entry {
-		if key != "command" {
-			rest[key] = value
-		}
+// hermesWroteWith is the Wrote list of record with the command Setup writes now.
+func hermesWroteWith(record hermesHookEntryRecord, command string) []string {
+	hash := hermesCommandHash(command)
+	wrote := slices.DeleteFunc(slices.Clone(record.Wrote), func(other string) bool { return other == hash })
+	wrote = append(wrote, hash)
+	if len(wrote) > hermesWroteLimit {
+		wrote = wrote[len(wrote)-hermesWroteLimit:]
 	}
-	data, _ := json.Marshal(rest)
-	return hermesCommandHash(string(data))
+	return wrote
 }
 
 // hermesRecordDir is the data directory that holds the record, read from the
@@ -66,61 +65,29 @@ func hermesRecordDir(hookScript string) string {
 }
 
 // hermesKeptCommands lists the hashes of the entries of one event that Setup
-// keeps as the place of an entry DefenseClaw wrote and a person has edited: an
-// entry DefenseClaw does not own that was kept before and is still there, or,
-// when the event no longer holds an entry DefenseClaw owns, the one entry that
-// has the shape of the entry Setup wrote and is not a hook Setup saw there
-// already (record.Seen). Setup wrote one entry, so more than one candidate
-// means one of them is not an edit of it, and none is listed. Without a record
-// of the event nothing is listed.
+// leaves in the file although DefenseClaw no longer owns them: entries whose
+// exact command the record says Setup wrote (record.Wrote) or kept before
+// (record.Kept). Nothing else is listed, whatever shape an entry has. Without a
+// record of the event nothing is listed.
 func hermesKeptCommands(prior hermesHomeSetUp, event string, raw interface{}, hookScript string, recognizedCommands map[string]struct{}) []string {
 	record, ok := prior.Hooks[event]
 	if !ok {
 		return nil
 	}
 	entries, _ := hermesHookList(raw)
-	ownedLeft := false
-	for _, entry := range entries {
-		ownedLeft = ownedLeft || hermesHookEntryOwned(entry, hookScript, recognizedCommands)
-	}
-	var kept, candidates []string
+	var kept []string
 	for _, entry := range entries {
 		command, hasCommand := hermesHookEntryCommand(entry)
 		if !hasCommand || hermesHookEntryOwned(entry, hookScript, recognizedCommands) {
 			continue
 		}
 		hash := hermesCommandHash(command)
-		switch {
-		case slices.Contains(kept, hash) || slices.Contains(candidates, hash):
-		case slices.Contains(record.Kept, hash):
+		if (slices.Contains(record.Wrote, hash) || slices.Contains(record.Kept, hash)) && !slices.Contains(kept, hash) {
 			kept = append(kept, hash)
-		case !ownedLeft && !slices.Contains(record.Seen, hash) && record.Shape == hermesEntryShape(entry.(map[string]interface{})):
-			candidates = append(candidates, hash)
 		}
-	}
-	if len(candidates) == 1 {
-		kept = append(kept, candidates...)
 	}
 	sort.Strings(kept)
 	return kept
-}
-
-// hermesSeenCommands lists the hashes of the commands of the entries of one
-// event that DefenseClaw does not own and Setup did not just keep: the hooks
-// that belong to a person.
-func hermesSeenCommands(entries []interface{}, hookScript string, recognizedCommands map[string]struct{}, kept []string) []string {
-	var seen []string
-	for _, entry := range entries {
-		command, hasCommand := hermesHookEntryCommand(entry)
-		if !hasCommand || hermesHookEntryOwned(entry, hookScript, recognizedCommands) {
-			continue
-		}
-		if hash := hermesCommandHash(command); !slices.Contains(kept, hash) && !slices.Contains(seen, hash) {
-			seen = append(seen, hash)
-		}
-	}
-	sort.Strings(seen)
-	return seen
 }
 
 // hermesRecordedKeptEvents lists, for teardown, the required events whose file

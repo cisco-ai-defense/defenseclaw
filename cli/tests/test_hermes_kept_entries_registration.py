@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -78,10 +77,10 @@ def test_a_registration_with_only_a_padded_command_is_reported(tmp_path):
 
 
 def _record_setup(tmp_path: Path, kept: dict[str, list[str]] | None = None) -> None:
-    """Write the Hermes home record Setup makes: the shape of its entry per event and the commands it kept."""
+    """Write the Hermes home record Setup makes: per event, the commands it wrote and the commands it kept."""
 
     hooks = {
-        event: {"shape": hashlib.sha256(event.encode()).hexdigest(), **({"kept": [hermes_command_hash(c) for c in kept[event]]} if event in (kept or {}) else {})}
+        event: {"wrote": [hermes_command_hash(event)], **({"kept": [hermes_command_hash(c) for c in kept[event]]} if event in (kept or {}) else {})}
         for event in _HERMES_REQUIRED_HOOKS
     }
     record = {"home": str(tmp_path), "set_up_at": "2026-11-09T00:00:00Z", "hooks": hooks}
