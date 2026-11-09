@@ -321,6 +321,9 @@ func dispatchTrustedAction(
 		request.targetMemo = hookpaths.NewTargetMemo()
 	}
 	request.Input.ActiveStateTreeNames = clientStateTreeNames(request.ResolvedWriteTargets)
+	// Only the strict tier judges the body of a function the text never
+	// calls; the other tiers follow the functions a call runs.
+	request.Input.StraightLineFunctions = !request.StrictPolicy
 	request.Input.ClientResolvedTargets = withLocalWriteAnswers(
 		request, clientResolvedPathTargets(request.ResolvedWriteTargets),
 	)

@@ -107,9 +107,17 @@ func overLimitHostHook(t *testing.T, connector, home, body string) string {
 // write evidence computed by the caller.
 func overLimitHostHookWithEvidence(t *testing.T, connector, home, body, evidence string) string {
 	t.Helper()
+	return overLimitHostHookInPack(t, connector, "", home, body, evidence)
+}
+
+// overLimitHostHookInPack is overLimitHostHookWithEvidence judged in the
+// policy tier of rulePack ("" is the default tier, "strict" the strict tier).
+func overLimitHostHookInPack(t *testing.T, connector, rulePack, home, body, evidence string) string {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
+	cfg.Guardrail.RulePack = rulePack
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connector+"/hook", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

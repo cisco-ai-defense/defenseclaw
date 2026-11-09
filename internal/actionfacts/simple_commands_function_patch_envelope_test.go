@@ -91,3 +91,48 @@ func TestSimpleCommandsWalkTheStateOfAFunctionBodyNeverCalled(t *testing.T) {
 		})
 	}
 }
+
+// With Input.StraightLineFunctions (the default and permissive tiers of the
+// gateway) a function body the text never calls contributes no command, no
+// directory and no variable: an envelope in it is not exposed, and the state it
+// or another uncalled body sets does not reach an envelope the text runs. The
+// body of a function a call expands is read at the call, in either reading.
+func TestSimpleCommandsStraightLineFunctionsReadOnlyCalledBodies(t *testing.T) {
+	const patch = "apply_patch <<\x27PATCH\x27\n*** Begin Patch\n*** Add File: ld.so.preload\n+/usr/local/lib/libreview.so\n*** End Patch\nPATCH"
+	for _, tt := range []struct {
+		name, command string
+		// straight is how many envelopes the straight-line reading exposes and
+		// full how many the full reading does.
+		straight, full int
+	}{
+		{"called body", "f() {\ncd /etc\n" + patch + "\n}\nf\n", 1, 1},
+		{"uncalled body", "f() {\ncd /etc\n" + patch + "\n}\n", 0, 1},
+		{"uncalled body with a nested definition", "g() {\n" + patch + "\n}\nf() {\ng() { cd /etc; }\n}\n", 0, 1},
+		{"helper defined by an uncalled body", "h() {\ng\n" + patch + "\n}\nf() {\ng() { cd /etc; }\n}\n", 0, 1},
+		{"helper defined by an uncalled body, caller called", "h() {\ng\n" + patch + "\n}\nf() {\ng() { cd /etc; }\n}\nh\n", 1, 1},
+		{"envelope after an uncalled body", "f() {\ncd /etc\n}\n" + patch + "\n", 1, 1},
+		{"uncalled body with commands and an envelope", "f() {\neval \x27rm -rf /\x27\n" + patch + "\n}\n", 0, 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, straightLine := range []bool{true, false} {
+				input := Input{Tool: "shell", Command: tt.command, CWD: "/repo", ActiveHome: "/home/alice", StraightLineFunctions: straightLine}
+				want := tt.full
+				if straightLine {
+					want = tt.straight
+				}
+				envelopes := 0
+				for _, child := range SimpleCommands(input, Analyze(input)) {
+					if strings.HasPrefix(child.Text, "apply_patch <<") {
+						envelopes++
+					}
+					if straightLine && strings.Contains(child.Text, "rm -rf") {
+						t.Errorf("straight-line=%t: a command of an uncalled body is exposed: %q", straightLine, child.Text)
+					}
+				}
+				if envelopes != want {
+					t.Errorf("straight-line=%t: envelopes exposed = %d, want %d", straightLine, envelopes, want)
+				}
+			}
+		})
+	}
+}

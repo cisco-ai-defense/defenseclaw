@@ -191,7 +191,7 @@ func shortCircuitListSequence(source string, compound bool) (string, bool) {
 // and one where a statement could change what another runs (a function
 // definition) or where cutting the text could lose input (a here-document).
 func sequenceStatements(source string, compound bool) (statements []string, reduced, ok bool) {
-	parts, reduced, ok := sequenceStatementDetails(source, compound, false)
+	parts, reduced, ok := sequenceStatementDetails(source, compound, false, false)
 	if !ok {
 		return nil, false, false
 	}
@@ -237,8 +237,12 @@ type simpleLoopBind struct {
 // sequenceStatementDetails is the one full-parser flattening step. The
 // reductions retain ordinary pipelines as a unit; simple-command policy
 // evaluation asks it to expose their individual stages too. Scope identifies
-// statements whose shell directory and variables are shared.
-func sequenceStatementDetails(source string, compound, allSimple bool) (statements []sequenceStatement, reduced, ok bool) {
+// statements whose shell directory and variables are shared. walkUncalled
+// also walks, where it is defined, the body of a function no call of the text
+// expands, for the apply_patch envelope in it; without it (a caller that
+// judges only what the shell runs, Input.StraightLineFunctions) such a body
+// contributes no statement and no state.
+func sequenceStatementDetails(source string, compound, allSimple, walkUncalled bool) (statements []sequenceStatement, reduced, ok bool) {
 	if source == "" {
 		return nil, false, false
 	}
@@ -685,7 +689,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 	if !flattenAll(file.Stmts) {
 		return nil, false, false
 	}
-	if allSimple && len(definitions) != 0 {
+	if walkUncalled && len(definitions) != 0 {
 		// A function the text never calls runs nothing, and the content rules
 		// read the envelope, not the order in which the shell would run it: walk
 		// its body where it is defined, as the body of a child shell, so its
