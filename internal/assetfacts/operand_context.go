@@ -4,6 +4,10 @@
 package assetfacts
 
 import (
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -12,17 +16,19 @@ import (
 //  1. A field a tool uses for a path (Read file_path, Grep and Glob path, a
 //     Glob pattern) is one path, judged whole as typed, spaces and tabs
 //     included.
-//  2. A shell command is read one simple command at a time. When the program
-//     of a command only reads or copies (cat, grep, find, cp, sed, python,
-//     and the same names behind sudo, env, command, xargs), every word after
-//     it, option values included, may name a path.
-//  3. Any other program (echo, printf, git) has paths only in the words with
-//     a slash in them; its slash-free words are paths only in the strict tier,
-//     and only where they name an existing entry of the working folder.
+//  2. A word of a command line with a slash in it is a path, whatever the
+//     program; an argument vector element with a slash is one path whole.
+//  3. A word without a slash is a path only as the name of an existing entry
+//     that leads into a skill folder (a link to one, or an entry of a folder
+//     inside one). The line is not split into operands for this: the check is
+//     whether the text of the call holds the name of such an entry at all.
+//     With a word that reads, copies, writes or runs (readerWords) it is a
+//     path in every tier; without one only in the strict tier. A name is
+//     matched as a substring of the text as typed and with quotes and
+//     backslashes taken out, without regard to case.
 //
-// A slash-free word is a path only when it names an existing entry of the
-// working folder (see skillFolderRefs), so a word that names nothing stays a
-// word in every tier.
+// The entries read are those of the working folder and of each folder the
+// line names with a path (entryScan).
 
 type fieldKind int
 
@@ -150,87 +156,74 @@ func collectFields(tool string, value any, key string, depth int, out *[]inputFi
 	}
 }
 
-// word is one word of a command line.
-type word struct {
-	text string
-	// segment numbers the simple command the word belongs to.
-	segment int
-	// redirect is set for the target of a redirection.
-	redirect bool
-	// eqAfter is set for a word that ended at an equals sign (NAME=, --opt=);
-	// value for the word that follows it.
-	eqAfter, value bool
-}
-
-func isSegmentBreak(r rune) bool {
-	switch r {
-	case 0x3b, 0x7c, 0x26, 0x28, 0x29, 0x0a, 0x60:
-		return true
-	}
-	return false
-}
-
-// shellWords splits a command line into words as the shell does for quotes
-// and escaped spaces, keeping command operators out of the words (an operator
-// ends a word, so does a space, a comma and an equals sign). segment is the
-// number of the command the first word belongs to; a command operator starts
-// the next one.
-func shellWords(value string, segment int) []word {
-	var words []word
+// splitWords splits a command line into words at blanks and at the characters
+// that end a command or start a redirection or a substitution. Quotes are
+// removed. A backslash before a blank or a quote makes it part of the word;
+// with posix a backslash before any character does (the shell reads a\b as
+// ab), without it a backslash is kept (a Windows path separator). A comma and
+// an equals sign do not split: they are characters of file names.
+func splitWords(value string, posix bool) []string {
+	var words []string
 	var current strings.Builder
 	var quote rune
-	redirectNext, afterEquals := false, false
-	flush := func(sep rune) {
+	flush := func() {
 		if current.Len() > 0 {
-			words = append(words, word{
-				text: current.String(), segment: segment,
-				redirect: redirectNext, eqAfter: sep == 0x3d, value: afterEquals,
-			})
+			words = append(words, current.String())
 			current.Reset()
-			redirectNext, afterEquals = false, sep == 0x3d
-		}
-		switch {
-		case isSegmentBreak(sep):
-			segment++
-			afterEquals, redirectNext = false, false
-		case sep == 0x3c || sep == 0x3e:
-			redirectNext = true
 		}
 	}
 	chars := []rune(value)
 	for i := 0; i < len(chars); i++ {
 		ch := chars[i]
-		if ch == 0x5c && quote != 0x27 && i+1 < len(chars) {
+		switch {
+		case ch == 0x5c && quote != 0x27 && i+1 < len(chars):
 			next := chars[i+1]
-			if next == 0x20 || next == 0x09 || next == 0x22 || next == 0x27 {
+			if posix || next == 0x20 || next == 0x09 || next == 0x22 || next == 0x27 {
 				current.WriteRune(next)
 				i++
 				continue
 			}
-		}
-		if ch == 0x22 || ch == 0x27 {
+			current.WriteRune(ch)
+		case (ch == 0x22 || ch == 0x27) && (quote == 0 || quote == ch):
 			if quote == 0 {
 				quote = ch
-				continue
-			}
-			if quote == ch {
+			} else {
 				quote = 0
-				continue
 			}
+		case quote == 0 && strings.ContainsRune(" \t\r\n;|&()<>`", ch):
+			flush()
+		default:
+			current.WriteRune(ch)
 		}
-		if quote == 0 && isCommandSeparator(ch) {
-			// 2>&1 duplicates a descriptor; it does not start a command.
-			if ch == 0x26 && i > 0 && (chars[i-1] == 0x3c || chars[i-1] == 0x3e) {
-				flush(0)
-				continue
-			}
-			flush(ch)
-			continue
-		}
-		current.WriteRune(ch)
 	}
-	flush(0)
+	flush()
 	return words
+}
+
+// slashWords lists the words of a command line that have a slash in them,
+// each spelled as the shell reads it (with and without backslash escapes) and
+// also split at the commas and equals signs that may join a value to an
+// option (--file=/x/y, NAME=/x/y). Such a word is a path in every tier.
+func slashWords(value string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(word string) {
+		if strings.ContainsAny(word, "/\\") && !seen[word] {
+			seen[word] = true
+			out = append(out, word)
+		}
+	}
+	for _, posix := range []bool{false, true} {
+		for _, word := range splitWords(value, posix) {
+			add(word)
+			if strings.ContainsAny(word, "=,") {
+				for _, part := range strings.FieldsFunc(word, func(r rune) bool { return r == 0x3d || r == 0x2c }) {
+					add(part)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // isShellScriptFlag reports whether arg is the option that makes a shell run
@@ -239,71 +232,42 @@ func isShellScriptFlag(arg string) bool {
 	return len(arg) >= 2 && arg[0] == 0x2d && arg[1] != 0x2d && strings.HasSuffix(arg, "c")
 }
 
-// wrapperWords run the command that follows them, or put it in a block.
-var wrapperWords = map[string]bool{
-	"sudo": true, "doas": true, "env": true, "time": true, "nohup": true,
-	"nice": true, "ionice": true, "exec": true, "command": true, "builtin": true,
-	"xargs": true, "parallel": true, "timeout": true, "stdbuf": true, "setsid": true, "watch": true,
-	"if": true, "then": true, "else": true, "elif": true, "do": true,
-	"while": true, "until": true, "!": true, "{": true,
-}
+// readerWords are the words that read, copy, write, search or run what their
+// operands name: readers and copiers, writers, interpreters, shells and the
+// wrappers that run another command (sudo, env, xargs, eval, ...). A command
+// line that holds the name of a protected link and one of them may use it.
+var readerWords = func() map[string]bool {
+	words := map[string]bool{}
+	for _, list := range []string{
+		// readers and copiers
+		"cat head tail less more tac nl bat grep egrep fgrep zgrep rg ag ack find ls dir vdir tree du",
+		"cp mv rsync scp tar zip unzip gzip gunzip zcat bzcat xzcat 7z ar cpio sed awk gawk mawk sort uniq wc",
+		"diff cmp comm xxd od hexdump strings file stat cut paste tr rev fold fmt column jq yq base64",
+		"readlink realpath sha256sum shasum md5sum cksum python python3 node ruby perl vi vim view nano",
+		"emacs code open cd pushd source read mapfile readarray type gc get-content select-string sls findstr",
+		"copy xcopy robocopy move get-childitem gci get-item gi get-itemproperty",
+		// writers
+		"tee dd install ln rm rmdir touch truncate chmod chown chgrp mkdir unlink shred patch sponge mklink",
+		"del erase rd ren rename set-content add-content out-file copy-item cpi move-item mi remove-item ri",
+		// shells, evaluators and wrappers that run another command
+		"sh bash zsh dash ksh fish pwsh powershell cmd eval sudo doas env xargs parallel command builtin exec",
+		"time nohup nice ionice timeout stdbuf setsid watch",
+	} {
+		for _, word := range strings.Fields(list) {
+			words[word] = true
+		}
+	}
+	return words
+}()
 
-// wrapperValueLetters and wrapperValueLong are the options of a wrapper that
-// take the next word as their value, so that word is not the program.
-var wrapperValueLetters = map[string]string{
-	"sudo": "ughpCDRTUrtc", "doas": "uC", "env": "uCSP", "nice": "n", "ionice": "cnpPu",
-	"timeout": "sk", "stdbuf": "ioe", "xargs": "aEILnPsd", "time": "fo", "watch": "n", "exec": "a",
-	"parallel": "jaNnSIL",
-}
-
-var wrapperValueLong = map[string][]string{
-	"sudo": {"user", "group", "host", "prompt", "close-from", "chdir", "chroot", "role", "type", "other-user", "command-timeout"},
-	"env":  {"unset", "chdir", "split-string"}, "nice": {"adjustment"}, "ionice": {"class", "classdata", "pid"},
-	"timeout": {"signal", "kill-after"}, "stdbuf": {"input", "output", "error"},
-	"xargs": {"arg-file", "delimiter", "eof", "max-args", "max-lines", "max-procs", "max-chars", "replace"},
-	"time":  {"format", "output"}, "watch": {"interval"}, "parallel": {"jobs", "arg-file", "max-args", "delimiter"},
-}
-
-// readerPrograms read or copy the files named by their words (all of them,
-// the pattern or script of a search included, since an option can make that
-// word a file), so each word may name a path.
-var readerPrograms = map[string]bool{
-	"cat": true, "head": true, "tail": true, "less": true, "more": true, "tac": true, "nl": true, "bat": true,
-	"grep": true, "egrep": true, "fgrep": true, "zgrep": true, "rg": true, "ag": true, "ack": true,
-	"find": true, "ls": true, "dir": true, "vdir": true, "tree": true, "du": true,
-	"cp": true, "mv": true, "rsync": true, "scp": true, "tar": true, "zip": true, "unzip": true,
-	"gzip": true, "gunzip": true, "zcat": true, "bzcat": true, "xzcat": true, "7z": true, "ar": true, "cpio": true,
-	"sed": true, "awk": true, "gawk": true, "mawk": true, "sort": true, "uniq": true, "wc": true,
-	"diff": true, "cmp": true, "comm": true, "xxd": true, "od": true, "hexdump": true, "strings": true,
-	"file": true, "stat": true, "cut": true, "paste": true, "tr": true, "rev": true, "fold": true,
-	"fmt": true, "column": true, "jq": true, "yq": true, "base64": true, "readlink": true, "realpath": true,
-	"sha256sum": true, "shasum": true, "md5sum": true, "cksum": true,
-	"python": true, "python3": true, "node": true, "ruby": true, "perl": true,
-	"vi": true, "vim": true, "view": true, "nano": true, "emacs": true, "code": true, "open": true,
-	"cd": true, "pushd": true, "source": true, ".": true,
-	"type": true, "gc": true, "get-content": true, "select-string": true, "sls": true, "findstr": true,
-	"copy": true, "xcopy": true, "robocopy": true, "move": true, "get-childitem": true, "gci": true,
-}
-
-// shellPrograms run a command line given to them with a script option (-c,
-// /c, -Command); the rest of the line is judged as a command of its own.
-var shellPrograms = map[string]bool{
-	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "fish": true,
-	"pwsh": true, "powershell": true, "cmd": true,
-}
-
-// cwdSearchPrograms look through the working folder when no word names
-// another place; the grep family only with a recursive option.
-var cwdSearchPrograms = map[string]bool{
+// searchPrograms look through the working folder when no word names another
+// place; the grep family only with a recursive option.
+var searchPrograms = map[string]bool{
 	"ls": true, "dir": true, "vdir": true, "tree": true, "du": true, "find": true,
-	"rg": true, "ag": true, "ack": true, "grep": true, "egrep": true, "fgrep": true, "zgrep": true,
+	"rg": true, "ag": true, "ack": true,
 }
 
-var recursiveGrep = map[string]bool{"grep": true, "egrep": true, "fgrep": true, "zgrep": true}
-
-// maxShellDepth bounds the command lines read inside command lines (sh -c,
-// eval).
-const maxShellDepth = 4
+var grepPrograms = map[string]bool{"grep": true, "egrep": true, "fgrep": true, "zgrep": true}
 
 func programName(text string) string {
 	text = strings.ToLower(text)
@@ -313,235 +277,219 @@ func programName(text string) string {
 	return strings.TrimSuffix(text, ".exe")
 }
 
-// simpleCommand is one command of a command line: its program with the
-// wrappers (sudo -u root, env X=1, xargs -n1) taken off, the words around it,
-// and whether a wrapper reads the line it runs from its input.
-type simpleCommand struct {
-	program string
-	// programWord is the program as written: a path to it has a slash.
-	programWord string
-	// before holds the words in front of the program that are not wrappers:
-	// assignments, option values of the wrappers, redirection targets.
-	before []word
-	args   []word
-	feeds  bool
-}
-
-func parseSimpleCommand(seg []word) simpleCommand {
-	var c simpleCommand
-	i := 0
-	for i < len(seg) {
-		w := seg[i]
-		if w.redirect || w.eqAfter || w.value {
-			c.before = append(c.before, w)
-			i++
-			continue
-		}
-		name := programName(w.text)
-		if !wrapperWords[name] {
-			c.program, c.programWord, c.args = name, w.text, seg[i+1:]
-			return c
-		}
-		c.feeds = c.feeds || name == "xargs" || name == "parallel"
-		i++
-		for i < len(seg) {
-			o := seg[i]
-			if o.redirect || o.eqAfter || o.value {
-				c.before = append(c.before, o)
-				i++
-				continue
-			}
-			if len(o.text) < 2 || o.text[0] != 0x2d {
-				break
-			}
-			i++
-			if o.text == "--" {
-				break
-			}
-			if wrapperOptionTakesValue(name, o.text) && i < len(seg) {
-				c.before = append(c.before, seg[i])
-				i++
-			}
-		}
-		if name == "timeout" && i < len(seg) {
-			i++
-		}
+// textForms are the spellings of a command line the name check reads: as
+// typed, and with the quote, escape and caret characters taken out (c\at,
+// 'cat' and nee\dle read as cat and needle). They are lower case: the file
+// systems of Windows and macOS do not tell the case of a name.
+func textForms(line string) []string {
+	lower := strings.ToLower(line)
+	plain := strings.NewReplacer(`\`, "", `'`, "", `"`, "", "^", "", "`", "").Replace(lower)
+	if plain == lower {
+		return []string{lower}
 	}
-	return c
+	return []string{lower, plain}
 }
 
-func wrapperOptionTakesValue(wrapper, option string) bool {
-	if strings.HasPrefix(option, "--") {
-		for _, long := range wrapperValueLong[wrapper] {
-			if option == "--"+long {
+// safeRedirect matches the redirections that read or write no file of a
+// call: a duplicated descriptor and the null device.
+var safeRedirect = regexp.MustCompile(`[0-9&]?>>?\s*/dev/null|[0-9]*>&[0-9-]+|&>>?\s*/dev/null`)
+
+// holdsReaderWord reports whether the command line holds one of the readerWords
+// as a word of its own, a read redirection (<, a write: >) or the dot command.
+func holdsReaderWord(forms []string) bool {
+	for _, form := range forms {
+		for _, word := range strings.FieldsFunc(form, func(r rune) bool {
+			return !isWordRune(r)
+		}) {
+			if readerWords[word] {
 				return true
 			}
 		}
-		return false
+		for _, word := range strings.FieldsFunc(form, func(r rune) bool { return strings.ContainsRune(" \t\r\n;|&()", r) }) {
+			if word == "." {
+				return true
+			}
+		}
+		if strings.ContainsAny(safeRedirect.ReplaceAllString(form, " "), "<>") {
+			return true
+		}
 	}
-	letters := wrapperValueLetters[wrapper]
-	return letters != "" && strings.ContainsRune(letters, rune(option[len(option)-1]))
+	return false
 }
 
-// commandPathWords reads a command line, or an argument vector, and returns
-// the words that may name a path under the rules above, and whether a command
-// in it searches dir because it names no other place (ls, grep -r). strict
-// reads the slash-free words of any program as paths.
-func commandPathWords(text string, argv []string, dir string, strict bool, depth int) (paths []string, cwdSearch bool) {
-	var words []word
-	if argv == nil {
-		words = shellWords(text, 0)
-	} else {
-		for _, arg := range argv {
-			segment := 0
-			if len(words) > 0 {
-				segment = words[len(words)-1].segment
-			}
-			words = append(words, shellWords(arg, segment)...)
-		}
-	}
-	var commands []simpleCommand
-	for start := 0; start < len(words); {
-		end := start
-		for end < len(words) && words[end].segment == words[start].segment {
-			end++
-		}
-		commands = append(commands, parseSimpleCommand(words[start:end]))
-		start = end
-	}
-	// The words a command prints are the operands of a later command that
-	// reads its line from its input (echo name | xargs cat).
-	lastFeed := -1
-	for i, c := range commands {
-		if c.feeds {
-			lastFeed = i
-		}
-	}
-	for i, c := range commands {
-		more, search := c.pathWords(dir, strict || i < lastFeed, depth)
-		paths = append(paths, more...)
-		cwdSearch = cwdSearch || search
-	}
-	return paths, cwdSearch
+// isWordRune is a character of a program name: a lower-case letter, a digit,
+// a hyphen or an underscore.
+func isWordRune(r rune) bool {
+	return r >= 0x61 && r <= 0x7a || r >= 0x30 && r <= 0x39 || r == 0x2d || r == 0x5f
 }
 
-// pathWords lists the words of the command that may name a path. all reads
-// every word of any program as one.
-func (c simpleCommand) pathWords(dir string, all bool, depth int) (paths []string, cwdSearch bool) {
-	for _, w := range c.before {
-		paths = append(paths, w.text)
-	}
-	if strings.ContainsAny(c.programWord, "/\\") {
-		paths = append(paths, c.programWord)
-	}
-	switch {
-	case readerPrograms[c.program]:
-		for _, w := range c.args {
-			paths = append(paths, w.text)
-			paths = append(paths, attachedOptionValues(w.text)...)
-		}
-	case shellPrograms[c.program]:
-		inner, rest, ok := shellScript(c.program, c.args)
-		if ok && depth < maxShellDepth {
-			more, search := commandPathWords(inner, nil, dir, all, depth+1)
-			paths, cwdSearch = append(paths, more...), search
-			for _, w := range rest {
-				paths = append(paths, w.text)
-			}
-			break
-		}
-		for _, w := range c.args {
-			paths = append(paths, w.text)
-		}
-	case c.program == "eval" && depth < maxShellDepth:
-		texts := make([]string, len(c.args))
-		for i, w := range c.args {
-			texts[i] = w.text
-		}
-		more, search := commandPathWords(strings.Join(texts, " "), nil, dir, all, depth+1)
-		paths, cwdSearch = append(paths, more...), search
-	case c.program == "for" || c.program == "select":
-		listed := false
-		for _, w := range c.args {
-			if listed {
-				paths = append(paths, w.text)
-			}
-			listed = listed || w.text == "in"
-		}
-	default:
-		listed := false
-		for _, w := range c.args {
-			listed = listed || w.text == ":::"
-			if all || listed || strings.ContainsAny(w.text, "/\\") {
-				paths = append(paths, w.text)
-			}
+// searchesFolder reports whether the command line looks through the working
+// folder because no word names another place: ls, find, tree, rg and the like
+// with no word with a slash in it, grep with a recursive option.
+func searchesFolder(line string) bool {
+	searching, grep, recursive := false, false, false
+	for _, word := range splitWords(line, false) {
+		name := programName(word)
+		switch {
+		case searchPrograms[name]:
+			searching = true
+		case grepPrograms[name]:
+			grep = true
+		case strings.ContainsAny(word, "/\\"):
+			return false
+		case strings.HasPrefix(word, "--"):
+			recursive = recursive || word == "--recursive" || word == "--dereference-recursive"
+		case len(word) > 1 && word[0] == 0x2d:
+			recursive = recursive || strings.ContainsAny(word[1:], "rR")
 		}
 	}
-	for _, w := range c.args {
-		if w.redirect && !readerPrograms[c.program] {
-			paths = append(paths, w.text)
-		}
-	}
-	return paths, cwdSearch || c.searchesFolder(dir)
+	return searching || grep && recursive
 }
 
-// attachedOptionValues are the values glued to a short option (-frules is
-// -f rules): the part after each letter.
-func attachedOptionValues(text string) []string {
-	if len(text) < 3 || len(text) > 64 || text[0] != 0x2d || text[1] == 0x2d {
+// maxListedEntries bounds the entries read from one folder, and
+// maxNamedFolders the folders besides the working folder a command line may
+// name.
+const (
+	maxListedEntries = 8192
+	maxNamedFolders  = 64
+	maxNamedWords    = 256
+)
+
+// entryScan finds the entries of a folder, and the skill folders they lead
+// into, whose names a command line holds. It is made for one call: the
+// listings and the answers are kept.
+type entryScan struct {
+	home, account string
+	listed        map[string]listing
+	resolved      map[string][]FolderRef
+}
+
+type listing struct {
+	names    []string
+	complete bool
+}
+
+func newEntryScan(home, account string) *entryScan {
+	return &entryScan{home: home, account: account, listed: map[string]listing{}, resolved: map[string][]FolderRef{}}
+}
+
+func (s *entryScan) entries(dir string) listing {
+	if l, ok := s.listed[dir]; ok {
+		return l
+	}
+	var l listing
+	if filepath.IsAbs(dir) && readableTarget(dir) {
+		if f, err := os.Open(dir); err == nil {
+			names, _ := f.Readdirnames(maxListedEntries + 1)
+			f.Close()
+			l = listing{names: names, complete: len(names) <= maxListedEntries}
+		}
+	}
+	s.listed[dir] = l
+	return l
+}
+
+// folders lists the skill folders reached by the entries of the working
+// folder, and of each folder the command line names with a path, whose names
+// the command line holds anywhere in its text, whatever the words around them
+// are. The name of an entry is what the shell is given, however the line is
+// split, quoted or run, so no reading of the line can hide it. A folder too
+// large to list is read word by word.
+func (s *entryScan) folders(line, cwd string) []FolderRef {
+	forms := textForms(line)
+	dirs := []string{cwd}
+	named := slashWords(line)
+	for i, word := range splitWords(line, true) {
+		// A word with no slash that is a folder of the working folder
+		// (cd sub; cat name) names that folder too.
+		if i < maxNamedWords && !strings.ContainsAny(word, "/\\") {
+			named = append(named, "./"+word)
+		}
+	}
+	for _, word := range named {
+		for _, dir := range s.namedFolders(word, cwd) {
+			if len(dirs) <= maxNamedFolders && !slices.Contains(dirs, dir) {
+				dirs = append(dirs, dir)
+			}
+		}
+	}
+	var refs []FolderRef
+	for _, dir := range dirs {
+		l := s.entries(dir)
+		names := l.names
+		if !l.complete {
+			names = nil
+			for _, word := range splitWords(line, true) {
+				if !strings.ContainsAny(word, "/\\") {
+					if namesEntryIn(dir, word) {
+						names = append(names, word)
+					}
+				}
+			}
+		}
+		for _, name := range names {
+			lower := strings.ToLower(name)
+			if lower == "" || !slices.ContainsFunc(forms, func(form string) bool { return strings.Contains(form, lower) }) {
+				continue
+			}
+			refs = append(refs, s.reached(filepath.Join(dir, name))...)
+		}
+	}
+	return refs
+}
+
+// reached lists the skill folders the entry at path leads into.
+func (s *entryScan) reached(path string) []FolderRef {
+	if refs, ok := s.resolved[path]; ok {
+		return refs
+	}
+	refs := skillFolderRefs(path, s.home, "", s.account)
+	for i := range refs {
+		refs[i].BareOperand = true
+	}
+	s.resolved[path] = refs
+	return refs
+}
+
+// namedFolders lists the folders a path word of the command line leads to: the
+// path itself where it is a folder, and the folder that holds it.
+func (s *entryScan) namedFolders(word, cwd string) []string {
+	path := filepath.FromSlash(trimExtendedPrefix(strings.ReplaceAll(word, "\\", "/")))
+	path = expandHome(path, s.home, s.account)
+	if strings.HasPrefix(path, "~") || strings.Contains(path, "$") {
 		return nil
 	}
-	var values []string
-	for i := 2; i < len(text); i++ {
-		values = append(values, text[i:])
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
 	}
-	return values
-}
-
-// shellScript finds the command line a shell is told to run: the word after
-// -c for a POSIX shell, the rest of the line after /c or -Command for cmd and
-// PowerShell. rest holds the words that come after a POSIX script.
-func shellScript(program string, args []word) (script string, rest []word, ok bool) {
-	for i, w := range args {
-		lower := strings.ToLower(w.text)
-		switch {
-		case program == "cmd" && (lower == "/c" || lower == "/k"),
-			(program == "pwsh" || program == "powershell") && (lower == "-command" || lower == "-c"):
-			texts := make([]string, 0, len(args)-i-1)
-			for _, t := range args[i+1:] {
-				texts = append(texts, t.text)
+	var out []string
+	for _, dir := range []string{filepath.Clean(path), filepath.Dir(filepath.Clean(path))} {
+		if readableTarget(dir) {
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				out = append(out, dir)
 			}
-			return strings.Join(texts, " "), nil, len(texts) > 0
-		case isShellScriptFlag(w.text) && program != "cmd" && program != "pwsh" && program != "powershell":
-			if i+1 >= len(args) {
-				return "", nil, false
-			}
-			return args[i+1].text, args[i+2:], true
 		}
 	}
-	return "", nil, false
+	return out
 }
 
-// searchesFolder reports whether the command looks through the working folder
-// because no word names another place.
-func (c simpleCommand) searchesFolder(dir string) bool {
-	if !cwdSearchPrograms[c.program] {
-		return false
+// expandHome spells a leading ~/, ~caller/, $HOME/ or ${HOME}/ with the home
+// folder.
+func expandHome(path, home, caller string) string {
+	path = filepath.ToSlash(path)
+	if home == "" {
+		return filepath.FromSlash(path)
 	}
-	recursive := !recursiveGrep[c.program]
-	for _, w := range c.args {
-		switch {
-		case w.redirect:
-		case strings.HasPrefix(w.text, "--"):
-			recursive = recursive || w.text == "--recursive" || w.text == "--dereference-recursive"
-		case len(w.text) > 1 && w.text[0] == 0x2d:
-			recursive = recursive || strings.ContainsAny(w.text[1:], "rR")
-		case w.text == "." || w.text == ".." || strings.HasPrefix(w.text, "~") || strings.HasPrefix(w.text, "$") ||
-			strings.ContainsAny(w.text, "/\\") || namesEntryIn(dir, w.text):
-			return false
+	prefixes := []string{"~/", "$HOME/", "${HOME}/"}
+	if caller != "" && !strings.ContainsAny(caller, "/\\") {
+		prefixes = append([]string{"~" + caller + "/"}, prefixes...)
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(path, prefix) {
+			return filepath.FromSlash(filepath.ToSlash(home) + "/" + strings.TrimPrefix(path, prefix))
 		}
 	}
-	return recursive
+	return filepath.FromSlash(path)
 }
 
 // searchesWorkingFolder reports whether a call of tool searches the working
@@ -557,12 +505,4 @@ func searchesWorkingFolder(tool string, fields []inputField) bool {
 		}
 	}
 	return true
-}
-
-func wordTexts(words []word) []string {
-	texts := make([]string, len(words))
-	for i, w := range words {
-		texts[i] = w.text
-	}
-	return texts
 }
