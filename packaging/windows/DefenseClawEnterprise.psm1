@@ -15903,16 +15903,40 @@ function Get-DefenseClawKeptRecordFiles {
     }
 }
 
+function Test-DefenseClawDeploymentServicesRegistered {
+    <#
+        Read only. $true when the gateway or the guardian service is registered
+        (or cannot be told to be absent): a deployment may be running.
+    #>
+    param([Parameter(Mandatory)][string]$GatewayServiceName, [Parameter(Mandatory)][string]$GuardianServiceName)
+    foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
+        try {
+            if (Test-DefenseClawServiceExists -Name $name) { return $true }
+        }
+        catch {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Get-DefenseClawOrphanedKeptRecordRefusal {
     <#
         Read only. '' unless the deployment record is missing while a copy of
-        it that a Setup run kept aside is still next to it: the state an
-        earlier build left when it stopped between the move and the rewrite
-        (a hard kill, a Setup timeout), or that a put-back failure left. The
-        refusal names that state and the way out; status, verify and every
-        action but Repair and Uninstall stop with it.
+        it that a Setup run kept aside is still next to it AND a DefenseClaw
+        service is registered: the state an earlier build left when it stopped
+        between the move and the rewrite (a hard kill, a Setup timeout), or
+        that a put-back failure left, on a host that may be running. Status,
+        verify and every action but Repair and Uninstall stop with it. With no
+        service registered it is only what an uninstall left behind: no
+        deployment runs from it, nothing reads the copy, and an install removes
+        it (Remove-DefenseClawLeftoverKeptRecords), so it is no refusal.
     #>
-    param([Parameter(Mandatory)][hashtable]$Layout)
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
     if (-not (Test-DefenseClawStandaloneProfile)) { return '' }
     try {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath -PathType Leaf) { return '' }
@@ -15922,11 +15946,47 @@ function Get-DefenseClawOrphanedKeptRecordRefusal {
     }
     $kept = @(Get-DefenseClawKeptRecordFiles -Path $Layout.MetadataPath)
     if ($kept.Count -eq 0) { return '' }
+    if (-not (Test-DefenseClawDeploymentServicesRegistered -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) { return '' }
     return ("untrusted_record: $($Layout.MetadataPath) is missing, and $($kept -join ', ') is the copy of it that Setup kept aside because another account could change it; " +
         'an earlier run stopped before it wrote the record again, so no deployment record is in place and nothing here says what is installed. ' +
         "Fix, from an elevated prompt: run $(Format-DefenseClawSetupAction -Action '/repair'). It writes the record again from the machine's services and the signed Setup payload " +
-        '(it never reads the kept copy), and gives the kept copy administrator-only access. ' +
-        "If no gateway service is registered, this is state an uninstall left behind: run $(Format-DefenseClawSetupAction -Action '/uninstall PURGE=1') instead.")
+        '(it never reads the kept copy), and gives the kept copy administrator-only access.')
+}
+
+function Remove-DefenseClawLeftoverKeptRecords {
+    <#
+        Install and Upgrade, under the lifecycle lock: removes the copies a
+        Setup run kept aside (<record>.rejected-*) from a state an uninstall
+        left behind, so they do not block the reinstall or ask for a purge that
+        would delete data. Acts only when there is no deployment record and no
+        DefenseClaw service, and only on regular files in the install folder
+        that carry the name Setup gave them; the copies are DefenseClaw-made
+        backups and nothing reads them. A copy it cannot remove is a warning.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.MetadataPath) -or
+        (Test-DefenseClawDeploymentServicesRegistered -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName)) {
+        return
+    }
+    foreach ($record in @([string]$Layout.MetadataPath, [string]$Layout.AgentApplicationControlAttestationPath)) {
+        foreach ($keptFile in @(Get-DefenseClawKeptRecordFiles -Path $record)) {
+            $leaf = [IO.Path]::GetFileName($keptFile)
+            if ($leaf -cnotmatch '^(deployment|agent-application-control-attestation)\.json\.rejected-\d{8}T\d{9}Z-([0-9a-f]{12}|unreadable)$') { continue }
+            try {
+                Assert-DefenseClawNoReparsePath -Path $keptFile
+                Microsoft.PowerShell.Management\Remove-Item -LiteralPath $keptFile -Force -ErrorAction Stop
+                Microsoft.PowerShell.Utility\Write-Warning -Message "kept_record_removed: $keptFile was left by an earlier uninstall (a copy of a changed record that Setup kept aside; nothing reads it) and was removed before the install"
+            }
+            catch {
+                Microsoft.PowerShell.Utility\Write-Warning -Message "kept_record_left: could not remove $keptFile ($($_.Exception.Message)); it is evidence only, delete it with Remove-Item -LiteralPath `"$keptFile`" -Force from an elevated prompt"
+            }
+        }
+    }
 }
 
 function Protect-DefenseClawKeptRecord {
@@ -16046,7 +16106,7 @@ function Invoke-DefenseClawStandaloneRecordRecovery {
             $changed.Add([pscustomobject]@{ Kind = $record.Kind; Path = $record.Path; Reason = $reason })
         }
     }
-    $orphaned = -not [string]::IsNullOrEmpty((Get-DefenseClawOrphanedKeptRecordRefusal -Layout $Layout))
+    $orphaned = -not [string]::IsNullOrEmpty((Get-DefenseClawOrphanedKeptRecordRefusal -Layout $Layout -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName))
     if ($changed.Count -eq 0 -and -not $orphaned) {
         Complete-DefenseClawKeptRecordStamps -Layout $Layout
         return $kept.ToArray()
@@ -52868,7 +52928,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -not $recoverProductionUninstallAcl) {
         # A deployment record that is missing while a copy kept aside is left
         # next to it: an earlier run stopped between the two (GAP-0602 D1).
-        $orphanedRecord = Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout
+        $orphanedRecord = Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout -GatewayServiceName $GatewayServiceName -GuardianServiceName $GuardianServiceName
         if (-not [string]::IsNullOrEmpty($orphanedRecord)) { throw $orphanedRecord }
     }
     if ((Test-DefenseClawDeploymentMetadataPresent -Path $layout.MetadataPath) -and
@@ -53185,6 +53245,14 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         if ($Action -in @('Install', 'Upgrade', 'Repair') -and
             $GatewayServiceName -ceq 'DefenseClawGateway') {
             Assert-DefenseClawNoOtherProfileDeployment
+        }
+        if ($Action -in @('Install', 'Upgrade') -and (Test-DefenseClawStandaloneProfile)) {
+            # Copies a Setup run kept aside, left by an uninstall that kept the
+            # state, must not block this install (nothing reads them).
+            Remove-DefenseClawLeftoverKeptRecords `
+                -Layout $layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
         }
         if ($Action -eq 'Repair' -and (Test-DefenseClawStandaloneProfile)) {
             [void](Invoke-DefenseClawStandaloneRecordRecovery `

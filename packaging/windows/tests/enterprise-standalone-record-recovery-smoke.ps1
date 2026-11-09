@@ -279,17 +279,17 @@ try {
         # is next to it (an earlier build stopped between the two) is named,
         # and a repair writes it again from the machine and stamps the copy.
         Reset-Records
-        if ((Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout) -ne '') { throw 'a healthy host was reported as having an orphaned kept copy' }
+        if ((Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout -GatewayServiceName 'G' -GuardianServiceName 'H') -ne '') { throw 'a healthy host was reported as having an orphaned kept copy' }
         Plant-Writer $metadata
         $orphanKept = Join-Path $install 'deployment.json.rejected-20261101T000000000Z-0123456789ab'
         Microsoft.PowerShell.Management\Move-Item -LiteralPath $metadata -Destination $orphanKept
-        $orphan = Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout
-        if ($orphan -notmatch '^untrusted_record: ' -or $orphan -notmatch [regex]::Escape($orphanKept) -or $orphan -notmatch '/repair' -or $orphan -notmatch 'PURGE=1') { throw "the orphaned kept copy is not named with the way out: $orphan" }
+        $orphan = Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout -GatewayServiceName 'G' -GuardianServiceName 'H'
+        if ($orphan -notmatch '^untrusted_record: ' -or $orphan -notmatch [regex]::Escape($orphanKept) -or $orphan -notmatch '/repair' -or $orphan -match 'PURGE=1') { throw "the orphaned kept copy is not named with the way out: $orphan" }
         if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $orphanKept) -eq '') { throw 'the planted orphan is not untrusted' }
         $script:rebuilds.Clear()
         $kept = @(Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H')
         if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata -PathType Leaf) -or $script:rebuilds.Count -ne 1 -or @(Kept 'deployment.json').Count -ne 1 -or
-            (Get-DefenseClawStandaloneRecordUntrustedReason -Path $orphanKept) -ne '' -or (Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout) -ne '') {
+            (Get-DefenseClawStandaloneRecordUntrustedReason -Path $orphanKept) -ne '' -or (Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout -GatewayServiceName 'G' -GuardianServiceName 'H') -ne '') {
             throw 'a repair did not write the record again and stamp the orphaned copy'
         }
 
@@ -316,6 +316,31 @@ try {
             if ($text -notmatch [regex]::Escape($want)) { throw "the refusal lacks '$want': $text" }
         }
         if ($text -match '<[A-Za-z ]+>') { throw "the refusal holds a template: $text" }
+
+        # Orphan reinstall: with no DefenseClaw service registered, a kept copy
+        # left by an uninstall is no refusal, and an install removes it (only a
+        # regular file with the name Setup gave it); with a live record, or with
+        # a service registered, nothing is removed.
+        Reset-Records
+        Plant-Writer $metadata
+        $leftover = Join-Path $install 'deployment.json.rejected-20261101T000000000Z-0123456789ab'
+        $decoy = Join-Path $install 'deployment.json.rejected-notes.txt'
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $metadata -Destination $leftover
+        [IO.File]::WriteAllText($decoy, 'mine')
+        $script:serviceRegistered = $true
+        Remove-DefenseClawLeftoverKeptRecords -Layout $layout -GatewayServiceName 'G' -GuardianServiceName 'H' 3>&1 | Out-Null
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $leftover)) { throw 'a kept copy was removed while a service is registered' }
+        $script:serviceRegistered = $false
+        if ((Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout -GatewayServiceName 'G' -GuardianServiceName 'H') -ne '') { throw 'a leftover kept copy with no service registered blocks the reinstall' }
+        New-Record $metadata '{"installed":true}'
+        Remove-DefenseClawLeftoverKeptRecords -Layout $layout -GatewayServiceName 'G' -GuardianServiceName 'H' 3>&1 | Out-Null
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $leftover)) { throw 'a kept copy was removed next to a live record' }
+        Microsoft.PowerShell.Management\Remove-Item -LiteralPath $metadata -Force
+        $removed = @(Remove-DefenseClawLeftoverKeptRecords -Layout $layout -GatewayServiceName 'G' -GuardianServiceName 'H' 3>&1)
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $leftover) { throw 'the leftover kept copy was not removed by the install step' }
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $decoy)) { throw 'a file that Setup did not name was removed' }
+        if ((@($removed | Microsoft.PowerShell.Core\Where-Object { $_ -is [Management.Automation.WarningRecord] -and $_.Message -match '^kept_record_removed: ' })).Count -ne 1) { throw 'the removal was not named' }
+        $script:serviceRegistered = $true
 
         # Secure Client: nothing changes.
         function Test-DefenseClawStandaloneProfile { return $false }

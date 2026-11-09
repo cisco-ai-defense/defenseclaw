@@ -100,7 +100,14 @@ def test_publish_stamps_a_sibling_then_swaps_it_in_with_the_old_object_kept() ->
 def test_the_orphaned_kept_copy_is_named_by_status_and_finished_by_repair() -> None:
     text = _text()
     refusal = _function(text, "Get-DefenseClawOrphanedKeptRecordRefusal")
-    assert "untrusted_record: " in refusal and "'/repair'" in refusal and "PURGE=1" in refusal
+    assert "untrusted_record: " in refusal and "'/repair'" in refusal
+    # A state an uninstall left behind (no service) is no refusal: an install
+    # removes the copies, so nobody is sent to a purge that deletes data.
+    assert "Test-DefenseClawDeploymentServicesRegistered" in refusal and "PURGE=1" not in refusal
+    leftover = _function(_text(), "Remove-DefenseClawLeftoverKeptRecords")
+    assert "Test-DefenseClawDeploymentServicesRegistered" in leftover and ".rejected-" in leftover
+    install = _text().index("Remove-DefenseClawLeftoverKeptRecords `\n                -Layout $layout")
+    assert "'Install', 'Upgrade'" in _text()[install - 400 : install]
     entry = text.index("Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout")
     guard = text[text.rindex("if ((Test-DefenseClawStandaloneProfile)", 0, entry) : entry]
     assert "'Status', 'Verify', 'Install', 'Upgrade', 'Reconcile'" in guard
