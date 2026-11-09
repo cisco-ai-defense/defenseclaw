@@ -9,8 +9,9 @@ import (
 )
 
 // The content proofs read the literal envelope of an apply_patch command with a
-// quoted here-document as they read the apply_patch tool, and read nothing
-// from any other shell text.
+// here-document as they read the apply_patch tool, and read nothing from any
+// other shell text. Every delimiter spelling is covered by
+// TestContentProofsReadTheEnvelopeOfEveryHereDocumentSpelling.
 func TestContentProofsReadTheEnvelopeOfAShellApplyPatch(t *testing.T) {
 	const lib = "/usr/local/lib/libreview.so"
 	patch := func(directives string) string {
@@ -33,7 +34,7 @@ func TestContentProofsReadTheEnvelopeOfAShellApplyPatch(t *testing.T) {
 		{name: "command after the patch", command: patch(loader) + "cat notes.txt\n", loader: true},
 		{name: "ordinary file", command: patch("*** Add File: notes.txt\n+hello\n")},
 		{name: "redirect is not a patch", command: "echo " + lib + " > /etc/ld.so.preload\n"},
-		{name: "not a literal envelope", command: "apply_patch <<PATCH\n*** Begin Patch\n" + loader + "*** End Patch\nPATCH\n"},
+		{name: "unquoted delimiter", loader: true, command: "apply_patch <<PATCH\n*** Begin Patch\n" + loader + "*** End Patch\nPATCH\n"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

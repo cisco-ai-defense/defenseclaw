@@ -146,9 +146,10 @@ func boundedNativeText(text string) string {
 
 // nativeCallWrites reads the files one call writes and the facts that describe
 // them. A native file-tool call gives them in its arguments, and its facts are
-// the facts of the call. A shell command gives them only in the literal
-// envelope of an apply_patch command with a quoted here-document, the form in
-// which Codex sends its patch tool (exec_command), and the proofs then read the
+// the facts of the call. A shell command gives them only in the envelope of an
+// apply_patch command fed by a here-document (any delimiter spelling, as
+// applyPatchStdinText reads it), the form in which Codex sends its patch tool
+// (exec_command), and the proofs then read the
 // path facts of those commands only: a path another command of the same text
 // reads or writes is judged by the rules for that command, and is no operand of
 // the patch. Any other shell text, and any call with an argument vector, writes
@@ -168,14 +169,12 @@ func nativeCallWrites(input Input, facts Facts) ([]nativeFileWrite, Facts) {
 	var writes []nativeFileWrite
 	patchCommands := map[int64]bool{}
 	for _, command := range facts.Commands {
-		if command.Dialect != DialectPOSIX || command.Executable != "apply_patch" ||
-			!command.ArgvComplete || len(command.Argv) != 1 ||
-			!command.LiteralStdinComplete || command.LiteralStdinAmbiguous ||
-			parsePatchEnvelope(command.LiteralStdin).status != StatusComplete {
+		text, ok := applyPatchStdinText(command)
+		if !ok || parsePatchEnvelope(text).status != StatusComplete {
 			continue
 		}
 		patchCommands[command.ID] = true
-		for _, write := range nativePatchEnvelopeWrites(command.LiteralStdin) {
+		for _, write := range nativePatchEnvelopeWrites(text) {
 			write.added = boundedNativeText(write.added)
 			write.replaced = boundedNativeText(write.replaced)
 			writes = append(writes, write)

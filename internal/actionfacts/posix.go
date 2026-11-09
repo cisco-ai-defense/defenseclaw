@@ -943,13 +943,15 @@ func projectPOSIXLiteralHeredoc(
 	command *CommandFact,
 	out *parseOutput,
 ) {
-	if redirection == nil || command == nil || redirection.Op != syntax.Hdoc ||
-		redirection.Hdoc == nil {
+	if redirection == nil || command == nil || redirection.Hdoc == nil ||
+		redirection.Op != syntax.Hdoc &&
+			(redirection.Op != syntax.DashHdoc || command.Program != "apply_patch") {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
 	if command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
 		command.LiteralStdin = ""
+		command.LiteralStdinView = ""
 		command.LiteralStdinComplete = false
 		command.LiteralStdinAmbiguous = true
 		out.markPartial(IssueUnsupportedConstruct)
@@ -966,6 +968,10 @@ func projectPOSIXLiteralHeredoc(
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
+	if command.Program == "apply_patch" {
+		projectPOSIXPatchHeredoc(redirection, command, out)
+		return
+	}
 	delimiter := projectPOSIXWord(redirection.Word)
 	if !delimiter.Expands && delimiter.Value != "" && delimiter.Quote != QuoteSingle &&
 		posixHeredocBodyRunsNothing(redirection.Hdoc) {
@@ -980,14 +986,8 @@ func projectPOSIXLiteralHeredoc(
 		return
 	}
 	body, exact := literalPOSIXHeredocBody(redirection.Hdoc)
-	limit := maxScalarBytes
-	if command.Program == "apply_patch" {
-		// Patch envelopes can contain ordinary file content beyond the
-		// scalar operand bound; the shell command itself remains bounded.
-		limit = maxCommandBytes
-	}
 	if delimiter.Expands || delimiter.Quote != QuoteSingle ||
-		delimiter.Value == "" || !exact || len(body) > limit ||
+		delimiter.Value == "" || !exact || len(body) > maxScalarBytes ||
 		strings.ContainsRune(body, '\x00') {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
@@ -1012,6 +1012,129 @@ func literalPOSIXHeredocBody(word *syntax.Word) (string, bool) {
 		text.WriteString(literal.Value)
 	}
 	return text.String(), true
+}
+
+// projectPOSIXPatchHeredoc reads the here-document of an apply_patch command
+// in every delimiter spelling (unquoted, double-quoted, quoted by a
+// backslash, single-quoted, each also with <<-). The spelling decides only
+// whether the shell expands the body (any quoting of the delimiter word
+// prevents it); <<- only strips the leading tabs of the lines. A body that
+// reaches the command byte for byte is the literal stdin in every spelling.
+func projectPOSIXPatchHeredoc(
+	redirection *syntax.Redirect,
+	command *CommandFact,
+	out *parseOutput,
+) {
+	delimiter := projectPOSIXWord(redirection.Word)
+	if delimiter.Expands || delimiter.Value == "" {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	body, dynamic, readable := posixHeredocText(
+		redirection.Hdoc, posixHeredocDelimiterQuoted(redirection.Word),
+		redirection.Op == syntax.DashHdoc,
+	)
+	// Patch envelopes can contain ordinary file content beyond the scalar
+	// operand bound; the shell command itself remains bounded.
+	if !readable || len(body) > maxCommandBytes || strings.ContainsRune(body, '\x00') {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	if !dynamic {
+		command.LiteralStdin = body
+		command.LiteralStdinComplete = true
+		return
+	}
+	// The shell expands this body, so its bytes are not known. The patch keeps
+	// the text it shows, each expansion replaced by one "$", for the readers of
+	// its envelope (applyPatchStdinText). A substitution in the body is a
+	// command of its own in the facts, judged by its own facts; the patch stays
+	// as certain as with a quoted body, only the text of the lines that hold an
+	// expansion is unknown.
+	command.LiteralStdinView = body
+	command.LiteralStdinAmbiguous = true
+}
+
+// posixHeredocDelimiterQuoted reports a here-document delimiter with any part
+// quoted, in single or double quotes or by a backslash: the shell then leaves
+// the body unexpanded.
+func posixHeredocDelimiterQuoted(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	for _, part := range word.Parts {
+		switch typed := part.(type) {
+		case *syntax.SglQuoted, *syntax.DblQuoted:
+			return true
+		case *syntax.Lit:
+			if strings.Contains(typed.Value, "\\") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// posixHeredocText is the text of a here-document body as the shell hands it
+// to the command, less the expansions: for <<- the leading tabs of every line
+// are dropped. dynamic is set for a body the shell expands: a substitution or
+// parameter expansion, or a backslash before $, a backquote, another backslash
+// or a line end. The text then holds one "$" for each expansion and keeps the
+// backslashes as written. readable is false for a quoted body that is not one
+// literal.
+func posixHeredocText(
+	body *syntax.Word, quoted, stripTabs bool,
+) (text string, dynamic, readable bool) {
+	var out strings.Builder
+	lineStart := true
+	for _, part := range body.Parts {
+		literal, ok := part.(*syntax.Lit)
+		if !ok {
+			if quoted {
+				return "", false, false
+			}
+			out.WriteByte('$')
+			lineStart = false
+			dynamic = true
+			continue
+		}
+		for index := 0; index < len(literal.Value); index++ {
+			char := literal.Value[index]
+			if lineStart && stripTabs && char == '\t' {
+				continue
+			}
+			out.WriteByte(char)
+			lineStart = char == '\n'
+		}
+		if !quoted && posixHeredocLiteralEscapes(literal.Value) {
+			dynamic = true
+		}
+	}
+	return out.String(), dynamic, true
+}
+
+// posixHeredocLiteralEscapes reports text of an unquoted here-document body
+// the shell may expand: a $ or backquote the parser left in a literal, or a
+// backslash before $, a backquote, a backslash or a line end. Any other
+// backslash stays two ordinary characters.
+func posixHeredocLiteralEscapes(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] == '$' || text[index] == '`' {
+			return true
+		}
+		if text[index] != '\\' {
+			continue
+		}
+		if index+1 == len(text) {
+			return true
+		}
+		switch text[index+1] {
+		case '$', '`', '\\', '\n':
+			return true
+		}
+		index++
+	}
+	return false
 }
 
 // posixHeredocBodyRunsNothing reports an unquoted heredoc body that expands
