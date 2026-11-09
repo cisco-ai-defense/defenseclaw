@@ -46,6 +46,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -711,6 +712,44 @@ def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str
     )
 
 
+# How long the shim waits for a started Windows installer to open its log.
+_INSTALLER_LOG_WAIT = 60.0
+_INSTALLER_LOG_POLL = 0.25
+
+
+def _terminal_command(script: str, ps_args: list[str]) -> str:
+    """The command that runs *script* in the current terminal, for a message."""
+    return " ".join(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{script}"', *ps_args])
+
+
+def _install_logs(logs: str) -> set[str]:
+    try:
+        names = os.listdir(logs)
+    except OSError:
+        return set()
+    return {name for name in names if name.startswith("install-") and name.endswith(".log")}
+
+
+def _await_installer_log(proc: subprocess.Popen[bytes], logs: str, known: set[str]) -> tuple[bool, int | None]:
+    """Wait until the started installer opens a new install log or ends.
+
+    Returns (log opened, exit code or None while it still runs). It gives up
+    waiting after ``_INSTALLER_LOG_WAIT`` seconds; an installer that is still
+    running then (it waits for an earlier uninstall, a lock or a download) is
+    reported as running, not as failed.
+    """
+    deadline = time.monotonic() + _INSTALLER_LOG_WAIT
+    while True:
+        rc = proc.poll()
+        if _install_logs(logs) - known:
+            return True, rc
+        if rc is not None:
+            return False, rc
+        if time.monotonic() >= deadline:
+            return False, None
+        time.sleep(_INSTALLER_LOG_POLL)
+
+
 def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | None = None) -> int:
     # The installer downloads the release assets: hand it update.source
     # through its DEFENSECLAW_REPO input (an owner/name or an https base URL).
@@ -738,17 +777,18 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
             # An SSH session has no desktop: the new window never appears and
             # the result would only be in the install log (GAP-1993). Keep the
             # staged installer and give the command that runs it right here.
-            command = " ".join(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", f'"{path}"', *ps_args]
-            )
+            command = _terminal_command(path, ps_args)
             raise ShimError(
                 "this terminal has no desktop (SSH session), so the installer's window would not be "
                 "visible here.\n"
                 "    Run the installer in this terminal instead; it shows the result and sets the exit code:\n"
                 f"      {command}"
             )
+        home = _data_home()
+        logs = os.path.join(home, "logs")
+        known = _install_logs(logs)
         try:
-            subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
+            proc = subprocess.Popen(  # noqa: S603 - fixed interpreter and verified script
                 [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path, *ps_args],
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
                 cwd=workdir,
@@ -757,9 +797,24 @@ def _run_installer(path: str, args: list[str], workdir: str, *, newer: str | Non
         except OSError as exc:
             shutil.rmtree(workdir, ignore_errors=True)
             raise ShimError(f"could not start {powershell}: {exc}") from None
-        home = _data_home()
-        print("  → The installer continues in a new window, which shows the result when it ends.")
-        print(f"    Its log is saved in {os.path.join(home, 'logs')} (install-<time>.log).")
+        # A started process is not a running install (GAP-1011): the installer
+        # opens its log only after it has the install lock, and an installer
+        # that ends before then leaves nothing but a window that closes.
+        opened, rc = _await_installer_log(proc, logs, known)
+        if rc not in (None, 0) and not opened:
+            shutil.rmtree(workdir, ignore_errors=True)
+            raise ShimError(
+                f"the installer ended with exit code {rc} before it opened its log, so it made no change; "
+                "the reason was shown only in its window, which has closed. Run this command again and read "
+                "that window, or check the install with: defenseclaw doctor"
+            )
+        if rc == 0 and not opened:
+            print("  → The installer ran in its own window and ended with exit code 0 without opening an install log.")
+        else:
+            print("  → The installer continues in a new window, which shows the result when it ends.")
+            print(f"    Its log is saved in {logs} (install-<time>.log).")
+        if rc is None and not opened:
+            print(f"  ! Its log is not open after {int(_INSTALLER_LOG_WAIT)} seconds; it may wait on another install.")
         print("    Confirm the result afterwards with: defenseclaw --version")
         return 0
     bash = "/bin/bash" if os.path.exists("/bin/bash") else (shutil.which("bash") or "bash")
