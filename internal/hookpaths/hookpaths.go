@@ -2293,6 +2293,15 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 		}
 		if raw, ok := RawDotDotOperand(candidate.Value, cwd); ok {
 			path = raw
+		} else if pathFactIsNativeWrite(tool, candidate, facts.Commands) &&
+			!strings.ContainsAny(candidate.Value, "*?[]$\x60~") {
+			// A write of a file tool or an apply_patch header that steps up
+			// a directory is listed by the raw spelling too, so its links
+			// (the working directory of the call is one) are walked before
+			// the step and the gateway finds the answer by the same key.
+			if raw, steps := actionfacts.StepUpSpelling(candidate.Value, cwd); steps {
+				path = raw
+			}
 		}
 		if value := filepath.ToSlash(candidate.Value); value == ".." || strings.HasPrefix(value, "../") {
 			dotDotOperands = append(dotDotOperands, candidate.Value)
@@ -3054,6 +3063,22 @@ func RawDotDotOperand(value, cwd string) (string, bool) {
 		return "", false
 	}
 	return OperandPath(value, cwd), true
+}
+
+// pathFactIsNativeWrite reports whether a path fact is the target of a write
+// that a file tool or an apply_patch command makes itself: every path of a
+// typed file-tool call, and a path of an apply_patch command. No other
+// command is part of the class.
+func pathFactIsNativeWrite(tool string, candidate actionfacts.PathFact, commands []actionfacts.CommandFact) bool {
+	if actionfacts.PathTool(tool) {
+		return true
+	}
+	for _, command := range commands {
+		if command.ID == candidate.CommandID {
+			return command.Executable == "apply_patch"
+		}
+	}
+	return false
 }
 
 func pathFactIsRedirect(candidate actionfacts.PathFact, commands []actionfacts.CommandFact) bool {
