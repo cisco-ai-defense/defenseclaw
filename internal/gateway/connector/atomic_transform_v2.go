@@ -2664,6 +2664,7 @@ func inspectAtomicTransformV2HarmlessAllocationArtifact(
 	harmlessAttributes := witness.FileAttributes &^
 		(windows.FILE_ATTRIBUTE_ARCHIVE | windows.FILE_ATTRIBUTE_NORMAL)
 	harmlessStreams := len(witness.Streams) == 1
+	var staleEA error
 	if allowStagedEA && len(witness.Streams) > 1 && witness.EACopyability == atomicTransformEACopyable {
 		// Ra binds both the harmless marker bytes and Old's exact raw witness.
 		// EA staging may finish before Rs is durable. Only the exact ordinary
@@ -2682,14 +2683,16 @@ func inspectAtomicTransformV2HarmlessAllocationArtifact(
 			if errors.Is(err, errAtomicTransformConflict) || errors.Is(err, os.ErrNotExist) {
 				// The prior config this EA was copied from is no longer live
 				// (an editor saved over it, or it was removed): the copy cannot
-				// be proved to be the transaction own, so it is not deleted.
-				return atomicTransformArtifactState{}, errors.Join(errAtomicTransformV2StagedEAUnproven, err)
-			}
-			if err != nil {
+				// be proved to be the transaction own, so it is not deleted. The
+				// rest of the stage must still be the harmless shape below before
+				// the caller may release its receipt.
+				staleEA = errors.Join(errAtomicTransformV2StagedEAUnproven, err)
+			} else if err != nil {
 				return atomicTransformArtifactState{}, err
 			}
 		}
-		harmlessStreams = atomicTransformV2EAMatchesWitness(permitted, atomicTransformV2EAStreamSlice(preservedEA))
+		harmlessStreams = staleEA != nil ||
+			atomicTransformV2EAMatchesWitness(permitted, atomicTransformV2EAStreamSlice(preservedEA))
 		mainCount, eaCount := 0, 0
 		for _, stream := range witness.Streams {
 			switch stream.ID {
@@ -2714,6 +2717,9 @@ func inspectAtomicTransformV2HarmlessAllocationArtifact(
 			"allocation-authenticated artifact has non-harmless metadata; preserving it fail-closed: %s",
 			name,
 		)
+	}
+	if staleEA != nil {
+		return atomicTransformArtifactState{}, staleEA
 	}
 	return state, nil
 }
