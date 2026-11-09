@@ -18,6 +18,7 @@ package actionfacts
 
 import (
 	"encoding/json"
+	"maps"
 	"path"
 	"regexp"
 	"slices"
@@ -159,6 +160,23 @@ type commandWriteScan struct {
 	// vars are the values the text assigns to a variable name, for the names
 	// whose value is, or holds, a protected file.
 	vars map[string][]string
+	// open are the command substitutions and backticks the read is inside:
+	// what the directories and values were when each opened, taken back at its
+	// close, as a subshell leaves the shell around it as it was. next is the
+	// first scope of the layout not opened yet. sharedVars is true while vars
+	// is also held by an open scope, so a change copies it first.
+	open       []scanScope
+	next       int
+	sharedVars bool
+}
+
+// scanScope is the state a command substitution or backtick opened with.
+type scanScope struct {
+	end      int
+	dirs     []string
+	previous []string
+	vars     map[string][]string
+	shared   bool
 }
 
 // commandOperand is one word read from a command text; plain is false when
@@ -181,6 +199,7 @@ func (s *commandWriteScan) protectedWriteClass() string {
 	}
 	var skipCursor, quotedCursor int
 	for index := 0; index < len(s.text); {
+		s.syncScopes(index)
 		if end := spanEnd(s.layout.skipped, &skipCursor, index); end > index {
 			index = end
 			continue
@@ -230,6 +249,36 @@ func (s *commandWriteScan) protectedWriteClass() string {
 		index = max(next, index+1)
 	}
 	return ""
+}
+
+// syncScopes closes the scopes that end at or before index, taking back the
+// directories and values they opened with, and opens those that start at or
+// before it. A scope the read jumped over whole is not opened.
+func (s *commandWriteScan) syncScopes(index int) {
+	for n := len(s.open); n > 0 && s.open[n-1].end <= index; n = len(s.open) {
+		saved := s.open[n-1]
+		s.dirs, s.previous, s.vars, s.sharedVars = saved.dirs, saved.previous, saved.vars, saved.shared
+		s.open = s.open[:n-1]
+	}
+	for s.next < len(s.layout.scopes) && s.layout.scopes[s.next].start <= index {
+		span := s.layout.scopes[s.next]
+		s.next++
+		if span.end > index {
+			s.open = append(s.open, scanScope{span.end, s.dirs, s.previous, s.vars, s.sharedVars})
+			s.sharedVars = true
+		}
+	}
+}
+
+// ownVars makes vars safe to change: it is copied while an open scope also
+// holds it.
+func (s *commandWriteScan) ownVars() {
+	if s.sharedVars {
+		s.vars, s.sharedVars = maps.Clone(s.vars), false
+	}
+	if s.vars == nil {
+		s.vars = make(map[string][]string)
+	}
 }
 
 // followAssignments reads the text once for the variables it assigns a
@@ -336,9 +385,7 @@ func (s *commandWriteScan) addVariable(name, value string) {
 	if slices.Contains(s.vars[name], value) || len(s.vars[name]) >= scanMaxDirs {
 		return
 	}
-	if s.vars == nil {
-		s.vars = make(map[string][]string)
-	}
+	s.ownVars()
 	s.vars[name] = append(s.vars[name], value)
 }
 
@@ -357,6 +404,7 @@ func (s *commandWriteScan) relativeValueMatters(value string) bool {
 // setVariable replaces what a variable holds: the shell has the value of the
 // last assignment, whatever the variable held before.
 func (s *commandWriteScan) setVariable(name string, values []string) {
+	s.ownVars()
 	delete(s.vars, name)
 	for _, value := range values {
 		if strings.HasPrefix(value, "/") {
@@ -364,9 +412,6 @@ func (s *commandWriteScan) setVariable(name string, values []string) {
 		}
 		if len(s.vars[name]) >= scanMaxDirs {
 			return
-		}
-		if s.vars == nil {
-			s.vars = make(map[string][]string)
 		}
 		if !slices.Contains(s.vars[name], value) {
 			s.vars[name] = append(s.vars[name], value)
