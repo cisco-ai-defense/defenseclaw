@@ -66,6 +66,9 @@ type hookReportedMCPServers struct {
 	// refused holds, per session and server name, the refused definitions
 	// the session reported (heldMCPRefusals).
 	refused map[string]*heldMCPRefusals
+	// unkept holds, per connector and account, the names no store could keep
+	// (unkeptMCP).
+	unkept map[string]*unkeptMCP
 }
 
 func (h *hookReportedMCPServers) list() ([]config.MCPServerEntry, error) {
@@ -121,17 +124,22 @@ func (h *hookReportedMCPServers) forget(entry config.MCPServerEntry) {
 // calling account defined it, so the pending check that follows refuses the
 // call until the watcher has admitted the server (GAP-2591): a URL server,
 // or a local one the scanner refuses from its definition (GAP-0925).
-func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) {
+//
+// A report the list or the session store cannot keep because the account used
+// its share is not dropped: the name is held (holdUnkept) and the call, and
+// each later call to the name, gets the decision of a failed admission
+// returned here, so a full store never turns a refusal into an allow.
+func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	if a == nil || a.hookMCP == nil || !probe.Matched || probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
-		return
+		return config.AssetPolicyDecision{}, false
 	}
 	cfg := a.liveConfig()
 	if !watcherUsesHookReportedMCP(cfg) {
-		return
+		return config.AssetPolicyDecision{}, false
 	}
 	home, serviceAccount := callerHomeForAssets(ctx)
 	if !serviceAccount || home == "" {
-		return
+		return config.AssetPolicyDecision{}, false
 	}
 	entry, ok := a.lookupCallerMCPServer(ctx, cfg, connectorName, probe.WorkspaceDir, probe.ServerName)
 	haveCurrent := ok && strings.TrimSpace(entry.Name) != ""
@@ -160,24 +168,33 @@ func (a *APIServer) noteHookReportedMCPServer(ctx context.Context, connectorName
 		// A call that names no session cannot be tied to an agent process, and
 		// nothing would end the hold (mcpSessionStarted needs the id), so only
 		// a named session keeps what it met.
-		if probe.SessionID != "" {
-			a.hookMCP.retainRefused(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, reported, now)
+		kept := probe.SessionID == "" || a.hookMCP.retainRefused(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, reported, now)
+		a.hookMCP.note(reported)
+		if !kept || !a.hookMCP.listedAs(reported) {
+			a.hookMCP.holdUnkept(connectorName, home, probe.ServerName, reported, now)
 		}
-		a.hookMCP.note(reported)
-		return
+	} else if held, _ := a.hookMCP.heldRefusals(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, now); len(held) > 0 {
+		// The running agent keeps the connection to a refused definition after
+		// its config is edited, so a refusal the session reported stays
+		// listed, and blocks the calls, until the agent starts again
+		// (mcpSessionStarted).
+		last := held[len(held)-1]
+		a.hookMCP.note(last)
+		if !a.hookMCP.listedAs(last) {
+			a.hookMCP.holdUnkept(connectorName, home, probe.ServerName, last, now)
+		}
+	} else if haveCurrent {
+		if reported.URL == "" {
+			a.hookMCP.forget(reported)
+		} else {
+			a.hookMCP.note(reported)
+			if !a.hookMCP.listedAs(reported) {
+				a.hookMCP.holdUnkept(connectorName, home, probe.ServerName, reported, now)
+			}
+		}
 	}
-	// The running agent keeps the connection to a refused definition after its
-	// config is edited, so a refusal the session reported stays listed, and
-	// blocks the calls, until the agent starts again (mcpSessionStarted).
-	if held, _ := a.hookMCP.heldRefusals(connectorName, home, probe.SessionID, probe.WorkspaceDir, probe.ServerName, now); len(held) > 0 {
-		a.hookMCP.note(held[len(held)-1])
-		return
+	if held, ok := a.hookMCP.unkeptFor(connectorName, home, probe.ServerName, now); ok {
+		return a.unkeptMCPDecision(ctx, cfg, connectorName, hookEvent, probe, held)
 	}
-	switch {
-	case !haveCurrent:
-	case reported.URL != "":
-		a.hookMCP.note(reported)
-	default:
-		a.hookMCP.forget(reported)
-	}
+	return config.AssetPolicyDecision{}, false
 }
