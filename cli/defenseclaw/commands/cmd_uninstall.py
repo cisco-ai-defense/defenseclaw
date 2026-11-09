@@ -1402,13 +1402,34 @@ def _is_empty_lock(raw: bytes) -> bool:
     return raw == b""
 
 
+def _is_plugin_answer(answer: object) -> bool:
+    """One answer as the gateway writes it (hermesStoredAnswer): "entrypoints" (strings) and "seen" (an int64)."""
+    return (
+        isinstance(answer, dict)
+        and set(answer) == {"entrypoints", "seen"}
+        and isinstance(answer["entrypoints"], list)
+        and all(isinstance(entrypoint, str) for entrypoint in answer["entrypoints"])
+        and type(answer["seen"]) is int
+        and -(2**63) <= answer["seen"] < 2**63
+    )
+
+
 def _is_plugin_answer_store(raw: bytes) -> bool:
-    """hermes-plugin-entrypoints.json: one object whose only key is "answers" (hermes_vendor_manifest_store.go)."""
+    """hermes-plugin-entrypoints.json: one object whose only key is "answers", each answer as the gateway writes it.
+
+    A file whose answers the gateway's loader would drop as damaged is not a file the gateway wrote, so it is the
+    account's and stays (GAP-0945).
+    """
     try:
         document = json.loads(raw)
     except ValueError:
         return False
-    return isinstance(document, dict) and set(document) == {"answers"} and isinstance(document["answers"], dict)
+    return (
+        isinstance(document, dict)
+        and set(document) == {"answers"}
+        and isinstance(document["answers"], dict)
+        and all(_is_plugin_answer(answer) for answer in document["answers"].values())
+    )
 
 
 _FLAT_HOOK_RECORD_LINE = re.compile(
@@ -1430,13 +1451,14 @@ def _is_hermes_flat_hook_record(raw: bytes) -> bool:
 
 
 # The other records Setup and the gateway keep for a connector in the folder they ran in, by path
-# below the folder and the test of the bytes Setup writes there. A file of another shape at the
-# name belongs to the account and stays (GAP-0945).
+# below the folder, the test of the bytes Setup writes there, and whether the gateway running in that
+# folder rewrites the file as it works (its scanner answers). A file of another shape at the name
+# belongs to the account and stays (GAP-0945).
 _CONNECTOR_STATE_RECORD_SHAPES = {
     "hermes": (
-        ((".hermes-lifecycle.lock",), _is_empty_lock),
-        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store),
-        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record),
+        ((".hermes-lifecycle.lock",), _is_empty_lock, False),
+        (("hermes-plugin-entrypoints.json",), _is_plugin_answer_store, True),
+        (("hooks", ".hookcfg.hermes"), _is_hermes_flat_hook_record, False),
     ),
 }
 
@@ -1457,7 +1479,7 @@ def _small_file_bytes(path: str) -> bytes | None:
 
 def move_recorded_record_paths() -> tuple[str, ...]:
     """The paths below a data folder, with "/" separators, of the records whose digest a data_dir move records."""
-    state = ("/".join(parts) for records in _CONNECTOR_STATE_RECORD_SHAPES.values() for parts, _ in records)
+    state = ("/".join(parts) for records in _CONNECTOR_STATE_RECORD_SHAPES.values() for parts, _, _ in records)
     return (*_TOP_LEVEL_BACKUP_SHAPES, *state)
 
 
@@ -1504,7 +1526,9 @@ def _remove_earlier_folder_connector_records(plan: UninstallPlan) -> list[str]:
     a regular file this account owns, in a real folder this account owns, for a
     connector this uninstall tore down; the folder, the config, the audit store
     and every other file stay. Returns what DefenseClaw wrote and could not
-    remove, one line each, so the caller does not report a clean uninstall.
+    remove, one line each, so the caller does not report a clean uninstall. The scanner
+    answers the gateway rewrote after the move are kept and named in a warning; they hold
+    no credential, so they do not fail the uninstall.
     """
     names = tuple(name for name in plan.connectors if name in _MOVED_RECORD_CONNECTORS)
     stayed: list[str] = []
@@ -1513,8 +1537,10 @@ def _remove_earlier_folder_connector_records(plan: UninstallPlan) -> list[str]:
     for folder in plan.record_dirs:
         if config_module._same_folder(folder, plan.records_dir):
             continue
-        removed, left = _remove_connector_records_in(folder, names)
+        removed, left, kept = _remove_connector_records_in(folder, names)
         stayed.extend(left)
+        for note in kept:
+            ux.warn(f"kept in the earlier data folder {folder}: {note}")
         if removed:
             ux.ok(f"removed {removed} connector record(s) the earlier data folder {folder} still held")
     return stayed
@@ -1610,17 +1636,22 @@ def _setup_backup_record_stem(path: str, connector: str) -> str:
     return stem if name == f"{stem}.json" else ""
 
 
-def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[int, list[str]]:
-    """Remove *names*' records from one earlier folder; return the count removed and what stayed."""
+def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[int, list[str], list[str]]:
+    """Remove *names*' records from one earlier folder.
+
+    Returns the count removed, what stayed that DefenseClaw wrote or could not safely open (an error), and
+    what was kept without being an error: scanner answers the gateway wrote after the move.
+    """
     removed = 0
     stayed: list[str] = []
+    kept: list[str] = []
     if not os.path.lexists(folder):
-        return removed, stayed
+        return removed, stayed, kept
     linked = _link_on_path(folder)
     if linked or not _account_owned_real_dir(folder):
         # Replaced since the plan was read, or reached through a link: nothing under it is ours to follow.
         why = f"{linked} is a link on its path" if linked else "not a folder this account owns"
-        return removed, [f"{folder} ({why}, so it was not entered)"]
+        return removed, [f"{folder} ({why}, so it was not entered)"], kept
     hooks = os.path.join(folder, "hooks")
     backups = os.path.join(folder, "connector_backups")
     # What the move recorded of this folder; a folder it did not record has nothing proven unchanged.
@@ -1664,7 +1695,7 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
                 drop(os.path.join(hooks, script))
         for record in _CONNECTOR_SETUP_RECORDS.get(name, ()):
             drop(os.path.join(folder, record))
-        for parts, written_by_setup in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
+        for parts, written_by_setup, gateway_rewrites in _CONNECTOR_STATE_RECORD_SHAPES.get(name, ()):
             path = os.path.join(folder, *parts)
             if len(parts) > 1 and not real_dir(os.path.join(folder, *parts[:-1])):
                 continue
@@ -1676,15 +1707,21 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
             raw = _small_file_bytes(path)
             # The shape says it is the record Setup writes; the digest says it is still the copy the move left.
             # Nothing the account cannot also write proves a later write is the gateway's, so a record that is
-            # no longer the recorded copy is kept, whoever wrote it.
+            # no longer the recorded copy is kept, whoever wrote it. The scanner answers the gateway rewrites
+            # as it works hold no credential: keeping them is reported, not an error, so a clean uninstall
+            # does not fail because the gateway answered once after the move.
             if raw is not None and written_by_setup(raw):
                 if hashlib.sha256(raw).hexdigest() == move_digests.get("/".join(parts)):
                     drop(path)
+                    continue
+                note = (
+                    f"{path} (no longer the copy the move recorded: DefenseClaw cannot tell a later write of "
+                    "the gateway that ran in this folder from your edit, so it was kept"
+                )
+                if gateway_rewrites:
+                    kept.append(note + "; it holds scanner answers and no credential, and you can delete it)")
                 else:
-                    stayed.append(
-                        f"{path} (no longer the copy the move recorded: DefenseClaw cannot tell a later write of "
-                        "the gateway that ran in this folder from your edit, so it was kept)"
-                    )
+                    stayed.append(note + ")")
             else:
                 # The name belongs to DefenseClaw, so a file of another shape there is reported, not removed.
                 stayed.append(f"{path} (not the record Setup writes, so it was kept)")
@@ -1721,14 +1758,14 @@ def _remove_connector_records_in(folder: str, names: tuple[str, ...]) -> tuple[i
             with contextlib.suppress(OSError):
                 os.rmdir(backup)
     if _connector_state_remains(folder):
-        return removed, stayed
+        return removed, stayed, kept
     for record in _FOLDER_RECORDS:
         drop(os.path.join(folder, record))
     for path in (hooks, backups):
         if real_dir(path):
             with contextlib.suppress(OSError):
                 os.rmdir(path)
-    return removed, stayed
+    return removed, stayed, kept
 
 
 def _is_generated_hook_script(path: str) -> bool:
@@ -3196,6 +3233,7 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         ux.echo(
             f"  • {ux.bold('earlier data_dir:')} {folder}: the setup records left there are read; "
             "the ones Setup wrote and nobody changed are removed; "
+            "scanner answers the gateway wrote there since the move are kept and named; "
             "this uninstall does not remove that folder"
         )
     if plan.store_dir and plan.connectors and not plan.remove_data_dir:

@@ -6,6 +6,7 @@
 import json
 import os
 import signal
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -117,8 +118,6 @@ GATEWAY_ANSWERS = {
     "b" * 64: {"entrypoints": ["plugins/a/__init__.py", "plugins/é/x.py"], "seen": 1789012345678901234},
     "a" * 64: {"entrypoints": [], "seen": 7},
 }
-# The checksum of exactly these answers, length-prefixed with the keys in byte order (computable by anyone).
-CHECKSUM_OF_GATEWAY_ANSWERS = "ca761783fb55bdc977ddc51de8c6221df60de69801ff8ce3f7cb5eb5c9c75490"
 
 
 def _moved_plan(tmp_path, monkeypatch, records):
@@ -135,41 +134,102 @@ def _moved_plan(tmp_path, monkeypatch, records):
     )
 
 
-def test_a_cache_written_after_the_move_is_kept_and_reported_whoever_wrote_it(tmp_path, monkeypatch):
-    # The gateway still running in the folder rewrites its scanner cache after the move; the account can write the
-    # same bytes, so a later write is never proof that DefenseClaw wrote it: the cache is kept and named.
+def _execute_earlier_folder_phase(plan):
+    """_execute_plan with the teardown phases that are not under test stubbed out."""
+    with (
+        patch.object(cmd_uninstall, "_validate_plan"),
+        patch.object(cmd_uninstall, "_connector_teardown"),
+        patch.object(cmd_uninstall, "_turn_guardrail_off"),
+        patch.object(cmd_uninstall, "_print_removed_connector_leftovers"),
+        patch.object(cmd_uninstall, "_render_execution_result"),
+    ):
+        return cmd_uninstall._execute_plan(plan)
+
+
+def test_a_cache_the_gateway_rewrote_after_the_move_is_kept_named_and_does_not_fail_the_uninstall(
+    tmp_path, monkeypatch, capsys,
+):
+    # The gateway still running in the folder rewrites its scanner cache after the move. DefenseClaw cannot prove
+    # who wrote it (the account can write the same bytes), so the file is kept; it holds scanner answers and no
+    # credential, so keeping it is named in the output and the uninstall still succeeds.
     home, plan = _move_and_plan(tmp_path, monkeypatch)
     cache = home / "hermes-plugin-entrypoints.json"
-    later = json.dumps({"answers": GATEWAY_ANSWERS})
+    later = json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":"))
     cache.write_text(later)
 
-    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+    result = _execute_earlier_folder_phase(plan)
 
     assert cache.read_text() == later
-    assert [line.split(" (")[0] for line in stayed] == [str(cache)]
-    assert "no longer the copy the move recorded" in stayed[0]
+    assert result.succeeded
+    assert cmd_uninstall._phases_left(result) == []
+    shown = capsys.readouterr()
+    assert str(cache) in shown.out + shown.err
+    assert "no longer the copy the move recorded" in shown.out + shown.err
     for name in (".hermes-lifecycle.lock", "hooks/.hookcfg.hermes"):
         assert not (home / name).exists(), name
 
 
-@pytest.mark.parametrize("when", ["absent at the move", "replaced after the move"])
-def test_a_cache_carrying_a_checksum_of_its_answers_is_kept_when_the_move_did_not_record_it(
-    tmp_path, monkeypatch, when,
+def test_a_cache_the_gateway_wrote_where_the_move_found_none_is_kept_named_and_does_not_fail_the_uninstall(
+    tmp_path, monkeypatch, capsys,
 ):
-    # A checksum of the answers in the same file can be computed by anyone, so a file bearing it (made by the
-    # account, or copied from another folder) is no proof of a write of the gateway.
     records = {name: body for name, body in RECORDS.items() if name != "hermes-plugin-entrypoints.json"}
-    if when == "replaced after the move":
-        records["hermes-plugin-entrypoints.json"] = "{\"answers\": {}}\n"
     home, plan = _moved_plan(tmp_path, monkeypatch, records)
     cache = home / "hermes-plugin-entrypoints.json"
-    sealed = {"answers": GATEWAY_ANSWERS, "sealed": CHECKSUM_OF_GATEWAY_ANSWERS}
-    cache.write_text(json.dumps(sealed))
+    cache.write_text(json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":")))
 
-    stayed = cmd_uninstall._remove_earlier_folder_connector_records(plan)
+    result = _execute_earlier_folder_phase(plan)
 
-    assert json.loads(cache.read_text()) == sealed
-    assert [line.split(" (")[0] for line in stayed] == [str(cache)]
+    assert cache.exists()
+    assert result.succeeded
+    shown = capsys.readouterr()
+    assert str(cache) in shown.out + shown.err
+
+
+def test_a_changed_hook_record_still_fails_the_uninstall_beside_a_kept_cache(tmp_path, monkeypatch):
+    # Only the gateway's scanner answers are a named leftover; any other record DefenseClaw wrote that is not
+    # removed keeps the phase failed.
+    home, plan = _move_and_plan(tmp_path, monkeypatch)
+    (home / "hermes-plugin-entrypoints.json").write_text(json.dumps({"answers": GATEWAY_ANSWERS}))
+    (home / "hooks" / ".hookcfg.hermes").write_text("DEFENSECLAW_CONNECTOR=hermes\nDEFENSECLAW_FAIL_MODE=closed\n")
+
+    result = _execute_earlier_folder_phase(plan)
+
+    assert not result.succeeded
+    left = cmd_uninstall._phases_left(result)
+    assert [phase.name for phase in left] == [cmd_uninstall._EARLIER_FOLDER_RECORDS_PHASE]
+    assert ".hookcfg.hermes" in left[0].detail
+    assert "hermes-plugin-entrypoints.json" not in left[0].detail
+
+
+def test_a_cache_with_answers_is_removed_while_it_is_the_copy_the_move_recorded(tmp_path, monkeypatch):
+    body = json.dumps({"answers": GATEWAY_ANSWERS}, separators=(",", ":"))
+    home, stayed = _move_and_sweep(tmp_path, monkeypatch, {**RECORDS, "hermes-plugin-entrypoints.json": body})
+
+    assert stayed == []
+    assert not (home / "hermes-plugin-entrypoints.json").exists()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"answers": {"b" * 64: {"note": "mine"}}},
+        {"answers": {"b" * 64: {"entrypoints": [7], "seen": 1}}},
+        {"answers": {"b" * 64: {"entrypoints": [], "seen": True}}},
+        {"answers": {"b" * 64: {"entrypoints": [], "seen": 1.5}}},
+        {"answers": {"b" * 64: {"entrypoints": [], "seen": 2**63}}},
+        {"answers": {"b" * 64: {"entrypoints": [], "seen": 1, "note": "mine"}}},
+        {"answers": {"b" * 64: {"entrypoints": None, "seen": 1}}},
+        {"answers": {"b" * 64: "mine"}},
+    ],
+)
+def test_an_answer_cache_the_writer_cannot_emit_that_is_there_at_the_move_is_kept_and_reported(
+    tmp_path, monkeypatch, body,
+):
+    text = json.dumps(body)
+    home, stayed = _move_and_sweep(tmp_path, monkeypatch, {**RECORDS, "hermes-plugin-entrypoints.json": text})
+
+    assert (home / "hermes-plugin-entrypoints.json").read_text() == text
+    assert [line.split(" (")[0] for line in stayed] == [str(home / "hermes-plugin-entrypoints.json")]
 
 
 def test_a_record_edited_after_the_move_stays_even_when_it_keeps_the_shape_setup_writes(tmp_path, monkeypatch):
