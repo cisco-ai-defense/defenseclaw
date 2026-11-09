@@ -299,8 +299,8 @@ func TestListedReplacementDoesNotClearTheRevokedAdmissionOfTheEarlierConnection(
 				t.Fatalf("%d departed definitions held, want the unscanned first one", held)
 			}
 			status := f.w.MCPAdmissionStatus(MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home})
-			if !status.Failed || status.Name != original.Name || status.ScanIssue != MCPScanIssueAddress {
-				t.Fatalf("the call with the replacement listed and the first allow revoked: %+v, want the failed admission of %q", status, original.Name)
+			if !status.Failed || !status.Revoked || status.Name != original.Name || status.ScanIssue != MCPScanIssueAddress {
+				t.Fatalf("the call with the replacement listed and the first allow revoked: %+v, want the revoked failed admission of %q", status, original.Name)
 			}
 		})
 	}
@@ -391,5 +391,47 @@ func TestDepartedMCPOverflowFailsOnlyTheAccountItCameFrom(t *testing.T) {
 	f.w.mcpAdmissionMu.RUnlock()
 	if scopes != 0 || keys != 0 {
 		t.Fatalf("%d lost scopes and %d lost definitions after they listed again, want none", scopes, keys)
+	}
+}
+
+// The verdict for a server name is the most restrictive of the definitions
+// the agent may still run: a listed replacement whose own admission failed
+// does not hide the revoked admission of the earlier one, and that earlier
+// failure is marked so an allow written for the listed definition cannot
+// answer it (GAP-0920).
+func TestRevokedEarlierDefinitionWinsOverAFailedListedReplacement(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	original := f.server
+	f.admittedByAllowRule()
+	f.server.URL = "http://127.0.0.1:28773/mcp"
+	if status := f.status(); !status.Pending {
+		t.Fatalf("the edited definition: %+v, want it pending its own admission", status)
+	}
+	f.admitQueued()
+	query := MCPAdmissionQuery{Connector: original.Connector, Server: original.Name, Home: original.Home}
+	// Benign twin: the allow of the first definition stands, so only the
+	// listed replacement is failed and its own allow rules decide.
+	if status := f.w.MCPAdmissionStatus(query); !status.Failed || status.Revoked {
+		t.Fatalf("the failed replacement with the first allow standing: %+v, want its own failed admission, not revoked", status)
+	}
+	f.cfg.AssetPolicy.MCP.Allowed = nil
+	if status := f.w.MCPAdmissionStatus(query); !status.Failed || !status.Revoked {
+		t.Fatalf("the failed replacement with the first allow revoked: %+v, want the revoked admission of the earlier definition", status)
+	}
+}
+
+// An earlier definition that lists again is forgotten, so the call is judged
+// by the listing alone and nothing is marked revoked.
+func TestEarlierDefinitionListedAgainIsNotRevokedAfterItsAllowIsGone(t *testing.T) {
+	f := newRemovableEntryFixture(t)
+	original := f.server
+	f.admittedByAllowRule()
+	f.server.URL = "https://replacement.example.test/mcp"
+	f.status()
+	f.server = original
+	f.cfg.AssetPolicy.MCP.Allowed = nil
+	status := f.status()
+	if status.Revoked {
+		t.Fatalf("the earlier definition listed again: %+v, want it judged as listed, not revoked", status)
 	}
 }
