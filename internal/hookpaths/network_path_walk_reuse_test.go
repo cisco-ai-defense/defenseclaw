@@ -224,6 +224,73 @@ func TestShareKnownFolderReadThatDoesNotReturnIsBounded(t *testing.T) {
 	}
 }
 
+// A held read of a known folder is bounded by what the hook call has left of
+// its share wait, not by a full answer wait: a call with 20 ms left stops
+// waiting after about 20 ms, and the time is charged to the call.
+func TestShareKnownFolderReadHonorsTheWaitTheCallHasLeft(t *testing.T) {
+	fx := newWalkReuseFixture(t)
+	oldWait := networkShareAnswerWait
+	networkShareAnswerWait = 400 * time.Millisecond
+	t.Cleanup(func() { networkShareAnswerWait = oldWait })
+	end := HookCall()
+	defer end()
+	readOperands(t, fx.slot, 1)
+	call := currentHookCall()
+	call.waitLeft, call.tail = 20*time.Millisecond, 0
+	release := make(chan struct{})
+	defer close(release)
+	old := walkLstat
+	walkLstat = func(name string) (os.FileInfo, error) {
+		if name == fx.slot {
+			<-release
+		}
+		return os.Lstat(name)
+	}
+	t.Cleanup(func() { walkLstat = old })
+	start := time.Now()
+	if _, err := pathLstat(filepath.Join(fx.slot, "f1")); !errors.Is(err, errNetworkShareUnanswered) {
+		t.Fatalf("held read = %v, want the share error", err)
+	}
+	if took := time.Since(start); took > 200*time.Millisecond {
+		t.Fatalf("held read took %v with 20 ms of the call wait left", took)
+	}
+	if call.waitLeft > 0 {
+		t.Fatalf("the held read was not charged to the call: %v left", call.waitLeft)
+	}
+}
+
+// A call whose share wait is spent waits for a held read of a known folder
+// no longer than the read grace, and an ordinary operand stays readable.
+func TestShareKnownFolderWithNoCallWaitLeftIsNotWaitedFor(t *testing.T) {
+	fx := newWalkReuseFixture(t)
+	oldWait := networkShareAnswerWait
+	networkShareAnswerWait = 400 * time.Millisecond
+	t.Cleanup(func() { networkShareAnswerWait = oldWait })
+	end := HookCall()
+	defer end()
+	readOperands(t, fx.slot, 1)
+	call := currentHookCall()
+	call.waitLeft, call.tail = 0, 0
+	readOperands(t, fx.slot, 3)
+	release := make(chan struct{})
+	defer close(release)
+	old := walkLstat
+	walkLstat = func(name string) (os.FileInfo, error) {
+		if name == fx.slot {
+			<-release
+		}
+		return os.Lstat(name)
+	}
+	t.Cleanup(func() { walkLstat = old })
+	start := time.Now()
+	if _, err := pathLstat(filepath.Join(fx.slot, "f9")); !errors.Is(err, errNetworkShareUnanswered) {
+		t.Fatalf("held read = %v, want the share error", err)
+	}
+	if took := time.Since(start); took > 200*time.Millisecond {
+		t.Fatalf("held read took %v with no call wait left", took)
+	}
+}
+
 // noIdentity is a folder read whose identity cannot be compared.
 type noIdentity struct{ os.FileInfo }
 
