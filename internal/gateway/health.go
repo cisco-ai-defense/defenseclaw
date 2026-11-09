@@ -207,15 +207,6 @@ type HealthSnapshot struct {
 	// signal for OpenClaw. Omitted until the interceptor reports a
 	// result or the proxy sees an authenticated X-DC-Target-URL hop.
 	Interception *InterceptionHealth `json:"interception,omitempty"`
-	// OpenClawConfigWrite is the digest of the bytes this gateway process last
-	// wrote to openclaw.json. Omitted until it has written the file.
-	OpenClawConfigWrite *OpenClawConfigWriteHealth `json:"openclaw_config_write,omitempty"`
-}
-
-// OpenClawConfigWriteHealth lets the setup CLI that started this process tell
-// whether openclaw.json still holds the bytes this process wrote (GAP-0973).
-type OpenClawConfigWriteHealth struct {
-	SHA256 string `json:"sha256"`
 }
 
 // InterceptionSelfTestFreshness is three plugin self-test cadences.
@@ -1884,10 +1875,6 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		snap.Interception = info
 	}
 	h.mu.RUnlock()
-
-	if sum, ok := connector.LastOpenClawConfigWrite(); ok {
-		snap.OpenClawConfigWrite = &OpenClawConfigWriteHealth{SHA256: sum}
-	}
 
 	if source != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), observabilityV8HealthSnapshotTimeout)

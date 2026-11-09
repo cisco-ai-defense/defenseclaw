@@ -221,7 +221,7 @@ func dropDefenseClawPluginApprovalsFile(configPath string) error {
 	if err != nil || out == nil {
 		return err
 	}
-	return writeOpenClawConfig(configPath, out, 0o644)
+	return atomicWriteFile(configPath, out, 0o644)
 }
 
 // openClawTeardownNoticeOutput receives the notice that teardown kept a changed
@@ -690,7 +690,7 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals, dropR
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", configPath, err)
 	}
-	return writeOpenClawConfig(configPath, append(out, '\n'), 0o644)
+	return atomicWriteFile(configPath, append(out, '\n'), 0o644)
 }
 
 // uninstallOpenClawExtension removes the extension directory and deletes
@@ -727,7 +727,7 @@ func uninstallOpenClawExtension(ocHome string, dropRejectedApprovals bool, grant
 	if err != nil {
 		errs = append(errs, err.Error())
 	} else if out != nil {
-		if err := writeOpenClawConfig(configPath, out, 0o644); err != nil {
+		if err := atomicWriteFile(configPath, out, 0o644); err != nil {
 			errs = append(errs, fmt.Sprintf("write openclaw.json: %v", err))
 		}
 	}

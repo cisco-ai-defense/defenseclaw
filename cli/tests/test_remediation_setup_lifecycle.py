@@ -206,7 +206,9 @@ class TestRestartFailsClosed(unittest.TestCase):
             patch.object(cmd_setup, "_restart_restored_connector_runtime") as reconcile,
             self.assertRaises(click.ClickException) as final,
         ):
-            cmd_setup._rollback_failed_connector_application(app, SimpleNamespace(applied_runtime=None, openclaw_config=None), cause)
+            cmd_setup._rollback_failed_connector_application(
+                app, SimpleNamespace(applied_runtime=None, openclaw_config=()), cause
+            )
         reconcile.assert_called_once_with(app, skip_openclaw=True)
         message = final.exception.message
         self.assertIn("openclaw gateway run", message)
