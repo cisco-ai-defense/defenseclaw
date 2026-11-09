@@ -116,6 +116,14 @@ type Input struct {
 	// link, the client keys by the name it was given). ActionFacts never
 	// derives it from action input.
 	ClientWorkingDirectories []string `json:"-"`
+	// ClientNativeFileContents is trusted caller context: the text, read when
+	// the call is judged, of the file an Edit or MultiEdit of Docker's daemon
+	// configuration changes (DockerDaemonConfigEditFiles names them), keyed by
+	// the cleaned absolute target of the call. A file that does not exist is
+	// present with empty text; a file that could not be read (permission, too
+	// large, not text, a gateway that cannot see the caller's files) is absent.
+	// ActionFacts never derives it from action input and never retains it.
+	ClientNativeFileContents map[string]string `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-

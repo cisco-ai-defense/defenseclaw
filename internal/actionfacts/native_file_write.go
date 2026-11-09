@@ -18,13 +18,20 @@ import (
 // place (a replacement's new text; a hunk's context and added lines), in
 // order, for a proof that judges the text an edit leaves and must not read
 // pieces from different places of the file as one text; added and replaced are
-// the added and removed pieces joined. before is, for a multi-step edit only,
-// the text each step replaces, parallel to after.
+// the added and removed pieces joined. before is, for an edit, the text each
+// step replaces, parallel to after, and all whether the step replaces every
+// occurrence; edit is set for an Edit or a MultiEdit, whose steps the tool
+// applies to the file in order.
 type nativeFileWrite struct {
 	target, added, replaced string
-	whole                   bool
+	whole, edit             bool
 	after, before           []string
+	all                     []bool
 }
+
+// NativeEditContentLimit is the largest file text a proof reads for an Edit
+// or MultiEdit (ClientNativeFileContents): a larger file is not read.
+const NativeEditContentLimit = maxCommandBytes
 
 // The argument names the reviewed whole-file write tools use for the target and
 // the written text (Claude Code Write, the write_file aliases, OpenCode and the
@@ -53,6 +60,42 @@ func nativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 		}
 	}
 	return writes
+}
+
+// applyEdits applies the steps of an Edit or a MultiEdit, in order, to the text
+// of the file, as the tool does: a step replaces its text where the file holds
+// it once, or every occurrence when the step asks for it; an empty replaced
+// text over a file with no text gives the new text. ok is false when the steps
+// cannot be applied that way (a step finds its text more than once or not at
+// all, which a tool that matches loosely may still edit, or an empty replaced
+// text over a file that has text); the text they leave is then read without
+// the file.
+func (write nativeFileWrite) applyEdits(content string) (string, bool) {
+	if !write.edit || len(write.before) == 0 ||
+		len(write.before) != len(write.after) || len(write.before) != len(write.all) {
+		return "", false
+	}
+	for step, replaced := range write.before {
+		replacement := write.after[step]
+		if len(replaced) > maxCommandBytes || len(replacement) > maxCommandBytes {
+			return "", false
+		}
+		if replaced == "" {
+			if strings.TrimSpace(content) != "" {
+				return "", false
+			}
+			content = replacement
+			continue
+		}
+		if count := strings.Count(content, replaced); count == 0 || count > 1 && !write.all[step] {
+			return "", false
+		}
+		content = strings.ReplaceAll(content, replaced, replacement)
+		if len(content) > maxCommandBytes {
+			return "", false
+		}
+	}
+	return content, true
 }
 
 // boundedNativeText is text padded with white space past maxCommandBytes in
@@ -207,7 +250,11 @@ func nativeEditWrites(object map[string]any, edit codingAgentEditKeys) []nativeF
 			return nil
 		}
 	}
-	return []nativeFileWrite{{target: target, added: newText, replaced: oldText}}
+	all, _ := object[edit.all].(bool)
+	return []nativeFileWrite{{
+		target: target, added: newText, replaced: oldText, edit: true,
+		after: []string{newText}, before: []string{oldText}, all: []bool{all},
+	}}
 }
 
 func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
@@ -222,6 +269,7 @@ func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
 	}
 	var added, replaced []string
 	var after, before []string
+	var all []bool
 	for _, value := range edits {
 		item, ok := value.(map[string]any)
 		if !ok {
@@ -234,10 +282,12 @@ func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
 		}
 		added, replaced = append(added, newText), append(replaced, oldText)
 		after, before = append(after, newText), append(before, oldText)
+		replaceAll, _ := item[edit.all].(bool)
+		all = append(all, replaceAll)
 	}
 	return []nativeFileWrite{{
 		target: target, added: strings.Join(added, "\n"), replaced: strings.Join(replaced, "\n"),
-		after: after, before: before,
+		edit: true, after: after, before: before, all: all,
 	}}
 }
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -27,8 +28,12 @@ const dockerDaemonConfigPath = "/etc/docker/daemon.json"
 // file the call names, in any spelling that cleans to it, or the file an
 // existing link reaches. A whole-file write is judged as the document it
 // leaves: any other setting the document carries, or a registry it lists
-// twice, does not change the verdict. An edit, a patch or an append is not
-// given the file it changes, so it is judged on the text it leaves in place,
+// twice, does not change the verdict. An Edit or MultiEdit of a file the
+// gateway read (Input.ClientNativeFileContents) is applied to that text, step
+// by step, as the tool applies it, and the document it leaves is judged as a
+// write of it; no step is read on its own. An edit of a file that could not be
+// read, a patch or an append is not given the file it changes, so it is judged
+// on the text it leaves in place,
 // the union of every replacement of a multi-step edit and every hunk of a
 // patch (its context and added lines), read for the lists it spells, whatever
 // the file held before: an entry the file already listed, or that another
@@ -41,9 +46,14 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 	}
 	writes, facts := nativeCallWrites(input, facts)
 	for _, write := range writes {
-		text := write.added
-		if text == "" || len(text) > maxCommandBytes || !utf8.ValidString(text) ||
-			strings.ContainsRune(text, 0) {
+		target, _ := nativeAbsoluteTarget(write.target, input.CWD)
+		document, applied := "", false
+		if content, read := input.ClientNativeFileContents[target]; read && dockerJudgeableText(content) {
+			document, applied = write.applyEdits(content)
+		}
+		// The file the tool writes is a document, judged as a Write of it.
+		if applied && !dockerJudgeableText(document) ||
+			!applied && !dockerJudgeableText(write.added) {
 			continue
 		}
 		// An absolute name is placed by its lexical clean, a relative one in the
@@ -51,14 +61,64 @@ func ExactDockerInsecureRegistryWrite(input Input, facts Facts) bool {
 		// the file the client answered with when it gave one; a link or a name
 		// the gateway cannot place is read from the client answer.
 		for _, file := range nativeWriteFiles(input, facts, writes, write, true) {
-			if EtcSpelling(file) == dockerDaemonConfigPath &&
-				writeToolNamesItsFile(input) &&
-				dockerWriteAddsInsecureRegistry(write) {
+			if EtcSpelling(file) != dockerDaemonConfigPath || !writeToolNamesItsFile(input) {
+				continue
+			}
+			if applied {
+				if dockerDocumentHasInsecureRegistry(document) {
+					return true
+				}
+			} else if dockerWriteAddsInsecureRegistry(write) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// dockerJudgeableText reports whether text is one the proof reads: some text,
+// within the proof's bound, valid UTF-8, with no NUL.
+func dockerJudgeableText(text string) bool {
+	return text != "" && len(text) <= maxCommandBytes && utf8.ValidString(text) &&
+		!strings.ContainsRune(text, 0)
+}
+
+// DockerDaemonConfigEditFiles names, for each Edit or MultiEdit of a native
+// file-tool call that changes Docker's daemon configuration (by its own name
+// or through a link the client or this gateway placed on it), the file whose
+// text the call changes, keyed by the cleaned absolute target of the call
+// (the key of Input.ClientNativeFileContents). A gateway that can read those
+// files supplies their text, so the edit is judged on the document it leaves.
+func DockerDaemonConfigEditFiles(input Input) map[string]string {
+	if input.Command != "" || len(input.Argv) != 0 {
+		return nil
+	}
+	isDaemonConfig := func(name string) bool {
+		return name != "" && EtcSpelling(path.Clean(name)) == dockerDaemonConfigPath
+	}
+	var files map[string]string
+	for _, write := range nativeFileWrites(input.Tool, input.Args) {
+		target, ok := nativeAbsoluteTarget(write.target, input.CWD)
+		if !ok || !write.edit {
+			continue
+		}
+		file := ""
+		if isDaemonConfig(target) {
+			file = target
+		} else if physical, linked := clientResolvedTargetWhere(
+			write.target, input.CWD, input.ClientWorkingDirectories, input.ClientResolvedTargets, isDaemonConfig,
+		); linked {
+			file = physical
+		}
+		if file == "" {
+			continue
+		}
+		if files == nil {
+			files = map[string]string{}
+		}
+		files[target] = file
+	}
+	return files
 }
 
 // writeToolNamesItsFile reports whether a Write call names its file the way
@@ -89,8 +149,7 @@ func writeToolNamesItsFile(input Input) bool {
 // cannot read (dockerd refuses such a file) adds nothing.
 func dockerWriteAddsInsecureRegistry(write nativeFileWrite) bool {
 	if write.whole {
-		entries, ok := dockerDocumentRegistries(write.added)
-		return ok && dockerListHasInsecureRegistry(entries)
+		return dockerDocumentHasInsecureRegistry(write.added)
 	}
 	for _, piece := range write.editPieces() {
 		if entries, ok := dockerEditTextRegistries(piece); ok && dockerListHasInsecureRegistry(entries) {
@@ -126,6 +185,13 @@ func dockerListHasInsecureRegistry(entries []string) bool {
 		found = found || insecure
 	}
 	return found
+}
+
+// dockerDocumentHasInsecureRegistry reports whether the complete daemon.json
+// document puts a non-loopback insecure registry in force.
+func dockerDocumentHasInsecureRegistry(content string) bool {
+	entries, ok := dockerDocumentRegistries(content)
+	return ok && dockerListHasInsecureRegistry(entries)
 }
 
 // dockerDocumentRegistries reads the insecure-registries list of a complete
