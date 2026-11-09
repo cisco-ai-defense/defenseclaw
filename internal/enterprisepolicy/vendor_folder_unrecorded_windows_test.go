@@ -425,3 +425,32 @@ func TestVerifyListsAnUnrecordedCopilotFileOnce(t *testing.T) {
 		}
 	}
 }
+
+// A weak recorded folder's own message names the foreign file it holds; the
+// file is not listed a second time as an unrecorded file (whoever owns it).
+func TestInspectDoesNotListTheForeignFileOfAFolderAlreadyReportedWeak(t *testing.T) {
+	for _, tc := range vendorFolderCases() {
+		if !tc.siblings {
+			continue
+		}
+		t.Run(tc.name, func(t *testing.T) {
+			opts, file, folder := publishedWeakCase(t, tc, vendorFolderAddOnlyDACL)
+			foreign := filepath.Join(folder, "foreign.json")
+			if tc.connector == ConnectorOpenCode {
+				foreign = filepath.Join(folder, "opencode.jsonc")
+			}
+			if err := os.WriteFile(foreign, []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			ownAs(t, foreign, wellKnownSID(t, windows.WinBuiltinUsersSid))
+			_ = file
+			problems := InspectRecordedVendorFolders(opts, []string{tc.request})
+			if len(problems) != 1 || problems[0].UnrecordedFile || !strings.EqualFold(problems[0].Dir, folder) {
+				t.Fatalf("problems = %+v; want only the weak folder", problems)
+			}
+			if _, blocked := ReprotectRecordedVendorFolders(opts, []string{tc.request}); len(blocked) != 1 || blocked[0].UnrecordedFile {
+				t.Fatalf("blocked = %+v; want only the weak folder", blocked)
+			}
+		})
+	}
+}
