@@ -1317,15 +1317,15 @@ def hermes_command_names_defenseclaw_hook(command: str, hooks_dir: str) -> bool:
 
     The Python mirror of hermesCommandNamesDefenseClawHook: the generated
     script, a file in the hooks folder (absolute, ``~`` or ``$HOME``) or the
-    native launcher's Hermes flag. It only picks which kept entries the notice
-    lists (GAP-0940); ownership never reads the command.
+    native launcher Hermes flag, each as a whole word (``.defenseclaw/hooks-backup``
+    and ``my-hermes-hook.sh`` are other names). It only picks which kept entries
+    the notice lists (GAP-0940); ownership never reads the command.
     """
 
     text = command.replace("\\", "/")
-    fragments = (HOOK_SCRIPT_NAMES["hermes"], ".defenseclaw/hooks", "hook --connector hermes")
-    return any(fragment in text for fragment in fragments) or (
-        bool(hooks_dir) and hooks_dir.replace("\\", "/").rstrip("/") + "/" in text
-    )
+    if hooks_dir and hooks_dir.replace("\\", "/").rstrip("/") + "/" in text:
+        return True
+    return _HERMES_DEFENSECLAW_HOOK_WORD.search(text) is not None
 
 
 def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:
@@ -2079,6 +2079,12 @@ HOOK_SCRIPT_NAMES = {
     "hermes": "hermes-hook.sh",
     "kiro": "kiro-hook.sh",
 }
+
+# Where a Hermes hook command names a DefenseClaw hook (hermes_command_names_defenseclaw_hook).
+_HERMES_DEFENSECLAW_HOOK_WORD = re.compile(
+    r"(?:^|[^A-Za-z0-9._-])(?:" + re.escape(HOOK_SCRIPT_NAMES["hermes"])
+    + r"|\.defenseclaw/hooks(?:$|[^A-Za-z0-9._-])|hook --connector hermes(?:$|[^A-Za-z0-9._-]))"
+)
 
 _EDITED_HOOK_PREFIX = "hook command edited: "
 

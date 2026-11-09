@@ -7,6 +7,7 @@ package connector
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -39,23 +40,28 @@ func hermesKeptHookEvents(hooks map[string]interface{}, hookScript string, recog
 	return events
 }
 
-// hermesCommandNamesDefenseClawHook reports whether a kept entry's command
+// hermesDefenseClawHookWord finds, in a command, the generated script name, the
+// hooks folder (.defenseclaw/hooks) or the native launcher flag, each as a whole
+// word: a character that can continue a file or folder name (letter, digit, dot,
+// underscore, hyphen) before or after it means a different name, such as
+// .defenseclaw/hooks-backup or my-hermes-hook.sh. An edited copy of the script
+// (hermes-hook.sh.off) keeps its place, so nothing follows the script name.
+var hermesDefenseClawHookWord = regexp.MustCompile(
+	`(?:^|[^A-Za-z0-9._-])(?:` + regexp.QuoteMeta(hermesHookScriptName) +
+		`|\.defenseclaw/hooks(?:$|[^A-Za-z0-9._-])` +
+		`|` + regexp.QuoteMeta(nativeHookFlag+"hermes") + `(?:$|[^A-Za-z0-9._-]))`)
+
+// hermesCommandNamesDefenseClawHook reports whether a kept entry command
 // names a DefenseClaw hook: the generated script, a file in the hooks folder
-// (spelled absolute, with ~ or with $HOME) or the native launcher's Hermes
+// (spelled absolute, with ~ or with $HOME) or the native launcher Hermes
 // flag. It only picks which kept entries are listed; ownership never reads the
 // command, so no entry is changed, claimed or removed because of it.
 func hermesCommandNamesDefenseClawHook(command, hookScript string) bool {
 	command = strings.ReplaceAll(command, `\`, "/")
-	fragments := []string{hermesHookScriptName, ".defenseclaw/hooks", nativeHookFlag + "hermes"}
-	if hookScript != "" {
-		fragments = append(fragments, filepath.ToSlash(filepath.Dir(hookScript))+"/")
+	if hookScript != "" && strings.Contains(command, filepath.ToSlash(filepath.Dir(hookScript))+"/") {
+		return true
 	}
-	for _, fragment := range fragments {
-		if strings.Contains(command, fragment) {
-			return true
-		}
-	}
-	return false
+	return hermesDefenseClawHookWord.MatchString(command)
 }
 
 // warnHermesKeptHookEntries says once, after Setup or teardown (operation),
