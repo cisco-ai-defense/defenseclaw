@@ -98,14 +98,16 @@ def test_the_process_mark_is_standalone_only_and_widens_only_the_content_drift_r
     call = service.index("managed.MarkStandaloneLifecycleProcess()")
     guard = service[service.rindex("if windowsEnterpriseStandalone(opts) {", 0, call) : call]
     assert guard.count("{") == 1, "the mark must sit directly under the standalone check"
+    # It ends with the action, so a process that runs several carries none over.
+    assert service[call:].index("defer managed.UnmarkStandaloneLifecycleProcess()") < 200
     # Secure Client never marks the process; the mark is read only by the
     # content-drift refusal, not by the trust scope.
     trust = (ROOT / "internal" / "managed" / "trust_standalone_windows.go").read_text(encoding="utf-8")
     refusal = trust[trust.index("func StandaloneRefusesContentDrift() bool {") :]
     refusal = refusal[: refusal.index("\n}\n")]
-    assert "windowsStandaloneTrustScope() || standaloneLifecycleProcessMarked()" in refusal
+    assert "windowsStandaloneTrustScope() || standaloneLifecycleProcess.Load()" in refusal
     scope = trust[trust.index("var windowsStandaloneTrustScope = func() bool {") :]
-    assert "standaloneLifecycleProcessMarked" not in scope[: scope.index("\n}\n")]
+    assert "standaloneLifecycleProcess" not in scope[: scope.index("\n}\n")]
 
 
 def test_the_token_and_acp_folders_are_refused_before_a_standalone_stamp() -> None:
@@ -124,7 +126,7 @@ def test_ensure_names_a_runtime_folder_another_account_can_write_before_it_plans
     go = STANDALONE.read_text(encoding="utf-8")
     seam = go[go.index("var windowsEnterpriseRuntimeFolderRefusal = func() string {") :]
     seam = seam[: seam.index("\n}\n")]
-    assert '[]string{"hooks", "acp"}' in seam and "managed.RefuseStandaloneInPlaceRepair(" in seam
+    assert '[]string{"hooks", "acp"}' in seam and "managed.RefuseStandaloneInPlaceRepairAs(" in seam
     call = go.index("windowsEnterpriseRuntimeFolderRefusal(); refusal != \"\"")
     assert go.rindex("noteWindowsEnterpriseEnsureDriftRepairs(result, driftRepaired)", 0, call) > go.rindex("func runWindowsEnterpriseStandaloneEnsureOnce(", 0, call)
     assert "alreadyAppliedNeedsRepair := false" in go[call : call + 700], "the refusal must come before the plan"

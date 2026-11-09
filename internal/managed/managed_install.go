@@ -170,18 +170,19 @@ var managedInstallRefusesContentDrift = StandaloneRefusesContentDrift
 var standaloneRepairAfterCheck = func(string) {}
 
 // standaloneContentRepairRefusal is the recovery step logged with a refused
-// content file.
-var standaloneContentRepairRefusal = "not repaired in place on a standalone install, because an account " +
-	"that could write this file may have changed it: from an elevated PowerShell prompt run `" + WindowsSetupCommand("/ensure") +
-	"` so Setup writes a fresh file, then `" + WindowsAdminCommand("enterprise", "windows", "verify", "--profile", "standalone") +
-	"` (GAP-0561). " + WindowsSetupSource
+// content file, with the exact commands: the Setup run that writes a fresh
+// file and the icacls fix by hand.
+func standaloneContentRepairRefusal(result CanonicalResult) string {
+	return "not repaired in place on a standalone install, because an account that could write this file may " +
+		"have changed it (GAP-0561): " + standaloneInPlaceRecovery(result.Path, false, result.UntrustedWriters, result.Drift)
+}
 
 // standaloneFolderRepairRefusal is the recovery step logged with a refused
 // managed folder.
-const standaloneFolderRepairRefusal = "not repaired in place on a standalone install, because an account that " +
-	"could change this folder may have put or replaced files in it: from an elevated prompt remove that entry " +
-	"(icacls \"<folder>\" /remove:g *<SID>; for an inherited entry first run icacls \"<folder>\" /inheritance:d, which keeps copies of the inherited entries), or give the folder back to Administrators " +
-	"(icacls \"<folder>\" /setowner *S-1-5-32-544), check what is in it, then run Setup /ensure and Setup /verify (GAP-0561)"
+func standaloneFolderRepairRefusal(result CanonicalResult) string {
+	return "not repaired in place on a standalone install, because an account that could change this folder " +
+		"may have put or replaced files in it (GAP-0561): " + standaloneInPlaceRecovery(result.Path, true, result.UntrustedWriters, result.Drift)
+}
 
 // refuseStandaloneFolderRepair reads a managed folder's descriptor without
 // writing. When an untrusted principal can write or owns it, it logs the
@@ -202,17 +203,17 @@ func refuseStandaloneFolderRepair(target managedDataTarget, opts CanonicalOption
 	if result.Outcome != CanonicalBoundary {
 		return CanonicalResult{}, false
 	}
-	result.RepairError = standaloneFolderRepairRefusal
+	result.RepairError = standaloneFolderRepairRefusal(result)
 	reportCanonicalResult(result, opts)
 	return result, true
 }
 
 // standaloneDataPathRepairRefusal is the recovery step logged with a refused
 // gateway data file (a token, a database, the log).
-const standaloneDataPathRepairRefusal = "not repaired in place on a standalone install, because an account that " +
-	"could write this file may have changed it: from an elevated prompt remove that entry " +
-	"(icacls \"<path>\" /remove:g *<SID>; for an inherited entry first run icacls \"<path>\" /inheritance:d, which keeps copies of the inherited entries), or give it back to Administrators (icacls \"<path>\" /setowner *S-1-5-32-544), " +
-	"check it, then run Setup /ensure and Setup /verify (GAP-0561)"
+func standaloneDataPathRepairRefusal(result CanonicalResult) string {
+	return "not repaired in place on a standalone install, because an account that could write this file may " +
+		"have changed it (GAP-0561): " + standaloneInPlaceRecovery(result.Path, false, result.UntrustedWriters, result.Drift)
+}
 
 // refuseStandaloneDataPathRepair is refuseStandaloneFolderRepair for every
 // managed data object: a folder or file an untrusted principal can write or
@@ -231,7 +232,7 @@ func refuseStandaloneDataPathRepair(target managedDataTarget, opts CanonicalOpti
 	if result.Outcome != CanonicalBoundary {
 		return CanonicalResult{}, false
 	}
-	result.RepairError = standaloneDataPathRepairRefusal
+	result.RepairError = standaloneDataPathRepairRefusal(result)
 	reportCanonicalResult(result, opts)
 	return result, true
 }
@@ -252,14 +253,14 @@ func refuseStandaloneContentRepair(target managedDataTarget, opts CanonicalOptio
 	}
 	switch result.Outcome {
 	case CanonicalBoundary:
-		result.RepairError = standaloneContentRepairRefusal
+		result.RepairError = standaloneContentRepairRefusal(result)
 	case CanonicalAccepted:
 		strictErr := ValidateTrustedFilePath(target.path, string(target.kind))
 		if strictErr == nil {
 			return CanonicalResult{}, false
 		}
 		result.Outcome = CanonicalBoundary
-		result.RepairError = standaloneContentRepairRefusal + ": " + strictErr.Error()
+		result.RepairError = standaloneContentRepairRefusal(result) + ": " + strictErr.Error()
 	default:
 		return CanonicalResult{}, false
 	}

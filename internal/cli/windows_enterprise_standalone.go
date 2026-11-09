@@ -242,7 +242,7 @@ var windowsEnterpriseRepairDataDirBeforePlan = func() string {
 	}
 	// On standalone a runtime folder another account can write or owns is
 	// left for the strict trust walk to refuse and name (g582 round 4).
-	if managed.RefuseStandaloneInPlaceRepair(layout.DataDir, managed.ObjectRuntimeDirectory) != nil {
+	if managed.RefuseStandaloneInPlaceRepairAs(layout.DataDir, managed.ObjectRuntimeDirectory, layout.ServiceUser) != nil {
 		return ""
 	}
 	// The gateway service account is named: this process carries no
@@ -253,6 +253,28 @@ var windowsEnterpriseRepairDataDirBeforePlan = func() string {
 	}
 	return "restored the access control of " + layout.DataDir + ", which had drifted (" +
 		windowsEnterpriseBoundedDiagnostic(strings.Join(repaired.Drift, "; ")) + ")"
+}
+
+// windowsEnterpriseRuntimeFolderRefusal names the token folder (hooks) and
+// the ACP credential folder (acp) of the runtime folder when an account
+// other than SYSTEM, Administrators and the gateway can write or owns one,
+// with the exact commands; "" otherwise. A seam for tests.
+var windowsEnterpriseRuntimeFolderRefusal = func() string {
+	if !windowsEnterpriseIsElevated() {
+		return ""
+	}
+	layout, err := windowsManagedLayout.standalone()
+	if err != nil || strings.TrimSpace(layout.DataDir) == "" {
+		return ""
+	}
+	for _, name := range []string{"hooks", "acp"} {
+		// The gateway service account is named: this process carries no
+		// service pin, and the gateway's own write entry is no other account's.
+		if refused := managed.RefuseStandaloneInPlaceRepairAs(filepath.Join(layout.DataDir, name), managed.ObjectRuntimeDirectory, layout.ServiceUser); refused != nil {
+			return refused.Error()
+		}
+	}
+	return ""
 }
 
 // windowsEnterpriseGuardianRepairsSinceLastRun lists the repairs the hook
@@ -832,7 +854,13 @@ func runWindowsEnterpriseStandaloneAction(
 	hookRuntimeRepaired := ""
 	claudeDropInRepaired := ""
 	if action == "repair" && windowsEnterpriseIsElevated() {
-		hookRuntimeRepaired = repairWindowsEnterpriseHookRuntimeAccess()
+		var hookRuntimeRefusal string
+		hookRuntimeRepaired, hookRuntimeRefusal = repairWindowsEnterpriseHookRuntimeAccessOrRefuse()
+		if hookRuntimeRefusal != "" {
+			result := newWindowsEnterpriseStandaloneResult(action, opts)
+			result.AddError("machine_policy_summary_untrusted", hookRuntimeRefusal)
+			return finishWindowsEnterpriseStandalone(cmd, opts, result, windowsEnterpriseFailureCodeFor(result))
+		}
 		claudeDropInRepaired = repairWindowsEnterpriseClaudeDropIn()
 	}
 	var configReplaced []string
@@ -4414,6 +4442,15 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 	// guardian logged since the last lifecycle run too.
 	if statusReport.Installed && !statusReport.TransactionPending {
 		noteWindowsEnterpriseEnsureDriftRepairs(result, driftRepaired)
+		// The folders under the runtime folder that another account can
+		// write or owns are named, not reported ok: the guardian does not
+		// write them back either (GAP-0651).
+		if refusal := windowsEnterpriseRuntimeFolderRefusal(); refusal != "" {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("lifecycle_error", "refusing to report the deployment healthy, and nothing was changed: "+refusal)
+			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		}
 	}
 	alreadyAppliedNeedsRepair := false
 	alreadyAppliedCoworkDrift := ""
@@ -4696,7 +4733,14 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			actionOpts.configPath = ""
 		}
 		actionOpts = *windowsEnterpriseRepairRecordingOptions("repair", &actionOpts)
-		if repaired := repairWindowsEnterpriseHookRuntimeAccess(); repaired != "" {
+		repaired, hookRuntimeRefusal := repairWindowsEnterpriseHookRuntimeAccessOrRefuse()
+		if hookRuntimeRefusal != "" {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("machine_policy_summary_untrusted", hookRuntimeRefusal)
+			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		}
+		if repaired != "" {
 			result.Changes = append(result.Changes, repaired)
 		}
 		if repaired := repairWindowsEnterpriseClaudeDropIn(); repaired != "" {

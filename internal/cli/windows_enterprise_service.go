@@ -557,6 +557,14 @@ func runWindowsEnterpriseLifecycle(
 		return failPreflight(err)
 	}
 	windowsEnterpriseRunStandalone.Store(windowsEnterpriseStandalone(opts))
+	if windowsEnterpriseStandalone(opts) {
+		// Setup runs this from a staged copy that carries no profile pin and
+		// sits outside the install root: it still refuses to give a folder or
+		// file another account can write back its access list in place
+		// (GAP-0651).
+		managed.MarkStandaloneLifecycleProcess()
+		defer managed.UnmarkStandaloneLifecycleProcess()
+	}
 	if (opts.bundlePath != "" || opts.trustAnchors != "") && !windowsEnterpriseStandalone(opts) {
 		return failPreflight(errors.New("--bundle and --trust-anchors are valid only with --profile standalone"))
 	}

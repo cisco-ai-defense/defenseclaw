@@ -20,6 +20,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Every enrolled user's hook reads the machine policy summary in
@@ -144,13 +145,24 @@ func windowsEnterpriseHookRuntimeMissing() string {
 
 // repairWindowsEnterpriseHookRuntimeAccess writes the hook runtime folder's
 // owner and access list back before a repair, and says so.
-func repairWindowsEnterpriseHookRuntimeAccess() string {
+// repairWindowsEnterpriseHookRuntimeAccessOrRefuse is that repair. On
+// a standalone host a folder another account can write or owns that already
+// holds a DefenseClaw file is not written back in place: that account may
+// have put or replaced files in it, or may hold a handle to one. The repair
+// then returns that refusal, which names the folder and the exact commands,
+// and the caller stops before the lifecycle; a run that swallowed it went on
+// and reported ok with the folder as the other account left it (GAP-0652).
+func repairWindowsEnterpriseHookRuntimeAccessOrRefuse() (change, refusal string) {
 	dir, problem := windowsEnterpriseHookRuntimeDrift()
 	if problem == "" {
-		return ""
+		return "", ""
 	}
 	if err := windowsEnterpriseRepairPublicDir(dir); err != nil {
-		return ""
+		var refused *managed.StandaloneContentDriftError
+		if errors.As(err, &refused) {
+			return "", dir + ": " + err.Error()
+		}
+		return "", ""
 	}
-	return "re-applied the permissions of " + dir + " (SYSTEM and Administrators full control, BUILTIN\\Users read and execute)"
+	return "re-applied the permissions of " + dir + " (SYSTEM and Administrators full control, BUILTIN\\Users read and execute)", ""
 }
