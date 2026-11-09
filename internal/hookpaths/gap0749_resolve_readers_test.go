@@ -39,7 +39,6 @@ func gap0749ResolveReaders(command, cwd, home string) {
 	ActionCommandDecision(command, cwd, home)
 	actionClientProvedOverwrittenRedirect(command, cwd, home)
 	actionClientLoopCopyDestinationProtected(command, cwd, home)
-	describedCopyReading("cp '' f", command, cwd, home)
 	if NoDereferenceTouchShape(command, cwd, home) {
 		noDereferenceTouchStatus(command, cwd, home)
 	}
@@ -114,7 +113,7 @@ var gap0749ResolveReaderCalls = []string{
 	"actionClientProvedSafeVariableTargetsForHook", "actionClientVariableWriteCandidate",
 	"actionConcreteProtectedWriteOnWithOperands", "actionGlobFacts", "actionfacts.ActiveUserTildeTwin",
 	"actionfacts.Analyze", "actionfacts.DynamicOperandTwins", "actionfacts.SimpleCommands", "actionfacts.WrapperUnwrapTwin",
-	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "describedCopyReading", "knownStateOperands", "noDereferenceTouchStatus",
+	"callPastArgvBound", "clientStatementBudgetExceeded", "commandLinksWithFacts", "knownStateOperands", "noDereferenceTouchStatus",
 	"plainMoveDestinationsWithStatements", "shellWriteOperands", "shellparse.TooDeep", "straightLineReadings",
 }
 

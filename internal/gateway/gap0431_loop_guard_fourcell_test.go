@@ -69,25 +69,29 @@ func TestGAP0431LoopDestinationGuardsFourCell(t *testing.T) {
 	}
 }
 
-func TestGAP0431ManagedLoopBenignSources(t *testing.T) {
+// A loop that runs its body judges cp by its name as a writer whatever its
+// source operand holds, so a destination that reaches a protected file through
+// a link blocks in every profile; a move replaces the entry and stays ordinary
+// (rel-1-0-6:GAP-0880, GAP-0885).
+func TestGAP0431ManagedLoopSourcesAreJudgedAsWriters(t *testing.T) {
 	f := newB36ManagedHookFixture(t)
-	for _, command := range []string{
-		`for f in keylink; do cp "$(printf '')" "$f"; done`,
-		`src=; for f in keylink; do cp "$src" "$f"; done`,
-		`src=-n; for f in keylink; do cp "$src" "$f"; done`,
-		`src=-f; for f in keylink; do cp "$src" "$f"; done`,
-		`src=--help; for f in keylink; do cp "$src" "$f"; done`,
-		`REPLY=; for f in keylink; do cp "$REPLY" "$f"; done`,
-		`OPTARG=; for f in keylink; do cp "$OPTARG" "$f"; done`,
-		`BASH_ENV=; for f in keylink; do cp "$BASH_ENV" "$f"; done`,
-		`IFS=; for f in keylink; do cp "$IFS" "$f"; done`,
-		`src=a.txt; for f in keylink; do mv a.txt "$f"; done`,
+	for _, row := range []struct{ command, want string }{
+		{`for f in keylink; do cp "$(printf '')" "$f"; done`, "block"},
+		{`src=; for f in keylink; do cp "$src" "$f"; done`, "block"},
+		{`src=-n; for f in keylink; do cp "$src" "$f"; done`, "block"},
+		{`src=-f; for f in keylink; do cp "$src" "$f"; done`, "block"},
+		{`src=--help; for f in keylink; do cp "$src" "$f"; done`, "block"},
+		{`REPLY=; for f in keylink; do cp "$REPLY" "$f"; done`, "block"},
+		{`OPTARG=; for f in keylink; do cp "$OPTARG" "$f"; done`, "block"},
+		{`BASH_ENV=; for f in keylink; do cp "$BASH_ENV" "$f"; done`, "block"},
+		{`IFS=; for f in keylink; do cp "$IFS" "$f"; done`, "block"},
+		{`src=a.txt; for f in keylink; do mv a.txt "$f"; done`, "allow"},
 	} {
-		payload := f.payload(t, command)
+		payload := f.payload(t, row.command)
 		header := f.clientHeader(t, payload)
 		for _, connector := range []string{"claudecode", "codex"} {
-			if got := f.post(t, connector, payload, header); got != "allow" {
-				t.Errorf("%s: %s = %s, want allow", connector, command, got)
+			if got := f.post(t, connector, payload, header); got != row.want {
+				t.Errorf("%s: %s = %s, want %s", connector, row.command, got, row.want)
 			}
 		}
 	}

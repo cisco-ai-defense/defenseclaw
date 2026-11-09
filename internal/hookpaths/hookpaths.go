@@ -1893,13 +1893,10 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 							!slices.Contains(dynamicReadings, simple.Text) &&
 							(simple.ResolvedVariable && links.opaque ||
 								simple.LoginGuess && readingReachesLink(simple.Text, cwd, home)) {
-							if text, described := describedCopyReading(simple.Text, command, cwd, home); described &&
-								!slices.Contains(dynamicReadings, text) {
-								if len(dynamicReadings) >= maxResolvedReadings {
-									truncated = true
-								} else {
-									dynamicReadings = append(dynamicReadings, text)
-								}
+							if len(dynamicReadings) >= maxResolvedReadings {
+								truncated = true
+							} else {
+								dynamicReadings = append(dynamicReadings, simple.Text)
 							}
 						}
 						if simple.EvaluationFailure == "" && simple.Text != command && filepath.IsAbs(simple.CWD) {
