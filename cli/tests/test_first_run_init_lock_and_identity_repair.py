@@ -784,3 +784,50 @@ def test_the_repair_command_before_any_config_does_not_need_a_gateway_check(tmp_
 
     assert result.exit_code == 0, result.output
     assert _valid(home)
+
+
+@pytest.mark.parametrize("override", ["absent-path", "other-config"])
+@pytest.mark.parametrize("size", [0, 20])
+def test_a_config_override_never_hides_the_gateway_of_a_home_that_is_configured(
+    tmp_path, monkeypatch, override, size
+):
+    # DEFENSECLAW_CONFIG names a file that is absent, or another config, while the home own
+    # config.yaml exists: the gateway of that home may still run, so the repair needs the proof.
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _cut_short_key(home, size, configured=True)
+    root = Path(os.path.realpath(tmp_path))
+    if override == "other-config":
+        other = root / "other" / "config.yaml"
+        other.parent.mkdir()
+        other.write_text((home / "config.yaml").read_text())
+        monkeypatch.setenv("DEFENSECLAW_CONFIG", str(other))
+    else:
+        monkeypatch.setenv("DEFENSECLAW_CONFIG", str(root / "absent" / "config.yaml"))
+    before = _snapshot(home)
+
+    with _gateway_running():
+        refused = _repair()
+
+    assert refused.exit_code != 0
+    assert "verified managed gateway process is running" in refused.output
+    assert _snapshot(home) == before
+    assert _orphans(home) == []
+
+    assert _repair().exit_code == 0  # with the gateway stopped, the same command repairs it
+    assert _valid(home)
+
+
+def test_the_repair_command_with_an_absent_override_and_no_home_config_needs_no_gateway_check(
+    tmp_path, monkeypatch
+):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _cut_short_key(home, 20, configured=False)
+    monkeypatch.setenv("DEFENSECLAW_CONFIG", str(Path(os.path.realpath(tmp_path)) / "absent" / "config.yaml"))
+
+    with _gateway_running():
+        result = _repair()
+
+    assert result.exit_code == 0, result.output
+    assert _valid(home)
