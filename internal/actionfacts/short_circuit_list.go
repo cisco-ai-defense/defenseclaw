@@ -313,14 +313,57 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 			topLevel[declaration] = true
 		}
 	}
-	mayChange, mayChangeKnown := false, false
-	functionsMayChange := func() bool {
-		if !mayChangeKnown {
-			mayChange, mayChangeKnown = simpleMayReach(file, ""), true
-		}
-		return mayChange
-	}
 	functionDepth := 0
+	defined := make(map[string]bool)
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if declaration, ok := node.(*syntax.FuncDecl); ok && declaration.Name != nil {
+			defined[declaration.Name.Value] = true
+		}
+		return true
+	})
+	// functionStable reports whether the call at stmt runs the function name
+	// the action defined, not the program of that name. Only the shell can
+	// remove, replace or shadow a function, and only before the call runs:
+	// the commands that run before it, in the order the shell runs them, and
+	// its own arguments, are read for that. A command after a plain top-level
+	// call does not count. A call that sits inside a compound statement counts
+	// that statement, and a call the walk reaches through another function
+	// counts the whole action. A function of the action that can run the
+	// program of that name (a body that forwards to it, also through another
+	// function) always counts.
+	functionStable := func(stmt *syntax.Stmt, name string) bool {
+		self, _ := stmt.Cmd.(*syntax.CallExpr)
+		if self == nil {
+			return false
+		}
+		forwards := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if declaration, ok := node.(*syntax.FuncDecl); ok && declaration.Body != nil &&
+				(simpleReach{name: name, defined: defined, programs: true}).in(declaration.Body) {
+				forwards = true
+			}
+			return !forwards
+		})
+		if forwards {
+			return false
+		}
+		reach := simpleReach{name: name, defined: defined, self: self}
+		if functionDepth != 0 {
+			return !reach.in(file)
+		}
+		for index, top := range file.Stmts {
+			if stmt.Pos().Offset() < top.Pos().Offset() || stmt.Pos().Offset() >= top.End().Offset() {
+				continue
+			}
+			for _, before := range file.Stmts[:index] {
+				if (simpleReach{name: name, defined: defined}).in(before) {
+					return false
+				}
+			}
+			return !reach.in(top)
+		}
+		return false
+	}
 	// assigned holds the static values the walk has seen assigned to each
 	// variable, so a program word such as $x can name the function it
 	// calls (GAP-0934); unbound holds the variables the action may also
@@ -406,7 +449,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 				return true, false
 			}
 			functions[typed.Name.Value] = typed.Body
-			if topLevel[typed] && !indefinite[typed.Name.Value] && !simpleMayReach(typed.Body, typed.Name.Value) {
+			if topLevel[typed] && !indefinite[typed.Name.Value] {
 				definite[typed.Name.Value] = true
 			} else {
 				indefinite[typed.Name.Value] = true
@@ -603,7 +646,7 @@ func sequenceStatementDetails(source string, compound, allSimple bool) (statemen
 					if functionDepth >= 8 || !keep(stmt.Cmd, stmt.Redirs...) {
 						return false
 					}
-					if direct, plain := simpleStaticWord(call.Args[0], nil); plain && definite[direct] && !functionsMayChange() {
+					if direct, plain := simpleStaticWord(call.Args[0], nil); plain && definite[direct] && functionStable(stmt, direct) {
 						statements[len(statements)-1].functionCall = true
 					}
 					reduced = true
@@ -885,11 +928,39 @@ func simpleExportedFunctionNames(decl *syntax.DeclClause) ([]string, bool) {
 	return names, true
 }
 
-// simpleMayReach reports whether the commands of node can remove or replace a
-// function the walk does not follow (an unset, an eval, a sourced file or a
-// trap, or a command whose name is not a literal word), or, for a name that is
-// not empty, can run the program of that name (any literal word that holds it).
-func simpleMayReach(node syntax.Node, name string) bool {
+// simpleInertArguments names the commands that only read their arguments as
+// data: they run no word they are given and can not remove a function. The
+// walk treats the words of such a command as text, not as a program or a
+// function name, unless the action defines a function of that name.
+var simpleInertArguments = map[string]bool{":": true, "true": true, "false": true, "echo": true,
+	"printf": true, "cat": true, "touch": true, "mkdir": true, "rm": true, "cp": true, "mv": true,
+	"ls": true, "tee": true, "test": true, "[": true, "pwd": true, "cd": true, "read": true,
+	"sleep": true, "wc": true, "head": true, "tail": true, "sort": true, "date": true}
+
+// simpleReach is what the commands of a node can do to the call of the shell
+// function name that the action defined.
+type simpleReach struct {
+	name    string
+	defined map[string]bool
+	// self is the call of the function itself: its arguments are data and
+	// only the commands inside them run.
+	self *syntax.CallExpr
+	// programs also counts a command that can run the program of that name
+	// (a wrapper such as command, env, exec or sh -c, or the program word):
+	// that matters in the body of a function the call runs, not before the
+	// call, which only the shell can change.
+	programs bool
+}
+
+// in reports whether the commands of node can remove, replace or shadow the
+// function (an unset that names it or names something that is not literal,
+// an alias, an eval, source, . or trap, a command whose program word is not
+// literal, or any other command with a literal word that holds "unset" or
+// "alias", as a wrapper can run what it is given), or, with programs, run
+// the program of that name. The arguments of the commands in
+// simpleInertArguments are text and never count. A plain call of the name is
+// a call of the function and does not count either.
+func (r simpleReach) in(node syntax.Node) bool {
 	may := false
 	syntax.Walk(node, func(part syntax.Node) bool {
 		call, ok := part.(*syntax.CallExpr)
@@ -897,16 +968,38 @@ func simpleMayReach(node syntax.Node, name string) bool {
 			return !may
 		}
 		program, literal := simpleStaticWord(call.Args[0], nil)
-		may = !literal || program == "eval" || program == "source" || program == "." || program == "trap"
-		for _, arg := range call.Args {
-			if word, literal := simpleStaticWord(arg, nil); literal &&
-				(strings.Contains(word, "unset") || name != "" && strings.Contains(word, name)) {
-				may = true
+		switch {
+		case call == r.self || literal && program == r.name:
+		case !literal || program == "eval" || program == "source" || program == "." || program == "trap":
+			may = true
+		case !r.defined[program] && program == "unset":
+			may = simpleUnsetNames(call.Args[1:], r.name)
+		case !r.defined[program] && simpleInertArguments[program]:
+		default:
+			for _, arg := range call.Args {
+				if word, literal := simpleStaticWord(arg, nil); literal && (strings.Contains(word, "unset") ||
+					strings.Contains(word, "alias") || r.programs && strings.Contains(word, r.name)) {
+					may = true
+				}
 			}
 		}
 		return !may
 	})
 	return may
+}
+
+// simpleUnsetNames reports whether the operands of an unset name the
+// function called name or are not literal words (a glob or an expansion can
+// spell any name). Options and the names of other variables and functions do
+// not count.
+func simpleUnsetNames(operands []*syntax.Word, name string) bool {
+	for _, operand := range operands {
+		word, literal := simpleStaticWord(operand, nil)
+		if !literal || word == name {
+			return true
+		}
+	}
+	return false
 }
 
 // simpleFunctionCallName resolves literal spellings and the shell builtins
