@@ -373,7 +373,7 @@ func analyze(input Input, twinCommand string, capture *redirectTargetCapture) Fa
 	facts.POSIXNonRootUIDZeroAccountWrites =
 		projectPOSIXNonRootUIDZeroAccountWrites(input)
 	facts.POSIXUnrestrictedSudoersGrantWrites =
-		projectPOSIXUnrestrictedSudoersGrantWrites(input)
+		projectPOSIXUnrestrictedSudoersGrantWrites(input, facts)
 	return facts
 }
 
