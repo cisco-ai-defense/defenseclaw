@@ -139,7 +139,6 @@ from defenseclaw.doctor_hooks import (
     validate_windows_copilot_hook_registration,
     validate_windows_hook_registration,
 )
-from defenseclaw.doctor_recovery import DEVICE_KEY_PAYLOAD_INVALID, REPAIR_IDENTITY_COMMAND
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
 from defenseclaw.file_permissions import (
@@ -4750,7 +4749,12 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
         )
         return
     if health.reason_code == _DEVICE_KEY_LEFTOVERS:
-        # Only the key is gone: say so and name the attended repair (GAP-0323).
+        # Only the key is gone: Doctor does not replace the provenance files (they may be the only
+        # trace of that identity); it names them and the manual steps (GAP-0927), and still names its own
+        # attended fix, which asks first (GAP-0323, unchanged).
+        from defenseclaw.doctor_recovery import device_identity_leftovers, keyless_identity_message
+
+        files = device_identity_leftovers(target, str(getattr(cfg, "data_dir", "") or ""))
         _emit(
             "fail",
             "Device identity",
@@ -4759,25 +4763,9 @@ def _check_device_identity(cfg, r: _DoctorResult) -> None:
             check_id="doctor.identity.device-key",
             reason_code=health.reason_code,
             remediation=(
-                f"restore device.key from a trusted backup, or run: {REPAIR_IDENTITY_COMMAND} "
-                "(it asks first, moves those files aside and mints a new identity; check that no init is "
-                "running), or defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize "
-                "(the same repair)"
-            ),
-        )
-        return
-    if health.reason_code == DEVICE_KEY_PAYLOAD_INVALID:
-        _emit(
-            "fail",
-            "Device identity",
-            f"the device key at {target} holds no usable key (empty or cut short)",
-            r=r,
-            check_id="doctor.identity.device-key",
-            reason_code=health.reason_code,
-            remediation=(
-                f"restore device.key from a trusted backup, or run: {REPAIR_IDENTITY_COMMAND} "
-                "(it asks first, keeps that file and the provenance files aside as *.orphaned-* and mints a "
-                "new identity; stop the gateway and check that no init is running)"
+                keyless_identity_message(target, files)
+                + " Or run Doctor's attended repair (it asks first, moves those files aside and mints a new "
+                "identity): defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
             ),
         )
         return
@@ -16859,7 +16847,6 @@ def _fix_device_key_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
         apply_device_key_recovery,
         inspect_device_key,
         plan_missing_device_key,
-        set_aside_identity_leftovers,
     )
 
     # The declarative engine deliberately passes assume_yes=False for
@@ -16902,11 +16889,13 @@ def _fix_device_key_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
         default=False,
     ):
         return ("skip", "declined by user")
-    try:
-        # Kept, not deleted (*.orphaned-*): a continuity-aware review can still use them.
-        set_aside_identity_leftovers(target, data_dir)
-    except OSError as exc:
-        return ("fail", f"could not move the provenance files aside: {exc}")
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    for path in leftovers:
+        # Kept, not deleted: a continuity-aware review can still use them.
+        try:
+            os.replace(path, f"{path}.orphaned-{stamp}")
+        except OSError as exc:
+            return ("fail", f"could not move {path} aside: {exc}")
     plan = plan_missing_device_key(target, data_dir=data_dir)
     try:
         result = apply_device_key_recovery(plan, approved=True, unattended=False)
