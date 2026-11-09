@@ -3448,7 +3448,7 @@ func windowsEnterpriseFailureCodeFor(result *enterprisestatus.Result) int {
 			return enterprisestatus.WindowsExitBusy
 		case "bundle_apply_failed", "bundle_policy_not_adopted", "bundle_post_verify_failed", "bundle_targets_refresh_failed":
 			return enterprisestatus.WindowsExitBusy
-		case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held":
+		case "hook_calls_running", "hook_in_use", "codex_state_held", "codex_requirements_held", "guardian_state_held":
 			// The lifecycle deferred before it changed anything, while hook
 			// calls of the installed release still run (GAP-1124), another
 			// program holds the installed hook open (GAP-2001) or a user
@@ -4608,6 +4608,18 @@ func runWindowsEnterpriseStandaloneEnsureOnce(
 			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
 			result.Errors = []enterprisestatus.Message{}
 			result.AddError("preflight_failed", err.Error())
+			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
+		}
+	}
+
+	// A hook guardian state file another program holds open keeps the
+	// guardian from publishing, so a change could be neither proven nor
+	// undone: say so before anything changes (GAP-0967).
+	if plan.Action == "upgrade" || plan.Action == "repair" {
+		if err := windowsEnterpriseGuardianStatePreflight(); err != nil {
+			applyWindowsEnterpriseInstallerReport(result, opts, statusReport, statusRun)
+			result.Errors = []enterprisestatus.Message{}
+			result.AddError("guardian_state_held", err.Error())
 			return false, finishEnsure(windowsEnterpriseFailureCodeFor(result))
 		}
 	}

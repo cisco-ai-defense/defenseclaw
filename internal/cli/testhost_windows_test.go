@@ -843,8 +843,10 @@ func isolateTestDeploymentReaders(dir string) {
 	// and looks in each for a removed connector's files.
 	sandboxSeam("enterpriseHookWindowsEligibleProfiles", &enterpriseHookWindowsEligibleProfiles,
 		func(context.Context) ([]enterprisehooks.TargetCredentials, error) { return nil, nil })
-	sandboxSeam("enterpriseHookWindowsConnectorUserRuntimeLeftover", &enterpriseHookWindowsConnectorUserRuntimeLeftover,
-		func(string, string, string) bool { return false })
+	sandboxSeam("windowsEnterpriseGuardianStateHeldNow", &windowsEnterpriseGuardianStateHeldNow,
+		func(managed.StandaloneLayout) *windowsGuardianStateHold { return nil })
+	sandboxSeam("enterpriseHookWindowsConnectorUserRuntimeLeftovers", &enterpriseHookWindowsConnectorUserRuntimeLeftovers,
+		func(string, string, string, []string) []string { return nil })
 	sandboxSeam("windowsConnectorOffRosterRead", &windowsConnectorOffRosterRead, func(string) (bool, error) { return false, nil })
 	sandboxSeam("windowsEnterpriseRemovedConnectorsForStatus", &windowsEnterpriseRemovedConnectorsForStatus, func() ([]managed.RemovedConnector, error) { return nil, nil })
 	sandboxSeam("windowsEnterpriseAgentSettingsNotices", &windowsEnterpriseAgentSettingsNotices, func() []string { return nil })

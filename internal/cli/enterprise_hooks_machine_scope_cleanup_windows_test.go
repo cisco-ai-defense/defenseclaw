@@ -103,18 +103,7 @@ func TestRevokeUsersCleansOffRosterMachineScopeFilesOfAccountsWithoutAProtectedR
 	sidC := "S-1-5-21-1000000000-2000000000-3000000000-1019"
 	sidD := "S-1-5-21-1000000000-2000000000-3000000000-1020"
 	writeUserCleanupAuthorization(t, dataDir) // no protected row
-	previousCfg, previousProfiles := cfg, enterpriseHookWindowsEligibleProfiles
-	previousLeftover, previousRemover := enterpriseHookWindowsConnectorUserRuntimeLeftover, enterpriseHookWindowsConnectorUserRuntimeRemover
-	t.Cleanup(func() {
-		cfg, enterpriseHookWindowsEligibleProfiles = previousCfg, previousProfiles
-		enterpriseHookWindowsConnectorUserRuntimeLeftover, enterpriseHookWindowsConnectorUserRuntimeRemover = previousLeftover, previousRemover
-	})
-	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
-	cfg = &config.Config{
-		DeploymentMode: managed.DeploymentModeManagedEnterprise, DataDir: dataDir,
-		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone},
-	}
-	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}, "codex": {}}
+	useOffRosterScan(t, dataDir)
 	listed := 0
 	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
 		listed++
@@ -124,9 +113,15 @@ func TestRevokeUsersCleansOffRosterMachineScopeFilesOfAccountsWithoutAProtectedR
 		}, nil
 	}
 	// A and B hold Cursor files and C holds Claude Code files (Claude Code is
-	// on the roster); D holds nothing.
-	enterpriseHookWindowsConnectorUserRuntimeLeftover = func(home, _ string, name string) bool {
-		return (name == "cursor" && (home == homeA || home == homeB)) || (name == "claudecode" && home == homeC)
+	// on the roster); D holds nothing. One call per account lists all the
+	// connectors that are off the roster.
+	var asked []string
+	enterpriseHookWindowsConnectorUserRuntimeLeftovers = func(home, sid, _ string, connectors []string) []string {
+		asked = append(asked, filepath.Base(home)+":"+strings.Join(connectors, "+"))
+		if home == homeA || home == homeB {
+			return []string{"cursor"}
+		}
+		return nil
 	}
 	var removed []string
 	enterpriseHookWindowsConnectorUserRuntimeRemover = func(home, sid, _ string, name string) error {
@@ -143,12 +138,24 @@ func TestRevokeUsersCleansOffRosterMachineScopeFilesOfAccountsWithoutAProtectedR
 	if strings.Join(removed, ",") != strings.Join(want, ",") || listed == 0 {
 		t.Fatalf("removed %v, want %v (profiles listed %d); log: %s", removed, want, listed, log.String())
 	}
+	for _, call := range asked {
+		if !strings.HasSuffix(call, ":cursor") {
+			t.Fatalf("the scan asked %q: only Cursor is off the roster", call)
+		}
+	}
 	if pending, err := loadEnterpriseHookUserCleanups(dataDir); err != nil || len(pending) != 0 {
 		t.Fatalf("completed cleanups remained recorded: %+v %v", pending, err)
+	}
+	// S4: an account found only by its files is recorded as not managed, like
+	// one the guardian held a row for.
+	records, err := loadEnterpriseHookRemovedConnectors(dataDir)
+	if err != nil || len(records) != 2 {
+		t.Fatalf("removed-connectors record = %+v %v, want both accounts with files", records, err)
 	}
 
 	// A manifest that admits Cursor for an account keeps that account's files,
 	// and a failed removal is recorded for the next pass.
+	resetOffRosterScan()
 	removed = nil
 	enterpriseHookWindowsConnectorUserRuntimeRemover = func(home, sid, _ string, name string) error {
 		removed = append(removed, name+"/"+sid)
@@ -166,8 +173,109 @@ func TestRevokeUsersCleansOffRosterMachineScopeFilesOfAccountsWithoutAProtectedR
 
 	// With every machine-scope connector on the roster nothing is looked at.
 	listed = 0
-	if got := windowsStandaloneOffRosterRuntimeCleanups(context.Background(), func(string) bool { return true }, nil, time.Now()); len(got) != 0 || listed != 0 {
+	if got := windowsStandaloneOffRosterRuntimeCleanups(context.Background(), &log, func(string) bool { return true }, nil, time.Now()); len(got) != 0 || listed != 0 {
 		t.Fatalf("cleanups %+v with every connector published (profiles listed %d)", got, listed)
+	}
+}
+
+// useOffRosterScan gives a test the standalone guardian config with Claude
+// Code and Codex on the roster, the sandbox's seams to put back, and a fresh
+// scan throttle.
+func useOffRosterScan(t *testing.T, dataDir string) {
+	t.Helper()
+	previousCfg, previousProfiles := cfg, enterpriseHookWindowsEligibleProfiles
+	previousLeftovers, previousRemover := enterpriseHookWindowsConnectorUserRuntimeLeftovers, enterpriseHookWindowsConnectorUserRuntimeRemover
+	t.Cleanup(func() {
+		cfg, enterpriseHookWindowsEligibleProfiles = previousCfg, previousProfiles
+		enterpriseHookWindowsConnectorUserRuntimeLeftovers, enterpriseHookWindowsConnectorUserRuntimeRemover = previousLeftovers, previousRemover
+		resetOffRosterScan()
+	})
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	cfg = &config.Config{
+		DeploymentMode: managed.DeploymentModeManagedEnterprise, DataDir: dataDir,
+		Enterprise: config.EnterpriseConfig{Profile: managed.ProfileStandalone},
+	}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"claudecode": {}, "codex": {}}
+	resetOffRosterScan()
+}
+
+func resetOffRosterScan() {
+	enterpriseHookWindowsOffRosterScanState.Lock()
+	enterpriseHookWindowsOffRosterScanState.last, enterpriseHookWindowsOffRosterScanState.fingerprint = time.Time{}, ""
+	enterpriseHookWindowsOffRosterScanState.Unlock()
+}
+
+// S3: the scan runs when the set of connectors off the roster changes and then
+// at most once in the interval, and a failed profile list is logged.
+func TestOffRosterScanIsThrottledAndLogsTheProfileListError(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	useOffRosterScan(t, dataDir)
+	home := t.TempDir()
+	scans := 0
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		scans++
+		return []enterprisehooks.TargetCredentials{{UserHome: home, SID: userCleanupSIDA}}, errors.New("group cache unreadable")
+	}
+	enterpriseHookWindowsConnectorUserRuntimeLeftovers = func(string, string, string, []string) []string { return []string{"cursor"} }
+	offCursor := func(name string) bool { return name != "cursor" }
+	offCursorAndCodex := func(name string) bool { return name == "claudecode" }
+	var log bytes.Buffer
+	now := time.Now()
+	scan := func(published func(string) bool, at time.Time) int {
+		return len(windowsStandaloneOffRosterRuntimeCleanups(context.Background(), &log, published, nil, at))
+	}
+	if scan(offCursor, now) != 1 || scans != 1 || !strings.Contains(log.String(), "group cache unreadable") {
+		t.Fatalf("first scan: scans=%d log=%q", scans, log.String())
+	}
+	if scan(offCursor, now.Add(time.Minute)) != 0 || scans != 1 {
+		t.Fatalf("a scan inside the interval ran: scans=%d", scans)
+	}
+	if scan(offCursorAndCodex, now.Add(2*time.Minute)) != 1 || scans != 2 {
+		t.Fatalf("a changed set of connectors off the roster did not scan: scans=%d", scans)
+	}
+	if scan(offCursorAndCodex, now.Add(2*time.Minute+enterpriseHookWindowsOffRosterScanInterval)) != 1 || scans != 3 {
+		t.Fatalf("a scan after the interval did not run: scans=%d", scans)
+	}
+}
+
+// S2: an entry for a machine-scope connector the config publishes again is
+// held for an account the enrollment admits, not run; an account it does not
+// admit is still cleaned.
+func TestReAddedConnectorEntryIsHeldForAnEligibleAccountOnly(t *testing.T) {
+	dataDir := useUserCleanupStateDir(t)
+	useOffRosterScan(t, dataDir)
+	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
+		return []enterprisehooks.TargetCredentials{{UserHome: t.TempDir(), SID: userCleanupSIDA}}, nil
+	}
+	published := func(name string) bool { return name == "cursor" }
+	hold := windowsStandaloneReAddedHold(context.Background(), published)
+	if !hold("cursor", userCleanupSIDA) {
+		t.Fatal("an eligible account's entry for a re-added connector was not held")
+	}
+	if hold("cursor", userCleanupSIDB) {
+		t.Fatal("an account the enrollment does not admit was held")
+	}
+	if hold("codex", userCleanupSIDA) {
+		t.Fatal("an entry for a connector still off the roster was held")
+	}
+	if hold("devin", userCleanupSIDA) {
+		t.Fatal("a per-user connector was held")
+	}
+}
+
+// S1: a link left where a connector file should be is said once and the
+// cleanup is done; it is not a failure to retry.
+func TestAttemptWindowsStandaloneUserCleanupSaysALeftLinkOnceAndIsDone(t *testing.T) {
+	home := t.TempDir()
+	original := enterpriseHookWindowsConnectorUserRuntimeRemover
+	t.Cleanup(func() { enterpriseHookWindowsConnectorUserRuntimeRemover = original })
+	enterpriseHookWindowsConnectorUserRuntimeRemover = func(string, string, string, string) error {
+		return &enterprisehooks.WindowsConnectorUserRuntimeLinksLeft{Links: []string{`hooks\.hook-cursor.token`}}
+	}
+	outcome, err := attemptWindowsStandaloneUserCleanup(context.Background(),
+		enterpriseHookUserCleanup{Connector: "cursor", SID: userCleanupSIDA, UserHome: home})
+	if outcome != enterpriseHookUserCleanupDone || err != nil {
+		t.Fatalf("outcome=%d err=%v, want done", outcome, err)
 	}
 }
 
@@ -176,17 +284,14 @@ func TestRevokeUsersCleansOffRosterMachineScopeFilesOfAccountsWithoutAProtectedR
 func TestRevokeUsersOffRosterDiscoveryIsStandaloneOnly(t *testing.T) {
 	dataDir := useUserCleanupStateDir(t)
 	writeUserCleanupAuthorization(t, dataDir)
-	previousCfg, previousProfiles, previousLeftover := cfg, enterpriseHookWindowsEligibleProfiles, enterpriseHookWindowsConnectorUserRuntimeLeftover
-	t.Cleanup(func() {
-		cfg, enterpriseHookWindowsEligibleProfiles, enterpriseHookWindowsConnectorUserRuntimeLeftover = previousCfg, previousProfiles, previousLeftover
-	})
+	useOffRosterScan(t, dataDir)
 	enterpriseHookWindowsEligibleProfiles = func(context.Context) ([]enterprisehooks.TargetCredentials, error) {
 		t.Fatal("Secure Client listed the profiles for the off-roster cleanup")
 		return nil, nil
 	}
-	enterpriseHookWindowsConnectorUserRuntimeLeftover = func(string, string, string) bool {
+	enterpriseHookWindowsConnectorUserRuntimeLeftovers = func(string, string, string, []string) []string {
 		t.Fatal("Secure Client looked in an account folder for a removed connector's files")
-		return false
+		return nil
 	}
 	t.Setenv(managed.EnterpriseProfileEnv, "")
 	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise, DataDir: dataDir}

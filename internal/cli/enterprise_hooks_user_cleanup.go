@@ -394,7 +394,9 @@ func addEnterpriseHookDiscoveredCleanups(
 // reconcileEnterpriseHookUserCleanups is the guardian step: plan from the
 // previous protected rows, the ledger and the cleanups discovered in the
 // accounts' own folders (nil where the platform has none), attempt every
-// cleanup of a user the manifest does not enroll, log the outcome, and persist
+// cleanup of a user the manifest does not enroll, except an entry hold names
+// (nil holds none: a connector the config publishes again, for an account the
+// enrollment is about to admit), log the outcome, and persist
 // what is still pending. An error means the ledger
 // could not be written, so the caller must not publish state that drops
 // the revoked rows.
@@ -405,6 +407,7 @@ func reconcileEnterpriseHookUserCleanups(
 	manifest enterprisehooks.Manifest,
 	perUser func(string) bool,
 	discovered []enterpriseHookUserCleanup,
+	hold func(connectorName, sid string) bool,
 	attempt enterpriseHookUserCleanupAttempt,
 	now time.Time,
 ) error {
@@ -439,7 +442,7 @@ func reconcileEnterpriseHookUserCleanups(
 	// again (then it is dropped) or the user is revoked again (then it runs).
 	var due, held []enterpriseHookUserCleanup
 	for _, entry := range planned {
-		if admitted(entry.Connector, entry.SID) {
+		if admitted(entry.Connector, entry.SID) || (hold != nil && hold(entry.Connector, entry.SID)) {
 			held = append(held, entry)
 		} else {
 			due = append(due, entry)

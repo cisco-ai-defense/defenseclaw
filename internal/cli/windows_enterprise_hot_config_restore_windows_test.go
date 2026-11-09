@@ -192,6 +192,9 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 		// how often the proof must have run.
 		hookUnproven bool
 		proofs       int
+		// GAP-0967: a program holds a guardian state file open, so the
+		// guardian cannot publish for the undo.
+		held bool
 	}{
 		{name: "restore fails after adoption and target refresh", restoreFails: true, adopted: true, verify: true,
 			code: "config_restore_failed", installed: next, stops: 1,
@@ -221,6 +224,12 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 			code: "targets_restore_failed", installed: previous, stops: 1, proofs: 1,
 			state: "holds the previous config", targets: "published again for the previous config",
 			unprotected: "these previously enrolled targets have no DefenseClaw hook now: bob (S-1-5-21-1-2-3-1002) claudecode"},
+		// GAP-0967: the same unproven undo while a program holds the guardian's
+		// state file: the services are left running and nothing is closed; the
+		// error names the holder and the repair.
+		{name: "dropped hook not back while a guardian state file is held", hookUnproven: true, held: true, adopted: true, verify: true,
+			code: "guardian_state_held", installed: previous, stops: 0, proofs: 1,
+			unprotected: "these previously enrolled targets have no DefenseClaw hook until the repair: bob (S-1-5-21-1-2-3-1002) claudecode"},
 		{name: "targets cannot be published again nor put back", refreshFails: 2, putBackFails: true, adopted: true, verify: true,
 			code: "targets_restore_failed", installed: previous, stops: 1, putBack: 1,
 			state: "holds the previous config", targets: "a user it does not enroll has no DefenseClaw hooks",
@@ -261,6 +270,13 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 			}
 			if tc.putBackFails {
 				host.targetRestoreErr = errors.New("targets.yaml replace refused")
+			}
+			if tc.held {
+				previousHeld := windowsEnterpriseGuardianStateHeldNow
+				t.Cleanup(func() { windowsEnterpriseGuardianStateHeldNow = previousHeld })
+				windowsEnterpriseGuardianStateHeldNow = func(managed.StandaloneLayout) *windowsGuardianStateHold {
+					return &windowsGuardianStateHold{Path: `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state\protected_targets.json`, Holders: []string{"editor.exe (PID 4242)"}}
+				}
 			}
 			host.dropped = []enterprisehooks.ManifestTarget{{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "claudecode"}}
 			if tc.hookUnproven {
@@ -348,6 +364,20 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 				t.Fatalf("installer runs %q: no upgrade transaction may follow an unproven undo", stub.calls)
 			}
 			message := fmt.Sprint(result.Errors)
+			if tc.held {
+				for _, want := range []string{"protected_targets.json", "editor.exe (PID 4242)", "services were left running", "no hook was closed", "enterprise windows repair", tc.unprotected} {
+					if !strings.Contains(message, want) {
+						t.Fatalf("errors %s do not say %q", message, want)
+					}
+				}
+				if strings.Contains(message, "gateway service was stopped") {
+					t.Fatalf("errors %s claim the gateway was stopped", message)
+				}
+				if got := windowsEnterpriseFailureCodeFor(&result); got != enterprisestatus.WindowsExitBusy {
+					t.Fatalf("exit code %d, want %d (retry)", got, enterprisestatus.WindowsExitBusy)
+				}
+				return
+			}
 			if tc.unprotected != "" && !strings.Contains(message, tc.unprotected) {
 				t.Fatalf("errors %s do not name the target without a hook (%q)", message, tc.unprotected)
 			}

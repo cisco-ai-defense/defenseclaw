@@ -35,11 +35,6 @@ func WindowsMachineScopeUserRuntimeConnector(name string) bool {
 	return false
 }
 
-// WindowsMachineScopeUserRuntimeConnectorNames lists them.
-func WindowsMachineScopeUserRuntimeConnectorNames() []string {
-	return append([]string(nil), windowsMachineScopeUserRuntimeConnectors...)
-}
-
 // windowsConnectorUserRuntimeLeaves returns, relative to the account's
 // DefenseClaw folder, every file the managed install of one machine-scope
 // connector wrote for the account and no other connector shares: the entries
@@ -65,51 +60,125 @@ func windowsConnectorUserRuntimeLeaves(name string) ([]string, error) {
 	return leaves, nil
 }
 
-// WindowsConnectorUserRuntimeLeftover reports whether the account's DefenseClaw
-// folder still holds, for one machine-scope connector, a file its managed
-// install wrote: the scoped hook token, the hook config, the connector's own
-// hook script or a runtime generation record. It only looks, so the guardian
-// can ask it for every profile on every pass and queue
+// WindowsConnectorUserRuntimeLeftovers returns those of connectors (machine-
+// scope names) for which the account's DefenseClaw folder still holds a file
+// its managed install wrote: the scoped hook token, the hook config, the
+// connector's own hook script or a runtime generation record. It only looks,
+// so the guardian can ask it for every profile and queue
 // RemoveWindowsConnectorUserRuntime only where there is something to remove
-// (GAP-0964). The removal itself pins the folder and leaves a link as found, so
-// a link planted for this answer changes nothing but the question. An
-// unreadable folder, and a folder that holds a per-user DefenseClaw install
-// (which the removal leaves as found), say false.
-func WindowsConnectorUserRuntimeLeftover(rawHome, rawDataDir, connectorName string) bool {
-	name := strings.ToLower(strings.TrimSpace(connectorName))
-	leaves, err := windowsConnectorUserRuntimeLeaves(name)
-	if err != nil {
-		return false
+// (GAP-0964). It runs as LocalSystem on a folder the account can write, so it
+// takes the removal's gates and never follows a link: the home is validated
+// against the SID, no element below it may be a reparse point, the folder is
+// pinned without delete sharing, and every name is read through the opened
+// root. A link at the folder, at hooks or at a leaf, an unreadable folder and
+// a folder that holds a per-user DefenseClaw install (which the removal leaves
+// as found) all say nothing; a link leaf is not a file the connector owns.
+func WindowsConnectorUserRuntimeLeftovers(rawHome, rawSID, rawDataDir string, connectors []string) []string {
+	if len(connectors) == 0 {
+		return nil
 	}
-	home := filepath.Clean(strings.TrimSpace(rawHome))
-	if !filepath.IsAbs(home) {
-		return false
+	home, _, err := validateWindowsEnterpriseHome(rawHome, rawSID)
+	if err != nil {
+		return nil
 	}
 	dataDir, err := resolveWindowsEnterpriseDataDir(home, rawDataDir)
 	if err != nil {
-		return false
+		return nil
 	}
-	// A folder that holds a per-user DefenseClaw install is left as found by
-	// the removal, so asking for it would only record a failure for ever.
-	if windowsPerUserInstallLeftover(dataDir) != "" {
-		return false
+	rel, err := filepath.Rel(home, dataDir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, `..\`) {
+		return nil
 	}
-	for _, leaf := range leaves {
-		if _, err := os.Lstat(filepath.Join(dataDir, leaf)); err == nil {
-			return true
-		}
+	if err := inventoryDACLRejectLinkBelow(home, filepath.Join(rel, "hooks")); err != nil {
+		return nil
 	}
-	entries, err := os.ReadDir(filepath.Join(dataDir, "hooks"))
+	if info, err := os.Lstat(dataDir); err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return nil
+	}
+	pin, err := openWindowsUserStatePin(home, rel)
 	if err != nil {
-		return false
+		return nil
 	}
-	prefix := ".managed-runtime-" + name + "-"
-	for _, entry := range entries {
-		if strings.HasPrefix(entry.Name(), prefix) && strings.HasSuffix(entry.Name(), ".json") {
-			return true
+	defer pin.Close()
+	root, err := os.OpenRoot(dataDir)
+	if err != nil {
+		return nil
+	}
+	defer root.Close()
+	pinned, err := pin.Stat()
+	if err != nil {
+		return nil
+	}
+	opened, err := root.Stat(".")
+	if err != nil || !pinned.IsDir() || !os.SameFile(pinned, opened) {
+		return nil
+	}
+	for _, marker := range windowsPerUserInstallLeftovers {
+		if _, err := root.Lstat(marker); err == nil {
+			return nil
 		}
 	}
-	return false
+	if info, err := root.Lstat("hooks"); err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return nil
+	}
+	names, err := windowsManagedUserRuntimeDirNames(root, "hooks")
+	if err != nil {
+		return nil
+	}
+	present := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		present[name] = struct{}{}
+	}
+	plainFile := func(leaf string) bool {
+		info, err := root.Lstat(leaf)
+		return err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 && !info.IsDir()
+	}
+	var found []string
+	for _, connectorName := range connectors {
+		name := strings.ToLower(strings.TrimSpace(connectorName))
+		leaves, err := windowsConnectorUserRuntimeLeaves(name)
+		if err != nil {
+			continue
+		}
+		hit := false
+		for _, leaf := range leaves {
+			if _, ok := present[filepath.Base(leaf)]; ok && plainFile(leaf) {
+				hit = true
+				break
+			}
+		}
+		prefix := ".managed-runtime-" + name + "-"
+		for _, entry := range names {
+			if hit {
+				break
+			}
+			if strings.HasPrefix(entry, prefix) && strings.HasSuffix(entry, ".json") && plainFile(filepath.Join("hooks", entry)) {
+				hit = true
+			}
+		}
+		if hit {
+			found = append(found, name)
+		}
+	}
+	return found
+}
+
+// WindowsMachineScopeUserRuntimeConnectorNames lists them.
+func WindowsMachineScopeUserRuntimeConnectorNames() []string {
+	return append([]string(nil), windowsMachineScopeUserRuntimeConnectors...)
+}
+
+// WindowsConnectorUserRuntimeLinksLeft is what RemoveWindowsConnectorUserRuntime
+// returns when it removed everything it owns but a link sits where one of the
+// connector's files should be: the link is left as found and nothing behind it
+// is touched. It is not a failure to retry, so the guardian reports it once and
+// counts the cleanup done.
+type WindowsConnectorUserRuntimeLinksLeft struct {
+	Links []string
+}
+
+func (e *WindowsConnectorUserRuntimeLinksLeft) Error() string {
+	return "the removed connector's files were taken out, but " + strings.Join(e.Links, ", ") + " is a link and was left as found (not followed)"
 }
 
 // windowsConnectorUserRuntimeBeforeLockClear runs, while the folder is pinned,
@@ -200,6 +269,7 @@ func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorNam
 		pin.Close()
 		return err
 	}
+	var leftLinks []string
 	removeErr := func() error {
 		pinned, err := pin.Stat()
 		if err != nil {
@@ -212,9 +282,11 @@ func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorNam
 		if !pinned.IsDir() || pinned.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || !os.SameFile(pinned, opened) {
 			return fmt.Errorf("enterprise hooks: refusing to clean %s, which changed while it was opened", dataDir)
 		}
-		if err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(pin.Fd()), name, leaves); err != nil {
+		links, err := removeWindowsConnectorUserRuntimeEntries(root, windows.Handle(pin.Fd()), name, leaves)
+		if err != nil {
 			return err
 		}
+		leftLinks = links
 		// The connector's entry of the hook contract lock goes last, through
 		// the lock's own owner-bound writer (it claims the entry and removes
 		// exactly that one, and removes nothing when the entry names another
@@ -251,16 +323,20 @@ func RemoveWindowsConnectorUserRuntime(rawHome, rawSID, rawDataDir, connectorNam
 	if err := inventoryDACLRejectLinkBelow(home, rel); err != nil {
 		return errors.Join(removeErr, linked)
 	}
+	if removeErr == nil && len(leftLinks) > 0 {
+		return &WindowsConnectorUserRuntimeLinksLeft{Links: leftLinks}
+	}
 	return removeErr
 }
 
 // removeWindowsConnectorUserRuntimeEntries removes the named leaves and the
 // connector's runtime generation records below root, each through
 // removeWindowsManagedUserRuntimeEntry (a link is named and left as found; an
-// entry whose access list refuses LocalSystem goes with backup intent).
-func removeWindowsConnectorUserRuntimeEntries(root *os.Root, pin windows.Handle, name string, leaves []string) error {
+// entry whose access list refuses LocalSystem goes with backup intent). It
+// returns the links it named and left.
+func removeWindowsConnectorUserRuntimeEntries(root *os.Root, pin windows.Handle, name string, leaves []string) ([]string, error) {
 	if info, err := root.Lstat("hooks"); err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-		return errors.New("enterprise hooks: the hooks folder is a link or junction; left as found")
+		return nil, errors.New("enterprise hooks: the hooks folder is a link or junction; left as found")
 	}
 	var failures []error
 	var links []string
@@ -279,5 +355,5 @@ func removeWindowsConnectorUserRuntimeEntries(root *os.Root, pin windows.Handle,
 			}
 		}
 	}
-	return errors.Join(failures...)
+	return links, errors.Join(failures...)
 }

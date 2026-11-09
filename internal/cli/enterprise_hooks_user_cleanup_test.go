@@ -131,7 +131,7 @@ func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 		t.Helper()
 		attempts = nil
 		var log bytes.Buffer
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, attempt, now); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, nil, attempt, now); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 		now = now.Add(time.Minute)
@@ -189,7 +189,7 @@ func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 		}
 		var log bytes.Buffer
 		now := time.Now()
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, attempt, now); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, nil, attempt, now); err != nil {
 			t.Fatalf("first reconcile: %v", err)
 		}
 		pending, err := loadEnterpriseHookUserCleanups(dataDir)
@@ -207,7 +207,7 @@ func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 		path := enterpriseHookUserCleanupPath(dataDir)
 		before, _ := os.ReadFile(path)
 		log.Reset()
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, attempt, now.Add(time.Minute)); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, nil, attempt, now.Add(time.Minute)); err != nil {
 			t.Fatalf("second reconcile: %v", err)
 		}
 		after, _ := os.ReadFile(path)
@@ -216,7 +216,7 @@ func TestReconcileEnterpriseHookUserCleanupsForSignedOutUsers(t *testing.T) {
 		}
 
 		signedIn = true
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, attempt, now.Add(2*time.Minute)); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, nil, nil, attempt, now.Add(2*time.Minute)); err != nil {
 			t.Fatalf("sign-in reconcile: %v", err)
 		}
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -358,7 +358,7 @@ func TestReconcileEnterpriseHookUserCleanupsRunsDiscoveredEntries(t *testing.T) 
 		t.Helper()
 		attempts = nil
 		var log bytes.Buffer
-		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, found, attempt, now.Add(offset)); err != nil {
+		if err := reconcileEnterpriseHookUserCleanups(context.Background(), &log, dataDir, manifest, userCleanupPerUser, found, nil, attempt, now.Add(offset)); err != nil {
 			t.Fatalf("reconcile: %v", err)
 		}
 	}
