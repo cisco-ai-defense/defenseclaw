@@ -2131,6 +2131,9 @@ func agentHookConfigLaunchedAgent(argv []string) string {
 			argv = argv[1:]
 			for len(argv) > 0 && (strings.HasPrefix(argv[0], "-") || strings.Contains(argv[0], "=")) {
 				option := argv[0]
+				if program == "env" {
+					option = agentHookConfigLongWord(option, agentHookConfigEnvLongOptions)
+				}
 				argv = argv[1:]
 				if (option == "-u" || option == "--unset" || option == "-C" || option == "--chdir") && len(argv) > 0 {
 					argv = argv[1:]
@@ -2157,6 +2160,43 @@ var agentHookConfigWrapperOptionArgs = map[string][]string{
 	"doas": {"-u", "-C"},
 }
 
+// agentHookConfigEnvLongOptions are the long options of GNU env; it accepts
+// any unambiguous abbreviation of them (--ch is --chdir).
+var agentHookConfigEnvLongOptions = []string{"ignore-environment", "null", "unset", "chdir", "split-string",
+	"block-signal", "default-signal", "ignore-signal", "list-signal-handling", "debug", "argv0", "help", "version"}
+
+// agentHookConfigWrapperLongNames lists the long option names of each
+// process wrapper that takes a value, without the leading --.
+var agentHookConfigWrapperLongNames = func() map[string][]string {
+	names := map[string][]string{}
+	for program, options := range agentHookConfigWrapperOptionArgs {
+		for _, option := range options {
+			if name, long := strings.CutPrefix(option, "--"); long {
+				names[program] = append(names[program], name)
+			}
+		}
+	}
+	return names
+}()
+
+// agentHookConfigLongWord spells an abbreviated long option word in full,
+// keeping an =value tail. A word that is not a long option of options, or is
+// ambiguous, is returned as it is.
+func agentHookConfigLongWord(word string, options []string) string {
+	if !strings.HasPrefix(word, "--") || word == "--" {
+		return word
+	}
+	name, value, joined := strings.Cut(word[2:], "=")
+	option := hookpaths.ExpandLongOption(name, options)
+	if option == "" {
+		return word
+	}
+	if joined {
+		return "--" + option + "=" + value
+	}
+	return "--" + option
+}
+
 // agentHookConfigEnvChild reads one env call and returns the words it runs:
 // the NAME=value assignments it passes (kept in front, in the order
 // agentHookConfigGitTarget reads) followed by the command, the folder
@@ -2172,6 +2212,9 @@ func agentHookConfigEnvChild(argv []string) (child []string, directory string, u
 	optionsEnded := false
 	for index := 1; index < len(argv); index++ {
 		word := argv[index]
+		if !optionsEnded {
+			word = agentHookConfigLongWord(word, agentHookConfigEnvLongOptions)
+		}
 		switch {
 		case optionsEnded && agentHookConfigAssignment(word):
 			assigned = append(assigned, word)
@@ -2263,6 +2306,7 @@ func agentHookConfigWrapperChild(argv []string) ([]string, bool) {
 			break
 		}
 		index++
+		word = agentHookConfigLongWord(word, agentHookConfigWrapperLongNames[program])
 		if slices.Contains(options, word) {
 			index++
 		}

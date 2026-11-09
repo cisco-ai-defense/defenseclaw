@@ -461,19 +461,24 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 	var operands []string
 	directory := ""
 	noTarget, optionsEnded, parents := false, false, false
+	program := programBase(words[0])
 	for i := 1; i < len(words); i++ {
 		if known != nil && !known[i] {
 			operands = append(operands, "")
 			continue
 		}
-		switch word := words[i]; {
+		word := words[i]
+		if !optionsEnded {
+			word = registrationLongWord(program, word)
+		}
+		switch {
 		case optionsEnded:
 			operands = append(operands, word)
 		case word == "--":
 			optionsEnded = true
-		case registrationCopyParentsOption(words[0], word):
+		case word == "--parents" && (program == "cp" || program == "gcp"):
 			parents = true
-		case word == "-t" || word == "--target-directory":
+		case word == "--target-directory":
 			if i+1 < len(words) {
 				if known != nil && !known[i+1] {
 					return nil
@@ -483,12 +488,40 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 			}
 		case strings.HasPrefix(word, "--target-directory="):
 			directory = strings.TrimPrefix(word, "--target-directory=")
-		case word == "-T" || word == "--no-target-directory":
+		case word == "--no-target-directory":
 			noTarget = true
-		case word == "-m" || word == "-o" || word == "-g" || word == "-S" ||
-			word == "--mode" || word == "--owner" || word == "--group" || word == "--suffix":
+		case word == "--mode" || word == "--owner" || word == "--group" || word == "--suffix":
 			i++
+		case strings.HasPrefix(word, "--"):
 		case strings.HasPrefix(word, "-") && word != "-":
+			// A short cluster (-t DIR, -rt DIR, -aTS.bak): -T is a flag, and the
+			// first letter that takes a value takes the rest of the word or
+			// the next word.
+			for position := 1; position < len(word); position++ {
+				letter := word[position : position+1]
+				if letter == "T" {
+					noTarget = true
+					continue
+				}
+				if !strings.Contains(registrationValueLetters(program), letter) {
+					continue
+				}
+				value := word[position+1:]
+				if value == "" && i+1 < len(words) {
+					i++
+					if known != nil && !known[i] {
+						if letter == "t" {
+							return nil
+						}
+						break
+					}
+					value = words[i]
+				}
+				if letter == "t" && value != "" {
+					directory = value
+				}
+				break
+			}
 		default:
 			operands = append(operands, word)
 		}
@@ -526,19 +559,44 @@ func registrationPlacedPaths(words []string, known []bool, cwd string) []string 
 	return placed
 }
 
-// registrationCopyParentsOption reports the cp option --parents (or an
-// unambiguous abbreviation of it): the copy is named after the whole source
-// path under the destination folder, not after the source base name.
-func registrationCopyParentsOption(program, word string) bool {
-	if base := programBase(program); base != "cp" && base != "gcp" {
-		return false
+// registrationValueLetters lists the short options of a cp, install or ln
+// call that take a value (the target folder -t, the backup suffix -S, and
+// install's mode, owner and group).
+func registrationValueLetters(program string) string {
+	if program == "install" || program == "ginstall" {
+		return "tSmog"
 	}
-	name, ok := strings.CutPrefix(word, "--")
-	if !ok {
-		return false
+	return "tS"
+}
+
+// registrationLongWord spells an abbreviated long option of a cp, install or
+// ln call in full (GNU accepts any unambiguous prefix: --target-d is
+// --target-directory). A word that is not an option of the program, or is
+// ambiguous, is returned as it is.
+func registrationLongWord(program, word string) string {
+	if !strings.HasPrefix(word, "--") || word == "--" {
+		return word
 	}
-	option, ok := longOption(name, cpLongOptions)
-	return ok && option == "parents"
+	var options []string
+	switch program {
+	case "cp", "gcp":
+		options = cpLongOptions
+	case "ln", "gln":
+		options = lnLongOptions
+	case "install", "ginstall":
+		options = installLongOptions
+	default:
+		return word
+	}
+	name, value, joined := strings.Cut(word[2:], "=")
+	option := ExpandLongOption(name, options)
+	if option == "" {
+		return word
+	}
+	if joined {
+		return "--" + option + "=" + value
+	}
+	return "--" + option
 }
 
 func registrationRsyncReach(words []string, cwd string, protected protectedFiles) bool {
