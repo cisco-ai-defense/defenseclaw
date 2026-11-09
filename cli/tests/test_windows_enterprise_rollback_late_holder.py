@@ -266,6 +266,9 @@ def test_a_guardian_state_hold_is_found_before_anything_stops() -> None:
     for gone in ("S-1-5-32-545", "-band"):
         assert gone not in readable, gone
     assert "windowsEnterpriseGuardianStateSIDIsAdminOnly" in go and 'HasPrefix(sid.String(), "S-1-5-80-")' in go
+    # GAP-0989: an inherit-only entry grants nothing on the file, in both implementations.
+    assert "PropagationFlags.HasFlag([Security.AccessControl.PropagationFlags]::InheritOnly)" in readable
+    assert "ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0" in go
     # S-H2: an uninstall or purge transaction is not held up by it.
     hold = _function_body(text, "Get-DefenseClawGuardianStateHold")
     assert "Test-DefenseClawStandaloneProfile" in hold and "Test-DefenseClawFileDeleteBlocked" in hold

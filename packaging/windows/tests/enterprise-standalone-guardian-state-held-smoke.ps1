@@ -146,6 +146,20 @@ try {
                 finally { & icacls.exe $ledger /remove:g ($grant -replace ':.*$', '') | Out-Null }
                 if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -notcontains $ledger) { throw "the ledger stayed out of the class after $label was removed" }
             }
+            # GAP-0989: an inherit-only Users entry applies to what a folder holds, not to
+            # the file that carries it, so the ledger stays in the class; the same entry
+            # without the flag takes it out.
+            & icacls.exe $ledger /grant '*S-1-5-32-545:(OI)(CI)(IO)R' | Out-Null
+            try {
+                if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -notcontains $ledger) { throw 'an inherit-only Users entry took the ledger out of the class' }
+            }
+            finally { & icacls.exe $ledger /remove:g '*S-1-5-32-545' | Out-Null }
+            & icacls.exe $ledger /grant '*S-1-5-32-545:(OI)(CI)R' | Out-Null
+            try {
+                if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -contains $ledger) { throw 'a Users entry on the file itself left the ledger in the class' }
+            }
+            finally { & icacls.exe $ledger /remove:g '*S-1-5-32-545' | Out-Null }
+            if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -notcontains $ledger) { throw 'the ledger stayed out of the class after the inheritable entry was removed' }
             # S-I1: a hold that fails after it stopped the guardian starts it again
             # and puts its start mode back; the services a held run left Running
             # are Running at the end. The service calls are replaced in the module.

@@ -35935,8 +35935,10 @@ function Test-DefenseClawGuardianStateFileUserOpenable {
         and the like can then open the file and hold it with read sharing, so
         a lifecycle run must not wait for it (N2). The gated set holds only
         files just SYSTEM, Administrators and the service SIDs can open. Deny
-        entries grant nothing. A path whose access list cannot be read answers
-        $false (it stays gated).
+        entries grant nothing, and neither does an inherit-only entry (it
+        applies to what a folder holds, not to the file that carries it,
+        GAP-0989). A path whose access list cannot be read answers $false (it
+        stays gated).
     #>
     param([Parameter(Mandatory)][string]$Path)
     try {
@@ -35944,6 +35946,7 @@ function Test-DefenseClawGuardianStateFileUserOpenable {
         foreach ($rule in @($acl.Access)) {
             if ([string]$rule.AccessControlType -ne 'Allow') { continue }
             if ([int]$rule.FileSystemRights -eq 0) { continue }
+            if ($rule.PropagationFlags.HasFlag([Security.AccessControl.PropagationFlags]::InheritOnly)) { continue }
             $reference = $rule.IdentityReference
             $sid = ''
             try { $sid = $reference.Translate([Security.Principal.SecurityIdentifier]).Value }
