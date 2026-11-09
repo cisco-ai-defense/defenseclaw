@@ -37,15 +37,7 @@ func ExactPAMAuthenticationBypass(input Input, facts Facts) (PAMAuthenticationBy
 	}
 	writes := nativeFileWrites(input.Tool, input.Args)
 	for _, write := range writes {
-		target, ok := nativeAbsoluteTarget(write.target, input.CWD)
-		if !ok {
-			continue
-		}
-		files := []string{target}
-		if nativeOperandsCoverTarget(facts, len(writes), target) {
-			files = nativeReachedFiles(facts, target)
-		}
-		for _, file := range files {
+		for _, file := range nativeWriteFiles(input, facts, writes, write, false) {
 			if proof, proven := pamBypassProof(file, write); proven {
 				return proof, true
 			}
