@@ -140,6 +140,16 @@ Assert-Selection -Case 'case and sidecars' -Entries @(
     'C:\Users\dev\.defenseclaw\hook_contract_lock.json'
 )
 
+# The backup an upgrade renamed a running image to and queued for deletion
+# is never written again, so its delete stays.
+$backups = @(
+    "\??\$installRoot\bin\defenseclaw-hook.exe.backup.0123456789abcdef0123456789ABCDEF", '',
+    "*1\??\$stateRoot\etc\policy.json.backup.fedcba9876543210fedcba9876543210", ''
+)
+Assert-Selection -Case 'replacement backups' -Entries ($backups + @(
+        "\??\$installRoot\bin\defenseclaw-hook.exe", ''
+    )) -ExpectedKept $backups -ExpectedCancelled @("$installRoot\bin\defenseclaw-hook.exe")
+
 # A list that is not made of pairs is not understood, so nothing changes.
 $odd = @("\??\$installRoot\bin\defenseclaw-hook.exe", '', '\??\C:\x')
 Assert-Selection -Case 'odd list' -Entries $odd -ExpectedKept $odd -ExpectedCancelled @()

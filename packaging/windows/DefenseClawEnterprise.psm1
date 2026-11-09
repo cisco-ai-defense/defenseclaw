@@ -41633,6 +41633,11 @@ function Test-DefenseClawRestartDeleteInScope {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]$Scope
     )
+    # The <file>.backup.<32 hex> an upgrade renames a running image to and
+    # queues for deletion is never written again: its delete stays.
+    if ($Path -match '\.backup\.[0-9A-Fa-f]{32}$') {
+        return $false
+    }
     $ignoreCase = [StringComparison]::OrdinalIgnoreCase
     foreach ($file in @($Scope.Files)) {
         if ([string]::Equals($Path, [string]$file, $ignoreCase)) {
@@ -46220,9 +46225,26 @@ function Invoke-DefenseClawEnterpriseLifecycle {
                     }
                 }
                 catch {
-                    Microsoft.PowerShell.Utility\Write-Warning (
+                    $cancelWarning = (
                         "DefenseClaw $Action could not cancel the restart deletes queued for its files " +
                         "($($_.Exception.Message)); run Repair after the next restart")
+                    Microsoft.PowerShell.Utility\Write-Warning $cancelWarning
+                    if ($null -ne $installResult) {
+                        $warnings = [Collections.Generic.List[string]]::new()
+                        $existing = $installResult.PSObject.Properties['warnings']
+                        if ($null -ne $existing -and $null -ne $existing.Value) {
+                            foreach ($item in @($existing.Value)) {
+                                $warnings.Add([string]$item)
+                            }
+                        }
+                        $warnings.Add($cancelWarning)
+                        $installResult |
+                            Microsoft.PowerShell.Utility\Add-Member `
+                                -MemberType NoteProperty `
+                                -Name warnings `
+                                -Value ([string[]]@($warnings.ToArray())) `
+                                -Force
+                    }
                 }
                 return $installResult
             }
