@@ -1792,14 +1792,8 @@ func agentHookConfigRunOverride(argv []string, guard *agentHookConfigGuard, fact
 	if program == "env" {
 		assigned, command, unset, understood := agentHookConfigEnvSplit(argv)
 		if !understood {
-			// An option the env reader does not know leaves the call as it is.
-			command = argv[1:]
-			for len(command) > 0 && (strings.HasPrefix(command[0], "-") || strings.Contains(command[0], "=")) {
-				if agentHookConfigRunHomeAssignment(command[0]) {
-					assigned = append(assigned, command[0])
-				}
-				command = command[1:]
-			}
+			// GNU env rejects the call, or it runs no command.
+			return "", ""
 		}
 		var assignments []string
 		for _, word := range assigned {
@@ -2118,23 +2112,16 @@ func agentHookConfigLaunchedAgent(argv []string) string {
 			return strings.ToLower(child[0])
 		}
 		switch program {
-		case "exec", "command", "nohup", "env":
-			if program == "env" {
-				if _, command, _, understood := agentHookConfigEnvSplit(argv); understood {
-					argv = command
-					continue
-				}
+		case "env":
+			_, command, _, understood := agentHookConfigEnvSplit(argv)
+			if !understood {
+				return ""
 			}
+			argv = command
+		case "exec", "command", "nohup":
 			argv = argv[1:]
 			for len(argv) > 0 && (strings.HasPrefix(argv[0], "-") || strings.Contains(argv[0], "=")) {
-				option := argv[0]
-				if program == "env" {
-					option = agentHookConfigLongWord(option, agentHookConfigEnvLongOptions)
-				}
 				argv = argv[1:]
-				if (option == "-u" || option == "--unset" || option == "-C" || option == "--chdir") && len(argv) > 0 {
-					argv = argv[1:]
-				}
 			}
 		default:
 			return ""
@@ -2194,89 +2181,223 @@ func agentHookConfigLongWord(word string, options []string) string {
 	return "--" + option
 }
 
-// agentHookConfigEnvChild reads one env call and returns the words it runs:
-// the NAME=value assignments it passes (kept in front, in the order
-// agentHookConfigGitTarget reads) followed by the command, the folder
-// -C/--chdir starts it in, and the variables it drops from the environment it
-// received first (-u NAME; "*" for -i or a lone -). Options end at the first
-// assignment or --, as env reads them. An option the reader does not know
-// (-S, a split string) is not a wrapper read, so the call is left as it is.
+// agentHookConfigEnvChild reads one GNU env call through its whole grammar
+// and returns the words it runs: the NAME=value assignments it passes (kept
+// in front, in the order agentHookConfigGitTarget reads) followed by the
+// command, the folder -C/--chdir starts it in, and the variables it drops from
+// the environment it received first (-u NAME; "*" for -i or a lone -).
+// Options end at the first assignment, --, or command word, as env reads
+// them. The grammar is: -i/--ignore-environment, -0/--null, -v/--debug,
+// -u/--unset NAME, -C/--chdir DIR, -a/--argv0 NAME, -S/--split-string
+// STRING (split into words that are read as if typed in its place), the
+// signal options (--block-signal[=SIG], --default-signal[=SIG],
+// --ignore-signal[=SIG], --list-signal-handling), any unambiguous long
+// abbreviation and short cluster of these, and --. wrapper is false for what
+// GNU env rejects, for --help and --version (no command runs), and for a
+// split string that needs the environment to read (${NAME}).
 func agentHookConfigEnvChild(argv []string) (child []string, directory string, unset []string, wrapper bool) {
 	if len(argv) == 0 || strings.ToLower(filepath.Base(argv[0])) != "env" {
 		return nil, "", nil, false
 	}
+	args := slices.Clone(argv[1:])
 	var assigned []string
 	optionsEnded := false
-	for index := 1; index < len(argv); index++ {
-		word := argv[index]
-		if !optionsEnded {
-			word = agentHookConfigLongWord(word, agentHookConfigEnvLongOptions)
-		}
+	for index := 0; index < len(args); index++ {
+		word := args[index]
 		switch {
 		case optionsEnded && agentHookConfigAssignment(word):
 			assigned = append(assigned, word)
+			continue
 		case optionsEnded:
-			return append(assigned, argv[index:]...), directory, unset, true
+			return append(assigned, args[index:]...), directory, unset, true
 		case word == "--":
 			optionsEnded = true
-		case word == "-" || word == "--ignore-environment":
-			unset = append(unset, "*")
-		case word == "--null" || word == "--debug":
-		case word == "--unset" || word == "--chdir":
-			if index+1 >= len(argv) {
-				return nil, "", nil, false
-			}
-			index++
-			if word == "--unset" {
-				unset = append(unset, argv[index])
-			} else {
-				directory = argv[index]
-			}
-		case strings.HasPrefix(word, "--chdir="):
-			directory = strings.TrimPrefix(word, "--chdir=")
-		case strings.HasPrefix(word, "--unset="):
-			unset = append(unset, strings.TrimPrefix(word, "--unset="))
-		case strings.HasPrefix(word, "--"):
-			return nil, "", nil, false
-		case strings.HasPrefix(word, "-"):
-			// A short cluster: -i -0 -v flags, and -u/-C taking the rest
-			// of the word or the next word.
-			cluster := word[1:]
-			for position := 0; position < len(cluster); position++ {
-				letter := cluster[position]
-				if letter == 'i' {
-					unset = append(unset, "*")
-					continue
-				}
-				if letter == '0' || letter == 'v' {
-					continue
-				}
-				if letter != 'u' && letter != 'C' {
-					return nil, "", nil, false
-				}
-				value := cluster[position+1:]
-				if value == "" {
-					if index+1 >= len(argv) {
-						return nil, "", nil, false
-					}
-					index++
-					value = argv[index]
-				}
-				if letter == 'u' {
-					unset = append(unset, value)
-				} else {
-					directory = value
-				}
-				break
-			}
+			continue
 		case agentHookConfigAssignment(word):
 			optionsEnded = true
 			assigned = append(assigned, word)
-		default:
-			return append(assigned, argv[index:]...), directory, unset, true
+			continue
+		case word == "-":
+			unset = append(unset, "*")
+			continue
+		case !strings.HasPrefix(word, "-"):
+			return append(assigned, args[index:]...), directory, unset, true
 		}
+		// An option: one long word, or a short cluster. letter is the option
+		// that takes an operand (u, C, a, S) and tail the part of the word
+		// after it; the operand is the tail, or else the next word.
+		letter, tail := byte(0), ""
+		if long := agentHookConfigLongWord(word, agentHookConfigEnvLongOptions); strings.HasPrefix(long, "--") {
+			name, joined, hasTail := strings.Cut(long[2:], "=")
+			switch name {
+			case "ignore-environment", "null", "debug", "list-signal-handling":
+				if hasTail {
+					return nil, "", nil, false
+				}
+				if name == "ignore-environment" {
+					unset = append(unset, "*")
+				}
+				continue
+			case "block-signal", "default-signal", "ignore-signal":
+				continue
+			case "unset":
+				letter = 'u'
+			case "chdir":
+				letter = 'C'
+			case "argv0":
+				letter = 'a'
+			case "split-string":
+				letter = 'S'
+			default:
+				return nil, "", nil, false
+			}
+			tail = joined
+		} else {
+			for position := 1; position < len(word) && letter == 0; position++ {
+				switch word[position] {
+				case 'i':
+					unset = append(unset, "*")
+				case '0', 'v':
+				case 'u', 'C', 'a', 'S':
+					letter, tail = word[position], word[position+1:]
+				default:
+					return nil, "", nil, false
+				}
+			}
+			if letter == 0 {
+				continue
+			}
+		}
+		last := index
+		operand := tail
+		if operand == "" {
+			if index+1 >= len(args) {
+				return nil, "", nil, false
+			}
+			last, operand = index+1, args[index+1]
+		}
+		switch letter {
+		case 'u':
+			unset = append(unset, operand)
+		case 'C':
+			directory = operand
+		case 'S':
+			fields, split := agentHookConfigSplitString(operand)
+			if !split {
+				return nil, "", nil, false
+			}
+			// The fields stand where -S STRING stood and are read in turn as
+			// options, assignments and the command.
+			args = slices.Concat(args[:index], fields, args[last+1:])
+			index--
+			continue
+		}
+		index = last
 	}
 	return assigned, directory, unset, true
+}
+
+// agentHookConfigSplitEscapes are the backslash letters env -S reads.
+var agentHookConfigSplitEscapes = map[byte]byte{'f': '\f', 'n': '\n', 'r': '\r', 't': '\t', 'v': '\v'}
+
+// agentHookConfigSplitString splits the STRING of env -S the way GNU env
+// does: blanks separate words; single quotes keep their text; double quotes
+// keep their text but read \" \\ \$ and the escape letters; a backslash
+// outside quotes reads \_ (a blank), \c (end of string), \f \n \r \t \v and
+// the quote, backslash, # and $ characters; # at the start of a word starts
+// a comment. It returns false for what GNU env rejects and for ${NAME},
+// which needs the environment of the call.
+func agentHookConfigSplitString(text string) ([]string, bool) {
+	var fields []string
+	var current strings.Builder
+	inWord := false
+	flush := func() {
+		if inWord {
+			fields = append(fields, current.String())
+			current.Reset()
+			inWord = false
+		}
+	}
+	// escape reads the character after a backslash at text[i]; done is true
+	// for \c, which ends the string.
+	escape := func(i int, quoted bool) (done, ok bool) {
+		if i >= len(text) {
+			return false, false
+		}
+		c := text[i]
+		switch {
+		case c == 'c':
+			return true, true
+		case c == '_' && !quoted:
+			flush()
+			return false, true
+		case agentHookConfigSplitEscapes[c] != 0:
+			current.WriteByte(agentHookConfigSplitEscapes[c])
+		case c == '"' || c == '\\' || c == '$' || !quoted && (c == '\'' || c == '#'):
+			current.WriteByte(c)
+		default:
+			return false, false
+		}
+		inWord = true
+		return false, true
+	}
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r':
+			flush()
+		case c == '#' && !inWord:
+			return fields, true
+		case c == '$' && i+1 < len(text) && text[i+1] == '{':
+			return nil, false
+		case c == '\'':
+			end := strings.IndexByte(text[i+1:], '\'')
+			if end < 0 {
+				return nil, false
+			}
+			current.WriteString(text[i+1 : i+1+end])
+			i += end + 1
+			inWord = true
+		case c == '"':
+			inWord = true
+			for i++; i < len(text) && text[i] != '"'; i++ {
+				switch {
+				case text[i] == '$' && i+1 < len(text) && text[i+1] == '{':
+					return nil, false
+				case text[i] == '\\':
+					i++
+					done, ok := escape(i, true)
+					if !ok {
+						return nil, false
+					}
+					if done {
+						flush()
+						return fields, true
+					}
+				default:
+					current.WriteByte(text[i])
+				}
+			}
+			if i >= len(text) {
+				return nil, false
+			}
+		case c == '\\':
+			i++
+			done, ok := escape(i, false)
+			if !ok {
+				return nil, false
+			}
+			if done {
+				flush()
+				return fields, true
+			}
+		default:
+			current.WriteByte(c)
+			inWord = true
+		}
+	}
+	flush()
+	return fields, true
 }
 
 // agentHookConfigEnvSplit reads one env call through agentHookConfigEnvChild
