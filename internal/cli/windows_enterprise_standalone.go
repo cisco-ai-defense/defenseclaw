@@ -2049,11 +2049,45 @@ func addWindowsEnterpriseCreatedFoldersKept(result *enterprisestatus.Result, rep
 	if report == nil || result.Action != "uninstall" {
 		return
 	}
+	links := windowsEnterpriseKeptLinkPaths(report)
 	for _, note := range report.CreatedFoldersKept {
-		if note = strings.TrimSpace(note); note != "" {
-			result.AddWarning("created_folders_kept", windowsEnterpriseBoundedDiagnostic(note))
+		note = strings.TrimSpace(note)
+		if note == "" {
+			continue
+		}
+		// A folder at or below a link a purge kept is named once, by the
+		// machine_state_kept warning, with the command that removes the link
+		// (GAP-0900); its record stays all the same.
+		if folder, _, _ := strings.Cut(note, ": "); windowsEnterprisePathAtOrBelowKeptLink(folder, links) {
+			continue
+		}
+		result.AddWarning("created_folders_kept", windowsEnterpriseBoundedDiagnostic(note))
+	}
+}
+
+// windowsEnterpriseKeptLinkPaths are the links a purge kept, from the
+// machine_state_remaining entries that carry the kept-link reason.
+func windowsEnterpriseKeptLinkPaths(report *windowsEnterpriseInstallerReport) []string {
+	var links []string
+	for _, entry := range windowsEnterpriseReportStrings(report.MachineStateRemaining) {
+		if path, reason, _ := strings.Cut(entry, ": "); strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason) {
+			links = append(links, path)
 		}
 	}
+	return links
+}
+
+// windowsEnterprisePathAtOrBelowKeptLink reports whether path is one of the
+// kept links or below one.
+func windowsEnterprisePathAtOrBelowKeptLink(path string, links []string) bool {
+	folded := strings.TrimRight(strings.ToLower(path), `\`)
+	for _, link := range links {
+		prefix := strings.TrimRight(strings.ToLower(link), `\`)
+		if folded == prefix || strings.HasPrefix(folded, prefix+`\`) {
+			return true
+		}
+	}
+	return false
 }
 
 // windowsEnterpriseNoStartGuardianIssues are what the guardian status says
@@ -2207,12 +2241,7 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 	var failed, kept, stale []string
 	seen := map[string]bool{}
 	entries := windowsEnterpriseReportStrings(report.MachineStateRemaining)
-	var links []string
-	for _, entry := range entries {
-		if path, reason, _ := strings.Cut(entry, ": "); strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason) {
-			links = append(links, path)
-		}
-	}
+	links := windowsEnterpriseKeptLinkPaths(report)
 	for _, entry := range entries {
 		path, reason, _ := strings.Cut(entry, ": ")
 		if windowsEnterprisePathBehindKeptLink(path, links, strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason)) {
@@ -2230,6 +2259,11 @@ func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, re
 				// A link at the Codex folder is named with what it cannot
 				// promise, whichever step met it first (GAP-0773).
 				entry = path + ": " + windowsEnterpriseCodexKeptLinkReason
+			}
+			if strings.HasPrefix(reason, windowsEnterpriseKeptLinkReason) {
+				// The one place a kept link is named: with the command that
+				// removes only the link, the same words status uses (GAP-0900).
+				entry += "; " + windowsEnterpriseRemoveLinkFix(path)
 			}
 			kept = append(kept, entry)
 		} else {

@@ -2377,8 +2377,9 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 		strings.Contains(linked[0].Message, "ClaudeCode") || strings.Contains(linked[0].Message, "Codex") ||
 		!strings.Contains(linked[0].Message, "could not remove 1 DefenseClaw machine folder(s)") ||
 		!strings.Contains(linked[1].Message, "kept 2 DefenseClaw machine file(s) or folder(s) on purpose") ||
-		strings.Count(linked[1].Message, `ClaudeCode`) != 1 || strings.Contains(linked[1].Message, "managed-settings.d") ||
-		strings.Count(linked[1].Message, `OpenAI\Codex`) != 1 {
+		strings.Count(linked[1].Message, `a link sits here`) != 2 || strings.Contains(linked[1].Message, "managed-settings.d") ||
+		strings.Count(linked[1].Message, `rmdir "C:\Program Files\ClaudeCode"`) != 1 ||
+		strings.Count(linked[1].Message, `rmdir "C:\ProgramData\OpenAI\Codex"`) != 1 {
 		t.Fatalf("a kept link listed twice, or as a failure: %+v", linked)
 	}
 	// The Codex entry carries the longer reason (the policy behind the link
@@ -4328,5 +4329,69 @@ func TestWindowsEnterprisePhaseLinesKeepNoticesWhereverTheyFall(t *testing.T) {
 	}
 	if windowsEnterpriseNoticePhaseLine("notice: without a timestamp") || !windowsEnterpriseNoticePhaseLine("2026-11-01T00:00:00Z notice: x") {
 		t.Fatal("notice detection reads the stage after the timestamp")
+	}
+}
+
+// GAP-0900: a kept link is named once in the uninstall result, with the command
+// that removes only the link in the words status uses, and a folder DefenseClaw
+// created at or below the link is not named again by created_folders_kept (its
+// record stays). A kept folder that is not behind a link is still named.
+func TestWindowsEnterpriseUninstallNamesAKeptLinkOnceWithItsFix(t *testing.T) {
+	const base = `{"schema_version":1,"action":"uninstall","installed":false,"transaction_pending":false,"ok":true,"errors":[]`
+	const keptLink = `: kept: a link sits here; DefenseClaw does not follow, change or remove it`
+	for _, tc := range []struct{ name, link, report string }{
+		{"cursor", `C:\ProgramData\Cursor`, base + `,"machine_state_remaining":["C:\\ProgramData\\Cursor` + keptLink + `"],` +
+			`"created_folders_kept":["C:\\ProgramData\\Cursor: a folder DefenseClaw created stays, and so does its record: reparse points are not allowed in managed path: C:\\ProgramData\\Cursor",` +
+			`"C:\\ProgramData\\Cisco: a folder DefenseClaw created stays, and so does its record: the lifecycle folder in it keeps the records of the folders that stayed"]}`},
+		{"claude code", `C:\Program Files\ClaudeCode`, base + `,"machine_state_remaining":["C:\\Program Files\\ClaudeCode` + keptLink + `","C:\\Program Files\\ClaudeCode` + keptLink + `"],` +
+			`"created_folders_kept":["C:\\Program Files\\ClaudeCode\\managed-settings.d: a folder DefenseClaw created stays, and so does its record: reparse points are not allowed in managed path: C:\\Program Files\\ClaudeCode",` +
+			`"C:\\Program Files\\ClaudeCode: a folder DefenseClaw created stays, and so does its record: reparse points are not allowed in managed path: C:\\Program Files\\ClaudeCode"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := parseWindowsEnterpriseInstallerReport([]byte(tc.report))
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+			applyWindowsEnterpriseInstallerReport(result, &windowsEnterpriseLifecycleOptions{purge: true}, report, windowsEnterpriseStandaloneRun{})
+			named := 0
+			for _, warning := range result.Warnings {
+				named += strings.Count(warning.Message, tc.link)
+				if warning.Code == "created_folders_kept" && strings.Contains(warning.Message, tc.link) {
+					t.Fatalf("a folder at or below the kept link is named again: %q", warning.Message)
+				}
+			}
+			var kept string
+			for _, warning := range result.Warnings {
+				if warning.Code == "machine_state_kept" {
+					kept = warning.Message
+				}
+			}
+			fix := windowsEnterpriseRemoveLinkFix(tc.link)
+			if strings.Count(kept, "a link sits here") != 1 || strings.Count(kept, fix) != 1 || !strings.Contains(kept, `cmd /c rmdir "`+tc.link+`"`) {
+				t.Fatalf("the kept link is not named once with its fix: %q", kept)
+			}
+			// The path occurs in the entry and in the command, nowhere else.
+			if named != 2 {
+				t.Fatalf("the link path occurs %d times in the warnings, want 2 (the entry and its command): %+v", named, result.Warnings)
+			}
+		})
+	}
+	// A kept folder that is not behind a link is still named.
+	report, err := parseWindowsEnterpriseInstallerReport([]byte(base + `,"machine_state_remaining":["C:\\ProgramData\\Cursor` + keptLink + `"],` +
+		`"created_folders_kept":["C:\\ProgramData\\Cisco: a folder DefenseClaw created stays, and so does its record: x"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("uninstall", "standalone", "windows", "test")
+	applyWindowsEnterpriseInstallerReport(result, &windowsEnterpriseLifecycleOptions{purge: true}, report, windowsEnterpriseStandaloneRun{})
+	folders := 0
+	for _, warning := range result.Warnings {
+		if warning.Code == "created_folders_kept" && strings.HasPrefix(warning.Message, `C:\ProgramData\Cisco:`) {
+			folders++
+		}
+	}
+	if folders != 1 {
+		t.Fatalf("a kept folder beside the link was dropped: %+v", result.Warnings)
 	}
 }
