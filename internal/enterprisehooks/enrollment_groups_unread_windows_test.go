@@ -99,6 +99,7 @@ func TestEnumerateWindowsKeepsRowsWhileAnActiveSessionsGroupsAreUnreadable(t *te
 		rows             []string
 		wantRows         string
 		wantExcluded     string
+		wantInDoubt      string // excluded on cached groups: reported, but never proved
 		wantPending      string
 	}{
 		{
@@ -135,7 +136,13 @@ func TestEnumerateWindowsKeepsRowsWhileAnActiveSessionsGroupsAreUnreadable(t *te
 			name: "a user without rows whom the cache excludes stays excluded", exclude: exclude,
 			cache: map[string][]string{testDomainUserA: {testDomainGroupSID}}, sessions: unidentified,
 			tokenErrs:    map[uint32]error{2: windows.ERROR_ACCESS_DENIED},
-			wantExcluded: testDomainUserA,
+			wantExcluded: testDomainUserA, wantInDoubt: testDomainUserA,
+		},
+		{
+			name: "a user without rows whom the cached include groups leave out stays excluded", include: include,
+			cache: map[string][]string{testDomainUserA: {}}, sessions: activeA,
+			groupErrs:    map[uint32]error{1: windows.ERROR_ACCESS_DENIED},
+			wantExcluded: testDomainUserA, wantInDoubt: testDomainUserA,
 		},
 		{
 			name: "a complete read decides a signed-out user from the cache", include: include,
@@ -163,14 +170,15 @@ func TestEnumerateWindowsKeepsRowsWhileAnActiveSessionsGroupsAreUnreadable(t *te
 			for sid, groups := range tc.cache {
 				cache.Users[sid] = groups
 			}
-			var excluded []string
+			var excluded, inDoubt []string
 			var pending []UnprotectedAgent
 			manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("codex"), EnumerateOptions{
-				ExistingManifestPath: writeWindowsTestManifest(t, rows...),
-				IncludeGroups:        tc.include,
-				ExcludeGroups:        tc.exclude,
-				GroupCache:           cache,
-				ReportExcluded:       func(target ManifestTarget) { excluded = append(excluded, target.SID) },
+				ExistingManifestPath:  writeWindowsTestManifest(t, rows...),
+				IncludeGroups:         tc.include,
+				ExcludeGroups:         tc.exclude,
+				GroupCache:            cache,
+				ReportExcluded:        func(target ManifestTarget) { excluded = append(excluded, target.SID) },
+				ReportExcludedInDoubt: func(target ManifestTarget) { inDoubt = append(inDoubt, target.SID) },
 				ReportUnprotected: func(agent UnprotectedAgent) {
 					if strings.Contains(agent.Reason, "pending") {
 						pending = append(pending, agent)
@@ -186,6 +194,10 @@ func TestEnumerateWindowsKeepsRowsWhileAnActiveSessionsGroupsAreUnreadable(t *te
 			sort.Strings(excluded)
 			if got := strings.Join(excluded, ","); got != tc.wantExcluded {
 				t.Fatalf("excluded %q, want %q", got, tc.wantExcluded)
+			}
+			sort.Strings(inDoubt)
+			if got := strings.Join(inDoubt, ","); got != tc.wantInDoubt {
+				t.Fatalf("excluded in doubt %q, want %q: only a proved exclusion may authorize the hook", got, tc.wantInDoubt)
 			}
 			if tc.wantPending != "" && (len(pending) != 1 || pending[0].SID != tc.wantPending) {
 				t.Fatalf("pending reports %+v, want one for %s: a signed-in user can run the agent", pending, tc.wantPending)

@@ -232,3 +232,31 @@ func TestAutomaticModeFailedCycleRevokesTheExclusionMarkers(t *testing.T) {
 		}
 	}
 }
+
+// An exclusion that rests on group membership cached at an earlier sign-in,
+// while the current token is unreadable, is reported excluded but is not
+// proved: it never becomes a pass for the machine-wide hook. A proved
+// exclusion of another account in the same cycle still does.
+func TestAutomaticModeExclusionInDoubtIsNotAMarker(t *testing.T) {
+	const provedSID, doubtfulSID = "S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1002"
+	cfg := standaloneWindowsEnrollmentConfig(config.EnterpriseEnrollmentConfig{
+		Mode:          config.EnterpriseEnrollmentAuto,
+		ExcludeGroups: []string{"CONTOSO\\Contractors"},
+	})
+	h := newExcludedMarkerCycleHarness(t, cfg)
+	h.walk = func(opts enterprisehooks.EnumerateOptions) (enterprisehooks.Manifest, error) {
+		opts.ReportExcluded(enterprisehooks.ManifestTarget{SID: provedSID})
+		opts.ReportExcluded(enterprisehooks.ManifestTarget{SID: doubtfulSID})
+		opts.ReportExcludedInDoubt(enterprisehooks.ManifestTarget{SID: strings.ToLower(doubtfulSID)})
+		return enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{}}, nil
+	}
+	if err := h.cycle(); err != nil {
+		t.Fatal(err)
+	}
+	if !h.hookPasses(provedSID) {
+		t.Fatal("a proved exclusion lost its pass")
+	}
+	if h.hookPasses(doubtfulSID) {
+		t.Fatal("an exclusion resting on cached groups in doubt became a pass for the hook")
+	}
+}

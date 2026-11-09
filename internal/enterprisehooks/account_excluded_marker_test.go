@@ -21,6 +21,7 @@ func plainMarkerIO() accountExcludedMarkerIO {
 	return accountExcludedMarkerIO{
 		ensure: func(dir string) error { return os.MkdirAll(dir, 0o755) },
 		write:  func(path string, body []byte) error { return os.WriteFile(path, body, 0o600) },
+		remove: os.Remove,
 		read: func(path string) ([]byte, bool, error) {
 			data, err := os.ReadFile(path)
 			if errors.Is(err, os.ErrNotExist) {
@@ -180,11 +181,95 @@ func TestAccountExcludedMarkerWriteFailureKeepsTheOtherAccounts(t *testing.T) {
 	}
 }
 
-// A marker that cannot be removed does not keep authorizing the account: it is
-// overwritten with a revoked body the hook reads as no marker, and when even
-// that fails the error says the marker stays valid (GAP-0979: a failed prune
-// left a valid marker for an account no longer excluded).
+// holdsOpen is a store whose files named by held cannot be removed or
+// replaced, as when a reader holds them open without delete sharing; a file
+// that does not exist yet can still be created.
+func holdsOpen(files accountExcludedMarkerIO, held ...string) accountExcludedMarkerIO {
+	isHeld := func(path string) bool {
+		for _, name := range held {
+			if filepath.Base(path) == name {
+				return true
+			}
+		}
+		return false
+	}
+	realRemove, realWrite := files.remove, files.write
+	files.remove = func(path string) error {
+		if isHeld(path) {
+			return errors.New("the process cannot access the file because it is being used by another process")
+		}
+		return realRemove(path)
+	}
+	files.write = func(path string, body []byte) error {
+		if _, err := os.Stat(path); err == nil && isHeld(path) {
+			return errors.New("the process cannot access the file because it is being used by another process")
+		}
+		return realWrite(path, body)
+	}
+	return files
+}
+
+// A marker that cannot be removed does not keep authorizing the account: the
+// revocation record, a new file nothing holds, ends the pass; and when the
+// held file also cannot be replaced, which a reader holding it open causes
+// (GAP-0979: a failed delete plus a failed replacement left the old pass
+// valid). The record is cleared when the marker is gone or published again.
 func TestAccountExcludedMarkerCannotOutliveTheExclusionWhenRemovalFails(t *testing.T) {
+	previousWait := accountExcludedRemoveWait
+	accountExcludedRemoveWait = 0
+	t.Cleanup(func() { accountExcludedRemoveWait = previousWait })
+	dir := filepath.Join(t.TempDir(), "hookruntime")
+	files := plainMarkerIO()
+	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDOne, excludedSIDTwo}, files); err != nil {
+		t.Fatal(err)
+	}
+	heldName := filepath.Base(accountExcludedMarkerPath(dir, excludedSIDOne))
+	held := holdsOpen(files, heldName)
+	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDTwo}, held); err != nil {
+		t.Fatalf("the revocation was not written: %v", err)
+	}
+	if got, err := accountExcludedMarkerPresent(dir, excludedSIDOne, files); got || err == nil {
+		t.Fatalf("the held marker of the account taken off the list is still valid: excluded=%t err=%v", got, err)
+	}
+	if got, err := accountExcludedMarkerPresent(dir, excludedSIDTwo, files); err != nil || !got {
+		t.Fatalf("the account still excluded lost its pass: excluded=%t err=%v", got, err)
+	}
+	// Every later cycle keeps the revocation while the marker is held.
+	if err := publishAccountExcludedMarkers(dir, nil, held); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := accountExcludedMarkerPresent(dir, excludedSIDOne, files); got {
+		t.Fatal("the held marker became valid again in a later cycle")
+	}
+	// The account excluded again while the old marker is still held: its
+	// revocation cannot be cleared by a failing remove, so no pass.
+	revokedName := filepath.Base(accountExcludedRevokedPath(dir, excludedSIDOne))
+	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDOne}, holdsOpen(files, heldName, revokedName)); err == nil {
+		t.Fatal("a revocation that could not be cleared was not reported")
+	}
+	if got, _ := accountExcludedMarkerPresent(dir, excludedSIDOne, files); got {
+		t.Fatal("an account whose revocation could not be cleared got its pass back")
+	}
+	// Once the reader lets go, the next cycle removes the marker and its record.
+	if err := publishAccountExcludedMarkers(dir, nil, files); err != nil {
+		t.Fatal(err)
+	}
+	if names := markerNames(t, dir); len(names) != 0 {
+		t.Fatalf("directory after the reader let go = %v, want it empty", names)
+	}
+	// An account excluded again after a revocation gets its pass back.
+	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDOne}, held); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := accountExcludedMarkerPresent(dir, excludedSIDOne, files); err != nil || !got {
+		t.Fatalf("an account excluded again has no pass: excluded=%t err=%v", got, err)
+	}
+}
+
+// When even the revocation record cannot be written the marker stays valid
+// and the error says so; the benign twin, a removal that works, leaves
+// nothing behind.
+func TestAccountExcludedMarkerReportsAnUnrevokableMarker(t *testing.T) {
 	previousWait := accountExcludedRemoveWait
 	accountExcludedRemoveWait = 0
 	t.Cleanup(func() { accountExcludedRemoveWait = previousWait })
@@ -193,34 +278,37 @@ func TestAccountExcludedMarkerCannotOutliveTheExclusionWhenRemovalFails(t *testi
 	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDOne}, files); err != nil {
 		t.Fatal(err)
 	}
-	// A directory that cannot be written refuses the removal; the file itself
-	// is still the guardian's to rewrite.
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	_ = publishAccountExcludedMarkers(dir, nil, files)
-	if got, _ := accountExcludedMarkerPresent(dir, excludedSIDOne, files); got {
-		t.Fatal("the account taken off exclude_users still has a valid marker after the removal failed")
-	}
-
-	// When the revoking write fails too, the failure is returned.
-	dir2 := filepath.Join(t.TempDir(), "hookruntime")
-	if err := publishAccountExcludedMarkers(dir2, []string{excludedSIDOne}, files); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir2, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir2, 0o700) })
-	if os.Geteuid() == 0 {
-		return // root removes from a read-only directory; the case above is the proof here
-	}
 	denied := files
+	denied.remove = func(string) error { return errors.New("access is denied") }
 	denied.write = func(string, []byte) error { return errors.New("access is denied") }
-	err := publishAccountExcludedMarkers(dir2, nil, denied)
+	err := publishAccountExcludedMarkers(dir, nil, denied)
 	if err == nil || !strings.Contains(err.Error(), "neither removed") {
 		t.Fatalf("err = %v, want the unrevoked marker reported", err)
+	}
+	if err := publishAccountExcludedMarkers(dir, nil, files); err != nil {
+		t.Fatal(err)
+	}
+	if names := markerNames(t, dir); len(names) != 0 {
+		t.Fatalf("directory after a working removal = %v, want it empty", names)
+	}
+}
+
+// A revocation record that cannot be read is a revocation too.
+func TestAccountExcludedMarkerUnreadableRevocationIsARevocation(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "hookruntime")
+	files := plainMarkerIO()
+	if err := publishAccountExcludedMarkers(dir, []string{excludedSIDOne}, files); err != nil {
+		t.Fatal(err)
+	}
+	readRecord := files.read
+	files.read = func(path string) ([]byte, bool, error) {
+		if strings.HasPrefix(filepath.Base(path), accountExcludedRevokedPrefix) {
+			return nil, false, errors.New("the file is not trusted")
+		}
+		return readRecord(path)
+	}
+	if got, err := accountExcludedMarkerPresent(dir, excludedSIDOne, files); got || err == nil {
+		t.Fatalf("excluded=%t err=%v with an unreadable revocation record", got, err)
 	}
 }
 
