@@ -34,6 +34,12 @@ OpenAI's standalone `~/.codex/packages/standalone/current` selection,
 Homebrew, and user/system package-manager metadata (including NVM and Bun)
 before the bounded `PATH` fallback. Claude Code applies the same NVM/Bun
 coverage in addition to its native installer and Desktop/extension layouts.
+GitHub Copilot CLI reads the `@github/copilot` package metadata (user npm,
+NVM, Bun, then `/usr/local` and `/opt/homebrew`) and the Homebrew cask
+`copilot-cli` release folders, and never runs `copilot`. A curl-script install
+leaves no metadata; the user is still enrolled once Copilot's own
+`~/.copilot/logs` or `~/.copilot/session-state` exists. The guardian creates
+`~/.copilot/hooks` as the user and Setup writes `defenseclaw.json` there.
 
 Bundle metadata is preferred when available. When a known application bundle
 only exposes an executable version probe, the enumerator runs `--version` as
