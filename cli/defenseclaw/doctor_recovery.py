@@ -345,7 +345,7 @@ def inspect_device_key(
     except OSError:
         return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-read-failed")
     if not _valid_device_key_bytes(key_data):
-        return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, "device-key-payload-invalid")
+        return DeviceKeyHealth(DeviceKeyHealthStatus.INVALID, DEVICE_KEY_PAYLOAD_INVALID)
 
     secret_path = os.path.join(plan.data_dir, _DEVICE_PROVENANCE_SECRET)
     provenance_path = plan.target + ".provenance"
@@ -727,7 +727,7 @@ def keyless_identity_message(target: str, files: list[str]) -> str:
     what = "that file" if len(files) == 1 else "those files"
     return (
         f"the device identity at {target} has no key, but these files of it remain: {listed}. "
-        "DefenseClaw does not replace them, and nothing was changed. "
+        "DefenseClaw does not replace them and leaves them as they are. "
         "If you have a backup of device.key, restore it. Otherwise: "
         "1) stop the gateway (defenseclaw-gateway stop); "
         "2) confirm that no other defenseclaw init is running; "
@@ -742,6 +742,34 @@ def device_identity_leftovers(target: str, data_dir: str) -> list[str]:
 
     plan = plan_missing_device_key(target, data_dir=data_dir)
     return [path for path in plan.continuity_paths if os.path.lexists(path)]
+
+
+# The reason code of a device key that exists but holds no usable key (empty or cut short).
+DEVICE_KEY_PAYLOAD_INVALID = "device-key-payload-invalid"
+
+
+def unusable_key_message(target: str, data_dir: str) -> str:
+    """What init and Doctor print when device.key exists but holds no usable key.
+
+    A creation stopped during the key write can leave an empty or cut-short key beside its published
+    provenance files. DefenseClaw keeps all of them as they are: the way out is manual and named.
+    """
+
+    files = [target]
+    for path in (os.path.join(data_dir, _DEVICE_PROVENANCE_SECRET), target + ".provenance"):
+        if os.path.lexists(path):
+            files.append(path)
+    listed = ", ".join(files)
+    return (
+        f"the device key at {target} exists but holds no usable key (it is empty or cut short). "
+        "DefenseClaw does not replace it and leaves it and its provenance files as they are. "
+        "If you have a backup of device.key, restore it. Otherwise: "
+        "1) stop the gateway (defenseclaw-gateway stop); "
+        "2) confirm that no other defenseclaw init is running; "
+        f"3) remove these files ({listed}); "
+        "4) run defenseclaw init again, which creates a new device identity "
+        "(pairings tied to the old key will not be recoverable)."
+    )
 
 
 def _roll_back_device_identity(placed: list[tuple[str, str]]) -> list[tuple[str, str]]:
