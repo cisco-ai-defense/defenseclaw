@@ -36701,6 +36701,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -ExpectedStartMode $expectedServiceStartMode
     }
     Assert-DefenseClawInstalledConfig -Layout $Layout -GatewayServiceName $GatewayServiceName
+    if ($codexFolderLink -eq '') {
     if ($RepairRecoveredCodexRequirements -and $ServicingTransaction -and
         $codexTargetEnabled -and (Test-DefenseClawStandaloneProfile)) {
         # GAP-0802: the file a rollback restored may carry an administrator's
@@ -36710,7 +36711,6 @@ function Assert-DefenseClawEnterpriseDeployment {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
     }
-    if ($codexFolderLink -eq '') {
     [void](Invoke-DefenseClawCodexRequirementsCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
