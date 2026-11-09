@@ -3019,8 +3019,9 @@ def unix_hermes_hook_problem(config_path: str, script_path: str, *, check_approv
         if not os.path.isfile(script_path):
             raise _InspectionError("missing", f"Hermes hook script is missing: {script_path}")
         expected = os.path.realpath(script_path)
-        # Setup owns an entry by identity (hermes_command_written): a command it did not write,
-        # a padded one say, is kept for the user and is not a second DefenseClaw handler.
+        # Setup owns an entry by identity (hermes_command_written): its own command and any plain
+        # spelling of it. A command it did not write, one that runs another script, say, is kept for
+        # the user and is not a second DefenseClaw handler.
         current = {os.path.normpath(script_path), expected}
         commands: set[str] = set()
         for event, matcher in _HERMES_REQUIRED_HOOKS.items():
@@ -3060,7 +3061,7 @@ def unix_hermes_hook_problem(config_path: str, script_path: str, *, check_approv
             if event in _HERMES_REQUIRED_HOOKS or not isinstance(entries, list):
                 continue
             # Setup removes an extra event's entry by the same identity test, so a command it
-            # did not write (padded, quoted another way, with arguments) is the user's, as above.
+            # did not write (one that runs another script, say) is the user's, as above.
             if any(
                 isinstance(entry, dict)
                 and isinstance(entry.get("command"), str)
