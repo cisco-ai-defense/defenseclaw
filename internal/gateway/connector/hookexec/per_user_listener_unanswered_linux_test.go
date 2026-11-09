@@ -285,6 +285,20 @@ func TestFrozenOwnGatewayFollowsTheOutageMode(t *testing.T) {
 // record in dataDir names as this account's gateway.
 func assertFrozenGatewayFollowsOutageMode(t *testing.T, addr, dataDir string) {
 	t.Helper()
+	assertListenerOutageModeCells(t, addr, dataDir, func(t *testing.T) *http.Client {
+		client, err := NewPerUserGatewayHTTPClient(10*time.Second, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client
+	})
+}
+
+// assertListenerOutageModeCells is the Claude Code turn of
+// assertFrozenGatewayFollowsOutageMode over the client newClient makes: the
+// outage mode of the account decides each call, whatever ended the try.
+func assertListenerOutageModeCells(t *testing.T, addr, dataDir string, newClient func(*testing.T) *http.Client) {
+	t.Helper()
 	project := lateOrdinaryProject(t)
 	for _, tc := range []struct {
 		name    string
@@ -303,10 +317,7 @@ func assertFrozenGatewayFollowsOutageMode(t *testing.T, addr, dataDir string) {
 		{"post-tool event, strict tier", "PostToolBatch", `{"hook_event_name":"PostToolBatch"}`, "closed", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client, err := NewPerUserGatewayHTTPClient(10*time.Second, addr)
-			if err != nil {
-				t.Fatal(err)
-			}
+			client := newClient(t)
 			started := time.Now()
 			result := run(t, "claudecode", nil, func(opts *Options) {
 				opts.APIAddr = addr
