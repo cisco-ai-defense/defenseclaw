@@ -20,22 +20,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {set: m, sub: cc-empty, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-empty', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-not-json, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-not-json', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-nul, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-nul', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-trailing-nl, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-trailing-nl', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-nested-event, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-nested-event', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-over-transport, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-over-transport', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-over-cap, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-over-cap', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: cc-answers, only: 'claudecode-cursor/managed-closed/PreToolUse/unreachable', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-empty, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-empty', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-not-json, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-not-json', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-nul, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-nul', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-trailing-nl, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-trailing-nl', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-nested-event, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-nested-event', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-over-transport, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-over-transport', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-over-cap, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-over-cap', run: '^TestShellHookBehaviourMatchesGolden$'}
-          - {set: m, sub: ag-answers, only: 'antigravity/managed-closed/PreToolUse/unreachable', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: cc-trace, only: 'claudecode-cursor/managed-closed/PreToolUse/allow/stdin-over-transport', run: '^TestShellHookBehaviourMatchesGolden$'}
+          - {set: m, sub: ag-trace, only: 'antigravity/managed-closed/PreToolUse/allow/stdin-over-transport', run: '^TestShellHookBehaviourMatchesGolden$'}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -82,7 +68,14 @@ jobs:
           monitor=$!
           bin="$RUNNER_TEMP/connector.test"
           args=(-test.v -test.count=1 -test.timeout 8m -test.run "$RUN")
-          DC_HOOK_GOLDEN_ONLY="$ONLY" timeout -k 15 540 "$bin" "${args[@]}"; rc=$?
+          sudo apt-get install -y -qq strace >/dev/null 2>&1 || true
+          trace="$RUNNER_TEMP/trace"
+          DC_HOOK_GOLDEN_ONLY="$ONLY" DC_HOOK_GOLDEN_WORKERS=1 timeout -k 15 480 strace -f -qq -s 160 -e trace=process,signal,%file,prlimit64,setrlimit -e signal=none -o "$trace" "$bin" "${args[@]}"; rc=$?
+          echo "=== trace lines: $(wc -l < "$trace")"
+          echo "=== execve (hook side, after the gateway build)"; grep -E 'execve\(' "$trace" | grep -vE 'go-build|/pkg/tool/|/usr/bin/(gcc|ld|as)|collect2|cc1' | cut -c1-400 | tail -n +1 | head -400
+          echo "=== signals not to self"; grep -E '(^| )(kill|tkill|tgkill|pidfd_send_signal)\(' "$trace" | head -100
+          echo "=== rlimits"; grep -E 'prlimit64|setrlimit' "$trace" | grep -v 'NULL, {' | head -50
+          echo "=== writes outside the case root"; grep -E 'open(at)?\(.*O_(WRONLY|RDWR|CREAT)' "$trace" | grep -vE '/tmp/dcg|/tmp/go-build|/dev/null|/tmp/TestShell|pipe:' | cut -c1-300 | head -80
           kill "$monitor"
           echo "exit $rc"
           echo "=== monitor"; cat "$mon"
