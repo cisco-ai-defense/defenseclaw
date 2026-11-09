@@ -123,13 +123,16 @@ func gap0055NoPanic(t *testing.T, name string, read func()) {
 // evidence call (Resolve) costs several times what it does in a plain build.
 // Every other build, native Windows included, reads every form through
 // Resolve: the sweep is split into gap0055SweepParts tests so the Windows
-// shard packer can run the parts side by side (GAP-0749).
+// shard packer can run the parts side by side (GAP-0749). A part took about
+// 215 s on a hosted Windows runner when there were eight; sixteen keep each
+// part near 110 s, so the packer can fill a shard step with small parts
+// (GAP-0963).
 var gap0055BoundedSweep = gap0055RaceBuild
 
 // gap0055SweepParts is the number of tests the sweep is split into; part i
 // reads the forms whose index is i modulo this number. A test of each part
 // follows TestGAP0055ProgramBranchesShortArgvNoPanic (TestGAP0749SweepPartsAreAllRun).
-const gap0055SweepParts = 8
+const gap0055SweepParts = 16
 
 // gap0055ResolveBudget bounds the forms a bounded sweep reads through
 // Resolve, so a source that grows more program-specific words cannot push it
@@ -216,7 +219,7 @@ func gap0055ReadParsers(command, cwd, home string) {
 }
 
 // gap0055SweepPart runs one part of the class test of GAP-0055 (the tests
-// TestGAP0055ProgramBranchesShortArgvNoPanicPart0 to Part7 run every form):
+// TestGAP0055ProgramBranchesShortArgvNoPanicPart0 to Part15 run every form):
 // a program-specific branch that reads an argv word by position, or skips
 // an option's value, without checking that the word is there. Every word
 // and option the package's branches compare with is run with zero, one and
@@ -283,14 +286,22 @@ func gap0055SweepPart(t *testing.T, part int) {
 	t.Logf("part %d of %d: %d words, %d options, %d programs, %d of %d commands, %d panics", part, gap0055SweepParts, len(words), len(options), len(programs), read, len(forms), failures)
 }
 
-func TestGAP0055ProgramBranchesShortArgvNoPanicPart0(t *testing.T) { gap0055SweepPart(t, 0) }
-func TestGAP0055ProgramBranchesShortArgvNoPanicPart1(t *testing.T) { gap0055SweepPart(t, 1) }
-func TestGAP0055ProgramBranchesShortArgvNoPanicPart2(t *testing.T) { gap0055SweepPart(t, 2) }
-func TestGAP0055ProgramBranchesShortArgvNoPanicPart3(t *testing.T) { gap0055SweepPart(t, 3) }
-func TestGAP0055ProgramBranchesShortArgvNoPanicPart4(t *testing.T) { gap0055SweepPart(t, 4) }
-func TestGAP0055ProgramBranchesShortArgvNoPanicPart5(t *testing.T) { gap0055SweepPart(t, 5) }
-func TestGAP0055ProgramBranchesShortArgvNoPanicPart6(t *testing.T) { gap0055SweepPart(t, 6) }
-func TestGAP0055ProgramBranchesShortArgvNoPanicPart7(t *testing.T) { gap0055SweepPart(t, 7) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart0(t *testing.T)  { gap0055SweepPart(t, 0) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart1(t *testing.T)  { gap0055SweepPart(t, 1) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart2(t *testing.T)  { gap0055SweepPart(t, 2) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart3(t *testing.T)  { gap0055SweepPart(t, 3) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart4(t *testing.T)  { gap0055SweepPart(t, 4) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart5(t *testing.T)  { gap0055SweepPart(t, 5) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart6(t *testing.T)  { gap0055SweepPart(t, 6) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart7(t *testing.T)  { gap0055SweepPart(t, 7) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart8(t *testing.T)  { gap0055SweepPart(t, 8) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart9(t *testing.T)  { gap0055SweepPart(t, 9) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart10(t *testing.T) { gap0055SweepPart(t, 10) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart11(t *testing.T) { gap0055SweepPart(t, 11) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart12(t *testing.T) { gap0055SweepPart(t, 12) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart13(t *testing.T) { gap0055SweepPart(t, 13) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart14(t *testing.T) { gap0055SweepPart(t, 14) }
+func TestGAP0055ProgramBranchesShortArgvNoPanicPart15(t *testing.T) { gap0055SweepPart(t, 15) }
 
 // TestGAP0055ArchiveProgramsShortArgvNoPanic: the archive readers take an
 // argv of any length, with static flags of any length.
