@@ -2378,6 +2378,14 @@ func mcpDefinitionHash(entry config.MCPServerEntry) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// MCPDefinitionHash is the digest of the complete definition of an MCP server
+// (mcpDefinitionHash): equal for the same definition, different for any edit,
+// headers and environment included.
+func MCPDefinitionHash(entry config.MCPServerEntry) string {
+	hash, _ := mcpDefinitionHash(entry)
+	return hash
+}
+
 // targetStillPresent reports whether the target of evt is still there after
 // its admission: an MCP server still listed under its key, a skill or plugin
 // still at its path. An MCP event path is a key, not a file, so the Lstat
