@@ -121,7 +121,9 @@ func (a *APIServer) claudeCodeMCPAssetDecision(ctx context.Context, req claudeCo
 	if decision, refused := a.mcpStateUnreadableDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
-	a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe)
+	if decision, refused := a.noteHookReportedMCPServer(ctx, "claudecode", req.HookEventName, probe); refused {
+		return decision, true
+	}
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "claudecode", req.HookEventName, probe); refused {
 		return decision, true
 	}
@@ -426,7 +428,9 @@ func (a *APIServer) codexMCPAssetDecision(ctx context.Context, req codexHookRequ
 	if decision, refused := a.mcpUnpublishedSourceDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
-	a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe)
+	if decision, refused := a.noteHookReportedMCPServer(ctx, "codex", req.HookEventName, probe); refused {
+		return decision, true
+	}
 	if decision, refused := a.mcpAdmissionPendingDecision(ctx, "codex", req.HookEventName, probe); refused {
 		return decision, true
 	}
