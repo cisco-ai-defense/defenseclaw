@@ -76,12 +76,17 @@ func nativeReachedFiles(facts Facts, target string) []string {
 	return files
 }
 
-// nativeWriteFiles returns every file a native write may put its text into: the
-// file its target names, the physical file of an existing link the facts record
-// (nativeReachedFiles), and the files the hook client placed the target on
-// (nativeClientReachedFiles). requireOperand is true for a proof that judges the
-// lexical target only when the facts carry the operand for it.
+// nativeWriteFiles returns every file a native write may put its text into: for
+// a name that steps up a directory and has a client answer, that answer
+// (nativeDotDotAnswers); otherwise the file its target names, the physical file
+// of an existing link the facts record (nativeReachedFiles), and the files the
+// hook client placed the target on (nativeClientReachedFiles). requireOperand
+// is true for a proof that judges the lexical target only when the facts carry
+// the operand for it.
 func nativeWriteFiles(input Input, facts Facts, writes []nativeFileWrite, write nativeFileWrite, requireOperand bool) []string {
+	if answers := nativeDotDotAnswers(input, write.target); len(answers) != 0 {
+		return answers
+	}
 	var files []string
 	if target, ok := nativeAbsoluteTarget(write.target, input.CWD); ok {
 		switch {
@@ -161,6 +166,20 @@ func nativeClientDirectories(input Input, target string) []string {
 		}
 	}
 	return dirs
+}
+
+// nativeDotDotAnswers returns the physical files the hook client gave for a
+// name that steps up a directory, none for any other name or when the client
+// gave no answer. The lexical clean of such a name is not a file the write
+// reaches (the links before the segment decide the file), so a proof that has
+// the client answer judges the answer and not that spelling: an ordinary file
+// reached through a link is never judged as the protected file its lexical
+// clean names, and a link to a protected file is still judged as that file.
+func nativeDotDotAnswers(input Input, target string) []string {
+	if !hasDotDotSegment(target) {
+		return nil
+	}
+	return nativeClientAnswers(input, target)
 }
 
 // hasDotDotSegment reports whether a name steps up a directory. The physical
