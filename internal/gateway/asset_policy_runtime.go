@@ -316,7 +316,8 @@ func (a *APIServer) mcpAdmissionStatusDecision(ctx context.Context, cfg *config.
 	// that could not complete in every tier, strict and managed included:
 	// the administrator has decided the server, and its scan cannot. An
 	// explicit deny was handled above (GAP-0775, GAP-0778).
-	if status.Failed && !matched && existing.Enabled && existing.Source == "admin-allow" {
+	if status.Failed && !matched && existing.Enabled && existing.Source == "admin-allow" &&
+		a.heldRefusalsAllowed(ctx, cfg, connectorName, probe) {
 		return config.AssetPolicyDecision{}, false
 	}
 	name := status.Name
@@ -733,6 +734,7 @@ func (a *APIServer) mcpSessionStarted(ctx context.Context, connector, sessionID,
 		return
 	}
 	a.mcpResolved.forgetSession(connector, home, sessionID)
+	a.hookMCP.forgetSession(connector, home, sessionID)
 }
 
 // mcpProbeDecision is the asset policy verdict on a probe whose definition
