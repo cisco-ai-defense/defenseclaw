@@ -19,6 +19,10 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make check` | v7 parity, observability-v8, dashboard, provider, model-catalog, and guardrail-catalog gates |
 | `make lint` | Ruff, Go formatting/linting, the go.mod no-toolchain check, the repro-flags and assemble parity checks, and a Python compile check |
 
+Some Python and Go tests on Linux and macOS build small stand-in programs from
+`internal/testenv/native/*.c`, so they need a C compiler: `cc` on `PATH`, or the
+command line in `CC` (for example `CC="clang -O2"`).
+
 ## Focused Tests
 
 ```bash

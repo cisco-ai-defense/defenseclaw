@@ -45,8 +45,12 @@ for command in systemd-sysusers systemd-tmpfiles sync; do
     printf '#!/bin/sh\nexit 0\n' >"$work/bin/$command"
 done
 chmod +x "$work/bin/"*
-# The stand-in daemon: its command line is what the scripts look for.
-cp "$(command -v sleep)" "$work/sandbox-daemon"
+# The stand-in daemon: its command line is what the scripts look for. It is
+# built, not copied from the system sleep: a distribution may ship that as one
+# entry of a multi-call binary that refuses to run under another name.
+native_sleep_source=$(dirname "$0")/../../../internal/testenv/native/sleep.c
+install_daemon() { ${CC:-cc} -o "$work/sandbox-daemon" "$native_sleep_source"; }
+install_daemon
 fake_cmd="$work/sandbox-daemon 3000"
 # The record check is root_owned in the package; here the file is the test's.
 # shellcheck disable=SC2016
@@ -135,7 +139,7 @@ test ! -e "$work/sandbox.held"
 PATH="$work/bin:$PATH" sh "$work/preinstall.sh" upgrade
 held "$daemon" "an upgrade from 1.0.3"
 rm -f "$work/sandbox-daemon"
-cp "$(command -v sleep)" "$work/sandbox-daemon"
+install_daemon
 sh "$work/recovery.sh"
 i=0
 while [ -e "/proc/$daemon" ] && [ "$(state_of "$daemon")" != Z ] && [ "$i" -lt 30 ]; do
