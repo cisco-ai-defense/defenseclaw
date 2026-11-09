@@ -911,8 +911,8 @@ Other recovery notes:
   guardian can read the state; the held copy stays until it is released.
   A program that opens one of those two files after that check and does not
   share delete access cannot be kept out of the rest of the run. If the run
-  then fails and rolls back, Setup waits up to 30 seconds for that file,
-  leaves it as it is, puts the rest back and starts the restored services,
+  then fails and rolls back, Setup waits 30 s for that file to be released,
+  then leaves it as it is, puts the rest back and starts the restored services,
   and ends with the same `codex_requirements_held` or `codex_state_held`
   (exit `1618`) naming the program and its process id, and with the failure
   that started the rollback. The transaction stays pending, and the next
