@@ -870,13 +870,23 @@ def test_the_purge_walks_of_state_root_retry_with_call_scoped_privileges_for_a_d
         "Run the same uninstall as SYSTEM",
         "$walkScope.Dispose()",
         "Write-DefenseClawLifecycleLogDiagnostic",
+        "[string]$WalkName = 'walk'",
+        ': $WalkName listed after access denied',
     ):
         assert guard in wrapper, guard
     # The first attempt is plain; the privileged one comes after the guards, and
     # the scope is released in a finally block.
     assert first < wrapper.index("EnterTreeWalkPrivileges()") and wrapper.index("finally") > wrapper.index("EnterTreeWalkPrivileges()")
     links = _function_body(module, "Remove-DefenseClawUninstallStateTreeLinks")
-    assert "Invoke-DefenseClawStateRootWalk -WalkRoot $stateRoot -WalkLabel StateRoot -NothingChanged" in links
+    assert "-WalkLabel StateRoot -WalkName 'junction scan' -NothingChanged" in links
+    for walk_name in ("reparse veto", "name scan"):
+        assert f"-WalkName '{walk_name}'" in _function_body(module, "Remove-DefenseClawManagedTree")
+    assert "-WalkName 'preflight file walk'" in _function_body(module, "Get-DefenseClawStateRootFiles")
+    assert "-WalkName 'install-root walk'" in _function_body(module, "Get-DefenseClawInstallRootHolders")
+    # An unlistable item under InstallRoot is the documented unexpected-item refusal.
+    assert "refusing to remove unexpected item from managed install root: " in _function_body(
+        module, "Assert-DefenseClawStandaloneUninstallInstallTree"
+    )
     # The precommit file walks (state files, install files) go through the same
     # wrapper, so the files inside a SYSTEM-only folder are holder-checked
     # before anything changes (review R1).

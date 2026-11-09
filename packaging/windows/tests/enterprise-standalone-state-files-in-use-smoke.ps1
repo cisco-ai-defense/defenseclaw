@@ -863,7 +863,7 @@ public static class DcsfUnnamedRestartManager {
                         $failures.Add('the privileged walk left the process privileges changed')
                     }
                     $walkLog = [IO.Path]::Combine($script:WindowsDirectory, 'Logs', 'DefenseClaw', 'enterprise-lifecycle.log')
-                    if (-not [IO.File]::Exists($walkLog) -or [IO.File]::ReadAllText($walkLog) -notmatch 'listed after access denied, with backup and restore privileges enabled for this walk only') {
+                    if (-not [IO.File]::Exists($walkLog) -or [IO.File]::ReadAllText($walkLog) -notmatch 'junction scan listed after access denied, with backup and restore privileges enabled for this walk only') {
                         $failures.Add('the privileged walk left no lifecycle log line')
                     }
                     # The rows below call Invoke-DefenseClawStateRootWalk directly. The

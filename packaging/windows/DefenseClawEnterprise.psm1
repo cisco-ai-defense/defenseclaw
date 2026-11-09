@@ -10619,7 +10619,7 @@ function Get-DefenseClawStateRootFiles {
         return , $walkList.ToArray()
     }
     if ($FailOnUnreadable) {
-        $walkResult = @(Invoke-DefenseClawStateRootWalk -WalkRoot $root -WalkLabel StateRoot -Walk $walkFiles)
+        $walkResult = @(Invoke-DefenseClawStateRootWalk -WalkRoot $root -WalkLabel StateRoot -WalkName 'preflight file walk' -Walk $walkFiles)
         return , $walkResult
     }
     $walkStrict = $false
@@ -39147,6 +39147,19 @@ function Assert-DefenseClawStandaloneUninstallInstallTree {
     }
     catch {
         $message = [string]$_.Exception.Message
+        if ((Test-DefenseClawStandaloneProfile) -and (Test-DefenseClawAccessDeniedError -ErrorRecord $_)) {
+            # A folder under InstallRoot that this account cannot list was not
+            # installed by DefenseClaw (it sets no such access list there), so
+            # it is the documented unexpected-item refusal, not a raw error
+            # (GAP-0890 r2 review R4).
+            $deniedRoot = [IO.Path]::GetFullPath([string]$Layout.InstallRoot).TrimEnd('\')
+            throw (
+                'refusing to remove unexpected item from managed install root: ' + $message +
+                '. The uninstall stopped before it changed anything and the services are still running. DefenseClaw did not install ' +
+                'that item and this account cannot open it: move it out of ' + $deniedRoot +
+                ' (as SYSTEM, which is the account that can open it), then run the uninstall again'
+            )
+        }
         if ($message -notlike 'refusing to remove unexpected * from managed install root: *') {
             throw
         }
@@ -39202,7 +39215,7 @@ function Remove-DefenseClawUninstallStateTreeLinks {
     if (($root.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw (Get-DefenseClawUninstallStateLinkRefusal -Item $root)
     }
-    Invoke-DefenseClawStateRootWalk -WalkRoot $stateRoot -WalkLabel StateRoot -NothingChanged -Walk {
+    Invoke-DefenseClawStateRootWalk -WalkRoot $stateRoot -WalkLabel StateRoot -WalkName 'junction scan' -NothingChanged -Walk {
         $links = [Collections.Generic.List[object]]::new()
         $pending = [Collections.Generic.Stack[string]]::new()
         $pending.Push($stateRoot)
@@ -39725,14 +39738,14 @@ function Remove-DefenseClawManagedTree {
             -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
         return
     }
-    [void](Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label -Walk {
+    [void](Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label -WalkName 'reparse veto' -Walk {
         Assert-DefenseClawManagedTreeNoReparse `
             -Root $safe `
             -AllowAFUnixSocketAt $AllowAFUnixSocketAt
     })
     # A tree that holds a name normalization changes (GAP-1145) is removed
     # through its extended-length path, which keeps every name exact.
-    $target = Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label -Walk {
+    $target = Invoke-DefenseClawStateRootWalk -WalkRoot $safe -WalkLabel $Label -WalkName 'name scan' -Walk {
         $walkTarget = $safe
         foreach ($item in @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $safe -Recurse -Force)) {
             if ((Get-DefenseClawExactItemPath -Path $item.FullName) -cne [string]$item.FullName) {
@@ -43666,7 +43679,7 @@ function Get-DefenseClawInstallRootHolders {
     }
     $walked = $null
     try {
-        $walked = Invoke-DefenseClawStateRootWalk -WalkRoot ([IO.Path]::GetFullPath($InstallRoot)) -WalkLabel InstallRoot -Walk $walkInstall
+        $walked = Invoke-DefenseClawStateRootWalk -WalkRoot ([IO.Path]::GetFullPath($InstallRoot)) -WalkLabel InstallRoot -WalkName 'install-root walk' -Walk $walkInstall
     }
     catch {
         if ($_.Exception.Message.StartsWith('privileges_required: ', [StringComparison]::Ordinal)) {
@@ -43949,6 +43962,10 @@ function Invoke-DefenseClawStateRootWalk {
         [Parameter(Mandatory)][string]$WalkRoot,
         [Parameter(Mandatory)][string]$WalkLabel,
         [Parameter(Mandatory)][scriptblock]$Walk,
+        # Names the walk in the log line, so a support reader can tell which
+        # step needed the privilege (junction scan, reparse veto, name scan,
+        # preflight file walk, install-root walk).
+        [string]$WalkName = 'walk',
         [switch]$NothingChanged
     )
     try {
@@ -43991,18 +44008,18 @@ function Invoke-DefenseClawStateRootWalk {
                 'the purge stopped here and the uninstall can be run again'
             }
             throw (
-                'privileges_required: ' + $_.Exception.Message + " DefenseClaw's own folder holds a file or folder that only SYSTEM may " +
+                'privileges_required: ' + $_.Exception.Message + " (the $WalkName) DefenseClaw's own folder holds a file or folder that only SYSTEM may " +
                 "list, and $walkWhy, so an Administrator cannot remove it; $walkState. Run the same uninstall as SYSTEM " +
                 '(an MDM or Intune run is SYSTEM; by hand, a scheduled task or psexec -s that runs the same uninstall command)'
             )
         }
         Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
             path   = $WalkRoot
-            reason = "listed after access denied, with backup and restore privileges enabled for this walk only: $($walkFailure.Exception.Message)"
+            reason = "$WalkName listed after access denied, with backup and restore privileges enabled for this walk only: $($walkFailure.Exception.Message)"
         }
         Write-DefenseClawLifecycleLogDiagnostic -Message (
             'defenseclaw_repair path=' + $WalkRoot +
-            ': listed after access denied, with backup and restore privileges enabled for this walk only')
+            ": $WalkName listed after access denied, with backup and restore privileges enabled for this walk only")
         return $walkValue
     }
     finally {
@@ -44067,13 +44084,13 @@ function Remove-DefenseClawStateTreePrivileged {
     foreach ($entry in $deleted) {
         Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
             path   = [string]$entry
-            reason = "deleted after access denied, with backup and restore privileges enabled for this call only: $($ErrorRecord.Exception.Message)"
+            reason = "delete (fallback) deleted after access denied, with backup and restore privileges enabled for this call only: $($ErrorRecord.Exception.Message)"
         }
         # The warning stream is not kept by the CLI or Setup; the lifecycle
         # log is, so each privileged deletion is named there too.
         Write-DefenseClawLifecycleLogDiagnostic -Message (
             'defenseclaw_repair path=' + [string]$entry +
-            ': deleted after access denied, with backup and restore privileges enabled for this call only')
+            ': delete (fallback) deleted after access denied, with backup and restore privileges enabled for this call only')
         if (-not $script:LifecycleLogDiagnosticWritten) {
             $logMissing = $true
         }
@@ -44334,7 +44351,7 @@ function Complete-DefenseClawStatePurge {
         # the count, in the warnings and the lifecycle log.
         $removedCountProperty = if ($null -ne $stateCleanup) { $stateCleanup.PSObject.Properties['entries_removed'] } else { $null }
         if ((Test-DefenseClawStandaloneProfile) -and $null -ne $removedCountProperty -and [int]$removedCountProperty.Value -gt 0) {
-            $removedReason = "removed $([int]$removedCountProperty.Value) entries with backup and restore privileges enabled for that purge's own run"
+            $removedReason = "native exact-root purge removed $([int]$removedCountProperty.Value) entries with backup and restore privileges enabled for that purge's own run"
             Write-DefenseClawResilienceEvent -Marker defenseclaw_repair -Fields @{
                 path   = [IO.Path]::GetFullPath([string]$Layout.StateRoot).TrimEnd('\')
                 reason = $removedReason
