@@ -165,3 +165,39 @@ func TestPasswdProvidersKeepsTheServicesAnNSSActionStopsBefore(t *testing.T) {
 		t.Fatalf("passwdProviders = %v, %v", got, err)
 	}
 }
+
+// A clause with two actions is read whole, so a deleted uid still gets its
+// absence proof on the valid line, and a service that holds the uid after
+// the clause is still found.
+func TestDirectoryShowsUIDUnusedReadsAMultiActionNSSLine(t *testing.T) {
+	const uid = 4321
+	held := commandResult{stdout: []byte("kim:x:4321:4321::/home/kim:/bin/sh\n")}
+	for name, tc := range map[string]struct {
+		line     string
+		results  map[string]commandResult
+		wantErr  bool
+		wantHeld bool
+	}{
+		"two actions, uid deleted":       {line: "passwd: files [SUCCESS=return NOTFOUND=continue] systemd\n"},
+		"one action, uid deleted":        {line: "passwd: files [SUCCESS=return] systemd\n"},
+		"two actions, systemd holds uid": {line: "passwd: files [SUCCESS=return NOTFOUND=continue] systemd\n", results: map[string]commandResult{"-s systemd passwd 4321": held}, wantErr: true, wantHeld: true},
+		"one action, systemd holds uid":  {line: "passwd: files [SUCCESS=return] systemd\n", results: map[string]commandResult{"-s systemd passwd 4321": held}, wantErr: true, wantHeld: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			oldNSS := nsswitchPath
+			t.Cleanup(func() { nsswitchPath = oldNSS })
+			nsswitchPath = filepath.Join(t.TempDir(), "nsswitch.conf")
+			writeTestFile(t, nsswitchPath, tc.line)
+			services, err := passwdProviders()
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = servicesShowUIDUnused(services, uid, func() (*NSSResolver, error) {
+				return newFakeNSS(&fakeRun{results: tc.results}), nil
+			})
+			if (err != nil) != tc.wantErr || errors.Is(err, ErrUIDHeld) != tc.wantHeld {
+				t.Fatalf("servicesShowUIDUnused(%v) = %v, wantErr %v, wantHeld %v", services, err, tc.wantErr, tc.wantHeld)
+			}
+		})
+	}
+}

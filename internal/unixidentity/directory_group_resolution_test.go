@@ -393,3 +393,30 @@ func TestLocalAccountGroupsFailWhenTheDirectoryDoesNotAnswer(t *testing.T) {
 		}
 	})
 }
+
+// An NSS action clause may hold several actions and spaces and is one unit of
+// the grammar: none of its words is a service. A clause glibc would reject
+// (no closing bracket) never shortens the list, so a caller that asks every
+// service refuses its words instead of skipping a source.
+func TestNSSActionClausesAreNotServices(t *testing.T) {
+	for name, tc := range map[string]struct {
+		line string
+		want []string
+	}{
+		"one action":                        {"passwd: files [NOTFOUND=return] sss", []string{"files", "sss"}},
+		"two actions in one clause":         {"passwd: files [SUCCESS=return NOTFOUND=continue] systemd", []string{"files", "systemd"}},
+		"spaces inside the brackets":        {"passwd: files [ !UNAVAIL=return  NOTFOUND=continue ] systemd", []string{"files", "systemd"}},
+		"clause attached to the service":    {"passwd: files[SUCCESS=return] systemd", []string{"files", "systemd"}},
+		"several clauses":                   {"passwd: files [NOTFOUND=return] sss [UNAVAIL=continue STATUS=return] extrausers", []string{"files", "sss", "extrausers"}},
+		"clause last on the line":           {"passwd: files systemd [NOTFOUND=return]", []string{"files", "systemd"}},
+		"upper-case services and a comment": {"passwd: FILES [SUCCESS=return NOTFOUND=continue] Systemd # note", []string{"files", "systemd"}},
+		"no clause":                         {"passwd: files sss", []string{"files", "sss"}},
+		"unterminated clause keeps words":   {"passwd: files [SUCCESS=return NOTFOUND=continue systemd", []string{"files", "success=return", "notfound=continue", "systemd"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := ParseNSSwitchServices(tc.line+"\n", "passwd"); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("services = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
