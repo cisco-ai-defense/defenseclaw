@@ -286,12 +286,12 @@ func TestCredentialFixtureInAProjectFolderNamedHomeOrUsersStaysAFixture(t *testi
 func TestWindowsNativeFileToolCredentialFileInAProfileFolderIsJudgedLikeAnyOtherHome(t *testing.T) {
 	previous := windowsProfileFolder
 	t.Cleanup(func() { windowsProfileFolder = previous })
-	windowsProfileFolder = func(dir string) bool {
+	windowsProfileFolder = func(dir string) (bool, error) {
 		switch strings.ToLower(dir) {
 		case "c:/profiles/bob", "d:/staff/émile.x", "e:/data/appdata-user":
-			return true
+			return true, nil
 		}
-		return false
+		return false, nil
 	}
 	const home = `C:\Users\r109yws.d-2`
 	for _, profile := range []string{"default", "permissive", "strict"} {
@@ -391,7 +391,7 @@ func TestWindowsNativeFileToolUnresolvedShortNameLookupIsJudgedByProfile(t *test
 				findings := windowsFileToolFindings(t, connector, tool, home, home+`\project`, target, true)
 				var unverified []RuleFinding
 				for _, finding := range findings {
-					if finding.RuleID == windowsAliasUnverifiedRuleID {
+					if finding.RuleID == windowsPathUnverifiedRuleID {
 						unverified = append(unverified, finding)
 					}
 				}
@@ -404,7 +404,7 @@ func TestWindowsNativeFileToolUnresolvedShortNameLookupIsJudgedByProfile(t *test
 				}
 				observed := windowsFileToolFindings(t, connector, tool, home, home+`\project`, target, false)
 				for _, finding := range observed {
-					if finding.RuleID == windowsAliasUnverifiedRuleID && finding.contributesToEnforcement() {
+					if finding.RuleID == windowsPathUnverifiedRuleID && finding.contributesToEnforcement() {
 						t.Errorf("%s %s %q: the finding of a call that cannot enforce enforces", profile, tool, target)
 					}
 				}
@@ -416,7 +416,7 @@ func TestWindowsNativeFileToolUnresolvedShortNameLookupIsJudgedByProfile(t *test
 				{tool, home + `\project\NETRC~1`}, {tool, home + `\project\notes.txt`}, {"Read", home + `\locked\NETRC~1`},
 			} {
 				for _, finding := range windowsFileToolFindings(t, connector, c.tool, home, home+`\project`, c.target, true) {
-					if finding.RuleID == windowsAliasUnverifiedRuleID {
+					if finding.RuleID == windowsPathUnverifiedRuleID {
 						t.Errorf("%s %s %q: unexpected %s", profile, c.tool, c.target, finding.RuleID)
 					}
 				}
@@ -433,12 +433,12 @@ func TestWindowsNativeFileToolUnresolvedShortNameLookupIsJudgedByProfile(t *test
 func TestWindowsNativeFileToolCredentialFileOfAKnownHomeIsNotAFixtureOfItsOwnWorkingDirectory(t *testing.T) {
 	previous := windowsProfileFolder
 	t.Cleanup(func() { windowsProfileFolder = previous })
-	windowsProfileFolder = func(dir string) bool {
+	windowsProfileFolder = func(dir string) (bool, error) {
 		switch strings.ToLower(dir) {
 		case "c:/profiles/bob", "e:":
-			return true
+			return true, nil
 		}
-		return false
+		return false, nil
 	}
 	const home = `C:\Users\r109yws.d-2`
 	for _, profile := range []string{"default", "permissive", "strict"} {
@@ -479,7 +479,7 @@ func TestWindowsNativeFileToolCredentialFileOfAKnownHomeIsNotAFixtureOfItsOwnWor
 func TestWindowsNativeFileToolProjectWithAppDataFoldersIsNoProfile(t *testing.T) {
 	previous := windowsProfileFolder
 	t.Cleanup(func() { windowsProfileFolder = previous })
-	windowsProfileFolder = func(dir string) bool {
+	windowsProfileFolder = func(dir string) (bool, error) {
 		return holdsProfileEntries(dir, func(path string) (os.FileInfo, error) {
 			switch strings.ToLower(path) {
 			case "c:/work/proj/appdata", "c:/work/real/ntuser.dat":
@@ -566,6 +566,76 @@ func TestWindowsNativeFileToolThreePeriodFolderIsAFolderOfItsOwn(t *testing.T) {
 		} {
 			if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, home+`\project`, target); action != "block" || len(rules) == 0 {
 				t.Errorf("%s %q: %s %v, want block", profile, target, action, rules)
+			}
+		}
+	}
+}
+
+// A mandatory profile keeps its registry hive under the name NTUSER.MAN, and
+// a profile folder whose hive the file system refuses to answer for (access
+// denied) is no proven profile: the first is a home like any other, judged by
+// the name of the file, and the second is judged by the profile of the posture
+// (an alert in default and permissive, a block in strict) because the call may
+// write a credential file of an account. A project folder with no hive stays
+// allowed in every profile.
+func TestWindowsNativeFileToolMovedProfileWithAMandatoryOrUnreadableHiveKeepsItsCredentialFiles(t *testing.T) {
+	previous := windowsProfileFolder
+	t.Cleanup(func() { windowsProfileFolder = previous })
+	windowsProfileFolder = func(dir string) (bool, error) {
+		return holdsProfileEntries(dir, func(path string) (os.FileInfo, error) {
+			switch strings.ToLower(path) {
+			case "c:/profiles/mandatory.v6/ntuser.man":
+				return fakeEntry{}, nil
+			case "c:/profiles/locked/ntuser.dat", "c:/profiles/locked/ntuser.man":
+				return nil, os.ErrPermission
+			}
+			return nil, os.ErrNotExist
+		})
+	}
+	const home = `C:\Users\r109yws.d-2`
+	credentials := []string{`.netrc`, `.git-credentials`, `.aws\credentials`}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		connector := "windows-native-credential-mandatory-profile-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, cwd := range []string{home + `\project`, `D:\work`, `C:\Profiles\mandatory.v6`} {
+			for _, name := range credentials {
+				target := `C:\Profiles\mandatory.v6\` + name
+				if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, target); action != "block" || len(rules) == 0 {
+					t.Errorf("%s cwd=%q %q: mandatory profile: %s %v, want block", profile, cwd, target, action, rules)
+				}
+			}
+			for _, target := range []string{`C:\Profiles\mandatory.v6\notes.txt`, `C:\Profiles\mandatory.v6\.netrc.bak`, `C:\work\proj\.netrc`} {
+				if action, rules := windowsFileToolVerdictIn(t, connector, "Write", home, cwd, target); action != "allow" {
+					t.Errorf("%s cwd=%q %q: %s %v, want allow", profile, cwd, target, action, rules)
+				}
+			}
+		}
+		want := map[string]string{"default": "alert", "permissive": "alert", "strict": "block"}[profile]
+		for _, name := range credentials {
+			target := `C:\Profiles\locked\` + name
+			findings := windowsFileToolFindings(t, connector, "Write", home, home+`\project`, target, true)
+			var unverified []RuleFinding
+			for _, finding := range findings {
+				if finding.RuleID == windowsPathUnverifiedRuleID {
+					unverified = append(unverified, finding)
+				}
+			}
+			if len(unverified) != 1 {
+				t.Errorf("%s %q: %d unverified findings %v, want one", profile, target, len(unverified), FindingStrings(findings))
+				continue
+			}
+			if got := actionAtProfile(profile, unverified); got != want {
+				t.Errorf("%s %q: unreadable hive: %s, want %s", profile, target, got, want)
+			}
+			// A read, and a project folder the file system answered for, take no finding.
+			for _, c := range []struct{ tool, target string }{
+				{"Read", target}, {"Write", `C:\Profiles\mandatory.v6\` + name}, {"Write", `C:\work\proj\` + name},
+			} {
+				for _, finding := range windowsFileToolFindings(t, connector, c.tool, home, home+`\project`, c.target, true) {
+					if finding.RuleID == windowsPathUnverifiedRuleID {
+						t.Errorf("%s %s %q: unexpected %s", profile, c.tool, c.target, finding.RuleID)
+					}
+				}
 			}
 		}
 	}

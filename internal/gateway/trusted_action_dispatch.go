@@ -1046,7 +1046,7 @@ func dispatchTrustedActionWith(
 		// findings, never the state-write proof a stateProofOnly reading keeps.
 		finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
 		finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
-		finalized = appendWindowsAliasUnverifiedFinding(finalized, request, facts)
+		finalized = appendWindowsPathUnverifiedFinding(finalized, request, facts)
 	}
 	if staticTargetTwin == nil {
 		return finalized
