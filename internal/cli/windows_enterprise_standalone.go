@@ -3390,12 +3390,13 @@ func windowsEnterpriseMessageCode(message, fallback string) string {
 }
 
 // windowsEnterpriseTrimHeldCodePrefix drops the leading "code: " the module
-// puts on the two Codex hold deferrals so the code that is a field of the
+// puts on the two Codex hold deferrals and on privileges_required (GAP-0890
+// r2) so the code that is a field of the
 // error is not repeated at the start of its message ("codex_state_held:
 // codex_state_held: ...", g582 round 11c, L3).
 func windowsEnterpriseTrimHeldCodePrefix(code, message string) string {
 	switch code {
-	case "codex_state_held", "codex_requirements_held":
+	case "codex_state_held", "codex_requirements_held", "privileges_required":
 		return strings.TrimPrefix(message, code+": ")
 	}
 	return message

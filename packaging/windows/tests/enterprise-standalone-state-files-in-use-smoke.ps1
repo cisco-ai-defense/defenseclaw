@@ -866,7 +866,15 @@ public static class DcsfUnnamedRestartManager {
                     if (-not [IO.File]::Exists($walkLog) -or [IO.File]::ReadAllText($walkLog) -notmatch 'listed after access denied, with backup and restore privileges enabled for this walk only') {
                         $failures.Add('the privileged walk left no lifecycle log line')
                     }
-                    # The tree walk and the name scan of the managed-tree delete.
+                    # The rows below call Invoke-DefenseClawStateRootWalk directly. The
+                    # link walk above is the entry point of the purge, so a module
+                    # without the wrapper (the release before GAP-0890 r2) already
+                    # failed it with the access denied of the first walk; the missing
+                    # wrapper is said once and the direct rows are not run.
+                    if (-not (Microsoft.PowerShell.Core\Get-Command -Name Invoke-DefenseClawStateRootWalk -ErrorAction SilentlyContinue)) {
+                        $failures.Add('Invoke-DefenseClawStateRootWalk is missing')
+                    }
+                    else {
                     $walkValue = Invoke-DefenseClawStateRootWalk -WalkRoot $walkLayout.StateRoot -WalkLabel StateRoot -Walk {
                         @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $walkLayout.StateRoot -Recurse -Force) | Microsoft.PowerShell.Core\Out-Null
                         return 'walked'
@@ -895,6 +903,25 @@ public static class DcsfUnnamedRestartManager {
                     if (-not $refused) {
                         $failures.Add('the privileged walk acted for the Secure Client profile')
                     }
+                    # Review R1: a file inside the forced SYSTEM-only folder is
+                    # holder-checked before anything changes. The preflight walks
+                    # the folder under the call-scoped privileges, so a program
+                    # that holds the nested file without delete sharing refuses the
+                    # purge, names the file and changes nothing; with no holder the
+                    # preflight passes.
+                    $nestedFile = [IO.Path]::Combine($forcedFolder, 'nested', 'file.txt')
+                    $walkLayout.GatewayServiceName = 'DefenseClawGateway'
+                    $script:InstallTreeUseRecheckMilliseconds = 300
+                    Test-Accepted 'purge preflight with a SYSTEM-only folder and no holder' { Invoke-Preflight $walkLayout }
+                    $nestedHolder = Start-TestReader $nestedFile 120000 'Read' $backupReaderScript
+                    Test-Refused 'purge with a file inside the SYSTEM-only folder held open' { Invoke-Preflight $walkLayout } (
+                        '^uninstall_in_use: a program has r109ib22-forced\\nested\\file\.txt open \(it is probably running as SYSTEM.*\) in ' +
+                        [regex]::Escape([string]$walkLayout.StateRoot) + ', which the purge deletes.*nothing was changed\. ')
+                    if (-not [IO.Directory]::Exists($walkLayout.StateRoot) -or -not [IO.Directory]::Exists($walkOutside)) {
+                        $failures.Add('the refused preflight changed the tree')
+                    }
+                    Stop-TestReader $nestedHolder
+                    Test-Accepted 'purge preflight after the nested holder closed' { Invoke-Preflight $walkLayout }
                     # A token that does not hold the privileges at all (they are
                     # removed from the token of a child process, as a user-rights
                     # policy does) is refused with the reason and the way out,
@@ -935,6 +962,7 @@ public static class DcsfRemove {
                     }
                     if (-not (Microsoft.PowerShell.Management\Get-Item -LiteralPath $walkJunction -Force -ErrorAction SilentlyContinue)) {
                         $failures.Add('the refused walk changed the tree')
+                    }
                     }
                     # Give the scratch cleanup the forced folder back (its owner may).
                     & "$env:SystemRoot\System32\icacls.exe" $forcedFolder /grant '*S-1-5-32-544:(OI)(CI)F' /C /Q 2>&1 | Out-Null

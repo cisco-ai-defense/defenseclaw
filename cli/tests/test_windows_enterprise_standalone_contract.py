@@ -877,6 +877,13 @@ def test_the_purge_walks_of_state_root_retry_with_call_scoped_privileges_for_a_d
     assert first < wrapper.index("EnterTreeWalkPrivileges()") and wrapper.index("finally") > wrapper.index("EnterTreeWalkPrivileges()")
     links = _function_body(module, "Remove-DefenseClawUninstallStateTreeLinks")
     assert "Invoke-DefenseClawStateRootWalk -WalkRoot $stateRoot -WalkLabel StateRoot -NothingChanged" in links
+    # The precommit file walks (state files, install files) go through the same
+    # wrapper, so the files inside a SYSTEM-only folder are holder-checked
+    # before anything changes (review R1).
+    files = _function_body(module, "Get-DefenseClawStateRootFiles")
+    assert "[switch]$FailOnUnreadable" in files and "Invoke-DefenseClawStateRootWalk -WalkRoot $root -WalkLabel StateRoot" in files
+    assert "Get-DefenseClawStateRootFiles -Layout $Layout -FailOnUnreadable" in _function_body(module, "Assert-DefenseClawStandaloneStateFilesNotInUse")
+    assert "Invoke-DefenseClawStateRootWalk -WalkRoot ([IO.Path]::GetFullPath($InstallRoot)) -WalkLabel InstallRoot" in _function_body(module, "Get-DefenseClawInstallRootHolders")
     helper = _function_body(module, "Get-DefenseClawMissingPrivilegeRefusal")
     assert "privileges_required: " in helper and "Run the same uninstall as SYSTEM" in helper
     assert "Get-DefenseClawMissingPrivilegeRefusal" in _function_body(module, "Get-DefenseClawStateFileHolders")
@@ -1571,6 +1578,8 @@ def test_a_failed_exact_root_cleanup_names_the_programs_that_hold_its_files(tmp_
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
             "Test-DefenseClawUnnamedFileHolder",
+            "Test-DefenseClawAccessDeniedError",
+            "Invoke-DefenseClawStateRootWalk",
             "Get-DefenseClawNamespaceRootCleanupHolderText",
         ],
         _FAKE_RENAME_NATIVE
@@ -1625,6 +1634,8 @@ def test_a_committed_retirement_defers_only_to_a_holder_it_finds(tmp_path) -> No
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
             "Test-DefenseClawUnnamedFileHolder",
+            "Test-DefenseClawAccessDeniedError",
+            "Invoke-DefenseClawStateRootWalk",
             "Get-DefenseClawInstallRootRenameDenial",
             "Invoke-DefenseClawCommittedInstallRootRetirement",
         ],
@@ -1720,6 +1731,8 @@ def test_an_uninstall_refuses_a_lasting_install_root_holder_before_its_commit(tm
             "Format-DefenseClawProcessInUse",
             "Get-DefenseClawInstallRootHolders",
             "Test-DefenseClawUnnamedFileHolder",
+            "Test-DefenseClawAccessDeniedError",
+            "Invoke-DefenseClawStateRootWalk",
             "Assert-DefenseClawStandaloneInstallRootNotHeld",
         ],
         _FAKE_RENAME_NATIVE
