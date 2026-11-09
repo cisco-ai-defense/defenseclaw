@@ -139,3 +139,45 @@ def test_an_extra_event_with_the_setup_written_single_quoted_command_is_still_re
     state, problem = unix_hermes_hook_problem(str(config), str(script), check_approvals=False)
 
     assert state == "stale" and "some_future_event" in problem
+
+
+def test_a_users_own_hook_is_kept_without_a_notice(tmp_path):
+    config, script, _command = _registration(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["pre_tool_call"].insert(0, {"command": str(tmp_path / "user-hook.sh"), "timeout": 30})
+    document["hooks"]["post_tool_call"].insert(0, {"command": "/opt/tools/audit --event post_tool_call", "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert unix_hermes_hook_problem(str(config), str(script), check_approvals=False) == ("", "")
+    assert hermes_kept_hook_note(str(tmp_path), str(config)) == ""
+
+
+def test_the_notice_lists_a_copy_of_a_defenseclaw_hook_and_not_the_users_hook_beside_it(tmp_path):
+    config, script, command = _registration(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["pre_tool_call"].insert(0, {"command": str(tmp_path / "user-hook.sh"), "timeout": 30})
+    document["hooks"]["post_tool_call"].insert(0, {"command": command + " ", "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    note = hermes_kept_hook_note(str(tmp_path), str(config))
+
+    assert "(events: post_tool_call)" in note
+    assert "pre_tool_call" not in note
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "~/.defenseclaw/hooks/hookX",
+        "$HOME/.defenseclaw/hooks/hookX --event pre_tool_call",
+        "bash /somewhere/else/hermes-hook.sh",
+        "echo hermes-hook.sh",
+    ],
+)
+def test_an_entry_that_names_a_defenseclaw_hook_is_listed(tmp_path, command):
+    config, _script, _command = _registration(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["hooks"]["pre_tool_call"].insert(0, {"command": command, "timeout": 30})
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert "(events: pre_tool_call)" in hermes_kept_hook_note(str(tmp_path), str(config))
