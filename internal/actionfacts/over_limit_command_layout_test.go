@@ -147,3 +147,49 @@ func TestReadCommandLayout(t *testing.T) {
 		})
 	}
 }
+
+// TestCommandLayoutExpansions pins which braced expansions the layout reading
+// finds in a place the shell expands them (GAP-0934): none in a single quote,
+// after a backslash, in a comment or in the data of a quoted here-document.
+func TestCommandLayoutExpansions(t *testing.T) {
+	for _, c := range []struct {
+		name, text string
+		want       []bool
+	}{
+		{"word", "echo ${F:=x}", []bool{true}},
+		{"double quote", "echo \"${F:=x}\"", []bool{true}},
+		{"single quote", "echo '${F:=x}'", []bool{false}},
+		{"single quote of a command", "cp a '${F:=x}'", []bool{false}},
+		{"escaped dollar", "echo \\${F:=x}", []bool{false}},
+		{"single quote inside a double quote", "echo \"'${F:=x}'\"", []bool{true}},
+		{"comment", "# ${F:=x}\necho a", []bool{false}},
+		{"comment after a command", "echo a # ${F:=x}", []bool{false}},
+		{"hash in a word", "echo a#${F:=x}", []bool{true}},
+		{"unquoted document", "cat <<EOF\n${F:=x}\nEOF\n", []bool{true}},
+		{"quoted document", "cat <<'EOF'\n${F:=x}\nEOF\n", []bool{false}},
+		{"escaped delimiter document", "cat <<\\EOF\n${F:=x}\nEOF\n", []bool{false}},
+		{"escaped dollar in an unquoted document", "cat <<EOF\n\\${F:=x}\nEOF\n", []bool{false}},
+		{"document that feeds a shell", "sh <<'EOF'\n${F:=x}\nEOF\n", []bool{true}},
+		{"substitution", "echo $(echo ${F:=x})", []bool{true}},
+		{"single quote in a substitution", "echo $(echo '${F:=x}')", []bool{false}},
+		{"comment in a substitution", "echo $(ls # ${F:=x}\n)", []bool{false}},
+		{"backtick", "echo `echo ${F:=x}`", []bool{true}},
+		{"nested", "echo ${A:-${F:=x}}", []bool{true, true}},
+		{"nested in a document", "cat <<EOF\n${A:-${F:=x}}\nEOF\n", []bool{true, true}},
+		{"later after a single quote", "echo '${A:=x}' ${F:=x}", []bool{false, true}},
+		{"unreadable text counts all", "echo '${F:=x}' $(", []bool{true}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			layout, _ := readCommandLayout(c.text)
+			var got []bool
+			for index := 0; index+1 < len(c.text); index++ {
+				if c.text[index:index+2] == "${" {
+					got = append(got, layout.expandsAt(index))
+				}
+			}
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("expansions %v, want %v", got, c.want)
+			}
+		})
+	}
+}
