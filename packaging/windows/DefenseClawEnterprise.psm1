@@ -35630,7 +35630,12 @@ function Get-DefenseClawBlockedCodexStatePath {
         holder here stops it as one on requirements.toml does.
     #>
     param([Parameter(Mandatory)][hashtable]$Layout)
-    foreach ($candidate in (@([string]$Layout.CodexManagedHooksStatePath) +
+    # A partial layout (a test fixture) may not carry the key.
+    $statePath = [string](Get-DefenseClawOptionalLayoutValue -Layout $Layout -Name CodexManagedHooksStatePath)
+    if ([string]::IsNullOrWhiteSpace($statePath)) {
+        return ''
+    }
+    foreach ($candidate in (@($statePath) +
             @(Get-DefenseClawCodexManagedHooksStateWriterCopyList -Layout $Layout))) {
         if ([string]::IsNullOrWhiteSpace($candidate) -or
             -not [IO.Path]::IsPathRooted($candidate) -or
