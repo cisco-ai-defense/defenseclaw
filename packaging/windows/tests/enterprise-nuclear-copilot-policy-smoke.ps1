@@ -33,6 +33,41 @@ if ($definitions.Count -ne 1) {
 }
 . ([scriptblock]::Create($definitions[0].Extent.Text))
 
+# The purge driver calls it once, with the machine-wide policy.d folder and
+# the reboot flag, incomplete and warnings lists of the purge, before it
+# judges the lifecycle folder empty: a record left there kept that folder.
+$drivers = @($ast.FindAll({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq 'Invoke-DefenseClawNuclearUninstall'
+        }, $true))
+if ($drivers.Count -ne 1) {
+    throw 'expected exactly one Invoke-DefenseClawNuclearUninstall in the module'
+}
+$driver = $drivers[0].Body.Extent.Text
+$calls = @([regex]::Matches($driver, '(?m)^\s*Remove-DefenseClawNuclearCopilotPolicy\b'))
+if ($calls.Count -ne 1) {
+    throw "the nuclear purge calls Remove-DefenseClawNuclearCopilotPolicy $($calls.Count) times, expected once"
+}
+$call = $driver.Substring($calls[0].Index)
+$call = $call.Substring(0, $call.IndexOf("`n    #"))
+foreach ($argument in @(
+        "-CopilotPolicyDirectory ([IO.Path]::Combine(`$script:ProgramData, 'GitHub', 'Copilot', 'policy.d'))",
+        '-LifecycleDirectory $copilotLifecycleDir',
+        '-RebootRequired ([ref]$rebootRequired)',
+        '-Incomplete $incomplete',
+        '-Warnings $warnings'
+    )) {
+    if (-not $call.Contains($argument)) {
+        throw "the nuclear purge's Copilot policy call lacks $argument"
+    }
+}
+# The listing that judges the lifecycle folder empty skips only the lock.
+$emptyCheck = $driver.IndexOf("-cne 'lifecycle.lock'", [StringComparison]::Ordinal)
+if ($emptyCheck -lt 0 -or $calls[0].Index -gt $emptyCheck) {
+    throw 'the nuclear purge must remove the Copilot policy record before it judges the lifecycle folder empty'
+}
+
 # Stand-in for the purge's delete: the paths in $script:Stuck stay, as a file
 # held open without a restart deletion would; the paths in $script:Scheduled
 # stay too but count as removed, as a held file queued for deletion at the
@@ -73,6 +108,8 @@ $dropIn = [IO.Path]::Combine($policyDir, '90-defenseclaw.json')
 $record = [IO.Path]::Combine($store, 'copilot.json')
 $lock = [IO.Path]::Combine($lifecycle, 'lifecycle.lock')
 $otherReceipt = [IO.Path]::Combine($lifecycle, 'purge-intent-0123456789abcdef.json')
+# Another program's drop-in beside DefenseClaw's in policy.d.
+$otherDropIn = [IO.Path]::Combine($policyDir, '50-other.json')
 # Siblings that share a prefix with the folders the purge may touch.
 $storeSibling = [IO.Path]::Combine("$store.bak", 'copilot.json')
 $policySibling = [IO.Path]::Combine("$policyDir.bak", '90-defenseclaw.json')
@@ -90,6 +127,7 @@ function New-Fixture {
     [IO.File]::WriteAllText($record, '{"schema_version":1,"connector":"copilot"}')
     [IO.File]::WriteAllText($lock, '')
     [IO.File]::WriteAllText($otherReceipt, '{}')
+    [IO.File]::WriteAllText($otherDropIn, '{"version":1}')
     foreach ($sibling in @($storeSibling, $policySibling)) {
         [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($sibling))
         [IO.File]::WriteAllText($sibling, '{}')
@@ -132,9 +170,9 @@ function Assert-State {
             throw "${Case}: $path was removed"
         }
     }
-    foreach ($path in @($storeSibling, $policySibling)) {
+    foreach ($path in @($storeSibling, $policySibling, $otherDropIn)) {
         if (-not (Test-Path -LiteralPath $path)) {
-            throw "${Case}: $path, a sibling of a folder the purge cleans, was removed"
+            throw "${Case}: $path, which is not DefenseClaw's, was removed"
         }
     }
     $ignoreCase = [StringComparison]::OrdinalIgnoreCase
@@ -196,6 +234,16 @@ try {
         throw "a drop-in queued for the restart did not keep its record with one warning: incomplete=[$($result.Incomplete -join '; ')] warnings=[$($result.Warnings -join '; ')] reboot=$($result.RebootRequired)"
     }
 
+    # A record whose deletion is queued for the restart keeps the store
+    # (it is not empty yet) and is neither incomplete nor a warning.
+    New-Fixture
+    $script:Scheduled = @($record)
+    $result = Invoke-Purge
+    Assert-State 'record queued for the restart' -Gone @($dropIn) -Present @($record, $store, $lock)
+    if ($result.Incomplete.Count -ne 0 -or $result.Warnings.Count -ne 0 -or -not $result.RebootRequired) {
+        throw "a record queued for the restart was not a clean restart deletion: incomplete=[$($result.Incomplete -join '; ')] warnings=[$($result.Warnings -join '; ')] reboot=$($result.RebootRequired)"
+    }
+
     # A record that stays is a warning, not an incomplete purge.
     New-Fixture
     $script:Stuck = @($record)
@@ -210,8 +258,8 @@ try {
     New-Fixture
     $result = Invoke-Purge -LifecycleDirectory ''
     Assert-State 'no lifecycle folder' -Gone @($dropIn) -Present @($record, $store, $lock)
-    if ($result.Incomplete.Count -ne 0 -or $result.Warnings.Count -ne 0) {
-        throw "no lifecycle folder reported incomplete=[$($result.Incomplete -join '; ')] warnings=[$($result.Warnings -join '; ')]"
+    if ($result.Incomplete.Count -ne 0 -or $result.Warnings.Count -ne 0 -or $result.RebootRequired) {
+        throw "no lifecycle folder reported incomplete=[$($result.Incomplete -join '; ')] warnings=[$($result.Warnings -join '; ')] reboot=$($result.RebootRequired)"
     }
 }
 finally {
