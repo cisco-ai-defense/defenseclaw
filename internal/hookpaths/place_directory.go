@@ -5,8 +5,34 @@ package hookpaths
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 )
+
+// parentStepIsText is true where the system reads a parent step in a path as
+// text before it asks the file system: Win32 normalizes a path (and the
+// directory a process starts in) lexically, so proj\lnk\.. is proj whatever
+// lnk is. A variable so a test on another OS can stand in for Windows.
+var parentStepIsText = runtime.GOOS == "windows"
+
+// SetParentStepIsText makes a test on another OS read a parent step as text,
+// as Windows does, and returns the function that restores the OS behaviour.
+func SetParentStepIsText(on bool) (restore func()) {
+	previous := parentStepIsText
+	parentStepIsText = on
+	return func() { parentStepIsText = previous }
+}
+
+// OSCleanedDirectory is a directory as the system reads it when the system
+// reads its parent steps as text (Windows): cleaned lexically. A directory
+// elsewhere, or one without a parent step, is returned as given, because
+// there the file system follows each link before a parent step.
+func OSCleanedDirectory(dir string) string {
+	if parentStepIsText && hasParentStep(dir) {
+		return filepath.Clean(dir)
+	}
+	return dir
+}
 
 // JoinDirectoryText places a directory that may be relative at the folder a
 // call starts in, as text. It is the one way a hook client or a gateway
@@ -45,9 +71,10 @@ func CleanedDirectory(base, dir string) string {
 // without a parent step is only cleaned, so a folder the caller reached
 // through a link keeps the spelling the gateway also sees. A directory the
 // file system cannot resolve (it does not exist, so no call runs in it) is
-// cleaned as text.
+// cleaned as text. Where the system reads a parent step as text (Windows,
+// OSCleanedDirectory) the directory is cleaned as text, a link included.
 func PlaceDirectory(base, dir string) string {
-	text := JoinDirectoryText(base, dir)
+	text := OSCleanedDirectory(JoinDirectoryText(base, dir))
 	if hasParentStep(text) {
 		if real, err := pathEvalSymlinks(text); err == nil {
 			return real
