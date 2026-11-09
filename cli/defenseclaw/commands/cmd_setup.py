@@ -8675,22 +8675,61 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
         )
 
 
+_OPENCLAW_WITNESS_KEY = "defenseclaw._openclaw_file_witness"
+_UNREADABLE = object()
+
+
+class _OpenClawFileWitness:
+    """The bytes of openclaw.json this setup run wrote, held in memory only.
+
+    The registration that writes the file runs inside the gateway service, so
+    the run cannot learn its bytes from the writer. It reads the file around each
+    of its own gateway restarts: when the file holds what the run last saw, the
+    restart's output is this run's and ``written`` becomes those bytes. When the
+    file held anything else at the start of a restart (OpenClaw or you saved it,
+    or another process registered over it), the run lost track of it for good.
+    Nothing on disk can say who wrote a file, so no token or receipt takes part.
+    """
+
+    def __init__(self, path: str, body: bytes | None) -> None:
+        self.path = path
+        self.written: bytes | None | object = body
+        self.lost = False
+
+    def _current(self) -> bytes | None | object:
+        try:
+            return _read_openclaw_config_bytes(self.path)
+        except OSError:
+            return _UNREADABLE
+
+    def before_restart(self) -> None:
+        if not self.lost and self._current() != self.written:
+            self.lost = True
+
+    def after_restart(self) -> None:
+        if not self.lost:
+            self.written = self._current()
+            self.lost = self.written is _UNREADABLE
+
+    def owns(self, body: bytes) -> bool:
+        """True while the file holds exactly the bytes this run wrote."""
+        return not self.lost and isinstance(self.written, bytes) and body == self.written
+
+
 @dataclass(frozen=True)
 class _OpenClawConfigRecord:
     """openclaw.json as it was before setup: the bytes a failed setup puts back (GAP-0973).
 
     ``body`` is None when the file did not exist: a failed setup then removes
-    the file DefenseClaw created.
+    the file DefenseClaw created. ``witness`` is what this run knows of the
+    bytes its own gateway restarts left.
     """
 
     path: str
     body: bytes | None = field(repr=False)
     mode: int
+    witness: _OpenClawFileWitness = field(compare=False, repr=False)
     data_dir: str = ""
-    # The nonce of this run, held in memory and handed to the Go writer through the
-    # hand-off file (_OPENCLAW_RUN_HANDOFF). Only a receipt that carries it was
-    # published by this run; "" (a record not taken by a run) authorizes nothing.
-    run_id: str = field(default="", repr=False)
 
 
 # An exact copy is kept in memory, so a file past this size is refused up
@@ -8731,9 +8770,12 @@ def _capture_openclaw_config_record(
             f"cannot keep an exact copy of {path} before setup ({reason}), so a failed setup could not put it "
             "back. No changes made. Fix the file or its permissions, then run the same setup command again."
         ) from exc
-    data_dir = os.fspath(data_dir) if data_dir else ""
     return _OpenClawConfigRecord(
-        path=path, body=body, mode=mode, data_dir=data_dir, run_id=_announce_openclaw_setup_run(data_dir)
+        path=path,
+        body=body,
+        mode=mode,
+        witness=_OpenClawFileWitness(path, body),
+        data_dir=os.fspath(data_dir) if data_dir else "",
     )
 
 
@@ -8744,45 +8786,10 @@ def _with_openclaw_config_record(
 
 
 # The Go registration (registerPlugin in internal/gateway/connector/openclaw.go)
-# publishes this record under the data directory: the pre-setup digest and, once
-# it has written the file, the digest of the exact bytes it committed. It is the
-# only evidence of what the writer made of this file with this setup's flags,
-# OpenClaw release and plugin schema, so the rollback does not model the writer.
+# keeps a record of the file under the data directory. It says nothing about who
+# wrote the file, so it plays no part in the restore decision; only after a
+# restore is the record of the rolled-back registration dropped (see below).
 _OPENCLAW_WRITER_RECEIPT = ("connector_backups", "openclaw", "openclaw.json.json")
-
-
-# The registration runs inside the gateway service, which a setup cannot pass
-# a value to by environment. The run therefore announces its nonce in a file
-# next to the receipt (internal/gateway/connector/managed_backup.go reads it as
-# managedSetupRun and stores it in the receipt as setup_run). A gateway that does
-# not know the file leaves no nonce, and the rollback then keeps openclaw.json.
-_OPENCLAW_RUN_HANDOFF = ("connector_backups", "openclaw", "setup_run")
-
-
-def _announce_openclaw_setup_run(data_dir: str) -> str:
-    """Start a run: a fresh nonce, published for the writer. Empty when it could not be published."""
-    if not data_dir:
-        return ""
-    run_id = secrets.token_hex(16)
-    path = os.path.join(data_dir, *_OPENCLAW_RUN_HANDOFF)
-    try:
-        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        atomic_write_private_bytes(path, (run_id + "\n").encode("ascii"))
-    except OSError:
-        return ""
-    return run_id
-
-
-def _withdraw_openclaw_setup_run(record: _OpenClawConfigRecord) -> None:
-    """End a run: remove its announcement unless a later run has replaced it."""
-    if not record.run_id:
-        return
-    path = os.path.join(record.data_dir, *_OPENCLAW_RUN_HANDOFF)
-    with suppress(OSError):
-        with open(path, "rb") as handle:
-            announced = handle.read(128).decode("ascii", "replace").strip()
-        if announced == record.run_id:
-            os.unlink(path)
 
 
 def _same_openclaw_file(first: str, second: str) -> bool:
@@ -8790,7 +8797,7 @@ def _same_openclaw_file(first: str, second: str) -> bool:
 
 
 def _openclaw_writer_receipt(record: _OpenClawConfigRecord) -> tuple[str, dict[str, Any]] | None:
-    """The writer's receipt for this openclaw.json (its path and fields), None when there is none."""
+    """The writer's record for this openclaw.json (its path and fields), None when there is none."""
     if not record.data_dir:
         return None
     receipt_path = os.path.join(record.data_dir, *_OPENCLAW_WRITER_RECEIPT)
@@ -8811,30 +8818,12 @@ def _openclaw_writer_receipt(record: _OpenClawConfigRecord) -> tuple[str, dict[s
     return receipt_path, receipt
 
 
-def _openclaw_writer_sha256(record: _OpenClawConfigRecord) -> str | None:
-    """The digest of the bytes the registration of this run committed, None until it has published one.
-
-    The writer keeps the receipt of an earlier setup until a registration
-    reaches it, and a registration that is not this run can replace it. A
-    receipt counts only when it carries the nonce of this run, which the writer
-    stamps from the hand-off file whenever it records a new post hash.
-    """
-    found = _openclaw_writer_receipt(record)
-    if found is None or not record.run_id:
-        return None
-    receipt = found[1]
-    if receipt.get("setup_run") != record.run_id:
-        return None
-    digest = receipt.get("post_sha256")
-    return digest if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest) else None
-
-
 def _discard_openclaw_writer_receipt(record: _OpenClawConfigRecord) -> None:
-    """Drop the receipt of a registration that was rolled back.
+    """Drop the record of a registration that was rolled back.
 
-    The file is back to the bytes the receipt calls pre-setup, so the receipt
+    The file is back to the bytes the record calls pre-setup, so the record
     would otherwise read as drifted at the next setup and switch off the exact
-    restore at uninstall (GAP-0966). A receipt of an earlier setup stays.
+    restore at uninstall (GAP-0966). A record of an earlier setup stays.
     """
     found = _openclaw_writer_receipt(record)
     if found is None:
@@ -8878,9 +8867,9 @@ def _restore_openclaw_config_record(record: _OpenClawConfigRecord) -> str:
     """Put back the saved openclaw.json unless that would lose a change setup did not make.
 
     Returns ``"unchanged"`` (already the saved bytes), ``"restored"`` or
-    ``"kept"`` (the file is not exactly what the registration committed: it was
-    saved by OpenClaw or the operator, deleted, or the registration published no
-    receipt for it, so it is left as it is).
+    ``"kept"`` (the file is not exactly what this run wrote, byte for byte: it
+    was saved by OpenClaw or the operator, registered over by another process,
+    or deleted, or this run never saw its own registration, so it is left as it is).
 
     The rollback restarts DefenseClaw's gateway on the restored configuration,
     and that start registers the plugin again when the restored configuration
@@ -8900,9 +8889,8 @@ def _restore_openclaw_config_record(record: _OpenClawConfigRecord) -> str:
         return "unchanged"
     if state is None:
         return "kept"  # The registration never deletes openclaw.json.
-    committed = _openclaw_writer_sha256(record)
-    if committed is None or hashlib.sha256(state.body).hexdigest() != committed:
-        return "kept"
+    if not record.witness.owns(state.body):
+        return "kept"  # Not byte for byte what this run wrote: nothing says setup may overwrite it.
     fd, scratch = tempfile.mkstemp(prefix=".openclaw-restore-", dir=os.path.dirname(record.path))
     pin = scratch + ".pin"
     pinned = False
@@ -11543,7 +11531,7 @@ def _rollback_failed_connector_application(
     if openclaw_file_kept:
         failure = click.ClickException(
             f"{failure.format_message()} Exception: openclaw.json was saved by OpenClaw or you while setup ran "
-            "(or setup's own write could not be confirmed), so it was left as it is and may still list "
+            "(or it is not exactly what setup wrote), so it was left as it is and may still list "
             "the DefenseClaw plugin; "
             "`defenseclaw setup remove openclaw` removes only DefenseClaw's entries."
         )
@@ -15339,9 +15327,7 @@ def _setup_guardrail_connector_alias(
             prior_snapshot, app.cfg.claw.config_file, getattr(app.cfg, "data_dir", None)
         )
         if prior_snapshot.openclaw_config is not None:
-            click.get_current_context().call_on_close(
-                lambda record=prior_snapshot.openclaw_config: _withdraw_openclaw_setup_run(record)
-            )
+            click.get_current_context().meta[_OPENCLAW_WITNESS_KEY] = prior_snapshot.openclaw_config.witness
     if replaced:
         app.cfg.guardrail.connectors = {}
     if connector == "openclaw":
@@ -17099,6 +17085,9 @@ def _restart_services(
     if wait_for_connector_ready and not teardown and title != _ROLLBACK_RESTART_TITLE and "opencode" in must_converge:
         _preflight_opencode_plugin_folder()
 
+    witness = ctx.meta.get(_OPENCLAW_WITNESS_KEY) if ctx is not None else None
+    if witness is not None:
+        witness.before_restart()
     gateway_restarted = (
         _restart_defense_gateway(
             data_dir,
@@ -17113,6 +17102,8 @@ def _restart_services(
     )
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
+    elif witness is not None:
+        witness.after_restart()
 
     if gateway_restarted and "opencode" in {connector, *(connectors or [])}:
         # OpenCode V2's background server keeps the plugin it loaded (rel-1-0-6
