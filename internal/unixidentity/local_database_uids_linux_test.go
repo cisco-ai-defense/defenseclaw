@@ -8,6 +8,7 @@ package unixidentity
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -97,38 +98,70 @@ func TestLocalDatabaseUIDsFailsOnASourceItCannotRead(t *testing.T) {
 }
 
 // getent exits 2 for an account that is not there and for a directory that
-// cannot answer. DirectoryShowsUIDUnused is nil only when no directory is
-// configured or every one shows it answers.
-func TestDirectoryShowsUIDUnusedNeedsTheDirectoryToAnswer(t *testing.T) {
-	oldNSS := nsswitchPath
-	t.Cleanup(func() { nsswitchPath = oldNSS })
-	dir := t.TempDir()
-	nsswitchPath = filepath.Join(dir, "nsswitch.conf")
+// cannot answer, and the combined lookup stops at the first miss when an NSS
+// action says so. servicesShowUIDUnused asks each passwd service but files
+// for the uid by itself: nil only when none holds it and each shows it
+// answers.
+func TestDirectoryShowsUIDUnusedAsksEveryPasswdServiceByItself(t *testing.T) {
+	const uid = 4321
+	held := commandResult{stdout: []byte("kim:x:4321:4321::/home/kim:/bin/sh\n")}
 	for name, tc := range map[string]struct {
-		content string
-		sssd    bool
-		wantErr bool
+		services []string
+		results  map[string]commandResult
+		errs     map[string]error
+		sssd     bool
+		wantErr  bool
+		wantHeld bool
 	}{
-		"files only":              {content: "passwd: files systemd\n"},
-		"altfiles and files":      {content: "passwd: files altfiles\n"},
-		"sss with no sssd config": {content: "passwd: files sss\n"},
-		"sss configured, stopped": {content: "passwd: files sss\n", sssd: true, wantErr: true},
-		"nis":                     {content: "passwd: files nis\n", wantErr: true},
-		"a module with no check":  {content: "passwd: files aad\n", wantErr: true},
+		"files only":                                     {services: []string{"files"}},
+		"files systemd altfiles, no match":               {services: []string{"files", "systemd", "altfiles"}},
+		"sss with no sssd config":                        {services: []string{"files", "sss"}},
+		"sss configured but stopped":                     {services: []string{"files", "sss"}, sssd: true, wantErr: true},
+		"nis":                                            {services: []string{"files", "nis"}, wantErr: true},
+		"a module with no check":                         {services: []string{"files", "aad"}, wantErr: true},
+		"a service name that is not valid":               {services: []string{"files", "../x"}, wantErr: true},
+		"sss holds the uid after files":                  {services: []string{"files", "sss"}, sssd: true, results: map[string]commandResult{"-s sss passwd 4321": held}, wantErr: true, wantHeld: true},
+		"extrausers holds the uid":                       {services: []string{"files", "extrausers"}, results: map[string]commandResult{"-s extrausers passwd 4321": held}, wantErr: true, wantHeld: true},
+		"db holds the uid":                               {services: []string{"files", "db"}, results: map[string]commandResult{"-s db passwd 4321": held}, wantErr: true, wantHeld: true},
+		"usrfiles holds the uid":                         {services: []string{"files", "usrfiles"}, results: map[string]commandResult{"-s usrfiles passwd 4321": held}, wantErr: true, wantHeld: true},
+		"mymachines holds the uid":                       {services: []string{"files", "mymachines"}, results: map[string]commandResult{"-s mymachines passwd 4321": held}, wantErr: true, wantHeld: true},
+		"a local service that cannot be asked":           {services: []string{"files", "extrausers"}, results: map[string]commandResult{"-s extrausers passwd 4321": {exitCode: 1}}, wantErr: true},
+		"a service lookup that fails":                    {services: []string{"files", "db"}, errs: map[string]error{"-s db passwd 4321": errors.New("timed out")}, wantErr: true},
+		"extrausers, db, usrfiles, mymachines, no match": {services: []string{"files", "extrausers", "db", "usrfiles", "mymachines"}},
 	} {
 		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			oldConf, oldSocket := sssdConfPath, sssdNSSSocket
+			t.Cleanup(func() { sssdConfPath, sssdNSSSocket = oldConf, oldSocket })
+			sssdConfPath, sssdNSSSocket = filepath.Join(dir, "none.conf"), filepath.Join(dir, "no-sssd", "nss")
 			if tc.sssd {
-				sssdConfiguredHost(t)
-			} else {
-				oldConf, oldDir := sssdConfPath, sssdConfDir
-				t.Cleanup(func() { sssdConfPath, sssdConfDir = oldConf, oldDir })
-				sssdConfPath, sssdConfDir = filepath.Join(dir, "none.conf"), filepath.Join(dir, "none.d")
+				writeTestFile(t, sssdConfPath, "[sssd]\ndomains = corp.example.com\n")
 			}
-			writeTestFile(t, nsswitchPath, tc.content)
-			err := DirectoryShowsUIDUnused(context.Background(), 4321)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("DirectoryShowsUIDUnused = %v, wantErr %v", err, tc.wantErr)
+			runner := &fakeRun{results: tc.results, errs: tc.errs}
+			asked := false
+			err := servicesShowUIDUnused(tc.services, uid, func() (*NSSResolver, error) {
+				asked = true
+				return newFakeNSS(runner), nil
+			})
+			if (err != nil) != tc.wantErr || errors.Is(err, ErrUIDHeld) != tc.wantHeld {
+				t.Fatalf("servicesShowUIDUnused = %v, wantErr %v, wantHeld %v", err, tc.wantErr, tc.wantHeld)
+			}
+			if len(tc.services) == 1 && asked {
+				t.Fatal("a host with only files needs no getent")
 			}
 		})
+	}
+}
+
+// The passwd line of nsswitch.conf keeps listing the services an action
+// such as [NOTFOUND=return] sits before, so each is asked.
+func TestPasswdProvidersKeepsTheServicesAnNSSActionStopsBefore(t *testing.T) {
+	oldNSS := nsswitchPath
+	t.Cleanup(func() { nsswitchPath = oldNSS })
+	nsswitchPath = filepath.Join(t.TempDir(), "nsswitch.conf")
+	writeTestFile(t, nsswitchPath, "passwd: files [NOTFOUND=return] sss extrausers\n")
+	got, err := passwdProviders()
+	if err != nil || !reflect.DeepEqual(got, []string{"files", "sss", "extrausers"}) {
+		t.Fatalf("passwdProviders = %v, %v", got, err)
 	}
 }

@@ -196,26 +196,51 @@ func parseLocalPasswdUIDs(content string) []int {
 	return out
 }
 
-// platformDirectoryShowsUIDUnused asks each non-local passwd service of
-// nsswitch.conf to show that it answers (passwdAbsent). A service name
-// DefenseClaw cannot check, or that is not a valid service name, is no proof.
+// platformDirectoryShowsUIDUnused asks every passwd service of nsswitch.conf
+// but files (read by LocalDatabaseUIDs) for uid by itself, getent -s
+// <service>: the combined lookup stops at the first miss when an NSS action
+// such as [NOTFOUND=return] says so, and then never asks the services after
+// it. A service that holds the uid is ErrUIDHeld. One that does not must also
+// show it answers (passwdAbsent: SSSD and winbind online, nslcd completing the
+// search). A service name DefenseClaw cannot check, or that is not a valid
+// service name, is no proof.
 func platformDirectoryShowsUIDUnused(ctx context.Context, uid int) error {
 	services, err := passwdProviders()
 	if err != nil {
 		return err
 	}
 	var resolver *NSSResolver
+	return servicesShowUIDUnused(services, uid, func() (*NSSResolver, error) {
+		if resolver == nil {
+			var err error
+			if resolver, err = NewNSSResolver(ctx); err != nil {
+				return nil, err
+			}
+		}
+		return resolver, nil
+	})
+}
+
+// servicesShowUIDUnused is platformDirectoryShowsUIDUnused for a list of
+// services and the resolver it gets lazily, so a host with only files never
+// needs getent.
+func servicesShowUIDUnused(services []string, uid int, resolverFor func() (*NSSResolver, error)) error {
 	for _, service := range services {
-		if nssLocalPasswdSources[service] {
+		if service == "files" {
 			continue
 		}
 		if !validServiceName(service) {
 			return fmt.Errorf("unixidentity: NSS passwd service %q cannot be checked", service)
 		}
-		if resolver == nil {
-			if resolver, err = NewNSSResolver(ctx); err != nil {
-				return err
-			}
+		resolver, err := resolverFor()
+		if err != nil {
+			return err
+		}
+		switch _, err := resolver.LookupUIDInService(service, uid); {
+		case err == nil:
+			return fmt.Errorf("%w: NSS service %s holds uid %d", ErrUIDHeld, service, uid)
+		case !errors.Is(err, ErrNotFound):
+			return fmt.Errorf("unixidentity: NSS service %s cannot show that uid %d has no account: %w", service, uid, err)
 		}
 		if err := resolver.passwdAbsent(service, strconv.Itoa(uid), true); err != nil {
 			return fmt.Errorf("unixidentity: NSS service %s cannot show that uid %d has no account: %w", service, uid, err)

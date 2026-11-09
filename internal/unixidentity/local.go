@@ -56,12 +56,17 @@ func LocalDatabaseUIDs(ctx context.Context) ([]int, error) {
 	return platformLocalDatabaseUIDs(ctx)
 }
 
-// DirectoryShowsUIDUnused returns nil only when the directory sources of
-// this host can be shown to answer, so that their "no such account" for uid is
-// a fact: no passwd source other than the local ones (Linux nsswitch.conf,
-// the macOS search policy), or each such source confirms it answers (SSSD and
-// winbind online, nslcd completing the search, Open Directory listing no node
-// offline). Any other directory is an error: getent and dscl say "no such
+// ErrUIDHeld is the error DirectoryShowsUIDUnused returns when a directory
+// source holds the uid: the account exists.
+var ErrUIDHeld = errors.New("unixidentity: a passwd service holds the uid")
+
+// DirectoryShowsUIDUnused returns nil only when no source beyond the local
+// files can hold uid. Linux asks every nsswitch.conf passwd service but files
+// for the uid by itself (a combined lookup can stop before a source) and also
+// needs each to show it answers (SSSD and winbind online, nslcd completing the
+// search); macOS needs the search policy to list only local nodes, or Open
+// Directory to list no node offline. A source that holds the uid is
+// ErrUIDHeld. Any other directory is an error: getent and dscl say "no such
 // account" the same way when the directory cannot be reached.
 func DirectoryShowsUIDUnused(ctx context.Context, uid int) error {
 	if ctx == nil {

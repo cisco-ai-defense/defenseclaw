@@ -31,10 +31,11 @@ var openCodePortDirectoryShowsUnused = unixidentity.DirectoryShowsUIDUnused
 // policy and the local node with dscl on macOS) and the local account
 // databases, every uid of them. One source that lists the uid is enough.
 // "No account" needs affirmative evidence from every source: the local
-// databases are all readable and none holds the uid, and the directory
-// sources show they answer (unixidentity.DirectoryShowsUIDUnused), because
-// getent exit 2 and an empty dscl answer are also what a directory that
-// cannot be reached gives. A source that cannot answer is an error, never "no
+// databases are all readable and none holds the uid, and each other source
+// is asked for the uid by itself and shows it answers
+// (unixidentity.DirectoryShowsUIDUnused), because the combined getent lookup
+// can stop at a miss before a source (an NSS action), and getent exit 2 and an
+// empty dscl answer are also what a directory that cannot be reached gives. A source that cannot answer is an error, never "no
 // account": a caller that wants proof the uid is unused treats the error as no
 // proof.
 func (e *Env) UIDHasAccount(ctx context.Context, uid int) (bool, error) {
@@ -80,7 +81,9 @@ func (e *Env) UIDHasAccount(ctx context.Context, uid int) (bool, error) {
 			return true, nil
 		}
 	}
-	if err := openCodePortDirectoryShowsUnused(ctx, uid); err != nil {
+	if err := openCodePortDirectoryShowsUnused(ctx, uid); errors.Is(err, unixidentity.ErrUIDHeld) {
+		return true, nil
+	} else if err != nil {
 		failed = append(failed, "directory: "+err.Error())
 	}
 	if len(failed) > 0 {
