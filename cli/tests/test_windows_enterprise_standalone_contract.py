@@ -921,6 +921,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-forced-uninstall-residue-smoke.ps1",
     "enterprise-standalone-guardian-first-reconcile-wait-smoke.ps1",
     "enterprise-standalone-guardian-readiness-older-gateway-smoke.ps1",
+    "enterprise-standalone-guardian-state-held-smoke.ps1",
     "enterprise-standalone-guardian-state-identity-smoke.ps1",
     "enterprise-standalone-hook-keep-smoke.ps1",
     "enterprise-standalone-hook-swap-launch-smoke.ps1",
