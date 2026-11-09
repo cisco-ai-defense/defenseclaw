@@ -2359,7 +2359,7 @@ func resolveConnector(connector, surface, event string, payload []byte, watch **
 	}
 	// An apply_patch edit names its files in the patch envelope, not in a
 	// redirect. Unknown targets make the map incomplete.
-	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
+	patchTargets, patchKnown := ApplyPatchClientTargets(tool, args, "", cwd, home)
 	if hermesV4A {
 		// The V4A headers, read as Hermes reads them, are the whole target
 		// list; the apply_patch envelope reading does not apply.
