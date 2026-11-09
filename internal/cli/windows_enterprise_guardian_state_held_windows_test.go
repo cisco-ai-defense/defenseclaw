@@ -7,6 +7,7 @@ package cli
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -36,10 +37,11 @@ func TestWindowsEnterpriseGuardianStateHeld(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(authDir, "claude-mcp"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	previousOpen, previousWait, previousHolders := windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateHolders
+	previousOpen, previousWait, previousHolders, previousReadable := windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateHolders, windowsEnterpriseGuardianStateUserReadable
 	t.Cleanup(func() {
-		windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateHolders = previousOpen, previousWait, previousHolders
+		windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateHolders, windowsEnterpriseGuardianStateUserReadable = previousOpen, previousWait, previousHolders, previousReadable
 	})
+	windowsEnterpriseGuardianStateUserReadable = func(string) bool { return false }
 	windowsEnterpriseGuardianStateProbeWait = time.Millisecond
 	windowsEnterpriseGuardianStateHolders = func(path string) []string { return []string{"editor.exe (PID 4242)"} }
 	heldFile := filepath.Join(authDir, "protected_targets.json")
@@ -121,9 +123,10 @@ func TestWindowsEnterpriseGuardianStatePreflightNamesTheHolderAndTheRepair(t *te
 	}
 }
 
-// GAP-0977: every file the guardian and its enumerator publish is in the
-// probe's list, not only the ledger.
-func TestWindowsEnterpriseGuardianStateFilesListsTheWholeClass(t *testing.T) {
+// GAP-0977 and N2: the probe class is the critical files only, and a file a
+// standard account can open is never in it: a user who held one with read
+// sharing would otherwise block every ensure and repair.
+func TestWindowsEnterpriseGuardianStateFilesAreTheCriticalAdministratorOnlyFiles(t *testing.T) {
 	root := t.TempDir()
 	layout := managed.StandaloneLayout{
 		GuardianAuthDir: filepath.Join(root, "hook-guardian-state"),
@@ -131,24 +134,25 @@ func TestWindowsEnterpriseGuardianStateFilesListsTheWholeClass(t *testing.T) {
 		ManifestPath:    filepath.Join(root, "hook-guardian", "targets.yaml"),
 		HookRuntimeDir:  filepath.Join(root, "hook-runtime"),
 	}
-	want := map[string]string{
-		filepath.Join(layout.GuardianAuthDir, "protected_targets.json"):  "ledger",
-		filepath.Join(layout.GuardianAuthDir, "activation.json"):         "activation",
-		filepath.Join(layout.GuardianAuthDir, "removed-connectors.json"): "removed connectors",
-		filepath.Join(layout.GuardianAuthDir, "user-cleanup.json"):       "cleanup ledger",
-		filepath.Join(layout.GuardianAuthDir, "unprotected-agents.json"): "unprotected agents",
-		filepath.Join(layout.DataDir, "hook_guardian_state.json"):        "state",
-		filepath.Join(layout.DataDir, "hook_guardian_notices.json"):      "notices",
-		filepath.Join(layout.DataDir, "hook_guardian_restores.json"):     "restores",
-		filepath.Join(layout.DataDir, windowsOpenCodePortWarningsFile):   "opencode warnings",
-		layout.ManifestPath: "manifest",
-		filepath.Join(filepath.Dir(layout.ManifestPath), "unprotected-agents.json"):     "enumerator unprotected agents",
-		filepath.Join(filepath.Dir(layout.ManifestPath), ".enrollment-groups.json"):     "enrollment group cache",
-		filepath.Join(filepath.Dir(layout.ManifestPath), ".inventory-grants.json"):      "inventory grants",
-		filepath.Join(filepath.Dir(layout.ManifestPath), "opencode-service-ports.json"): "opencode service ports",
-		filepath.Join(layout.HookRuntimeDir, ".defenseclaw-connector-off-roster-codex"): "marker",
+	critical := []string{
+		filepath.Join(layout.GuardianAuthDir, "protected_targets.json"),
+		filepath.Join(layout.GuardianAuthDir, "activation.json"),
+		filepath.Join(layout.GuardianAuthDir, "user-cleanup.json"),
+		filepath.Join(layout.DataDir, "hook_guardian_state.json"),
 	}
-	for path := range want {
+	others := []string{
+		filepath.Join(layout.GuardianAuthDir, "removed-connectors.json"),
+		filepath.Join(layout.GuardianAuthDir, "unprotected-agents.json"),
+		filepath.Join(layout.DataDir, "hook_guardian_startup.json"),
+		filepath.Join(layout.DataDir, "hook_guardian_notices.json"),
+		filepath.Join(layout.DataDir, "hook_guardian_restores.json"),
+		filepath.Join(layout.DataDir, windowsOpenCodePortWarningsFile),
+		layout.ManifestPath,
+		filepath.Join(filepath.Dir(layout.ManifestPath), "unprotected-agents.json"),
+		filepath.Join(filepath.Dir(layout.ManifestPath), ".enrollment-groups.json"),
+		filepath.Join(layout.HookRuntimeDir, ".defenseclaw-connector-off-roster-claudecode"),
+	}
+	for _, path := range append(append([]string{}, critical...), others...) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -156,33 +160,104 @@ func TestWindowsEnterpriseGuardianStateFilesListsTheWholeClass(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// What the class does not include: another file of the data folder, a
-	// folder of the authorization folder, an unrelated marker name.
-	for _, path := range []string{filepath.Join(layout.DataDir, "audit.db"), filepath.Join(layout.HookRuntimeDir, "unrelated.txt")} {
-		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// A lock or a state marker an enumerator holds open on purpose is not in it.
-	for _, name := range []string{"opencode-service-ports.lock", ".state"} {
-		if err := os.WriteFile(filepath.Join(filepath.Dir(layout.ManifestPath), name), []byte("x"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.Mkdir(filepath.Join(layout.GuardianAuthDir, "claude-mcp"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	previous := windowsEnterpriseGuardianStateUserReadable
+	t.Cleanup(func() { windowsEnterpriseGuardianStateUserReadable = previous })
+	windowsEnterpriseGuardianStateUserReadable = func(string) bool { return false }
 	got := map[string]bool{}
 	for _, path := range windowsEnterpriseGuardianStateFiles(layout) {
 		got[path] = true
 	}
-	for path, name := range want {
+	for _, path := range critical {
 		if !got[path] {
-			t.Errorf("%s (%s) is not in the probe's list", path, name)
+			t.Errorf("%s is critical and not in the probe class", path)
 		}
 	}
-	if len(got) != len(want) {
-		t.Errorf("the list holds %d files, want %d: %v", len(got), len(want), got)
+	if len(got) != len(critical) {
+		t.Errorf("the class holds %d files, want the %d critical ones: %v", len(got), len(critical), got)
+	}
+	// A critical file a standard account can read leaves the class.
+	userReadable := critical[0]
+	windowsEnterpriseGuardianStateUserReadable = func(path string) bool { return path == userReadable }
+	for _, path := range windowsEnterpriseGuardianStateFiles(layout) {
+		if path == userReadable {
+			t.Errorf("%s is readable by a standard account and stayed in the class", path)
+		}
+	}
+}
+
+// The user-readable test reads the real access list: Users, Authenticated
+// Users, Everyone or Interactive with read access make a file user-readable.
+func TestWindowsEnterpriseGuardianStateUserReadableReadsTheAccessList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "marker")
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := func(args ...string) {
+		t.Helper()
+		if out, err := exec.Command("icacls.exe", append([]string{path}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("icacls %v: %v: %s", args, err, out)
+		}
+	}
+	run("/inheritance:r", "/grant:r", "*S-1-5-18:F", "*S-1-5-32-544:F")
+	if windowsEnterpriseGuardianStateUserReadable(path) {
+		t.Fatal("a file only SYSTEM and Administrators can open read as user-readable")
+	}
+	run("/grant", "*S-1-5-32-545:R")
+	if !windowsEnterpriseGuardianStateUserReadable(path) {
+		t.Fatal("a file Users can read was not seen as user-readable")
+	}
+	run("/remove:g", "*S-1-5-32-545", "/grant", "*S-1-5-11:R")
+	if !windowsEnterpriseGuardianStateUserReadable(path) {
+		t.Fatal("a file Authenticated Users can read was not seen as user-readable")
+	}
+	run("/remove:g", "*S-1-5-11", "/deny", "*S-1-5-32-545:R")
+	if windowsEnterpriseGuardianStateUserReadable(path) {
+		t.Fatal("a deny entry counted as a read grant")
+	}
+}
+
+// N2: a user-readable file held by a reader of a standard account is not a hold.
+func TestWindowsEnterpriseGuardianStateHeldIgnoresAUserReadableFile(t *testing.T) {
+	root := t.TempDir()
+	layout := managed.StandaloneLayout{GuardianAuthDir: filepath.Join(root, "auth"), DataDir: filepath.Join(root, "runtime")}
+	ledger := filepath.Join(layout.GuardianAuthDir, "protected_targets.json")
+	for _, path := range []string{ledger, filepath.Join(layout.DataDir, "hook_guardian_state.json")} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previousOpen, previousWait, previousReadable := windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateUserReadable
+	t.Cleanup(func() {
+		windowsEnterpriseGuardianStateOpenForDelete, windowsEnterpriseGuardianStateProbeWait, windowsEnterpriseGuardianStateUserReadable = previousOpen, previousWait, previousReadable
+	})
+	windowsEnterpriseGuardianStateProbeWait = time.Millisecond
+	windowsEnterpriseGuardianStateOpenForDelete = func(path string) error {
+		if path == ledger {
+			return windows.ERROR_SHARING_VIOLATION // a reader holds it
+		}
+		return nil
+	}
+	windowsEnterpriseGuardianStateUserReadable = func(path string) bool { return path == ledger }
+	if hold := windowsEnterpriseGuardianStateHeld(layout); hold != nil {
+		t.Fatalf("a file a standard account can read produced a hold: %+v", hold)
+	}
+	previousLayout, previousHeld := windowsEnterpriseHotConfigLayout, windowsEnterpriseGuardianStateHeldNow
+	t.Cleanup(func() {
+		windowsEnterpriseHotConfigLayout, windowsEnterpriseGuardianStateHeldNow = previousLayout, previousHeld
+	})
+	windowsEnterpriseHotConfigLayout = func() (managed.StandaloneLayout, error) { return layout, nil }
+	windowsEnterpriseGuardianStateHeldNow = windowsEnterpriseGuardianStateHeld
+	if err := windowsEnterpriseGuardianStatePreflight(); err != nil {
+		t.Fatalf("the preflight (the 1618 refusal) fired for a user-readable file: %v", err)
+	}
+	result := &enterprisestatus.Result{SecurityComplete: true}
+	result.Enrollment.Accounts = []enterprisestatus.EnrollmentAccount{{Account: "a", Connectors: map[string]string{"codex": "enrolled"}}}
+	applyWindowsEnterpriseGuardianStateHold(result)
+	if !result.SecurityComplete || result.Enrollment.Accounts[0].Connectors["codex"] != "enrolled" || len(result.Warnings) != 0 {
+		t.Fatalf("status changed for a user-readable file: %+v", result)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -61,50 +62,85 @@ var (
 	windowsEnterpriseGuardianStateHolders   = processutil.FileHolders
 )
 
-// windowsEnterpriseGuardianStateFiles lists every file the hook guardian and
-// its enumerator publish and a lifecycle run waits for: the regular files of
-// the authorization folder (the ledger protected_targets.json, activation.json,
-// removed-connectors.json, user-cleanup.json, unprotected-agents.json and the
-// others the guardian writes there), the guardian's records in its data
-// folder (hook_guardian_state.json, hook_guardian_notices.json,
-// hook_guardian_restores.json and the OpenCode port warnings), the files of the
-// enumerator's folder (the manifest targets.yaml, its unprotected-agents record,
-// the enrollment group cache, the inventory grants and the OpenCode service
-// ports), and the off-roster markers of the machine hook runtime folder.
+// windowsEnterpriseGuardianCriticalFiles are the guardian state files whose
+// hold breaks a lifecycle run, measured natively (GAP-0977): the ledger
+// (protected_targets.json) and the activation receipt, the guardian state
+// record, and the cleanup ledger, whose failed save aborts a guardian pass
+// (RevokeUsers returns the error). A hold on any other file the guardian or
+// its enumerator publishes (the removed-connectors record, the startup record,
+// the notices and restores records, the OpenCode port warnings, the
+// enumerator folder, the off-roster markers) did not stop a repair, so it is
+// not gated: gating a file a standard account can open would let that account
+// block every ensure and repair (N2).
+var (
+	windowsEnterpriseGuardianAuthorizationCriticalFiles = []string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, managed.HookGuardianUserCleanupFile}
+	windowsEnterpriseGuardianRuntimeCriticalFiles       = []string{hookGuardianStateFile}
+)
+
+// windowsEnterpriseGuardianStateUserReadable reports whether the access list of
+// path grants read to Users, Authenticated Users, Everyone or Interactive: a
+// standard account can then open it and hold it with read sharing, so it is not
+// a file a lifecycle run may wait for. Replaceable in tests.
+var windowsEnterpriseGuardianStateUserReadable = func(path string) bool {
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	acl, _, err := descriptor.DACL()
+	if err != nil {
+		return false
+	}
+	if acl == nil {
+		return true // no access list: everyone
+	}
+	var readers []*windows.SID
+	for _, kind := range []windows.WELL_KNOWN_SID_TYPE{
+		windows.WinBuiltinUsersSid, windows.WinAuthenticatedUserSid, windows.WinWorldSid, windows.WinInteractiveSid,
+	} {
+		if sid, err := windows.CreateWellKnownSid(kind); err == nil {
+			readers = append(readers, sid)
+		}
+	}
+	const readMask = windows.FILE_READ_DATA | windows.GENERIC_READ | windows.GENERIC_ALL
+	for index := uint32(0); index < uint32(acl.AceCount); index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, index, &ace); err != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			continue
+		}
+		if ace.Mask&readMask == 0 {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		for _, reader := range readers {
+			if windows.EqualSid(sid, reader) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// windowsEnterpriseGuardianStateFiles lists the critical guardian state files
+// that exist and that no standard account can open.
 func windowsEnterpriseGuardianStateFiles(layout managed.StandaloneLayout) []string {
 	var files []string
-	add := func(dir, pattern string) {
-		matches, err := filepath.Glob(filepath.Join(dir, pattern))
-		if err != nil {
+	add := func(dir string, names []string) {
+		if dir == "" {
 			return
 		}
-		for _, match := range matches {
-			// A lock or a service's own state marker is held open on
-			// purpose while a service runs.
-			if strings.HasSuffix(match, ".lock") || strings.HasSuffix(match, ".state") {
+		for _, name := range names {
+			path := filepath.Join(dir, name)
+			if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
 				continue
 			}
-			if info, err := os.Lstat(match); err == nil && info.Mode().IsRegular() {
-				files = append(files, match)
+			if windowsEnterpriseGuardianStateUserReadable(path) {
+				continue
 			}
+			files = append(files, path)
 		}
 	}
-	if layout.GuardianAuthDir != "" {
-		add(layout.GuardianAuthDir, "*")
-	}
-	if layout.DataDir != "" {
-		add(layout.DataDir, "hook_guardian_*.json")
-		add(layout.DataDir, windowsOpenCodePortWarningsFile)
-	}
-	if layout.ManifestPath != "" {
-		// The enumerator's folder: the manifest (targets.yaml), its
-		// unprotected-agents record, its enrollment group cache and inventory
-		// grants, and the OpenCode service ports.
-		add(filepath.Dir(layout.ManifestPath), "*")
-	}
-	if layout.HookRuntimeDir != "" {
-		add(layout.HookRuntimeDir, ".defenseclaw-connector-off-roster-*")
-	}
+	add(layout.GuardianAuthDir, windowsEnterpriseGuardianAuthorizationCriticalFiles)
+	add(layout.DataDir, windowsEnterpriseGuardianRuntimeCriticalFiles)
 	return files
 }
 

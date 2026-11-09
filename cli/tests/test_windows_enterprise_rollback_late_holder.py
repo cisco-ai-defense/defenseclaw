@@ -245,12 +245,23 @@ def test_a_guardian_state_hold_is_found_before_anything_stops() -> None:
     gate = transaction.index("Assert-DefenseClawGuardianStateNotHeld -Layout $Layout")
     assert gate < transaction.index("$codexReadHolds = $null")
     assert gate < transaction.index("New-DefenseClawDirectory -Path $directory")
-    assert "Test-DefenseClawStandaloneProfile" in transaction[gate - 400 : gate]
+    condition = "if ((Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive -and -not $SkipRedactionKeySnapshot) {"
+    assert transaction.rindex(condition, 0, gate) > transaction.index("$codexReadHolds = $null") - 1200
     assert "-Phase Gate" in _function_body(text, "Assert-DefenseClawGuardianStateNotHeld")
-    # The class: the authorization folder, the guardian records, the enumerator folder.
+    # The class is the critical files only (the others did not stop a repair when held),
+    # and never a file a standard account can open (N2). The CLI list is the same four.
     files = _function_body(text, "Get-DefenseClawGuardianStateFiles")
-    for needle in ("AuthorizationDirectory", "hook_guardian_*.json", "ManifestPath", "'*.lock'", "'.state'"):
+    for needle in ("'protected_targets.json', 'activation.json', 'user-cleanup.json'", "hook_guardian_state.json", "Test-DefenseClawGuardianStateFileUserReadable"):
         assert needle in files, needle
+    for gone in ("hook_guardian_*.json", "ManifestPath", "-Filter", "off-roster"):
+        assert gone not in files, gone
+    go = (ROOT / "internal" / "cli" / "windows_enterprise_guardian_state_held_windows.go").read_text(encoding="utf-8")
+    assert "[]string{managed.HookGuardianAuthorizationFile, hookGuardianActivationFile, managed.HookGuardianUserCleanupFile}" in go
+    assert "[]string{hookGuardianStateFile}" in go and "windowsEnterpriseGuardianStateUserReadable(path)" in go
+    readable = _function_body(text, "Test-DefenseClawGuardianStateFileUserReadable")
+    for sid in ("S-1-5-32-545", "S-1-5-11", "S-1-1-0", "S-1-5-4"):
+        assert sid in readable, sid
+    # S-H2: an uninstall or purge transaction is not held up by it.
     hold = _function_body(text, "Get-DefenseClawGuardianStateHold")
     assert "Test-DefenseClawStandaloneProfile" in hold and "Test-DefenseClawFileDeleteBlocked" in hold
 
@@ -278,3 +289,40 @@ def test_a_rollback_defers_the_guardian_proof_for_a_guardian_state_hold() -> Non
     assert "the hook guardian" in _function_body(text, "Get-DefenseClawHeldMessagePath")
     # Fail closed kept: Secure Client has no such deferral, and the held run is pending, not covered.
     assert "-Code 'guardian_state_held'" in _function_body(text, "New-DefenseClawGuardianStateHeldMessage")
+
+
+def test_a_holder_that_arrives_during_the_rollback_proof_is_resolved_not_thrown() -> None:
+    text = _text()
+    start = _function_body(text, "Start-DefenseClawTransactionServices")
+    wait = start.index("Wait-DefenseClawFreshGuardianReconcile")
+    resolve = start.index("Resolve-DefenseClawRollbackLateGuardianHold")
+    assert wait < resolve < start.index("Test-DefenseClawRecoveryActivationDeferral")
+    body = _function_body(text, "Resolve-DefenseClawRollbackLateGuardianHold")
+    # Standalone only, the held code only, and a deferral that actually took hold.
+    assert body.index("if (-not (Test-DefenseClawStandaloneProfile)") < body.rindex("Set-DefenseClawRollbackGuardianStateDeferral")
+    assert "'^guardian_state_held: '" in body and "Test-DefenseClawRollbackCoverageDeferred" in body
+    assert body.rindex("return $true") > body.index("Start-DefenseClawService -Name $GuardianServiceName")
+
+
+def test_secure_client_sees_none_of_the_guardian_state_hold_inserts() -> None:
+    """S-H4: the three shared functions that gained an insert keep Secure Client as it was."""
+    text = _text()
+    # New-DefenseClawTransaction: the gate sits behind the standalone test.
+    transaction = _function_body(text, "New-DefenseClawTransaction")
+    gate = transaction.index("Assert-DefenseClawGuardianStateNotHeld -Layout $Layout")
+    assert "if ((Test-DefenseClawStandaloneProfile) -and $PriorDeploymentActive -and -not $SkipRedactionKeySnapshot) {" in transaction[:gate]
+    # Wait-DefenseClawFreshGuardianReconcile: the hold lookup answers $null off the standalone profile.
+    wait = _function_body(text, "Wait-DefenseClawFreshGuardianReconcile")
+    assert wait.count("Get-DefenseClawGuardianStateHold") == 1
+    hold = _function_body(text, "Get-DefenseClawGuardianStateHold")
+    assert hold.index("Test-DefenseClawStandaloneProfile") < hold.index("Get-DefenseClawGuardianStateFiles")
+    assert "return $null" in hold[: hold.index("Get-DefenseClawGuardianStateFiles")]
+    # Start-DefenseClawTransactionServices: both inserts are standalone-only.
+    start = _function_body(text, "Start-DefenseClawTransactionServices")
+    assert "if (Test-DefenseClawStandaloneProfile) {\n                # GAP-0977" in start
+    assert "Resolve-DefenseClawRollbackLateGuardianHold" in start
+    assert "Test-DefenseClawStandaloneProfile" in _function_body(text, "Resolve-DefenseClawRollbackLateGuardianHold")
+    assert "Test-DefenseClawStandaloneProfile" in _function_body(text, "Set-DefenseClawRollbackGuardianStateDeferral")
+    # Nothing else in the module calls the new functions.
+    for name in ("Assert-DefenseClawGuardianStateNotHeld", "Set-DefenseClawRollbackGuardianStateDeferral", "Resolve-DefenseClawRollbackLateGuardianHold"):
+        assert len(re.findall(re.escape(name) + r" -", text)) <= 2, name

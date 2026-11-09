@@ -28,7 +28,8 @@ try {
         $authorization = [IO.Path]::Combine($Scratch, 'hook-guardian-state')
         $runtime = [IO.Path]::Combine($Scratch, 'runtime')
         $enumerator = [IO.Path]::Combine($Scratch, 'hook-guardian')
-        foreach ($directory in @($authorization, $runtime, $enumerator)) { [void][IO.Directory]::CreateDirectory($directory) }
+        $markers = [IO.Path]::Combine($Scratch, 'hook-runtime')
+        foreach ($directory in @($authorization, $runtime, $enumerator, $markers)) { [void][IO.Directory]::CreateDirectory($directory) }
         $layout = @{
             AuthorizationDirectory = $authorization
             RuntimeDirectory       = $runtime
@@ -38,24 +39,31 @@ try {
         $class = @(
             [IO.Path]::Combine($authorization, 'protected_targets.json'),
             [IO.Path]::Combine($authorization, 'activation.json'),
-            [IO.Path]::Combine($authorization, 'removed-connectors.json'),
             [IO.Path]::Combine($authorization, 'user-cleanup.json'),
+            [IO.Path]::Combine($runtime, 'hook_guardian_state.json')
+        )
+        # Published too, but a hold on them did not stop a repair, or a standard
+        # account can open them: not gated.
+        $notGated = @(
+            [IO.Path]::Combine($authorization, 'removed-connectors.json'),
             [IO.Path]::Combine($authorization, 'unprotected-agents.json'),
-            [IO.Path]::Combine($runtime, 'hook_guardian_state.json'),
             [IO.Path]::Combine($runtime, 'hook_guardian_startup.json'),
             [IO.Path]::Combine($runtime, 'hook_guardian_notices.json'),
             [IO.Path]::Combine($runtime, 'hook_guardian_restores.json'),
             [IO.Path]::Combine($enumerator, 'targets.yaml'),
             [IO.Path]::Combine($enumerator, 'unprotected-agents.json'),
             [IO.Path]::Combine($enumerator, '.enrollment-groups.json'),
-            [IO.Path]::Combine($enumerator, '.inventory-grants.json'),
-            [IO.Path]::Combine($enumerator, 'opencode-service-ports.json')
+            [IO.Path]::Combine($markers, '.defenseclaw-connector-off-roster-claudecode')
         )
-        foreach ($path in $class) { [IO.File]::WriteAllText($path, '{}') }
-        # Held open on purpose, and not the guardian's: audit data in the runtime folder.
+        foreach ($path in @($class + $notGated)) { [IO.File]::WriteAllText($path, '{}') }
+        # Held open on purpose, and not the guardian: audit data in the runtime folder.
         [IO.File]::WriteAllText([IO.Path]::Combine($enumerator, 'opencode-service-ports.lock'), 'x')
-        [IO.File]::WriteAllText([IO.Path]::Combine($enumerator, '.state'), 'x')
         [IO.File]::WriteAllText([IO.Path]::Combine($runtime, 'audit.db'), 'x')
+        # What the guardian publishes is for administrators; the scratch folder
+        # inherits the profile access list, so make it so.
+        foreach ($path in @($class + $notGated)) {
+            & icacls.exe $path /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' "*$([Security.Principal.WindowsIdentity]::GetCurrent().User.Value):F" | Out-Null
+        }
 
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         try {
@@ -103,6 +111,46 @@ try {
                 Set-DefenseClawRollbackGuardianStateDeferral -Layout $layout
                 if (Test-DefenseClawRollbackCoverageDeferred) { throw "a rollback deferred with nothing held (after $name)" }
             }
+            # A published file that is not critical is not gated, held or not.
+            foreach ($path in $notGated) {
+                $other = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                try { if ($null -ne (Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2)) { throw "a hold on the non-critical $([IO.Path]::GetFileName($path)) was gated" } }
+                finally { $other.Dispose() }
+            }
+            # N2: a critical file a standard account can read is not gated either:
+            # that account could hold it and block every ensure and repair.
+            $ledger = $class[0]
+            & icacls.exe $ledger /grant '*S-1-5-32-545:R' | Out-Null
+            $reader = [IO.FileStream]::new($ledger, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try {
+                if (@(Get-DefenseClawGuardianStateFiles -Layout $layout) -contains $ledger) { throw 'a user-readable ledger stayed in the class' }
+                if ($null -ne (Get-DefenseClawGuardianStateHold -Layout $layout -Probes 2)) { throw 'a user-readable file held by a reader was reported as a hold' }
+                $gate = ''
+                try { Assert-DefenseClawGuardianStateNotHeld -Layout $layout -TimeoutSeconds 1 } catch { $gate = $_.Exception.Message }
+                if ($gate -ne '') { throw "the gate refused over a user-readable file: $gate" }
+            }
+            finally { $reader.Dispose(); & icacls.exe $ledger /remove:g '*S-1-5-32-545' | Out-Null }
+            # S-H3: a holder that arrives during the rollback proof (after the check
+            # before it) is resolved: the proof is deferred and the run continues.
+            $late = [IO.FileStream]::new($class[1], [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try {
+                Clear-DefenseClawRollbackDeferredHolds
+                $failure = $null
+                try { throw ('guardian_state_held: x has ' + $class[1] + ' open without delete sharing, so the hook guardian could not publish fresh required coverage') } catch { $failure = $_ }
+                # The service name does not exist: the best-effort start fails and is logged, as on a guardian that does not stay up.
+                if (-not (Resolve-DefenseClawRollbackLateGuardianHold -Layout $layout -Failure $failure -GuardianServiceName 'DcSmokeNoSuchGuardian')) { throw 'a late holder was not resolved' }
+                if (-not (Test-DefenseClawRollbackCoverageDeferred)) { throw 'the late holder did not defer the proof' }
+                $ended = ''
+                try { Assert-DefenseClawRollbackHoldsResolved } catch { $ended = $_.Exception.Message }
+                if (-not $ended.StartsWith('guardian_state_held: ') -or -not $ended.Contains($class[1])) { throw "the late holder ended '$ended'" }
+                # Another failure is not resolved, and neither is a holder that has gone.
+                $other = $null
+                try { throw 'some other failure' } catch { $other = $_ }
+                if (Resolve-DefenseClawRollbackLateGuardianHold -Layout $layout -Failure $other -GuardianServiceName 'DcSmokeNoSuchGuardian') { throw 'another failure was resolved as a late holder' }
+            }
+            finally { $late.Dispose() }
+            Clear-DefenseClawRollbackDeferredHolds
+            if (Resolve-DefenseClawRollbackLateGuardianHold -Layout $layout -Failure $failure -GuardianServiceName 'DcSmokeNoSuchGuardian') { throw 'a holder that has gone was resolved' }
             # Files outside the class do not count; a lock the enumerator holds on purpose neither.
             $auditHold = [IO.FileStream]::new([IO.Path]::Combine($runtime, 'audit.db'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
             $lockHold = [IO.FileStream]::new([IO.Path]::Combine($enumerator, 'opencode-service-ports.lock'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
