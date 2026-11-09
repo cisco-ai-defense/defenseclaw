@@ -428,6 +428,7 @@ try {
             [IO.File]::WriteAllText($glayout.AuthorizationLedgerPath, ('{' + "`n" + '  "updated_at": "' + $Authorization + '"' + "`n" + '}'))
             [IO.File]::WriteAllText([IO.Path]::Combine($run, 'hook_guardian_state.json'), ('{"version": 1, "updated_at": "' + $StateStamp + '"}'))
         }
+        Add-Type -AssemblyName System.ServiceProcess
         $script:GuardianRepublishWaitSeconds = 3
         $script:GuardianRepublishPollSeconds = 1
         $script:guardianStatus = [ServiceProcess.ServiceControllerStatus]::Running
