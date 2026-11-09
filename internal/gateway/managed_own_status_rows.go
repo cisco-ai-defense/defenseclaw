@@ -4,8 +4,11 @@
 package gateway
 
 import (
+	"runtime"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Every connector row of an own-status answer that is not "protected" says
@@ -151,16 +154,24 @@ const (
 
 const (
 	ownExcludedBase = "your account is listed in enterprise.enrollment.exclude_users: excluded from enrollment"
-	// ownExcludedNextStep names the administrator rule and the command that
-	// shows it.
-	ownExcludedNextStep = "Ask IT to remove your account from enterprise.enrollment.exclude_users; defenseclaw-gateway enterprise policy show --user <account> shows the rule"
 )
+
+// ownExcludedNextStep names the administrator rule and the command that shows
+// it. Setup puts no DefenseClaw command on the PATH of a Windows computer, so
+// there the command is the managed CLI by its path, in PowerShell (GAP-0979).
+func ownExcludedNextStep() string {
+	command := "defenseclaw-gateway enterprise policy show --user <account>"
+	if runtime.GOOS == "windows" {
+		command = managed.WindowsAdminCommand("enterprise", "policy", "show", "--user", "<account>")
+	}
+	return "Ask IT to remove your account from enterprise.enrollment.exclude_users; " + command + " shows the rule"
+}
 
 // ownExcludedCause is the reason of an excluded row: the exclusion, and what
 // the status can prove about the calls. The state stays excluded whatever the
 // inspection is; the reason is in its own field.
 func ownExcludedCause(inspection ownInspection) ownCause {
-	cause := ownCause{"excluded_users", ownExcludedBase, ownExcludedNextStep}
+	cause := ownCause{"excluded_users", ownExcludedBase, ownExcludedNextStep()}
 	switch inspection {
 	case ownInspectionNone:
 		cause.reason += "; DefenseClaw does not inspect your calls"
@@ -169,7 +180,7 @@ func ownExcludedCause(inspection ownInspection) ownCause {
 		cause.reason += "; the machine policy still inspects your calls"
 	default:
 		cause.code = "excluded_users_unverified"
-		cause.reason += "; run defenseclaw-managed status as an administrator to see what still inspects calls"
+		cause.reason += "; to see what still inspects calls, an administrator runs " + managed.AdminStatusHint(runtime.GOOS)
 	}
 	return cause
 }

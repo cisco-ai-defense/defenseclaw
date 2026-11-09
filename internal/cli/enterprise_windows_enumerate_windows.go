@@ -395,6 +395,7 @@ func runEnterpriseWindowsEnumerateSingleCycle(
 	}
 	if standalone {
 		revokeEnterpriseWindowsExcludedInventoryRead(stderr, excluded)
+		publishEnterpriseWindowsExcludedAccountMarkers(stderr, excluded)
 	}
 	elapsed := time.Since(start)
 
@@ -621,6 +622,26 @@ func revokeEnterpriseWindowsExcludedInventoryRead(stderr io.Writer, excluded []e
 		state.sids[strings.ToUpper(strings.TrimSpace(target.SID))] = true
 	}
 	fmt.Fprintf(stderr, "[hook-enumerator] inventory-DACL revoked on %d excluded profile(s)\n", len(pending.Targets))
+}
+
+// enterpriseWindowsExcludedAccountMarkerPublisher is replaceable in tests.
+var enterpriseWindowsExcludedAccountMarkerPublisher = enterprisehooks.PublishWindowsExcludedAccountMarkers
+
+// publishEnterpriseWindowsExcludedAccountMarkers tells the machine-wide hook
+// which accounts the administrator excludes from enrollment, so the hook lets
+// their calls pass instead of refusing them as accounts whose enrollment is
+// pending. It publishes the SIDs this cycle judged excluded and removes the
+// marker of every other account, so an account taken off exclude_users is
+// governed again within the cycle. A failure is logged; the hook then keeps
+// its existing refusal for that account, and the next cycle publishes again.
+func publishEnterpriseWindowsExcludedAccountMarkers(stderr io.Writer, excluded []enterprisehooks.ManifestTarget) {
+	sids := make([]string, 0, len(excluded))
+	for _, target := range excluded {
+		sids = append(sids, target.SID)
+	}
+	if err := enterpriseWindowsExcludedAccountMarkerPublisher(sids); err != nil {
+		fmt.Fprintf(stderr, "[hook-enumerator] WARN could not publish the excluded-account markers: %v\n", err)
+	}
 }
 
 // publishEnterpriseWindowsManifestIdentity refreshes signed-in token groups
