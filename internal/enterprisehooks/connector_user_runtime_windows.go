@@ -73,7 +73,8 @@ func windowsConnectorUserRuntimeLeaves(name string) ([]string, error) {
 // RemoveWindowsConnectorUserRuntime only where there is something to remove
 // (GAP-0964). The removal itself pins the folder and leaves a link as found, so
 // a link planted for this answer changes nothing but the question. An
-// unreadable folder says false.
+// unreadable folder, and a folder that holds a per-user DefenseClaw install
+// (which the removal leaves as found), say false.
 func WindowsConnectorUserRuntimeLeftover(rawHome, rawDataDir, connectorName string) bool {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	leaves, err := windowsConnectorUserRuntimeLeaves(name)
@@ -86,6 +87,11 @@ func WindowsConnectorUserRuntimeLeftover(rawHome, rawDataDir, connectorName stri
 	}
 	dataDir, err := resolveWindowsEnterpriseDataDir(home, rawDataDir)
 	if err != nil {
+		return false
+	}
+	// A folder that holds a per-user DefenseClaw install is left as found by
+	// the removal, so asking for it would only record a failure for ever.
+	if windowsPerUserInstallLeftover(dataDir) != "" {
 		return false
 	}
 	for _, leaf := range leaves {

@@ -374,7 +374,7 @@ func TestWindowsConnectorUserRuntimeLeftoverSeesOnlyTheConnectorsOwnFiles(t *tes
 	}
 	writeConnectorRuntimeFixture(t, dataDir,
 		"hooks/.hook-claudecode.token", "hooks/claude-code-hook.sh", "hooks/_hardening.sh", "hooks/inspect-tool.sh",
-		"hooks/.hookcfg", "hooks/.hookcfg.lock", "hooks/.managed-runtime-cursorish-0123abcd.json", "hook_contract_lock.json", "config.yaml")
+		"hooks/.hookcfg", "hooks/.hookcfg.lock", "hooks/.managed-runtime-cursorish-0123abcd.json", "hook_contract_lock.json", "notes.txt")
 	if WindowsConnectorUserRuntimeLeftover(home, "", "cursor") || WindowsConnectorUserRuntimeLeftover(home, "", "codex") {
 		t.Fatal("another connector's files, the shared scripts or the account's own files counted as a leftover")
 	}
@@ -394,6 +394,21 @@ func TestWindowsConnectorUserRuntimeLeftoverSeesOnlyTheConnectorsOwnFiles(t *tes
 		if WindowsConnectorUserRuntimeLeftover(home, "", name) {
 			t.Fatalf("%q is not a machine-scope connector and reported a leftover", name)
 		}
+	}
+	// A per-user DefenseClaw install in the folder is left as found by the
+	// removal, so it is not offered for it.
+	writeConnectorRuntimeFixture(t, dataDir, "hooks/.hook-cursor.token", "config.yaml")
+	if WindowsConnectorUserRuntimeLeftover(home, "", "cursor") {
+		t.Fatal("a folder that holds a per-user install was offered for the removal")
+	}
+	if err := os.Remove(filepath.Join(dataDir, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if !WindowsConnectorUserRuntimeLeftover(home, "", "cursor") {
+		t.Fatal("the Cursor token was not seen once the per-user install was gone")
+	}
+	if err := os.Remove(filepath.Join(dataDir, "hooks", ".hook-cursor.token")); err != nil {
+		t.Fatal(err)
 	}
 	if WindowsConnectorUserRuntimeLeftover("relative", "", "cursor") || WindowsConnectorUserRuntimeLeftover(home, filepath.Join(t.TempDir(), "elsewhere"), "cursor") {
 		t.Fatal("a relative home or a data folder outside the profile reported a leftover")
