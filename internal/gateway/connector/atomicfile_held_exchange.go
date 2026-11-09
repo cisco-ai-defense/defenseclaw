@@ -31,7 +31,7 @@ var errHeldConversionNeedsExchange = errors.New("this file system cannot replace
 // plain replacement for a conversion, which is a check followed by a rename and
 // always leaves an instant for a save to be lost in. tmpPath is gone on return,
 // except when a save could not be put back and the error names it.
-func publishHeldConversion(tmpPath, writePath, found string, data []byte) error {
+func publishHeldConversion(tmpPath, writePath, found string, data []byte, _ conversionPublish) error {
 	err := atomicExchange(tmpPath, writePath)
 	switch {
 	case err == nil:
