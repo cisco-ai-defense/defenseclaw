@@ -12,20 +12,16 @@ import (
 // gives that file. replaced is the text an edit tool removes; it is empty for
 // a whole-file write. whole is set when added is the complete new content of
 // the file (a whole-file write or a patch that adds the file), so a proof that
-// needs the final document may rely on it and not on a fragment. steps lists
-// the separate replacements of a multi-step edit or the separate hunks of a
-// patch, in order, for a proof that must not read pieces from different places
-// of the file as one text; added and replaced are those pieces joined.
+// needs the final document may rely on it and not on a fragment. after lists,
+// for a multi-step edit or a patch, the text each replacement or hunk leaves in
+// place (a replacement's new text; a hunk's context and added lines), in
+// order, for a proof that judges the text an edit leaves and must not read
+// pieces from different places of the file as one text; added and replaced are
+// the added and removed pieces joined.
 type nativeFileWrite struct {
 	target, added, replaced string
 	whole                   bool
-	steps                   []nativeEditStep
-}
-
-// nativeEditStep is one replacement of an edit: the text it adds and the text
-// it replaces.
-type nativeEditStep struct {
-	added, replaced string
+	after                   []string
 }
 
 // The argument names the reviewed whole-file write tools use for the target and
@@ -47,9 +43,8 @@ func nativeFileWrites(tool string, args json.RawMessage) []nativeFileWrite {
 	for index := range writes {
 		writes[index].added = boundedNativeText(writes[index].added)
 		writes[index].replaced = boundedNativeText(writes[index].replaced)
-		for step := range writes[index].steps {
-			writes[index].steps[step].added = boundedNativeText(writes[index].steps[step].added)
-			writes[index].steps[step].replaced = boundedNativeText(writes[index].steps[step].replaced)
+		for piece := range writes[index].after {
+			writes[index].after[piece] = boundedNativeText(writes[index].after[piece])
 		}
 	}
 	return writes
@@ -221,7 +216,7 @@ func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
 		return nil
 	}
 	var added, replaced []string
-	var steps []nativeEditStep
+	var after []string
 	for _, value := range edits {
 		item, ok := value.(map[string]any)
 		if !ok {
@@ -233,18 +228,18 @@ func nativeMultiEditWrites(object map[string]any) []nativeFileWrite {
 			return nil
 		}
 		added, replaced = append(added, newText), append(replaced, oldText)
-		steps = append(steps, nativeEditStep{added: newText, replaced: oldText})
+		after = append(after, newText)
 	}
 	return []nativeFileWrite{{
 		target: target, added: strings.Join(added, "\n"), replaced: strings.Join(replaced, "\n"),
-		steps: steps,
+		after: after,
 	}}
 }
 
 // nativePatchWrites reads the added and removed lines of each file of one
-// apply_patch envelope given to the native tool, joined and per hunk (an @@
-// line starts the next hunk). A moved file's new path receives the same
-// hunks.
+// apply_patch envelope given to the native tool, joined, and the text each hunk
+// leaves in place (an @@ line starts the next hunk). A moved file's new path
+// receives the same hunks.
 func nativePatchWrites(object map[string]any) []nativeFileWrite {
 	if len(object) != 1 {
 		return nil
@@ -278,32 +273,35 @@ func nativePatchEnvelopeWrites(text string) []nativeFileWrite {
 			current = nil
 		case strings.HasPrefix(line, "@@"):
 			for _, index := range current {
-				if steps := writes[index].steps; len(steps) > 0 && steps[len(steps)-1] != (nativeEditStep{}) {
-					writes[index].steps = append(steps, nativeEditStep{})
+				if after := writes[index].after; len(after) > 0 && after[len(after)-1] != "" {
+					writes[index].after = append(after, "")
 				}
 			}
 		case strings.HasPrefix(line, "+"):
 			for _, index := range current {
 				writes[index].added += line[1:] + "\n"
-				writes[index].lastStep().added += line[1:] + "\n"
+				*writes[index].lastHunk() += line[1:] + "\n"
 			}
 		case strings.HasPrefix(line, "-"):
 			for _, index := range current {
 				writes[index].replaced += line[1:] + "\n"
-				writes[index].lastStep().replaced += line[1:] + "\n"
+			}
+		case strings.HasPrefix(line, " "), line == "":
+			for _, index := range current {
+				*writes[index].lastHunk() += strings.TrimPrefix(line, " ") + "\n"
 			}
 		}
 	}
 	return writes
 }
 
-// lastStep is the step the next changed line belongs to, started when the
-// write has none.
-func (write *nativeFileWrite) lastStep() *nativeEditStep {
-	if len(write.steps) == 0 {
-		write.steps = append(write.steps, nativeEditStep{})
+// lastHunk is the text of the hunk the next context or added line belongs to,
+// started when the write has none.
+func (write *nativeFileWrite) lastHunk() *string {
+	if len(write.after) == 0 {
+		write.after = append(write.after, "")
 	}
-	return &write.steps[len(write.steps)-1]
+	return &write.after[len(write.after)-1]
 }
 
 // nativeStringField returns the string value of the one key of keys that the
