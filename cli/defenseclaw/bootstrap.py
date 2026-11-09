@@ -1306,10 +1306,10 @@ def _run_first_run_locked(options: FirstRunOptions, locks: InitLocks) -> FirstRu
                     "Bootstrap",
                     "fail",
                     e,
-                    # A device key gone with its provenance files is never replaced by init itself:
-                    # the message names the manual steps, after which init runs again.
+                    # A device key gone with its provenance files, or one that holds no usable key, is never
+                    # replaced by init itself: the message names the manual steps, after which init runs again.
                     options.rerun_command
-                    if "continuity-evidence-present" in e
+                    if "continuity-evidence-present" in e or "device-key-payload-invalid" in e
                     else "defenseclaw doctor --fix --dry-run",
                 )
                 for e in bootstrap.errors

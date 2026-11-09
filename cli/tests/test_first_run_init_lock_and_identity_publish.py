@@ -442,3 +442,103 @@ def test_init_has_no_identity_repair_option():
 
     assert result.exit_code == 2
     assert "No such option" in result.output
+
+
+# --- an empty or cut-short key is not a finished identity ------------------------------------------
+
+_SHORT_KEYS = {"empty": b"", "cut-short": b"-----BEGIN ED25519 PRIVATE KEY-----\nMC4CAQAwBQYDK2Vw"}
+
+
+def _home_with_short_key(tmp_path, monkeypatch, shape: str) -> Path:
+    """Leave what a creation stopped during the key write leaves: the provenance files and a short key."""
+
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _leftover_secret_and_sentinel(home)
+    (home / "device.key").write_bytes(_SHORT_KEYS[shape])
+    protect_private_file(str(home / "device.key"))
+    return home
+
+
+def test_a_finished_identity_is_accepted_by_a_second_init(tmp_path, monkeypatch):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    assert run_first_run(_options()).status != "needs_attention"
+    before = _identity_files(home)
+
+    assert run_first_run(_options()).status != "needs_attention"
+    assert _identity_files(home) == before
+    assert _valid(home)
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("shape", sorted(_SHORT_KEYS))
+def test_an_empty_or_cut_short_key_stops_init_with_the_manual_steps_and_changes_no_identity_file(
+    tmp_path, monkeypatch, plain, shape
+):
+    home = _home_with_short_key(tmp_path, monkeypatch, shape)
+    before = _identity_files(home)
+
+    if plain:
+        result = _plain_init()
+        assert result.exit_code != 0
+        output = result.output
+    else:
+        report = run_first_run(_options())
+        assert report.status == "needs_attention"
+        assert "defenseclaw init" in report.next_commands
+        output = " ".join(step.detail for step in report.setup)
+
+    for path in (home / "device.key", home / SECRET, home / "device.key.provenance"):
+        assert str(path) in output
+    for step in _MANUAL_STEPS[:2] + ("run defenseclaw init again",):
+        assert step in output
+    assert "holds no usable key" in output
+    assert _identity_files(home) == before
+    assert _orphans(home) == []
+
+    # The documented way out works: remove the named files, run init again.
+    for name in ("device.key", SECRET, "device.key.provenance"):
+        (home / name).unlink()
+    assert run_first_run(_options()).status != "needs_attention"
+    assert _valid(home)
+
+
+@pytest.mark.parametrize("shape", sorted(_SHORT_KEYS))
+def test_doctor_names_the_unusable_key_file_and_replaces_nothing(tmp_path, monkeypatch, shape):
+    from defenseclaw.commands import cmd_doctor
+
+    home = _home_with_short_key(tmp_path, monkeypatch, shape)
+    cfg = type("Cfg", (), {})()
+    cfg.data_dir = str(home)
+    cfg.gateway = type("Gw", (), {"device_key_file": str(home / "device.key")})()
+    before = _identity_files(home)
+    result = cmd_doctor._DoctorResult()
+
+    cmd_doctor._check_device_identity(cfg, result)
+
+    check = result.checks[-1]
+    assert check["status"] == "fail"
+    assert check["reason_code"] == "device-key-payload-invalid"
+    for path in (home / "device.key", home / SECRET, home / "device.key.provenance"):
+        assert str(path) in check["remediation"]
+    assert "defenseclaw-gateway stop" in check["remediation"]
+    assert "device-key.initialize" not in check["remediation"]
+    assert _identity_files(home) == before
+    assert _orphans(home) == []
+
+
+def test_plain_init_does_not_claim_that_nothing_was_changed_when_it_stops_on_a_keyless_artifact(
+    tmp_path, monkeypatch
+):
+    home = _home(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(home))
+    _plant(home, "both")
+
+    result = _plain_init()
+
+    assert result.exit_code != 0
+    assert "nothing was changed" not in result.output
+    assert "leaves them as they are" in result.output
+    # Plain init saves its config before the identity step; the message must not deny that.
+    assert (home / "config.yaml").exists()
