@@ -2949,6 +2949,75 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestMcpListAllowedServerWithFailedScan(MCPCommandTestBase):
+    """A server the operator allowed is not listed as unverified, and gets no
+    advice to allow it, when its last scan failed (the list reads the allow
+    that the table row reads)."""
+
+    REFUSED = (
+        "refused, command 'python3' is not an allowlisted stdio launcher (allowed: npx, uvx)"
+    )
+
+    def _server(self, args=("server.py",)):
+        return MCPServerEntry(name="NEW", command="python3", args=list(args), transport="stdio")
+
+    def _fail_scan(self):
+        db = self.app.store.db
+        columns = {row[1] for row in db.execute("PRAGMA table_info(scan_results)").fetchall()}
+        for column, ddl in (("exit_code", "INTEGER"), ("error", "TEXT")):
+            if column not in columns:
+                db.execute(f"ALTER TABLE scan_results ADD COLUMN {column} {ddl}")
+        db.execute(
+            "INSERT INTO scan_results (id, scanner, target, timestamp, finding_count, max_severity,"
+            " exit_code, error) VALUES (?, 'mcp-scanner', 'mcp://claudecode/NEW', ?, 0, 'INFO', 1, ?)",
+            (str(uuid.uuid4()), datetime.now(timezone.utc).isoformat(), self.REFUSED),
+        )
+        db.commit()
+
+    def _list(self, server):
+        self.app.cfg.mcp_servers = lambda connector=None, **_: [server]  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        self._fail_scan()
+        result = self.invoke(["list", "--connector", "claudecode"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        return " ".join(result.output.split())
+
+    def _allow(self, **pin):
+        from defenseclaw.config import AssetPolicyRule
+
+        self.app.cfg.asset_policy.mcp.allowed = [
+            AssetPolicyRule(name="NEW", connector="claudecode", **pin),
+        ]
+
+    def test_allowed_server_is_not_listed_as_unscanned_and_gets_no_allow_hint(self):
+        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
+
+        flat = self._list(self._server())
+
+        self.assertNotIn("could not be scanned", flat)
+        self.assertNotIn("mcp allow NEW", flat)
+        self.assertNotIn("not an allowlisted stdio launcher", flat)
+        self.assertIn("1 allowed MCP server(s) have a failed last scan", flat)
+        self.assertIn("NEW (claudecode)", flat)
+
+    def test_server_that_is_not_allowed_keeps_the_footer_and_the_allow_hint(self):
+        flat = self._list(self._server())
+
+        self.assertIn("1 MCP server(s) could not be scanned (last scan failed): NEW (claudecode)", flat)
+        self.assertIn("or trust it: defenseclaw mcp allow NEW", flat)
+        self.assertNotIn("allowed MCP server(s) have a failed last scan", flat)
+
+    def test_server_changed_after_it_was_allowed_keeps_the_footer(self):
+        # The allow is pinned to the definition it was written for; a server
+        # that now starts differently is not covered by it.
+        self._allow(command="python3", args_prefix=["server.py"], transport="stdio")
+
+        flat = self._list(self._server(args=("other.py",)))
+
+        self.assertIn("1 MCP server(s) could not be scanned (last scan failed): NEW (claudecode)", flat)
+        self.assertIn("or trust it: defenseclaw mcp allow NEW", flat)
+
+
 class TestMCPScanDirectURLPreamble(MCPCommandTestBase):
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_direct_url_scan_names_no_connector(self, mock_scan):
