@@ -593,3 +593,80 @@ func TestExactDockerInsecureRegistryEditJudgesEachStepAndHunkByTheListItPutsInFo
 		}
 	}
 }
+
+// TestExactDockerInsecureRegistryEditJudgesAListWhereItLandsAndNullAsEmpty pins
+// two readings of an edit to the verdict of a write of the document it leaves:
+// a registry that goes from one insecure-registries key to another across the
+// steps of a MultiEdit or the hunks of a patch is judged where it lands, and a
+// last key set to null leaves no registry in force.
+func TestExactDockerInsecureRegistryEditJudgesAListWhereItLandsAndNullAsEmpty(t *testing.T) {
+	t.Parallel()
+	const remote = `"198.51.100.7:5000"`
+	step := func(oldText, newText string) map[string]any {
+		return map[string]any{"old_string": oldText, "new_string": newText}
+	}
+	multi := func(steps ...map[string]any) Input {
+		edits := make([]any, len(steps))
+		for index := range steps {
+			edits[index] = steps[index]
+		}
+		return nativeCall(t, "MultiEdit", map[string]any{"file_path": dockerDaemonConfigPath, "edits": edits})
+	}
+	edit := func(oldText, newText string) Input {
+		return nativeCall(t, "Edit", map[string]any{"file_path": dockerDaemonConfigPath, "old_string": oldText, "new_string": newText})
+	}
+	patch := func(hunks ...[]string) Input {
+		text := "*** Begin Patch\n*** Update File: " + dockerDaemonConfigPath + "\n"
+		for _, lines := range hunks {
+			text += "@@\n"
+			for _, line := range lines {
+				text += line + "\n"
+			}
+		}
+		return nativeCall(t, "apply_patch", map[string]any{"command": text + "*** End Patch\n"})
+	}
+	for _, row := range []struct {
+		name  string
+		input Input
+		want  bool
+	}{
+		{"list moves from the earlier key to the last key in a MultiEdit", multi(
+			step(`"insecure-registries":[`+remote+`],`, `"insecure-registries":[],`),
+			step(`"insecure-registries":[]}`, `"insecure-registries":[`+remote+`]}`)), true},
+		{"list moves from the earlier key to the last key in two patch hunks", patch(
+			[]string{`-  "insecure-registries":[` + remote + `],`, `+  "insecure-registries":[],`},
+			[]string{`-  "insecure-registries":[]`, `+  "insecure-registries":[` + remote + `]`}), true},
+		{"earlier key dropped and the last key gets the list in a MultiEdit", multi(
+			step(`"insecure-registries":[`+remote+`],`, ``),
+			step(`"insecure-registries":[]`, `"insecure-registries":[`+remote+`]`)), true},
+		{"earlier key dropped and the last key gets the list in two patch hunks", patch(
+			[]string{`-  "insecure-registries":[` + remote + `],`},
+			[]string{`-  "insecure-registries":[]`, `+  "insecure-registries":[` + remote + `]`}), true},
+		{"list moves to a loopback list in the earlier key and a remote list in the last", multi(
+			step(`"insecure-registries":[`+remote+`],`, `"insecure-registries":["127.0.0.1:5000"],`),
+			step(`"insecure-registries":[]}`, `"insecure-registries":[`+remote+`]}`)), true},
+
+		{"remote list followed by a last null key in an Edit", edit(`{"debug":true}`, `{"debug":true,"insecure-registries":[`+remote+`],"insecure-registries":null}`), false},
+		{"remote list piece followed by a last null key in an Edit", edit(`"debug":true`, `"insecure-registries":[`+remote+`],"insecure-registries":null,"debug":true`), false},
+		{"remote list lines followed by a last null key in a patch", patch(
+			[]string{`+  "insecure-registries":[` + remote + `],`, `+  "insecure-registries": null`}), false},
+		{"remote list lines followed by a last null key in a MultiEdit step", multi(
+			step(`"debug":true`, `"insecure-registries":[`+remote+`], "insecure-registries": null`),
+			step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), false},
+		{"null key and then a remote list after it", edit(`"debug":true`, `"insecure-registries":null,"insecure-registries":[`+remote+`]`), true},
+		{"null key in the last position of a complete document", edit(`{"debug":true}`, `{"insecure-registries":null}`), false},
+		{"remote list kept in its own key by a step", multi(
+			step(`"insecure-registries":[`+remote+`],"debug":true`, `"insecure-registries":[`+remote+`],"debug":false`),
+			step(`"log-driver":"json-file"`, `"log-driver":"journald"`)), false},
+		{"list moves from a key to a new key in a MultiEdit", multi(
+			step(`"insecure-registries":[`+remote+`],`, ``),
+			step(`"debug":true`, `"debug":true,"insecure-registries":[`+remote+`]`)), false},
+		{"list moves from a key to a new key in two patch hunks", patch(
+			[]string{`-  "insecure-registries":[` + remote + `],`},
+			[]string{`+  "insecure-registries":[` + remote + `],`}), false},
+	} {
+		if got := ExactDockerInsecureRegistryWrite(row.input, Analyze(row.input)); got != row.want {
+			t.Errorf("%s: proof=%t, want %t", row.name, got, row.want)
+		}
+	}
+}

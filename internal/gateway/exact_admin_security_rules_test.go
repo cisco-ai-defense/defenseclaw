@@ -184,6 +184,35 @@ func TestExactAdministrativeSecurityRulePosture(t *testing.T) {
 			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
 		},
 		{
+			name:   "Docker insecure registry moving between two keys in a MultiEdit",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "MultiEdit", map[string]any{
+				"file_path": "/etc/docker/daemon.json",
+				"edits": []any{
+					map[string]any{
+						"old_string": `"insecure-registries":["198.51.100.7:5000"],`,
+						"new_string": `"insecure-registries":[],`,
+					},
+					map[string]any{
+						"old_string": `"insecure-registries":[]}`,
+						"new_string": `"insecure-registries":["198.51.100.7:5000"]}`,
+					},
+				},
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
+			name:   "Docker insecure registry moving between two keys in two patch hunks",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
+					"-  \"insecure-registries\":[\"198.51.100.7:5000\"],\n+  \"insecure-registries\":[],\n" +
+					"@@\n-  \"insecure-registries\":[]\n+  \"insecure-registries\":[\"198.51.100.7:5000\"]\n" +
+					"*** End Patch\n",
+			}),
+			actions: map[string]string{"default": "block", "permissive": "alert", "strict": "block"},
+		},
+		{
 			name:   "Docker insecure registry long zero-padded port",
 			ruleID: dockerInsecureHTTPRegistryRuleID,
 			input: exactStructuredInput(t, "Write", map[string]any{
@@ -350,6 +379,24 @@ func TestExactAdministrativeSecurityRuleHardNegatives(t *testing.T) {
 			input: exactStructuredInput(t, "apply_patch", map[string]any{
 				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
 					"+  \"insecure-registries\":[\"198.51.100.7:5000\"],\n+  \"insecure-registries\":[]\n" +
+					"*** End Patch\n",
+			}),
+		},
+		{
+			name:   "Docker Edit adding a remote list followed by a last null insecure-registries key",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "Edit", map[string]any{
+				"file_path":  "/etc/docker/daemon.json",
+				"old_string": `"debug":true`,
+				"new_string": `"insecure-registries":["198.51.100.7:5000"],"insecure-registries":null,"debug":true`,
+			}),
+		},
+		{
+			name:   "Docker patch adding a remote list followed by a last null insecure-registries key",
+			ruleID: dockerInsecureHTTPRegistryRuleID,
+			input: exactStructuredInput(t, "apply_patch", map[string]any{
+				"command": "*** Begin Patch\n*** Update File: /etc/docker/daemon.json\n@@\n" +
+					"+  \"insecure-registries\":[\"198.51.100.7:5000\"],\n+  \"insecure-registries\": null\n" +
 					"*** End Patch\n",
 			}),
 		},
