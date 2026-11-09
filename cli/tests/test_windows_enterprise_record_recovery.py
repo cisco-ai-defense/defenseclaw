@@ -44,25 +44,31 @@ def test_recovery_acts_only_on_standalone_without_a_pending_transaction() -> Non
     # The deployment record and the attestation are the two records; the
     # deployment record is rebuilt whenever either is kept aside.
     assert "$Layout.MetadataPath" in body and "$Layout.AgentApplicationControlAttestationPath" in body
-    assert "-RebuildBecause" in body
+    assert "New-DefenseClawRebuiltDeploymentRecord" in body
 
 
-def test_the_rebuild_is_checked_before_anything_is_moved() -> None:
+def test_the_rebuild_is_checked_and_built_before_any_live_record_changes() -> None:
     body = _function(_text(), "Invoke-DefenseClawStandaloneRecordRecovery")
-    ready = body.index("Assert-DefenseClawMetadataRebuildReady")
-    move = body.index("= Move-DefenseClawStandaloneRecordAside")
-    rebuild = body.index("[void](Repair-DefenseClawUnreadableDeploymentMetadata")
-    assert ready < move < rebuild
-    # A failed rebuild puts every record back; the kept file is stamped only
-    # after the record was written again, so moving it back restores the host.
-    assert body.index("Move-Item", rebuild) > rebuild and "back where it was" in body
-    assert body.index("Protect-DefenseClawKeptRecord", rebuild) > rebuild
-    aside = _function(_text(), "Move-DefenseClawStandaloneRecordAside")
-    assert "Set-DefenseClawPathAcl" not in aside
+    ready = body.index("    Assert-DefenseClawMetadataRebuildReady `\n")
+    names = body.index("= (Get-DefenseClawStandaloneKeptRecordPath")
+    build = body.index("$deploymentValue = New-DefenseClawRebuiltDeploymentRecord")
+    publish = body.index("Publish-DefenseClawRecordKeepingOld `\n")
+    assert ready < names < build < publish
+    # Nothing at a live name is renamed, moved or deleted by this function: the
+    # old object is kept by the atomic step of Publish-..., so a record is in
+    # place at every moment (review D1). The kept file is stamped after.
+    assert "Move-Item" not in body and "Remove-Item" not in body
+    assert body.index("    Protect-DefenseClawKeptRecord ", publish) > publish
+    # A later run finishes what an earlier one left.
+    assert "Complete-DefenseClawKeptRecordStamps" in body and "Get-DefenseClawOrphanedKeptRecordRefusal" in body
+    names_body = _function(_text(), "Get-DefenseClawStandaloneKeptRecordPath")
+    assert "Set-DefenseClawPathAcl" not in names_body and "Move-Item" not in names_body
     repair = _function(_text(), "Repair-DefenseClawUnreadableDeploymentMetadata")
     assert "Assert-DefenseClawMetadataRebuildReady" in repair
     ready_body = _function(_text(), "Assert-DefenseClawMetadataRebuildReady")
     assert "Write-DefenseClawJsonAtomic" not in ready_body and "Move-Item" not in ready_body
+    builder = _function(_text(), "New-DefenseClawRebuiltDeploymentRecord")
+    assert "Write-DefenseClawJsonAtomic" not in builder and "Move-Item" not in builder
 
 
 def test_an_uninstall_refusal_names_the_forced_way_out() -> None:
@@ -71,14 +77,30 @@ def test_an_uninstall_refusal_names_the_forced_way_out() -> None:
     assert "$Scope -cne 'Lifecycle'" in tail and "/uninstall FORCE=1 PURGE=1" in tail
 
 
-def test_move_aside_renames_the_object_and_refuses_a_changeable_folder() -> None:
-    body = _function(_text(), "Move-DefenseClawStandaloneRecordAside")
-    folder = body.index("Get-DefenseClawPathAclVerdicts")
-    move = body.index("Move-Item")
-    assert folder < move
-    assert ".rejected-" in body
-    # The live path is free once the object is renamed.
-    assert "Set-DefenseClawPathAcl" not in body
+def test_publish_stamps_a_sibling_then_swaps_it_in_with_the_old_object_kept() -> None:
+    names = _function(_text(), "Get-DefenseClawStandaloneKeptRecordPath")
+    assert names.index("Get-DefenseClawPathAclVerdicts") < names.index("'{0}.rejected-")
+    body = _function(_text(), "Publish-DefenseClawRecordKeepingOld")
+    sibling = body.index('$temporary = "$Path.new.')
+    stamp = body.index("Set-DefenseClawPathAcl -Path $temporary -Kind AdminFile")
+    swap = body.index("Invoke-DefenseClawLaunchableFileSwap")
+    # The new JSON has its administrator-only access list before it has the
+    # live name; one swap puts it there and keeps the old object as Kept.
+    assert sibling < stamp < swap
+    assert "-Backup $Kept" in body and "-KeepReplacementAccess" in body
+    # No step renames the live record away before the new one is built.
+    assert body.index("Move-Item") > swap
+
+
+def test_the_orphaned_kept_copy_is_named_by_status_and_finished_by_repair() -> None:
+    text = _text()
+    refusal = _function(text, "Get-DefenseClawOrphanedKeptRecordRefusal")
+    assert "untrusted_record: " in refusal and "'/repair'" in refusal and "PURGE=1" in refusal
+    entry = text.index("Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout")
+    guard = text[text.rindex("if ((Test-DefenseClawStandaloneProfile)", 0, entry) : entry]
+    assert "'Status', 'Verify', 'Install', 'Upgrade', 'Reconcile'" in guard
+    # Uninstall and Repair are not stopped by it.
+    assert "'Uninstall'" not in guard and "'Repair'" not in guard
 
 
 def test_readers_refuse_by_name_with_the_exact_commands() -> None:

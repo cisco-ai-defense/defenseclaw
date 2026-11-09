@@ -31,13 +31,31 @@ try {
         $script:approvedCarried = $null
         $script:serviceRegistered = $true
         $script:failKeptStamp = $false
-        function Repair-DefenseClawUnreadableDeploymentMetadata {
-            param($Layout, $Sources, $GatewayServiceName, $GuardianServiceName, [string]$RebuildBecause = '', $ApprovedPolicySources = $null)
-            if ($script:rebuildFails) { throw 'the rebuild write failed (fixture)' }
-            $script:rebuilds.Add($RebuildBecause)
+        function New-DefenseClawRebuiltDeploymentRecord {
+            param($Layout, $Sources, $GatewayServiceName, $GuardianServiceName, $ApprovedPolicySources = $null)
+            if ($script:rebuildFails) { throw 'the rebuild failed (fixture)' }
+            $script:rebuilds.Add('built')
             $script:approvedCarried = $ApprovedPolicySources
-            [IO.File]::WriteAllText($Layout.MetadataPath, '{"installed":true,"rebuilt":true}')
-            return $true
+            return [ordered]@{ installed = $true; rebuilt = $true }
+        }
+        # Review D1: the one-step swap is wrapped so a run can be "killed" at
+        # the Nth swap, and every call checks that a live record is in place
+        # before and after it and that the sibling it publishes was
+        # administrator-only before it had the live name.
+        $script:swapCalls = 0
+        $script:failSwapOn = 0
+        $script:liveGaps = [Collections.Generic.List[string]]::new()
+        $script:siblingOpen = [Collections.Generic.List[string]]::new()
+        $realSwap = Get-Command -Name Invoke-DefenseClawLaunchableFileSwap -CommandType Function
+        function Invoke-DefenseClawLaunchableFileSwap {
+            param($Temporary, $Destination, $Backup, [switch]$KeepReplacementAccess)
+            $script:swapCalls++
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Destination -PathType Leaf)) { $script:liveGaps.Add("before swap $($script:swapCalls): $Destination") }
+            if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $Temporary) -ne '') { $script:siblingOpen.Add($Temporary) }
+            if ($script:failSwapOn -eq $script:swapCalls) { throw 'the process was killed here (fixture)' }
+            $result = & $realSwap -Temporary $Temporary -Destination $Destination -Backup $Backup -KeepReplacementAccess:$KeepReplacementAccess
+            if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Destination -PathType Leaf)) { $script:liveGaps.Add("after swap $($script:swapCalls): $Destination") }
+            return $result
         }
         function Test-DefenseClawServiceExists { param([string]$Name) return $script:serviceRegistered }
         function Assert-DefenseClawOwnedServiceOrAbsent { param($Name, $ExpectedGatewayPath) }
@@ -123,18 +141,27 @@ try {
             (Microsoft.PowerShell.Management\Get-Content -LiteralPath $metadata -Raw) -notmatch 'rebuilt') { throw 'the changed deployment record was not moved aside and written again' }
         if ((Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $kept[0] -Algorithm SHA256).Hash -ne $before) { throw 'the kept record lost its bytes' }
         if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $kept[0]) -ne '') { throw "the kept record still carries the other account's access: $(Get-DefenseClawStandaloneRecordUntrustedReason -Path $kept[0])" }
-        if ($script:rebuilds.Count -ne 1 -or $script:rebuilds[0] -notmatch 'deployment record could be changed by another account') { throw 'the deployment record was not rebuilt' }
+        if ($script:rebuilds.Count -ne 1) { throw 'the deployment record was not rebuilt' }
+        if ($script:liveGaps.Count -ne 0 -or $script:siblingOpen.Count -ne 0) { throw "a record was absent or a sibling was open during the swap: $($script:liveGaps -join '; ') $($script:siblingOpen -join '; ')" }
         if (@(Kept 'deployment.json').Count -ne 1) { throw 'the kept record is not named <name>.rejected-<time>-<hash>' }
 
-        # An attestation owner: kept aside, and the deployment record is rebuilt
-        # with it so the two agree.
+        # An attestation owner: the old one is kept, a not-attested one takes
+        # its place with no moment without a record, and the deployment record
+        # is rebuilt with it so the two agree.
         Reset-Records
+        $attestationBytes = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $attestation -Algorithm SHA256).Hash
         Plant-Owner $attestation
+        $script:swapCalls = 0; $script:liveGaps.Clear(); $script:siblingOpen.Clear()
         $kept = @(Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H')
-        if ($kept.Count -ne 1 -or (Microsoft.PowerShell.Management\Test-Path -LiteralPath $attestation) -or
+        if ($kept.Count -ne 1 -or -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $attestation) -or
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata) -or $script:rebuilds.Count -ne 1) {
-            throw 'an untrusted attestation was not kept aside with the deployment record rebuilt'
+            throw 'an untrusted attestation was not replaced with the deployment record rebuilt'
         }
+        if ((Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $kept[0] -Algorithm SHA256).Hash -ne $attestationBytes) { throw 'the kept attestation lost its bytes' }
+        $replacement = Microsoft.PowerShell.Management\Get-Content -LiteralPath $attestation -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+        if ($replacement.agent_application_control_enforced -ne $false -or [string]::IsNullOrEmpty([string]$replacement.attested_at)) { throw 'the replacement attestation is not a not-attested record' }
+        if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $attestation) -ne '' -or (Get-DefenseClawStandaloneRecordUntrustedReason -Path $kept[0]) -ne '') { throw 'the attestation or its kept copy carries the other account access' }
+        if ($script:swapCalls -ne 1 -or $script:liveGaps.Count -ne 0 -or $script:siblingOpen.Count -ne 0) { throw "attestation swap: calls $($script:swapCalls), gaps $($script:liveGaps -join '; '), open siblings $($script:siblingOpen -join '; ')" }
 
         # A pending transaction restores its own preimages: nothing moves.
         Reset-Records
@@ -169,27 +196,56 @@ try {
             try { [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $sources -GatewayServiceName 'G' -GuardianServiceName 'H') }
             catch { $refused = $_.Exception.Message }
             $script:serviceRegistered = $true
-            if ($refused -notmatch '^untrusted_record: ' -or $refused -notmatch 'nothing was moved' -or $refused -notmatch '/repair|/uninstall PURGE=1') { throw "$($case.Name): not refused by name: $refused" }
+            if ($refused -notmatch '^untrusted_record: ' -or $refused -notmatch 'nothing was changed' -or $refused -notmatch '/repair|/uninstall PURGE=1') { throw "$($case.Name): not refused by name: $refused" }
             if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata) -or @(Kept 'deployment.json').Count -ne 0 -or
                 (Get-DefenseClawStandaloneRecordUntrustedReason -Path $metadata) -eq '' -or $script:rebuilds.Count -ne 0) {
                 throw "$($case.Name): the record was moved, re-stamped or rebuilt"
             }
         }
 
-        # A rebuild that fails after the move puts the record back exactly as it
-        # was, with the access it had, and says so.
-        Reset-Records
-        Plant-Writer $metadata
-        $beforeSddl = (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $metadata).Sddl
-        $script:rebuildFails = $true
-        $refused = ''
-        try { [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H') }
-        catch { $refused = $_.Exception.Message }
-        $script:rebuildFails = $false
-        if ($refused -notmatch '^untrusted_record: ' -or $refused -notmatch 'back where it was') { throw "a failed rebuild was not refused by name: $refused" }
-        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata) -or @(Kept 'deployment.json').Count -ne 0 -or
-            (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $metadata).Sddl -ne $beforeSddl) {
-            throw 'a failed rebuild did not put the record back with its access'
+        # Review D1: a kill at any step leaves a live record at each name. The
+        # run is "killed" (an injected throw) before anything is published,
+        # at the first swap, and at the second swap; after each, both records
+        # exist, the one not yet replaced is byte for byte as it was, and a
+        # later run finishes the job.
+        foreach ($case in @(
+                @{ Name = 'the rebuild fails before any swap'; Rebuild = $true; Swap = 0; Both = $true },
+                @{ Name = 'killed at the first swap'; Rebuild = $false; Swap = 1; Both = $true },
+                @{ Name = 'killed at the second swap'; Rebuild = $false; Swap = 2; Both = $true })) {
+            Reset-Records
+            Plant-Writer $metadata
+            Plant-Owner $attestation
+            $metadataSha = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $metadata -Algorithm SHA256).Hash
+            $attestationSha = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $attestation -Algorithm SHA256).Hash
+            $script:swapCalls = 0; $script:liveGaps.Clear(); $script:siblingOpen.Clear()
+            $script:rebuildFails = [bool]$case.Rebuild
+            $script:failSwapOn = [int]$case.Swap
+            $refused = ''
+            try { [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H') }
+            catch { $refused = $_.Exception.Message }
+            $script:rebuildFails = $false; $script:failSwapOn = 0
+            if ($refused -notmatch '^untrusted_record: ' -or $refused -notmatch 'run the same command again|/repair') { throw "$($case.Name): not refused by name: $refused" }
+            foreach ($live in @($metadata, $attestation)) {
+                if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $live -PathType Leaf)) { throw "$($case.Name): no live record at $live" }
+            }
+            if ($script:liveGaps.Count -ne 0 -or $script:siblingOpen.Count -ne 0) { throw "$($case.Name): gaps $($script:liveGaps -join '; '), open siblings $($script:siblingOpen -join '; ')" }
+            # Whatever was not replaced is as it was found, access included.
+            if ($case.Swap -le 1 -and (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $metadata -Algorithm SHA256).Hash -ne $metadataSha) { throw "$($case.Name): the deployment record changed" }
+            if ($case.Swap -ge 1 -and (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $attestation -Algorithm SHA256).Hash -ne $attestationSha) { throw "$($case.Name): the attestation changed before its swap" }
+            if ($case.Swap -eq 0 -and (@(Kept 'deployment.json').Count -ne 0 -or @(Kept 'agent-application-control-attestation.json').Count -ne 0)) { throw "$($case.Name): a record was moved" }
+            if ($case.Swap -eq 2 -and (Microsoft.PowerShell.Management\Get-Content -LiteralPath $metadata -Raw) -notmatch 'rebuilt') { throw "$($case.Name): the first record was not replaced" }
+            if (@(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $install -Force -Filter '*.new.*').Count -ne 0) { throw "$($case.Name): a sibling was left behind" }
+            # The next run finishes it: both records trusted, the kept copies
+            # stamped, no further copy kept for a record it already replaced.
+            $script:swapCalls = 0
+            [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H')
+            foreach ($live in @($metadata, $attestation)) {
+                if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $live) -ne '') { throw "$($case.Name): the rerun left $live untrusted" }
+            }
+            foreach ($keptFile in @((Kept 'deployment.json') + (Kept 'agent-application-control-attestation.json'))) {
+                if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $keptFile.FullName) -ne '') { throw "$($case.Name): the rerun left $($keptFile.Name) unstamped" }
+            }
+            if ($script:liveGaps.Count -ne 0) { throw "$($case.Name): the rerun had a gap: $($script:liveGaps -join '; ')" }
         }
 
         # Review S1: a kept file that cannot be given administrator-only access
@@ -204,6 +260,35 @@ try {
         if ($refused -notmatch 'could not be given administrator-only access' -or $refused -notmatch 'icacls' -or
             -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata) -or @(Kept 'deployment.json').Count -ne 1) {
             throw "a kept file that could not be stamped was not named: $refused"
+        }
+        # D2: the text says a rerun finishes it, and the rerun does: the kept
+        # copy gets its administrator-only access once nothing holds it.
+        if ($refused -notmatch 'run the same command again' -or $refused -notmatch 'already written') { throw "the stamp refusal does not say a rerun finishes it: $refused" }
+        $heldKept = (Kept 'deployment.json')[0].FullName
+        if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $heldKept) -eq '') { throw 'the kept copy was stamped although the stamp failed' }
+        $script:failKeptStamp = $true
+        $quiet = @(Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H' 3>&1)
+        $script:failKeptStamp = $false
+        if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $heldKept) -eq '') { throw 'a rerun with the copy still held stamped it' }
+        [void](Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H')
+        if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $heldKept) -ne '' -or @(Kept 'deployment.json').Count -ne 1) { throw 'the rerun did not finish the stamp of the kept copy' }
+
+        # Review D1: a deployment record that is missing while a copy kept aside
+        # is next to it (an earlier build stopped between the two) is named,
+        # and a repair writes it again from the machine and stamps the copy.
+        Reset-Records
+        if ((Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout) -ne '') { throw 'a healthy host was reported as having an orphaned kept copy' }
+        Plant-Writer $metadata
+        $orphanKept = Join-Path $install 'deployment.json.rejected-20261101T000000000Z-0123456789ab'
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $metadata -Destination $orphanKept
+        $orphan = Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout
+        if ($orphan -notmatch '^untrusted_record: ' -or $orphan -notmatch [regex]::Escape($orphanKept) -or $orphan -notmatch '/repair' -or $orphan -notmatch 'PURGE=1') { throw "the orphaned kept copy is not named with the way out: $orphan" }
+        if ((Get-DefenseClawStandaloneRecordUntrustedReason -Path $orphanKept) -eq '') { throw 'the planted orphan is not untrusted' }
+        $script:rebuilds.Clear()
+        $kept = @(Invoke-DefenseClawStandaloneRecordRecovery -Layout $layout -Sources $full -GatewayServiceName 'G' -GuardianServiceName 'H')
+        if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $metadata -PathType Leaf) -or $script:rebuilds.Count -ne 1 -or @(Kept 'deployment.json').Count -ne 1 -or
+            (Get-DefenseClawStandaloneRecordUntrustedReason -Path $orphanKept) -ne '' -or (Get-DefenseClawOrphanedKeptRecordRefusal -Layout $layout) -ne '') {
+            throw 'a repair did not write the record again and stamp the orphaned copy'
         }
 
         # Review S2: an attestation-only change keeps the approved config and
