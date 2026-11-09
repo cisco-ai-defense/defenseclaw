@@ -3179,7 +3179,7 @@ func TestWindowsEnterpriseRefusedPowerShellReportsRecordedDeployment(t *testing.
 			strings.Contains(warning.Message, "restore") && strings.Contains(warning.Message, "then"))
 	}
 	if !result.Installed || len(result.Services) != 4 || len(result.Errors) != 1 ||
-		result.Errors[0].Code != "powershell7_untrusted" || !notChecked {
+		result.Errors[0].Code != "powershell7_untrusted" || !notChecked || result.Inspection.Local != "unknown" {
 		t.Fatalf("refused verify result = %+v", result)
 	}
 }
@@ -3233,7 +3233,8 @@ func TestWindowsEnterpriseStandardUserStatusReportsRecordedDeployment(t *testing
 			}
 			if !result.Installed || result.InstalledVersion != "" || len(result.Services) != 4 ||
 				result.Errors[0].Code != "elevation_required" || result.ExitCode != 5 ||
-				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" {
+				len(result.Warnings) != 1 || result.Warnings[0].Code != "health_not_checked" ||
+				result.Inspection.Local != "unknown" || result.Readiness.Gateway || result.Readiness.Guardian {
 				t.Fatalf("%s --json: result %+v", action, result)
 			}
 		}

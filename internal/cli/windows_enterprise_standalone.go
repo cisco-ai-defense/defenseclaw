@@ -1029,7 +1029,9 @@ func settleWindowsEnterpriseHotConfigClosure(ctx context.Context, result *enterp
 // them too, as the running deployment's (GAP-0103).
 func appendWindowsEnterpriseStatusAdvisories(ctx context.Context, result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
 	appendWindowsOpenCodePortWarnings(result)
-	if layout, err := windowsManagedLayout.standalone(); err == nil && strings.TrimSpace(layout.DataDir) != "" {
+	// Only an elevated caller can read the descriptor of a kept copy; a
+	// standard account is refused before this runs, and says nothing here.
+	if layout, err := windowsManagedLayout.standalone(); err == nil && strings.TrimSpace(layout.DataDir) != "" && windowsEnterpriseIsElevated() {
 		addWindowsEnterpriseKeptRecordWarnings(result, filepath.Join(filepath.Dir(layout.DataDir), "install"))
 	}
 	if layout, err := windowsEnterpriseHotConfigLayout(); err == nil {
@@ -3890,6 +3892,10 @@ func applyWindowsEnterpriseRecordedDeployment(result *enterprisestatus.Result) {
 				result.Readiness.SensorHelper = state == "running"
 			}
 		}
+		// Nothing was checked, so the "active" default is not a finding:
+		// whether verdicts are inspected is not proven (delta-3 standard-
+		// account follow-up; the same word the gateway-not-ready case uses).
+		result.Inspection.Local = "unknown"
 		result.AddWarning(windowsEnterpriseHealthNotChecked, windowsEnterpriseUncheckedHealthMessage(profile, false))
 		return
 	}
