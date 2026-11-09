@@ -168,3 +168,43 @@ func TestHookAssetFactsReportsASpaceNamedLinkedSkillFolder(t *testing.T) {
 		t.Fatalf("DeclaredFor(ordinary) = %q, want its declared name", got)
 	}
 }
+
+// A linked skill folder whose name holds a tab is a valid folder: the hook
+// reports its own path and the name its SKILL.md declares, with no loss signal,
+// so the gateway can judge the folder the link leads to.
+func TestHookAssetFactsReportsATabNamedLinkedSkillFolder(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	dir := filepath.Join(home, ".claude", "skills", "ordinary\tcopy")
+	proj := filepath.Join(home, "proj")
+	for _, d := range []string{dir, proj} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Skipf("cannot make this folder name here: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte("---\nname: ordinary-skill\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(proj, "ordinary-link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Skipf("cannot create a link here: %v", err)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"tool_name": "Bash", "cwd": proj, "tool_input": map[string]any{"command": "cat " + link + "/SKILL.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts, ok := assetfacts.Decode(hookAssetFacts("claudecode", raw))
+	if !ok || len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != dir || facts.SkillLinksTruncated || facts.SkillsTruncated {
+		t.Fatalf("SkillLinks = %q links_truncated=%t skills_truncated=%t, want %q carried with no signal",
+			facts.SkillLinks, facts.SkillLinksTruncated, facts.SkillsTruncated, dir)
+	}
+	if got := facts.DeclaredFor("ordinary\tcopy"); len(got) != 1 || got[0] != "ordinary-skill" {
+		t.Fatalf("DeclaredFor(tab name) = %q, want its declared name", got)
+	}
+}

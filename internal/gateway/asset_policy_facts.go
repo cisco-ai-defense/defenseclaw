@@ -426,7 +426,7 @@ func (a *APIServer) skillFolderAccessDecision(
 		// name, so it is refused as unproven (fail closed, GAP-1303).
 		if facts.SkillsTruncated && !claimed && skillManifestUnreadable(ref.Dir) {
 			decision := runtimeAssetDisableBlockDecision("skill", ref.Name, connector, "skill_folder", fmt.Sprintf(
-				"skill folder %s: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
+				"skill folder %q: DefenseClaw cannot read its SKILL.md and the hook reported more skill names than it sends, "+
 					"so the folder cannot be shown not to be a denied skill; name fewer skill folders in one call", ref.Dir),
 				"skill-facts-truncated")
 			decision.RegistryStatus = "unknown"

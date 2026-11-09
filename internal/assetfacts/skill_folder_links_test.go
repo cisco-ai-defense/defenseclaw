@@ -213,11 +213,18 @@ func TestSkillLinksPastTheBoundAreSignalled(t *testing.T) {
 	if !ok || len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != long || facts.SkillLinksTruncated {
 		t.Fatalf("a %d byte path: ok=%t links=%d truncated=%t, want it carried", len(long), ok, len(facts.SkillLinks), facts.SkillLinksTruncated)
 	}
-	// A path the claim cannot carry (past the bound of one path, or text that
-	// is not a path) is signalled, with the ones it can carry kept.
+	// A path with a tab in a folder name is a path; one the claim cannot carry
+	// (past the bound of one path, or text that is not a path) is signalled,
+	// with the ones it can carry kept.
+	tabbed := filepath.Join(skills, "ordinary\tcopy")
+	facts, ok = Decode(Encode(Facts{SkillLinks: []string{tabbed}}))
+	if !ok || len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != tabbed || facts.SkillLinksTruncated {
+		t.Fatalf("a tab-named folder: ok=%t links=%q truncated=%t, want it carried", ok, facts.SkillLinks, facts.SkillLinksTruncated)
+	}
 	for name, bad := range map[string]string{
 		"past the path bound": filepath.Join(sep, "home", strings.Repeat("d", maxSkillLinkPathBytes), "held"),
-		"control character":   filepath.Join(sep, "home", "u", "sk\x01ll"),
+		"NUL":                 filepath.Join(sep, "home", "u", "sk\x00ll"),
+		"invalid text":        filepath.Join(sep, "home", "u", "sk\xffll"),
 		"not absolute":        "skills/held",
 	} {
 		facts, ok = Decode(Encode(Facts{SkillLinks: []string{dirs[0], bad}}))
@@ -227,15 +234,15 @@ func TestSkillLinksPastTheBoundAreSignalled(t *testing.T) {
 	}
 }
 
-// A skill folder named with space is a folder: its link path and its declared
-// name arrive as the hook found them, and a claim the header cannot carry is
-// signalled rather than dropped.
+// A skill folder named with space or a control character (a tab) is a folder:
+// its link path and its declared name arrive as the hook found them, and a
+// claim the header cannot carry is signalled rather than dropped.
 func TestSpaceNamedSkillFolderClaimsAreCarriedExactly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fixture paths are not absolute here")
 	}
 	skills := filepath.Join(string(filepath.Separator), "home", "u", ".claude", "skills")
-	for _, name := range []string{" ", "  ", " lead", "trail ", "mid dle"} {
+	for _, name := range []string{" ", "  ", " lead", "trail ", "mid dle", "ordinary\tcopy", "tab\t", "line\nbreak"} {
 		dir := filepath.Join(skills, name)
 		facts, ok := Decode(Encode(Facts{SkillLinks: []string{dir}, Skills: []Skill{{Folder: name, Declared: "listed-name"}}}))
 		if !ok || len(facts.SkillLinks) != 1 || facts.SkillLinks[0] != dir || facts.SkillLinksTruncated {
@@ -247,8 +254,9 @@ func TestSpaceNamedSkillFolderClaimsAreCarriedExactly(t *testing.T) {
 	}
 	// A name the claim cannot carry is signalled; an empty claim is no claim.
 	for name, skill := range map[string]Skill{
-		"control character in the folder": {Folder: "sk\x01ll", Declared: "listed-name"},
-		"declared name past the bound":    {Folder: "folder", Declared: strings.Repeat("n", maxNameBytes+1)},
+		"NUL in the folder":            {Folder: "sk\x00ll", Declared: "listed-name"},
+		"invalid text in the folder":   {Folder: "sk\xffll", Declared: "listed-name"},
+		"declared name past the bound": {Folder: "folder", Declared: strings.Repeat("n", maxNameBytes+1)},
 	} {
 		facts, _ := Decode(Encode(Facts{SkillLinks: []string{skills + "/x"}, Skills: []Skill{skill}}))
 		if len(facts.Skills) != 0 || !facts.SkillsTruncated {
