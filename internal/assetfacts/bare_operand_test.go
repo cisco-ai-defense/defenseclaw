@@ -26,7 +26,7 @@ func TestBareOperandThatNamesAnExistingEntryIsAPath(t *testing.T) {
 	linkOrSkip(t, filepath.Join(proj, "lnk-held"), filepath.Join(proj, "lnk-chain"))
 
 	reach := func(input map[string]any, cwd string) (FolderRef, bool) {
-		for _, ref := range SkillFolderRefs(input, home, cwd) {
+		for _, ref := range SkillFolderRefs("", input, home, cwd) {
 			if ref.Dir == held {
 				return ref, true
 			}
@@ -62,13 +62,13 @@ func TestBareOperandThatNamesAnExistingEntryIsAPath(t *testing.T) {
 		"ordinary file": {"file_path": "notes.txt"},
 	} {
 		t.Run("twin "+name, func(t *testing.T) {
-			if refs := SkillFolderRefs(input, home, proj); len(refs) != 0 {
+			if refs := SkillFolderRefs("", input, home, proj); len(refs) != 0 {
 				t.Fatalf("%v: refs = %+v, want none", input, refs)
 			}
 		})
 	}
 	// A word that is no entry of the skills root names no skill folder.
-	if refs := SkillFolderRefs(map[string]any{"command": "echo other"}, home, root); len(refs) != 0 {
+	if refs := SkillFolderRefs("", map[string]any{"command": "echo other"}, home, root); len(refs) != 0 {
 		t.Errorf("a word that names no entry of the skills root: refs = %+v, want none", refs)
 	}
 }
