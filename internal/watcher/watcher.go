@@ -254,6 +254,11 @@ type InstallWatcher struct {
 	// shelling out to the real scanner binaries.
 	scannerFactory func(InstallEvent) scanner.Scanner
 
+	// rootRoute judges the link route of a root. Nil means
+	// skillrootsafe.ResolveWithWarnings; tests set it before Run and never
+	// change it afterwards.
+	rootRoute func(string, func(string) (string, error)) (string, []string, error)
+
 	// rulePackSource returns the guardrail rule pack the install-time scan of
 	// a connector's skills applies on top of the skill scanner, or nil when
 	// that connector's scope selects none. Nil applies no overlay.
@@ -444,12 +449,13 @@ func (w *InstallWatcher) rootWarned(path string) bool {
 	return false
 }
 
-// rootRouteWarnings judges the link route of a root (tests replace it).
-var rootRouteWarnings = skillrootsafe.ResolveWithWarnings
-
 // refreshRootWarning judges the link route of an admitted root again.
 func (w *InstallWatcher) refreshRootWarning(kind, path string) {
-	_, folders, err := rootRouteWarnings(path, watcherEvalSymlinks)
+	route := w.rootRoute
+	if route == nil {
+		route = skillrootsafe.ResolveWithWarnings
+	}
+	_, folders, err := route(path, watcherEvalSymlinks)
 	if err != nil {
 		folders = nil
 	}
